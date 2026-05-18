@@ -210,7 +210,8 @@ bool append_frame_signal(const StreamFrameData &frame,
 template <typename JsonOut>
 void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
     json = "{";
-    json_add_bool(json, "arduino_started", ota.arduino_started, false);
+    json_add_string(json, "version", aircannect_version(), false);
+    json_add_bool(json, "arduino_started", ota.arduino_started);
     json_add_bool(json, "http_active", ota.http_active);
     json_add_bool(json, "http_ready", ota.http_ready);
     json_add_bool(json, "reboot_pending", ota.reboot_pending);

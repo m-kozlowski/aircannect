@@ -878,20 +878,12 @@
           <div class="card">
             <h3>ESP32 Firmware</h3>
             <div class="row">
-              <label>ArduinoOTA</label>
-              <span class="value" id="otaArduino">--</span>
-            </div>
-            <div class="row">
-              <label>HTTP Update</label>
-              <span class="value" id="otaHttp">--</span>
+              <label>Version</label>
+              <span class="value" id="otaVersion">--</span>
             </div>
             <div class="row">
               <label>Progress</label>
               <span class="value" id="otaProgress">--</span>
-            </div>
-            <div class="row">
-              <label>Partition</label>
-              <span class="value" id="otaPartition">--</span>
             </div>
             <div class="row">
               <label>Firmware .bin</label>
@@ -917,10 +909,6 @@
               <span class="value" id="resmedOtaProgress">--</span>
             </div>
             <div class="row">
-              <label>Block Size</label>
-              <span class="value" id="resmedOtaBlock">--</span>
-            </div>
-            <div class="row">
               <label>SHA256</label>
               <span class="value" id="resmedOtaHash">--</span>
             </div>
@@ -933,9 +921,16 @@
             </div>
             <div class="btns">
               <button class="btn primary" onclick="resmedOtaUpload()">
-                Upload + Verify
+                Upload
               </button>
-              <button class="btn danger" onclick="resmedOtaAbort()">Abort</button>
+              <button
+                class="btn danger"
+                id="resmedOtaApplyBtn"
+                style="display: none"
+                onclick="resmedOtaApply()"
+              >
+                Apply
+              </button>
             </div>
             <div class="msg" id="resmedOtaMsg"></div>
           </div>
@@ -2332,17 +2327,42 @@
       wifiAction("remove", {index});
     }
 
+    let otaReloadTimer = null;
+
+    function scheduleOtaReload() {
+      if (otaReloadTimer ||
+          (location.protocol !== "http:" && location.protocol !== "https:")) {
+        return;
+      }
+
+      const started = Date.now();
+      const path = location.pathname || "/";
+      const check = async () => {
+        try {
+          const response = await fetch(path, {cache: "no-store"});
+          if (response.ok) {
+            location.reload();
+            return;
+          }
+        } catch (error) {}
+
+        if (Date.now() - started < 120000) {
+          otaReloadTimer = setTimeout(check, 2000);
+        } else {
+          otaReloadTimer = null;
+        }
+      };
+
+      otaReloadTimer = setTimeout(check, 6000);
+    }
+
     async function loadOta() {
       try {
         const response = await api("/api/ota");
         const data = await response.json();
-        up("otaArduino", data.arduino_started ? "port " + data.arduino_port : "stopped");
-        up("otaHttp", data.http_active ? "uploading" :
-          data.reboot_pending ? "restarting" :
-          data.http_ready ? "ready" : "idle");
+        up("otaVersion", data.version || "--");
         up("otaProgress", (data.progress || 0) + "% / " +
           (data.bytes || 0) + " bytes");
-        up("otaPartition", data.partition || "--");
 
         const resmedResponse = await api("/api/resmed-ota");
         renderResmedOta(await resmedResponse.json());
@@ -2380,6 +2400,9 @@
                   "Upload finished") :
                 ("Upload failed: " + (data.last_error || xhr.statusText)),
               xhr.status < 300 && data.http_ready);
+            if (xhr.status < 300 && (data.reboot_pending || data.http_ready)) {
+              scheduleOtaReload();
+            }
             loadOta();
           } catch (error) {
             msg("otaMsg", "Upload failed", false);
@@ -2400,8 +2423,17 @@
       up("resmedOtaState", (data.phase || "--") + (data.waiting ? " / waiting" : ""));
       up("resmedOtaProgress", (data.progress || 0) + "% / " +
         (data.uploaded_bytes || 0) + "/" + (data.total_size || 0) + " bytes");
-      up("resmedOtaBlock", data.xfer_block_size || "--");
       up("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
+
+      const apply = document.getElementById("resmedOtaApplyBtn");
+      if (apply) {
+        const canApply = data.phase === "verified" && !data.waiting;
+        const applying = data.phase === "applying";
+        const complete = data.phase === "complete";
+        apply.style.display = canApply || applying || complete ? "" : "none";
+        apply.disabled = !canApply;
+        apply.textContent = applying ? "Applying" : complete ? "Applied" : "Apply";
+      }
 
       const progress = document.getElementById("resmedOtaUploadProgress");
       const bar = document.getElementById("resmedOtaUploadBar");
@@ -2494,17 +2526,27 @@
 
         await postResmedOta("/api/resmed-ota/check", {});
         await waitResmedOta((data) => data.phase === "verified");
-        msg("resmedOtaMsg", "Upload verified", true);
+        msg("resmedOtaMsg", "Upload complete", true);
       } catch (error) {
         msg("resmedOtaMsg", error.message, false);
         loadOta();
       }
     }
 
-    async function resmedOtaAbort() {
+    async function resmedOtaApply() {
+      if (!confirm("Apply uploaded firmware to the ResMed device now?")) {
+        return;
+      }
+
       try {
-        await postResmedOta("/api/resmed-ota/abort", {});
-        msg("resmedOtaMsg", "Aborted", true);
+        await postResmedOta("/api/resmed-ota/apply", {
+          mode: "plain",
+          reset: false,
+          confirm: "APPLY_RESMED_OTA",
+        });
+        await waitResmedOta((data) =>
+          data.phase === "complete" || data.phase === "error", 240);
+        msg("resmedOtaMsg", "Apply complete", true);
       } catch (error) {
         msg("resmedOtaMsg", error.message, false);
       }
