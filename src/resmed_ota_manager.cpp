@@ -257,6 +257,7 @@ bool ResmedOtaManager::begin_upload(size_t total_size,
         set_error("not_initialized");
         return false;
     }
+    if (!guard_device_idle_for_upgrade()) return false;
     if (transport_active() || active()) {
         set_error("session_active");
         return false;
@@ -471,6 +472,7 @@ bool ResmedOtaManager::begin_staged_upload(size_t input_size,
         set_error("not_initialized");
         return false;
     }
+    if (!guard_device_idle_for_upgrade()) return false;
     if (active() || transport_active()) {
         set_error("session_active");
         return false;
@@ -632,7 +634,11 @@ bool ResmedOtaManager::start_staged_upload() {
 void ResmedOtaManager::abort(const char *reason) {
     ScopedLock lock(*this, 1000);
     if (!lock) return;
-    set_error(reason ? reason : "aborted");
+    const char *why = reason ? reason : "aborted";
+    if (arbiter_) {
+        arbiter_->cancel_requests_from_source(RpcSource::ResmedOta, why);
+    }
+    set_error(why);
 }
 
 bool ResmedOtaManager::active() const {
@@ -1087,6 +1093,39 @@ bool ResmedOtaManager::enough_storage(size_t output_size) const {
     if (storage.free_bytes < output_size) return false;
     return storage.free_bytes - output_size >=
            AC_RESMED_OTA_STORAGE_MARGIN_BYTES;
+}
+
+bool ResmedOtaManager::guard_device_idle_for_upgrade() {
+    const char *reason = nullptr;
+    if (device_idle_for_upgrade(&reason)) return true;
+    set_error(reason);
+    return false;
+}
+
+bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
+    if (reason) *reason = "therapy_state_unknown";
+    if (!arbiter_) return false;
+
+    const As11DeviceState &as11 = arbiter_->as11_state();
+    if (as11.therapy_command_pending()) {
+        if (reason) *reason = "therapy_transition_pending";
+        return false;
+    }
+
+    switch (as11.therapy_state()) {
+        case As11TherapyState::Standby:
+            return true;
+        case As11TherapyState::Running:
+            if (reason) *reason = "therapy_active";
+            return false;
+        case As11TherapyState::Other:
+            if (reason) *reason = "device_active";
+            return false;
+        case As11TherapyState::Unknown:
+        default:
+            if (reason) *reason = "therapy_state_unknown";
+            return false;
+    }
 }
 
 bool ResmedOtaManager::lock(uint32_t timeout_ms) const {

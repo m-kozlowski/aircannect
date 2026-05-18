@@ -925,6 +925,14 @@
               </button>
               <button
                 class="btn danger"
+                id="resmedOtaCancelBtn"
+                style="display: none"
+                onclick="resmedOtaCancel()"
+              >
+                Cancel
+              </button>
+              <button
+                class="btn danger"
                 id="resmedOtaApplyBtn"
                 style="display: none"
                 onclick="resmedOtaApply()"
@@ -2526,6 +2534,13 @@
         apply.textContent = applying ? "Applying" : complete ? "Applied" : "Apply";
       }
 
+      const cancel = document.getElementById("resmedOtaCancelBtn");
+      if (cancel) {
+        const cancellable = data.active && data.phase !== "applying";
+        cancel.style.display = cancellable ? "" : "none";
+        cancel.disabled = !cancellable;
+      }
+
       const progress = document.getElementById("resmedOtaUploadProgress");
       const bar = document.getElementById("resmedOtaUploadBar");
       progress.style.display =
@@ -2669,6 +2684,20 @@
         await waitResmedOta((data) =>
           data.phase === "complete" || data.phase === "error", 240);
         msg("resmedOtaMsg", "Apply complete", true, true);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false, true);
+      }
+    }
+
+    async function resmedOtaCancel() {
+      if (!confirm("Cancel the current ResMed firmware operation?")) {
+        return;
+      }
+
+      try {
+        await postResmedOta("/api/resmed-ota/abort", {});
+        msg("resmedOtaMsg", "Cancelled", false, true);
+        setTimeout(getResmedOta, 300);
       } catch (error) {
         msg("resmedOtaMsg", error.message, false, true);
       }

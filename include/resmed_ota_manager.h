@@ -119,6 +119,8 @@ private:
                                  size_t len);
     bool finalize_raw_abc();
     bool enough_storage(size_t output_size) const;
+    bool guard_device_idle_for_upgrade();
+    bool device_idle_for_upgrade(const char **reason) const;
     bool lock(uint32_t timeout_ms) const;
     void unlock() const;
 

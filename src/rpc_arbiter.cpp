@@ -557,6 +557,34 @@ void RpcArbiter::set_background_polls_suspended(bool suspended) {
     background_polls_suspended_ = suspended;
 }
 
+void RpcArbiter::cancel_requests_from_source(RpcSource source,
+                                             const char *reason) {
+    const char *why = reason ? reason : "cancelled";
+    if (pending_.active && pending_.source == source) {
+        cancel_pending_request(why);
+    }
+    if (dispatch_retry_active_ && dispatch_retry_.source == source) {
+        cancel_queued_request(dispatch_retry_, why);
+        dispatch_retry_ = {};
+        dispatch_retry_active_ = false;
+        dispatch_retry_deadline_ms_ = 0;
+        next_dispatch_retry_ms_ = 0;
+    }
+
+    QueuedRequest request;
+    FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> keep;
+    while (requests_.pop(request)) {
+        if (request.source == source) {
+            cancel_queued_request(request, why);
+        } else {
+            keep.push(request);
+        }
+    }
+    while (keep.pop(request)) {
+        requests_.push(request);
+    }
+}
+
 bool RpcArbiter::background_backoff_active(uint32_t now) const {
     return background_backoff_until_ms_ &&
            static_cast<int32_t>(background_backoff_until_ms_ - now) > 0;

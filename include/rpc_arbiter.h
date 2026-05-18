@@ -126,6 +126,7 @@ public:
     bool request_as11_healthcheck();
     bool request_as11_settings_refresh();
     bool recover_can(const char *reason);
+    void cancel_requests_from_source(RpcSource source, const char *reason);
     void set_background_polls_suspended(bool suspended);
 
     const RpcArbiterStats &stats() const { return stats_; }
