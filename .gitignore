@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+build/
+__pycache__
+*.pyc
+*.swp
+src/web_ui_html.h
+provision.env

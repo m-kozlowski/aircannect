@@ -1,0 +1,142 @@
+#pragma once
+
+#include <Arduino.h>
+#include <IPAddress.h>
+
+#include "board.h"
+#include "softap_mode.h"
+
+namespace aircannect {
+
+enum class WifiModeState {
+    Off,
+    StaConnected,
+    StaConnecting,
+    StaPmfRetry,
+    SoftAp,
+    StaRoamScanning,
+    Failed,
+};
+
+struct WifiProfile {
+    String ssid;
+    String password;
+    bool open = false;
+    bool enabled = true;
+};
+
+struct WifiManagerStats {
+    uint32_t connect_attempts = 0;
+    uint32_t connect_successes = 0;
+    uint32_t connect_failures = 0;
+    uint32_t disconnects = 0;
+    uint32_t pmf_retries = 0;
+    uint32_t roam_scans = 0;
+    uint32_t roam_scan_failures = 0;
+    uint32_t roam_switches = 0;
+    uint32_t last_roam_candidates = 0;
+    uint8_t last_disconnect_reason = 0;
+};
+
+class WifiManager {
+public:
+    bool begin();
+    void poll();
+
+    bool network_available() const { return network_available_; }
+    bool has_sta_config() const { return sta_configured_; }
+    bool sta_is_open() const { return sta_open_; }
+    const String &sta_ssid() const { return sta_ssid_; }
+    WifiModeState mode_state() const { return mode_state_; }
+    const char *state_name() const;
+    IPAddress ip() const;
+    IPAddress gateway() const;
+    int32_t rssi() const;
+    int32_t channel() const;
+    void bssid(char *out, size_t size) const;
+    size_t profile_count() const { return profile_count_; }
+    const WifiProfile &profile(size_t index) const { return profiles_[index]; }
+    int8_t active_profile_index() const { return active_profile_index_; }
+    const WifiManagerStats &stats() const { return stats_; }
+
+    void set_hostname(const String &hostname);
+    void set_softap_mode(SoftApMode mode);
+    SoftApMode softap_mode() const { return softap_mode_; }
+    bool softap_running() const { return softap_running_; }
+    void apply_softap_mode();
+    void set_country_code(const String &country);
+    void set_roaming_suspended(bool suspended);
+    bool roaming_enabled() const { return profile_count_ > 1; }
+    bool roaming_suspended() const { return roaming_suspended_; }
+    bool configure_sta(const String &ssid, const String &password);
+    bool configure_open_sta(const String &ssid);
+    bool add_profile(const String &ssid, const String &password,
+                     bool open_network);
+    bool remove_profile(size_t index);
+    void clear_sta_config();
+    bool reconnect();
+
+    void print_status(Print &out) const;
+    void scan(Print &out);
+
+private:
+    void load_config();
+    void save_config(size_t first_dirty_index = 0);
+
+    bool start_profile(size_t index);
+    bool start_next_profile(size_t start_index);
+    bool start_softap(bool with_sta);
+    void stop_wifi();
+    void apply_country_code();
+    void handle_connected();
+    void handle_connect_timeout();
+    void maybe_start_roam_scan();
+    void handle_roam_scan();
+    void cleanup_manual_scan();
+
+    int8_t find_profile_by_ssid(const String &ssid) const;
+    void collect_scan_candidates(int16_t scan_count);
+    bool start_scan_candidate(size_t candidate_index);
+    void retry_with_pmf_disabled();
+    const char *mode_name() const;
+
+    struct ScanCandidate {
+        uint8_t profile_index = 0;
+        uint8_t bssid[6] = {};
+        uint8_t channel = 0;
+        int8_t rssi = -127;
+    };
+
+    bool network_available_ = false;
+    bool sta_configured_ = false;
+    bool sta_open_ = false;
+
+    SoftApMode softap_mode_ = SoftApMode::Auto;
+    bool softap_running_ = false;
+    bool roaming_suspended_ = false;
+    bool roam_connect_pending_ = false;
+    bool manual_scan_active_ = false;
+    bool pmf_retry_attempted_ = false;
+    uint8_t last_disconnect_reason_ = 0;
+    uint32_t connect_deadline_ms_ = 0;
+    uint32_t last_roam_check_ms_ = 0;
+    uint32_t manual_scan_completed_ms_ = 0;
+
+    String hostname_ = AC_HOSTNAME;
+    String country_code_;
+    String sta_ssid_;
+    String sta_pass_;
+
+    WifiProfile profiles_[AC_WIFI_PROFILE_MAX];
+    size_t profile_count_ = 0;
+    int8_t active_profile_index_ = -1;
+    uint8_t consecutive_profile_failures_ = 0;
+    uint8_t low_rssi_count_ = 0;
+    ScanCandidate scan_candidates_[AC_WIFI_SCAN_CANDIDATES_MAX];
+    size_t scan_candidate_count_ = 0;
+
+    WifiManagerStats stats_;
+    WifiModeState mode_state_ = WifiModeState::Off;
+};
+
+}  // namespace aircannect

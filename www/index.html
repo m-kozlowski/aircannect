@@ -1,0 +1,2680 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AirCANnect</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #101114;
+      --surface: #181b20;
+      --panel: #20242b;
+      --line: #303641;
+      --text: #e8eaed;
+      --muted: #969da8;
+      --accent: #00d4aa;
+      --blue: #71a7ff;
+      --orange: #f4a261;
+      --red: #e85d75;
+      --green: #62d98f;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      height: 100%;
+      min-height: 0;
+    }
+
+    .sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .brand {
+      padding: 20px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand h1 {
+      font-size: 24px;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .brand small {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 3px;
+    }
+
+    nav {
+      padding: 8px 0;
+      flex: 1;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 18px;
+      color: var(--muted);
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      font-size: 15px;
+    }
+
+    .nav:hover {
+      background: #ffffff08;
+      color: var(--text);
+    }
+
+    .nav.active {
+      color: var(--accent);
+      background: #00d4aa18;
+      border-left-color: var(--accent);
+    }
+
+    .nav .ico {
+      width: 20px;
+      text-align: center;
+      color: inherit;
+    }
+
+    .main {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .topbar {
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 22px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .topbar .right {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .wifi-signal {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+
+    .wifi-bars {
+      display: inline-flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 12px;
+    }
+
+    .wifi-bars span {
+      width: 3px;
+      border-radius: 1px;
+      background: #475569;
+    }
+
+    .wifi-bars span:nth-child(1) {
+      height: 4px;
+    }
+
+    .wifi-bars span:nth-child(2) {
+      height: 6px;
+    }
+
+    .wifi-bars span:nth-child(3) {
+      height: 9px;
+    }
+
+    .wifi-bars span:nth-child(4) {
+      height: 12px;
+    }
+
+    .wifi-bars span.on {
+      background: var(--accent);
+    }
+
+    .value.wifi-signal {
+      justify-content: flex-end;
+    }
+
+    .content {
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+      padding: 20px 24px;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .pane {
+      display: none;
+      max-width: 980px;
+    }
+
+    .pane.active {
+      display: block;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+
+    .card h3 {
+      font-size: 13px;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      margin-bottom: 12px;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .card-head .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--muted);
+    }
+
+    .headline {
+      font-size: 20px;
+      font-weight: 650;
+      margin: 4px 0 10px;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 3px 9px;
+      color: var(--muted);
+    }
+
+    .badge.good {
+      color: var(--green);
+      border-color: #236b45;
+      background: #123323;
+    }
+
+    .badge.warn {
+      color: var(--orange);
+      border-color: #7a5525;
+      background: #372817;
+    }
+
+    .badge.bad {
+      color: var(--red);
+      border-color: #743040;
+      background: #361820;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid #30364166;
+      padding: 8px 0;
+    }
+
+    .row.pending {
+      border-left: 3px solid var(--orange);
+      padding-left: 8px;
+    }
+
+    .row:last-child {
+      border-bottom: none;
+    }
+
+    .row label {
+      font-size: 14px;
+      color: var(--text);
+    }
+
+    .row small {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    .value {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 13px;
+      text-align: right;
+      color: var(--text);
+    }
+
+    input,
+    select {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 7px 9px;
+      font-size: 14px;
+      min-width: 160px;
+    }
+
+    input.pending,
+    select.pending {
+      border-color: var(--orange);
+    }
+
+    input:disabled,
+    select:disabled {
+      opacity: .62;
+    }
+
+    input[type=checkbox] {
+      min-width: 0;
+    }
+
+    .btn {
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-weight: 650;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .btn:hover {
+      background: #ffffff0c;
+    }
+
+    .btn:disabled {
+      opacity: .72;
+      cursor: default;
+    }
+
+    .btn:disabled:hover {
+      background: transparent;
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #06120f;
+    }
+
+    .btn.primary:disabled:hover {
+      background: var(--accent);
+    }
+
+    .btn.danger {
+      background: var(--red);
+      border-color: var(--red);
+      color: white;
+    }
+
+    .btns {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .config-helper {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+      flex-wrap: wrap;
+      max-width: 560px;
+    }
+
+    .config-helper input {
+      flex: 1 1 260px;
+      min-width: 260px;
+    }
+
+    .config-helper select {
+      min-width: 170px;
+    }
+
+    .config-helper .btn {
+      padding: 7px 11px;
+    }
+
+    .msg {
+      display: none;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-top: 10px;
+      font-size: 13px;
+    }
+
+    .msg.ok {
+      display: block;
+      background: #123323;
+      color: var(--green);
+      border: 1px solid #236b45;
+    }
+
+    .msg.err {
+      display: block;
+      background: #361820;
+      color: var(--red);
+      border: 1px solid #743040;
+    }
+
+    .section-title {
+      font-size: 13px;
+      color: var(--blue);
+      text-transform: uppercase;
+      margin: 18px 0 8px;
+    }
+
+    .telemetry-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 20px 0 10px;
+    }
+
+    .telemetry-head h3 {
+      font-size: 13px;
+      color: var(--text);
+      text-transform: uppercase;
+      letter-spacing: .6px;
+    }
+
+    .chart-card {
+      background: #0b0d12;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px 12px;
+      margin-bottom: 14px;
+    }
+
+    .chart-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .chart-header .label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .chart-header .value {
+      font-size: 18px;
+      font-weight: 750;
+    }
+
+    .chart-header .unit {
+      color: var(--muted);
+      font-size: 12px;
+      margin-left: 4px;
+    }
+
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .legend-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      margin-right: 4px;
+    }
+
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    canvas.live-chart {
+      display: block;
+      width: 100%;
+      height: 150px;
+    }
+
+    .chart-grid canvas.live-chart {
+      height: 120px;
+    }
+
+    .progress {
+      display: none;
+      height: 8px;
+      border-radius: 999px;
+      background: #101114;
+      border: 1px solid var(--line);
+      overflow: hidden;
+      margin-top: 10px;
+    }
+
+    .bar {
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+    }
+
+    .storage-meter {
+      height: 6px;
+      border-radius: 999px;
+      background: #101114;
+      border: 1px solid var(--line);
+      overflow: hidden;
+      margin-top: -4px;
+      margin-bottom: 12px;
+    }
+
+    .storage-meter-fill {
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+    }
+
+    .bottom {
+      display: none;
+      background: var(--surface);
+      border-top: 1px solid var(--line);
+      overflow-x: auto;
+    }
+
+    .bottom .nav {
+      border-left: 0;
+      border-top: 3px solid transparent;
+      flex-direction: column;
+      gap: 2px;
+      font-size: 10px;
+      padding: 7px 12px;
+      white-space: nowrap;
+    }
+
+    .bottom .nav.active {
+      border-top-color: var(--accent);
+    }
+
+    @media (max-width: 760px) {
+      body {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .app {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(0, 1fr);
+        height: auto;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .sidebar {
+        display: none;
+      }
+
+      .bottom {
+        display: flex;
+        flex-shrink: 0;
+      }
+
+      .content {
+        padding: 16px;
+      }
+
+      .topbar {
+        padding: 0 14px;
+      }
+
+      .topbar .right #heap {
+        display: none;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .chart-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      input,
+      select {
+        width: 100%;
+      }
+
+      .config-helper {
+        width: 100%;
+      }
+
+      .config-helper input,
+      .config-helper select,
+      .config-helper .btn {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>AirCANnect</h1>
+        <small id="ver">--</small>
+        <small id="built">--</small>
+      </div>
+
+      <nav>
+        <a class="nav active" data-tab="dash">
+          <span class="ico">&#9878;</span>Dashboard
+        </a>
+        <a class="nav" data-tab="clinical">
+          <span class="ico">&#9881;</span>Clinical
+        </a>
+        <a class="nav" data-tab="wifi">
+          <span class="ico">&#9783;</span>WiFi
+        </a>
+        <a class="nav" data-tab="ota">
+          <span class="ico">&#8679;</span>Update
+        </a>
+        <a class="nav" data-tab="console">
+          <span class="ico">&#9002;</span>Console
+        </a>
+        <a class="nav" data-tab="config">
+          <span class="ico">&#9000;</span>Config
+        </a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <span id="title">Dashboard</span>
+        </div>
+        <div class="right">
+          <span id="uptime">Up: --</span>
+          <span id="wifiTop">WiFi: --</span>
+          <span id="heap">-- free</span>
+          <button class="btn" onclick="refreshActive()">Refresh</button>
+        </div>
+      </div>
+
+      <div class="content">
+        <section class="pane active" id="p-dash">
+          <div class="grid">
+            <div class="card">
+              <div class="card-head">
+                <span class="label">Device</span>
+                <span class="badge" id="therapyBadge">Unknown</span>
+              </div>
+              <div class="headline" id="productName">--</div>
+              <div class="row">
+                <label>Serial</label>
+                <span class="value" id="serial">--</span>
+              </div>
+              <div class="row">
+                <label>Firmware</label>
+                <span class="value" id="firmware">--</span>
+              </div>
+              <div class="row">
+                <label>Profile</label>
+                <span class="value" id="profile">--</span>
+              </div>
+              <div class="row">
+                <label>Motor Hours</label>
+                <span class="value" id="motorHours">--</span>
+              </div>
+              <div class="btns">
+                <button class="btn" id="therapyStart" onclick="therapy('start')">
+                  Therapy
+                </button>
+                <button class="btn" id="therapyStop" onclick="therapy('stop')">
+                  Standby
+                </button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="label">System</span>
+              </div>
+              <div class="row">
+                <label>Time</label>
+                <span class="value" id="espTime">--</span>
+              </div>
+              <div class="row">
+                <label>ResMed</label>
+                <span class="value" id="deviceTime">--</span>
+              </div>
+              <div class="row">
+                <label>Time Sync</label>
+                <span class="value" id="timeSync">--</span>
+              </div>
+              <div class="btns">
+                <button class="btn" onclick="timeAction('ntp_sync')">NTP</button>
+                <button class="btn" onclick="timeAction('sync_to_resmed')">
+                  To ResMed
+                </button>
+                <button class="btn" onclick="timeAction('sync_from_resmed')">
+                  From ResMed
+                </button>
+              </div>
+              <div class="row">
+                <label>Storage</label>
+                <span class="value" id="storageSummary">--</span>
+              </div>
+              <div class="storage-meter">
+                <div class="storage-meter-fill" id="storageMeter"></div>
+              </div>
+              <div class="msg" id="timeMsg"></div>
+            </div>
+          </div>
+
+          <div class="telemetry-head">
+            <h3>Live Telemetry</h3>
+            <span class="badge" id="liveBadge">Idle</span>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-header">
+              <span class="label">Mask Pressure</span>
+              <div>
+                <span class="value" id="chartPressure">--</span>
+                <span class="unit">cmH2O</span>
+              </div>
+            </div>
+            <canvas class="live-chart" id="chartPressureCanvas"></canvas>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-header">
+              <span class="label">Flow Rate</span>
+              <div>
+                <span class="value" id="chartFlow">--</span>
+                <span class="unit">L/min</span>
+              </div>
+            </div>
+            <canvas class="live-chart" id="chartFlowCanvas"></canvas>
+          </div>
+
+          <div class="chart-grid">
+            <div class="chart-card">
+              <div class="chart-header">
+                <span class="label">Leak</span>
+                <div>
+                  <span class="value" id="chartLeak">--</span>
+                  <span class="unit">L/min</span>
+                </div>
+              </div>
+              <canvas class="live-chart" id="chartLeakCanvas"></canvas>
+            </div>
+
+            <div class="chart-card">
+              <div class="chart-header">
+                <span class="label">IPAP / EPAP</span>
+                <div>
+                  <span class="value" id="chartInspPressure">--</span>
+                  <span class="unit">/</span>
+                  <span class="value" id="chartExpPressure">--</span>
+                  <span class="unit">cmH2O</span>
+                </div>
+              </div>
+              <div class="chart-legend">
+                <span>
+                  <span class="legend-dot" style="background:#22c55e"></span>IPAP
+                </span>
+                <span>
+                  <span class="legend-dot" style="background:#f97316"></span>EPAP
+                </span>
+              </div>
+              <canvas class="live-chart" id="chartTherapyPressureCanvas"></canvas>
+            </div>
+          </div>
+
+          <div class="chart-grid">
+            <div class="chart-card">
+              <div class="chart-header">
+                <span class="label">SpO2</span>
+                <div>
+                  <span class="value" id="chartSpo2">--</span>
+                  <span class="unit">%</span>
+                </div>
+              </div>
+              <canvas class="live-chart" id="chartSpo2Canvas"></canvas>
+            </div>
+
+            <div class="chart-card">
+              <div class="chart-header">
+                <span class="label">Pulse Rate</span>
+                <div>
+                  <span class="value" id="chartPulse">--</span>
+                  <span class="unit">bpm</span>
+                </div>
+              </div>
+              <canvas class="live-chart" id="chartPulseCanvas"></canvas>
+            </div>
+          </div>
+        </section>
+
+        <section class="pane" id="p-clinical">
+          <div class="card">
+            <h3>Clinical Settings</h3>
+            <div
+              id="settingsMeta"
+              class="value"
+              style="display: none; text-align: left; margin-bottom: 8px"
+            ></div>
+            <div id="settingsFields"></div>
+            <div class="btns">
+              <button class="btn primary" id="settingsSave" onclick="saveSettings()">
+                Save
+              </button>
+              <button
+                class="btn"
+                id="settingsRevert"
+                style="display: none"
+                onclick="revertSettingsDraft()"
+              >
+                Revert
+              </button>
+              <button class="btn" onclick="loadSettings(true)">Refresh</button>
+            </div>
+            <div class="msg" id="settingsMsg"></div>
+          </div>
+        </section>
+
+        <section class="pane" id="p-wifi">
+          <div class="card">
+            <h3>WiFi</h3>
+            <div class="section-title">Current Connection</div>
+            <div id="wifiCurrent"></div>
+            <div class="section-title">Profiles</div>
+            <div id="wifiProfiles"></div>
+            <div class="section-title">Add Profile</div>
+            <div class="row">
+              <label>SSID</label>
+              <input id="wifiSsid" type="text">
+            </div>
+            <div class="row">
+              <label>Password</label>
+              <input id="wifiPass" type="password">
+            </div>
+            <div class="btns">
+              <button class="btn primary" onclick="wifiAdd()">Add</button>
+              <button class="btn" onclick="wifiAction('reconnect')">
+                Reconnect
+              </button>
+              <button class="btn danger" onclick="wifiAction('clear')">
+                Clear
+              </button>
+            </div>
+            <div class="msg" id="wifiMsg"></div>
+          </div>
+        </section>
+
+        <section class="pane" id="p-ota">
+          <div class="card">
+            <h3>ESP32 Firmware</h3>
+            <div class="row">
+              <label>ArduinoOTA</label>
+              <span class="value" id="otaArduino">--</span>
+            </div>
+            <div class="row">
+              <label>HTTP Update</label>
+              <span class="value" id="otaHttp">--</span>
+            </div>
+            <div class="row">
+              <label>Progress</label>
+              <span class="value" id="otaProgress">--</span>
+            </div>
+            <div class="row">
+              <label>Partition</label>
+              <span class="value" id="otaPartition">--</span>
+            </div>
+            <div class="row">
+              <label>Firmware .bin</label>
+              <input id="otaFile" type="file" accept=".bin">
+            </div>
+            <div class="progress" id="otaUploadProgress">
+              <div class="bar" id="otaUploadBar"></div>
+            </div>
+            <div class="btns">
+              <button class="btn primary" onclick="otaUpload()">Upload</button>
+            </div>
+            <div class="msg" id="otaMsg"></div>
+          </div>
+
+          <div class="card">
+            <h3>ResMed Firmware</h3>
+            <div class="row">
+              <label>State</label>
+              <span class="value" id="resmedOtaState">--</span>
+            </div>
+            <div class="row">
+              <label>Progress</label>
+              <span class="value" id="resmedOtaProgress">--</span>
+            </div>
+            <div class="row">
+              <label>Block Size</label>
+              <span class="value" id="resmedOtaBlock">--</span>
+            </div>
+            <div class="row">
+              <label>SHA256</label>
+              <span class="value" id="resmedOtaHash">--</span>
+            </div>
+            <div class="row">
+              <label>Firmware .abc</label>
+              <input id="resmedOtaFile" type="file" accept=".abc">
+            </div>
+            <div class="progress" id="resmedOtaUploadProgress">
+              <div class="bar" id="resmedOtaUploadBar"></div>
+            </div>
+            <div class="btns">
+              <button class="btn primary" onclick="resmedOtaUpload()">
+                Upload + Verify
+              </button>
+              <button class="btn danger" onclick="resmedOtaAbort()">Abort</button>
+            </div>
+            <div class="msg" id="resmedOtaMsg"></div>
+          </div>
+        </section>
+
+        <section class="pane" id="p-config">
+          <div class="card">
+            <h3>Device Config</h3>
+            <div id="configFields"></div>
+            <div class="btns">
+              <button class="btn primary" onclick="saveConfig()">Save</button>
+            </div>
+            <div class="msg" id="configMsg"></div>
+          </div>
+        </section>
+
+        <section class="pane" id="p-console">
+          <div class="card">
+            <h3>Management Console</h3>
+            <div
+              id="consoleLog"
+              style="
+                height: 420px;
+                overflow: auto;
+                background: var(--bg);
+                border: 1px solid var(--line);
+                border-radius: 6px;
+                padding: 10px;
+                font-family: 'SF Mono', Consolas, monospace;
+                font-size: 12px;
+                white-space: pre-wrap;
+                word-break: break-word;
+                color: var(--green);
+                margin-bottom: 10px;
+              "
+            ></div>
+            <div style="display: flex; gap: 8px">
+              <input
+                id="consoleInput"
+                type="text"
+                style="flex: 1; width: auto; font-family: 'SF Mono', Consolas, monospace"
+                placeholder="command"
+                onkeydown="if (event.key === 'Enter') sendConsoleCommand()"
+              >
+              <button class="btn primary" onclick="sendConsoleCommand()">Send</button>
+              <button class="btn" onclick="clearConsoleLog()">Clear</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <nav class="bottom">
+    <a class="nav active" data-tab="dash">
+      <span class="ico">&#9878;</span>Home
+    </a>
+    <a class="nav" data-tab="clinical">
+      <span class="ico">&#9881;</span>Clinical
+    </a>
+    <a class="nav" data-tab="wifi">
+      <span class="ico">&#9783;</span>WiFi
+    </a>
+    <a class="nav" data-tab="ota">
+      <span class="ico">&#8679;</span>Update
+    </a>
+    <a class="nav" data-tab="console">
+      <span class="ico">&#9002;</span>CLI
+    </a>
+    <a class="nav" data-tab="config">
+      <span class="ico">&#9000;</span>Config
+    </a>
+  </nav>
+
+  <script>
+    let statusData = {};
+    let streamData = {};
+    let settingsData = null;
+    let configData = null;
+    let evtSrc = null;
+    let consoleSeq = -1;
+    let settingsPollTimer = null;
+    let settingsRefreshUntil = 0;
+    let settingsDraftMode = null;
+    let settingsActiveMode = null;
+    const LIVE_FAST_POINTS = 6000;
+    const LIVE_MEDIUM_POINTS = 3000;
+    const LIVE_SLOW_POINTS = 1800;
+    const liveData = {
+      pressure: [],
+      flow: [],
+      leak: [],
+      inspPressure: [],
+      expPressure: [],
+      spo2: [],
+      pulse: [],
+    };
+    const chartScales = {
+      pressure: {min: 0, max: 15, step: 5},
+      flow: {min: -40, max: 40, step: 10, symmetric: true},
+      leak: {min: 0, max: 20, step: 5},
+      therapyPressure: {min: 0, max: 15, step: 5},
+    };
+
+    const tabs = {
+      dash: "Dashboard",
+      clinical: "Clinical",
+      wifi: "WiFi",
+      ota: "Update",
+      console: "Console",
+      config: "Config",
+    };
+
+    document.querySelectorAll(".nav").forEach((nav) => {
+      nav.onclick = () => showTab(nav.dataset.tab);
+    });
+
+    function showTab(id) {
+      Object.keys(tabs).forEach((tab) => {
+        document.getElementById("p-" + tab).classList.toggle("active", tab === id);
+      });
+      document.querySelectorAll(".nav").forEach((nav) => {
+        nav.classList.toggle("active", nav.dataset.tab === id);
+      });
+
+      document.getElementById("title").textContent = tabs[id];
+      location.hash = id;
+
+      if (id === "dash") loadStatus();
+      if (id === "clinical") loadSettings(true);
+      if (id === "wifi") loadWifi();
+      if (id === "ota") loadOta();
+      if (id === "console") {
+        loadConsole();
+        setTimeout(() => document.getElementById("consoleInput").focus(), 0);
+      }
+      if (id === "config") loadConfig();
+    }
+
+    function refreshActive() {
+      const pane = document.querySelector(".pane.active").id.replace("p-", "");
+      if (pane === "dash") loadStatus();
+      if (pane === "clinical") loadSettings(true);
+      if (pane === "wifi") loadWifi();
+      if (pane === "ota") loadOta();
+      if (pane === "console") loadConsole();
+      if (pane === "config") loadConfig();
+    }
+
+    async function api(url, opt) {
+      const response = await fetch(url, opt);
+      if (!response.ok) throw new Error(await response.text());
+      return response;
+    }
+
+    function msg(id, text, ok) {
+      const element = document.getElementById(id);
+      element.textContent = text;
+      element.className = "msg " + (ok ? "ok" : "err");
+      setTimeout(() => element.className = "msg", 5000);
+    }
+
+    function up(id, text) {
+      const element = document.getElementById(id);
+      if (element) {
+        element.textContent =
+          text === undefined || text === null || text === "" ? "--" : text;
+      }
+    }
+
+    function apiError(error) {
+      up("title", "API unavailable");
+      if (location.protocol === "file:") {
+        up("wifiTop", "Open device HTTP UI, not file preview");
+      } else {
+        up("wifiTop", error && error.message ? error.message : "API error");
+      }
+    }
+
+    function fmtUp(seconds) {
+      const days = (seconds / 86400) | 0;
+      const hours = ((seconds % 86400) / 3600) | 0;
+      const minutes = ((seconds % 3600) / 60) | 0;
+      return (days ? days + "d " : "") + hours + "h " + minutes + "m";
+    }
+
+    function fmtBytes(bytes) {
+      if (!bytes) return "0 B";
+
+      const units = ["B", "KB", "MB", "GB"];
+      let index = 0;
+      let value = Number(bytes);
+      while (value >= 1024 && index < units.length - 1) {
+        value /= 1024;
+        index++;
+      }
+      return (value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)) +
+        " " + units[index];
+    }
+
+    function fmtRssi(rssi) {
+      const value = Number(rssi);
+      return Number.isFinite(value) && value < 0 ?
+        Math.round(value) + " dBm" : "--";
+    }
+
+    function wifiSignalLevel(rssi) {
+      const value = Number(rssi);
+      if (!Number.isFinite(value) || value >= 0) return 0;
+      if (value >= -55) return 4;
+      if (value >= -65) return 3;
+      if (value >= -75) return 2;
+      return 1;
+    }
+
+    function wifiBarsElement(rssi) {
+      const level = wifiSignalLevel(rssi);
+      const bars = document.createElement("span");
+      bars.className = "wifi-bars";
+      bars.title = fmtRssi(rssi);
+      for (let index = 1; index <= 4; index++) {
+        const bar = document.createElement("span");
+        if (index <= level) bar.className = "on";
+        bars.appendChild(bar);
+      }
+      return bars;
+    }
+
+    function wifiSignalValue(rssi, prefix) {
+      const value = document.createElement("span");
+      value.className = "value wifi-signal";
+      value.appendChild(wifiBarsElement(rssi));
+      const text = document.createElement("span");
+      text.textContent = (prefix ? prefix + " " : "") + fmtRssi(rssi);
+      value.appendChild(text);
+      return value;
+    }
+
+    function setWifiTop(data) {
+      const element = document.getElementById("wifiTop");
+      if (!element) return;
+      element.textContent = "";
+
+      const state = data && data.wifi_state ? String(data.wifi_state) : "--";
+      const rssi = data && data.wifi_rssi;
+      const wrapper = document.createElement("span");
+      wrapper.className = "wifi-signal";
+      wrapper.appendChild(wifiBarsElement(rssi));
+
+      const text = document.createElement("span");
+      const rssiText = fmtRssi(rssi);
+      text.textContent = "WiFi: " + state +
+        (rssiText !== "--" ? " " + rssiText : "");
+      wrapper.appendChild(text);
+      element.appendChild(wrapper);
+    }
+
+    function pad2(value) {
+      return String(value).padStart(2, "0");
+    }
+
+    function fmtIsoMinute(value, ageMs) {
+      value = String(value || "");
+      if (!value) return "";
+
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      if (Number.isFinite(ageMs) && ageMs > 0) {
+        date.setTime(date.getTime() + ageMs);
+      }
+
+      let timezone = "";
+      try {
+        const part = new Intl.DateTimeFormat(undefined, {
+          timeZoneName: "short",
+        }).formatToParts(date).find((entry) => entry.type === "timeZoneName");
+        timezone = part && part.value ? " " + part.value : "";
+      } catch (error) {
+        timezone = "";
+      }
+
+      return date.getFullYear() + "-" +
+        pad2(date.getMonth() + 1) + "-" +
+        pad2(date.getDate()) + " " +
+        pad2(date.getHours()) + ":" +
+        pad2(date.getMinutes()) +
+        timezone;
+    }
+
+    const TZ_ABBR = {
+      "Africa/Cairo": ["EET", null],
+      "Africa/Lagos": ["WAT", null],
+      "Africa/Nairobi": ["EAT", null],
+      "America/Anchorage": ["AKST", "AKDT"],
+      "America/Argentina/Buenos_Aires": ["ART", null],
+      "America/Chicago": ["CST", "CDT"],
+      "America/Denver": ["MST", "MDT"],
+      "America/Los_Angeles": ["PST", "PDT"],
+      "America/Mexico_City": ["CST", null],
+      "America/New_York": ["EST", "EDT"],
+      "America/Sao_Paulo": ["BRT", null],
+      "America/Toronto": ["EST", "EDT"],
+      "Asia/Bangkok": ["ICT", null],
+      "Asia/Dhaka": ["BST", null],
+      "Asia/Dubai": ["GST", null],
+      "Asia/Hong_Kong": ["HKT", null],
+      "Asia/Jerusalem": ["IST", "IDT"],
+      "Asia/Karachi": ["PKT", null],
+      "Asia/Kathmandu": ["NPT", null],
+      "Asia/Kolkata": ["IST", null],
+      "Asia/Seoul": ["KST", null],
+      "Asia/Shanghai": ["CST", null],
+      "Asia/Singapore": ["SGT", null],
+      "Asia/Tokyo": ["JST", null],
+      "Australia/Sydney": ["AEST", "AEDT"],
+      "Europe/Berlin": ["CET", "CEST"],
+      "Europe/Helsinki": ["EET", "EEST"],
+      "Europe/Istanbul": ["TRT", null],
+      "Europe/London": ["GMT", "BST"],
+      "Europe/Moscow": ["MSK", null],
+      "Europe/Paris": ["CET", "CEST"],
+      "Europe/Warsaw": ["CET", "CEST"],
+      "Pacific/Auckland": ["NZST", "NZDT"],
+      "Pacific/Fiji": ["FJT", "FJST"],
+      "Pacific/Honolulu": ["HST", null],
+    };
+
+    const TZ_ZONES = [
+      "UTC",
+      "Pacific/Honolulu",
+      "America/Anchorage",
+      "America/Los_Angeles",
+      "America/Denver",
+      "America/Chicago",
+      "America/New_York",
+      "America/Toronto",
+      "America/Mexico_City",
+      "America/Sao_Paulo",
+      "America/Argentina/Buenos_Aires",
+      "Europe/London",
+      "Europe/Paris",
+      "Europe/Berlin",
+      "Europe/Warsaw",
+      "Europe/Helsinki",
+      "Europe/Moscow",
+      "Europe/Istanbul",
+      "Africa/Cairo",
+      "Africa/Lagos",
+      "Africa/Nairobi",
+      "Asia/Dubai",
+      "Asia/Karachi",
+      "Asia/Kolkata",
+      "Asia/Kathmandu",
+      "Asia/Dhaka",
+      "Asia/Bangkok",
+      "Asia/Shanghai",
+      "Asia/Hong_Kong",
+      "Asia/Singapore",
+      "Asia/Tokyo",
+      "Asia/Seoul",
+      "Asia/Jerusalem",
+      "Australia/Sydney",
+      "Pacific/Auckland",
+      "Pacific/Fiji",
+    ].sort();
+
+    const TZ_FORMATTERS = {};
+
+    function timezoneFormatter(timezone) {
+      if (!TZ_FORMATTERS[timezone]) {
+        TZ_FORMATTERS[timezone] = new Intl.DateTimeFormat("en-US", {
+          timeZone: timezone,
+          hourCycle: "h23",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+      }
+      return TZ_FORMATTERS[timezone];
+    }
+
+    function timezoneWallTime(date, timezone) {
+      const parts = {};
+      timezoneFormatter(timezone).formatToParts(date).forEach((part) => {
+        if (part.type !== "literal") parts[part.type] = part.value;
+      });
+      return {
+        year: Number(parts.year),
+        month: Number(parts.month),
+        day: Number(parts.day),
+        hour: Number(parts.hour),
+        minute: Number(parts.minute),
+        second: Number(parts.second),
+      };
+    }
+
+    function timezoneOffsetMinutes(date, timezone) {
+      const wall = timezoneWallTime(date, timezone);
+      const wallMs = Date.UTC(
+        wall.year,
+        wall.month - 1,
+        wall.day,
+        wall.hour,
+        wall.minute,
+        wall.second
+      );
+      const instantMs = Math.floor(date.getTime() / 1000) * 1000;
+      return (wallMs - instantMs) / 60000;
+    }
+
+    function timezoneAbbr(date, timezone, daylight) {
+      if (timezone === "UTC" || timezone === "Etc/UTC") return "UTC";
+
+      const known = TZ_ABBR[timezone];
+      if (known) {
+        const abbr = daylight ? known[1] : known[0];
+        if (abbr) return abbr;
+      }
+
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        timeZoneName: "short",
+      }).formatToParts(date);
+      const part = parts.find((entry) => entry.type === "timeZoneName");
+      const value = part && part.value ? part.value.replace(/[<>]/g, "") : "";
+      if (/^[A-Za-z]{3,}$/.test(value)) return value;
+      return "<" + (value || (daylight ? "DST" : "STD")) + ">";
+    }
+
+    function formatPosixOffset(minutes) {
+      const hours = Math.trunc(-minutes / 60);
+      const mins = Math.abs(minutes % 60);
+      return String(hours) + (mins ? ":" + pad2(mins) : "");
+    }
+
+    function formatTimezoneTransition(timezone, reference, year) {
+      const referenceOffset = timezoneOffsetMinutes(reference, timezone);
+      let start = null;
+      let end = null;
+
+      for (let month = 0; month < 12; month++) {
+        const first = new Date(year, month, 1);
+        const next = new Date(year, month + 1, 1);
+        if (timezoneOffsetMinutes(first, timezone) === referenceOffset &&
+            timezoneOffsetMinutes(next, timezone) !== referenceOffset) {
+          start = first.getTime();
+          end = next.getTime();
+          break;
+        }
+      }
+
+      if (start === null) return "J365/25";
+
+      while (end - start > 1000) {
+        const mid = start + Math.floor((end - start) / 2);
+        if (timezoneOffsetMinutes(new Date(mid), timezone) === referenceOffset) {
+          start = mid;
+        } else {
+          end = mid;
+        }
+      }
+
+      const wall = new Date(end + referenceOffset * 60000);
+      const month = wall.getUTCMonth() + 1;
+      const day = wall.getUTCDate();
+      const weekday = wall.getUTCDay();
+      const hour = wall.getUTCHours();
+      const minute = wall.getUTCMinutes();
+      const second = wall.getUTCSeconds();
+      const daysInMonth = new Date(Date.UTC(wall.getUTCFullYear(), month, 0))
+        .getUTCDate();
+      const week = day + 7 > daysInMonth ? 5 : Math.ceil(day / 7);
+      let rule = "M" + month + "." + week + "." + weekday;
+
+      if (hour !== 2 || minute || second) {
+        rule += "/" + hour;
+        if (minute || second) {
+          rule += ":" + pad2(minute);
+          if (second) rule += ":" + pad2(second);
+        }
+      }
+
+      return rule;
+    }
+
+    function getPosixTimezone(timezone) {
+      if (timezone === "UTC" || timezone === "Etc/UTC") return "UTC0";
+
+      const year = new Date().getFullYear();
+      const jan = new Date(year, 0, 1);
+      const jun = new Date(year, 5, 1);
+      const janOffset = timezoneOffsetMinutes(jan, timezone);
+      const junOffset = timezoneOffsetMinutes(jun, timezone);
+      const standardOffset = Math.min(janOffset, junOffset);
+      const daylightOffset = Math.max(janOffset, junOffset);
+      const standardRef = standardOffset === janOffset ? jan : jun;
+      const daylightRef = daylightOffset === janOffset ? jan : jun;
+
+      let value = timezoneAbbr(standardRef, timezone, false) +
+        formatPosixOffset(standardOffset);
+      if (standardOffset !== daylightOffset) {
+        value += timezoneAbbr(daylightRef, timezone, true);
+        if (daylightOffset !== standardOffset + 60) {
+          value += formatPosixOffset(daylightOffset);
+        }
+        value += "," +
+          formatTimezoneTransition(timezone, standardRef, year) + "," +
+          formatTimezoneTransition(timezone, daylightRef, year);
+      }
+
+      return value;
+    }
+
+    function setTimezoneFromZone(input, timezone) {
+      const value = getPosixTimezone(timezone);
+      input.value = value;
+      input.title = timezone + " -> " + value;
+    }
+
+    function timezoneHelper(input) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "config-helper";
+      wrapper.appendChild(input);
+
+      const detect = document.createElement("button");
+      detect.type = "button";
+      detect.className = "btn";
+      detect.textContent = "Detect";
+      detect.onclick = () => {
+        try {
+          const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone ||
+            "UTC";
+          setTimezoneFromZone(input, timezone);
+        } catch (error) {
+          input.value = "UTC0";
+          input.title = "Timezone detection failed";
+        }
+      };
+      wrapper.appendChild(detect);
+
+      const select = document.createElement("select");
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Preset...";
+      select.appendChild(placeholder);
+      TZ_ZONES.forEach((timezone) => {
+        const option = document.createElement("option");
+        option.value = timezone;
+        option.textContent = timezone;
+        select.appendChild(option);
+      });
+      select.onchange = () => {
+        if (select.value) setTimezoneFromZone(input, select.value);
+      };
+      wrapper.appendChild(select);
+
+      return wrapper;
+    }
+
+    const WIFI_COUNTRY_PRESETS = [
+      ["01", "Worldwide / default"],
+      ["AU", "Australia"],
+      ["BR", "Brazil"],
+      ["CA", "Canada"],
+      ["CN", "China"],
+      ["DE", "Germany"],
+      ["ES", "Spain"],
+      ["FI", "Finland"],
+      ["FR", "France"],
+      ["GB", "United Kingdom"],
+      ["IN", "India"],
+      ["IT", "Italy"],
+      ["JP", "Japan"],
+      ["KR", "South Korea"],
+      ["MX", "Mexico"],
+      ["NL", "Netherlands"],
+      ["NO", "Norway"],
+      ["NZ", "New Zealand"],
+      ["PL", "Poland"],
+      ["SE", "Sweden"],
+      ["US", "United States"],
+    ];
+
+    function wifiCountryHelper(input) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "config-helper";
+      wrapper.appendChild(input);
+      input.maxLength = 2;
+      input.autocapitalize = "characters";
+      input.oninput = () => {
+        input.value = input.value.toUpperCase();
+      };
+
+      const world = document.createElement("button");
+      world.type = "button";
+      world.className = "btn";
+      world.textContent = "Default";
+      world.onclick = () => {
+        input.value = "01";
+        input.title = "Worldwide / ESP-IDF default";
+      };
+      wrapper.appendChild(world);
+
+      const select = document.createElement("select");
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Preset...";
+      select.appendChild(placeholder);
+      WIFI_COUNTRY_PRESETS.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry[0];
+        option.textContent = entry[0] + " - " + entry[1];
+        select.appendChild(option);
+      });
+      select.onchange = () => {
+        if (!select.value) return;
+        input.value = select.value;
+        const selected = WIFI_COUNTRY_PRESETS.find((entry) =>
+          entry[0] === select.value);
+        input.title = selected ? selected[1] : "";
+      };
+      wrapper.appendChild(select);
+
+      return wrapper;
+    }
+
+    function fmtFirmware(value) {
+      value = String(value || "");
+      const match = value.match(/^[A-Z]{2}\d+\.(\d+\.\d+\.\d+\.\d+)/);
+      return match ? match[1] : value;
+    }
+
+    function fmtProfile(value) {
+      return String(value || "")
+        .replace(/[_-]/g, " ")
+        .replace(/\s*Profile$/i, "")
+        .trim();
+    }
+
+    function fmtTherapy(value) {
+      if (value === "running") return "Therapy";
+      if (value === "standby") return "Standby";
+      if (value === "unknown") return "Unknown";
+      return value || "Unknown";
+    }
+
+    function fmtSync(data) {
+      if (!data.esp_time_valid) return "Clock invalid";
+
+      let source = data.esp_time_source === "ntp" ? "NTP" :
+        data.esp_time_source === "resmed" ? "ResMed" : "Clock";
+      if (data.ntp_synced) source = "NTP";
+      return source + (data.resmed_time_sync_enabled ? " -> ResMed" : "");
+    }
+
+    function renderStorageStatus(data) {
+      const summary = document.getElementById("storageSummary");
+      const meter = document.getElementById("storageMeter");
+      if (!summary || !meter) return;
+
+      let text = "Not configured";
+      let percent = 0;
+      const total = Number(data.storage_total || 0);
+      const free = Number(data.storage_free || 0);
+      const used = Number(data.storage_used || 0);
+      if (data.storage_mounted && total > 0) {
+        text = fmtBytes(free) + " / " + fmtBytes(total);
+        percent = Math.max(0, Math.min(100, used / total * 100));
+      } else if (data.storage_configured) {
+        text = data.storage_state || "Not mounted";
+      }
+
+      summary.textContent = text;
+      meter.style.width = percent.toFixed(1) + "%";
+      meter.title = percent.toFixed(1) + "% used";
+    }
+
+    function therapyPending(data) {
+      return data.therapy_pending && data.therapy_pending !== "none";
+    }
+
+    function therapyDisplayState(data) {
+      return therapyPending(data) ? data.therapy_pending : data.therapy;
+    }
+
+    function setTherapyButtons(data) {
+      const start = document.getElementById("therapyStart");
+      const stop = document.getElementById("therapyStop");
+      if (!start || !stop) return;
+
+      const pending = therapyPending(data);
+      const shown = therapyDisplayState(data);
+      start.textContent = pending && shown === "running" ? "Starting" : "Therapy";
+      stop.textContent = pending && shown === "standby" ? "Stopping" : "Standby";
+      start.className = "btn" + (shown === "running" ? " primary" : "");
+      stop.className = "btn" + (shown === "standby" ? " primary" : "");
+      start.disabled = !!pending || shown === "running";
+      stop.disabled = !!pending || shown === "standby";
+    }
+
+    function applyTherapyPending(action) {
+      const data = Object.assign({}, statusData || {});
+      data.therapy_pending = action === "start" ? "running" : "standby";
+      if (!data.therapy) data.therapy = "unknown";
+      statusData = data;
+      renderStatus(data);
+    }
+
+    async function loadStatus() {
+      try {
+        const response = await api("/api/status");
+        statusData = await response.json();
+        renderStatus(statusData);
+      } catch (error) {
+        apiError(error);
+      }
+    }
+
+    function renderStatus(data) {
+      up("ver", data.version);
+      up("built", data.built);
+
+      let memory = (data.heap / 1024).toFixed(1) + " KB heap";
+      if (data.psram_available) {
+        memory += " / " + (data.psram_free / 1048576).toFixed(1) + " MB psram";
+      }
+      up("heap", memory);
+      up("uptime", "Up: " + fmtUp(data.uptime || 0));
+      setWifiTop(data);
+      const wifiPane = document.getElementById("p-wifi");
+      if (wifiPane && wifiPane.classList.contains("active")) {
+        renderWifiCurrent({});
+      }
+      up("productName", data.device_name || "AirSense 11");
+      up("serial", data.serial);
+      up("firmware", fmtFirmware(data.software_id || data.application));
+      up("profile", fmtProfile(data.profile));
+      up("motorHours", data.motor_hours ?
+        Number(data.motor_hours).toLocaleString() + " hrs" : "--");
+      up("deviceTime", fmtIsoMinute(data.device_datetime,
+        data.device_datetime_age_ms));
+      up("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
+      renderStorageStatus(data);
+      up("timeSync", fmtSync(data));
+
+      const badge = document.getElementById("therapyBadge");
+      const pending = therapyPending(data);
+      const label = pending ?
+        (data.therapy_pending === "running" ? "Starting" : "Stopping") :
+        fmtTherapy(data.therapy);
+      badge.textContent = label;
+      badge.className = "badge " +
+        (pending ? "warn" : data.therapy === "running" ? "good" : "");
+      setTherapyButtons(data);
+    }
+
+    async function loadStream() {
+      try {
+        const response = await api("/api/stream");
+        streamData = await response.json();
+        renderStream(streamData);
+      } catch (error) {
+        /* Stream panel is not visible yet. */
+      }
+    }
+
+    function renderStream(data) {
+      const state = data.error ? "error" :
+        data.pending_start ? "starting" :
+        data.pending_stop ? "stopping" :
+        data.subscribed ? "subscribed" :
+        data.desired ? "requested" : "idle";
+      up("streamState", state);
+      up("streamConsumers", data.consumers);
+      up("streamNotifications", data.notifications || 0);
+      up("streamFanout", (data.fanout_targets || 0) + " targets, " +
+        (data.fanout_drops || 0) + " drops");
+      up("streamFrames", (data.frame_pool_used || 0) + "/" +
+        (data.frame_pool_capacity || 0) + " used, " +
+        (data.parse_errors || 0) + " parse, " +
+        (data.truncated_frames || 0) + " trunc");
+      up("streamCommands", (data.start_requests || 0) + " start, " +
+        (data.stop_requests || 0) + " stop, " +
+        (data.command_errors || 0) + " errors");
+      up("streamLast", data.last_age_ms === null ?
+        "--" : Math.round(data.last_age_ms / 1000) + " s ago");
+      up("streamId", data.stream_id || "--");
+    }
+
+    function chartPush(name, values, limit) {
+      if (!Array.isArray(values) || !values.length) return;
+      const target = liveData[name];
+      values.forEach((value) => {
+        target.push(value === null || value === undefined ? null : Number(value));
+      });
+      while (target.length > limit) target.shift();
+    }
+
+    function lastNumber(values) {
+      for (let index = values.length - 1; index >= 0; index--) {
+        const value = values[index];
+        if (Number.isFinite(value)) return value;
+      }
+      return null;
+    }
+
+    function setChartValue(id, value, decimals) {
+      const element = document.getElementById(id);
+      if (!element) return;
+      element.textContent = Number.isFinite(value) ? value.toFixed(decimals) : "--";
+    }
+
+    function expandChartScale(name, seriesList) {
+      const scale = chartScales[name];
+      if (!scale) return null;
+      const series = Array.isArray(seriesList) &&
+          seriesList.some((item) => Array.isArray(item))
+        ? seriesList
+        : [seriesList];
+      series.forEach((values) => {
+        if (!Array.isArray(values)) return;
+        values.forEach((value) => {
+          if (!Number.isFinite(value)) return;
+          if (scale.symmetric) {
+            while (value < scale.min || value > scale.max) {
+              scale.min -= scale.step;
+              scale.max += scale.step;
+            }
+          } else {
+            while (value > scale.max) scale.max += scale.step;
+          }
+        });
+      });
+      return scale;
+    }
+
+    function drawChart(id, values, color, minY, maxY, options) {
+      options = options || {};
+      const multi = Array.isArray(values) &&
+        values.some((item) => item && Array.isArray(item.values));
+      const seriesList = multi ? values : [{values, color}];
+      const canvas = document.getElementById(id);
+      if (!canvas) return;
+      const parent = canvas.parentElement;
+      const width = parent ? Math.max(260, parent.clientWidth - 32) : 640;
+      const height = parseInt(getComputedStyle(canvas).height, 10) || 140;
+      const ratio = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(width * ratio) ||
+          canvas.height !== Math.round(height * ratio)) {
+        canvas.width = Math.round(width * ratio);
+        canvas.height = Math.round(height * ratio);
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#080a0f";
+      ctx.fillRect(0, 0, width, height);
+
+      const pad = {left: 42, right: 8, top: 12, bottom: 12};
+      const graphW = width - pad.left - pad.right;
+      const graphH = height - pad.top - pad.bottom;
+      ctx.strokeStyle = "#1f2633";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 5]);
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.top + graphH * (i / 4);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(width - pad.right, y);
+        ctx.stroke();
+      }
+      if (minY < 0 && maxY > 0) {
+        const zeroY = pad.top + graphH * (1 - (0 - minY) / (maxY - minY));
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, zeroY);
+        ctx.lineTo(width - pad.right, zeroY);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = "#69717f";
+      ctx.font = "10px SF Mono, Consolas, monospace";
+      ctx.textAlign = "right";
+      for (let i = 0; i <= 4; i++) {
+        const value = maxY - (maxY - minY) * (i / 4);
+        const label = Math.abs(value) >= 10 ? value.toFixed(0) : value.toFixed(1);
+        ctx.fillText(label, pad.left - 6, pad.top + graphH * (i / 4) + 3);
+      }
+
+      const maxLen = seriesList.reduce((max, series) =>
+        Math.max(max, Array.isArray(series.values) ? series.values.length : 0), 0);
+      if (maxLen < 2) return;
+      const pointLimit = Math.max(2, options.points || maxLen);
+      function trace(seriesValues, lineWidth, strokeStyle) {
+        const points = Array.isArray(seriesValues) ?
+          seriesValues.slice(-pointLimit) : [];
+        if (points.length < 2) return;
+        ctx.beginPath();
+        ctx.lineWidth = lineWidth;
+        ctx.strokeStyle = strokeStyle;
+        let started = false;
+        points.forEach((value, index) => {
+          if (!Number.isFinite(value)) {
+            started = false;
+            return;
+          }
+          const clipped = Math.max(minY, Math.min(maxY, value));
+          const x = pad.left + graphW * (index / Math.max(1, points.length - 1));
+          const y = pad.top + graphH * (1 - (clipped - minY) / (maxY - minY));
+          if (!started) {
+            ctx.moveTo(x, y);
+            started = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+        });
+        ctx.stroke();
+      }
+      seriesList.forEach((series) => {
+        trace(series.values, 4, series.color + "44");
+        trace(series.values, 1.6, series.color);
+      });
+    }
+
+    function updateCharts() {
+      const pressureScale = expandChartScale("pressure", liveData.pressure);
+      const flowScale = expandChartScale("flow", liveData.flow);
+      const leakScale = expandChartScale("leak", liveData.leak);
+      const therapyPressureScale = expandChartScale("therapyPressure", [
+        liveData.inspPressure,
+        liveData.expPressure,
+      ]);
+
+      drawChart("chartPressureCanvas", liveData.pressure, "#22d3ee",
+        pressureScale.min, pressureScale.max, {points: LIVE_FAST_POINTS});
+      drawChart("chartFlowCanvas", liveData.flow, "#818cf8",
+        flowScale.min, flowScale.max, {points: LIVE_FAST_POINTS});
+      drawChart("chartLeakCanvas", liveData.leak, "#fb923c",
+        leakScale.min, leakScale.max, {points: LIVE_MEDIUM_POINTS});
+      drawChart("chartTherapyPressureCanvas", [
+        {values: liveData.inspPressure, color: "#22c55e"},
+        {values: liveData.expPressure, color: "#f97316"},
+      ], "#22c55e", therapyPressureScale.min, therapyPressureScale.max,
+        {points: LIVE_MEDIUM_POINTS});
+      drawChart("chartSpo2Canvas", liveData.spo2, "#62d98f", 80, 100,
+        {points: LIVE_SLOW_POINTS});
+      drawChart("chartPulseCanvas", liveData.pulse, "#e85d75", 40, 160,
+        {points: LIVE_SLOW_POINTS});
+
+      setChartValue("chartPressure", lastNumber(liveData.pressure), 1);
+      setChartValue("chartFlow", lastNumber(liveData.flow), 1);
+      setChartValue("chartLeak", lastNumber(liveData.leak), 1);
+      setChartValue("chartInspPressure", lastNumber(liveData.inspPressure), 1);
+      setChartValue("chartExpPressure", lastNumber(liveData.expPressure), 1);
+      setChartValue("chartSpo2", lastNumber(liveData.spo2), 0);
+      setChartValue("chartPulse", lastNumber(liveData.pulse), 0);
+    }
+
+    function renderLive(data) {
+      const active = data && data.active;
+      const attached = data && data.attached;
+      const badge = document.getElementById("liveBadge");
+      if (badge) {
+        badge.textContent = attached ? "Live" : active ? "Starting" : "Idle";
+        badge.className = "badge " + (attached ? "good" : active ? "warn" : "");
+      }
+      if (!data || !data.samples) {
+        updateCharts();
+        return;
+      }
+      chartPush("pressure", data.samples.pressure, LIVE_FAST_POINTS);
+      chartPush("flow", data.samples.flow, LIVE_FAST_POINTS);
+      chartPush("leak", data.samples.leak, LIVE_MEDIUM_POINTS);
+      chartPush("inspPressure", data.samples.inspiratory_pressure,
+        LIVE_MEDIUM_POINTS);
+      chartPush("expPressure", data.samples.expiratory_pressure,
+        LIVE_MEDIUM_POINTS);
+      chartPush("spo2", data.samples.spo2, LIVE_SLOW_POINTS);
+      chartPush("pulse", data.samples.pulse, LIVE_SLOW_POINTS);
+      updateCharts();
+    }
+
+    function initEvents() {
+      if (!window.EventSource) return;
+      if (evtSrc) evtSrc.close();
+
+      evtSrc = new EventSource("/api/events");
+      evtSrc.addEventListener("status", (event) => {
+        try {
+          statusData = JSON.parse(event.data);
+          renderStatus(statusData);
+        } catch (error) {}
+      });
+      evtSrc.addEventListener("stream", (event) => {
+        try {
+          streamData = JSON.parse(event.data);
+          renderStream(streamData);
+        } catch (error) {}
+      });
+      evtSrc.addEventListener("console", (event) => {
+        try {
+          renderConsole(JSON.parse(event.data));
+        } catch (error) {}
+      });
+      evtSrc.addEventListener("live", (event) => {
+        try {
+          renderLive(JSON.parse(event.data));
+        } catch (error) {}
+      });
+    }
+
+    async function therapy(action) {
+      applyTherapyPending(action);
+      try {
+        const response = await api("/api/therapy", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({action}),
+        });
+        const data = await response.json();
+        if (!data.ok) throw new Error("therapy command queue failed");
+        [300, 900, 1800, 3200, 5200].forEach((delay) => {
+          setTimeout(loadStatus, delay);
+        });
+      } catch (error) {
+        alert(error.message);
+        loadStatus();
+      }
+    }
+
+    async function timeAction(action) {
+      try {
+        const response = await api("/api/time", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({action}),
+        });
+        const data = await response.json();
+        msg("timeMsg", data.result, data.ok);
+        setTimeout(loadStatus, 900);
+      } catch (error) {
+        msg("timeMsg", error.message, false);
+      }
+    }
+
+    function row(label, control, small) {
+      const element = document.createElement("div");
+      element.className = "row";
+      const labelElement = document.createElement("label");
+      labelElement.textContent = label;
+      if (small) {
+        const smallElement = document.createElement("small");
+        smallElement.textContent = small;
+        labelElement.appendChild(smallElement);
+      }
+      element.appendChild(labelElement);
+      element.appendChild(control);
+      return element;
+    }
+
+    function valueSpan(text) {
+      const value = document.createElement("span");
+      value.className = "value";
+      value.textContent =
+        text === undefined || text === null || text === "" ? "--" : text;
+      return value;
+    }
+
+    function scheduleSettingsPoll(data) {
+      if (settingsPollTimer) {
+        clearTimeout(settingsPollTimer);
+        settingsPollTimer = null;
+      }
+
+      const active = document.getElementById("p-clinical").classList.contains("active");
+      if (data.valid && !data.refresh_queued && (data.age_ms || 0) < 2500) {
+        settingsRefreshUntil = 0;
+      }
+
+      const refreshing = Date.now() < settingsRefreshUntil;
+      if (active && (data.refresh_queued || refreshing || !data.valid ||
+          data.pending_count)) {
+        settingsPollTimer = setTimeout(() => loadSettings(false, true), 1200);
+      }
+    }
+
+    async function loadSettings(refresh, poll) {
+      try {
+        if (refresh) settingsRefreshUntil = Date.now() + 7000;
+
+        const query = [];
+        if (refresh) query.push("refresh=1");
+        if (poll) query.push("poll=1");
+        if (settingsDraftMode !== null) {
+          query.push("mode=" + encodeURIComponent(settingsDraftMode));
+        }
+
+        const response = await api("/api/settings" +
+          (query.length ? "?" + query.join("&") : ""));
+        settingsData = await response.json();
+        renderSettings(settingsData);
+      } catch (error) {
+        msg("settingsMsg", error.message, false);
+      }
+    }
+
+    function renderSettings(data) {
+      const parts = [];
+      if (data.active_mode !== undefined && data.active_mode !== null) {
+        settingsActiveMode = Number(data.active_mode);
+      }
+      if (data.mode !== undefined && data.mode !== null) {
+        settingsDraftMode = Number(data.mode);
+      }
+      if (data.valid && !data.refresh_queued && (data.age_ms || 0) < 2500) {
+        settingsRefreshUntil = 0;
+      }
+
+      const refreshing = Date.now() < settingsRefreshUntil;
+      if (data.refresh_queued || refreshing) {
+        parts.push("Refreshing settings");
+      } else if (!data.valid) {
+        parts.push("Waiting for device");
+      }
+      if (settingsDraftMode !== null && settingsActiveMode !== null &&
+          settingsDraftMode !== settingsActiveMode) {
+        parts.push("Unsaved mode change");
+      }
+      if (data.pending_count) parts.push(data.pending_count + " pending readback");
+
+      const meta = document.getElementById("settingsMeta");
+      const metaText = parts.join("; ");
+      meta.textContent = metaText;
+      meta.style.display = metaText ? "block" : "none";
+
+      const root = document.getElementById("settingsFields");
+      const save = document.getElementById("settingsSave");
+      const revert = document.getElementById("settingsRevert");
+      root.innerHTML = "";
+      scheduleSettingsPoll(data);
+      if (revert) {
+        revert.style.display =
+          settingsDraftMode !== null && settingsActiveMode !== null &&
+          settingsDraftMode !== settingsActiveMode ? "" : "none";
+      }
+
+      const visible = (data.settings || []).filter((setting) =>
+        setting.available || setting.inferred || setting.pending);
+      if (!visible.length) {
+        root.innerHTML = '<div class="value" style="text-align:left">' +
+          (data.valid ? "No readable settings for this mode" :
+            "Waiting for AS11 settings readback") +
+          "</div>";
+        if (save) save.disabled = true;
+        return;
+      }
+
+      let group = "";
+      visible.forEach((setting) => {
+        if (setting.group !== group) {
+          group = setting.group;
+          const heading = document.createElement("div");
+          heading.className = "section-title";
+          heading.textContent = group;
+          root.appendChild(heading);
+        }
+
+        const raw = setting.pending ?
+          setting.pending_value : (setting.value || "");
+        const shown = setting.pending ?
+          (setting.pending_display || setting.pending_value) :
+          (setting.display || setting.value || "");
+        let control;
+
+        if (setting.kind === "enum") {
+          control = document.createElement("select");
+          let seen = false;
+          if (raw === "") {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "--";
+            option.selected = true;
+            option.disabled = true;
+            control.appendChild(option);
+          }
+          (setting.options || []).forEach((item, index) => {
+            const label = item && typeof item === "object" ? item.label : item;
+            const value = item && typeof item === "object" &&
+              item.value !== undefined ? String(item.value) : String(index);
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = label;
+            if (value === String(raw)) {
+              option.selected = true;
+              seen = true;
+            }
+            control.appendChild(option);
+          });
+          if (raw !== "" && !seen) {
+            const option = document.createElement("option");
+            option.value = raw;
+            option.textContent = shown || raw;
+            option.selected = true;
+            control.appendChild(option);
+          }
+          if (setting.name === "TherapyMode") {
+            control.onchange = () => {
+              const nextMode = Number(control.value);
+              if (!Number.isNaN(nextMode)) {
+                settingsDraftMode = nextMode;
+                loadSettings(false);
+              }
+            };
+          }
+        } else if (setting.kind === "bool") {
+          control = document.createElement("select");
+          ["false", "true"].forEach((value) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value === "true" ? "On" : "Off";
+            const current = String(raw).toLowerCase();
+            if (current === value ||
+                current === (value === "true" ? "on" : "off")) {
+              option.selected = true;
+            }
+            control.appendChild(option);
+          });
+        } else {
+          control = document.createElement("input");
+          control.type = setting.kind === "number" ? "number" : "text";
+          control.value = setting.available || setting.inferred ? (shown || "") : "";
+          if (setting.kind === "number") {
+            control.min = setting.min;
+            control.max = setting.max;
+            control.step = setting.step;
+          }
+        }
+
+        control.dataset.name = setting.name;
+        control.dataset.kind = setting.kind;
+        control.dataset.orig =
+          setting.kind === "enum" || setting.kind === "bool" ?
+            (raw || "") : (control.value || "");
+        if (!setting.available || !setting.writable) control.disabled = true;
+        if (setting.pending) control.classList.add("pending");
+
+        let small = "";
+        if (setting.pending) {
+          small = "Pending readback; current " +
+            (setting.display || setting.value || "--");
+        } else if (setting.inferred) {
+          small = setting.name === "TherapyMode" ?
+            "" : "Inferred from device status";
+        }
+
+        const entry = row(setting.label, control, small);
+        if (setting.pending) entry.classList.add("pending");
+        root.appendChild(entry);
+      });
+
+      if (save) save.disabled = !root.querySelector("[data-name]:not(:disabled)");
+    }
+
+    async function saveSettings() {
+      const changes = {};
+      if (settingsDraftMode !== null && settingsActiveMode !== null &&
+          settingsDraftMode !== settingsActiveMode) {
+        changes.TherapyMode = settingsDraftMode;
+      }
+      document.querySelectorAll("#settingsFields [data-name]").forEach((input) => {
+        if (input.disabled) return;
+        if (String(input.value) === String(input.dataset.orig)) return;
+
+        if (input.dataset.kind === "number") {
+          if (input.value === "") return;
+          changes[input.dataset.name] = Number(input.value);
+        } else if (input.dataset.kind === "bool") {
+          changes[input.dataset.name] = input.value === "true";
+        } else if (input.dataset.kind === "enum") {
+          if (input.value === "") return;
+          changes[input.dataset.name] = Number(input.value);
+        } else {
+          changes[input.dataset.name] = input.value;
+        }
+      });
+
+      if (!Object.keys(changes).length) {
+        msg("settingsMsg", "No changes", true);
+        return;
+      }
+
+      try {
+        const response = await api("/api/settings", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(changes),
+        });
+        const data = await response.json();
+        msg("settingsMsg",
+          data.ok ? "Settings queued" : "Queue failed",
+          data.ok);
+        settingsRefreshUntil = Date.now() + 7000;
+        setTimeout(() => loadSettings(true), 1200);
+      } catch (error) {
+        msg("settingsMsg", error.message, false);
+      }
+    }
+
+    function revertSettingsDraft() {
+      if (settingsActiveMode === null) return;
+      settingsDraftMode = settingsActiveMode;
+      loadSettings(false);
+    }
+
+    function renderWifiCurrent(data) {
+      const root = document.getElementById("wifiCurrent");
+      if (!root) return;
+      root.innerHTML = "";
+
+      const status = statusData || {};
+      const state = data.state || status.wifi_state || "--";
+      const ssid = data.ssid || status.wifi_ssid || "";
+      const ip = data.ip || status.wifi_ip || "";
+      const channel = data.channel || status.wifi_channel || 0;
+      const bssid = data.bssid || status.wifi_bssid || "";
+      const rssi = data.rssi !== undefined ? data.rssi : status.wifi_rssi;
+      const roam = data.roam !== undefined ? data.roam : status.wifi_roam;
+      const active = Number.isFinite(Number(data.active)) ?
+        Number(data.active) : Number(status.wifi_profile);
+
+      root.appendChild(row("State", valueSpan(state),
+        roam ? "roaming on" : "roaming off"));
+      root.appendChild(row("SSID", valueSpan(ssid),
+        Number.isFinite(active) && active >= 0 ? "profile " + active : ""));
+      root.appendChild(row("Signal", wifiSignalValue(rssi),
+        channel > 0 ? "channel " + channel : ""));
+      root.appendChild(row("IP", valueSpan(ip),
+        bssid && bssid !== "00:00:00:00:00:00" ? bssid : ""));
+    }
+
+    async function loadWifi() {
+      try {
+        const response = await api("/api/wifi");
+        const data = await response.json();
+        renderWifiCurrent(data);
+        const root = document.getElementById("wifiProfiles");
+        root.innerHTML = "";
+        if (!data.profiles.length) {
+          root.innerHTML = '<div class="value" style="text-align:left">No profiles</div>';
+        }
+        data.profiles.forEach((profile, index) => {
+          const button = document.createElement("button");
+          button.className = "btn danger";
+          button.textContent = "Remove";
+          button.onclick = () => wifiRemove(index);
+          root.appendChild(row(profile.ssid, button,
+            (index === data.active ? "active, " : "") +
+            (profile.open ? "open" : "password")));
+        });
+      } catch (error) {
+        msg("wifiMsg", error.message, false);
+      }
+    }
+
+    async function wifiAction(action, extra) {
+      try {
+        const body = Object.assign({action}, extra || {});
+        const response = await api("/api/wifi", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        msg("wifiMsg", data.result, data.ok);
+        setTimeout(loadWifi, 600);
+        setTimeout(loadStatus, 900);
+      } catch (error) {
+        msg("wifiMsg", error.message, false);
+      }
+    }
+
+    function wifiAdd() {
+      wifiAction("add", {
+        ssid: document.getElementById("wifiSsid").value,
+        pass: document.getElementById("wifiPass").value,
+      });
+    }
+
+    function wifiRemove(index) {
+      wifiAction("remove", {index});
+    }
+
+    async function loadOta() {
+      try {
+        const response = await api("/api/ota");
+        const data = await response.json();
+        up("otaArduino", data.arduino_started ? "port " + data.arduino_port : "stopped");
+        up("otaHttp", data.http_active ? "uploading" :
+          data.reboot_pending ? "restarting" :
+          data.http_ready ? "ready" : "idle");
+        up("otaProgress", (data.progress || 0) + "% / " +
+          (data.bytes || 0) + " bytes");
+        up("otaPartition", data.partition || "--");
+
+        const resmedResponse = await api("/api/resmed-ota");
+        renderResmedOta(await resmedResponse.json());
+      } catch (error) {
+        msg("otaMsg", error.message, false);
+      }
+    }
+
+    async function otaUpload() {
+      const file = document.getElementById("otaFile").files[0];
+      if (!file) {
+        msg("otaMsg", "Select firmware .bin", false);
+        return;
+      }
+
+      const progress = document.getElementById("otaUploadProgress");
+      const bar = document.getElementById("otaUploadBar");
+      progress.style.display = "block";
+      bar.style.width = "0%";
+
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            bar.style.width = (event.loaded / event.total * 100) + "%";
+          }
+        };
+        xhr.onload = () => {
+          try {
+            const data = JSON.parse(xhr.responseText || "{}");
+            msg("otaMsg",
+              xhr.status < 300 ?
+                (data.reboot_pending ? "Upload OK. Restarting..." :
+                  data.http_ready ? "Upload OK. Restarting shortly." :
+                  "Upload finished") :
+                ("Upload failed: " + (data.last_error || xhr.statusText)),
+              xhr.status < 300 && data.http_ready);
+            loadOta();
+          } catch (error) {
+            msg("otaMsg", "Upload failed", false);
+          }
+        };
+        xhr.onerror = () => msg("otaMsg", "Upload error", false);
+        xhr.open("POST", "/api/ota/upload");
+
+        const form = new FormData();
+        form.append("firmware", file);
+        xhr.send(form);
+      } catch (error) {
+        msg("otaMsg", error.message, false);
+      }
+    }
+
+    function renderResmedOta(data) {
+      up("resmedOtaState", (data.phase || "--") + (data.waiting ? " / waiting" : ""));
+      up("resmedOtaProgress", (data.progress || 0) + "% / " +
+        (data.uploaded_bytes || 0) + "/" + (data.total_size || 0) + " bytes");
+      up("resmedOtaBlock", data.xfer_block_size || "--");
+      up("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
+
+      const progress = document.getElementById("resmedOtaUploadProgress");
+      const bar = document.getElementById("resmedOtaUploadBar");
+      progress.style.display =
+        data.active || data.phase === "complete" || data.phase === "verified" ?
+          "block" : "none";
+      bar.style.width = (data.progress || 0) + "%";
+      if (data.last_error) msg("resmedOtaMsg", data.last_error, false);
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function hexFromBytes(bytes) {
+      let output = "";
+      const hex = "0123456789ABCDEF";
+      for (const byte of bytes) {
+        output += hex[byte >> 4] + hex[byte & 15];
+      }
+      return output;
+    }
+
+    async function readFileHex(file, offset, len) {
+      const buffer = await file.slice(offset, offset + len).arrayBuffer();
+      return hexFromBytes(new Uint8Array(buffer));
+    }
+
+    async function getResmedOta() {
+      const response = await api("/api/resmed-ota");
+      const data = await response.json();
+      renderResmedOta(data);
+      return data;
+    }
+
+    async function waitResmedOta(predicate, attempts) {
+      for (let index = 0; index < (attempts || 360); index++) {
+        const data = await getResmedOta();
+        if (data.phase === "error") {
+          throw new Error(data.last_error || "ResMed OTA failed");
+        }
+        if (predicate(data)) return data;
+        await sleep(500);
+      }
+      throw new Error("ResMed OTA timeout");
+    }
+
+    async function postResmedOta(url, body) {
+      const response = await api(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body || {}),
+      });
+      const data = await response.json();
+      if (!response.ok && data.error) throw new Error(data.error);
+      if (data.queued) {
+        setTimeout(getResmedOta, 300);
+        return data;
+      }
+      renderResmedOta(data);
+      return data;
+    }
+
+    async function resmedOtaUpload() {
+      const file = document.getElementById("resmedOtaFile").files[0];
+      if (!file) {
+        msg("resmedOtaMsg", "Select firmware .abc", false);
+        return;
+      }
+
+      try {
+        msg("resmedOtaMsg", "Starting", true);
+        await postResmedOta("/api/resmed-ota/init", {
+          size: file.size,
+          filename: file.name,
+        });
+
+        const state = await waitResmedOta((data) => data.phase === "ready");
+        const block = state.xfer_block_size || 500;
+        for (let offset = 0; offset < file.size;) {
+          const len = Math.min(block, file.size - offset);
+          const data = await readFileHex(file, offset, len);
+          await postResmedOta("/api/resmed-ota/block", {offset, data});
+          offset += len;
+          await waitResmedOta((ota) =>
+            (ota.uploaded_bytes || 0) >= offset &&
+            ota.phase !== "uploading" &&
+            !ota.waiting);
+        }
+
+        await postResmedOta("/api/resmed-ota/check", {});
+        await waitResmedOta((data) => data.phase === "verified");
+        msg("resmedOtaMsg", "Upload verified", true);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false);
+        loadOta();
+      }
+    }
+
+    async function resmedOtaAbort() {
+      try {
+        await postResmedOta("/api/resmed-ota/abort", {});
+        msg("resmedOtaMsg", "Aborted", true);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false);
+      }
+    }
+
+    async function loadConsole() {
+      try {
+        const response = await api("/api/console");
+        renderConsole(await response.json());
+      } catch (error) {}
+    }
+
+    function renderConsole(data) {
+      if (!data || data.seq === consoleSeq) return;
+      consoleSeq = data.seq;
+      const output = document.getElementById("consoleLog");
+      output.textContent = data.log || "";
+      output.scrollTop = output.scrollHeight;
+    }
+
+    async function sendConsoleCommand() {
+      const input = document.getElementById("consoleInput");
+      const command = input.value.trim();
+      if (!command) return;
+      input.value = "";
+
+      try {
+        const response = await api("/api/console", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({cmd: command}),
+        });
+        const data = await response.json();
+        if (data.log !== undefined) renderConsole(data);
+        setTimeout(loadConsole, 300);
+      } catch (error) {
+        const output = document.getElementById("consoleLog");
+        output.textContent += "\nERR: " + error.message + "\n";
+        output.scrollTop = output.scrollHeight;
+      }
+    }
+
+    async function clearConsoleLog() {
+      try {
+        await api("/api/console/clear", {method: "POST"});
+        setTimeout(loadConsole, 300);
+      } catch (error) {}
+    }
+
+    async function loadConfig() {
+      try {
+        const response = await api("/api/config");
+        configData = await response.json();
+
+        const root = document.getElementById("configFields");
+        root.innerHTML = "";
+        const fields = [
+          ["hostname", "Hostname", "text"],
+          ["tcp_enabled", "Raw TCP", "bool"],
+          ["tcp_port", "Raw TCP Port", "number"],
+          ["telnet_enabled", "Telnet", "bool"],
+          ["telnet_port", "Telnet Port", "number"],
+          ["softap_mode", "SoftAP Mode", "enum", ["auto", "forced"]],
+          ["wifi_country", "WiFi Country", "text"],
+          ["timezone", "Timezone", "text"],
+          ["resmed_time_sync_enabled", "Sync AS11 Time", "bool"],
+          ["http_auth_required", "HTTP Auth", "bool"],
+          ["http_user", "HTTP User", "text"],
+          ["http_password", "HTTP Password", "password"],
+          ["auth_whitelist", "Auth Whitelist", "text"],
+          ["ota_auth", "ArduinoOTA Auth", "bool"],
+          ["ota_password", "ArduinoOTA Password", "password"],
+        ];
+
+        fields.forEach((field) => {
+          let control;
+          if (field[2] === "bool") {
+            control = document.createElement("select");
+            ["false", "true"].forEach((value) => {
+              const option = document.createElement("option");
+              option.value = value;
+              option.textContent = value === "true" ? "On" : "Off";
+              if (String(configData[field[0]]) === value) option.selected = true;
+              control.appendChild(option);
+            });
+          } else if (field[2] === "enum") {
+            control = document.createElement("select");
+            field[3].forEach((value) => {
+              const option = document.createElement("option");
+              option.value = value;
+              option.textContent = value;
+              if (String(configData[field[0]]) === value) option.selected = true;
+              control.appendChild(option);
+            });
+          } else {
+            control = document.createElement("input");
+            control.type = field[2];
+            control.value = configData[field[0]] || "";
+            if (field[0] === "http_password") {
+              control.placeholder = configData.http_password_set ? "set" : "empty";
+            }
+            if (field[0] === "ota_password") {
+              control.placeholder = configData.ota_password_set ? "set" : "empty";
+            }
+          }
+
+          control.dataset.key = field[0];
+          control.dataset.type = field[2];
+          control.dataset.orig = String(configData[field[0]] || "");
+          let rendered = control;
+          if (field[0] === "timezone") rendered = timezoneHelper(control);
+          if (field[0] === "wifi_country") rendered = wifiCountryHelper(control);
+          root.appendChild(row(field[1], rendered, field[0]));
+        });
+      } catch (error) {
+        msg("configMsg", error.message, false);
+      }
+    }
+
+    async function saveConfig() {
+      const changes = {};
+      document.querySelectorAll("#configFields [data-key]").forEach((input) => {
+        if (String(input.value) === String(input.dataset.orig)) return;
+        if (input.dataset.type === "bool") {
+          changes[input.dataset.key] = input.value === "true";
+        } else if (input.dataset.type === "number") {
+          changes[input.dataset.key] = Number(input.value);
+        } else {
+          changes[input.dataset.key] = input.value;
+        }
+      });
+
+      if (changes.http_auth_required === false) {
+        changes.http_user = "";
+        changes.http_password = "";
+      }
+
+      if (!Object.keys(changes).length) {
+        msg("configMsg", "No changes", true);
+        return;
+      }
+
+      try {
+        const response = await api("/api/config", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(changes),
+        });
+        const data = await response.json();
+        msg("configMsg", data.queued ? "Config update queued" : "Saved", true);
+        setTimeout(loadConfig, 600);
+      } catch (error) {
+        msg("configMsg", error.message, false);
+      }
+    }
+
+    initEvents();
+    updateCharts();
+    window.addEventListener("resize", updateCharts);
+    if (location.hash && tabs[location.hash.slice(1)]) {
+      showTab(location.hash.slice(1));
+    } else {
+      loadStatus();
+    }
+
+    setInterval(() => {
+      if (document.getElementById("p-dash").classList.contains("active")) {
+        loadStatus();
+      }
+    }, 5000);
+  </script>
+</body>
+</html>

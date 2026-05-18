@@ -1,0 +1,494 @@
+#include "as11_device_state.h"
+
+#include <ArduinoJson.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/time.h>
+#include <time.h>
+
+#include "board.h"
+#include "string_util.h"
+
+namespace aircannect {
+namespace {
+
+static constexpr time_t VALID_TIME_MIN_EPOCH = 1609459200;
+
+bool variant_to_string(JsonVariantConst value, std::string &out) {
+    if (value.isNull()) return false;
+    if (value.is<const char *>()) {
+        out = value.as<const char *>();
+        return true;
+    }
+    if (value.is<int>()) {
+        out = std::to_string(value.as<int>());
+        return true;
+    }
+    if (value.is<unsigned int>()) {
+        out = std::to_string(value.as<unsigned int>());
+        return true;
+    }
+    if (value.is<long>()) {
+        out = std::to_string(value.as<long>());
+        return true;
+    }
+    if (value.is<unsigned long>()) {
+        out = std::to_string(value.as<unsigned long>());
+        return true;
+    }
+    if (value.is<bool>()) {
+        out = value.as<bool>() ? "true" : "false";
+        return true;
+    }
+    return false;
+}
+
+bool get_string(JsonObjectConst object, const char *name, std::string &out) {
+    return variant_to_string(object[name], out);
+}
+
+bool variant_to_int(JsonVariantConst value, int32_t &out) {
+    if (value.isNull()) return false;
+    if (value.is<int>()) {
+        out = value.as<int>();
+        return true;
+    }
+    if (value.is<long>()) {
+        out = static_cast<int32_t>(value.as<long>());
+        return true;
+    }
+    if (value.is<const char *>()) {
+        char *end = nullptr;
+        long parsed = strtol(value.as<const char *>(), &end, 10);
+        if (end && *end == 0) {
+            out = static_cast<int32_t>(parsed);
+            return true;
+        }
+    }
+    return false;
+}
+
+As11TherapyState classify_rop(const std::string &value) {
+    const std::string normalized = lower_compact_copy(value);
+    if (normalized.empty()) return As11TherapyState::Unknown;
+    if (normalized == "standby" || normalized == "0" ||
+        normalized == "0000") {
+        return As11TherapyState::Standby;
+    }
+    if (normalized == "normal" || normalized == "therapy" ||
+        normalized == "running" || normalized == "1" ||
+        normalized == "0001") {
+        return As11TherapyState::Running;
+    }
+    return As11TherapyState::Other;
+}
+
+As11TherapyTarget target_for_method(const std::string &method) {
+    if (method == "EnterTherapy") return As11TherapyTarget::Running;
+    if (method == "EnterStandby") return As11TherapyTarget::Standby;
+    return As11TherapyTarget::None;
+}
+
+As11TherapyState therapy_state_for_event(const std::string &event) {
+    if (event == "TherapyStarted" || event == "TherapyStart") {
+        return As11TherapyState::Running;
+    }
+    if (event == "StandbyStarted" || event == "TherapyStop") {
+        return As11TherapyState::Standby;
+    }
+    if (event == "MaskfitStarted" || event == "TestDriveStarted" ||
+        event == "CalibrationStarted") {
+        return As11TherapyState::Other;
+    }
+    return As11TherapyState::Unknown;
+}
+
+bool leap_year(int year) {
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+uint8_t days_in_month(int year, int month) {
+    static const uint8_t days[] = {
+        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    };
+    if (month == 2 && leap_year(year)) return 29;
+    return days[month - 1];
+}
+
+int64_t days_from_civil(int year, unsigned month, unsigned day) {
+    year -= month <= 2;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(year - era * 400);
+    const unsigned doy =
+        (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return static_cast<int64_t>(era) * 146097 +
+           static_cast<int64_t>(doe) - 719468;
+}
+
+bool utc_fields_to_epoch_ms(int year,
+                            int month,
+                            int day,
+                            int hour,
+                            int minute,
+                            int second,
+                            int millisecond,
+                            int64_t &epoch_ms) {
+    if (year < 2020 || month < 1 || month > 12 || day < 1 ||
+        day > days_in_month(year, month) ||
+        hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        second < 0 || second > 59 ||
+        millisecond < 0 || millisecond > 999) {
+        return false;
+    }
+    const int64_t days =
+        days_from_civil(year, static_cast<unsigned>(month),
+                        static_cast<unsigned>(day));
+    const int64_t seconds = days * 86400 +
+                            static_cast<int64_t>(hour) * 3600 +
+                            static_cast<int64_t>(minute) * 60 + second;
+    if (seconds < static_cast<int64_t>(VALID_TIME_MIN_EPOCH)) return false;
+    epoch_ms = seconds * 1000 + millisecond;
+    return true;
+}
+
+bool parse_datetime_epoch_ms(const std::string &datetime, int64_t &epoch_ms) {
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int consumed = 0;
+    if (sscanf(datetime.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d%n",
+               &year, &month, &day, &hour, &minute, &second,
+               &consumed) != 6) {
+        return false;
+    }
+
+    int millisecond = 0;
+    const char *p = datetime.c_str() + consumed;
+    if (*p == '.') {
+        p++;
+        int digits = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (digits < 3) {
+                millisecond = millisecond * 10 + (*p - '0');
+            }
+            digits++;
+            p++;
+        }
+        if (digits == 0) return false;
+        while (digits < 3) {
+            millisecond *= 10;
+            digits++;
+        }
+    }
+    if (*p != 'Z' || p[1] != 0) return false;
+    return utc_fields_to_epoch_ms(year, month, day, hour, minute, second,
+                                  millisecond, epoch_ms);
+}
+
+bool current_epoch_ms(int64_t &epoch_ms) {
+    struct timeval tv = {};
+    if (gettimeofday(&tv, nullptr) != 0) return false;
+    if (tv.tv_sec < VALID_TIME_MIN_EPOCH) return false;
+    epoch_ms = static_cast<int64_t>(tv.tv_sec) * 1000 +
+               static_cast<int64_t>(tv.tv_usec / 1000);
+    return true;
+}
+
+bool midpoint_epoch_ms(int64_t request_epoch_ms,
+                       int64_t response_epoch_ms,
+                       int64_t &epoch_ms) {
+    const int64_t min_epoch_ms =
+        static_cast<int64_t>(VALID_TIME_MIN_EPOCH) * 1000;
+    if (request_epoch_ms < min_epoch_ms ||
+        response_epoch_ms < request_epoch_ms) {
+        return false;
+    }
+    epoch_ms = request_epoch_ms + (response_epoch_ms - request_epoch_ms) / 2;
+    return true;
+}
+
+}  // namespace
+
+const char *as11_identity_get_params_json() {
+    return "[\"_PNA\",\"_SRN\",\"_SID\"]";
+}
+
+const char *as11_runtime_get_params_json() {
+    return "[\"_MOP\",\"_ROP\"]";
+}
+
+const char *as11_motor_runtime_get_params_json() {
+    return "[\"_MHR\"]";
+}
+
+const char *as11_timezone_get_params_json() {
+    return "[\"_TZO\"]";
+}
+
+void As11DeviceState::reset() {
+    *this = As11DeviceState{};
+}
+
+void As11DeviceState::poll(uint32_t now_ms) {
+    if (pending_therapy_target_ == As11TherapyTarget::None) return;
+    if (static_cast<int32_t>(now_ms - pending_therapy_since_ms_) <
+        static_cast<int32_t>(AC_AS11_THERAPY_CONFIRM_TIMEOUT_MS)) {
+        return;
+    }
+    clear_pending_therapy_command("confirm_timeout", now_ms);
+}
+
+bool As11DeviceState::apply_status_get_response(const std::string &payload,
+                                                uint32_t now_ms) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) return false;
+
+    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
+    if (result.isNull()) return false;
+
+    bool updated = false;
+    std::string text;
+    if (get_string(result, "_PNA", text)) {
+        product_name_ = text;
+        updated = true;
+    }
+    if (get_string(result, "_SRN", text)) {
+        serial_number_ = text;
+        updated = true;
+    }
+    if (get_string(result, "_SID", text)) {
+        software_identifier_ = text;
+        updated = true;
+    }
+    if (get_string(result, "_MOP", text)) {
+        active_therapy_profile_ = text;
+        updated = true;
+    }
+    if (get_string(result, "_MHR", text)) {
+        mhr_ = text;
+        updated = true;
+    }
+
+    int32_t timezone = 0;
+    if (variant_to_int(result["_TZO"], timezone)) {
+        timezone_offset_minutes_ = timezone;
+        timezone_offset_valid_ = true;
+        updated = true;
+    }
+
+    if (get_string(result, "_ROP", text) || get_string(result, "ROP", text)) {
+        update_rop(text, now_ms);
+        updated = true;
+    }
+
+    if (updated) {
+        status_valid_ = true;
+        status_updated_ms_ = now_ms;
+    }
+    return updated;
+}
+
+bool As11DeviceState::apply_datetime_response(
+    const std::string &payload,
+    uint32_t now_ms,
+    int64_t request_epoch_ms,
+    int64_t response_epoch_ms) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) return false;
+
+    std::string text;
+    if (!variant_to_string(doc["result"]["dateTime"], text)) return false;
+    device_datetime_ = text;
+    clock_valid_ = true;
+    clock_sample_ms_ = now_ms;
+    int64_t device_epoch_ms = 0;
+    int64_t esp_epoch_ms = 0;
+    if (parse_datetime_epoch_ms(text, device_epoch_ms) &&
+        (midpoint_epoch_ms(request_epoch_ms, response_epoch_ms,
+                           esp_epoch_ms) ||
+         current_epoch_ms(esp_epoch_ms))) {
+        const int64_t offset = device_epoch_ms - esp_epoch_ms;
+        if (offset >= INT32_MIN && offset <= INT32_MAX) {
+            clock_offset_ms_ = static_cast<int32_t>(offset);
+            clock_offset_valid_ = true;
+        } else {
+            clock_offset_valid_ = false;
+        }
+    } else {
+        clock_offset_valid_ = false;
+    }
+    return true;
+}
+
+bool As11DeviceState::apply_activity_subscription_response(
+    const std::string &payload,
+    uint32_t now_ms,
+    uint32_t &subscription_id) {
+    (void)now_ms;
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) return false;
+
+    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
+    if (result.isNull()) return false;
+
+    int32_t signed_id = 0;
+    if (variant_to_int(result["subscriptionId"], signed_id) &&
+        signed_id >= 0) {
+        subscription_id = static_cast<uint32_t>(signed_id);
+    } else if (result["subscriptionId"].is<unsigned int>()) {
+        subscription_id = result["subscriptionId"].as<unsigned int>();
+    } else {
+        return false;
+    }
+
+    JsonArrayConst ids = result["dataIds"].as<JsonArrayConst>();
+    if (ids.isNull()) return true;
+    for (JsonObjectConst item : ids) {
+        std::string data_id;
+        if (!variant_to_string(item["dataId"], data_id)) continue;
+        if (data_id != "SystemActivityEvents-FrequentActivityEvents") continue;
+        return item["valid"].as<bool>();
+    }
+    return false;
+}
+
+bool As11DeviceState::apply_activity_event_notification(
+    const std::string &payload,
+    uint32_t now_ms) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) return false;
+
+    std::string method;
+    if (!variant_to_string(doc["method"], method) ||
+        method != "EventNotification") {
+        return false;
+    }
+
+    JsonObjectConst params = doc["params"].as<JsonObjectConst>();
+    if (params.isNull()) return false;
+
+    std::string data_id;
+    if (!variant_to_string(params["dataId"], data_id) ||
+        data_id != "SystemActivityEvents-FrequentActivityEvents") {
+        return false;
+    }
+
+    bool updated = false;
+    JsonArrayConst events = params["events"].as<JsonArrayConst>();
+    for (JsonObjectConst item : events) {
+        std::string event_name;
+        if (!variant_to_string(item["event"], event_name)) continue;
+        As11TherapyState event_state = therapy_state_for_event(event_name);
+
+        last_activity_event_ = event_name;
+        last_activity_event_report_time_.clear();
+        variant_to_string(item["reportTime"],
+                          last_activity_event_report_time_);
+        last_activity_event_ms_ = now_ms;
+        if (event_state != As11TherapyState::Unknown) {
+            therapy_state_ = event_state;
+            status_valid_ = true;
+            status_updated_ms_ = now_ms;
+            confirm_pending_if_matched(now_ms);
+        }
+        updated = true;
+    }
+    return updated;
+}
+
+void As11DeviceState::mark_therapy_command_sent(const std::string &method,
+                                                uint32_t now_ms) {
+    As11TherapyTarget target = target_for_method(method);
+    if (target == As11TherapyTarget::None) return;
+
+    pending_therapy_target_ = target;
+    pending_therapy_since_ms_ = now_ms;
+    last_therapy_command_status_ = "sent";
+}
+
+void As11DeviceState::mark_therapy_command_response(const std::string &method,
+                                                    bool is_error,
+                                                    uint32_t now_ms) {
+    As11TherapyTarget target = target_for_method(method);
+    if (target == As11TherapyTarget::None) return;
+
+    if (is_error) {
+        clear_pending_therapy_command("error", now_ms);
+        return;
+    }
+
+    if (pending_therapy_target_ == As11TherapyTarget::None) {
+        pending_therapy_target_ = target;
+        pending_therapy_since_ms_ = now_ms;
+    }
+    last_therapy_command_status_ = "accepted";
+    confirm_pending_if_matched(now_ms);
+}
+
+void As11DeviceState::mark_therapy_command_timeout(const std::string &method,
+                                                   uint32_t now_ms) {
+    if (!is_therapy_command_method(method)) return;
+    clear_pending_therapy_command("timeout", now_ms);
+}
+
+void As11DeviceState::clear_pending_therapy_command(const char *reason,
+                                                    uint32_t now_ms) {
+    (void)now_ms;
+    pending_therapy_target_ = As11TherapyTarget::None;
+    pending_therapy_since_ms_ = 0;
+    last_therapy_command_status_ = reason ? reason : "";
+}
+
+bool As11DeviceState::is_therapy_command_method(const std::string &method) {
+    return target_for_method(method) != As11TherapyTarget::None;
+}
+
+const char *As11DeviceState::therapy_state_name(As11TherapyState state) {
+    switch (state) {
+        case As11TherapyState::Standby: return "standby";
+        case As11TherapyState::Running: return "running";
+        case As11TherapyState::Other: return "other";
+        case As11TherapyState::Unknown:
+        default:
+            return "unknown";
+    }
+}
+
+const char *As11DeviceState::therapy_target_name(As11TherapyTarget target) {
+    switch (target) {
+        case As11TherapyTarget::Standby: return "standby";
+        case As11TherapyTarget::Running: return "running";
+        case As11TherapyTarget::None:
+        default:
+            return "none";
+    }
+}
+
+void As11DeviceState::update_rop(const std::string &value, uint32_t now_ms) {
+    rop_ = value;
+    therapy_state_ = classify_rop(value);
+    confirm_pending_if_matched(now_ms);
+}
+
+void As11DeviceState::confirm_pending_if_matched(uint32_t now_ms) {
+    (void)now_ms;
+    if (pending_therapy_target_ == As11TherapyTarget::None) return;
+    if ((pending_therapy_target_ == As11TherapyTarget::Running &&
+         therapy_state_ == As11TherapyState::Running) ||
+        (pending_therapy_target_ == As11TherapyTarget::Standby &&
+         therapy_state_ == As11TherapyState::Standby)) {
+        pending_therapy_target_ = As11TherapyTarget::None;
+        pending_therapy_since_ms_ = 0;
+        last_therapy_command_status_ = "confirmed";
+    }
+}
+
+}  // namespace aircannect

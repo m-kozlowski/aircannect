@@ -1,0 +1,52 @@
+#pragma once
+
+#include <Arduino.h>
+#include <stdint.h>
+
+namespace aircannect {
+
+enum class StorageType : uint8_t {
+    None,
+    SdMmc,
+    SpiSd,
+};
+
+enum class StorageState : uint8_t {
+    Disabled,
+    NotPresent,
+    Mounted,
+    Error,
+};
+
+struct StorageStatus {
+    bool configured = false;
+    bool mounted = false;
+    StorageType type = StorageType::None;
+    StorageState state = StorageState::Disabled;
+    uint64_t total_bytes = 0;
+    uint64_t used_bytes = 0;
+    uint64_t free_bytes = 0;
+    uint64_t card_size_bytes = 0;
+    uint32_t last_checked_ms = 0;
+    uint8_t width = 0;
+    char mount_point[16] = {};
+    char card_type[16] = {};
+    char last_error[96] = {};
+};
+
+namespace Storage {
+
+void begin();
+void poll();
+bool remount();
+
+StorageStatus status();
+bool mounted();
+
+const char *type_name(StorageType type);
+const char *state_name(StorageState state);
+
+void print_status(Print &out);
+
+}  // namespace Storage
+}  // namespace aircannect

@@ -1,0 +1,291 @@
+#include "as11_rpc.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <algorithm>
+
+#include "json_cursor.h"
+
+namespace aircannect {
+namespace {
+
+bool seek_top_member(JsonCursor &json, const char *member) {
+    if (!member || !json.consume('{')) return false;
+
+    json.skip_ws();
+    if (json.pos < json.end && *json.pos == '}') return false;
+
+    while (json.pos < json.end) {
+        char key[64] = {};
+        if (!json.parse_string(key, sizeof(key))) return false;
+        if (!json.consume(':')) return false;
+
+        if (strcmp(key, member) == 0) return true;
+        if (!json.skip_value()) return false;
+
+        json.skip_ws();
+        if (json.pos < json.end && *json.pos == ',') {
+            json.pos++;
+            continue;
+        }
+        if (json.pos < json.end && *json.pos == '}') return false;
+        return false;
+    }
+    return false;
+}
+
+bool collect_rpc_top_flags(const std::string &payload,
+                           bool &has_id,
+                           bool &has_method) {
+    has_id = false;
+    has_method = false;
+
+    JsonCursor json(payload);
+    if (!json.consume('{')) return false;
+
+    json.skip_ws();
+    if (json.pos < json.end && *json.pos == '}') return true;
+
+    while (json.pos < json.end) {
+        char key[64] = {};
+        if (!json.parse_string(key, sizeof(key))) return false;
+        if (!json.consume(':')) return false;
+
+        if (strcmp(key, "id") == 0) has_id = true;
+        if (strcmp(key, "method") == 0) has_method = true;
+        if (!json.skip_value()) return false;
+
+        json.skip_ws();
+        if (json.pos < json.end && *json.pos == ',') {
+            json.pos++;
+            continue;
+        }
+        if (json.pos < json.end && *json.pos == '}') return true;
+        return false;
+    }
+    return false;
+}
+
+}  // namespace
+
+const char *const DEFAULT_EDF_STREAM_IDS =
+    "PatientFlow-100hz,"
+    "MaskPressure-100hz,"
+    "MaskPressure-TwoSecond,"
+    "InspiratoryPressure-50hz,"
+    "ExpiratoryPressure-50hz,"
+    "InspiratoryPressure-TwoSecond,"
+    "ExpiratoryPressure-TwoSecond,"
+    "Leak-50hz,"
+    "RespiratoryRate-50hz,"
+    "TidalVolume-50hz,"
+    "MinuteVentilation-50hz,"
+    "TargetMinuteVentilation,"
+    "IeRatio,"
+    "SnoreIndex-50hz,"
+    "FlowLimitation-50hz,"
+    "InspiratoryDuration,"
+    "HeartRate,"
+    "SpO2";
+
+const char *rpc_version_for_method(const std::string &method) {
+    if (method == "GetVersion" || method == "EnterMaskFit") return "2.0";
+    if (method == "SetDateTime" || method == "ApplyUpgrade" ||
+        method == "GenerateAuthCode") {
+        return "1.1";
+    }
+    return "1.0";
+}
+
+std::string json_escape(const std::string &text) {
+    std::string out;
+    out.reserve(text.size() + 8);
+    for (char c : text) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[7];
+                    snprintf(buf, sizeof(buf), "\\u%04X",
+                             static_cast<unsigned char>(c));
+                    out += buf;
+                } else {
+                    out += c;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+std::string build_rpc_request(const std::string &method,
+                              const std::string &params_json,
+                              uint32_t id) {
+    std::string req;
+    req.reserve(method.size() + params_json.size() + 64);
+    req += "{\"jsonrpc\":\"";
+    req += rpc_version_for_method(method);
+    req += "\",\"method\":\"";
+    req += json_escape(method);
+    req += "\",\"id\":";
+    req += std::to_string(id);
+    if (!params_json.empty()) {
+        req += ",\"params\":";
+        req += params_json;
+    }
+    req += "}";
+    return req;
+}
+
+std::string build_get_params(const std::string &names) {
+    std::string out = "[";
+    size_t pos = 0;
+    bool first = true;
+    while (pos < names.size()) {
+        while (pos < names.size() &&
+               isspace(static_cast<unsigned char>(names[pos]))) {
+            pos++;
+        }
+        if (pos >= names.size()) break;
+        const size_t start = pos;
+        while (pos < names.size() &&
+               !isspace(static_cast<unsigned char>(names[pos]))) {
+            pos++;
+        }
+        if (!first) out += ",";
+        out += "\"";
+        out += json_escape(names.substr(start, pos - start));
+        out += "\"";
+        first = false;
+    }
+    out += "]";
+    return out;
+}
+
+std::string build_set_datetime_params(const std::string &utc_datetime) {
+    std::string out;
+    out.reserve(utc_datetime.size() + 20);
+    out += "{\"dateTime\":\"";
+    out += json_escape(utc_datetime);
+    out += "\"}";
+    return out;
+}
+
+static std::string trim_copy(const std::string &text) {
+    size_t start = 0;
+    while (start < text.size() &&
+           isspace(static_cast<unsigned char>(text[start]))) {
+        start++;
+    }
+    size_t end = text.size();
+    while (end > start &&
+           isspace(static_cast<unsigned char>(text[end - 1]))) {
+        end--;
+    }
+    return text.substr(start, end - start);
+}
+
+static std::string build_stream_data_ids_json(const std::string &csv) {
+    std::string out = "[";
+    bool first = true;
+    size_t start = 0;
+    while (start <= csv.size()) {
+        size_t comma = csv.find(',', start);
+        if (comma == std::string::npos) comma = csv.size();
+        std::string item = trim_copy(csv.substr(start, comma - start));
+        if (!item.empty()) {
+            if (!first) out += ",";
+            out += "\"";
+            out += json_escape(item);
+            out += "\"";
+            first = false;
+        }
+        if (comma == csv.size()) break;
+        start = comma + 1;
+    }
+    out += "]";
+    return out;
+}
+
+std::string build_stream_params(const std::string &ids_csv,
+                                uint32_t sample_ms,
+                                uint32_t report_ms) {
+    if (sample_ms < 10) sample_ms = 10;
+    if (sample_ms > 65000) sample_ms = 65000;
+    sample_ms = (sample_ms / 10) * 10;
+    if (sample_ms == 0) sample_ms = 10;
+
+    if (report_ms == 0) report_ms = sample_ms * 5;
+    if (report_ms < sample_ms) report_ms = sample_ms;
+    if (report_ms > sample_ms * 5) report_ms = sample_ms * 5;
+    if (report_ms > 300000) report_ms = 300000;
+    report_ms = (report_ms / 10) * 10;
+    if (report_ms == 0) report_ms = sample_ms;
+
+    std::string params;
+    params.reserve(ids_csv.size() + 96);
+    params += "{\"dataIds\":";
+    params += build_stream_data_ids_json(ids_csv);
+    params += ",\"sampleIntervalMs\":";
+    params += std::to_string(sample_ms);
+    params += ",\"reportIntervalMs\":";
+    params += std::to_string(report_ms);
+    params += "}";
+    return params;
+}
+
+bool json_member_present(const std::string &json, const char *member) {
+    JsonCursor cursor(json);
+    return seek_top_member(cursor, member);
+}
+
+bool json_has_id(const std::string &json, uint32_t id) {
+    uint32_t parsed = 0;
+    return json_extract_id(json, parsed) && parsed == id;
+}
+
+bool json_extract_id(const std::string &json, uint32_t &id) {
+    return json_extract_uint_member(json, "id", id);
+}
+
+bool json_method_is(const std::string &json, const char *method) {
+    std::string parsed;
+    return method && json_extract_string_member(json, "method", parsed) &&
+           parsed == method;
+}
+
+bool json_extract_uint_member(const std::string &json,
+                              const char *member,
+                              uint32_t &value) {
+    JsonCursor cursor(json);
+    return seek_top_member(cursor, member) && cursor.parse_uint(value);
+}
+
+bool json_extract_string_member(const std::string &json,
+                                const char *member,
+                                std::string &value) {
+    JsonCursor cursor(json);
+    return seek_top_member(cursor, member) && cursor.parse_string(value);
+}
+
+RpcPayloadKind classify_rpc_payload(const std::string &json) {
+    bool has_id = false;
+    bool has_method = false;
+    if (!collect_rpc_top_flags(json, has_id, has_method)) {
+        return RpcPayloadKind::Unknown;
+    }
+    if (has_method && !has_id) return RpcPayloadKind::Notification;
+    if (has_id) return RpcPayloadKind::Response;
+    return RpcPayloadKind::Unknown;
+}
+
+}  // namespace aircannect
