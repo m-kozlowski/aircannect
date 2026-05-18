@@ -6,3 +6,4 @@ __pycache__
 *.swp
 src/web_ui_html.h
 provision.env
+platformio-private*.ini
