@@ -54,14 +54,11 @@ private:
     bool start_controller();
     void handle_alerts(uint32_t alerts);
 
-    bool transmit_current();
+    void pump_tx_queue(uint32_t alerts);
     const char *state_name(twai_state_t state) const;
 
     FixedQueue<RawCanFrame, AC_CAN_TX_QUEUE_DEPTH> tx_queue_;
-    RawCanFrame current_tx_ = {};
-    bool tx_active_ = false;
-    bool waiting_tx_result_ = false;
-    uint32_t tx_deadline_ms_ = 0;
+    uint32_t last_tx_success_ms_ = 0;
 
     uint32_t last_bus_error_log_ms_ = 0;
     uint32_t suppressed_bus_error_alerts_ = 0;

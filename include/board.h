@@ -243,7 +243,10 @@ static constexpr size_t AC_STORAGE_WRITE_BUDGET_BYTES = 1024;
 static constexpr size_t AC_SINK_STREAM_FRAME_BUDGET = 4;
 static constexpr uint32_t AC_SINK_ATTACH_RETRY_MS = 2000;
 
-static constexpr size_t AC_CAN_TX_QUEUE_DEPTH = 96;
+// ResMed OTA UpgradeDataBlock at 500 raw bytes expands to about 162 CAN
+// datagram frames after ASCII-hex JSON wrapping.
+static constexpr size_t AC_CAN_TX_QUEUE_DEPTH = 224;
+static constexpr size_t AC_CAN_TX_DRAIN_BUDGET = 32;
 static constexpr size_t AC_CAN_RX_QUEUE_LEN = 128;
 static constexpr size_t AC_CAN_RX_DRAIN_BUDGET = 128;
 static constexpr size_t AC_DG_MAX_PAYLOAD_BYTES = 8192;
@@ -270,6 +273,13 @@ static constexpr uint32_t AC_RESMED_OTA_VERIFY_TIMEOUT_MS = 120000;
 static constexpr uint32_t AC_RESMED_OTA_IDLE_TIMEOUT_MS = 300000;
 static constexpr size_t AC_RESMED_OTA_MAX_BLOCK_BYTES = 500;
 static constexpr size_t AC_RESMED_OTA_MAX_FILE_BYTES = 4UL * 1024UL * 1024UL;
+static constexpr const char *AC_RESMED_OTA_STORAGE_DIR = "/aircannect";
+static constexpr const char *AC_RESMED_OTA_STAGED_PATH =
+    "/aircannect/resmed-ota.abc";
+static constexpr const char *AC_RESMED_OTA_STAGED_TMP_PATH =
+    "/aircannect/resmed-ota.abc.tmp";
+static constexpr uint64_t AC_RESMED_OTA_STORAGE_MARGIN_BYTES =
+    1024ULL * 1024ULL;
 static constexpr const char *AC_RESMED_OTA_CONFIRM = "APPLY_RESMED_OTA";
 static constexpr uint32_t AC_RPC_MIN_TX_INTERVAL_MS = 20;
 static constexpr uint8_t AC_RPC_BACKGROUND_TIMEOUTS_BEFORE_BACKOFF = 2;

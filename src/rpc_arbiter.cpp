@@ -59,7 +59,8 @@ std::string current_utc_iso_nearest_second() {
 }
 
 const char *const ACTIVITY_EVENT_SUBSCRIBE_PARAMS =
-    "{\"dataIds\":[\"SystemActivityEvents-FrequentActivityEvents\"]}";
+    "{\"dataIds\":[\"SystemActivityEvents-FrequentActivityEvents\","
+    "\"SystemActivityEvents-SporadicActivityEvents\"]}";
 
 bool event_suggests_identity_refresh(const std::string &event) {
     return event == "PowerUp" ||

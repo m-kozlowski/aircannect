@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 #include <stdint.h>
 
 namespace aircannect {
@@ -42,6 +43,11 @@ bool remount();
 
 StorageStatus status();
 bool mounted();
+bool ensure_dir(const char *path);
+bool exists(const char *path);
+bool remove(const char *path);
+bool rename(const char *from, const char *to);
+File open(const char *path, const char *mode);
 
 const char *type_name(StorageType type);
 const char *state_name(StorageState state);

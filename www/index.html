@@ -913,8 +913,8 @@
               <span class="value" id="resmedOtaHash">--</span>
             </div>
             <div class="row">
-              <label>Firmware .abc</label>
-              <input id="resmedOtaFile" type="file" accept=".abc">
+              <label>Firmware image</label>
+              <input id="resmedOtaFile" type="file" accept=".abc,.bin,.img">
             </div>
             <div class="progress" id="resmedOtaUploadProgress">
               <div class="bar" id="resmedOtaUploadBar"></div>
@@ -1016,6 +1016,13 @@
     let settingsRefreshUntil = 0;
     let settingsDraftMode = null;
     let settingsActiveMode = null;
+    const resmedOtaRate = {
+      phase: "",
+      total: 0,
+      bytes: 0,
+      time: 0,
+      bps: 0,
+    };
     const LIVE_FAST_POINTS = 6000;
     const LIVE_MEDIUM_POINTS = 3000;
     const LIVE_SLOW_POINTS = 1800;
@@ -1086,11 +1093,19 @@
       return response;
     }
 
-    function msg(id, text, ok) {
+    const msgTimers = {};
+
+    function msg(id, text, ok, sticky) {
       const element = document.getElementById(id);
+      if (msgTimers[id]) {
+        clearTimeout(msgTimers[id]);
+        msgTimers[id] = null;
+      }
       element.textContent = text;
       element.className = "msg " + (ok ? "ok" : "err");
-      setTimeout(() => element.className = "msg", 5000);
+      if (!sticky) {
+        msgTimers[id] = setTimeout(() => element.className = "msg", 5000);
+      }
     }
 
     function up(id, text) {
@@ -1129,6 +1144,16 @@
       }
       return (value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)) +
         " " + units[index];
+    }
+
+    function fmtDuration(seconds) {
+      const value = Number(seconds);
+      if (!Number.isFinite(value) || value < 0) return "";
+      if (value < 90) return Math.ceil(value) + "s";
+      if (value < 3600) return Math.ceil(value / 60) + "m";
+      const hours = Math.floor(value / 3600);
+      const minutes = Math.ceil((value - hours * 3600) / 60);
+      return hours + "h " + minutes + "m";
     }
 
     function fmtRssi(rssi) {
@@ -2419,10 +2444,75 @@
       }
     }
 
+    function resmedOtaStatusText(data) {
+      const target = data.target && data.target !== "ABC" ? " " + data.target : "";
+      if (data.phase === "staging") return "Preparing image" + target;
+      if (data.phase === "staged") return "Image prepared" + target;
+      if (data.phase === "initiating") return "Starting device upload" + target;
+      if (data.phase === "ready" || data.phase === "uploading") {
+        return "Sending to ResMed" + target;
+      }
+      if (data.phase === "uploaded" || data.phase === "checking") {
+        return "Verifying on ResMed";
+      }
+      if (data.phase === "verified") return "Upload complete. Ready to apply.";
+      if (data.phase === "applying") return "Applying firmware";
+      if (data.phase === "complete") return "Apply complete";
+      if (data.phase === "error") return data.last_error || "ResMed OTA failed";
+      return data.phase || "--";
+    }
+
+    function resmedOtaTransferActive(data) {
+      return data.phase === "ready" || data.phase === "uploading";
+    }
+
+    function resetResmedOtaRate(data, now, bytes, total) {
+      resmedOtaRate.phase = data.phase || "";
+      resmedOtaRate.total = total || 0;
+      resmedOtaRate.bytes = bytes || 0;
+      resmedOtaRate.time = now || performance.now();
+      resmedOtaRate.bps = 0;
+    }
+
+    function resmedOtaRateText(data) {
+      const now = performance.now();
+      const bytes = Number(data.uploaded_bytes || 0);
+      const total = Number(data.total_size || 0);
+      if (!resmedOtaTransferActive(data) || total <= 0) {
+        resetResmedOtaRate(data, now, bytes, total);
+        return "";
+      }
+
+      if (resmedOtaRate.phase !== data.phase ||
+          resmedOtaRate.total !== total ||
+          bytes < resmedOtaRate.bytes) {
+        resetResmedOtaRate(data, now, bytes, total);
+        return "";
+      }
+
+      const elapsed = (now - resmedOtaRate.time) / 1000;
+      if (bytes > resmedOtaRate.bytes && elapsed > 0) {
+        const sample = (bytes - resmedOtaRate.bytes) / elapsed;
+        resmedOtaRate.bps =
+          resmedOtaRate.bps ? (resmedOtaRate.bps * 0.7 + sample * 0.3) : sample;
+        resmedOtaRate.bytes = bytes;
+        resmedOtaRate.time = now;
+      }
+
+      if (!resmedOtaRate.bps) return "";
+      const remaining = Math.max(0, total - bytes);
+      const eta = fmtDuration(remaining / resmedOtaRate.bps);
+      return fmtBytes(resmedOtaRate.bps) + "/s" + (eta ? " ETA " + eta : "");
+    }
+
     function renderResmedOta(data) {
-      up("resmedOtaState", (data.phase || "--") + (data.waiting ? " / waiting" : ""));
-      up("resmedOtaProgress", (data.progress || 0) + "% / " +
-        (data.uploaded_bytes || 0) + "/" + (data.total_size || 0) + " bytes");
+      const rateText = resmedOtaRateText(data);
+      const stateText = resmedOtaStatusText(data) +
+        (data.waiting ? " / waiting" : "");
+      const progressText = (data.progress || 0) + "%" +
+        (rateText ? " " + rateText : "");
+      up("resmedOtaState", stateText);
+      up("resmedOtaProgress", progressText);
       up("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
 
       const apply = document.getElementById("resmedOtaApplyBtn");
@@ -2441,7 +2531,15 @@
         data.active || data.phase === "complete" || data.phase === "verified" ?
           "block" : "none";
       bar.style.width = (data.progress || 0) + "%";
-      if (data.last_error) msg("resmedOtaMsg", data.last_error, false);
+      if (data.last_error) {
+        msg("resmedOtaMsg", data.last_error, false, true);
+      } else if (data.phase === "verified") {
+        msg("resmedOtaMsg", "Upload complete. Ready to apply.", true, true);
+      } else if (data.phase === "complete") {
+        msg("resmedOtaMsg", "Apply complete", true, true);
+      } else if (data.active) {
+        msg("resmedOtaMsg", stateText, true, true);
+      }
     }
 
     function sleep(ms) {
@@ -2457,8 +2555,9 @@
       return output;
     }
 
-    async function readFileHex(file, offset, len) {
-      const buffer = await file.slice(offset, offset + len).arrayBuffer();
+    async function readFileMagicHex(file) {
+      const len = Math.min(8, file.size);
+      const buffer = await file.slice(0, len).arrayBuffer();
       return hexFromBytes(new Uint8Array(buffer));
     }
 
@@ -2497,38 +2596,60 @@
       return data;
     }
 
+    async function uploadResmedImage(file, magic) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const progress = document.getElementById("resmedOtaUploadProgress");
+        const bar = document.getElementById("resmedOtaUploadBar");
+
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) return;
+          progress.style.display = "block";
+          bar.style.width = Math.round((event.loaded * 100) / event.total) + "%";
+        };
+        xhr.onload = () => {
+          let data = {};
+          try {
+            data = JSON.parse(xhr.responseText || "{}");
+          } catch (error) {}
+          renderResmedOta(data);
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(data);
+          } else {
+            reject(new Error(data.last_error || data.error ||
+              ("Upload failed: HTTP " + xhr.status)));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Upload error"));
+        xhr.open("POST", "/api/resmed-ota/upload?size=" +
+          encodeURIComponent(file.size) + "&magic=" +
+          encodeURIComponent(magic || ""));
+
+        const form = new FormData();
+        form.append("firmware", file);
+        xhr.send(form);
+      });
+    }
+
     async function resmedOtaUpload() {
       const file = document.getElementById("resmedOtaFile").files[0];
       if (!file) {
-        msg("resmedOtaMsg", "Select firmware .abc", false);
+        msg("resmedOtaMsg", "Select firmware image", false, true);
         return;
       }
 
       try {
-        msg("resmedOtaMsg", "Starting", true);
-        await postResmedOta("/api/resmed-ota/init", {
-          size: file.size,
-          filename: file.name,
-        });
-
-        const state = await waitResmedOta((data) => data.phase === "ready");
-        const block = state.xfer_block_size || 500;
-        for (let offset = 0; offset < file.size;) {
-          const len = Math.min(block, file.size - offset);
-          const data = await readFileHex(file, offset, len);
-          await postResmedOta("/api/resmed-ota/block", {offset, data});
-          offset += len;
-          await waitResmedOta((ota) =>
-            (ota.uploaded_bytes || 0) >= offset &&
-            ota.phase !== "uploading" &&
-            !ota.waiting);
-        }
-
-        await postResmedOta("/api/resmed-ota/check", {});
-        await waitResmedOta((data) => data.phase === "verified");
-        msg("resmedOtaMsg", "Upload complete", true);
+        msg("resmedOtaMsg", "Uploading", true, true);
+        const magic = await readFileMagicHex(file);
+        await uploadResmedImage(file, magic);
+        const result = await waitResmedOta((data) =>
+          data.phase === "complete" || data.phase === "verified", 4200);
+        msg("resmedOtaMsg",
+          result.phase === "complete" ?
+            "Apply complete" : "Upload complete. Ready to apply.",
+          true, true);
       } catch (error) {
-        msg("resmedOtaMsg", error.message, false);
+        msg("resmedOtaMsg", error.message, false, true);
         loadOta();
       }
     }
@@ -2546,9 +2667,9 @@
         });
         await waitResmedOta((data) =>
           data.phase === "complete" || data.phase === "error", 240);
-        msg("resmedOtaMsg", "Apply complete", true);
+        msg("resmedOtaMsg", "Apply complete", true, true);
       } catch (error) {
-        msg("resmedOtaMsg", error.message, false);
+        msg("resmedOtaMsg", error.message, false, true);
       }
     }
 

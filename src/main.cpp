@@ -211,5 +211,9 @@ void loop() {
     drain_rpc_events();
     StorageWriter::poll();
 
-    delay(2);
+    if (resmed_ota_transport_active) {
+        delay(0);
+    } else {
+        delay(2);
+    }
 }

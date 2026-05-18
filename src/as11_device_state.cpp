@@ -350,13 +350,19 @@ bool As11DeviceState::apply_activity_subscription_response(
 
     JsonArrayConst ids = result["dataIds"].as<JsonArrayConst>();
     if (ids.isNull()) return true;
+    bool saw_supported_selector = false;
+    bool accepted_supported_selector = false;
     for (JsonObjectConst item : ids) {
         std::string data_id;
         if (!variant_to_string(item["dataId"], data_id)) continue;
-        if (data_id != "SystemActivityEvents-FrequentActivityEvents") continue;
-        return item["valid"].as<bool>();
+        if (data_id != "SystemActivityEvents-FrequentActivityEvents" &&
+            data_id != "SystemActivityEvents-SporadicActivityEvents") {
+            continue;
+        }
+        saw_supported_selector = true;
+        if (item["valid"].as<bool>()) accepted_supported_selector = true;
     }
-    return false;
+    return saw_supported_selector && accepted_supported_selector;
 }
 
 bool As11DeviceState::apply_activity_event_notification(
@@ -377,7 +383,8 @@ bool As11DeviceState::apply_activity_event_notification(
 
     std::string data_id;
     if (!variant_to_string(params["dataId"], data_id) ||
-        data_id != "SystemActivityEvents-FrequentActivityEvents") {
+        (data_id != "SystemActivityEvents-FrequentActivityEvents" &&
+         data_id != "SystemActivityEvents-SporadicActivityEvents")) {
         return false;
     }
 

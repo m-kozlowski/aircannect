@@ -42,6 +42,27 @@ void reset_status() {
               AC_STORAGE_MOUNT_POINT);
 }
 
+fs::FS *active_fs() {
+    if (!current.mounted) return nullptr;
+    switch (current.type) {
+        case StorageType::SdMmc:
+#if AC_STORAGE_SDMMC_ENABLED && SOC_SDMMC_HOST_SUPPORTED
+            return &SD_MMC;
+#else
+            return nullptr;
+#endif
+        case StorageType::SpiSd:
+#if AC_STORAGE_SPI_SD_ENABLED
+            return &SD;
+#else
+            return nullptr;
+#endif
+        case StorageType::None:
+        default:
+            return nullptr;
+    }
+}
+
 void set_state(StorageType type,
                StorageState state,
                const char *error = nullptr) {
@@ -249,6 +270,48 @@ StorageStatus status() {
 
 bool mounted() {
     return status().mounted;
+}
+
+bool ensure_dir(const char *path) {
+    if (!path || !*path) return false;
+    if (!initialized) begin();
+    fs::FS *fs = active_fs();
+    if (!fs) return false;
+    if (fs->exists(path)) {
+        File dir = fs->open(path);
+        const bool ok = dir && dir.isDirectory();
+        if (dir) dir.close();
+        return ok;
+    }
+    return fs->mkdir(path);
+}
+
+bool exists(const char *path) {
+    if (!path || !*path) return false;
+    if (!initialized) begin();
+    fs::FS *fs = active_fs();
+    return fs && fs->exists(path);
+}
+
+bool remove(const char *path) {
+    if (!path || !*path) return false;
+    if (!initialized) begin();
+    fs::FS *fs = active_fs();
+    return fs && (!fs->exists(path) || fs->remove(path));
+}
+
+bool rename(const char *from, const char *to) {
+    if (!from || !*from || !to || !*to) return false;
+    if (!initialized) begin();
+    fs::FS *fs = active_fs();
+    return fs && fs->rename(from, to);
+}
+
+File open(const char *path, const char *mode) {
+    if (!path || !*path || !mode || !*mode) return File();
+    if (!initialized) begin();
+    fs::FS *fs = active_fs();
+    return fs ? fs->open(path, mode) : File();
 }
 
 const char *type_name(StorageType type) {

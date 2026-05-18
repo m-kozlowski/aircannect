@@ -36,6 +36,7 @@ enum WebCommandKind : uint8_t {
     WebCommandResmedOtaCheck,
     WebCommandResmedOtaApply,
     WebCommandResmedOtaAbort,
+    WebCommandResmedOtaStartStaged,
 };
 
 struct WebCommand {
@@ -96,6 +97,23 @@ int request_mode_arg(AsyncWebServerRequest *request) {
     if (!request || !request->hasArg("mode")) return -1;
     return as11_mode_index_from_value(
         std::string(request->arg("mode").c_str()));
+}
+
+bool request_size_arg(AsyncWebServerRequest *request,
+                      const char *name,
+                      size_t &out) {
+    out = 0;
+    if (!request || !name || !request->hasArg(name)) return false;
+    const String value = request->arg(name);
+    char *end = nullptr;
+    const unsigned long long parsed =
+        strtoull(value.c_str(), &end, 10);
+    if (!end || *end != 0 || parsed == 0 ||
+        parsed > AC_RESMED_OTA_MAX_FILE_BYTES) {
+        return false;
+    }
+    out = static_cast<size_t>(parsed);
+    return true;
 }
 
 String settings_placeholder_json(int mode, bool refresh_queued) {
@@ -227,7 +245,7 @@ void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
 
 template <typename JsonOut>
 void build_resmed_ota_json(JsonOut &json, const ResmedOtaManager &ota) {
-    const ResmedOtaStatus &status = ota.status();
+    const ResmedOtaStatus status = ota.status();
     json = "{";
     json_add_string(json, "phase", ota.phase_name(), false);
     json_add_bool(json, "active", ota.active());
@@ -244,6 +262,9 @@ void build_resmed_ota_json(JsonOut &json, const ResmedOtaManager &ota) {
     json_add_string(json, "computed_sha256",
                     status.computed_sha256.c_str());
     json_add_string(json, "apply_mode", status.apply_mode.c_str());
+    json_add_string(json, "input_type", status.input_type.c_str());
+    json_add_string(json, "target", status.target.c_str());
+    json_add_string(json, "staged_path", status.staged_path.c_str());
     json_add_string(json, "last_result", status.last_result.c_str());
     json_add_string(json, "last_error", status.last_error.c_str());
     json += '}';
@@ -1347,6 +1368,7 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandResmedOtaCheck:
         case WebCommandResmedOtaApply:
         case WebCommandResmedOtaAbort:
+        case WebCommandResmedOtaStartStaged:
             execute_resmed_ota_command(command);
             break;
         default:
@@ -1557,6 +1579,11 @@ void WebUI::execute_resmed_ota_command(const WebCommand &command) {
         snapshots_dirty_ = true;
         return;
     }
+    if (command.kind == WebCommandResmedOtaStartStaged) {
+        resmed_ota_manager_->start_staged_upload();
+        snapshots_dirty_ = true;
+        return;
+    }
 
     JsonDocument doc;
     if (deserializeJson(doc, command.body.c_str())) return;
@@ -1706,6 +1733,41 @@ void WebUI::register_routes() {
     server_->on("/api/resmed-ota", HTTP_GET,
         [this](AsyncWebServerRequest *request) {
             send_cached(request, cached_resmed_ota_json_);
+        });
+
+    server_->on(
+        "/api/resmed-ota/upload", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            const ResmedOtaStatus status = resmed_ota_manager_->status();
+            bool ok = status.phase == ResmedOtaPhase::Staging &&
+                      resmed_ota_manager_->finish_staged_upload();
+            if (ok && !enqueue_simple_command(WebCommandResmedOtaStartStaged)) {
+                resmed_ota_manager_->abort("web_queue_full");
+                ok = false;
+            }
+            snapshots_dirty_ = true;
+            String json;
+            json.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
+            build_resmed_ota_json(json, *resmed_ota_manager_);
+            request->send(ok ? 200 : 400, "application/json", json);
+        },
+        [this](AsyncWebServerRequest *request, const String &filename,
+               size_t index, uint8_t *data, size_t len, bool final) {
+            (void)final;
+            if (index == 0) {
+                size_t declared_size = 0;
+                if (!request_size_arg(request, "size", declared_size)) {
+                    resmed_ota_manager_->abort("missing_size");
+                    return;
+                }
+                const String magic =
+                    request->hasArg("magic") ? request->arg("magic") : "";
+                if (!resmed_ota_manager_->begin_staged_upload(
+                        declared_size, filename, magic)) {
+                    return;
+                }
+            }
+            resmed_ota_manager_->write_staged_upload(index, data, len);
         });
 
     server_->on(

@@ -20,6 +20,17 @@ public:
         return true;
     }
 
+    bool push_front(const T &value) {
+        if (full()) {
+            dropped_++;
+            return false;
+        }
+        head_ = (head_ + N - 1) % N;
+        items_[head_] = value;
+        count_++;
+        return true;
+    }
+
     bool pop(T &value) {
         if (empty()) return false;
         value = std::move(items_[head_]);

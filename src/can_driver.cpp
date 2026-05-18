@@ -129,46 +129,7 @@ void CanDriver::poll() {
         return;
     }
 
-    if (alerts) {
-        if (waiting_tx_result_ && (alerts & TWAI_ALERT_TX_SUCCESS)) {
-            stats_.tx_frames++;
-            waiting_tx_result_ = false;
-            tx_active_ = false;
-            current_tx_ = {};
-        }
-
-        if (alerts & TWAI_ALERT_BUS_OFF) {
-            if (waiting_tx_result_) stats_.tx_failures++;
-            waiting_tx_result_ = false;
-            tx_active_ = false;
-            current_tx_ = {};
-            recover_or_restart("CAN bus off");
-            return;
-        }
-
-        if (waiting_tx_result_ && (alerts & TWAI_ALERT_TX_FAILED)) {
-            stats_.tx_failures++;
-            waiting_tx_result_ = false;
-            tx_active_ = false;
-            current_tx_ = {};
-            recover_or_restart("CAN TX failed");
-            return;
-        }
-    }
-
-    if (waiting_tx_result_) {
-        if (static_cast<int32_t>(millis() - tx_deadline_ms_) >= 0) {
-            Log::logf(CAT_CAN, LOG_WARN, "[CAN] TX confirmation timeout\n");
-            stats_.tx_failures++;
-            waiting_tx_result_ = false;
-            tx_active_ = false;
-            current_tx_ = {};
-            recover_or_restart("CAN TX timeout");
-        }
-        return;
-    }
-
-    transmit_current();
+    pump_tx_queue(alerts);
 }
 
 bool CanDriver::enqueue_tx(const RawCanFrame &frame) {
@@ -181,40 +142,73 @@ bool CanDriver::enqueue_tx(const RawCanFrame &frame) {
     return true;
 }
 
-bool CanDriver::transmit_current() {
-    if (!tx_active_) {
-        if (!tx_queue_.pop(current_tx_)) return false;
-        tx_active_ = true;
+void CanDriver::pump_tx_queue(uint32_t alerts) {
+    const uint32_t now = millis();
+    if (alerts & TWAI_ALERT_TX_SUCCESS) {
+        last_tx_success_ms_ = now;
+    }
+
+    if (alerts & TWAI_ALERT_BUS_OFF) {
+        stats_.tx_failures++;
+        recover_or_restart("CAN bus off");
+        return;
+    }
+
+    if (alerts & TWAI_ALERT_TX_FAILED) {
+        stats_.tx_failures++;
+        recover_or_restart("CAN TX failed");
+        return;
     }
 
     twai_status_info_t status = {};
-    if (twai_get_status_info(&status) == ESP_OK &&
+    if (twai_get_status_info(&status) != ESP_OK ||
         status.state != TWAI_STATE_RUNNING) {
-        return false;
+        return;
     }
 
-    twai_message_t msg = {};
-    msg.identifier = current_tx_.id;
-    msg.extd = current_tx_.extended ? 1 : 0;
-    msg.rtr = current_tx_.remote ? 1 : 0;
-    msg.data_length_code = current_tx_.len;
-    memcpy(msg.data, current_tx_.data, current_tx_.len);
-
-    esp_err_t err = twai_transmit(&msg, 0);
-    if (err == ESP_ERR_TIMEOUT) return false;
-    if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] transmit failed: %s\n",
-                  esp_err_name_short(err));
+    const bool busy_before = status.msgs_to_tx > 0 || tx_queue_.count() > 0;
+    if (busy_before && !last_tx_success_ms_) last_tx_success_ms_ = now;
+    if (busy_before &&
+        static_cast<int32_t>(now - last_tx_success_ms_) >= 100) {
+        Log::logf(CAT_CAN, LOG_WARN, "[CAN] TX confirmation timeout\n");
         stats_.tx_failures++;
-        tx_active_ = false;
-        current_tx_ = {};
-        recover_or_restart("CAN transmit failed");
-        return false;
+        recover_or_restart("CAN TX timeout");
+        return;
     }
 
-    waiting_tx_result_ = true;
-    tx_deadline_ms_ = millis() + 100;
-    return true;
+    for (size_t pumped = 0; pumped < AC_CAN_TX_DRAIN_BUDGET; ++pumped) {
+        RawCanFrame frame;
+        if (!tx_queue_.pop(frame)) break;
+
+        twai_message_t msg = {};
+        msg.identifier = frame.id;
+        msg.extd = frame.extended ? 1 : 0;
+        msg.rtr = frame.remote ? 1 : 0;
+        msg.data_length_code = frame.len;
+        memcpy(msg.data, frame.data, frame.len);
+
+        esp_err_t err = twai_transmit(&msg, 0);
+        if (err == ESP_ERR_TIMEOUT) {
+            tx_queue_.push_front(frame);
+            break;
+        }
+        if (err != ESP_OK) {
+            Log::logf(CAT_CAN, LOG_WARN, "[CAN] transmit failed: %s\n",
+                      esp_err_name_short(err));
+            stats_.tx_failures++;
+            recover_or_restart("CAN transmit failed");
+            return;
+        }
+        stats_.tx_frames++;
+        if (!last_tx_success_ms_) last_tx_success_ms_ = now;
+    }
+
+    if (!tx_queue_.count()) {
+        twai_status_info_t after = {};
+        if (twai_get_status_info(&after) == ESP_OK && after.msgs_to_tx == 0) {
+            last_tx_success_ms_ = 0;
+        }
+    }
 }
 
 bool CanDriver::receive(RawCanFrame &frame, uint32_t wait_ms) {
@@ -342,9 +336,7 @@ bool CanDriver::restart_after_recovery() {
     (void)twai_clear_transmit_queue();
     (void)twai_clear_receive_queue();
     tx_queue_.clear();
-    tx_active_ = false;
-    waiting_tx_result_ = false;
-    current_tx_ = {};
+    last_tx_success_ms_ = 0;
 
     esp_err_t err = twai_start();
     if (err != ESP_OK) {

@@ -367,7 +367,7 @@ void ManagementConsole::handle_resmed_ota(
     ResmedOtaManager &resmed_ota_manager) {
     rest.trim();
     if (!rest.length() || rest == "status") {
-        const ResmedOtaStatus &status = resmed_ota_manager.status();
+        const ResmedOtaStatus status = resmed_ota_manager.status();
         out.print("[RESMED OTA] phase=");
         out.print(resmed_ota_manager.phase_name());
         out.print(" waiting=");
@@ -402,8 +402,9 @@ void ManagementConsole::handle_resmed_ota(
         if (resmed_ota_manager.request_check()) {
             out.println("[RESMED OTA] CheckUpgradeFile queued");
         } else {
+            const ResmedOtaStatus status = resmed_ota_manager.status();
             out.print("[RESMED OTA] check failed: ");
-            out.println(resmed_ota_manager.status().last_error);
+            out.println(status.last_error);
         }
         return;
     }
@@ -433,8 +434,9 @@ void ManagementConsole::handle_resmed_ota(
             if (resmed_ota_manager.request_apply_plain(false, confirm)) {
                 out.println("[RESMED OTA] ApplyUpgrade queued");
             } else {
+                const ResmedOtaStatus status = resmed_ota_manager.status();
                 out.print("[RESMED OTA] apply failed: ");
-                out.println(resmed_ota_manager.status().last_error);
+                out.println(status.last_error);
             }
             return;
         }
@@ -449,8 +451,9 @@ void ManagementConsole::handle_resmed_ota(
             if (resmed_ota_manager.request_apply_authenticated(tag, confirm)) {
                 out.println("[RESMED OTA] ApplyAuthenticatedUpgrade queued");
             } else {
+                const ResmedOtaStatus status = resmed_ota_manager.status();
                 out.print("[RESMED OTA] apply failed: ");
-                out.println(resmed_ota_manager.status().last_error);
+                out.println(status.last_error);
             }
             return;
         }
