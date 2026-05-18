@@ -236,6 +236,7 @@ void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
     json_add_bool(json, "auth_enabled", ota.auth_enabled);
     json_add_int(json, "arduino_port", ota.arduino_port);
     json_add_int(json, "bytes", static_cast<long>(ota.bytes));
+    json_add_int(json, "total_size", static_cast<long>(ota.total_size));
     json_add_int(json, "progress", ota.progress_percent);
     json_add_string(json, "method", ota.method.c_str());
     json_add_string(json, "partition", ota.partition.c_str());
@@ -1724,8 +1725,15 @@ void WebUI::register_routes() {
         [this](AsyncWebServerRequest *request, const String &filename,
                size_t index, uint8_t *data, size_t len, bool final) {
             (void)final;
-            if (index == 0 && !ota_manager_->begin_http_upload(filename)) {
-                return;
+            if (index == 0) {
+                size_t declared_size = 0;
+                if (!request_size_arg(request, "size", declared_size)) {
+                    ota_manager_->abort_http_upload("missing_size");
+                    return;
+                }
+                if (!ota_manager_->begin_http_upload(filename, declared_size)) {
+                    return;
+                }
             }
             ota_manager_->write_http_upload(data, len);
         });

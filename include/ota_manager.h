@@ -20,6 +20,7 @@ struct OtaManagerStatus {
     bool auth_enabled = true;
     uint16_t arduino_port = AC_ARDUINO_OTA_PORT;
     size_t bytes = 0;
+    size_t total_size = 0;
     uint8_t progress_percent = 0;
     String method = "idle";
     String partition;
@@ -32,7 +33,7 @@ public:
     void poll(const WifiManager &wifi_manager);
     void mark_config_dirty();
 
-    bool begin_http_upload(const String &filename);
+    bool begin_http_upload(const String &filename, size_t image_size);
     bool write_http_upload(const uint8_t *data, size_t len);
     bool finish_http_upload();
     void abort_http_upload(const char *reason);

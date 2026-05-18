@@ -1,6 +1,7 @@
 #include "ota_manager.h"
 
 #include <ArduinoOTA.h>
+#include <Update.h>
 #include <esp_err.h>
 #include <esp_ota_ops.h>
 
@@ -56,7 +57,7 @@ void OtaManager::mark_config_dirty() {
     arduino_config_dirty_ = true;
 }
 
-bool OtaManager::begin_http_upload(const String &filename) {
+bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     if (status_.http_active) {
         set_error("upload_already_active");
         return false;
@@ -65,6 +66,7 @@ bool OtaManager::begin_http_upload(const String &filename) {
     status_.method = "http";
     status_.http_active = true;
     status_.bytes = 0;
+    status_.total_size = image_size;
     status_.progress_percent = 0;
     status_.partition = "";
     status_.last_error = "";
@@ -74,19 +76,22 @@ bool OtaManager::begin_http_upload(const String &filename) {
         abort_http_upload("no_ota_partition");
         return false;
     }
+    if (image_size == 0 || image_size > http_partition_->size) {
+        abort_http_upload("image_size_invalid");
+        return false;
+    }
 
     status_.partition = http_partition_->label;
-    esp_err_t err = esp_ota_begin(http_partition_, OTA_SIZE_UNKNOWN,
-                                  &http_handle_);
+    esp_err_t err = esp_ota_begin(http_partition_, image_size, &http_handle_);
     if (err != ESP_OK) {
         abort_http_upload(esp_err_to_name(err));
         return false;
     }
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "[OTA] HTTP upload start file=%s partition=%s size=%u\n",
+              "[OTA] HTTP upload start file=%s partition=%s image_size=%u\n",
               filename.c_str(), http_partition_->label,
-              static_cast<unsigned>(http_partition_->size));
+              static_cast<unsigned>(image_size));
     return true;
 }
 
@@ -101,7 +106,7 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
         abort_http_upload("bad_esp32_image");
         return false;
     }
-    if (status_.bytes + len > http_partition_->size) {
+    if (status_.total_size == 0 || status_.bytes + len > status_.total_size) {
         abort_http_upload("image_too_large");
         return false;
     }
@@ -114,7 +119,7 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
 
     status_.bytes += len;
     status_.progress_percent =
-        static_cast<uint8_t>((status_.bytes * 100ULL) / http_partition_->size);
+        static_cast<uint8_t>((status_.bytes * 100ULL) / status_.total_size);
     if (status_.progress_percent != last_progress_log_percent_ &&
         (status_.progress_percent % 10 == 0 ||
          status_.progress_percent == 100)) {
@@ -128,6 +133,10 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
 bool OtaManager::finish_http_upload() {
     if (!status_.http_active || !http_partition_ || !http_handle_) {
         if (!status_.last_error.length()) set_error("upload_not_active");
+        return false;
+    }
+    if (status_.total_size == 0 || status_.bytes != status_.total_size) {
+        abort_http_upload("incomplete_upload");
         return false;
     }
 
@@ -194,6 +203,7 @@ void OtaManager::start_arduino_ota() {
         arduino_active_ = true;
         status_.method = "arduino";
         status_.bytes = 0;
+        status_.total_size = 0;
         status_.progress_percent = 0;
         status_.last_error = "";
         last_progress_log_percent_ = 255;
@@ -210,6 +220,7 @@ void OtaManager::start_arduino_ota() {
     arduino_ota_->onProgress([this](unsigned int progress,
                                     unsigned int total) {
         status_.bytes = progress;
+        status_.total_size = total;
         if (total > 0) {
             status_.progress_percent =
                 static_cast<uint8_t>((progress * 100ULL) / total);
@@ -224,7 +235,9 @@ void OtaManager::start_arduino_ota() {
     });
     arduino_ota_->onError([this](ota_error_t error) {
         arduino_active_ = false;
+        Update.abort();
         set_error(arduino_ota_error_name(error));
+        arduino_config_dirty_ = true;
         Log::logf(CAT_OTA, LOG_ERROR, "[OTA] ArduinoOTA error: %s\n",
                   status_.last_error.c_str());
     });
@@ -258,6 +271,7 @@ void OtaManager::clear_http_state() {
     status_.http_active = false;
     status_.http_ready = false;
     status_.bytes = 0;
+    status_.total_size = 0;
     status_.progress_percent = 0;
     last_progress_log_percent_ = 255;
 }

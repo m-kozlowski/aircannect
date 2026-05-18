@@ -2387,7 +2387,7 @@
         const data = await response.json();
         up("otaVersion", data.version || "--");
         up("otaProgress", (data.progress || 0) + "% / " +
-          (data.bytes || 0) + " bytes");
+          fmtBytes(data.bytes || 0));
 
         const resmedResponse = await api("/api/resmed-ota");
         renderResmedOta(await resmedResponse.json());
@@ -2434,7 +2434,8 @@
           }
         };
         xhr.onerror = () => msg("otaMsg", "Upload error", false);
-        xhr.open("POST", "/api/ota/upload");
+        xhr.open("POST", "/api/ota/upload?size=" +
+          encodeURIComponent(file.size));
 
         const form = new FormData();
         form.append("firmware", file);
