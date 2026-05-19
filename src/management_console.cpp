@@ -1075,26 +1075,6 @@ void ManagementConsole::handle_config(Print &out, String rest,
         return;
     }
 
-    if (rest == "ota-auth") {
-        out.print("[CONFIG] ota_auth=");
-        out.println(on_off_text(app_config.data().ota_auth_enabled));
-        return;
-    }
-
-    if (rest.startsWith("ota-auth ")) {
-        String state = rest.substring(9);
-        bool enabled = false;
-        if (!parse_on_off(state, enabled)) {
-            out.println("[CONFIG] usage: config ota-auth on|off");
-            return;
-        }
-        app_config.set_ota_auth_enabled(enabled);
-        ota_manager.mark_config_dirty();
-        out.print("[CONFIG] ota_auth=");
-        out.println(on_off_text(app_config.data().ota_auth_enabled));
-        return;
-    }
-
     if (rest == "ota-password") {
         out.print("[CONFIG] ota_password=");
         out.println(app_config.data().ota_password.length() ? "<set>"
@@ -1103,18 +1083,27 @@ void ManagementConsole::handle_config(Print &out, String rest,
     }
 
     if (rest.startsWith("ota-password ")) {
-        String password = rest.substring(13);
+        String args = rest.substring(13);
+        int pos = 0;
+        String password;
+        if (!parse_console_arg(args, pos, password)) {
+            out.println("[CONFIG] usage: config ota-password PASSWORD");
+            out.println("[CONFIG] use: config ota-password \"\" to allow open ArduinoOTA access");
+            return;
+        }
         if (!app_config.set_ota_password(password)) {
             out.println("[CONFIG] invalid OTA password");
             return;
         }
         ota_manager.mark_config_dirty();
-        out.println("[CONFIG] ota_password=<set>");
+        out.print("[CONFIG] ota_password=");
+        out.println(app_config.data().ota_password.length() ? "<set>"
+                                                            : "<empty>");
         return;
     }
 
     print_unknown_command(out, "CONFIG",
-                          "config, hostname, tcp, softap, wifi-country, timezone, resmed-time-sync, http-auth, http-whitelist, telnet, ota-auth, ota-password, reset, factory-reset");
+                          "config, hostname, tcp, softap, wifi-country, timezone, resmed-time-sync, http-auth, http-whitelist, telnet, ota-password, reset, factory-reset");
 }
 
 void ManagementConsole::apply_runtime_config(const AppConfig &app_config,

@@ -20,7 +20,6 @@ struct AppConfigData {
     uint16_t tcp_bridge_port = AC_TCP_BRIDGE_PORT;
     bool telnet_console_enabled = AC_DEFAULT_TELNET_CONSOLE_ENABLED != 0;
     uint16_t telnet_console_port = AC_TELNET_CONSOLE_PORT;
-    bool ota_auth_enabled = AC_DEFAULT_OTA_AUTH_ENABLED != 0;
     String ota_password = AC_DEFAULT_OTA_PASSWORD;
 
     String http_user = AC_DEFAULT_HTTP_USER;
@@ -67,7 +66,6 @@ public:
     bool set_http_auth(const String &user, const String &password);
     bool set_auth_whitelist(const String &whitelist);
     bool set_telnet_console(bool enabled, uint16_t port);
-    bool set_ota_auth_enabled(bool enabled);
     bool set_ota_password(const String &password);
 
     bool set_log_level(log_cat_t cat, log_level_t level);

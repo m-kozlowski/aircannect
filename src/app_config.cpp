@@ -25,7 +25,6 @@ static constexpr const char *KEY_HTTP_PASSWORD = "http_pass";
 static constexpr const char *KEY_AUTH_WHITELIST = "auth_wl";
 static constexpr const char *KEY_TELNET_ENABLED = "telnet_en";
 static constexpr const char *KEY_TELNET_PORT = "telnet_port";
-static constexpr const char *KEY_OTA_AUTH = "ota_auth";
 static constexpr const char *KEY_OTA_PASSWORD = "ota_pass";
 static constexpr const char *KEY_SYSLOG_ENABLED = "syslog_en";
 static constexpr const char *KEY_SYSLOG_HOST = "syslog_host";
@@ -40,15 +39,14 @@ static constexpr uint32_t DIRTY_RESMED_TIME = 1UL << 5;
 static constexpr uint32_t DIRTY_HTTP_AUTH = 1UL << 6;
 static constexpr uint32_t DIRTY_AUTH_WHITELIST = 1UL << 7;
 static constexpr uint32_t DIRTY_TELNET = 1UL << 8;
-static constexpr uint32_t DIRTY_OTA_AUTH = 1UL << 9;
-static constexpr uint32_t DIRTY_OTA_PASSWORD = 1UL << 10;
+static constexpr uint32_t DIRTY_OTA_PASSWORD = 1UL << 9;
 static constexpr uint32_t DIRTY_LOG_LEVELS = 1UL << 12;
 static constexpr uint32_t DIRTY_SYSLOG = 1UL << 13;
 static constexpr uint32_t DIRTY_ALL =
     DIRTY_HOSTNAME | DIRTY_TCP | DIRTY_SOFTAP | DIRTY_WIFI_COUNTRY |
     DIRTY_TIMEZONE | DIRTY_RESMED_TIME | DIRTY_HTTP_AUTH |
-    DIRTY_AUTH_WHITELIST | DIRTY_TELNET | DIRTY_OTA_AUTH |
-    DIRTY_OTA_PASSWORD | DIRTY_LOG_LEVELS | DIRTY_SYSLOG;
+    DIRTY_AUTH_WHITELIST | DIRTY_TELNET | DIRTY_OTA_PASSWORD |
+    DIRTY_LOG_LEVELS | DIRTY_SYSLOG;
 
 bool valid_hostname_char(char c) {
     return isalnum(static_cast<unsigned char>(c)) || c == '-';
@@ -197,8 +195,6 @@ bool AppConfig::load() {
         prefs.getBool(KEY_TELNET_ENABLED, defaults.telnet_console_enabled);
     data_.telnet_console_port = static_cast<uint16_t>(
         prefs.getUInt(KEY_TELNET_PORT, defaults.telnet_console_port));
-    data_.ota_auth_enabled =
-        prefs.getBool(KEY_OTA_AUTH, defaults.ota_auth_enabled);
     data_.ota_password =
         prefs.getString(KEY_OTA_PASSWORD, defaults.ota_password);
     for (int i = 0; i < CAT_COUNT; ++i) {
@@ -270,9 +266,6 @@ bool AppConfig::save_fields(uint32_t dirty) const {
              ok;
         ok = prefs.putUInt(KEY_TELNET_PORT, data_.telnet_console_port) != 0 &&
              ok;
-    }
-    if (dirty & DIRTY_OTA_AUTH) {
-        ok = prefs.putBool(KEY_OTA_AUTH, data_.ota_auth_enabled) != 0 && ok;
     }
     if (dirty & DIRTY_OTA_PASSWORD) {
         ok = put_string(prefs, KEY_OTA_PASSWORD, data_.ota_password) && ok;
@@ -373,7 +366,7 @@ bool AppConfig::normalize() {
         data_.telnet_console_port = defaults.telnet_console_port;
         unchanged = false;
     }
-    if (!valid_secret(data_.ota_password)) {
+    if (!valid_optional_secret(data_.ota_password)) {
         data_.ota_password = defaults.ota_password;
         unchanged = false;
     }
@@ -496,16 +489,10 @@ bool AppConfig::set_telnet_console(bool enabled, uint16_t port) {
     return persist(DIRTY_TELNET);
 }
 
-bool AppConfig::set_ota_auth_enabled(bool enabled) {
-    if (data_.ota_auth_enabled == enabled) return true;
-    data_.ota_auth_enabled = enabled;
-    return persist(DIRTY_OTA_AUTH);
-}
-
 bool AppConfig::set_ota_password(const String &password) {
     String value = password;
     value.trim();
-    if (!valid_secret(value)) return false;
+    if (!valid_optional_secret(value)) return false;
     if (data_.ota_password == value) return true;
     data_.ota_password = value;
     return persist(DIRTY_OTA_PASSWORD);
@@ -608,8 +595,8 @@ void AppConfig::print_redacted(Print &out) const {
     out.print(on_off(data_.telnet_console_enabled));
     out.print(" port=");
     out.println(data_.telnet_console_port);
-    out.print("  ota_auth: ");
-    out.println(on_off(data_.ota_auth_enabled));
+    out.print("  ota: ");
+    out.println(data_.ota_password.length() ? "protected" : "open");
     out.print("  ota_password: ");
     out.println(data_.ota_password.length() ? "<set>" : "<empty>");
 }

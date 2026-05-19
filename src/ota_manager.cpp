@@ -26,7 +26,7 @@ const char *arduino_ota_error_name(ota_error_t error) {
 
 void OtaManager::begin(AppConfig &app_config) {
     app_config_ = &app_config;
-    status_.auth_enabled = app_config.data().ota_auth_enabled;
+    status_.auth_enabled = app_config.data().ota_password.length() > 0;
     status_.arduino_port = AC_ARDUINO_OTA_PORT;
     esp_ota_mark_app_valid_cancel_rollback();
 }
@@ -41,7 +41,7 @@ void OtaManager::poll(const WifiManager &wifi_manager) {
 
     if (!app_config_) return;
 
-    status_.auth_enabled = app_config_->data().ota_auth_enabled;
+    status_.auth_enabled = app_config_->data().ota_password.length() > 0;
     if (!wifi_manager.network_available()) {
         if (status_.arduino_started) stop_arduino_ota();
         return;
@@ -195,7 +195,7 @@ void OtaManager::start_arduino_ota() {
     arduino_ota_->setPort(AC_ARDUINO_OTA_PORT);
     arduino_ota_->setMdnsEnabled(false);
     arduino_ota_->setRebootOnSuccess(true);
-    if (cfg.ota_auth_enabled && cfg.ota_password.length()) {
+    if (cfg.ota_password.length()) {
         arduino_ota_->setPassword(cfg.ota_password.c_str());
     }
 
@@ -248,7 +248,7 @@ void OtaManager::start_arduino_ota() {
     Log::logf(CAT_OTA, LOG_INFO,
               "[OTA] ArduinoOTA ready port=%u auth=%s mdns=off\n",
               static_cast<unsigned>(AC_ARDUINO_OTA_PORT),
-              cfg.ota_auth_enabled ? "on" : "off");
+              cfg.ota_password.length() ? "on" : "off");
 }
 
 void OtaManager::stop_arduino_ota() {

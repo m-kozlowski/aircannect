@@ -2768,7 +2768,6 @@
           ["http_user", "HTTP User", "text"],
           ["http_password", "HTTP Password", "password"],
           ["auth_whitelist", "Auth Whitelist", "text"],
-          ["ota_auth", "ArduinoOTA Auth", "bool"],
           ["ota_password", "ArduinoOTA Password", "password"],
         ];
 
@@ -2801,12 +2800,15 @@
             }
             if (field[0] === "ota_password") {
               control.placeholder = configData.ota_password_set ? "set" : "empty";
+              if (configData.ota_password_set) {
+                control.value = "********";
+              }
             }
           }
 
           control.dataset.key = field[0];
           control.dataset.type = field[2];
-          control.dataset.orig = String(configData[field[0]] || "");
+          control.dataset.orig = String(control.value || "");
           let rendered = control;
           if (field[0] === "timezone") rendered = timezoneHelper(control);
           if (field[0] === "wifi_country") rendered = wifiCountryHelper(control);

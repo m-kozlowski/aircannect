@@ -54,8 +54,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config http-auth U P      set Web UI auth; empty U/P disables auth");
         out.println("  config http-whitelist L   bypass auth for IP/range list, or clear");
         out.println("  config telnet on|off [P]  enable management telnet console");
-        out.println("  config ota-auth on|off    require auth for ArduinoOTA");
-        out.println("  config ota-password VALUE set ArduinoOTA password");
+        out.println("  config ota-password VALUE set ArduinoOTA password; empty opens access");
         return;
     }
 

@@ -1155,7 +1155,6 @@ void WebUI::build_config_json(LargeTextBuffer &json) const {
     json_add_string(json, "auth_whitelist", cfg.auth_whitelist.c_str());
     json_add_bool(json, "telnet_enabled", cfg.telnet_console_enabled);
     json_add_int(json, "telnet_port", cfg.telnet_console_port);
-    json_add_bool(json, "ota_auth", cfg.ota_auth_enabled);
     json_add_bool(json, "ota_password_set", cfg.ota_password.length() > 0);
     json_add_string(json, "ota_password", "");
     json += '}';
@@ -1461,12 +1460,7 @@ void WebUI::execute_config_update(const std::string &body) {
         app_config_->set_auth_whitelist(s)) {
         saved++;
     }
-    if (doc["ota_auth"].is<bool>() &&
-        app_config_->set_ota_auth_enabled(doc["ota_auth"].as<bool>())) {
-        ota_manager_->mark_config_dirty();
-        saved++;
-    }
-    if (json_get_string(doc, "ota_password", s) && s.length() &&
+    if (json_get_string(doc, "ota_password", s) &&
         app_config_->set_ota_password(s)) {
         ota_manager_->mark_config_dirty();
         saved++;
