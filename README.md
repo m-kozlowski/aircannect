@@ -40,6 +40,24 @@ ESP32 bridge for ResMed AirSense 11 / AirCurve 11 CPAP.
 
 Without a stored Wi-Fi profile, the device starts SoftAP `AirCANnect_XXXXXX` (password `aircannect`) so you can join it directly and configure Wi-Fi from the web UI at `http://192.168.4.1/`. After the first STA profile is added, SoftAP stays as recovery fallback (configurable to forced-always-on if you want both).
 
+On SD-enabled builds, first-boot provisioning can also be done by placing
+`config.txt` in the card root. AirCANnect reads `key=value` lines during boot,
+then renames the file to `config.ok`. See the full
+[configuration reference](docs/configuration.md). Useful keys include:
+
+```ini
+host=aircannect
+ssid_0=your-network
+pass_0=your-password
+wifi_ctry=01
+tz=CET-1CEST,M3.5.0,M10.5.0/3
+http_user=admin
+http_pass=aircannect
+```
+
+For multiple Wi-Fi profiles, use `ssid_0` / `pass_0` through
+`ssid_3` / `pass_3`.
+
 ## Build profiles
 
 - `xiao-esp32s3-plus-sdmmc4` *(default)* - XIAO ESP32-S3 Plus, 4-bit microSD on the exposed non-strapping GPIOs.

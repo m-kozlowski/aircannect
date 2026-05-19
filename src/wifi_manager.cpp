@@ -404,6 +404,40 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
     return reconnect();
 }
 
+bool WifiManager::replace_profiles(const WifiProfile *profiles,
+                                   size_t count,
+                                   bool reconnect_now) {
+    if (count > AC_WIFI_PROFILE_MAX) return false;
+    if (count > 0 && !profiles) return false;
+
+    WifiProfile cleaned[AC_WIFI_PROFILE_MAX];
+    size_t write = 0;
+    for (size_t i = 0; i < count; ++i) {
+        String ssid = profiles[i].ssid;
+        ssid.trim();
+        if (!ssid.length()) continue;
+
+        cleaned[write].ssid = ssid;
+        cleaned[write].password = profiles[i].password;
+        write++;
+    }
+
+    for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
+    for (size_t i = 0; i < write; ++i) profiles_[i] = cleaned[i];
+    profile_count_ = write;
+    sta_configured_ = profile_count_ > 0;
+    active_profile_index_ = -1;
+    if (sta_configured_) {
+        sta_ssid_ = profiles_[0].ssid;
+        sta_pass_ = profiles_[0].password;
+    } else {
+        sta_ssid_ = "";
+        sta_pass_ = "";
+    }
+    save_config();
+    return reconnect_now ? reconnect() : true;
+}
+
 bool WifiManager::remove_profile(size_t index) {
     if (index >= profile_count_) return false;
     for (size_t i = index + 1; i < profile_count_; ++i) {

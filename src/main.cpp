@@ -7,6 +7,7 @@
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
+#include "provisioning.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
 #include "session_manager.h"
@@ -149,6 +150,7 @@ void setup() {
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] management CLI ready\n");
 
     app_config.begin();
+    apply_storage_provisioning(app_config, wifi_manager);
     app_config.apply_log_config();
     session_manager.begin();
     sink_manager.begin(rpc_arbiter, session_manager);

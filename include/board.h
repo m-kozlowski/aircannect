@@ -80,6 +80,16 @@
 #define AC_STORAGE_MAX_OPEN_FILES 4
 #endif
 
+#ifndef AC_PROVISION_CONFIG_PATH
+#define AC_PROVISION_CONFIG_PATH "/config.txt"
+#endif
+
+#ifndef AC_PROVISION_OK_PATH
+#define AC_PROVISION_OK_PATH "/config.ok"
+#endif
+
+static constexpr size_t AC_PROVISION_LINE_MAX = 256;
+
 #ifndef AC_SDMMC_WIDTH
 #define AC_SDMMC_WIDTH 4
 #endif
@@ -155,7 +165,6 @@
 #ifndef AC_DEFAULT_TELNET_CONSOLE_ENABLED
 #define AC_DEFAULT_TELNET_CONSOLE_ENABLED 1
 #endif
-
 
 #ifndef AC_DEFAULT_OTA_PASSWORD
 #define AC_DEFAULT_OTA_PASSWORD "aircannect"

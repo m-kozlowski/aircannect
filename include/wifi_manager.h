@@ -72,6 +72,8 @@ public:
     bool configure_open_sta(const String &ssid);
     bool add_profile(const String &ssid, const String &password,
                      bool open_network);
+    bool replace_profiles(const WifiProfile *profiles, size_t count,
+                          bool reconnect_now);
     bool remove_profile(size_t index);
     void clear_sta_config();
     bool reconnect();
