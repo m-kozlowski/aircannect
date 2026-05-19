@@ -142,17 +142,13 @@ void WifiManager::load_config() {
         profiles_[i].ssid = prefs.getString(key, "");
         snprintf(key, sizeof(key), "pass_%u", static_cast<unsigned>(i));
         profiles_[i].password = prefs.getString(key, "");
-        snprintf(key, sizeof(key), "open_%u", static_cast<unsigned>(i));
-        profiles_[i].open = prefs.getBool(key, false);
-        snprintf(key, sizeof(key), "ena_%u", static_cast<unsigned>(i));
-        profiles_[i].enabled = prefs.getBool(key, true);
     }
 
     if (profile_count_ == 0 && prefs.getBool(WIFI_PREF_HAS, false)) {
         profiles_[0].ssid = prefs.getString(WIFI_PREF_SSID, "");
-        profiles_[0].password = prefs.getString(WIFI_PREF_PASS, "");
-        profiles_[0].open = prefs.getBool(WIFI_PREF_OPEN, false);
-        profiles_[0].enabled = true;
+        const bool legacy_open = prefs.getBool(WIFI_PREF_OPEN, false);
+        profiles_[0].password =
+            legacy_open ? "" : prefs.getString(WIFI_PREF_PASS, "");
         if (profiles_[0].ssid.length()) profile_count_ = 1;
         needs_save = true;
     }
@@ -179,10 +175,8 @@ void WifiManager::load_config() {
     if (sta_configured_) {
         sta_ssid_ = profiles_[0].ssid;
         sta_pass_ = profiles_[0].password;
-        sta_open_ = profiles_[0].open;
     } else {
         sta_configured_ = false;
-        sta_open_ = false;
         sta_ssid_ = "";
         sta_pass_ = "";
     }
@@ -207,18 +201,15 @@ void WifiManager::save_config(size_t first_dirty_index) {
         if (i < profile_count_) prefs.putString(key, profiles_[i].password);
         else remove_key_if_present(prefs, key);
         snprintf(key, sizeof(key), "open_%u", static_cast<unsigned>(i));
-        if (i < profile_count_) prefs.putBool(key, profiles_[i].open);
-        else remove_key_if_present(prefs, key);
+        remove_key_if_present(prefs, key);
         snprintf(key, sizeof(key), "ena_%u", static_cast<unsigned>(i));
-        if (i < profile_count_) prefs.putBool(key, profiles_[i].enabled);
-        else remove_key_if_present(prefs, key);
+        remove_key_if_present(prefs, key);
     }
     if (first_dirty_index == 0) {
         prefs.putString(WIFI_PREF_SSID, profile_count_ ? profiles_[0].ssid : "");
         prefs.putString(WIFI_PREF_PASS,
                         profile_count_ ? profiles_[0].password : "");
-        prefs.putBool(WIFI_PREF_OPEN,
-                      profile_count_ ? profiles_[0].open : false);
+        remove_key_if_present(prefs, WIFI_PREF_OPEN);
     }
     prefs.end();
 }
@@ -226,7 +217,7 @@ void WifiManager::save_config(size_t first_dirty_index) {
 bool WifiManager::start_profile(size_t index) {
     if (index >= profile_count_) return false;
     WifiProfile &profile = profiles_[index];
-    if (!profile.enabled || !profile.ssid.length()) return false;
+    if (!profile.ssid.length()) return false;
 
     if (softap_mode_ == SoftApMode::Forced && !softap_running_) {
         start_softap(true);
@@ -240,7 +231,6 @@ bool WifiManager::start_profile(size_t index) {
     active_profile_index_ = static_cast<int8_t>(index);
     sta_ssid_ = profile.ssid;
     sta_pass_ = profile.password;
-    sta_open_ = profile.open;
     connect_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
     pmf_retry_attempted_ = false;
     last_disconnect_reason_ = 0;
@@ -249,7 +239,7 @@ bool WifiManager::start_profile(size_t index) {
 
     Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] connecting to profile %u SSID=%s\n",
               static_cast<unsigned>(index), profile.ssid.c_str());
-    if (profile.open) {
+    if (!profile.password.length()) {
         WiFi.begin(profile.ssid.c_str());
     } else {
         WiFi.begin(profile.ssid.c_str(), profile.password.c_str());
@@ -319,8 +309,6 @@ bool WifiManager::configure_sta(const String &ssid, const String &password) {
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     profiles_[0].ssid = ssid;
     profiles_[0].password = password;
-    profiles_[0].open = false;
-    profiles_[0].enabled = true;
     profile_count_ = 1;
     sta_configured_ = true;
     save_config();
@@ -385,8 +373,7 @@ bool WifiManager::configure_open_sta(const String &ssid) {
     if (!ssid.length()) return false;
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     profiles_[0].ssid = ssid;
-    profiles_[0].open = true;
-    profiles_[0].enabled = true;
+    profiles_[0].password = "";
     profile_count_ = 1;
     sta_configured_ = true;
     save_config();
@@ -402,8 +389,6 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
     for (size_t i = 0; i < profile_count_; ++i) {
         if (!profiles_[i].ssid.equals(clean_ssid)) continue;
         profiles_[i].password = open_network ? "" : password;
-        profiles_[i].open = open_network;
-        profiles_[i].enabled = true;
         sta_configured_ = true;
         save_config(i);
         return reconnect();
@@ -413,8 +398,6 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
     const size_t index = profile_count_;
     profiles_[index].ssid = clean_ssid;
     profiles_[index].password = open_network ? "" : password;
-    profiles_[index].open = open_network;
-    profiles_[index].enabled = true;
     profile_count_++;
     sta_configured_ = true;
     save_config(index);
@@ -435,7 +418,6 @@ bool WifiManager::remove_profile(size_t index) {
 
 void WifiManager::clear_sta_config() {
     sta_configured_ = false;
-    sta_open_ = false;
     sta_ssid_ = "";
     sta_pass_ = "";
     profile_count_ = 0;
@@ -529,7 +511,7 @@ void WifiManager::print_status(Print &out) const {
         out.print(" ssid=\"");
         out.print(sta_ssid_);
         out.print("\" auth=");
-        out.print(sta_open_ ? "open" : "password");
+        out.print(sta_is_open() ? "open" : "password");
         out.print(" active_profile=");
         out.print(static_cast<int>(active_profile_index_));
     }
@@ -648,7 +630,6 @@ void WifiManager::maybe_start_roam_scan() {
 
 int8_t WifiManager::find_profile_by_ssid(const String &ssid) const {
     for (size_t i = 0; i < profile_count_; ++i) {
-        if (!profiles_[i].enabled) continue;
         if (profiles_[i].ssid == ssid) return static_cast<int8_t>(i);
     }
     return -1;
@@ -688,7 +669,7 @@ bool WifiManager::start_scan_candidate(size_t candidate_index) {
     const ScanCandidate &candidate = scan_candidates_[candidate_index];
     if (candidate.profile_index >= profile_count_) return false;
     WifiProfile &profile = profiles_[candidate.profile_index];
-    if (!profile.enabled || !profile.ssid.length()) return false;
+    if (!profile.ssid.length()) return false;
 
     stop_wifi();
     if (softap_mode_ == SoftApMode::Forced) start_softap(true);
@@ -700,7 +681,6 @@ bool WifiManager::start_scan_candidate(size_t candidate_index) {
     active_profile_index_ = static_cast<int8_t>(candidate.profile_index);
     sta_ssid_ = profile.ssid;
     sta_pass_ = profile.password;
-    sta_open_ = profile.open;
     connect_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
     pmf_retry_attempted_ = false;
     last_disconnect_reason_ = 0;
@@ -716,7 +696,9 @@ bool WifiManager::start_scan_candidate(size_t candidate_index) {
               profile.ssid.c_str(), bssid_text,
               static_cast<unsigned>(candidate.channel),
               static_cast<int>(candidate.rssi));
-    const char *password = profile.open ? nullptr : profile.password.c_str();
+    const char *password = profile.password.length()
+                               ? profile.password.c_str()
+                               : nullptr;
     WiFi.begin(profile.ssid.c_str(), password, candidate.channel,
                candidate.bssid);
     return true;

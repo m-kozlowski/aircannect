@@ -21,8 +21,6 @@ enum class WifiModeState {
 struct WifiProfile {
     String ssid;
     String password;
-    bool open = false;
-    bool enabled = true;
 };
 
 struct WifiManagerStats {
@@ -45,7 +43,9 @@ public:
 
     bool network_available() const { return network_available_; }
     bool has_sta_config() const { return sta_configured_; }
-    bool sta_is_open() const { return sta_open_; }
+    bool sta_is_open() const {
+        return sta_configured_ && sta_pass_.length() == 0;
+    }
     const String &sta_ssid() const { return sta_ssid_; }
     WifiModeState mode_state() const { return mode_state_; }
     const char *state_name() const;
@@ -109,8 +109,6 @@ private:
 
     bool network_available_ = false;
     bool sta_configured_ = false;
-    bool sta_open_ = false;
-
     SoftApMode softap_mode_ = SoftApMode::Auto;
     bool softap_running_ = false;
     bool roaming_suspended_ = false;

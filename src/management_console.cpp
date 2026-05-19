@@ -624,9 +624,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
             out.print(": ssid=\"");
             out.print(profile.ssid);
             out.print("\" auth=");
-            out.print(profile.open ? "open" : "password");
-            out.print(" enabled=");
-            out.print(profile.enabled ? "yes" : "no");
+            out.print(profile.password.length() == 0 ? "open" : "password");
             if (active == static_cast<int8_t>(i)) {
                 out.print(" active=yes");
             }

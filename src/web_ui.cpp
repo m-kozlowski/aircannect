@@ -1179,8 +1179,7 @@ void WebUI::build_wifi_json(LargeTextBuffer &json) const {
         if (i) json += ',';
         json += "{";
         json_add_string(json, "ssid", profile.ssid.c_str(), false);
-        json_add_bool(json, "open", profile.open);
-        json_add_bool(json, "enabled", profile.enabled);
+        json_add_bool(json, "open", profile.password.length() == 0);
         json += '}';
     }
     json += "]}";
