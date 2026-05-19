@@ -201,10 +201,14 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
 
                 stats_.lines_in++;
                 last_line_in_ms_ = millis();
-                Log::logf(CAT_TCP, LOG_INFO, "[TCP %u -> RPC] %s\n",
-                          static_cast<unsigned>(i), line.c_str());
-                if (!arbiter.submit_raw_payload(std::string(line.c_str()),
-                                                RpcSource::Tcp)) {
+                const std::string payload(line.c_str());
+                if (Log::get_cat_level(CAT_TCP) >= LOG_DEBUG) {
+                    char prefix[32];
+                    snprintf(prefix, sizeof(prefix), "[TCP %u -> RPC] ",
+                             static_cast<unsigned>(i));
+                    Log::log_payload(CAT_TCP, LOG_DEBUG, prefix, payload);
+                }
+                if (!arbiter.submit_raw_payload(payload, RpcSource::Tcp)) {
                     stats_.enqueue_failures++;
                     Log::logf(CAT_TCP, LOG_WARN,
                               "[TCP %u] CAN queue rejected payload\n",

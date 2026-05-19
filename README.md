@@ -18,7 +18,7 @@ ESP32 bridge for ResMed AirSense 11 / AirCurve 11 CPAP.
     (Autodetects firmware format (raw or .abc container) and target memory block)
 - **Raw TCP bridge**
   - send commands to AirSense over WiFi. \
-  (one JSON-RPC payload per line, compatible with `as11_config.py` and other host tooling.)
+    (one JSON-RPC payload per line, compatible with `as11_config.py` and other host tooling.)
 - **Multi-profile Wi-Fi**
   - up to four STA profiles, BSSID-targeted roaming, SoftAP auto-fallback or forced always-on.
 
@@ -68,10 +68,10 @@ For multiple Wi-Fi profiles, use `ssid_0` / `pass_0` through
 <!--
 ## Related tools
 
-[airbreak-plus](https://github.com/m-kozlowski/airbreak-plus/tree/master/python/) has Python tooling that speaks the AS11 JSON-RPC protocol directly over the raw TCP bridge:
+[airbreak-plus](https://github.com/m-kozlowski/airbreak-plus/tree/master/python/) has Python tooling that should use the generic AirCANnect host transport:
 
 - `python/as11_config.py -p tcp:aircannect` - read/write AS11 settings, run RPC calls, follow streams.
-- `python/as11_flash.py -p tcp:aircannect` - build and upload `.abc` firmware images (host-paced; the device just transports).
+- `python/as11_flash.py -p tcp:aircannect` - upload ResMed firmware through the same transport.
 
 Both also support `-p /dev/ttyUSB0` for direct serial CAN tooling on hardware that exposes it.
 -->

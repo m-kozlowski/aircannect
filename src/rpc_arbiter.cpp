@@ -123,11 +123,20 @@ void RpcArbiter::poll() {
 }
 
 bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source) {
-    char prefix[80];
-    snprintf(prefix, sizeof(prefix), "[RPC raw request source=%s] ",
-             source_name(source));
-    Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
-    return enqueue_payload_frames(payload, source);
+    if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
+        char prefix[80];
+        snprintf(prefix, sizeof(prefix), "[RPC raw request source=%s] ",
+                 source_name(source));
+        Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
+    }
+    if (!enqueue_payload_frames(payload, source)) return false;
+
+    uint32_t id = 0;
+    if ((source == RpcSource::Console || source == RpcSource::Tcp) &&
+        json_extract_id(payload, id)) {
+        remember_raw_passthrough(id, source, millis());
+    }
+    return true;
 }
 
 bool RpcArbiter::enqueue_payload_frames(const std::string &payload,
@@ -784,6 +793,58 @@ void RpcArbiter::cancel_all_requests(const char *reason) {
     while (requests_.pop(request)) {
         cancel_queued_request(request, reason);
     }
+    for (auto &raw : raw_passthrough_) raw = {};
+}
+
+void RpcArbiter::expire_raw_passthrough(uint32_t now) {
+    for (auto &request : raw_passthrough_) {
+        if (!request.active) continue;
+        if (static_cast<int32_t>(now - request.deadline_ms) >= 0) {
+            request = {};
+        }
+    }
+}
+
+void RpcArbiter::remember_raw_passthrough(uint32_t id,
+                                          RpcSource source,
+                                          uint32_t now) {
+    expire_raw_passthrough(now);
+
+    RawPassthroughRequest *slot = nullptr;
+    for (auto &request : raw_passthrough_) {
+        if (request.active && request.id == id) {
+            slot = &request;
+            break;
+        }
+        if (!request.active && !slot) slot = &request;
+    }
+    if (!slot) {
+        slot = &raw_passthrough_[0];
+        for (auto &request : raw_passthrough_) {
+            if (static_cast<int32_t>(request.deadline_ms -
+                                     slot->deadline_ms) < 0) {
+                slot = &request;
+            }
+        }
+    }
+
+    slot->active = true;
+    slot->id = id;
+    slot->source = source;
+    slot->deadline_ms = now + AC_RESMED_OTA_VERIFY_TIMEOUT_MS;
+}
+
+bool RpcArbiter::match_raw_passthrough(uint32_t id,
+                                       RpcSource &source,
+                                       uint32_t now) {
+    expire_raw_passthrough(now);
+    for (auto &request : raw_passthrough_) {
+        if (!request.active || request.id != id) continue;
+        source = request.source;
+        request = {};
+        return true;
+    }
+    return false;
 }
 
 void RpcArbiter::dispatch_next_request() {
@@ -1340,7 +1401,8 @@ void RpcArbiter::handle_rpc_payload(const std::string &payload) {
         case RpcPayloadKind::Response: {
             stats_.rpc_responses++;
             uint32_t response_id = 0;
-            if (pending_.active && json_extract_id(payload, response_id) &&
+            const bool has_response_id = json_extract_id(payload, response_id);
+            if (pending_.active && has_response_id &&
                 response_id == pending_.id) {
                 stats_.rpc_matched_responses++;
                 const uint32_t matched_id = pending_.id;
@@ -1367,7 +1429,24 @@ void RpcArbiter::handle_rpc_payload(const std::string &payload) {
                 push_event(RpcEventKind::RpcResponse, payload,
                            response_source, matched_id);
                 break;
-            } else if (pending_.active) {
+            }
+            RpcSource passthrough_source = RpcSource::Internal;
+            if (has_response_id &&
+                match_raw_passthrough(response_id, passthrough_source,
+                                      millis())) {
+                if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
+                    char prefix[112];
+                    snprintf(prefix, sizeof(prefix),
+                             "[RPC response id=%lu source=%s] ",
+                             static_cast<unsigned long>(response_id),
+                             source_name(passthrough_source));
+                    Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
+                }
+                push_event(RpcEventKind::RpcResponse, payload,
+                           passthrough_source, response_id);
+                break;
+            }
+            if (pending_.active) {
                 stats_.rpc_unmatched++;
                 Log::logf(CAT_RPC, LOG_DEBUG,
                           "[RPC] response did not match pending id=%lu\n",

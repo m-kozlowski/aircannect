@@ -155,6 +155,15 @@ private:
         StreamCommandType stream_command = StreamCommandType::None;
     };
 
+    struct RawPassthroughRequest {
+        bool active = false;
+        uint32_t id = 0;
+        uint32_t deadline_ms = 0;
+        RpcSource source = RpcSource::Internal;
+    };
+
+    static constexpr size_t RAW_PASSTHROUGH_PENDING_MAX = 8;
+
     void push_event(RpcEventKind kind,
                     const std::string &payload,
                     RpcSource source = RpcSource::Internal,
@@ -171,6 +180,14 @@ private:
     void cancel_queued_request(const QueuedRequest &request,
                                const char *reason);
     void cancel_all_requests(const char *reason);
+
+    void expire_raw_passthrough(uint32_t now);
+    void remember_raw_passthrough(uint32_t id,
+                                  RpcSource source,
+                                  uint32_t now);
+    bool match_raw_passthrough(uint32_t id,
+                               RpcSource &source,
+                               uint32_t now);
 
     bool background_backoff_active(uint32_t now) const;
     void note_request_success(RpcSource source, uint32_t now);
@@ -204,6 +221,7 @@ private:
 
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
     PendingRequest pending_;
+    RawPassthroughRequest raw_passthrough_[RAW_PASSTHROUGH_PENDING_MAX];
     QueuedRequest dispatch_retry_;
     bool dispatch_retry_active_ = false;
     uint32_t dispatch_retry_deadline_ms_ = 0;
