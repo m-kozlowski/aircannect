@@ -271,6 +271,8 @@ static constexpr uint8_t AC_OXIMETRY_SENSOR_TASK_PRIO = 3;
 static constexpr uint32_t AC_OXIMETRY_SENSOR_SCAN_MS = 5000;
 static constexpr uint32_t AC_OXIMETRY_SENSOR_SCAN_IDLE_MS = 10000;
 static constexpr uint32_t AC_OXIMETRY_SENSOR_NOTIFY_TIMEOUT_MS = 10000;
+static constexpr uint32_t AC_OXIMETRY_SENSOR_INVALID_DISCONNECT_MS = 30000;
+static constexpr uint32_t AC_OXIMETRY_SENSOR_RECONNECT_HOLDOFF_MS = 60000;
 
 static constexpr uint32_t AC_STORAGE_STATUS_POLL_MS = 30000;
 static constexpr size_t AC_STORAGE_WRITE_QUEUE_INTERNAL = 4;

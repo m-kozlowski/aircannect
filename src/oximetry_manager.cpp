@@ -2,6 +2,7 @@
 
 #include <Preferences.h>
 #include <string.h>
+#include <time.h>
 
 #include "debug_log.h"
 #include "string_util.h"
@@ -21,6 +22,7 @@ static constexpr uint16_t PLX_SFLOAT_NEG_INF = 0x0802;
 static constexpr uint16_t PLX_SFLOAT_RESERVED = 0x0801;
 static constexpr uint16_t BLE_CONN_NONE = 0xffff;
 static constexpr const char *SENSOR_NS = "oxi_sensor";
+static constexpr const char *SENSOR_KNOWN_COUNT_KEY = "known_count";
 static constexpr const char *PLX_SERVICE_UUID = "1822";
 static constexpr const char *PLX_CONTINUOUS_UUID = "2A5F";
 static constexpr const char *PLX_SPOT_UUID = "2A5E";
@@ -34,8 +36,14 @@ static constexpr const char *VIATOM_READ_UUID =
     "0734594A-A8E7-4B1A-A6B1-CD5243059A57";
 static constexpr const char *VIATOM_WRITE_UUID =
     "8B00ACE7-EB0B-49B0-BBE9-9AEE0A26E1A3";
+static constexpr uint8_t VIATOM_CMD_CONFIG = 0x16;
+static constexpr uint8_t VIATOM_CMD_INFO = 0x14;
 static constexpr uint8_t VIATOM_CMD_READ_SENSORS = 0x17;
 static constexpr uint32_t VIATOM_SENSOR_POLL_MS = 2000;
+static constexpr uint32_t VIATOM_RESPONSE_TIMEOUT_MS = 1500;
+static constexpr size_t VIATOM_WRITE_CHUNK_LEN = 20;
+static constexpr uint32_t VIATOM_WRITE_CHUNK_DELAY_MS = 50;
+static constexpr uint8_t VIATOM_NO_PENDING_CMD = 0xff;
 
 #if AC_OXIMETRY_BLE_ENABLED
 NimBLEServer *ble_server = nullptr;
@@ -44,6 +52,13 @@ NimBLECharacteristic *plx_features = nullptr;
 uint16_t ble_conn_handle = BLE_CONN_NONE;
 NimBLEClient *sensor_client = nullptr;
 NimBLERemoteCharacteristic *sensor_viatom_write = nullptr;
+uint8_t sensor_viatom_rx[64] = {};
+size_t sensor_viatom_rx_len = 0;
+size_t sensor_viatom_rx_want = 0;
+uint8_t sensor_viatom_pending_cmd = VIATOM_NO_PENDING_CMD;
+uint32_t sensor_viatom_pending_ms = 0;
+bool sensor_viatom_need_info = false;
+bool sensor_viatom_need_time_sync = false;
 SemaphoreHandle_t ble_runtime_mutex = nullptr;
 OximetryManager *sensor_owner = nullptr;
 #endif
@@ -63,6 +78,189 @@ uint8_t crc8_ccitt(const uint8_t *data, size_t len, uint8_t crc = 0x00) {
     }
     return crc;
 }
+
+void sensor_known_key(char *out,
+                      size_t out_len,
+                      size_t index,
+                      const char *field) {
+    snprintf(out, out_len, "known%u_%s",
+             static_cast<unsigned>(index),
+             field);
+}
+
+void remove_nvs_key_if_present(Preferences &prefs, const char *key) {
+    if (prefs.isKey(key)) prefs.remove(key);
+}
+
+void viatom_reset_rx() {
+#if AC_OXIMETRY_BLE_ENABLED
+    sensor_viatom_rx_len = 0;
+    sensor_viatom_rx_want = 0;
+#endif
+}
+
+void viatom_clear_pending() {
+#if AC_OXIMETRY_BLE_ENABLED
+    sensor_viatom_pending_cmd = VIATOM_NO_PENDING_CMD;
+    sensor_viatom_pending_ms = 0;
+#endif
+}
+
+const char *viatom_cmd_name(uint8_t cmd) {
+    switch (cmd) {
+        case VIATOM_CMD_INFO: return "info";
+        case VIATOM_CMD_CONFIG: return "config";
+        case VIATOM_CMD_READ_SENSORS: return "read_sensors";
+        case VIATOM_NO_PENDING_CMD: return "none";
+        default: return "unknown";
+    }
+}
+
+void log_oxi_hex_debug(const char *label,
+                       const uint8_t *data,
+                       size_t len,
+                       uint8_t cmd = VIATOM_NO_PENDING_CMD) {
+    if (Log::get_cat_level(CAT_OXI) < LOG_DEBUG) return;
+    if (!data) {
+        Log::logf(CAT_OXI, LOG_DEBUG,
+                  "[OXI] %s len=0 pending=%s\n",
+                  label ? label : "hex",
+                  viatom_cmd_name(cmd));
+        return;
+    }
+
+    static constexpr size_t MAX_BYTES = 24;
+    const size_t shown = len < MAX_BYTES ? len : MAX_BYTES;
+    char hex[MAX_BYTES * 3 + 1] = {};
+    size_t pos = 0;
+    for (size_t i = 0; i < shown && pos + 4 < sizeof(hex); ++i) {
+        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", data[i]);
+    }
+    if (pos > 0) hex[pos - 1] = 0;
+    Log::logf(CAT_OXI, LOG_DEBUG,
+              "[OXI] %s len=%u pending=%s%s %s\n",
+              label ? label : "hex",
+              static_cast<unsigned>(len),
+              viatom_cmd_name(cmd),
+              len > shown ? " truncated" : "",
+              hex);
+}
+
+bool viatom_decode_reading(const uint8_t *packet,
+                           size_t len,
+                           uint16_t &spo2_raw,
+                           uint16_t &pulse_raw,
+                           bool &invalid) {
+    if (!packet || len < 9 || packet[0] != 0x55) return false;
+    if (packet[1] != static_cast<uint8_t>(packet[2] ^ 0xff)) return false;
+
+    const uint16_t payload_len =
+        static_cast<uint16_t>(packet[5]) |
+        (static_cast<uint16_t>(packet[6]) << 8);
+    const size_t packet_len = static_cast<size_t>(payload_len) + 8;
+    if (payload_len < 2 || len < packet_len) return false;
+    if (crc8_ccitt(packet, packet_len - 1) != packet[packet_len - 1]) {
+        return false;
+    }
+
+    const uint8_t spo2 = packet[7];
+    const uint8_t pulse = packet[8];
+    const bool finger_present = payload_len < 12 || packet[18] != 0;
+    const bool valid =
+        spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse != 0xff &&
+        pulse < 250 && finger_present;
+    spo2_raw = valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN;
+    pulse_raw = valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN;
+    invalid = !valid;
+    return true;
+}
+
+#if AC_OXIMETRY_BLE_ENABLED
+bool viatom_write_packet(NimBLERemoteCharacteristic *write_chr,
+                         uint8_t cmd,
+                         const uint8_t *payload,
+                         size_t payload_len) {
+    if (!write_chr || payload_len > 0xffff) return false;
+    const size_t packet_len = 7 + payload_len + 1;
+    if (packet_len > 80) return false;
+
+    uint8_t packet[80] = {};
+    packet[0] = 0xaa;
+    packet[1] = cmd;
+    packet[2] = static_cast<uint8_t>(cmd ^ 0xff);
+    packet[3] = 0x00;
+    packet[4] = 0x00;
+    packet[5] = static_cast<uint8_t>(payload_len & 0xff);
+    packet[6] = static_cast<uint8_t>((payload_len >> 8) & 0xff);
+    if (payload && payload_len) {
+        memcpy(packet + 7, payload, payload_len);
+    }
+    packet[7 + payload_len] = crc8_ccitt(packet, 7 + payload_len);
+
+    for (size_t offset = 0; offset < packet_len;
+         offset += VIATOM_WRITE_CHUNK_LEN) {
+        size_t chunk_len = packet_len - offset;
+        if (chunk_len > VIATOM_WRITE_CHUNK_LEN) {
+            chunk_len = VIATOM_WRITE_CHUNK_LEN;
+        }
+        if (!write_chr->writeValue(packet + offset, chunk_len, false)) {
+            return false;
+        }
+        if (offset + chunk_len < packet_len) {
+            vTaskDelay(pdMS_TO_TICKS(VIATOM_WRITE_CHUNK_DELAY_MS));
+        }
+    }
+    return true;
+}
+
+bool viatom_sync_datetime(NimBLERemoteCharacteristic *write_chr) {
+    if (!write_chr) return false;
+
+    const time_t now = time(nullptr);
+    if (now < 1704067200) return false;  // 2024-01-01T00:00:00Z
+
+    struct tm local = {};
+    localtime_r(&now, &local);
+
+    char payload[48] = {};
+    if (!strftime(payload, sizeof(payload),
+                  "{\"SetTIME\":\"%Y-%m-%d,%H:%M:%S\"}", &local)) {
+        return false;
+    }
+
+    const bool ok = viatom_write_packet(
+        write_chr,
+        VIATOM_CMD_CONFIG,
+        reinterpret_cast<const uint8_t *>(payload),
+        strlen(payload));
+    if (ok) {
+        Log::logf(CAT_OXI, LOG_INFO,
+                  "[OXI] Sensor Viatom datetime set: %s\n",
+                  payload);
+    } else {
+        Log::logf(CAT_OXI, LOG_WARN,
+                  "[OXI] Sensor Viatom datetime write failed\n");
+    }
+    return ok;
+}
+
+bool viatom_send_command(NimBLERemoteCharacteristic *write_chr,
+                         uint8_t cmd,
+                         const uint8_t *payload,
+                         size_t payload_len,
+                         uint32_t now_ms) {
+    if (!viatom_write_packet(write_chr, cmd, payload, payload_len)) {
+        return false;
+    }
+    sensor_viatom_pending_cmd = cmd;
+    sensor_viatom_pending_ms = now_ms;
+    Log::logf(CAT_OXI, LOG_DEBUG,
+              "[OXI] Sensor Viatom TX cmd=%s payload_len=%u\n",
+              viatom_cmd_name(cmd),
+              static_cast<unsigned>(payload_len));
+    return true;
+}
+#endif
 
 #if AC_OXIMETRY_BLE_ENABLED
 bool ensure_ble_runtime(const char *name) {
@@ -200,7 +398,14 @@ public:
     void onDisconnect(NimBLEClient *client, int reason) override {
         (void)client;
         sensor_viatom_write = nullptr;
-        if (owner_) owner_->on_sensor_disconnect(reason);
+        viatom_reset_rx();
+        viatom_clear_pending();
+        sensor_viatom_need_info = false;
+        sensor_viatom_need_time_sync = false;
+        if (owner_) {
+            owner_->sensor_invalid_since_ms_ = 0;
+            owner_->on_sensor_disconnect(reason);
+        }
     }
 
     void onPassKeyEntry(NimBLEConnInfo &connInfo) override {
@@ -259,27 +464,91 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
                              bool is_notify) {
     (void)chr;
     (void)is_notify;
-    if (!data || len < 9 || data[0] != 0x55) return;
-    if (data[1] != static_cast<uint8_t>(data[2] ^ 0xff)) return;
+    if (!data || !len) return;
+    log_oxi_hex_debug("Sensor Viatom RX fragment",
+                      data,
+                      len,
+                      sensor_viatom_pending_cmd);
 
-    const uint16_t payload_len =
-        static_cast<uint16_t>(data[5]) |
-        (static_cast<uint16_t>(data[6]) << 8);
-    const size_t packet_len = static_cast<size_t>(payload_len) + 8;
-    if (packet_len > len || payload_len < 2) return;
-    if (crc8_ccitt(data, packet_len - 1) != data[packet_len - 1]) return;
-    if (data[1] != VIATOM_CMD_READ_SENSORS) return;
+    const uint8_t *packet = data;
+    size_t packet_len = len;
 
-    const uint8_t spo2 = data[7];
-    const uint8_t pulse = data[8];
-    const bool valid =
-        spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse != 0xff &&
-        pulse < 250;
+    if (data[0] == 0x55) {
+        sensor_viatom_rx_len = 0;
+        sensor_viatom_rx_want = 0;
+        if (len >= 7) {
+            const uint16_t payload_len =
+                static_cast<uint16_t>(data[5]) |
+                (static_cast<uint16_t>(data[6]) << 8);
+            const size_t want = static_cast<size_t>(payload_len) + 8;
+            if (want <= sizeof(sensor_viatom_rx)) {
+                sensor_viatom_rx_want = want;
+            } else {
+                Log::logf(CAT_OXI, LOG_DEBUG,
+                          "[OXI] Sensor Viatom RX too large want=%u\n",
+                          static_cast<unsigned>(want));
+            }
+        }
+    }
+
+    bool buffered_packet = false;
+    bool buffered_packet_complete = false;
+    if (sensor_viatom_rx_want) {
+        if (sensor_viatom_rx_len + len > sizeof(sensor_viatom_rx)) {
+            Log::logf(CAT_OXI, LOG_DEBUG,
+                      "[OXI] Sensor Viatom RX overflow have=%u add=%u\n",
+                      static_cast<unsigned>(sensor_viatom_rx_len),
+                      static_cast<unsigned>(len));
+            viatom_reset_rx();
+            return;
+        }
+        memcpy(sensor_viatom_rx + sensor_viatom_rx_len, data, len);
+        sensor_viatom_rx_len += len;
+        if (sensor_viatom_rx_len < sensor_viatom_rx_want) {
+            Log::logf(CAT_OXI, LOG_DEBUG,
+                      "[OXI] Sensor Viatom RX partial have=%u want=%u\n",
+                      static_cast<unsigned>(sensor_viatom_rx_len),
+                      static_cast<unsigned>(sensor_viatom_rx_want));
+            return;
+        }
+        packet = sensor_viatom_rx;
+        packet_len = sensor_viatom_rx_len;
+        buffered_packet = true;
+        buffered_packet_complete =
+            sensor_viatom_rx_len >= sensor_viatom_rx_want;
+    }
+
+    const uint8_t pending_cmd = sensor_viatom_pending_cmd;
+    viatom_clear_pending();
+    if (pending_cmd != VIATOM_CMD_READ_SENSORS) {
+        Log::logf(CAT_OXI, LOG_DEBUG,
+                  "[OXI] Sensor Viatom RX ignored for cmd=%s\n",
+                  viatom_cmd_name(pending_cmd));
+        if (buffered_packet_complete) viatom_reset_rx();
+        return;
+    }
+
+    uint16_t spo2_raw = PLX_SFLOAT_NAN;
+    uint16_t pulse_raw = PLX_SFLOAT_NAN;
+    bool invalid = true;
+    if (!viatom_decode_reading(packet, packet_len, spo2_raw, pulse_raw,
+                               invalid)) {
+        Log::logf(CAT_OXI, LOG_DEBUG,
+                  "[OXI] Sensor Viatom RX read decode failed len=%u\n",
+                  static_cast<unsigned>(packet_len));
+        if (buffered_packet_complete) viatom_reset_rx();
+        return;
+    }
+    Log::logf(CAT_OXI, LOG_DEBUG,
+              "[OXI] Sensor Viatom reading %s\n",
+              invalid ? "invalid" : "valid");
+
+    if (buffered_packet) {
+        viatom_reset_rx();
+    }
+
     if (sensor_owner) {
-        sensor_owner->on_sensor_sample(
-            valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
-            valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
-            !valid);
+        sensor_owner->on_sensor_sample(spo2_raw, pulse_raw, invalid);
     }
 }
 #endif
@@ -559,13 +828,21 @@ bool OximetryManager::load_sensor_known() {
         return false;
     }
 
-    const uint8_t count = prefs.getUChar("count", 0);
+    uint8_t count = prefs.getUChar(SENSOR_KNOWN_COUNT_KEY, 0);
+    if (!count && prefs.isKey("count")) {
+        count = prefs.getUChar("count", 0);
+    }
     for (uint8_t i = 0;
          i < count && i < AC_OXIMETRY_SENSOR_MAX_KNOWN;
-         ++i) {
-        char key[8];
-        snprintf(key, sizeof(key), "a%u", i);
+        ++i) {
+        char key[16];
+        sensor_known_key(key, sizeof(key), i, "addr");
+        bool has_key = prefs.isKey(key);
         String addr = prefs.getString(key, "");
+        if (!has_key) {
+            snprintf(key, sizeof(key), "a%u", i);
+            addr = prefs.getString(key, "");
+        }
         addr.trim();
         if (!addr.length() || addr.length() >= sizeof(sensor_known_[i].addr)) {
             continue;
@@ -573,12 +850,27 @@ bool OximetryManager::load_sensor_known() {
         strncpy(sensor_known_[i].addr, addr.c_str(),
                 sizeof(sensor_known_[i].addr) - 1);
 
-        snprintf(key, sizeof(key), "t%u", i);
+        sensor_known_key(key, sizeof(key), i, "type");
+        has_key = prefs.isKey(key);
         sensor_known_[i].addr_type = prefs.getUChar(key, 1);
-        snprintf(key, sizeof(key), "e%u", i);
+        if (!has_key) {
+            snprintf(key, sizeof(key), "t%u", i);
+            sensor_known_[i].addr_type = prefs.getUChar(key, 1);
+        }
+        sensor_known_key(key, sizeof(key), i, "auto");
+        has_key = prefs.isKey(key);
         sensor_known_[i].autoconnect = prefs.getBool(key, true);
-        snprintf(key, sizeof(key), "n%u", i);
+        if (!has_key) {
+            snprintf(key, sizeof(key), "e%u", i);
+            sensor_known_[i].autoconnect = prefs.getBool(key, true);
+        }
+        sensor_known_key(key, sizeof(key), i, "name");
+        has_key = prefs.isKey(key);
         String name = prefs.getString(key, "");
+        if (!has_key) {
+            snprintf(key, sizeof(key), "n%u", i);
+            name = prefs.getString(key, "");
+        }
         strncpy(sensor_known_[i].name, name.c_str(),
                 sizeof(sensor_known_[i].name) - 1);
     }
@@ -606,32 +898,44 @@ bool OximetryManager::save_sensor_known() const {
     for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
         if (snapshot[i].addr[0]) count++;
     }
-    bool ok = prefs.putUChar("count", count) != 0;
+    bool ok = prefs.putUChar(SENSOR_KNOWN_COUNT_KEY, count) != 0;
 
     uint8_t out_index = 0;
     for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
         if (!snapshot[i].addr[0]) continue;
-        char key[8];
-        snprintf(key, sizeof(key), "a%u", out_index);
+        char key[16];
+        sensor_known_key(key, sizeof(key), out_index, "addr");
         ok = prefs.putString(key, snapshot[i].addr) != 0 && ok;
-        snprintf(key, sizeof(key), "t%u", out_index);
+        sensor_known_key(key, sizeof(key), out_index, "type");
         ok = prefs.putUChar(key, snapshot[i].addr_type) != 0 && ok;
-        snprintf(key, sizeof(key), "e%u", out_index);
+        sensor_known_key(key, sizeof(key), out_index, "auto");
         ok = prefs.putBool(key, snapshot[i].autoconnect) != 0 && ok;
-        snprintf(key, sizeof(key), "n%u", out_index);
+        sensor_known_key(key, sizeof(key), out_index, "name");
         ok = prefs.putString(key, snapshot[i].name) != 0 && ok;
         out_index++;
     }
     for (; out_index < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++out_index) {
+        char key[16];
+        sensor_known_key(key, sizeof(key), out_index, "addr");
+        remove_nvs_key_if_present(prefs, key);
+        sensor_known_key(key, sizeof(key), out_index, "type");
+        remove_nvs_key_if_present(prefs, key);
+        sensor_known_key(key, sizeof(key), out_index, "auto");
+        remove_nvs_key_if_present(prefs, key);
+        sensor_known_key(key, sizeof(key), out_index, "name");
+        remove_nvs_key_if_present(prefs, key);
+    }
+    remove_nvs_key_if_present(prefs, "count");
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
         char key[8];
-        snprintf(key, sizeof(key), "a%u", out_index);
-        prefs.remove(key);
-        snprintf(key, sizeof(key), "t%u", out_index);
-        prefs.remove(key);
-        snprintf(key, sizeof(key), "e%u", out_index);
-        prefs.remove(key);
-        snprintf(key, sizeof(key), "n%u", out_index);
-        prefs.remove(key);
+        snprintf(key, sizeof(key), "a%u", static_cast<unsigned>(i));
+        remove_nvs_key_if_present(prefs, key);
+        snprintf(key, sizeof(key), "t%u", static_cast<unsigned>(i));
+        remove_nvs_key_if_present(prefs, key);
+        snprintf(key, sizeof(key), "e%u", static_cast<unsigned>(i));
+        remove_nvs_key_if_present(prefs, key);
+        snprintf(key, sizeof(key), "n%u", static_cast<unsigned>(i));
+        remove_nvs_key_if_present(prefs, key);
     }
     prefs.end();
     return ok;
@@ -812,10 +1116,32 @@ void OximetryManager::sensor_set_state(OximetrySensorState state) {
 #endif
     status_.sensor_state = state;
     status_.sensor_scanning = state == OximetrySensorState::Scanning;
-    status_.sensor_connected = state == OximetrySensorState::Streaming;
+    status_.sensor_connected =
+        state == OximetrySensorState::Connected ||
+        state == OximetrySensorState::Streaming;
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&sensor_mux_);
 #endif
+}
+
+void OximetryManager::sensor_hold_autoconnect(const char *addr,
+                                              uint32_t now_ms) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sensor_auto_holdoff_until_ms_ =
+        now_ms + AC_OXIMETRY_SENSOR_RECONNECT_HOLDOFF_MS;
+    strncpy(sensor_auto_holdoff_addr_, addr ? addr : "",
+            sizeof(sensor_auto_holdoff_addr_) - 1);
+    sensor_auto_holdoff_addr_[sizeof(sensor_auto_holdoff_addr_) - 1] = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    Log::logf(CAT_OXI, LOG_DEBUG,
+              "[OXI] Sensor auto-connect holdoff addr=%s ms=%lu\n",
+              sensor_auto_holdoff_addr_[0] ? sensor_auto_holdoff_addr_ : "*",
+              static_cast<unsigned long>(
+                  AC_OXIMETRY_SENSOR_RECONNECT_HOLDOFF_MS));
 }
 
 void OximetryManager::sensor_store_scan_result(const char *addr,
@@ -851,13 +1177,21 @@ void OximetryManager::sensor_store_scan_result(const char *addr,
 }
 
 bool OximetryManager::sensor_pick_autoconnect_target(
-    OximetrySensorDevice &target) {
+    OximetrySensorDevice &target,
+    uint32_t now_ms) {
     int best_rssi = -999;
     bool found = false;
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&sensor_mux_);
 #endif
     for (uint8_t i = 0; i < sensor_scan_count_; ++i) {
+        const bool holdoff_active =
+            sensor_auto_holdoff_until_ms_ &&
+            static_cast<int32_t>(now_ms - sensor_auto_holdoff_until_ms_) < 0 &&
+            (!sensor_auto_holdoff_addr_[0] ||
+             strcasecmp(sensor_auto_holdoff_addr_,
+                        sensor_scan_results_[i].addr) == 0);
+        if (holdoff_active) continue;
         for (const auto &known : sensor_known_) {
             if (!known.addr[0] || !known.autoconnect) continue;
             if (strcasecmp(known.addr, sensor_scan_results_[i].addr) != 0) {
@@ -942,32 +1276,65 @@ void OximetryManager::sensor_task_loop() {
 #endif
 
         if (disconnect_now) {
+            char holdoff_addr[sizeof(sensor_connected_addr_)] = {};
+#if AC_OXIMETRY_BLE_ENABLED
+            portENTER_CRITICAL(&sensor_mux_);
+#endif
+            strncpy(holdoff_addr, sensor_connected_addr_,
+                    sizeof(holdoff_addr) - 1);
+            holdoff_addr[sizeof(holdoff_addr) - 1] = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+            portEXIT_CRITICAL(&sensor_mux_);
+#endif
             if (sensor_client->isConnected()) sensor_client->disconnect();
             sensor_viatom_write = nullptr;
+            viatom_reset_rx();
+            viatom_clear_pending();
+            sensor_viatom_need_info = false;
+            sensor_viatom_need_time_sync = false;
+            sensor_hold_autoconnect(holdoff_addr, millis());
+            sensor_invalid_since_ms_ = 0;
             sensor_set_state(OximetrySensorState::Idle);
         }
 
         const uint32_t now_ms = millis();
+        if (sensor_viatom_pending_cmd != VIATOM_NO_PENDING_CMD &&
+            static_cast<int32_t>(now_ms - sensor_viatom_pending_ms) >=
+                static_cast<int32_t>(VIATOM_RESPONSE_TIMEOUT_MS)) {
+            Log::logf(CAT_OXI, LOG_DEBUG,
+                      "[OXI] Sensor Viatom response timeout cmd=%s\n",
+                      viatom_cmd_name(sensor_viatom_pending_cmd));
+            viatom_reset_rx();
+            viatom_clear_pending();
+        }
+
         if (sensor_client->isConnected() && sensor_viatom_write &&
-            static_cast<int32_t>(now_ms - last_viatom_poll_ms) >=
-                static_cast<int32_t>(VIATOM_SENSOR_POLL_MS)) {
-            uint8_t cmd[] = {
-                0xAA,
-                VIATOM_CMD_READ_SENSORS,
-                static_cast<uint8_t>(VIATOM_CMD_READ_SENSORS ^ 0xff),
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-                0x00,
-            };
-            cmd[sizeof(cmd) - 1] = crc8_ccitt(cmd, sizeof(cmd) - 1);
-            if (sensor_viatom_write->writeValue(cmd, sizeof(cmd), false)) {
-                last_viatom_poll_ms = now_ms;
-            } else {
-                Log::logf(CAT_OXI, LOG_DEBUG,
-                          "[OXI] Sensor Viatom poll write failed\n");
-                last_viatom_poll_ms = now_ms;
+            sensor_viatom_pending_cmd == VIATOM_NO_PENDING_CMD) {
+            if (sensor_viatom_need_info) {
+                if (viatom_send_command(sensor_viatom_write, VIATOM_CMD_INFO,
+                                        nullptr, 0, now_ms)) {
+                    sensor_viatom_need_info = false;
+                } else {
+                    Log::logf(CAT_OXI, LOG_DEBUG,
+                              "[OXI] Sensor Viatom info write failed\n");
+                }
+            } else if (sensor_viatom_need_time_sync) {
+                if (viatom_sync_datetime(sensor_viatom_write)) {
+                    sensor_viatom_pending_cmd = VIATOM_CMD_CONFIG;
+                    sensor_viatom_pending_ms = now_ms;
+                }
+                sensor_viatom_need_time_sync = false;
+            } else if (static_cast<int32_t>(now_ms - last_viatom_poll_ms) >=
+                       static_cast<int32_t>(VIATOM_SENSOR_POLL_MS)) {
+                if (viatom_send_command(sensor_viatom_write,
+                                        VIATOM_CMD_READ_SENSORS,
+                                        nullptr, 0, now_ms)) {
+                    last_viatom_poll_ms = now_ms;
+                } else {
+                    Log::logf(CAT_OXI, LOG_DEBUG,
+                              "[OXI] Sensor Viatom poll write failed\n");
+                    last_viatom_poll_ms = now_ms;
+                }
             }
         }
 
@@ -1046,7 +1413,7 @@ void OximetryManager::sensor_task_loop() {
             portEXIT_CRITICAL(&sensor_mux_);
 #endif
         } else if (auto_scan && auto_allowed) {
-            have_target = sensor_pick_autoconnect_target(target);
+            have_target = sensor_pick_autoconnect_target(target, now_ms);
         }
 
         if (have_target) {
@@ -1066,8 +1433,13 @@ bool OximetryManager::sensor_connect_target(
     sensor_set_state(OximetrySensorState::Connecting);
     NimBLEDevice::getScan()->stop();
     if (sensor_client->isConnected()) sensor_client->disconnect();
-    sensor_viatom_write = nullptr;
-    sensor_client->cancelConnect();
+        sensor_viatom_write = nullptr;
+        viatom_reset_rx();
+        viatom_clear_pending();
+        sensor_viatom_need_info = false;
+        sensor_viatom_need_time_sync = false;
+        sensor_invalid_since_ms_ = 0;
+        sensor_client->cancelConnect();
     vTaskDelay(pdMS_TO_TICKS(100));
 
     NimBLEAddress address(std::string(target.addr), target.addr_type);
@@ -1154,6 +1526,12 @@ bool OximetryManager::sensor_connect_target(
     portEXIT_CRITICAL(&sensor_mux_);
 #endif
     if (manual) save_sensor_known();
+    if (sensor_viatom_write) {
+        viatom_reset_rx();
+        viatom_clear_pending();
+        sensor_viatom_need_info = true;
+        sensor_viatom_need_time_sync = true;
+    }
 
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&sensor_mux_);
@@ -1162,9 +1540,9 @@ bool OximetryManager::sensor_connect_target(
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&sensor_mux_);
 #endif
-    sensor_set_state(OximetrySensorState::Streaming);
+    sensor_set_state(OximetrySensorState::Connected);
     Log::logf(CAT_OXI, LOG_INFO,
-              "[OXI] Sensor streaming addr=%s name=\"%s\"\n",
+              "[OXI] Sensor connected addr=%s name=\"%s\"\n",
               target.addr, target.name);
     return true;
 #else
@@ -1226,6 +1604,8 @@ bool OximetryManager::sensor_subscribe_client(void *client_ptr,
         NimBLERemoteService *viatom_service =
             client->getService(NimBLEUUID(VIATOM_SERVICE_UUID));
         if (viatom_service) {
+            Log::logf(CAT_OXI, LOG_DEBUG,
+                      "[OXI] Sensor Viatom service found\n");
             NimBLERemoteCharacteristic *read =
                 viatom_service->getCharacteristic(
                     NimBLEUUID(VIATOM_READ_UUID));
@@ -1238,7 +1618,13 @@ bool OximetryManager::sensor_subscribe_client(void *client_ptr,
                 if (subscribed) {
                     Log::logf(CAT_OXI, LOG_DEBUG,
                               "[OXI] Sensor subscribed Viatom read\n");
+                } else {
+                    Log::logf(CAT_OXI, LOG_DEBUG,
+                              "[OXI] Sensor Viatom write missing\n");
                 }
+            } else {
+                Log::logf(CAT_OXI, LOG_DEBUG,
+                          "[OXI] Sensor Viatom read subscribe failed\n");
             }
         }
     }
@@ -1339,6 +1725,7 @@ bool OximetryManager::note_source_packet(OximetrySource source,
     reading_.timestamp_ms = now_ms;
     reading_.valid = valid;
     if (reading_.valid) {
+        if (source == OximetrySource::Ble) sensor_invalid_since_ms_ = 0;
         reading_.spo2 = spo2;
         reading_.pulse_bpm = pulse;
     } else {
@@ -1346,6 +1733,26 @@ bool OximetryManager::note_source_packet(OximetrySource source,
         reading_.pulse_bpm = -1;
         if (source == OximetrySource::Ble) {
             status_.sensor_invalid_notifications++;
+            if (!sensor_invalid_since_ms_) sensor_invalid_since_ms_ = now_ms;
+            if (static_cast<int32_t>(now_ms - sensor_invalid_since_ms_) >=
+                static_cast<int32_t>(
+                    AC_OXIMETRY_SENSOR_INVALID_DISCONNECT_MS)) {
+                char holdoff_addr[sizeof(sensor_connected_addr_)] = {};
+#if AC_OXIMETRY_BLE_ENABLED
+                portENTER_CRITICAL(&sensor_mux_);
+#endif
+                strncpy(holdoff_addr, sensor_connected_addr_,
+                        sizeof(holdoff_addr) - 1);
+                holdoff_addr[sizeof(holdoff_addr) - 1] = 0;
+                sensor_disconnect_requested_ = true;
+#if AC_OXIMETRY_BLE_ENABLED
+                portEXIT_CRITICAL(&sensor_mux_);
+#endif
+                sensor_hold_autoconnect(holdoff_addr, now_ms);
+                sensor_invalid_since_ms_ = now_ms;
+                Log::logf(CAT_OXI, LOG_INFO,
+                          "[OXI] Sensor invalid readings; disconnecting\n");
+            }
         }
     }
     return true;
@@ -1692,8 +2099,10 @@ void OximetryManager::drain_sensor_events(uint32_t now_ms) {
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&sensor_mux_);
 #endif
-        (void)note_source_packet(OximetrySource::Ble, detail, spo2_raw,
-                                 pulse_raw, true, now_ms);
+        if (note_source_packet(OximetrySource::Ble, detail, spo2_raw,
+                               pulse_raw, true, now_ms)) {
+            sensor_set_state(OximetrySensorState::Streaming);
+        }
     }
 
     if (disconnect_pending) {
@@ -1704,6 +2113,7 @@ void OximetryManager::drain_sensor_events(uint32_t now_ms) {
             reading_.spo2 = -1;
             reading_.pulse_bpm = -1;
             status_.source_detail[0] = 0;
+            sensor_invalid_since_ms_ = 0;
         }
         status_.sensor_disconnects++;
         Log::logf(CAT_OXI, LOG_INFO,
@@ -1743,6 +2153,7 @@ void OximetryManager::mark_source_stale(uint32_t now_ms) {
     reading_.valid = false;
     reading_.spo2 = -1;
     reading_.pulse_bpm = -1;
+    sensor_invalid_since_ms_ = 0;
     status_.source_detail[0] = 0;
     if (stale_source == OximetrySource::Ble) {
         sensor_disconnect_requested_ = true;
@@ -1808,6 +2219,7 @@ const char *OximetryManager::sensor_state_name(OximetrySensorState state) {
         case OximetrySensorState::Idle: return "idle";
         case OximetrySensorState::Scanning: return "scanning";
         case OximetrySensorState::Connecting: return "connecting";
+        case OximetrySensorState::Connected: return "connected";
         case OximetrySensorState::Streaming: return "streaming";
         default: return "?";
     }

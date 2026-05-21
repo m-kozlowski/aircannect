@@ -86,6 +86,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  log syslog HOST [PORT]    send logs to syslog host");
         out.println("  log test [MESSAGE]        emit a test log line");
         out.println("  log level rpc debug       show RPC request/response payloads");
+        out.println("  log level oxi debug       show oximetry BLE/protocol details");
         return;
     }
 

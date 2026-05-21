@@ -21,6 +21,7 @@ enum class OximetrySensorState : uint8_t {
     Idle,
     Scanning,
     Connecting,
+    Connected,
     Streaming,
 };
 
@@ -160,11 +161,13 @@ private:
     static void sensor_task_entry(void *param);
     void sensor_task_loop();
     void sensor_set_state(OximetrySensorState state);
+    void sensor_hold_autoconnect(const char *addr, uint32_t now_ms);
     void sensor_store_scan_result(const char *addr,
                                   uint8_t addr_type,
                                   const char *name,
                                   int rssi);
-    bool sensor_pick_autoconnect_target(OximetrySensorDevice &target);
+    bool sensor_pick_autoconnect_target(OximetrySensorDevice &target,
+                                        uint32_t now_ms);
     bool sensor_connect_target(const OximetrySensorDevice &target,
                                bool manual);
     bool sensor_subscribe_client(void *client,
@@ -209,6 +212,9 @@ private:
     OximetrySensorDevice sensor_manual_target_device_;
     char sensor_connected_addr_[18] = {};
     char sensor_connected_name_[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
+    char sensor_auto_holdoff_addr_[18] = {};
+    uint32_t sensor_auto_holdoff_until_ms_ = 0;
+    uint32_t sensor_invalid_since_ms_ = 0;
     bool sensor_auto_allowed_ = false;
     bool sensor_enabled_ = false;
 

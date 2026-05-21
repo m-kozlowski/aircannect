@@ -2062,6 +2062,9 @@
         badgeText = "off";
       } else if (state === "streaming") {
         badgeStyle = "good";
+      } else if (state === "connected") {
+        badgeText = "connected";
+        badgeStyle = "warn";
       } else if (state === "connecting" || state === "scanning") {
         badgeStyle = "warn";
       }
@@ -2092,25 +2095,31 @@
       const disconnectBtn = document.getElementById("oxiSensorDisconnectBtn");
       if (scanBtn) {
         scanBtn.disabled = !oxi.enabled || !oxi.ble_available ||
-          state === "scanning" || state === "connecting";
+          oxi.sensor_connected || state === "scanning" ||
+          state === "connecting";
       }
       if (disconnectBtn) {
         disconnectBtn.disabled = !oxi.sensor_connected;
       }
+      const activeSensor = (oxi.sensor_peer || "").toLowerCase();
 
       renderSensorList("oxiSensorResults", scanResults,
         "No scan results", (controls, device) => {
           const button = document.createElement("button");
           button.className = "btn primary";
-          button.textContent = "Connect";
-          button.disabled = !oxi.enabled || !oxi.ble_available ||
-            state === "connecting";
-          button.onclick = () => oxiSensorConnect(device.index);
+          const isActive = activeSensor &&
+            (device.addr || "").toLowerCase() === activeSensor;
+          button.textContent = isActive ? "Connected" : "Connect";
+          button.disabled = isActive || !oxi.enabled || !oxi.ble_available ||
+            oxi.sensor_connected || state === "connecting";
+          button.onclick = () => oxiSensorConnect(device.index, false);
           controls.appendChild(button);
         });
 
       renderSensorList("oxiSensorKnown", knownSensors,
         "No known devices", (controls, device) => {
+          const isActive = activeSensor &&
+            (device.addr || "").toLowerCase() === activeSensor;
           const auto = document.createElement("button");
           auto.className = "btn" + (device.autoconnect ? " primary" : "");
           auto.textContent = device.autoconnect ?
@@ -2121,10 +2130,10 @@
 
           const connect = document.createElement("button");
           connect.className = "btn primary";
-          connect.textContent = "Connect";
-          connect.disabled = !oxi.enabled || !oxi.ble_available ||
-            state === "connecting";
-          connect.onclick = () => oxiSensorConnect(device.addr);
+          connect.textContent = isActive ? "Connected" : "Connect";
+          connect.disabled = isActive || !oxi.enabled || !oxi.ble_available ||
+            oxi.sensor_connected || state === "connecting";
+          connect.onclick = () => oxiSensorConnect(device.addr, true);
           controls.appendChild(connect);
 
           const forget = document.createElement("button");
@@ -2554,9 +2563,12 @@
       oxiAction("sensor_scan", null, "oxiSensorMsg");
     }
 
-    function oxiSensorConnect(target) {
+    function oxiSensorConnect(target, fromKnown) {
       if (target === undefined || target === null || target === "") return;
-      oxiAction("sensor_connect", {target: String(target)}, "oxiKnownMsg");
+      oxiAction(
+        "sensor_connect",
+        {target: String(target)},
+        fromKnown ? "oxiKnownMsg" : "oxiSensorMsg");
     }
 
     function oxiSensorDisconnect() {

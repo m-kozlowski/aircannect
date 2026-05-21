@@ -18,6 +18,7 @@ const char *sensor_state_text(OximetrySensorState state) {
         case OximetrySensorState::Idle: return "idle";
         case OximetrySensorState::Scanning: return "scanning";
         case OximetrySensorState::Connecting: return "connecting";
+        case OximetrySensorState::Connected: return "connected";
         case OximetrySensorState::Streaming: return "streaming";
         default: return "unknown";
     }
