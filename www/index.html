@@ -2393,15 +2393,30 @@
       try {
         const response = await api("/api/ota");
         const data = await response.json();
-        up("otaVersion", data.version || "--");
-        up("otaProgress", (data.progress || 0) + "% / " +
-          fmtBytes(data.bytes || 0));
+        renderOta(data);
 
         const resmedResponse = await api("/api/resmed-ota");
         renderResmedOta(await resmedResponse.json());
       } catch (error) {
         msg("otaMsg", error.message, false);
       }
+    }
+
+    function renderOta(data) {
+      up("otaVersion", data.version || "--");
+      const active = data.http_active || data.http_ready ||
+        data.reboot_pending || data.method === "http" ||
+        data.method === "arduino";
+      if (!active && !(data.bytes || data.progress)) {
+        up("otaProgress", "--");
+        return;
+      }
+      up("otaProgress", (data.progress || 0) + "% / " +
+        fmtBytes(data.bytes || 0));
+    }
+
+    function setOtaUploadProgress(percent, bytes) {
+      up("otaProgress", percent + "% / " + fmtBytes(bytes || 0));
     }
 
     async function otaUpload() {
@@ -2415,17 +2430,28 @@
       const bar = document.getElementById("otaUploadBar");
       progress.style.display = "block";
       bar.style.width = "0%";
+      setOtaUploadProgress(0, 0);
 
       try {
         const xhr = new XMLHttpRequest();
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {
-            bar.style.width = (event.loaded / event.total * 100) + "%";
+            const percent = Math.min(100,
+              Math.floor(event.loaded / event.total * 100));
+            const bytes = Math.min(file.size, event.loaded);
+            bar.style.width = percent + "%";
+            setOtaUploadProgress(percent, bytes);
           }
         };
         xhr.onload = () => {
           try {
             const data = JSON.parse(xhr.responseText || "{}");
+            if (xhr.status < 300) {
+              bar.style.width = "100%";
+              setOtaUploadProgress(100, data.bytes || file.size);
+            } else {
+              renderOta(data);
+            }
             msg("otaMsg",
               xhr.status < 300 ?
                 (data.reboot_pending ? "Upload OK. Restarting..." :
@@ -2436,7 +2462,7 @@
             if (xhr.status < 300 && (data.reboot_pending || data.http_ready)) {
               scheduleOtaReload();
             }
-            loadOta();
+            if (xhr.status >= 300) loadOta();
           } catch (error) {
             msg("otaMsg", "Upload failed", false);
           }
