@@ -28,6 +28,14 @@ static constexpr const char *NONIN_SERVICE_UUID =
     "46A970E0-0D5F-11E2-8B5E-0002A5D5C51B";
 static constexpr const char *NONIN_CONTINUOUS_UUID =
     "0AAD7EA0-0D60-11E2-8E3C-0002A5D5C51B";
+static constexpr const char *VIATOM_SERVICE_UUID =
+    "14839AC4-7D7E-415C-9A42-167340CF2339";
+static constexpr const char *VIATOM_READ_UUID =
+    "0734594A-A8E7-4B1A-A6B1-CD5243059A57";
+static constexpr const char *VIATOM_WRITE_UUID =
+    "8B00ACE7-EB0B-49B0-BBE9-9AEE0A26E1A3";
+static constexpr uint8_t VIATOM_CMD_READ_SENSORS = 0x17;
+static constexpr uint32_t VIATOM_SENSOR_POLL_MS = 2000;
 
 #if AC_OXIMETRY_BLE_ENABLED
 NimBLEServer *ble_server = nullptr;
@@ -35,6 +43,7 @@ NimBLECharacteristic *plx_continuous = nullptr;
 NimBLECharacteristic *plx_features = nullptr;
 uint16_t ble_conn_handle = BLE_CONN_NONE;
 NimBLEClient *sensor_client = nullptr;
+NimBLERemoteCharacteristic *sensor_viatom_write = nullptr;
 SemaphoreHandle_t ble_runtime_mutex = nullptr;
 OximetryManager *sensor_owner = nullptr;
 #endif
@@ -55,6 +64,17 @@ void print_bool(Print &out, bool value) {
 uint16_t encode_sfloat_int_value(int16_t value) {
     if (value < 0 || value > 0x07fd) return PLX_SFLOAT_NAN;
     return static_cast<uint16_t>(value) & 0x0fff;
+}
+
+uint8_t crc8_ccitt(const uint8_t *data, size_t len, uint8_t crc = 0x00) {
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x07)
+                               : static_cast<uint8_t>(crc << 1);
+        }
+    }
+    return crc;
 }
 
 #if AC_OXIMETRY_BLE_ENABLED
@@ -159,7 +179,19 @@ public:
         const bool is_oxi =
             dev->isAdvertisingService(NimBLEUUID(PLX_SERVICE_UUID)) ||
             dev->isAdvertisingService(NimBLEUUID(NONIN_SERVICE_UUID)) ||
-            name.rfind("Nonin", 0) == 0;
+            dev->isAdvertisingService(NimBLEUUID(VIATOM_SERVICE_UUID)) ||
+            name.rfind("Nonin", 0) == 0 ||
+            name.rfind("O2Ring", 0) == 0 ||
+            name.rfind("O2M", 0) == 0 ||
+            name.rfind("CheckMe", 0) == 0 ||
+            name.rfind("Checkme", 0) == 0 ||
+            name.rfind("CheckO2", 0) == 0 ||
+            name.rfind("SleepU", 0) == 0 ||
+            name.rfind("SleepO2", 0) == 0 ||
+            name.rfind("WearO2", 0) == 0 ||
+            name.rfind("KidsO2", 0) == 0 ||
+            name.rfind("BabyO2", 0) == 0 ||
+            name.rfind("Oxylink", 0) == 0;
         if (!is_oxi) return;
 
         owner_->sensor_store_scan_result(
@@ -180,6 +212,7 @@ public:
 
     void onDisconnect(NimBLEClient *client, int reason) override {
         (void)client;
+        sensor_viatom_write = nullptr;
         if (owner_) owner_->on_sensor_disconnect(reason);
     }
 
@@ -225,6 +258,36 @@ void sensor_nonin_notify_cb(NimBLERemoteCharacteristic *chr,
         static_cast<uint16_t>(data[3]) |
         (static_cast<uint16_t>(data[4]) << 8);
     const bool valid = spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse < 500;
+    if (sensor_owner) {
+        sensor_owner->on_sensor_sample(
+            valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
+            valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
+            !valid);
+    }
+}
+
+void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
+                             uint8_t *data,
+                             size_t len,
+                             bool is_notify) {
+    (void)chr;
+    (void)is_notify;
+    if (!data || len < 9 || data[0] != 0x55) return;
+    if (data[1] != static_cast<uint8_t>(data[2] ^ 0xff)) return;
+
+    const uint16_t payload_len =
+        static_cast<uint16_t>(data[5]) |
+        (static_cast<uint16_t>(data[6]) << 8);
+    const size_t packet_len = static_cast<size_t>(payload_len) + 8;
+    if (packet_len > len || payload_len < 2) return;
+    if (crc8_ccitt(data, packet_len - 1) != data[packet_len - 1]) return;
+    if (data[1] != VIATOM_CMD_READ_SENSORS) return;
+
+    const uint8_t spo2 = data[7];
+    const uint8_t pulse = data[8];
+    const bool valid =
+        spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse != 0xff &&
+        pulse < 250;
     if (sensor_owner) {
         sensor_owner->on_sensor_sample(
             valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
@@ -900,6 +963,7 @@ void OximetryManager::sensor_task_loop() {
     SensorBleScanCallbacks scan_callbacks(this);
     SensorBleClientCallbacks client_callbacks(this);
     uint32_t next_auto_scan_ms = 0;
+    uint32_t last_viatom_poll_ms = 0;
 
     while (true) {
         bool enabled = false;
@@ -959,10 +1023,34 @@ void OximetryManager::sensor_task_loop() {
 
         if (disconnect_now) {
             if (sensor_client->isConnected()) sensor_client->disconnect();
+            sensor_viatom_write = nullptr;
             sensor_set_state(OximetrySensorState::Idle);
         }
 
         const uint32_t now_ms = millis();
+        if (sensor_client->isConnected() && sensor_viatom_write &&
+            static_cast<int32_t>(now_ms - last_viatom_poll_ms) >=
+                static_cast<int32_t>(VIATOM_SENSOR_POLL_MS)) {
+            uint8_t cmd[] = {
+                0xAA,
+                VIATOM_CMD_READ_SENSORS,
+                static_cast<uint8_t>(VIATOM_CMD_READ_SENSORS ^ 0xff),
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            };
+            cmd[sizeof(cmd) - 1] = crc8_ccitt(cmd, sizeof(cmd) - 1);
+            if (sensor_viatom_write->writeValue(cmd, sizeof(cmd), false)) {
+                last_viatom_poll_ms = now_ms;
+            } else {
+                Log::logf(CAT_OXI, LOG_DEBUG,
+                          "[OXI] Sensor Viatom poll write failed\n");
+                last_viatom_poll_ms = now_ms;
+            }
+        }
+
         bool auto_allowed = false;
 #if AC_OXIMETRY_BLE_ENABLED
         portENTER_CRITICAL(&sensor_mux_);
@@ -1058,6 +1146,7 @@ bool OximetryManager::sensor_connect_target(
     sensor_set_state(OximetrySensorState::Connecting);
     NimBLEDevice::getScan()->stop();
     if (sensor_client->isConnected()) sensor_client->disconnect();
+    sensor_viatom_write = nullptr;
     sensor_client->cancelConnect();
     vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -1171,6 +1260,7 @@ bool OximetryManager::sensor_subscribe_client(void *client_ptr,
     auto *client = static_cast<NimBLEClient *>(client_ptr);
     if (!client) return false;
     bool subscribed = false;
+    sensor_viatom_write = nullptr;
 
     NimBLERemoteService *plx_service =
         client->getService(NimBLEUUID(PLX_SERVICE_UUID));
@@ -1208,6 +1298,27 @@ bool OximetryManager::sensor_subscribe_client(void *client_ptr,
                 subscribed = true;
                 Log::logf(CAT_OXI, LOG_DEBUG,
                           "[OXI] Sensor subscribed Nonin continuous\n");
+            }
+        }
+    }
+
+    if (!subscribed) {
+        NimBLERemoteService *viatom_service =
+            client->getService(NimBLEUUID(VIATOM_SERVICE_UUID));
+        if (viatom_service) {
+            NimBLERemoteCharacteristic *read =
+                viatom_service->getCharacteristic(
+                    NimBLEUUID(VIATOM_READ_UUID));
+            if (read && read->canNotify() &&
+                read->subscribe(true, sensor_viatom_notify_cb)) {
+                sensor_viatom_write =
+                    viatom_service->getCharacteristic(
+                        NimBLEUUID(VIATOM_WRITE_UUID));
+                subscribed = sensor_viatom_write != nullptr;
+                if (subscribed) {
+                    Log::logf(CAT_OXI, LOG_DEBUG,
+                              "[OXI] Sensor subscribed Viatom read\n");
+                }
             }
         }
     }
