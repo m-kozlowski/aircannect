@@ -48,19 +48,6 @@ SemaphoreHandle_t ble_runtime_mutex = nullptr;
 OximetryManager *sensor_owner = nullptr;
 #endif
 
-const char *source_name(OximetrySource source) {
-    switch (source) {
-        case OximetrySource::None: return "none";
-        case OximetrySource::Udp: return "udp";
-        case OximetrySource::Ble: return "ble";
-        default: return "?";
-    }
-}
-
-void print_bool(Print &out, bool value) {
-    out.print(value ? "yes" : "no");
-}
-
 uint16_t encode_sfloat_int_value(int16_t value) {
     if (value < 0 || value > 0x07fd) return PLX_SFLOAT_NAN;
     return static_cast<uint16_t>(value) & 0x0fff;
@@ -487,73 +474,6 @@ size_t OximetryManager::known_sensors(OximetrySensorDevice *out,
     portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
 #endif
     return count;
-}
-
-void OximetryManager::print_status(Print &out) const {
-    const OximetryStatus s = status();
-    out.print("[OXI] enabled=");
-    print_bool(out, s.enabled);
-    out.print(" source=");
-    out.print(source_name(s.source));
-    if (s.source_detail[0]) {
-        out.print(":");
-        out.print(s.source_detail);
-    }
-    out.print(" present=");
-    print_bool(out, s.source_present);
-    out.print(" fresh=");
-    print_bool(out, s.source_fresh);
-    out.print(" valid=");
-    print_bool(out, s.reading.valid);
-    out.print(" spo2=");
-    if (s.reading.valid) out.print(s.reading.spo2);
-    else out.print("--");
-    out.print(" pulse=");
-    if (s.reading.valid) out.print(s.reading.pulse_bpm);
-    else out.print("--");
-    out.print(" age_ms=");
-    out.print(s.last_source_age_ms);
-    out.print(" udp=");
-    out.print(s.udp_started ? "listening" : "stopped");
-    out.print(":");
-    out.print(s.udp_port);
-    out.print(" packets=");
-    out.print(s.udp_packets);
-    out.print("/");
-    out.print(s.udp_bad_packets);
-    out.print(" advertise=");
-    out.print(oximetry_advertise_mode_name(s.advertise_mode));
-    out.print(" pair=");
-    if (s.pairing_active) {
-        out.print("active/");
-        out.print((s.pairing_left_ms + 999) / 1000);
-        out.print("s");
-    } else {
-        out.print("off");
-    }
-    out.print(" ble=");
-    out.print(s.ble_available ? "available" : "disabled");
-    out.print(" adv=");
-    print_bool(out, s.advertising);
-    out.print(" connected=");
-    print_bool(out, s.connected);
-    out.print(" subscribed=");
-    print_bool(out, s.subscribed);
-    out.print(" disconnect_reason=");
-    out.print(s.ble_last_disconnect_reason);
-    out.print(" sensor=");
-    out.print(sensor_state_name(s.sensor_state));
-    out.print(" known=");
-    out.print(s.sensor_known_count);
-    out.print(" scan=");
-    out.print(s.sensor_scan_count);
-    if (s.sensor_peer[0]) {
-        out.print(" peer=");
-        out.print(s.sensor_peer);
-    }
-    out.print(" name=\"");
-    out.print(s.ble_name);
-    out.println("\"");
 }
 
 void OximetryManager::apply_config() {

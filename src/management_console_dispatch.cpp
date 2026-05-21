@@ -161,7 +161,7 @@ void ManagementConsole::handle_status_command(Print &out,
     ctx.arbiter.print_as11_status(out);
     ctx.session_manager.print_status(out);
     ctx.sink_manager.print_status(out);
-    ctx.oximetry_manager.print_status(out);
+    print_oximetry_status(out, ctx.oximetry_manager);
 }
 
 void ManagementConsole::handle_stats_command(Print &out,
@@ -186,7 +186,7 @@ void ManagementConsole::handle_stats_command(Print &out,
     StorageWriter::print_status(out);
     ctx.session_manager.print_status(out);
     ctx.sink_manager.print_status(out);
-    ctx.oximetry_manager.print_status(out);
+    print_oximetry_status(out, ctx.oximetry_manager);
 }
 
 void ManagementConsole::handle_memory_command(Print &out,

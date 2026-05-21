@@ -23,6 +23,15 @@ const char *sensor_state_text(OximetrySensorState state) {
     }
 }
 
+const char *oximetry_source_text(OximetrySource source) {
+    switch (source) {
+        case OximetrySource::None: return "none";
+        case OximetrySource::Udp: return "udp";
+        case OximetrySource::Ble: return "ble";
+        default: return "unknown";
+    }
+}
+
 void print_yes_no(Print &out, bool value) {
     out.print(value ? "yes" : "no");
 }
@@ -108,6 +117,75 @@ void print_oximetry_sensor_known(Print &out,
 
 void ManagementConsole::begin(Print &out) {
     out.println("[CLI] ready. Type 'help'.");
+}
+
+void ManagementConsole::print_oximetry_status(
+    Print &out,
+    const OximetryManager &oximetry_manager) const {
+    const OximetryStatus s = oximetry_manager.status();
+    out.print("[OXI] enabled=");
+    print_yes_no(out, s.enabled);
+    out.print(" source=");
+    out.print(oximetry_source_text(s.source));
+    if (s.source_detail[0]) {
+        out.print(":");
+        out.print(s.source_detail);
+    }
+    out.print(" present=");
+    print_yes_no(out, s.source_present);
+    out.print(" fresh=");
+    print_yes_no(out, s.source_fresh);
+    out.print(" valid=");
+    print_yes_no(out, s.reading.valid);
+    out.print(" spo2=");
+    if (s.reading.valid) out.print(s.reading.spo2);
+    else out.print("--");
+    out.print(" pulse=");
+    if (s.reading.valid) out.print(s.reading.pulse_bpm);
+    else out.print("--");
+    out.print(" age_ms=");
+    out.print(s.last_source_age_ms);
+    out.print(" udp=");
+    out.print(s.udp_started ? "listening" : "stopped");
+    out.print(":");
+    out.print(s.udp_port);
+    out.print(" packets=");
+    out.print(s.udp_packets);
+    out.print("/");
+    out.print(s.udp_bad_packets);
+    out.print(" advertise=");
+    out.print(oximetry_advertise_mode_name(s.advertise_mode));
+    out.print(" pair=");
+    if (s.pairing_active) {
+        out.print("active/");
+        out.print((s.pairing_left_ms + 999) / 1000);
+        out.print("s");
+    } else {
+        out.print("off");
+    }
+    out.print(" ble=");
+    out.print(s.ble_available ? "available" : "disabled");
+    out.print(" adv=");
+    print_yes_no(out, s.advertising);
+    out.print(" connected=");
+    print_yes_no(out, s.connected);
+    out.print(" subscribed=");
+    print_yes_no(out, s.subscribed);
+    out.print(" disconnect_reason=");
+    out.print(s.ble_last_disconnect_reason);
+    out.print(" sensor=");
+    out.print(sensor_state_text(s.sensor_state));
+    out.print(" known=");
+    out.print(s.sensor_known_count);
+    out.print(" scan=");
+    out.print(s.sensor_scan_count);
+    if (s.sensor_peer[0]) {
+        out.print(" peer=");
+        out.print(s.sensor_peer);
+    }
+    out.print(" name=\"");
+    out.print(s.ble_name);
+    out.println("\"");
 }
 
 bool ManagementConsole::event_has_output(const RpcEvent &event) {
@@ -595,7 +673,7 @@ void ManagementConsole::handle_oximetry(
     String lower = rest;
     lower.toLowerCase();
     if (!lower.length() || lower == "status") {
-        oximetry_manager.print_status(out);
+        print_oximetry_status(out, oximetry_manager);
         return;
     }
 
@@ -605,7 +683,7 @@ void ManagementConsole::handle_oximetry(
             return;
         }
         out.println("[OXI] enabled");
-        oximetry_manager.print_status(out);
+        print_oximetry_status(out, oximetry_manager);
         return;
     }
 
@@ -615,7 +693,7 @@ void ManagementConsole::handle_oximetry(
             return;
         }
         out.println("[OXI] disabled");
-        oximetry_manager.print_status(out);
+        print_oximetry_status(out, oximetry_manager);
         return;
     }
 
@@ -627,14 +705,14 @@ void ManagementConsole::handle_oximetry(
         }
         oximetry_manager.request_pairing(true);
         out.println("[OXI] CPAP pairing window started");
-        oximetry_manager.print_status(out);
+        print_oximetry_status(out, oximetry_manager);
         return;
     }
 
     if (lower == "cpap pair stop" || lower == "cpap pairing stop") {
         oximetry_manager.request_pairing(false);
         out.println("[OXI] CPAP pairing window stopped");
-        oximetry_manager.print_status(out);
+        print_oximetry_status(out, oximetry_manager);
         return;
     }
 
@@ -648,7 +726,7 @@ void ManagementConsole::handle_oximetry(
     }
 
     if (lower == "cpap status") {
-        oximetry_manager.print_status(out);
+        print_oximetry_status(out, oximetry_manager);
         return;
     }
 
@@ -737,13 +815,13 @@ void ManagementConsole::handle_oximetry(
         if (mode == "start" || mode == "on") {
             oximetry_manager.request_advertising(true);
             out.println("[OXI] manual advertising requested");
-            oximetry_manager.print_status(out);
+            print_oximetry_status(out, oximetry_manager);
             return;
         }
         if (mode == "stop" || mode == "off") {
             oximetry_manager.request_advertising(false);
             out.println("[OXI] manual advertising stopped");
-            oximetry_manager.print_status(out);
+            print_oximetry_status(out, oximetry_manager);
             return;
         }
 

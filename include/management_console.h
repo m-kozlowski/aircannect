@@ -88,6 +88,9 @@ private:
                        WifiManager &wifi_manager, TcpBridge &tcp_bridge,
                        OtaManager &ota_manager);
 
+    void print_oximetry_status(Print &out,
+                               const OximetryManager &oximetry_manager) const;
+
     void apply_runtime_config(const AppConfig &app_config,
                               WifiManager &wifi_manager,
                               TcpBridge &tcp_bridge);
