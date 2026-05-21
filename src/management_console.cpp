@@ -557,7 +557,81 @@ void ManagementConsole::handle_oximetry(
     }
 
     if (lower == "sensor" || lower == "sensor status") {
-        out.println("[OXI sensor] not implemented");
+        oximetry_manager.print_sensor_status(out);
+        return;
+    }
+
+    if (lower == "sensor scan") {
+        if (oximetry_manager.request_sensor_scan()) {
+            out.println("[OXI sensor] scan queued");
+        } else {
+            out.println("[OXI sensor] scan failed");
+        }
+        oximetry_manager.print_sensor_status(out);
+        return;
+    }
+
+    if (lower == "sensor results" || lower == "sensor scan-results") {
+        oximetry_manager.print_sensor_scan_results(out);
+        return;
+    }
+
+    if (lower == "sensor list" || lower == "sensor known") {
+        oximetry_manager.print_sensor_known(out);
+        return;
+    }
+
+    if (lower == "sensor disconnect") {
+        oximetry_manager.request_sensor_disconnect();
+        out.println("[OXI sensor] disconnect queued");
+        oximetry_manager.print_sensor_status(out);
+        return;
+    }
+
+    if (lower.startsWith("sensor connect ")) {
+        String target = rest.substring(15);
+        target.trim();
+        if (!oximetry_manager.request_sensor_connect(target.c_str())) {
+            out.println("[OXI sensor] connect failed; use scan result index or known address");
+            return;
+        }
+        out.println("[OXI sensor] connect queued");
+        oximetry_manager.print_sensor_status(out);
+        return;
+    }
+
+    if (lower.startsWith("sensor forget ")) {
+        String target = rest.substring(14);
+        target.trim();
+        if (!oximetry_manager.forget_sensor(target.c_str())) {
+            out.println("[OXI sensor] forget failed");
+            return;
+        }
+        out.println("[OXI sensor] forgotten");
+        oximetry_manager.print_sensor_known(out);
+        return;
+    }
+
+    if (lower.startsWith("sensor autoconnect ")) {
+        String args = rest.substring(19);
+        args.trim();
+        const int split = args.lastIndexOf(' ');
+        if (split <= 0) {
+            out.println("[OXI sensor] usage: oxi sensor autoconnect ADDR on|off");
+            return;
+        }
+        String addr = args.substring(0, split);
+        String value = args.substring(split + 1);
+        bool enabled = false;
+        if (!parse_on_off(value, enabled) ||
+            !oximetry_manager.set_sensor_autoconnect(addr.c_str(),
+                                                     enabled)) {
+            out.println("[OXI sensor] autoconnect failed");
+            return;
+        }
+        out.print("[OXI sensor] autoconnect=");
+        out.println(on_off_text(enabled));
+        oximetry_manager.print_sensor_known(out);
         return;
     }
 

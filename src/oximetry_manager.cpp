@@ -1,5 +1,6 @@
 #include "oximetry_manager.h"
 
+#include <Preferences.h>
 #include <string.h>
 
 #include "debug_log.h"
@@ -19,18 +20,30 @@ static constexpr uint16_t PLX_SFLOAT_POS_INF = 0x07fe;
 static constexpr uint16_t PLX_SFLOAT_NEG_INF = 0x0802;
 static constexpr uint16_t PLX_SFLOAT_RESERVED = 0x0801;
 static constexpr uint16_t BLE_CONN_NONE = 0xffff;
+static constexpr const char *SENSOR_NS = "oxi_sensor";
+static constexpr const char *PLX_SERVICE_UUID = "1822";
+static constexpr const char *PLX_CONTINUOUS_UUID = "2A5F";
+static constexpr const char *PLX_SPOT_UUID = "2A5E";
+static constexpr const char *NONIN_SERVICE_UUID =
+    "46A970E0-0D5F-11E2-8B5E-0002A5D5C51B";
+static constexpr const char *NONIN_CONTINUOUS_UUID =
+    "0AAD7EA0-0D60-11E2-8E3C-0002A5D5C51B";
 
 #if AC_OXIMETRY_BLE_ENABLED
 NimBLEServer *ble_server = nullptr;
 NimBLECharacteristic *plx_continuous = nullptr;
 NimBLECharacteristic *plx_features = nullptr;
 uint16_t ble_conn_handle = BLE_CONN_NONE;
+NimBLEClient *sensor_client = nullptr;
+SemaphoreHandle_t ble_runtime_mutex = nullptr;
+OximetryManager *sensor_owner = nullptr;
 #endif
 
 const char *source_name(OximetrySource source) {
     switch (source) {
         case OximetrySource::None: return "none";
         case OximetrySource::Udp: return "udp";
+        case OximetrySource::Ble: return "ble";
         default: return "?";
     }
 }
@@ -38,6 +51,30 @@ const char *source_name(OximetrySource source) {
 void print_bool(Print &out, bool value) {
     out.print(value ? "yes" : "no");
 }
+
+uint16_t encode_sfloat_int_value(int16_t value) {
+    if (value < 0 || value > 0x07fd) return PLX_SFLOAT_NAN;
+    return static_cast<uint16_t>(value) & 0x0fff;
+}
+
+#if AC_OXIMETRY_BLE_ENABLED
+bool ensure_ble_runtime(const char *name) {
+    if (!ble_runtime_mutex) ble_runtime_mutex = xSemaphoreCreateMutex();
+    if (ble_runtime_mutex) xSemaphoreTake(ble_runtime_mutex, portMAX_DELAY);
+
+    bool ok = true;
+    if (!NimBLEDevice::isInitialized()) {
+        ok = NimBLEDevice::init(name ? name : "AirCANnect");
+        if (ok) {
+            NimBLEDevice::setSecurityAuth(true, false, false);
+            NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+        }
+    }
+
+    if (ble_runtime_mutex) xSemaphoreGive(ble_runtime_mutex);
+    return ok;
+}
+#endif
 
 }  // namespace
 
@@ -110,15 +147,105 @@ public:
 private:
     OximetryManager *owner_ = nullptr;
 };
+
+class SensorBleScanCallbacks : public NimBLEScanCallbacks {
+public:
+    explicit SensorBleScanCallbacks(OximetryManager *owner)
+        : owner_(owner) {}
+
+    void onResult(const NimBLEAdvertisedDevice *dev) override {
+        if (!owner_ || !dev) return;
+        const std::string name = dev->getName();
+        const bool is_oxi =
+            dev->isAdvertisingService(NimBLEUUID(PLX_SERVICE_UUID)) ||
+            dev->isAdvertisingService(NimBLEUUID(NONIN_SERVICE_UUID)) ||
+            name.rfind("Nonin", 0) == 0;
+        if (!is_oxi) return;
+
+        owner_->sensor_store_scan_result(
+            dev->getAddress().toString().c_str(),
+            dev->getAddress().getType(),
+            name.c_str(),
+            dev->getRSSI());
+    }
+
+private:
+    OximetryManager *owner_ = nullptr;
+};
+
+class SensorBleClientCallbacks : public NimBLEClientCallbacks {
+public:
+    explicit SensorBleClientCallbacks(OximetryManager *owner)
+        : owner_(owner) {}
+
+    void onDisconnect(NimBLEClient *client, int reason) override {
+        (void)client;
+        if (owner_) owner_->on_sensor_disconnect(reason);
+    }
+
+    void onPassKeyEntry(NimBLEConnInfo &connInfo) override {
+        NimBLEDevice::injectPassKey(connInfo, 0);
+    }
+
+    void onConfirmPasskey(NimBLEConnInfo &connInfo, uint32_t pin) override {
+        (void)pin;
+        NimBLEDevice::injectConfirmPasskey(connInfo, true);
+    }
+
+private:
+    OximetryManager *owner_ = nullptr;
+};
+
+void sensor_plx_notify_cb(NimBLERemoteCharacteristic *chr,
+                          uint8_t *data,
+                          size_t len,
+                          bool is_notify) {
+    (void)chr;
+    (void)is_notify;
+    if (len < 5 || !data) return;
+    if (sensor_owner) {
+        sensor_owner->on_sensor_sample(
+            static_cast<uint16_t>(data[1]) |
+                (static_cast<uint16_t>(data[2]) << 8),
+            static_cast<uint16_t>(data[3]) |
+                (static_cast<uint16_t>(data[4]) << 8),
+            false);
+    }
+}
+
+void sensor_nonin_notify_cb(NimBLERemoteCharacteristic *chr,
+                            uint8_t *data,
+                            size_t len,
+                            bool is_notify) {
+    (void)chr;
+    (void)is_notify;
+    if (len < 5 || !data) return;
+    const uint8_t spo2 = data[2];
+    const uint16_t pulse =
+        static_cast<uint16_t>(data[3]) |
+        (static_cast<uint16_t>(data[4]) << 8);
+    const bool valid = spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse < 500;
+    if (sensor_owner) {
+        sensor_owner->on_sensor_sample(
+            valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
+            valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
+            !valid);
+    }
+}
 #endif
 
 bool OximetryManager::begin(AppConfig &app_config) {
     app_config_ = &app_config;
+#if AC_OXIMETRY_BLE_ENABLED
+    sensor_owner = this;
+    if (!ble_runtime_mutex) ble_runtime_mutex = xSemaphoreCreateMutex();
+#endif
     status_.udp_port = app_config.data().oximetry_udp_port;
     status_.advertise_mode = app_config.data().oximetry_advertise_mode;
     status_.enabled = app_config.data().oximetry_enabled;
     build_ble_name();
     status_.ble_available = AC_OXIMETRY_BLE_ENABLED != 0;
+    load_sensor_known();
     begun_ = true;
     apply_config();
     return true;
@@ -135,13 +262,31 @@ void OximetryManager::poll(bool network_available) {
     if (!status_.enabled) {
         status_.pairing_active = false;
         pairing_until_ms_ = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        sensor_auto_allowed_ = false;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
         stop_udp();
         stop_ble_roles();
         return;
     }
 
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sensor_auto_allowed_ =
+        !source_present_ || source_ == OximetrySource::Ble;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    if (has_sensor_autoconnect()) ensure_sensor_task();
+
     ensure_udp(network_available);
     poll_udp(now_ms);
+    drain_sensor_events(now_ms);
 
     if (source_present_ && !source_alive(now_ms)) {
         mark_source_stale(now_ms);
@@ -209,7 +354,25 @@ bool OximetryManager::forget_bonds() {
 }
 
 OximetryStatus OximetryManager::status() const {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
     OximetryStatus out = status_;
+    out.sensor_task_started = sensor_task_started_;
+    out.sensor_known_count = 0;
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        if (sensor_known_[i].addr[0]) out.sensor_known_count++;
+    }
+    out.sensor_scan_count = sensor_scan_count_;
+    strncpy(out.sensor_peer, sensor_connected_addr_,
+            sizeof(out.sensor_peer) - 1);
+    out.sensor_peer[sizeof(out.sensor_peer) - 1] = 0;
+    strncpy(out.sensor_name, sensor_connected_name_,
+            sizeof(out.sensor_name) - 1);
+    out.sensor_name[sizeof(out.sensor_name) - 1] = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
     const uint32_t now_ms = millis();
     out.source_present = source_present_;
     out.source_fresh = sample_fresh(now_ms);
@@ -280,9 +443,111 @@ void OximetryManager::print_status(Print &out) const {
     print_bool(out, s.subscribed);
     out.print(" disconnect_reason=");
     out.print(s.ble_last_disconnect_reason);
+    out.print(" sensor=");
+    out.print(sensor_state_name(s.sensor_state));
+    out.print(" known=");
+    out.print(s.sensor_known_count);
+    out.print(" scan=");
+    out.print(s.sensor_scan_count);
+    if (s.sensor_peer[0]) {
+        out.print(" peer=");
+        out.print(s.sensor_peer);
+    }
     out.print(" name=\"");
     out.print(s.ble_name);
     out.println("\"");
+}
+
+void OximetryManager::print_sensor_status(Print &out) const {
+    const OximetryStatus s = status();
+    out.print("[OXI sensor] state=");
+    out.print(sensor_state_name(s.sensor_state));
+    out.print(" task=");
+    print_bool(out, s.sensor_task_started);
+    out.print(" scanning=");
+    print_bool(out, s.sensor_scanning);
+    out.print(" connected=");
+    print_bool(out, s.sensor_connected);
+    if (s.sensor_peer[0]) {
+        out.print(" peer=");
+        out.print(s.sensor_peer);
+    }
+    if (s.sensor_name[0]) {
+        out.print(" name=\"");
+        out.print(s.sensor_name);
+        out.print("\"");
+    }
+    out.print(" known=");
+    out.print(s.sensor_known_count);
+    out.print(" results=");
+    out.print(s.sensor_scan_count);
+    out.print(" notifications=");
+    out.print(s.sensor_notifications);
+    out.print(" invalid=");
+    out.print(s.sensor_invalid_notifications);
+    out.print(" connects=");
+    out.print(s.sensor_connects);
+    out.print(" disconnects=");
+    out.print(s.sensor_disconnects);
+    out.print(" failures=");
+    out.println(s.sensor_connect_failures);
+}
+
+void OximetryManager::print_sensor_scan_results(Print &out) const {
+    out.println("[OXI sensor scan]");
+    OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
+    uint8_t count = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    count = sensor_scan_count_;
+    for (uint8_t i = 0; i < count; ++i) snapshot[i] = sensor_scan_results_[i];
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    for (uint8_t i = 0; i < count; ++i) {
+        out.print("  ");
+        out.print(i);
+        out.print(": ");
+        out.print(snapshot[i].addr);
+        out.print(" type=");
+        out.print(snapshot[i].addr_type);
+        out.print(" rssi=");
+        out.print(snapshot[i].rssi);
+        out.print(" name=\"");
+        out.print(snapshot[i].name);
+        out.println("\"");
+    }
+    if (!count) out.println("  <none>");
+}
+
+void OximetryManager::print_sensor_known(Print &out) const {
+    out.println("[OXI sensor known]");
+    OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        snapshot[i] = sensor_known_[i];
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    bool any = false;
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        if (!snapshot[i].addr[0]) continue;
+        any = true;
+        out.print("  ");
+        out.print(snapshot[i].addr);
+        out.print(" type=");
+        out.print(snapshot[i].addr_type);
+        out.print(" autoconnect=");
+        print_bool(out, snapshot[i].autoconnect);
+        out.print(" name=\"");
+        out.print(snapshot[i].name);
+        out.println("\"");
+    }
+    if (!any) out.println("  <none>");
 }
 
 void OximetryManager::apply_config() {
@@ -295,11 +560,24 @@ void OximetryManager::apply_config() {
     status_.enabled = cfg.oximetry_enabled;
     status_.udp_port = cfg.oximetry_udp_port;
     status_.advertise_mode = cfg.oximetry_advertise_mode;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sensor_enabled_ = cfg.oximetry_enabled;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
 
     if (cfg.hostname != last_hostname_) {
         build_ble_name();
         ble_adv_data_dirty_ = true;
     }
+
+#if AC_OXIMETRY_BLE_ENABLED
+    if (status_.enabled) {
+        (void)ensure_ble();
+    }
+#endif
 
     if (!status_.enabled && was_enabled) {
         stop_udp();
@@ -335,8 +613,669 @@ void OximetryManager::build_ble_name() {
 
 void OximetryManager::set_error(const char *text) {
     if (!text) text = "";
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
     strncpy(status_.last_error, text, sizeof(status_.last_error) - 1);
     status_.last_error[sizeof(status_.last_error) - 1] = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+}
+
+bool OximetryManager::load_sensor_known() {
+    if (sensor_known_loaded_) return true;
+    for (auto &dev : sensor_known_) dev = OximetrySensorDevice{};
+
+    Preferences prefs;
+    if (!prefs.begin(SENSOR_NS, true)) {
+        sensor_known_loaded_ = true;
+        return false;
+    }
+
+    const uint8_t count = prefs.getUChar("count", 0);
+    for (uint8_t i = 0;
+         i < count && i < AC_OXIMETRY_SENSOR_MAX_KNOWN;
+         ++i) {
+        char key[8];
+        snprintf(key, sizeof(key), "a%u", i);
+        String addr = prefs.getString(key, "");
+        addr.trim();
+        if (!addr.length() || addr.length() >= sizeof(sensor_known_[i].addr)) {
+            continue;
+        }
+        strncpy(sensor_known_[i].addr, addr.c_str(),
+                sizeof(sensor_known_[i].addr) - 1);
+
+        snprintf(key, sizeof(key), "t%u", i);
+        sensor_known_[i].addr_type = prefs.getUChar(key, 1);
+        snprintf(key, sizeof(key), "e%u", i);
+        sensor_known_[i].autoconnect = prefs.getBool(key, true);
+        snprintf(key, sizeof(key), "n%u", i);
+        String name = prefs.getString(key, "");
+        strncpy(sensor_known_[i].name, name.c_str(),
+                sizeof(sensor_known_[i].name) - 1);
+    }
+    prefs.end();
+    sensor_known_loaded_ = true;
+    return true;
+}
+
+bool OximetryManager::save_sensor_known() const {
+    OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        snapshot[i] = sensor_known_[i];
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+
+    Preferences prefs;
+    if (!prefs.begin(SENSOR_NS, false)) return false;
+
+    uint8_t count = 0;
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        if (snapshot[i].addr[0]) count++;
+    }
+    bool ok = prefs.putUChar("count", count) != 0;
+
+    uint8_t out_index = 0;
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        if (!snapshot[i].addr[0]) continue;
+        char key[8];
+        snprintf(key, sizeof(key), "a%u", out_index);
+        ok = prefs.putString(key, snapshot[i].addr) != 0 && ok;
+        snprintf(key, sizeof(key), "t%u", out_index);
+        ok = prefs.putUChar(key, snapshot[i].addr_type) != 0 && ok;
+        snprintf(key, sizeof(key), "e%u", out_index);
+        ok = prefs.putBool(key, snapshot[i].autoconnect) != 0 && ok;
+        snprintf(key, sizeof(key), "n%u", out_index);
+        ok = prefs.putString(key, snapshot[i].name) != 0 && ok;
+        out_index++;
+    }
+    for (; out_index < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++out_index) {
+        char key[8];
+        snprintf(key, sizeof(key), "a%u", out_index);
+        prefs.remove(key);
+        snprintf(key, sizeof(key), "t%u", out_index);
+        prefs.remove(key);
+        snprintf(key, sizeof(key), "e%u", out_index);
+        prefs.remove(key);
+        snprintf(key, sizeof(key), "n%u", out_index);
+        prefs.remove(key);
+    }
+    prefs.end();
+    return ok;
+}
+
+bool OximetryManager::has_sensor_autoconnect() const {
+    bool found = false;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    for (const auto &dev : sensor_known_) {
+        if (dev.addr[0] && dev.autoconnect) {
+            found = true;
+            break;
+        }
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    return found;
+}
+
+bool OximetryManager::find_sensor_addr(const char *addr, size_t &index) const {
+    if (!addr || !addr[0]) return false;
+    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+        if (sensor_known_[i].addr[0] &&
+            strcasecmp(sensor_known_[i].addr, addr) == 0) {
+            index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool OximetryManager::resolve_sensor_target(
+    const char *addr_or_index,
+    OximetrySensorDevice &target) const {
+    if (!addr_or_index || !addr_or_index[0]) return false;
+
+    char *end = nullptr;
+    const unsigned long parsed = strtoul(addr_or_index, &end, 10);
+    if (end && *end == 0) {
+        if (parsed >= sensor_scan_count_) return false;
+        target = sensor_scan_results_[parsed];
+        return target.addr[0] != 0;
+    }
+
+    for (uint8_t i = 0; i < sensor_scan_count_; ++i) {
+        if (strcasecmp(sensor_scan_results_[i].addr, addr_or_index) == 0) {
+            target = sensor_scan_results_[i];
+            return true;
+        }
+    }
+    size_t known_index = 0;
+    if (find_sensor_addr(addr_or_index, known_index)) {
+        target = sensor_known_[known_index];
+        return true;
+    }
+    return false;
+}
+
+bool OximetryManager::request_sensor_scan() {
+    if (!status_.enabled) return false;
+    ensure_sensor_task();
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sensor_scan_requested_ = true;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    return true;
+}
+
+bool OximetryManager::request_sensor_connect(const char *addr_or_index) {
+    if (!status_.enabled || !addr_or_index) return false;
+    OximetrySensorDevice target;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    const bool ok = resolve_sensor_target(addr_or_index, target);
+    if (ok) {
+        strncpy(sensor_manual_target_, target.addr,
+                sizeof(sensor_manual_target_) - 1);
+        sensor_manual_target_[sizeof(sensor_manual_target_) - 1] = 0;
+        sensor_manual_target_device_ = target;
+        sensor_manual_connect_requested_ = true;
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    if (ok) ensure_sensor_task();
+    return ok;
+}
+
+bool OximetryManager::request_sensor_disconnect() {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sensor_disconnect_requested_ = true;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    return true;
+}
+
+bool OximetryManager::forget_sensor(const char *addr_or_all) {
+    if (!addr_or_all || !addr_or_all[0]) return false;
+    bool changed = false;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    if (strcasecmp(addr_or_all, "all") == 0) {
+        for (auto &dev : sensor_known_) dev = OximetrySensorDevice{};
+        changed = true;
+    } else {
+        size_t index = 0;
+        if (find_sensor_addr(addr_or_all, index)) {
+            sensor_known_[index] = OximetrySensorDevice{};
+            changed = true;
+        }
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    if (changed) save_sensor_known();
+    return changed;
+}
+
+bool OximetryManager::set_sensor_autoconnect(const char *addr,
+                                             bool enabled) {
+    if (!addr || !addr[0]) return false;
+    bool changed = false;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    size_t index = 0;
+    if (find_sensor_addr(addr, index)) {
+        sensor_known_[index].autoconnect = enabled;
+        changed = true;
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    if (changed) save_sensor_known();
+    return changed;
+}
+
+void OximetryManager::ensure_sensor_task() {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+    if (sensor_task_started_) {
+        portEXIT_CRITICAL(&sensor_mux_);
+        return;
+    }
+    sensor_task_started_ = true;
+    status_.sensor_task_started = true;
+    portEXIT_CRITICAL(&sensor_mux_);
+    xTaskCreatePinnedToCore(sensor_task_entry,
+                            "oxi_sensor",
+                            AC_OXIMETRY_SENSOR_TASK_STACK,
+                            this,
+                            AC_OXIMETRY_SENSOR_TASK_PRIO,
+                            nullptr,
+                            0);
+#endif
+}
+
+void OximetryManager::sensor_task_entry(void *param) {
+    auto *self = static_cast<OximetryManager *>(param);
+    if (self) self->sensor_task_loop();
+    vTaskDelete(nullptr);
+}
+
+void OximetryManager::sensor_set_state(OximetrySensorState state) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    status_.sensor_state = state;
+    status_.sensor_scanning = state == OximetrySensorState::Scanning;
+    status_.sensor_connected = state == OximetrySensorState::Streaming;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+}
+
+void OximetryManager::sensor_store_scan_result(const char *addr,
+                                               uint8_t addr_type,
+                                               const char *name,
+                                               int rssi) {
+    if (!addr || !addr[0]) return;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    for (uint8_t i = 0; i < sensor_scan_count_; ++i) {
+        if (strcasecmp(sensor_scan_results_[i].addr, addr) == 0) {
+            sensor_scan_results_[i].rssi = rssi;
+#if AC_OXIMETRY_BLE_ENABLED
+            portEXIT_CRITICAL(&sensor_mux_);
+#endif
+            return;
+        }
+    }
+    if (sensor_scan_count_ < AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS) {
+        OximetrySensorDevice &dev = sensor_scan_results_[sensor_scan_count_++];
+        strncpy(dev.addr, addr, sizeof(dev.addr) - 1);
+        dev.addr[sizeof(dev.addr) - 1] = 0;
+        dev.addr_type = addr_type;
+        strncpy(dev.name, name ? name : "", sizeof(dev.name) - 1);
+        dev.name[sizeof(dev.name) - 1] = 0;
+        dev.rssi = rssi;
+        dev.autoconnect = true;
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+}
+
+bool OximetryManager::sensor_pick_autoconnect_target(
+    OximetrySensorDevice &target) {
+    int best_rssi = -999;
+    bool found = false;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    for (uint8_t i = 0; i < sensor_scan_count_; ++i) {
+        for (const auto &known : sensor_known_) {
+            if (!known.addr[0] || !known.autoconnect) continue;
+            if (strcasecmp(known.addr, sensor_scan_results_[i].addr) != 0) {
+                continue;
+            }
+            if (!found || sensor_scan_results_[i].rssi > best_rssi) {
+                target = sensor_scan_results_[i];
+                target.autoconnect = known.autoconnect;
+                best_rssi = target.rssi;
+                found = true;
+            }
+        }
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    return found;
+}
+
+void OximetryManager::sensor_task_loop() {
+#if AC_OXIMETRY_BLE_ENABLED
+    sensor_set_state(OximetrySensorState::Idle);
+    SensorBleScanCallbacks scan_callbacks(this);
+    SensorBleClientCallbacks client_callbacks(this);
+    uint32_t next_auto_scan_ms = 0;
+
+    while (true) {
+        bool enabled = false;
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        enabled = sensor_enabled_;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        if (!enabled) {
+            if (sensor_client && sensor_client->isConnected()) {
+                sensor_client->disconnect();
+            }
+            sensor_set_state(OximetrySensorState::Off);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        if (!ensure_ble_runtime(ble_name_)) {
+            set_error("BLE init failed");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (!sensor_client) {
+            sensor_client = NimBLEDevice::createClient();
+            if (sensor_client) sensor_client->setClientCallbacks(
+                &client_callbacks, false);
+        }
+        if (!sensor_client) {
+            set_error("BLE sensor client failed");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        bool disconnect_now = false;
+        bool manual_scan = false;
+        bool manual_connect = false;
+        char manual_target[sizeof(sensor_manual_target_)] = {};
+        OximetrySensorDevice manual_target_device;
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        disconnect_now = sensor_disconnect_requested_;
+        manual_scan = sensor_scan_requested_;
+        manual_connect = sensor_manual_connect_requested_;
+        strncpy(manual_target, sensor_manual_target_,
+                sizeof(manual_target) - 1);
+        manual_target[sizeof(manual_target) - 1] = 0;
+        manual_target_device = sensor_manual_target_device_;
+        sensor_disconnect_requested_ = false;
+        sensor_scan_requested_ = false;
+        sensor_manual_connect_requested_ = false;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+
+        if (disconnect_now) {
+            if (sensor_client->isConnected()) sensor_client->disconnect();
+            sensor_set_state(OximetrySensorState::Idle);
+        }
+
+        const uint32_t now_ms = millis();
+        bool auto_allowed = false;
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        auto_allowed = sensor_auto_allowed_;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        const bool auto_scan =
+            auto_allowed &&
+            has_sensor_autoconnect() &&
+            !sensor_client->isConnected() &&
+            static_cast<int32_t>(now_ms - next_auto_scan_ms) >= 0;
+
+        if (!manual_scan && !manual_connect && !auto_scan) {
+            if (!sensor_client->isConnected()) {
+                sensor_set_state(OximetrySensorState::Idle);
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        if (manual_connect && manual_target_device.addr[0]) {
+            (void)sensor_connect_target(manual_target_device, true);
+            continue;
+        }
+
+        if (sensor_client->isConnected() && (manual_scan || manual_connect)) {
+            sensor_client->disconnect();
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+
+        NimBLEScan *scan = NimBLEDevice::getScan();
+        if (!scan) {
+            set_error("BLE scan unavailable");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        sensor_scan_count_ = 0;
+        for (auto &dev : sensor_scan_results_) dev = OximetrySensorDevice{};
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        status_.sensor_scans++;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        sensor_set_state(OximetrySensorState::Scanning);
+        scan->clearResults();
+        scan->setScanCallbacks(&scan_callbacks, false);
+        scan->setActiveScan(true);
+        scan->setInterval(100);
+        scan->setWindow(99);
+        (void)scan->getResults(AC_OXIMETRY_SENSOR_SCAN_MS, false);
+        next_auto_scan_ms =
+            millis() + AC_OXIMETRY_SENSOR_SCAN_IDLE_MS;
+
+        OximetrySensorDevice target;
+        bool have_target = false;
+        if (manual_connect) {
+#if AC_OXIMETRY_BLE_ENABLED
+            portENTER_CRITICAL(&sensor_mux_);
+#endif
+            have_target = resolve_sensor_target(manual_target, target);
+#if AC_OXIMETRY_BLE_ENABLED
+            portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        } else if (auto_scan && auto_allowed) {
+            have_target = sensor_pick_autoconnect_target(target);
+        }
+
+        if (have_target) {
+            (void)sensor_connect_target(target, manual_connect);
+        } else {
+            sensor_set_state(OximetrySensorState::Idle);
+        }
+    }
+#endif
+}
+
+bool OximetryManager::sensor_connect_target(
+    const OximetrySensorDevice &target,
+    bool manual) {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (!sensor_client || !target.addr[0]) return false;
+    sensor_set_state(OximetrySensorState::Connecting);
+    NimBLEDevice::getScan()->stop();
+    if (sensor_client->isConnected()) sensor_client->disconnect();
+    sensor_client->cancelConnect();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    NimBLEAddress address(std::string(target.addr), target.addr_type);
+    Log::logf(CAT_OXI, LOG_INFO,
+              "[OXI] Sensor connecting addr=%s type=%u name=\"%s\"\n",
+              target.addr,
+              static_cast<unsigned>(target.addr_type),
+              target.name);
+    if (!sensor_client->connect(address)) {
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        status_.sensor_connect_failures++;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        Log::logf(CAT_OXI, LOG_WARN,
+                  "[OXI] Sensor connect failed addr=%s err=%d\n",
+                  target.addr,
+                  sensor_client->getLastError());
+        sensor_set_state(OximetrySensorState::Idle);
+        return false;
+    }
+
+    const bool needs_encryption = strncmp(target.name, "Nonin", 5) == 0;
+    if (needs_encryption && !sensor_client->secureConnection(false)) {
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        status_.sensor_connect_failures++;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        Log::logf(CAT_OXI, LOG_WARN,
+                  "[OXI] Sensor encryption failed addr=%s err=%d\n",
+                  target.addr,
+                  sensor_client->getLastError());
+        sensor_client->disconnect();
+        sensor_set_state(OximetrySensorState::Idle);
+        return false;
+    }
+
+    if (!sensor_subscribe_client(sensor_client, target.name)) {
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        status_.sensor_connect_failures++;
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        Log::logf(CAT_OXI, LOG_WARN,
+                  "[OXI] Sensor has no supported oximetry service addr=%s\n",
+                  target.addr);
+        sensor_client->disconnect();
+        sensor_set_state(OximetrySensorState::Idle);
+        return false;
+    }
+
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    strncpy(sensor_connected_addr_, target.addr,
+            sizeof(sensor_connected_addr_) - 1);
+    sensor_connected_addr_[sizeof(sensor_connected_addr_) - 1] = 0;
+    strncpy(sensor_connected_name_, target.name,
+            sizeof(sensor_connected_name_) - 1);
+    sensor_connected_name_[sizeof(sensor_connected_name_) - 1] = 0;
+    if (manual) {
+        size_t known_index = 0;
+        if (!find_sensor_addr(target.addr, known_index)) {
+            for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
+                if (sensor_known_[i].addr[0]) continue;
+                sensor_known_[i] = target;
+                sensor_known_[i].autoconnect = true;
+                break;
+            }
+        } else {
+            sensor_known_[known_index].addr_type = target.addr_type;
+            strncpy(sensor_known_[known_index].name, target.name,
+                    sizeof(sensor_known_[known_index].name) - 1);
+        }
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    if (manual) save_sensor_known();
+
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    status_.sensor_connects++;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+    sensor_set_state(OximetrySensorState::Streaming);
+    Log::logf(CAT_OXI, LOG_INFO,
+              "[OXI] Sensor streaming addr=%s name=\"%s\"\n",
+              target.addr, target.name);
+    return true;
+#else
+    (void)target;
+    (void)manual;
+    return false;
+#endif
+}
+
+bool OximetryManager::sensor_subscribe_client(void *client_ptr,
+                                              const char *name) {
+#if AC_OXIMETRY_BLE_ENABLED
+    auto *client = static_cast<NimBLEClient *>(client_ptr);
+    if (!client) return false;
+    bool subscribed = false;
+
+    NimBLERemoteService *plx_service =
+        client->getService(NimBLEUUID(PLX_SERVICE_UUID));
+    if (plx_service) {
+        NimBLERemoteCharacteristic *continuous =
+            plx_service->getCharacteristic(NimBLEUUID(PLX_CONTINUOUS_UUID));
+        if (continuous && continuous->canNotify() &&
+            continuous->subscribe(true, sensor_plx_notify_cb)) {
+            subscribed = true;
+            Log::logf(CAT_OXI, LOG_DEBUG,
+                      "[OXI] Sensor subscribed PLX continuous\n");
+        }
+        if (!subscribed) {
+            NimBLERemoteCharacteristic *spot =
+                plx_service->getCharacteristic(NimBLEUUID(PLX_SPOT_UUID));
+            if (spot && (spot->canNotify() || spot->canIndicate()) &&
+                spot->subscribe(spot->canNotify(),
+                                sensor_plx_notify_cb)) {
+                subscribed = true;
+                Log::logf(CAT_OXI, LOG_DEBUG,
+                          "[OXI] Sensor subscribed PLX spot\n");
+            }
+        }
+    }
+
+    if (!subscribed) {
+        NimBLERemoteService *nonin_service =
+            client->getService(NimBLEUUID(NONIN_SERVICE_UUID));
+        if (nonin_service) {
+            NimBLERemoteCharacteristic *continuous =
+                nonin_service->getCharacteristic(
+                    NimBLEUUID(NONIN_CONTINUOUS_UUID));
+            if (continuous && continuous->canNotify() &&
+                continuous->subscribe(true, sensor_nonin_notify_cb)) {
+                subscribed = true;
+                Log::logf(CAT_OXI, LOG_DEBUG,
+                          "[OXI] Sensor subscribed Nonin continuous\n");
+            }
+        }
+    }
+
+    (void)name;
+    return subscribed;
+#else
+    (void)client_ptr;
+    (void)name;
+    return false;
+#endif
 }
 
 bool OximetryManager::ensure_udp(bool network_available) {
@@ -392,27 +1331,50 @@ void OximetryManager::note_udp_packet(uint16_t spo2_raw,
                                       uint16_t pulse_raw,
                                       IPAddress remote_ip,
                                       uint32_t now_ms) {
+    char source_detail[48];
+    snprintf(source_detail, sizeof(source_detail),
+             "%u.%u.%u.%u",
+             remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3]);
+    (void)note_source_packet(OximetrySource::Udp, source_detail, spo2_raw,
+                             pulse_raw, false, now_ms);
+}
+
+bool OximetryManager::note_source_packet(OximetrySource source,
+                                         const char *detail,
+                                         uint16_t spo2_raw,
+                                         uint16_t pulse_raw,
+                                         bool allow_invalid_claim,
+                                         uint32_t now_ms) {
     bool spo2_valid = false;
     bool pulse_valid = false;
     const int16_t spo2 = decode_plx_sfloat(spo2_raw, spo2_valid);
     const int16_t pulse = decode_plx_sfloat(pulse_raw, pulse_valid);
+    const bool valid = spo2_valid && pulse_valid;
+
+    if (source_present_ && source_ != source) return false;
+    if (!source_present_ && !valid && !allow_invalid_claim) return false;
 
     source_present_ = true;
-    source_ = OximetrySource::Udp;
-    snprintf(status_.source_detail, sizeof(status_.source_detail),
-             "%u.%u.%u.%u",
-             remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3]);
+    source_ = source;
+    strncpy(status_.source_detail, detail ? detail : "",
+            sizeof(status_.source_detail) - 1);
+    status_.source_detail[sizeof(status_.source_detail) - 1] = 0;
     last_source_ms_ = now_ms;
-    status_.udp_packets++;
+    if (source == OximetrySource::Udp) status_.udp_packets++;
+    else if (source == OximetrySource::Ble) status_.sensor_notifications++;
     reading_.timestamp_ms = now_ms;
-    reading_.valid = spo2_valid && pulse_valid;
+    reading_.valid = valid;
     if (reading_.valid) {
         reading_.spo2 = spo2;
         reading_.pulse_bpm = pulse;
     } else {
         reading_.spo2 = -1;
         reading_.pulse_bpm = -1;
+        if (source == OximetrySource::Ble) {
+            status_.sensor_invalid_notifications++;
+        }
     }
+    return true;
 }
 
 bool OximetryManager::ensure_ble() {
@@ -423,11 +1385,13 @@ bool OximetryManager::ensure_ble() {
         return true;
     }
 
-    NimBLEDevice::init(ble_name_);
-    NimBLEDevice::setSecurityAuth(true, false, false);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    if (!ensure_ble_runtime(ble_name_)) {
+        set_error("BLE init failed");
+        return false;
+    }
 
-    ble_server = NimBLEDevice::createServer();
+    ble_server = NimBLEDevice::getServer();
+    if (!ble_server) ble_server = NimBLEDevice::createServer();
     if (!ble_server) {
         set_error("BLE server alloc failed");
         return false;
@@ -715,6 +1679,65 @@ void OximetryManager::drain_ble_events() {
     }
 }
 
+void OximetryManager::drain_sensor_events(uint32_t now_ms) {
+    bool sample_pending = false;
+    uint16_t spo2_raw = PLX_SFLOAT_NAN;
+    uint16_t pulse_raw = PLX_SFLOAT_NAN;
+    bool invalid_packet = false;
+    bool disconnect_pending = false;
+    int disconnect_reason = 0;
+
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sample_pending = sensor_sample_pending_;
+    spo2_raw = sensor_pending_spo2_raw_;
+    pulse_raw = sensor_pending_pulse_raw_;
+    invalid_packet = sensor_pending_invalid_packet_;
+    disconnect_pending = sensor_disconnect_pending_;
+    disconnect_reason = sensor_pending_disconnect_reason_;
+    sensor_sample_pending_ = false;
+    sensor_disconnect_pending_ = false;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+
+    if (sample_pending) {
+        (void)invalid_packet;
+        char detail[64] = {};
+#if AC_OXIMETRY_BLE_ENABLED
+        portENTER_CRITICAL(&sensor_mux_);
+#endif
+        if (sensor_connected_name_[0]) {
+            snprintf(detail, sizeof(detail), "%s %s",
+                     sensor_connected_addr_, sensor_connected_name_);
+        } else {
+            strncpy(detail, sensor_connected_addr_, sizeof(detail) - 1);
+            detail[sizeof(detail) - 1] = 0;
+        }
+#if AC_OXIMETRY_BLE_ENABLED
+        portEXIT_CRITICAL(&sensor_mux_);
+#endif
+        (void)note_source_packet(OximetrySource::Ble, detail, spo2_raw,
+                                 pulse_raw, true, now_ms);
+    }
+
+    if (disconnect_pending) {
+        if (source_ == OximetrySource::Ble) {
+            source_present_ = false;
+            source_ = OximetrySource::None;
+            reading_ = OximetryReading{};
+            reading_.spo2 = -1;
+            reading_.pulse_bpm = -1;
+            status_.source_detail[0] = 0;
+        }
+        status_.sensor_disconnects++;
+        Log::logf(CAT_OXI, LOG_INFO,
+                  "[OXI] Sensor disconnected reason=%d\n",
+                  disconnect_reason);
+    }
+}
+
 void OximetryManager::enforce_source_required(uint32_t now_ms) {
     if (!status_.connected || status_.pairing_active || source_present_) {
         no_source_connected_since_ms_ = 0;
@@ -740,11 +1763,16 @@ void OximetryManager::enforce_source_required(uint32_t now_ms) {
 
 void OximetryManager::mark_source_stale(uint32_t now_ms) {
     (void)now_ms;
+    const OximetrySource stale_source = source_;
     source_present_ = false;
     source_ = OximetrySource::None;
     reading_.valid = false;
     reading_.spo2 = -1;
     reading_.pulse_bpm = -1;
+    status_.source_detail[0] = 0;
+    if (stale_source == OximetrySource::Ble) {
+        sensor_disconnect_requested_ = true;
+    }
     if (!status_.pairing_active) {
         disconnect_ble();
         stop_advertising();
@@ -755,8 +1783,12 @@ void OximetryManager::mark_source_stale(uint32_t now_ms) {
 
 bool OximetryManager::source_alive(uint32_t now_ms) const {
     if (!source_present_) return false;
+    const uint32_t timeout =
+        source_ == OximetrySource::Ble
+            ? AC_OXIMETRY_SENSOR_NOTIFY_TIMEOUT_MS
+            : AC_OXIMETRY_SOURCE_TIMEOUT_MS;
     return static_cast<int32_t>(now_ms - last_source_ms_) <
-           static_cast<int32_t>(AC_OXIMETRY_SOURCE_TIMEOUT_MS);
+           static_cast<int32_t>(timeout);
 }
 
 bool OximetryManager::sample_fresh(uint32_t now_ms) const {
@@ -793,8 +1825,18 @@ int16_t OximetryManager::decode_plx_sfloat(uint16_t raw, bool &valid) {
 }
 
 uint16_t OximetryManager::encode_plx_sfloat_int(int16_t value) {
-    if (value < 0 || value > 0x07fd) return PLX_SFLOAT_NAN;
-    return static_cast<uint16_t>(value) & 0x0fff;
+    return encode_sfloat_int_value(value);
+}
+
+const char *OximetryManager::sensor_state_name(OximetrySensorState state) {
+    switch (state) {
+        case OximetrySensorState::Off: return "off";
+        case OximetrySensorState::Idle: return "idle";
+        case OximetrySensorState::Scanning: return "scanning";
+        case OximetrySensorState::Connecting: return "connecting";
+        case OximetrySensorState::Streaming: return "streaming";
+        default: return "?";
+    }
 }
 
 void OximetryManager::on_ble_connect(uint16_t conn_handle,
@@ -851,6 +1893,36 @@ void OximetryManager::on_ble_error(const char *text) {
     ble_pending_error_[sizeof(ble_pending_error_) - 1] = 0;
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&ble_event_mux_);
+#endif
+}
+
+void OximetryManager::on_sensor_sample(uint16_t spo2_raw,
+                                       uint16_t pulse_raw,
+                                       bool from_invalid_packet) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sensor_pending_spo2_raw_ = spo2_raw;
+    sensor_pending_pulse_raw_ = pulse_raw;
+    sensor_pending_invalid_packet_ = from_invalid_packet;
+    sensor_sample_pending_ = true;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
+#endif
+}
+
+void OximetryManager::on_sensor_disconnect(int reason) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&sensor_mux_);
+#endif
+    sensor_disconnect_pending_ = true;
+    sensor_pending_disconnect_reason_ = reason;
+    sensor_connected_addr_[0] = 0;
+    sensor_connected_name_[0] = 0;
+    status_.sensor_connected = false;
+    status_.sensor_state = OximetrySensorState::Idle;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&sensor_mux_);
 #endif
 }
 

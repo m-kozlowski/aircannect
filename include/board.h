@@ -263,6 +263,14 @@ static constexpr uint32_t AC_OXIMETRY_PAIRING_WINDOW_MS = 120000;
 static constexpr size_t AC_OXIMETRY_BLE_NAME_MAX = 22;
 static constexpr size_t AC_OXIMETRY_UDP_PACKET_SIZE = 7;
 static constexpr size_t AC_OXIMETRY_UDP_READ_BUDGET = 8;
+static constexpr size_t AC_OXIMETRY_SENSOR_MAX_KNOWN = 4;
+static constexpr size_t AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS = 8;
+static constexpr size_t AC_OXIMETRY_SENSOR_NAME_MAX = 24;
+static constexpr uint32_t AC_OXIMETRY_SENSOR_TASK_STACK = 6144;
+static constexpr uint8_t AC_OXIMETRY_SENSOR_TASK_PRIO = 3;
+static constexpr uint32_t AC_OXIMETRY_SENSOR_SCAN_MS = 5000;
+static constexpr uint32_t AC_OXIMETRY_SENSOR_SCAN_IDLE_MS = 10000;
+static constexpr uint32_t AC_OXIMETRY_SENSOR_NOTIFY_TIMEOUT_MS = 10000;
 
 static constexpr uint32_t AC_STORAGE_STATUS_POLL_MS = 30000;
 static constexpr size_t AC_STORAGE_WRITE_QUEUE_INTERNAL = 4;

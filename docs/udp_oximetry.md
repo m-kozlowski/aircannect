@@ -33,3 +33,11 @@ dropped.
 `oxi_udp` - default 8025.
 `oxi_adv` - default auto. Auto advertises to AS11 only while UDP oximetry data
 is fresh.
+
+## Source arbitration
+
+Only one source feeds at a time.
+
+UDP takes ownership on the first valid packet. A BLE oximeter takes ownership
+when it starts notifying. The other source is ignored until the active source
+goes silent.

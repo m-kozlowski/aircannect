@@ -151,7 +151,14 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  oxi cpap pair             advertise temporarily for CPAP pairing");
         out.println("  oxi cpap pair stop        stop the CPAP pairing window");
         out.println("  oxi cpap forget           clear CPAP-side BLE bonds");
-        out.println("  oxi sensor status         show future sensor side status");
+        out.println("  oxi sensor status         show BLE oximeter source status");
+        out.println("  oxi sensor scan           scan for BLE oximeters");
+        out.println("  oxi sensor results        list last scan results");
+        out.println("  oxi sensor connect ID     connect scan result index/address");
+        out.println("  oxi sensor disconnect     disconnect current BLE oximeter");
+        out.println("  oxi sensor list           list known BLE oximeters");
+        out.println("  oxi sensor forget ADDR|all remove known BLE oximeter");
+        out.println("  oxi sensor autoconnect ADDR on|off");
         out.println("  oxi advertise auto|manual set source-driven or on-demand advertising");
         out.println("  oxi advertise start|stop  request/stop manual advertising");
         return;

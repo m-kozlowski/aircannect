@@ -1875,8 +1875,17 @@
       up("oxiAs11", as11);
       up("oxiTabAs11", as11);
 
-      let advertise = oxi.advertise_mode || "--";
-      advertise += oxi.advertising ? " on" : " off";
+      let advertiseState = "idle";
+      if (!oxi.enabled) {
+        advertiseState = "off";
+      } else if (oxi.subscribed || oxi.connected) {
+        advertiseState = "connected";
+      } else if (oxi.advertising) {
+        advertiseState = "advertising";
+      } else if (oxi.manual_advertising_requested) {
+        advertiseState = "requested";
+      }
+      let advertise = (oxi.advertise_mode || "--") + " / " + advertiseState;
       if (oxi.pairing_active) {
         advertise += " / pairing " +
           Math.ceil((oxi.pairing_left_ms || 0) / 1000) + "s";

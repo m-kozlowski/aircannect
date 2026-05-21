@@ -13,6 +13,15 @@ namespace aircannect {
 enum class OximetrySource {
     None,
     Udp,
+    Ble,
+};
+
+enum class OximetrySensorState : uint8_t {
+    Off,
+    Idle,
+    Scanning,
+    Connecting,
+    Streaming,
 };
 
 struct OximetryReading {
@@ -20,6 +29,14 @@ struct OximetryReading {
     int16_t pulse_bpm = -1;
     bool valid = false;
     uint32_t timestamp_ms = 0;
+};
+
+struct OximetrySensorDevice {
+    char addr[18] = {};
+    uint8_t addr_type = 1;
+    char name[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
+    int rssi = 0;
+    bool autoconnect = true;
 };
 
 struct OximetryStatus {
@@ -47,6 +64,20 @@ struct OximetryStatus {
     uint32_t ble_last_disconnect_reason = 0;
     uint32_t ble_notifications = 0;
     uint32_t ble_invalid_notifications = 0;
+    OximetrySensorState sensor_state = OximetrySensorState::Off;
+    bool sensor_task_started = false;
+    bool sensor_scanning = false;
+    bool sensor_connected = false;
+    uint8_t sensor_known_count = 0;
+    uint8_t sensor_scan_count = 0;
+    uint32_t sensor_notifications = 0;
+    uint32_t sensor_invalid_notifications = 0;
+    uint32_t sensor_connects = 0;
+    uint32_t sensor_disconnects = 0;
+    uint32_t sensor_connect_failures = 0;
+    uint32_t sensor_scans = 0;
+    char sensor_peer[18] = {};
+    char sensor_name[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
     char ble_name[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
     char ble_peer[24] = {};
     char last_error[64] = {};
@@ -62,9 +93,21 @@ public:
     bool request_advertising(bool enabled);
     bool request_pairing(bool enabled);
     bool forget_bonds();
+    bool request_sensor_scan();
+    bool request_sensor_connect(const char *addr_or_index);
+    bool request_sensor_disconnect();
+    bool forget_sensor(const char *addr_or_all);
+    bool set_sensor_autoconnect(const char *addr, bool enabled);
 
     OximetryStatus status() const;
     void print_status(Print &out) const;
+    void print_sensor_status(Print &out) const;
+    void print_sensor_scan_results(Print &out) const;
+    void print_sensor_known(Print &out) const;
+    void on_sensor_sample(uint16_t spo2_raw,
+                          uint16_t pulse_raw,
+                          bool from_invalid_packet);
+    void on_sensor_disconnect(int reason);
 
 private:
     void apply_config();
@@ -78,6 +121,12 @@ private:
                          uint16_t pulse_raw,
                          IPAddress remote_ip,
                          uint32_t now_ms);
+    bool note_source_packet(OximetrySource source,
+                            const char *detail,
+                            uint16_t spo2_raw,
+                            uint16_t pulse_raw,
+                            bool allow_invalid_claim,
+                            uint32_t now_ms);
 
     bool ensure_ble();
     void rebuild_advertising_data();
@@ -92,6 +141,7 @@ private:
     void stop_ble_roles_if_idle(uint32_t now_ms);
     void notify_ble(uint32_t now_ms);
     void drain_ble_events();
+    void drain_sensor_events(uint32_t now_ms);
     void enforce_source_required(uint32_t now_ms);
 
     void mark_source_stale(uint32_t now_ms);
@@ -100,9 +150,31 @@ private:
 
     static int16_t decode_plx_sfloat(uint16_t raw, bool &valid);
     static uint16_t encode_plx_sfloat_int(int16_t value);
+    static const char *sensor_state_name(OximetrySensorState state);
 
+    bool load_sensor_known();
+    bool save_sensor_known() const;
+    bool has_sensor_autoconnect() const;
+    bool find_sensor_addr(const char *addr, size_t &index) const;
+    bool resolve_sensor_target(const char *addr_or_index,
+                               OximetrySensorDevice &target) const;
+    void ensure_sensor_task();
+    static void sensor_task_entry(void *param);
+    void sensor_task_loop();
+    void sensor_set_state(OximetrySensorState state);
+    void sensor_store_scan_result(const char *addr,
+                                  uint8_t addr_type,
+                                  const char *name,
+                                  int rssi);
+    bool sensor_pick_autoconnect_target(OximetrySensorDevice &target);
+    bool sensor_connect_target(const OximetrySensorDevice &target,
+                               bool manual);
+    bool sensor_subscribe_client(void *client,
+                                 const char *name);
     friend class PlxBleServerCallbacks;
     friend class PlxBleMeasurementCallbacks;
+    friend class SensorBleScanCallbacks;
+    friend class SensorBleClientCallbacks;
     void on_ble_connect(uint16_t conn_handle,
                         const char *peer,
                         bool bonded);
@@ -126,9 +198,25 @@ private:
     char ble_name_[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
     char last_hostname_[64] = {};
     WiFiUDP udp_;
+    OximetrySensorDevice sensor_known_[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+    OximetrySensorDevice sensor_scan_results_[
+        AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
+    uint8_t sensor_scan_count_ = 0;
+    bool sensor_known_loaded_ = false;
+    bool sensor_task_started_ = false;
+    bool sensor_scan_requested_ = false;
+    bool sensor_manual_connect_requested_ = false;
+    bool sensor_disconnect_requested_ = false;
+    char sensor_manual_target_[18] = {};
+    OximetrySensorDevice sensor_manual_target_device_;
+    char sensor_connected_addr_[18] = {};
+    char sensor_connected_name_[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
+    bool sensor_auto_allowed_ = false;
+    bool sensor_enabled_ = false;
 
 #if AC_OXIMETRY_BLE_ENABLED
     portMUX_TYPE ble_event_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    portMUX_TYPE sensor_mux_ = portMUX_INITIALIZER_UNLOCKED;
 #endif
     bool ble_connect_pending_ = false;
     uint16_t ble_pending_conn_handle_ = UINT16_MAX;
@@ -142,6 +230,12 @@ private:
     bool ble_pending_subscribe_enabled_ = false;
     bool ble_error_pending_ = false;
     char ble_pending_error_[64] = {};
+    bool sensor_sample_pending_ = false;
+    uint16_t sensor_pending_spo2_raw_ = 0x07ff;
+    uint16_t sensor_pending_pulse_raw_ = 0x07ff;
+    bool sensor_pending_invalid_packet_ = false;
+    bool sensor_disconnect_pending_ = false;
+    int sensor_pending_disconnect_reason_ = 0;
 };
 
 }  // namespace aircannect
