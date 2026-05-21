@@ -162,6 +162,7 @@ const char *cat_name(log_cat_t cat) {
         case CAT_WIFI: return "WIFI";
         case CAT_STREAM: return "STREAM";
         case CAT_OTA: return "OTA";
+        case CAT_OXI: return "OXI";
         default: return "?";
     }
 }
@@ -221,6 +222,10 @@ bool parse_cat(String value, log_cat_t &cat) {
     }
     if (value == "ota") {
         cat = CAT_OTA;
+        return true;
+    }
+    if (value == "oxi" || value == "oximetry") {
+        cat = CAT_OXI;
         return true;
     }
     return false;

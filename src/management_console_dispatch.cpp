@@ -108,6 +108,8 @@ void ManagementConsole::execute_line(String line,
         {"mem", &ManagementConsole::handle_memory_command},
         {"session", &ManagementConsole::handle_session_command},
         {"sink", &ManagementConsole::handle_sink_command},
+        {"oxi", &ManagementConsole::handle_oximetry_command},
+        {"oximetry", &ManagementConsole::handle_oximetry_command},
         {"storage", &ManagementConsole::handle_storage_command},
         {"as11", &ManagementConsole::handle_as11_command},
         {"therapy", &ManagementConsole::handle_therapy_command},
@@ -159,6 +161,7 @@ void ManagementConsole::handle_status_command(Print &out,
     ctx.arbiter.print_as11_status(out);
     ctx.session_manager.print_status(out);
     ctx.sink_manager.print_status(out);
+    ctx.oximetry_manager.print_status(out);
 }
 
 void ManagementConsole::handle_stats_command(Print &out,
@@ -183,6 +186,7 @@ void ManagementConsole::handle_stats_command(Print &out,
     StorageWriter::print_status(out);
     ctx.session_manager.print_status(out);
     ctx.sink_manager.print_status(out);
+    ctx.oximetry_manager.print_status(out);
 }
 
 void ManagementConsole::handle_memory_command(Print &out,
@@ -213,6 +217,12 @@ void ManagementConsole::handle_sink_command(Print &out,
                                             String rest,
                                             ConsoleContext &ctx) {
     handle_sink(out, rest, ctx.sink_manager);
+}
+
+void ManagementConsole::handle_oximetry_command(Print &out,
+                                                String rest,
+                                                ConsoleContext &ctx) {
+    handle_oximetry(out, rest, ctx.oximetry_manager);
 }
 
 void ManagementConsole::handle_storage_command(Print &out,

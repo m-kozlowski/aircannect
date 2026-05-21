@@ -31,6 +31,7 @@ enum WebCommandKind : uint8_t {
     WebCommandSettingsRefresh,
     WebCommandSettingsUpdate,
     WebCommandTherapyAction,
+    WebCommandOximetryAction,
     WebCommandResmedOtaInit,
     WebCommandResmedOtaBlock,
     WebCommandResmedOtaCheck,
@@ -164,6 +165,14 @@ const char *stream_command_name(StreamCommandType type) {
     }
 }
 
+const char *oximetry_source_name(OximetrySource source) {
+    switch (source) {
+        case OximetrySource::None: return "none";
+        case OximetrySource::Udp: return "udp";
+        default: return "unknown";
+    }
+}
+
 template <typename JsonOut>
 void append_json_float_value(JsonOut &json, float value) {
     char buf[24];
@@ -282,6 +291,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   ResmedOtaManager &resmed_ota_manager,
                   SessionManager &session_manager,
                   SinkManager &sink_manager,
+                  OximetryManager &oximetry_manager,
                   ConsoleContext &console_ctx,
                   uint16_t port) {
     if (started_) return true;
@@ -295,6 +305,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     resmed_ota_manager_ = &resmed_ota_manager;
     session_manager_ = &session_manager;
     sink_manager_ = &sink_manager;
+    oximetry_manager_ = &oximetry_manager;
     console_ctx_ = &console_ctx;
 
     command_queue_ = xQueueCreate(AC_WEB_COMMAND_QUEUE_DEPTH,
@@ -922,6 +933,7 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     const StorageWriterStatus writer = StorageWriter::status();
     const SessionStatus &session = session_manager_->status();
     const SinkRuntimeStatus &sink = sink_manager_->status();
+    const OximetryStatus oxi = oximetry_manager_->status();
 
     json = "{";
     json_add_string(json, "version", aircannect_version(), false);
@@ -1042,6 +1054,45 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_int(json, "sink_drops", sink.frame_drops);
     json_add_int(json, "sink_attach_failures", sink.attach_failures);
     json_add_string(json, "sink_last_error", sink.last_error);
+    json += ",\"oximetry\":{";
+    json_add_bool(json, "enabled", oxi.enabled, false);
+    json_add_string(json, "source", oximetry_source_name(oxi.source));
+    json_add_string(json, "source_detail", oxi.source_detail);
+    json_add_bool(json, "source_present", oxi.source_present);
+    json_add_bool(json, "source_fresh", oxi.source_fresh);
+    json_add_bool(json, "valid", oxi.reading.valid);
+    if (oxi.reading.valid) {
+        json_add_int(json, "spo2", oxi.reading.spo2);
+        json_add_int(json, "pulse_bpm", oxi.reading.pulse_bpm);
+    } else {
+        json += ",\"spo2\":null,\"pulse_bpm\":null";
+    }
+    json_add_int(json, "source_age_ms", oxi.last_source_age_ms);
+    json_add_int(json, "udp_port", oxi.udp_port);
+    json_add_bool(json, "udp_started", oxi.udp_started);
+    json_add_string(json, "advertise_mode",
+                    oximetry_advertise_mode_name(oxi.advertise_mode));
+    json_add_bool(json, "manual_advertising_requested",
+                  oxi.manual_advertising_requested);
+    json_add_bool(json, "ble_available", oxi.ble_available);
+    json_add_bool(json, "advertising", oxi.advertising);
+    json_add_bool(json, "connected", oxi.connected);
+    json_add_bool(json, "subscribed", oxi.subscribed);
+    json_add_bool(json, "pairing_active", oxi.pairing_active);
+    json_add_int(json, "pairing_left_ms", oxi.pairing_left_ms);
+    json_add_string(json, "ble_name", oxi.ble_name);
+    json_add_string(json, "ble_peer", oxi.ble_peer);
+    json_add_string(json, "last_error", oxi.last_error);
+    json_add_int(json, "udp_packets", oxi.udp_packets);
+    json_add_int(json, "udp_bad_packets", oxi.udp_bad_packets);
+    json_add_int(json, "ble_connections", oxi.ble_connections);
+    json_add_int(json, "ble_disconnects", oxi.ble_disconnects);
+    json_add_int(json, "ble_last_disconnect_reason",
+                 oxi.ble_last_disconnect_reason);
+    json_add_int(json, "ble_notifications", oxi.ble_notifications);
+    json_add_int(json, "ble_invalid_notifications",
+                 oxi.ble_invalid_notifications);
+    json += '}';
     json_add_string(json, "device_datetime",
                     as11.device_datetime().c_str());
     if (as11.clock_valid()) {
@@ -1148,6 +1199,11 @@ void WebUI::build_config_json(LargeTextBuffer &json) const {
     json_add_string(json, "timezone", cfg.timezone.c_str());
     json_add_bool(json, "resmed_time_sync_enabled",
                   cfg.resmed_time_sync_enabled);
+    json_add_bool(json, "oximetry_enabled", cfg.oximetry_enabled);
+    json_add_int(json, "oximetry_udp_port", cfg.oximetry_udp_port);
+    json_add_string(json, "oximetry_advertise_mode",
+                    oximetry_advertise_mode_name(
+                        cfg.oximetry_advertise_mode));
     json_add_bool(json, "http_auth_required", network_auth_required(cfg));
     json_add_string(json, "http_user", cfg.http_user.c_str());
     json_add_bool(json, "http_password_set", cfg.http_password.length() > 0);
@@ -1362,6 +1418,9 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandTherapyAction:
             execute_therapy_action(command.text);
             break;
+        case WebCommandOximetryAction:
+            execute_oximetry_action(command.text);
+            break;
         case WebCommandResmedOtaInit:
         case WebCommandResmedOtaBlock:
         case WebCommandResmedOtaCheck:
@@ -1417,6 +1476,26 @@ void WebUI::execute_config_update(const std::string &body) {
         app_config_->set_resmed_time_sync(
             doc["resmed_time_sync_enabled"].as<bool>())) {
         saved++;
+    }
+    if (doc["oximetry_enabled"].is<bool>() &&
+        app_config_->set_oximetry_enabled(
+            doc["oximetry_enabled"].as<bool>())) {
+        saved++;
+    }
+    if (doc["oximetry_udp_port"].is<int>()) {
+        int parsed = doc["oximetry_udp_port"].as<int>();
+        if (parsed > 0 && parsed <= 65535 &&
+            app_config_->set_oximetry_udp_port(
+                static_cast<uint16_t>(parsed))) {
+            saved++;
+        }
+    }
+    if (json_get_string(doc, "oximetry_advertise_mode", s)) {
+        OximetryAdvertiseMode mode;
+        if (parse_oximetry_advertise_mode(s, mode) &&
+            app_config_->set_oximetry_advertise_mode(mode)) {
+            saved++;
+        }
     }
     if (json_get_string(doc, "softap_mode", s)) {
         SoftApMode softap_mode;
@@ -1559,6 +1638,27 @@ void WebUI::execute_therapy_action(const std::string &action) {
     if (action == "stop" || action == "standby") method = "EnterStandby";
     if (!method) return;
     arbiter_->send_request(method, "", RpcSource::HttpApi);
+    snapshots_dirty_ = true;
+}
+
+void WebUI::execute_oximetry_action(const std::string &action) {
+    if (!oximetry_manager_) return;
+    if (action == "enable") {
+        oximetry_manager_->set_enabled(true);
+    } else if (action == "disable") {
+        oximetry_manager_->set_enabled(false);
+    } else if (action == "pair") {
+        oximetry_manager_->set_enabled(true);
+        oximetry_manager_->request_pairing(true);
+    } else if (action == "pair_stop") {
+        oximetry_manager_->request_pairing(false);
+    } else if (action == "forget") {
+        oximetry_manager_->forget_bonds();
+    } else if (action == "advertise_start") {
+        oximetry_manager_->request_advertising(true);
+    } else if (action == "advertise_stop") {
+        oximetry_manager_->request_advertising(false);
+    }
     snapshots_dirty_ = true;
 }
 
@@ -1873,6 +1973,32 @@ void WebUI::register_routes() {
             WebCommand *queued = new WebCommand();
             if (queued) {
                 queued->kind = WebCommandTimeAction;
+                queued->text = action.c_str();
+            }
+            send_queue_result(request, enqueue_command(queued));
+        },
+        nullptr, handle_body);
+
+    server_->on(
+        "/api/oximetry", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            JsonDocument doc;
+            std::string body;
+            if (!parse_body_copy(request, doc, body)) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad json\"}");
+                return;
+            }
+            String action;
+            if (!json_get_string(doc, "action", action)) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"missing action\"}");
+                return;
+            }
+            action.trim();
+            WebCommand *queued = new WebCommand();
+            if (queued) {
+                queued->kind = WebCommandOximetryAction;
                 queued->text = action.c_str();
             }
             send_queue_result(request, enqueue_command(queued));

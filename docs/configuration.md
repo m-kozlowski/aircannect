@@ -48,6 +48,14 @@ Empty `http_user` and `http_pass` mean open HTTP access.
 | `tz` | POSIX timezone string, max 64 chars | `UTC` | yes | Local timezone used for UI/CLI display. AS11 RPC time remains UTC. |
 | `resmed_time` | boolean | `off` | yes | When NTP is synced and therapy is idle, push ESP time to the ResMed device. |
 
+## Oximetry
+
+| Key | Values | Default | Provisioning | Description |
+| --- | --- | --- | --- | --- |
+| `oxi_en` | boolean | `off` | yes | Enable the oximetry bridge. |
+| `oxi_udp` | UDP port `1` to `65535` | `8025` | yes | UDP source port. source format is AirBridge-compatible 7-byte packets. |
+| `oxi_adv` | `auto`, `manual` | `auto` | yes | `auto` advertises the PLX BLE peripheral only while a source is fresh. `manual` requires `oxi advertise start`, but still stops on source timeout. |
+
 ## ESP32 OTA
 
 | Key | Values | Default | Provisioning | Description |
@@ -69,6 +77,7 @@ Empty `http_user` and `http_pass` mean open HTTP access.
 | `log5` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | no | `WIFI` category log level. |
 | `log6` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | no | `STREAM` category log level. |
 | `log7` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | no | `OTA` category log level. |
+| `log8` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | no | `OXI` category log level. |
 
 Per-category log levels are currently changed from the management console with
 `log level`, not from `config.txt`.

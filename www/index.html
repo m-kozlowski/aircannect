@@ -229,6 +229,42 @@
       margin: 4px 0 10px;
     }
 
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .metric {
+      border: 1px solid #30364166;
+      border-radius: 7px;
+      padding: 12px;
+      background: #10111466;
+    }
+
+    .metric .metric-value {
+      display: inline-block;
+      font-size: 26px;
+      font-weight: 760;
+      line-height: 1.1;
+    }
+
+    .metric .metric-unit {
+      color: var(--muted);
+      font-size: 12px;
+      margin-left: 3px;
+    }
+
+    .metric small {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 7px;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+    }
+
     .badge {
       display: inline-block;
       border-radius: 999px;
@@ -633,6 +669,9 @@
         <a class="nav" data-tab="clinical">
           <span class="ico">&#9881;</span>Clinical
         </a>
+        <a class="nav" data-tab="oxi">
+          <span class="ico">&#9829;</span>Oximetry
+        </a>
         <a class="nav" data-tab="wifi">
           <span class="ico">&#9783;</span>WiFi
         </a>
@@ -730,6 +769,41 @@
               </div>
               <div class="msg" id="timeMsg"></div>
             </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="label">Oximetry</span>
+                <span class="badge" id="oxiBadge">Off</span>
+              </div>
+              <div class="metric-grid">
+                <div class="metric">
+                  <span>
+                    <span class="metric-value" id="oxiSpo2">--</span>
+                    <span class="metric-unit">%</span>
+                  </span>
+                  <small>SpO2</small>
+                </div>
+                <div class="metric">
+                  <span>
+                    <span class="metric-value" id="oxiPulse">--</span>
+                    <span class="metric-unit">bpm</span>
+                  </span>
+                  <small>Pulse</small>
+                </div>
+              </div>
+              <div class="row">
+                <label>Source</label>
+                <span class="value" id="oxiSource">--</span>
+              </div>
+              <div class="row">
+                <label>AirSense</label>
+                <span class="value" id="oxiAs11">--</span>
+              </div>
+              <div class="row">
+                <label>Advertising</label>
+                <span class="value" id="oxiAdvertise">--</span>
+              </div>
+            </div>
           </div>
 
           <div class="telemetry-head">
@@ -814,6 +888,85 @@
                 </div>
               </div>
               <canvas class="live-chart" id="chartPulseCanvas"></canvas>
+            </div>
+          </div>
+        </section>
+
+        <section class="pane" id="p-oxi">
+          <div class="grid">
+            <div class="card">
+              <div class="card-head">
+                <span class="label">Current Reading</span>
+                <span class="badge" id="oxiTabBadge">Off</span>
+              </div>
+              <div class="metric-grid">
+                <div class="metric">
+                  <span>
+                    <span class="metric-value" id="oxiTabSpo2">--</span>
+                    <span class="metric-unit">%</span>
+                  </span>
+                  <small>SpO2</small>
+                </div>
+                <div class="metric">
+                  <span>
+                    <span class="metric-value" id="oxiTabPulse">--</span>
+                    <span class="metric-unit">bpm</span>
+                  </span>
+                  <small>Pulse</small>
+                </div>
+              </div>
+              <div class="row">
+                <label>Source</label>
+                <span class="value" id="oxiTabSource">--</span>
+              </div>
+              <div class="row">
+                <label>Status</label>
+                <span class="value" id="oxiTabStatus">--</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="label">AirSense Integration</span>
+              </div>
+              <div class="row">
+                <label>AirSense</label>
+                <span class="value" id="oxiTabAs11">--</span>
+              </div>
+              <div class="row">
+                <label>Advertising</label>
+                <span class="value" id="oxiTabAdvertise">--</span>
+              </div>
+              <div class="row">
+                <label>Advertising Mode</label>
+                <select id="oxiAdvertiseMode" onchange="saveOximetryAdvertiseConfig()">
+                  <option value="auto">Auto</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </div>
+              <div class="row">
+                <label>BLE Name</label>
+                <span class="value" id="oxiTabBleName">--</span>
+              </div>
+              <div class="row">
+                <label>Peer</label>
+                <span class="value" id="oxiTabPeer">--</span>
+              </div>
+              <div class="btns">
+                <button class="btn primary" id="oxiPairBtn" onclick="oxiPairToggle()">
+                  Pair AirSense
+                </button>
+                <button class="btn" id="oxiAdvStartBtn" onclick="oxiAction('advertise_start')">
+                  Advertise
+                </button>
+                <button class="btn" id="oxiAdvStopBtn" onclick="oxiAction('advertise_stop')">
+                  Stop Adv
+                </button>
+                <button class="btn danger" onclick="oxiForget()">
+                  Forget AirSense
+                </button>
+              </div>
+              <div class="msg" id="oxiTabMsg"></div>
             </div>
           </div>
         </section>
@@ -999,6 +1152,9 @@
     <a class="nav" data-tab="clinical">
       <span class="ico">&#9881;</span>Clinical
     </a>
+    <a class="nav" data-tab="oxi">
+      <span class="ico">&#9829;</span>Oxi
+    </a>
     <a class="nav" data-tab="wifi">
       <span class="ico">&#9783;</span>WiFi
     </a>
@@ -1053,6 +1209,7 @@
     const tabs = {
       dash: "Dashboard",
       clinical: "Clinical",
+      oxi: "Oximetry",
       wifi: "WiFi",
       ota: "Update",
       console: "Console",
@@ -1075,6 +1232,7 @@
       location.hash = id;
 
       if (id === "dash") loadStatus();
+      if (id === "oxi") loadStatus();
       if (id === "clinical") loadSettings(true);
       if (id === "wifi") loadWifi();
       if (id === "ota") loadOta();
@@ -1088,6 +1246,7 @@
     function refreshActive() {
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       if (pane === "dash") loadStatus();
+      if (pane === "oxi") loadStatus();
       if (pane === "clinical") loadSettings(true);
       if (pane === "wifi") loadWifi();
       if (pane === "ota") loadOta();
@@ -1105,6 +1264,7 @@
 
     function msg(id, text, ok, sticky) {
       const element = document.getElementById(id);
+      if (!element) return;
       if (msgTimers[id]) {
         clearTimeout(msgTimers[id]);
         msgTimers[id] = null;
@@ -1114,6 +1274,12 @@
       if (!sticky) {
         msgTimers[id] = setTimeout(() => element.className = "msg", 5000);
       }
+    }
+
+    function setControlValue(id, value) {
+      const element = document.getElementById(id);
+      if (!element || document.activeElement === element) return;
+      element.value = value === undefined || value === null ? "" : String(value);
     }
 
     function up(id, text) {
@@ -1644,6 +1810,104 @@
       meter.title = percent.toFixed(1) + "% used";
     }
 
+    function renderOximetryStatus(data) {
+      const oxi = data && data.oximetry ? data.oximetry : {};
+      const sourceValid = !!(oxi.source_fresh && oxi.valid);
+      up("oxiSpo2", sourceValid ? oxi.spo2 : "--");
+      up("oxiPulse", sourceValid ? oxi.pulse_bpm : "--");
+      up("oxiTabSpo2", sourceValid ? oxi.spo2 : "--");
+      up("oxiTabPulse", sourceValid ? oxi.pulse_bpm : "--");
+
+      let badgeLabel = "Off";
+      let badgeStyle = "";
+      if (!oxi.enabled) {
+        badgeLabel = "Off";
+      } else if (!oxi.ble_available) {
+        badgeLabel = "BLE Off";
+        badgeStyle = "bad";
+      } else if (oxi.subscribed) {
+        badgeLabel = "Recording";
+        badgeStyle = "good";
+      } else if (oxi.connected) {
+        badgeLabel = "Connected";
+        badgeStyle = "warn";
+      } else if (oxi.pairing_active) {
+        badgeLabel = "Pairing";
+        badgeStyle = "warn";
+      } else if (oxi.advertising) {
+        badgeLabel = "Advertising";
+        badgeStyle = "warn";
+      } else if (sourceValid) {
+        badgeLabel = "Ready";
+        badgeStyle = "good";
+      } else {
+        badgeLabel = "Idle";
+      }
+      ["oxiBadge", "oxiTabBadge"].forEach((id) => {
+        const badge = document.getElementById(id);
+        if (!badge) return;
+        badge.textContent = badgeLabel;
+        badge.className = "badge " + badgeStyle;
+      });
+
+      const sourceKind = oxi.source && oxi.source !== "none" ?
+        oxi.source.toUpperCase() : "none";
+      const sourceDetail = (oxi.source_detail || "").trim();
+      const sourceIdentity = sourceKind === "none" ? "none" :
+        sourceKind + (sourceDetail ? " " + sourceDetail : "");
+      let sourceStatus = "no source";
+      if (!oxi.enabled) {
+        sourceStatus = "off";
+      } else if (oxi.source_present && oxi.source_fresh && oxi.valid) {
+        sourceStatus = "fresh";
+      } else if (oxi.source_present && oxi.source_fresh) {
+        sourceStatus = "invalid";
+      } else if (oxi.source_present) {
+        sourceStatus = "stale";
+      }
+      up("oxiSource", sourceIdentity === "none" ?
+        sourceStatus : sourceIdentity + " " + sourceStatus);
+      up("oxiTabSource", sourceIdentity);
+      up("oxiTabStatus", sourceStatus);
+
+      const as11 = oxi.subscribed ? "subscribed" :
+        oxi.connected ? "connected" : "not connected";
+      up("oxiAs11", as11);
+      up("oxiTabAs11", as11);
+
+      let advertise = oxi.advertise_mode || "--";
+      advertise += oxi.advertising ? " on" : " off";
+      if (oxi.pairing_active) {
+        advertise += " / pairing " +
+          Math.ceil((oxi.pairing_left_ms || 0) / 1000) + "s";
+      }
+      up("oxiAdvertise", advertise);
+      up("oxiTabAdvertise", advertise);
+
+      up("oxiTabBleName", oxi.ble_name || "--");
+      up("oxiTabPeer", oxi.ble_peer || "--");
+
+      setControlValue("oxiAdvertiseMode", oxi.advertise_mode || "auto");
+
+      const pair = document.getElementById("oxiPairBtn");
+      const advStart = document.getElementById("oxiAdvStartBtn");
+      const advStop = document.getElementById("oxiAdvStopBtn");
+      if (pair) {
+        pair.textContent = oxi.pairing_active ? "Stop Pairing" : "Pair AirSense";
+        pair.disabled = !oxi.ble_available;
+      }
+      const manual = oxi.advertise_mode === "manual";
+      if (advStart) {
+        advStart.style.display = manual ? "" : "none";
+        advStart.disabled = !oxi.enabled || oxi.advertising;
+      }
+      if (advStop) {
+        advStop.style.display = manual ? "" : "none";
+        advStop.disabled = !oxi.advertising &&
+          !oxi.manual_advertising_requested;
+      }
+    }
+
     function therapyPending(data) {
       return data.therapy_pending && data.therapy_pending !== "none";
     }
@@ -1711,6 +1975,7 @@
       up("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
       renderStorageStatus(data);
       up("timeSync", fmtSync(data));
+      renderOximetryStatus(data);
 
       const badge = document.getElementById("therapyBadge");
       const pending = therapyPending(data);
@@ -2010,6 +2275,50 @@
         setTimeout(loadStatus, 900);
       } catch (error) {
         msg("timeMsg", error.message, false);
+      }
+    }
+
+    async function oxiAction(action) {
+      try {
+        const response = await api("/api/oximetry", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({action}),
+        });
+        const data = await response.json();
+        msg("oxiTabMsg", data.result || "Queued", data.ok);
+        setTimeout(loadStatus, 500);
+        setTimeout(loadStatus, 1500);
+      } catch (error) {
+        msg("oxiTabMsg", error.message, false);
+      }
+    }
+
+    function oxiPairToggle() {
+      const oxi = statusData && statusData.oximetry ? statusData.oximetry : {};
+      oxiAction(oxi.pairing_active ? "pair_stop" : "pair");
+    }
+
+    function oxiForget() {
+      if (!confirm("Forget paired AirSense oximeter bond?")) return;
+      oxiAction("forget");
+    }
+
+    async function saveOximetryAdvertiseConfig() {
+      const advertiseMode = document.getElementById("oxiAdvertiseMode").value;
+      try {
+        const response = await api("/api/config", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            oximetry_advertise_mode: advertiseMode,
+          }),
+        });
+        const data = await response.json();
+        msg("oxiTabMsg", data.queued ? "Config update queued" : "Saved", true);
+        setTimeout(loadStatus, 600);
+      } catch (error) {
+        msg("oxiTabMsg", error.message, false);
       }
     }
 
@@ -2790,6 +3099,8 @@
           ["wifi_country", "WiFi Country", "text"],
           ["timezone", "Timezone", "text"],
           ["resmed_time_sync_enabled", "Sync AS11 Time", "bool"],
+          ["oximetry_enabled", "Oximetry Bridge", "bool"],
+          ["oximetry_udp_port", "Oximetry UDP Port", "number"],
           ["http_auth_required", "HTTP Auth", "bool"],
           ["http_user", "HTTP User", "text"],
           ["http_password", "HTTP Password", "password"],

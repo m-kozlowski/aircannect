@@ -1,0 +1,857 @@
+#include "oximetry_manager.h"
+
+#include <string.h>
+
+#include "debug_log.h"
+#include "string_util.h"
+
+#if AC_OXIMETRY_BLE_ENABLED
+#include <NimBLEDevice.h>
+#endif
+
+namespace aircannect {
+
+namespace {
+
+static constexpr uint16_t PLX_SFLOAT_NAN = 0x07ff;
+static constexpr uint16_t PLX_SFLOAT_NRES = 0x0800;
+static constexpr uint16_t PLX_SFLOAT_POS_INF = 0x07fe;
+static constexpr uint16_t PLX_SFLOAT_NEG_INF = 0x0802;
+static constexpr uint16_t PLX_SFLOAT_RESERVED = 0x0801;
+static constexpr uint16_t BLE_CONN_NONE = 0xffff;
+
+#if AC_OXIMETRY_BLE_ENABLED
+NimBLEServer *ble_server = nullptr;
+NimBLECharacteristic *plx_continuous = nullptr;
+NimBLECharacteristic *plx_features = nullptr;
+uint16_t ble_conn_handle = BLE_CONN_NONE;
+#endif
+
+const char *source_name(OximetrySource source) {
+    switch (source) {
+        case OximetrySource::None: return "none";
+        case OximetrySource::Udp: return "udp";
+        default: return "?";
+    }
+}
+
+void print_bool(Print &out, bool value) {
+    out.print(value ? "yes" : "no");
+}
+
+}  // namespace
+
+#if AC_OXIMETRY_BLE_ENABLED
+class PlxBleServerCallbacks : public NimBLEServerCallbacks {
+public:
+    explicit PlxBleServerCallbacks(OximetryManager *owner)
+        : owner_(owner) {}
+
+    void onConnect(NimBLEServer *server, NimBLEConnInfo &conn_info) override {
+        const bool have_bonds = NimBLEDevice::getNumBonds() > 0;
+        const bool known =
+            conn_info.isBonded() ||
+            NimBLEDevice::isBonded(conn_info.getIdAddress()) ||
+            NimBLEDevice::isBonded(conn_info.getAddress());
+        std::string peer = conn_info.getIdAddress().toString();
+        if (peer == "00:00:00:00:00:00") {
+            peer = conn_info.getAddress().toString();
+        }
+
+        if (have_bonds && !known) {
+            if (owner_) owner_->on_ble_error("unknown BLE central rejected");
+            server->disconnect(conn_info);
+            return;
+        }
+
+        if (owner_) {
+            owner_->on_ble_connect(conn_info.getConnHandle(), peer.c_str(),
+                                   known);
+        }
+    }
+
+    void onDisconnect(NimBLEServer *server,
+                      NimBLEConnInfo &conn_info,
+                      int reason) override {
+        (void)server;
+        if (owner_) owner_->on_ble_disconnect(conn_info.getConnHandle(),
+                                              reason);
+    }
+
+    void onAuthenticationComplete(NimBLEConnInfo &conn_info) override {
+        if (!owner_) return;
+        std::string peer = conn_info.getIdAddress().toString();
+        if (peer == "00:00:00:00:00:00") {
+            peer = conn_info.getAddress().toString();
+        }
+        owner_->on_ble_connect(conn_info.getConnHandle(), peer.c_str(),
+                               conn_info.isBonded());
+    }
+
+private:
+    OximetryManager *owner_ = nullptr;
+};
+
+class PlxBleMeasurementCallbacks : public NimBLECharacteristicCallbacks {
+public:
+    explicit PlxBleMeasurementCallbacks(OximetryManager *owner)
+        : owner_(owner) {}
+
+    void onSubscribe(NimBLECharacteristic *characteristic,
+                     NimBLEConnInfo &conn_info,
+                     uint16_t sub_value) override {
+        (void)characteristic;
+        if (owner_) {
+            owner_->on_ble_subscribe(conn_info.getConnHandle(),
+                                     (sub_value & 0x0001) != 0);
+        }
+    }
+
+private:
+    OximetryManager *owner_ = nullptr;
+};
+#endif
+
+bool OximetryManager::begin(AppConfig &app_config) {
+    app_config_ = &app_config;
+    status_.udp_port = app_config.data().oximetry_udp_port;
+    status_.advertise_mode = app_config.data().oximetry_advertise_mode;
+    status_.enabled = app_config.data().oximetry_enabled;
+    build_ble_name();
+    status_.ble_available = AC_OXIMETRY_BLE_ENABLED != 0;
+    begun_ = true;
+    apply_config();
+    return true;
+}
+
+void OximetryManager::poll(bool network_available) {
+    if (!begun_) return;
+    const uint32_t now_ms = millis();
+    if (static_cast<int32_t>(now_ms - last_config_check_ms_) >= 500) {
+        last_config_check_ms_ = now_ms;
+        apply_config();
+    }
+
+    if (!status_.enabled) {
+        status_.pairing_active = false;
+        pairing_until_ms_ = 0;
+        stop_udp();
+        stop_ble_roles();
+        return;
+    }
+
+    ensure_udp(network_available);
+    poll_udp(now_ms);
+
+    if (source_present_ && !source_alive(now_ms)) {
+        mark_source_stale(now_ms);
+    }
+
+    if (ble_initialized_) drain_ble_events();
+    update_pairing_state(now_ms);
+    enforce_source_required(now_ms);
+    update_advertising_policy(now_ms);
+    notify_ble(now_ms);
+}
+
+bool OximetryManager::set_enabled(bool enabled) {
+    if (!app_config_) return false;
+    const bool ok = app_config_->set_oximetry_enabled(enabled);
+    apply_config();
+    return ok;
+}
+
+bool OximetryManager::set_advertise_mode(OximetryAdvertiseMode mode) {
+    if (!app_config_) return false;
+    const bool ok = app_config_->set_oximetry_advertise_mode(mode);
+    apply_config();
+    return ok;
+}
+
+bool OximetryManager::request_advertising(bool enabled) {
+    status_.manual_advertising_requested = enabled;
+    if (!enabled) {
+        stop_advertising();
+        stop_ble_roles_if_idle(millis());
+    }
+    return true;
+}
+
+bool OximetryManager::request_pairing(bool enabled) {
+    if (enabled) {
+        pairing_until_ms_ = millis() + AC_OXIMETRY_PAIRING_WINDOW_MS;
+        status_.pairing_active = true;
+        status_.manual_advertising_requested = false;
+        set_error("");
+        return true;
+    }
+
+    pairing_until_ms_ = 0;
+    status_.pairing_active = false;
+    if (!source_present_) {
+        disconnect_ble();
+        stop_advertising();
+        stop_ble_roles_if_idle(millis());
+    }
+    return true;
+}
+
+bool OximetryManager::forget_bonds() {
+#if AC_OXIMETRY_BLE_ENABLED
+    disconnect_ble();
+    const bool ok = NimBLEDevice::deleteAllBonds();
+    if (!ok) set_error("bond delete failed");
+    return ok;
+#else
+    set_error("BLE disabled");
+    return false;
+#endif
+}
+
+OximetryStatus OximetryManager::status() const {
+    OximetryStatus out = status_;
+    const uint32_t now_ms = millis();
+    out.source_present = source_present_;
+    out.source_fresh = sample_fresh(now_ms);
+    out.source = source_;
+    out.reading = reading_;
+    out.last_source_age_ms =
+        source_present_ ? now_ms - last_source_ms_ : 0;
+    if (status_.pairing_active) {
+        out.pairing_left_ms =
+            static_cast<int32_t>(pairing_until_ms_ - now_ms) > 0
+                ? pairing_until_ms_ - now_ms
+                : 0;
+    }
+    strncpy(out.ble_name, ble_name_, sizeof(out.ble_name) - 1);
+    out.ble_name[sizeof(out.ble_name) - 1] = 0;
+    return out;
+}
+
+void OximetryManager::print_status(Print &out) const {
+    const OximetryStatus s = status();
+    out.print("[OXI] enabled=");
+    print_bool(out, s.enabled);
+    out.print(" source=");
+    out.print(source_name(s.source));
+    if (s.source_detail[0]) {
+        out.print(":");
+        out.print(s.source_detail);
+    }
+    out.print(" present=");
+    print_bool(out, s.source_present);
+    out.print(" fresh=");
+    print_bool(out, s.source_fresh);
+    out.print(" valid=");
+    print_bool(out, s.reading.valid);
+    out.print(" spo2=");
+    if (s.reading.valid) out.print(s.reading.spo2);
+    else out.print("--");
+    out.print(" pulse=");
+    if (s.reading.valid) out.print(s.reading.pulse_bpm);
+    else out.print("--");
+    out.print(" age_ms=");
+    out.print(s.last_source_age_ms);
+    out.print(" udp=");
+    out.print(s.udp_started ? "listening" : "stopped");
+    out.print(":");
+    out.print(s.udp_port);
+    out.print(" packets=");
+    out.print(s.udp_packets);
+    out.print("/");
+    out.print(s.udp_bad_packets);
+    out.print(" advertise=");
+    out.print(oximetry_advertise_mode_name(s.advertise_mode));
+    out.print(" pair=");
+    if (s.pairing_active) {
+        out.print("active/");
+        out.print((s.pairing_left_ms + 999) / 1000);
+        out.print("s");
+    } else {
+        out.print("off");
+    }
+    out.print(" ble=");
+    out.print(s.ble_available ? "available" : "disabled");
+    out.print(" adv=");
+    print_bool(out, s.advertising);
+    out.print(" connected=");
+    print_bool(out, s.connected);
+    out.print(" subscribed=");
+    print_bool(out, s.subscribed);
+    out.print(" disconnect_reason=");
+    out.print(s.ble_last_disconnect_reason);
+    out.print(" name=\"");
+    out.print(s.ble_name);
+    out.println("\"");
+}
+
+void OximetryManager::apply_config() {
+    if (!app_config_) return;
+    const AppConfigData &cfg = app_config_->data();
+    const bool was_enabled = status_.enabled;
+    const uint16_t old_port = status_.udp_port;
+    const OximetryAdvertiseMode old_mode = status_.advertise_mode;
+
+    status_.enabled = cfg.oximetry_enabled;
+    status_.udp_port = cfg.oximetry_udp_port;
+    status_.advertise_mode = cfg.oximetry_advertise_mode;
+
+    if (cfg.hostname != last_hostname_) {
+        build_ble_name();
+        ble_adv_data_dirty_ = true;
+    }
+
+    if (!status_.enabled && was_enabled) {
+        stop_udp();
+        stop_ble_roles();
+    }
+    if (status_.udp_port != old_port) stop_udp();
+    if (status_.advertise_mode != old_mode &&
+        status_.advertise_mode == OximetryAdvertiseMode::Auto) {
+        status_.manual_advertising_requested = false;
+    }
+}
+
+void OximetryManager::build_ble_name() {
+    const String fallback = "AirCANnect";
+    const String &hostname =
+        app_config_ ? app_config_->data().hostname : fallback;
+    strncpy(last_hostname_, hostname.c_str(), sizeof(last_hostname_) - 1);
+    last_hostname_[sizeof(last_hostname_) - 1] = 0;
+
+    size_t write = 0;
+    for (size_t i = 0;
+         i < hostname.length() && write < AC_OXIMETRY_BLE_NAME_MAX;
+         ++i) {
+        const char c = hostname[i];
+        if (c >= 0x20 && c <= 0x7e) ble_name_[write++] = c;
+    }
+    if (write == 0) {
+        strncpy(ble_name_, "AirCANnect", sizeof(ble_name_) - 1);
+    } else {
+        ble_name_[write] = 0;
+    }
+}
+
+void OximetryManager::set_error(const char *text) {
+    if (!text) text = "";
+    strncpy(status_.last_error, text, sizeof(status_.last_error) - 1);
+    status_.last_error[sizeof(status_.last_error) - 1] = 0;
+}
+
+bool OximetryManager::ensure_udp(bool network_available) {
+    if (!status_.enabled || !network_available) {
+        stop_udp();
+        return false;
+    }
+    if (status_.udp_started) return true;
+    if (!udp_.begin(status_.udp_port)) {
+        set_error("UDP bind failed");
+        return false;
+    }
+    status_.udp_started = true;
+    Log::logf(CAT_OXI, LOG_INFO, "[OXI] UDP listening on port %u\n",
+              status_.udp_port);
+    return true;
+}
+
+void OximetryManager::stop_udp() {
+    if (!status_.udp_started) return;
+    udp_.stop();
+    status_.udp_started = false;
+}
+
+void OximetryManager::poll_udp(uint32_t now_ms) {
+    if (!status_.udp_started) return;
+    for (size_t i = 0; i < AC_OXIMETRY_UDP_READ_BUDGET; ++i) {
+        const int packet_size = udp_.parsePacket();
+        if (packet_size <= 0) return;
+        const IPAddress remote_ip = udp_.remoteIP();
+        uint8_t packet[AC_OXIMETRY_UDP_PACKET_SIZE] = {};
+        const int read = udp_.read(packet, sizeof(packet));
+        while (udp_.available()) udp_.read();
+
+        if (packet_size != static_cast<int>(AC_OXIMETRY_UDP_PACKET_SIZE) ||
+            read != static_cast<int>(AC_OXIMETRY_UDP_PACKET_SIZE) ||
+            packet[0] != 0x55 || packet[1] != 0xab) {
+            status_.udp_bad_packets++;
+            continue;
+        }
+
+        const uint16_t spo2_raw =
+            static_cast<uint16_t>(packet[3]) |
+            (static_cast<uint16_t>(packet[4]) << 8);
+        const uint16_t pulse_raw =
+            static_cast<uint16_t>(packet[5]) |
+            (static_cast<uint16_t>(packet[6]) << 8);
+        note_udp_packet(spo2_raw, pulse_raw, remote_ip, now_ms);
+    }
+}
+
+void OximetryManager::note_udp_packet(uint16_t spo2_raw,
+                                      uint16_t pulse_raw,
+                                      IPAddress remote_ip,
+                                      uint32_t now_ms) {
+    bool spo2_valid = false;
+    bool pulse_valid = false;
+    const int16_t spo2 = decode_plx_sfloat(spo2_raw, spo2_valid);
+    const int16_t pulse = decode_plx_sfloat(pulse_raw, pulse_valid);
+
+    source_present_ = true;
+    source_ = OximetrySource::Udp;
+    snprintf(status_.source_detail, sizeof(status_.source_detail),
+             "%u.%u.%u.%u",
+             remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3]);
+    last_source_ms_ = now_ms;
+    status_.udp_packets++;
+    reading_.timestamp_ms = now_ms;
+    reading_.valid = spo2_valid && pulse_valid;
+    if (reading_.valid) {
+        reading_.spo2 = spo2;
+        reading_.pulse_bpm = pulse;
+    } else {
+        reading_.spo2 = -1;
+        reading_.pulse_bpm = -1;
+    }
+}
+
+bool OximetryManager::ensure_ble() {
+    if (!status_.enabled) return false;
+#if AC_OXIMETRY_BLE_ENABLED
+    if (ble_initialized_) {
+        if (ble_adv_data_dirty_) rebuild_advertising_data();
+        return true;
+    }
+
+    NimBLEDevice::init(ble_name_);
+    NimBLEDevice::setSecurityAuth(true, false, false);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+
+    ble_server = NimBLEDevice::createServer();
+    if (!ble_server) {
+        set_error("BLE server alloc failed");
+        return false;
+    }
+    ble_server->setCallbacks(new PlxBleServerCallbacks(this), true);
+
+    NimBLEService *service = ble_server->createService("1822");
+    if (!service) {
+        set_error("PLX service alloc failed");
+        return false;
+    }
+    plx_features =
+        service->createCharacteristic("2A60", NIMBLE_PROPERTY::READ, 2);
+    plx_continuous =
+        service->createCharacteristic("2A5F", NIMBLE_PROPERTY::NOTIFY, 5);
+    if (!plx_features || !plx_continuous) {
+        set_error("PLX characteristic alloc failed");
+        return false;
+    }
+    const uint8_t features[] = {0x00, 0x00};
+    plx_features->setValue(features, sizeof(features));
+    plx_continuous->setCallbacks(new PlxBleMeasurementCallbacks(this));
+    if (!ble_server->start()) {
+        set_error("BLE server start failed");
+        return false;
+    }
+
+    ble_initialized_ = true;
+    status_.ble_available = true;
+    rebuild_advertising_data();
+    Log::logf(CAT_OXI, LOG_INFO,
+              "[OXI] PLX BLE peripheral ready name=%s\n", ble_name_);
+    return true;
+#else
+    status_.ble_available = false;
+    set_error("BLE disabled");
+    return false;
+#endif
+}
+
+void OximetryManager::rebuild_advertising_data() {
+#if AC_OXIMETRY_BLE_ENABLED
+    NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+    if (!advertising) return;
+    const bool was_advertising = status_.advertising;
+    if (was_advertising) advertising->stop();
+
+    uint8_t raw[31] = {};
+    size_t len = 0;
+    raw[len++] = 0x02;
+    raw[len++] = 0x01;
+    raw[len++] = 0x02;
+    raw[len++] = 0x03;
+    raw[len++] = 0x03;
+    raw[len++] = 0x22;
+    raw[len++] = 0x18;
+    const size_t name_len = strnlen(ble_name_, AC_OXIMETRY_BLE_NAME_MAX);
+    raw[len++] = static_cast<uint8_t>(name_len + 1);
+    raw[len++] = 0x09;
+    memcpy(raw + len, ble_name_, name_len);
+    len += name_len;
+
+    NimBLEAdvertisementData adv_data;
+    adv_data.addData(raw, len);
+    advertising->enableScanResponse(false);
+    advertising->setAdvertisementData(adv_data);
+    ble_adv_data_dirty_ = false;
+
+    if (was_advertising) advertising->start();
+#endif
+}
+
+bool OximetryManager::as11_advertising_requested(uint32_t now_ms) const {
+    if (!status_.enabled || !status_.ble_available) return false;
+    return
+        status_.pairing_active ||
+        (sample_fresh(now_ms) &&
+         (status_.advertise_mode == OximetryAdvertiseMode::Auto ||
+          status_.manual_advertising_requested));
+}
+
+bool OximetryManager::ble_runtime_required(uint32_t now_ms) const {
+    if (!status_.enabled || !status_.ble_available) return false;
+    if (status_.connected || status_.advertising) return true;
+
+    // Future BLE sensor-central support belongs here. A known sensor scan or
+    // sensor connection should keep NimBLE up even when the AS11-facing PLX
+    // peripheral is idle.
+    return as11_advertising_requested(now_ms);
+}
+
+void OximetryManager::update_advertising_policy(uint32_t now_ms) {
+    if (!status_.enabled || !status_.ble_available) {
+        stop_advertising();
+        stop_ble_roles_if_idle(now_ms);
+        return;
+    }
+    if (status_.connected) return;
+
+    if (as11_advertising_requested(now_ms)) start_advertising();
+    else {
+        stop_advertising();
+        stop_ble_roles_if_idle(now_ms);
+    }
+}
+
+void OximetryManager::update_pairing_state(uint32_t now_ms) {
+    if (!status_.pairing_active) return;
+    if (static_cast<int32_t>(pairing_until_ms_ - now_ms) > 0) return;
+
+    status_.pairing_active = false;
+    pairing_until_ms_ = 0;
+    if (!source_present_) {
+        disconnect_ble();
+        stop_advertising();
+        stop_ble_roles_if_idle(now_ms);
+        Log::logf(CAT_OXI, LOG_INFO, "[OXI] pairing window expired\n");
+    }
+}
+
+void OximetryManager::start_advertising() {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (status_.advertising) return;
+    if (!ensure_ble()) return;
+    if (ble_adv_data_dirty_) rebuild_advertising_data();
+    NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+    if (!advertising || !advertising->start()) {
+        set_error("BLE advertising failed");
+        return;
+    }
+    status_.advertising = true;
+    Log::logf(CAT_OXI, LOG_INFO, "[OXI] BLE advertising started\n");
+#endif
+}
+
+void OximetryManager::stop_advertising() {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (!status_.advertising) return;
+    NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+    if (advertising) advertising->stop();
+#endif
+    status_.advertising = false;
+}
+
+void OximetryManager::disconnect_ble() {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (ble_server) {
+        std::vector<uint16_t> peers = ble_server->getPeerDevices();
+        for (uint16_t handle : peers) ble_server->disconnect(handle);
+    }
+#endif
+    status_.connected = false;
+    status_.subscribed = false;
+    ble_conn_handle = BLE_CONN_NONE;
+    no_source_connected_since_ms_ = 0;
+}
+
+void OximetryManager::stop_ble_roles() {
+    stop_advertising();
+    disconnect_ble();
+    status_.advertising = false;
+    status_.connected = false;
+    status_.subscribed = false;
+    ble_conn_handle = BLE_CONN_NONE;
+    no_source_connected_since_ms_ = 0;
+}
+
+void OximetryManager::stop_ble_roles_if_idle(uint32_t now_ms) {
+    if (ble_runtime_required(now_ms)) return;
+    stop_ble_roles();
+}
+
+void OximetryManager::notify_ble(uint32_t now_ms) {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (!status_.connected || !status_.subscribed || !plx_continuous) {
+        return;
+    }
+    if (static_cast<int32_t>(now_ms - last_notify_ms_) <
+        static_cast<int32_t>(AC_OXIMETRY_NOTIFY_INTERVAL_MS)) {
+        return;
+    }
+    last_notify_ms_ = now_ms;
+
+    uint16_t spo2 = PLX_SFLOAT_NAN;
+    uint16_t pulse = PLX_SFLOAT_NAN;
+    if (sample_fresh(now_ms) && reading_.valid) {
+        spo2 = encode_plx_sfloat_int(reading_.spo2);
+        pulse = encode_plx_sfloat_int(reading_.pulse_bpm);
+    } else {
+        status_.ble_invalid_notifications++;
+    }
+
+    uint8_t payload[5] = {
+        0x00,
+        static_cast<uint8_t>(spo2 & 0xff),
+        static_cast<uint8_t>((spo2 >> 8) & 0xff),
+        static_cast<uint8_t>(pulse & 0xff),
+        static_cast<uint8_t>((pulse >> 8) & 0xff),
+    };
+    if (plx_continuous->notify(payload, sizeof(payload), ble_conn_handle)) {
+        status_.ble_notifications++;
+    }
+#endif
+}
+
+void OximetryManager::drain_ble_events() {
+    bool connect_pending = false;
+    uint16_t connect_handle = BLE_CONN_NONE;
+    bool connect_bonded = false;
+    char connect_peer[sizeof(status_.ble_peer)] = {};
+
+    bool disconnect_pending = false;
+    uint16_t disconnect_handle = BLE_CONN_NONE;
+    int disconnect_reason = 0;
+
+    bool subscribe_pending = false;
+    uint16_t subscribe_handle = BLE_CONN_NONE;
+    bool subscribe_enabled = false;
+
+    bool error_pending = false;
+    char error_text[sizeof(status_.last_error)] = {};
+
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&ble_event_mux_);
+#endif
+    connect_pending = ble_connect_pending_;
+    connect_handle = ble_pending_conn_handle_;
+    connect_bonded = ble_pending_bonded_;
+    strncpy(connect_peer, ble_pending_peer_, sizeof(connect_peer) - 1);
+    connect_peer[sizeof(connect_peer) - 1] = 0;
+
+    disconnect_pending = ble_disconnect_pending_;
+    disconnect_handle = ble_pending_disconnect_handle_;
+    disconnect_reason = ble_pending_disconnect_reason_;
+
+    subscribe_pending = ble_subscribe_pending_;
+    subscribe_handle = ble_pending_subscribe_handle_;
+    subscribe_enabled = ble_pending_subscribe_enabled_;
+
+    error_pending = ble_error_pending_;
+    strncpy(error_text, ble_pending_error_, sizeof(error_text) - 1);
+    error_text[sizeof(error_text) - 1] = 0;
+
+    ble_connect_pending_ = false;
+    ble_disconnect_pending_ = false;
+    ble_subscribe_pending_ = false;
+    ble_error_pending_ = false;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&ble_event_mux_);
+#endif
+
+    if (error_pending) set_error(error_text);
+
+    if (connect_pending) {
+        (void)connect_bonded;
+        if (!status_.connected || ble_conn_handle != connect_handle) {
+            status_.ble_connections++;
+        }
+        status_.connected = true;
+        if (status_.pairing_active) {
+            status_.pairing_active = false;
+            pairing_until_ms_ = 0;
+        }
+        status_.advertising = false;
+        ble_conn_handle = connect_handle;
+        strncpy(status_.ble_peer, connect_peer,
+                sizeof(status_.ble_peer) - 1);
+        status_.ble_peer[sizeof(status_.ble_peer) - 1] = 0;
+    }
+
+    if (subscribe_pending) {
+        ble_conn_handle = subscribe_handle;
+        status_.subscribed = subscribe_enabled;
+    }
+
+    if (disconnect_pending) {
+        (void)disconnect_handle;
+        status_.connected = false;
+        status_.subscribed = false;
+        status_.ble_disconnects++;
+        status_.ble_last_disconnect_reason =
+            static_cast<uint32_t>(disconnect_reason);
+        ble_conn_handle = BLE_CONN_NONE;
+        no_source_connected_since_ms_ = 0;
+    }
+}
+
+void OximetryManager::enforce_source_required(uint32_t now_ms) {
+    if (!status_.connected || status_.pairing_active || source_present_) {
+        no_source_connected_since_ms_ = 0;
+        return;
+    }
+
+    if (!no_source_connected_since_ms_) {
+        no_source_connected_since_ms_ = now_ms;
+        return;
+    }
+
+    if (static_cast<int32_t>(now_ms - no_source_connected_since_ms_) <
+        static_cast<int32_t>(AC_OXIMETRY_SOURCE_TIMEOUT_MS)) {
+        return;
+    }
+
+    disconnect_ble();
+    stop_advertising();
+    stop_ble_roles_if_idle(now_ms);
+    Log::logf(CAT_OXI, LOG_INFO,
+              "[OXI] no source after BLE connect; disconnected\n");
+}
+
+void OximetryManager::mark_source_stale(uint32_t now_ms) {
+    (void)now_ms;
+    source_present_ = false;
+    source_ = OximetrySource::None;
+    reading_.valid = false;
+    reading_.spo2 = -1;
+    reading_.pulse_bpm = -1;
+    if (!status_.pairing_active) {
+        disconnect_ble();
+        stop_advertising();
+        stop_ble_roles_if_idle(now_ms);
+        Log::logf(CAT_OXI, LOG_INFO, "[OXI] source stale; BLE stopped\n");
+    }
+}
+
+bool OximetryManager::source_alive(uint32_t now_ms) const {
+    if (!source_present_) return false;
+    return static_cast<int32_t>(now_ms - last_source_ms_) <
+           static_cast<int32_t>(AC_OXIMETRY_SOURCE_TIMEOUT_MS);
+}
+
+bool OximetryManager::sample_fresh(uint32_t now_ms) const {
+    if (!source_present_) return false;
+    return static_cast<int32_t>(now_ms - last_source_ms_) <
+           static_cast<int32_t>(AC_OXIMETRY_SAMPLE_STALE_MS);
+}
+
+int16_t OximetryManager::decode_plx_sfloat(uint16_t raw, bool &valid) {
+    valid = false;
+    if (raw == PLX_SFLOAT_NAN || raw == PLX_SFLOAT_NRES ||
+        raw == PLX_SFLOAT_POS_INF || raw == PLX_SFLOAT_NEG_INF ||
+        raw == PLX_SFLOAT_RESERVED) {
+        return -1;
+    }
+
+    int16_t mantissa = raw & 0x0fff;
+    if (mantissa & 0x0800) mantissa |= 0xf000;
+    int8_t exponent = static_cast<int8_t>((raw >> 12) & 0x0f);
+    if (exponent & 0x08) exponent |= 0xf0;
+
+    float value = static_cast<float>(mantissa);
+    while (exponent > 0) {
+        value *= 10.0f;
+        exponent--;
+    }
+    while (exponent < 0) {
+        value /= 10.0f;
+        exponent++;
+    }
+    if (value < 0.0f || value > 300.0f) return -1;
+    valid = true;
+    return static_cast<int16_t>(value + 0.5f);
+}
+
+uint16_t OximetryManager::encode_plx_sfloat_int(int16_t value) {
+    if (value < 0 || value > 0x07fd) return PLX_SFLOAT_NAN;
+    return static_cast<uint16_t>(value) & 0x0fff;
+}
+
+void OximetryManager::on_ble_connect(uint16_t conn_handle,
+                                     const char *peer,
+                                     bool bonded) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&ble_event_mux_);
+#endif
+    ble_connect_pending_ = true;
+    ble_pending_conn_handle_ = conn_handle;
+    ble_pending_bonded_ = bonded;
+    if (peer) {
+        strncpy(ble_pending_peer_, peer, sizeof(ble_pending_peer_) - 1);
+        ble_pending_peer_[sizeof(ble_pending_peer_) - 1] = 0;
+    } else {
+        ble_pending_peer_[0] = 0;
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&ble_event_mux_);
+#endif
+}
+
+void OximetryManager::on_ble_disconnect(uint16_t conn_handle, int reason) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&ble_event_mux_);
+#endif
+    ble_disconnect_pending_ = true;
+    ble_pending_disconnect_handle_ = conn_handle;
+    ble_pending_disconnect_reason_ = reason;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&ble_event_mux_);
+#endif
+}
+
+void OximetryManager::on_ble_subscribe(uint16_t conn_handle, bool enabled) {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&ble_event_mux_);
+#endif
+    ble_subscribe_pending_ = true;
+    ble_pending_subscribe_handle_ = conn_handle;
+    ble_pending_subscribe_enabled_ = enabled;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&ble_event_mux_);
+#endif
+}
+
+void OximetryManager::on_ble_error(const char *text) {
+    if (!text) text = "";
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(&ble_event_mux_);
+#endif
+    ble_error_pending_ = true;
+    strncpy(ble_pending_error_, text, sizeof(ble_pending_error_) - 1);
+    ble_pending_error_[sizeof(ble_pending_error_) - 1] = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(&ble_event_mux_);
+#endif
+}
+
+}  // namespace aircannect

@@ -5,6 +5,7 @@
 
 #include "app_config.h"
 #include "ota_manager.h"
+#include "oximetry_manager.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
 #include "session_manager.h"
@@ -26,6 +27,7 @@ struct ConsoleContext {
     ResmedOtaManager &resmed_ota_manager;
     SessionManager &session_manager;
     SinkManager &sink_manager;
+    OximetryManager &oximetry_manager;
 };
 
 class ManagementConsole {
@@ -46,6 +48,8 @@ private:
     void handle_memory_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_session_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_sink_command(Print &out, String rest, ConsoleContext &ctx);
+    void handle_oximetry_command(Print &out, String rest,
+                                 ConsoleContext &ctx);
     void handle_storage_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_as11_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_therapy_command(Print &out, String rest, ConsoleContext &ctx);
@@ -75,6 +79,8 @@ private:
     void handle_resmed_ota(Print &out, String rest,
                            ResmedOtaManager &resmed_ota_manager);
     void handle_sink(Print &out, String rest, SinkManager &sink_manager);
+    void handle_oximetry(Print &out, String rest,
+                         OximetryManager &oximetry_manager);
     void handle_log(Print &out, String rest, AppConfig &app_config);
     void handle_wifi(Print &out, String rest, WifiManager &wifi_manager,
                      TcpBridge &tcp_bridge, const AppConfig &app_config);

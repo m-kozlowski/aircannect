@@ -26,6 +26,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  time              ESP and AS11 clock sync commands");
         out.println("  stream            AS11 stream subscription controls");
         out.println("  sink              stream sink status and debug sink toggle");
+        out.println("  oxi               oximetry source and BLE injector status");
         out.println("  storage           persistent storage and writer status");
         out.println("  session           therapy session tracking state");
         out.println("  tcp               raw JSON-RPC TCP bridge status");
@@ -51,6 +52,9 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config wifi-country CC    set Wi-Fi regulatory country");
         out.println("  config timezone VALUE     set ESP local timezone");
         out.println("  config resmed-time-sync on|off  push NTP time to AS11");
+        out.println("  config oximetry on|off    enable oximetry bridge");
+        out.println("  config oximetry udp-port P        set UDP source port");
+        out.println("  config oximetry advertise auto|manual  set BLE advertising policy");
         out.println("  config http-auth U P      set Web UI auth; empty U/P disables auth");
         out.println("  config http-whitelist L   bypass auth for IP/range list, or clear");
         out.println("  config telnet on|off [P]  enable management telnet console");
@@ -137,6 +141,19 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP sink]");
         out.println("  sink status               show stream sink state");
         out.println("  sink debug on|off         enable/disable debug sink");
+        return;
+    }
+
+    if (topic == "oxi" || topic == "oximetry") {
+        out.println("[HELP oxi]");
+        out.println("  oxi status                show oximetry source and BLE state");
+        out.println("  oxi on|off                enable/disable oximetry bridge");
+        out.println("  oxi cpap pair             advertise temporarily for CPAP pairing");
+        out.println("  oxi cpap pair stop        stop the CPAP pairing window");
+        out.println("  oxi cpap forget           clear CPAP-side BLE bonds");
+        out.println("  oxi sensor status         show future sensor side status");
+        out.println("  oxi advertise auto|manual set source-driven or on-demand advertising");
+        out.println("  oxi advertise start|stop  request/stop manual advertising");
         return;
     }
 

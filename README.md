@@ -21,13 +21,14 @@ ESP32 bridge for ResMed AirSense 11 / AirCurve 11 CPAP.
     (one JSON-RPC payload per line, compatible with `as11_config.py` and other host tooling.)
 - **Multi-profile Wi-Fi**
   - up to four STA profiles, BSSID-targeted roaming, SoftAP auto-fallback or forced always-on.
+- **Oximetry**
+  - use supported external oximetry sources with AirSense 11 HR/SpO2 recording
 
 
 ## Planned
 
-- **BLE oximetry**
+- **BLE oximeter sources**
   - O2Ring, Checkme O2, Nonin 3150, generic PLX/HR sensors
-  - UDP source for unsupported devices
 - **Live therapy data sinks** - HTTP, SMB, SleepHQ, MQTT... Plugin sinks subscribe through the stream broker; bounded per-consumer queues
 - **Local EDF capture** - record the active therapy session into set of EDF files on own SD card, indexed for remote retrieval over LAN.
 - **BLE provisioning** - replace SoftAP-only first-run with a BLE service for Wi-Fi scan, multi-profile setup, and basic device config from a phone.

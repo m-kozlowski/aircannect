@@ -20,6 +20,9 @@ static constexpr const char *KEY_SOFTAP_MODE = "softap_mode";
 static constexpr const char *KEY_WIFI_COUNTRY = "wifi_ctry";
 static constexpr const char *KEY_TIMEZONE = "tz";
 static constexpr const char *KEY_RESMED_TIME_SYNC = "resmed_time";
+static constexpr const char *KEY_OXIMETRY_ENABLED = "oxi_en";
+static constexpr const char *KEY_OXIMETRY_UDP_PORT = "oxi_udp";
+static constexpr const char *KEY_OXIMETRY_ADVERTISE_MODE = "oxi_adv";
 static constexpr const char *KEY_HTTP_USER = "http_user";
 static constexpr const char *KEY_HTTP_PASSWORD = "http_pass";
 static constexpr const char *KEY_AUTH_WHITELIST = "auth_wl";
@@ -40,13 +43,14 @@ static constexpr uint32_t DIRTY_HTTP_AUTH = 1UL << 6;
 static constexpr uint32_t DIRTY_AUTH_WHITELIST = 1UL << 7;
 static constexpr uint32_t DIRTY_TELNET = 1UL << 8;
 static constexpr uint32_t DIRTY_OTA_PASSWORD = 1UL << 9;
+static constexpr uint32_t DIRTY_OXIMETRY = 1UL << 10;
 static constexpr uint32_t DIRTY_LOG_LEVELS = 1UL << 12;
 static constexpr uint32_t DIRTY_SYSLOG = 1UL << 13;
 static constexpr uint32_t DIRTY_ALL =
     DIRTY_HOSTNAME | DIRTY_TCP | DIRTY_SOFTAP | DIRTY_WIFI_COUNTRY |
     DIRTY_TIMEZONE | DIRTY_RESMED_TIME | DIRTY_HTTP_AUTH |
     DIRTY_AUTH_WHITELIST | DIRTY_TELNET | DIRTY_OTA_PASSWORD |
-    DIRTY_LOG_LEVELS | DIRTY_SYSLOG;
+    DIRTY_OXIMETRY | DIRTY_LOG_LEVELS | DIRTY_SYSLOG;
 
 bool valid_hostname_char(char c) {
     return isalnum(static_cast<unsigned char>(c)) || c == '-';
@@ -121,6 +125,39 @@ bool valid_wifi_country(const String &country) {
     return true;
 }
 
+OximetryAdvertiseMode default_oximetry_advertise_mode() {
+    const OximetryAdvertiseMode mode =
+        static_cast<OximetryAdvertiseMode>(
+            AC_DEFAULT_OXIMETRY_ADVERTISE_MODE);
+    if (oximetry_advertise_mode_valid(mode)) return mode;
+    return OximetryAdvertiseMode::Auto;
+}
+
+OximetryAdvertiseMode load_oximetry_advertise_mode(
+    Preferences &prefs,
+    OximetryAdvertiseMode fallback) {
+    const PreferenceType type = prefs.getType(KEY_OXIMETRY_ADVERTISE_MODE);
+    if (type == PT_U8) {
+        const OximetryAdvertiseMode mode =
+            static_cast<OximetryAdvertiseMode>(
+                prefs.getUChar(KEY_OXIMETRY_ADVERTISE_MODE,
+                               static_cast<uint8_t>(fallback)));
+        if (oximetry_advertise_mode_valid(mode)) return mode;
+    } else if (type == PT_STR) {
+        OximetryAdvertiseMode mode = fallback;
+        if (parse_oximetry_advertise_mode(
+                prefs.getString(KEY_OXIMETRY_ADVERTISE_MODE, ""),
+                mode)) {
+            return mode;
+        }
+    }
+    return fallback;
+}
+
+void apply_build_defaults(AppConfigData &data) {
+    data.oximetry_advertise_mode = default_oximetry_advertise_mode();
+}
+
 const char *on_off(bool enabled) {
     return enabled ? "on" : "off";
 }
@@ -142,7 +179,8 @@ bool AppConfig::begin() {
 }
 
 bool AppConfig::load() {
-    const AppConfigData defaults;
+    AppConfigData defaults;
+    apply_build_defaults(defaults);
 
     Preferences prefs;
     if (!prefs.begin(CFG_NS, true)) {
@@ -186,6 +224,12 @@ bool AppConfig::load() {
     data_.resmed_time_sync_enabled =
         prefs.getBool(KEY_RESMED_TIME_SYNC,
                       defaults.resmed_time_sync_enabled);
+    data_.oximetry_enabled =
+        prefs.getBool(KEY_OXIMETRY_ENABLED, defaults.oximetry_enabled);
+    data_.oximetry_udp_port = static_cast<uint16_t>(
+        prefs.getUInt(KEY_OXIMETRY_UDP_PORT, defaults.oximetry_udp_port));
+    data_.oximetry_advertise_mode = load_oximetry_advertise_mode(
+        prefs, defaults.oximetry_advertise_mode);
     data_.http_user = prefs.getString(KEY_HTTP_USER, defaults.http_user);
     data_.http_password =
         prefs.getString(KEY_HTTP_PASSWORD, defaults.http_password);
@@ -251,6 +295,18 @@ bool AppConfig::save_fields(uint32_t dirty) const {
     if (dirty & DIRTY_RESMED_TIME) {
         ok = prefs.putBool(KEY_RESMED_TIME_SYNC,
                            data_.resmed_time_sync_enabled) != 0 &&
+             ok;
+    }
+    if (dirty & DIRTY_OXIMETRY) {
+        ok = prefs.putBool(KEY_OXIMETRY_ENABLED,
+                           data_.oximetry_enabled) != 0 &&
+             ok;
+        ok = prefs.putUInt(KEY_OXIMETRY_UDP_PORT,
+                           data_.oximetry_udp_port) != 0 &&
+             ok;
+        ok = prefs.putUChar(
+                 KEY_OXIMETRY_ADVERTISE_MODE,
+                 static_cast<uint8_t>(data_.oximetry_advertise_mode)) != 0 &&
              ok;
     }
     if (dirty & DIRTY_HTTP_AUTH) {
@@ -319,10 +375,12 @@ bool AppConfig::commit_update() {
 
 void AppConfig::set_defaults() {
     data_ = AppConfigData{};
+    apply_build_defaults(data_);
 }
 
 bool AppConfig::normalize() {
-    const AppConfigData defaults;
+    AppConfigData defaults;
+    apply_build_defaults(defaults);
     bool unchanged = true;
     if (data_.schema_version != AC_CONFIG_SCHEMA_VERSION) {
         data_.schema_version = AC_CONFIG_SCHEMA_VERSION;
@@ -348,6 +406,15 @@ bool AppConfig::normalize() {
     }
     if (!valid_timezone(data_.timezone)) {
         data_.timezone = defaults.timezone;
+        unchanged = false;
+    }
+    if (data_.oximetry_udp_port == 0) {
+        data_.oximetry_udp_port = defaults.oximetry_udp_port;
+        unchanged = false;
+    }
+    if (!oximetry_advertise_mode_valid(data_.oximetry_advertise_mode)) {
+        data_.oximetry_advertise_mode =
+            defaults.oximetry_advertise_mode;
         unchanged = false;
     }
     if (!valid_optional_secret(data_.http_user)) {
@@ -446,6 +513,27 @@ bool AppConfig::set_resmed_time_sync(bool enabled) {
     if (data_.resmed_time_sync_enabled == enabled) return true;
     data_.resmed_time_sync_enabled = enabled;
     return persist(DIRTY_RESMED_TIME);
+}
+
+bool AppConfig::set_oximetry_enabled(bool enabled) {
+    if (data_.oximetry_enabled == enabled) return true;
+    data_.oximetry_enabled = enabled;
+    return persist(DIRTY_OXIMETRY);
+}
+
+bool AppConfig::set_oximetry_udp_port(uint16_t port) {
+    if (port == 0) return false;
+    if (data_.oximetry_udp_port == port) return true;
+    data_.oximetry_udp_port = port;
+    return persist(DIRTY_OXIMETRY);
+}
+
+bool AppConfig::set_oximetry_advertise_mode(
+    OximetryAdvertiseMode mode) {
+    if (!oximetry_advertise_mode_valid(mode)) return false;
+    if (data_.oximetry_advertise_mode == mode) return true;
+    data_.oximetry_advertise_mode = mode;
+    return persist(DIRTY_OXIMETRY);
 }
 
 bool AppConfig::set_http_auth(const String &user, const String &password) {
@@ -573,6 +661,13 @@ void AppConfig::print_redacted(Print &out) const {
     out.println(data_.timezone);
     out.print("  resmed_time_sync: ");
     out.println(on_off(data_.resmed_time_sync_enabled));
+    out.print("  oximetry: ");
+    out.print(on_off(data_.oximetry_enabled));
+    out.print(" udp_port=");
+    out.print(data_.oximetry_udp_port);
+    out.print(" advertise=");
+    out.println(oximetry_advertise_mode_name(
+        data_.oximetry_advertise_mode));
     out.print("  http_auth: ");
     out.println(data_.http_user.length() || data_.http_password.length()
                     ? "protected"

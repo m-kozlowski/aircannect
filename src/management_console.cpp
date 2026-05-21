@@ -491,6 +491,112 @@ void ManagementConsole::handle_sink(Print &out,
     print_unknown_command(out, "SINK", "sink status, sink debug on|off");
 }
 
+void ManagementConsole::handle_oximetry(
+    Print &out,
+    String rest,
+    OximetryManager &oximetry_manager) {
+    rest.trim();
+    String lower = rest;
+    lower.toLowerCase();
+    if (!lower.length() || lower == "status") {
+        oximetry_manager.print_status(out);
+        return;
+    }
+
+    if (lower == "on" || lower == "enable" || lower == "enabled") {
+        if (!oximetry_manager.set_enabled(true)) {
+            out.println("[OXI] failed to enable");
+            return;
+        }
+        out.println("[OXI] enabled");
+        oximetry_manager.print_status(out);
+        return;
+    }
+
+    if (lower == "off" || lower == "disable" || lower == "disabled") {
+        if (!oximetry_manager.set_enabled(false)) {
+            out.println("[OXI] failed to disable");
+            return;
+        }
+        out.println("[OXI] disabled");
+        oximetry_manager.print_status(out);
+        return;
+    }
+
+    if (lower == "cpap pair" || lower == "cpap pairing" ||
+        lower == "cpap pair start" || lower == "cpap pairing start") {
+        if (!oximetry_manager.set_enabled(true)) {
+            out.println("[OXI] failed to enable");
+            return;
+        }
+        oximetry_manager.request_pairing(true);
+        out.println("[OXI] CPAP pairing window started");
+        oximetry_manager.print_status(out);
+        return;
+    }
+
+    if (lower == "cpap pair stop" || lower == "cpap pairing stop") {
+        oximetry_manager.request_pairing(false);
+        out.println("[OXI] CPAP pairing window stopped");
+        oximetry_manager.print_status(out);
+        return;
+    }
+
+    if (lower == "cpap forget" || lower == "cpap forget-bonds") {
+        if (oximetry_manager.forget_bonds()) {
+            out.println("[OXI] CPAP BLE bonds cleared");
+        } else {
+            out.println("[OXI] CPAP BLE bond clear failed");
+        }
+        return;
+    }
+
+    if (lower == "cpap status") {
+        oximetry_manager.print_status(out);
+        return;
+    }
+
+    if (lower == "sensor" || lower == "sensor status") {
+        out.println("[OXI sensor] not implemented");
+        return;
+    }
+
+    if (lower.startsWith("advertise ")) {
+        String mode = lower.substring(10);
+        mode.trim();
+        if (mode == "start" || mode == "on") {
+            oximetry_manager.request_advertising(true);
+            out.println("[OXI] manual advertising requested");
+            oximetry_manager.print_status(out);
+            return;
+        }
+        if (mode == "stop" || mode == "off") {
+            oximetry_manager.request_advertising(false);
+            out.println("[OXI] manual advertising stopped");
+            oximetry_manager.print_status(out);
+            return;
+        }
+
+        OximetryAdvertiseMode adv_mode;
+        if (!parse_oximetry_advertise_mode(mode, adv_mode) ||
+            !oximetry_manager.set_advertise_mode(adv_mode)) {
+            out.println("[OXI] usage: oxi advertise auto|manual|start|stop");
+            return;
+        }
+        out.print("[OXI] advertise=");
+        out.println(oximetry_advertise_mode_name(adv_mode));
+        return;
+    }
+
+    if (lower == "forget" || lower == "forget-bonds") {
+        out.println("[OXI] use: oxi cpap forget");
+        return;
+    }
+
+    print_unknown_command(out, "OXI",
+                          "oxi status, on, off, cpap, sensor, advertise");
+}
+
 void ManagementConsole::handle_log(Print &out,
                                    String rest,
                                    AppConfig &app_config) {
@@ -959,6 +1065,73 @@ void ManagementConsole::handle_config(Print &out, String rest,
         return;
     }
 
+    if (rest == "oximetry") {
+        out.print("[CONFIG] oximetry=");
+        out.print(on_off_text(app_config.data().oximetry_enabled));
+        out.print(" udp_port=");
+        out.print(app_config.data().oximetry_udp_port);
+        out.print(" advertise=");
+        out.println(oximetry_advertise_mode_name(
+            app_config.data().oximetry_advertise_mode));
+        return;
+    }
+
+    if (rest.startsWith("oximetry ")) {
+        String args = rest.substring(9);
+        int pos = 0;
+        String key;
+        if (!parse_console_arg(args, pos, key)) {
+            out.println("[CONFIG] usage: config oximetry on|off|udp-port PORT|advertise auto|manual");
+            return;
+        }
+        key.toLowerCase();
+        bool ok = false;
+        if (key == "on" || key == "off" || key == "enable" ||
+            key == "disable" || key == "enabled" || key == "disabled") {
+            bool enabled = false;
+            if (key == "enable") enabled = true;
+            else if (key == "disable") enabled = false;
+            else if (!parse_on_off(key, enabled)) {
+                out.println("[CONFIG] usage: config oximetry on|off");
+                return;
+            }
+            ok = app_config.set_oximetry_enabled(enabled);
+        } else if (key == "udp-port" || key == "port") {
+            String port_arg;
+            uint16_t port = 0;
+            if (!parse_console_arg(args, pos, port_arg) ||
+                !parse_uint16_arg(port_arg, port)) {
+                out.println("[CONFIG] usage: config oximetry udp-port PORT");
+                return;
+            }
+            ok = app_config.set_oximetry_udp_port(port);
+        } else if (key == "advertise" || key == "adv") {
+            String mode_arg;
+            OximetryAdvertiseMode mode;
+            if (!parse_console_arg(args, pos, mode_arg) ||
+                !parse_oximetry_advertise_mode(mode_arg, mode)) {
+                out.println("[CONFIG] usage: config oximetry advertise auto|manual");
+                return;
+            }
+            ok = app_config.set_oximetry_advertise_mode(mode);
+        } else {
+            out.println("[CONFIG] usage: config oximetry on|off|udp-port PORT|advertise auto|manual");
+            return;
+        }
+        if (!ok) {
+            out.println("[CONFIG] failed to store oximetry config");
+            return;
+        }
+        out.print("[CONFIG] oximetry=");
+        out.print(on_off_text(app_config.data().oximetry_enabled));
+        out.print(" udp_port=");
+        out.print(app_config.data().oximetry_udp_port);
+        out.print(" advertise=");
+        out.println(oximetry_advertise_mode_name(
+            app_config.data().oximetry_advertise_mode));
+        return;
+    }
+
     if (rest == "http-auth") {
         out.print("[CONFIG] http_auth=");
         out.print(app_config.data().http_user.length() ||
@@ -1103,7 +1276,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
     }
 
     print_unknown_command(out, "CONFIG",
-                          "config, hostname, tcp, softap, wifi-country, timezone, resmed-time-sync, http-auth, http-whitelist, telnet, ota-password, reset, factory-reset");
+                          "config, hostname, tcp, softap, wifi-country, timezone, resmed-time-sync, oximetry, http-auth, http-whitelist, telnet, ota-password, reset, factory-reset");
 }
 
 void ManagementConsole::apply_runtime_config(const AppConfig &app_config,

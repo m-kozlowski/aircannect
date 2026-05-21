@@ -7,6 +7,7 @@
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
+#include "oximetry_manager.h"
 #include "provisioning.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
@@ -36,6 +37,7 @@ static OtaManager ota_manager;
 static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
+static OximetryManager oximetry_manager;
 static ConsoleContext console_ctx{
     rpc_arbiter,
     tcp_bridge,
@@ -46,6 +48,7 @@ static ConsoleContext console_ctx{
     resmed_ota_manager,
     session_manager,
     sink_manager,
+    oximetry_manager,
 };
 
 static bool is_rpc_event(RpcEventKind kind) {
@@ -154,6 +157,7 @@ void setup() {
     app_config.apply_log_config();
     session_manager.begin();
     sink_manager.begin(rpc_arbiter, session_manager);
+    oximetry_manager.begin(app_config);
     resmed_ota_manager.begin(rpc_arbiter);
     time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
     ota_manager.begin(app_config);
@@ -175,7 +179,8 @@ void setup() {
     sync_network_services();
     web_ui.begin(rpc_arbiter, wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
-                 session_manager, sink_manager, console_ctx);
+                 session_manager, sink_manager, oximetry_manager,
+                 console_ctx);
 
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] architecture baseline ready\n");
 }
@@ -192,6 +197,7 @@ void loop() {
     drain_rpc_events();
     session_manager.poll(rpc_arbiter.as11_state(), millis());
     sink_manager.poll();
+    oximetry_manager.poll(wifi_manager.network_available());
     wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||
                                        ota_manager.active() ||
                                        resmed_ota_transport_active);

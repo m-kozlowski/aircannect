@@ -5,11 +5,12 @@
 
 #include "board.h"
 #include "debug_log.h"
+#include "oximetry_types.h"
 #include "softap_mode.h"
 
 namespace aircannect {
 
-static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 12;
+static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 13;
 
 struct AppConfigData {
     uint32_t schema_version = AC_CONFIG_SCHEMA_VERSION;
@@ -33,11 +34,17 @@ struct AppConfigData {
     bool resmed_time_sync_enabled =
         AC_DEFAULT_RESMED_TIME_SYNC_ENABLED != 0;
 
+    bool oximetry_enabled = AC_DEFAULT_OXIMETRY_ENABLED != 0;
+    uint16_t oximetry_udp_port = AC_OXIMETRY_UDP_PORT;
+    OximetryAdvertiseMode oximetry_advertise_mode =
+        OximetryAdvertiseMode::Auto;
+
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
     uint16_t syslog_port = AC_SYSLOG_PORT;
 
     log_level_t log_levels[CAT_COUNT] = {
+        LOG_INFO,
         LOG_INFO,
         LOG_INFO,
         LOG_INFO,
@@ -62,6 +69,9 @@ public:
 
     bool set_timezone(const String &timezone);
     bool set_resmed_time_sync(bool enabled);
+    bool set_oximetry_enabled(bool enabled);
+    bool set_oximetry_udp_port(uint16_t port);
+    bool set_oximetry_advertise_mode(OximetryAdvertiseMode mode);
 
     bool set_http_auth(const String &user, const String &password);
     bool set_auth_whitelist(const String &whitelist);

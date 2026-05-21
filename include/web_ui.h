@@ -10,6 +10,7 @@
 #include "large_text_buffer.h"
 #include "management_console.h"
 #include "ota_manager.h"
+#include "oximetry_manager.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
 #include "session_manager.h"
@@ -42,6 +43,7 @@ public:
                ResmedOtaManager &resmed_ota_manager,
                SessionManager &session_manager,
                SinkManager &sink_manager,
+               OximetryManager &oximetry_manager,
                ConsoleContext &console_ctx,
                uint16_t port = 80);
     void stop();
@@ -77,6 +79,7 @@ private:
     void execute_time_action(const std::string &action);
     void execute_settings_update(const std::string &body);
     void execute_therapy_action(const std::string &action);
+    void execute_oximetry_action(const std::string &action);
     void execute_resmed_ota_command(const struct WebCommand &command);
 
     // SSE client tracking
@@ -118,6 +121,7 @@ private:
     ResmedOtaManager *resmed_ota_manager_ = nullptr;
     SessionManager *session_manager_ = nullptr;
     SinkManager *sink_manager_ = nullptr;
+    OximetryManager *oximetry_manager_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     ManagementConsole web_console_;

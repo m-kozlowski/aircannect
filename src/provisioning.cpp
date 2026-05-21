@@ -26,6 +26,12 @@ struct ProvisionState {
     String syslog_host;
     uint16_t syslog_port = 0;
 
+    bool oximetry_dirty = false;
+    bool oximetry_enabled = false;
+    uint16_t oximetry_udp_port = 0;
+    OximetryAdvertiseMode oximetry_advertise_mode =
+        OximetryAdvertiseMode::Auto;
+
     bool wifi_profile_touched = false;
     WifiProfile wifi[AC_WIFI_PROFILE_MAX];
     bool wifi_touched[AC_WIFI_PROFILE_MAX] = {};
@@ -132,6 +138,25 @@ bool apply_app_key(AppConfig &app_config,
         if (!parse_bool_value(value, bool_value)) return false;
         return app_config.set_resmed_time_sync(bool_value);
     }
+    if (key == "oxi_en") {
+        if (!parse_bool_value(value, bool_value)) return false;
+        state.oximetry_enabled = bool_value;
+        state.oximetry_dirty = true;
+        return true;
+    }
+    if (key == "oxi_udp") {
+        if (!parse_port_value(value, port_value)) return false;
+        state.oximetry_udp_port = port_value;
+        state.oximetry_dirty = true;
+        return true;
+    }
+    if (key == "oxi_adv") {
+        OximetryAdvertiseMode mode;
+        if (!parse_oximetry_advertise_mode(value, mode)) return false;
+        state.oximetry_advertise_mode = mode;
+        state.oximetry_dirty = true;
+        return true;
+    }
     if (key == "http_user") {
         return app_config.set_http_auth(value,
                                         app_config.data().http_password);
@@ -197,6 +222,17 @@ bool commit_grouped_config(AppConfig &app_config, ProvisionState &state) {
                                    state.syslog_port) &&
              ok;
     }
+    if (state.oximetry_dirty) {
+        ok = app_config.set_oximetry_enabled(
+                 state.oximetry_enabled) &&
+             ok;
+        ok = app_config.set_oximetry_udp_port(
+                 state.oximetry_udp_port) &&
+             ok;
+        ok = app_config.set_oximetry_advertise_mode(
+                 state.oximetry_advertise_mode) &&
+             ok;
+    }
     return ok;
 }
 
@@ -230,6 +266,9 @@ void consume_config_file(AppConfig &app_config, WifiManager &wifi_manager) {
     state.syslog_enabled = cfg.syslog_enabled;
     state.syslog_host = cfg.syslog_host;
     state.syslog_port = cfg.syslog_port;
+    state.oximetry_enabled = cfg.oximetry_enabled;
+    state.oximetry_udp_port = cfg.oximetry_udp_port;
+    state.oximetry_advertise_mode = cfg.oximetry_advertise_mode;
 
     size_t lines = 0;
     size_t applied = 0;

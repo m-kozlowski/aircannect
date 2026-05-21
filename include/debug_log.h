@@ -20,6 +20,7 @@ enum log_cat_t {
     CAT_WIFI,
     CAT_STREAM,
     CAT_OTA,
+    CAT_OXI,
     CAT_COUNT,
 };
 
