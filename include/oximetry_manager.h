@@ -100,10 +100,9 @@ public:
     bool set_sensor_autoconnect(const char *addr, bool enabled);
 
     OximetryStatus status() const;
+    size_t sensor_scan_results(OximetrySensorDevice *out, size_t max) const;
+    size_t known_sensors(OximetrySensorDevice *out, size_t max) const;
     void print_status(Print &out) const;
-    void print_sensor_status(Print &out) const;
-    void print_sensor_scan_results(Print &out) const;
-    void print_sensor_known(Print &out) const;
     void on_sensor_sample(uint16_t spo2_raw,
                           uint16_t pulse_raw,
                           bool from_invalid_packet);

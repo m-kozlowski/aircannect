@@ -56,6 +56,7 @@ private:
     void register_routes();
     void reserve_cached_json();
     void build_status_json(LargeTextBuffer &json) const;
+    void build_oximetry_sensors_json(LargeTextBuffer &json) const;
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json) const;
     void build_wifi_json(LargeTextBuffer &json) const;
@@ -79,7 +80,8 @@ private:
     void execute_time_action(const std::string &action);
     void execute_settings_update(const std::string &body);
     void execute_therapy_action(const std::string &action);
-    void execute_oximetry_action(const std::string &action);
+    void execute_oximetry_action(const std::string &action,
+                                 const std::string &body);
     void execute_resmed_ota_command(const struct WebCommand &command);
 
     // SSE client tracking

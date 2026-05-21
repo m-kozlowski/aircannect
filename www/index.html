@@ -453,6 +453,44 @@
       margin: 18px 0 8px;
     }
 
+    .sensor-device {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid #30364166;
+      padding: 10px 0;
+    }
+
+    .sensor-device:last-child {
+      border-bottom: none;
+    }
+
+    .sensor-device-main {
+      min-width: 0;
+    }
+
+    .sensor-device-title {
+      color: var(--text);
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+
+    .sensor-device-meta {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 3px;
+      overflow-wrap: anywhere;
+    }
+
+    .sensor-device-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex: 0 0 auto;
+      flex-wrap: wrap;
+    }
+
     .telemetry-head {
       display: flex;
       align-items: center;
@@ -629,6 +667,15 @@
 
       .chart-grid {
         grid-template-columns: 1fr;
+      }
+
+      .sensor-device {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .sensor-device-actions {
+        justify-content: flex-start;
       }
 
       .row {
@@ -969,6 +1016,32 @@
               <div class="msg" id="oxiTabMsg"></div>
             </div>
           </div>
+
+          <div class="card">
+            <div class="card-head">
+              <span class="label">Sensor Source</span>
+              <span class="badge" id="oxiSensorBadge">Idle</span>
+            </div>
+            <div class="btns">
+              <button class="btn primary" id="oxiSensorScanBtn" onclick="oxiSensorScan()">
+                Scan
+              </button>
+              <button class="btn" id="oxiSensorDisconnectBtn" onclick="oxiSensorDisconnect()">
+                Disconnect
+              </button>
+            </div>
+            <div class="section-title">Scan Results</div>
+            <div id="oxiSensorResults"></div>
+            <div class="msg" id="oxiSensorMsg"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <span class="label">Known Devices</span>
+            </div>
+            <div id="oxiSensorKnown"></div>
+            <div class="msg" id="oxiKnownMsg"></div>
+          </div>
         </section>
 
         <section class="pane" id="p-clinical">
@@ -1174,6 +1247,8 @@
     let streamData = {};
     let settingsData = null;
     let configData = null;
+    let oxiSensorData = {sensor_scan_results: [], sensor_known: []};
+    let oxiSensorsLoading = false;
     let evtSrc = null;
     let consoleSeq = -1;
     let settingsPollTimer = null;
@@ -1232,7 +1307,10 @@
       location.hash = id;
 
       if (id === "dash") loadStatus();
-      if (id === "oxi") loadStatus();
+      if (id === "oxi") {
+        loadStatus();
+        loadOximetrySensors();
+      }
       if (id === "clinical") loadSettings(true);
       if (id === "wifi") loadWifi();
       if (id === "ota") loadOta();
@@ -1246,7 +1324,10 @@
     function refreshActive() {
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       if (pane === "dash") loadStatus();
-      if (pane === "oxi") loadStatus();
+      if (pane === "oxi") {
+        loadStatus();
+        loadOximetrySensors();
+      }
       if (pane === "clinical") loadSettings(true);
       if (pane === "wifi") loadWifi();
       if (pane === "ota") loadOta();
@@ -1915,6 +1996,143 @@
         advStop.disabled = !oxi.advertising &&
           !oxi.manual_advertising_requested;
       }
+
+      renderOximetrySensor(oxi);
+    }
+
+    function sensorDisplayName(device) {
+      if (!device) return "--";
+      const name = (device.name || "").trim();
+      const addr = (device.addr || "").trim();
+      return name || addr || "--";
+    }
+
+    function sensorMeta(device) {
+      if (!device) return "";
+      const parts = [];
+      if (device.addr) parts.push(device.addr);
+      if (Number.isFinite(Number(device.rssi)) && Number(device.rssi) !== 0) {
+        parts.push(Number(device.rssi) + " dBm");
+      }
+      return parts.join(" / ");
+    }
+
+    function renderSensorList(rootId, devices, emptyText, renderControls) {
+      const root = document.getElementById(rootId);
+      if (!root) return;
+      root.innerHTML = "";
+      if (!devices || !devices.length) {
+        const empty = valueSpan(emptyText);
+        empty.style.display = "block";
+        empty.style.textAlign = "left";
+        root.appendChild(empty);
+        return;
+      }
+      devices.forEach((device, index) => {
+        const controls = document.createElement("div");
+        controls.className = "sensor-device-actions";
+        renderControls(controls, device, index);
+
+        const item = document.createElement("div");
+        item.className = "sensor-device";
+        const main = document.createElement("div");
+        main.className = "sensor-device-main";
+        const title = document.createElement("div");
+        title.className = "sensor-device-title";
+        title.textContent = sensorDisplayName(device);
+        main.appendChild(title);
+        const metaText = sensorMeta(device);
+        if (metaText) {
+          const meta = document.createElement("div");
+          meta.className = "sensor-device-meta";
+          meta.textContent = metaText;
+          main.appendChild(meta);
+        }
+        item.appendChild(main);
+        item.appendChild(controls);
+        root.appendChild(item);
+      });
+    }
+
+    function renderOximetrySensor(oxi) {
+      const state = oxi.sensor_state || "off";
+      let badgeStyle = "";
+      let badgeText = state;
+      if (!oxi.enabled) {
+        badgeText = "off";
+      } else if (state === "streaming") {
+        badgeStyle = "good";
+      } else if (state === "connecting" || state === "scanning") {
+        badgeStyle = "warn";
+      }
+      const badge = document.getElementById("oxiSensorBadge");
+      if (badge) {
+        badge.textContent = badgeText;
+        badge.className = "badge " + badgeStyle;
+      }
+
+      const scanResults = oxiSensorData.sensor_scan_results || [];
+      const knownSensors = oxiSensorData.sensor_known || [];
+      const oxiPane = document.getElementById("p-oxi");
+      const tabVisible = oxiPane && oxiPane.classList.contains("active");
+      const scanCount = Number(oxi.sensor_scan_count || 0);
+      const knownCount = Number(oxi.sensor_known_count || 0);
+      const loadedScanCount = Number(
+        oxiSensorData.sensor_scan_count !== undefined ?
+          oxiSensorData.sensor_scan_count : scanResults.length);
+      const loadedKnownCount = Number(
+        oxiSensorData.sensor_known_count !== undefined ?
+          oxiSensorData.sensor_known_count : knownSensors.length);
+      if (tabVisible && !oxiSensorsLoading &&
+          (scanCount !== loadedScanCount || knownCount !== loadedKnownCount)) {
+        setTimeout(loadOximetrySensors, 0);
+      }
+
+      const scanBtn = document.getElementById("oxiSensorScanBtn");
+      const disconnectBtn = document.getElementById("oxiSensorDisconnectBtn");
+      if (scanBtn) {
+        scanBtn.disabled = !oxi.enabled || !oxi.ble_available ||
+          state === "scanning" || state === "connecting";
+      }
+      if (disconnectBtn) {
+        disconnectBtn.disabled = !oxi.sensor_connected;
+      }
+
+      renderSensorList("oxiSensorResults", scanResults,
+        "No scan results", (controls, device) => {
+          const button = document.createElement("button");
+          button.className = "btn primary";
+          button.textContent = "Connect";
+          button.disabled = !oxi.enabled || !oxi.ble_available ||
+            state === "connecting";
+          button.onclick = () => oxiSensorConnect(device.index);
+          controls.appendChild(button);
+        });
+
+      renderSensorList("oxiSensorKnown", knownSensors,
+        "No known devices", (controls, device) => {
+          const auto = document.createElement("button");
+          auto.className = "btn" + (device.autoconnect ? " primary" : "");
+          auto.textContent = device.autoconnect ?
+            "Auto-connect On" : "Auto-connect Off";
+          auto.onclick = () => oxiSensorAutoconnect(
+            device.addr, !device.autoconnect);
+          controls.appendChild(auto);
+
+          const connect = document.createElement("button");
+          connect.className = "btn primary";
+          connect.textContent = "Connect";
+          connect.disabled = !oxi.enabled || !oxi.ble_available ||
+            state === "connecting";
+          connect.onclick = () => oxiSensorConnect(device.addr);
+          controls.appendChild(connect);
+
+          const forget = document.createElement("button");
+          forget.className = "btn danger";
+          forget.textContent = "Forget";
+          forget.onclick = () => oxiSensorForget(device.addr);
+          controls.appendChild(forget);
+        });
     }
 
     function therapyPending(data) {
@@ -1955,6 +2173,22 @@
         renderStatus(statusData);
       } catch (error) {
         apiError(error);
+      }
+    }
+
+    async function loadOximetrySensors() {
+      if (oxiSensorsLoading) return;
+      oxiSensorsLoading = true;
+      try {
+        const response = await api("/api/oximetry/sensors");
+        oxiSensorData = await response.json();
+        const oxi = statusData && statusData.oximetry ?
+          statusData.oximetry : {};
+        renderOximetrySensor(oxi);
+      } catch (error) {
+        apiError(error);
+      } finally {
+        oxiSensorsLoading = false;
       }
     }
 
@@ -2287,19 +2521,22 @@
       }
     }
 
-    async function oxiAction(action) {
+    async function oxiAction(action, extra, msgId) {
       try {
+        const body = Object.assign({action}, extra || {});
         const response = await api("/api/oximetry", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({action}),
+          body: JSON.stringify(body),
         });
         const data = await response.json();
-        msg("oxiTabMsg", data.result || "Queued", data.ok);
+        msg(msgId || "oxiTabMsg", data.result || "Queued", data.ok);
         setTimeout(loadStatus, 500);
         setTimeout(loadStatus, 1500);
+        setTimeout(loadOximetrySensors, 700);
+        setTimeout(loadOximetrySensors, 2500);
       } catch (error) {
-        msg("oxiTabMsg", error.message, false);
+        msg(msgId || "oxiTabMsg", error.message, false);
       }
     }
 
@@ -2311,6 +2548,36 @@
     function oxiForget() {
       if (!confirm("Forget paired AirSense oximeter bond?")) return;
       oxiAction("forget");
+    }
+
+    function oxiSensorScan() {
+      oxiAction("sensor_scan", null, "oxiSensorMsg");
+    }
+
+    function oxiSensorConnect(target) {
+      if (target === undefined || target === null || target === "") return;
+      oxiAction("sensor_connect", {target: String(target)}, "oxiKnownMsg");
+    }
+
+    function oxiSensorDisconnect() {
+      oxiAction("sensor_disconnect", null, "oxiSensorMsg");
+    }
+
+    function oxiSensorForget(addr) {
+      if (!addr) return;
+      if (!confirm("Forget BLE oximeter " + addr + "?")) return;
+      oxiAction("sensor_forget", {addr}, "oxiKnownMsg");
+    }
+
+    function oxiSensorAutoconnect(addr, enabled) {
+      if (!addr) return;
+      const known = oxiSensorData.sensor_known || [];
+      known.forEach((device) => {
+        if (device.addr === addr) device.autoconnect = enabled;
+      });
+      const oxi = statusData && statusData.oximetry ? statusData.oximetry : {};
+      renderOximetrySensor(oxi);
+      oxiAction("sensor_autoconnect", {addr, enabled}, "oxiKnownMsg");
     }
 
     async function saveOximetryAdvertiseConfig() {

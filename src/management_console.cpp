@@ -10,6 +10,102 @@
 
 namespace aircannect {
 
+namespace {
+
+const char *sensor_state_text(OximetrySensorState state) {
+    switch (state) {
+        case OximetrySensorState::Off: return "off";
+        case OximetrySensorState::Idle: return "idle";
+        case OximetrySensorState::Scanning: return "scanning";
+        case OximetrySensorState::Connecting: return "connecting";
+        case OximetrySensorState::Streaming: return "streaming";
+        default: return "unknown";
+    }
+}
+
+void print_yes_no(Print &out, bool value) {
+    out.print(value ? "yes" : "no");
+}
+
+void print_oximetry_sensor_status(Print &out,
+                                  const OximetryManager &oximetry_manager) {
+    const OximetryStatus s = oximetry_manager.status();
+    out.print("[OXI sensor] state=");
+    out.print(sensor_state_text(s.sensor_state));
+    out.print(" task=");
+    print_yes_no(out, s.sensor_task_started);
+    out.print(" scanning=");
+    print_yes_no(out, s.sensor_scanning);
+    out.print(" connected=");
+    print_yes_no(out, s.sensor_connected);
+    if (s.sensor_peer[0]) {
+        out.print(" peer=");
+        out.print(s.sensor_peer);
+    }
+    if (s.sensor_name[0]) {
+        out.print(" name=\"");
+        out.print(s.sensor_name);
+        out.print("\"");
+    }
+    out.print(" known=");
+    out.print(s.sensor_known_count);
+    out.print(" results=");
+    out.print(s.sensor_scan_count);
+    out.print(" notifications=");
+    out.print(s.sensor_notifications);
+    out.print(" invalid=");
+    out.print(s.sensor_invalid_notifications);
+    out.print(" connects=");
+    out.print(s.sensor_connects);
+    out.print(" disconnects=");
+    out.print(s.sensor_disconnects);
+    out.print(" failures=");
+    out.println(s.sensor_connect_failures);
+}
+
+void print_oximetry_sensor_scan_results(
+    Print &out,
+    const OximetryManager &oximetry_manager) {
+    out.println("[OXI sensor scan]");
+    OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
+    const size_t count =
+        oximetry_manager.sensor_scan_results(
+            snapshot, AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS);
+    for (size_t i = 0; i < count; ++i) {
+        out.print("  ");
+        out.print(i);
+        out.print(": ");
+        out.print(snapshot[i].addr);
+        out.print(" rssi=");
+        out.print(snapshot[i].rssi);
+        out.print(" name=\"");
+        out.print(snapshot[i].name);
+        out.println("\"");
+    }
+    if (!count) out.println("  <none>");
+}
+
+void print_oximetry_sensor_known(Print &out,
+                                 const OximetryManager &oximetry_manager) {
+    out.println("[OXI sensor known]");
+    OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+    const size_t count =
+        oximetry_manager.known_sensors(snapshot,
+                                       AC_OXIMETRY_SENSOR_MAX_KNOWN);
+    for (size_t i = 0; i < count; ++i) {
+        out.print("  ");
+        out.print(snapshot[i].addr);
+        out.print(" autoconnect=");
+        print_yes_no(out, snapshot[i].autoconnect);
+        out.print(" name=\"");
+        out.print(snapshot[i].name);
+        out.println("\"");
+    }
+    if (!count) out.println("  <none>");
+}
+
+}  // namespace
+
 void ManagementConsole::begin(Print &out) {
     out.println("[CLI] ready. Type 'help'.");
 }
@@ -557,7 +653,7 @@ void ManagementConsole::handle_oximetry(
     }
 
     if (lower == "sensor" || lower == "sensor status") {
-        oximetry_manager.print_sensor_status(out);
+        print_oximetry_sensor_status(out, oximetry_manager);
         return;
     }
 
@@ -567,24 +663,24 @@ void ManagementConsole::handle_oximetry(
         } else {
             out.println("[OXI sensor] scan failed");
         }
-        oximetry_manager.print_sensor_status(out);
+        print_oximetry_sensor_status(out, oximetry_manager);
         return;
     }
 
     if (lower == "sensor results" || lower == "sensor scan-results") {
-        oximetry_manager.print_sensor_scan_results(out);
+        print_oximetry_sensor_scan_results(out, oximetry_manager);
         return;
     }
 
     if (lower == "sensor list" || lower == "sensor known") {
-        oximetry_manager.print_sensor_known(out);
+        print_oximetry_sensor_known(out, oximetry_manager);
         return;
     }
 
     if (lower == "sensor disconnect") {
         oximetry_manager.request_sensor_disconnect();
         out.println("[OXI sensor] disconnect queued");
-        oximetry_manager.print_sensor_status(out);
+        print_oximetry_sensor_status(out, oximetry_manager);
         return;
     }
 
@@ -596,7 +692,7 @@ void ManagementConsole::handle_oximetry(
             return;
         }
         out.println("[OXI sensor] connect queued");
-        oximetry_manager.print_sensor_status(out);
+        print_oximetry_sensor_status(out, oximetry_manager);
         return;
     }
 
@@ -608,7 +704,7 @@ void ManagementConsole::handle_oximetry(
             return;
         }
         out.println("[OXI sensor] forgotten");
-        oximetry_manager.print_sensor_known(out);
+        print_oximetry_sensor_known(out, oximetry_manager);
         return;
     }
 
@@ -631,7 +727,7 @@ void ManagementConsole::handle_oximetry(
         }
         out.print("[OXI sensor] autoconnect=");
         out.println(on_off_text(enabled));
-        oximetry_manager.print_sensor_known(out);
+        print_oximetry_sensor_known(out, oximetry_manager);
         return;
     }
 

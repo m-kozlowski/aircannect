@@ -174,6 +174,33 @@ const char *oximetry_source_name(OximetrySource source) {
     }
 }
 
+const char *oximetry_sensor_state_name(OximetrySensorState state) {
+    switch (state) {
+        case OximetrySensorState::Off: return "off";
+        case OximetrySensorState::Idle: return "idle";
+        case OximetrySensorState::Scanning: return "scanning";
+        case OximetrySensorState::Connecting: return "connecting";
+        case OximetrySensorState::Streaming: return "streaming";
+        default: return "unknown";
+    }
+}
+
+template <typename JsonOut>
+void append_oximetry_sensor(JsonOut &json,
+                            const OximetrySensorDevice &device,
+                            size_t index,
+                            bool include_index) {
+    json += '{';
+    if (include_index) json_add_int(json, "index", index, false);
+    else json_add_string(json, "addr", device.addr, false);
+    if (include_index) json_add_string(json, "addr", device.addr);
+    json_add_int(json, "addr_type", device.addr_type);
+    json_add_string(json, "name", device.name);
+    json_add_int(json, "rssi", device.rssi);
+    json_add_bool(json, "autoconnect", device.autoconnect);
+    json += '}';
+}
+
 template <typename JsonOut>
 void append_json_float_value(JsonOut &json, float value) {
     char buf[24];
@@ -1093,6 +1120,23 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_int(json, "ble_notifications", oxi.ble_notifications);
     json_add_int(json, "ble_invalid_notifications",
                  oxi.ble_invalid_notifications);
+    json_add_string(json, "sensor_state",
+                    oximetry_sensor_state_name(oxi.sensor_state));
+    json_add_bool(json, "sensor_task_started", oxi.sensor_task_started);
+    json_add_bool(json, "sensor_scanning", oxi.sensor_scanning);
+    json_add_bool(json, "sensor_connected", oxi.sensor_connected);
+    json_add_int(json, "sensor_known_count", oxi.sensor_known_count);
+    json_add_int(json, "sensor_scan_count", oxi.sensor_scan_count);
+    json_add_int(json, "sensor_notifications", oxi.sensor_notifications);
+    json_add_int(json, "sensor_invalid_notifications",
+                 oxi.sensor_invalid_notifications);
+    json_add_int(json, "sensor_connects", oxi.sensor_connects);
+    json_add_int(json, "sensor_disconnects", oxi.sensor_disconnects);
+    json_add_int(json, "sensor_connect_failures",
+                 oxi.sensor_connect_failures);
+    json_add_int(json, "sensor_scans", oxi.sensor_scans);
+    json_add_string(json, "sensor_peer", oxi.sensor_peer);
+    json_add_string(json, "sensor_name", oxi.sensor_name);
     json += '}';
     json_add_string(json, "device_datetime",
                     as11.device_datetime().c_str());
@@ -1128,6 +1172,40 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
         json += ",\"timezone_offset_min\":null";
     }
     json += '}';
+}
+
+void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
+    const OximetryStatus oxi = oximetry_manager_->status();
+    OximetrySensorDevice oxi_scan[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
+    OximetrySensorDevice oxi_known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
+    const size_t oxi_scan_count =
+        oximetry_manager_->sensor_scan_results(
+            oxi_scan, AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS);
+    const size_t oxi_known_count =
+        oximetry_manager_->known_sensors(oxi_known,
+                                         AC_OXIMETRY_SENSOR_MAX_KNOWN);
+
+    json = "{";
+    json_add_string(json, "sensor_state",
+                    oximetry_sensor_state_name(oxi.sensor_state), false);
+    json_add_bool(json, "sensor_task_started", oxi.sensor_task_started);
+    json_add_bool(json, "sensor_scanning", oxi.sensor_scanning);
+    json_add_bool(json, "sensor_connected", oxi.sensor_connected);
+    json_add_int(json, "sensor_known_count", oxi.sensor_known_count);
+    json_add_int(json, "sensor_scan_count", oxi.sensor_scan_count);
+    json_add_string(json, "sensor_peer", oxi.sensor_peer);
+    json_add_string(json, "sensor_name", oxi.sensor_name);
+    json += ",\"sensor_scan_results\":[";
+    for (size_t i = 0; i < oxi_scan_count; ++i) {
+        if (i) json += ',';
+        append_oximetry_sensor(json, oxi_scan[i], i, true);
+    }
+    json += "],\"sensor_known\":[";
+    for (size_t i = 0; i < oxi_known_count; ++i) {
+        if (i) json += ',';
+        append_oximetry_sensor(json, oxi_known[i], i, false);
+    }
+    json += "]}";
 }
 
 void WebUI::build_stream_json(LargeTextBuffer &json) const {
@@ -1420,7 +1498,7 @@ void WebUI::execute_command(WebCommand &command) {
             execute_therapy_action(command.text);
             break;
         case WebCommandOximetryAction:
-            execute_oximetry_action(command.text);
+            execute_oximetry_action(command.text, command.body);
             break;
         case WebCommandResmedOtaInit:
         case WebCommandResmedOtaBlock:
@@ -1642,7 +1720,8 @@ void WebUI::execute_therapy_action(const std::string &action) {
     snapshots_dirty_ = true;
 }
 
-void WebUI::execute_oximetry_action(const std::string &action) {
+void WebUI::execute_oximetry_action(const std::string &action,
+                                    const std::string &body) {
     if (!oximetry_manager_) return;
     if (action == "enable") {
         oximetry_manager_->set_enabled(true);
@@ -1659,6 +1738,28 @@ void WebUI::execute_oximetry_action(const std::string &action) {
         oximetry_manager_->request_advertising(true);
     } else if (action == "advertise_stop") {
         oximetry_manager_->request_advertising(false);
+    } else if (action == "sensor_scan") {
+        oximetry_manager_->request_sensor_scan();
+    } else if (action == "sensor_disconnect") {
+        oximetry_manager_->request_sensor_disconnect();
+    } else if (action == "sensor_connect" ||
+               action == "sensor_forget" ||
+               action == "sensor_autoconnect") {
+        JsonDocument doc;
+        if (deserializeJson(doc, body.c_str())) return;
+        String target;
+        String addr;
+        json_get_string(doc, "target", target);
+        json_get_string(doc, "addr", addr);
+        if (action == "sensor_connect") {
+            oximetry_manager_->request_sensor_connect(target.c_str());
+        } else if (action == "sensor_forget") {
+            oximetry_manager_->forget_sensor(addr.c_str());
+        } else if (action == "sensor_autoconnect" &&
+                   doc["enabled"].is<bool>()) {
+            oximetry_manager_->set_sensor_autoconnect(
+                addr.c_str(), doc["enabled"].as<bool>());
+        }
     }
     snapshots_dirty_ = true;
 }
@@ -2001,10 +2102,19 @@ void WebUI::register_routes() {
             if (queued) {
                 queued->kind = WebCommandOximetryAction;
                 queued->text = action.c_str();
+                queued->body = body;
             }
             send_queue_result(request, enqueue_command(queued));
         },
         nullptr, handle_body);
+
+    server_->on("/api/oximetry/sensors", HTTP_GET,
+        [this](AsyncWebServerRequest *request) {
+            LargeTextBuffer json;
+            json.reserve(2048);
+            build_oximetry_sensors_json(json);
+            request->send(200, "application/json", String(json.c_str()));
+        });
 
     server_->on("/api/wifi", HTTP_GET, [this](AsyncWebServerRequest *request) {
         send_cached(request, cached_wifi_json_);

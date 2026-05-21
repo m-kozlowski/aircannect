@@ -391,6 +391,41 @@ OximetryStatus OximetryManager::status() const {
     return out;
 }
 
+size_t OximetryManager::sensor_scan_results(OximetrySensorDevice *out,
+                                            size_t max) const {
+    if (!out || !max) return 0;
+    size_t count = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    count = sensor_scan_count_;
+    if (count > max) count = max;
+    for (size_t i = 0; i < count; ++i) out[i] = sensor_scan_results_[i];
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    return count;
+}
+
+size_t OximetryManager::known_sensors(OximetrySensorDevice *out,
+                                      size_t max) const {
+    if (!out || !max) return 0;
+    size_t count = 0;
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    for (size_t i = 0;
+         i < AC_OXIMETRY_SENSOR_MAX_KNOWN && count < max;
+         ++i) {
+        if (!sensor_known_[i].addr[0]) continue;
+        out[count++] = sensor_known_[i];
+    }
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    return count;
+}
+
 void OximetryManager::print_status(Print &out) const {
     const OximetryStatus s = status();
     out.print("[OXI] enabled=");
@@ -456,98 +491,6 @@ void OximetryManager::print_status(Print &out) const {
     out.print(" name=\"");
     out.print(s.ble_name);
     out.println("\"");
-}
-
-void OximetryManager::print_sensor_status(Print &out) const {
-    const OximetryStatus s = status();
-    out.print("[OXI sensor] state=");
-    out.print(sensor_state_name(s.sensor_state));
-    out.print(" task=");
-    print_bool(out, s.sensor_task_started);
-    out.print(" scanning=");
-    print_bool(out, s.sensor_scanning);
-    out.print(" connected=");
-    print_bool(out, s.sensor_connected);
-    if (s.sensor_peer[0]) {
-        out.print(" peer=");
-        out.print(s.sensor_peer);
-    }
-    if (s.sensor_name[0]) {
-        out.print(" name=\"");
-        out.print(s.sensor_name);
-        out.print("\"");
-    }
-    out.print(" known=");
-    out.print(s.sensor_known_count);
-    out.print(" results=");
-    out.print(s.sensor_scan_count);
-    out.print(" notifications=");
-    out.print(s.sensor_notifications);
-    out.print(" invalid=");
-    out.print(s.sensor_invalid_notifications);
-    out.print(" connects=");
-    out.print(s.sensor_connects);
-    out.print(" disconnects=");
-    out.print(s.sensor_disconnects);
-    out.print(" failures=");
-    out.println(s.sensor_connect_failures);
-}
-
-void OximetryManager::print_sensor_scan_results(Print &out) const {
-    out.println("[OXI sensor scan]");
-    OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
-    uint8_t count = 0;
-#if AC_OXIMETRY_BLE_ENABLED
-    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
-#endif
-    count = sensor_scan_count_;
-    for (uint8_t i = 0; i < count; ++i) snapshot[i] = sensor_scan_results_[i];
-#if AC_OXIMETRY_BLE_ENABLED
-    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
-#endif
-    for (uint8_t i = 0; i < count; ++i) {
-        out.print("  ");
-        out.print(i);
-        out.print(": ");
-        out.print(snapshot[i].addr);
-        out.print(" type=");
-        out.print(snapshot[i].addr_type);
-        out.print(" rssi=");
-        out.print(snapshot[i].rssi);
-        out.print(" name=\"");
-        out.print(snapshot[i].name);
-        out.println("\"");
-    }
-    if (!count) out.println("  <none>");
-}
-
-void OximetryManager::print_sensor_known(Print &out) const {
-    out.println("[OXI sensor known]");
-    OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_KNOWN];
-#if AC_OXIMETRY_BLE_ENABLED
-    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
-#endif
-    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
-        snapshot[i] = sensor_known_[i];
-    }
-#if AC_OXIMETRY_BLE_ENABLED
-    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
-#endif
-    bool any = false;
-    for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
-        if (!snapshot[i].addr[0]) continue;
-        any = true;
-        out.print("  ");
-        out.print(snapshot[i].addr);
-        out.print(" type=");
-        out.print(snapshot[i].addr_type);
-        out.print(" autoconnect=");
-        print_bool(out, snapshot[i].autoconnect);
-        out.print(" name=\"");
-        out.print(snapshot[i].name);
-        out.println("\"");
-    }
-    if (!any) out.println("  <none>");
 }
 
 void OximetryManager::apply_config() {
