@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "board.h"
+#include "debug_log.h"
 
 #if AC_STORAGE_SDMMC_ENABLED
 #include "soc/soc_caps.h"
@@ -250,16 +251,33 @@ bool remount() {
     reset_status();
 
 #if AC_STORAGE_SDMMC_ENABLED
-    if (mount_sdmmc()) return true;
+    if (mount_sdmmc()) {
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[STORAGE] mounted type=%s card=%s mount=%s\n",
+                  type_name(current.type), current.card_type,
+                  current.mount_point);
+        return true;
+    }
 #endif
 #if AC_STORAGE_SPI_SD_ENABLED
-    if (mount_spi_sd()) return true;
+    if (mount_spi_sd()) {
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[STORAGE] mounted type=%s card=%s mount=%s\n",
+                  type_name(current.type), current.card_type,
+                  current.mount_point);
+        return true;
+    }
 #endif
 
     if (!current.configured) {
         set_state(StorageType::None, StorageState::Disabled,
                   "storage backend disabled");
     }
+    Log::logf(CAT_GENERAL,
+              current.state == StorageState::Error ? LOG_WARN : LOG_DEBUG,
+              "[STORAGE] unavailable type=%s state=%s error=%s\n",
+              type_name(current.type), state_name(current.state),
+              current.last_error[0] ? current.last_error : "--");
     return false;
 }
 

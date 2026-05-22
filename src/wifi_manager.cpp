@@ -312,6 +312,9 @@ bool WifiManager::configure_sta(const String &ssid, const String &password) {
     profile_count_ = 1;
     sta_configured_ = true;
     save_config();
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "[WiFi] configured single STA profile SSID=%s auth=%s\n",
+              ssid.c_str(), password.length() ? "password" : "open");
     return reconnect();
 }
 
@@ -377,6 +380,9 @@ bool WifiManager::configure_open_sta(const String &ssid) {
     profile_count_ = 1;
     sta_configured_ = true;
     save_config();
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "[WiFi] configured single open STA profile SSID=%s\n",
+              ssid.c_str());
     return reconnect();
 }
 
@@ -391,23 +397,42 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
         profiles_[i].password = open_network ? "" : password;
         sta_configured_ = true;
         save_config(i);
+        Log::logf(CAT_WIFI, LOG_INFO,
+                  "[WiFi] updated STA profile %u SSID=%s auth=%s\n",
+                  static_cast<unsigned>(i), clean_ssid.c_str(),
+                  open_network ? "open" : "password");
         return reconnect();
     }
 
-    if (profile_count_ >= AC_WIFI_PROFILE_MAX) return false;
+    if (profile_count_ >= AC_WIFI_PROFILE_MAX) {
+        Log::logf(CAT_WIFI, LOG_WARN,
+                  "[WiFi] cannot add STA profile SSID=%s: profile list full\n",
+                  clean_ssid.c_str());
+        return false;
+    }
     const size_t index = profile_count_;
     profiles_[index].ssid = clean_ssid;
     profiles_[index].password = open_network ? "" : password;
     profile_count_++;
     sta_configured_ = true;
     save_config(index);
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "[WiFi] added STA profile %u SSID=%s auth=%s\n",
+              static_cast<unsigned>(index), clean_ssid.c_str(),
+              open_network ? "open" : "password");
     return reconnect();
 }
 
 bool WifiManager::replace_profiles(const WifiProfile *profiles,
                                    size_t count,
                                    bool reconnect_now) {
-    if (count > AC_WIFI_PROFILE_MAX) return false;
+    if (count > AC_WIFI_PROFILE_MAX) {
+        Log::logf(CAT_WIFI, LOG_WARN,
+                  "[WiFi] profile replace rejected: count=%u max=%u\n",
+                  static_cast<unsigned>(count),
+                  static_cast<unsigned>(AC_WIFI_PROFILE_MAX));
+        return false;
+    }
     if (count > 0 && !profiles) return false;
 
     WifiProfile cleaned[AC_WIFI_PROFILE_MAX];
@@ -435,11 +460,16 @@ bool WifiManager::replace_profiles(const WifiProfile *profiles,
         sta_pass_ = "";
     }
     save_config();
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "[WiFi] replaced STA profiles count=%u reconnect=%s\n",
+              static_cast<unsigned>(profile_count_),
+              reconnect_now ? "yes" : "no");
     return reconnect_now ? reconnect() : true;
 }
 
 bool WifiManager::remove_profile(size_t index) {
     if (index >= profile_count_) return false;
+    const String removed_ssid = profiles_[index].ssid;
     for (size_t i = index + 1; i < profile_count_; ++i) {
         profiles_[i - 1] = profiles_[i];
     }
@@ -447,6 +477,10 @@ bool WifiManager::remove_profile(size_t index) {
     profiles_[profile_count_] = {};
     sta_configured_ = profile_count_ > 0;
     save_config(index);
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "[WiFi] removed STA profile %u SSID=%s remaining=%u\n",
+              static_cast<unsigned>(index), removed_ssid.c_str(),
+              static_cast<unsigned>(profile_count_));
     return reconnect();
 }
 
@@ -458,6 +492,7 @@ void WifiManager::clear_sta_config() {
     active_profile_index_ = -1;
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     save_config();
+    Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] cleared STA profiles\n");
     reconnect();
 }
 
@@ -799,8 +834,15 @@ void WifiManager::cleanup_manual_scan() {
 
     if (manual_scan_completed_ms_ == 0) {
         manual_scan_completed_ms_ = millis();
-        Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] manual scan complete count=%d\n",
-                  static_cast<int>(result));
+        if (result < 0) {
+            Log::logf(CAT_WIFI, LOG_WARN,
+                      "[WiFi] manual scan failed rc=%d\n",
+                      static_cast<int>(result));
+        } else {
+            Log::logf(CAT_WIFI, LOG_INFO,
+                      "[WiFi] manual scan complete count=%d\n",
+                      static_cast<int>(result));
+        }
         return;
     }
 
@@ -883,21 +925,27 @@ WifiScanStatus WifiManager::manual_scan_status() {
 
 WifiScanStartResult WifiManager::start_manual_scan() {
     if (mode_state_ == WifiModeState::StaRoamScanning) {
+        Log::logf(CAT_WIFI, LOG_DEBUG,
+                  "[WiFi] manual scan deferred: roaming scan active\n");
         return WifiScanStartResult::RoamInProgress;
     }
 
     if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
+        Log::logf(CAT_WIFI, LOG_DEBUG,
+                  "[WiFi] manual scan request ignored: scan already running\n");
         return WifiScanStartResult::Running;
     }
 
     WiFi.scanDelete();
     int16_t rc = WiFi.scanNetworks(true);
     if (rc == WIFI_SCAN_FAILED) {
+        Log::logf(CAT_WIFI, LOG_WARN, "[WiFi] manual scan start failed\n");
         return WifiScanStartResult::Failed;
     }
 
     manual_scan_active_ = true;
     manual_scan_completed_ms_ = 0;
+    Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] manual scan started\n");
     return WifiScanStartResult::Started;
 }
 

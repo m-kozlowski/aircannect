@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "debug_log.h"
+
 namespace aircannect {
 
 void SessionManager::begin() {
@@ -108,7 +110,6 @@ void SessionManager::print_status(Print &out) const {
 void SessionManager::start_session(const As11DeviceState &as11,
                                    uint32_t now_ms,
                                    const char *reason) {
-    (void)reason;
     const uint32_t start_count = status_.start_count;
     const uint32_t end_count = status_.end_count;
     status_ = SessionStatus();
@@ -121,6 +122,11 @@ void SessionManager::start_session(const As11DeviceState &as11,
     copy_time(status_.start_device_time,
               sizeof(status_.start_device_time),
               as11.device_datetime());
+    Log::logf(CAT_STREAM, LOG_INFO,
+              "[SESSION] started id=%lu reason=%s device_time=%s\n",
+              static_cast<unsigned long>(status_.session_id),
+              reason ? reason : "--",
+              status_.start_device_time[0] ? status_.start_device_time : "--");
 }
 
 void SessionManager::end_session(const As11DeviceState &as11,
@@ -134,6 +140,12 @@ void SessionManager::end_session(const As11DeviceState &as11,
               sizeof(status_.end_device_time),
               as11.device_datetime());
     copy_text(status_.end_reason, sizeof(status_.end_reason), reason);
+    Log::logf(CAT_STREAM, LOG_INFO,
+              "[SESSION] ended id=%lu reason=%s frames=%lu drops=%lu\n",
+              static_cast<unsigned long>(status_.session_id),
+              status_.end_reason[0] ? status_.end_reason : "--",
+              static_cast<unsigned long>(status_.frame_count),
+              static_cast<unsigned long>(status_.dropped_frames));
 }
 
 void SessionManager::copy_time(char *dst,
