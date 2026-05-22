@@ -218,8 +218,7 @@ void SinkManager::drain_debug_stream(uint32_t now_ms) {
     }
 
     const uint32_t queue_drops =
-        arbiter_->stream_broker().consumer_queue_drops(
-            status_.debug_stream_handle);
+        arbiter_->stream_consumer_queue_drops(status_.debug_stream_handle);
     if (queue_drops < last_debug_queue_drops_) {
         last_debug_queue_drops_ = queue_drops;
     } else if (queue_drops != last_debug_queue_drops_) {

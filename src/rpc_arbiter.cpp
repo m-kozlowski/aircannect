@@ -252,6 +252,11 @@ bool RpcArbiter::stream_consumer_active(StreamConsumerHandle handle) const {
     return stream_.consumer_active(handle);
 }
 
+uint32_t RpcArbiter::stream_consumer_queue_drops(
+    StreamConsumerHandle handle) const {
+    return stream_.consumer_queue_drops(handle);
+}
+
 bool RpcArbiter::stream_activity_active() const {
     if (stream_.desired_active() || stream_.actual_active() ||
         stream_.pending()) {

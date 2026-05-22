@@ -111,6 +111,7 @@ public:
                                       const std::string &params_json);
     void release_stream(StreamConsumerHandle handle);
     bool stream_consumer_active(StreamConsumerHandle handle) const;
+    uint32_t stream_consumer_queue_drops(StreamConsumerHandle handle) const;
     bool stream_activity_active() const;
     void set_stream_frame_observer(StreamFrameObserver observer,
                                    void *context);
