@@ -67,6 +67,7 @@ private:
     void build_console_json(LargeTextBuffer &json) const;
     void send_cached_settings(AsyncWebServerRequest *request,
                               int requested_mode);
+    void mark_snapshots_dirty(uint16_t mask);
     void publish_snapshots(bool force);
 
     // Deferred command queue
@@ -113,6 +114,24 @@ private:
         AsyncEventSourceClient *client = nullptr;
         uint32_t connected_ms = 0;
     };
+
+    static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
+    static constexpr uint16_t SNAPSHOT_STREAM = 1u << 1;
+    static constexpr uint16_t SNAPSHOT_CONSOLE = 1u << 2;
+    static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 3;
+    static constexpr uint16_t SNAPSHOT_WIFI = 1u << 4;
+    static constexpr uint16_t SNAPSHOT_OXIMETRY_SENSORS = 1u << 5;
+    static constexpr uint16_t SNAPSHOT_OTA = 1u << 6;
+    static constexpr uint16_t SNAPSHOT_RESMED_OTA = 1u << 7;
+    static constexpr uint16_t SNAPSHOT_SETTINGS = 1u << 8;
+    static constexpr uint16_t SNAPSHOT_ALL =
+        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONSOLE |
+        SNAPSHOT_CONFIG | SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS |
+        SNAPSHOT_OTA | SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
+    static constexpr uint16_t SNAPSHOT_PERIODIC =
+        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_WIFI |
+        SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
+        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
 
     RpcArbiter *arbiter_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
@@ -177,7 +196,7 @@ private:
     int requested_settings_mode_ = -1;
     bool cached_settings_refresh_queued_ = false;
     bool snapshots_ready_ = false;
-    bool snapshots_dirty_ = true;
+    uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;
     uint32_t last_sse_push_ms_ = 0;
     bool started_ = false;

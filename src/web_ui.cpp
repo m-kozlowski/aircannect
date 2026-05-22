@@ -462,7 +462,7 @@ void WebUI::stop() {
     live_json_ = "";
     reset_live_batch();
     snapshots_ready_ = false;
-    snapshots_dirty_ = true;
+    snapshots_dirty_mask_ = SNAPSHOT_ALL;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     started_ = false;
@@ -676,7 +676,7 @@ void WebUI::attach_live_stream(uint32_t now_ms) {
         live_stream_handle_ = result.handle;
         live_last_error_[0] = 0;
         live_state_dirty_ = true;
-        snapshots_dirty_ = true;
+        mark_snapshots_dirty(SNAPSHOT_STREAM);
         return;
     }
 
@@ -684,7 +684,7 @@ void WebUI::attach_live_stream(uint32_t now_ms) {
     snprintf(live_last_error_, sizeof(live_last_error_), "acquire:%u",
              static_cast<unsigned>(result.status));
     live_state_dirty_ = true;
-    snapshots_dirty_ = true;
+    mark_snapshots_dirty(SNAPSHOT_STREAM);
 }
 
 void WebUI::release_live_stream() {
@@ -694,7 +694,7 @@ void WebUI::release_live_stream() {
     live_stream_handle_ = STREAM_CONSUMER_INVALID;
     reset_live_batch();
     live_state_dirty_ = true;
-    snapshots_dirty_ = true;
+    mark_snapshots_dirty(SNAPSHOT_STREAM);
 }
 
 void WebUI::drain_live_stream(uint32_t now_ms) {
@@ -825,7 +825,7 @@ void WebUI::append_console_log(const String &text) {
         console_log_.remove(0, newline + 1);
     }
     console_seq_++;
-    snapshots_dirty_ = true;
+    mark_snapshots_dirty(SNAPSHOT_CONSOLE);
 }
 
 void WebUI::build_console_json(LargeTextBuffer &json) const {
@@ -833,6 +833,10 @@ void WebUI::build_console_json(LargeTextBuffer &json) const {
     json_add_int(json, "seq", console_seq_, false);
     json_add_string(json, "log", console_log_.c_str());
     json += '}';
+}
+
+void WebUI::mark_snapshots_dirty(uint16_t mask) {
+    snapshots_dirty_mask_ |= mask;
 }
 
 void WebUI::send_cached_settings(AsyncWebServerRequest *request,
@@ -849,7 +853,7 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
     if (requested_mode >= 0 && requested_mode != cached_settings_mode_) {
         requested_settings_mode_ = requested_mode;
         cached_settings_refresh_queued_ = true;
-        snapshots_dirty_ = true;
+        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
         mismatch = true;
     } else {
         has_cached = cached_settings_json_.length() > 0;
@@ -1432,44 +1436,67 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
 void WebUI::publish_snapshots(bool force) {
     const uint32_t now = millis();
     if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
-    const bool dirty = snapshots_dirty_ || !snapshots_ready_;
+    const bool periodic_due =
+        static_cast<int32_t>(now - last_snapshot_ms_) >=
+        static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
+    uint16_t rebuild_mask = snapshots_dirty_mask_;
+    if (force || !snapshots_ready_) {
+        rebuild_mask = SNAPSHOT_ALL;
+    } else if (periodic_due) {
+        rebuild_mask |= SNAPSHOT_PERIODIC;
+    }
 
-    if (!force && !dirty &&
-        static_cast<int32_t>(now - last_snapshot_ms_) <
-            static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS)) {
+    if (!rebuild_mask) {
         xSemaphoreGive(cache_mutex_);
         return;
     }
 
-    const int requested_mode = requested_settings_mode_;
-    const bool refresh_queued = cached_settings_refresh_queued_;
-    int published_settings_mode = requested_mode;
-    if (published_settings_mode < 0) {
-        published_settings_mode = arbiter_->as11_settings().mode_index();
+    if (rebuild_mask & SNAPSHOT_STATUS) build_status_json(cached_status_json_);
+    if (rebuild_mask & SNAPSHOT_STREAM) build_stream_json(cached_stream_json_);
+    if (rebuild_mask & SNAPSHOT_CONSOLE) {
+        build_console_json(cached_console_json_);
+    }
+    if (rebuild_mask & SNAPSHOT_CONFIG) build_config_json(cached_config_json_);
+    if (rebuild_mask & SNAPSHOT_WIFI) build_wifi_json(cached_wifi_json_);
+    if (rebuild_mask & SNAPSHOT_OXIMETRY_SENSORS) {
+        build_oximetry_sensors_json(cached_oximetry_sensors_json_);
+    }
+    if (rebuild_mask & SNAPSHOT_OTA) {
+        build_ota_json(cached_ota_json_, ota_manager_->status());
+    }
+    if (rebuild_mask & SNAPSHOT_RESMED_OTA) {
+        build_resmed_ota_json(cached_resmed_ota_json_, *resmed_ota_manager_);
+    }
+    if (rebuild_mask & SNAPSHOT_SETTINGS) {
+        const int requested_mode = requested_settings_mode_;
+        const bool refresh_queued = cached_settings_refresh_queued_;
+        int published_settings_mode = requested_mode;
         if (published_settings_mode < 0) {
-            published_settings_mode = as11_mode_index_from_value(
-                arbiter_->as11_state().active_therapy_profile());
+            published_settings_mode = arbiter_->as11_settings().mode_index();
+            if (published_settings_mode < 0) {
+                published_settings_mode = as11_mode_index_from_value(
+                    arbiter_->as11_state().active_therapy_profile());
+            }
         }
+
+        build_settings_json(cached_settings_json_,
+                            requested_mode,
+                            refresh_queued);
+        cached_settings_mode_ = published_settings_mode;
+        cached_settings_refresh_queued_ = false;
+    }
+    if (rebuild_mask & SNAPSHOT_CONFIG) {
+        cached_http_auth_required_ = network_auth_required(app_config_->data());
+        cached_http_user_ = app_config_->data().http_user;
+        cached_http_password_ = app_config_->data().http_password;
+        cached_auth_whitelist_ = app_config_->data().auth_whitelist;
     }
 
-    build_status_json(cached_status_json_);
-    build_stream_json(cached_stream_json_);
-    build_console_json(cached_console_json_);
-    build_config_json(cached_config_json_);
-    build_wifi_json(cached_wifi_json_);
-    build_oximetry_sensors_json(cached_oximetry_sensors_json_);
-    build_ota_json(cached_ota_json_, ota_manager_->status());
-    build_resmed_ota_json(cached_resmed_ota_json_, *resmed_ota_manager_);
-    build_settings_json(cached_settings_json_, requested_mode, refresh_queued);
-    cached_settings_mode_ = published_settings_mode;
-    cached_settings_refresh_queued_ = false;
-    cached_http_auth_required_ = network_auth_required(app_config_->data());
-    cached_http_user_ = app_config_->data().http_user;
-    cached_http_password_ = app_config_->data().http_password;
-    cached_auth_whitelist_ = app_config_->data().auth_whitelist;
     snapshots_ready_ = true;
-    snapshots_dirty_ = false;
-    last_snapshot_ms_ = now;
+    snapshots_dirty_mask_ &= ~rebuild_mask;
+    if (force || periodic_due || (rebuild_mask & SNAPSHOT_PERIODIC)) {
+        last_snapshot_ms_ = now;
+    }
     xSemaphoreGive(cache_mutex_);
 }
 
@@ -1481,7 +1508,7 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandConsoleClear:
             console_log_ = "";
             console_seq_++;
-            snapshots_dirty_ = true;
+            mark_snapshots_dirty(SNAPSHOT_CONSOLE);
             break;
         case WebCommandConfigUpdate:
             execute_config_update(command.body);
@@ -1494,7 +1521,7 @@ void WebUI::execute_command(WebCommand &command) {
             break;
         case WebCommandSettingsRefresh:
             arbiter_->request_as11_settings_refresh();
-            snapshots_dirty_ = true;
+            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
             break;
         case WebCommandSettingsUpdate:
             execute_settings_update(command.body);
@@ -1660,7 +1687,7 @@ void WebUI::execute_config_update(const std::string &body) {
                   "[WEB] failed to persist one or more config values\n");
     }
     if (reconnect) wifi_manager_->reconnect();
-    if (saved) snapshots_dirty_ = true;
+    if (saved) mark_snapshots_dirty(SNAPSHOT_ALL);
 }
 
 void WebUI::execute_wifi_update(const std::string &body) {
@@ -1684,7 +1711,7 @@ void WebUI::execute_wifi_update(const std::string &body) {
     } else if (action == "reconnect") {
         changed = wifi_manager_->reconnect();
     }
-    if (changed) snapshots_dirty_ = true;
+    if (changed) mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_WIFI);
 }
 
 void WebUI::execute_time_action(const std::string &action) {
@@ -1697,7 +1724,7 @@ void WebUI::execute_time_action(const std::string &action) {
     } else if (action == "retry_resmed_push") {
         time_sync_service_->reset_resmed_push();
     }
-    snapshots_dirty_ = true;
+    mark_snapshots_dirty(SNAPSHOT_STATUS);
 }
 
 void WebUI::execute_settings_update(const std::string &body) {
@@ -1712,7 +1739,7 @@ void WebUI::execute_settings_update(const std::string &body) {
     if (!accepted) return;
     if (arbiter_->send_request("Set", params, RpcSource::HttpApi)) {
         arbiter_->request_as11_settings_refresh();
-        snapshots_dirty_ = true;
+        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     }
 }
 
@@ -1722,7 +1749,7 @@ void WebUI::execute_therapy_action(const std::string &action) {
     if (action == "stop" || action == "standby") method = "EnterStandby";
     if (!method) return;
     arbiter_->send_request(method, "", RpcSource::HttpApi);
-    snapshots_dirty_ = true;
+    mark_snapshots_dirty(SNAPSHOT_STATUS);
 }
 
 void WebUI::execute_oximetry_action(const std::string &action,
@@ -1791,23 +1818,24 @@ void WebUI::execute_oximetry_action(const std::string &action,
                 addr.c_str(), doc["enabled"].as<bool>());
         }
     }
-    snapshots_dirty_ = true;
+    mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_CONFIG |
+                         SNAPSHOT_OXIMETRY_SENSORS);
 }
 
 void WebUI::execute_resmed_ota_command(const WebCommand &command) {
     if (command.kind == WebCommandResmedOtaCheck) {
         resmed_ota_manager_->request_check();
-        snapshots_dirty_ = true;
+        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
         return;
     }
     if (command.kind == WebCommandResmedOtaAbort) {
         resmed_ota_manager_->abort("aborted");
-        snapshots_dirty_ = true;
+        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
         return;
     }
     if (command.kind == WebCommandResmedOtaStartStaged) {
         resmed_ota_manager_->start_staged_upload();
-        snapshots_dirty_ = true;
+        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
         return;
     }
 
@@ -1849,7 +1877,7 @@ void WebUI::execute_resmed_ota_command(const WebCommand &command) {
                                                             confirm);
         }
     }
-    snapshots_dirty_ = true;
+    mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
 }
 
 void WebUI::register_routes() {
@@ -1978,7 +2006,7 @@ void WebUI::register_routes() {
                 resmed_ota_manager_->abort("web_queue_full");
                 ok = false;
             }
-            snapshots_dirty_ = true;
+            mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
             String json;
             json.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
             build_resmed_ota_json(json, *resmed_ota_manager_);
@@ -2172,7 +2200,7 @@ void WebUI::register_routes() {
             if (cache_mutex_ &&
                 xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
                 cached_settings_refresh_queued_ = true;
-                snapshots_dirty_ = true;
+                mark_snapshots_dirty(SNAPSHOT_SETTINGS);
                 xSemaphoreGive(cache_mutex_);
             }
             enqueue_simple_command(WebCommandSettingsRefresh);
