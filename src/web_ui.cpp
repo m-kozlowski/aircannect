@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "auth_utils.h"
+#include "app_config_update.h"
 #include "as11_rpc.h"
 #include "debug_log.h"
 #include "json_util.h"
@@ -1426,133 +1427,19 @@ void WebUI::execute_console_line(const std::string &line) {
 }
 
 void WebUI::execute_config_update(const std::string &body) {
-    JsonDocument doc;
-    if (deserializeJson(doc, body.c_str())) return;
-    size_t saved = 0;
-    bool reconnect = false;
-    String s;
-    app_config_->begin_update();
-    if (json_get_string(doc, "hostname", s) &&
-        app_config_->set_hostname(s)) {
-        wifi_manager_->set_hostname(app_config_->data().hostname);
-        ota_manager_->mark_config_dirty();
-        saved++;
-    }
-    if (json_get_string(doc, "wifi_country", s) &&
-        app_config_->set_wifi_country(s)) {
-        wifi_manager_->set_country_code(app_config_->data().wifi_country);
-        reconnect = true;
-        saved++;
-    }
-    if (json_get_string(doc, "timezone", s) &&
-        app_config_->set_timezone(s)) {
-        saved++;
-    }
-    if (doc["resmed_time_sync_enabled"].is<bool>() &&
-        app_config_->set_resmed_time_sync(
-            doc["resmed_time_sync_enabled"].as<bool>())) {
-        saved++;
-    }
-    if (doc["oximetry_enabled"].is<bool>() &&
-        app_config_->set_oximetry_enabled(
-            doc["oximetry_enabled"].as<bool>())) {
-        saved++;
-    }
-    if (doc["oximetry_udp_port"].is<int>()) {
-        int parsed = doc["oximetry_udp_port"].as<int>();
-        if (parsed > 0 && parsed <= 65535 &&
-            app_config_->set_oximetry_udp_port(
-                static_cast<uint16_t>(parsed))) {
-            saved++;
-        }
-    }
-    if (json_get_string(doc, "oximetry_advertise_mode", s)) {
-        OximetryAdvertiseMode mode;
-        if (parse_oximetry_advertise_mode(s, mode) &&
-            app_config_->set_oximetry_advertise_mode(mode)) {
-            saved++;
-        }
-    }
-    if (json_get_string(doc, "softap_mode", s)) {
-        SoftApMode softap_mode;
-        if (parse_softap_mode(s, softap_mode)) {
-            const WifiModeState wifi_mode = wifi_manager_->mode_state();
-            const bool was_softap = wifi_mode == WifiModeState::SoftAp;
-            if (app_config_->set_softap_mode(softap_mode)) {
-                wifi_manager_->set_softap_mode(
-                    app_config_->data().softap_mode);
-                wifi_manager_->apply_softap_mode();
-                reconnect = reconnect ||
-                            (was_softap &&
-                             app_config_->data().softap_mode ==
-                                 SoftApMode::Auto &&
-                             wifi_manager_->has_sta_config());
-                saved++;
-            }
-        }
-    }
-    const bool http_auth_present = doc["http_auth_required"].is<bool>();
-    const bool disable_http_auth =
-        http_auth_present && !doc["http_auth_required"].as<bool>();
-    const bool http_user_present = doc["http_user"].is<const char *>();
-    const bool http_password_present =
-        doc["http_password"].is<const char *>();
-    if (disable_http_auth || http_user_present || http_password_present) {
-        String user = app_config_->data().http_user;
-        String password = app_config_->data().http_password;
-        if (disable_http_auth) {
-            user = "";
-            password = "";
-        } else if (http_user_present) {
-            user = doc["http_user"].as<const char *>();
-        }
-        if (!disable_http_auth && http_password_present) {
-            password = doc["http_password"].as<const char *>();
-        }
-        if (app_config_->set_http_auth(user, password)) saved++;
-    }
-    if (json_get_string(doc, "auth_whitelist", s) &&
-        app_config_->set_auth_whitelist(s)) {
-        saved++;
-    }
-    if (json_get_string(doc, "ota_password", s) &&
-        app_config_->set_ota_password(s)) {
-        ota_manager_->mark_config_dirty();
-        saved++;
-    }
-    if (doc["tcp_enabled"].is<bool>() || doc["tcp_port"].is<int>()) {
-        bool enabled = app_config_->data().tcp_bridge_enabled;
-        uint16_t port = app_config_->data().tcp_bridge_port;
-        if (doc["tcp_enabled"].is<bool>()) enabled = doc["tcp_enabled"].as<bool>();
-        if (doc["tcp_port"].is<int>()) {
-            int parsed = doc["tcp_port"].as<int>();
-            if (parsed > 0 && parsed <= 65535) {
-                port = static_cast<uint16_t>(parsed);
-            }
-        }
-        if (app_config_->set_tcp_bridge(enabled, port)) saved++;
-    }
-    if (doc["telnet_enabled"].is<bool>() || doc["telnet_port"].is<int>()) {
-        bool enabled = app_config_->data().telnet_console_enabled;
-        uint16_t port = app_config_->data().telnet_console_port;
-        if (doc["telnet_enabled"].is<bool>()) {
-            enabled = doc["telnet_enabled"].as<bool>();
-        }
-        if (doc["telnet_port"].is<int>()) {
-            int parsed = doc["telnet_port"].as<int>();
-            if (parsed > 0 && parsed <= 65535) {
-                port = static_cast<uint16_t>(parsed);
-            }
-        }
-        if (app_config_->set_telnet_console(enabled, port)) saved++;
-    }
-    const bool config_committed = app_config_->commit_update();
-    if (!config_committed) {
+    AppConfigUpdateResult result;
+    const bool parsed = apply_web_config_update(
+        *app_config_, body,
+        {wifi_manager_->mode_state(), wifi_manager_->has_sta_config()},
+        result);
+    if (!parsed) return;
+    if (!result.persisted) {
         Log::logf(CAT_GENERAL, LOG_WARN,
                   "[WEB] failed to persist one or more config values\n");
     }
-    if (reconnect) wifi_manager_->reconnect();
-    if (saved) mark_snapshots_dirty(SNAPSHOT_ALL);
+    apply_config_runtime_effects(result, *app_config_, *wifi_manager_,
+                                 *ota_manager_);
+    if (result.changed_fields) mark_snapshots_dirty(SNAPSHOT_ALL);
 }
 
 void WebUI::execute_wifi_update(const std::string &body) {
