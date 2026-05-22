@@ -34,6 +34,12 @@ static constexpr const char *VIATOM_READ_UUID =
     "0734594A-A8E7-4B1A-A6B1-CD5243059A57";
 static constexpr const char *VIATOM_WRITE_UUID =
     "8B00ACE7-EB0B-49B0-BBE9-9AEE0A26E1A3";
+static constexpr const char *OXYII_SERVICE_UUID =
+    "E8FB0001-A14B-98F9-831B-4E2941D01248";
+static constexpr const char *OXYII_WRITE_UUID =
+    "E8FB0002-A14B-98F9-831B-4E2941D01248";
+static constexpr const char *OXYII_NOTIFY_UUID =
+    "E8FB0003-A14B-98F9-831B-4E2941D01248";
 
 uint16_t encode_sfloat_int_value(int16_t value);
 uint8_t crc8_ccitt(const uint8_t *data,

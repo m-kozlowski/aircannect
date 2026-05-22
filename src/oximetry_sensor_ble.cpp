@@ -51,7 +51,7 @@ public:
 
     void onDisconnect(NimBLEClient *client, int reason) override {
         (void)client;
-        sensor_viatom_reset();
+        sensor_protocols_reset();
         if (owner_) {
             owner_->sensor_invalid_since_ms_ = 0;
             owner_->on_sensor_disconnect(reason);
@@ -574,14 +574,14 @@ void OximetryManager::sensor_task_loop() {
             portEXIT_CRITICAL(&sensor_mux_);
 #endif
             if (sensor_client->isConnected()) sensor_client->disconnect();
-            sensor_viatom_reset();
+            sensor_protocols_reset();
             sensor_hold_autoconnect(holdoff_addr, millis());
             sensor_invalid_since_ms_ = 0;
             sensor_set_state(OximetrySensorState::Idle);
         }
 
         const uint32_t now_ms = millis();
-        sensor_viatom_poll(now_ms);
+        sensor_protocols_poll(now_ms);
 
         bool auto_allowed = false;
 #if AC_OXIMETRY_BLE_ENABLED
@@ -678,7 +678,7 @@ bool OximetryManager::sensor_connect_target(
     sensor_set_state(OximetrySensorState::Connecting);
     NimBLEDevice::getScan()->stop();
     if (sensor_client->isConnected()) sensor_client->disconnect();
-    sensor_viatom_reset();
+    sensor_protocols_reset();
     sensor_invalid_since_ms_ = 0;
     sensor_client->cancelConnect();
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -767,7 +767,7 @@ bool OximetryManager::sensor_connect_target(
     portEXIT_CRITICAL(&sensor_mux_);
 #endif
     if (manual) save_sensor_known();
-    sensor_viatom_on_connected();
+    sensor_protocols_on_connected();
 
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&sensor_mux_);
@@ -793,7 +793,7 @@ bool OximetryManager::sensor_subscribe_client(void *client_ptr,
 #if AC_OXIMETRY_BLE_ENABLED
     auto *client = static_cast<NimBLEClient *>(client_ptr);
     if (!client) return false;
-    sensor_viatom_reset();
+    sensor_protocols_reset();
 
     (void)name;
     return sensor_subscribe_supported_device(client);
