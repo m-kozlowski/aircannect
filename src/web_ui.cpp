@@ -16,6 +16,7 @@
 #include "sink_manager.h"
 #include "storage_manager.h"
 #include "storage_writer.h"
+#include "system_status_snapshot.h"
 #include "string_print.h"
 #include "version.h"
 #include "web_ui_html.h"
@@ -841,19 +842,32 @@ void WebUI::drain_commands() {
 }
 
 void WebUI::build_status_json(LargeTextBuffer &json) const {
-    const As11DeviceState &as11 = arbiter_->as11_state();
-    const WifiManagerStats &wifi_stats = wifi_manager_->stats();
-    const MemoryStatus mem = Memory::status();
-    const StorageStatus storage = Storage::status();
-    const StorageWriterStatus writer = StorageWriter::status();
-    const SessionStatus &session = session_manager_->status();
-    const SinkRuntimeStatus &sink = sink_manager_->status();
-    const OximetryRuntimeStatus oxi = oximetry_manager_->runtime_status();
+    const SystemStatusSnapshot snap = collect_system_status({
+        *arbiter_,
+        *wifi_manager_,
+        *tcp_bridge_,
+        *app_config_,
+        *time_sync_service_,
+        *ota_manager_,
+        *session_manager_,
+        *sink_manager_,
+        *oximetry_manager_,
+    });
+    const MemoryStatus &mem = snap.memory;
+    const StorageStatus &storage = snap.storage;
+    const StorageWriterStatus &writer = snap.storage_writer;
+    const WifiStatusSnapshot &wifi = snap.wifi;
+    const WifiManagerStats &wifi_stats = wifi.stats;
+    const As11StatusSnapshot &as11 = snap.as11;
+    const SessionStatus &session = snap.session;
+    const SinkRuntimeStatus &sink = snap.sink;
+    const OximetryRuntimeStatus &oxi = snap.oximetry;
+    const TimeStatusSnapshot &time = snap.time;
 
     json = "{";
-    json_add_string(json, "version", aircannect_version(), false);
-    json_add_string(json, "built", aircannect_build_date());
-    json_add_int(json, "uptime", millis() / 1000);
+    json_add_string(json, "version", snap.version, false);
+    json_add_string(json, "built", snap.built);
+    json_add_int(json, "uptime", snap.uptime_s);
     json_add_int(json, "heap", static_cast<long>(mem.heap_free));
     json_add_int(json, "heap_total", static_cast<long>(mem.heap_total));
     json_add_int(json, "heap_max_alloc",
@@ -888,22 +902,18 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                  writer.open_errors + writer.write_errors);
     json_add_uint64(json, "storage_writer_bytes_written",
                     writer.bytes_written);
-    json_add_string(json, "wifi_state", wifi_manager_->state_name());
-    json_add_string(json, "wifi_ssid", wifi_manager_->sta_ssid().c_str());
-    json_add_string(json, "wifi_ip",
-                    wifi_manager_->ip().toString().c_str());
+    json_add_string(json, "wifi_state", wifi.state.c_str());
+    json_add_string(json, "wifi_ssid", wifi.ssid.c_str());
+    json_add_string(json, "wifi_ip", wifi.ip.c_str());
     json_add_string(json, "softap_mode",
-                    softap_mode_name(wifi_manager_->softap_mode()));
-    json_add_bool(json, "softap_running", wifi_manager_->softap_running());
-    char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
-    wifi_manager_->bssid(bssid_text, sizeof(bssid_text));
-    json_add_int(json, "wifi_rssi", wifi_manager_->rssi());
-    json_add_int(json, "wifi_channel", wifi_manager_->channel());
-    json_add_string(json, "wifi_bssid", bssid_text);
-    json_add_int(json, "wifi_profile", wifi_manager_->active_profile_index());
-    json_add_bool(json, "wifi_roam", wifi_manager_->roaming_enabled());
-    json_add_bool(json, "wifi_roam_suspended",
-                  wifi_manager_->roaming_suspended());
+                    softap_mode_name(wifi.softap_mode));
+    json_add_bool(json, "softap_running", wifi.softap_running);
+    json_add_int(json, "wifi_rssi", wifi.rssi);
+    json_add_int(json, "wifi_channel", wifi.channel);
+    json_add_string(json, "wifi_bssid", wifi.bssid.c_str());
+    json_add_int(json, "wifi_profile", wifi.active_profile);
+    json_add_bool(json, "wifi_roam", wifi.roaming_enabled);
+    json_add_bool(json, "wifi_roam_suspended", wifi.roaming_suspended);
     json_add_int(json, "wifi_attempts", wifi_stats.connect_attempts);
     json_add_int(json, "wifi_failures", wifi_stats.connect_failures);
     json_add_int(json, "wifi_disconnects", wifi_stats.disconnects);
@@ -913,33 +923,32 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                  wifi_stats.last_roam_candidates);
     json_add_int(json, "wifi_last_reason",
                  wifi_stats.last_disconnect_reason);
-    json_add_bool(json, "tcp_started", tcp_bridge_->started());
-    json_add_bool(json, "ota_active", ota_manager_->active());
-    json_add_bool(json, "ota_ready", ota_manager_->status().http_ready);
-    json_add_string(json, "device_name", as11.product_name().c_str());
-    json_add_string(json, "serial", as11.serial_number().c_str());
+    json_add_bool(json, "tcp_started", snap.tcp_started);
+    json_add_bool(json, "ota_active", snap.ota_active);
+    json_add_bool(json, "ota_ready", snap.ota_ready);
+    json_add_string(json, "device_name", as11.product_name.c_str());
+    json_add_string(json, "serial", as11.serial_number.c_str());
     json_add_string(json, "software_id",
-                    as11.software_identifier().c_str());
+                    as11.software_identifier.c_str());
     json_add_string(json, "therapy",
-                    As11DeviceState::therapy_state_name(
-                        as11.therapy_state()));
+                    As11DeviceState::therapy_state_name(as11.therapy_state));
     json_add_string(json, "therapy_pending",
                     As11DeviceState::therapy_target_name(
-                        as11.pending_therapy_target()));
-    json_add_string(json, "rop", as11.rop().c_str());
+                        as11.pending_therapy_target));
+    json_add_string(json, "rop", as11.rop.c_str());
     json_add_string(json, "activity_event",
-                    as11.last_activity_event().c_str());
+                    as11.last_activity_event.c_str());
     json_add_string(json, "activity_event_time",
-                    as11.last_activity_event_report_time().c_str());
-    if (as11.last_activity_event_ms()) {
+                    as11.last_activity_event_report_time.c_str());
+    if (as11.last_activity_event_ms) {
         json_add_int(json, "activity_event_age_ms",
-                     millis() - as11.last_activity_event_ms());
+                     snap.now_ms - as11.last_activity_event_ms);
     } else {
         json += ",\"activity_event_age_ms\":null";
     }
     json_add_string(json, "profile",
-                    as11.active_therapy_profile().c_str());
-    String hours = motor_hours(as11.mhr());
+                    as11.active_therapy_profile.c_str());
+    String hours = motor_hours(as11.motor_run_meter);
     json_add_string(json, "motor_hours", hours.c_str());
     json_add_bool(json, "session_active",
                   session.state == SessionState::Active);
@@ -953,13 +962,14 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                     session.end_device_time);
     json_add_string(json, "session_end_reason", session.end_reason);
     if (session.state == SessionState::Active && session.started_ms) {
-        json_add_int(json, "session_age_ms", millis() - session.started_ms);
+        json_add_int(json, "session_age_ms",
+                     snap.now_ms - session.started_ms);
     } else {
         json += ",\"session_age_ms\":null";
     }
     if (session.last_frame_ms) {
         json_add_int(json, "session_last_frame_age_ms",
-                     millis() - session.last_frame_ms);
+                     snap.now_ms - session.last_frame_ms);
     } else {
         json += ",\"session_last_frame_age_ms\":null";
     }
@@ -999,35 +1009,32 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_string(json, "ble_peer", oxi.ble_peer);
     json += '}';
     json_add_string(json, "device_datetime",
-                    as11.device_datetime().c_str());
-    if (as11.clock_valid()) {
+                    as11.device_datetime.c_str());
+    if (as11.clock_valid) {
         json_add_int(json, "device_datetime_age_ms",
-                     millis() - as11.clock_sample_ms());
+                     snap.now_ms - as11.clock_sample_ms);
     } else {
         json += ",\"device_datetime_age_ms\":null";
     }
-    if (as11.clock_offset_valid()) {
+    if (as11.clock_offset_valid) {
         json_add_int(json, "device_clock_offset_ms",
-                     as11.clock_offset_ms());
+                     as11.clock_offset_ms);
     } else {
         json += ",\"device_clock_offset_ms\":null";
     }
     json_add_string(json, "time_sync_policy",
                     "ntp_with_resmed_fallback");
     json_add_bool(json, "resmed_time_sync_enabled",
-                  app_config_->data().resmed_time_sync_enabled);
-    json_add_string(json, "time_sync_status",
-                    time_sync_service_->last_status());
-    json_add_bool(json, "ntp_synced", time_sync_service_->ntp_synced());
-    json_add_bool(json, "esp_time_valid",
-                  time_sync_service_->esp_clock_valid());
+                  time.resmed_time_sync_enabled);
+    json_add_string(json, "time_sync_status", time.status.c_str());
+    json_add_bool(json, "ntp_synced", time.ntp_synced);
+    json_add_bool(json, "esp_time_valid", time.esp_time_valid);
     json_add_string(json, "esp_time_source",
-                    time_sync_service_->esp_clock_source_name());
-    const std::string esp_datetime = time_sync_service_->utc_now_iso();
-    json_add_string(json, "esp_datetime", esp_datetime.c_str());
-    if (as11.timezone_offset_valid()) {
+                    time.esp_time_source.c_str());
+    json_add_string(json, "esp_datetime", time.esp_datetime.c_str());
+    if (as11.timezone_offset_valid) {
         json_add_int(json, "timezone_offset_min",
-                     as11.timezone_offset_minutes());
+                     as11.timezone_offset_minutes);
     } else {
         json += ",\"timezone_offset_min\":null";
     }
