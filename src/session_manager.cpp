@@ -63,50 +63,6 @@ const char *SessionManager::state_name(SessionState state) {
     }
 }
 
-void SessionManager::print_status(Print &out) const {
-    out.print("[SESSION] state=");
-    out.print(state_name(status_.state));
-    out.print(" id=");
-    out.print(status_.session_id);
-    out.print(" therapy=");
-    out.print(As11DeviceState::therapy_state_name(status_.therapy_state));
-    out.print(" starts=");
-    out.print(status_.start_count);
-    out.print(" ends=");
-    out.print(status_.end_count);
-    out.print(" frames=");
-    out.print(status_.frame_count);
-    out.print(" drops=");
-    out.print(status_.dropped_frames);
-    if (status_.state == SessionState::Active && status_.started_ms) {
-        out.print(" age_ms=");
-        out.print(millis() - status_.started_ms);
-    }
-    if (status_.last_frame_ms) {
-        out.print(" last_frame_age_ms=");
-        out.print(millis() - status_.last_frame_ms);
-    }
-    if (status_.stream_id) {
-        out.print(" stream_id=");
-        out.print(status_.stream_id);
-    }
-    if (status_.start_device_time[0]) {
-        out.print(" start_device_time=\"");
-        out.print(status_.start_device_time);
-        out.print("\"");
-    }
-    if (status_.end_device_time[0]) {
-        out.print(" end_device_time=\"");
-        out.print(status_.end_device_time);
-        out.print("\"");
-    }
-    if (status_.end_reason[0]) {
-        out.print(" end_reason=");
-        out.print(status_.end_reason);
-    }
-    out.println();
-}
-
 void SessionManager::start_session(const As11DeviceState &as11,
                                    uint32_t now_ms,
                                    const char *reason) {

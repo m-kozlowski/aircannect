@@ -42,7 +42,6 @@ public:
 
     const SessionStatus &status() const { return status_; }
     static const char *state_name(SessionState state);
-    void print_status(Print &out) const;
 
 private:
     void start_session(const As11DeviceState &as11,

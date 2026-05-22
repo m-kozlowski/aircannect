@@ -52,7 +52,5 @@ File open(const char *path, const char *mode);
 const char *type_name(StorageType type);
 const char *state_name(StorageState state);
 
-void print_status(Print &out);
-
 }  // namespace Storage
 }  // namespace aircannect

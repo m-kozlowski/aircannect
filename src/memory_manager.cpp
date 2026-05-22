@@ -83,24 +83,5 @@ void free(void *ptr) {
     if (ptr) ::free(ptr);
 }
 
-void print_status(Print &out) {
-    const MemoryStatus mem = status();
-    out.print("[MEM] heap_free=");
-    out.print(static_cast<unsigned long>(mem.heap_free));
-    out.print(" heap_total=");
-    out.print(static_cast<unsigned long>(mem.heap_total));
-    out.print(" heap_max_alloc=");
-    out.print(static_cast<unsigned long>(mem.heap_max_alloc));
-    out.print(" psram=");
-    out.print(mem.psram_available ? "yes" : "no");
-    out.print(" psram_free=");
-    out.print(static_cast<unsigned long>(mem.psram_free));
-    out.print(" psram_total=");
-    out.print(static_cast<unsigned long>(mem.psram_total));
-    out.print(" psram_max_alloc=");
-    out.print(static_cast<unsigned long>(mem.psram_max_alloc));
-    out.println();
-}
-
 }  // namespace Memory
 }  // namespace aircannect

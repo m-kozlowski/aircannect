@@ -29,7 +29,5 @@ void *calloc_large(size_t count,
 void *alloc_internal(size_t size);
 void free(void *ptr);
 
-void print_status(Print &out);
-
 }  // namespace Memory
 }  // namespace aircannect

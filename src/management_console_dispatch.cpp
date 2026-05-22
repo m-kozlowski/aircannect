@@ -6,6 +6,7 @@
 #include "as11_rpc.h"
 #include "as11_settings.h"
 #include "debug_log.h"
+#include "management_console_format.h"
 #include "management_console_utils.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
@@ -159,8 +160,8 @@ void ManagementConsole::handle_status_command(Print &out,
     }
     ctx.arbiter.print_status(out);
     ctx.arbiter.print_as11_status(out);
-    ctx.session_manager.print_status(out);
-    ctx.sink_manager.print_status(out);
+    ConsoleFormat::print_session_status(out, ctx.session_manager.status());
+    ConsoleFormat::print_sink_status(out, ctx.sink_manager);
     print_oximetry_status(out, ctx.oximetry_manager);
 }
 
@@ -179,13 +180,13 @@ void ManagementConsole::handle_stats_command(Print &out,
         return;
     }
     ctx.arbiter.print_stats(out);
-    ctx.tcp_bridge.print_stats(out);
+    ConsoleFormat::print_tcp_stats(out, ctx.tcp_bridge);
     Log::print_stats(out);
-    Memory::print_status(out);
-    Storage::print_status(out);
-    StorageWriter::print_status(out);
-    ctx.session_manager.print_status(out);
-    ctx.sink_manager.print_status(out);
+    ConsoleFormat::print_memory_status(out, Memory::status());
+    ConsoleFormat::print_storage_status(out, Storage::status());
+    ConsoleFormat::print_storage_writer_status(out, StorageWriter::status());
+    ConsoleFormat::print_session_status(out, ctx.session_manager.status());
+    ConsoleFormat::print_sink_status(out, ctx.sink_manager);
     print_oximetry_status(out, ctx.oximetry_manager);
 }
 
@@ -198,7 +199,7 @@ void ManagementConsole::handle_memory_command(Print &out,
         print_unknown_command(out, "MEM", "memory");
         return;
     }
-    Memory::print_status(out);
+    ConsoleFormat::print_memory_status(out, Memory::status());
 }
 
 void ManagementConsole::handle_session_command(Print &out,
@@ -210,7 +211,7 @@ void ManagementConsole::handle_session_command(Print &out,
         print_unknown_command(out, "SESSION", "session status");
         return;
     }
-    ctx.session_manager.print_status(out);
+    ConsoleFormat::print_session_status(out, ctx.session_manager.status());
 }
 
 void ManagementConsole::handle_sink_command(Print &out,
@@ -233,17 +234,19 @@ void ManagementConsole::handle_storage_command(Print &out,
     String rest_lower = rest;
     to_lower_inplace(rest_lower);
     if (!rest_lower.length() || rest_lower == "status") {
-        Storage::print_status(out);
-        StorageWriter::print_status(out);
+        ConsoleFormat::print_storage_status(out, Storage::status());
+        ConsoleFormat::print_storage_writer_status(out,
+                                                   StorageWriter::status());
         return;
     }
     if (rest_lower == "remount" || rest_lower == "retry") {
         Storage::remount();
-        Storage::print_status(out);
+        ConsoleFormat::print_storage_status(out, Storage::status());
         return;
     }
     if (rest_lower == "queue" || rest_lower == "writer") {
-        StorageWriter::print_status(out);
+        ConsoleFormat::print_storage_writer_status(out,
+                                                   StorageWriter::status());
         return;
     }
     if (rest_lower == "write-test" || rest_lower.startsWith("write-test ")) {
@@ -265,7 +268,8 @@ void ManagementConsole::handle_storage_command(Print &out,
                                           text.length());
         out.print("[STORAGE_WRITER] test ");
         out.println(queued ? "queued" : "rejected");
-        StorageWriter::print_status(out);
+        ConsoleFormat::print_storage_writer_status(out,
+                                                   StorageWriter::status());
         return;
     }
     print_unknown_command(out, "STORAGE",
@@ -306,7 +310,7 @@ void ManagementConsole::handle_tcp_command(Print &out,
         print_unknown_command(out, "TCP", "tcp status");
         return;
     }
-    ctx.tcp_bridge.print_status(out);
+    ConsoleFormat::print_tcp_status(out, ctx.tcp_bridge);
 }
 
 void ManagementConsole::handle_ota_command(Print &out,

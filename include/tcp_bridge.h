@@ -29,6 +29,14 @@ struct TcpBridgeStats {
     uint32_t rejected_clients = 0;
 };
 
+struct TcpBridgeClientStatus {
+    bool connected = false;
+    IPAddress remote_ip;
+    size_t line_buffer_len = 0;
+    size_t output_queue_count = 0;
+    size_t output_current_len = 0;
+};
+
 class TcpBridge : private LineProtocolServerBase {
 public:
     bool begin(uint16_t port = AC_TCP_BRIDGE_PORT);
@@ -38,11 +46,14 @@ public:
 
     void broadcast_rpc_payload(const std::string &payload);
 
-    void print_stats(Print &out);
-    void print_status(Print &out);
     int connected_count();
     bool started() const { return line_server_started(); }
     uint16_t port() const { return line_server_port(); }
+    const TcpBridgeStats &stats() const { return stats_; }
+    const LineProtocolIoStats &io_stats() const { return line_io_stats(); }
+    uint32_t last_line_in_ms() const { return last_line_in_ms_; }
+    uint32_t last_line_out_ms() const { return last_line_out_ms_; }
+    size_t client_statuses(TcpBridgeClientStatus *out, size_t max);
 
 private:
     void accept_clients();

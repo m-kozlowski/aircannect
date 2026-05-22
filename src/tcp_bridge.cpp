@@ -57,81 +57,26 @@ void TcpBridge::broadcast_rpc_payload(const std::string &payload) {
     }
 }
 
-void TcpBridge::print_stats(Print &out) {
-    out.print(" tcp_started=");
-    out.print(started() ? "yes" : "no");
-    out.print(" tcp_port=");
-    out.print(port());
-    out.print(" tcp_clients=");
-    out.print(connected_count());
-    out.print(" tcp_accepted=");
-    out.print(stats_.accepted_clients);
-    out.print(" tcp_disconnected=");
-    out.print(stats_.disconnected_clients);
-    out.print(" tcp_broadcasts=");
-    out.print(stats_.broadcasts);
-    out.print(" tcp_broadcast_targets=");
-    out.print(stats_.broadcast_targets);
-    out.print(" tcp_broadcast_no_clients=");
-    out.print(stats_.broadcasts_without_clients);
-    out.print(" tcp_in=");
-    out.print(stats_.lines_in);
-    out.print(" tcp_bytes_in=");
-    out.print(stats_.bytes_in);
-    out.print(" tcp_input_yields=");
-    out.print(stats_.input_yields);
-    out.print(" tcp_out=");
-    out.print(stats_.lines_out);
-    out.print(" tcp_bytes_out=");
-    out.print(line_io_stats().bytes_out);
-    out.print(" tcp_write_attempts=");
-    out.print(line_io_stats().write_attempts);
-    out.print(" tcp_write_deferred=");
-    out.print(line_io_stats().write_deferred);
-    out.print(" tcp_write_zero=");
-    out.print(line_io_stats().write_zero);
-    out.print(" tcp_write_errors=");
-    out.print(line_io_stats().write_errors);
-    out.print(" tcp_overlong=");
-    out.print(stats_.overlong_lines);
-    out.print(" tcp_enqueue_fail=");
-    out.print(stats_.enqueue_failures);
-    out.print(" tcp_q_drops=");
-    out.print(stats_.queue_drops);
-    out.print(" tcp_rejected=");
-    out.print(stats_.rejected_clients);
-    out.print(" tcp_last_in_ms=");
-    out.print(last_line_in_ms_);
-    out.print(" tcp_last_out_ms=");
-    out.print(last_line_out_ms_);
-}
-
-void TcpBridge::print_status(Print &out) {
-    out.print("[TCP] started=");
-    out.print(started() ? "yes" : "no");
-    out.print(" port=");
-    out.print(port());
-    out.print(" clients=");
-    out.println(connected_count());
-    for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
-        if (!clients_[i] || !clients_[i].connected()) continue;
-        out.print("[TCP ");
-        out.print(i);
-        out.print("] remote=");
-        out.print(clients_[i].remoteIP());
-        out.print(" line_buf=");
-        out.print(lines_[i].length());
-        out.print(" out_q=");
-        out.print(output_queues_[i].count());
-        out.print(" out_current=");
-        out.println(output_current_[i].length());
-    }
-}
-
 int TcpBridge::connected_count() {
     int count = 0;
     for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
         if (clients_[i] && clients_[i].connected()) count++;
+    }
+    return count;
+}
+
+size_t TcpBridge::client_statuses(TcpBridgeClientStatus *out, size_t max) {
+    if (!out || max == 0) return 0;
+    const size_t count = max < AC_MAX_TCP_CLIENTS ? max : AC_MAX_TCP_CLIENTS;
+    for (size_t i = 0; i < count; ++i) {
+        TcpBridgeClientStatus &dst = out[i];
+        dst = TcpBridgeClientStatus();
+        dst.connected = clients_[i] && clients_[i].connected();
+        if (!dst.connected) continue;
+        dst.remote_ip = clients_[i].remoteIP();
+        dst.line_buffer_len = lines_[i].length();
+        dst.output_queue_count = output_queues_[i].count();
+        dst.output_current_len = output_current_[i].length();
     }
     return count;
 }

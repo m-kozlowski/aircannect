@@ -50,6 +50,16 @@ struct LiveChartRuntimeStatus {
     LiveChartSeriesBatch pulse;
 };
 
+struct DebugSinkRuntimeStatus {
+    bool enabled = false;
+    uint32_t sessions_started = 0;
+    uint32_t sessions_ended = 0;
+    uint32_t frames = 0;
+    uint32_t last_session_id = 0;
+    uint32_t last_stream_id = 0;
+    uint32_t last_frame_ms = 0;
+};
+
 class Sink {
 public:
     virtual ~Sink() = default;
@@ -61,7 +71,6 @@ public:
                                  const StreamFrameData &frame) = 0;
     virtual void on_session_end(const SessionStatus &session) = 0;
     virtual void poll() = 0;
-    virtual void print_status(Print &out) const = 0;
 };
 
 class SinkManager {
@@ -81,7 +90,7 @@ public:
     void mark_live_chart_sent();
 
     const SinkRuntimeStatus &status() const { return status_; }
-    void print_status(Print &out) const;
+    DebugSinkRuntimeStatus debug_status() const;
 
 private:
     class DebugSink : public Sink {
@@ -94,7 +103,7 @@ private:
                              const StreamFrameData &frame) override;
         void on_session_end(const SessionStatus &session) override;
         void poll() override {}
-        void print_status(Print &out) const override;
+        DebugSinkRuntimeStatus status() const;
 
         uint32_t sessions_started() const { return sessions_started_; }
         uint32_t sessions_ended() const { return sessions_ended_; }

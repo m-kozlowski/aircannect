@@ -30,13 +30,6 @@ void copy_text(char *dst, size_t size, const char *src) {
     snprintf(dst, size, "%s", src ? src : "");
 }
 
-void print_u64(Print &out, uint64_t value) {
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%llu",
-             static_cast<unsigned long long>(value));
-    out.print(buf);
-}
-
 void reset_status() {
     current = StorageStatus();
     copy_text(current.mount_point, sizeof(current.mount_point),
@@ -349,35 +342,6 @@ const char *state_name(StorageState state) {
         case StorageState::Disabled:
         default: return "disabled";
     }
-}
-
-void print_status(Print &out) {
-    const StorageStatus s = status();
-    out.print("[STORAGE] configured=");
-    out.print(s.configured ? "yes" : "no");
-    out.print(" type=");
-    out.print(type_name(s.type));
-    out.print(" state=");
-    out.print(state_name(s.state));
-    out.print(" mounted=");
-    out.print(s.mounted ? "yes" : "no");
-    out.print(" card=");
-    out.print(s.card_type);
-    out.print(" width=");
-    out.print(s.width);
-    out.print(" mount=");
-    out.print(s.mount_point);
-    out.print(" total_bytes=");
-    print_u64(out, s.total_bytes);
-    out.print(" used_bytes=");
-    print_u64(out, s.used_bytes);
-    out.print(" free_bytes=");
-    print_u64(out, s.free_bytes);
-    if (s.last_error[0]) {
-        out.print(" error=");
-        out.print(s.last_error);
-    }
-    out.println();
 }
 
 }  // namespace Storage

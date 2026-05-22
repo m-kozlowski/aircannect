@@ -83,26 +83,16 @@ void SinkManager::DebugSink::on_session_end(const SessionStatus &session) {
     last_session_id_ = session.session_id;
 }
 
-void SinkManager::DebugSink::print_status(Print &out) const {
-    out.print("[SINK debug] enabled=");
-    out.print(enabled_ ? "yes" : "no");
-    out.print(" sessions_started=");
-    out.print(sessions_started_);
-    out.print(" sessions_ended=");
-    out.print(sessions_ended_);
-    out.print(" frames=");
-    out.print(frames_);
-    out.print(" last_session=");
-    out.print(last_session_id_);
-    if (last_stream_id_) {
-        out.print(" last_stream=");
-        out.print(last_stream_id_);
-    }
-    if (last_frame_ms_) {
-        out.print(" last_frame_age_ms=");
-        out.print(millis() - last_frame_ms_);
-    }
-    out.println();
+DebugSinkRuntimeStatus SinkManager::DebugSink::status() const {
+    DebugSinkRuntimeStatus out;
+    out.enabled = enabled_;
+    out.sessions_started = sessions_started_;
+    out.sessions_ended = sessions_ended_;
+    out.frames = frames_;
+    out.last_session_id = last_session_id_;
+    out.last_stream_id = last_stream_id_;
+    out.last_frame_ms = last_frame_ms_;
+    return out;
 }
 
 void SinkManager::begin(RpcArbiter &arbiter, SessionManager &session) {
@@ -153,6 +143,10 @@ bool SinkManager::debug_enabled() const {
     return debug_sink_.enabled();
 }
 
+DebugSinkRuntimeStatus SinkManager::debug_status() const {
+    return debug_sink_.status();
+}
+
 void SinkManager::set_live_chart_enabled(bool enabled) {
     if (live_chart_.enabled == enabled) return;
     live_chart_.enabled = enabled;
@@ -177,62 +171,6 @@ void SinkManager::clear_live_chart_batch() {
 void SinkManager::mark_live_chart_sent() {
     live_chart_.state_dirty = false;
     clear_live_chart_batch();
-}
-
-void SinkManager::print_status(Print &out) const {
-    out.print("[SINK] debug=");
-    out.print(debug_sink_.enabled() ? "on" : "off");
-    out.print(" live=");
-    out.print(live_chart_.enabled ? "on" : "off");
-    out.print(" stream=");
-    out.print(status_.debug_stream_attached ? "attached" : "detached");
-    out.print(" handle=");
-    out.print(status_.debug_stream_handle);
-    out.print(" attach_attempts=");
-    out.print(status_.attach_attempts);
-    out.print(" attach_failures=");
-    out.print(status_.attach_failures);
-    out.print(" frames=");
-    out.print(status_.frames);
-    out.print(" drops=");
-    out.print(status_.frame_drops);
-    out.print(" sessions_started=");
-    out.print(status_.sessions_started);
-    out.print(" sessions_ended=");
-    out.print(status_.sessions_ended);
-    if (status_.last_frame_ms) {
-        out.print(" last_frame_age_ms=");
-        out.print(millis() - status_.last_frame_ms);
-    }
-    if (status_.last_error[0]) {
-        out.print(" error=");
-        out.print(status_.last_error);
-    }
-    out.println();
-    out.print("[SINK live] enabled=");
-    out.print(live_chart_.enabled ? "yes" : "no");
-    out.print(" desired=");
-    out.print(live_chart_.desired ? "yes" : "no");
-    out.print(" stream=");
-    out.print(live_chart_.attached ? "attached" : "detached");
-    out.print(" handle=");
-    out.print(live_chart_.handle);
-    out.print(" frames=");
-    out.print(live_chart_.frames);
-    out.print(" drops=");
-    out.print(live_chart_.drops);
-    out.print(" attach_failures=");
-    out.print(live_chart_.attach_failures);
-    if (live_chart_.last_frame_ms) {
-        out.print(" last_frame_age_ms=");
-        out.print(millis() - live_chart_.last_frame_ms);
-    }
-    if (live_chart_.last_error[0]) {
-        out.print(" error=");
-        out.print(live_chart_.last_error);
-    }
-    out.println();
-    debug_sink_.print_status(out);
 }
 
 void SinkManager::dispatch_session_edges() {

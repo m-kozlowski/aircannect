@@ -6,6 +6,7 @@
 #include "as11_rpc.h"
 #include "board.h"
 #include "debug_log.h"
+#include "management_console_format.h"
 #include "management_console_utils.h"
 
 namespace aircannect {
@@ -740,7 +741,7 @@ void ManagementConsole::handle_sink(Print &out,
     rest.trim();
     rest.toLowerCase();
     if (!rest.length() || rest == "status") {
-        sink_manager.print_status(out);
+        ConsoleFormat::print_sink_status(out, sink_manager);
         return;
     }
 
@@ -748,7 +749,7 @@ void ManagementConsole::handle_sink(Print &out,
         rest == "debug enabled") {
         sink_manager.set_debug_enabled(true);
         out.println("[SINK] debug sink enabled");
-        sink_manager.print_status(out);
+        ConsoleFormat::print_sink_status(out, sink_manager);
         return;
     }
 
@@ -756,7 +757,7 @@ void ManagementConsole::handle_sink(Print &out,
         rest == "debug disabled") {
         sink_manager.set_debug_enabled(false);
         out.println("[SINK] debug sink disabled");
-        sink_manager.print_status(out);
+        ConsoleFormat::print_sink_status(out, sink_manager);
         return;
     }
 

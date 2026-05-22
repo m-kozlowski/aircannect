@@ -36,7 +36,6 @@ void poll();
 bool enqueue_append(const char *path, const uint8_t *data, size_t len);
 
 StorageWriterStatus status();
-void print_status(Print &out);
 
 }  // namespace StorageWriter
 }  // namespace aircannect

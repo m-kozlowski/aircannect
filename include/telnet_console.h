@@ -43,8 +43,6 @@ public:
 
     void handle_event(const RpcEvent &event);
 
-    void print_stats(Print &out);
-    void print_status(Print &out);
     int connected_count();
     bool started() const { return line_server_started(); }
     uint16_t port() const { return line_server_port(); }
