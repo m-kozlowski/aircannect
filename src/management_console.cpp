@@ -37,6 +37,102 @@ void print_yes_no(Print &out, bool value) {
     out.print(value ? "yes" : "no");
 }
 
+void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
+    out.println("[CONFIG]");
+    out.print("  schema: ");
+    out.println(cfg.schema_version);
+    out.print("  hostname: ");
+    out.println(cfg.hostname);
+    out.print("  tcp: ");
+    out.print(on_off_text(cfg.tcp_bridge_enabled));
+    out.print(" port=");
+    out.println(cfg.tcp_bridge_port);
+    out.print("  softap: ");
+    out.println(softap_mode_name(cfg.softap_mode));
+    out.print("  wifi_country: ");
+    out.println(cfg.wifi_country);
+    out.print("  timezone: ");
+    out.println(cfg.timezone);
+    out.print("  resmed_time_sync: ");
+    out.println(on_off_text(cfg.resmed_time_sync_enabled));
+    out.print("  oximetry: ");
+    out.print(on_off_text(cfg.oximetry_enabled));
+    out.print(" udp_port=");
+    out.print(cfg.oximetry_udp_port);
+    out.print(" advertise=");
+    out.println(oximetry_advertise_mode_name(
+        cfg.oximetry_advertise_mode));
+    out.print("  http_auth: ");
+    out.println(cfg.http_user.length() || cfg.http_password.length()
+                    ? "protected"
+                    : "open");
+    out.print("  http_user: ");
+    out.println(cfg.http_user.length() ? cfg.http_user : "<empty>");
+    out.print("  http_password: ");
+    out.println(cfg.http_password.length() ? "<set>" : "<empty>");
+    out.print("  http_whitelist: ");
+    out.println(cfg.auth_whitelist.length() ? cfg.auth_whitelist : "<empty>");
+    out.print("  telnet: ");
+    out.print(on_off_text(cfg.telnet_console_enabled));
+    out.print(" port=");
+    out.println(cfg.telnet_console_port);
+    out.print("  ota: ");
+    out.println(cfg.ota_password.length() ? "protected" : "open");
+    out.print("  ota_password: ");
+    out.println(cfg.ota_password.length() ? "<set>" : "<empty>");
+}
+
+void print_wifi_scan(Print &out, WifiManager &wifi_manager) {
+    switch (wifi_manager.manual_scan_status()) {
+        case WifiScanStatus::RoamInProgress:
+            out.println("[WiFi] roaming scan in progress; try again shortly");
+            return;
+        case WifiScanStatus::Running:
+            out.println("[WiFi] scan running; run wifi scan again for results");
+            return;
+        case WifiScanStatus::Failed:
+            out.println("[WiFi] scan failed");
+            wifi_manager.clear_manual_scan_results();
+            return;
+        case WifiScanStatus::Ready: {
+            static constexpr size_t MAX_RESULTS = 32;
+            WifiScanNetwork results[MAX_RESULTS];
+            const size_t count =
+                wifi_manager.copy_manual_scan_results(results, MAX_RESULTS);
+            for (size_t i = 0; i < count; ++i) {
+                out.print("[WiFi] ");
+                out.print(i + 1);
+                out.print(": ssid=\"");
+                out.print(results[i].ssid);
+                out.print("\" rssi=");
+                out.print(results[i].rssi);
+                out.print(" auth=");
+                out.println(results[i].open ? "open" : "secured");
+            }
+            if (!count) out.println("[WiFi] no networks found");
+            wifi_manager.clear_manual_scan_results();
+            return;
+        }
+        case WifiScanStatus::Idle:
+            break;
+    }
+
+    switch (wifi_manager.start_manual_scan()) {
+        case WifiScanStartResult::Started:
+            out.println("[WiFi] scan started; run wifi scan again for results");
+            return;
+        case WifiScanStartResult::RoamInProgress:
+            out.println("[WiFi] roaming scan in progress; try again shortly");
+            return;
+        case WifiScanStartResult::Running:
+            out.println("[WiFi] scan already running; try again shortly");
+            return;
+        case WifiScanStartResult::Failed:
+            out.println("[WiFi] scan start failed");
+            return;
+    }
+}
+
 void print_oximetry_sensor_status(Print &out,
                                   const OximetryManager &oximetry_manager) {
     const OximetryStatus s = oximetry_manager.status();
@@ -989,7 +1085,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
     }
 
     if (rest == "scan") {
-        wifi_manager.scan(out);
+        print_wifi_scan(out, wifi_manager);
         return;
     }
 
@@ -1114,7 +1210,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
                                       OtaManager &ota_manager) {
     rest.trim();
     if (!rest.length() || rest == "show" || rest == "dump") {
-        app_config.print_redacted(out);
+        print_app_config_redacted(out, app_config.data());
         return;
     }
 

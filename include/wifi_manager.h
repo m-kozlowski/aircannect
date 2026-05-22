@@ -36,6 +36,27 @@ struct WifiManagerStats {
     uint8_t last_disconnect_reason = 0;
 };
 
+enum class WifiScanStatus {
+    Idle,
+    RoamInProgress,
+    Running,
+    Ready,
+    Failed,
+};
+
+enum class WifiScanStartResult {
+    Started,
+    RoamInProgress,
+    Running,
+    Failed,
+};
+
+struct WifiScanNetwork {
+    String ssid;
+    int32_t rssi = 0;
+    bool open = false;
+};
+
 class WifiManager {
 public:
     bool begin();
@@ -77,9 +98,12 @@ public:
     bool remove_profile(size_t index);
     void clear_sta_config();
     bool reconnect();
+    WifiScanStartResult start_manual_scan();
+    WifiScanStatus manual_scan_status();
+    size_t copy_manual_scan_results(WifiScanNetwork *out, size_t max);
+    void clear_manual_scan_results();
 
     void print_status(Print &out) const;
-    void scan(Print &out);
 
 private:
     void load_config();

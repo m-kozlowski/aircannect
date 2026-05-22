@@ -158,10 +158,6 @@ void apply_build_defaults(AppConfigData &data) {
     data.oximetry_advertise_mode = default_oximetry_advertise_mode();
 }
 
-const char *on_off(bool enabled) {
-    return enabled ? "on" : "off";
-}
-
 bool put_string(Preferences &prefs, const char *key, const String &value) {
     const size_t written = prefs.putString(key, value);
     return written != 0 || value.length() == 0;
@@ -641,59 +637,6 @@ void AppConfig::apply_log_config() const {
     }
     Log::configure_syslog(data_.syslog_enabled, data_.syslog_host,
                           data_.syslog_port, data_.hostname);
-}
-
-void AppConfig::print_redacted(Print &out) const {
-    out.println("[CONFIG]");
-    out.print("  schema: ");
-    out.println(data_.schema_version);
-    out.print("  hostname: ");
-    out.println(data_.hostname);
-    out.print("  tcp: ");
-    out.print(on_off(data_.tcp_bridge_enabled));
-    out.print(" port=");
-    out.println(data_.tcp_bridge_port);
-    out.print("  softap: ");
-    out.println(softap_mode_name(data_.softap_mode));
-    out.print("  wifi_country: ");
-    out.println(data_.wifi_country);
-    out.print("  timezone: ");
-    out.println(data_.timezone);
-    out.print("  resmed_time_sync: ");
-    out.println(on_off(data_.resmed_time_sync_enabled));
-    out.print("  oximetry: ");
-    out.print(on_off(data_.oximetry_enabled));
-    out.print(" udp_port=");
-    out.print(data_.oximetry_udp_port);
-    out.print(" advertise=");
-    out.println(oximetry_advertise_mode_name(
-        data_.oximetry_advertise_mode));
-    out.print("  http_auth: ");
-    out.println(data_.http_user.length() || data_.http_password.length()
-                    ? "protected"
-                    : "open");
-    out.print("  http_user: ");
-    if (data_.http_user.length()) {
-        out.println(data_.http_user);
-    } else {
-        out.println("<empty>");
-    }
-    out.print("  http_password: ");
-    out.println(data_.http_password.length() ? "<set>" : "<empty>");
-    out.print("  http_whitelist: ");
-    if (data_.auth_whitelist.length()) {
-        out.println(data_.auth_whitelist);
-    } else {
-        out.println("<empty>");
-    }
-    out.print("  telnet: ");
-    out.print(on_off(data_.telnet_console_enabled));
-    out.print(" port=");
-    out.println(data_.telnet_console_port);
-    out.print("  ota: ");
-    out.println(data_.ota_password.length() ? "protected" : "open");
-    out.print("  ota_password: ");
-    out.println(data_.ota_password.length() ? "<set>" : "<empty>");
 }
 
 }  // namespace aircannect

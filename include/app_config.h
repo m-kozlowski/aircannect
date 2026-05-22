@@ -87,7 +87,6 @@ public:
 
     bool factory_reset();
     void apply_log_config() const;
-    void print_redacted(Print &out) const;
 
 private:
     bool load();

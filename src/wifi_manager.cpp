@@ -858,56 +858,70 @@ void WifiManager::retry_with_pmf_disabled() {
     esp_wifi_connect();
 }
 
-void WifiManager::scan(Print &out) {
+WifiScanStatus WifiManager::manual_scan_status() {
     if (mode_state_ == WifiModeState::StaRoamScanning) {
-        out.println("[WiFi] roaming scan in progress; try again shortly");
-        return;
+        return WifiScanStatus::RoamInProgress;
     }
 
     if (manual_scan_active_) {
         const int16_t count = WiFi.scanComplete();
         if (count == WIFI_SCAN_RUNNING) {
-            out.println("[WiFi] scan running; run wifi scan again for results");
-            return;
+            return WifiScanStatus::Running;
         }
         if (count < 0) {
-            out.println("[WiFi] scan failed");
-            WiFi.scanDelete();
-            manual_scan_active_ = false;
-            manual_scan_completed_ms_ = 0;
-            return;
+            return WifiScanStatus::Failed;
         }
-        for (int i = 0; i < count; ++i) {
-            out.print("[WiFi] ");
-            out.print(i + 1);
-            out.print(": ssid=\"");
-            out.print(WiFi.SSID(i));
-            out.print("\" rssi=");
-            out.print(WiFi.RSSI(i));
-            out.print(" auth=");
-            out.println(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open"
-                                                                 : "secured");
-        }
-        WiFi.scanDelete();
-        manual_scan_active_ = false;
-        manual_scan_completed_ms_ = 0;
-        return;
+        return WifiScanStatus::Ready;
     }
 
     if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
-        out.println("[WiFi] scan already running; try again shortly");
-        return;
+        return WifiScanStatus::Running;
+    }
+
+    return WifiScanStatus::Idle;
+}
+
+WifiScanStartResult WifiManager::start_manual_scan() {
+    if (mode_state_ == WifiModeState::StaRoamScanning) {
+        return WifiScanStartResult::RoamInProgress;
+    }
+
+    if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
+        return WifiScanStartResult::Running;
     }
 
     WiFi.scanDelete();
     int16_t rc = WiFi.scanNetworks(true);
     if (rc == WIFI_SCAN_FAILED) {
-        out.println("[WiFi] scan start failed");
-        return;
+        return WifiScanStartResult::Failed;
     }
+
     manual_scan_active_ = true;
     manual_scan_completed_ms_ = 0;
-    out.println("[WiFi] scan started; run wifi scan again for results");
+    return WifiScanStartResult::Started;
+}
+
+size_t WifiManager::copy_manual_scan_results(WifiScanNetwork *out,
+                                             size_t max) {
+    if (!out || !max || !manual_scan_active_) return 0;
+    const int16_t count = WiFi.scanComplete();
+    if (count < 0 || count == WIFI_SCAN_RUNNING) return 0;
+
+    size_t copied = 0;
+    for (int i = 0; i < count && copied < max; ++i) {
+        WifiScanNetwork &network = out[copied++];
+        network.ssid = WiFi.SSID(i);
+        network.rssi = WiFi.RSSI(i);
+        network.open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
+    }
+    return copied;
+}
+
+void WifiManager::clear_manual_scan_results() {
+    if (!manual_scan_active_) return;
+    WiFi.scanDelete();
+    manual_scan_active_ = false;
+    manual_scan_completed_ms_ = 0;
 }
 
 const char *WifiManager::mode_name() const {
