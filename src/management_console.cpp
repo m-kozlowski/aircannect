@@ -364,7 +364,7 @@ void ManagementConsole::handle_stream(Print &out, String rest,
     rest.trim();
 
     if (!rest.length() || rest == "status") {
-        arbiter.print_stream_status(out);
+        ConsoleFormat::print_stream_status(out, arbiter);
         return;
     }
 
@@ -376,7 +376,7 @@ void ManagementConsole::handle_stream(Print &out, String rest,
         } else {
             out.println("[STREAM] no console subscription active");
         }
-        arbiter.print_stream_status(out);
+        ConsoleFormat::print_stream_status(out, arbiter);
         return;
     }
 
@@ -399,7 +399,7 @@ void ManagementConsole::handle_stream(Print &out, String rest,
         } else {
             out.println("[STREAM] console subscription active");
         }
-        arbiter.print_stream_status(out);
+        ConsoleFormat::print_stream_status(out, arbiter);
         return;
     }
 
@@ -470,14 +470,14 @@ void ManagementConsole::handle_stream(Print &out, String rest,
             out.println("[STREAM] request rejected");
             break;
     }
-    arbiter.print_stream_status(out);
+    ConsoleFormat::print_stream_status(out, arbiter);
 }
 
 void ManagementConsole::handle_as11(Print &out, String rest,
                                     RpcArbiter &arbiter) {
     rest.trim();
     if (!rest.length() || rest == "status") {
-        arbiter.print_as11_status(out);
+        ConsoleFormat::print_as11_status(out, arbiter.as11_state());
         return;
     }
 
@@ -503,7 +503,7 @@ void ManagementConsole::handle_therapy(Print &out, String rest,
     rest.trim();
     rest.toLowerCase();
     if (!rest.length() || rest == "status") {
-        arbiter.print_as11_status(out);
+        ConsoleFormat::print_as11_status(out, arbiter.as11_state());
         return;
     }
 
@@ -949,7 +949,7 @@ void ManagementConsole::handle_log(Print &out,
                                    AppConfig &app_config) {
     rest.trim();
     if (!rest.length() || rest == "status") {
-        Log::print_status(out);
+        ConsoleFormat::print_log_status(out);
         return;
     }
 
@@ -970,7 +970,7 @@ void ManagementConsole::handle_log(Print &out,
                 return;
             }
             Log::set_level(level);
-            Log::print_status(out);
+            ConsoleFormat::print_log_status(out);
             return;
         }
 
@@ -989,7 +989,7 @@ void ManagementConsole::handle_log(Print &out,
             return;
         }
         Log::set_cat_level(cat, level);
-        Log::print_status(out);
+        ConsoleFormat::print_log_status(out);
         return;
     }
 
@@ -997,7 +997,7 @@ void ManagementConsole::handle_log(Print &out,
         String args = rest.length() > 6 ? rest.substring(6) : "";
         args.trim();
         if (!args.length() || args == "status") {
-            Log::print_status(out);
+            ConsoleFormat::print_log_status(out);
             return;
         }
 
@@ -1017,7 +1017,7 @@ void ManagementConsole::handle_log(Print &out,
                 return;
             }
             app_config.apply_log_config();
-            Log::print_status(out);
+            ConsoleFormat::print_log_status(out);
             return;
         }
 
@@ -1034,7 +1034,7 @@ void ManagementConsole::handle_log(Print &out,
             return;
         }
         app_config.apply_log_config();
-        Log::print_status(out);
+        ConsoleFormat::print_log_status(out);
         return;
     }
 
@@ -1056,7 +1056,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
                                     const AppConfig &app_config) {
     rest.trim();
     if (!rest.length() || rest == "status") {
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1100,7 +1100,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         } else if (!wifi_manager.network_available()) {
             out.println("[WiFi] STA connect started; use wifi status for progress");
         }
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1108,7 +1108,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         out.println("[WiFi] clearing stored STA credentials");
         wifi_manager.clear_sta_config();
         apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1135,7 +1135,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         } else if (!wifi_manager.network_available()) {
             out.println("[WiFi] STA connect started; use wifi status for progress");
         }
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1158,7 +1158,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         bool ok = wifi_manager.add_profile(ssid, password, false);
         apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         if (!ok) out.println("[WiFi] profile add failed");
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1181,7 +1181,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         } else if (!wifi_manager.network_available()) {
             out.println("[WiFi] STA connect started; use wifi status for progress");
         }
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1197,7 +1197,7 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
             return;
         }
         apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1227,7 +1227,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
         app_config.apply_log_config();
         apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         out.println("[CONFIG] factory reset complete");
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1347,7 +1347,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
         apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         out.print("[CONFIG] softap=");
         out.println(softap_mode_name(app_config.data().softap_mode));
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
@@ -1369,7 +1369,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
         apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         out.print("[CONFIG] wifi_country=");
         out.println(app_config.data().wifi_country);
-        wifi_manager.print_status(out);
+        ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 

@@ -13,9 +13,6 @@ namespace aircannect {
 
 struct LineProtocolIoStats {
     uint32_t bytes_out = 0;
-    uint32_t write_attempts = 0;
-    uint32_t write_deferred = 0;
-    uint32_t write_zero = 0;
     uint32_t write_errors = 0;
 };
 

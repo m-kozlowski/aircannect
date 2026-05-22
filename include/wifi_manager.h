@@ -67,13 +67,17 @@ public:
     bool sta_is_open() const {
         return sta_configured_ && sta_pass_.length() == 0;
     }
+    const String &hostname() const { return hostname_; }
+    const String &country_code() const { return country_code_; }
     const String &sta_ssid() const { return sta_ssid_; }
     WifiModeState mode_state() const { return mode_state_; }
     const char *state_name() const;
     IPAddress ip() const;
     IPAddress gateway() const;
+    IPAddress softap_ip() const;
     int32_t rssi() const;
     int32_t channel() const;
+    uint32_t connect_timeout_remaining_ms() const;
     void bssid(char *out, size_t size) const;
     size_t profile_count() const { return profile_count_; }
     const WifiProfile &profile(size_t index) const { return profiles_[index]; }
@@ -102,8 +106,6 @@ public:
     WifiScanStatus manual_scan_status();
     size_t copy_manual_scan_results(WifiScanNetwork *out, size_t max);
     void clear_manual_scan_results();
-
-    void print_status(Print &out) const;
 
 private:
     void load_config();

@@ -60,7 +60,6 @@ size_t LineProtocolServerBase::write_line_nonblocking(WiFiClient &client,
     const int ready = select(fd + 1, nullptr, &write_set, nullptr, &timeout);
     if (ready < 0) {
         if (errno == EINTR) {
-            io_stats_.write_deferred++;
             return 0;
         }
         io_stats_.write_errors++;
@@ -72,21 +71,17 @@ size_t LineProtocolServerBase::write_line_nonblocking(WiFiClient &client,
     }
 
     if (ready == 0 || !FD_ISSET(fd, &write_set)) {
-        io_stats_.write_deferred++;
         return 0;
     }
 
-    io_stats_.write_attempts++;
     const ssize_t sent = send(fd, data, len, MSG_DONTWAIT);
     if (sent > 0) return static_cast<size_t>(sent);
 
     if (sent == 0) {
-        io_stats_.write_zero++;
         return 0;
     }
 
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        io_stats_.write_deferred++;
         return 0;
     }
 

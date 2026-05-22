@@ -304,67 +304,19 @@ uint16_t syslog_port() {
     return syslog_port_value;
 }
 
+size_t syslog_queue_depth() {
+    lock_log();
+    const size_t out = syslog_queue.count();
+    unlock_log();
+    return out;
+}
+
 Stats stats() {
     lock_log();
     Stats out = log_stats;
     out.syslog_drops = syslog_queue.dropped();
     unlock_log();
     return out;
-}
-
-void print_status(Print &out) {
-    lock_log();
-    out.print("[LOG] levels");
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        out.print(' ');
-        out.print(cat_name(static_cast<log_cat_t>(i)));
-        out.print('=');
-        out.print(level_name(levels[i]));
-    }
-    out.println();
-    out.print("[SYSLOG] enabled=");
-    out.print(syslog_enabled_value ? "yes" : "no");
-    out.print(" host=");
-    out.print(syslog_host_text.length() ? syslog_host_text : "--");
-    out.print(" port=");
-    out.print(syslog_port_value);
-    out.print(" queued=");
-    out.print(syslog_queue.count());
-    out.print(" sent=");
-    out.print(log_stats.syslog_sent);
-    out.print(" drops=");
-    out.print(syslog_queue.dropped());
-    out.print(" errors=");
-    out.println(log_stats.syslog_errors);
-    unlock_log();
-}
-
-void print_stats(Print &out) {
-    lock_log();
-    Stats s = log_stats;
-    s.syslog_drops = syslog_queue.dropped();
-    const bool enabled = syslog_enabled_value;
-    const size_t queued = syslog_queue.count();
-    unlock_log();
-
-    out.print(" log_emitted=");
-    out.print(s.emitted);
-    out.print(" log_filtered=");
-    out.print(s.filtered);
-    out.print(" log_truncated=");
-    out.print(s.truncated);
-    out.print(" syslog_enabled=");
-    out.print(enabled ? "yes" : "no");
-    out.print(" syslog_q=");
-    out.print(queued);
-    out.print(" syslog_enqueued=");
-    out.print(s.syslog_enqueued);
-    out.print(" syslog_sent=");
-    out.print(s.syslog_sent);
-    out.print(" syslog_drops=");
-    out.print(s.syslog_drops);
-    out.print(" syslog_errors=");
-    out.print(s.syslog_errors);
 }
 
 void logf(log_cat_t cat, log_level_t level, const char *fmt, ...) {

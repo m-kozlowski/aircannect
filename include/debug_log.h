@@ -54,10 +54,9 @@ void poll(bool network_available);
 bool syslog_enabled();
 String syslog_host();
 uint16_t syslog_port();
+size_t syslog_queue_depth();
 
 Stats stats();
-void print_status(Print &out);
-void print_stats(Print &out);
 
 void logf(log_cat_t cat, log_level_t level, const char *fmt, ...);
 void log_payload(log_cat_t cat,

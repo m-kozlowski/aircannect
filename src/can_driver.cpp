@@ -56,6 +56,10 @@ const char *can_timing_name() {
 
 }  // namespace
 
+const char *CanDriver::error_name(esp_err_t err) {
+    return esp_err_name_short(err);
+}
+
 bool CanDriver::begin() {
     twai_general_config_t general_config = TWAI_GENERAL_CONFIG_DEFAULT(
         static_cast<gpio_num_t>(AC_CAN_TX_GPIO),
@@ -235,7 +239,6 @@ bool CanDriver::receive(RawCanFrame &frame, uint32_t wait_ms) {
 }
 
 void CanDriver::handle_alerts(uint32_t alerts) {
-    stats_.alerts_seen++;
     if (alerts & TWAI_ALERT_BUS_ERROR) stats_.bus_error_alerts++;
     if (alerts & TWAI_ALERT_RX_QUEUE_FULL) stats_.rx_queue_full_alerts++;
 
@@ -380,83 +383,27 @@ void CanDriver::clear_rx_state() {
     if (installed_) (void)twai_clear_receive_queue();
 }
 
-void CanDriver::print_status(Print &out) const {
+bool CanDriver::controller_status(CanControllerStatus &out) const {
+    out = {};
     twai_status_info_t status = {};
     esp_err_t err = twai_get_status_info(&status);
+    out.error = err;
     if (err != ESP_OK) {
-        out.print("[CAN] status failed: ");
-        out.println(esp_err_name_short(err));
-        return;
+        return false;
     }
 
-    out.print("[CAN] state=");
-    out.print(state_name(status.state));
-    out.print(" tx_err=");
-    out.print(status.tx_error_counter);
-    out.print(" rx_err=");
-    out.print(status.rx_error_counter);
-    out.print(" tx_q=");
-    out.print(status.msgs_to_tx);
-    out.print(" rx_q=");
-    out.print(status.msgs_to_rx);
-    out.print(" tx_failed=");
-    out.print(status.tx_failed_count);
-    out.print(" rx_missed=");
-    out.print(status.rx_missed_count);
-    out.print(" rx_overrun=");
-    out.print(status.rx_overrun_count);
-    out.print(" arb_lost=");
-    out.print(status.arb_lost_count);
-    out.print(" bus_errors=");
-    out.println(status.bus_error_count);
-}
-
-void CanDriver::print_stats(Print &out) const {
-    twai_status_info_t status = {};
-    const bool have_status = twai_get_status_info(&status) == ESP_OK;
-
-    out.print(" can_rx_frames=");
-    out.print(stats_.rx_frames);
-    out.print(" can_tx_frames=");
-    out.print(stats_.tx_frames);
-    out.print(" can_tx_q=");
-    out.print(tx_queue_.count());
-    out.print(" can_tx_q_drops=");
-    out.print(stats_.tx_queue_drops);
-    out.print(" can_tx_failures=");
-    out.print(stats_.tx_failures);
-    out.print(" recoveries=");
-    out.print(stats_.recoveries);
-    out.print(" recovery_failures=");
-    out.print(stats_.recovery_failures);
-    out.print(" alerts=");
-    out.print(stats_.alerts_seen);
-    out.print(" bus_error_alerts=");
-    out.print(stats_.bus_error_alerts);
-    out.print(" rx_queue_full_alerts=");
-    out.print(stats_.rx_queue_full_alerts);
-    if (have_status) {
-        out.print(" twai_state=");
-        out.print(state_name(status.state));
-        out.print(" tx_err=");
-        out.print(status.tx_error_counter);
-        out.print(" rx_err=");
-        out.print(status.rx_error_counter);
-        out.print(" twai_tx_q=");
-        out.print(status.msgs_to_tx);
-        out.print(" twai_rx_q=");
-        out.print(status.msgs_to_rx);
-        out.print(" tx_failed=");
-        out.print(status.tx_failed_count);
-        out.print(" rx_missed=");
-        out.print(status.rx_missed_count);
-        out.print(" rx_overrun=");
-        out.print(status.rx_overrun_count);
-        out.print(" arb_lost=");
-        out.print(status.arb_lost_count);
-        out.print(" bus_errors=");
-        out.print(status.bus_error_count);
-    }
+    out.valid = true;
+    out.state = status.state;
+    out.tx_error_counter = status.tx_error_counter;
+    out.rx_error_counter = status.rx_error_counter;
+    out.msgs_to_tx = status.msgs_to_tx;
+    out.msgs_to_rx = status.msgs_to_rx;
+    out.tx_failed_count = status.tx_failed_count;
+    out.rx_missed_count = status.rx_missed_count;
+    out.rx_overrun_count = status.rx_overrun_count;
+    out.arb_lost_count = status.arb_lost_count;
+    out.bus_error_count = status.bus_error_count;
+    return true;
 }
 
 void CanDriver::reset_stats() {
@@ -473,7 +420,7 @@ size_t CanDriver::tx_queue_depth() const {
     return tx_queue_.count();
 }
 
-const char *CanDriver::state_name(twai_state_t state) const {
+const char *CanDriver::state_name(twai_state_t state) {
     switch (state) {
         case TWAI_STATE_STOPPED: return "stopped";
         case TWAI_STATE_RUNNING: return "running";

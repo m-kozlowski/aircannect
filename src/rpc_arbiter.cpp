@@ -144,7 +144,6 @@ bool RpcArbiter::enqueue_payload_frames(const std::string &payload,
     (void)source;
     const auto frames = encode_datagram(payload);
     if (frames.size() > can_.tx_queue_free()) {
-        stats_.rejected_datagrams++;
         push_event(RpcEventKind::Info, "CAN TX queue full; payload rejected");
         return false;
     }
@@ -160,13 +159,11 @@ bool RpcArbiter::enqueue_encoded_frames(
         raw.len = frame.len;
         for (uint8_t i = 0; i < frame.len; ++i) raw.data[i] = frame.data[i];
         if (!can_.enqueue_tx(raw)) {
-            stats_.rejected_datagrams++;
             push_event(RpcEventKind::Info, "CAN TX enqueue failed");
             return false;
         }
     }
 
-    stats_.submitted_datagrams++;
     return true;
 }
 
@@ -198,14 +195,12 @@ bool RpcArbiter::send_set_datetime_now(RpcSource source,
 bool RpcArbiter::enqueue_request(QueuedRequest &request) {
     const uint32_t now = millis();
     if (scheduler_source(request.source) && background_backoff_active(now)) {
-        stats_.rejected_datagrams++;
         return false;
     }
 
     request.id = ++next_rpc_id_;
     if (!requests_.push(request)) {
         stats_.request_queue_drops++;
-        stats_.rejected_datagrams++;
         push_event(RpcEventKind::Info, "RPC request queue full");
         return false;
     }
@@ -291,271 +286,24 @@ void RpcArbiter::reset_stats() {
     stats_started_ms_ = millis();
 }
 
-void RpcArbiter::print_stats(Print &out) const {
-    const uint32_t elapsed_ms =
-        std::max<uint32_t>(1, millis() - stats_started_ms_);
-    const uint32_t can_rx_fps =
-        (can_.stats().rx_frames * 1000UL) / elapsed_ms;
-    const uint32_t rpc_dps =
-        (stats_.rpc_datagrams * 1000UL) / elapsed_ms;
-
-    out.print("[STATS]");
-    out.print(" elapsed_ms=");
-    out.print(elapsed_ms);
-    can_.print_stats(out);
-    out.print(" can_rx_fps=");
-    out.print(can_rx_fps);
-    out.print(" rpc_datagrams=");
-    out.print(stats_.rpc_datagrams);
-    out.print(" rpc_dps=");
-    out.print(rpc_dps);
-    out.print(" responses=");
-    out.print(stats_.rpc_responses);
-    out.print(" matched=");
-    out.print(stats_.rpc_matched_responses);
-    out.print(" notifications=");
-    out.print(stats_.rpc_notifications);
-    out.print(" unmatched=");
-    out.print(stats_.rpc_unmatched);
-    out.print(" rpc_framing_errors=");
-    out.print(stats_.rpc_framing_errors);
-    out.print(" log_datagrams=");
-    out.print(stats_.log_datagrams);
-    out.print(" log_framing_errors=");
-    out.print(stats_.log_framing_errors);
-    out.print(" boot_notifications=");
-    out.print(boot_notifications_seen_);
-    out.print(" rpc_req_q=");
-    out.print(requests_.count());
-    out.print(" rpc_pending=");
-    out.print(pending_.active ? pending_.id : 0);
-    out.print(" rpc_dispatch_retry=");
-    out.print(dispatch_retry_active_ ? dispatch_retry_.id : 0);
-    out.print(" queued_requests=");
-    out.print(stats_.queued_requests);
-    out.print(" dispatched_requests=");
-    out.print(stats_.dispatched_requests);
-    out.print(" request_timeouts=");
-    out.print(stats_.request_timeouts);
-    out.print(" request_q_drops=");
-    out.print(stats_.request_queue_drops);
-    out.print(" request_cancellations=");
-    out.print(stats_.request_cancellations);
-    out.print(" request_dispatch_retries=");
-    out.print(stats_.request_dispatch_retries);
-    out.print(" background_backoffs=");
-    out.print(stats_.background_backoffs);
-    out.print(" background_backoff_ms=");
+RpcRuntimeStatus RpcArbiter::runtime_status() const {
     const uint32_t now = millis();
-    if (background_backoff_active(now)) {
-        out.print(background_backoff_until_ms_ - now);
-    } else {
-        out.print(0);
+    RpcRuntimeStatus out;
+    out.stats_elapsed_ms = std::max<uint32_t>(1, now - stats_started_ms_);
+    out.request_queue_depth = requests_.count();
+    out.pending_request_id = pending_.active ? pending_.id : 0;
+    out.dispatch_retry_id = dispatch_retry_active_ ? dispatch_retry_.id : 0;
+    out.background_backoff_ms = background_backoff_active(now)
+        ? background_backoff_until_ms_ - now
+        : 0;
+    out.event_subscription_active = event_subscription_active_;
+    out.event_subscription_id = event_subscription_id_;
+    out.boot_notifications = boot_notifications_seen_;
+    if (!last_boot_notification_.empty()) {
+        out.last_boot_notification_age_ms = now - last_boot_notification_ms_;
+        out.last_boot_notification = last_boot_notification_;
     }
-    out.print(" submitted_datagrams=");
-    out.print(stats_.submitted_datagrams);
-    out.print(" rejected_datagrams=");
-    out.print(stats_.rejected_datagrams);
-    out.print(" event_drops=");
-    out.print(stats_.event_drops);
-    out.print(" stream_consumers=");
-    out.print(stream_.consumer_count());
-    out.print(" stream_subscribed=");
-    out.print(stream_.actual_active() ? "yes" : "no");
-    out.print(" stream_start_pending=");
-    out.print(stream_.pending_start() ? "yes" : "no");
-    out.print(" stream_stop_pending=");
-    out.print(stream_.pending_stop() ? "yes" : "no");
-    out.print(" stream_starts=");
-    out.print(stats_.stream_start_requests);
-    out.print(" stream_stops=");
-    out.print(stats_.stream_stop_requests);
-    out.print(" stream_notifications=");
-    out.print(stats_.stream_notifications);
-    out.print(" stream_fanout_targets=");
-    out.print(stats_.stream_fanout_targets);
-    out.print(" stream_fanout_drops=");
-    out.print(stats_.stream_fanout_drops);
-    out.print(" stream_rejects=");
-    out.print(stats_.stream_consumer_rejects);
-    out.print(" stream_deferred=");
-    out.print(stats_.stream_command_deferred);
-    out.print(" stream_errors=");
-    out.print(stats_.stream_command_errors);
-    out.print(" stream_parse_errors=");
-    out.print(stats_.stream_parse_errors);
-    out.print(" stream_pool_exhaustions=");
-    out.print(stats_.stream_pool_exhaustions);
-    out.print(" stream_truncated_frames=");
-    out.print(stats_.stream_truncated_frames);
-    out.print(" stream_frame_pool=");
-    out.print(stream_.frame_pool_in_use());
-    out.print("/");
-    out.print(stream_.frame_pool_capacity());
-    out.print(" event_subscribed=");
-    out.print(event_subscription_active_ ? "yes" : "no");
-    out.print(" event_subscription_id=");
-    out.print(event_subscription_id_);
-    out.print(" event_subscribe_requests=");
-    out.print(stats_.event_subscribe_requests);
-    out.print(" event_subscribe_successes=");
-    out.print(stats_.event_subscribe_successes);
-    out.print(" event_subscribe_errors=");
-    out.print(stats_.event_subscribe_errors);
-    out.print(" event_notifications=");
-    out.print(stats_.event_notifications);
-    out.print(" activity_state_events=");
-    out.print(stats_.activity_state_events);
-    out.print(" as11_identity_polls=");
-    out.print(stats_.as11_identity_polls);
-    out.print(" as11_status_polls=");
-    out.print(stats_.as11_status_polls);
-    out.print(" as11_motor_polls=");
-    out.print(stats_.as11_motor_polls);
-    out.print(" as11_timezone_polls=");
-    out.print(stats_.as11_timezone_polls);
-    out.print(" as11_clock_polls=");
-    out.print(stats_.as11_clock_polls);
-}
-
-void RpcArbiter::print_status(Print &out) const {
-    can_.print_status(out);
-    if (last_boot_notification_.empty()) {
-        out.println("[BOOT] notifications=0");
-        return;
-    }
-
-    out.print("[BOOT] notifications=");
-    out.print(stats_.boot_notifications);
-    out.print(" last_age_ms=");
-    out.print(millis() - last_boot_notification_ms_);
-    out.print(" last=");
-    out.println(last_boot_notification_.c_str());
-}
-
-void RpcArbiter::print_as11_status(Print &out) const {
-    out.print("[AS11] status=");
-    out.print(as11_state_.status_valid() ? "known" : "unknown");
-    if (as11_state_.status_valid()) {
-        out.print(" age_ms=");
-        out.print(millis() - as11_state_.status_updated_ms());
-    }
-    out.println();
-
-    out.print("[AS11] name=\"");
-    out.print(as11_state_.product_name().c_str());
-    out.print("\" serial=\"");
-    out.print(as11_state_.serial_number().c_str());
-    out.print("\" sid=\"");
-    out.print(as11_state_.software_identifier().c_str());
-    out.println("\"");
-
-    out.print("[AS11] therapy=");
-    out.print(As11DeviceState::therapy_state_name(
-        as11_state_.therapy_state()));
-    out.print(" pending=");
-    out.print(As11DeviceState::therapy_target_name(
-        as11_state_.pending_therapy_target()));
-    if (!as11_state_.last_therapy_command_status().empty()) {
-        out.print(" command=");
-        out.print(as11_state_.last_therapy_command_status().c_str());
-    }
-    out.print(" rop=\"");
-    out.print(as11_state_.rop().c_str());
-    out.print("\" mode=\"");
-    out.print(as11_state_.active_therapy_profile().c_str());
-    out.print("\" activity_event=\"");
-    out.print(as11_state_.last_activity_event().c_str());
-    out.print("\"");
-    if (as11_state_.last_activity_event_ms()) {
-        out.print(" event_age_ms=");
-        out.print(millis() - as11_state_.last_activity_event_ms());
-    }
-    out.println();
-
-    out.print("[AS11] mhr=\"");
-    out.print(as11_state_.mhr().c_str());
-    out.print("\"");
-    if (as11_state_.timezone_offset_valid()) {
-        out.print(" timezone_offset_min=");
-        out.print(as11_state_.timezone_offset_minutes());
-    } else {
-        out.print(" timezone_offset_min=unknown");
-    }
-    out.println();
-
-    out.print("[AS11] datetime=\"");
-    out.print(as11_state_.device_datetime().c_str());
-    out.print("\" clock=");
-    out.print(as11_state_.clock_valid() ? "known" : "unknown");
-    if (as11_state_.clock_valid()) {
-        out.print(" age_ms=");
-        out.print(millis() - as11_state_.clock_sample_ms());
-    }
-    out.print(" offset_ms=");
-    if (as11_state_.clock_offset_valid()) {
-        out.print(as11_state_.clock_offset_ms());
-    } else {
-        out.print("unknown");
-    }
-    out.println();
-}
-
-void RpcArbiter::print_stream_status(Print &out) const {
-    out.print("[STREAM] consumers=");
-    out.print(stream_.consumer_count());
-    out.print(" subscribed=");
-    out.print(stream_.actual_active() ? "yes" : "no");
-    out.print(" start_pending=");
-    out.print(stream_.pending_start() ? "yes" : "no");
-    out.print(" stop_pending=");
-    out.print(stream_.pending_stop() ? "yes" : "no");
-    out.print(" error=");
-    out.print(stream_.error() ? "yes" : "no");
-    out.print(" notifications=");
-    out.print(stats_.stream_notifications);
-    if (stream_.last_notification_ms()) {
-        out.print(" last_age_ms=");
-        out.print(millis() - stream_.last_notification_ms());
-    }
-    if (stream_.last_stream_id()) {
-        out.print(" stream_id=");
-        out.print(stream_.last_stream_id());
-    }
-    if (!stream_.last_start_time().empty()) {
-        out.print(" startTime=\"");
-        out.print(stream_.last_start_time().c_str());
-        out.print("\"");
-    }
-    out.println();
-    if (!stream_.params_json().empty()) {
-        out.print("[STREAM] params=");
-        out.println(stream_.params_json().c_str());
-    }
-    out.print("[STREAM] frame_pool used=");
-    out.print(stream_.frame_pool_in_use());
-    out.print(" free=");
-    out.print(stream_.frame_pool_free());
-    out.print(" capacity=");
-    out.print(stream_.frame_pool_capacity());
-    out.print(" parse_errors=");
-    out.print(stream_.parse_errors());
-    out.print(" pool_exhaustions=");
-    out.print(stream_.pool_exhaustions());
-    out.print(" truncated=");
-    out.println(stream_.truncated_frames());
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        StreamConsumerHandle handle = static_cast<StreamConsumerHandle>(i);
-        if (!stream_.consumer_active(handle)) continue;
-        out.print("[STREAM consumer ");
-        out.print(i);
-        out.print("] source=");
-        out.print(stream_.consumer_source(handle));
-        out.print(" q=");
-        out.print(stream_.consumer_queue_count(handle));
-        out.print(" drops=");
-        out.println(stream_.consumer_queue_drops(handle));
-    }
+    return out;
 }
 
 bool RpcArbiter::recover_can(const char *reason) {
@@ -1016,7 +764,6 @@ void RpcArbiter::poll_event_subscription() {
     request.source = RpcSource::Scheduler;
     request.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     if (enqueue_request(request)) {
-        stats_.event_subscribe_requests++;
         next_event_subscribe_ms_ = now + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
     } else {
         next_event_subscribe_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
@@ -1085,7 +832,6 @@ void RpcArbiter::poll_as11_healthcheck() {
         request.params_json = as11_identity_get_params_json();
         request.source = RpcSource::Scheduler;
         if (enqueue_request(request)) {
-            stats_.as11_identity_polls++;
             next_as11_identity_poll_ms_ = 0;
         } else {
             next_as11_identity_poll_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
@@ -1100,7 +846,6 @@ void RpcArbiter::poll_as11_healthcheck() {
         request.params_json = as11_runtime_get_params_json();
         request.source = RpcSource::Scheduler;
         if (enqueue_request(request)) {
-            stats_.as11_status_polls++;
             next_as11_status_poll_ms_ = now +
                 (as11_state_.therapy_command_pending()
                      ? AC_AS11_THERAPY_STATUS_POLL_INTERVAL_MS
@@ -1118,7 +863,6 @@ void RpcArbiter::poll_as11_healthcheck() {
         request.params_json = as11_motor_runtime_get_params_json();
         request.source = RpcSource::Scheduler;
         if (enqueue_request(request)) {
-            stats_.as11_motor_polls++;
             next_as11_motor_poll_ms_ =
                 as11_state_.therapy_state() == As11TherapyState::Running
                     ? now + AC_AS11_MOTOR_RUNTIME_POLL_INTERVAL_MS
@@ -1136,7 +880,6 @@ void RpcArbiter::poll_as11_healthcheck() {
         request.params_json = as11_timezone_get_params_json();
         request.source = RpcSource::Scheduler;
         if (enqueue_request(request)) {
-            stats_.as11_timezone_polls++;
             next_as11_timezone_poll_ms_ =
                 now + AC_AS11_TIMEZONE_POLL_INTERVAL_MS;
         } else {
@@ -1151,7 +894,6 @@ void RpcArbiter::poll_as11_healthcheck() {
         request.method = "GetDateTime";
         request.source = RpcSource::Scheduler;
         if (enqueue_request(request)) {
-            stats_.as11_clock_polls++;
             next_as11_clock_poll_ms_ =
                 now + AC_AS11_CLOCK_POLL_INTERVAL_MS;
         } else {
@@ -1194,7 +936,6 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
                 event_subscription_active_ = true;
                 event_subscription_id_ = subscription_id;
                 next_event_subscribe_ms_ = 0;
-                stats_.event_subscribe_successes++;
                 Log::logf(CAT_RPC, LOG_INFO,
                           "[RPC] subscribed to activity events id=%lu\n",
                           static_cast<unsigned long>(subscription_id));
@@ -1277,11 +1018,6 @@ bool RpcArbiter::request_as11_healthcheck() {
             : 0;
     next_as11_timezone_poll_ms_ = now + AC_AS11_TIMEZONE_POLL_INTERVAL_MS;
     next_as11_clock_poll_ms_ = now + AC_AS11_CLOCK_POLL_INTERVAL_MS;
-    stats_.as11_identity_polls++;
-    stats_.as11_status_polls++;
-    stats_.as11_motor_polls++;
-    stats_.as11_timezone_polls++;
-    stats_.as11_clock_polls++;
     return true;
 }
 
@@ -1332,7 +1068,6 @@ void RpcArbiter::handle_stream_notification(const std::string &payload) {
     stats_.stream_notifications++;
     StreamPublishResult result =
         stream_.publish_stream_data(payload, millis());
-    stats_.stream_fanout_targets += result.targets;
     stats_.stream_fanout_drops += result.drops;
     if (result.parse_error) stats_.stream_parse_errors++;
     if (result.pool_exhausted) stats_.stream_pool_exhaustions++;
@@ -1414,7 +1149,6 @@ void RpcArbiter::handle_rpc_payload(const std::string &payload) {
             const bool has_response_id = json_extract_id(payload, response_id);
             if (pending_.active && has_response_id &&
                 response_id == pending_.id) {
-                stats_.rpc_matched_responses++;
                 const uint32_t matched_id = pending_.id;
                 const std::string matched_method = pending_.method;
                 const RpcSource response_source = pending_.source;

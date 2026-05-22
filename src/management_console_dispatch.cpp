@@ -158,8 +158,8 @@ void ManagementConsole::handle_status_command(Print &out,
         print_unknown_command(out, "STATUS", "status");
         return;
     }
-    ctx.arbiter.print_status(out);
-    ctx.arbiter.print_as11_status(out);
+    ConsoleFormat::print_rpc_status(out, ctx.arbiter);
+    ConsoleFormat::print_as11_status(out, ctx.arbiter.as11_state());
     ConsoleFormat::print_session_status(out, ctx.session_manager.status());
     ConsoleFormat::print_sink_status(out, ctx.sink_manager);
     print_oximetry_status(out, ctx.oximetry_manager);
@@ -179,9 +179,9 @@ void ManagementConsole::handle_stats_command(Print &out,
         print_unknown_command(out, "STATS", "stats, stats reset");
         return;
     }
-    ctx.arbiter.print_stats(out);
+    ConsoleFormat::print_rpc_stats(out, ctx.arbiter);
     ConsoleFormat::print_tcp_stats(out, ctx.tcp_bridge);
-    Log::print_stats(out);
+    ConsoleFormat::print_log_stats(out);
     ConsoleFormat::print_memory_status(out, Memory::status());
     ConsoleFormat::print_storage_status(out, Storage::status());
     ConsoleFormat::print_storage_writer_status(out, StorageWriter::status());
@@ -349,7 +349,7 @@ void ManagementConsole::handle_can_command(Print &out,
     trim_inplace(rest);
     to_lower_inplace(rest);
     if (!rest.length() || rest == "status") {
-        ctx.arbiter.print_status(out);
+        ConsoleFormat::print_rpc_status(out, ctx.arbiter);
         return;
     }
     if (rest == "restart") {

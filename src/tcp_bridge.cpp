@@ -39,7 +39,6 @@ void TcpBridge::broadcast_rpc_payload(const std::string &payload) {
         }
     }
     if (!has_client) {
-        stats_.broadcasts_without_clients++;
         return;
     }
 
@@ -52,7 +51,6 @@ void TcpBridge::broadcast_rpc_payload(const std::string &payload) {
                       "[TCP %u] outbound queue full; dropping payload\n",
                       static_cast<unsigned>(i));
         } else {
-            stats_.broadcast_targets++;
         }
     }
 }
@@ -116,7 +114,6 @@ void TcpBridge::pump_outputs() {
 
         if (result.completed) {
             stats_.lines_out++;
-            last_line_out_ms_ = millis();
         }
     }
 }
@@ -145,7 +142,6 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
                 if (!line.length()) continue;
 
                 stats_.lines_in++;
-                last_line_in_ms_ = millis();
                 const std::string payload(line.c_str());
                 if (Log::get_cat_level(CAT_TCP) >= LOG_DEBUG) {
                     char prefix[32];
@@ -171,7 +167,6 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
                 }
             }
         }
-        if (budget == 0 && clients_[i].available()) stats_.input_yields++;
     }
 }
 

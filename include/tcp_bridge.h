@@ -17,11 +17,8 @@ struct TcpBridgeStats {
     uint32_t accepted_clients = 0;
     uint32_t disconnected_clients = 0;
     uint32_t broadcasts = 0;
-    uint32_t broadcast_targets = 0;
-    uint32_t broadcasts_without_clients = 0;
     uint32_t lines_in = 0;
     uint32_t bytes_in = 0;
-    uint32_t input_yields = 0;
     uint32_t lines_out = 0;
     uint32_t overlong_lines = 0;
     uint32_t enqueue_failures = 0;
@@ -51,8 +48,6 @@ public:
     uint16_t port() const { return line_server_port(); }
     const TcpBridgeStats &stats() const { return stats_; }
     const LineProtocolIoStats &io_stats() const { return line_io_stats(); }
-    uint32_t last_line_in_ms() const { return last_line_in_ms_; }
-    uint32_t last_line_out_ms() const { return last_line_out_ms_; }
     size_t client_statuses(TcpBridgeClientStatus *out, size_t max);
 
 private:
@@ -68,8 +63,6 @@ private:
     String output_current_[AC_MAX_TCP_CLIENTS];
     size_t output_pos_[AC_MAX_TCP_CLIENTS] = {};
 
-    uint32_t last_line_in_ms_ = 0;
-    uint32_t last_line_out_ms_ = 0;
     TcpBridgeStats stats_ = {};
 };
 

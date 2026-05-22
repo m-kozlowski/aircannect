@@ -524,6 +524,10 @@ IPAddress WifiManager::gateway() const {
     return WiFi.gatewayIP();
 }
 
+IPAddress WifiManager::softap_ip() const {
+    return WiFi.softAPIP();
+}
+
 int32_t WifiManager::rssi() const {
     if (mode_state_ != WifiModeState::StaConnected &&
         mode_state_ != WifiModeState::StaRoamScanning) {
@@ -550,85 +554,14 @@ void WifiManager::bssid(char *out, size_t size) const {
     format_bssid(out, size, WiFi.BSSID());
 }
 
-const char *WifiManager::state_name() const {
-    return mode_name();
+uint32_t WifiManager::connect_timeout_remaining_ms() const {
+    const int32_t remaining =
+        static_cast<int32_t>(connect_deadline_ms_ - millis());
+    return remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
 }
 
-void WifiManager::print_status(Print &out) const {
-    out.print("[WiFi] mode=");
-    out.print(mode_name());
-    out.print(" configured=");
-    out.print(sta_configured_ ? "yes" : "no");
-    out.print(" hostname=\"");
-    out.print(hostname_);
-    out.print("\" softap_mode=");
-    out.print(softap_mode_name(softap_mode_));
-    out.print(" softap=");
-    out.print(softap_running_ ? "up" : "down");
-    out.print(" roaming=");
-    out.print(roaming_enabled() ? (roaming_suspended_ ? "suspended" : "on")
-                                : "off");
-    out.print(" country=\"");
-    out.print(country_code_);
-    out.print("\"");
-    if (sta_configured_) {
-        out.print(" profiles=");
-        out.print(profile_count_);
-    }
-    if (active_profile_index_ >= 0 &&
-        active_profile_index_ < static_cast<int8_t>(profile_count_)) {
-        out.print(" ssid=\"");
-        out.print(sta_ssid_);
-        out.print("\" auth=");
-        out.print(sta_is_open() ? "open" : "password");
-        out.print(" active_profile=");
-        out.print(static_cast<int>(active_profile_index_));
-    }
-    out.print(" ip=");
-    out.print(ip());
-    if (softap_running_) {
-        out.print(" ap_ip=");
-        out.print(WiFi.softAPIP());
-    }
-    if (mode_state_ == WifiModeState::StaConnected) {
-        out.print(" gw=");
-        out.print(gateway());
-        out.print(" rssi=");
-        out.print(rssi());
-        out.print(" bssid=");
-        char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
-        bssid(bssid_text, sizeof(bssid_text));
-        out.print(bssid_text);
-        out.print(" channel=");
-        out.print(channel());
-    } else if (mode_state_ == WifiModeState::StaRoamScanning) {
-        out.print(" roam_scan=running rssi=");
-        out.print(rssi());
-    } else if (mode_state_ == WifiModeState::StaConnecting ||
-               mode_state_ == WifiModeState::StaPmfRetry) {
-        out.print(" timeout_ms=");
-        int32_t remaining = static_cast<int32_t>(connect_deadline_ms_ - millis());
-        out.print(remaining > 0 ? remaining : 0);
-    }
-    out.print(" attempts=");
-    out.print(stats_.connect_attempts);
-    out.print(" successes=");
-    out.print(stats_.connect_successes);
-    out.print(" failures=");
-    out.print(stats_.connect_failures);
-    out.print(" disconnects=");
-    out.print(stats_.disconnects);
-    out.print(" pmf_retries=");
-    out.print(stats_.pmf_retries);
-    out.print(" roam_scans=");
-    out.print(stats_.roam_scans);
-    out.print(" roam_switches=");
-    out.print(stats_.roam_switches);
-    out.print(" roam_candidates=");
-    out.print(stats_.last_roam_candidates);
-    out.print(" last_reason=");
-    out.print(stats_.last_disconnect_reason);
-    out.println();
+const char *WifiManager::state_name() const {
+    return mode_name();
 }
 
 void WifiManager::apply_country_code() {

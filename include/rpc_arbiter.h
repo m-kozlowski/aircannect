@@ -44,7 +44,6 @@ struct RpcEvent {
 struct RpcArbiterStats {
     uint32_t rpc_datagrams = 0;
     uint32_t rpc_responses = 0;
-    uint32_t rpc_matched_responses = 0;
     uint32_t rpc_notifications = 0;
     uint32_t rpc_unmatched = 0;
     uint32_t rpc_framing_errors = 0;
@@ -60,14 +59,11 @@ struct RpcArbiterStats {
     uint32_t request_dispatch_retries = 0;
     uint32_t background_backoffs = 0;
 
-    uint32_t submitted_datagrams = 0;
-    uint32_t rejected_datagrams = 0;
     uint32_t event_drops = 0;
 
     uint32_t stream_start_requests = 0;
     uint32_t stream_stop_requests = 0;
     uint32_t stream_notifications = 0;
-    uint32_t stream_fanout_targets = 0;
     uint32_t stream_fanout_drops = 0;
     uint32_t stream_consumer_rejects = 0;
     uint32_t stream_command_deferred = 0;
@@ -76,17 +72,22 @@ struct RpcArbiterStats {
     uint32_t stream_pool_exhaustions = 0;
     uint32_t stream_truncated_frames = 0;
 
-    uint32_t event_subscribe_requests = 0;
-    uint32_t event_subscribe_successes = 0;
     uint32_t event_subscribe_errors = 0;
     uint32_t event_notifications = 0;
     uint32_t activity_state_events = 0;
+};
 
-    uint32_t as11_identity_polls = 0;
-    uint32_t as11_status_polls = 0;
-    uint32_t as11_motor_polls = 0;
-    uint32_t as11_timezone_polls = 0;
-    uint32_t as11_clock_polls = 0;
+struct RpcRuntimeStatus {
+    uint32_t stats_elapsed_ms = 0;
+    size_t request_queue_depth = 0;
+    uint32_t pending_request_id = 0;
+    uint32_t dispatch_retry_id = 0;
+    uint32_t background_backoff_ms = 0;
+    bool event_subscription_active = false;
+    uint32_t event_subscription_id = 0;
+    uint32_t boot_notifications = 0;
+    uint32_t last_boot_notification_age_ms = 0;
+    std::string last_boot_notification;
 };
 
 class RpcArbiter {
@@ -121,10 +122,6 @@ public:
                              std::string &payload);
 
     void reset_stats();
-    void print_stats(Print &out) const;
-    void print_status(Print &out) const;
-    void print_as11_status(Print &out) const;
-    void print_stream_status(Print &out) const;
 
     bool request_as11_healthcheck();
     bool request_as11_settings_refresh();
@@ -133,6 +130,8 @@ public:
     void set_background_polls_suspended(bool suspended);
 
     const RpcArbiterStats &stats() const { return stats_; }
+    RpcRuntimeStatus runtime_status() const;
+    const CanDriver &can_driver() const { return can_; }
     const StreamBroker &stream_broker() const { return stream_; }
     const As11DeviceState &as11_state() const { return as11_state_; }
     const As11SettingsState &as11_settings() const { return as11_settings_; }
