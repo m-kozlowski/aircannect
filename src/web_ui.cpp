@@ -1416,9 +1416,9 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
             size_t options_emitted = 0;
             for (uint8_t opt_index = 0; opt_index < def.option_count;
                  ++opt_index) {
-                if (strcmp(def.name, "TherapyMode") == 0) {
-                    const uint16_t modes = state.supported_mode_mask();
-                    if (!modes || !(modes & (1u << opt_index))) continue;
+                if (!as11_setting_option_supported(
+                        def, opt_index, state.supported_mode_mask())) {
+                    continue;
                 }
                 if (options_emitted++) json += ',';
                 json += "{";

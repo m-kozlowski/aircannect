@@ -1139,6 +1139,15 @@ bool as11_setting_visible_for_mode(const As11SettingDef &def, int mode) {
     return (def.mode_mask & MODE_BIT(mode)) != 0;
 }
 
+bool as11_setting_option_supported(const As11SettingDef &def,
+                                   uint8_t option_index,
+                                   uint16_t supported_mode_mask) {
+    if (strcmp(def.name, "TherapyMode") != 0) return true;
+    if (option_index >= def.option_count) return false;
+    return supported_mode_mask &&
+           (supported_mode_mask & (1u << option_index)) != 0;
+}
+
 bool as11_setting_readable_via_rpc(const As11SettingDef &def) {
     return def.flat_name != nullptr || def.profile_field != nullptr ||
            (def.feature_name != nullptr && def.feature_field != nullptr);
