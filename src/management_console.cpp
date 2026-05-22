@@ -135,7 +135,7 @@ void print_wifi_scan(Print &out, WifiManager &wifi_manager) {
 
 void print_oximetry_sensor_status(Print &out,
                                   const OximetryManager &oximetry_manager) {
-    const OximetryStatus s = oximetry_manager.status();
+    const OximetrySensorStatus s = oximetry_manager.sensor_status();
     out.print("[OXI sensor] state=");
     out.print(sensor_state_text(s.sensor_state));
     out.print(" task=");
@@ -219,7 +219,8 @@ void ManagementConsole::begin(Print &out) {
 void ManagementConsole::print_oximetry_status(
     Print &out,
     const OximetryManager &oximetry_manager) const {
-    const OximetryStatus s = oximetry_manager.status();
+    const OximetryRuntimeStatus s = oximetry_manager.runtime_status();
+    const OximetrySensorStatus sensor = oximetry_manager.sensor_status();
     out.print("[OXI] enabled=");
     print_yes_no(out, s.enabled);
     out.print(" source=");
@@ -271,14 +272,14 @@ void ManagementConsole::print_oximetry_status(
     out.print(" disconnect_reason=");
     out.print(s.ble_last_disconnect_reason);
     out.print(" sensor=");
-    out.print(sensor_state_text(s.sensor_state));
+    out.print(sensor_state_text(sensor.sensor_state));
     out.print(" known=");
-    out.print(s.sensor_known_count);
+    out.print(sensor.sensor_known_count);
     out.print(" scan=");
-    out.print(s.sensor_scan_count);
-    if (s.sensor_peer[0]) {
+    out.print(sensor.sensor_scan_count);
+    if (sensor.sensor_peer[0]) {
         out.print(" peer=");
-        out.print(s.sensor_peer);
+        out.print(sensor.sensor_peer);
     }
     out.print(" name=\"");
     out.print(s.ble_name);

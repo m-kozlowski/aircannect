@@ -406,6 +406,7 @@ void WebUI::reserve_cached_json() {
     cached_console_json_.reserve(AC_WEB_CONSOLE_LOG_MAX + 128);
     cached_config_json_.reserve(AC_WEB_CONFIG_JSON_RESERVE);
     cached_wifi_json_.reserve(AC_WEB_WIFI_JSON_RESERVE);
+    cached_oximetry_sensors_json_.reserve(2048);
     cached_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
     cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
     cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
@@ -989,7 +990,7 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     const StorageWriterStatus writer = StorageWriter::status();
     const SessionStatus &session = session_manager_->status();
     const SinkRuntimeStatus &sink = sink_manager_->status();
-    const OximetryStatus oxi = oximetry_manager_->status();
+    const OximetryRuntimeStatus oxi = oximetry_manager_->runtime_status();
 
     json = "{";
     json_add_string(json, "version", aircannect_version(), false);
@@ -1126,8 +1127,6 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
         json += ",\"spo2\":null,\"pulse_bpm\":null";
     }
     json_add_int(json, "source_age_ms", oxi.last_source_age_ms);
-    json_add_int(json, "udp_port", oxi.udp_port);
-    json_add_bool(json, "udp_started", oxi.udp_started);
     json_add_string(json, "advertise_mode",
                     oximetry_advertise_mode_name(oxi.advertise_mode));
     json_add_bool(json, "manual_advertising_requested",
@@ -1140,16 +1139,6 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_int(json, "pairing_left_ms", oxi.pairing_left_ms);
     json_add_string(json, "ble_name", oxi.ble_name);
     json_add_string(json, "ble_peer", oxi.ble_peer);
-    json_add_string(json, "last_error", oxi.last_error);
-    json_add_int(json, "udp_packets", oxi.udp_packets);
-    json_add_int(json, "udp_bad_packets", oxi.udp_bad_packets);
-    json_add_int(json, "ble_connections", oxi.ble_connections);
-    json_add_int(json, "ble_disconnects", oxi.ble_disconnects);
-    json_add_int(json, "ble_last_disconnect_reason",
-                 oxi.ble_last_disconnect_reason);
-    json_add_int(json, "ble_notifications", oxi.ble_notifications);
-    json_add_int(json, "ble_invalid_notifications",
-                 oxi.ble_invalid_notifications);
     json += '}';
     json_add_string(json, "device_datetime",
                     as11.device_datetime().c_str());
@@ -1188,7 +1177,8 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
 }
 
 void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
-    const OximetryStatus oxi = oximetry_manager_->status();
+    const OximetryRuntimeStatus runtime = oximetry_manager_->runtime_status();
+    const OximetrySensorStatus sensor = oximetry_manager_->sensor_status();
     OximetrySensorDevice oxi_scan[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
     OximetrySensorDevice oxi_known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
     const size_t oxi_scan_count =
@@ -1199,19 +1189,19 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
                                          AC_OXIMETRY_SENSOR_MAX_KNOWN);
 
     json = "{";
-    json_add_bool(json, "enabled", oxi.enabled, false);
-    json_add_bool(json, "ble_available", oxi.ble_available);
+    json_add_bool(json, "enabled", runtime.enabled, false);
+    json_add_bool(json, "ble_available", runtime.ble_available);
     json_add_string(json, "sensor_state",
-                    oximetry_sensor_state_name(oxi.sensor_state));
-    json_add_bool(json, "sensor_task_started", oxi.sensor_task_started);
-    json_add_bool(json, "sensor_scanning", oxi.sensor_scanning);
-    json_add_bool(json, "sensor_connected", oxi.sensor_connected);
-    json_add_int(json, "sensor_known_count", oxi.sensor_known_count);
-    json_add_int(json, "sensor_scan_count", oxi.sensor_scan_count);
+                    oximetry_sensor_state_name(sensor.sensor_state));
+    json_add_bool(json, "sensor_task_started", sensor.sensor_task_started);
+    json_add_bool(json, "sensor_scanning", sensor.sensor_scanning);
+    json_add_bool(json, "sensor_connected", sensor.sensor_connected);
+    json_add_int(json, "sensor_known_count", sensor.sensor_known_count);
+    json_add_int(json, "sensor_scan_count", sensor.sensor_scan_count);
     json_add_int(json, "sensor_scan_generation",
-                 oxi.sensor_scan_generation);
-    json_add_string(json, "sensor_peer", oxi.sensor_peer);
-    json_add_string(json, "sensor_name", oxi.sensor_name);
+                 sensor.sensor_scan_generation);
+    json_add_string(json, "sensor_peer", sensor.sensor_peer);
+    json_add_string(json, "sensor_name", sensor.sensor_name);
     json += ",\"sensor_scan_results\":[";
     for (size_t i = 0; i < oxi_scan_count; ++i) {
         if (i) json += ',';
@@ -1470,6 +1460,7 @@ void WebUI::publish_snapshots(bool force) {
     build_console_json(cached_console_json_);
     build_config_json(cached_config_json_);
     build_wifi_json(cached_wifi_json_);
+    build_oximetry_sensors_json(cached_oximetry_sensors_json_);
     build_ota_json(cached_ota_json_, ota_manager_->status());
     build_resmed_ota_json(cached_resmed_ota_json_, *resmed_ota_manager_);
     build_settings_json(cached_settings_json_, requested_mode, refresh_queued);
@@ -2152,10 +2143,7 @@ void WebUI::register_routes() {
 
     server_->on("/api/oximetry/sensors", HTTP_GET,
         [this](AsyncWebServerRequest *request) {
-            LargeTextBuffer json;
-            json.reserve(2048);
-            build_oximetry_sensors_json(json);
-            request->send(200, "application/json", String(json.c_str()));
+            send_cached(request, cached_oximetry_sensors_json_);
         });
 
     server_->on("/api/wifi", HTTP_GET, [this](AsyncWebServerRequest *request) {

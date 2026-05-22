@@ -47,7 +47,7 @@ struct OximetrySensorDevice {
     bool autoconnect = true;
 };
 
-struct OximetryStatus {
+struct OximetryRuntimeStatus {
     bool enabled = false;
     OximetryAdvertiseMode advertise_mode = OximetryAdvertiseMode::Auto;
     bool source_present = false;
@@ -72,6 +72,12 @@ struct OximetryStatus {
     uint32_t ble_last_disconnect_reason = 0;
     uint32_t ble_notifications = 0;
     uint32_t ble_invalid_notifications = 0;
+    char ble_name[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
+    char ble_peer[24] = {};
+    char last_error[64] = {};
+};
+
+struct OximetrySensorStatus {
     OximetrySensorState sensor_state = OximetrySensorState::Off;
     bool sensor_task_started = false;
     bool sensor_scanning = false;
@@ -87,10 +93,10 @@ struct OximetryStatus {
     uint32_t sensor_scans = 0;
     char sensor_peer[18] = {};
     char sensor_name[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
-    char ble_name[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
-    char ble_peer[24] = {};
-    char last_error[64] = {};
 };
+
+struct OximetryInternalState : public OximetryRuntimeStatus,
+                               public OximetrySensorStatus {};
 
 class OximetryManager {
 public:
@@ -109,7 +115,8 @@ public:
     bool forget_sensor(const char *addr_or_all);
     bool set_sensor_autoconnect(const char *addr, bool enabled);
 
-    OximetryStatus status() const;
+    OximetryRuntimeStatus runtime_status() const;
+    OximetrySensorStatus sensor_status() const;
     size_t sensor_scan_results(OximetrySensorDevice *out, size_t max) const;
     size_t known_sensors(OximetrySensorDevice *out, size_t max) const;
     void on_sensor_sample(uint16_t spo2_raw,
@@ -200,7 +207,7 @@ private:
     void on_ble_error(const char *text);
 
     AppConfig *app_config_ = nullptr;
-    OximetryStatus status_;
+    OximetryInternalState status_;
     bool begun_ = false;
     bool ble_initialized_ = false;
     bool ble_adv_data_dirty_ = true;

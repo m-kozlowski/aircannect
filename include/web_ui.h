@@ -162,6 +162,7 @@ private:
     LargeTextBuffer cached_console_json_;
     LargeTextBuffer cached_config_json_;
     LargeTextBuffer cached_wifi_json_;
+    LargeTextBuffer cached_oximetry_sensors_json_;
     LargeTextBuffer cached_ota_json_;
     LargeTextBuffer cached_resmed_ota_json_;
     LargeTextBuffer cached_settings_json_;

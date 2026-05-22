@@ -1891,7 +1891,7 @@
       meter.title = percent.toFixed(1) + "% used";
     }
 
-    function renderOximetryStatus(data) {
+    function renderOximetryRuntime(data) {
       const oxi = data && data.oximetry ? data.oximetry : {};
       const sourceValid = !!(oxi.source_fresh && oxi.valid);
       up("oxiSpo2", sourceValid ? oxi.spo2 : "--");
@@ -2056,11 +2056,11 @@
       });
     }
 
-    function renderOximetrySensor(oxi) {
-      const state = oxi.sensor_state || "off";
+    function renderOximetrySensorManager(sensorData) {
+      const state = sensorData.sensor_state || "off";
       let badgeStyle = "";
       let badgeText = state;
-      if (!oxi.enabled) {
+      if (!sensorData.enabled) {
         badgeText = "off";
       } else if (state === "streaming") {
         badgeStyle = "good";
@@ -2076,20 +2076,20 @@
         badge.className = "badge " + badgeStyle;
       }
 
-      const scanResults = oxiSensorData.sensor_scan_results || [];
-      const knownSensors = oxiSensorData.sensor_known || [];
+      const scanResults = sensorData.sensor_scan_results || [];
+      const knownSensors = sensorData.sensor_known || [];
 
       const scanBtn = document.getElementById("oxiSensorScanBtn");
       const disconnectBtn = document.getElementById("oxiSensorDisconnectBtn");
       if (scanBtn) {
-        scanBtn.disabled = !oxi.enabled || !oxi.ble_available ||
-          oxi.sensor_connected || state === "scanning" ||
+        scanBtn.disabled = !sensorData.enabled || !sensorData.ble_available ||
+          sensorData.sensor_connected || state === "scanning" ||
           state === "connecting";
       }
       if (disconnectBtn) {
-        disconnectBtn.disabled = !oxi.sensor_connected;
+        disconnectBtn.disabled = !sensorData.sensor_connected;
       }
-      const activeSensor = (oxi.sensor_peer || "").toLowerCase();
+      const activeSensor = (sensorData.sensor_peer || "").toLowerCase();
 
       renderSensorList("oxiSensorResults", scanResults,
         "No scan results", (controls, device) => {
@@ -2098,8 +2098,9 @@
           const isActive = activeSensor &&
             (device.addr || "").toLowerCase() === activeSensor;
           button.textContent = isActive ? "Connected" : "Connect";
-          button.disabled = isActive || !oxi.enabled || !oxi.ble_available ||
-            oxi.sensor_connected || state === "connecting";
+          button.disabled = isActive || !sensorData.enabled ||
+            !sensorData.ble_available || sensorData.sensor_connected ||
+            state === "connecting";
           button.onclick = () => oxiSensorConnect(device, false);
           controls.appendChild(button);
         });
@@ -2119,8 +2120,9 @@
           const connect = document.createElement("button");
           connect.className = "btn primary";
           connect.textContent = isActive ? "Connected" : "Connect";
-          connect.disabled = isActive || !oxi.enabled || !oxi.ble_available ||
-            oxi.sensor_connected || state === "connecting";
+          connect.disabled = isActive || !sensorData.enabled ||
+            !sensorData.ble_available || sensorData.sensor_connected ||
+            state === "connecting";
           connect.onclick = () => oxiSensorConnect(device, true);
           controls.appendChild(connect);
 
@@ -2179,7 +2181,7 @@
       try {
         const response = await api("/api/oximetry/sensors");
         oxiSensorData = await response.json();
-        renderOximetrySensor(oxiSensorData);
+        renderOximetrySensorManager(oxiSensorData);
       } catch (error) {
         apiError(error);
       } finally {
@@ -2213,7 +2215,7 @@
       up("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
       renderStorageStatus(data);
       up("timeSync", fmtSync(data));
-      renderOximetryStatus(data);
+      renderOximetryRuntime(data);
 
       const badge = document.getElementById("therapyBadge");
       const pending = therapyPending(data);
@@ -2578,7 +2580,7 @@
       known.forEach((device) => {
         if (device.addr === addr) device.autoconnect = enabled;
       });
-      renderOximetrySensor(oxiSensorData);
+      renderOximetrySensorManager(oxiSensorData);
       oxiAction("sensor_autoconnect", {addr, enabled}, "oxiKnownMsg");
     }
 

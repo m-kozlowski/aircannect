@@ -128,11 +128,31 @@ bool OximetryManager::request_pairing(bool enabled) {
     return true;
 }
 
-OximetryStatus OximetryManager::status() const {
+OximetryRuntimeStatus OximetryManager::runtime_status() const {
+    OximetryRuntimeStatus out = status_;
+    const uint32_t now_ms = millis();
+    out.source_present = source_present_;
+    out.source_fresh = sample_fresh(now_ms);
+    out.source = source_;
+    out.reading = reading_;
+    out.last_source_age_ms =
+        source_present_ ? now_ms - last_source_ms_ : 0;
+    if (status_.pairing_active) {
+        out.pairing_left_ms =
+            static_cast<int32_t>(pairing_until_ms_ - now_ms) > 0
+                ? pairing_until_ms_ - now_ms
+                : 0;
+    }
+    strncpy(out.ble_name, ble_name_, sizeof(out.ble_name) - 1);
+    out.ble_name[sizeof(out.ble_name) - 1] = 0;
+    return out;
+}
+
+OximetrySensorStatus OximetryManager::sensor_status() const {
+    OximetrySensorStatus out = status_;
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
 #endif
-    OximetryStatus out = status_;
     out.sensor_task_started = sensor_task_started_;
     out.sensor_known_count = 0;
     for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
@@ -149,21 +169,6 @@ OximetryStatus OximetryManager::status() const {
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
 #endif
-    const uint32_t now_ms = millis();
-    out.source_present = source_present_;
-    out.source_fresh = sample_fresh(now_ms);
-    out.source = source_;
-    out.reading = reading_;
-    out.last_source_age_ms =
-        source_present_ ? now_ms - last_source_ms_ : 0;
-    if (status_.pairing_active) {
-        out.pairing_left_ms =
-            static_cast<int32_t>(pairing_until_ms_ - now_ms) > 0
-                ? pairing_until_ms_ - now_ms
-                : 0;
-    }
-    strncpy(out.ble_name, ble_name_, sizeof(out.ble_name) - 1);
-    out.ble_name[sizeof(out.ble_name) - 1] = 0;
     return out;
 }
 
