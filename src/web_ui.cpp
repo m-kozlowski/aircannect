@@ -236,7 +236,7 @@ void append_json_float_value(JsonOut &json, float value) {
 template <typename JsonOut>
 void append_live_series(JsonOut &json,
                         const char *key,
-                        const WebLiveSeriesBatch &series,
+                        const LiveChartSeriesBatch &series,
                         bool comma = true) {
     if (comma) json += ',';
     json += '"';
@@ -251,37 +251,6 @@ void append_live_series(JsonOut &json,
         }
     }
     json += ']';
-}
-
-void append_live_sample(WebLiveSeriesBatch &series,
-                        bool valid,
-                        float value,
-                        uint32_t &drops) {
-    if (series.count >= AC_WEB_LIVE_BATCH_SAMPLES_MAX) {
-        drops++;
-        return;
-    }
-    const size_t index = series.count++;
-    series.valid[index] = valid ? 1 : 0;
-    series.values[index] = valid ? value : 0.0f;
-}
-
-bool append_frame_signal(const StreamFrameData &frame,
-                         StreamSignalId id,
-                         WebLiveSeriesBatch &series,
-                         uint32_t &drops,
-                         float scale = 1.0f) {
-    const StreamSignalSpan *span = frame.find_signal(id);
-    if (!span) return false;
-    for (uint16_t i = 0; i < span->sample_count; ++i) {
-        const size_t index = span->value_offset + i;
-        const bool valid =
-            index < frame.value_count && frame.value_valid(index);
-        append_live_sample(series, valid,
-                           valid ? frame.values[index] * scale : 0.0f,
-                           drops);
-    }
-    return true;
 }
 
 template <typename JsonOut>
@@ -414,7 +383,7 @@ void WebUI::reserve_cached_json() {
 }
 
 void WebUI::stop() {
-    release_live_stream();
+    if (sink_manager_) sink_manager_->set_live_chart_enabled(false);
     if (events_) {
         events_->close();
     }
@@ -454,13 +423,12 @@ void WebUI::stop() {
     }
 
     sse_enforce_needed_ = false;
-    live_next_attach_ms_ = 0;
     live_last_send_ms_ = 0;
-    live_last_frame_ms_ = 0;
-    live_state_dirty_ = true;
-    live_last_error_[0] = 0;
     live_json_ = "";
-    reset_live_batch();
+    if (sink_manager_) {
+        sink_manager_->set_live_chart_enabled(false);
+        sink_manager_->clear_live_chart_batch();
+    }
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     last_snapshot_ms_ = 0;
@@ -628,120 +596,20 @@ size_t WebUI::sse_client_count() {
     return count;
 }
 
-bool WebUI::live_stream_active() const {
-    return arbiter_ &&
-           live_stream_handle_ != STREAM_CONSUMER_INVALID &&
-           arbiter_->stream_consumer_active(live_stream_handle_);
-}
-
-bool WebUI::live_stream_should_run(size_t clients) const {
-    if (!arbiter_ || clients == 0) return false;
-    const As11TherapyState therapy = arbiter_->as11_state().therapy_state();
-    if (therapy == As11TherapyState::Running) return true;
-    if (session_manager_ &&
-        session_manager_->status().state == SessionState::Active) {
-        return true;
-    }
-    return false;
-}
-
 void WebUI::poll_live_stream() {
     const size_t clients = sse_client_count();
-    const uint32_t now = millis();
-    if (!live_stream_should_run(clients)) {
-        if (live_stream_active()) release_live_stream();
-        send_live_batch(now);
-        return;
-    }
-
-    if (!live_stream_active()) {
-        attach_live_stream(now);
-    }
-    drain_live_stream(now);
-    send_live_batch(now);
-}
-
-void WebUI::attach_live_stream(uint32_t now_ms) {
-    if (!arbiter_) return;
-    if (static_cast<int32_t>(now_ms - live_next_attach_ms_) < 0) return;
-    live_next_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
-
-    const std::string params = build_stream_params(DEFAULT_EDF_STREAM_IDS,
-                                                   10,
-                                                   50);
-    StreamAcquireResult result =
-        arbiter_->acquire_stream(params, RpcSource::Sink);
-    if (result.status == StreamAcquireStatus::Acquired ||
-        result.status == StreamAcquireStatus::AlreadyActive) {
-        live_stream_handle_ = result.handle;
-        live_last_error_[0] = 0;
-        live_state_dirty_ = true;
-        mark_snapshots_dirty(SNAPSHOT_STREAM);
-        return;
-    }
-
-    live_attach_failures_++;
-    snprintf(live_last_error_, sizeof(live_last_error_), "acquire:%u",
-             static_cast<unsigned>(result.status));
-    live_state_dirty_ = true;
-    mark_snapshots_dirty(SNAPSHOT_STREAM);
-}
-
-void WebUI::release_live_stream() {
-    if (arbiter_ && live_stream_active()) {
-        arbiter_->release_stream(live_stream_handle_);
-    }
-    live_stream_handle_ = STREAM_CONSUMER_INVALID;
-    reset_live_batch();
-    live_state_dirty_ = true;
-    mark_snapshots_dirty(SNAPSHOT_STREAM);
-}
-
-void WebUI::drain_live_stream(uint32_t now_ms) {
-    if (!live_stream_active()) return;
-
-    for (size_t i = 0; i < AC_WEB_LIVE_FRAME_BUDGET; ++i) {
-        StreamFrameRef frame;
-        if (!arbiter_->next_stream_frame(live_stream_handle_, frame)) break;
-        if (!frame) continue;
-
-        append_frame_signal(*frame, StreamSignalId::MaskPressure100Hz,
-                            live_pressure_, live_drops_);
-        append_frame_signal(*frame, StreamSignalId::PatientFlow100Hz,
-                            live_flow_, live_drops_, 60.0f);
-        append_frame_signal(*frame, StreamSignalId::Leak50Hz,
-                            live_leak_, live_drops_, 60.0f);
-        if (!append_frame_signal(*frame,
-                                 StreamSignalId::InspiratoryPressure50Hz,
-                                 live_inspiratory_pressure_, live_drops_)) {
-            append_frame_signal(*frame,
-                                StreamSignalId::InspiratoryPressureTwoSecond,
-                                live_inspiratory_pressure_, live_drops_);
-        }
-        if (!append_frame_signal(*frame,
-                                 StreamSignalId::ExpiratoryPressure50Hz,
-                                 live_expiratory_pressure_, live_drops_)) {
-            append_frame_signal(*frame,
-                                StreamSignalId::ExpiratoryPressureTwoSecond,
-                                live_expiratory_pressure_, live_drops_);
-        }
-        append_frame_signal(*frame, StreamSignalId::SpO2,
-                            live_spo2_, live_drops_);
-        append_frame_signal(*frame, StreamSignalId::HeartRate,
-                            live_pulse_, live_drops_);
-
-        live_frames_++;
-        live_last_frame_ms_ = now_ms;
-    }
+    if (sink_manager_) sink_manager_->set_live_chart_enabled(clients > 0);
+    send_live_batch(millis());
 }
 
 void WebUI::send_live_batch(uint32_t now_ms) {
-    if (!events_) return;
+    if (!events_ || !sink_manager_) return;
+    const LiveChartRuntimeStatus &live = sink_manager_->live_chart_status();
     const bool has_samples =
-        live_pressure_.count || live_flow_.count || live_leak_.count ||
-        live_inspiratory_pressure_.count ||
-        live_expiratory_pressure_.count ||
-        live_spo2_.count || live_pulse_.count;
+        live.pressure.count || live.flow.count || live.leak.count ||
+        live.inspiratory_pressure.count ||
+        live.expiratory_pressure.count ||
+        live.spo2.count || live.pulse.count;
     const bool interval_due =
         static_cast<int32_t>(now_ms - live_last_send_ms_) >=
         static_cast<int32_t>(AC_WEB_LIVE_PUSH_INTERVAL_MS);
@@ -749,36 +617,36 @@ void WebUI::send_live_batch(uint32_t now_ms) {
         static_cast<int32_t>(now_ms - live_last_send_ms_) >=
         static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
     if (has_samples && !interval_due) return;
-    if (!has_samples && !live_state_dirty_ && !heartbeat_due) return;
+    if (!has_samples && !live.state_dirty && !heartbeat_due) return;
     if (sse_client_count() == 0) {
-        reset_live_batch();
+        sink_manager_->clear_live_chart_batch();
         return;
     }
 
     live_json_ = "{";
     json_add_int(live_json_, "seq", static_cast<long>(++live_seq_), false);
-    json_add_bool(live_json_, "active", live_stream_should_run(1));
-    json_add_bool(live_json_, "attached", live_stream_active());
-    json_add_int(live_json_, "frames", static_cast<long>(live_frames_));
-    json_add_int(live_json_, "drops", static_cast<long>(live_drops_));
+    json_add_bool(live_json_, "active", live.desired);
+    json_add_bool(live_json_, "attached", live.attached);
+    json_add_int(live_json_, "frames", static_cast<long>(live.frames));
+    json_add_int(live_json_, "drops", static_cast<long>(live.drops));
     json_add_int(live_json_, "attach_failures",
-                 static_cast<long>(live_attach_failures_));
-    if (live_last_frame_ms_) {
-        json_add_int(live_json_, "last_age_ms", now_ms - live_last_frame_ms_);
+                 static_cast<long>(live.attach_failures));
+    if (live.last_frame_ms) {
+        json_add_int(live_json_, "last_age_ms", now_ms - live.last_frame_ms);
     } else {
         live_json_ += ",\"last_age_ms\":null";
     }
-    json_add_string(live_json_, "last_error", live_last_error_);
+    json_add_string(live_json_, "last_error", live.last_error);
     live_json_ += ",\"samples\":{";
-    append_live_series(live_json_, "pressure", live_pressure_, false);
-    append_live_series(live_json_, "flow", live_flow_);
-    append_live_series(live_json_, "leak", live_leak_);
+    append_live_series(live_json_, "pressure", live.pressure, false);
+    append_live_series(live_json_, "flow", live.flow);
+    append_live_series(live_json_, "leak", live.leak);
     append_live_series(live_json_, "inspiratory_pressure",
-                       live_inspiratory_pressure_);
+                       live.inspiratory_pressure);
     append_live_series(live_json_, "expiratory_pressure",
-                       live_expiratory_pressure_);
-    append_live_series(live_json_, "spo2", live_spo2_);
-    append_live_series(live_json_, "pulse", live_pulse_);
+                       live.expiratory_pressure);
+    append_live_series(live_json_, "spo2", live.spo2);
+    append_live_series(live_json_, "pulse", live.pulse);
     live_json_ += "}}";
 
     if (events_->send(live_json_.c_str(), "live", now_ms) !=
@@ -786,18 +654,7 @@ void WebUI::send_live_batch(uint32_t now_ms) {
         sse_enforce_needed_ = true;
     }
     live_last_send_ms_ = now_ms;
-    live_state_dirty_ = false;
-    reset_live_batch();
-}
-
-void WebUI::reset_live_batch() {
-    live_pressure_.count = 0;
-    live_flow_.count = 0;
-    live_leak_.count = 0;
-    live_inspiratory_pressure_.count = 0;
-    live_expiratory_pressure_.count = 0;
-    live_spo2_.count = 0;
-    live_pulse_.count = 0;
+    sink_manager_->mark_live_chart_sent();
 }
 
 void WebUI::handle_event(const RpcEvent &event) {
@@ -1219,6 +1076,7 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
 void WebUI::build_stream_json(LargeTextBuffer &json) const {
     const StreamBroker &stream = arbiter_->stream_broker();
     const RpcArbiterStats &stats = arbiter_->stats();
+    const LiveChartRuntimeStatus &live = sink_manager_->live_chart_status();
 
     json = "{";
     json_add_bool(json, "desired", stream.desired_active(), false);
@@ -1238,13 +1096,13 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
     json_add_int(json, "parse_errors", stream.parse_errors());
     json_add_int(json, "pool_exhaustions", stream.pool_exhaustions());
     json_add_int(json, "truncated_frames", stream.truncated_frames());
-    json_add_bool(json, "web_live_attached", live_stream_active());
-    json_add_int(json, "web_live_handle", live_stream_handle_);
-    json_add_int(json, "web_live_frames", static_cast<long>(live_frames_));
-    json_add_int(json, "web_live_drops", static_cast<long>(live_drops_));
+    json_add_bool(json, "web_live_attached", live.attached);
+    json_add_int(json, "web_live_handle", live.handle);
+    json_add_int(json, "web_live_frames", static_cast<long>(live.frames));
+    json_add_int(json, "web_live_drops", static_cast<long>(live.drops));
     json_add_int(json, "web_live_attach_failures",
-                 static_cast<long>(live_attach_failures_));
-    json_add_string(json, "web_live_error", live_last_error_);
+                 static_cast<long>(live.attach_failures));
+    json_add_string(json, "web_live_error", live.last_error);
     json_add_int(json, "stream_id", stream.last_stream_id());
     json_add_int(json, "start_requests", stats.stream_start_requests);
     json_add_int(json, "stop_requests", stats.stream_stop_requests);

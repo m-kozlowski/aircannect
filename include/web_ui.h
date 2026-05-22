@@ -26,12 +26,6 @@ class AsyncWebServer;
 
 namespace aircannect {
 
-struct WebLiveSeriesBatch {
-    float values[AC_WEB_LIVE_BATCH_SAMPLES_MAX] = {};
-    uint8_t valid[AC_WEB_LIVE_BATCH_SAMPLES_MAX] = {};
-    size_t count = 0;
-};
-
 class WebUI {
 public:
     bool begin(RpcArbiter &arbiter,
@@ -93,13 +87,7 @@ private:
 
     // Dashboard live stream sink
     void poll_live_stream();
-    void attach_live_stream(uint32_t now_ms);
-    void release_live_stream();
-    void drain_live_stream(uint32_t now_ms);
     void send_live_batch(uint32_t now_ms);
-    void reset_live_batch();
-    bool live_stream_should_run(size_t clients) const;
-    bool live_stream_active() const;
 
     // Response helpers
     String queued_json(const char *result = "queued") const;
@@ -158,23 +146,8 @@ private:
     SseClientRef sse_clients_[AC_WEB_SSE_CLIENTS_MAX + 1];
     bool sse_enforce_needed_ = false;
 
-    StreamConsumerHandle live_stream_handle_ = STREAM_CONSUMER_INVALID;
-    uint32_t live_next_attach_ms_ = 0;
     uint32_t live_last_send_ms_ = 0;
     uint32_t live_seq_ = 0;
-    uint32_t live_frames_ = 0;
-    uint32_t live_drops_ = 0;
-    uint32_t live_attach_failures_ = 0;
-    uint32_t live_last_frame_ms_ = 0;
-    bool live_state_dirty_ = true;
-    char live_last_error_[64] = {};
-    WebLiveSeriesBatch live_pressure_;
-    WebLiveSeriesBatch live_flow_;
-    WebLiveSeriesBatch live_leak_;
-    WebLiveSeriesBatch live_inspiratory_pressure_;
-    WebLiveSeriesBatch live_expiratory_pressure_;
-    WebLiveSeriesBatch live_spo2_;
-    WebLiveSeriesBatch live_pulse_;
 
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer cached_stream_json_;

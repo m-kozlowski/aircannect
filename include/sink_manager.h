@@ -23,6 +23,33 @@ struct SinkRuntimeStatus {
     char last_error[96] = {};
 };
 
+struct LiveChartSeriesBatch {
+    float values[AC_WEB_LIVE_BATCH_SAMPLES_MAX] = {};
+    uint8_t valid[AC_WEB_LIVE_BATCH_SAMPLES_MAX] = {};
+    size_t count = 0;
+};
+
+struct LiveChartRuntimeStatus {
+    bool enabled = false;
+    bool desired = false;
+    bool attached = false;
+    bool state_dirty = true;
+    StreamConsumerHandle handle = STREAM_CONSUMER_INVALID;
+    uint32_t frames = 0;
+    uint32_t drops = 0;
+    uint32_t attach_failures = 0;
+    uint32_t last_frame_ms = 0;
+    char last_error[64] = {};
+
+    LiveChartSeriesBatch pressure;
+    LiveChartSeriesBatch flow;
+    LiveChartSeriesBatch leak;
+    LiveChartSeriesBatch inspiratory_pressure;
+    LiveChartSeriesBatch expiratory_pressure;
+    LiveChartSeriesBatch spo2;
+    LiveChartSeriesBatch pulse;
+};
+
 class Sink {
 public:
     virtual ~Sink() = default;
@@ -44,6 +71,14 @@ public:
 
     void set_debug_enabled(bool enabled);
     bool debug_enabled() const;
+
+    void set_live_chart_enabled(bool enabled);
+    bool live_chart_enabled() const;
+    const LiveChartRuntimeStatus &live_chart_status() const {
+        return live_chart_;
+    }
+    void clear_live_chart_batch();
+    void mark_live_chart_sent();
 
     const SinkRuntimeStatus &status() const { return status_; }
     void print_status(Print &out) const;
@@ -79,16 +114,25 @@ private:
     void attach_debug_stream(uint32_t now_ms);
     void release_debug_stream();
     void drain_debug_stream(uint32_t now_ms);
+    bool live_chart_should_run() const;
+    void poll_live_chart(uint32_t now_ms);
+    void attach_live_chart_stream(uint32_t now_ms);
+    void release_live_chart_stream();
+    void drain_live_chart_stream(uint32_t now_ms);
     void set_error(const char *error);
+    void set_live_error(const char *error);
 
     RpcArbiter *arbiter_ = nullptr;
     SessionManager *session_ = nullptr;
     DebugSink debug_sink_;
     SinkRuntimeStatus status_;
+    LiveChartRuntimeStatus live_chart_;
     uint32_t seen_session_starts_ = 0;
     uint32_t seen_session_ends_ = 0;
     uint32_t last_debug_queue_drops_ = 0;
+    uint32_t last_live_queue_drops_ = 0;
     uint32_t next_attach_ms_ = 0;
+    uint32_t next_live_attach_ms_ = 0;
     bool initialized_ = false;
 };
 

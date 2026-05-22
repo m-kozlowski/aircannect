@@ -27,6 +27,37 @@ void copy_text(char *dst, size_t size, const char *src) {
     snprintf(dst, size, "%s", src ? src : "");
 }
 
+void append_live_sample(LiveChartSeriesBatch &series,
+                        bool valid,
+                        float value,
+                        uint32_t &drops) {
+    if (series.count >= AC_WEB_LIVE_BATCH_SAMPLES_MAX) {
+        drops++;
+        return;
+    }
+    const size_t index = series.count++;
+    series.valid[index] = valid ? 1 : 0;
+    series.values[index] = valid ? value : 0.0f;
+}
+
+bool append_frame_signal(const StreamFrameData &frame,
+                         StreamSignalId id,
+                         LiveChartSeriesBatch &series,
+                         uint32_t &drops,
+                         float scale = 1.0f) {
+    const StreamSignalSpan *span = frame.find_signal(id);
+    if (!span) return false;
+    for (uint16_t i = 0; i < span->sample_count; ++i) {
+        const size_t index = span->value_offset + i;
+        const bool valid =
+            index < frame.value_count && frame.value_valid(index);
+        append_live_sample(series, valid,
+                           valid ? frame.values[index] * scale : 0.0f,
+                           drops);
+    }
+    return true;
+}
+
 }  // namespace
 
 void SinkManager::DebugSink::on_session_start(
@@ -86,6 +117,7 @@ void SinkManager::poll() {
     const uint32_t now = millis();
 
     dispatch_session_edges();
+    poll_live_chart(now);
 
     if (!debug_sink_.enabled()) {
         release_debug_stream();
@@ -121,9 +153,37 @@ bool SinkManager::debug_enabled() const {
     return debug_sink_.enabled();
 }
 
+void SinkManager::set_live_chart_enabled(bool enabled) {
+    if (live_chart_.enabled == enabled) return;
+    live_chart_.enabled = enabled;
+    live_chart_.state_dirty = true;
+    if (!enabled) release_live_chart_stream();
+}
+
+bool SinkManager::live_chart_enabled() const {
+    return live_chart_.enabled;
+}
+
+void SinkManager::clear_live_chart_batch() {
+    live_chart_.pressure.count = 0;
+    live_chart_.flow.count = 0;
+    live_chart_.leak.count = 0;
+    live_chart_.inspiratory_pressure.count = 0;
+    live_chart_.expiratory_pressure.count = 0;
+    live_chart_.spo2.count = 0;
+    live_chart_.pulse.count = 0;
+}
+
+void SinkManager::mark_live_chart_sent() {
+    live_chart_.state_dirty = false;
+    clear_live_chart_batch();
+}
+
 void SinkManager::print_status(Print &out) const {
     out.print("[SINK] debug=");
     out.print(debug_sink_.enabled() ? "on" : "off");
+    out.print(" live=");
+    out.print(live_chart_.enabled ? "on" : "off");
     out.print(" stream=");
     out.print(status_.debug_stream_attached ? "attached" : "detached");
     out.print(" handle=");
@@ -147,6 +207,29 @@ void SinkManager::print_status(Print &out) const {
     if (status_.last_error[0]) {
         out.print(" error=");
         out.print(status_.last_error);
+    }
+    out.println();
+    out.print("[SINK live] enabled=");
+    out.print(live_chart_.enabled ? "yes" : "no");
+    out.print(" desired=");
+    out.print(live_chart_.desired ? "yes" : "no");
+    out.print(" stream=");
+    out.print(live_chart_.attached ? "attached" : "detached");
+    out.print(" handle=");
+    out.print(live_chart_.handle);
+    out.print(" frames=");
+    out.print(live_chart_.frames);
+    out.print(" drops=");
+    out.print(live_chart_.drops);
+    out.print(" attach_failures=");
+    out.print(live_chart_.attach_failures);
+    if (live_chart_.last_frame_ms) {
+        out.print(" last_frame_age_ms=");
+        out.print(millis() - live_chart_.last_frame_ms);
+    }
+    if (live_chart_.last_error[0]) {
+        out.print(" error=");
+        out.print(live_chart_.last_error);
     }
     out.println();
     debug_sink_.print_status(out);
@@ -241,8 +324,142 @@ void SinkManager::drain_debug_stream(uint32_t now_ms) {
     }
 }
 
+bool SinkManager::live_chart_should_run() const {
+    if (!live_chart_.enabled || !arbiter_ || !session_) return false;
+    if (arbiter_->as11_state().therapy_state() == As11TherapyState::Running) {
+        return true;
+    }
+    return session_->status().state == SessionState::Active;
+}
+
+void SinkManager::poll_live_chart(uint32_t now_ms) {
+    const bool should_run = live_chart_should_run();
+    if (live_chart_.desired != should_run) {
+        live_chart_.desired = should_run;
+        live_chart_.state_dirty = true;
+    }
+    if (!should_run) {
+        release_live_chart_stream();
+        return;
+    }
+
+    attach_live_chart_stream(now_ms);
+    drain_live_chart_stream(now_ms);
+}
+
+void SinkManager::attach_live_chart_stream(uint32_t now_ms) {
+    if (live_chart_.handle != STREAM_CONSUMER_INVALID &&
+        arbiter_->stream_consumer_active(live_chart_.handle)) {
+        if (!live_chart_.attached) {
+            live_chart_.attached = true;
+            live_chart_.state_dirty = true;
+        }
+        return;
+    }
+    live_chart_.handle = STREAM_CONSUMER_INVALID;
+    if (live_chart_.attached) {
+        live_chart_.attached = false;
+        live_chart_.state_dirty = true;
+    }
+    if (static_cast<int32_t>(now_ms - next_live_attach_ms_) < 0) return;
+
+    next_live_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
+    const std::string params =
+        build_stream_params(DEFAULT_EDF_STREAM_IDS, 10, 50);
+    StreamAcquireResult result =
+        arbiter_->acquire_stream(params, RpcSource::Sink);
+    if (result.status == StreamAcquireStatus::Acquired ||
+        result.status == StreamAcquireStatus::AlreadyActive) {
+        live_chart_.handle = result.handle;
+        live_chart_.attached = true;
+        live_chart_.state_dirty = true;
+        last_live_queue_drops_ = 0;
+        live_chart_.last_error[0] = 0;
+        return;
+    }
+
+    live_chart_.attach_failures++;
+    live_chart_.state_dirty = true;
+    set_live_error(acquire_status_name(result.status));
+}
+
+void SinkManager::release_live_chart_stream() {
+    if (!arbiter_) return;
+    if (live_chart_.handle != STREAM_CONSUMER_INVALID &&
+        arbiter_->stream_consumer_active(live_chart_.handle)) {
+        arbiter_->release_stream(live_chart_.handle);
+    }
+    const bool was_attached =
+        live_chart_.handle != STREAM_CONSUMER_INVALID || live_chart_.attached;
+    live_chart_.handle = STREAM_CONSUMER_INVALID;
+    live_chart_.attached = false;
+    last_live_queue_drops_ = 0;
+    if (was_attached) live_chart_.state_dirty = true;
+}
+
+void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
+    if (live_chart_.handle == STREAM_CONSUMER_INVALID ||
+        !arbiter_->stream_consumer_active(live_chart_.handle)) {
+        if (live_chart_.attached) live_chart_.state_dirty = true;
+        live_chart_.attached = false;
+        return;
+    }
+
+    const uint32_t queue_drops =
+        arbiter_->stream_consumer_queue_drops(live_chart_.handle);
+    if (queue_drops < last_live_queue_drops_) {
+        last_live_queue_drops_ = queue_drops;
+    } else if (queue_drops != last_live_queue_drops_) {
+        const uint32_t delta = queue_drops - last_live_queue_drops_;
+        last_live_queue_drops_ = queue_drops;
+        live_chart_.drops += delta;
+    }
+
+    for (size_t i = 0; i < AC_WEB_LIVE_FRAME_BUDGET; ++i) {
+        StreamFrameRef frame;
+        if (!arbiter_->next_stream_frame(live_chart_.handle, frame)) break;
+        if (!frame) continue;
+
+        append_frame_signal(*frame, StreamSignalId::MaskPressure100Hz,
+                            live_chart_.pressure, live_chart_.drops);
+        append_frame_signal(*frame, StreamSignalId::PatientFlow100Hz,
+                            live_chart_.flow, live_chart_.drops, 60.0f);
+        append_frame_signal(*frame, StreamSignalId::Leak50Hz,
+                            live_chart_.leak, live_chart_.drops, 60.0f);
+        if (!append_frame_signal(*frame,
+                                 StreamSignalId::InspiratoryPressure50Hz,
+                                 live_chart_.inspiratory_pressure,
+                                 live_chart_.drops)) {
+            append_frame_signal(*frame,
+                                StreamSignalId::InspiratoryPressureTwoSecond,
+                                live_chart_.inspiratory_pressure,
+                                live_chart_.drops);
+        }
+        if (!append_frame_signal(*frame,
+                                 StreamSignalId::ExpiratoryPressure50Hz,
+                                 live_chart_.expiratory_pressure,
+                                 live_chart_.drops)) {
+            append_frame_signal(*frame,
+                                StreamSignalId::ExpiratoryPressureTwoSecond,
+                                live_chart_.expiratory_pressure,
+                                live_chart_.drops);
+        }
+        append_frame_signal(*frame, StreamSignalId::SpO2,
+                            live_chart_.spo2, live_chart_.drops);
+        append_frame_signal(*frame, StreamSignalId::HeartRate,
+                            live_chart_.pulse, live_chart_.drops);
+
+        live_chart_.frames++;
+        live_chart_.last_frame_ms = now_ms;
+    }
+}
+
 void SinkManager::set_error(const char *error) {
     copy_text(status_.last_error, sizeof(status_.last_error), error);
+}
+
+void SinkManager::set_live_error(const char *error) {
+    copy_text(live_chart_.last_error, sizeof(live_chart_.last_error), error);
 }
 
 }  // namespace aircannect
