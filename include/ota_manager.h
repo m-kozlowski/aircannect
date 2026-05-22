@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <stdint.h>
 
 #include "app_config.h"
@@ -40,11 +42,8 @@ public:
 
     void schedule_reboot(uint32_t delay_ms = 750);
 
-    bool active() const {
-        return status_.http_active || arduino_active_ ||
-               status_.reboot_pending;
-    }
-    const OtaManagerStatus &status() const { return status_; }
+    bool active() const;
+    OtaManagerStatus status() const;
 
 private:
     void start_arduino_ota();
@@ -52,6 +51,8 @@ private:
 
     void set_error(const char *error);
     void clear_http_state();
+    bool lock_status(TickType_t timeout = portMAX_DELAY) const;
+    void unlock_status() const;
 
     AppConfig *app_config_ = nullptr;
     ArduinoOTAClass *arduino_ota_ = nullptr;
@@ -65,6 +66,7 @@ private:
     esp_ota_handle_t http_handle_ = 0;
     const esp_partition_t *http_partition_ = nullptr;
     OtaManagerStatus status_;
+    mutable SemaphoreHandle_t status_mutex_ = nullptr;
 };
 
 }  // namespace aircannect

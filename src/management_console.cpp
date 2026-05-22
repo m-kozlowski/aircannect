@@ -604,7 +604,7 @@ void ManagementConsole::handle_ota(Print &out, String rest,
     rest.trim();
     rest.toLowerCase();
     if (!rest.length() || rest == "status") {
-        const OtaManagerStatus &ota = ota_manager.status();
+        const OtaManagerStatus ota = ota_manager.status();
         out.print("[OTA] arduino=");
         out.print(ota.arduino_started ? "started" : "stopped");
         out.print(" port=");

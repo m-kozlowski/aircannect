@@ -26,8 +26,13 @@ const char *arduino_ota_error_name(ota_error_t error) {
 
 void OtaManager::begin(AppConfig &app_config) {
     app_config_ = &app_config;
+    if (!status_mutex_) {
+        status_mutex_ = xSemaphoreCreateRecursiveMutex();
+    }
+    if (!lock_status()) return;
     status_.auth_enabled = app_config.data().ota_password.length() > 0;
     status_.arduino_port = AC_ARDUINO_OTA_PORT;
+    unlock_status();
     esp_ota_mark_app_valid_cancel_rollback();
 }
 
@@ -41,13 +46,18 @@ void OtaManager::poll(const WifiManager &wifi_manager) {
 
     if (!app_config_) return;
 
+    if (!lock_status()) return;
     status_.auth_enabled = app_config_->data().ota_password.length() > 0;
     if (!wifi_manager.network_available()) {
-        if (status_.arduino_started) stop_arduino_ota();
+        const bool stop_ota = status_.arduino_started;
+        unlock_status();
+        if (stop_ota) stop_arduino_ota();
         return;
     }
 
-    if (!status_.arduino_started || arduino_config_dirty_) {
+    const bool start_ota = !status_.arduino_started || arduino_config_dirty_;
+    unlock_status();
+    if (start_ota) {
         start_arduino_ota();
     }
     if (arduino_ota_) arduino_ota_->handle();
@@ -57,9 +67,26 @@ void OtaManager::mark_config_dirty() {
     arduino_config_dirty_ = true;
 }
 
+bool OtaManager::active() const {
+    if (!lock_status()) return false;
+    const bool result =
+        status_.http_active || arduino_active_ || status_.reboot_pending;
+    unlock_status();
+    return result;
+}
+
+OtaManagerStatus OtaManager::status() const {
+    if (!lock_status()) return OtaManagerStatus();
+    OtaManagerStatus copy = status_;
+    unlock_status();
+    return copy;
+}
+
 bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
+    if (!lock_status()) return false;
     if (status_.http_active) {
         set_error("upload_already_active");
+        unlock_status();
         return false;
     }
     clear_http_state();
@@ -74,10 +101,12 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     http_partition_ = esp_ota_get_next_update_partition(nullptr);
     if (!http_partition_) {
         abort_http_upload("no_ota_partition");
+        unlock_status();
         return false;
     }
     if (image_size == 0 || image_size > http_partition_->size) {
         abort_http_upload("image_size_invalid");
+        unlock_status();
         return false;
     }
 
@@ -85,6 +114,7 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     esp_err_t err = esp_ota_begin(http_partition_, image_size, &http_handle_);
     if (err != ESP_OK) {
         abort_http_upload(esp_err_to_name(err));
+        unlock_status();
         return false;
     }
 
@@ -92,28 +122,37 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
               "[OTA] HTTP upload start file=%s partition=%s image_size=%u\n",
               filename.c_str(), http_partition_->label,
               static_cast<unsigned>(image_size));
+    unlock_status();
     return true;
 }
 
 bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
+    if (!lock_status()) return false;
     if (!status_.http_active || !http_partition_ || !http_handle_) {
         if (!status_.last_error.length()) set_error("upload_not_active");
+        unlock_status();
         return false;
     }
-    if (!data || len == 0) return true;
+    if (!data || len == 0) {
+        unlock_status();
+        return true;
+    }
 
     if (status_.bytes == 0 && data[0] != 0xE9) {
         abort_http_upload("bad_esp32_image");
+        unlock_status();
         return false;
     }
     if (status_.total_size == 0 || status_.bytes + len > status_.total_size) {
         abort_http_upload("image_too_large");
+        unlock_status();
         return false;
     }
 
     esp_err_t err = esp_ota_write(http_handle_, data, len);
     if (err != ESP_OK) {
         abort_http_upload(esp_err_to_name(err));
+        unlock_status();
         return false;
     }
 
@@ -127,16 +166,20 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
         Log::logf(CAT_OTA, LOG_DEBUG, "[OTA] HTTP upload %u%%\n",
                   static_cast<unsigned>(status_.progress_percent));
     }
+    unlock_status();
     return true;
 }
 
 bool OtaManager::finish_http_upload() {
+    if (!lock_status()) return false;
     if (!status_.http_active || !http_partition_ || !http_handle_) {
         if (!status_.last_error.length()) set_error("upload_not_active");
+        unlock_status();
         return false;
     }
     if (status_.total_size == 0 || status_.bytes != status_.total_size) {
         abort_http_upload("incomplete_upload");
+        unlock_status();
         return false;
     }
 
@@ -147,6 +190,7 @@ bool OtaManager::finish_http_upload() {
 
     if (err != ESP_OK) {
         abort_http_upload(esp_err_to_name(err));
+        unlock_status();
         return false;
     }
 
@@ -161,10 +205,12 @@ bool OtaManager::finish_http_upload() {
     http_handle_ = 0;
     http_partition_ = nullptr;
     schedule_reboot(2000);
+    unlock_status();
     return true;
 }
 
 void OtaManager::abort_http_upload(const char *reason) {
+    if (!lock_status()) return;
     if (http_handle_) esp_ota_abort(http_handle_);
     http_handle_ = 0;
     http_partition_ = nullptr;
@@ -173,11 +219,14 @@ void OtaManager::abort_http_upload(const char *reason) {
     set_error(reason ? reason : "aborted");
     Log::logf(CAT_OTA, LOG_ERROR, "[OTA] HTTP upload failed: %s\n",
               status_.last_error.c_str());
+    unlock_status();
 }
 
 void OtaManager::schedule_reboot(uint32_t delay_ms) {
+    if (!lock_status()) return;
     reboot_at_ms_ = millis() + delay_ms;
     status_.reboot_pending = true;
+    unlock_status();
 }
 
 void OtaManager::start_arduino_ota() {
@@ -196,29 +245,36 @@ void OtaManager::start_arduino_ota() {
     arduino_ota_->setMdnsEnabled(false);
     arduino_ota_->setRebootOnSuccess(true);
     if (cfg.ota_password.length()) {
-        arduino_ota_->setPassword(cfg.ota_password.c_str());
+    arduino_ota_->setPassword(cfg.ota_password.c_str());
     }
 
     arduino_ota_->onStart([this]() {
-        arduino_active_ = true;
-        status_.method = "arduino";
-        status_.bytes = 0;
-        status_.total_size = 0;
-        status_.progress_percent = 0;
-        status_.last_error = "";
-        last_progress_log_percent_ = 255;
         const char *type =
             arduino_ota_->getCommand() == U_FLASH ? "firmware" : "filesystem";
+        if (lock_status()) {
+            arduino_active_ = true;
+            status_.method = "arduino";
+            status_.bytes = 0;
+            status_.total_size = 0;
+            status_.progress_percent = 0;
+            status_.last_error = "";
+            last_progress_log_percent_ = 255;
+            unlock_status();
+        }
         Log::logf(CAT_OTA, LOG_INFO, "[OTA] ArduinoOTA start %s\n", type);
     });
     arduino_ota_->onEnd([this]() {
-        arduino_active_ = false;
-        status_.progress_percent = 100;
+        if (lock_status()) {
+            arduino_active_ = false;
+            status_.progress_percent = 100;
+            unlock_status();
+        }
         Log::logf(CAT_OTA, LOG_INFO,
                   "[OTA] ArduinoOTA complete; rebooting\n");
     });
     arduino_ota_->onProgress([this](unsigned int progress,
                                     unsigned int total) {
+        if (!lock_status()) return;
         status_.bytes = progress;
         status_.total_size = total;
         if (total > 0) {
@@ -232,18 +288,24 @@ void OtaManager::start_arduino_ota() {
             Log::logf(CAT_OTA, LOG_DEBUG, "[OTA] ArduinoOTA %u%%\n",
                       static_cast<unsigned>(status_.progress_percent));
         }
+        unlock_status();
     });
     arduino_ota_->onError([this](ota_error_t error) {
-        arduino_active_ = false;
         Update.abort();
-        set_error(arduino_ota_error_name(error));
+        const char *name = arduino_ota_error_name(error);
+        if (lock_status()) {
+            arduino_active_ = false;
+            status_.last_error = name;
+            unlock_status();
+        }
         arduino_config_dirty_ = true;
-        Log::logf(CAT_OTA, LOG_ERROR, "[OTA] ArduinoOTA error: %s\n",
-                  status_.last_error.c_str());
+        Log::logf(CAT_OTA, LOG_ERROR, "[OTA] ArduinoOTA error: %s\n", name);
     });
 
     arduino_ota_->begin();
+    if (!lock_status()) return;
     status_.arduino_started = true;
+    unlock_status();
     arduino_config_dirty_ = false;
     Log::logf(CAT_OTA, LOG_INFO,
               "[OTA] ArduinoOTA ready port=%u auth=%s mdns=off\n",
@@ -257,15 +319,20 @@ void OtaManager::stop_arduino_ota() {
         delete arduino_ota_;
         arduino_ota_ = nullptr;
     }
+    if (!lock_status()) return;
     arduino_active_ = false;
     status_.arduino_started = false;
+    unlock_status();
 }
 
 void OtaManager::set_error(const char *error) {
+    if (!lock_status()) return;
     status_.last_error = error ? error : "error";
+    unlock_status();
 }
 
 void OtaManager::clear_http_state() {
+    if (!lock_status()) return;
     http_handle_ = 0;
     http_partition_ = nullptr;
     status_.http_active = false;
@@ -274,6 +341,16 @@ void OtaManager::clear_http_state() {
     status_.total_size = 0;
     status_.progress_percent = 0;
     last_progress_log_percent_ = 255;
+    unlock_status();
+}
+
+bool OtaManager::lock_status(TickType_t timeout) const {
+    return !status_mutex_ ||
+           xSemaphoreTakeRecursive(status_mutex_, timeout) == pdTRUE;
+}
+
+void OtaManager::unlock_status() const {
+    if (status_mutex_) xSemaphoreGiveRecursive(status_mutex_);
 }
 
 }  // namespace aircannect
