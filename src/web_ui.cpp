@@ -846,22 +846,15 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     const SystemStatusSnapshot snap = collect_system_status({
         *arbiter_,
         *wifi_manager_,
-        *tcp_bridge_,
         *app_config_,
         *time_sync_service_,
         *ota_manager_,
-        *session_manager_,
-        *sink_manager_,
         *oximetry_manager_,
     });
     const MemoryStatus &mem = snap.memory;
     const StorageStatus &storage = snap.storage;
-    const StorageWriterStatus &writer = snap.storage_writer;
     const WifiStatusSnapshot &wifi = snap.wifi;
-    const WifiManagerStats &wifi_stats = wifi.stats;
     const As11StatusSnapshot &as11 = snap.as11;
-    const SessionStatus &session = snap.session;
-    const SinkRuntimeStatus &sink = snap.sink;
     const OximetryRuntimeStatus &oxi = snap.oximetry;
     const TimeStatusSnapshot &time = snap.time;
 
@@ -870,39 +863,17 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_string(json, "built", snap.built);
     json_add_int(json, "uptime", snap.uptime_s);
     json_add_int(json, "heap", static_cast<long>(mem.heap_free));
-    json_add_int(json, "heap_total", static_cast<long>(mem.heap_total));
-    json_add_int(json, "heap_max_alloc",
-                 static_cast<long>(mem.heap_max_alloc));
     json_add_bool(json, "psram_available", mem.psram_available);
     json_add_int(json, "psram_free", static_cast<long>(mem.psram_free));
-    json_add_int(json, "psram_total", static_cast<long>(mem.psram_total));
-    json_add_int(json, "psram_max_alloc",
-                 static_cast<long>(mem.psram_max_alloc));
     json_add_bool(json, "storage_configured", storage.configured);
     json_add_bool(json, "storage_mounted", storage.mounted);
     json_add_string(json, "storage_type",
                     Storage::type_name(storage.type));
     json_add_string(json, "storage_state",
                     Storage::state_name(storage.state));
-    json_add_string(json, "storage_card", storage.card_type);
-    json_add_string(json, "storage_mount", storage.mount_point);
-    json_add_string(json, "storage_last_error", storage.last_error);
-    json_add_int(json, "storage_width", storage.width);
     json_add_uint64(json, "storage_total", storage.total_bytes);
     json_add_uint64(json, "storage_used", storage.used_bytes);
     json_add_uint64(json, "storage_free", storage.free_bytes);
-    json_add_bool(json, "storage_writer_available", writer.available);
-    json_add_bool(json, "storage_writer_psram", writer.using_psram);
-    json_add_int(json, "storage_writer_q", writer.queued);
-    json_add_int(json, "storage_writer_capacity", writer.capacity);
-    json_add_int(json, "storage_writer_chunk", writer.chunk_bytes);
-    json_add_int(json, "storage_writer_drops", writer.queue_drops);
-    json_add_int(json, "storage_writer_unavailable_drops",
-                 writer.unavailable_drops);
-    json_add_int(json, "storage_writer_errors",
-                 writer.open_errors + writer.write_errors);
-    json_add_uint64(json, "storage_writer_bytes_written",
-                    writer.bytes_written);
     json_add_string(json, "wifi_state", wifi.state.c_str());
     json_add_string(json, "wifi_ssid", wifi.ssid.c_str());
     json_add_string(json, "wifi_ip", wifi.ip.c_str());
@@ -915,18 +886,7 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_int(json, "wifi_profile", wifi.active_profile);
     json_add_bool(json, "wifi_roam", wifi.roaming_enabled);
     json_add_bool(json, "wifi_roam_suspended", wifi.roaming_suspended);
-    json_add_int(json, "wifi_attempts", wifi_stats.connect_attempts);
-    json_add_int(json, "wifi_failures", wifi_stats.connect_failures);
-    json_add_int(json, "wifi_disconnects", wifi_stats.disconnects);
-    json_add_int(json, "wifi_roam_scans", wifi_stats.roam_scans);
-    json_add_int(json, "wifi_roam_switches", wifi_stats.roam_switches);
-    json_add_int(json, "wifi_roam_candidates",
-                 wifi_stats.last_roam_candidates);
-    json_add_int(json, "wifi_last_reason",
-                 wifi_stats.last_disconnect_reason);
-    json_add_bool(json, "tcp_started", snap.tcp_started);
     json_add_bool(json, "ota_active", snap.ota_active);
-    json_add_bool(json, "ota_ready", snap.ota_ready);
     json_add_string(json, "device_name", as11.product_name.c_str());
     json_add_string(json, "serial", as11.serial_number.c_str());
     json_add_string(json, "software_id",
@@ -937,49 +897,10 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                     As11DeviceState::therapy_target_name(
                         as11.pending_therapy_target));
     json_add_string(json, "rop", as11.rop.c_str());
-    json_add_string(json, "activity_event",
-                    as11.last_activity_event.c_str());
-    json_add_string(json, "activity_event_time",
-                    as11.last_activity_event_report_time.c_str());
-    if (as11.last_activity_event_ms) {
-        json_add_int(json, "activity_event_age_ms",
-                     snap.now_ms - as11.last_activity_event_ms);
-    } else {
-        json += ",\"activity_event_age_ms\":null";
-    }
     json_add_string(json, "profile",
                     as11.active_therapy_profile.c_str());
     String hours = motor_hours(as11.motor_run_meter);
     json_add_string(json, "motor_hours", hours.c_str());
-    json_add_bool(json, "session_active",
-                  session.state == SessionState::Active);
-    json_add_int(json, "session_id", session.session_id);
-    json_add_int(json, "session_frames", session.frame_count);
-    json_add_int(json, "session_drops", session.dropped_frames);
-    json_add_int(json, "session_stream_id", session.stream_id);
-    json_add_string(json, "session_start_device_time",
-                    session.start_device_time);
-    json_add_string(json, "session_end_device_time",
-                    session.end_device_time);
-    json_add_string(json, "session_end_reason", session.end_reason);
-    if (session.state == SessionState::Active && session.started_ms) {
-        json_add_int(json, "session_age_ms",
-                     snap.now_ms - session.started_ms);
-    } else {
-        json += ",\"session_age_ms\":null";
-    }
-    if (session.last_frame_ms) {
-        json_add_int(json, "session_last_frame_age_ms",
-                     snap.now_ms - session.last_frame_ms);
-    } else {
-        json += ",\"session_last_frame_age_ms\":null";
-    }
-    json_add_bool(json, "sink_debug_enabled", sink.debug_enabled);
-    json_add_bool(json, "sink_debug_attached", sink.debug_stream_attached);
-    json_add_int(json, "sink_frames", sink.frames);
-    json_add_int(json, "sink_drops", sink.frame_drops);
-    json_add_int(json, "sink_attach_failures", sink.attach_failures);
-    json_add_string(json, "sink_last_error", sink.last_error);
     json += ",\"oximetry\":{";
     json_add_bool(json, "enabled", oxi.enabled, false);
     json_add_string(json, "source", oximetry_source_name(oxi.source));
@@ -1017,28 +938,13 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     } else {
         json += ",\"device_datetime_age_ms\":null";
     }
-    if (as11.clock_offset_valid) {
-        json_add_int(json, "device_clock_offset_ms",
-                     as11.clock_offset_ms);
-    } else {
-        json += ",\"device_clock_offset_ms\":null";
-    }
-    json_add_string(json, "time_sync_policy",
-                    "ntp_with_resmed_fallback");
     json_add_bool(json, "resmed_time_sync_enabled",
                   time.resmed_time_sync_enabled);
-    json_add_string(json, "time_sync_status", time.status.c_str());
     json_add_bool(json, "ntp_synced", time.ntp_synced);
     json_add_bool(json, "esp_time_valid", time.esp_time_valid);
     json_add_string(json, "esp_time_source",
                     time.esp_time_source.c_str());
     json_add_string(json, "esp_datetime", time.esp_datetime.c_str());
-    if (as11.timezone_offset_valid) {
-        json_add_int(json, "timezone_offset_min",
-                     as11.timezone_offset_minutes);
-    } else {
-        json += ",\"timezone_offset_min\":null";
-    }
     json += '}';
 }
 
