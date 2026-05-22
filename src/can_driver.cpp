@@ -213,6 +213,7 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
 
 bool CanDriver::receive(RawCanFrame &frame, uint32_t wait_ms) {
     if (!installed_) return false;
+    if (recovery_active_) return false;
 
     twai_message_t msg = {};
     esp_err_t err = twai_receive(&msg, pdMS_TO_TICKS(wait_ms));
