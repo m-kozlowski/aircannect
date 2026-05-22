@@ -31,8 +31,8 @@ dropped.
 
 `oxi_en` - default on, set off to disable.
 `oxi_udp` - default 8025.
-`oxi_adv` - default auto. Auto advertises to AS11 only while UDP oximetry data
-is fresh.
+`oxi_adv` - default auto. Auto advertises to AS11 only while source data is
+fresh.
 
 ## Source arbitration
 
