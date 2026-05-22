@@ -10,6 +10,11 @@
 
 namespace aircannect {
 
+class PlxBleMeasurementCallbacks;
+class PlxBleServerCallbacks;
+class SensorBleClientCallbacks;
+class SensorBleScanCallbacks;
+
 enum class OximetrySource {
     None,
     Udp,
