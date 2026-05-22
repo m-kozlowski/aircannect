@@ -262,6 +262,11 @@ bool RpcArbiter::stream_activity_active() const {
                AC_WIFI_ROAM_STREAM_QUIET_MS;
 }
 
+void RpcArbiter::set_stream_frame_observer(StreamFrameObserver observer,
+                                           void *context) {
+    stream_.set_frame_observer(observer, context);
+}
+
 bool RpcArbiter::next_stream_frame(StreamConsumerHandle handle,
                                    StreamFrameRef &frame) {
     return stream_.next_frame(handle, frame);

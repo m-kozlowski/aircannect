@@ -112,6 +112,8 @@ public:
     void release_stream(StreamConsumerHandle handle);
     bool stream_consumer_active(StreamConsumerHandle handle) const;
     bool stream_activity_active() const;
+    void set_stream_frame_observer(StreamFrameObserver observer,
+                                   void *context);
     bool next_stream_frame(StreamConsumerHandle handle,
                            StreamFrameRef &frame);
     bool next_stream_payload(StreamConsumerHandle handle,

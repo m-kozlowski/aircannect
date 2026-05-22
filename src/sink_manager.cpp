@@ -236,7 +236,6 @@ void SinkManager::drain_debug_stream(uint32_t now_ms) {
             break;
         }
         if (!frame) continue;
-        session_->note_stream_frame(*frame, now_ms);
         debug_sink_.on_stream_frame(session_->status(), *frame);
         status_.frames++;
         status_.last_frame_ms = now_ms;

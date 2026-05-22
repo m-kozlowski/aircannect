@@ -165,6 +165,12 @@ void StreamBroker::note_stream_data(uint32_t stream_id,
     last_notification_ms_ = now_ms;
 }
 
+void StreamBroker::set_frame_observer(StreamFrameObserver observer,
+                                      void *context) {
+    frame_observer_ = observer;
+    frame_observer_context_ = context;
+}
+
 StreamPublishResult StreamBroker::publish_stream_data(
     const std::string &payload,
     uint32_t now_ms) {
@@ -210,6 +216,9 @@ StreamPublishResult StreamBroker::publish_stream_data(
     result.values_truncated = frame->values_truncated;
     if (result.raw_truncated || result.values_truncated) truncated_frames_++;
     published_payloads_++;
+    if (frame_observer_) {
+        frame_observer_(frame_observer_context_, *frame, now_ms);
+    }
 
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         Consumer &consumer = consumers_[i];

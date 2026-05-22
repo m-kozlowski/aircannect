@@ -57,6 +57,12 @@ static bool is_rpc_event(RpcEventKind kind) {
            kind == RpcEventKind::RpcUnmatched;
 }
 
+static void note_session_stream_frame(void *context,
+                                      const StreamFrameData &frame,
+                                      uint32_t now_ms) {
+    static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
+}
+
 static void sync_network_services() {
     const bool should_run_tcp =
         app_config.data().tcp_bridge_enabled &&
@@ -156,6 +162,8 @@ void setup() {
     apply_storage_provisioning(app_config, wifi_manager);
     app_config.apply_log_config();
     session_manager.begin();
+    rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
+                                          &session_manager);
     sink_manager.begin(rpc_arbiter, session_manager);
     oximetry_manager.begin(app_config);
     resmed_ota_manager.begin(rpc_arbiter);

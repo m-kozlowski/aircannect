@@ -730,9 +730,6 @@ void WebUI::drain_live_stream(uint32_t now_ms) {
         append_frame_signal(*frame, StreamSignalId::HeartRate,
                             live_pulse_, live_drops_);
 
-        if (session_manager_) {
-            session_manager_->note_stream_frame(*frame, now_ms);
-        }
         live_frames_++;
         live_last_frame_ms_ = now_ms;
     }

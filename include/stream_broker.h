@@ -48,6 +48,10 @@ struct StreamPublishResult {
     bool values_truncated = false;
 };
 
+using StreamFrameObserver = void (*)(void *context,
+                                     const StreamFrameData &frame,
+                                     uint32_t now_ms);
+
 class StreamBroker {
 public:
     StreamAcquireResult acquire(const std::string &params_json,
@@ -80,6 +84,7 @@ public:
     void note_stream_data(uint32_t stream_id,
                           const std::string &start_time,
                           uint32_t now_ms);
+    void set_frame_observer(StreamFrameObserver observer, void *context);
     StreamPublishResult publish_stream_data(const std::string &payload,
                                             uint32_t now_ms);
     bool next_frame(StreamConsumerHandle handle, StreamFrameRef &frame);
@@ -128,6 +133,8 @@ private:
     uint32_t parse_errors_ = 0;
     uint32_t pool_exhaustions_ = 0;
     uint32_t truncated_frames_ = 0;
+    StreamFrameObserver frame_observer_ = nullptr;
+    void *frame_observer_context_ = nullptr;
 
     bool actual_active_ = false;
     bool error_ = false;
