@@ -34,6 +34,8 @@ struct OximetryReading {
     int16_t spo2 = -1;
     int16_t pulse_bpm = -1;
     bool valid = false;
+    bool contact_known = false;
+    bool contact_present = false;
     uint32_t timestamp_ms = 0;
 };
 
@@ -76,6 +78,7 @@ struct OximetryStatus {
     bool sensor_connected = false;
     uint8_t sensor_known_count = 0;
     uint8_t sensor_scan_count = 0;
+    uint32_t sensor_scan_generation = 0;
     uint32_t sensor_notifications = 0;
     uint32_t sensor_invalid_notifications = 0;
     uint32_t sensor_connects = 0;
@@ -101,6 +104,7 @@ public:
     bool forget_bonds();
     bool request_sensor_scan();
     bool request_sensor_connect(const char *addr_or_index);
+    bool request_sensor_connect_device(const OximetrySensorDevice &device);
     bool request_sensor_disconnect();
     bool forget_sensor(const char *addr_or_all);
     bool set_sensor_autoconnect(const char *addr, bool enabled);
@@ -110,7 +114,9 @@ public:
     size_t known_sensors(OximetrySensorDevice *out, size_t max) const;
     void on_sensor_sample(uint16_t spo2_raw,
                           uint16_t pulse_raw,
-                          bool from_invalid_packet);
+                          bool from_invalid_packet,
+                          bool contact_known = false,
+                          bool contact_present = false);
     void on_sensor_disconnect(int reason);
 
 private:
@@ -130,6 +136,8 @@ private:
                             uint16_t spo2_raw,
                             uint16_t pulse_raw,
                             bool allow_invalid_claim,
+                            bool contact_known,
+                            bool contact_present,
                             uint32_t now_ms);
 
     bool ensure_ble();
@@ -166,7 +174,10 @@ private:
     static void sensor_task_entry(void *param);
     void sensor_task_loop();
     void sensor_set_state(OximetrySensorState state);
-    void sensor_hold_autoconnect(const char *addr, uint32_t now_ms);
+    void sensor_hold_autoconnect(const char *addr,
+                                 uint32_t now_ms,
+                                 bool until_absent);
+    bool sensor_autoconnect_holdoff_active(uint32_t now_ms) const;
     void sensor_store_scan_result(const char *addr,
                                   uint8_t addr_type,
                                   const char *name,
@@ -208,17 +219,20 @@ private:
     OximetrySensorDevice sensor_scan_results_[
         AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
     uint8_t sensor_scan_count_ = 0;
+    uint32_t sensor_scan_generation_ = 0;
     bool sensor_known_loaded_ = false;
     bool sensor_task_started_ = false;
     bool sensor_scan_requested_ = false;
     bool sensor_manual_connect_requested_ = false;
     bool sensor_disconnect_requested_ = false;
+    bool sensor_disconnect_hold_until_absent_ = false;
     char sensor_manual_target_[18] = {};
     OximetrySensorDevice sensor_manual_target_device_;
     char sensor_connected_addr_[18] = {};
     char sensor_connected_name_[AC_OXIMETRY_SENSOR_NAME_MAX + 1] = {};
     char sensor_auto_holdoff_addr_[18] = {};
     uint32_t sensor_auto_holdoff_until_ms_ = 0;
+    bool sensor_auto_holdoff_until_absent_ = false;
     uint32_t sensor_invalid_since_ms_ = 0;
     bool sensor_auto_allowed_ = false;
     bool sensor_enabled_ = false;
@@ -243,8 +257,11 @@ private:
     uint16_t sensor_pending_spo2_raw_ = 0x07ff;
     uint16_t sensor_pending_pulse_raw_ = 0x07ff;
     bool sensor_pending_invalid_packet_ = false;
+    bool sensor_pending_contact_known_ = false;
+    bool sensor_pending_contact_present_ = false;
     bool sensor_disconnect_pending_ = false;
     int sensor_pending_disconnect_reason_ = 0;
+    char sensor_pending_disconnect_addr_[18] = {};
 };
 
 }  // namespace aircannect

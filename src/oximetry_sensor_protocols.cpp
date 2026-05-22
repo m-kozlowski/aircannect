@@ -26,6 +26,7 @@ bool sensor_matches_supported_device(const NimBLEAdvertisedDevice *dev) {
            dev->isAdvertisingService(NimBLEUUID(VIATOM_SERVICE_UUID)) ||
            dev->isAdvertisingService(NimBLEUUID(OXYII_SERVICE_UUID)) ||
            name.rfind("Nonin", 0) == 0 ||
+           name.rfind("O2 ", 0) == 0 ||
            name.rfind("O2Ring", 0) == 0 ||
            name.rfind("O2M", 0) == 0 ||
            name.rfind("S8-AW", 0) == 0 ||

@@ -1941,6 +1941,9 @@
         sourceStatus = "off";
       } else if (oxi.source_present && oxi.source_fresh && oxi.valid) {
         sourceStatus = "fresh";
+      } else if (oxi.source_present && oxi.source_fresh &&
+          oxi.contact_known && !oxi.contact_present) {
+        sourceStatus = "no finger";
       } else if (oxi.source_present && oxi.source_fresh) {
         sourceStatus = "invalid";
       } else if (oxi.source_present) {
@@ -1997,7 +2000,6 @@
           !oxi.manual_advertising_requested;
       }
 
-      renderOximetrySensor(oxi);
     }
 
     function sensorDisplayName(device) {
@@ -2076,20 +2078,6 @@
 
       const scanResults = oxiSensorData.sensor_scan_results || [];
       const knownSensors = oxiSensorData.sensor_known || [];
-      const oxiPane = document.getElementById("p-oxi");
-      const tabVisible = oxiPane && oxiPane.classList.contains("active");
-      const scanCount = Number(oxi.sensor_scan_count || 0);
-      const knownCount = Number(oxi.sensor_known_count || 0);
-      const loadedScanCount = Number(
-        oxiSensorData.sensor_scan_count !== undefined ?
-          oxiSensorData.sensor_scan_count : scanResults.length);
-      const loadedKnownCount = Number(
-        oxiSensorData.sensor_known_count !== undefined ?
-          oxiSensorData.sensor_known_count : knownSensors.length);
-      if (tabVisible && !oxiSensorsLoading &&
-          (scanCount !== loadedScanCount || knownCount !== loadedKnownCount)) {
-        setTimeout(loadOximetrySensors, 0);
-      }
 
       const scanBtn = document.getElementById("oxiSensorScanBtn");
       const disconnectBtn = document.getElementById("oxiSensorDisconnectBtn");
@@ -2112,7 +2100,7 @@
           button.textContent = isActive ? "Connected" : "Connect";
           button.disabled = isActive || !oxi.enabled || !oxi.ble_available ||
             oxi.sensor_connected || state === "connecting";
-          button.onclick = () => oxiSensorConnect(device.index, false);
+          button.onclick = () => oxiSensorConnect(device, false);
           controls.appendChild(button);
         });
 
@@ -2133,7 +2121,7 @@
           connect.textContent = isActive ? "Connected" : "Connect";
           connect.disabled = isActive || !oxi.enabled || !oxi.ble_available ||
             oxi.sensor_connected || state === "connecting";
-          connect.onclick = () => oxiSensorConnect(device.addr, true);
+          connect.onclick = () => oxiSensorConnect(device, true);
           controls.appendChild(connect);
 
           const forget = document.createElement("button");
@@ -2191,9 +2179,7 @@
       try {
         const response = await api("/api/oximetry/sensors");
         oxiSensorData = await response.json();
-        const oxi = statusData && statusData.oximetry ?
-          statusData.oximetry : {};
-        renderOximetrySensor(oxi);
+        renderOximetrySensor(oxiSensorData);
       } catch (error) {
         apiError(error);
       } finally {
@@ -2565,9 +2551,14 @@
 
     function oxiSensorConnect(target, fromKnown) {
       if (target === undefined || target === null || target === "") return;
-      oxiAction(
-        "sensor_connect",
-        {target: String(target)},
+      const body = typeof target === "object" ? {
+        target: target.addr || "",
+        addr: target.addr || "",
+        addr_type: target.addr_type || 0,
+        name: target.name || "",
+        rssi: target.rssi || 0,
+      } : {target: String(target)};
+      oxiAction("sensor_connect", body,
         fromKnown ? "oxiKnownMsg" : "oxiSensorMsg");
     }
 
@@ -2587,8 +2578,7 @@
       known.forEach((device) => {
         if (device.addr === addr) device.autoconnect = enabled;
       });
-      const oxi = statusData && statusData.oximetry ? statusData.oximetry : {};
-      renderOximetrySensor(oxi);
+      renderOximetrySensor(oxiSensorData);
       oxiAction("sensor_autoconnect", {addr, enabled}, "oxiKnownMsg");
     }
 
@@ -3493,6 +3483,9 @@
     setInterval(() => {
       if (document.getElementById("p-dash").classList.contains("active")) {
         loadStatus();
+      }
+      if (document.getElementById("p-oxi").classList.contains("active")) {
+        loadOximetrySensors();
       }
     }, 5000);
   </script>

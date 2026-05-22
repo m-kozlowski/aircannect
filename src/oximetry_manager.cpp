@@ -7,6 +7,20 @@
 
 namespace aircannect {
 
+namespace {
+
+const char *source_name(OximetrySource source) {
+    switch (source) {
+        case OximetrySource::Udp: return "udp";
+        case OximetrySource::Ble: return "ble";
+        case OximetrySource::None:
+        default:
+            return "none";
+    }
+}
+
+}  // namespace
+
 bool OximetryManager::begin(AppConfig &app_config) {
     app_config_ = &app_config;
 #if AC_OXIMETRY_BLE_ENABLED
@@ -125,6 +139,7 @@ OximetryStatus OximetryManager::status() const {
         if (sensor_known_[i].addr[0]) out.sensor_known_count++;
     }
     out.sensor_scan_count = sensor_scan_count_;
+    out.sensor_scan_generation = sensor_scan_generation_;
     strncpy(out.sensor_peer, sensor_connected_addr_,
             sizeof(out.sensor_peer) - 1);
     out.sensor_peer[sizeof(out.sensor_peer) - 1] = 0;
@@ -253,6 +268,8 @@ bool OximetryManager::note_source_packet(OximetrySource source,
                                          uint16_t spo2_raw,
                                          uint16_t pulse_raw,
                                          bool allow_invalid_claim,
+                                         bool contact_known,
+                                         bool contact_present,
                                          uint32_t now_ms) {
     bool spo2_valid = false;
     bool pulse_valid = false;
@@ -260,9 +277,15 @@ bool OximetryManager::note_source_packet(OximetrySource source,
     const int16_t pulse = decode_plx_sfloat(pulse_raw, pulse_valid);
     const bool valid = spo2_valid && pulse_valid;
 
-    if (source_present_ && source_ != source) return false;
+    if (source_present_ && source_ != source) {
+        Log::logf(CAT_OXI, LOG_DEBUG,
+                  "[OXI] ignored %s sample while %s source is active\n",
+                  source_name(source), source_name(source_));
+        return false;
+    }
     if (!source_present_ && !valid && !allow_invalid_claim) return false;
 
+    const bool source_was_present = source_present_;
     source_present_ = true;
     source_ = source;
     strncpy(status_.source_detail, detail ? detail : "",
@@ -273,6 +296,8 @@ bool OximetryManager::note_source_packet(OximetrySource source,
     else if (source == OximetrySource::Ble) status_.sensor_notifications++;
     reading_.timestamp_ms = now_ms;
     reading_.valid = valid;
+    reading_.contact_known = contact_known;
+    reading_.contact_present = contact_present;
     if (reading_.valid) {
         if (source == OximetrySource::Ble) sensor_invalid_since_ms_ = 0;
         reading_.spo2 = spo2;
@@ -286,23 +311,26 @@ bool OximetryManager::note_source_packet(OximetrySource source,
             if (static_cast<int32_t>(now_ms - sensor_invalid_since_ms_) >=
                 static_cast<int32_t>(
                     AC_OXIMETRY_SENSOR_INVALID_DISCONNECT_MS)) {
-                char holdoff_addr[sizeof(sensor_connected_addr_)] = {};
 #if AC_OXIMETRY_BLE_ENABLED
                 portENTER_CRITICAL(&sensor_mux_);
 #endif
-                strncpy(holdoff_addr, sensor_connected_addr_,
-                        sizeof(holdoff_addr) - 1);
-                holdoff_addr[sizeof(holdoff_addr) - 1] = 0;
                 sensor_disconnect_requested_ = true;
+                sensor_disconnect_hold_until_absent_ = true;
 #if AC_OXIMETRY_BLE_ENABLED
                 portEXIT_CRITICAL(&sensor_mux_);
 #endif
-                sensor_hold_autoconnect(holdoff_addr, now_ms);
                 sensor_invalid_since_ms_ = now_ms;
                 Log::logf(CAT_OXI, LOG_INFO,
                           "[OXI] Sensor invalid readings; disconnecting\n");
             }
         }
+    }
+    if (!source_was_present) {
+        Log::logf(CAT_OXI, LOG_INFO,
+                  "[OXI] source active type=%s detail=%s valid=%s\n",
+                  source_name(source_),
+                  status_.source_detail[0] ? status_.source_detail : "--",
+                  valid ? "yes" : "no");
     }
     return true;
 }
@@ -330,6 +358,8 @@ void OximetryManager::mark_source_stale(uint32_t now_ms) {
     reading_.valid = false;
     reading_.spo2 = -1;
     reading_.pulse_bpm = -1;
+    reading_.contact_known = false;
+    reading_.contact_present = false;
     sensor_invalid_since_ms_ = 0;
     status_.source_detail[0] = 0;
     if (stale_source == OximetrySource::Ble) {
@@ -360,30 +390,7 @@ bool OximetryManager::sample_fresh(uint32_t now_ms) const {
 }
 
 int16_t OximetryManager::decode_plx_sfloat(uint16_t raw, bool &valid) {
-    valid = false;
-    if (raw == PLX_SFLOAT_NAN || raw == PLX_SFLOAT_NRES ||
-        raw == PLX_SFLOAT_POS_INF || raw == PLX_SFLOAT_NEG_INF ||
-        raw == PLX_SFLOAT_RESERVED) {
-        return -1;
-    }
-
-    int16_t mantissa = raw & 0x0fff;
-    if (mantissa & 0x0800) mantissa |= 0xf000;
-    int8_t exponent = static_cast<int8_t>((raw >> 12) & 0x0f);
-    if (exponent & 0x08) exponent |= 0xf0;
-
-    float value = static_cast<float>(mantissa);
-    while (exponent > 0) {
-        value *= 10.0f;
-        exponent--;
-    }
-    while (exponent < 0) {
-        value /= 10.0f;
-        exponent++;
-    }
-    if (value < 0.0f || value > 300.0f) return -1;
-    valid = true;
-    return static_cast<int16_t>(value + 0.5f);
+    return decode_sfloat_int_value(raw, valid);
 }
 
 uint16_t OximetryManager::encode_plx_sfloat_int(int16_t value) {

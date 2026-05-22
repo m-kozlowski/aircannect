@@ -42,6 +42,7 @@ static constexpr const char *OXYII_NOTIFY_UUID =
     "E8FB0003-A14B-98F9-831B-4E2941D01248";
 
 uint16_t encode_sfloat_int_value(int16_t value);
+int16_t decode_sfloat_int_value(uint16_t raw, bool &valid);
 uint8_t crc8_ccitt(const uint8_t *data,
                    size_t len,
                    uint8_t crc = 0x00);

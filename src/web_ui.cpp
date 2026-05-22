@@ -48,6 +48,27 @@ struct WebCommand {
 
 namespace {
 
+const char *web_command_name(uint8_t kind) {
+    switch (kind) {
+        case WebCommandConsoleLine: return "console_line";
+        case WebCommandConsoleClear: return "console_clear";
+        case WebCommandConfigUpdate: return "config_update";
+        case WebCommandWifiUpdate: return "wifi_update";
+        case WebCommandTimeAction: return "time_action";
+        case WebCommandSettingsRefresh: return "settings_refresh";
+        case WebCommandSettingsUpdate: return "settings_update";
+        case WebCommandTherapyAction: return "therapy_action";
+        case WebCommandOximetryAction: return "oximetry_action";
+        case WebCommandResmedOtaInit: return "resmed_ota_init";
+        case WebCommandResmedOtaBlock: return "resmed_ota_block";
+        case WebCommandResmedOtaCheck: return "resmed_ota_check";
+        case WebCommandResmedOtaApply: return "resmed_ota_apply";
+        case WebCommandResmedOtaAbort: return "resmed_ota_abort";
+        case WebCommandResmedOtaStartStaged: return "resmed_ota_start_staged";
+        default: return "unknown";
+    }
+}
+
 void release_request_body(AsyncWebServerRequest *request) {
     if (!request || !request->_tempObject) return;
     Memory::free(request->_tempObject);
@@ -925,11 +946,17 @@ bool WebUI::request_allowed_cached(AsyncWebServerRequest *request) const {
 
 bool WebUI::enqueue_command(WebCommand *command) {
     if (!command || !command_queue_) {
+        Log::logf(CAT_GENERAL, LOG_WARN,
+                  "[WEB] command queue unavailable kind=%s\n",
+                  command ? web_command_name(command->kind) : "none");
         delete command;
         return false;
     }
     WebCommand *queued = command;
     if (xQueueSend(command_queue_, &queued, 0) != pdTRUE) {
+        Log::logf(CAT_GENERAL, LOG_WARN,
+                  "[WEB] command queue full kind=%s\n",
+                  web_command_name(command->kind));
         delete command;
         return false;
     }
@@ -1090,6 +1117,8 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_bool(json, "source_present", oxi.source_present);
     json_add_bool(json, "source_fresh", oxi.source_fresh);
     json_add_bool(json, "valid", oxi.reading.valid);
+    json_add_bool(json, "contact_known", oxi.reading.contact_known);
+    json_add_bool(json, "contact_present", oxi.reading.contact_present);
     if (oxi.reading.valid) {
         json_add_int(json, "spo2", oxi.reading.spo2);
         json_add_int(json, "pulse_bpm", oxi.reading.pulse_bpm);
@@ -1121,23 +1150,6 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_int(json, "ble_notifications", oxi.ble_notifications);
     json_add_int(json, "ble_invalid_notifications",
                  oxi.ble_invalid_notifications);
-    json_add_string(json, "sensor_state",
-                    oximetry_sensor_state_name(oxi.sensor_state));
-    json_add_bool(json, "sensor_task_started", oxi.sensor_task_started);
-    json_add_bool(json, "sensor_scanning", oxi.sensor_scanning);
-    json_add_bool(json, "sensor_connected", oxi.sensor_connected);
-    json_add_int(json, "sensor_known_count", oxi.sensor_known_count);
-    json_add_int(json, "sensor_scan_count", oxi.sensor_scan_count);
-    json_add_int(json, "sensor_notifications", oxi.sensor_notifications);
-    json_add_int(json, "sensor_invalid_notifications",
-                 oxi.sensor_invalid_notifications);
-    json_add_int(json, "sensor_connects", oxi.sensor_connects);
-    json_add_int(json, "sensor_disconnects", oxi.sensor_disconnects);
-    json_add_int(json, "sensor_connect_failures",
-                 oxi.sensor_connect_failures);
-    json_add_int(json, "sensor_scans", oxi.sensor_scans);
-    json_add_string(json, "sensor_peer", oxi.sensor_peer);
-    json_add_string(json, "sensor_name", oxi.sensor_name);
     json += '}';
     json_add_string(json, "device_datetime",
                     as11.device_datetime().c_str());
@@ -1187,13 +1199,17 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
                                          AC_OXIMETRY_SENSOR_MAX_KNOWN);
 
     json = "{";
+    json_add_bool(json, "enabled", oxi.enabled, false);
+    json_add_bool(json, "ble_available", oxi.ble_available);
     json_add_string(json, "sensor_state",
-                    oximetry_sensor_state_name(oxi.sensor_state), false);
+                    oximetry_sensor_state_name(oxi.sensor_state));
     json_add_bool(json, "sensor_task_started", oxi.sensor_task_started);
     json_add_bool(json, "sensor_scanning", oxi.sensor_scanning);
     json_add_bool(json, "sensor_connected", oxi.sensor_connected);
     json_add_int(json, "sensor_known_count", oxi.sensor_known_count);
     json_add_int(json, "sensor_scan_count", oxi.sensor_scan_count);
+    json_add_int(json, "sensor_scan_generation",
+                 oxi.sensor_scan_generation);
     json_add_string(json, "sensor_peer", oxi.sensor_peer);
     json_add_string(json, "sensor_name", oxi.sensor_name);
     json += ",\"sensor_scan_results\":[";
@@ -1750,10 +1766,35 @@ void WebUI::execute_oximetry_action(const std::string &action,
         if (deserializeJson(doc, body.c_str())) return;
         String target;
         String addr;
+        String name;
         json_get_string(doc, "target", target);
         json_get_string(doc, "addr", addr);
+        json_get_string(doc, "name", name);
         if (action == "sensor_connect") {
-            oximetry_manager_->request_sensor_connect(target.c_str());
+            bool ok = false;
+            if (addr.length()) {
+                OximetrySensorDevice device;
+                strncpy(device.addr, addr.c_str(), sizeof(device.addr) - 1);
+                device.addr[sizeof(device.addr) - 1] = 0;
+                if (doc["addr_type"].is<uint8_t>()) {
+                    device.addr_type = doc["addr_type"].as<uint8_t>();
+                }
+                if (name.length()) {
+                    strncpy(device.name, name.c_str(),
+                            sizeof(device.name) - 1);
+                    device.name[sizeof(device.name) - 1] = 0;
+                }
+                if (doc["rssi"].is<int>()) device.rssi = doc["rssi"].as<int>();
+                ok = oximetry_manager_->request_sensor_connect_device(device);
+            } else {
+                ok = oximetry_manager_->request_sensor_connect(target.c_str());
+            }
+            if (!ok) {
+                Log::logf(CAT_OXI, LOG_WARN,
+                          "[OXI] Web sensor connect command rejected target=\"%s\" addr=\"%s\"\n",
+                          target.c_str(),
+                          addr.c_str());
+            }
         } else if (action == "sensor_forget") {
             oximetry_manager_->forget_sensor(addr.c_str());
         } else if (action == "sensor_autoconnect" &&

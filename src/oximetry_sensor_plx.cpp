@@ -14,13 +14,24 @@ void sensor_plx_notify_cb(NimBLERemoteCharacteristic *chr,
     (void)chr;
     (void)is_notify;
     if (len < 5 || !data) return;
+    const uint16_t spo2_raw =
+        static_cast<uint16_t>(data[1]) |
+        (static_cast<uint16_t>(data[2]) << 8);
+    const uint16_t pulse_raw =
+        static_cast<uint16_t>(data[3]) |
+        (static_cast<uint16_t>(data[4]) << 8);
+    bool spo2_valid = false;
+    bool pulse_valid = false;
+    const int16_t spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
+    const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid);
+    const bool valid = spo2_valid && pulse_valid;
+    Log::logf(CAT_OXI, LOG_DEBUG,
+              "[OXI] Sensor PLX reading %s spo2=%d pulse=%d\n",
+              valid ? "valid" : "invalid",
+              static_cast<int>(spo2),
+              static_cast<int>(pulse));
     if (sensor_owner) {
-        sensor_owner->on_sensor_sample(
-            static_cast<uint16_t>(data[1]) |
-                (static_cast<uint16_t>(data[2]) << 8),
-            static_cast<uint16_t>(data[3]) |
-                (static_cast<uint16_t>(data[4]) << 8),
-            false);
+        sensor_owner->on_sensor_sample(spo2_raw, pulse_raw, !valid);
     }
 }
 

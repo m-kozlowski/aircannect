@@ -2,6 +2,8 @@
 
 #include <IPAddress.h>
 #include <WiFiUdp.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -17,6 +19,8 @@ namespace {
 
 log_level_t levels[CAT_COUNT];
 WiFiUDP syslog_udp;
+StaticSemaphore_t log_mutex_storage;
+SemaphoreHandle_t log_mutex = nullptr;
 
 struct LogRecord {
     uint32_t ms = 0;
@@ -91,6 +95,18 @@ void dispatch_structured(log_cat_t cat,
     enqueue_syslog(cat, level, buf);
 }
 
+void lock_log() {
+    if (log_mutex) {
+        xSemaphoreTake(log_mutex, portMAX_DELAY);
+    }
+}
+
+void unlock_log() {
+    if (log_mutex) {
+        xSemaphoreGive(log_mutex);
+    }
+}
+
 void send_syslog_record(const LogRecord &record) {
     char payload[AC_LOG_LINE_MAX + 96];
     const int facility_local0 = 16;
@@ -122,6 +138,9 @@ void send_syslog_record(const LogRecord &record) {
 namespace Log {
 
 void init() {
+    if (!log_mutex) {
+        log_mutex = xSemaphoreCreateMutexStatic(&log_mutex_storage);
+    }
     for (int i = 0; i < CAT_COUNT; ++i) levels[i] = LOG_INFO;
 }
 
@@ -235,6 +254,7 @@ void configure_syslog(bool enabled,
                       const String &host,
                       uint16_t port,
                       const String &hostname) {
+    lock_log();
     syslog_enabled_value = false;
     syslog_queue.clear();
     syslog_host_text = "";
@@ -243,20 +263,31 @@ void configure_syslog(bool enabled,
         strncpy(syslog_hostname, hostname.c_str(), sizeof(syslog_hostname) - 1);
         syslog_hostname[sizeof(syslog_hostname) - 1] = 0;
     }
-    if (!enabled) return;
+    if (!enabled) {
+        unlock_log();
+        return;
+    }
 
     IPAddress parsed;
-    if (!parsed.fromString(host)) return;
+    if (!parsed.fromString(host)) {
+        unlock_log();
+        return;
+    }
     syslog_ip = parsed;
     syslog_host_text = host;
     syslog_enabled_value = true;
+    unlock_log();
 }
 
 void poll(bool network_available) {
     if (!syslog_enabled_value || !network_available) return;
     for (size_t i = 0; i < AC_SYSLOG_SEND_BUDGET; ++i) {
         LogRecord record;
-        if (!syslog_queue.pop(record)) return;
+        lock_log();
+        const bool have_record = syslog_enabled_value &&
+                                 syslog_queue.pop(record);
+        unlock_log();
+        if (!have_record) return;
         send_syslog_record(record);
     }
 }
@@ -274,12 +305,15 @@ uint16_t syslog_port() {
 }
 
 Stats stats() {
+    lock_log();
     Stats out = log_stats;
     out.syslog_drops = syslog_queue.dropped();
+    unlock_log();
     return out;
 }
 
 void print_status(Print &out) {
+    lock_log();
     out.print("[LOG] levels");
     for (int i = 0; i < CAT_COUNT; ++i) {
         out.print(' ');
@@ -302,10 +336,17 @@ void print_status(Print &out) {
     out.print(syslog_queue.dropped());
     out.print(" errors=");
     out.println(log_stats.syslog_errors);
+    unlock_log();
 }
 
 void print_stats(Print &out) {
-    Stats s = stats();
+    lock_log();
+    Stats s = log_stats;
+    s.syslog_drops = syslog_queue.dropped();
+    const bool enabled = syslog_enabled_value;
+    const size_t queued = syslog_queue.count();
+    unlock_log();
+
     out.print(" log_emitted=");
     out.print(s.emitted);
     out.print(" log_filtered=");
@@ -313,9 +354,9 @@ void print_stats(Print &out) {
     out.print(" log_truncated=");
     out.print(s.truncated);
     out.print(" syslog_enabled=");
-    out.print(syslog_enabled_value ? "yes" : "no");
+    out.print(enabled ? "yes" : "no");
     out.print(" syslog_q=");
-    out.print(syslog_queue.count());
+    out.print(queued);
     out.print(" syslog_enqueued=");
     out.print(s.syslog_enqueued);
     out.print(" syslog_sent=");
@@ -338,7 +379,9 @@ void logf(log_cat_t cat, log_level_t level, const char *fmt, ...) {
     va_start(args, fmt);
     const int len = format_message(buf, sizeof(buf), fmt, args);
     va_end(args);
+    lock_log();
     dispatch_structured(cat, level, buf, len);
+    unlock_log();
 }
 
 void log_payload(log_cat_t cat,
@@ -353,6 +396,7 @@ void log_payload(log_cat_t cat,
     }
 
     if (!prefix) prefix = "";
+    lock_log();
     log_stats.emitted++;
     serial_dispatch(prefix, strlen(prefix));
     if (!payload.empty()) {
@@ -360,7 +404,10 @@ void log_payload(log_cat_t cat,
     }
     serial_dispatch("\n", 1);
 
-    if (!syslog_enabled_value) return;
+    if (!syslog_enabled_value) {
+        unlock_log();
+        return;
+    }
     char record[AC_LOG_LINE_MAX];
     const size_t prefix_len = strlen(prefix);
     const size_t room =
@@ -372,6 +419,7 @@ void log_payload(log_cat_t cat,
     if (len >= static_cast<int>(sizeof(record))) log_stats.truncated++;
     record[sizeof(record) - 1] = 0;
     enqueue_syslog(cat, level, record);
+    unlock_log();
 }
 
 }  // namespace Log

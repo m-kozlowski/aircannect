@@ -60,7 +60,7 @@ void OximetryManager::note_udp_packet(uint16_t spo2_raw,
              "%u.%u.%u.%u",
              remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3]);
     (void)note_source_packet(OximetrySource::Udp, source_detail, spo2_raw,
-                             pulse_raw, false, now_ms);
+                             pulse_raw, false, false, false, now_ms);
 }
 
 }  // namespace aircannect

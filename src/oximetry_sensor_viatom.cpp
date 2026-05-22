@@ -10,9 +10,8 @@ namespace aircannect {
 namespace {
 
 static constexpr uint8_t VIATOM_CMD_CONFIG = 0x16;
-static constexpr uint8_t VIATOM_CMD_INFO = 0x14;
 static constexpr uint8_t VIATOM_CMD_READ_SENSORS = 0x17;
-static constexpr uint32_t VIATOM_SENSOR_POLL_MS = 2000;
+static constexpr uint32_t VIATOM_SENSOR_POLL_MS = 1000;
 static constexpr uint32_t VIATOM_RESPONSE_TIMEOUT_MS = 1500;
 static constexpr size_t VIATOM_WRITE_CHUNK_LEN = 20;
 static constexpr uint32_t VIATOM_WRITE_CHUNK_DELAY_MS = 50;
@@ -26,7 +25,6 @@ size_t sensor_viatom_rx_want = 0;
 uint8_t sensor_viatom_pending_cmd = VIATOM_NO_PENDING_CMD;
 uint32_t sensor_viatom_pending_ms = 0;
 uint32_t sensor_viatom_last_poll_ms = 0;
-bool sensor_viatom_need_info = false;
 bool sensor_viatom_need_time_sync = false;
 #endif
 
@@ -46,7 +44,6 @@ void viatom_clear_pending() {
 
 const char *viatom_cmd_name(uint8_t cmd) {
     switch (cmd) {
-        case VIATOM_CMD_INFO: return "info";
         case VIATOM_CMD_CONFIG: return "config";
         case VIATOM_CMD_READ_SENSORS: return "read_sensors";
         case VIATOM_NO_PENDING_CMD: return "none";
@@ -54,38 +51,14 @@ const char *viatom_cmd_name(uint8_t cmd) {
     }
 }
 
-void log_oxi_hex_debug(const char *label,
-                       const uint8_t *data,
-                       size_t len,
-                       uint8_t cmd = VIATOM_NO_PENDING_CMD) {
-    if (Log::get_cat_level(CAT_OXI) < LOG_DEBUG) return;
-    if (!data) {
-        Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] %s len=0 pending=%s\n",
-                  label ? label : "hex",
-                  viatom_cmd_name(cmd));
-        return;
-    }
-
-    static constexpr size_t MAX_BYTES = 24;
-    const size_t shown = len < MAX_BYTES ? len : MAX_BYTES;
-    char hex[MAX_BYTES * 3 + 1] = {};
-    size_t pos = 0;
-    for (size_t i = 0; i < shown && pos + 4 < sizeof(hex); ++i) {
-        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", data[i]);
-    }
-    if (pos > 0) hex[pos - 1] = 0;
-    Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] %s len=%u pending=%s%s %s\n",
-              label ? label : "hex",
-              static_cast<unsigned>(len),
-              viatom_cmd_name(cmd),
-              len > shown ? " truncated" : "",
-              hex);
-}
-
 bool viatom_decode_reading(const uint8_t *packet,
                            size_t len,
+                           uint8_t &spo2,
+                           uint16_t &pulse,
+                           uint8_t &lead_state,
+                           uint8_t &battery,
+                           uint8_t &battery_state,
+                           uint8_t &pi,
                            uint16_t &spo2_raw,
                            uint16_t &pulse_raw,
                            bool &invalid) {
@@ -96,17 +69,22 @@ bool viatom_decode_reading(const uint8_t *packet,
         static_cast<uint16_t>(packet[5]) |
         (static_cast<uint16_t>(packet[6]) << 8);
     const size_t packet_len = static_cast<size_t>(payload_len) + 8;
-    if (payload_len < 2 || len < packet_len) return false;
+    if (payload_len < 12 || len < packet_len) return false;
     if (crc8_ccitt(packet, packet_len - 1) != packet[packet_len - 1]) {
         return false;
     }
 
-    const uint8_t spo2 = packet[7];
-    const uint8_t pulse = packet[8];
-    const bool finger_present = payload_len < 12 || packet[18] != 0;
+    const uint8_t *payload = packet + 7;
+    spo2 = payload[0];
+    pulse = static_cast<uint16_t>(payload[1]) |
+            (static_cast<uint16_t>(payload[2]) << 8);
+    battery = payload[7];
+    battery_state = payload[8];
+    pi = payload[10];
+    lead_state = payload[11] & 0x01;
     const bool valid =
-        spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse != 0xff &&
-        pulse < 250 && finger_present;
+        spo2 > 0 && spo2 != 0xff && spo2 <= 100 &&
+        pulse > 0 && pulse != 0xff && pulse < 250;
     spo2_raw = valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN;
     pulse_raw = valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN;
     invalid = !valid;
@@ -205,10 +183,6 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
     (void)chr;
     (void)is_notify;
     if (!data || !len) return;
-    log_oxi_hex_debug("Sensor Viatom RX fragment",
-                      data,
-                      len,
-                      sensor_viatom_pending_cmd);
 
     const uint8_t *packet = data;
     size_t packet_len = len;
@@ -245,10 +219,6 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
         memcpy(sensor_viatom_rx + sensor_viatom_rx_len, data, len);
         sensor_viatom_rx_len += len;
         if (sensor_viatom_rx_len < sensor_viatom_rx_want) {
-            Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor Viatom RX partial have=%u want=%u\n",
-                      static_cast<unsigned>(sensor_viatom_rx_len),
-                      static_cast<unsigned>(sensor_viatom_rx_want));
             return;
         }
         packet = sensor_viatom_rx;
@@ -270,8 +240,16 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
 
     uint16_t spo2_raw = PLX_SFLOAT_NAN;
     uint16_t pulse_raw = PLX_SFLOAT_NAN;
+    uint8_t spo2 = 0;
+    uint16_t pulse = 0;
+    uint8_t lead_state = 0xff;
+    uint8_t battery = 0xff;
+    uint8_t battery_state = 0xff;
+    uint8_t pi = 0;
     bool invalid = true;
-    if (!viatom_decode_reading(packet, packet_len, spo2_raw, pulse_raw,
+    if (!viatom_decode_reading(packet, packet_len, spo2, pulse,
+                               lead_state, battery, battery_state, pi,
+                               spo2_raw, pulse_raw,
                                invalid)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "[OXI] Sensor Viatom RX read decode failed len=%u\n",
@@ -280,15 +258,22 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
         return;
     }
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor Viatom reading %s\n",
-              invalid ? "invalid" : "valid");
+              "[OXI] Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f\n",
+              invalid ? "invalid" : "valid",
+              static_cast<unsigned>(spo2),
+              static_cast<unsigned>(pulse),
+              static_cast<unsigned>(lead_state),
+              static_cast<unsigned>(battery),
+              static_cast<unsigned>(battery_state),
+              static_cast<double>(pi) / 10.0);
 
     if (buffered_packet) {
         viatom_reset_rx();
     }
 
     if (sensor_owner) {
-        sensor_owner->on_sensor_sample(spo2_raw, pulse_raw, invalid);
+        sensor_owner->on_sensor_sample(
+            spo2_raw, pulse_raw, invalid, true, lead_state != 0);
     }
 }
 
@@ -330,7 +315,6 @@ void sensor_viatom_on_connected() {
     viatom_reset_rx();
     viatom_clear_pending();
     sensor_viatom_last_poll_ms = 0;
-    sensor_viatom_need_info = true;
     sensor_viatom_need_time_sync = true;
 }
 
@@ -339,7 +323,6 @@ void sensor_viatom_reset() {
     viatom_reset_rx();
     viatom_clear_pending();
     sensor_viatom_last_poll_ms = 0;
-    sensor_viatom_need_info = false;
     sensor_viatom_need_time_sync = false;
 }
 
@@ -360,17 +343,6 @@ void sensor_viatom_poll(uint32_t now_ms) {
     }
 
     if (sensor_viatom_pending_cmd != VIATOM_NO_PENDING_CMD) return;
-
-    if (sensor_viatom_need_info) {
-        if (viatom_send_command(sensor_viatom_write, VIATOM_CMD_INFO,
-                                nullptr, 0, now_ms)) {
-            sensor_viatom_need_info = false;
-        } else {
-            Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor Viatom info write failed\n");
-        }
-        return;
-    }
 
     if (sensor_viatom_need_time_sync) {
         if (viatom_sync_datetime(sensor_viatom_write)) {

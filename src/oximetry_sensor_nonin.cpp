@@ -19,6 +19,11 @@ void sensor_nonin_notify_cb(NimBLERemoteCharacteristic *chr,
         static_cast<uint16_t>(data[3]) |
         (static_cast<uint16_t>(data[4]) << 8);
     const bool valid = spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse < 500;
+    Log::logf(CAT_OXI, LOG_DEBUG,
+              "[OXI] Sensor Nonin reading %s spo2=%u pulse=%u\n",
+              valid ? "valid" : "invalid",
+              static_cast<unsigned>(spo2),
+              static_cast<unsigned>(pulse));
     if (sensor_owner) {
         sensor_owner->on_sensor_sample(
             valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,

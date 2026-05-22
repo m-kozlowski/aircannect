@@ -63,29 +63,6 @@ const char *oxyii_cmd_name(uint8_t cmd) {
     }
 }
 
-void log_oxyii_hex_debug(const char *label,
-                         const uint8_t *data,
-                         size_t len,
-                         uint8_t cmd = OXYII_NO_PENDING_CMD) {
-    if (Log::get_cat_level(CAT_OXI) < LOG_DEBUG) return;
-
-    static constexpr size_t MAX_BYTES = 24;
-    const size_t shown = len < MAX_BYTES ? len : MAX_BYTES;
-    char hex[MAX_BYTES * 3 + 1] = {};
-    size_t pos = 0;
-    for (size_t i = 0; data && i < shown && pos + 4 < sizeof(hex); ++i) {
-        pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", data[i]);
-    }
-    if (pos > 0) hex[pos - 1] = 0;
-    Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] %s len=%u pending=%s%s %s\n",
-              label ? label : "OxyII",
-              static_cast<unsigned>(len),
-              oxyii_cmd_name(cmd),
-              len > shown ? " truncated" : "",
-              hex);
-}
-
 bool oxyii_decode_frame(const uint8_t *frame,
                         size_t len,
                         uint8_t &cmd,
@@ -108,13 +85,15 @@ bool oxyii_decode_frame(const uint8_t *frame,
 
 bool oxyii_decode_reading(const uint8_t *payload,
                           size_t len,
+                          uint8_t &spo2,
+                          uint8_t &pulse,
                           uint16_t &spo2_raw,
                           uint16_t &pulse_raw,
                           bool &invalid) {
     if (!payload || len < 9) return false;
 
-    const uint8_t spo2 = payload[6];
-    const uint8_t pulse = payload[8];
+    spo2 = payload[6];
+    pulse = payload[8];
     const bool valid =
         spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse != 0xff &&
         pulse < 250;
@@ -235,10 +214,6 @@ void sensor_oxyii_notify_cb(NimBLERemoteCharacteristic *chr,
     (void)chr;
     (void)is_notify;
     if (!data || !len) return;
-    log_oxyii_hex_debug("Sensor OxyII RX fragment",
-                        data,
-                        len,
-                        sensor_oxyii_pending_cmd);
 
     if (data[0] == 0xa5) {
         sensor_oxyii_rx_len = 0;
@@ -305,17 +280,21 @@ void sensor_oxyii_notify_cb(NimBLERemoteCharacteristic *chr,
 
     uint16_t spo2_raw = PLX_SFLOAT_NAN;
     uint16_t pulse_raw = PLX_SFLOAT_NAN;
+    uint8_t spo2 = 0;
+    uint8_t pulse = 0;
     bool invalid = true;
-    if (!oxyii_decode_reading(payload, payload_len, spo2_raw, pulse_raw,
-                              invalid)) {
+    if (!oxyii_decode_reading(payload, payload_len, spo2, pulse,
+                              spo2_raw, pulse_raw, invalid)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "[OXI] Sensor OxyII live decode failed len=%u\n",
                   static_cast<unsigned>(payload_len));
         return;
     }
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor OxyII reading %s\n",
-              invalid ? "invalid" : "valid");
+              "[OXI] Sensor OxyII reading %s spo2=%u pulse=%u\n",
+              invalid ? "invalid" : "valid",
+              static_cast<unsigned>(spo2),
+              static_cast<unsigned>(pulse));
 
     if (sensor_owner) {
         sensor_owner->on_sensor_sample(spo2_raw, pulse_raw, invalid);
