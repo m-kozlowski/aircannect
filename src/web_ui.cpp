@@ -435,6 +435,7 @@ void WebUI::stop() {
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
+    sse_push_requested_ = false;
     started_ = false;
 }
 
@@ -446,12 +447,18 @@ void WebUI::poll() {
     publish_snapshots(false);
 
     if (!events_ || events_->count() == 0) return;
-    if (static_cast<int32_t>(millis() - last_sse_push_ms_) <
+    const bool push_requested = sse_push_requested_;
+    if (!push_requested &&
+        static_cast<int32_t>(millis() - last_sse_push_ms_) <
         static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS)) {
         return;
     }
     last_sse_push_ms_ = millis();
-    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
+    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
+        sse_push_requested_ = push_requested;
+        return;
+    }
+    sse_push_requested_ = false;
     const uint32_t event_id = millis();
     bool sse_backpressure = false;
     if (events_->send(cached_status_json_.c_str(), "status", event_id) !=
@@ -660,6 +667,13 @@ void WebUI::send_live_batch(uint32_t now_ms) {
 }
 
 void WebUI::handle_event(const RpcEvent &event) {
+    if (event.kind == RpcEventKind::BootNotification) {
+        mark_snapshots_dirty(SNAPSHOT_STATUS);
+    } else if (event.kind == RpcEventKind::RpcNotification &&
+               json_method_is(event.payload, "EventNotification")) {
+        mark_snapshots_dirty(SNAPSHOT_STATUS);
+    }
+
     if (!ManagementConsole::event_has_output(event)) return;
 
     StringPrint capture;
@@ -696,6 +710,13 @@ void WebUI::build_console_json(LargeTextBuffer &json) const {
 
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
     snapshots_dirty_mask_ |= mask;
+    if (mask & (SNAPSHOT_STATUS | SNAPSHOT_OTA | SNAPSHOT_RESMED_OTA)) {
+        request_sse_push();
+    }
+}
+
+void WebUI::request_sse_push() {
+    sse_push_requested_ = true;
 }
 
 void WebUI::send_cached_settings(AsyncWebServerRequest *request,

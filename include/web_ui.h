@@ -62,6 +62,7 @@ private:
     void send_cached_settings(AsyncWebServerRequest *request,
                               int requested_mode);
     void mark_snapshots_dirty(uint16_t mask);
+    void request_sse_push();
     void publish_snapshots(bool force);
 
     // Deferred command queue
@@ -172,6 +173,7 @@ private:
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;
     uint32_t last_sse_push_ms_ = 0;
+    bool sse_push_requested_ = false;
     bool started_ = false;
 };
 
