@@ -2634,10 +2634,6 @@
       }
 
       const active = document.getElementById("p-clinical").classList.contains("active");
-      if (data.valid && !data.refresh_queued && (data.age_ms || 0) < 2500) {
-        settingsRefreshUntil = 0;
-      }
-
       const refreshing = Date.now() < settingsRefreshUntil;
       if (active && (data.refresh_queued || refreshing || !data.valid ||
           data.pending_count)) {
@@ -2659,13 +2655,13 @@
         const response = await api("/api/settings" +
           (query.length ? "?" + query.join("&") : ""));
         settingsData = await response.json();
-        renderSettings(settingsData);
+        renderSettings(settingsData, !!refresh);
       } catch (error) {
         msg("settingsMsg", error.message, false);
       }
     }
 
-    function renderSettings(data) {
+    function renderSettings(data, requestedRefresh) {
       const parts = [];
       if (data.active_mode !== undefined && data.active_mode !== null) {
         settingsActiveMode = Number(data.active_mode);
@@ -2673,7 +2669,8 @@
       if (data.mode !== undefined && data.mode !== null) {
         settingsDraftMode = Number(data.mode);
       }
-      if (data.valid && !data.refresh_queued && (data.age_ms || 0) < 2500) {
+      if (!requestedRefresh && data.valid && !data.refresh_queued &&
+          (data.age_ms || 0) < 2500) {
         settingsRefreshUntil = 0;
       }
 

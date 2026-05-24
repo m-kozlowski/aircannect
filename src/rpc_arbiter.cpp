@@ -1,7 +1,9 @@
 #include "rpc_arbiter.h"
 
+#include <ArduinoJson.h>
 #include <algorithm>
 #include <stdio.h>
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -58,9 +60,36 @@ std::string current_utc_iso_nearest_second() {
     return format_utc_ms(rounded_ms);
 }
 
-const char *const ACTIVITY_EVENT_SUBSCRIBE_PARAMS =
+const char *const SETTINGS_HISTORY_CHANGE_DATA_ID =
+    "SettingsHistoryChangeCount";
+
+const char *const AS11_EVENT_SUBSCRIBE_PARAMS =
     "{\"dataIds\":[\"SystemActivityEvents-FrequentActivityEvents\","
-    "\"SystemActivityEvents-SporadicActivityEvents\"]}";
+    "\"SystemActivityEvents-SporadicActivityEvents\","
+    "\"SettingsHistoryChangeCount\"]}";
+
+bool settings_history_change_notification(const std::string &payload) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) return false;
+
+    const char *method = doc["method"].as<const char *>();
+    if (!method || strcmp(method, "EventNotification") != 0) return false;
+
+    JsonObjectConst params = doc["params"].as<JsonObjectConst>();
+    if (params.isNull()) return false;
+    const char *data_id = params["dataId"].as<const char *>();
+    if (!data_id || strcmp(data_id, SETTINGS_HISTORY_CHANGE_DATA_ID) != 0) {
+        return false;
+    }
+
+    JsonArrayConst events = params["events"].as<JsonArrayConst>();
+    for (JsonObjectConst event : events) {
+        const char *name = event["event"].as<const char *>();
+        if (name && strcmp(name, "ValueChange") == 0) return true;
+    }
+    return false;
+}
 
 bool event_suggests_identity_refresh(const std::string &event) {
     return event == "PowerUp" ||
@@ -685,6 +714,7 @@ void RpcArbiter::dispatch_next_request() {
     pending_.source = request.source;
     pending_.method = request.method;
     pending_.stream_command = request.stream_command;
+    pending_.settings_refresh = request.settings_refresh;
     pending_.deadline_ms = millis() + request.timeout_ms;
     pending_.dispatch_epoch_ms = 0;
     (void)current_epoch_ms(pending_.dispatch_epoch_ms);
@@ -760,7 +790,7 @@ void RpcArbiter::poll_event_subscription() {
 
     QueuedRequest request;
     request.method = "SubscribeEvent";
-    request.params_json = ACTIVITY_EVENT_SUBSCRIBE_PARAMS;
+    request.params_json = AS11_EVENT_SUBSCRIBE_PARAMS;
     request.source = RpcSource::Scheduler;
     request.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     if (enqueue_request(request)) {
@@ -908,6 +938,7 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
     const bool therapy_method =
         As11DeviceState::is_therapy_command_method(pending_.method);
     bool get_had_pending_therapy = false;
+    bool settings_updated = false;
     if (pending_.method == "Set") {
         as11_settings_.note_set_response(is_error, now);
     }
@@ -917,7 +948,8 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
             const As11TherapyState before_get_state =
                 as11_state_.therapy_state();
             as11_state_.apply_status_get_response(payload, now);
-            as11_settings_.apply_settings_get_response(payload, now);
+            settings_updated =
+                as11_settings_.apply_settings_get_response(payload, now);
             if (before_get_state == As11TherapyState::Running &&
                 as11_state_.therapy_state() == As11TherapyState::Standby) {
                 schedule_as11_motor_refresh(
@@ -976,6 +1008,10 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
                                       is_error, now);
         if (is_error) stats_.stream_command_errors++;
     }
+    if (settings_updated && pending_.settings_refresh) {
+        push_event(RpcEventKind::InternalSettingsStateUpdated, "",
+                   pending_.source, pending_.id);
+    }
 }
 
 bool RpcArbiter::request_as11_healthcheck() {
@@ -1031,6 +1067,7 @@ bool RpcArbiter::request_as11_settings_refresh() {
     }
     request.params_json = as11_settings_get_params_json(mode);
     request.source = RpcSource::Scheduler;
+    request.settings_refresh = true;
     return enqueue_request(request);
 }
 
@@ -1041,6 +1078,11 @@ bool RpcArbiter::handle_event_notification(const std::string &payload) {
     const As11TherapyState before_state = as11_state_.therapy_state();
     const bool activity_updated =
         as11_state_.apply_activity_event_notification(payload, now);
+    if (settings_history_change_notification(payload)) {
+        push_event(RpcEventKind::InternalSettingsStateInvalidated, "",
+                   RpcSource::Scheduler);
+        request_as11_settings_refresh();
+    }
     const std::string event = as11_state_.last_activity_event();
     if (activity_updated && event_suggests_identity_refresh(event)) {
         schedule_as11_identity_refresh(

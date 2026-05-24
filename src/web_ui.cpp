@@ -668,7 +668,18 @@ void WebUI::send_live_batch(uint32_t now_ms) {
 
 void WebUI::handle_event(const RpcEvent &event) {
     if (event.kind == RpcEventKind::BootNotification) {
-        mark_snapshots_dirty(SNAPSHOT_STATUS);
+        mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_SETTINGS);
+    } else if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
+        if (cache_mutex_ &&
+            xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
+            cached_settings_refresh_queued_ = true;
+            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+            xSemaphoreGive(cache_mutex_);
+        } else {
+            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+        }
+    } else if (event.kind == RpcEventKind::InternalSettingsStateUpdated) {
+        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     } else if (event.kind == RpcEventKind::RpcNotification &&
                json_method_is(event.payload, "EventNotification")) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
@@ -723,6 +734,7 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
                                  int requested_mode) {
     bool mismatch = false;
     bool has_cached = false;
+    bool refresh_queued = false;
     if (!cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
         request->send(503, "application/json",
@@ -736,7 +748,8 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
         mismatch = true;
     } else {
-        has_cached = cached_settings_json_.length() > 0;
+        refresh_queued = cached_settings_refresh_queued_;
+        has_cached = !refresh_queued && cached_settings_json_.length() > 0;
     }
 
     if (!mismatch && has_cached) {
@@ -758,7 +771,7 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
     xSemaphoreGive(cache_mutex_);
 
     const String placeholder =
-        settings_placeholder_json(requested_mode, mismatch);
+        settings_placeholder_json(requested_mode, mismatch || refresh_queued);
     request->send(200, "application/json", placeholder);
 }
 

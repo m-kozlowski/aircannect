@@ -30,6 +30,8 @@ enum class RpcEventKind {
     RpcUnmatched,
     DebugLog,
     BootNotification,
+    InternalSettingsStateInvalidated,
+    InternalSettingsStateUpdated,
     FramingError,
     Info,
 };
@@ -145,6 +147,7 @@ private:
         RpcSource source = RpcSource::Internal;
         std::string method;
         StreamCommandType stream_command = StreamCommandType::None;
+        bool settings_refresh = false;
     };
 
     struct QueuedRequest {
@@ -155,6 +158,7 @@ private:
         std::string params_json;
         bool set_datetime_now = false;
         StreamCommandType stream_command = StreamCommandType::None;
+        bool settings_refresh = false;
     };
 
     struct RawPassthroughRequest {
