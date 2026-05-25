@@ -153,7 +153,7 @@ private:
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_WIFI |
         SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
-        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
+        SNAPSHOT_RESMED_OTA;
 
     RpcArbiter *arbiter_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
