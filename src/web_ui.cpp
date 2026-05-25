@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string_view>
 
 #include "auth_utils.h"
 #include "app_config_update.h"
@@ -157,16 +158,27 @@ String settings_placeholder_json(int mode, bool refresh_queued) {
     return json;
 }
 
-String motor_hours(const std::string &iso_duration) {
-    if (iso_duration.size() < 4 || iso_duration.rfind("PT", 0) != 0) {
-        return "";
+bool motor_hours(std::string_view iso_duration,
+                 char *out,
+                 size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = 0;
+    if (iso_duration.size() < 4 || iso_duration.substr(0, 2) != "PT") {
+        return false;
     }
     size_t start = 2;
-    size_t end = iso_duration.find('S', start);
-    if (end == std::string::npos) return "";
-    uint64_t seconds = strtoull(
-        iso_duration.substr(start, end - start).c_str(), nullptr, 10);
-    return String(static_cast<unsigned long>((seconds + 1800) / 3600));
+    const size_t end = iso_duration.find('S', start);
+    if (end == std::string_view::npos || end == start) return false;
+    uint64_t seconds = 0;
+    for (size_t i = start; i < end; ++i) {
+        const char c = iso_duration[i];
+        if (c < '0' || c > '9') return false;
+        seconds = seconds * 10 + static_cast<unsigned>(c - '0');
+    }
+    const unsigned long hours =
+        static_cast<unsigned long>((seconds + 1800) / 3600);
+    snprintf(out, out_size, "%lu", hours);
+    return true;
 }
 
 const char *setting_kind_name(As11SettingKind kind) {
@@ -1082,33 +1094,32 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_uint64(json, "storage_total", storage.total_bytes);
     json_add_uint64(json, "storage_used", storage.used_bytes);
     json_add_uint64(json, "storage_free", storage.free_bytes);
-    json_add_string(json, "wifi_state", wifi.state.c_str());
-    json_add_string(json, "wifi_ssid", wifi.ssid.c_str());
-    json_add_string(json, "wifi_ip", wifi.ip.c_str());
+    json_add_string_view(json, "wifi_state", wifi.state);
+    json_add_string_view(json, "wifi_ssid", wifi.ssid);
+    json_add_string(json, "wifi_ip", wifi.ip);
     json_add_string(json, "softap_mode",
                     softap_mode_name(wifi.softap_mode));
     json_add_bool(json, "softap_running", wifi.softap_running);
     json_add_int(json, "wifi_rssi", wifi.rssi);
     json_add_int(json, "wifi_channel", wifi.channel);
-    json_add_string(json, "wifi_bssid", wifi.bssid.c_str());
+    json_add_string(json, "wifi_bssid", wifi.bssid);
     json_add_int(json, "wifi_profile", wifi.active_profile);
     json_add_bool(json, "wifi_roam", wifi.roaming_enabled);
     json_add_bool(json, "wifi_roam_suspended", wifi.roaming_suspended);
     json_add_bool(json, "ota_active", snap.ota_active);
-    json_add_string(json, "device_name", as11.product_name.c_str());
-    json_add_string(json, "serial", as11.serial_number.c_str());
-    json_add_string(json, "software_id",
-                    as11.software_identifier.c_str());
+    json_add_string_view(json, "device_name", as11.product_name);
+    json_add_string_view(json, "serial", as11.serial_number);
+    json_add_string_view(json, "software_id", as11.software_identifier);
     json_add_string(json, "therapy",
                     As11DeviceState::therapy_state_name(as11.therapy_state));
     json_add_string(json, "therapy_pending",
                     As11DeviceState::therapy_target_name(
                         as11.pending_therapy_target));
-    json_add_string(json, "rop", as11.rop.c_str());
-    json_add_string(json, "profile",
-                    as11.active_therapy_profile.c_str());
-    String hours = motor_hours(as11.motor_run_meter);
-    json_add_string(json, "motor_hours", hours.c_str());
+    json_add_string_view(json, "rop", as11.rop);
+    json_add_string_view(json, "profile", as11.active_therapy_profile);
+    char hours[16];
+    motor_hours(as11.motor_run_meter, hours, sizeof(hours));
+    json_add_string(json, "motor_hours", hours);
     json += ",\"oximetry\":{";
     json_add_bool(json, "enabled", oxi.enabled, false);
     json_add_string(json, "source", oximetry_source_name(oxi.source));
@@ -1138,8 +1149,7 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_string(json, "ble_name", oxi.ble_name);
     json_add_string(json, "ble_peer", oxi.ble_peer);
     json += '}';
-    json_add_string(json, "device_datetime",
-                    as11.device_datetime.c_str());
+    json_add_string_view(json, "device_datetime", as11.device_datetime);
     if (as11.clock_valid) {
         json_add_int(json, "device_datetime_age_ms",
                      snap.now_ms - as11.clock_sample_ms);
@@ -1150,9 +1160,8 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                   time.resmed_time_sync_enabled);
     json_add_bool(json, "ntp_synced", time.ntp_synced);
     json_add_bool(json, "esp_time_valid", time.esp_time_valid);
-    json_add_string(json, "esp_time_source",
-                    time.esp_time_source.c_str());
-    json_add_string(json, "esp_datetime", time.esp_datetime.c_str());
+    json_add_string_view(json, "esp_time_source", time.esp_time_source);
+    json_add_string(json, "esp_datetime", time.esp_datetime);
     json += '}';
 }
 

@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string_view>
 
 #if __has_include(<Arduino.h>)
 #include <Arduino.h>
@@ -33,6 +34,10 @@ void append_json_escaped(LargeTextBuffer &out, const char *value,
                          size_t len);
 void json_add_string(LargeTextBuffer &out, const char *key, const char *value,
                      bool comma = true);
+void json_add_string_view(LargeTextBuffer &out,
+                          const char *key,
+                          std::string_view value,
+                          bool comma = true);
 void json_add_bool(LargeTextBuffer &out, const char *key, bool value,
                    bool comma = true);
 void json_add_int(LargeTextBuffer &out, const char *key, long value,

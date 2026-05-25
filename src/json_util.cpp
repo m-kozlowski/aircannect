@@ -140,6 +140,18 @@ void json_add_string(LargeTextBuffer &out, const char *key, const char *value,
     json_add_string_impl(out, key, value, comma);
 }
 
+void json_add_string_view(LargeTextBuffer &out,
+                          const char *key,
+                          std::string_view value,
+                          bool comma) {
+    if (comma) out += ',';
+    out += '"';
+    out += key;
+    out += "\":\"";
+    append_json_escaped_impl(out, value.data(), value.size());
+    out += '"';
+}
+
 void json_add_bool(LargeTextBuffer &out, const char *key, bool value,
                    bool comma) {
     json_add_bool_impl(out, key, value, comma);

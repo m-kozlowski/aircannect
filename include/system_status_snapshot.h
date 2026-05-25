@@ -1,10 +1,12 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
-#include <string>
+#include <string_view>
 
 #include "app_config.h"
 #include "as11_device_state.h"
+#include "board.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
@@ -14,11 +16,14 @@
 
 namespace aircannect {
 
+static constexpr size_t AC_STATUS_IP_TEXT_MAX = 46;
+static constexpr size_t AC_STATUS_ISO_TIME_TEXT_MAX = 29;
+
 struct WifiStatusSnapshot {
-    std::string state;
-    std::string ssid;
-    std::string ip;
-    std::string bssid;
+    std::string_view state;
+    std::string_view ssid;
+    char ip[AC_STATUS_IP_TEXT_MAX] = "";
+    char bssid[AC_WIFI_BSSID_TEXT_MAX] = "";
     SoftApMode softap_mode = SoftApMode::Auto;
     bool softap_running = false;
     bool roaming_enabled = false;
@@ -29,13 +34,13 @@ struct WifiStatusSnapshot {
 };
 
 struct As11StatusSnapshot {
-    std::string product_name;
-    std::string serial_number;
-    std::string software_identifier;
-    std::string active_therapy_profile;
-    std::string motor_run_meter;
-    std::string rop;
-    std::string device_datetime;
+    std::string_view product_name;
+    std::string_view serial_number;
+    std::string_view software_identifier;
+    std::string_view active_therapy_profile;
+    std::string_view motor_run_meter;
+    std::string_view rop;
+    std::string_view device_datetime;
     As11TherapyState therapy_state = As11TherapyState::Unknown;
     As11TherapyTarget pending_therapy_target = As11TherapyTarget::None;
     bool clock_valid = false;
@@ -43,8 +48,8 @@ struct As11StatusSnapshot {
 };
 
 struct TimeStatusSnapshot {
-    std::string esp_time_source;
-    std::string esp_datetime;
+    std::string_view esp_time_source;
+    char esp_datetime[AC_STATUS_ISO_TIME_TEXT_MAX] = "";
     bool resmed_time_sync_enabled = false;
     bool ntp_synced = false;
     bool esp_time_valid = false;

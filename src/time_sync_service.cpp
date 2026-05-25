@@ -163,14 +163,22 @@ const char *TimeSyncService::esp_clock_source_name() const {
 }
 
 std::string TimeSyncService::utc_now_iso() const {
+    char out[29];
+    if (!utc_now_iso(out, sizeof(out))) return "";
+    return std::string(out);
+}
+
+bool TimeSyncService::utc_now_iso(char *out, size_t size) const {
+    if (!out || size == 0) return false;
+    out[0] = 0;
     struct timeval tv = {};
     if (gettimeofday(&tv, nullptr) != 0 ||
         tv.tv_sec < VALID_TIME_MIN_EPOCH) {
-        return "";
+        return false;
     }
     const int64_t epoch_ms = static_cast<int64_t>(tv.tv_sec) * 1000 +
                              static_cast<int64_t>(tv.tv_usec / 1000);
-    return format_utc(epoch_ms);
+    return format_utc(epoch_ms, out, size);
 }
 
 void TimeSyncService::apply_timezone() {
@@ -396,20 +404,33 @@ bool TimeSyncService::parse_resmed_datetime_ms(
 }
 
 std::string TimeSyncService::format_utc(int64_t epoch_ms) const {
+    char full[29];
+    if (!format_utc(epoch_ms, full, sizeof(full))) return "";
+    return std::string(full);
+}
+
+bool TimeSyncService::format_utc(int64_t epoch_ms,
+                                 char *out,
+                                 size_t size) const {
+    if (!out || size == 0) return false;
+    out[0] = 0;
     if (epoch_ms < static_cast<int64_t>(VALID_TIME_MIN_EPOCH) * 1000) {
-        return "";
+        return false;
     }
     struct tm utc = {};
     const time_t epoch = static_cast<time_t>(epoch_ms / 1000);
     gmtime_r(&epoch, &utc);
-    char out[25];
+    char base[25];
     const int millisecond = static_cast<int>(epoch_ms % 1000);
-    if (strftime(out, sizeof(out), "%Y-%m-%dT%H:%M:%S", &utc) == 0) {
-        return "";
+    if (strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &utc) == 0) {
+        return false;
     }
-    char full[29];
-    snprintf(full, sizeof(full), "%s.%03dZ", out, millisecond);
-    return std::string(full);
+    const int written = snprintf(out, size, "%s.%03dZ", base, millisecond);
+    if (written < 0 || static_cast<size_t>(written) >= size) {
+        out[0] = 0;
+        return false;
+    }
+    return true;
 }
 
 }  // namespace aircannect

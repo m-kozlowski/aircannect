@@ -1,5 +1,7 @@
 #include "system_status_snapshot.h"
 
+#include <stdio.h>
+
 #include "version.h"
 
 namespace aircannect {
@@ -17,10 +19,13 @@ SystemStatusSnapshot collect_system_status(
 
     out.wifi.state = sources.wifi_manager.state_name();
     out.wifi.ssid = sources.wifi_manager.sta_ssid().c_str();
-    out.wifi.ip = sources.wifi_manager.ip().toString().c_str();
-    char bssid[AC_WIFI_BSSID_TEXT_MAX];
-    sources.wifi_manager.bssid(bssid, sizeof(bssid));
-    out.wifi.bssid = bssid;
+    const IPAddress ip = sources.wifi_manager.ip();
+    snprintf(out.wifi.ip, sizeof(out.wifi.ip), "%u.%u.%u.%u",
+             static_cast<unsigned>(ip[0]),
+             static_cast<unsigned>(ip[1]),
+             static_cast<unsigned>(ip[2]),
+             static_cast<unsigned>(ip[3]));
+    sources.wifi_manager.bssid(out.wifi.bssid, sizeof(out.wifi.bssid));
     out.wifi.softap_mode = sources.wifi_manager.softap_mode();
     out.wifi.softap_running = sources.wifi_manager.softap_running();
     out.wifi.roaming_enabled = sources.wifi_manager.roaming_enabled();
@@ -54,7 +59,8 @@ SystemStatusSnapshot collect_system_status(
         sources.time_sync_service.esp_clock_valid();
     out.time.esp_time_source =
         sources.time_sync_service.esp_clock_source_name();
-    out.time.esp_datetime = sources.time_sync_service.utc_now_iso();
+    sources.time_sync_service.utc_now_iso(out.time.esp_datetime,
+                                          sizeof(out.time.esp_datetime));
 
     return out;
 }
