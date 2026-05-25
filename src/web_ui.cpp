@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string_view>
+#include <utility>
 
 #include "auth_utils.h"
 #include "app_config_update.h"
@@ -24,30 +25,6 @@
 #include "web_ui_html.h"
 
 namespace aircannect {
-
-enum WebCommandKind : uint8_t {
-    WebCommandConsoleLine,
-    WebCommandConsoleClear,
-    WebCommandConfigUpdate,
-    WebCommandWifiUpdate,
-    WebCommandTimeAction,
-    WebCommandSettingsRefresh,
-    WebCommandSettingsUpdate,
-    WebCommandTherapyAction,
-    WebCommandOximetryAction,
-    WebCommandResmedOtaInit,
-    WebCommandResmedOtaBlock,
-    WebCommandResmedOtaCheck,
-    WebCommandResmedOtaApply,
-    WebCommandResmedOtaAbort,
-    WebCommandResmedOtaStartStaged,
-};
-
-struct WebCommand {
-    uint8_t kind = WebCommandConsoleLine;
-    std::string text;
-    std::string body;
-};
 
 namespace {
 
@@ -87,7 +64,7 @@ void handle_body(AsyncWebServerRequest *request,
         release_request_body(request);
         if (total > AC_WEB_MAX_POST_BODY) return;
         request->_tempObject =
-            Memory::calloc_large(AC_WEB_MAX_POST_BODY + 1, sizeof(char));
+            Memory::calloc_large(total + 1, sizeof(char));
     }
     char *body = static_cast<char *>(request->_tempObject);
     if (!body || index + len > AC_WEB_MAX_POST_BODY) return;
@@ -349,11 +326,10 @@ bool WebUI::begin(RpcArbiter &arbiter,
     oximetry_manager_ = &oximetry_manager;
     console_ctx_ = &console_ctx;
 
-    command_queue_ = xQueueCreate(AC_WEB_COMMAND_QUEUE_DEPTH,
-                                  sizeof(WebCommand *));
+    command_mutex_ = xSemaphoreCreateMutex();
     cache_mutex_ = xSemaphoreCreateMutex();
     sse_mutex_ = xSemaphoreCreateMutex();
-    if (!command_queue_ || !cache_mutex_ || !sse_mutex_) {
+    if (!command_mutex_ || !cache_mutex_ || !sse_mutex_) {
         stop();
         return false;
     }
@@ -467,14 +443,15 @@ void WebUI::stop() {
     }
     events_ = nullptr;
 
-    if (command_queue_) {
-        WebCommand *command = nullptr;
-        while (xQueueReceive(command_queue_, &command, 0) == pdTRUE) {
-            delete command;
-            command = nullptr;
+    if (command_mutex_) {
+        if (xSemaphoreTake(command_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+            command_queue_.clear();
+            xSemaphoreGive(command_mutex_);
+        } else {
+            command_queue_.clear();
         }
-        vQueueDelete(command_queue_);
-        command_queue_ = nullptr;
+        vSemaphoreDelete(command_mutex_);
+        command_mutex_ = nullptr;
     }
 
     if (sse_mutex_) {
@@ -1074,40 +1051,48 @@ bool WebUI::request_allowed_cached(AsyncWebServerRequest *request) const {
     return request && request->authenticate(user.c_str(), password.c_str());
 }
 
-bool WebUI::enqueue_command(WebCommand *command) {
-    if (!command || !command_queue_) {
+bool WebUI::enqueue_command(WebCommand &&command) {
+    const uint8_t kind = command.kind;
+    if (!command_mutex_) {
         Log::logf(CAT_GENERAL, LOG_WARN,
                   "[WEB] command queue unavailable kind=%s\n",
-                  command ? web_command_name(command->kind) : "none");
-        delete command;
+                  web_command_name(kind));
         return false;
     }
-    WebCommand *queued = command;
-    if (xQueueSend(command_queue_, &queued, 0) != pdTRUE) {
+
+    if (xSemaphoreTake(command_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        Log::logf(CAT_GENERAL, LOG_WARN,
+                  "[WEB] command queue busy kind=%s\n",
+                  web_command_name(kind));
+        return false;
+    }
+    const bool queued = command_queue_.push(std::move(command));
+    xSemaphoreGive(command_mutex_);
+    if (!queued) {
         Log::logf(CAT_GENERAL, LOG_WARN,
                   "[WEB] command queue full kind=%s\n",
-                  web_command_name(command->kind));
-        delete command;
-        return false;
+                  web_command_name(kind));
     }
-    return true;
+    return queued;
 }
 
 bool WebUI::enqueue_simple_command(uint8_t kind) {
-    WebCommand *command = new WebCommand();
-    if (!command) return false;
-    command->kind = kind;
-    return enqueue_command(command);
+    WebCommand command;
+    command.kind = kind;
+    return enqueue_command(std::move(command));
 }
 
 void WebUI::drain_commands() {
-    if (!command_queue_) return;
+    if (!command_mutex_) return;
     for (size_t i = 0; i < AC_WEB_COMMANDS_PER_POLL; ++i) {
-        WebCommand *command = nullptr;
-        if (xQueueReceive(command_queue_, &command, 0) != pdTRUE) break;
-        if (!command) continue;
-        execute_command(*command);
-        delete command;
+        WebCommand command;
+        if (xSemaphoreTake(command_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
+            return;
+        }
+        const bool has_command = command_queue_.pop(command);
+        xSemaphoreGive(command_mutex_);
+        if (!has_command) break;
+        execute_command(command);
     }
 }
 
@@ -1839,12 +1824,10 @@ void WebUI::register_routes() {
                 return;
             }
 
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandConsoleLine;
-                queued->text = command.c_str();
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandConsoleLine;
+            queued.text = command.c_str();
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -1869,12 +1852,10 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"bad json\"}");
                 return;
             }
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandConfigUpdate;
-                queued->body = body;
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandConfigUpdate;
+            queued.body = std::move(body);
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -1962,12 +1943,10 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"missing size\"}");
                 return;
             }
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandResmedOtaInit;
-                queued->body = body;
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandResmedOtaInit;
+            queued.body = std::move(body);
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -1992,12 +1971,10 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"missing data\"}");
                 return;
             }
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandResmedOtaBlock;
-                queued->body = body;
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandResmedOtaBlock;
+            queued.body = std::move(body);
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -2018,12 +1995,10 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"bad json\"}");
                 return;
             }
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandResmedOtaApply;
-                queued->body = body;
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandResmedOtaApply;
+            queued.body = std::move(body);
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -2046,12 +2021,10 @@ void WebUI::register_routes() {
             }
             String action;
             json_get_string(doc, "action", action);
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandTimeAction;
-                queued->text = action.c_str();
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandTimeAction;
+            queued.text = action.c_str();
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -2072,13 +2045,11 @@ void WebUI::register_routes() {
                 return;
             }
             action.trim();
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandOximetryAction;
-                queued->text = action.c_str();
-                queued->body = body;
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandOximetryAction;
+            queued.text = action.c_str();
+            queued.body = std::move(body);
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -2101,12 +2072,10 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"bad json\"}");
                 return;
             }
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandWifiUpdate;
-                queued->body = body;
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandWifiUpdate;
+            queued.body = std::move(body);
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -2141,13 +2110,14 @@ void WebUI::register_routes() {
         }
         const int mode = request_profile_mode_arg(request);
         if (request->hasArg("refresh")) {
-            if (cache_mutex_ &&
+            const bool queued =
+                enqueue_simple_command(WebCommandSettingsRefresh);
+            if (queued && cache_mutex_ &&
                 xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
                 cached_settings_refresh_queued_ = true;
                 mark_snapshots_dirty(SNAPSHOT_SETTINGS);
                 xSemaphoreGive(cache_mutex_);
             }
-            enqueue_simple_command(WebCommandSettingsRefresh);
         }
         send_cached_settings(request, mode);
     });
@@ -2162,12 +2132,10 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"bad json\"}");
                 return;
             }
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandSettingsUpdate;
-                queued->body = body;
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandSettingsUpdate;
+            queued.body = std::move(body);
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 
@@ -2189,12 +2157,10 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"unknown action\"}");
                 return;
             }
-            WebCommand *queued = new WebCommand();
-            if (queued) {
-                queued->kind = WebCommandTherapyAction;
-                queued->text = action.c_str();
-            }
-            send_queue_result(request, enqueue_command(queued));
+            WebCommand queued;
+            queued.kind = WebCommandTherapyAction;
+            queued.text = action.c_str();
+            send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
 

@@ -2,11 +2,12 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include <string>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <freertos/semphr.h>
 
 #include "app_config.h"
+#include "fixed_queue.h"
 #include "large_text_buffer.h"
 #include "management_console.h"
 #include "ota_manager.h"
@@ -25,6 +26,30 @@ class AsyncEventSource;
 class AsyncWebServer;
 
 namespace aircannect {
+
+enum WebCommandKind : uint8_t {
+    WebCommandConsoleLine,
+    WebCommandConsoleClear,
+    WebCommandConfigUpdate,
+    WebCommandWifiUpdate,
+    WebCommandTimeAction,
+    WebCommandSettingsRefresh,
+    WebCommandSettingsUpdate,
+    WebCommandTherapyAction,
+    WebCommandOximetryAction,
+    WebCommandResmedOtaInit,
+    WebCommandResmedOtaBlock,
+    WebCommandResmedOtaCheck,
+    WebCommandResmedOtaApply,
+    WebCommandResmedOtaAbort,
+    WebCommandResmedOtaStartStaged,
+};
+
+struct WebCommand {
+    uint8_t kind = WebCommandConsoleLine;
+    std::string text;
+    std::string body;
+};
 
 struct WebUiBufferMemoryStatus {
     size_t length = 0;
@@ -100,10 +125,10 @@ private:
     void publish_snapshots(bool force);
 
     // Deferred command queue
-    bool enqueue_command(struct WebCommand *command);
+    bool enqueue_command(WebCommand &&command);
     bool enqueue_simple_command(uint8_t kind);
     void drain_commands();
-    void execute_command(struct WebCommand &command);
+    void execute_command(WebCommand &command);
     void execute_console_line(const std::string &line);
     void execute_config_update(const std::string &body);
     void execute_wifi_update(const std::string &body);
@@ -112,7 +137,7 @@ private:
     void execute_therapy_action(const std::string &action);
     void execute_oximetry_action(const std::string &action,
                                  const std::string &body);
-    void execute_resmed_ota_command(const struct WebCommand &command);
+    void execute_resmed_ota_command(const WebCommand &command);
 
     // SSE client tracking
     void handle_sse_connect(AsyncEventSourceClient *client);
@@ -177,7 +202,8 @@ private:
     uint32_t console_sse_seq_ = 0;
     uint64_t console_sse_pos_ = 0;
     bool console_sse_reset_pending_ = false;
-    QueueHandle_t command_queue_ = nullptr;
+    FixedQueue<WebCommand, AC_WEB_COMMAND_QUEUE_DEPTH> command_queue_;
+    SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;
 
