@@ -101,6 +101,9 @@ public:
     size_t frame_pool_capacity() const { return frame_pool_.capacity(); }
     size_t frame_pool_free() const { return frame_pool_.free_count(); }
     size_t frame_pool_in_use() const { return frame_pool_.in_use_count(); }
+    uint32_t frame_pool_allocation_failures() const {
+        return frame_pool_.allocation_failures();
+    }
     void reset_counters();
 
     uint32_t last_stream_id() const { return last_stream_id_; }

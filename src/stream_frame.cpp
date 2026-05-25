@@ -358,12 +358,18 @@ void StreamFrameRef::reset() {
     data_ = nullptr;
 }
 
-StreamFramePool::~StreamFramePool() {
+void StreamFramePool::free_storage() {
     if (!frames_) return;
     for (size_t i = 0; i < capacity_; ++i) {
         free_frame_bytes(frames_[i]);
     }
     free_frame_bytes(frames_);
+    frames_ = nullptr;
+    capacity_ = 0;
+}
+
+StreamFramePool::~StreamFramePool() {
+    free_storage();
 }
 
 bool StreamFramePool::begin() {
@@ -409,6 +415,13 @@ void StreamFramePool::reset() {
     for (size_t i = 0; i < capacity_; ++i) {
         stream_frame_reset(*frames_[i]);
     }
+}
+
+bool StreamFramePool::release_storage() {
+    if (!frames_) return true;
+    if (in_use_count() != 0) return false;
+    free_storage();
+    return true;
 }
 
 StreamFrameRef StreamFramePool::allocate(uint32_t now_ms) {

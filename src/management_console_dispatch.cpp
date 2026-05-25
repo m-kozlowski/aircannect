@@ -64,6 +64,10 @@ void print_web_memory_detail(Print &out, WebUI *web_ui) {
     out.print(web.started ? "yes" : "no");
     out.print(" sse_clients=");
     out.print(static_cast<unsigned long>(web.sse_clients));
+    out.print(" sse_pending=");
+    out.print(static_cast<unsigned long>(web.sse_pending_total));
+    out.print(" sse_worst=");
+    out.print(static_cast<unsigned long>(web.sse_pending_worst));
     out.print(" console_log_len=");
     out.print(static_cast<unsigned long>(web.console_log_length));
     out.println();
@@ -90,10 +94,69 @@ void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
     const size_t frame_pool_bytes =
         frame_pool_slots * sizeof(StreamFrameData) +
         frame_pool_slots * sizeof(StreamFrameData *);
+    size_t stream_queue_total = 0;
+    size_t stream_queue_capacity = 0;
+    size_t stream_queue_worst = 0;
+    uint32_t stream_queue_drops = 0;
+    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
+        const StreamConsumerHandle handle =
+            static_cast<StreamConsumerHandle>(i);
+        if (!stream.consumer_active(handle)) continue;
+        const size_t queued = stream.consumer_queue_count(handle);
+        stream_queue_total += queued;
+        stream_queue_capacity += AC_STREAM_CONSUMER_QUEUE_DEPTH;
+        if (queued > stream_queue_worst) stream_queue_worst = queued;
+        stream_queue_drops += stream.consumer_queue_drops(handle);
+    }
+    const char *pending = "none";
+    if (stream.pending_start()) pending = "start";
+    else if (stream.pending_stop()) pending = "stop";
+    out.print("[MEM stream] desired=");
+    out.print(stream.desired_active() ? "yes" : "no");
+    out.print(" actual=");
+    out.print(stream.actual_active() ? "yes" : "no");
+    out.print(" pending=");
+    out.print(pending);
+    out.print(" consumers=");
+    out.print(static_cast<unsigned long>(stream.consumer_count()));
+    out.print(" q=");
+    out.print(static_cast<unsigned long>(stream_queue_total));
+    out.print('/');
+    out.print(static_cast<unsigned long>(stream_queue_capacity));
+    out.print(" q_worst=");
+    out.print(static_cast<unsigned long>(stream_queue_worst));
+    out.print(" q_drops=");
+    out.print(static_cast<unsigned long>(stream_queue_drops));
+    out.println();
+    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
+        const StreamConsumerHandle handle =
+            static_cast<StreamConsumerHandle>(i);
+        if (!stream.consumer_active(handle)) continue;
+        out.print("[MEM stream consumer] id=");
+        out.print(static_cast<unsigned long>(i));
+        out.print(" source=");
+        out.print(static_cast<unsigned long>(
+            stream.consumer_source(handle)));
+        out.print(" q=");
+        out.print(static_cast<unsigned long>(
+            stream.consumer_queue_count(handle)));
+        out.print('/');
+        out.print(static_cast<unsigned long>(
+            AC_STREAM_CONSUMER_QUEUE_DEPTH));
+        out.print(" drops=");
+        out.print(static_cast<unsigned long>(
+            stream.consumer_queue_drops(handle)));
+        out.println();
+    }
     out.print("[MEM owner] stream_frame_pool slots=");
     out.print(static_cast<unsigned long>(frame_pool_slots));
     out.print(" in_use=");
     out.print(static_cast<unsigned long>(stream.frame_pool_in_use()));
+    out.print(" free=");
+    out.print(static_cast<unsigned long>(stream.frame_pool_free()));
+    out.print(" alloc_failures=");
+    out.print(static_cast<unsigned long>(
+        stream.frame_pool_allocation_failures()));
     out.print(" approx_bytes=");
     out.print(static_cast<unsigned long>(frame_pool_bytes));
     out.println();

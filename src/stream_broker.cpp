@@ -71,8 +71,12 @@ StreamAcquireResult StreamBroker::update(StreamConsumerHandle handle,
 
 void StreamBroker::release(StreamConsumerHandle handle) {
     if (!consumer_active(handle)) return;
+    consumers_[handle].queue.clear();
     consumers_[handle] = {};
-    if (consumer_count() == 0) clear_error();
+    if (consumer_count() == 0) {
+        clear_error();
+        frame_pool_.release_storage();
+    }
 }
 
 bool StreamBroker::consumer_active(StreamConsumerHandle handle) const {
@@ -144,6 +148,7 @@ void StreamBroker::mark_command_response(StreamCommandType type,
         actual_active_ = true;
     } else if (type == StreamCommandType::Stop) {
         actual_active_ = false;
+        if (consumer_count() == 0) frame_pool_.release_storage();
     }
 }
 

@@ -102,6 +102,7 @@ public:
     bool begin();
     bool begin(size_t capacity);
     void reset();
+    bool release_storage();
 
     StreamFrameRef allocate(uint32_t now_ms);
 
@@ -115,6 +116,7 @@ private:
 
     void retain(StreamFrameData *data);
     void release(StreamFrameData *data);
+    void free_storage();
 
     StreamFrameData **frames_ = nullptr;
     size_t capacity_ = 0;

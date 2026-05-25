@@ -45,6 +45,8 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus live;
     size_t console_log_length = 0;
     size_t sse_clients = 0;
+    size_t sse_pending_total = 0;
+    size_t sse_pending_worst = 0;
 };
 
 class WebUI {

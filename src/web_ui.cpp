@@ -418,7 +418,26 @@ WebUiMemoryStatus WebUI::memory_status() {
 
     WebUiMemoryStatus out;
     out.started = started_;
-    out.sse_clients = sse_client_count();
+    if (sse_mutex_ && xSemaphoreTake(sse_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
+        for (SseClientRef &ref : sse_clients_) {
+            AsyncEventSourceClient *client = ref.client;
+            if (!client) continue;
+            if (!client->connected()) {
+                ref.client = nullptr;
+                ref.connected_ms = 0;
+                continue;
+            }
+            const size_t pending = client->packetsWaiting();
+            out.sse_clients++;
+            out.sse_pending_total += pending;
+            if (pending > out.sse_pending_worst) {
+                out.sse_pending_worst = pending;
+            }
+        }
+        xSemaphoreGive(sse_mutex_);
+    } else {
+        out.sse_clients = events_ ? events_->count() : 0;
+    }
     if (!cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
         return out;
