@@ -54,6 +54,8 @@ struct As11SettingDef {
     uint16_t mode_mask;
     uint16_t scale_div;
     uint8_t decimals;
+    // Optional protocol literals when display labels differ from AS11 values.
+    const char *const *wire_options = nullptr;
 };
 
 class As11SettingsState {

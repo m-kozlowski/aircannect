@@ -276,7 +276,7 @@ const As11SettingDef SETTINGS[] = {
     {"AutoSetComfort", nullptr, "ComfortFeature", "AutoSetComfort",
      nullptr, "Response", "comfort", As11SettingKind::Enum,
      0, 1, 1, STANDARD_SOFT_OPTIONS, option_count(STANDARD_SOFT_OPTIONS),
-     MODE_BIT(1), 1, 0},
+     MODE_BIT(1), 1, 0, ON_OFF_OPTIONS},
     {"RampEnable", nullptr, "AutoRampFeature", "RampEnable", nullptr, "Ramp", "comfort", As11SettingKind::Enum,
      0, 2, 1, RAMP_OPTIONS, option_count(RAMP_OPTIONS), MODES_ALL, 1, 0},
     {"RampEnablePatientAccess", nullptr, "AutoRampFeature",
@@ -479,12 +479,22 @@ int option_index_of(const As11SettingDef &def, const char *value) {
     for (uint8_t i = 0; i < def.option_count; ++i) {
         if (strcmp(def.options[i], value) == 0) return i;
     }
+    if (def.wire_options) {
+        for (uint8_t i = 0; i < def.option_count; ++i) {
+            if (strcmp(def.wire_options[i], value) == 0) return i;
+        }
+    }
     return -1;
 }
 
 const char *option_value_at(const As11SettingDef &def, int index) {
     if (index < 0 || index >= def.option_count) return nullptr;
     return def.options[index];
+}
+
+const char *option_wire_value_at(const As11SettingDef &def, int index) {
+    if (index < 0 || index >= def.option_count) return nullptr;
+    return def.wire_options ? def.wire_options[index] : def.options[index];
 }
 
 const char *known_var_alias(const char *name) {
@@ -730,10 +740,10 @@ bool json_literal_for_set(const As11SettingDef &def,
         } else if (value.is<const char *>()) {
             index = enum_index_from_text(def, value.as<const char *>());
         }
-        const char *label = option_value_at(def, index);
-        if (!label) return false;
+        const char *wire_value = option_wire_value_at(def, index);
+        if (!wire_value) return false;
         out = "\"";
-        out += json_escape(label);
+        out += json_escape(wire_value);
         out += "\"";
         return true;
     }
