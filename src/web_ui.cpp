@@ -118,10 +118,28 @@ bool parse_body_copy(AsyncWebServerRequest *request,
     return !deserializeJson(doc, body.c_str());
 }
 
-int request_mode_arg(AsyncWebServerRequest *request) {
-    if (!request || !request->hasArg("mode")) return -1;
+int request_profile_mode_arg(AsyncWebServerRequest *request) {
+    if (!request) return -1;
+    const char *arg_name = nullptr;
+    if (request->hasArg("profile_mode")) {
+        arg_name = "profile_mode";
+    } else if (request->hasArg("mode")) {
+        arg_name = "mode";
+    } else {
+        return -1;
+    }
     return as11_mode_index_from_value(
-        std::string(request->arg("mode").c_str()));
+        std::string(request->arg(arg_name).c_str()));
+}
+
+int active_settings_mode(const RpcArbiter *arbiter) {
+    if (!arbiter) return -1;
+    int mode = arbiter->as11_settings().mode_index();
+    if (mode < 0) {
+        mode = as11_mode_index_from_value(
+            arbiter->as11_state().active_therapy_profile());
+    }
+    return mode;
 }
 
 bool request_size_arg(AsyncWebServerRequest *request,
@@ -141,15 +159,10 @@ bool request_size_arg(AsyncWebServerRequest *request,
     return true;
 }
 
-String settings_placeholder_json(int mode, bool refresh_queued) {
+String settings_placeholder_json(bool refresh_queued) {
     String json = "{";
     json_add_bool(json, "valid", false, false);
     json_add_bool(json, "refresh_queued", refresh_queued);
-    if (mode >= 0) json_add_int(json, "mode", mode);
-    else json += ",\"mode\":null";
-    json_add_string(json, "mode_name", as11_mode_name(mode));
-    json += ",\"active_mode\":null";
-    json_add_string(json, "active_mode_name", "");
     json_add_int(json, "pending_count", 0);
     json_add_string(json, "last_write_status", "");
     json += ",\"last_write_age_ms\":null";
@@ -742,7 +755,14 @@ void WebUI::handle_event(const RpcEvent &event) {
             mark_snapshots_dirty(SNAPSHOT_SETTINGS);
         }
     } else if (event.kind == RpcEventKind::InternalSettingsStateUpdated) {
-        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+        if (cache_mutex_ &&
+            xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
+            cached_settings_refresh_queued_ = false;
+            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+            xSemaphoreGive(cache_mutex_);
+        } else {
+            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+        }
     } else if (event.kind == RpcEventKind::RpcNotification &&
                json_method_is(event.payload_text(), "EventNotification")) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
@@ -928,9 +948,19 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
                       "\"settings\":[]}");
         return;
     }
-    if (requested_mode >= 0 && requested_mode != cached_settings_mode_) {
+    const int active_mode =
+        requested_mode < 0 ? active_settings_mode(arbiter_) : -1;
+    const bool explicit_mode_mismatch =
+        requested_mode >= 0 &&
+        (requested_settings_mode_ != requested_mode ||
+         cached_settings_mode_ != requested_mode);
+    const bool active_mode_mismatch =
+        requested_mode < 0 &&
+        (requested_settings_mode_ >= 0 ||
+         (active_mode >= 0 && cached_settings_mode_ != active_mode));
+
+    if (explicit_mode_mismatch || active_mode_mismatch) {
         requested_settings_mode_ = requested_mode;
-        cached_settings_refresh_queued_ = true;
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
         mismatch = true;
     } else {
@@ -957,7 +987,7 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
     xSemaphoreGive(cache_mutex_);
 
     const String placeholder =
-        settings_placeholder_json(requested_mode, mismatch || refresh_queued);
+        settings_placeholder_json(mismatch || refresh_queued);
     request->send(200, "application/json", placeholder);
 }
 
@@ -1326,21 +1356,16 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
         active_mode = as11_mode_index_from_value(
             as11.active_therapy_profile());
     }
-    int mode = requested_mode >= 0 ? requested_mode : active_mode;
+    int profile_mode = requested_mode >= 0 ? requested_mode : active_mode;
     const uint16_t supported_modes = state.supported_mode_mask();
-    if (mode >= 0 && supported_modes && !(supported_modes & (1u << mode))) {
-        mode = active_mode;
+    if (profile_mode >= 0 && supported_modes &&
+        !(supported_modes & (1u << profile_mode))) {
+        profile_mode = active_mode;
     }
 
     json = "{";
     json_add_bool(json, "valid", state.valid(), false);
     json_add_bool(json, "refresh_queued", refresh_queued);
-    if (mode >= 0) json_add_int(json, "mode", mode);
-    else json += ",\"mode\":null";
-    json_add_string(json, "mode_name", as11_mode_name(mode));
-    if (active_mode >= 0) json_add_int(json, "active_mode", active_mode);
-    else json += ",\"active_mode\":null";
-    json_add_string(json, "active_mode_name", as11_mode_name(active_mode));
     json_add_int(json, "supported_mode_mask", supported_modes);
     json_add_int(json, "pending_count",
                  static_cast<long>(state.pending_count()));
@@ -1361,25 +1386,22 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
     size_t emitted = 0;
     for (size_t i = 0; i < as11_setting_count(); ++i) {
         const As11SettingDef &def = as11_setting(i);
-        if (!state.setting_visible(i, mode)) continue;
+        if (!state.setting_visible(i, profile_mode)) continue;
         if (!as11_setting_readable_via_rpc(def)) continue;
 
-        std::string value = state.value(i, mode);
+        const bool is_therapy_mode = strcmp(def.name, "TherapyMode") == 0;
+        std::string value =
+            state.value(i, is_therapy_mode ? active_mode : profile_mode);
         const bool available = !value.empty() || state.pending(i);
-        const bool inferred =
-            strcmp(def.name, "TherapyMode") == 0 &&
-            mode >= 0 &&
-            mode != active_mode;
         const bool pending = state.pending(i);
-        const bool writable = as11_setting_writable_via_rpc(def, mode);
-        if (!available && !inferred && !pending) continue;
+        const bool writable = as11_setting_writable_via_rpc(def, profile_mode);
+        if (!available && !pending) continue;
 
         if (emitted++) json += ',';
         json += "{";
         json_add_string(json, "name", def.name, false);
         json_add_string(json, "value", value.c_str());
         if (!available) json_add_bool(json, "available", false);
-        if (inferred) json_add_bool(json, "inferred", true);
         if (!writable) json_add_bool(json, "writable", false);
         if (pending) {
             json_add_bool(json, "pending", true);
@@ -1466,18 +1488,13 @@ void WebUI::publish_snapshots(bool force) {
         const bool refresh_queued = cached_settings_refresh_queued_;
         int published_settings_mode = requested_mode;
         if (published_settings_mode < 0) {
-            published_settings_mode = arbiter_->as11_settings().mode_index();
-            if (published_settings_mode < 0) {
-                published_settings_mode = as11_mode_index_from_value(
-                    arbiter_->as11_state().active_therapy_profile());
-            }
+            published_settings_mode = active_settings_mode(arbiter_);
         }
 
         build_settings_json(cached_settings_json_,
                             requested_mode,
                             refresh_queued);
         cached_settings_mode_ = published_settings_mode;
-        cached_settings_refresh_queued_ = false;
     }
     if (rebuild_mask & SNAPSHOT_CONFIG) {
         cached_http_auth_required_ = network_auth_required(app_config_->data());
@@ -2101,7 +2118,7 @@ void WebUI::register_routes() {
                           "{\"ok\":false,\"error\":\"not found\"}");
             return;
         }
-        const int mode = request_mode_arg(request);
+        const int mode = request_profile_mode_arg(request);
         if (request->hasArg("refresh")) {
             if (cache_mutex_ &&
                 xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {

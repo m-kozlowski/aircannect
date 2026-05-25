@@ -1257,7 +1257,8 @@
     let consoleSeq = -1;
     let settingsPollTimer = null;
     let settingsRefreshUntil = 0;
-    let settingsDraftMode = null;
+    let settingsProfileMode = null;
+    let settingsModeDirty = false;
     let settingsActiveMode = null;
     const resmedOtaRate = {
       phase: "",
@@ -2680,9 +2681,20 @@
       return fallback;
     }
 
+    function settingsTherapyMode(data) {
+      const setting = (data.settings || []).find((item) =>
+        item && item.name === "TherapyMode");
+      if (!setting || setting.value === undefined || setting.value === null) {
+        return null;
+      }
+      const mode = Number(setting.value);
+      return Number.isFinite(mode) ? mode : null;
+    }
+
     function mergeSettingsCatalog(data) {
-      const mode = data.mode !== undefined && data.mode !== null ?
-        Number(data.mode) : settingsDraftMode;
+      const activeMode = settingsTherapyMode(data);
+      const mode = settingsModeDirty && settingsProfileMode !== null ?
+        settingsProfileMode : activeMode;
       const merged = Object.assign({}, data);
       merged.settings = (data.settings || []).map((setting) => {
         const meta = settingMetaFor(setting, mode);
@@ -2749,8 +2761,8 @@
         const query = [];
         if (refresh) query.push("refresh=1");
         if (poll) query.push("poll=1");
-        if (settingsDraftMode !== null) {
-          query.push("mode=" + encodeURIComponent(settingsDraftMode));
+        if (settingsModeDirty && settingsProfileMode !== null) {
+          query.push("profile_mode=" + encodeURIComponent(settingsProfileMode));
         }
 
         const response = await api("/api/settings" +
@@ -2766,11 +2778,15 @@
 
     function renderSettings(data, requestedRefresh) {
       const parts = [];
-      if (data.active_mode !== undefined && data.active_mode !== null) {
-        settingsActiveMode = Number(data.active_mode);
+      const activeMode = settingsTherapyMode(data);
+      if (activeMode !== null) settingsActiveMode = activeMode;
+      if (!settingsModeDirty && settingsActiveMode !== null) {
+        settingsProfileMode = settingsActiveMode;
       }
-      if (data.mode !== undefined && data.mode !== null) {
-        settingsDraftMode = Number(data.mode);
+      if (settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode === settingsActiveMode && !data.pending_count) {
+        settingsModeDirty = false;
       }
       if (!requestedRefresh && data.valid && !data.refresh_queued &&
           (data.age_ms || 0) < 2500) {
@@ -2783,8 +2799,9 @@
       } else if (!data.valid) {
         parts.push("Waiting for device");
       }
-      if (settingsDraftMode !== null && settingsActiveMode !== null &&
-          settingsDraftMode !== settingsActiveMode) {
+      if (settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode !== settingsActiveMode) {
         parts.push("Unsaved mode change");
       }
       if (data.pending_count) parts.push(data.pending_count + " pending readback");
@@ -2801,8 +2818,9 @@
       scheduleSettingsPoll(data);
       if (revert) {
         revert.style.display =
-          settingsDraftMode !== null && settingsActiveMode !== null &&
-          settingsDraftMode !== settingsActiveMode ? "" : "none";
+          settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode !== settingsActiveMode ? "" : "none";
       }
 
       const visible = (data.settings || []).filter((setting) =>
@@ -2827,8 +2845,12 @@
           root.appendChild(heading);
         }
 
-        const raw = setting.pending ?
+        let raw = setting.pending ?
           setting.pending_value : (setting.value || "");
+        if (setting.name === "TherapyMode" && settingsModeDirty &&
+            settingsProfileMode !== null) {
+          raw = String(settingsProfileMode);
+        }
         const shown = formatSettingValue(setting, raw);
         let control;
 
@@ -2867,7 +2889,9 @@
             control.onchange = () => {
               const nextMode = Number(control.value);
               if (!Number.isNaN(nextMode)) {
-                settingsDraftMode = nextMode;
+                settingsProfileMode = nextMode;
+                settingsModeDirty = settingsActiveMode !== null &&
+                  nextMode !== settingsActiveMode;
                 loadSettings(false);
               }
             };
@@ -2926,9 +2950,10 @@
 
     async function saveSettings() {
       const changes = {};
-      if (settingsDraftMode !== null && settingsActiveMode !== null &&
-          settingsDraftMode !== settingsActiveMode) {
-        changes.TherapyMode = settingsDraftMode;
+      if (settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode !== settingsActiveMode) {
+        changes.TherapyMode = settingsProfileMode;
       }
       document.querySelectorAll("#settingsFields [data-name]").forEach((input) => {
         if (input.disabled) return;
@@ -2971,7 +2996,8 @@
 
     function revertSettingsDraft() {
       if (settingsActiveMode === null) return;
-      settingsDraftMode = settingsActiveMode;
+      settingsProfileMode = settingsActiveMode;
+      settingsModeDirty = false;
       loadSettings(false);
     }
 

@@ -1123,7 +1123,13 @@ bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
             return false;
         case As11TherapyState::Unknown:
         default:
-            if (reason) *reason = "therapy_state_unknown";
+            if (reason) {
+                *reason = arbiter_->request_as11_healthcheck()
+                              ? "therapy_state_refreshing"
+                              : "therapy_state_unknown";
+            } else {
+                arbiter_->request_as11_healthcheck();
+            }
             return false;
     }
 }
