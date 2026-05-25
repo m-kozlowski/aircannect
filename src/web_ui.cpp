@@ -1217,23 +1217,23 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
             strcmp(def.name, "TherapyMode") == 0 &&
             mode >= 0 &&
             mode != active_mode;
+        const bool pending = state.pending(i);
+        const bool writable = as11_setting_writable_via_rpc(def, mode);
+        if (!available && !inferred && !pending) continue;
 
         if (emitted++) json += ',';
         json += "{";
         json_add_string(json, "name", def.name, false);
         json_add_string(json, "value", value.c_str());
-        json_add_bool(json, "available", available);
-        json_add_bool(json, "inferred", inferred);
-        json_add_bool(json, "writable",
-                      as11_setting_writable_via_rpc(def, mode));
-        if (state.pending(i)) {
+        if (!available) json_add_bool(json, "available", false);
+        if (inferred) json_add_bool(json, "inferred", true);
+        if (!writable) json_add_bool(json, "writable", false);
+        if (pending) {
             json_add_bool(json, "pending", true);
             json_add_string(json, "pending_value",
                             state.pending_value(i).c_str());
             json_add_int(json, "pending_age_ms",
                          millis() - state.pending_since_ms(i));
-        } else {
-            json_add_bool(json, "pending", false);
         }
         json += '}';
     }
@@ -1924,21 +1924,7 @@ void WebUI::register_routes() {
         },
         nullptr, handle_body);
 
-    server_->on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        const int mode = request_mode_arg(request);
-        if (request->hasArg("refresh")) {
-            if (cache_mutex_ &&
-                xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-                cached_settings_refresh_queued_ = true;
-                mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-                xSemaphoreGive(cache_mutex_);
-            }
-            enqueue_simple_command(WebCommandSettingsRefresh);
-        }
-        send_cached_settings(request, mode);
-    });
-
-    server_->on("/api/settings/catalog", HTTP_GET,
+    server_->on("/api/settings-catalog", HTTP_GET,
         [this](AsyncWebServerRequest *request) {
             LargeTextBuffer json;
             json.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
@@ -1960,6 +1946,25 @@ void WebUI::register_routes() {
                 json.length());
             request->send(response);
         });
+
+    server_->on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (request->url() != "/api/settings") {
+            request->send(404, "application/json",
+                          "{\"ok\":false,\"error\":\"not found\"}");
+            return;
+        }
+        const int mode = request_mode_arg(request);
+        if (request->hasArg("refresh")) {
+            if (cache_mutex_ &&
+                xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+                cached_settings_refresh_queued_ = true;
+                mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+                xSemaphoreGive(cache_mutex_);
+            }
+            enqueue_simple_command(WebCommandSettingsRefresh);
+        }
+        send_cached_settings(request, mode);
+    });
 
     server_->on(
         "/api/settings", HTTP_POST,

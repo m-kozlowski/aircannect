@@ -2652,11 +2652,15 @@
     async function ensureSettingsCatalog() {
       if (settingsCatalog.length) return;
       if (!settingsCatalogPromise) {
-        settingsCatalogPromise = api("/api/settings/catalog")
+        settingsCatalogPromise = api("/api/settings-catalog")
           .then((response) => response.json())
           .then((data) => {
-            settingsCatalog = Array.isArray(data.settings) ?
+            const catalog = Array.isArray(data.settings) ?
               data.settings : [];
+            if (!catalog.some((item) => item && item.kind && item.label)) {
+              throw new Error("settings catalog unavailable");
+            }
+            settingsCatalog = catalog;
           })
           .finally(() => {
             settingsCatalogPromise = null;
@@ -2730,6 +2734,14 @@
       return raw;
     }
 
+    function settingAvailable(setting) {
+      return setting.available !== false;
+    }
+
+    function settingWritable(setting) {
+      return setting.writable !== false;
+    }
+
     async function loadSettings(refresh, poll) {
       try {
         if (refresh) settingsRefreshUntil = Date.now() + 7000;
@@ -2794,7 +2806,7 @@
       }
 
       const visible = (data.settings || []).filter((setting) =>
-        setting.available || setting.inferred || setting.pending);
+        settingAvailable(setting) || setting.inferred || setting.pending);
       if (!visible.length) {
         root.innerHTML = '<div class="value" style="text-align:left">' +
           (data.valid ? "No readable settings for this mode" :
@@ -2876,7 +2888,8 @@
         } else {
           control = document.createElement("input");
           control.type = setting.kind === "number" ? "number" : "text";
-          control.value = setting.available || setting.inferred ? (shown || "") : "";
+          control.value = settingAvailable(setting) || setting.inferred ?
+            (shown || "") : "";
           if (setting.kind === "number") {
             control.min = setting.min;
             control.max = setting.max;
@@ -2889,7 +2902,9 @@
         control.dataset.orig =
           setting.kind === "enum" || setting.kind === "bool" ?
             (raw || "") : (control.value || "");
-        if (!setting.available || !setting.writable) control.disabled = true;
+        if (!settingAvailable(setting) || !settingWritable(setting)) {
+          control.disabled = true;
+        }
         if (setting.pending) control.classList.add("pending");
 
         let small = "";
