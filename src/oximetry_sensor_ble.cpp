@@ -813,10 +813,12 @@ void OximetryManager::sensor_task_loop() {
                   auto_scan ? "yes" : "no");
         scan->clearResults();
         scan->setScanCallbacks(&scan_callbacks, false);
+        scan->setMaxResults(0);
         scan->setActiveScan(true);
         scan->setInterval(100);
         scan->setWindow(99);
         (void)scan->getResults(AC_OXIMETRY_SENSOR_SCAN_MS, false);
+        scan->clearResults();
         next_auto_scan_ms =
             millis() + AC_OXIMETRY_SENSOR_SCAN_IDLE_MS;
 
