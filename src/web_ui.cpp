@@ -1188,6 +1188,7 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
     if (active_mode >= 0) json_add_int(json, "active_mode", active_mode);
     else json += ",\"active_mode\":null";
     json_add_string(json, "active_mode_name", as11_mode_name(active_mode));
+    json_add_int(json, "supported_mode_mask", supported_modes);
     json_add_int(json, "pending_count",
                  static_cast<long>(state.pending_count()));
     json_add_string(json, "last_write_status",
@@ -1220,28 +1221,39 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
         if (emitted++) json += ',';
         json += "{";
         json_add_string(json, "name", def.name, false);
-        json_add_string(json, "label", def.label);
-        json_add_string(json, "group", def.group);
-        json_add_string(json, "kind", setting_kind_name(def.kind));
         json_add_string(json, "value", value.c_str());
-        std::string display = as11_setting_display_value(def, value);
-        json_add_string(json, "display", display.c_str());
         json_add_bool(json, "available", available);
         json_add_bool(json, "inferred", inferred);
         json_add_bool(json, "writable",
                       as11_setting_writable_via_rpc(def, mode));
-        json_add_bool(json, "pending", state.pending(i));
-        json_add_string(json, "pending_value",
-                        state.pending_value(i).c_str());
-        std::string pending_display =
-            as11_setting_display_value(def, state.pending_value(i));
-        json_add_string(json, "pending_display", pending_display.c_str());
         if (state.pending(i)) {
+            json_add_bool(json, "pending", true);
+            json_add_string(json, "pending_value",
+                            state.pending_value(i).c_str());
             json_add_int(json, "pending_age_ms",
                          millis() - state.pending_since_ms(i));
         } else {
-            json += ",\"pending_age_ms\":null";
+            json_add_bool(json, "pending", false);
         }
+        json += '}';
+    }
+    json += "]}";
+}
+
+void WebUI::build_settings_catalog_json(LargeTextBuffer &json) const {
+    json = "{\"settings\":[";
+    size_t emitted = 0;
+    for (size_t i = 0; i < as11_setting_count(); ++i) {
+        const As11SettingDef &def = as11_setting(i);
+        if (!as11_setting_readable_via_rpc(def)) continue;
+
+        if (emitted++) json += ',';
+        json += "{";
+        json_add_string(json, "name", def.name, false);
+        json_add_string(json, "label", def.label);
+        json_add_string(json, "group", def.group);
+        json_add_string(json, "kind", setting_kind_name(def.kind));
+        json_add_int(json, "modes", def.mode_mask);
         json_add_float(json, "min", def.min_value);
         json_add_float(json, "max", def.max_value);
         json_add_float(json, "step", def.step);
@@ -1252,10 +1264,6 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
             size_t options_emitted = 0;
             for (uint8_t opt_index = 0; opt_index < def.option_count;
                  ++opt_index) {
-                if (!as11_setting_option_supported(
-                        def, opt_index, state.supported_mode_mask())) {
-                    continue;
-                }
                 if (options_emitted++) json += ',';
                 json += "{";
                 json_add_int(json, "value", opt_index, false);
@@ -1929,6 +1937,29 @@ void WebUI::register_routes() {
         }
         send_cached_settings(request, mode);
     });
+
+    server_->on("/api/settings/catalog", HTTP_GET,
+        [this](AsyncWebServerRequest *request) {
+            LargeTextBuffer json;
+            json.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
+            build_settings_catalog_json(json);
+            if (json.overflowed()) {
+                request->send(503, "application/json",
+                              "{\"ok\":false,\"error\":\"catalog alloc\"}");
+                return;
+            }
+            AsyncResponseStream *response =
+                request->beginResponseStream("application/json");
+            if (!response) {
+                request->send(503, "application/json",
+                              "{\"ok\":false,\"error\":\"response alloc\"}");
+                return;
+            }
+            response->write(
+                reinterpret_cast<const uint8_t *>(json.c_str()),
+                json.length());
+            request->send(response);
+        });
 
     server_->on(
         "/api/settings", HTTP_POST,

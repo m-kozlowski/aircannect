@@ -1248,6 +1248,8 @@
     let statusData = {};
     let streamData = {};
     let settingsData = null;
+    let settingsCatalog = [];
+    let settingsCatalogPromise = null;
     let configData = null;
     let oxiSensorData = {sensor_scan_results: [], sensor_known: []};
     let oxiSensorsLoading = false;
@@ -2641,6 +2643,93 @@
       }
     }
 
+    function modeBit(mode) {
+      const value = Number(mode);
+      if (!Number.isInteger(value) || value < 0 || value > 15) return 0;
+      return 1 << value;
+    }
+
+    async function ensureSettingsCatalog() {
+      if (settingsCatalog.length) return;
+      if (!settingsCatalogPromise) {
+        settingsCatalogPromise = api("/api/settings/catalog")
+          .then((response) => response.json())
+          .then((data) => {
+            settingsCatalog = Array.isArray(data.settings) ?
+              data.settings : [];
+          })
+          .finally(() => {
+            settingsCatalogPromise = null;
+          });
+      }
+      await settingsCatalogPromise;
+    }
+
+    function settingMetaFor(setting, mode) {
+      const bit = modeBit(mode);
+      let fallback = null;
+      for (const meta of settingsCatalog) {
+        if (meta.name !== setting.name) continue;
+        if (!fallback) fallback = meta;
+        if (bit && (Number(meta.modes || 0) & bit)) return meta;
+      }
+      return fallback;
+    }
+
+    function mergeSettingsCatalog(data) {
+      const mode = data.mode !== undefined && data.mode !== null ?
+        Number(data.mode) : settingsDraftMode;
+      const merged = Object.assign({}, data);
+      merged.settings = (data.settings || []).map((setting) => {
+        const meta = settingMetaFor(setting, mode);
+        return meta ? Object.assign({}, meta, setting) : setting;
+      });
+      return merged;
+    }
+
+    function optionValue(item, index) {
+      return item && typeof item === "object" && item.value !== undefined ?
+        String(item.value) : String(index);
+    }
+
+    function optionLabel(item) {
+      return item && typeof item === "object" ?
+        (item.label || String(item.value)) : String(item);
+    }
+
+    function visibleOptions(setting, supportedMask) {
+      const options = setting.options || [];
+      if (setting.name !== "TherapyMode" || !supportedMask) return options;
+      return options.filter((item, index) =>
+        supportedMask & modeBit(optionValue(item, index)));
+    }
+
+    function formatSettingValue(setting, value) {
+      if (value === undefined || value === null || value === "") return "";
+      const raw = String(value);
+      if (setting.kind === "enum") {
+        const options = setting.options || [];
+        for (let i = 0; i < options.length; i++) {
+          if (optionValue(options[i], i) === raw) {
+            return optionLabel(options[i]) || raw;
+          }
+        }
+        return raw;
+      }
+      if (setting.kind === "number") {
+        const numeric = Number(raw);
+        if (!Number.isFinite(numeric)) return raw;
+        const scale = Number(setting.scale_div || 1);
+        const displayValue = scale > 1 ? numeric / scale : numeric;
+        const decimals = Number(setting.decimals || 0);
+        if (Number.isInteger(decimals) && decimals >= 0) {
+          return displayValue.toFixed(decimals);
+        }
+        return String(displayValue);
+      }
+      return raw;
+    }
+
     async function loadSettings(refresh, poll) {
       try {
         if (refresh) settingsRefreshUntil = Date.now() + 7000;
@@ -2654,7 +2743,9 @@
 
         const response = await api("/api/settings" +
           (query.length ? "?" + query.join("&") : ""));
-        settingsData = await response.json();
+        const data = await response.json();
+        await ensureSettingsCatalog();
+        settingsData = mergeSettingsCatalog(data);
         renderSettings(settingsData, !!refresh);
       } catch (error) {
         msg("settingsMsg", error.message, false);
@@ -2715,19 +2806,18 @@
 
       let group = "";
       visible.forEach((setting) => {
-        if (setting.group !== group) {
-          group = setting.group;
+        const settingGroup = setting.group || "";
+        if (settingGroup !== group) {
+          group = settingGroup;
           const heading = document.createElement("div");
           heading.className = "section-title";
-          heading.textContent = group;
+          heading.textContent = group || "settings";
           root.appendChild(heading);
         }
 
         const raw = setting.pending ?
           setting.pending_value : (setting.value || "");
-        const shown = setting.pending ?
-          (setting.pending_display || setting.pending_value) :
-          (setting.display || setting.value || "");
+        const shown = formatSettingValue(setting, raw);
         let control;
 
         if (setting.kind === "enum") {
@@ -2741,19 +2831,19 @@
             option.disabled = true;
             control.appendChild(option);
           }
-          (setting.options || []).forEach((item, index) => {
-            const label = item && typeof item === "object" ? item.label : item;
-            const value = item && typeof item === "object" &&
-              item.value !== undefined ? String(item.value) : String(index);
-            const option = document.createElement("option");
-            option.value = value;
-            option.textContent = label;
-            if (value === String(raw)) {
-              option.selected = true;
-              seen = true;
-            }
-            control.appendChild(option);
-          });
+          visibleOptions(setting, data.supported_mode_mask || 0)
+            .forEach((item, index) => {
+              const label = optionLabel(item);
+              const value = optionValue(item, index);
+              const option = document.createElement("option");
+              option.value = value;
+              option.textContent = label;
+              if (value === String(raw)) {
+                option.selected = true;
+                seen = true;
+              }
+              control.appendChild(option);
+            });
           if (raw !== "" && !seen) {
             const option = document.createElement("option");
             option.value = raw;
@@ -2805,13 +2895,13 @@
         let small = "";
         if (setting.pending) {
           small = "Pending readback; current " +
-            (setting.display || setting.value || "--");
+            (formatSettingValue(setting, setting.value) || "--");
         } else if (setting.inferred) {
           small = setting.name === "TherapyMode" ?
             "" : "Inferred from device status";
         }
 
-        const entry = row(setting.label, control, small);
+        const entry = row(setting.label || setting.name, control, small);
         if (setting.pending) entry.classList.add("pending");
         root.appendChild(entry);
       });

@@ -238,7 +238,8 @@ static constexpr size_t AC_WEB_CONFIG_JSON_RESERVE = 1024;
 static constexpr size_t AC_WEB_WIFI_JSON_RESERVE = 1024;
 static constexpr size_t AC_WEB_OTA_JSON_RESERVE = 768;
 static constexpr size_t AC_WEB_RESMED_OTA_JSON_RESERVE = 1024;
-static constexpr size_t AC_WEB_SETTINGS_JSON_RESERVE = 12288;
+static constexpr size_t AC_WEB_SETTINGS_JSON_RESERVE = 4096;
+static constexpr size_t AC_WEB_SETTINGS_CATALOG_JSON_RESERVE = 8192;
 
 #ifndef AC_MEMORY_HEAP_TRACE_ENABLED
 #define AC_MEMORY_HEAP_TRACE_ENABLED 0

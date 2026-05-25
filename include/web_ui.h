@@ -79,6 +79,7 @@ private:
     void build_settings_json(LargeTextBuffer &json,
                              int requested_mode,
                              bool refresh_queued) const;
+    void build_settings_catalog_json(LargeTextBuffer &json) const;
     void append_console_log(const String &text);
     void build_console_json(LargeTextBuffer &json) const;
     void send_cached_settings(AsyncWebServerRequest *request,
