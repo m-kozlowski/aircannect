@@ -1,4 +1,5 @@
 #include "version.h"
+#include "version_info.h"
 
 #ifndef AIRCANNECT_VERSION
 #define AIRCANNECT_VERSION "unknown"

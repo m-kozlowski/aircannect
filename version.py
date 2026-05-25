@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import datetime
 import os
+import sys
 import subprocess
+from pathlib import Path
 
 
 def shell_define(name, value):
@@ -39,7 +41,31 @@ def build_date():
     return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
 
 
-print(
-    shell_define("AIRCANNECT_VERSION", git_version()),
-    shell_define("AIRCANNECT_BUILD_DATE", build_date()),
-)
+def c_string(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def write_header(path):
+    version = c_string(git_version())
+    date = c_string(build_date())
+    content = (
+        "// Auto-generated from version.py, do not edit.\n"
+        "#pragma once\n\n"
+        f'#define AIRCANNECT_VERSION "{version}"\n'
+        f'#define AIRCANNECT_BUILD_DATE "{date}"\n'
+    )
+    target = Path(path)
+    if target.exists() and target.read_text(encoding="utf-8") == content:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--header":
+        write_header(sys.argv[2])
+    else:
+        print(
+            shell_define("AIRCANNECT_VERSION", git_version()),
+            shell_define("AIRCANNECT_BUILD_DATE", build_date()),
+        )
