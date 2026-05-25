@@ -270,6 +270,7 @@ static constexpr uint32_t AC_OXIMETRY_SOURCE_TIMEOUT_MS = 30000;
 static constexpr uint32_t AC_OXIMETRY_NOTIFY_INTERVAL_MS = 1000;
 static constexpr uint32_t AC_OXIMETRY_PAIRING_WINDOW_MS = 120000;
 static constexpr size_t AC_OXIMETRY_BLE_NAME_MAX = 22;
+static constexpr uint16_t AC_OXIMETRY_BLE_SCAN_DUP_CACHE = 16;
 static constexpr size_t AC_OXIMETRY_UDP_PACKET_SIZE = 7;
 static constexpr size_t AC_OXIMETRY_UDP_READ_BUDGET = 8;
 static constexpr size_t AC_OXIMETRY_SENSOR_MAX_KNOWN = 4;

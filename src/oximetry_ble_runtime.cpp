@@ -62,6 +62,11 @@ bool ensure_ble_runtime(const char *name) {
     if (!ble_runtime_mutex) ble_runtime_mutex = xSemaphoreCreateMutex();
     if (!name || !name[0]) name = "aircannect";
     if (!NimBLEDevice::isInitialized()) {
+#if defined(CONFIG_BTDM_BLE_SCAN_DUPL) || defined(CONFIG_BT_LE_SCAN_DUPL) || \
+    defined(CONFIG_BT_CTRL_BLE_SCAN_DUPL)
+        NimBLEDevice::setScanDuplicateCacheSize(
+            AC_OXIMETRY_BLE_SCAN_DUP_CACHE);
+#endif
         if (!NimBLEDevice::init(name)) return false;
         NimBLEDevice::setSecurityAuth(true, false, false);
         NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
