@@ -374,7 +374,6 @@ bool WebUI::begin(RpcArbiter &arbiter,
 void WebUI::reserve_cached_json() {
     cached_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     cached_stream_json_.reserve(AC_WEB_STREAM_JSON_RESERVE);
-    cached_console_json_.reserve(AC_WEB_CONSOLE_LOG_MAX + 128);
     cached_config_json_.reserve(AC_WEB_CONFIG_JSON_RESERVE);
     cached_wifi_json_.reserve(AC_WEB_WIFI_JSON_RESERVE);
     cached_oximetry_sensors_json_.reserve(2048);
@@ -401,7 +400,8 @@ WebUiMemoryStatus WebUI::memory_status() {
     }
     out.status = capture(cached_status_json_);
     out.stream = capture(cached_stream_json_);
-    out.console = capture(cached_console_json_);
+    out.console.length = console_log_length_;
+    out.console.capacity = console_log_capacity_;
     out.config = capture(cached_config_json_);
     out.wifi = capture(cached_wifi_json_);
     out.oximetry_sensors = capture(cached_oximetry_sensors_json_);
@@ -409,7 +409,7 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.resmed_ota = capture(cached_resmed_ota_json_);
     out.settings = capture(cached_settings_json_);
     out.live = capture(live_json_);
-    out.console_log_length = console_log_.length();
+    out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
     return out;
 }
@@ -457,6 +457,14 @@ void WebUI::stop() {
     sse_enforce_needed_ = false;
     live_last_send_ms_ = 0;
     live_json_ = "";
+    Memory::free(console_log_);
+    console_log_ = nullptr;
+    console_log_capacity_ = 0;
+    console_log_start_ = 0;
+    console_log_length_ = 0;
+    console_log_write_pos_ = 0;
+    console_sse_pos_ = 0;
+    console_sse_reset_pending_ = false;
     if (sink_manager_) {
         sink_manager_->set_live_chart_enabled(false);
         sink_manager_->clear_live_chart_batch();
@@ -502,11 +510,24 @@ void WebUI::poll() {
     if (console_sse_seq_ != console_seq_) {
         // Console output can be chatty during RPC activity, so it shares the
         // same throttled SSE cadence as status/stream updates.
-        if (events_->send(cached_console_json_.c_str(), "console", event_id) !=
-            AsyncEventSource::ENQUEUED) {
+        const uint64_t begin = console_log_begin_pos();
+        const uint64_t end = console_log_write_pos_;
+        const bool reset = console_sse_reset_pending_ ||
+                           console_sse_pos_ < begin ||
+                           console_sse_pos_ > end;
+        const uint64_t from = reset ? begin : console_sse_pos_;
+        const size_t payload_len =
+            static_cast<size_t>(end > from ? end - from : 0);
+        LargeTextBuffer console_json;
+        console_json.reserve(payload_len + 128);
+        build_console_sse_json(console_json);
+        if (console_json.overflowed() ||
+            events_->send(console_json.c_str(), "console", event_id) !=
+                AsyncEventSource::ENQUEUED) {
             sse_backpressure = true;
+        } else {
+            note_console_sse_sent();
         }
-        console_sse_seq_ = console_seq_;
     }
     xSemaphoreGive(cache_mutex_);
     if (sse_backpressure) {
@@ -725,28 +746,151 @@ void WebUI::handle_event(const RpcEvent &event) {
 
 void WebUI::append_console_log(const String &text) {
     if (!text.length()) return;
-    console_log_ += text;
-    while (console_log_.length() > AC_WEB_CONSOLE_LOG_MAX) {
-        int newline = console_log_.indexOf('\n',
-                                           console_log_.length() -
-                                               AC_WEB_CONSOLE_LOG_MAX);
-        if (newline < 0) {
-            console_log_.remove(0,
-                                console_log_.length() -
-                                    AC_WEB_CONSOLE_LOG_MAX);
-            break;
+    reserve_console_log();
+    const char *data = text.c_str();
+    const size_t original_len = text.length();
+    size_t len = original_len;
+    if (console_log_ && console_log_capacity_) {
+        if (len >= console_log_capacity_) {
+            data += len - console_log_capacity_;
+            len = console_log_capacity_;
+            console_log_start_ = 0;
+            console_log_length_ = len;
+            memcpy(console_log_, data, len);
+        } else {
+            const size_t free_space =
+                console_log_capacity_ - console_log_length_;
+            const size_t overflow = len > free_space ? len - free_space : 0;
+            if (overflow) {
+                console_log_start_ =
+                    (console_log_start_ + overflow) % console_log_capacity_;
+                console_log_length_ -= overflow;
+            }
+
+            size_t write_at =
+                (console_log_start_ + console_log_length_) %
+                console_log_capacity_;
+            size_t first = console_log_capacity_ - write_at;
+            if (first > len) first = len;
+            memcpy(console_log_ + write_at, data, first);
+            if (len > first) {
+                memcpy(console_log_, data + first, len - first);
+            }
+            console_log_length_ += len;
         }
-        console_log_.remove(0, newline + 1);
     }
+    console_log_write_pos_ += original_len;
     console_seq_++;
-    mark_snapshots_dirty(SNAPSHOT_CONSOLE);
+}
+
+void WebUI::reserve_console_log() {
+    if (console_log_ || AC_WEB_CONSOLE_LOG_MAX == 0) return;
+    console_log_ = static_cast<char *>(
+        Memory::alloc_large(AC_WEB_CONSOLE_LOG_MAX));
+    if (console_log_) {
+        console_log_capacity_ = AC_WEB_CONSOLE_LOG_MAX;
+    }
+}
+
+void WebUI::clear_console_log() {
+    Memory::free(console_log_);
+    console_log_ = nullptr;
+    console_log_capacity_ = 0;
+    console_log_start_ = 0;
+    console_log_length_ = 0;
+    console_log_write_pos_++;
+    console_seq_++;
+    console_sse_reset_pending_ = true;
+}
+
+uint64_t WebUI::console_log_begin_pos() const {
+    return console_log_write_pos_ - console_log_length_;
+}
+
+void WebUI::append_console_log_json_range(LargeTextBuffer &json,
+                                          uint64_t from,
+                                          uint64_t to) const {
+    if (!console_log_ || !console_log_capacity_ || from >= to) return;
+    const uint64_t begin = console_log_begin_pos();
+    if (from < begin) from = begin;
+    if (to > console_log_write_pos_) to = console_log_write_pos_;
+    if (from >= to) return;
+
+    const size_t offset = static_cast<size_t>(from - begin);
+    const size_t len = static_cast<size_t>(to - from);
+    const size_t read_at =
+        (console_log_start_ + offset) % console_log_capacity_;
+    size_t first = console_log_capacity_ - read_at;
+    if (first > len) first = len;
+    append_json_escaped(json, console_log_ + read_at, first);
+    if (len > first) {
+        append_json_escaped(json, console_log_, len - first);
+    }
 }
 
 void WebUI::build_console_json(LargeTextBuffer &json) const {
     json = "{";
     json_add_int(json, "seq", console_seq_, false);
-    json_add_string(json, "log", console_log_.c_str());
-    json += '}';
+    json += ",\"log\":\"";
+    append_console_log_json_range(json, console_log_begin_pos(),
+                                  console_log_write_pos_);
+    json += "\"}";
+}
+
+void WebUI::build_console_sse_json(LargeTextBuffer &json) const {
+    const uint64_t begin = console_log_begin_pos();
+    const uint64_t end = console_log_write_pos_;
+    const bool reset = console_sse_reset_pending_ ||
+                       console_sse_pos_ < begin ||
+                       console_sse_pos_ > end;
+
+    json = "{";
+    json_add_int(json, "seq", console_seq_, false);
+    if (reset) {
+        json_add_bool(json, "reset", true);
+        json += ",\"log\":\"";
+        append_console_log_json_range(json, begin, end);
+    } else {
+        json += ",\"append\":\"";
+        append_console_log_json_range(json, console_sse_pos_, end);
+    }
+    json += "\"}";
+}
+
+void WebUI::note_console_sse_sent() {
+    console_sse_seq_ = console_seq_;
+    console_sse_pos_ = console_log_write_pos_;
+    console_sse_reset_pending_ = false;
+}
+
+void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
+    if (!cache_mutex_ ||
+        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"cache busy\"}");
+        return;
+    }
+    LargeTextBuffer json;
+    json.reserve(console_log_length_ + 128);
+    build_console_json(json);
+    if (json.overflowed()) {
+        xSemaphoreGive(cache_mutex_);
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"console alloc\"}");
+        return;
+    }
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        xSemaphoreGive(cache_mutex_);
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    xSemaphoreGive(cache_mutex_);
+    request->send(response);
 }
 
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
@@ -1297,9 +1441,6 @@ void WebUI::publish_snapshots(bool force) {
 
     if (rebuild_mask & SNAPSHOT_STATUS) build_status_json(cached_status_json_);
     if (rebuild_mask & SNAPSHOT_STREAM) build_stream_json(cached_stream_json_);
-    if (rebuild_mask & SNAPSHOT_CONSOLE) {
-        build_console_json(cached_console_json_);
-    }
     if (rebuild_mask & SNAPSHOT_CONFIG) build_config_json(cached_config_json_);
     if (rebuild_mask & SNAPSHOT_WIFI) build_wifi_json(cached_wifi_json_);
     if (rebuild_mask & SNAPSHOT_OXIMETRY_SENSORS) {
@@ -1350,9 +1491,7 @@ void WebUI::execute_command(WebCommand &command) {
             execute_console_line(command.text);
             break;
         case WebCommandConsoleClear:
-            console_log_ = "";
-            console_seq_++;
-            mark_snapshots_dirty(SNAPSHOT_CONSOLE);
+            clear_console_log();
             break;
         case WebCommandConfigUpdate:
             execute_config_update(command.body);
@@ -1627,7 +1766,7 @@ void WebUI::register_routes() {
     });
 
     server_->on("/api/console", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        send_cached(request, cached_console_json_);
+        send_console_snapshot(request);
     });
 
     server_->on(

@@ -3433,7 +3433,14 @@
       if (!data || data.seq === consoleSeq) return;
       consoleSeq = data.seq;
       const output = document.getElementById("consoleLog");
-      output.textContent = data.log || "";
+      if (data.reset || data.log !== undefined) {
+        output.textContent = data.log || "";
+      } else if (data.append !== undefined) {
+        output.textContent += data.append || "";
+        if (output.textContent.length > 8192) {
+          output.textContent = output.textContent.slice(-8192);
+        }
+      }
       output.scrollTop = output.scrollHeight;
     }
 

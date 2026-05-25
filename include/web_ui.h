@@ -80,8 +80,17 @@ private:
                              int requested_mode,
                              bool refresh_queued) const;
     void build_settings_catalog_json(LargeTextBuffer &json) const;
+    void reserve_console_log();
     void append_console_log(const String &text);
+    void clear_console_log();
+    uint64_t console_log_begin_pos() const;
+    void append_console_log_json_range(LargeTextBuffer &json,
+                                       uint64_t from,
+                                       uint64_t to) const;
     void build_console_json(LargeTextBuffer &json) const;
+    void build_console_sse_json(LargeTextBuffer &json) const;
+    void note_console_sse_sent();
+    void send_console_snapshot(AsyncWebServerRequest *request) const;
     void send_cached_settings(AsyncWebServerRequest *request,
                               int requested_mode);
     void mark_snapshots_dirty(uint16_t mask);
@@ -129,7 +138,6 @@ private:
 
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
     static constexpr uint16_t SNAPSHOT_STREAM = 1u << 1;
-    static constexpr uint16_t SNAPSHOT_CONSOLE = 1u << 2;
     static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 3;
     static constexpr uint16_t SNAPSHOT_WIFI = 1u << 4;
     static constexpr uint16_t SNAPSHOT_OXIMETRY_SENSORS = 1u << 5;
@@ -137,9 +145,9 @@ private:
     static constexpr uint16_t SNAPSHOT_RESMED_OTA = 1u << 7;
     static constexpr uint16_t SNAPSHOT_SETTINGS = 1u << 8;
     static constexpr uint16_t SNAPSHOT_ALL =
-        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONSOLE |
-        SNAPSHOT_CONFIG | SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS |
-        SNAPSHOT_OTA | SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
+        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONFIG |
+        SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
+        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_WIFI |
         SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
@@ -158,9 +166,15 @@ private:
     ConsoleContext *console_ctx_ = nullptr;
 
     ManagementConsole web_console_;
-    String console_log_;
+    char *console_log_ = nullptr;
+    size_t console_log_capacity_ = 0;
+    size_t console_log_start_ = 0;
+    size_t console_log_length_ = 0;
+    uint64_t console_log_write_pos_ = 0;
     uint32_t console_seq_ = 0;
     uint32_t console_sse_seq_ = 0;
+    uint64_t console_sse_pos_ = 0;
+    bool console_sse_reset_pending_ = false;
     QueueHandle_t command_queue_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;
@@ -175,7 +189,6 @@ private:
 
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer cached_stream_json_;
-    LargeTextBuffer cached_console_json_;
     LargeTextBuffer cached_config_json_;
     LargeTextBuffer cached_wifi_json_;
     LargeTextBuffer cached_oximetry_sensors_json_;

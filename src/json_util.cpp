@@ -11,9 +11,9 @@ namespace aircannect {
 namespace {
 
 template <typename Out>
-void append_json_escaped_impl(Out &out, const char *value) {
+void append_json_escaped_impl(Out &out, const char *value, size_t len) {
     if (!value) return;
-    while (*value) {
+    for (size_t i = 0; i < len; ++i) {
         const unsigned char c = static_cast<unsigned char>(*value++);
         switch (c) {
             case '"': out += "\\\""; break;
@@ -43,7 +43,7 @@ void json_add_string_impl(Out &out, const char *key, const char *value,
     out += '"';
     out += key;
     out += "\":\"";
-    append_json_escaped_impl(out, value);
+    append_json_escaped_impl(out, value, value ? strlen(value) : 0);
     out += '"';
 }
 
@@ -97,7 +97,11 @@ void json_add_uint64_impl(Out &out, const char *key, uint64_t value,
 }  // namespace
 
 void append_json_escaped(String &out, const char *value) {
-    append_json_escaped_impl(out, value);
+    append_json_escaped_impl(out, value, value ? strlen(value) : 0);
+}
+
+void append_json_escaped(String &out, const char *value, size_t len) {
+    append_json_escaped_impl(out, value, len);
 }
 
 void json_add_string(String &out, const char *key, const char *value,
@@ -123,7 +127,12 @@ void json_add_uint64(String &out, const char *key, uint64_t value,
 }
 
 void append_json_escaped(LargeTextBuffer &out, const char *value) {
-    append_json_escaped_impl(out, value);
+    append_json_escaped_impl(out, value, value ? strlen(value) : 0);
+}
+
+void append_json_escaped(LargeTextBuffer &out, const char *value,
+                         size_t len) {
+    append_json_escaped_impl(out, value, len);
 }
 
 void json_add_string(LargeTextBuffer &out, const char *key, const char *value,
