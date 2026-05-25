@@ -1810,12 +1810,14 @@ void WebUI::register_routes() {
         send_cached(request, cached_stream_json_);
     });
 
-    server_->on("/api/console", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        send_console_snapshot(request);
-    });
+    server_->on(
+        AsyncURIMatcher::exact("/api/console"), HTTP_GET,
+        [this](AsyncWebServerRequest *request) {
+            send_console_snapshot(request);
+        });
 
     server_->on(
-        "/api/console", HTTP_POST,
+        AsyncURIMatcher::exact("/api/console"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             JsonDocument doc;
             std::string body;
@@ -1847,7 +1849,7 @@ void WebUI::register_routes() {
         nullptr, handle_body);
 
     server_->on(
-        "/api/console/clear", HTTP_POST,
+        AsyncURIMatcher::exact("/api/console/clear"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             send_queue_result(request,
                               enqueue_simple_command(WebCommandConsoleClear));
