@@ -18,6 +18,7 @@ class LargeTextBuffer;
 #if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
 void append_json_escaped(String &out, const char *value);
 void append_json_escaped(String &out, const char *value, size_t len);
+void append_json_float(String &out, float value);
 void json_add_string(String &out, const char *key, const char *value,
                      bool comma = true);
 void json_add_bool(String &out, const char *key, bool value,
@@ -32,6 +33,7 @@ void json_add_uint64(String &out, const char *key, uint64_t value,
 void append_json_escaped(LargeTextBuffer &out, const char *value);
 void append_json_escaped(LargeTextBuffer &out, const char *value,
                          size_t len);
+void append_json_float(LargeTextBuffer &out, float value);
 void json_add_string(LargeTextBuffer &out, const char *key, const char *value,
                      bool comma = true);
 void json_add_string_view(LargeTextBuffer &out,

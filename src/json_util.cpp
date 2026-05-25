@@ -2,6 +2,7 @@
 
 #if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -68,17 +69,41 @@ void json_add_int_impl(Out &out, const char *key, long value, bool comma) {
 }
 
 template <typename Out>
-void json_add_float_impl(Out &out, const char *key, float value, bool comma) {
+void append_json_float_impl(Out &out, float value) {
+    if (!isfinite(value)) {
+        out += "null";
+        return;
+    }
+    const bool negative = value < 0.0f;
+    const float abs_value = negative ? -value : value;
+    const unsigned long scaled =
+        static_cast<unsigned long>(abs_value * 1000.0f + 0.5f);
+    const unsigned long whole = scaled / 1000UL;
+    const unsigned long frac = scaled % 1000UL;
+
     char buf[24];
-    snprintf(buf, sizeof(buf), "%.3f", static_cast<double>(value));
-    char *end = buf + strlen(buf);
-    while (end > buf && end[-1] == '0') *--end = 0;
-    if (end > buf && end[-1] == '.') *--end = 0;
+    if (negative && scaled != 0) out += '-';
+    snprintf(buf, sizeof(buf), "%lu", whole);
+    out += buf;
+    if (!frac) return;
+
+    char frac_buf[3];
+    frac_buf[0] = static_cast<char>('0' + (frac / 100UL) % 10UL);
+    frac_buf[1] = static_cast<char>('0' + (frac / 10UL) % 10UL);
+    frac_buf[2] = static_cast<char>('0' + frac % 10UL);
+    size_t digits = 3;
+    while (digits > 0 && frac_buf[digits - 1] == '0') --digits;
+    out += '.';
+    for (size_t i = 0; i < digits; ++i) out += frac_buf[i];
+}
+
+template <typename Out>
+void json_add_float_impl(Out &out, const char *key, float value, bool comma) {
     if (comma) out += ',';
     out += '"';
     out += key;
     out += "\":";
-    out += buf;
+    append_json_float_impl(out, value);
 }
 
 template <typename Out>
@@ -102,6 +127,10 @@ void append_json_escaped(String &out, const char *value) {
 
 void append_json_escaped(String &out, const char *value, size_t len) {
     append_json_escaped_impl(out, value, len);
+}
+
+void append_json_float(String &out, float value) {
+    append_json_float_impl(out, value);
 }
 
 void json_add_string(String &out, const char *key, const char *value,
@@ -133,6 +162,10 @@ void append_json_escaped(LargeTextBuffer &out, const char *value) {
 void append_json_escaped(LargeTextBuffer &out, const char *value,
                          size_t len) {
     append_json_escaped_impl(out, value, len);
+}
+
+void append_json_float(LargeTextBuffer &out, float value) {
+    append_json_float_impl(out, value);
 }
 
 void json_add_string(LargeTextBuffer &out, const char *key, const char *value,

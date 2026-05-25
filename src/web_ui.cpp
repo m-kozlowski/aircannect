@@ -252,12 +252,7 @@ void append_oximetry_sensor(JsonOut &json,
 
 template <typename JsonOut>
 void append_json_float_value(JsonOut &json, float value) {
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%.3f", static_cast<double>(value));
-    char *end = buf + strlen(buf);
-    while (end > buf && end[-1] == '0') *--end = 0;
-    if (end > buf && end[-1] == '.') *--end = 0;
-    json += buf;
+    append_json_float(json, value);
 }
 
 template <typename JsonOut>
