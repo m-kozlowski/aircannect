@@ -246,6 +246,10 @@ bool RpcArbiter::next_resmed_ota_event(RpcEvent &event) {
     return resmed_ota_events_.pop(event);
 }
 
+void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
+    raw_rpc_events_enabled_ = enabled;
+}
+
 StreamAcquireResult RpcArbiter::acquire_stream(const std::string &params_json,
                                                RpcSource source) {
     StreamAcquireResult result = stream_.acquire(params_json, source_id(source));
@@ -472,24 +476,47 @@ void RpcArbiter::push_event(RpcEventKind kind,
                             const std::string &payload,
                             RpcSource source,
                             uint32_t id) {
+    if (payload.empty()) {
+        push_event(kind, RpcPayloadRef(), source, id);
+        return;
+    }
+    push_event(kind, make_rpc_payload_ref(std::string(payload)), source, id);
+}
+
+void RpcArbiter::push_event(RpcEventKind kind,
+                            RpcPayloadRef payload,
+                            RpcSource source,
+                            uint32_t id) {
     RpcEvent event;
     event.kind = kind;
     event.source = source;
     event.id = id;
-    event.payload = payload;
-    if (!events_.push(event)) stats_.event_drops++;
+    event.payload = std::move(payload);
+    if (!events_.push(std::move(event))) stats_.event_drops++;
 }
 
 void RpcArbiter::push_resmed_ota_event(RpcEventKind kind,
                                        const std::string &payload,
                                        RpcSource source,
                                        uint32_t id) {
+    if (payload.empty()) {
+        push_resmed_ota_event(kind, RpcPayloadRef(), source, id);
+        return;
+    }
+    push_resmed_ota_event(kind, make_rpc_payload_ref(std::string(payload)),
+                          source, id);
+}
+
+void RpcArbiter::push_resmed_ota_event(RpcEventKind kind,
+                                       RpcPayloadRef payload,
+                                       RpcSource source,
+                                       uint32_t id) {
     RpcEvent event;
     event.kind = kind;
     event.source = source;
     event.id = id;
-    event.payload = payload;
-    if (!resmed_ota_events_.push(event)) stats_.event_drops++;
+    event.payload = std::move(payload);
+    if (!resmed_ota_events_.push(std::move(event))) stats_.event_drops++;
 }
 
 void RpcArbiter::cancel_pending_request(const char *reason) {
@@ -1125,7 +1152,7 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
     if (frame.id == AC_CAN_RX_ID) {
         DatagramFeedResult result = rpc_rx_.feed(frame.data, frame.len, now);
         if (result.status == DatagramStatus::Complete) {
-            handle_rpc_payload(result.payload);
+            handle_rpc_payload(std::move(result.payload));
         } else if (result.status == DatagramStatus::Error) {
             stats_.rpc_framing_errors++;
             push_event(RpcEventKind::FramingError,
@@ -1137,7 +1164,7 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
     if (frame.id == AC_CAN_LOG_ID) {
         DatagramFeedResult result = log_rx_.feed(frame.data, frame.len, now);
         if (result.status == DatagramStatus::Complete) {
-            handle_debug_payload(result.payload);
+            handle_debug_payload(std::move(result.payload));
         } else if (result.status == DatagramStatus::Error) {
             stats_.log_framing_errors++;
             push_event(RpcEventKind::FramingError,
@@ -1171,18 +1198,29 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
     }
 }
 
-void RpcArbiter::handle_rpc_payload(const std::string &payload) {
+void RpcArbiter::handle_rpc_payload(std::string payload) {
     stats_.rpc_datagrams++;
+    RpcPayloadRef payload_ref;
+    auto ref_payload = [&]() {
+        if (!payload_ref) {
+            payload_ref = make_rpc_payload_ref(std::move(payload));
+        }
+        return payload_ref;
+    };
+
     switch (classify_rpc_payload(payload)) {
         case RpcPayloadKind::Notification: {
             stats_.rpc_notifications++;
+            const bool stream_data = json_method_is(payload, "StreamData");
             handle_stream_notification(payload);
             handle_event_notification(payload);
-            if (!json_method_is(payload, "StreamData")) {
+            if (!stream_data) {
                 Log::log_payload(CAT_RPC, LOG_DEBUG, "[RPC notify] ",
                                  payload);
             }
-            push_event(RpcEventKind::RpcNotification, payload);
+            if (!stream_data || raw_rpc_events_enabled_) {
+                push_event(RpcEventKind::RpcNotification, ref_payload());
+            }
             break;
         }
         case RpcPayloadKind::Response: {
@@ -1207,12 +1245,13 @@ void RpcArbiter::handle_rpc_payload(const std::string &payload) {
                 note_request_success(response_source, millis());
                 pending_ = {};
                 if (response_source == RpcSource::ResmedOta) {
-                    push_resmed_ota_event(RpcEventKind::RpcResponse, payload,
-                                          response_source, matched_id);
+                    push_resmed_ota_event(RpcEventKind::RpcResponse,
+                                          ref_payload(), response_source,
+                                          matched_id);
                     break;
                 }
                 if (!emit_matched_response(response_source)) break;
-                push_event(RpcEventKind::RpcResponse, payload,
+                push_event(RpcEventKind::RpcResponse, ref_payload(),
                            response_source, matched_id);
                 break;
             }
@@ -1228,7 +1267,7 @@ void RpcArbiter::handle_rpc_payload(const std::string &payload) {
                              source_name(passthrough_source));
                     Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
                 }
-                push_event(RpcEventKind::RpcResponse, payload,
+                push_event(RpcEventKind::RpcResponse, ref_payload(),
                            passthrough_source, response_id);
                 break;
             }
@@ -1240,21 +1279,24 @@ void RpcArbiter::handle_rpc_payload(const std::string &payload) {
             }
             Log::log_payload(CAT_RPC, LOG_DEBUG, "[RPC response unmatched] ",
                              payload);
-            push_event(RpcEventKind::RpcResponse, payload);
+            push_event(RpcEventKind::RpcResponse, ref_payload());
             break;
         }
         case RpcPayloadKind::Unknown:
             stats_.rpc_unmatched++;
             Log::log_payload(CAT_RPC, LOG_DEBUG, "[RPC unmatched] ", payload);
-            push_event(RpcEventKind::RpcUnmatched, payload);
+            push_event(RpcEventKind::RpcUnmatched, ref_payload());
             break;
     }
 }
 
-void RpcArbiter::handle_debug_payload(const std::string &payload) {
+void RpcArbiter::handle_debug_payload(std::string payload) {
     stats_.log_datagrams++;
     Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11 log] ", payload);
-    push_event(RpcEventKind::DebugLog, payload);
+    if (raw_rpc_events_enabled_) {
+        push_event(RpcEventKind::DebugLog,
+                   make_rpc_payload_ref(std::move(payload)));
+    }
 }
 
 std::string RpcArbiter::format_boot_frame(const RawCanFrame &frame) const {

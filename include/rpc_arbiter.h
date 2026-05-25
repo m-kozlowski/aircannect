@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <memory>
 #include <stdint.h>
 #include <string>
 
@@ -36,11 +37,26 @@ enum class RpcEventKind {
     Info,
 };
 
+using RpcPayloadRef = std::shared_ptr<const std::string>;
+
+inline RpcPayloadRef make_rpc_payload_ref(std::string payload) {
+    return std::make_shared<const std::string>(std::move(payload));
+}
+
 struct RpcEvent {
     RpcEventKind kind = RpcEventKind::Info;
     RpcSource source = RpcSource::Internal;
     uint32_t id = 0;
-    std::string payload;
+    RpcPayloadRef payload;
+
+    const std::string &payload_text() const {
+        static const std::string empty;
+        return payload ? *payload : empty;
+    }
+
+    const char *payload_c_str() const {
+        return payload ? payload->c_str() : "";
+    }
 };
 
 struct RpcArbiterStats {
@@ -107,6 +123,7 @@ public:
                                uint32_t timeout_ms = 0);
     bool next_event(RpcEvent &event);
     bool next_resmed_ota_event(RpcEvent &event);
+    void set_raw_rpc_events_enabled(bool enabled);
 
     StreamAcquireResult acquire_stream(const std::string &params_json,
                                        RpcSource source);
@@ -174,8 +191,16 @@ private:
                     const std::string &payload,
                     RpcSource source = RpcSource::Internal,
                     uint32_t id = 0);
+    void push_event(RpcEventKind kind,
+                    RpcPayloadRef payload,
+                    RpcSource source = RpcSource::Internal,
+                    uint32_t id = 0);
     void push_resmed_ota_event(RpcEventKind kind,
                                const std::string &payload,
+                               RpcSource source = RpcSource::Internal,
+                               uint32_t id = 0);
+    void push_resmed_ota_event(RpcEventKind kind,
+                               RpcPayloadRef payload,
                                RpcSource source = RpcSource::Internal,
                                uint32_t id = 0);
 
@@ -214,8 +239,8 @@ private:
     void handle_stream_notification(const std::string &payload);
     uint8_t source_id(RpcSource source) const;
     void handle_frame(const RawCanFrame &frame);
-    void handle_rpc_payload(const std::string &payload);
-    void handle_debug_payload(const std::string &payload);
+    void handle_rpc_payload(std::string payload);
+    void handle_debug_payload(std::string payload);
     std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
 
@@ -255,6 +280,7 @@ private:
     uint32_t next_as11_timezone_poll_ms_ = 0;
     uint32_t next_as11_clock_poll_ms_ = 0;
     bool background_polls_suspended_ = false;
+    bool raw_rpc_events_enabled_ = false;
     uint8_t consecutive_scheduler_timeouts_ = 0;
     uint32_t background_backoff_until_ms_ = 0;
 };

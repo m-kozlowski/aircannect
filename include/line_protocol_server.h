@@ -27,6 +27,13 @@ protected:
     bool begin_line_server(uint16_t port, const char *label);
     void stop_line_server();
     WiFiClient accept_line_client();
+    size_t write_line_nonblocking(WiFiClient &client,
+                                  size_t idx,
+                                  const char *label,
+                                  const uint8_t *data,
+                                  size_t len,
+                                  bool &fatal_error);
+    void note_line_bytes_out(size_t bytes) { io_stats_.bytes_out += bytes; }
 
     bool line_server_started() const { return started_; }
     uint16_t line_server_port() const { return port_; }
@@ -79,13 +86,6 @@ protected:
     }
 
 private:
-    size_t write_line_nonblocking(WiFiClient &client,
-                                  size_t idx,
-                                  const char *label,
-                                  const uint8_t *data,
-                                  size_t len,
-                                  bool &fatal_error);
-
     WiFiServer *server_ = nullptr;
     bool started_ = false;
     uint16_t port_ = 0;

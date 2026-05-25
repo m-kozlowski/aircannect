@@ -104,7 +104,7 @@ static void drain_rpc_events() {
         if (event.kind == RpcEventKind::BootNotification) {
             session_manager.note_device_boot(millis());
         }
-        if (is_rpc_event(event.kind)) {
+        if (is_rpc_event(event.kind) && event.payload) {
             tcp_bridge.broadcast_rpc_payload(event.payload);
         }
     }
@@ -199,6 +199,8 @@ void loop() {
         resmed_ota_manager.transport_active();
     rpc_arbiter.set_background_polls_suspended(
         resmed_ota_transport_active);
+    rpc_arbiter.set_raw_rpc_events_enabled(
+        tcp_bridge.raw_client_connected());
     rpc_arbiter.poll();
     resmed_ota_manager.poll();
     // First drain handles events produced by CAN/RPC/OTA work before services

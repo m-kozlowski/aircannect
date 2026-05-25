@@ -721,10 +721,10 @@ bool ResmedOtaManager::queue_request(const char *method,
 
 void ResmedOtaManager::handle_event(const RpcEvent &event) {
     if (event.kind != RpcEventKind::RpcResponse) {
-        set_error(event.payload.c_str());
+        set_error(event.payload_c_str());
         return;
     }
-    handle_response(event.payload);
+    handle_response(event.payload_text());
 }
 
 void ResmedOtaManager::handle_response(const std::string &payload) {

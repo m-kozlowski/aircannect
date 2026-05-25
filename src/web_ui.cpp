@@ -744,7 +744,7 @@ void WebUI::handle_event(const RpcEvent &event) {
     } else if (event.kind == RpcEventKind::InternalSettingsStateUpdated) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     } else if (event.kind == RpcEventKind::RpcNotification &&
-               json_method_is(event.payload, "EventNotification")) {
+               json_method_is(event.payload_text(), "EventNotification")) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
     }
 

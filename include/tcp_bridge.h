@@ -41,9 +41,10 @@ public:
     void stop();
     void poll(RpcArbiter &arbiter);
 
-    void broadcast_rpc_payload(const std::string &payload);
+    void broadcast_rpc_payload(const RpcPayloadRef &payload);
 
     int connected_count();
+    bool raw_client_connected();
     bool started() const { return line_server_started(); }
     uint16_t port() const { return line_server_port(); }
     const TcpBridgeStats &stats() const { return stats_; }
@@ -53,14 +54,16 @@ public:
 private:
     void accept_clients();
     void pump_outputs();
+    LineOutputPumpResult pump_rpc_output(size_t idx);
     void poll_inputs(RpcArbiter &arbiter);
     void disconnect_slot(size_t idx);
 
     WiFiClient clients_[AC_MAX_TCP_CLIENTS];
     String lines_[AC_MAX_TCP_CLIENTS];
 
-    FixedQueue<String, AC_TCP_TX_QUEUE_DEPTH> output_queues_[AC_MAX_TCP_CLIENTS];
-    String output_current_[AC_MAX_TCP_CLIENTS];
+    FixedQueue<RpcPayloadRef, AC_TCP_TX_QUEUE_DEPTH>
+        output_queues_[AC_MAX_TCP_CLIENTS];
+    RpcPayloadRef output_current_[AC_MAX_TCP_CLIENTS];
     size_t output_pos_[AC_MAX_TCP_CLIENTS] = {};
 
     TcpBridgeStats stats_ = {};

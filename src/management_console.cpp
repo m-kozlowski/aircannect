@@ -336,13 +336,13 @@ void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
     switch (event.kind) {
         case RpcEventKind::RpcResponse:
             out.print("[RPC response] ");
-            out.println(event.payload.c_str());
+            out.println(event.payload_c_str());
             break;
         case RpcEventKind::RpcNotification:
             break;
         case RpcEventKind::RpcUnmatched:
             out.print("[RPC unmatched] ");
-            out.println(event.payload.c_str());
+            out.println(event.payload_c_str());
             break;
         case RpcEventKind::DebugLog:
             break;
@@ -352,15 +352,15 @@ void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
             break;
         case RpcEventKind::BootNotification:
             out.print("[CAN] ");
-            out.println(event.payload.c_str());
+            out.println(event.payload_c_str());
             break;
         case RpcEventKind::FramingError:
             out.print("[FRAMING] ");
-            out.println(event.payload.c_str());
+            out.println(event.payload_c_str());
             break;
         case RpcEventKind::Info:
             out.print("[INFO] ");
-            out.println(event.payload.c_str());
+            out.println(event.payload_c_str());
             break;
     }
 }

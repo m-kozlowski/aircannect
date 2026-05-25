@@ -1,5 +1,7 @@
 #include "tcp_bridge.h"
 
+#include <utility>
+
 #include "debug_log.h"
 
 namespace aircannect {
@@ -27,25 +29,15 @@ void TcpBridge::poll(RpcArbiter &arbiter) {
     poll_inputs(arbiter);
 }
 
-void TcpBridge::broadcast_rpc_payload(const std::string &payload) {
-    if (!started()) return;
+void TcpBridge::broadcast_rpc_payload(const RpcPayloadRef &payload) {
+    if (!started() || !payload) return;
     stats_.broadcasts++;
 
-    bool has_client = false;
-    for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
-        if (clients_[i] && clients_[i].connected()) {
-            has_client = true;
-            break;
-        }
-    }
-    if (!has_client) {
-        return;
-    }
+    if (!raw_client_connected()) return;
 
-    String line(payload.c_str());
     for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
         if (!clients_[i] || !clients_[i].connected()) continue;
-        if (!output_queues_[i].push(line)) {
+        if (!output_queues_[i].push(payload)) {
             stats_.queue_drops++;
             Log::logf(CAT_TCP, LOG_WARN,
                       "[TCP %u] outbound queue full; dropping payload\n",
@@ -63,6 +55,14 @@ int TcpBridge::connected_count() {
     return count;
 }
 
+bool TcpBridge::raw_client_connected() {
+    if (!started()) return false;
+    for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
+        if (clients_[i] && clients_[i].connected()) return true;
+    }
+    return false;
+}
+
 size_t TcpBridge::client_statuses(TcpBridgeClientStatus *out, size_t max) {
     if (!out || max == 0) return 0;
     const size_t count = max < AC_MAX_TCP_CLIENTS ? max : AC_MAX_TCP_CLIENTS;
@@ -74,7 +74,11 @@ size_t TcpBridge::client_statuses(TcpBridgeClientStatus *out, size_t max) {
         dst.remote_ip = clients_[i].remoteIP();
         dst.line_buffer_len = lines_[i].length();
         dst.output_queue_count = output_queues_[i].count();
-        dst.output_current_len = output_current_[i].length();
+        if (output_current_[i]) {
+            const size_t total = output_current_[i]->size() + 1;
+            dst.output_current_len =
+                output_pos_[i] < total ? total - output_pos_[i] : 0;
+        }
     }
     return count;
 }
@@ -103,9 +107,7 @@ void TcpBridge::pump_outputs() {
     for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
         if (!clients_[i] || !clients_[i].connected()) continue;
 
-        LineOutputPumpResult result = pump_line_output(
-            clients_[i], output_queues_[i], output_current_[i], output_pos_[i],
-            i, "TCP", true);
+        LineOutputPumpResult result = pump_rpc_output(i);
         if (result.fatal_error) {
             stats_.disconnected_clients++;
             disconnect_slot(i);
@@ -116,6 +118,56 @@ void TcpBridge::pump_outputs() {
             stats_.lines_out++;
         }
     }
+}
+
+LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
+    LineOutputPumpResult result;
+    if (idx >= AC_MAX_TCP_CLIENTS) return result;
+    WiFiClient &client = clients_[idx];
+    if (!client || !client.connected()) return result;
+
+    if (!output_current_[idx]) {
+        RpcPayloadRef next;
+        if (!output_queues_[idx].pop(next)) return result;
+        output_current_[idx] = std::move(next);
+        output_pos_[idx] = 0;
+    }
+    if (!output_current_[idx]) return result;
+
+    const std::string &payload = *output_current_[idx];
+    const size_t payload_len = payload.size();
+    const size_t total_len = payload_len + 1;
+    if (output_pos_[idx] >= total_len) {
+        output_current_[idx].reset();
+        output_pos_[idx] = 0;
+        result.completed = true;
+        return result;
+    }
+
+    const uint8_t newline = '\n';
+    const uint8_t *data = &newline;
+    size_t chunk = 1;
+    if (output_pos_[idx] < payload_len) {
+        const size_t remaining = payload_len - output_pos_[idx];
+        chunk = remaining < AC_TCP_WRITE_CHUNK
+                    ? remaining
+                    : AC_TCP_WRITE_CHUNK;
+        data = reinterpret_cast<const uint8_t *>(
+            payload.data() + output_pos_[idx]);
+    }
+
+    result.written = write_line_nonblocking(client, idx, "TCP", data,
+                                            chunk, result.fatal_error);
+    if (result.fatal_error || result.written == 0) return result;
+
+    output_pos_[idx] += result.written;
+    note_line_bytes_out(result.written);
+    if (output_pos_[idx] >= total_len) {
+        output_current_[idx].reset();
+        output_pos_[idx] = 0;
+        result.completed = true;
+    }
+    return result;
 }
 
 void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
@@ -175,7 +227,7 @@ void TcpBridge::disconnect_slot(size_t idx) {
     if (clients_[idx]) clients_[idx].stop();
     lines_[idx] = "";
     output_queues_[idx].clear();
-    output_current_[idx] = "";
+    output_current_[idx].reset();
     output_pos_[idx] = 0;
 }
 
