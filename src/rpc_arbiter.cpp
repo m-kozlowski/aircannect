@@ -1087,12 +1087,7 @@ bool RpcArbiter::request_as11_healthcheck() {
 bool RpcArbiter::request_as11_settings_refresh() {
     QueuedRequest request;
     request.method = "Get";
-    int mode = as11_settings_.mode_index();
-    if (mode < 0) {
-        mode = as11_mode_index_from_value(
-            as11_state_.active_therapy_profile());
-    }
-    request.params_json = as11_settings_get_params_json(mode);
+    request.params_json = as11_settings_get_params_json();
     request.source = RpcSource::Scheduler;
     request.settings_refresh = true;
     return enqueue_request(request);

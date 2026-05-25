@@ -487,11 +487,6 @@ int option_index_of(const As11SettingDef &def, const char *value) {
     return -1;
 }
 
-const char *option_value_at(const As11SettingDef &def, int index) {
-    if (index < 0 || index >= def.option_count) return nullptr;
-    return def.options[index];
-}
-
 const char *option_wire_value_at(const As11SettingDef &def, int index) {
     if (index < 0 || index >= def.option_count) return nullptr;
     return def.wire_options ? def.wire_options[index] : def.options[index];
@@ -1190,30 +1185,7 @@ const char *as11_mode_name(int mode) {
     return names[mode];
 }
 
-std::string as11_setting_display_value(const As11SettingDef &def,
-                                       const std::string &raw) {
-    if (raw.empty()) return "";
-    if (def.kind == As11SettingKind::Enum) {
-        int index = -1;
-        if (parse_int_text(raw, index)) {
-            const char *label = option_value_at(def, index);
-            if (label) return label;
-        }
-        return raw;
-    }
-    if (def.kind == As11SettingKind::Number && def.scale_div > 1) {
-        double value = 0;
-        if (!parse_number(raw, value)) return raw;
-        value /= def.scale_div;
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%.*f", def.decimals, value);
-        return buf;
-    }
-    return raw;
-}
-
-std::string as11_settings_get_params_json(int mode) {
-    (void)mode;
+std::string as11_settings_get_params_json() {
     std::string out = "[";
     out += "\"_MOP\",\"TherapyProfiles\",\"FeatureProfiles\"";
     out += "]";
