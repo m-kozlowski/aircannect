@@ -46,6 +46,7 @@ struct DescriptorPreset {
 const DescriptorPreset DESCRIPTOR_PRESETS[] = {
     {"14.8.3.0", 0x2D89E58Fu, 0xBEB37EE2u},
     {"15.8.4.0", 0xD785ABA6u, 0xBEB37EE2u},
+    {"16.8.5.0", 0x7862CBA7u, 0xBEB37EE2u},
 };
 
 int hex_nibble(char c) {
