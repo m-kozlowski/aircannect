@@ -79,7 +79,11 @@ std::vector<DatagramFrame> encode_datagram(const std::string &payload) {
 }
 
 void DatagramRx::reset() {
-    parts_.clear();
+    if (parts_.capacity() > AC_DG_INITIAL_RESERVE_BYTES) {
+        std::vector<uint8_t>().swap(parts_);
+    } else {
+        parts_.clear();
+    }
     expected_crc_ = 0;
     last_frame_ms_ = 0;
     have_crc_ = false;
