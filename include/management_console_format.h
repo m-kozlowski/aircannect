@@ -23,6 +23,8 @@ void print_stream_status(Print &out, const RpcArbiter &arbiter);
 void print_log_status(Print &out);
 void print_log_stats(Print &out);
 void print_memory_status(Print &out, const MemoryStatus &status);
+void print_memory_detail_status(Print &out,
+                                const MemoryDetailStatus &status);
 void print_storage_status(Print &out, const StorageStatus &status);
 void print_storage_writer_status(Print &out,
                                  const StorageWriterStatus &status);

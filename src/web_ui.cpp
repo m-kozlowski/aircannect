@@ -384,6 +384,36 @@ void WebUI::reserve_cached_json() {
     live_json_.reserve(4096);
 }
 
+WebUiMemoryStatus WebUI::memory_status() {
+    auto capture = [](const LargeTextBuffer &buffer) {
+        WebUiBufferMemoryStatus out;
+        out.length = buffer.length();
+        out.capacity = buffer.capacity();
+        return out;
+    };
+
+    WebUiMemoryStatus out;
+    out.started = started_;
+    out.sse_clients = sse_client_count();
+    if (!cache_mutex_ ||
+        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return out;
+    }
+    out.status = capture(cached_status_json_);
+    out.stream = capture(cached_stream_json_);
+    out.console = capture(cached_console_json_);
+    out.config = capture(cached_config_json_);
+    out.wifi = capture(cached_wifi_json_);
+    out.oximetry_sensors = capture(cached_oximetry_sensors_json_);
+    out.ota = capture(cached_ota_json_);
+    out.resmed_ota = capture(cached_resmed_ota_json_);
+    out.settings = capture(cached_settings_json_);
+    out.live = capture(live_json_);
+    out.console_log_length = console_log_.length();
+    xSemaphoreGive(cache_mutex_);
+    return out;
+}
+
 void WebUI::stop() {
     if (sink_manager_) sink_manager_->set_live_chart_enabled(false);
     if (events_) {

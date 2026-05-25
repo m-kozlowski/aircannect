@@ -26,6 +26,27 @@ class AsyncWebServer;
 
 namespace aircannect {
 
+struct WebUiBufferMemoryStatus {
+    size_t length = 0;
+    size_t capacity = 0;
+};
+
+struct WebUiMemoryStatus {
+    bool started = false;
+    WebUiBufferMemoryStatus status;
+    WebUiBufferMemoryStatus stream;
+    WebUiBufferMemoryStatus console;
+    WebUiBufferMemoryStatus config;
+    WebUiBufferMemoryStatus wifi;
+    WebUiBufferMemoryStatus oximetry_sensors;
+    WebUiBufferMemoryStatus ota;
+    WebUiBufferMemoryStatus resmed_ota;
+    WebUiBufferMemoryStatus settings;
+    WebUiBufferMemoryStatus live;
+    size_t console_log_length = 0;
+    size_t sse_clients = 0;
+};
+
 class WebUI {
 public:
     bool begin(RpcArbiter &arbiter,
@@ -44,6 +65,7 @@ public:
     void poll();
     void handle_event(const RpcEvent &event);
     bool started() const { return started_; }
+    WebUiMemoryStatus memory_status();
 
 private:
     // Server setup and cached snapshots

@@ -240,6 +240,14 @@ static constexpr size_t AC_WEB_OTA_JSON_RESERVE = 768;
 static constexpr size_t AC_WEB_RESMED_OTA_JSON_RESERVE = 1024;
 static constexpr size_t AC_WEB_SETTINGS_JSON_RESERVE = 12288;
 
+#ifndef AC_MEMORY_HEAP_TRACE_ENABLED
+#define AC_MEMORY_HEAP_TRACE_ENABLED 0
+#endif
+
+#ifndef AC_MEMORY_HEAP_TRACE_RECORDS
+#define AC_MEMORY_HEAP_TRACE_RECORDS 128
+#endif
+
 static constexpr size_t AC_LOG_LINE_MAX = 192;
 static constexpr size_t AC_SYSLOG_QUEUE_DEPTH = 32;
 static constexpr size_t AC_SYSLOG_SEND_BUDGET = 4;

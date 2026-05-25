@@ -385,6 +385,39 @@ void print_memory_status(Print &out, const MemoryStatus &mem) {
     out.println();
 }
 
+void print_memory_region(Print &out,
+                         const char *name,
+                         const MemoryRegionStatus &region) {
+    out.print("[MEM region] name=");
+    out.print(name);
+    out.print(" free=");
+    out.print(static_cast<unsigned long>(region.free_bytes));
+    out.print(" allocated=");
+    out.print(static_cast<unsigned long>(region.allocated_bytes));
+    out.print(" largest=");
+    out.print(static_cast<unsigned long>(region.largest_free_block));
+    out.print(" min_free=");
+    out.print(static_cast<unsigned long>(region.minimum_free_bytes));
+    out.print(" blocks_alloc=");
+    out.print(static_cast<unsigned long>(region.allocated_blocks));
+    out.print(" blocks_free=");
+    out.print(static_cast<unsigned long>(region.free_blocks));
+    out.print(" blocks_total=");
+    out.print(static_cast<unsigned long>(region.total_blocks));
+    out.println();
+}
+
+void print_memory_detail_status(Print &out,
+                                const MemoryDetailStatus &detail) {
+    print_memory_status(out, detail.summary);
+    print_memory_region(out, "default_8bit", detail.default_8bit);
+    print_memory_region(out, "internal_8bit", detail.internal_8bit);
+    print_memory_region(out, "internal_dma", detail.internal_dma);
+    if (detail.summary.psram_available) {
+        print_memory_region(out, "psram_8bit", detail.psram_8bit);
+    }
+}
+
 void print_storage_status(Print &out, const StorageStatus &s) {
     out.print("[STORAGE] configured=");
     out.print(s.configured ? "yes" : "no");

@@ -16,6 +16,8 @@
 
 namespace aircannect {
 
+class WebUI;
+
 struct ConsoleContext {
     RpcArbiter &arbiter;
     TcpBridge &tcp_bridge;
@@ -28,6 +30,7 @@ struct ConsoleContext {
     SessionManager &session_manager;
     SinkManager &sink_manager;
     OximetryManager &oximetry_manager;
+    WebUI *web_ui = nullptr;
 };
 
 class ManagementConsole {

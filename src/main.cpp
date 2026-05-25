@@ -49,6 +49,7 @@ static ConsoleContext console_ctx{
     session_manager,
     sink_manager,
     oximetry_manager,
+    &web_ui,
 };
 
 static bool is_rpc_event(RpcEventKind kind) {
