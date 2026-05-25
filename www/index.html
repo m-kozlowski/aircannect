@@ -3479,8 +3479,8 @@
         output.textContent = data.log || "";
       } else if (data.append !== undefined) {
         output.textContent += data.append || "";
-        if (output.textContent.length > 8192) {
-          output.textContent = output.textContent.slice(-8192);
+        if (output.textContent.length > 4096) {
+          output.textContent = output.textContent.slice(-4096);
         }
       }
       output.scrollTop = output.scrollHeight;
