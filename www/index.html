@@ -3511,8 +3511,14 @@
     async function clearConsoleLog() {
       try {
         await api("/api/console/clear", {method: "POST"});
-        setTimeout(loadConsole, 300);
-      } catch (error) {}
+        const output = document.getElementById("consoleLog");
+        output.textContent = "";
+        output.scrollTop = 0;
+      } catch (error) {
+        const output = document.getElementById("consoleLog");
+        output.textContent += "\nERR: " + error.message + "\n";
+        output.scrollTop = output.scrollHeight;
+      }
     }
 
     async function loadConfig() {
