@@ -1326,6 +1326,11 @@
       if (id === "config") loadConfig();
     }
 
+    function clinicalTabActive() {
+      const pane = document.getElementById("p-clinical");
+      return !!pane && pane.classList.contains("active");
+    }
+
     function refreshActive() {
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       if (pane === "dash") loadStatus();
@@ -2471,6 +2476,9 @@
           renderStatus(statusData);
         } catch (error) {}
       });
+      evtSrc.addEventListener("device_boot", () => {
+        invalidateSettingsCatalog();
+      });
       evtSrc.addEventListener("stream", (event) => {
         try {
           streamData = JSON.parse(event.data);
@@ -2636,12 +2644,20 @@
         settingsPollTimer = null;
       }
 
-      const active = document.getElementById("p-clinical").classList.contains("active");
+      const active = clinicalTabActive();
       const refreshing = Date.now() < settingsRefreshUntil;
       if (active && (data.refresh_queued || refreshing || !data.valid ||
           data.pending_count)) {
         settingsPollTimer = setTimeout(() => loadSettings(false, true), 1200);
       }
+    }
+
+    function invalidateSettingsCatalog() {
+      settingsCatalog = [];
+      settingsCatalogPromise = null;
+      settingsProfileMode = null;
+      settingsModeDirty = false;
+      if (clinicalTabActive()) loadSettings(true);
     }
 
     function modeBit(mode) {

@@ -764,6 +764,11 @@ void WebUI::send_live_batch(uint32_t now_ms) {
 void WebUI::handle_event(const RpcEvent &event) {
     if (event.kind == RpcEventKind::BootNotification) {
         mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_SETTINGS);
+        if (events_ &&
+            events_->send("{}", "device_boot", millis()) !=
+                AsyncEventSource::ENQUEUED) {
+            sse_enforce_needed_ = true;
+        }
     } else if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
         if (cache_mutex_ &&
             xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
