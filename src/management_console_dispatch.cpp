@@ -176,82 +176,6 @@ void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
     out.println();
 }
 
-void print_heap_trace_status(Print &out) {
-    const HeapTraceStatus trace = Memory::heap_trace_status();
-    out.print("[MEM trace] build=");
-    out.print(trace.build_enabled ? "enabled" : "disabled");
-    out.print(" backend=");
-    out.print(trace.backend_available ? "available" : "unavailable");
-    out.print(" initialized=");
-    out.print(trace.initialized ? "yes" : "no");
-    out.print(" running=");
-    out.print(trace.running ? "yes" : "no");
-    out.print(" mode=");
-    out.print(Memory::heap_trace_mode_name(trace.mode));
-    out.print(" records=");
-    out.print(static_cast<unsigned long>(trace.count));
-    out.print('/');
-    out.print(static_cast<unsigned long>(trace.capacity));
-    out.print(" allocs=");
-    out.print(static_cast<unsigned long>(trace.total_allocations));
-    out.print(" frees=");
-    out.print(static_cast<unsigned long>(trace.total_frees));
-    out.print(" high_water=");
-    out.print(static_cast<unsigned long>(trace.high_water_mark));
-    out.print(" overflow=");
-    out.print(trace.overflowed ? "yes" : "no");
-    if (trace.last_error && trace.last_error[0]) {
-        out.print(" error=");
-        out.print(trace.last_error);
-    }
-    out.println();
-}
-
-bool parse_heap_trace_mode(const String &text, HeapTraceMode &mode) {
-    if (!text.length() || text == "leaks") {
-        mode = HeapTraceMode::Leaks;
-        return true;
-    }
-    if (text == "all") {
-        mode = HeapTraceMode::All;
-        return true;
-    }
-    return false;
-}
-
-void print_heap_trace_records(Print &out, size_t limit) {
-    const HeapTraceStatus status = Memory::heap_trace_status();
-    const size_t count = status.count;
-    if (limit == 0 || limit > count) limit = count;
-    out.print("[MEM trace dump] records=");
-    out.print(static_cast<unsigned long>(count));
-    out.print(" showing=");
-    out.print(static_cast<unsigned long>(limit));
-    out.println();
-
-    for (size_t i = 0; i < limit; ++i) {
-        HeapTraceRecord record;
-        if (!Memory::heap_trace_record(i, record)) continue;
-        out.print("[MEM trace record] i=");
-        out.print(static_cast<unsigned long>(i));
-        out.print(" addr=0x");
-        out.print(static_cast<unsigned long>(record.address), HEX);
-        out.print(" size=");
-        out.print(static_cast<unsigned long>(record.size));
-        out.print(" freed=");
-        out.print(record.freed ? "yes" : "no");
-        if (record.alloc_pc) {
-            out.print(" alloc_pc=0x");
-            out.print(static_cast<unsigned long>(record.alloc_pc), HEX);
-        }
-        if (record.free_pc) {
-            out.print(" free_pc=0x");
-            out.print(static_cast<unsigned long>(record.free_pc), HEX);
-        }
-        out.println();
-    }
-}
-
 std::string cli_set_value_literal(String value) {
     trim_inplace(value);
     String lower = value;
@@ -419,68 +343,9 @@ void ManagementConsole::handle_memory_command(Print &out,
                                                   Memory::detail_status());
         print_owned_memory_detail(out, ctx);
         print_web_memory_detail(out, ctx.web_ui);
-        print_heap_trace_status(out);
         return;
     }
-    if (rest == "trace" || rest == "trace status") {
-        print_heap_trace_status(out);
-        return;
-    }
-    if (rest.startsWith("trace start")) {
-        String mode_text = rest.substring(strlen("trace start"));
-        trim_inplace(mode_text);
-        HeapTraceMode mode = HeapTraceMode::Leaks;
-        if (!parse_heap_trace_mode(mode_text, mode)) {
-            print_unknown_command(
-                out, "MEM",
-                "memory, memory detail, memory trace start [leaks|all]");
-            return;
-        }
-        const bool ok = Memory::heap_trace_start(mode);
-        out.print("[MEM trace] start=");
-        out.print(ok ? "ok" : "failed");
-        out.println();
-        print_heap_trace_status(out);
-        return;
-    }
-    if (rest == "trace stop") {
-        const bool ok = Memory::heap_trace_stop();
-        out.print("[MEM trace] stop=");
-        out.print(ok ? "ok" : "failed");
-        out.println();
-        print_heap_trace_status(out);
-        return;
-    }
-    if (rest == "trace clear") {
-        const bool ok = Memory::heap_trace_clear();
-        out.print("[MEM trace] clear=");
-        out.print(ok ? "ok" : "failed");
-        out.println();
-        print_heap_trace_status(out);
-        return;
-    }
-    if (rest == "trace dump" || rest.startsWith("trace dump ")) {
-        size_t limit = 32;
-        if (rest.length() > strlen("trace dump")) {
-            String limit_text = rest.substring(strlen("trace dump"));
-            trim_inplace(limit_text);
-            char *end = nullptr;
-            const unsigned long parsed = strtoul(limit_text.c_str(), &end, 10);
-            if (!end || *end != 0) {
-                print_unknown_command(
-                    out, "MEM",
-                    "memory trace dump [limit]");
-                return;
-            }
-            limit = static_cast<size_t>(parsed);
-        }
-        print_heap_trace_status(out);
-        print_heap_trace_records(out, limit);
-        return;
-    }
-    print_unknown_command(
-        out, "MEM",
-        "memory, memory detail, memory trace start|stop|dump|clear");
+    print_unknown_command(out, "MEM", "memory, memory detail");
 }
 
 void ManagementConsole::handle_session_command(Print &out,

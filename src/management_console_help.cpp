@@ -209,11 +209,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP memory]");
         out.println("  memory                    show heap and PSRAM usage");
         out.println("  memory detail             show heap regions and owned buffers");
-        out.println("  memory trace              show heap trace status");
-        out.println("  memory trace start [MODE] start trace; MODE is leaks or all");
-        out.println("  memory trace stop         stop trace");
-        out.println("  memory trace dump [N]     show up to N trace records");
-        out.println("  memory trace clear        clear trace buffer");
         return;
     }
 
