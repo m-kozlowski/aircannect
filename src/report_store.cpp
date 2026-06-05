@@ -27,6 +27,7 @@ constexpr size_t SUMMARY_SESSION_SIZE = 12;
 constexpr uint32_t COVERAGE_MAGIC = 0x56524341u;  // "ACRV", little-endian.
 constexpr uint16_t COVERAGE_SCHEMA = 3;  // bumped: night-partitioned chunk layout
 constexpr size_t COVERAGE_RECORD_SIZE = 48;
+constexpr size_t COVERAGE_MAX_INTERVALS = 128;
 constexpr uint32_t CHUNK_INDEX_MAGIC = 0x49524341u;  // "ACRI", little-endian.
 constexpr uint16_t CHUNK_INDEX_SCHEMA = 2;  // bumped for chunk origin byte
 constexpr size_t CHUNK_INDEX_RECORD_SIZE = 64;
@@ -653,6 +654,113 @@ bool read_coverage_record(File &file,
     }
     // false here (full record, bad magic/schema/CRC) is a skippable stale record
     return decode_coverage_record(raw, record);
+}
+
+// Coverage is stored per source as Complete intervals kept sorted by start and
+// merged when same-tag (parser_schema/source_hash/origin) spans overlap or sit
+// within the join tolerance; "missing" is simply a gap. A query is one walk for
+// the first gap; a write loads, merges, and atomically rewrites, so refreshing a
+// covered span never grows the file and old append-log files coalesce on first
+// read. cov_scratch is reused under the SD guard, which serialises every
+// coverage op, so a single shared buffer is safe.
+ReportStoreCoverageRecord cov_scratch[COVERAGE_MAX_INTERVALS];
+
+bool coverage_same_tag(const ReportStoreCoverageRecord &a,
+                       const ReportStoreCoverageRecord &b) {
+    return a.parser_schema == b.parser_schema &&
+           a.source_hash == b.source_hash && a.origin == b.origin;
+}
+
+// Insert rec into recs[] (kept sorted by start) and coalesce the same-tag run it
+// now belongs to. Only Complete intervals are tracked; on overflow the interval
+// is dropped (its span reads as missing and is re-fetched).
+void coverage_insert(ReportStoreCoverageRecord *recs, size_t &count,
+                     const ReportStoreCoverageRecord &rec) {
+    if (rec.state != ReportStoreCoverageState::Complete ||
+        rec.end_ms <= rec.start_ms) {
+        return;
+    }
+    if (count >= COVERAGE_MAX_INTERVALS) return;
+    size_t pos = 0;
+    while (pos < count && recs[pos].start_ms < rec.start_ms) ++pos;
+    for (size_t i = count; i > pos; --i) recs[i] = recs[i - 1];
+    recs[pos] = rec;
+    ++count;
+    // One left-to-right pass coalesces adjacent same-tag spans within tolerance.
+    // It suffices because the array is sorted and a source has a single tag in
+    // practice, so the whole run merges transitively (and any leftover adjacency
+    // is still stitched by the query walk).
+    const int64_t tol = AC_REPORT_COVERAGE_TOLERANCE_MS;
+    size_t w = 0;
+    for (size_t r = 1; r < count; ++r) {
+        if (coverage_same_tag(recs[w], recs[r]) &&
+            recs[r].start_ms <= recs[w].end_ms + tol) {
+            if (recs[r].end_ms > recs[w].end_ms) recs[w].end_ms = recs[r].end_ms;
+        } else {
+            recs[++w] = recs[r];
+        }
+    }
+    count = w + 1;
+}
+
+// Read a source's coverage file into recs[], coalescing as it goes; returns the
+// interval count. Stale/old-schema records are skipped.
+size_t load_coverage(const char *source, ReportStoreCoverageRecord *recs) {
+    size_t count = 0;
+    char path[REPORT_PATH_MAX];
+    if (!build_coverage_path(source, path, sizeof(path))) return 0;
+    if (!Storage::exists(path)) return 0;
+    File file = Storage::open(path, "r");
+    if (!file) return 0;
+    for (;;) {
+        bool eof = false;
+        ReportStoreCoverageRecord record;
+        if (!read_coverage_record(file, record, eof)) {
+            if (eof) break;
+            current.coverage_read_errors++;  // skippable stale record
+            continue;
+        }
+        current.coverage_records_read++;
+        coverage_insert(recs, count, record);
+    }
+    file.close();
+    return count;
+}
+
+// Atomically replace a source's coverage file with recs[] (tmp + rename); an
+// empty set removes the file.
+bool rewrite_coverage_file(const char *source,
+                           const ReportStoreCoverageRecord *recs,
+                           size_t count) {
+    char path[REPORT_PATH_MAX];
+    if (!build_coverage_path(source, path, sizeof(path))) return false;
+    char tmp[REPORT_PATH_MAX + 8];
+    const int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(tmp)) return false;
+    Storage::remove(tmp);
+    File out = Storage::open(tmp, "w");
+    if (!out) return false;
+    bool ok = true;
+    for (size_t i = 0; i < count && ok; ++i) {
+        uint8_t raw[COVERAGE_RECORD_SIZE];
+        encode_coverage_record(raw, recs[i]);
+        ok = write_all(out, raw, sizeof(raw));
+    }
+    out.close();
+    if (!ok) {
+        Storage::remove(tmp);
+        return false;
+    }
+    Storage::remove(path);
+    if (count == 0) {
+        Storage::remove(tmp);
+        return true;
+    }
+    if (!Storage::rename(tmp, path)) {
+        Storage::remove(tmp);
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -1453,24 +1561,19 @@ bool write_coverage(const char *source,
         return false;
     }
     if (!ensure_layout()) return false;
-
-    char path[REPORT_PATH_MAX];
-    if (!build_coverage_path(source, path, sizeof(path))) {
-        note_error("bad_coverage_path", &current.coverage_write_errors);
-        return false;
+    // Only Complete intervals are persisted; an Incomplete span is just a gap
+    // (absence), so it needs no record.
+    if (record.state != ReportStoreCoverageState::Complete) {
+        set_error(current.last_error, sizeof(current.last_error), "");
+        return true;
     }
 
-    File file = Storage::open(path, "a");
-    if (!file) {
-        note_error("coverage_open_failed", &current.coverage_write_errors);
-        return false;
-    }
-
-    uint8_t raw[COVERAGE_RECORD_SIZE];
-    encode_coverage_record(raw, record);
-    const bool ok = write_all(file, raw, sizeof(raw));
-    file.close();
-    if (!ok) {
+    // Load -> merge -> atomic rewrite, so a refresh of an already-covered span is
+    // absorbed instead of appended: the file stays the size of the real coverage
+    // and a single walk answers "what is missing".
+    size_t count = load_coverage(source, cov_scratch);
+    coverage_insert(cov_scratch, count, record);
+    if (!rewrite_coverage_file(source, cov_scratch, count)) {
         note_error("coverage_write_failed", &current.coverage_write_errors);
         return false;
     }
@@ -1478,9 +1581,9 @@ bool write_coverage(const char *source,
     current.coverage_records_written++;
     set_error(current.last_error, sizeof(current.last_error), "");
     Log::logf(CAT_RPC, LOG_DEBUG,
-              "[REPORT] stored coverage source=%s state=%u start=%lld "
-              "end=%lld parser=%lu hash=%08lx\n",
-              source, static_cast<unsigned>(record.state),
+              "[REPORT] coverage source=%s intervals=%u add=[%lld,%lld] "
+              "parser=%lu hash=%08lx\n",
+              source, static_cast<unsigned>(count),
               static_cast<long long>(record.start_ms),
               static_cast<long long>(record.end_ms),
               static_cast<unsigned long>(record.parser_schema),
@@ -1516,56 +1619,24 @@ bool coverage_first_missing(const char *source,
         return false;
     }
 
-    char path[REPORT_PATH_MAX];
-    if (!build_coverage_path(source, path, sizeof(path))) {
-        note_error("bad_coverage_path", &current.coverage_read_errors);
-        return false;
-    }
-    if (!Storage::exists(path)) return true;
-
+    const size_t count = load_coverage(source, cov_scratch);
+    const int64_t tol = AC_REPORT_COVERAGE_TOLERANCE_MS;
     int64_t covered_until = start_ms;
-    uint16_t passes = 0;
-    while (covered_until < end_ms && passes++ < 1024) {
-        File file = Storage::open(path, "r");
-        if (!file) {
-            note_error("coverage_open_failed", &current.coverage_read_errors);
-            return false;
+    // cov_scratch is sorted by start and same-tag coalesced, so one walk over the
+    // matching-schema intervals finds the first gap. Tolerance absorbs small
+    // joint/boundary slack; a real interior gap (minutes) is not masked.
+    for (size_t i = 0; i < count; ++i) {
+        const ReportStoreCoverageRecord &iv = cov_scratch[i];
+        if (iv.parser_schema != parser_schema) continue;
+        if (iv.start_ms > covered_until + tol) break;  // gap before this span
+        if (iv.end_ms > covered_until) covered_until = iv.end_ms;
+        if (covered_until + tol >= end_ms) {
+            missing_ms = end_ms;
+            set_error(current.last_error, sizeof(current.last_error), "");
+            return true;
         }
-
-        bool progressed = false;
-        while (true) {
-            bool eof = false;
-            ReportStoreCoverageRecord record;
-            if (!read_coverage_record(file, record, eof)) {
-                if (eof) break;
-                // Stale record from an older schema (after a schema bump) or a
-                // bad CRC: skip it and keep scanning rather than aborting the
-                // whole coverage read (which would falsely report "missing").
-                current.coverage_read_errors++;
-                continue;
-            }
-            current.coverage_records_read++;
-            if (record.state != ReportStoreCoverageState::Complete) continue;
-            if (record.parser_schema != parser_schema) continue;
-            if (record.start_ms <= covered_until +
-                                       AC_REPORT_COVERAGE_TOLERANCE_MS &&
-                record.end_ms > covered_until) {
-                covered_until = record.end_ms;
-                progressed = true;
-                if (covered_until + AC_REPORT_COVERAGE_TOLERANCE_MS >= end_ms) {
-                    file.close();
-                    missing_ms = end_ms;
-                    set_error(current.last_error, sizeof(current.last_error),
-                              "");
-                    return true;
-                }
-            }
-        }
-        file.close();
-        if (!progressed) break;
     }
-
-    missing_ms = covered_until;
+    missing_ms = covered_until < end_ms ? covered_until : end_ms;
     return true;
 }
 
