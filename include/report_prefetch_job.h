@@ -24,6 +24,7 @@ private:
     State state_ = State::Pick;
     uint32_t rescan_after_ms_ = 0;  // don't Pick again until this time
     uint32_t consec_fail_ = 0;      // consecutive failures -> circuit breaker
+    uint32_t last_summary_rev_ = 0; // rescan immediately when this changes
 };
 
 }  // namespace aircannect

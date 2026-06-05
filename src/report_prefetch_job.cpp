@@ -11,7 +11,14 @@ JobStep ReportPrefetchJob::step() {
     const ReportManager::PrefetchSnapshot snap = report_->prefetch_snapshot();
 
     switch (state_) {
-    case State::Pick:
+    case State::Pick: {
+        // A summary refresh (e.g. right after therapy stops) may include a new night,
+        // rescan immediately rather than waiting out the backoff.
+        const uint32_t summary_rev = report_->summary_status().revision;
+        if (summary_rev != last_summary_rev_) {
+            last_summary_rev_ = summary_rev;
+            rescan_after_ms_ = 0;
+        }
         // After the queue drained, back off before re-scanning coverage so we
         // don't hit the card every tick when there is nothing to fetch.
         if (rescan_after_ms_ != 0 &&
@@ -24,6 +31,7 @@ JobStep ReportPrefetchJob::step() {
         }
         state_ = State::Wait;
         return JobStep::Waiting;
+    }
 
     case State::Wait:
         if (snap.phase == ReportManager::PrefetchPhase::Pending ||

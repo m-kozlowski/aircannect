@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "board.h"
 #include "can_datagram.h"
 #include "debug_log.h"
 #include "storage_manager.h"
@@ -1486,14 +1487,6 @@ bool write_coverage(const char *source,
               static_cast<unsigned long>(record.source_hash));
     return true;
 }
-
-// Spool boundaries rarely line up to the millisecond with the Summary session
-// span (the device returns data ending a few seconds short, or rounds session
-// edges). Tolerate small gaps at stitch joints and at the final boundary so a
-// near-complete source is treated as covered and served from SD instead of
-// being re-spooled forever. Kept to seconds: a genuine interior gap (minutes)
-// still leaves covered_until far below end_ms and is NOT masked.
-constexpr int64_t AC_REPORT_COVERAGE_TOLERANCE_MS = 5000;
 
 bool coverage_complete(const char *source,
                        int64_t start_ms,

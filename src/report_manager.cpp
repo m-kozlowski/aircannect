@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "board.h"
 #include "debug_log.h"
 #include "json_util.h"
 #include "memory_manager.h"
@@ -16,15 +17,8 @@ namespace aircannect {
 namespace {
 
 const char *const REPORT_SUMMARY_FROM = "2000-01-01T00:00:00.000Z";
-constexpr size_t REPORT_PLOT_BUCKETS = 1200;
-// Gap between consecutive series chunks that marks a session boundary. The
-// coalescing writer flushes here and derive_result_session_ranges() splits
-// here; they must agree, or a coalesced chunk would span (and hide) a gap.
-constexpr int64_t AC_REPORT_SESSION_GAP_MS = 3LL * 60LL * 1000LL;
-constexpr size_t REPORT_PLOT_INITIAL_RESERVE = 256 * 1024;
 constexpr const char *REPORT_PLOT_CACHE_DIR = "/aircannect/report/v2/plots/v10";
 constexpr size_t REPORT_PLOT_PATH_MAX = 128;
-constexpr int64_t REPORT_LATEST_TAIL_OVERLAP_MS = 60000;
 
 struct ChunkWriteContext {
     ReportManager *manager = nullptr;
@@ -2014,13 +2008,13 @@ bool ReportManager::start_result_plot_build() {
 
     const int64_t span_ms = plot_end_ms_ - plot_start_ms_;
     plot_bucket_ms_ = std::max<int64_t>(
-        1, span_ms / static_cast<int64_t>(REPORT_PLOT_BUCKETS));
+        1, span_ms / static_cast<int64_t>(AC_REPORT_PLOT_BUCKETS));
     plot_build_bin_.clear();
     plot_build_bin_.set_max_size(768 * 1024);
     plot_tmp_.clear();
     plot_tmp_.set_max_size(128 * 1024);
     plot_bin_ok_ = true;
-    if (!plot_build_bin_.reserve_capacity(REPORT_PLOT_INITIAL_RESERVE)) {
+    if (!plot_build_bin_.reserve_capacity(AC_REPORT_PLOT_INITIAL_RESERVE)) {
         fail_result_prepare("plot_alloc_failed");
         return false;
     }
@@ -2165,8 +2159,8 @@ bool ReportManager::process_plot_series_chunk(const ReportResultChunk &chunk) {
         int64_t sample_bucket =
             (sample.timestamp_ms - plot_start_ms_) / plot_bucket_ms_;
         if (sample_bucket < 0) sample_bucket = 0;
-        if (sample_bucket >= static_cast<int64_t>(REPORT_PLOT_BUCKETS)) {
-            sample_bucket = static_cast<int64_t>(REPORT_PLOT_BUCKETS) - 1;
+        if (sample_bucket >= static_cast<int64_t>(AC_REPORT_PLOT_BUCKETS)) {
+            sample_bucket = static_cast<int64_t>(AC_REPORT_PLOT_BUCKETS) - 1;
         }
         if (plot_current_bucket_ != sample_bucket) {
             flush_plot_bucket();
@@ -2717,7 +2711,7 @@ bool ReportManager::build_cache_plan(const ReportSummaryRecord &night,
                                                    night,
                                                    cached_end_ms) &&
                 cached_end_ms > latest_tail_start_ms) {
-                from_ms = cached_end_ms - REPORT_LATEST_TAIL_OVERLAP_MS;
+                from_ms = cached_end_ms - AC_REPORT_LATEST_TAIL_OVERLAP_MS;
                 if (from_ms < latest_tail_start_ms) {
                     from_ms = latest_tail_start_ms;
                 }

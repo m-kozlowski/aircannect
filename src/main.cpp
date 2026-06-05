@@ -215,6 +215,18 @@ void setup() {
                     ota_manager);
 }
 
+// On the therapy-stop edge, refresh the night index so the idle background backfills it
+static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
+                                            ReportManager &report) {
+    static As11TherapyState last_state = As11TherapyState::Unknown;
+    const As11TherapyState state = arbiter.as11_state().therapy_state();
+    if (last_state == As11TherapyState::Running &&
+        state != As11TherapyState::Running) {
+        report.request_summary_refresh();
+    }
+    last_state = state;
+}
+
 void loop() {
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
@@ -228,6 +240,7 @@ void loop() {
     // First drain handles events produced by CAN/RPC/OTA work before services
     // that depend on fresh state run below.
     drain_rpc_events();
+    refresh_summary_on_therapy_stop(rpc_arbiter, report_manager);
     session_manager.poll(rpc_arbiter.as11_state(), millis());
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
