@@ -446,11 +446,223 @@
       border: 1px solid #743040;
     }
 
+    /* Report status renders as a compact pill next to the top-bar title, so it
+       never resizes the report card or shifts the charts. Background/border and
+       colors come from .msg.ok / .msg.err. */
+    #reportMsg.ok,
+    #reportMsg.err {
+      display: inline-block;
+      margin: 0 0 0 12px;
+      padding: 3px 9px;
+      font-size: 12px;
+      max-width: 46vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+
     .section-title {
       font-size: 13px;
       color: var(--blue);
       text-transform: uppercase;
       margin: 18px 0 8px;
+    }
+
+    .report-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .report-actions select {
+      min-width: 260px;
+    }
+
+    .report-night {
+      display: grid;
+      grid-template-columns: minmax(130px, 1fr) auto auto;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid #ffffff08;
+    }
+
+    .report-night:last-child {
+      border-bottom: 0;
+    }
+
+    .report-sessions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 0;
+    }
+
+    .report-session {
+      border: 1px solid #0f766e;
+      background: #0f766e33;
+      color: var(--accent);
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .report-session.toggle {
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .report-session.hidden {
+      border-color: #3a3f4b;
+      background: transparent;
+      color: var(--muted);
+      text-decoration: line-through;
+      opacity: 0.6;
+    }
+
+    .report-charts {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .report-chart {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--card);
+      padding: 12px;
+      min-width: 0;
+    }
+
+    .report-chart canvas,
+    .report-chart svg {
+      width: 100%;
+      height: 210px;
+      display: block;
+      background: #080a0f;
+      border: 1px solid #202837;
+      margin-top: 8px;
+      cursor: crosshair;
+    }
+
+    .report-chart-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .report-chart-title .value {
+      color: var(--text);
+    }
+
+    .report-chart-title .readout {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+      font-family: "SF Mono", Consolas, monospace;
+    }
+
+    /* Placeholder for a signal with no data (high-res aged out, or backfilling). */
+    .report-chart-empty {
+      opacity: 0.6;
+    }
+    .report-chart-note {
+      color: var(--muted);
+      font-style: italic;
+      padding: 4px 0;
+    }
+
+    /* Badge marking a chart drawn from the low-res 1-minute trend (high-res
+       aged out for this night). */
+    .report-res-badge {
+      margin-left: 8px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: #3a2e12;
+      color: #f0b760;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    /* Compact report metric strip: therapy time, AHI, event breakdown. */
+    .report-metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .report-metric {
+      border: 1px solid #30364166;
+      border-radius: 6px;
+      padding: 6px 12px;
+      background: #10111466;
+    }
+
+    .report-metric-value {
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.15;
+    }
+
+    .report-metric-label {
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 5px;
+    }
+
+    .report-metric-events {
+      flex: 1 1 240px;
+    }
+
+    /* Fixed width so AHI up to NNN.NN never resizes the box / shifts layout. */
+    .report-metric-ahi {
+      min-width: 84px;
+    }
+
+    .report-metric-ahi .report-metric-value {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .report-events {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      min-height: 22px;
+    }
+
+    .report-events .evt {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      background: #1E293B;
+      border-radius: 5px;
+      padding: 12px;
+    }
+
+    .report-events .evt b {
+      color: var(--text);
+      font-weight: 700;
+      margin-left: 3px;
+    }
+
+    .report-legend-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 4px;
+      vertical-align: middle;
     }
 
     .sensor-device {
@@ -715,6 +927,9 @@
         <a class="nav active" data-tab="dash">
           <span class="ico">&#9878;</span>Dashboard
         </a>
+        <a class="nav" data-tab="report">
+          <span class="ico">&#9638;</span>Report
+        </a>
         <a class="nav" data-tab="clinical">
           <span class="ico">&#9881;</span>Clinical
         </a>
@@ -740,6 +955,7 @@
       <div class="topbar">
         <div>
           <span id="title">Dashboard</span>
+          <span class="msg" id="reportMsg"></span>
         </div>
         <div class="right">
           <span id="uptime">Up: --</span>
@@ -939,6 +1155,40 @@
               <canvas class="live-chart" id="chartPulseCanvas"></canvas>
             </div>
           </div>
+        </section>
+
+        <section class="pane" id="p-report">
+          <div class="card">
+            <h3>Therapy Report</h3>
+            <div class="report-actions">
+              <select id="reportNight"></select>
+              <button class="btn" onclick="refreshReportSummary(true)">
+                Refresh Summary
+              </button>
+              <button class="btn" onclick="loadSelectedReportNight(true, true)">
+                Reload Night
+              </button>
+              <button class="btn" onclick="resetReportZoom()">
+                Reset Zoom
+              </button>
+            </div>
+            <div class="report-metrics">
+              <div class="report-metric">
+                <div class="report-metric-label">Therapy Time</div>
+                <div class="report-metric-value" id="reportDuration">--</div>
+              </div>
+              <div class="report-metric report-metric-ahi">
+                <div class="report-metric-label">AHI</div>
+                <div class="report-metric-value" id="reportAhi">--</div>
+              </div>
+              <div class="report-metric report-metric-events">
+                <div class="report-metric-label">Events</div>
+                <div class="report-events" id="reportEventCounts"></div>
+              </div>
+            </div>
+            <div class="report-sessions" id="reportSessions"></div>
+          </div>
+          <div id="reportCharts" class="report-charts"></div>
         </section>
 
         <section class="pane" id="p-oxi">
@@ -1285,9 +1535,84 @@
       leak: {min: 0, max: 20, step: 5},
       therapyPressure: {min: 0, max: 15, step: 5},
     };
+    let reportSummary = null;
+    let reportPollTimer = null;
+    let reportLoadToken = 0;
+    let reportLoadedId = "";
+    let reportResult = null;
+    let reportSeries = {};
+    let reportEvents = [];
+    // Non-persistent per-view set of hidden session start timestamps. Cleared
+    // whenever a different night loads; toggling re-ranges the charts.
+    const reportHiddenSessions = new Set();
+    let reportDrawItems = [];
+    let reportDrawPending = false;
+    let reportDrawRetryCount = 0;
+    let reportResizeObserver = null;
+    const reportClientCache = new Map();
+    let reportZoom = null;        // {start,end} when drag-zoomed, else null
+    let reportHoverTime = null;   // cursor time shared across all charts
+    let reportDrag = null;        // active drag-to-zoom selection state
+
+    const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
+    const REPORT_CLIENT_CACHE_MAX = 4;
+    const reportChartDefs = [
+      {key: "flow", title: "Flow", color: "#8b5cf6", unit: "L/min"},
+      {
+        key: "pressure",
+        title: "Pressure",
+        unit: "cmH2O",
+        series: [
+          {key: "inspiratory_pressure", label: "IPAP", color: "#22c55e"},
+          {key: "expiratory_pressure", label: "EPAP", color: "#f97316"},
+        ],
+      },
+      {key: "leak", title: "Leak", color: "#fb923c", unit: "L/min"},
+      {
+        key: "minute_ventilation",
+        title: "Minute Vent",
+        color: "#a78bfa",
+        unit: "L/min",
+      },
+      {
+        key: "mask_pressure",
+        title: "Mask Pressure",
+        color: "#22d3ee",
+        unit: "cmH2O",
+      },
+      {
+        key: "inspiratory_duration",
+        title: "Insp. Duration",
+        color: "#f59e0b",
+        unit: "s",
+      },
+      {
+        key: "respiratory_rate",
+        title: "Resp. Rate",
+        color: "#06b6d4",
+        unit: "/min",
+      },
+      {key: "ie_ratio", title: "I:E", color: "#f43f5e", unit: ""},
+    ];
+    const reportEventDefs = [
+      {code: 3, key: "CA", label: "Central Apnea", color: "#d946ef"},
+      {code: 4, key: "OA", label: "Obstructive Apnea", color: "#22d3ee"},
+      {code: 5, key: "UA", label: "Apnea", color: "#a78bfa"},
+      {code: 2, key: "H", label: "Hypopnea", color: "#fb923c"},
+      {code: 6, key: "Ar", label: "Arousal", color: "#cbd5e1"},
+    ];
+    // Maps the events metric chips to the count fields in the result JSON.
+    const reportEventCountFields = [
+      {key: "CA", field: "ca_count"},
+      {key: "OA", field: "oa_count"},
+      {key: "UA", field: "ua_count"},
+      {key: "H", field: "hypopnea_count"},
+      {key: "Ar", field: "arousal_count"},
+    ];
 
     const tabs = {
       dash: "Dashboard",
+      report: "Report",
       clinical: "Clinical",
       oxi: "Oximetry",
       wifi: "WiFi",
@@ -1312,6 +1637,10 @@
       location.hash = id;
 
       if (id === "dash") loadStatus();
+      if (id === "report") {
+        loadReportSummary(true);
+        scheduleReportDrawAfterReveal();
+      }
       if (id === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -1331,9 +1660,15 @@
       return !!pane && pane.classList.contains("active");
     }
 
+    function reportTabActive() {
+      const pane = document.getElementById("p-report");
+      return !!pane && pane.classList.contains("active");
+    }
+
     function refreshActive() {
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       if (pane === "dash") loadStatus();
+      if (pane === "report") refreshReportSummary(true);
       if (pane === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -1419,6 +1754,1186 @@
       const hours = Math.floor(value / 3600);
       const minutes = Math.ceil((value - hours * 3600) / 60);
       return hours + "h " + minutes + "m";
+    }
+
+    function fmtMinutes(minutes) {
+      const value = Number(minutes);
+      if (!Number.isFinite(value) || value <= 0) return "--";
+      const hours = Math.floor(value / 60);
+      const mins = value - hours * 60;
+      if (!hours) return mins + "m";
+      return hours + "h" + (mins ? " " + mins + "m" : "");
+    }
+
+    function fmtReportDate(ms) {
+      const date = new Date(Number(ms));
+      if (Number.isNaN(date.getTime())) return "--";
+      return date.getFullYear() + "-" +
+        pad2(date.getMonth() + 1) + "-" +
+        pad2(date.getDate());
+    }
+
+    function reportNightsNewestFirst() {
+      const nights = reportSummary && Array.isArray(reportSummary.nights) ?
+        reportSummary.nights.slice() : [];
+      nights.sort((a, b) => Number(b.start || 0) - Number(a.start || 0));
+      return nights;
+    }
+
+    function selectedReportNight() {
+      const select = document.getElementById("reportNight");
+      const id = select && select.value ? select.value : "";
+      return reportNightsNewestFirst().find((night) => String(night.id) === id) ||
+        null;
+    }
+
+    function reportTherapyIndex(night) {
+      if (!night) return null;
+      const value = Number(night.therapy_index);
+      return Number.isInteger(value) && value >= 0 ? value : null;
+    }
+
+    function fmtReportTime(ms) {
+      const date = new Date(Number(ms));
+      if (Number.isNaN(date.getTime())) return "--";
+      return pad2(date.getHours()) + ":" + pad2(date.getMinutes());
+    }
+
+    function renderReportSessions(sessions) {
+      const container = document.getElementById("reportSessions");
+      if (!container) return;
+      container.textContent = "";
+      if (!Array.isArray(sessions) || !sessions.length) return;
+      const toggleable = sessions.length > 1;
+      sessions.forEach((session) => {
+        const item = document.createElement("span");
+        item.className = "report-session";
+        const start = Number(session.start || 0);
+        const minutes = Number(session.duration_min || 0);
+        const end = start + minutes * 60000;
+        item.textContent = fmtReportTime(start) + "-" + fmtReportTime(end) +
+          " " + fmtMinutes(minutes);
+        if (toggleable) {
+          item.classList.add("toggle");
+          if (reportHiddenSessions.has(start)) item.classList.add("hidden");
+          item.onclick = () => {
+            if (reportHiddenSessions.has(start)) {
+              reportHiddenSessions.delete(start);
+            } else {
+              reportHiddenSessions.add(start);
+            }
+            renderReportSessions(sessions);
+            renderReportCharts();
+          };
+        }
+        container.appendChild(item);
+      });
+    }
+
+    function renderReportEventCounts(result) {
+      const container = document.getElementById("reportEventCounts");
+      if (!container) return;
+      container.textContent = "";
+      reportEventCountFields.forEach((item) => {
+        const count = result ? Number(result[item.field] || 0) : 0;
+        const chip = document.createElement("span");
+        chip.className = "evt";
+        chip.appendChild(document.createTextNode(item.key));
+        const value = document.createElement("b");
+        value.textContent = String(count);
+        chip.appendChild(value);
+        container.appendChild(chip);
+      });
+    }
+
+    function resetReportData() {
+      disconnectReportResizeObserver();
+      reportHiddenSessions.clear();
+      reportZoom = null;
+      reportHoverTime = null;
+      reportDrag = null;
+      reportResult = null;
+      reportSeries = {};
+      reportEvents = [];
+      reportDrawItems = [];
+      reportDrawPending = false;
+      reportDrawRetryCount = 0;
+      const charts = document.getElementById("reportCharts");
+      if (charts) charts.textContent = "";
+    }
+
+    function reportNightCacheKey(night) {
+      if (!night) return "";
+      const sessions = Array.isArray(night.sessions) ? night.sessions.length : 0;
+      return [
+        String(night.id || night.start || ""),
+        Number(night.duration_min || 0),
+        Number(night.session_count || sessions),
+      ].join(":");
+    }
+
+    // Global data epoch from the summary; bumps whenever any chunk is written.
+    // Used to drop a client-cached plot after a background backfill lands.
+    function reportDataEpoch() {
+      return Number((reportSummary && reportSummary.data_epoch) || 0);
+    }
+
+    function cloneReportSeries(series) {
+      const copy = {};
+      Object.keys(series || {}).forEach((key) => {
+        copy[key] = (series[key] || []).map((point) => ({
+          t: point.t,
+          value: point.value,
+        }));
+      });
+      return copy;
+    }
+
+    function cloneReportEvents(events) {
+      return (events || []).map((event) => ({
+        t: event.t,
+        duration: event.duration,
+        code: event.code,
+        flags: event.flags,
+      }));
+    }
+
+    function cloneReportResult(result) {
+      return result ? JSON.parse(JSON.stringify(result)) : null;
+    }
+
+    function rememberReportClientCache(night) {
+      const key = reportNightCacheKey(night);
+      if (!key || !reportResult || reportResult.state !== "ready") return;
+      reportClientCache.set(key, {
+        result: cloneReportResult(reportResult),
+        series: cloneReportSeries(reportSeries),
+        events: cloneReportEvents(reportEvents),
+        epoch: reportDataEpoch(),
+      });
+      while (reportClientCache.size > REPORT_CLIENT_CACHE_MAX) {
+        const oldest = reportClientCache.keys().next().value;
+        reportClientCache.delete(oldest);
+      }
+    }
+
+    function restoreReportClientCache(night) {
+      const key = reportNightCacheKey(night);
+      const cached = key ? reportClientCache.get(key) : null;
+      if (!cached) return false;
+      if (Number(cached.epoch || 0) !== reportDataEpoch()) {
+        reportClientCache.delete(key);
+        return false;
+      }
+      reportHiddenSessions.clear();
+      reportResult = cloneReportResult(cached.result);
+      reportSeries = cloneReportSeries(cached.series);
+      reportEvents = cloneReportEvents(cached.events);
+      reportLoadedId = String(night.id);
+      renderReportSummary();
+      renderReportCharts();
+      msg("reportMsg", "Report loaded", true);
+      return true;
+    }
+
+    function reportRange() {
+      const ranges = reportVisibleSessionRanges();
+      let start = Infinity;
+      let end = -Infinity;
+      ranges.forEach((range) => {
+        start = Math.min(start, range.start);
+        end = Math.max(end, range.end);
+      });
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        start = Number(reportResult && reportResult.start || 0);
+        end = Number(reportResult && reportResult.end || 0);
+      }
+      return {start, end};
+    }
+
+    function reportSessionRanges() {
+      const sessions = reportResult && Array.isArray(reportResult.sessions) ?
+        reportResult.sessions : [];
+      return sessions.map((session) => {
+        const start = Number(session.start || 0);
+        const minutes = Number(session.duration_min || 0);
+        return {
+          start,
+          end: start + minutes * 60000,
+        };
+      }).filter((range) => range.start > 0 && range.end > range.start)
+        .sort((a, b) => a.start - b.start);
+    }
+
+    // Session ranges minus any toggled-off sessions. If every session is
+    // hidden, fall back to all of them so the view is never stranded blank.
+    function reportVisibleSessionRanges() {
+      const all = reportSessionRanges();
+      if (!reportHiddenSessions.size) return all;
+      const visible = all.filter(
+        (range) => !reportHiddenSessions.has(range.start));
+      return visible.length ? visible : all;
+    }
+
+    function reportPointRangeIndex(t, ranges) {
+      if (!Array.isArray(ranges) || !ranges.length) return 0;
+      for (let i = 0; i < ranges.length; i++) {
+        if (t >= ranges[i].start && t <= ranges[i].end) return i;
+      }
+      return -1;
+    }
+
+    function reportSeriesExtent(seriesList) {
+      let min = Infinity;
+      let max = -Infinity;
+      seriesList.forEach((series) => {
+        series.forEach((point) => {
+          if (!Number.isFinite(point.value)) return;
+          min = Math.min(min, point.value);
+          max = Math.max(max, point.value);
+        });
+      });
+      if (!Number.isFinite(min) || !Number.isFinite(max)) {
+        return {min: 0, max: 1};
+      }
+      if (min === max) {
+        min -= 1;
+        max += 1;
+      }
+      const pad = Math.max(0.5, (max - min) * 0.08);
+      return {min: min - pad, max: max + pad};
+    }
+
+    function disconnectReportResizeObserver() {
+      if (!reportResizeObserver) return;
+      reportResizeObserver.disconnect();
+      reportResizeObserver = null;
+    }
+
+    function observeReportCanvas(canvas) {
+      if (!canvas || typeof ResizeObserver !== "function") return;
+      if (!reportResizeObserver) {
+        reportResizeObserver = new ResizeObserver(() => {
+          scheduleReportDraw();
+        });
+      }
+      reportResizeObserver.observe(canvas);
+    }
+
+    function reportVisibleWidthFallback(canvas) {
+      let node = canvas ? canvas.parentElement : null;
+      while (node) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width > 24) return rect.width - 24;
+        if (node.id === "p-report") break;
+        node = node.parentElement;
+      }
+      const host = document.getElementById("reportCharts");
+      return host ? host.clientWidth - 24 : 0;
+    }
+
+    function reportSvgBox(svg, fallbackHeight) {
+      const rect = svg.getBoundingClientRect();
+      const parentRect = svg.parentElement
+        ? svg.parentElement.getBoundingClientRect()
+        : {width: 0};
+      const cssHeight = parseFloat(getComputedStyle(svg).height);
+      let measuredWidth = rect.width || svg.clientWidth ||
+        Math.max(0, parentRect.width - 24) ||
+        reportVisibleWidthFallback(svg);
+      // Firefox often has no laid-out width on the first paint after the tab is
+      // revealed and never re-fires ResizeObserver for display:none -> shown, so
+      // the chart could stay blank until a manual resize. The SVG uses viewBox +
+      // preserveAspectRatio="none", so a logical fallback width is stretched to
+      // the real CSS width and renders correctly; a later resize/redraw refines
+      // the coordinate resolution. Only force a width while the tab is visible.
+      if (measuredWidth <= 0 && reportTabActive()) measuredWidth = 800;
+      if (measuredWidth <= 0) return null;
+      const width = Math.max(320, Math.floor(measuredWidth || 0));
+      const height = Math.max(80,
+        Math.floor(rect.height || svg.clientHeight || cssHeight ||
+          fallbackHeight));
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      svg.setAttribute("preserveAspectRatio", "none");
+      return {width, height};
+    }
+
+    function svgNode(name, attrs) {
+      const node = document.createElementNS(SVG_NS, name);
+      Object.keys(attrs || {}).forEach((key) => {
+        node.setAttribute(key, attrs[key]);
+      });
+      return node;
+    }
+
+    function svgText(text, x, y, attrs) {
+      const node = svgNode("text", Object.assign({
+        x: x.toFixed(1),
+        y: y.toFixed(1),
+        fill: "#69717f",
+        "font-size": "10",
+        "font-family": "SF Mono, Consolas, monospace",
+      }, attrs || {}));
+      node.textContent = text;
+      return node;
+    }
+
+    function clearReportSvg(svg, width, height) {
+      svg.textContent = "";
+      svg.appendChild(svgNode("rect", {
+        x: "0",
+        y: "0",
+        width: String(width),
+        height: String(height),
+        fill: "#080a0f",
+      }));
+    }
+
+    function reportTimeTickCount(graphW) {
+      return Math.max(4, Math.min(12, Math.round(graphW / 110)));
+    }
+
+    // Vertical gridlines + time labels along the x-axis, shared by every chart
+    // so they line up. Drawn before the data so traces/marks sit on top.
+    function drawReportTimeAxis(svg, pad, graphW, graphH, height, start, end) {
+      const ticks = reportTimeTickCount(graphW);
+      for (let i = 0; i <= ticks; i++) {
+        const frac = i / ticks;
+        const x = pad.left + graphW * frac;
+        svg.appendChild(svgNode("line", {
+          x1: x.toFixed(1),
+          y1: String(pad.top),
+          x2: x.toFixed(1),
+          y2: (pad.top + graphH).toFixed(1),
+          stroke: "#1f2633",
+          "stroke-width": "1",
+          "stroke-dasharray": "2 5",
+        }));
+        svg.appendChild(svgText(fmtReportTime(start + (end - start) * frac),
+          x, height - 5, {"text-anchor": "middle"}));
+      }
+    }
+
+    function drawReportChart(svg, seriesList, minY, maxY, start, end, ranges) {
+      const box = reportSvgBox(svg, 150);
+      if (!box) return false;
+      const {width, height} = box;
+      clearReportSvg(svg, width, height);
+
+      const pad = {left: 44, right: 10, top: 12, bottom: 20};
+      const graphW = width - pad.left - pad.right;
+      const graphH = height - pad.top - pad.bottom;
+
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.top + graphH * (i / 4);
+        svg.appendChild(svgNode("line", {
+          x1: String(pad.left),
+          y1: y.toFixed(1),
+          x2: String(width - pad.right),
+          y2: y.toFixed(1),
+          stroke: "#1f2633",
+          "stroke-width": "1",
+          "stroke-dasharray": "2 5",
+        }));
+      }
+
+      for (let i = 0; i <= 4; i++) {
+        const value = maxY - (maxY - minY) * (i / 4);
+        const label = Math.abs(value) >= 10 ? value.toFixed(0) :
+          value.toFixed(1);
+        svg.appendChild(svgText(label, pad.left - 6,
+          pad.top + graphH * (i / 4) + 3, {"text-anchor": "end"}));
+      }
+
+      drawReportTimeAxis(svg, pad, graphW, graphH, height, start, end);
+
+      seriesList.forEach((series) => {
+        const points = Array.isArray(series.points) ? series.points : [];
+        if (points.length < 2) return;
+        const parts = [];
+        let started = false;
+        let currentRange = -1;
+        points.forEach((point) => {
+          if (!Number.isFinite(point.t) || !Number.isFinite(point.value) ||
+              point.t < start || point.t > end) {
+            started = false;
+            currentRange = -1;
+            return;
+          }
+          const rangeIndex = reportPointRangeIndex(point.t, ranges);
+          if (rangeIndex < 0) {
+            started = false;
+            currentRange = -1;
+            return;
+          }
+          if (rangeIndex !== currentRange) {
+            started = false;
+            currentRange = rangeIndex;
+          }
+          const x = pad.left + graphW * ((point.t - start) / (end - start));
+          const y = pad.top + graphH *
+            (1 - (point.value - minY) / (maxY - minY));
+          parts.push((started ? "L" : "M") + x.toFixed(1) + " " +
+            y.toFixed(1));
+          started = true;
+        });
+        if (!parts.length) return;
+        svg.appendChild(svgNode("path", {
+          d: parts.join(" "),
+          fill: "none",
+          stroke: series.color,
+          "stroke-width": "1.5",
+          "vector-effect": "non-scaling-stroke",
+        }));
+      });
+      svg._geom = {pad, graphW, width, height};
+      const cursor = svgNode("line", {
+        x1: "0", x2: "0",
+        y1: String(pad.top), y2: (pad.top + graphH).toFixed(1),
+        stroke: "#7c8595", "stroke-width": "1", "stroke-dasharray": "3 3",
+        "pointer-events": "none", visibility: "hidden",
+      });
+      svg.appendChild(cursor);
+      svg._cursor = cursor;
+      return true;
+    }
+
+    function drawReportEventFlags(svg, events, start, end, ranges) {
+      const box = reportSvgBox(svg, 120);
+      if (!box) return false;
+      const {width, height} = box;
+      clearReportSvg(svg, width, height);
+
+      const pad = {left: 44, right: 10, top: 10, bottom: 18};
+      const graphW = width - pad.left - pad.right;
+      const graphH = height - pad.top - pad.bottom;
+      const rowH = graphH / reportEventDefs.length;
+
+      reportEventDefs.forEach((def, row) => {
+        const y = pad.top + rowH * row;
+        svg.appendChild(svgNode("rect", {
+          x: String(pad.left),
+          y: y.toFixed(1),
+          width: graphW.toFixed(1),
+          height: rowH.toFixed(1),
+          fill: row % 2 ? "#0b1010" : "#0b140f",
+        }));
+        svg.appendChild(svgText(def.key, pad.left - 8,
+          y + rowH * 0.65, {
+            fill: "#9aa7bd",
+            "text-anchor": "end",
+          }));
+      });
+
+      drawReportTimeAxis(svg, pad, graphW, graphH, height, start, end);
+
+      events.forEach((event) => {
+        const def = reportEventDefs.find((item) => item.code === event.code);
+        if (!def || event.t < start || event.t > end) return;
+        if (reportPointRangeIndex(event.t, ranges) < 0) return;
+        const row = reportEventDefs.indexOf(def);
+        const x = pad.left + graphW * ((event.t - start) / (end - start));
+        const y = pad.top + rowH * row + 2;
+        const duration = Math.max(0, Number(event.duration || 0));
+        const w = Math.max(2, graphW * (duration / (end - start)));
+        svg.appendChild(svgNode("rect", {
+          x: x.toFixed(1),
+          y: y.toFixed(1),
+          width: w.toFixed(1),
+          height: Math.max(2, rowH - 4).toFixed(1),
+          fill: def.color,
+        }));
+      });
+      svg._geom = {pad, graphW, width, height};
+      const cursor = svgNode("line", {
+        x1: "0", x2: "0",
+        y1: String(pad.top), y2: (pad.top + graphH).toFixed(1),
+        stroke: "#7c8595", "stroke-width": "1", "stroke-dasharray": "3 3",
+        "pointer-events": "none", visibility: "hidden",
+      });
+      svg.appendChild(cursor);
+      svg._cursor = cursor;
+      return true;
+    }
+
+    function fmtReportClock(ms) {
+      const d = new Date(Number(ms));
+      if (Number.isNaN(d.getTime())) return "--";
+      return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
+        pad2(d.getSeconds());
+    }
+
+    function fmtReportVal(v) {
+      if (!Number.isFinite(v)) return "--";
+      return Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+    }
+
+    // Nearest point to time t (points sorted ascending). Returns null if the
+    // closest sample is too far away (i.e. the cursor sits in a data gap).
+    function nearestSeriesValue(points, t) {
+      if (!points || !points.length) return null;
+      let lo = 0;
+      let hi = points.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (points[mid].t < t) lo = mid + 1; else hi = mid;
+      }
+      let best = points[lo];
+      if (lo > 0 && Math.abs(points[lo - 1].t - t) < Math.abs(best.t - t)) {
+        best = points[lo - 1];
+      }
+      if (Math.abs(best.t - t) > 120000) return null;
+      return best.value;
+    }
+
+    // Mouse clientX over a chart svg -> time within its range (viewBox is
+    // stretched to the CSS width via preserveAspectRatio=none).
+    function reportCanvasTime(canvas, clientX) {
+      const g = canvas._geom;
+      const it = canvas._item;
+      if (!g || !it || !g.graphW) return null;
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || it.end <= it.start) return null;
+      const logicalX = ((clientX - rect.left) / rect.width) * g.width;
+      const frac = (logicalX - g.pad.left) / g.graphW;
+      const t = it.start + frac * (it.end - it.start);
+      return Math.max(it.start, Math.min(it.end, t));
+    }
+
+    function reportReadoutText(item, t) {
+      if (item.type === "events") return fmtReportClock(t);
+      const parts = [];
+      (item.seriesList || []).forEach((s) => {
+        const v = nearestSeriesValue(s.points, t);
+        if (v != null) parts.push(s.label + " " + fmtReportVal(v));
+      });
+      return parts.join("   ");
+    }
+
+    function reportTimeToX(canvas, t) {
+      const g = canvas._geom;
+      const it = canvas._item;
+      return g.pad.left + g.graphW * ((t - it.start) / (it.end - it.start));
+    }
+
+    // Item 6: one cursor time, drawn on every chart, with each header showing
+    // that chart's value at the cursor.
+    function updateReportHover() {
+      reportDrawItems.forEach((item) => {
+        const canvas = item.canvas;
+        if (!canvas || !canvas._geom || !canvas._cursor) return;
+        const t = reportHoverTime;
+        const inRange = t != null && t >= item.start && t <= item.end;
+        if (!inRange) {
+          canvas._cursor.setAttribute("visibility", "hidden");
+          if (canvas._readout) canvas._readout.textContent = "";
+          return;
+        }
+        const x = reportTimeToX(canvas, t);
+        canvas._cursor.setAttribute("x1", x.toFixed(1));
+        canvas._cursor.setAttribute("x2", x.toFixed(1));
+        canvas._cursor.setAttribute("visibility", "visible");
+        if (canvas._readout) {
+          canvas._readout.textContent = reportReadoutText(item, t);
+        }
+      });
+    }
+
+    function reportClearDragRect() {
+      if (reportDrag && reportDrag.rect && reportDrag.rect.parentNode) {
+        reportDrag.rect.parentNode.removeChild(reportDrag.rect);
+      }
+    }
+
+    // Item 7: drag a range on any chart to zoom every chart to it.
+    function reportFinishDrag() {
+      if (!reportDrag) return;
+      const drag = reportDrag;
+      reportClearDragRect();
+      reportDrag = null;
+      const lo = Math.min(drag.t0, drag.t1);
+      const hi = Math.max(drag.t0, drag.t1);
+      if (hi - lo > 60000) {
+        reportZoom = {start: lo, end: hi};
+        renderReportCharts();
+      }
+    }
+    document.addEventListener("mouseup", reportFinishDrag);
+
+    function resetReportZoom() {
+      if (!reportZoom) return;
+      reportZoom = null;
+      renderReportCharts();
+    }
+
+    function attachReportChartPointer(canvas) {
+      canvas.addEventListener("mousemove", (ev) => {
+        const t = reportCanvasTime(canvas, ev.clientX);
+        if (t == null) return;
+        if (reportDrag) {
+          if (reportDrag.canvas !== canvas || !canvas._geom) return;
+          const g = canvas._geom;
+          const x = reportTimeToX(canvas, t);
+          if (!reportDrag.rect) {
+            reportDrag.rect = svgNode("rect", {
+              y: String(g.pad.top),
+              fill: "#8b5cf633",
+              stroke: "#8b5cf6",
+              "stroke-width": "1",
+              "pointer-events": "none",
+            });
+            canvas.appendChild(reportDrag.rect);
+          }
+          reportDrag.rect.setAttribute("x",
+            Math.min(x, reportDrag.x0).toFixed(1));
+          reportDrag.rect.setAttribute("width",
+            Math.abs(x - reportDrag.x0).toFixed(1));
+          reportDrag.rect.setAttribute("height",
+            (g.height - g.pad.top - g.pad.bottom).toFixed(1));
+          reportDrag.t1 = t;
+          return;
+        }
+        reportHoverTime = t;
+        updateReportHover();
+      });
+      canvas.addEventListener("mouseleave", () => {
+        if (reportDrag) return;
+        reportHoverTime = null;
+        updateReportHover();
+      });
+      canvas.addEventListener("mousedown", (ev) => {
+        const t = reportCanvasTime(canvas, ev.clientX);
+        if (t == null || !canvas._geom) return;
+        ev.preventDefault();
+        reportDrag = {canvas, t0: t, t1: t, x0: reportTimeToX(canvas, t),
+                      rect: null};
+        reportHoverTime = null;
+        updateReportHover();
+      });
+    }
+
+    function drawReportItems() {
+      reportDrawPending = false;
+      let retry = false;
+      reportDrawItems.forEach((item) => {
+        if (!item || !item.canvas ||
+            !document.body.contains(item.canvas)) {
+          return;
+        }
+        if (item.type === "events") {
+          retry = !drawReportEventFlags(item.canvas, item.events, item.start,
+                                        item.end, item.ranges) || retry;
+        } else {
+          retry = !drawReportChart(item.canvas,
+                                   item.seriesList,
+                                   item.minY,
+                                   item.maxY,
+                                   item.start,
+                                   item.end,
+                                   item.ranges) || retry;
+        }
+      });
+      updateReportHover();
+      if (retry && reportTabActive()) {
+        reportDrawRetryCount++;
+        setTimeout(() => scheduleReportDraw(), 50);
+      } else if (!retry) {
+        reportDrawRetryCount = 0;
+      }
+    }
+
+    function scheduleReportDraw() {
+      if (!reportDrawItems.length || reportDrawPending) return;
+      reportDrawPending = true;
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(drawReportItems);
+      } else {
+        setTimeout(drawReportItems, 0);
+      }
+    }
+
+    function scheduleReportDrawAfterReveal() {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => scheduleReportDraw());
+      } else {
+        setTimeout(() => scheduleReportDraw(), 0);
+      }
+    }
+
+    function renderReportEventFlags(container, range, ranges) {
+      if (!reportEvents.length) return;
+      const card = document.createElement("div");
+      card.className = "report-chart";
+      const title = document.createElement("div");
+      title.className = "report-chart-title";
+      const name = document.createElement("span");
+      name.textContent = "Event Flags";
+      title.appendChild(name);
+      const readout = document.createElement("span");
+      readout.className = "readout";
+      title.appendChild(readout);
+      const legend = document.createElement("span");
+      legend.className = "value";
+      reportEventDefs.forEach((def) => {
+        const tag = document.createElement("span");
+        tag.style.marginLeft = "10px";
+        const dot = document.createElement("span");
+        dot.className = "report-legend-dot";
+        dot.style.background = def.color;
+        tag.appendChild(dot);
+        tag.appendChild(document.createTextNode(def.key));
+        legend.appendChild(tag);
+      });
+      title.appendChild(legend);
+      card.appendChild(title);
+      const canvas = document.createElementNS(SVG_NS, "svg");
+      canvas.style.height = "120px";
+      card.appendChild(canvas);
+      container.appendChild(card);
+      const item = {
+        type: "events",
+        canvas,
+        events: reportEvents.slice(),
+        start: range.start,
+        end: range.end,
+        ranges: ranges,
+      };
+      reportDrawItems.push(item);
+      canvas._item = item;
+      canvas._readout = readout;
+      attachReportChartPointer(canvas);
+      observeReportCanvas(canvas);
+    }
+
+    function renderReportCharts() {
+      const container = document.getElementById("reportCharts");
+      if (!container) return;
+      disconnectReportResizeObserver();
+      container.textContent = "";
+      reportDrawItems = [];
+      reportDrawPending = false;
+      reportDrawRetryCount = 0;
+      if (!reportResult || reportResult.state !== "ready") {
+        if (reportResult && reportResult.state === "incomplete") {
+          const note = document.createElement("div");
+          note.className = "report-chart-note";
+          note.textContent =
+            "Backfilling this night - charts will appear once cached.";
+          container.appendChild(note);
+        }
+        return;
+      }
+      const range = reportZoom || reportRange();
+      if (!(range.end > range.start)) return;
+      const sessionRanges = reportVisibleSessionRanges();
+
+      // Map each signal name -> whether it fell back to the low-res 1-min trend
+      // (high-res aged out); used to badge the affected charts.
+      const lowResByName = {};
+      (reportResult.stream_details || []).forEach((s) => {
+        if (s && s.name) lowResByName[s.name] = !!s.low_res;
+      });
+
+      renderReportEventFlags(container, range, sessionRanges);
+
+      reportChartDefs.forEach((def) => {
+        const seriesDefs = def.series || [def];
+        const seriesList = seriesDefs.map((seriesDef) => ({
+          label: seriesDef.label || def.title,
+          color: seriesDef.color || def.color,
+          points: (reportSeries[seriesDef.key] || []).slice()
+            .sort((a, b) => a.t - b.t),
+        })).filter((series) => series.points.length > 0);
+        if (!seriesList.length) {
+          // Expected signal with no data: high-res aged out on the device
+          // (best-effort night) or not yet backfilled. Show a labelled
+          // placeholder instead of silently dropping the chart.
+          const card = document.createElement("div");
+          card.className = "report-chart report-chart-empty";
+          const ctitle = document.createElement("div");
+          ctitle.className = "report-chart-title";
+          const cname = document.createElement("span");
+          cname.textContent = def.title;
+          ctitle.appendChild(cname);
+          const cnote = document.createElement("span");
+          cnote.className = "report-chart-note";
+          cnote.textContent =
+            reportResult && reportResult.missing_required > 0
+              ? "backfilling..."
+              : "not retained for this night";
+          ctitle.appendChild(cnote);
+          card.appendChild(ctitle);
+          container.appendChild(card);
+          return;
+        }
+        const extent = reportSeriesExtent(seriesList.map((series) =>
+          series.points.filter((p) =>
+            reportPointRangeIndex(p.t, sessionRanges) >= 0 &&
+            p.t >= range.start && p.t <= range.end)));
+
+        const card = document.createElement("div");
+        card.className = "report-chart";
+        const title = document.createElement("div");
+        title.className = "report-chart-title";
+        const name = document.createElement("span");
+        name.textContent = def.title;
+        if (seriesDefs.some((sd) => lowResByName[sd.key])) {
+          const badge = document.createElement("span");
+          badge.className = "report-res-badge";
+          badge.textContent = "1-min";
+          badge.title =
+            "High-res not retained for this night; showing the 1-minute trend.";
+          name.appendChild(badge);
+        }
+        title.appendChild(name);
+        const readout = document.createElement("span");
+        readout.className = "readout";
+        title.appendChild(readout);
+        const legend = document.createElement("span");
+        legend.className = "value";
+        seriesList.forEach((series) => {
+          const tag = document.createElement("span");
+          tag.style.marginLeft = "10px";
+          const dot = document.createElement("span");
+          dot.className = "report-legend-dot";
+          dot.style.background = series.color;
+          tag.appendChild(dot);
+          tag.appendChild(document.createTextNode(series.label));
+          legend.appendChild(tag);
+        });
+        if (def.unit) {
+          const unit = document.createElement("span");
+          unit.style.marginLeft = "8px";
+          unit.style.color = "var(--muted)";
+          unit.textContent = def.unit;
+          legend.appendChild(unit);
+        }
+        title.appendChild(legend);
+        card.appendChild(title);
+        const canvas = document.createElementNS(SVG_NS, "svg");
+        card.appendChild(canvas);
+        container.appendChild(card);
+        const item = {
+          type: "series",
+          canvas,
+          seriesList,
+          minY: extent.min,
+          maxY: extent.max,
+          start: range.start,
+          end: range.end,
+          ranges: sessionRanges,
+        };
+        reportDrawItems.push(item);
+        canvas._item = item;
+        canvas._readout = readout;
+        attachReportChartPointer(canvas);
+        observeReportCanvas(canvas);
+      });
+      drawReportItems();
+    }
+
+    function renderReportSummary() {
+      const state = reportSummary && reportSummary.state ?
+        String(reportSummary.state) : "idle";
+      const nights = reportNightsNewestFirst();
+      const select = document.getElementById("reportNight");
+      const previous = select ? select.value : "";
+
+      if (select) {
+        select.textContent = "";
+        if (!nights.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "No nights";
+          select.appendChild(option);
+        } else {
+          nights.forEach((night) => {
+            const option = document.createElement("option");
+            option.value = String(night.id);
+            option.textContent = fmtReportDate(night.start) + " " +
+              fmtMinutes(night.duration_min);
+            select.appendChild(option);
+          });
+          if (previous && nights.some((night) => String(night.id) === previous)) {
+            select.value = previous;
+          }
+        }
+        select.onchange = () => loadSelectedReportNight(true, false);
+      }
+
+      const selected = selectedReportNight();
+      const ready = reportResult && reportResult.state === "ready";
+      const durationMin = ready && reportResult.duration_min ?
+        reportResult.duration_min : (selected ? selected.duration_min : 0);
+      up("reportDuration", durationMin ? fmtMinutes(durationMin) : "--");
+      up("reportAhi", ready && Number.isFinite(Number(reportResult.ahi)) ?
+        Number(reportResult.ahi).toFixed(2) : "--");
+      renderReportEventCounts(ready ? reportResult : null);
+      renderReportSessions(reportResult && reportResult.sessions ?
+        reportResult.sessions : selected ? selected.sessions : []);
+
+      const list = document.getElementById("reportNightList");
+      if (list) {
+        list.textContent = "";
+        if (!nights.length) {
+          const empty = document.createElement("div");
+          empty.className = "value";
+          empty.style.textAlign = "left";
+          empty.textContent = state === "fetching" ?
+            "Fetching Summary..." : "No therapy nights indexed.";
+          list.appendChild(empty);
+        } else {
+          nights.forEach((night) => {
+            const rowElement = document.createElement("div");
+            rowElement.className = "report-night";
+
+            const date = document.createElement("div");
+            date.textContent = fmtReportDate(night.start);
+            rowElement.appendChild(date);
+
+            const duration = document.createElement("span");
+            duration.className = "value";
+            duration.textContent = fmtMinutes(night.duration_min);
+            rowElement.appendChild(duration);
+
+            const sessions = document.createElement("span");
+            sessions.className = "value";
+            sessions.textContent = night.session_count !== undefined ?
+              String(night.session_count) + " sessions" : "--";
+            rowElement.appendChild(sessions);
+
+            list.appendChild(rowElement);
+          });
+        }
+      }
+
+      if (state === "fetching") {
+        const spool = reportSummary && reportSummary.spool ? reportSummary.spool : {};
+        const text = "Fetching Summary" +
+          (spool.bytes ? " " + fmtBytes(spool.bytes) : "");
+        msg("reportMsg", text, true, true);
+      } else if (state === "error") {
+        msg("reportMsg", reportSummary.error || "Summary refresh failed", false, true);
+      } else if (nights.length) {
+        msg("reportMsg", "Summary loaded", true);
+      } else {
+        const element = document.getElementById("reportMsg");
+        if (element) element.className = "msg";
+      }
+    }
+
+    async function pollReportResult(token, targetIndex, previousRevision,
+                                    requireNewRevision) {
+      for (;;) {
+        const result = await (await api("/api/report/result")).json();
+        if (token !== reportLoadToken) return null;
+        reportResult = result;
+        up("reportState", result.state || "--");
+        const resultIndex = Number(result.therapy_index);
+        const resultRevision = Number(result.revision || 0);
+        const staleResult = resultIndex !== Number(targetIndex) ||
+          (requireNewRevision && resultRevision <= previousRevision);
+        if (result.state === "preparing" || result.state === "idle" ||
+            staleResult) {
+          msg("reportMsg",
+              result.state === "preparing"
+                ? reportProgressText(result)
+                : "Report request queued...",
+              true,
+              true);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          continue;
+        }
+        return result;
+      }
+    }
+
+    function reportProgressText(result) {
+      if (!result) return "Preparing report...";
+      const cache = result.cache || {};
+      if (result.error === "cache_fetching" && cache.active) {
+        const parts = ["Fetching report cache"];
+        const source = String(cache.source || "");
+        if (source && source !== "Summary") parts.push(source);
+        const index = Number(cache.source_index || 0);
+        const count = Number(cache.source_count || 0);
+        if (count > 0) {
+          parts.push(String(Math.min(index + 1, count)) + "/" + String(count));
+        }
+        const spool = cache.spool || {};
+        const bytes = Number(spool.bytes || 0);
+        if (bytes > 0) parts.push(fmtBytes(bytes));
+        return parts.join(" ");
+      }
+      if (result.error === "summary_fetching") return "Fetching Summary...";
+      return "Preparing report...";
+    }
+
+    async function fetchReportPlot(token) {
+      // /api/report/plot can briefly 404 ("plot not ready") between state=ready
+      // and the plot being republished; retry within the token, do not surface it.
+      let buf = null;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if (token !== reportLoadToken) return false;
+        const response = await fetch("/api/report/plot");
+        if (response.ok) {
+          buf = await response.arrayBuffer();
+          break;
+        }
+        if (response.status === 404) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
+        throw new Error(await response.text());
+      }
+      if (token !== reportLoadToken) return false;
+      if (!buf) throw new Error("plot not ready");
+      parseReportPlotBinary(buf);
+      return token === reportLoadToken;
+    }
+
+    // Decode the binary plot blob (mirrors report_manager.cpp, little-endian):
+    //   header: magic u32 'ACPB', version u16, flags u16, base_ms i64
+    //   events: count u32, then count*{ t_delta i32, duration i32, code i32, flags i32 }
+    //   series: to EOF, repeated { name_len u16, name, point_count u32,
+    //           point_count*{ t_delta i32, value_milli i32 } }
+    function parseReportPlotBinary(buf) {
+      reportEvents = [];
+      reportSeries = {};
+      const dv = new DataView(buf);
+      // Header: magic u32, version u16, flags u16, base_ms i64 (16 bytes).
+      if (dv.byteLength < 16 || dv.getUint32(0, true) !== 0x42504341) return;
+      if (dv.getUint16(4, true) !== 1) return;  // PLOT_BIN_VERSION
+      const base = Number(dv.getBigInt64(8, true));
+      let off = 16;
+      // Every read below is bounds-checked: a truncated/corrupt blob bails
+      // cleanly (no out-of-range throw, no half-record) so a later redraw never
+      // sees partial state. Events are all-or-nothing; series stop at the last
+      // whole one decoded.
+      if (off + 4 > dv.byteLength) return;
+      const eventCount = dv.getUint32(off, true); off += 4;
+      if (off + eventCount * 16 > dv.byteLength) { reportEvents = []; return; }
+      for (let i = 0; i < eventCount; i++) {
+        reportEvents.push({
+          t: base + dv.getInt32(off, true),
+          duration: dv.getInt32(off + 4, true),
+          code: dv.getInt32(off + 8, true),
+          flags: dv.getInt32(off + 12, true),
+        });
+        off += 16;
+      }
+      const decoder = new TextDecoder();
+      while (off + 6 <= dv.byteLength) {
+        const nameLen = dv.getUint16(off, true); off += 2;
+        if (off + nameLen + 4 > dv.byteLength) break;
+        const name = decoder.decode(new Uint8Array(buf, off, nameLen));
+        off += nameLen;
+        const pointCount = dv.getUint32(off, true); off += 4;
+        if (off + pointCount * 8 > dv.byteLength) break;
+        const points = [];
+        for (let p = 0; p < pointCount; p++) {
+          const t = base + dv.getInt32(off, true);
+          const value = dv.getInt32(off + 4, true) / 1000;
+          off += 8;
+          if (t > 0 && Number.isFinite(value)) points.push({t, value});
+        }
+        reportSeries[name] = points;
+      }
+    }
+
+    async function loadSelectedReportNight(force, refreshCache) {
+      const night = selectedReportNight();
+      if (!night) {
+        resetReportData();
+        renderReportSummary();
+        return;
+      }
+      if (!force && reportLoadedId === String(night.id) &&
+          reportResult && reportResult.state === "ready") {
+        renderReportSummary();
+        renderReportCharts();
+        return;
+      }
+      const therapyIndex = reportTherapyIndex(night);
+      if (therapyIndex === null) {
+        msg("reportMsg", "Selected night has no report index", false, true);
+        return;
+      }
+      if (!force && !refreshCache && restoreReportClientCache(night)) {
+        return;
+      }
+
+      const token = ++reportLoadToken;
+      const previousRevision = reportResult
+        ? Number(reportResult.revision || 0)
+        : 0;
+      resetReportData();
+      reportLoadedId = "";
+      renderReportSummary();
+      msg("reportMsg", "Preparing report...", true, true);
+      try {
+        await api("/api/report/result", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            index: therapyIndex,
+            refresh_cache: !!refreshCache,
+          }),
+        });
+        const result = await pollReportResult(token,
+                                             therapyIndex,
+                                             previousRevision,
+                                             true);
+        if (!result || token !== reportLoadToken) return;
+        if (result.state !== "ready") {
+          msg("reportMsg", result.error || "Report incomplete", false, true);
+          renderReportSummary();
+          return;
+        }
+
+        const ok = await fetchReportPlot(token);
+        if (!ok) return;
+        reportLoadedId = String(night.id);
+        rememberReportClientCache(night);
+        renderReportSummary();
+        renderReportCharts();
+        msg("reportMsg", "Report loaded", true);
+      } catch (error) {
+        if (token !== reportLoadToken) return;
+        msg("reportMsg", error.message, false, true);
+      }
+    }
+
+    function scheduleReportPoll() {
+      if (reportPollTimer) clearTimeout(reportPollTimer);
+      reportPollTimer = setTimeout(() => loadReportSummary(false), 750);
+    }
+
+    async function loadReportSummary(autoRefresh) {
+      try {
+        const data = await (await api("/api/report/summary")).json();
+        reportSummary = data;
+        renderReportSummary();
+        if (data.state === "fetching") {
+          scheduleReportPoll();
+        } else if (autoRefresh && data.state === "idle") {
+          await refreshReportSummary(false);
+        } else if (autoRefresh && data.state === "ready") {
+          await loadSelectedReportNight(false);
+        }
+      } catch (error) {
+        msg("reportMsg", error.message, false, true);
+      }
+    }
+
+    async function refreshReportSummary(force) {
+      try {
+        await api("/api/report/summary", {method: "POST"});
+        await loadReportSummary(false);
+        scheduleReportPoll();
+      } catch (error) {
+        msg("reportMsg", error.message, false, true);
+      }
     }
 
     function fmtRssi(rssi) {
@@ -3634,7 +5149,10 @@
 
     initEvents();
     updateCharts();
-    window.addEventListener("resize", updateCharts);
+    window.addEventListener("resize", () => {
+      updateCharts();
+      scheduleReportDraw();
+    });
     if (location.hash && tabs[location.hash.slice(1)]) {
       showTab(location.hash.slice(1));
     } else {

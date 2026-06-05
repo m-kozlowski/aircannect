@@ -12,6 +12,7 @@
 #include "management_console.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
+#include "report_manager.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
 #include "session_manager.h"
@@ -37,6 +38,8 @@ enum WebCommandKind : uint8_t {
     WebCommandSettingsUpdate,
     WebCommandTherapyAction,
     WebCommandOximetryAction,
+    WebCommandReportSummaryRefresh,
+    WebCommandReportResultPrepare,
     WebCommandResmedOtaInit,
     WebCommandResmedOtaBlock,
     WebCommandResmedOtaCheck,
@@ -68,6 +71,7 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus resmed_ota;
     WebUiBufferMemoryStatus settings;
     WebUiBufferMemoryStatus live;
+    WebUiBufferMemoryStatus report_result;
     size_t console_log_length = 0;
     size_t sse_clients = 0;
     size_t sse_pending_total = 0;
@@ -86,6 +90,7 @@ public:
                SessionManager &session_manager,
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
+               ReportManager &report_manager,
                ConsoleContext &console_ctx,
                uint16_t port = 80);
     void stop();
@@ -100,6 +105,10 @@ private:
     void reserve_cached_json();
     void build_status_json(LargeTextBuffer &json) const;
     void build_oximetry_sensors_json(LargeTextBuffer &json) const;
+    void build_report_summary_json(LargeTextBuffer &json) const;
+    void build_report_result_json(LargeTextBuffer &json) const;
+    void send_report_chunks(AsyncWebServerRequest *request) const;
+    void send_report_plot(AsyncWebServerRequest *request) const;
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json) const;
     void build_wifi_json(LargeTextBuffer &json) const;
@@ -137,6 +146,8 @@ private:
     void execute_therapy_action(const std::string &action);
     void execute_oximetry_action(const std::string &action,
                                  const std::string &body);
+    void execute_report_summary_refresh();
+    void execute_report_result_prepare(const std::string &body);
     void execute_resmed_ota_command(const WebCommand &command);
 
     // SSE client tracking
@@ -171,10 +182,13 @@ private:
     static constexpr uint16_t SNAPSHOT_OTA = 1u << 6;
     static constexpr uint16_t SNAPSHOT_RESMED_OTA = 1u << 7;
     static constexpr uint16_t SNAPSHOT_SETTINGS = 1u << 8;
+    static constexpr uint16_t SNAPSHOT_REPORT_SUMMARY = 1u << 9;
+    static constexpr uint16_t SNAPSHOT_REPORT_RESULT = 1u << 10;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONFIG |
         SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
-        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
+        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS |
+        SNAPSHOT_REPORT_SUMMARY | SNAPSHOT_REPORT_RESULT;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_WIFI |
         SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
@@ -190,6 +204,7 @@ private:
     SessionManager *session_manager_ = nullptr;
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
+    ReportManager *report_manager_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     ManagementConsole web_console_;
@@ -223,6 +238,8 @@ private:
     LargeTextBuffer cached_ota_json_;
     LargeTextBuffer cached_resmed_ota_json_;
     LargeTextBuffer cached_settings_json_;
+    LargeTextBuffer cached_report_summary_json_;
+    LargeTextBuffer cached_report_result_json_;
     LargeTextBuffer live_json_;
 
     bool cached_http_auth_required_ = true;
@@ -233,6 +250,8 @@ private:
     int cached_settings_mode_ = -1;
     int requested_settings_mode_ = -1;
     bool cached_settings_refresh_queued_ = false;
+    uint32_t cached_report_summary_revision_ = UINT32_MAX;
+    uint32_t cached_report_result_revision_ = UINT32_MAX;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;

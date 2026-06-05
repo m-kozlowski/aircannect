@@ -27,6 +27,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  stream            AS11 stream subscription controls");
         out.println("  sink              stream sink status and debug sink toggle");
         out.println("  oxi               oximetry source and BLE injector status");
+        out.println("  report            therapy report index/cache status");
         out.println("  storage           persistent storage and writer status");
         out.println("  session           therapy session tracking state");
         out.println("  tcp               raw JSON-RPC TCP bridge status");
@@ -135,6 +136,30 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  storage remount           retry storage mount");
         out.println("  storage queue             show async writer queue state");
         out.println("  storage write-test P T    append test text through writer");
+        return;
+    }
+
+    if (topic == "report") {
+        out.println("[HELP report]");
+        out.println("  report                    show report store status");
+        out.println("  report status             show report store status");
+        out.println("  report store              show durable report store status");
+        out.println("  report nights             list indexed therapy nights");
+        out.println("  report coverage latest    show latest night cache coverage");
+        out.println("  report coverage INDEX     show coverage for report nights index");
+        out.println("  report coverage ms VALUE  show coverage for raw start ms");
+        out.println("  report cache latest       fetch missing cached source data");
+        out.println("  report cache INDEX        fetch cache for report nights index");
+        out.println("  report cache force INDEX  refetch supported cached sources");
+        out.println("  report cache cancel       cancel active cache fetch");
+        out.println("  report cache clear all    clear all report cache");
+        out.println("  report cache clear latest clear latest night cache");
+        out.println("  report cache clear INDEX  clear cache for report night");
+        out.println("  report cache clear ms VAL clear cache for raw start ms");
+        out.println("  report result latest      prepare latest report manifest");
+        out.println("  report result INDEX       prepare report manifest by index");
+        out.println("  report prefetch           show background prefetch status");
+        out.println("  report prefetch on|off    enable/disable idle prefetch");
         return;
     }
 

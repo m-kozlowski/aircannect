@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include "board.h"
 #include "debug_log.h"
 
@@ -24,6 +27,11 @@ namespace {
 
 StorageStatus current;
 bool initialized = false;
+
+SemaphoreHandle_t sd_mutex() {
+    static SemaphoreHandle_t m = xSemaphoreCreateRecursiveMutex();
+    return m;
+}
 
 void copy_text(char *dst, size_t size, const char *src) {
     if (!dst || size == 0) return;
@@ -229,18 +237,31 @@ void update_capacity_if_due() {
 
 }  // namespace
 
+void lock() {
+    SemaphoreHandle_t m = sd_mutex();
+    if (m) xSemaphoreTakeRecursive(m, portMAX_DELAY);
+}
+
+void unlock() {
+    SemaphoreHandle_t m = sd_mutex();
+    if (m) xSemaphoreGiveRecursive(m);
+}
+
 void begin() {
+    Guard g;
     if (initialized) return;
     initialized = true;
     remount();
 }
 
 void poll() {
+    Guard g;
     if (!initialized) begin();
     update_capacity_if_due();
 }
 
 bool remount() {
+    Guard g;
     reset_status();
 
 #if AC_STORAGE_SDMMC_ENABLED
@@ -275,6 +296,7 @@ bool remount() {
 }
 
 StorageStatus status() {
+    Guard g;
     if (!initialized) begin();
     return current;
 }
@@ -285,6 +307,7 @@ bool mounted() {
 
 bool ensure_dir(const char *path) {
     if (!path || !*path) return false;
+    Guard g;
     if (!initialized) begin();
     fs::FS *fs = active_fs();
     if (!fs) return false;
@@ -299,6 +322,7 @@ bool ensure_dir(const char *path) {
 
 bool exists(const char *path) {
     if (!path || !*path) return false;
+    Guard g;
     if (!initialized) begin();
     fs::FS *fs = active_fs();
     return fs && fs->exists(path);
@@ -306,13 +330,23 @@ bool exists(const char *path) {
 
 bool remove(const char *path) {
     if (!path || !*path) return false;
+    Guard g;
     if (!initialized) begin();
     fs::FS *fs = active_fs();
     return fs && (!fs->exists(path) || fs->remove(path));
 }
 
+bool rmdir(const char *path) {
+    if (!path || !*path) return false;
+    Guard g;
+    if (!initialized) begin();
+    fs::FS *fs = active_fs();
+    return fs && (!fs->exists(path) || fs->rmdir(path));
+}
+
 bool rename(const char *from, const char *to) {
     if (!from || !*from || !to || !*to) return false;
+    Guard g;
     if (!initialized) begin();
     fs::FS *fs = active_fs();
     return fs && fs->rename(from, to);
@@ -320,6 +354,7 @@ bool rename(const char *from, const char *to) {
 
 File open(const char *path, const char *mode) {
     if (!path || !*path || !mode || !*mode) return File();
+    Guard g;
     if (!initialized) begin();
     fs::FS *fs = active_fs();
     return fs ? fs->open(path, mode) : File();

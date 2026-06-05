@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
+#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,14 +13,18 @@
 #include "auth_utils.h"
 #include "app_config_update.h"
 #include "as11_rpc.h"
+#include "background_worker.h"
 #include "debug_log.h"
 #include "json_util.h"
 #include "memory_manager.h"
+#include "report_records.h"
+#include "report_store.h"
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "storage_manager.h"
 #include "storage_writer.h"
 #include "system_status_snapshot.h"
+#include "string_util.h"
 #include "string_print.h"
 #include "version.h"
 #include "web_ui_html.h"
@@ -39,6 +44,10 @@ const char *web_command_name(uint8_t kind) {
         case WebCommandSettingsUpdate: return "settings_update";
         case WebCommandTherapyAction: return "therapy_action";
         case WebCommandOximetryAction: return "oximetry_action";
+        case WebCommandReportSummaryRefresh:
+            return "report_summary_refresh";
+        case WebCommandReportResultPrepare:
+            return "report_result_prepare";
         case WebCommandResmedOtaInit: return "resmed_ota_init";
         case WebCommandResmedOtaBlock: return "resmed_ota_block";
         case WebCommandResmedOtaCheck: return "resmed_ota_check";
@@ -53,6 +62,17 @@ void release_request_body(AsyncWebServerRequest *request) {
     if (!request || !request->_tempObject) return;
     Memory::free(request->_tempObject);
     request->_tempObject = nullptr;
+}
+
+bool append_le32(ReportSpoolBuffer &out, uint32_t value) {
+    size_t offset = 0;
+    uint8_t *dst = out.append_uninitialized(4, offset);
+    if (!dst) return false;
+    dst[0] = static_cast<uint8_t>(value & 0xFFu);
+    dst[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    dst[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+    dst[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+    return true;
 }
 
 void handle_body(AsyncWebServerRequest *request,
@@ -132,6 +152,22 @@ bool request_size_arg(AsyncWebServerRequest *request,
         parsed > AC_RESMED_OTA_MAX_FILE_BYTES) {
         return false;
     }
+    out = static_cast<size_t>(parsed);
+    return true;
+}
+
+bool request_size_arg_limited(AsyncWebServerRequest *request,
+                              const char *name,
+                              size_t default_value,
+                              size_t max_value,
+                              size_t &out) {
+    out = default_value;
+    if (!request || !name || !request->hasArg(name)) return true;
+    const String value = request->arg(name);
+    char *end = nullptr;
+    const unsigned long long parsed =
+        strtoull(value.c_str(), &end, 10);
+    if (!end || *end != 0 || parsed > max_value) return false;
     out = static_cast<size_t>(parsed);
     return true;
 }
@@ -310,6 +346,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   SessionManager &session_manager,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
+                  ReportManager &report_manager,
                   ConsoleContext &console_ctx,
                   uint16_t port) {
     if (started_) return true;
@@ -324,6 +361,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     session_manager_ = &session_manager;
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
+    report_manager_ = &report_manager;
     console_ctx_ = &console_ctx;
 
     command_mutex_ = xSemaphoreCreateMutex();
@@ -376,6 +414,8 @@ void WebUI::reserve_cached_json() {
     cached_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
     cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
     cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
+    cached_report_summary_json_.reserve(4096);
+    cached_report_result_json_.reserve(2048);
     live_json_.reserve(4096);
 }
 
@@ -423,6 +463,7 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.ota = capture(cached_ota_json_);
     out.resmed_ota = capture(cached_resmed_ota_json_);
     out.settings = capture(cached_settings_json_);
+    out.report_result = capture(cached_report_result_json_);
     out.live = capture(live_json_);
     out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
@@ -481,6 +522,8 @@ void WebUI::stop() {
     console_log_write_pos_ = 0;
     console_sse_pos_ = 0;
     console_sse_reset_pending_ = false;
+    cached_report_summary_revision_ = UINT32_MAX;
+    cached_report_result_revision_ = UINT32_MAX;
     if (sink_manager_) {
         sink_manager_->set_live_chart_enabled(false);
         sink_manager_->clear_live_chart_batch();
@@ -490,6 +533,7 @@ void WebUI::stop() {
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
+    report_manager_ = nullptr;
     started_ = false;
 }
 
@@ -1238,6 +1282,98 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
+void WebUI::build_report_summary_json(LargeTextBuffer &json) const {
+    if (!report_manager_) {
+        json = "{\"state\":\"error\",\"error\":\"report unavailable\","
+               "\"nights\":[]}";
+        return;
+    }
+    report_manager_->build_summary_json(json);
+}
+
+void WebUI::build_report_result_json(LargeTextBuffer &json) const {
+    if (!report_manager_) {
+        json = "{\"state\":\"error\",\"error\":\"report unavailable\"}";
+        return;
+    }
+    report_manager_->build_result_json(json);
+}
+
+void WebUI::send_report_chunks(AsyncWebServerRequest *request) const {
+    if (!report_manager_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"report unavailable\"}");
+        return;
+    }
+
+    size_t offset = 0;
+    size_t limit = 32;
+    if (!request_size_arg_limited(request, "offset", 0, 65535, offset) ||
+        !request_size_arg_limited(request, "limit", 32, 128, limit)) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad range\"}");
+        return;
+    }
+
+    LargeTextBuffer json;
+    json.reserve(1024 + limit * 192);
+    report_manager_->build_result_chunks_json(json, offset, limit);
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"chunks alloc\"}");
+        return;
+    }
+
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    request->send(response);
+}
+
+void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
+    if (!report_manager_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"report unavailable\"}");
+        return;
+    }
+    const ReportSpoolBuffer &plot = report_manager_->result_plot_bin();
+    if (plot.size() == 0) {
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"error\":\"plot not ready\"}");
+        return;
+    }
+    auto payload = std::make_shared<ReportSpoolBuffer>();
+    payload->set_max_size(plot.size());
+    if (!payload->append(plot.data(), plot.size())) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"plot alloc\"}");
+        return;
+    }
+    AsyncWebServerResponse *response = request->beginResponse(
+        "application/octet-stream",
+        payload->size(),
+        [payload](uint8_t *buffer, size_t max_len, size_t index) -> size_t {
+            if (!buffer || index >= payload->size()) return 0;
+            const size_t remaining = payload->size() - index;
+            const size_t n = remaining < max_len ? remaining : max_len;
+            memcpy(buffer, payload->data() + index, n);
+            return n;
+        });
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response alloc\"}");
+        return;
+    }
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
 void WebUI::build_stream_json(LargeTextBuffer &json) const {
     const StreamBroker &stream = arbiter_->stream_broker();
     const RpcArbiterStats &stats = arbiter_->stats();
@@ -1469,6 +1605,32 @@ void WebUI::publish_snapshots(bool force) {
         rebuild_mask |= SNAPSHOT_PERIODIC;
     }
 
+    if (report_manager_) {
+        const ReportSummaryStatus &summary_status =
+            report_manager_->summary_status();
+        const uint32_t summary_revision = summary_status.revision;
+        if (force ||
+            summary_revision != cached_report_summary_revision_ ||
+            (periodic_due &&
+             summary_status.state == ReportSummaryState::Fetching)) {
+            rebuild_mask |= SNAPSHOT_REPORT_SUMMARY;
+            cached_report_summary_revision_ = summary_revision;
+        }
+        const ReportResultStatus &result_status =
+            report_manager_->result_status();
+        const uint32_t result_revision = result_status.revision;
+        const ReportCacheFetchStatus &cache_status =
+            report_manager_->cache_fetch_status();
+        if (force ||
+            result_revision != cached_report_result_revision_ ||
+            (periodic_due &&
+             (result_status.state == ReportResultState::Preparing ||
+              cache_status.active))) {
+            rebuild_mask |= SNAPSHOT_REPORT_RESULT;
+            cached_report_result_revision_ = result_revision;
+        }
+    }
+
     if (!rebuild_mask) {
         xSemaphoreGive(cache_mutex_);
         return;
@@ -1486,6 +1648,12 @@ void WebUI::publish_snapshots(bool force) {
     }
     if (rebuild_mask & SNAPSHOT_RESMED_OTA) {
         build_resmed_ota_json(cached_resmed_ota_json_, *resmed_ota_manager_);
+    }
+    if (rebuild_mask & SNAPSHOT_REPORT_SUMMARY) {
+        build_report_summary_json(cached_report_summary_json_);
+    }
+    if (rebuild_mask & SNAPSHOT_REPORT_RESULT) {
+        build_report_result_json(cached_report_result_json_);
     }
     if (rebuild_mask & SNAPSHOT_SETTINGS) {
         const int requested_mode = requested_settings_mode_;
@@ -1545,6 +1713,12 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandOximetryAction:
             execute_oximetry_action(command.text, command.body);
             break;
+        case WebCommandReportSummaryRefresh:
+            execute_report_summary_refresh();
+            break;
+        case WebCommandReportResultPrepare:
+            execute_report_result_prepare(command.body);
+            break;
         case WebCommandResmedOtaInit:
         case WebCommandResmedOtaBlock:
         case WebCommandResmedOtaCheck:
@@ -1556,6 +1730,36 @@ void WebUI::execute_command(WebCommand &command) {
         default:
             break;
     }
+}
+
+void WebUI::execute_report_summary_refresh() {
+    if (!report_manager_) return;
+    report_manager_->request_summary_refresh(true);
+    mark_snapshots_dirty(SNAPSHOT_REPORT_SUMMARY);
+}
+
+void WebUI::execute_report_result_prepare(const std::string &body) {
+    if (!report_manager_) return;
+    if (!body.empty() && body.find_first_not_of("0123456789") ==
+                             std::string::npos) {
+        report_manager_->prepare_result_by_therapy_index(
+            static_cast<size_t>(strtoul(body.c_str(), nullptr, 10)));
+        mark_snapshots_dirty(SNAPSHOT_REPORT_RESULT);
+        return;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body.c_str())) return;
+    size_t index = 0;
+    bool refresh_cache = false;
+    if (doc["index"].is<unsigned long>()) {
+        index = static_cast<size_t>(doc["index"].as<unsigned long>());
+    }
+    if (doc["refresh_cache"].is<bool>()) {
+        refresh_cache = doc["refresh_cache"].as<bool>();
+    }
+    report_manager_->prepare_result_by_therapy_index(index, refresh_cache);
+    mark_snapshots_dirty(SNAPSHOT_REPORT_RESULT);
 }
 
 void WebUI::execute_console_line(const std::string &line) {
@@ -1794,6 +1998,130 @@ void WebUI::register_routes() {
     server_->on("/api/stream", HTTP_GET, [this](AsyncWebServerRequest *request) {
         send_cached(request, cached_stream_json_);
     });
+
+    server_->on("/api/report/summary", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_cached(request, cached_report_summary_json_);
+    });
+
+    server_->on("/api/report/summary", HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        send_queue_result(
+            request,
+            enqueue_simple_command(WebCommandReportSummaryRefresh));
+    });
+
+    server_->on("/api/report/result", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        if (request->hasArg("index")) {
+            request->send(405, "application/json",
+                          "{\"ok\":false,\"error\":\"use POST\"}");
+            return;
+        }
+        send_cached(request, cached_report_result_json_);
+    });
+
+    server_->on("/api/report/chunks", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_report_chunks(request);
+    });
+
+    server_->on("/api/report/plot", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_report_plot(request);
+    });
+
+    server_->on("/api/report/prefetch", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        BackgroundWorker *w = background_worker();
+        if (!w || !report_manager_) {
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"worker unavailable\"}");
+            return;
+        }
+        const BackgroundWorkerStatus s = w->status();
+        const ReportManager::PrefetchSnapshot p =
+            report_manager_->prefetch_snapshot();
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+                 "{\"ok\":true,\"started\":%s,\"enabled\":%s,\"idle\":%s,"
+                 "\"gate\":\"%s\",\"ticks\":%lu,\"stack_free\":%lu,"
+                 "\"phase\":%u,\"night_ms\":%llu,\"completed\":%lu,"
+                 "\"failed\":%lu}",
+                 s.task_started ? "true" : "false",
+                 s.enabled ? "true" : "false",
+                 s.idle ? "true" : "false",
+                 s.gate_reason,
+                 static_cast<unsigned long>(s.ticks),
+                 static_cast<unsigned long>(s.stack_high_water_words),
+                 static_cast<unsigned>(p.phase),
+                 static_cast<unsigned long long>(p.night_ms),
+                 static_cast<unsigned long>(p.completed),
+                 static_cast<unsigned long>(p.failed));
+        request->send(200, "application/json", buf);
+    });
+
+    server_->on("/api/report/prefetch", HTTP_POST,
+                [](AsyncWebServerRequest *request) {
+        BackgroundWorker *w = background_worker();
+        if (!w) {
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"worker unavailable\"}");
+            return;
+        }
+        if (!request->hasArg("enable")) {
+            request->send(400, "application/json",
+                          "{\"ok\":false,\"error\":\"missing enable=0|1\"}");
+            return;
+        }
+        const bool on = request->arg("enable") != "0";
+        w->set_enabled(on);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "{\"ok\":true,\"enabled\":%s,\"applied\":%s}",
+                 on ? "true" : "false",
+                 w->enabled() ? "true" : "false");
+        request->send(200, "application/json", buf);
+    });
+
+    server_->on(
+        "/api/report/result", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            if (request->hasArg("index")) {
+                WebCommand queued;
+                queued.kind = WebCommandReportResultPrepare;
+                queued.body = "{\"index\":";
+                queued.body += request->arg("index").c_str();
+                bool refresh_cache = false;
+                if (request->hasArg("refresh_cache")) {
+                    parse_bool_yesno(request->arg("refresh_cache"),
+                                     refresh_cache);
+                }
+                queued.body += ",\"refresh_cache\":";
+                queued.body += refresh_cache ? "true" : "false";
+                queued.body += "}";
+                send_queue_result(request,
+                                  enqueue_command(std::move(queued)));
+                return;
+            }
+
+            JsonDocument doc;
+            std::string body;
+            if (!parse_body_copy(request, doc, body)) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad json\"}");
+                return;
+            }
+            if (!doc["index"].is<unsigned long>()) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"missing index\"}");
+                return;
+            }
+            WebCommand queued;
+            queued.kind = WebCommandReportResultPrepare;
+            queued.body = body;
+            send_queue_result(request, enqueue_command(std::move(queued)));
+        },
+        nullptr, handle_body);
 
     server_->on(
         AsyncURIMatcher::exact("/api/console"), HTTP_GET,

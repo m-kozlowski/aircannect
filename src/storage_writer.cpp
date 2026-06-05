@@ -153,6 +153,7 @@ void drop_all_unavailable() {
 }
 
 bool write_chunk(const Slot &slot) {
+    Storage::Guard g;
     const StorageStatus storage = Storage::status();
     if (!storage.mounted) {
         stats.unavailable_drops++;

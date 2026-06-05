@@ -6,6 +6,7 @@
 #include "app_config.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
+#include "report_manager.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
 #include "session_manager.h"
@@ -30,6 +31,7 @@ struct ConsoleContext {
     SessionManager &session_manager;
     SinkManager &sink_manager;
     OximetryManager &oximetry_manager;
+    ReportManager &report_manager;
     WebUI *web_ui = nullptr;
 };
 
@@ -53,6 +55,7 @@ private:
     void handle_sink_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_oximetry_command(Print &out, String rest,
                                  ConsoleContext &ctx);
+    void handle_report_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_storage_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_as11_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_therapy_command(Print &out, String rest, ConsoleContext &ctx);

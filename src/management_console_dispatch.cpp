@@ -1,15 +1,19 @@
 #include "management_console.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "as11_rpc.h"
 #include "as11_settings.h"
+#include "background_worker.h"
 #include "debug_log.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "memory_manager.h"
+#include "report_store.h"
 #include "storage_manager.h"
 #include "storage_writer.h"
 #include "string_util.h"
@@ -51,6 +55,13 @@ void print_web_buffer_memory(Print &out,
     out.print(" cap=");
     out.print(static_cast<unsigned long>(buffer.capacity));
     out.println();
+}
+
+void print_uint64(Print &out, uint64_t value) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%llu",
+             static_cast<unsigned long long>(value));
+    out.print(buf);
 }
 
 void print_web_memory_detail(Print &out, WebUI *web_ui) {
@@ -176,6 +187,335 @@ void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
     out.println();
 }
 
+void print_report_store_status(Print &out) {
+    const ReportStoreStatus status = ReportStore::status();
+    out.print("[REPORT_STORE] initialized=");
+    out.print(status.initialized ? "yes" : "no");
+    out.print(" available=");
+    out.print(status.available ? "yes" : "no");
+    out.print(" chunks_written=");
+    out.print(static_cast<unsigned long>(status.chunks_written));
+    out.print(" chunks_read=");
+    out.print(static_cast<unsigned long>(status.chunks_read));
+    out.print(" chunks_listed=");
+    out.print(static_cast<unsigned long>(status.chunks_listed));
+    out.print(" summary_written=");
+    out.print(static_cast<unsigned long>(status.summary_records_written));
+    out.print(" summary_read=");
+    out.print(static_cast<unsigned long>(status.summary_records_read));
+    out.print(" coverage_written=");
+    out.print(static_cast<unsigned long>(status.coverage_records_written));
+    out.print(" coverage_read=");
+    out.print(static_cast<unsigned long>(status.coverage_records_read));
+    out.print(" bytes_written=");
+    print_uint64(out, status.bytes_written);
+    out.print(" bytes_read=");
+    print_uint64(out, status.bytes_read);
+    out.print(" layout_errors=");
+    out.print(static_cast<unsigned long>(status.layout_errors));
+    out.print(" write_errors=");
+    out.print(static_cast<unsigned long>(status.write_errors));
+    out.print(" read_errors=");
+    out.print(static_cast<unsigned long>(status.read_errors));
+    out.print(" coverage_write_errors=");
+    out.print(static_cast<unsigned long>(status.coverage_write_errors));
+    out.print(" coverage_read_errors=");
+    out.print(static_cast<unsigned long>(status.coverage_read_errors));
+    out.print(" last_error=");
+    out.print(status.last_error[0] ? status.last_error : "--");
+    out.println();
+}
+
+void print_report_cache_clear_result(Print &out,
+                                     const ReportCacheClearResult &result) {
+    out.print("[REPORT] cache cleared reset=");
+    out.print(static_cast<unsigned long>(result.store_reset));
+    out.print(" summary=");
+    out.print(static_cast<unsigned long>(result.summary_deleted));
+    out.print(" chunks=");
+    out.print(static_cast<unsigned long>(result.chunks_deleted));
+    out.print(" coverage=");
+    out.print(static_cast<unsigned long>(result.coverage_deleted));
+    out.print(" plots=");
+    out.print(static_cast<unsigned long>(result.plots_deleted));
+    out.println();
+}
+
+const char *report_summary_state_name(ReportSummaryState state) {
+    switch (state) {
+        case ReportSummaryState::Fetching: return "fetching";
+        case ReportSummaryState::Ready: return "ready";
+        case ReportSummaryState::Error: return "error";
+        case ReportSummaryState::Idle:
+        default: return "idle";
+    }
+}
+
+const char *report_result_state_name(ReportResultState state) {
+    switch (state) {
+        case ReportResultState::Preparing: return "preparing";
+        case ReportResultState::Ready: return "ready";
+        case ReportResultState::Incomplete: return "incomplete";
+        case ReportResultState::Error: return "error";
+        case ReportResultState::Idle:
+        default: return "idle";
+    }
+}
+
+void print_duration_min(Print &out, uint32_t duration_min);
+
+void print_report_summary_status(Print &out,
+                                 const ReportManager &manager) {
+    const ReportSummaryStatus status = manager.summary_status();
+    out.print("[REPORT] summary=");
+    out.print(report_summary_state_name(status.state));
+    out.print(" revision=");
+    out.print(static_cast<unsigned long>(status.revision));
+    out.print(" records=");
+    out.print(static_cast<unsigned long>(status.records_total));
+    out.print(" therapy_nights=");
+    out.print(static_cast<unsigned long>(status.nights_with_therapy));
+    out.print(" elapsed_ms=");
+    out.print(static_cast<unsigned long>(status.elapsed_ms));
+    out.print(" active=");
+    out.print(status.active_spool.length() ? status.active_spool.c_str()
+                                           : "--");
+    out.print(" error=");
+    out.print(status.error.length() ? status.error.c_str() : "--");
+    out.println();
+}
+
+void print_report_result_status(Print &out,
+                                const ReportManager &manager) {
+    const ReportResultStatus status = manager.result_status();
+    out.print("[REPORT] result=");
+    out.print(report_result_state_name(status.state));
+    out.print(" revision=");
+    out.print(static_cast<unsigned long>(status.revision));
+    out.print(" index=");
+    out.print(static_cast<unsigned long>(status.therapy_index));
+    out.print(" night=");
+    print_uint64(out, status.night_start_ms);
+    out.print(" duration=");
+    print_duration_min(out, status.duration_min);
+    out.print(" missing_required=");
+    out.print(static_cast<unsigned long>(status.missing_required));
+    out.print(" missing_streams=");
+    out.print(static_cast<unsigned long>(status.missing_streams));
+    out.print(" streams=");
+    out.print(static_cast<unsigned long>(status.stream_count));
+    out.print(" chunks=");
+    out.print(static_cast<unsigned long>(status.chunk_count));
+    out.print(" records=");
+    out.print(static_cast<unsigned long>(status.record_count));
+    out.print(" bytes=");
+    out.print(static_cast<unsigned long>(status.payload_bytes));
+    out.print(" error=");
+    out.print(status.error.length() ? status.error.c_str() : "--");
+    out.println();
+}
+
+void print_report_prefetch_status(Print &out, const ReportManager &manager) {
+    char line[128];
+    BackgroundWorker *w = background_worker();
+    if (w) {
+        const BackgroundWorkerStatus s = w->status();
+        snprintf(line, sizeof(line),
+                 "[REPORT] prefetch worker=%s gate=%s ticks=%lu stack_free=%lu",
+                 s.enabled ? "enabled" : "disabled", s.gate_reason,
+                 static_cast<unsigned long>(s.ticks),
+                 static_cast<unsigned long>(s.stack_high_water_words));
+        out.println(line);
+    } else {
+        out.println("[REPORT] prefetch worker=unavailable");
+    }
+    const ReportManager::PrefetchSnapshot p = manager.prefetch_snapshot();
+    const char *phase = "?";
+    switch (p.phase) {
+        case ReportManager::PrefetchPhase::Idle: phase = "idle"; break;
+        case ReportManager::PrefetchPhase::Pending: phase = "pending"; break;
+        case ReportManager::PrefetchPhase::Fetching: phase = "fetching"; break;
+        case ReportManager::PrefetchPhase::Done: phase = "done"; break;
+        case ReportManager::PrefetchPhase::Failed: phase = "failed"; break;
+        case ReportManager::PrefetchPhase::Drained: phase = "drained"; break;
+    }
+    snprintf(line, sizeof(line),
+             "[REPORT] prefetch phase=%s night_ms=%llu completed=%lu failed=%lu",
+             phase, static_cast<unsigned long long>(p.night_ms),
+             static_cast<unsigned long>(p.completed),
+             static_cast<unsigned long>(p.failed));
+    out.println(line);
+}
+
+void print_report_cache_status(Print &out,
+                               const ReportManager &manager) {
+    const ReportCacheFetchStatus status = manager.cache_fetch_status();
+    out.print("[REPORT] cache=");
+    out.print(status.active ? "active" : "idle");
+    out.print(" revision=");
+    out.print(static_cast<unsigned long>(status.revision));
+    out.print(" night=");
+    print_uint64(out, status.night_start_ms);
+    out.print(" source=");
+    out.print(status.source_count ? report_source_spool_type(
+                  status.active_source) : "--");
+    out.print(" index=");
+    out.print(static_cast<unsigned long>(status.source_index));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.source_count));
+    out.print(" chunks=");
+    out.print(static_cast<unsigned long>(status.chunks_written));
+    out.print(" error=");
+    out.print(status.error.length() ? status.error.c_str() : "--");
+    out.println();
+}
+
+void print_utc_ms(Print &out, uint64_t ms) {
+    const time_t seconds = static_cast<time_t>(ms / 1000);
+    struct tm tmv;
+    if (!gmtime_r(&seconds, &tmv)) {
+        print_uint64(out, ms);
+        return;
+    }
+
+    char buf[24];
+    if (!strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M UTC", &tmv)) {
+        print_uint64(out, ms);
+        return;
+    }
+    out.print(buf);
+}
+
+void print_duration_min(Print &out, uint32_t duration_min) {
+    out.print(static_cast<unsigned long>(duration_min / 60));
+    out.print("h ");
+    out.print(static_cast<unsigned long>(duration_min % 60));
+    out.print('m');
+}
+
+struct ReportNightPrintContext {
+    Print *out = nullptr;
+    size_t count = 0;
+};
+
+bool print_report_night_row(void *context,
+                            const ReportSummaryNight &night) {
+    ReportNightPrintContext *ctx =
+        static_cast<ReportNightPrintContext *>(context);
+    if (!ctx || !ctx->out) return false;
+
+    Print &out = *ctx->out;
+    out.print("  ");
+    out.print(static_cast<unsigned long>(night.therapy_index));
+    out.print(": ");
+    print_utc_ms(out, night.record.start_ms);
+    out.print(" duration=");
+    print_duration_min(out, night.record.duration_min);
+    if (night.record.has_session_count) {
+        out.print(" sessions=");
+        out.print(static_cast<unsigned long>(night.record.session_count));
+    }
+    if (night.record.session_interval_count > 0) {
+        out.print(" intervals=");
+        out.print(static_cast<unsigned long>(
+            night.record.session_interval_count));
+    }
+    out.print(" start_ms=");
+    print_uint64(out, night.record.start_ms);
+    out.println();
+    ctx->count++;
+    return true;
+}
+
+void print_report_nights(Print &out, const ReportManager &manager) {
+    out.println("[REPORT nights]");
+    ReportNightPrintContext ctx;
+    ctx.out = &out;
+    manager.for_each_summary_night(print_report_night_row, &ctx);
+    if (!ctx.count) out.println("  no therapy nights indexed");
+}
+
+bool parse_u64_arg(const String &text, uint64_t &out) {
+    if (!text.length()) return false;
+    uint64_t value = 0;
+    for (size_t i = 0; i < text.length(); ++i) {
+        const char ch = text.charAt(i);
+        if (ch < '0' || ch > '9') return false;
+        const uint8_t digit = static_cast<uint8_t>(ch - '0');
+        if (value > (UINT64_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    out = value;
+    return true;
+}
+
+bool parse_report_coverage_target(const String &arg,
+                                  const ReportManager &manager,
+                                  uint64_t &night_start_ms) {
+    String value = arg;
+    trim_inplace(value);
+    to_lower_inplace(value);
+    if (!value.length()) return false;
+
+    if (value == "latest") {
+        ReportSummaryRecord night;
+        if (!manager.latest_summary_night(night)) return false;
+        night_start_ms = night.start_ms;
+        return true;
+    }
+
+    if (value.startsWith("ms ")) {
+        value.remove(0, 3);
+        trim_inplace(value);
+        return parse_u64_arg(value, night_start_ms);
+    }
+
+    uint64_t numeric = 0;
+    if (!parse_u64_arg(value, numeric)) return false;
+
+    const ReportSummaryStatus status = manager.summary_status();
+    if (numeric < status.nights_with_therapy) {
+        ReportSummaryRecord night;
+        if (!manager.summary_night_by_therapy_index(
+                static_cast<size_t>(numeric), night)) {
+            return false;
+        }
+        night_start_ms = night.start_ms;
+        return true;
+    }
+
+    night_start_ms = numeric;
+    return true;
+}
+
+void print_report_coverage(Print &out,
+                           const ReportManager &manager,
+                           uint64_t night_start_ms) {
+    ReportNightCoverageStatus coverage;
+    if (!manager.night_coverage(night_start_ms, coverage)) {
+        out.println("[REPORT] coverage night not found");
+        return;
+    }
+    out.print("[REPORT] coverage night=");
+    print_uint64(out, coverage.start_ms);
+    out.print(" end=");
+    print_uint64(out, coverage.end_ms);
+    out.print(" duration_min=");
+    out.print(static_cast<unsigned long>(coverage.duration_min));
+    out.print(" missing_required=");
+    out.print(static_cast<unsigned long>(coverage.missing_required));
+    out.println();
+    for (size_t i = 0; i < coverage.source_count; ++i) {
+        const ReportNightSourceCoverage &source = coverage.sources[i];
+        out.print("  ");
+        out.print(report_source_spool_type(source.source));
+        out.print(" required=");
+        out.print(source.required ? "yes" : "no");
+        out.print(" coverage=");
+        out.println(source.complete ? "complete" : "missing");
+    }
+}
+
 std::string cli_set_value_literal(String value) {
     trim_inplace(value);
     String lower = value;
@@ -250,6 +590,7 @@ void ManagementConsole::execute_line(String line,
         {"sink", &ManagementConsole::handle_sink_command},
         {"oxi", &ManagementConsole::handle_oximetry_command},
         {"oximetry", &ManagementConsole::handle_oximetry_command},
+        {"report", &ManagementConsole::handle_report_command},
         {"storage", &ManagementConsole::handle_storage_command},
         {"as11", &ManagementConsole::handle_as11_command},
         {"therapy", &ManagementConsole::handle_therapy_command},
@@ -370,6 +711,166 @@ void ManagementConsole::handle_oximetry_command(Print &out,
                                                 String rest,
                                                 ConsoleContext &ctx) {
     handle_oximetry(out, rest, ctx.oximetry_manager);
+}
+
+void ManagementConsole::handle_report_command(Print &out,
+                                              String rest,
+                                              ConsoleContext &ctx) {
+    trim_inplace(rest);
+    to_lower_inplace(rest);
+    if (!rest.length() || rest == "status") {
+        print_report_summary_status(out, ctx.report_manager);
+        print_report_cache_status(out, ctx.report_manager);
+        print_report_result_status(out, ctx.report_manager);
+        print_report_store_status(out);
+        print_report_prefetch_status(out, ctx.report_manager);
+        return;
+    }
+    if (rest == "store" || rest == "store status") {
+        print_report_store_status(out);
+        return;
+    }
+    if (rest == "nights" || rest == "list") {
+        print_report_nights(out, ctx.report_manager);
+        return;
+    }
+    if (rest == "prefetch" || rest == "prefetch status") {
+        print_report_prefetch_status(out, ctx.report_manager);
+        return;
+    }
+    if (rest == "prefetch on" || rest == "prefetch off") {
+        BackgroundWorker *w = background_worker();
+        if (!w) {
+            out.println("[REPORT] background worker unavailable");
+            return;
+        }
+        const bool on = rest == "prefetch on";
+        w->set_enabled(on);
+        out.println(on ? "[REPORT] prefetch enabled"
+                       : "[REPORT] prefetch disabled");
+        print_report_prefetch_status(out, ctx.report_manager);
+        return;
+    }
+    if (rest == "coverage") {
+        out.println("[REPORT] usage: report coverage latest|INDEX|ms VALUE|NIGHT_START_MS");
+        return;
+    }
+    if (rest == "cache") {
+        out.println("[REPORT] usage: report cache [force] latest|INDEX|ms VALUE|NIGHT_START_MS");
+        out.println("[REPORT] usage: report cache cancel");
+        out.println("[REPORT] usage: report cache clear all|latest|INDEX|ms VALUE|NIGHT_START_MS");
+        return;
+    }
+    if (rest == "result") {
+        print_report_result_status(out, ctx.report_manager);
+        out.println("[REPORT] usage: report result latest|INDEX");
+        return;
+    }
+    if (rest.startsWith("result ")) {
+        String value = rest.substring(strlen("result "));
+        trim_inplace(value);
+        size_t index = 0;
+        if (value == "latest") {
+            index = 0;
+        } else {
+            uint64_t parsed = 0;
+            if (!parse_u64_arg(value, parsed) ||
+                parsed > static_cast<uint64_t>(SIZE_MAX)) {
+                out.println("[REPORT] usage: report result latest|INDEX");
+                return;
+            }
+            index = static_cast<size_t>(parsed);
+        }
+        if (!ctx.report_manager.prepare_result_by_therapy_index(index)) {
+            out.println("[REPORT] result prepare failed");
+        }
+        print_report_result_status(out, ctx.report_manager);
+        return;
+    }
+    if (rest.startsWith("cache ")) {
+        String value = rest.substring(strlen("cache "));
+        trim_inplace(value);
+        if (value == "clear") {
+            out.println("[REPORT] usage: report cache clear all|latest|INDEX|ms VALUE|NIGHT_START_MS");
+            return;
+        }
+        if (value == "cancel") {
+            if (!ctx.report_manager.cancel_cache_fetch()) {
+                out.println("[REPORT] no active cache fetch");
+            } else {
+                out.println("[REPORT] cache fetch cancelled");
+            }
+            print_report_cache_status(out, ctx.report_manager);
+            return;
+        }
+        if (value.startsWith("clear ")) {
+            value.remove(0, strlen("clear "));
+            trim_inplace(value);
+            ReportCacheClearResult clear_result;
+            bool ok = false;
+            if (value == "all") {
+                ok = ctx.report_manager.clear_cache_all(clear_result);
+            } else {
+                uint64_t night_start_ms = 0;
+                if (!parse_report_coverage_target(value,
+                                                  ctx.report_manager,
+                                                  night_start_ms)) {
+                    out.println("[REPORT] usage: report cache clear all|latest|INDEX|ms VALUE|NIGHT_START_MS");
+                    return;
+                }
+                ok = ctx.report_manager.clear_cache_night(night_start_ms,
+                                                          clear_result);
+            }
+            if (!ok) {
+                out.println("[REPORT] cache clear rejected");
+                print_report_cache_status(out, ctx.report_manager);
+                return;
+            }
+            print_report_cache_clear_result(out, clear_result);
+            print_report_store_status(out);
+            return;
+        }
+        bool force = false;
+        if (value.startsWith("force ")) {
+            force = true;
+            value.remove(0, strlen("force "));
+            trim_inplace(value);
+        }
+        uint64_t night_start_ms = 0;
+        if (!parse_report_coverage_target(value, ctx.report_manager,
+                                          night_start_ms)) {
+            out.println("[REPORT] usage: report cache [force] latest|INDEX|ms VALUE|NIGHT_START_MS");
+            return;
+        }
+        if (!ctx.report_manager.request_night_cache(night_start_ms, force)) {
+            out.println("[REPORT] cache request rejected");
+            print_report_cache_status(out, ctx.report_manager);
+            return;
+        }
+        out.println("[REPORT] cache request queued");
+        print_report_cache_status(out, ctx.report_manager);
+        return;
+    }
+    if (rest.startsWith("coverage ")) {
+        String value = rest.substring(strlen("coverage "));
+        trim_inplace(value);
+        uint64_t night_start_ms = 0;
+        if (!parse_report_coverage_target(value, ctx.report_manager,
+                                          night_start_ms)) {
+            out.println("[REPORT] usage: report coverage latest|INDEX|ms VALUE|NIGHT_START_MS");
+            return;
+        }
+        print_report_coverage(out, ctx.report_manager, night_start_ms);
+        return;
+    }
+    print_unknown_command(out, "REPORT",
+                          "report, report status, report store, "
+                          "report nights, report coverage latest|INDEX|ms VALUE, "
+                          "report cache latest|INDEX|ms VALUE, "
+                          "report cache cancel, "
+                          "report cache clear all|latest|INDEX|ms VALUE, "
+                          "report result latest|INDEX, "
+                          "report prefetch [status|on|off]");
 }
 
 void ManagementConsole::handle_storage_command(Print &out,

@@ -23,6 +23,7 @@ enum class RpcSource {
     Internal,
     ResmedOta,
     Sink,
+    Report,
 };
 
 enum class RpcEventKind {
@@ -38,6 +39,8 @@ enum class RpcEventKind {
 };
 
 using RpcPayloadRef = std::shared_ptr<const std::string>;
+struct RpcEvent;
+using RpcEventObserver = void (*)(void *context, const RpcEvent &event);
 
 inline RpcPayloadRef make_rpc_payload_ref(std::string payload) {
     return std::make_shared<const std::string>(std::move(payload));
@@ -119,10 +122,17 @@ public:
                       const std::string &params_json,
                       RpcSource source,
                       uint32_t timeout_ms = 0);
+    bool send_request_with_id(const std::string &method,
+                              const std::string &params_json,
+                              RpcSource source,
+                              uint32_t timeout_ms,
+                              uint32_t &id);
     bool send_set_datetime_now(RpcSource source,
                                uint32_t timeout_ms = 0);
     bool next_event(RpcEvent &event);
     bool next_resmed_ota_event(RpcEvent &event);
+    void set_report_event_observer(RpcEventObserver observer,
+                                   void *context);
     void set_raw_rpc_events_enabled(bool enabled);
 
     StreamAcquireResult acquire_stream(const std::string &params_json,
@@ -196,6 +206,10 @@ private:
                     RpcPayloadRef payload,
                     RpcSource source = RpcSource::Internal,
                     uint32_t id = 0);
+    void push_report_event(RpcEventKind kind,
+                           RpcPayloadRef payload,
+                           RpcSource source = RpcSource::Internal,
+                           uint32_t id = 0);
     void push_resmed_ota_event(RpcEventKind kind,
                                const std::string &payload,
                                RpcSource source = RpcSource::Internal,
@@ -258,6 +272,8 @@ private:
     DatagramRx log_rx_;
     FixedQueue<RpcEvent, AC_RPC_EVENT_QUEUE_DEPTH> events_;
     FixedQueue<RpcEvent, AC_RESMED_OTA_EVENT_QUEUE_DEPTH> resmed_ota_events_;
+    RpcEventObserver report_observer_ = nullptr;
+    void *report_observer_context_ = nullptr;
 
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
     PendingRequest pending_;

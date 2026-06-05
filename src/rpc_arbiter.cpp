@@ -230,6 +230,15 @@ bool RpcArbiter::send_request(const std::string &method,
                               const std::string &params_json,
                               RpcSource source,
                               uint32_t timeout_ms) {
+    uint32_t id = 0;
+    return send_request_with_id(method, params_json, source, timeout_ms, id);
+}
+
+bool RpcArbiter::send_request_with_id(const std::string &method,
+                                      const std::string &params_json,
+                                      RpcSource source,
+                                      uint32_t timeout_ms,
+                                      uint32_t &id) {
     QueuedRequest request;
     request.method = method;
     request.params_json = params_json;
@@ -238,7 +247,9 @@ bool RpcArbiter::send_request(const std::string &method,
         ((method == "StartStream") ? AC_RPC_STREAM_TIMEOUT_MS
                                    : AC_RPC_DEFAULT_TIMEOUT_MS);
 
-    return enqueue_request(request);
+    const bool queued = enqueue_request(request);
+    id = queued ? request.id : 0;
+    return queued;
 }
 
 bool RpcArbiter::send_set_datetime_now(RpcSource source,
@@ -274,6 +285,12 @@ bool RpcArbiter::next_event(RpcEvent &event) {
 
 bool RpcArbiter::next_resmed_ota_event(RpcEvent &event) {
     return resmed_ota_events_.pop(event);
+}
+
+void RpcArbiter::set_report_event_observer(RpcEventObserver observer,
+                                           void *context) {
+    report_observer_ = observer;
+    report_observer_context_ = context;
 }
 
 void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
@@ -526,6 +543,22 @@ void RpcArbiter::push_event(RpcEventKind kind,
     event.id = id;
     event.payload = std::move(payload);
     if (!events_.push(std::move(event))) stats_.event_drops++;
+}
+
+void RpcArbiter::push_report_event(RpcEventKind kind,
+                                   RpcPayloadRef payload,
+                                   RpcSource source,
+                                   uint32_t id) {
+    RpcEvent event;
+    event.kind = kind;
+    event.source = source;
+    event.id = id;
+    event.payload = std::move(payload);
+    if (report_observer_) {
+        report_observer_(report_observer_context_, event);
+        return;
+    }
+    stats_.event_drops++;
 }
 
 void RpcArbiter::push_resmed_ota_event(RpcEventKind kind,
@@ -1268,14 +1301,23 @@ void RpcArbiter::handle_rpc_payload(std::string payload) {
         case RpcPayloadKind::Notification: {
             stats_.rpc_notifications++;
             const bool stream_data = json_method_is(payload, "StreamData");
+            const bool spool_fragment =
+                json_method_is(payload, "SpoolFragment");
             handle_stream_notification(payload);
             handle_event_notification(payload);
-            if (!stream_data) {
+            if (!stream_data && !spool_fragment) {
                 Log::log_payload(CAT_RPC, LOG_DEBUG, "[RPC notify] ",
                                  payload);
             }
+            if (spool_fragment) {
+                push_report_event(RpcEventKind::RpcNotification,
+                                  ref_payload(),
+                                  RpcSource::Report);
+            }
             if (!stream_data || raw_rpc_events_enabled_) {
-                push_event(RpcEventKind::RpcNotification, ref_payload());
+                if (!spool_fragment || raw_rpc_events_enabled_) {
+                    push_event(RpcEventKind::RpcNotification, ref_payload());
+                }
             }
             break;
         }
@@ -1304,6 +1346,12 @@ void RpcArbiter::handle_rpc_payload(std::string payload) {
                     push_resmed_ota_event(RpcEventKind::RpcResponse,
                                           ref_payload(), response_source,
                                           matched_id);
+                    break;
+                }
+                if (response_source == RpcSource::Report) {
+                    push_report_event(RpcEventKind::RpcResponse,
+                                      ref_payload(), response_source,
+                                      matched_id);
                     break;
                 }
                 if (!emit_matched_response(response_source)) break;
@@ -1381,6 +1429,7 @@ const char *RpcArbiter::source_name(RpcSource source) const {
         case RpcSource::Internal: return "internal";
         case RpcSource::ResmedOta: return "resmed_ota";
         case RpcSource::Sink: return "sink";
+        case RpcSource::Report: return "report";
         default: return "?";
     }
 }

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "app_config.h"
+#include "background_worker.h"
 #include "board.h"
 #include "can_driver.h"
 #include "debug_log.h"
@@ -9,6 +10,8 @@
 #include "ota_manager.h"
 #include "oximetry_manager.h"
 #include "provisioning.h"
+#include "report_manager.h"
+#include "report_prefetch_job.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
 #include "session_manager.h"
@@ -38,6 +41,9 @@ static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
 static OximetryManager oximetry_manager;
+static ReportManager report_manager;
+static BackgroundWorker bg_worker;
+static ReportPrefetchJob report_prefetch_job(report_manager);
 static ConsoleContext console_ctx{
     rpc_arbiter,
     tcp_bridge,
@@ -49,6 +55,7 @@ static ConsoleContext console_ctx{
     session_manager,
     sink_manager,
     oximetry_manager,
+    report_manager,
     &web_ui,
 };
 
@@ -62,6 +69,10 @@ static void note_session_stream_frame(void *context,
                                       const StreamFrameData &frame,
                                       uint32_t now_ms) {
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
+}
+
+static void handle_report_event(void *context, const RpcEvent &event) {
+    static_cast<ReportManager *>(context)->handle_event(event);
 }
 
 static void sync_network_services() {
@@ -165,8 +176,11 @@ void setup() {
     session_manager.begin();
     rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
                                           &session_manager);
+    rpc_arbiter.set_report_event_observer(handle_report_event,
+                                          &report_manager);
     sink_manager.begin(rpc_arbiter, session_manager);
     oximetry_manager.begin(app_config);
+    report_manager.begin();
     resmed_ota_manager.begin(rpc_arbiter);
     time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
     ota_manager.begin(app_config);
@@ -189,9 +203,16 @@ void setup() {
     web_ui.begin(rpc_arbiter, wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
+                 report_manager,
                  console_ctx);
 
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] architecture baseline ready\n");
+
+    // Idle-time background storage worker (prefetch + plot build). Started last,
+    // once every subsystem it gates on (report, CAN, OTA) is up.
+    bg_worker.add_job(&report_prefetch_job);
+    bg_worker.begin(report_manager, rpc_arbiter, resmed_ota_manager,
+                    ota_manager);
 }
 
 void loop() {
@@ -202,6 +223,7 @@ void loop() {
     rpc_arbiter.set_raw_rpc_events_enabled(
         tcp_bridge.raw_client_connected());
     rpc_arbiter.poll();
+    report_manager.poll(rpc_arbiter);
     resmed_ota_manager.poll();
     // First drain handles events produced by CAN/RPC/OTA work before services
     // that depend on fresh state run below.
