@@ -2928,7 +2928,12 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
         }
 
         ReportStoreCoverageRecord coverage;
-        coverage.start_ms = span_start;
+        // Claim only what this fetch actually swept: a tail refresh (from_ms
+        // past the session start) must not mark the un-fetched earlier span
+        // complete, or a partially-cached night reads as fully covered. A full
+        // sweep (from_ms <= span_start) still claims the whole span so aged-out
+        // sources settle.
+        coverage.start_ms = from_ms > span_start ? from_ms : span_start;
         coverage.end_ms = span_end;
         coverage.parser_schema = def->parser_schema;
         coverage.state = ReportStoreCoverageState::Complete;
