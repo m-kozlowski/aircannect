@@ -10,7 +10,7 @@ StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
     if (params_json.empty()) return result;
 
     const size_t consumers = consumer_count();
-    if (consumers > 0 && params_json_ != params_json) {
+    if ((consumers > 0 || external_active_) && params_json_ != params_json) {
         result.status = StreamAcquireStatus::Incompatible;
         return result;
     }
@@ -34,7 +34,7 @@ StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
 
     result.handle = static_cast<StreamConsumerHandle>(slot);
     result.status =
-        consumers == 0 ? StreamAcquireStatus::Acquired
+        consumers == 0 && !external_active_ ? StreamAcquireStatus::Acquired
                        : StreamAcquireStatus::AlreadyActive;
     return result;
 }
@@ -76,6 +76,22 @@ void StreamBroker::release(StreamConsumerHandle handle) {
     if (consumer_count() == 0) {
         clear_error();
         frame_pool_.release_storage();
+    }
+}
+
+void StreamBroker::note_external_start(const std::string &params_json) {
+    if (params_json.empty()) return;
+    external_active_ = true;
+    params_json_ = params_json;
+    actual_active_ = true;
+    if (pending_ == StreamCommandType::Stop) pending_ = StreamCommandType::None;
+    clear_error();
+}
+
+void StreamBroker::note_external_stop() {
+    external_active_ = false;
+    if (consumer_count() == 0) {
+        params_json_.clear();
     }
 }
 

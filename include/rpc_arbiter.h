@@ -183,6 +183,7 @@ private:
         uint32_t id = 0;
         uint32_t deadline_ms = 0;
         RpcSource source = RpcSource::Internal;
+        StreamCommandType stream_command = StreamCommandType::None;
     };
 
     static constexpr size_t RAW_PASSTHROUGH_PENDING_MAX = 8;
@@ -215,10 +216,18 @@ private:
     void expire_raw_passthrough(uint32_t now);
     void remember_raw_passthrough(uint32_t id,
                                   RpcSource source,
+                                  StreamCommandType stream_command,
                                   uint32_t now);
+    bool match_raw_passthrough(uint32_t id,
+                               RawPassthroughRequest &request,
+                               uint32_t now);
     bool match_raw_passthrough(uint32_t id,
                                RpcSource &source,
                                uint32_t now);
+    void note_raw_stream_request(StreamCommandType command,
+                                 const std::string &params_json);
+    void note_raw_stream_response(StreamCommandType command,
+                                  bool is_error);
 
     bool background_backoff_active(uint32_t now) const;
     void note_request_success(RpcSource source, uint32_t now);

@@ -59,11 +59,14 @@ public:
     StreamAcquireResult update(StreamConsumerHandle handle,
                                const std::string &params_json);
     void release(StreamConsumerHandle handle);
+    void note_external_start(const std::string &params_json);
+    void note_external_stop();
 
     bool consumer_active(StreamConsumerHandle handle) const;
     size_t consumer_count() const;
-    bool desired_active() const { return consumer_count() > 0; }
+    bool desired_active() const { return consumer_count() > 0 || external_active_; }
     bool actual_active() const { return actual_active_; }
+    bool external_active() const { return external_active_; }
     bool pending() const { return pending_ != StreamCommandType::None; }
     bool pending_start() const { return pending_ == StreamCommandType::Start; }
     bool pending_stop() const { return pending_ == StreamCommandType::Stop; }
@@ -140,6 +143,7 @@ private:
     void *frame_observer_context_ = nullptr;
 
     bool actual_active_ = false;
+    bool external_active_ = false;
     bool error_ = false;
     StreamCommandType pending_ = StreamCommandType::None;
     StreamCommandType error_command_ = StreamCommandType::None;
