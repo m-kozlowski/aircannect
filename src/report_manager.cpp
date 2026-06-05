@@ -2851,6 +2851,9 @@ bool ReportManager::store_cache_round(ReportSpoolResult &result) {
             break;
     }
     if (!parsed) {
+        // An empty source spool is not a fetch failure: a session can hold zero
+        // events, or a sampled source can have aged out
+        if (strcmp(error, "spool_empty") == 0) return true;
         fail_cache_fetch(error[0] ? error : "cache_parse_failed");
         return false;
     }
