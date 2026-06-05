@@ -256,6 +256,7 @@ const char *report_result_state_name(ReportResultState state) {
         case ReportResultState::Preparing: return "preparing";
         case ReportResultState::Ready: return "ready";
         case ReportResultState::Incomplete: return "incomplete";
+        case ReportResultState::Partial: return "partial";
         case ReportResultState::Error: return "error";
         case ReportResultState::Idle:
         default: return "idle";

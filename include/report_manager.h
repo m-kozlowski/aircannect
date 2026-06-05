@@ -96,6 +96,7 @@ enum class ReportResultState : uint8_t {
     Preparing,
     Ready,
     Incomplete,
+    Partial,  // displayable best-effort; required coverage is incomplete
     Error,
 };
 

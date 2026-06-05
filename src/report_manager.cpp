@@ -178,6 +178,14 @@ bool source_is_sampled(const ReportSourceDef &source) {
             (REPORT_SOURCE_TREND_SERIES | REPORT_SOURCE_HIGH_RES_SERIES)) != 0;
 }
 
+// A built result is "ready" only when required coverage is complete; otherwise it
+// is displayable best-effort but "partial" (the doc reserves complete for full
+// required coverage, so a degraded night must not be presented as a valid one).
+ReportResultState settled_result_state(uint32_t missing_required) {
+    return missing_required == 0 ? ReportResultState::Ready
+                                 : ReportResultState::Partial;
+}
+
 bool source_missing_start_for_night(const ReportSummaryRecord &night,
                                     const ReportSourceDef &source,
                                     int64_t &out_start_ms) {
@@ -1529,6 +1537,7 @@ const char *ReportManager::result_state_name() const {
         case ReportResultState::Preparing: return "preparing";
         case ReportResultState::Ready: return "ready";
         case ReportResultState::Incomplete: return "incomplete";
+        case ReportResultState::Partial: return "partial";
         case ReportResultState::Error: return "error";
     }
     return "unknown";
@@ -1963,7 +1972,7 @@ bool ReportManager::start_result_plot_build() {
     if (result_status_.state == ReportResultState::Error ||
         !result_chunks_ || result_status_.chunk_count == 0) {
         build_empty_plot_bin(result_plot_bin_);
-        result_status_.state = ReportResultState::Ready;
+        result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
         return true;
     }
@@ -1975,7 +1984,7 @@ bool ReportManager::start_result_plot_build() {
                                AC_REPORT_SUMMARY_SESSION_MAX);
     if (range_count == 0) {
         build_empty_plot_bin(result_plot_bin_);
-        result_status_.state = ReportResultState::Ready;
+        result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
         return true;
     }
@@ -1991,12 +2000,12 @@ bool ReportManager::start_result_plot_build() {
     }
     if (plot_start_ms_ <= 0 || plot_end_ms_ <= plot_start_ms_) {
         build_empty_plot_bin(result_plot_bin_);
-        result_status_.state = ReportResultState::Ready;
+        result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
         return true;
     }
     if (load_result_plot_cache()) {
-        result_status_.state = ReportResultState::Ready;
+        result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
         Log::logf(CAT_RPC,
                   LOG_INFO,
@@ -2222,7 +2231,7 @@ bool ReportManager::finish_result_plot_build() {
     }
     save_result_plot_cache();
     reset_plot_build();
-    result_status_.state = ReportResultState::Ready;
+    result_status_.state = settled_result_state(result_status_.missing_required);
     result_status_.error.clear();
     result_status_.revision++;
     Log::logf(CAT_RPC,
@@ -2369,7 +2378,8 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
     // sum, so comparing it would defeat the fast path and briefly empty
     // result_plot_bin_ (a /api/report/plot 404 window).
     if (!refresh_cache &&
-        result_status_.state == ReportResultState::Ready &&
+        (result_status_.state == ReportResultState::Ready ||
+         result_status_.state == ReportResultState::Partial) &&
         result_status_.therapy_index == therapy_index &&
         result_status_.chunk_count > 0 &&
         result_status_.night_start_ms == night.start_ms &&

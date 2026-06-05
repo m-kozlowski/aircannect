@@ -2513,7 +2513,8 @@
       reportDrawItems = [];
       reportDrawPending = false;
       reportDrawRetryCount = 0;
-      if (!reportResult || reportResult.state !== "ready") {
+      if (!reportResult ||
+          (reportResult.state !== "ready" && reportResult.state !== "partial")) {
         if (reportResult && reportResult.state === "incomplete") {
           const note = document.createElement("div");
           note.className = "report-chart-note";
@@ -2522,6 +2523,13 @@
           container.appendChild(note);
         }
         return;
+      }
+      if (reportResult.state === "partial") {
+        const pnote = document.createElement("div");
+        pnote.className = "report-chart-note";
+        pnote.textContent =
+          "Incomplete night - best-effort from cached data; missing sources are marked below.";
+        container.appendChild(pnote);
       }
       const range = reportZoom || reportRange();
       if (!(range.end > range.start)) return;
@@ -2662,13 +2670,14 @@
       }
 
       const selected = selectedReportNight();
-      const ready = reportResult && reportResult.state === "ready";
-      const durationMin = ready && reportResult.duration_min ?
+      const displayable = reportResult &&
+        (reportResult.state === "ready" || reportResult.state === "partial");
+      const durationMin = displayable && reportResult.duration_min ?
         reportResult.duration_min : (selected ? selected.duration_min : 0);
       up("reportDuration", durationMin ? fmtMinutes(durationMin) : "--");
-      up("reportAhi", ready && Number.isFinite(Number(reportResult.ahi)) ?
+      up("reportAhi", displayable && Number.isFinite(Number(reportResult.ahi)) ?
         Number(reportResult.ahi).toFixed(2) : "--");
-      renderReportEventCounts(ready ? reportResult : null);
+      renderReportEventCounts(displayable ? reportResult : null);
       renderReportSessions(reportResult && reportResult.sessions ?
         reportResult.sessions : selected ? selected.sessions : []);
 
@@ -2885,7 +2894,7 @@
                                              previousRevision,
                                              true);
         if (!result || token !== reportLoadToken) return;
-        if (result.state !== "ready") {
+        if (result.state !== "ready" && result.state !== "partial") {
           msg("reportMsg", result.error || "Report incomplete", false, true);
           renderReportSummary();
           return;
@@ -2897,7 +2906,10 @@
         rememberReportClientCache(night);
         renderReportSummary();
         renderReportCharts();
-        msg("reportMsg", "Report loaded", true);
+        msg("reportMsg",
+            result.state === "partial"
+              ? "Report loaded (incomplete - some data missing)"
+              : "Report loaded", true);
       } catch (error) {
         if (token !== reportLoadToken) return;
         msg("reportMsg", error.message, false, true);
