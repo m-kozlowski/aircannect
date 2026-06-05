@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
@@ -151,6 +152,9 @@ public:
     const ReportSummaryStatus &summary_status() const {
         return summary_status_;
     }
+    // Atomic mirror of summary_status_.revision, published each poll() so the
+    // background prefetch job can watch for new nights without a cross-task read.
+    uint32_t summary_revision() const { return summary_revision_pub_.load(); }
 
     bool night_coverage(uint64_t night_start_ms, ReportNightCoverageStatus &out) const;
     bool night_coverage_by_therapy_index(size_t therapy_index, ReportNightCoverageStatus &out) const;
@@ -369,6 +373,7 @@ private:
     size_t record_count_ = 0;
     uint32_t nights_with_therapy_ = 0;
     ReportSummaryStatus summary_status_;
+    std::atomic<uint32_t> summary_revision_pub_{0};  // see summary_revision()
     SpoolClient spool_;
     bool summary_fetch_active_ = false;
     uint32_t summary_started_ms_ = 0;

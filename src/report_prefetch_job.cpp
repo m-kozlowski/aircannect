@@ -14,7 +14,7 @@ JobStep ReportPrefetchJob::step() {
     case State::Pick: {
         // A summary refresh (e.g. right after therapy stops) may include a new night,
         // rescan immediately rather than waiting out the backoff.
-        const uint32_t summary_rev = report_->summary_status().revision;
+        const uint32_t summary_rev = report_->summary_revision();
         if (summary_rev != last_summary_rev_) {
             last_summary_rev_ = summary_rev;
             rescan_after_ms_ = 0;

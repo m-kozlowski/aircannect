@@ -401,6 +401,8 @@ bool ReportManager::request_summary_refresh(bool force) {
 
 void ReportManager::poll(RpcArbiter &arbiter) {
     service_prefetch();
+    // Publish the summary revision for the background prefetch job (cross-task).
+    summary_revision_pub_.store(summary_status_.revision);
     if (!summary_fetch_active_ && !cache_fetch_active_ &&
         !plot_build_active_ &&
         static_cast<int32_t>(millis() - next_trash_cleanup_ms_) >= 0) {
