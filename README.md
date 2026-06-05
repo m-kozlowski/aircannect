@@ -2,6 +2,8 @@
 
 ESP32 bridge for ResMed AirSense 11 / AirCurve 11 CPAP.
 
+Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
+
 ![AirCANnect dashboard](docs/screenshots/aircannect-dashboard.png)
 
 ## What it does
@@ -10,20 +12,22 @@ ESP32 bridge for ResMed AirSense 11 / AirCurve 11 CPAP.
   - live dashboard with AS11 status and identity
   - read/write all therapy settings
   - live pressure / flow / leak / SpO2 charts
+- **Reports**
+  - therapy-night charts with event flags, session toggles, zoom, and cached data
+- **Oximetry**
+  - use supported BLE oximeters or UDP sources with AirSense 11 HR/SpO2 recording
+  - currently supported: O2Ring, O2Ring-S, Checkme O2, Nonin 3150, generic PLX/HR sensors
 - **Time sync**
   - NTP-first with AS11 clock fallback
   - Optional AirSense time synchronization - fixes RTC drift issue
-- **ResMed OTA**
-  - flash AirSense firmware from web UI or CLI. \
-    (Autodetects firmware format (raw or .abc container) and target memory block)
 - **Raw TCP bridge**
   - send commands to AirSense over WiFi. \
     (one JSON-RPC payload per line, compatible with `as11_config.py` and other host tooling.)
 - **Multi-profile Wi-Fi**
   - up to four STA profiles, BSSID-targeted roaming, SoftAP auto-fallback or forced always-on.
-- **Oximetry**
-  - use supported BLE oximeters or UDP sources with AirSense 11 HR/SpO2 recording
-  - currently supported: O2Ring, O2Ring-S, Checkme O2, Nonin 3150, generic PLX/HR sensors
+- **ResMed OTA**
+  - flash AirSense firmware from web UI or CLI. \
+    (Autodetects firmware format (raw or .abc container) and target memory block)
 
 
 ## Planned
@@ -60,13 +64,17 @@ Both also support `-p /dev/ttyUSB0` for direct serial CAN tooling on hardware th
 
 ## Screenshots
 
-| Live charts | Clinical Settings |
+| Live charts | Reports |
 |---|---|
-| ![Live](docs/screenshots/charts.png) | ![Clinical](docs/screenshots/clinical.png) |
+| ![Live](docs/screenshots/charts.png) | ![Reports](docs/screenshots/report_charts.png) |
 
-| ResMed OTA | Oximetry |
+| Oximetry | Clinical Settings |
 |---|---|
-| ![OTA](docs/screenshots/ota.png) | ![Oximetry](docs/screenshots/oximetry.png) |
+| ![Oximetry](docs/screenshots/oximetry.png) | ![Clinical](docs/screenshots/clinical.png) |
+
+| ResMed OTA | Wifi |
+|---|---|
+| ![OTA](docs/screenshots/ota.png) | ![OTA](docs/screenshots/wifi.png) |
 
 ## License
 
