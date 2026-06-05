@@ -120,6 +120,7 @@ struct ReportResultStatus {
     uint32_t record_count = 0;
     uint32_t payload_bytes = 0;
     bool event_metrics_valid = false;
+    bool events_available = false;  // event source covered: counts are real, not unknown
     float ahi = 0.0f;
     float oa_index = 0.0f;
     float ca_index = 0.0f;

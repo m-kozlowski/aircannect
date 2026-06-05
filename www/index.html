@@ -1834,16 +1834,24 @@
       const container = document.getElementById("reportEventCounts");
       if (!container) return;
       container.textContent = "";
+      // Event source not covered for this night: counts are unknown, not zero.
+      const unavailable = !!result && result.events_available === false;
       reportEventCountFields.forEach((item) => {
         const count = result ? Number(result[item.field] || 0) : 0;
         const chip = document.createElement("span");
         chip.className = "evt";
         chip.appendChild(document.createTextNode(item.key));
         const value = document.createElement("b");
-        value.textContent = String(count);
+        value.textContent = unavailable ? "--" : String(count);
         chip.appendChild(value);
         container.appendChild(chip);
       });
+      if (unavailable) {
+        const note = document.createElement("span");
+        note.className = "report-res-badge";
+        note.textContent = "events not captured";
+        container.appendChild(note);
+      }
     }
 
     function resetReportData() {

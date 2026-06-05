@@ -924,6 +924,7 @@ void ReportManager::build_result_json(LargeTextBuffer &json) const {
                  static_cast<long>(result_status_.hypopnea_count));
     json_add_int(json, "arousal_count",
                  static_cast<long>(result_status_.arousal_count));
+    json_add_bool(json, "events_available", result_status_.events_available);
     json += ",\"sessions\":[";
     for (uint32_t i = 0; i < result_night_.session_interval_count; ++i) {
         const ReportSummarySession &session = result_night_.sessions[i];
@@ -1694,7 +1695,11 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
         return false;
     }
     const bool sparse_events = kind == ReportStoreChunkKind::Events;
-    const bool complete = sparse_events ||
+    // Completeness is coverage-driven for every source, events included: a swept
+    // span is covered full-width (so zero events is real) and an unswept span is
+    // not (events unavailable, not zero). sparse_events still guards the aged-out
+    // series check below, where a covered event stream may hold zero chunks.
+    const bool complete =
         ReportStore::coverage_complete(source_def->spool_type,
                                        start_ms,
                                        end_ms,
@@ -2415,6 +2420,13 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
         return false;
     }
     result_status_.missing_required = coverage.missing_required;
+    // Event counts come from cached event chunks; if the event source is not
+    // covered for this night, zero counts are unknown (not real) -> flag
+    // unavailable so the UI shows that rather than reporting zero events.
+    const ReportSourceDef *events_def =
+        report_source_def(ReportSourceId::RespiratoryEvents);
+    result_status_.events_available =
+        events_def && source_complete_for_night(night, *events_def);
 
     // Use the session data span, not night.end_ms (a 24h day bucket far past the
     // therapy data) coverage is only written/checked over the session span,
@@ -2636,7 +2648,10 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
                     result_status_.ca_index +
                     result_status_.ua_index +
                     result_status_.hypopnea_index;
-                result_status_.event_metrics_valid = true;
+                // Trust chunk-derived indices only when events are covered;
+                // otherwise the counts are zero-by-absence, so omit the AHI.
+                result_status_.event_metrics_valid =
+                    result_status_.events_available;
             }
         }
         if (!start_result_plot_build()) return false;
