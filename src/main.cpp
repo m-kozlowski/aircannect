@@ -211,8 +211,7 @@ void setup() {
     // Idle-time background storage worker (prefetch + plot build). Started last,
     // once every subsystem it gates on (report, CAN, OTA) is up.
     bg_worker.add_job(&report_prefetch_job);
-    bg_worker.begin(report_manager, rpc_arbiter, resmed_ota_manager,
-                    ota_manager);
+    bg_worker.begin();
 }
 
 // On the therapy-stop edge, refresh the night index so the idle background backfills it
@@ -256,6 +255,14 @@ void loop() {
     ota_manager.poll(wifi_manager);
     resmed_ota_manager.poll();
     Storage::poll();
+    // Publish the worker's gate inputs from here (the owner thread) so the
+    // background task reads a coherent snapshot instead of these managers.
+    bg_worker.publish_gate(
+        report_manager.foreground_busy(),
+        rpc_arbiter.stream_activity_active(),
+        resmed_ota_manager.transport_active(),
+        ota_manager.active(),
+        rpc_arbiter.as11_state().therapy_state() == As11TherapyState::Running);
     web_ui.poll();
     tcp_bridge.poll(rpc_arbiter);
     telnet_console.poll(console_ctx);

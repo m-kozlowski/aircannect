@@ -2,10 +2,6 @@
 
 #include "board.h"
 #include "debug_log.h"
-#include "ota_manager.h"
-#include "report_manager.h"
-#include "resmed_ota_manager.h"
-#include "rpc_arbiter.h"
 
 namespace aircannect {
 namespace {
@@ -14,12 +10,7 @@ BackgroundWorker *g_instance = nullptr;
 
 BackgroundWorker *background_worker() { return g_instance; }
 
-void BackgroundWorker::begin(ReportManager &report, RpcArbiter &arbiter,
-                             ResmedOtaManager &resmed_ota, OtaManager &ota) {
-    report_ = &report;
-    arbiter_ = &arbiter;
-    resmed_ota_ = &resmed_ota;
-    ota_ = &ota;
+void BackgroundWorker::begin() {
     if (!status_lock_) status_lock_ = xSemaphoreCreateMutex();
     g_instance = this;
     if (task_) return;
@@ -45,19 +36,32 @@ void BackgroundWorker::note_activity() {
     last_activity_ms_.store(now);
 }
 
+void BackgroundWorker::publish_gate(bool foreground_busy, bool stream_active,
+                                   bool resmed_ota_active, bool esp_ota_active,
+                                   bool therapy_running) {
+    uint32_t v = 0;
+    if (foreground_busy) v |= GATE_FOREGROUND;
+    if (stream_active) v |= GATE_STREAM;
+    if (resmed_ota_active) v |= GATE_RESMED_OTA;
+    if (esp_ota_active) v |= GATE_ESP_OTA;
+    if (therapy_running) v |= GATE_THERAPY;
+    gate_inputs_.store(v);
+}
+
 bool BackgroundWorker::gate_open(const char **reason) const {
     if (!enabled_.load()) { *reason = "disabled"; return false; }
-    // A user-initiated report op owns the spool/caches; the prefetch's OWN fetch
-    // is excluded so the worker does not gate itself off mid-prefetch.
-    if (report_->foreground_busy()) { *reason = "report_busy"; return false; }
+    // The main loop owns these subsystems and publishes their state via
+    // publish_gate(); the worker reads the snapshot, never the managers.
+    const uint32_t gi = gate_inputs_.load();
+    if (gi & GATE_UNPUBLISHED) { *reason = "starting"; return false; }
+    // A user-initiated report op owns the spool/caches (the prefetch's own fetch
+    // is excluded upstream in foreground_busy()).
+    if (gi & GATE_FOREGROUND) { *reason = "report_busy"; return false; }
     // CAN must stay free for live streaming and therapy capture.
-    if (arbiter_->stream_activity_active()) { *reason = "stream"; return false; }
-    if (resmed_ota_->transport_active()) { *reason = "resmed_ota"; return false; }
-    if (ota_->active()) { *reason = "esp_ota"; return false; }
-    if (arbiter_->as11_state().therapy_state() == As11TherapyState::Running) {
-        *reason = "therapy";
-        return false;
-    }
+    if (gi & GATE_STREAM) { *reason = "stream"; return false; }
+    if (gi & GATE_RESMED_OTA) { *reason = "resmed_ota"; return false; }
+    if (gi & GATE_ESP_OTA) { *reason = "esp_ota"; return false; }
+    if (gi & GATE_THERAPY) { *reason = "therapy"; return false; }
     const uint32_t last = last_activity_ms_.load();
     if (last != 0 && (millis() - last) < AC_BG_WORKER_ACTIVITY_GRACE_MS) {
         *reason = "web_grace";

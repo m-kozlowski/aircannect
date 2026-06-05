@@ -10,11 +10,6 @@
 
 namespace aircannect {
 
-class ReportManager;
-class RpcArbiter;
-class ResmedOtaManager;
-class OtaManager;
-
 // What a single step() accomplished, so the worker can pace the next tick.
 enum class JobStep {
     Idle,     // nothing to do now -> worker sleeps long
@@ -44,9 +39,14 @@ struct BackgroundWorkerStatus {
 // activity). One instance per device; see background_worker().
 class BackgroundWorker {
 public:
-    void begin(ReportManager &report, RpcArbiter &arbiter,
-               ResmedOtaManager &resmed_ota, OtaManager &ota);
+    void begin();
     void add_job(BackgroundJob *job);
+
+    // The main loop owns the gated subsystems; it publishes their state here
+    // every iteration so the worker never reads them cross-task. Main loop only.
+    void publish_gate(bool foreground_busy, bool stream_active,
+                      bool resmed_ota_active, bool esp_ota_active,
+                      bool therapy_running);
 
     void set_enabled(bool enabled) { enabled_.store(enabled); }
     bool enabled() const { return enabled_.load(); }
@@ -63,10 +63,14 @@ private:
     bool gate_open(const char **reason) const;
     void publish(bool idle, const char *reason);
 
-    ReportManager *report_ = nullptr;
-    RpcArbiter *arbiter_ = nullptr;
-    ResmedOtaManager *resmed_ota_ = nullptr;
-    OtaManager *ota_ = nullptr;
+    // Gate-input bits published by the main loop (see publish_gate), packed into
+    // one atomic so the worker reads a coherent snapshot lock-free.
+    static constexpr uint32_t GATE_FOREGROUND = 1u << 0;
+    static constexpr uint32_t GATE_STREAM = 1u << 1;
+    static constexpr uint32_t GATE_RESMED_OTA = 1u << 2;
+    static constexpr uint32_t GATE_ESP_OTA = 1u << 3;
+    static constexpr uint32_t GATE_THERAPY = 1u << 4;
+    static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
     static constexpr size_t MAX_JOBS = 4;
     BackgroundJob *jobs_[MAX_JOBS] = {};
@@ -74,6 +78,9 @@ private:
 
     std::atomic<bool> enabled_{true};
     std::atomic<uint32_t> last_activity_ms_{0};  // web grace; set from AsyncTCP
+    // Gate inputs from the main loop; starts "unpublished" so the worker stays
+    // gated until the first publish_gate().
+    std::atomic<uint32_t> gate_inputs_{GATE_UNPUBLISHED};
     TaskHandle_t task_ = nullptr;
 
     mutable SemaphoreHandle_t status_lock_ = nullptr;
