@@ -1337,6 +1337,9 @@ void WebUI::send_report_chunks(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
+    // A report view is active foreground work; defer the idle prefetch so it
+    // does not contend for the SD bus while the user is loading charts.
+    if (BackgroundWorker *w = background_worker()) w->note_activity();
     if (!report_manager_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"report unavailable\"}");

@@ -42,7 +42,7 @@ void BackgroundWorker::add_job(BackgroundJob *job) {
 void BackgroundWorker::note_activity() {
     uint32_t now = millis();
     if (now == 0) now = 1;  // 0 is the "never" sentinel
-    last_activity_ms_ = now;
+    last_activity_ms_.store(now);
 }
 
 bool BackgroundWorker::gate_open(const char **reason) const {
@@ -58,7 +58,7 @@ bool BackgroundWorker::gate_open(const char **reason) const {
         *reason = "therapy";
         return false;
     }
-    const uint32_t last = last_activity_ms_;
+    const uint32_t last = last_activity_ms_.load();
     if (last != 0 && (millis() - last) < AC_BG_WORKER_ACTIVITY_GRACE_MS) {
         *reason = "web_grace";
         return false;

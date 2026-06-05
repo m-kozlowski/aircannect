@@ -73,7 +73,7 @@ private:
     size_t job_count_ = 0;
 
     std::atomic<bool> enabled_{true};
-    volatile uint32_t last_activity_ms_ = 0;
+    std::atomic<uint32_t> last_activity_ms_{0};  // web grace; set from AsyncTCP
     TaskHandle_t task_ = nullptr;
 
     mutable SemaphoreHandle_t status_lock_ = nullptr;
