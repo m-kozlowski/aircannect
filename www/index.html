@@ -524,6 +524,116 @@
       opacity: 0.6;
     }
 
+    .night-picker {
+      position: relative;
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .np-arrow {
+      padding: 7px 9px;
+    }
+
+    .np-date {
+      min-width: 150px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .np-date .np-dur {
+      color: var(--muted);
+      font-weight: 400;
+      margin-left: 6px;
+    }
+
+    .np-pop {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      width: 262px;
+      max-width: calc(100vw - 16px);
+      padding: 10px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    }
+
+    .np-pop.open {
+      display: block;
+    }
+
+    .np-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .np-head span {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .np-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 2px;
+    }
+
+    .np-dow {
+      text-align: center;
+      padding: 2px 0;
+      font-size: 10px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .np-day {
+      position: relative;
+      text-align: center;
+      padding: 7px 0;
+      border-radius: 5px;
+      font-size: 13px;
+      color: #5b626d;
+    }
+
+    .np-day.has {
+      color: var(--text);
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .np-day.has:hover {
+      background: var(--line);
+    }
+
+    .np-day.has::after {
+      content: "";
+      position: absolute;
+      bottom: 4px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .np-day.sel {
+      background: var(--accent);
+      color: #04221c;
+    }
+
+    .np-day.sel::after {
+      background: #04221c;
+    }
+
+    .np-day.empty {
+      visibility: hidden;
+    }
+
     .report-charts {
       display: grid;
       grid-template-columns: 1fr;
@@ -1161,7 +1271,22 @@
           <div class="card">
             <h3>Therapy Report</h3>
             <div class="report-actions">
-              <select id="reportNight"></select>
+              <div class="night-picker">
+                <button class="btn np-arrow" id="reportPrevNight"
+                        title="Older night" onclick="stepReportNight(1)">&larr;</button>
+                <button class="btn np-date" id="reportDateBtn"
+                        onclick="toggleReportCalendar()">--</button>
+                <button class="btn np-arrow" id="reportNextNight"
+                        title="Newer night" onclick="stepReportNight(-1)">&rarr;</button>
+                <div class="np-pop" id="reportCalPop">
+                  <div class="np-head">
+                    <button class="btn" onclick="stepReportCalMonth(-1)">&lsaquo;</button>
+                    <span id="reportCalMonth">--</span>
+                    <button class="btn" onclick="stepReportCalMonth(1)">&rsaquo;</button>
+                  </div>
+                  <div class="np-grid" id="reportCalGrid"></div>
+                </div>
+              </div>
               <button class="btn" onclick="refreshReportSummary(true)">
                 Refresh Summary
               </button>
@@ -1553,6 +1678,8 @@
     let reportZoom = null;        // {start,end} when drag-zoomed, else null
     let reportHoverTime = null;   // cursor time shared across all charts
     let reportDrag = null;        // active drag-to-zoom selection state
+    let reportSelectedNightId = ""; // user-picked night id; "" defaults to newest
+    let reportCalView = null;     // Date at the 1st of the calendar's shown month
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_CLIENT_CACHE_MAX = 4;
@@ -1781,11 +1908,139 @@
     }
 
     function selectedReportNight() {
-      const select = document.getElementById("reportNight");
-      const id = select && select.value ? select.value : "";
-      return reportNightsNewestFirst().find((night) => String(night.id) === id) ||
-        null;
+      const nights = reportNightsNewestFirst();
+      return nights.find((night) => String(night.id) === reportSelectedNightId) ||
+        nights[0] || null;
     }
+
+    function startOfMonth(ms) {
+      const date = new Date(Number(ms));
+      return new Date(date.getFullYear(), date.getMonth(), 1);
+    }
+
+    function pickReportNight(id) {
+      reportSelectedNightId = String(id);
+      closeReportCalendar();
+      loadSelectedReportNight(true, false);
+    }
+
+    function stepReportNight(delta) {
+      const nights = reportNightsNewestFirst();
+      if (!nights.length) return;
+      const current = selectedReportNight();
+      let index = nights.findIndex((night) => night === current);
+      if (index < 0) index = 0;
+      const next = index + delta;
+      if (next < 0 || next >= nights.length) return;
+      pickReportNight(nights[next].id);
+    }
+
+    function toggleReportCalendar() {
+      const pop = document.getElementById("reportCalPop");
+      if (!pop) return;
+      if (pop.classList.contains("open")) {
+        closeReportCalendar();
+        return;
+      }
+      const selected = selectedReportNight();
+      reportCalView = startOfMonth(selected ? selected.start : Date.now());
+      renderReportCalendar();
+      positionReportCalendar();
+      pop.classList.add("open");
+    }
+
+    function positionReportCalendar() {
+      const pop = document.getElementById("reportCalPop");
+      const button = document.getElementById("reportDateBtn");
+      if (!pop || !button) return;
+      const rect = button.getBoundingClientRect();
+      const maxLeft = window.innerWidth - 262 - 8;
+      let left = rect.left;
+      if (left > maxLeft) left = maxLeft;
+      if (left < 8) left = 8;
+      pop.style.left = left + "px";
+      pop.style.top = (rect.bottom + 6) + "px";
+    }
+
+    function closeReportCalendar() {
+      const pop = document.getElementById("reportCalPop");
+      if (pop) pop.classList.remove("open");
+    }
+
+    function stepReportCalMonth(delta) {
+      if (!reportCalView) reportCalView = startOfMonth(Date.now());
+      reportCalView = new Date(reportCalView.getFullYear(),
+                              reportCalView.getMonth() + delta, 1);
+      renderReportCalendar();
+    }
+
+    function renderReportCalendar() {
+      const label = document.getElementById("reportCalMonth");
+      const grid = document.getElementById("reportCalGrid");
+      if (!label || !grid || !reportCalView) return;
+      const months = ["January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"];
+      const year = reportCalView.getFullYear();
+      const month = reportCalView.getMonth();
+      label.textContent = months[month] + " " + year;
+
+      const byDay = {};
+      reportNightsNewestFirst().forEach((night) => {
+        const date = new Date(Number(night.start));
+        if (date.getFullYear() === year && date.getMonth() === month) {
+          byDay[date.getDate()] = night;
+        }
+      });
+      const selected = selectedReportNight();
+      const selId = selected ? String(selected.id) : "";
+
+      grid.textContent = "";
+      ["S", "M", "T", "W", "T", "F", "S"].forEach((name) => {
+        const cell = document.createElement("div");
+        cell.className = "np-dow";
+        cell.textContent = name;
+        grid.appendChild(cell);
+      });
+      const lead = new Date(year, month, 1).getDay();
+      for (let blank = 0; blank < lead; blank++) {
+        const cell = document.createElement("div");
+        cell.className = "np-day empty";
+        grid.appendChild(cell);
+      }
+      const days = new Date(year, month + 1, 0).getDate();
+      for (let day = 1; day <= days; day++) {
+        const cell = document.createElement("div");
+        cell.textContent = String(day);
+        const night = byDay[day];
+        if (night) {
+          cell.className = "np-day has" +
+            (String(night.id) === selId ? " sel" : "");
+          cell.title = fmtMinutes(night.duration_min);
+          cell.onclick = () => pickReportNight(night.id);
+        } else {
+          cell.className = "np-day";
+        }
+        grid.appendChild(cell);
+      }
+    }
+
+    document.addEventListener("click", (event) => {
+      const pop = document.getElementById("reportCalPop");
+      if (!pop || !pop.classList.contains("open")) return;
+      if (!event.target.closest || !event.target.closest(".night-picker")) {
+        closeReportCalendar();
+      }
+    });
+
+    // The calendar is position:fixed anchored to the date button; a scroll or
+    // resize would leave it detached, so close it on either (capture catches the
+    // scroll-container's scroll, which does not bubble).
+    function closeReportCalendarOnViewportChange() {
+      const pop = document.getElementById("reportCalPop");
+      if (pop && pop.classList.contains("open")) closeReportCalendar();
+    }
+    window.addEventListener("scroll", closeReportCalendarOnViewportChange, true);
+    window.addEventListener("resize", closeReportCalendarOnViewportChange);
 
     function reportTherapyIndex(night) {
       if (!night) return null;
@@ -2652,32 +2907,28 @@
       const state = reportSummary && reportSummary.state ?
         String(reportSummary.state) : "idle";
       const nights = reportNightsNewestFirst();
-      const select = document.getElementById("reportNight");
-      const previous = select ? select.value : "";
-
-      if (select) {
-        select.textContent = "";
-        if (!nights.length) {
-          const option = document.createElement("option");
-          option.value = "";
-          option.textContent = "No nights";
-          select.appendChild(option);
-        } else {
-          nights.forEach((night) => {
-            const option = document.createElement("option");
-            option.value = String(night.id);
-            option.textContent = fmtReportDate(night.start) + " " +
-              fmtMinutes(night.duration_min);
-            select.appendChild(option);
-          });
-          if (previous && nights.some((night) => String(night.id) === previous)) {
-            select.value = previous;
-          }
-        }
-        select.onchange = () => loadSelectedReportNight(true, false);
-      }
-
       const selected = selectedReportNight();
+
+      const dateBtn = document.getElementById("reportDateBtn");
+      if (dateBtn) {
+        if (selected) {
+          dateBtn.innerHTML = fmtReportDate(selected.start) +
+            "<span class=\"np-dur\">" + fmtMinutes(selected.duration_min) +
+            "</span>";
+        } else {
+          dateBtn.textContent = state === "fetching" ? "Loading..." :
+            (nights.length ? "Select night" : "No nights");
+        }
+      }
+      const selIndex = selected ?
+        nights.findIndex((night) => night === selected) : -1;
+      const prevBtn = document.getElementById("reportPrevNight");
+      const nextBtn = document.getElementById("reportNextNight");
+      if (prevBtn) prevBtn.disabled = !(selIndex >= 0 &&
+        selIndex < nights.length - 1);
+      if (nextBtn) nextBtn.disabled = !(selIndex > 0);
+      const pop = document.getElementById("reportCalPop");
+      if (pop && pop.classList.contains("open")) renderReportCalendar();
       const displayable = reportResult &&
         (reportResult.state === "ready" || reportResult.state === "partial");
       const durationMin = displayable && reportResult.duration_min ?
@@ -2688,41 +2939,6 @@
       renderReportEventCounts(displayable ? reportResult : null);
       renderReportSessions(reportResult && reportResult.sessions ?
         reportResult.sessions : selected ? selected.sessions : []);
-
-      const list = document.getElementById("reportNightList");
-      if (list) {
-        list.textContent = "";
-        if (!nights.length) {
-          const empty = document.createElement("div");
-          empty.className = "value";
-          empty.style.textAlign = "left";
-          empty.textContent = state === "fetching" ?
-            "Fetching Summary..." : "No therapy nights indexed.";
-          list.appendChild(empty);
-        } else {
-          nights.forEach((night) => {
-            const rowElement = document.createElement("div");
-            rowElement.className = "report-night";
-
-            const date = document.createElement("div");
-            date.textContent = fmtReportDate(night.start);
-            rowElement.appendChild(date);
-
-            const duration = document.createElement("span");
-            duration.className = "value";
-            duration.textContent = fmtMinutes(night.duration_min);
-            rowElement.appendChild(duration);
-
-            const sessions = document.createElement("span");
-            sessions.className = "value";
-            sessions.textContent = night.session_count !== undefined ?
-              String(night.session_count) + " sessions" : "--";
-            rowElement.appendChild(sessions);
-
-            list.appendChild(rowElement);
-          });
-        }
-      }
 
       if (state === "fetching") {
         const spool = reportSummary && reportSummary.spool ? reportSummary.spool : {};
