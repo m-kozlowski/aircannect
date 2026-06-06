@@ -1549,46 +1549,51 @@ bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed) {
     return ok;
 }
 
-bool write_coverage(const char *source,
-                    const ReportStoreCoverageRecord &record) {
+bool write_coverage_batch(const char *source,
+                          const ReportStoreCoverageRecord *records,
+                          size_t count) {
     Storage::Guard g;
     if (!source || !source[0]) {
         note_error("bad_coverage_source", &current.coverage_write_errors);
         return false;
     }
-    if (!valid_coverage_record(record)) {
-        note_error("bad_coverage_record", &current.coverage_write_errors);
-        return false;
-    }
     if (!ensure_layout()) return false;
-    // Only Complete intervals are persisted; an Incomplete span is just a gap
-    // (absence), so it needs no record.
-    if (record.state != ReportStoreCoverageState::Complete) {
+
+    // One load -> coalesce ALL records -> one atomic rewrite. Doing this per
+    // record (the old per-night call) re-read+rewrote the whole file each time,
+    // O(nights x filesize) SD on the main loop -> CAN RX starves -> framing CRC.
+    size_t set_count = load_coverage(source, cov_scratch);
+    size_t added = 0;
+    for (size_t i = 0; i < count; ++i) {
+        // Only Complete intervals are persisted; an Incomplete span is just a gap.
+        if (records[i].state != ReportStoreCoverageState::Complete) continue;
+        if (!valid_coverage_record(records[i])) {
+            note_error("bad_coverage_record", &current.coverage_write_errors);
+            continue;
+        }
+        coverage_insert(cov_scratch, set_count, records[i]);
+        ++added;
+    }
+    if (added == 0) {
         set_error(current.last_error, sizeof(current.last_error), "");
         return true;
     }
-
-    // Load -> merge -> atomic rewrite, so a refresh of an already-covered span is
-    // absorbed instead of appended: the file stays the size of the real coverage
-    // and a single walk answers "what is missing".
-    size_t count = load_coverage(source, cov_scratch);
-    coverage_insert(cov_scratch, count, record);
-    if (!rewrite_coverage_file(source, cov_scratch, count)) {
+    if (!rewrite_coverage_file(source, cov_scratch, set_count)) {
         note_error("coverage_write_failed", &current.coverage_write_errors);
         return false;
     }
-
-    current.coverage_records_written++;
+    current.coverage_records_written += static_cast<uint32_t>(added);
     set_error(current.last_error, sizeof(current.last_error), "");
     Log::logf(CAT_RPC, LOG_DEBUG,
-              "[REPORT] coverage source=%s intervals=%u add=[%lld,%lld] "
-              "parser=%lu hash=%08lx\n",
-              source, static_cast<unsigned>(count),
-              static_cast<long long>(record.start_ms),
-              static_cast<long long>(record.end_ms),
-              static_cast<unsigned long>(record.parser_schema),
-              static_cast<unsigned long>(record.source_hash));
+              "[REPORT] coverage source=%s intervals=%u added=%u\n",
+              source, static_cast<unsigned>(set_count),
+              static_cast<unsigned>(added));
     return true;
+}
+
+bool write_coverage(const char *source,
+                    const ReportStoreCoverageRecord &record) {
+    return write_coverage_batch(source, &record, 1);
 }
 
 bool coverage_complete(const char *source,

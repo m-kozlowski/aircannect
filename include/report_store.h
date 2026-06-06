@@ -113,6 +113,10 @@ bool clear_chunks(ReportStoreChunkKind kind,
 
 bool write_coverage(const char *source,
                     const ReportStoreCoverageRecord &record);
+// Coalesce-insert many records in ONE load+rewrite
+bool write_coverage_batch(const char *source,
+                          const ReportStoreCoverageRecord *records,
+                          size_t count);
 bool coverage_complete(const char *source,
                        int64_t start_ms,
                        int64_t end_ms,

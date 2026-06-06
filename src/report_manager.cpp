@@ -2902,24 +2902,29 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
         return false;
     }
 
-    // Mark coverage for every night actually delivered by this sweep (a fetch
-    // of an old night sweeps old->now, so all intermediate nights get data and
-    // are backfilled here). Bound each claim to the real data extent so a night
-    // whose data stopped early is only marked complete up to where data arrived;
-    // the missing tail stays uncovered and is re-fetched later. extent == 0
-    // means the night received no data this sweep -> skip (applies to series
-    // and event sources alike).
-    // This runs only after a source's spool completed successfully (a truncated
-    // or failed fetch never reaches here), so the fetch covered the whole
-    // [from_ms, now] sweep -> claim each night's full session span. A sampled
-    // source that delivered nothing for a night is skipped only when that night
-    // was partially swept; a FULLY swept night (from_ms <= span_start) with no
-    // data means the device does not retain this source that far back (high-res
-    // waveforms age out after ~a week), so its span is recorded as covered and
-    // the night settles instead of being re-fetched forever. Event sources are
-    // sparse so a covered range can hold zero events and is never extent-gated.
+    // Build coverage for every night this sweep delivered, then persist them all
+    // in ONE load+coalesce+rewrite (write_coverage_batch). Writing per night
+    // re-read+rewrote the whole coverage file O(nights) times on the spool path,
+    // starving the CAN RX (dropped frames -> framing CRC). This runs only after
+    // a source's spool completed the [from_ms, now] sweep. Per night:
+    // - start: a tail refresh (from_ms past the session start) claims only from
+    //   where it fetched, never back-claiming the earlier span; a full sweep
+    //   (from_ms <= span_start) claims from the span start.
+    // - end: the full session span. A sampled source that delivered nothing is
+    //   skipped on a partial sweep but settled covered on a full sweep (the
+    //   device no longer retains it -- aged out -- so it stops re-fetching).
+    //   Events are sparse, so a covered span can legitimately hold zero events.
     const bool sampled = source_is_sampled(*def);
-    bool wrote_any = false;
+    static ReportStoreCoverageRecord *cov_batch = nullptr;
+    if (!cov_batch) {
+        cov_batch = static_cast<ReportStoreCoverageRecord *>(Memory::calloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX, sizeof(ReportStoreCoverageRecord)));
+    }
+    if (!cov_batch) {
+        fail_cache_fetch("coverage_alloc_failed");
+        return false;
+    }
+    size_t batch_count = 0;
     for (size_t i = 0; i < record_count_; ++i) {
         const ReportSummaryRecord &record = records_[i];
         if (!record.valid || !record.duration_min) continue;
@@ -2927,30 +2932,26 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
         int64_t span_end = 0;
         if (!night_data_span(record, span_start, span_end)) continue;
         if (span_end <= from_ms) continue;
-        if (sampled && cache_source_night_extent_ms_[i] <= span_start &&
-            from_ms > span_start) {
-            continue;
-        }
+        const int64_t extent = cache_source_night_extent_ms_[i];
+        if (sampled && extent <= span_start && from_ms > span_start) continue;
+        if (batch_count >= AC_REPORT_SUMMARY_RECORD_MAX) break;
 
-        ReportStoreCoverageRecord coverage;
-        // Claim only what this fetch actually swept: a tail refresh (from_ms
-        // past the session start) must not mark the un-fetched earlier span
-        // complete, or a partially-cached night reads as fully covered. A full
-        // sweep (from_ms <= span_start) still claims the whole span so aged-out
-        // sources settle.
+        ReportStoreCoverageRecord &coverage = cov_batch[batch_count];
+        coverage = {};
         coverage.start_ms = from_ms > span_start ? from_ms : span_start;
         coverage.end_ms = span_end;
         coverage.parser_schema = def->parser_schema;
         coverage.state = ReportStoreCoverageState::Complete;
         coverage.origin = ReportStoreChunkOrigin::Spool;
-        if (!ReportStore::write_coverage(def->spool_type, coverage)) {
-            fail_cache_fetch("coverage_write_failed");
-            return false;
-        }
-        wrote_any = true;
+        ++batch_count;
     }
-    if (!wrote_any) {
+    if (batch_count == 0) {
         fail_cache_fetch("coverage_empty");
+        return false;
+    }
+    if (!ReportStore::write_coverage_batch(def->spool_type, cov_batch,
+                                           batch_count)) {
+        fail_cache_fetch("coverage_write_failed");
         return false;
     }
     if (!source_complete_for_night(cache_night_, *def)) {
