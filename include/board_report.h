@@ -39,6 +39,9 @@ static constexpr uint32_t AC_REPORT_PREFETCH_OFFLINE_BACKOFF_MS = 600000;
 static constexpr size_t AC_REPORT_PLOT_BUCKETS = 1200;
 // Initial reserve for the incrementally-built plot binary.
 static constexpr size_t AC_REPORT_PLOT_INITIAL_RESERVE = 256 * 1024;
+// Range (zoom) plot: a boundary-crossing drag fetches up to 2h at 6.25Hz
+static constexpr size_t AC_REPORT_RANGE_PLOT_MAX_BYTES = 1536 * 1024;
+static constexpr size_t AC_REPORT_RANGE_MAX_POINTS = 48000;  // per stream (~2.1h @ 6.25Hz)
 // Gap between consecutive series chunks that marks a session boundary. The
 // coalescing writer flushes here and derive_result_session_ranges() splits
 // here; they must agree, or a coalesced chunk would span (and hide) a gap.

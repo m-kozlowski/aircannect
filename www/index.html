@@ -1676,6 +1676,13 @@
     let reportResizeObserver = null;
     const reportClientCache = new Map();
     let reportZoom = null;        // {start,end} when drag-zoomed, else null
+    // Zoom: raw samples for the hour-rounded window, cached per (index, window).
+    let reportBaseSeries = {};
+    let reportBaseEvents = [];
+    let reportCurrentIndex = -1;
+    let reportCurrentEtag = null;
+    const reportRangeCache = new Map();
+    let reportRangeToken = 0;
     let reportHoverTime = null;   // cursor time shared across all charts
     let reportDrag = null;        // active drag-to-zoom selection state
     let reportSelectedNightId = ""; // user-picked night id; "" defaults to newest
@@ -2118,6 +2125,12 @@
       reportResult = null;
       reportSeries = {};
       reportEvents = [];
+      reportBaseSeries = {};
+      reportBaseEvents = [];
+      reportCurrentIndex = -1;
+      reportCurrentEtag = null;
+      reportRangeCache.clear();
+      reportRangeToken++;
       reportDrawItems = [];
       reportDrawPending = false;
       reportDrawRetryCount = 0;
@@ -2586,6 +2599,7 @@
       if (hi - lo > 60000) {
         reportZoom = {start: lo, end: hi};
         renderReportCharts();
+        fetchReportRange(lo, hi);
       }
     }
     document.addEventListener("mouseup", reportFinishDrag);
@@ -2593,6 +2607,8 @@
     function resetReportZoom() {
       if (!reportZoom) return;
       reportZoom = null;
+      reportSeries = reportBaseSeries;
+      reportEvents = reportBaseEvents;
       renderReportCharts();
     }
 
@@ -2691,7 +2707,11 @@
     }
 
     function renderReportEventFlags(container, range, ranges) {
-      if (!reportEvents.length) return;
+      // Stay visible if the night has events; do not vanish on an event-free zoom.
+      if (!((reportResult && reportResult.events_available) ||
+            reportBaseEvents.length)) {
+        return;
+      }
       const card = document.createElement("div");
       card.className = "report-chart";
       const title = document.createElement("div");
@@ -3002,7 +3022,77 @@
       if (token !== reportLoadToken) return false;
       if (!buf) throw new Error("plot not ready");
       parseReportPlotBinary(buf);
+      reportBaseSeries = reportSeries;
+      reportBaseEvents = reportEvents;
+      reportCurrentIndex = index;
+      reportCurrentEtag = version;
+      reportRangeCache.clear();
       return token === reportLoadToken;
+    }
+
+    // Zoom detail: raw samples for [lo,hi] rounded out to hour bounds.
+    async function fetchReportRange(lo, hi) {
+      if (reportCurrentEtag == null) return;
+      const HOUR = 3600000;
+      const from = Math.floor(lo / HOUR) * HOUR;
+      const to = Math.ceil(hi / HOUR) * HOUR;
+      if (!(to > from)) return;
+      const key = reportCurrentIndex + ":" + from + ":" + to;
+      const token = ++reportRangeToken;
+      const cached = reportRangeCache.get(key);
+      if (cached) {
+        reportSeries = cached.series;
+        reportEvents = cached.events;
+        renderReportCharts();
+        return;
+      }
+      // Coarse base shows while the raw tile loads, then sharpens.
+      if (reportSeries !== reportBaseSeries) {
+        reportSeries = reportBaseSeries;
+        reportEvents = reportBaseEvents;
+        renderReportCharts();
+      }
+      const url = "/api/report/plot?index=" + reportCurrentIndex +
+        "&v=" + encodeURIComponent(reportCurrentEtag) +
+        "&from=" + from + "&to=" + to;
+      // Poll ~60s; re-poll an empty/short 200 too so a transient does not stick.
+      for (let attempt = 0; attempt < 120; attempt++) {
+        if (token !== reportRangeToken) return;
+        let resp;
+        try { resp = await fetch(url, {cache: "no-store"}); }
+        catch (e) { return; }
+        // resp.ok is true for 202 too; key off 200 so a "preparing" reply is not
+        // parsed as a zero-series plot.
+        if (resp.status === 200) {
+          const ab = await resp.arrayBuffer();
+          parseReportPlotBinary(ab);
+          const hasData = Object.keys(reportSeries).some(
+            (k) => reportSeries[k] && reportSeries[k].length);
+          if (hasData) {
+            reportRangeCache.set(key,
+              {series: reportSeries, events: reportEvents});
+            renderReportCharts();
+            return;
+          }
+          // Empty/short 200: keep coarse, keep polling; the backend rebuilds.
+          reportSeries = reportBaseSeries;
+          reportEvents = reportBaseEvents;
+          renderReportCharts();
+          await new Promise((r) => setTimeout(r, 250));
+          continue;
+        }
+        if (resp.status === 202) {
+          await new Promise((r) => setTimeout(r, 250));
+          continue;
+        }
+        if (resp.status === 404) return;
+        const text = await resp.text();
+        if (resp.status === 503 && isTransientReportError(text)) {
+          await new Promise((r) => setTimeout(r, 250));
+          continue;
+        }
+        return;
+      }
     }
 
     // Decode the binary plot blob (mirrors report_manager.cpp, little-endian):

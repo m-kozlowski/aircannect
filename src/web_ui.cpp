@@ -1460,8 +1460,18 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
     String version;
     if (request->hasArg("v")) version = request->arg("v");
     std::shared_ptr<ReportSpoolBuffer> payload;
-    const ReportManager::PlotRead st = report_manager_->read_plot(
-        static_cast<size_t>(index), version.c_str(), payload);
+    ReportManager::PlotRead st;
+    if (request->hasArg("from") && request->hasArg("to")) {
+        // Zoom: raw samples for [from,to] (epoch-ms exceeds 32-bit long).
+        const int64_t from_ms =
+            strtoll(request->arg("from").c_str(), nullptr, 10);
+        const int64_t to_ms = strtoll(request->arg("to").c_str(), nullptr, 10);
+        st = report_manager_->read_plot_range(static_cast<size_t>(index),
+                                              from_ms, to_ms, payload);
+    } else {
+        st = report_manager_->read_plot(static_cast<size_t>(index),
+                                        version.c_str(), payload);
+    }
     if (st == ReportManager::PlotRead::NotFound) {
         request->send(404, "application/json",
                       "{\"ok\":false,\"error\":\"no such night\"}");

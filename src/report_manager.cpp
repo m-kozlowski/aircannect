@@ -335,7 +335,7 @@ static bool event_coverage_dropped(const ReportSummaryRecord &night,
     }
     int64_t end_ms = 0;
     if (source_latest_cached_end_for_night(source, night, end_ms)) {
-        return false;  // event chunks present -- nothing was dropped
+        return false;  // event chunks present, nothing was dropped
     }
     const ReportSourceDef *high_res =
         report_source_def(ReportSourceId::RespiratoryFlow6p25Hz);
@@ -546,6 +546,7 @@ bool ReportManager::request_summary_refresh(bool force) {
 
 void ReportManager::poll(RpcArbiter &arbiter) {
     service_build_queue();
+    service_range_plot();
     service_prefetch();
     // Publish the summary revision for the background prefetch job (cross-task).
     if (take_summary_lock(0)) {
@@ -2971,6 +2972,248 @@ bool ReportManager::finish_result_plot_build() {
               static_cast<unsigned long>(result_status_.chunk_count),
               static_cast<unsigned long>(result_plot_bin_.size()));
     return true;
+}
+
+bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
+                                     ReportSpoolBuffer &out) {
+    if (to_ms <= from_ms) return false;
+    out.clear();
+    out.set_max_size(AC_REPORT_RANGE_PLOT_MAX_BYTES);
+    bool ok = out.reserve_capacity(64 * 1024);
+    ok = ok && bin_put_u32(out, PLOT_BIN_MAGIC);
+    ok = ok && bin_put_u16(out, PLOT_BIN_VERSION);
+    ok = ok && bin_put_u16(out, 0);  // flags
+    ok = ok && bin_put_i64(out, from_ms);  // base_ms
+    if (!ok) return false;
+    const int64_t night = static_cast<int64_t>(result_night_.start_ms);
+
+    // Walk result_chunks_ (the prepared manifest); keep samples in [from,to].
+    // plot_tmp_ must hold a full high-res stream (~360KB), over the 128KB the
+    // night build sets.
+    plot_tmp_.set_max_size(768 * 1024);
+    plot_tmp_.reserve_capacity(384 * 1024);
+    plot_tmp_.clear();
+    ReportSpoolBuffer seen;
+    seen.set_max_size(16 * 1024);
+    seen.reserve_capacity(2 * 1024);
+    uint32_t ev_count = 0;
+    for (size_t ci = 0; ci < result_status_.chunk_count && ok; ++ci) {
+        const ReportResultChunk &chunk = result_chunks_[ci];
+        if (chunk.kind != ReportStoreChunkKind::Events) continue;
+        if (chunk.end_ms <= from_ms || chunk.start_ms >= to_ms) continue;
+        const char *src = report_source_spool_type(chunk.source);
+        if (!src || !chunk.name) continue;
+        ReportStoreChunkKey key;
+        key.kind = chunk.kind;
+        key.source = src;
+        key.name = chunk.name;
+        key.start_ms = chunk.start_ms;
+        key.end_ms = chunk.end_ms;
+        key.night_start_ms = night;
+        ReportStoreChunkMeta meta;
+        ReportSpoolBuffer payload;
+        if (!ReportStore::read_chunk(key, meta, payload)) continue;
+        const size_t wire = report_event_record_wire_size();
+        const size_t n = wire ? payload.size() / wire : 0;
+        for (size_t j = 0; j < n; ++j) {
+            ReportEventRecord e;
+            if (!report_read_event_record(payload.data(), payload.size(), j,
+                                          e)) {
+                continue;
+            }
+            if (e.start_ms < from_ms || e.start_ms >= to_ms) continue;
+            if (report_event_seen(seen, e)) continue;
+            if (!remember_report_event(seen, e)) { ok = false; break; }
+            ok = ok && bin_put_i32(plot_tmp_,
+                                   static_cast<int32_t>(e.start_ms - from_ms));
+            ok = ok && bin_put_i32(plot_tmp_,
+                                   static_cast<int32_t>(e.duration_ms));
+            ok = ok && bin_put_i32(plot_tmp_, static_cast<int32_t>(e.code));
+            ok = ok && bin_put_i32(plot_tmp_, static_cast<int32_t>(e.flags));
+            if (!ok) break;
+            ++ev_count;
+        }
+    }
+    ok = ok && bin_put_u32(out, ev_count);
+    if (ok && plot_tmp_.size()) {
+        ok = out.append(plot_tmp_.data(), plot_tmp_.size());
+    }
+    if (!ok) return false;
+
+    // Series: one stream at a time - name, point count, raw in-range points.
+    for (size_t i = 0; i < result_stream_count_; ++i) {
+        const ReportResultStream &st = result_streams_[i];
+        if (st.kind != ReportStoreChunkKind::Series || !st.name || !st.name[0]) {
+            continue;
+        }
+        const size_t name_len = strlen(st.name);
+        ok = ok && bin_put_u16(out, static_cast<uint16_t>(name_len));
+        ok = ok && out.append(reinterpret_cast<const uint8_t *>(st.name),
+                              name_len);
+        if (!ok) return false;
+        const int32_t scale =
+            (st.source == ReportSourceId::RespiratoryFlow6p25Hz ||
+             st.source == ReportSourceId::Leak0p5Hz) ? 60 : 1;
+        plot_tmp_.clear();
+        uint32_t points = 0;
+        for (size_t ci = 0;
+             ci < result_status_.chunk_count &&
+             points < AC_REPORT_RANGE_MAX_POINTS && ok; ++ci) {
+            const ReportResultChunk &chunk = result_chunks_[ci];
+            if (chunk.kind != ReportStoreChunkKind::Series ||
+                chunk.source != st.source ||
+                strcmp(chunk.name ? chunk.name : "", st.name) != 0) {
+                continue;
+            }
+            if (chunk.end_ms <= from_ms || chunk.start_ms >= to_ms) continue;
+            const char *src = report_source_spool_type(chunk.source);
+            if (!src) continue;
+            ReportStoreChunkKey key;
+            key.kind = chunk.kind;
+            key.source = src;
+            key.name = chunk.name;
+            key.start_ms = chunk.start_ms;
+            key.end_ms = chunk.end_ms;
+            key.night_start_ms = night;
+            ReportStoreChunkMeta meta;
+            ReportSpoolBuffer payload;
+            if (!ReportStore::read_chunk(key, meta, payload)) continue;
+            const size_t wire = report_series_sample_wire_size();
+            const size_t n = wire ? payload.size() / wire : 0;
+            for (size_t j = 0; j < n && points < AC_REPORT_RANGE_MAX_POINTS;
+                 ++j) {
+                ReportSeriesSample s;
+                if (!report_read_series_sample(payload.data(), payload.size(),
+                                               j, s)) {
+                    continue;
+                }
+                if (s.timestamp_ms < from_ms || s.timestamp_ms >= to_ms) {
+                    continue;
+                }
+                int64_t v = static_cast<int64_t>(s.value_milli) * scale;
+                if (v > INT32_MAX) v = INT32_MAX;
+                else if (v < INT32_MIN) v = INT32_MIN;
+                ok = ok && bin_put_i32(
+                    plot_tmp_, static_cast<int32_t>(s.timestamp_ms - from_ms));
+                ok = ok && bin_put_i32(plot_tmp_, static_cast<int32_t>(v));
+                if (!ok) break;
+                ++points;
+            }
+        }
+        ok = ok && bin_put_u32(out, points);
+        if (ok && plot_tmp_.size()) {
+            ok = out.append(plot_tmp_.data(), plot_tmp_.size());
+        }
+        if (!ok) return false;
+    }
+    return ok;
+}
+
+// Series-point count from the actual blob bytes (0 if malformed). Gates caching
+// and serving so a zero-series/truncated blob is never stored or sent.
+static uint32_t range_blob_series_points(const ReportSpoolBuffer &b) {
+    const uint8_t *d = reinterpret_cast<const uint8_t *>(b.data());
+    const size_t n = b.size();
+    if (!d || n < 20) return 0;
+    uint32_t ev = 0;
+    memcpy(&ev, d + 16, sizeof(ev));
+    size_t off = 20 + static_cast<size_t>(ev) * 16;
+    if (off > n) return 0;  // events truncated -> treat as no data
+    uint32_t total = 0;
+    // Bail to 0 on any malformation (e.g. a stream whose points are truncated).
+    while (off < n) {
+        if (off + 2 > n) return 0;
+        uint16_t name_len = 0;
+        memcpy(&name_len, d + off, sizeof(name_len));
+        off += 2;
+        if (off + name_len + 4 > n) return 0;
+        off += name_len;
+        uint32_t pc = 0;
+        memcpy(&pc, d + off, sizeof(pc));
+        off += 4;
+        if (off + static_cast<size_t>(pc) * 8 > n) return 0;
+        off += static_cast<size_t>(pc) * 8;
+        total += pc;
+    }
+    return total;
+}
+
+ReportManager::PlotRead ReportManager::read_plot_range(
+    size_t therapy_index, int64_t from_ms, int64_t to_ms,
+    std::shared_ptr<ReportSpoolBuffer> &out) {
+    if (!result_slots_lock_) return PlotRead::Unavailable;
+    if (to_ms <= from_ms) return PlotRead::NotFound;
+    xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+    if (range_plot_bytes_ && range_plot_index_ == therapy_index &&
+        range_plot_from_ == from_ms && range_plot_to_ == to_ms &&
+        range_blob_series_points(*range_plot_bytes_) > 0) {
+        out = range_plot_bytes_;
+        xSemaphoreGive(result_slots_lock_);
+        return PlotRead::Ready;
+    }
+    range_req_active_ = true;
+    range_req_index_ = therapy_index;
+    range_req_from_ = from_ms;
+    range_req_to_ = to_ms;
+    xSemaphoreGive(result_slots_lock_);
+    return PlotRead::Building;
+}
+
+void ReportManager::service_range_plot() {
+    if (!result_slots_lock_) return;
+    xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+    const bool active = range_req_active_;
+    const size_t index = range_req_index_;
+    const int64_t from_ms = range_req_from_;
+    const int64_t to_ms = range_req_to_;
+    xSemaphoreGive(result_slots_lock_);
+    if (!active) return;
+    // Defer while a night build or summary fetch owns the shared state + SD bus.
+    if (plot_build_active_ || summary_fetch_active_) return;
+    // Yield an idle prefetch so the range builds now; a real foreground fetch is
+    // not yielded, so wait for that.
+    if (cache_fetch_active_) {
+        prefetch_yield_to_foreground();
+        if (cache_fetch_active_) return;
+    }
+    const bool ready = result_status_.state == ReportResultState::Ready ||
+                       result_status_.state == ReportResultState::Partial;
+    if (!ready || result_status_.therapy_index != index) {
+        // Prepare the requested night first, then retry on a later poll.
+        ReportSummaryRecord rec;
+        if (summary_night_by_therapy_index(index, rec)) {
+            enqueue_build(rec.start_ms, index, false);
+        } else {
+            xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+            if (range_req_active_ && range_req_index_ == index &&
+                range_req_from_ == from_ms && range_req_to_ == to_ms) {
+                range_req_active_ = false;
+            }
+            xSemaphoreGive(result_slots_lock_);
+        }
+        return;
+    }
+    std::shared_ptr<ReportSpoolBuffer> bytes =
+        std::make_shared<ReportSpoolBuffer>();
+    const bool ok = bytes && build_range_plot(from_ms, to_ms, *bytes);
+    const bool has_points = ok && range_blob_series_points(*bytes) > 0;
+    xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+    if (has_points) {
+        range_plot_bytes_ = bytes;
+        range_plot_index_ = index;
+        range_plot_from_ = from_ms;
+        range_plot_to_ = to_ms;
+    } else if (range_plot_index_ == index && range_plot_from_ == from_ms &&
+               range_plot_to_ == to_ms) {
+        // Zero-series build (wrong manifest): never cache, and drop any stale
+        // empty for this window so a later poll rebuilds.
+        range_plot_bytes_.reset();
+    }
+    if (range_req_active_ && range_req_index_ == index &&
+        range_req_from_ == from_ms && range_req_to_ == to_ms) {
+        range_req_active_ = false;
+    }
+    xSemaphoreGive(result_slots_lock_);
 }
 
 void ReportManager::poll_result_plot_build() {

@@ -222,6 +222,9 @@ public:
     };
     PlotRead read_plot(size_t therapy_index, const char *version,
                        std::shared_ptr<ReportSpoolBuffer> &out);
+    PlotRead read_plot_range(size_t therapy_index, int64_t from_ms,
+                             int64_t to_ms,
+                             std::shared_ptr<ReportSpoolBuffer> &out);
     const ReportSpoolBuffer &result_plot_bin() const {
         return result_plot_bin_;
     }
@@ -385,6 +388,7 @@ private:
     bool process_plot_series_chunk(const ReportResultChunk &chunk);
     void flush_plot_bucket();
     bool finish_result_plot_build();
+    bool build_range_plot(int64_t from_ms, int64_t to_ms, ReportSpoolBuffer &out);
 
     bool result_plot_cache_path_for_night(const ReportSummaryRecord &night,
                                           char *path,
@@ -489,6 +493,17 @@ private:
     };
     MaterializedResult *result_slots_ = nullptr;  // PSRAM, AC_REPORT_RESULT_SLOT_MAX
     SemaphoreHandle_t result_slots_lock_ = nullptr;
+    // Zoom range plot: request set by the web thread, built on the main loop,
+    // result held for serving. All guarded by result_slots_lock_
+    bool range_req_active_ = false;
+    size_t range_req_index_ = 0;
+    int64_t range_req_from_ = 0;
+    int64_t range_req_to_ = 0;
+    std::shared_ptr<ReportSpoolBuffer> range_plot_bytes_;
+    size_t range_plot_index_ = 0;
+    int64_t range_plot_from_ = 0;
+    int64_t range_plot_to_ = 0;
+    void service_range_plot();
     uint32_t result_slot_tick_ = 0;
     void publish_result_to_slot();
     void invalidate_materialized_locked(uint64_t night_start_ms, bool all);
