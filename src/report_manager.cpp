@@ -2988,11 +2988,9 @@ bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
     const int64_t night = static_cast<int64_t>(result_night_.start_ms);
 
     // Walk result_chunks_ (the prepared manifest); keep samples in [from,to].
-    // plot_tmp_ must hold a full high-res stream (~360KB), over the 128KB the
-    // night build sets.
-    plot_tmp_.set_max_size(768 * 1024);
-    plot_tmp_.reserve_capacity(384 * 1024);
-    plot_tmp_.clear();
+    // scratch is local (freed on return) so the range leaves no persistent buffer.
+    ReportSpoolBuffer scratch;
+    scratch.set_max_size(768 * 1024);
     ReportSpoolBuffer seen;
     seen.set_max_size(16 * 1024);
     seen.reserve_capacity(2 * 1024);
@@ -3024,19 +3022,19 @@ bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
             if (e.start_ms < from_ms || e.start_ms >= to_ms) continue;
             if (report_event_seen(seen, e)) continue;
             if (!remember_report_event(seen, e)) { ok = false; break; }
-            ok = ok && bin_put_i32(plot_tmp_,
+            ok = ok && bin_put_i32(scratch,
                                    static_cast<int32_t>(e.start_ms - from_ms));
-            ok = ok && bin_put_i32(plot_tmp_,
+            ok = ok && bin_put_i32(scratch,
                                    static_cast<int32_t>(e.duration_ms));
-            ok = ok && bin_put_i32(plot_tmp_, static_cast<int32_t>(e.code));
-            ok = ok && bin_put_i32(plot_tmp_, static_cast<int32_t>(e.flags));
+            ok = ok && bin_put_i32(scratch, static_cast<int32_t>(e.code));
+            ok = ok && bin_put_i32(scratch, static_cast<int32_t>(e.flags));
             if (!ok) break;
             ++ev_count;
         }
     }
     ok = ok && bin_put_u32(out, ev_count);
-    if (ok && plot_tmp_.size()) {
-        ok = out.append(plot_tmp_.data(), plot_tmp_.size());
+    if (ok && scratch.size()) {
+        ok = out.append(scratch.data(), scratch.size());
     }
     if (!ok) return false;
 
@@ -3054,7 +3052,7 @@ bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
         const int32_t scale =
             (st.source == ReportSourceId::RespiratoryFlow6p25Hz ||
              st.source == ReportSourceId::Leak0p5Hz) ? 60 : 1;
-        plot_tmp_.clear();
+        scratch.clear();
         uint32_t points = 0;
         for (size_t ci = 0;
              ci < result_status_.chunk_count &&
@@ -3094,15 +3092,15 @@ bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
                 if (v > INT32_MAX) v = INT32_MAX;
                 else if (v < INT32_MIN) v = INT32_MIN;
                 ok = ok && bin_put_i32(
-                    plot_tmp_, static_cast<int32_t>(s.timestamp_ms - from_ms));
-                ok = ok && bin_put_i32(plot_tmp_, static_cast<int32_t>(v));
+                    scratch, static_cast<int32_t>(s.timestamp_ms - from_ms));
+                ok = ok && bin_put_i32(scratch, static_cast<int32_t>(v));
                 if (!ok) break;
                 ++points;
             }
         }
         ok = ok && bin_put_u32(out, points);
-        if (ok && plot_tmp_.size()) {
-            ok = out.append(plot_tmp_.data(), plot_tmp_.size());
+        if (ok && scratch.size()) {
+            ok = out.append(scratch.data(), scratch.size());
         }
         if (!ok) return false;
     }
@@ -3148,6 +3146,7 @@ ReportManager::PlotRead ReportManager::read_plot_range(
         range_plot_from_ == from_ms && range_plot_to_ == to_ms &&
         range_blob_series_points(*range_plot_bytes_) > 0) {
         out = range_plot_bytes_;
+        range_plot_bytes_.reset();  // serve once; the response holds it while streaming
         xSemaphoreGive(result_slots_lock_);
         return PlotRead::Ready;
     }
