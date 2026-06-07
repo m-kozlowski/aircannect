@@ -291,8 +291,6 @@ void print_report_result_status(Print &out,
     const ReportResultStatus status = manager.result_status();
     out.print("[REPORT] result=");
     out.print(report_result_state_name(status.state));
-    out.print(" revision=");
-    out.print(static_cast<unsigned long>(status.revision));
     out.print(" index=");
     out.print(static_cast<unsigned long>(status.therapy_index));
     out.print(" night=");

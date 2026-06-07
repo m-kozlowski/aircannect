@@ -3,6 +3,8 @@
 #include <atomic>
 #include <stddef.h>
 #include <stdint.h>
+#include <memory>
+#include <new>
 #include <string>
 
 #include <freertos/FreeRTOS.h>
@@ -22,6 +24,11 @@ static constexpr size_t AC_REPORT_NIGHT_SOURCE_MAX = 8;
 static constexpr size_t AC_REPORT_CACHE_SOURCE_MAX = 8;
 static constexpr size_t AC_REPORT_RESULT_CHUNK_MAX = 512;
 static constexpr size_t AC_REPORT_RESULT_STREAM_MAX = 16;
+static constexpr size_t AC_REPORT_RESULT_SLOT_MAX = 4;
+static constexpr size_t AC_REPORT_BUILD_QUEUE_MAX = 4;
+// Per-night plot bytes held in PSRAM for keyed /plot serving (start small to
+// bound PSRAM; raise if free PSRAM allows).
+static constexpr size_t AC_REPORT_PLOT_BLOB_MAX = 2;
 
 enum class ReportSummaryState : uint8_t {
     Idle,
@@ -109,7 +116,6 @@ enum class ReportPlotBuildPhase : uint8_t {
 
 struct ReportResultStatus {
     ReportResultState state = ReportResultState::Idle;
-    uint32_t revision = 0;
     size_t therapy_index = 0;
     uint64_t night_start_ms = 0;
     uint64_t night_end_ms = 0;
@@ -194,15 +200,27 @@ public:
     bool foreground_busy() const;
 
     bool prepare_result_by_therapy_index(size_t therapy_index, bool refresh_cache = false);
-    bool prepare_latest_result();
-    void build_result_json(LargeTextBuffer &json) const;
     void build_result_chunks_json(LargeTextBuffer &json, size_t offset, size_t limit) const;
+    // Stateless per-night result read: serves a materialized LRU entry by night
+    // index with an ETag, without touching the single build-scratch slot.
+    enum class ResultRead : uint8_t { NotFound, NotModified, Ready, Building };
+    ResultRead read_result(size_t therapy_index, const char *if_none_match,
+                           char *etag_out, size_t etag_out_size,
+                           LargeTextBuffer &json_out);
+    // Stateless per-night plot read: serves the PSRAM blob for (night, version);
+    // a miss queues a build and returns Building.
+    enum class PlotRead : uint8_t { NotFound, Ready, Building };
+    PlotRead read_plot(size_t therapy_index, const char *version,
+                       std::shared_ptr<ReportSpoolBuffer> &out);
     const ReportSpoolBuffer &result_plot_bin() const {
         return result_plot_bin_;
     }
     const ReportResultStatus &result_status() const {
         return result_status_;
     }
+    // Per-night content version "<start>-<dur>-<sessions>-<epoch>" for the HTTP
+    // ETag; computed from the in-memory summary record + the per-night epoch (no SD).
+    bool night_etag(size_t therapy_index, char *out, size_t out_size) const;
 
 private:
     struct PlotRange {
@@ -400,6 +418,19 @@ private:
     // cache_status_ reset). Exposed in the summary so the browser can drop a
     // client-cached plot once new data has landed for any night.
     uint32_t cache_data_epoch_ = 0;
+    // Per-night data version, keyed by the stable night_start_ms so it survives
+    // summary rebuilds: bumped on every chunk write to that night. Backs the
+    // report ETag (night_etag) so a GET derives a night's version without SD I/O.
+    struct NightEpoch {
+        uint64_t night_start_ms = 0;
+        uint32_t epoch = 0;
+    };
+    NightEpoch *night_epochs_ = nullptr;  // PSRAM, AC_REPORT_SUMMARY_RECORD_MAX
+    size_t night_epoch_count_ = 0;
+    void bump_night_epoch(uint64_t night_start_ms);
+    uint32_t night_epoch_for(uint64_t night_start_ms) const;
+    void format_night_etag(const ReportSummaryRecord &rec, char *out,
+                           size_t out_size) const;
     uint32_t next_trash_cleanup_ms_ = 0;
 
     mutable SemaphoreHandle_t prefetch_lock_ = nullptr;
@@ -414,6 +445,55 @@ private:
     size_t result_chunk_capacity_ = 0;
     ReportResultStream result_streams_[AC_REPORT_RESULT_STREAM_MAX] = {};
     size_t result_stream_count_ = 0;
+
+    // Served-result LRU. The result_* slot above is build SCRATCH only; GET-by-
+    // index serves these immutable per-night entries, so two clients on different
+    // nights never clobber each other. Published atomically at build finish.
+    struct MaterializedResult {
+        bool valid = false;
+        uint64_t night_start_ms = 0;
+        char etag[48] = {};
+        uint32_t last_used = 0;
+        ReportResultStatus status;
+        ReportSummaryRecord night;
+        ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
+        size_t stream_count = 0;
+    };
+    MaterializedResult *result_slots_ = nullptr;  // PSRAM, AC_REPORT_RESULT_SLOT_MAX
+    SemaphoreHandle_t result_slots_lock_ = nullptr;
+    uint32_t result_slot_tick_ = 0;
+    void publish_result_to_slot();
+    void build_result_json_from(const ReportResultStatus &status,
+                                const ReportSummaryRecord &night,
+                                const ReportResultStream *streams,
+                                size_t stream_count,
+                                const ReportCacheFetchStatus &cache,
+                                LargeTextBuffer &json) const;
+
+    // Bounded dedup build queue: a GET-miss (or POST refresh) enqueues a night to
+    // build; the main loop services one at a time, replacing the single pending slot.
+    struct ResultBuildJob {
+        uint64_t night_start_ms = 0;
+        size_t therapy_index = 0;
+        bool refresh = false;
+    };
+    ResultBuildJob build_queue_[AC_REPORT_BUILD_QUEUE_MAX];
+    size_t build_queue_head_ = 0;
+    size_t build_queue_count_ = 0;
+    SemaphoreHandle_t build_queue_lock_ = nullptr;
+    void enqueue_build(uint64_t night_start_ms, size_t therapy_index, bool refresh);
+    void service_build_queue();
+
+    // Per-night plot bytes (PSRAM), keyed by night+etag, served by GET /plot
+    // without touching SD or the build scratch. Shares result_slots_lock_.
+    struct PlotBlob {
+        bool valid = false;
+        uint64_t night_start_ms = 0;
+        char etag[48] = {};
+        uint32_t last_used = 0;
+        std::shared_ptr<ReportSpoolBuffer> bytes;
+    };
+    PlotBlob plot_blobs_[AC_REPORT_PLOT_BLOB_MAX];
 
     ReportSummaryRecord result_night_;
     ReportResultStatus result_status_;

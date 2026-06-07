@@ -1921,7 +1921,7 @@
     function pickReportNight(id) {
       reportSelectedNightId = String(id);
       closeReportCalendar();
-      loadSelectedReportNight(true, false);
+      loadSelectedReportNight(false, false);
     }
 
     function stepReportNight(delta) {
@@ -2125,22 +2125,6 @@
       if (charts) charts.textContent = "";
     }
 
-    function reportNightCacheKey(night) {
-      if (!night) return "";
-      const sessions = Array.isArray(night.sessions) ? night.sessions.length : 0;
-      return [
-        String(night.id || night.start || ""),
-        Number(night.duration_min || 0),
-        Number(night.session_count || sessions),
-      ].join(":");
-    }
-
-    // Global data epoch from the summary; bumps whenever any chunk is written.
-    // Used to drop a client-cached plot after a background backfill lands.
-    function reportDataEpoch() {
-      return Number((reportSummary && reportSummary.data_epoch) || 0);
-    }
-
     function cloneReportSeries(series) {
       const copy = {};
       Object.keys(series || {}).forEach((key) => {
@@ -2165,38 +2149,21 @@
       return result ? JSON.parse(JSON.stringify(result)) : null;
     }
 
-    function rememberReportClientCache(night) {
-      const key = reportNightCacheKey(night);
-      if (!key || !reportResult || reportResult.state !== "ready") return;
-      reportClientCache.set(key, {
+    function rememberReportClientCache(nightId, etag) {
+      if (!nightId || !reportResult ||
+          (reportResult.state !== "ready" && reportResult.state !== "partial")) {
+        return;
+      }
+      reportClientCache.set(nightId, {
+        etag: etag,
         result: cloneReportResult(reportResult),
         series: cloneReportSeries(reportSeries),
         events: cloneReportEvents(reportEvents),
-        epoch: reportDataEpoch(),
       });
       while (reportClientCache.size > REPORT_CLIENT_CACHE_MAX) {
         const oldest = reportClientCache.keys().next().value;
         reportClientCache.delete(oldest);
       }
-    }
-
-    function restoreReportClientCache(night) {
-      const key = reportNightCacheKey(night);
-      const cached = key ? reportClientCache.get(key) : null;
-      if (!cached) return false;
-      if (Number(cached.epoch || 0) !== reportDataEpoch()) {
-        reportClientCache.delete(key);
-        return false;
-      }
-      reportHiddenSessions.clear();
-      reportResult = cloneReportResult(cached.result);
-      reportSeries = cloneReportSeries(cached.series);
-      reportEvents = cloneReportEvents(cached.events);
-      reportLoadedId = String(night.id);
-      renderReportSummary();
-      renderReportCharts();
-      msg("reportMsg", "Report loaded", true);
-      return true;
     }
 
     function reportRange() {
@@ -2955,69 +2922,61 @@
       }
     }
 
-    async function pollReportResult(token, targetIndex, previousRevision,
-                                    requireNewRevision) {
-      for (;;) {
-        const result = await (await api("/api/report/result")).json();
+    // Conditional GET by night index: returns {status, etag, json}. Polls while
+    // the backend is still building (202). forceFresh (a refresh) keeps polling
+    // through 304 until the version changes, so it waits for the rebuild.
+    async function pollReportResult(token, index, inm, forceFresh) {
+      for (let attempt = 0; attempt < 80; attempt++) {
         if (token !== reportLoadToken) return null;
-        reportResult = result;
-        up("reportState", result.state || "--");
-        const resultIndex = Number(result.therapy_index);
-        const resultRevision = Number(result.revision || 0);
-        const staleResult = resultIndex !== Number(targetIndex) ||
-          (requireNewRevision && resultRevision <= previousRevision);
-        if (result.state === "preparing" || result.state === "idle" ||
-            staleResult) {
-          msg("reportMsg",
-              result.state === "preparing"
-                ? reportProgressText(result)
-                : "Report request queued...",
-              true,
-              true);
-          await new Promise((resolve) => setTimeout(resolve, 300));
+        const url = "/api/report/result?index=" + index +
+          (inm ? "&inm=" + encodeURIComponent(inm) : "");
+        const resp = await fetch(url);
+        if (token !== reportLoadToken) return null;
+        if (resp.status === 304) {
+          if (forceFresh) {
+            await new Promise((r) => setTimeout(r, 300));
+            continue;
+          }
+          return {status: 304, etag: inm, json: null};
+        }
+        if (resp.status === 200) {
+          const etag = (resp.headers.get("ETag") || "").replace(/"/g, "");
+          const json = await resp.json();
+          if (forceFresh && inm && etag === inm) {
+            await new Promise((r) => setTimeout(r, 300));
+            continue;
+          }
+          return {status: 200, etag: etag, json: json};
+        }
+        if (resp.status === 202) {
+          msg("reportMsg", "Preparing report...", true, true);
+          await new Promise((r) => setTimeout(r, 300));
           continue;
         }
-        return result;
+        if (resp.status === 404) return {status: 404, etag: "", json: null};
+        throw new Error(await resp.text());
       }
+      return {status: 0, etag: "", json: null};
     }
 
-    function reportProgressText(result) {
-      if (!result) return "Preparing report...";
-      const cache = result.cache || {};
-      if (result.error === "cache_fetching" && cache.active) {
-        const parts = ["Fetching report cache"];
-        const source = String(cache.source || "");
-        if (source && source !== "Summary") parts.push(source);
-        const index = Number(cache.source_index || 0);
-        const count = Number(cache.source_count || 0);
-        if (count > 0) {
-          parts.push(String(Math.min(index + 1, count)) + "/" + String(count));
-        }
-        const spool = cache.spool || {};
-        const bytes = Number(spool.bytes || 0);
-        if (bytes > 0) parts.push(fmtBytes(bytes));
-        return parts.join(" ");
-      }
-      if (result.error === "summary_fetching") return "Fetching Summary...";
-      return "Preparing report...";
-    }
-
-    async function fetchReportPlot(token) {
-      // /api/report/plot can briefly 404 ("plot not ready") between state=ready
-      // and the plot being republished; retry within the token, do not surface it.
+    async function fetchReportPlot(token, index, version) {
+      // The plot is keyed by (index, version=etag); 202 means it's still building
+      // (poll), 404 means no such night.
       let buf = null;
-      for (let attempt = 0; attempt < 40; attempt++) {
+      for (let attempt = 0; attempt < 60; attempt++) {
         if (token !== reportLoadToken) return false;
-        const response = await fetch("/api/report/plot");
+        const response = await fetch("/api/report/plot?index=" + index +
+          "&v=" + encodeURIComponent(version));
         if (response.ok) {
           buf = await response.arrayBuffer();
           break;
         }
-        if (response.status === 404) {
-          await new Promise((resolve) => setTimeout(resolve, 250));
+        if (response.status === 202) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
           continue;
         }
-        throw new Error(await response.text());
+        throw new Error(response.status === 404 ? "plot not found"
+                                                : await response.text());
       }
       if (token !== reportLoadToken) return false;
       if (!buf) throw new Error("plot not ready");
@@ -3092,46 +3051,56 @@
         msg("reportMsg", "Selected night has no report index", false, true);
         return;
       }
-      if (!force && !refreshCache && restoreReportClientCache(night)) {
-        return;
-      }
-
+      const nightId = String(night.id);
       const token = ++reportLoadToken;
-      const previousRevision = reportResult
-        ? Number(reportResult.revision || 0)
-        : 0;
+      const cached = reportClientCache.get(nightId);
+      const inm = (cached && !refreshCache) ? cached.etag : "";
       resetReportData();
       reportLoadedId = "";
       renderReportSummary();
-      msg("reportMsg", "Preparing report...", true, true);
+      msg("reportMsg", "Loading report...", true, true);
       try {
-        await api("/api/report/result", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            index: therapyIndex,
-            refresh_cache: !!refreshCache,
-          }),
-        });
-        const result = await pollReportResult(token,
-                                             therapyIndex,
-                                             previousRevision,
-                                             true);
-        if (!result || token !== reportLoadToken) return;
-        if (result.state !== "ready" && result.state !== "partial") {
-          msg("reportMsg", result.error || "Report incomplete", false, true);
+        if (refreshCache) {
+          await fetch("/api/report/result?index=" + therapyIndex +
+                      "&refresh_cache=1", {method: "POST"});
+        }
+        const res = await pollReportResult(token, therapyIndex, inm,
+                                           !!refreshCache);
+        if (!res || token !== reportLoadToken) return;
+        if (res.status === 304 && cached) {
+          reportHiddenSessions.clear();
+          reportResult = cloneReportResult(cached.result);
+          reportSeries = cloneReportSeries(cached.series);
+          reportEvents = cloneReportEvents(cached.events);
+          reportLoadedId = nightId;
+          renderReportSummary();
+          renderReportCharts();
+          msg("reportMsg", "Report loaded", true);
+          return;
+        }
+        if (res.status === 404) {
+          msg("reportMsg", "Night not found", false, true);
+          return;
+        }
+        if (res.status !== 200 || !res.json) {
+          msg("reportMsg", "Report not ready", false, true);
           renderReportSummary();
           return;
         }
-
-        const ok = await fetchReportPlot(token);
+        reportResult = res.json;
+        if (res.json.state !== "ready" && res.json.state !== "partial") {
+          msg("reportMsg", res.json.error || "Report incomplete", false, true);
+          renderReportSummary();
+          return;
+        }
+        const ok = await fetchReportPlot(token, therapyIndex, res.etag);
         if (!ok) return;
-        reportLoadedId = String(night.id);
-        rememberReportClientCache(night);
+        reportLoadedId = nightId;
+        rememberReportClientCache(nightId, res.etag);
         renderReportSummary();
         renderReportCharts();
         msg("reportMsg",
-            result.state === "partial"
+            res.json.state === "partial"
               ? "Report loaded (incomplete - some data missing)"
               : "Report loaded", true);
       } catch (error) {

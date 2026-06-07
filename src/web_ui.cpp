@@ -415,7 +415,7 @@ void WebUI::reserve_cached_json() {
     cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
     cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
     cached_report_summary_json_.reserve(4096);
-    cached_report_result_json_.reserve(2048);
+    result_by_index_json_.reserve(2048);
     live_json_.reserve(4096);
 }
 
@@ -463,7 +463,7 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.ota = capture(cached_ota_json_);
     out.resmed_ota = capture(cached_resmed_ota_json_);
     out.settings = capture(cached_settings_json_);
-    out.report_result = capture(cached_report_result_json_);
+    out.report_result = capture(result_by_index_json_);
     out.live = capture(live_json_);
     out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
@@ -523,7 +523,6 @@ void WebUI::stop() {
     console_sse_pos_ = 0;
     console_sse_reset_pending_ = false;
     cached_report_summary_revision_ = UINT32_MAX;
-    cached_report_result_revision_ = UINT32_MAX;
     if (sink_manager_) {
         sink_manager_->set_live_chart_enabled(false);
         sink_manager_->clear_live_chart_batch();
@@ -1062,6 +1061,84 @@ void WebUI::send_cached(AsyncWebServerRequest *request,
     request->send(response);
 }
 
+void WebUI::send_report_result(AsyncWebServerRequest *request) const {
+    if (BackgroundWorker *w = background_worker()) w->note_activity();
+    if (!report_manager_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"report unavailable\"}");
+        return;
+    }
+    if (!request->hasArg("index")) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"missing index\"}");
+        return;
+    }
+    const long index = request->arg("index").toInt();
+    if (index < 0) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad index\"}");
+        return;
+    }
+    String inm;
+    if (request->hasArg("inm")) {
+        inm = request->arg("inm");
+    } else if (request->hasHeader("If-None-Match")) {
+        // Browser HTTP-cache revalidation (e.g. after a reload): strip ETag quotes.
+        inm = request->getHeader("If-None-Match")->value();
+        if (inm.length() >= 2 && inm.charAt(0) == '"' &&
+            inm.charAt(inm.length() - 1) == '"') {
+            inm = inm.substring(1, inm.length() - 1);
+        }
+    }
+    if (!cache_mutex_ ||
+        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"cache busy\"}");
+        return;
+    }
+    char etag[48] = {};
+    const ReportManager::ResultRead st = report_manager_->read_result(
+        static_cast<size_t>(index), inm.c_str(), etag, sizeof(etag),
+        result_by_index_json_);
+    char etag_hdr[52];
+    snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", etag);
+    switch (st) {
+        case ReportManager::ResultRead::Ready: {
+            AsyncResponseStream *response =
+                request->beginResponseStream("application/json");
+            if (!response) {
+                xSemaphoreGive(cache_mutex_);
+                request->send(503, "application/json",
+                              "{\"ok\":false,\"error\":\"response alloc\"}");
+                return;
+            }
+            response->addHeader("ETag", etag_hdr);
+            response->addHeader("Cache-Control", "no-cache");
+            response->write(
+                reinterpret_cast<const uint8_t *>(result_by_index_json_.c_str()),
+                result_by_index_json_.length());
+            xSemaphoreGive(cache_mutex_);
+            request->send(response);
+            return;
+        }
+        case ReportManager::ResultRead::NotModified:
+            xSemaphoreGive(cache_mutex_);
+            request->send(304, "application/json", "");
+            return;
+        case ReportManager::ResultRead::Building:
+            xSemaphoreGive(cache_mutex_);
+            request->send(202, "application/json",
+                          "{\"ok\":true,\"state\":\"preparing\"}");
+            return;
+        case ReportManager::ResultRead::NotFound:
+        default:
+            xSemaphoreGive(cache_mutex_);
+            request->send(404, "application/json",
+                          "{\"ok\":false,\"error\":\"no such night\"}");
+            return;
+    }
+}
+
 void WebUI::send_queue_result(AsyncWebServerRequest *request,
                               bool queued,
                               const char *result) const {
@@ -1291,14 +1368,6 @@ void WebUI::build_report_summary_json(LargeTextBuffer &json) const {
     report_manager_->build_summary_json(json);
 }
 
-void WebUI::build_report_result_json(LargeTextBuffer &json) const {
-    if (!report_manager_) {
-        json = "{\"state\":\"error\",\"error\":\"report unavailable\"}";
-        return;
-    }
-    report_manager_->build_result_json(json);
-}
-
 void WebUI::send_report_chunks(AsyncWebServerRequest *request) const {
     if (!report_manager_) {
         request->send(503, "application/json",
@@ -1345,27 +1414,41 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"report unavailable\"}");
         return;
     }
-    const ReportSpoolBuffer &plot = report_manager_->result_plot_bin();
-    if (plot.size() == 0) {
-        request->send(404, "application/json",
-                      "{\"ok\":false,\"error\":\"plot not ready\"}");
+    if (!request->hasArg("index")) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"missing index\"}");
         return;
     }
-    auto payload = std::make_shared<ReportSpoolBuffer>();
-    payload->set_max_size(plot.size());
-    if (!payload->append(plot.data(), plot.size())) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"plot alloc\"}");
+    const long index = request->arg("index").toInt();
+    if (index < 0) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad index\"}");
+        return;
+    }
+    String version;
+    if (request->hasArg("v")) version = request->arg("v");
+    std::shared_ptr<ReportSpoolBuffer> payload;
+    const ReportManager::PlotRead st = report_manager_->read_plot(
+        static_cast<size_t>(index), version.c_str(), payload);
+    if (st == ReportManager::PlotRead::NotFound) {
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"error\":\"no such night\"}");
+        return;
+    }
+    if (st == ReportManager::PlotRead::Building || !payload ||
+        payload->size() == 0) {
+        request->send(202, "application/json",
+                      "{\"ok\":true,\"state\":\"preparing\"}");
         return;
     }
     AsyncWebServerResponse *response = request->beginResponse(
         "application/octet-stream",
         payload->size(),
-        [payload](uint8_t *buffer, size_t max_len, size_t index) -> size_t {
-            if (!buffer || index >= payload->size()) return 0;
-            const size_t remaining = payload->size() - index;
+        [payload](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
+            if (!buffer || offset >= payload->size()) return 0;
+            const size_t remaining = payload->size() - offset;
             const size_t n = remaining < max_len ? remaining : max_len;
-            memcpy(buffer, payload->data() + index, n);
+            memcpy(buffer, payload->data() + offset, n);
             return n;
         });
     if (!response) {
@@ -1373,7 +1456,10 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"response alloc\"}");
         return;
     }
-    response->addHeader("Cache-Control", "no-store");
+    char etag_hdr[52];
+    snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", version.c_str());
+    response->addHeader("ETag", etag_hdr);
+    response->addHeader("Cache-Control", "public, max-age=31536000, immutable");
     request->send(response);
 }
 
@@ -1619,19 +1705,6 @@ void WebUI::publish_snapshots(bool force) {
             rebuild_mask |= SNAPSHOT_REPORT_SUMMARY;
             cached_report_summary_revision_ = summary_revision;
         }
-        const ReportResultStatus &result_status =
-            report_manager_->result_status();
-        const uint32_t result_revision = result_status.revision;
-        const ReportCacheFetchStatus &cache_status =
-            report_manager_->cache_fetch_status();
-        if (force ||
-            result_revision != cached_report_result_revision_ ||
-            (periodic_due &&
-             (result_status.state == ReportResultState::Preparing ||
-              cache_status.active))) {
-            rebuild_mask |= SNAPSHOT_REPORT_RESULT;
-            cached_report_result_revision_ = result_revision;
-        }
     }
 
     if (!rebuild_mask) {
@@ -1654,9 +1727,6 @@ void WebUI::publish_snapshots(bool force) {
     }
     if (rebuild_mask & SNAPSHOT_REPORT_SUMMARY) {
         build_report_summary_json(cached_report_summary_json_);
-    }
-    if (rebuild_mask & SNAPSHOT_REPORT_RESULT) {
-        build_report_result_json(cached_report_result_json_);
     }
     if (rebuild_mask & SNAPSHOT_SETTINGS) {
         const int requested_mode = requested_settings_mode_;
@@ -1747,7 +1817,6 @@ void WebUI::execute_report_result_prepare(const std::string &body) {
                              std::string::npos) {
         report_manager_->prepare_result_by_therapy_index(
             static_cast<size_t>(strtoul(body.c_str(), nullptr, 10)));
-        mark_snapshots_dirty(SNAPSHOT_REPORT_RESULT);
         return;
     }
 
@@ -1762,7 +1831,6 @@ void WebUI::execute_report_result_prepare(const std::string &body) {
         refresh_cache = doc["refresh_cache"].as<bool>();
     }
     report_manager_->prepare_result_by_therapy_index(index, refresh_cache);
-    mark_snapshots_dirty(SNAPSHOT_REPORT_RESULT);
 }
 
 void WebUI::execute_console_line(const std::string &line) {
@@ -2017,11 +2085,11 @@ void WebUI::register_routes() {
     server_->on("/api/report/result", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         if (request->hasArg("index")) {
-            request->send(405, "application/json",
-                          "{\"ok\":false,\"error\":\"use POST\"}");
+            send_report_result(request);
             return;
         }
-        send_cached(request, cached_report_result_json_);
+        request->send(400, "application/json",
+                      "{\"error\":\"index_required\"}");
     });
 
     server_->on("/api/report/chunks", HTTP_GET,

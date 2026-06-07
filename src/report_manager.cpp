@@ -367,6 +367,21 @@ ReportManager::~ReportManager() {
 
 void ReportManager::begin() {
     if (!prefetch_lock_) prefetch_lock_ = xSemaphoreCreateMutex();
+    if (!result_slots_lock_) result_slots_lock_ = xSemaphoreCreateMutex();
+    if (!build_queue_lock_) build_queue_lock_ = xSemaphoreCreateMutex();
+    if (!night_epochs_) {
+        night_epochs_ = static_cast<NightEpoch *>(Memory::calloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX, sizeof(NightEpoch)));
+    }
+    if (!result_slots_) {
+        result_slots_ = static_cast<MaterializedResult *>(Memory::alloc_large(
+            AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult)));
+        if (result_slots_) {
+            for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
+                new (&result_slots_[i]) MaterializedResult();
+            }
+        }
+    }
     clear_summary_records();
     summary_status_ = {};
     load_summary_from_store();
@@ -400,6 +415,7 @@ bool ReportManager::request_summary_refresh(bool force) {
 }
 
 void ReportManager::poll(RpcArbiter &arbiter) {
+    service_build_queue();
     service_prefetch();
     // Publish the summary revision for the background prefetch job (cross-task).
     summary_revision_pub_.store(summary_status_.revision);
@@ -580,6 +596,7 @@ bool ReportManager::flush_cache_coalesce_buffer(size_t slot) {
             if (ok) {
                 cache_status_.chunks_written++;
                 ++cache_data_epoch_;
+                bump_night_epoch(buf.night_start_ms);
             }
         }
     }
@@ -834,12 +851,72 @@ void ReportManager::build_summary_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void ReportManager::build_result_json(LargeTextBuffer &json) const {
+void ReportManager::bump_night_epoch(uint64_t night_start_ms) {
+    if (!night_start_ms || !night_epochs_) return;
+    for (size_t i = 0; i < night_epoch_count_; ++i) {
+        if (night_epochs_[i].night_start_ms == night_start_ms) {
+            night_epochs_[i].epoch++;
+            return;
+        }
+    }
+    if (night_epoch_count_ < AC_REPORT_SUMMARY_RECORD_MAX) {
+        night_epochs_[night_epoch_count_].night_start_ms = night_start_ms;
+        night_epochs_[night_epoch_count_].epoch = 1;
+        ++night_epoch_count_;
+    }
+}
+
+uint32_t ReportManager::night_epoch_for(uint64_t night_start_ms) const {
+    if (!night_epochs_) return 0;
+    for (size_t i = 0; i < night_epoch_count_; ++i) {
+        if (night_epochs_[i].night_start_ms == night_start_ms) {
+            return night_epochs_[i].epoch;
+        }
+    }
+    return 0;
+}
+
+void ReportManager::format_night_etag(const ReportSummaryRecord &rec, char *out,
+                                      size_t out_size) const {
+    if (!out || !out_size) return;
+    snprintf(out, out_size, "%llu-%lu-%lu-%lu",
+             static_cast<unsigned long long>(rec.start_ms),
+             static_cast<unsigned long>(rec.duration_min),
+             static_cast<unsigned long>(rec.session_interval_count),
+             static_cast<unsigned long>(night_epoch_for(rec.start_ms)));
+}
+
+bool ReportManager::night_etag(size_t therapy_index, char *out,
+                               size_t out_size) const {
+    ReportSummaryRecord rec;
+    if (!summary_night_by_therapy_index(therapy_index, rec)) return false;
+    format_night_etag(rec, out, out_size);
+    return true;
+}
+
+static const char *result_state_name_for(ReportResultState state) {
+    switch (state) {
+        case ReportResultState::Idle: return "idle";
+        case ReportResultState::Preparing: return "preparing";
+        case ReportResultState::Ready: return "ready";
+        case ReportResultState::Incomplete: return "incomplete";
+        case ReportResultState::Partial: return "partial";
+        case ReportResultState::Error: return "error";
+    }
+    return "unknown";
+}
+
+void ReportManager::build_result_json_from(
+    const ReportResultStatus &result_status_,
+    const ReportSummaryRecord &result_night_,
+    const ReportResultStream *result_streams_,
+    size_t result_stream_count_,
+    const ReportCacheFetchStatus &cache_status_,
+    LargeTextBuffer &json) const {
     json.clear();
     json += "{";
-    json_add_string(json, "state", result_state_name(), false);
-    json_add_int(json, "revision",
-                 static_cast<long>(result_status_.revision));
+    json_add_string(json, "state", result_state_name_for(result_status_.state),
+                    false);
     json_add_string(json, "error", result_status_.error.c_str());
     json_add_int(json, "therapy_index",
                  static_cast<long>(result_status_.therapy_index));
@@ -978,6 +1055,155 @@ void ReportManager::build_result_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
+void ReportManager::publish_result_to_slot() {
+    if (!result_slots_lock_ || !result_slots_) return;
+    // The ETag must equal what read_result derives from the SUMMARY record: the
+    // prepare re-derives result_night_'s duration/sessions from the plot, so an
+    // etag off result_night_ would never match the summary-based one read computes.
+    char etag[48];
+    ReportSummaryRecord summ;
+    if (summary_night_by_therapy_index(result_status_.therapy_index, summ)) {
+        format_night_etag(summ, etag, sizeof(etag));
+    } else {
+        format_night_etag(result_night_, etag, sizeof(etag));
+    }
+    // Snapshot the plot bytes outside the lock (the copy is the heavy part); a
+    // shared_ptr lets a GET stream it even after the blob is evicted/rebuilt.
+    std::shared_ptr<ReportSpoolBuffer> plot;
+    if (result_plot_bin_.size() > 0) {
+        plot = std::make_shared<ReportSpoolBuffer>();
+        plot->set_max_size(result_plot_bin_.size());
+        if (!plot->reserve_capacity(result_plot_bin_.size()) ||
+            !plot->append(result_plot_bin_.data(), result_plot_bin_.size())) {
+            plot.reset();
+        }
+    }
+    xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+    size_t pick = 0;
+    bool found = false;
+    for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
+        if (result_slots_[i].valid &&
+            result_slots_[i].night_start_ms == result_night_.start_ms) {
+            pick = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
+            if (!result_slots_[i].valid) {
+                pick = i;
+                break;
+            }
+            if (result_slots_[i].last_used < result_slots_[pick].last_used) {
+                pick = i;
+            }
+        }
+    }
+    MaterializedResult &slot = result_slots_[pick];
+    slot.valid = true;
+    slot.night_start_ms = result_night_.start_ms;
+    snprintf(slot.etag, sizeof(slot.etag), "%s", etag);
+    slot.status = result_status_;
+    slot.night = result_night_;
+    slot.stream_count = result_stream_count_;
+    for (size_t i = 0; i < AC_REPORT_RESULT_STREAM_MAX; ++i) {
+        slot.streams[i] = (i < result_stream_count_) ? result_streams_[i]
+                                                     : ReportResultStream{};
+    }
+    slot.last_used = ++result_slot_tick_;
+    if (plot) {
+        size_t bp = 0;
+        bool bf = false;
+        for (size_t i = 0; i < AC_REPORT_PLOT_BLOB_MAX; ++i) {
+            if (plot_blobs_[i].valid &&
+                plot_blobs_[i].night_start_ms == result_night_.start_ms) {
+                bp = i;
+                bf = true;
+                break;
+            }
+        }
+        if (!bf) {
+            for (size_t i = 0; i < AC_REPORT_PLOT_BLOB_MAX; ++i) {
+                if (!plot_blobs_[i].valid) {
+                    bp = i;
+                    break;
+                }
+                if (plot_blobs_[i].last_used < plot_blobs_[bp].last_used) bp = i;
+            }
+        }
+        plot_blobs_[bp].valid = true;
+        plot_blobs_[bp].night_start_ms = result_night_.start_ms;
+        snprintf(plot_blobs_[bp].etag, sizeof(plot_blobs_[bp].etag), "%s", etag);
+        plot_blobs_[bp].bytes = plot;
+        plot_blobs_[bp].last_used = result_slot_tick_;
+    }
+    xSemaphoreGive(result_slots_lock_);
+}
+
+ReportManager::ResultRead ReportManager::read_result(
+    size_t therapy_index, const char *if_none_match, char *etag_out,
+    size_t etag_out_size, LargeTextBuffer &json_out) {
+    ReportSummaryRecord rec;
+    if (!summary_night_by_therapy_index(therapy_index, rec)) {
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        return ResultRead::NotFound;
+    }
+    char etag[48];
+    format_night_etag(rec, etag, sizeof(etag));
+    if (etag_out && etag_out_size) snprintf(etag_out, etag_out_size, "%s", etag);
+    if (if_none_match && if_none_match[0] && strcmp(if_none_match, etag) == 0) {
+        return ResultRead::NotModified;
+    }
+    if (result_slots_lock_ && result_slots_) {
+        xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+        for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
+            if (result_slots_[i].valid &&
+                result_slots_[i].night_start_ms == rec.start_ms &&
+                strcmp(result_slots_[i].etag, etag) == 0) {
+                result_slots_[i].last_used = ++result_slot_tick_;
+                const ReportCacheFetchStatus inactive{};
+                build_result_json_from(result_slots_[i].status,
+                                       result_slots_[i].night,
+                                       result_slots_[i].streams,
+                                       result_slots_[i].stream_count, inactive,
+                                       json_out);
+                xSemaphoreGive(result_slots_lock_);
+                return ResultRead::Ready;
+            }
+        }
+        xSemaphoreGive(result_slots_lock_);
+    }
+    enqueue_build(rec.start_ms, therapy_index, false);
+    return ResultRead::Building;
+}
+
+ReportManager::PlotRead ReportManager::read_plot(
+    size_t therapy_index, const char *version,
+    std::shared_ptr<ReportSpoolBuffer> &out) {
+    ReportSummaryRecord rec;
+    if (!summary_night_by_therapy_index(therapy_index, rec)) {
+        return PlotRead::NotFound;
+    }
+    if (result_slots_lock_) {
+        xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+        for (size_t i = 0; i < AC_REPORT_PLOT_BLOB_MAX; ++i) {
+            if (plot_blobs_[i].valid && plot_blobs_[i].bytes &&
+                plot_blobs_[i].night_start_ms == rec.start_ms &&
+                (!version || !version[0] ||
+                 strcmp(plot_blobs_[i].etag, version) == 0)) {
+                plot_blobs_[i].last_used = ++result_slot_tick_;
+                out = plot_blobs_[i].bytes;
+                xSemaphoreGive(result_slots_lock_);
+                return PlotRead::Ready;
+            }
+        }
+        xSemaphoreGive(result_slots_lock_);
+    }
+    enqueue_build(rec.start_ms, therapy_index, false);
+    return PlotRead::Building;
+}
+
 void ReportManager::build_result_chunks_json(LargeTextBuffer &json,
                                              size_t offset,
                                              size_t limit) const {
@@ -989,8 +1215,6 @@ void ReportManager::build_result_chunks_json(LargeTextBuffer &json,
     json.clear();
     json += "{";
     json_add_string(json, "state", result_state_name(), false);
-    json_add_int(json, "revision",
-                 static_cast<long>(result_status_.revision));
     json_add_int(json, "offset", static_cast<long>(offset));
     json_add_int(json, "limit", static_cast<long>(limit));
     json_add_int(json, "total", static_cast<long>(total));
@@ -1248,6 +1472,7 @@ ReportManager::PrefetchSnapshot ReportManager::prefetch_snapshot() const {
 
 bool ReportManager::foreground_busy() const {
     if (summary_fetch_active_ || plot_build_active_) return true;
+    if (build_queue_count_ > 0) return true;
     if (!cache_fetch_active_) return false;
     // A cache fetch is in flight: it's foreground unless it's the prefetch's own.
     if (!prefetch_lock_) return true;
@@ -1275,6 +1500,52 @@ void ReportManager::prefetch_yield_to_foreground() {
               "[REPORT] prefetch yielded to foreground prepare\n");
 }
 
+void ReportManager::enqueue_build(uint64_t night_start_ms, size_t therapy_index,
+                                  bool refresh) {
+    if (!build_queue_lock_ || !night_start_ms) return;
+    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    for (size_t k = 0; k < build_queue_count_; ++k) {
+        size_t idx = (build_queue_head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
+        if (build_queue_[idx].night_start_ms == night_start_ms) {
+            if (refresh) build_queue_[idx].refresh = true;
+            xSemaphoreGive(build_queue_lock_);
+            return;
+        }
+    }
+    if (build_queue_count_ < AC_REPORT_BUILD_QUEUE_MAX) {
+        size_t tail =
+            (build_queue_head_ + build_queue_count_) % AC_REPORT_BUILD_QUEUE_MAX;
+        build_queue_[tail].night_start_ms = night_start_ms;
+        build_queue_[tail].therapy_index = therapy_index;
+        build_queue_[tail].refresh = refresh;
+        build_queue_count_++;
+    }
+    xSemaphoreGive(build_queue_lock_);
+}
+
+void ReportManager::service_build_queue() {
+    if (!build_queue_lock_) return;
+    if (summary_fetch_active_ || plot_build_active_) return;
+    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    const bool have = build_queue_count_ > 0;
+    ResultBuildJob job = have ? build_queue_[build_queue_head_] : ResultBuildJob{};
+    xSemaphoreGive(build_queue_lock_);
+    if (!have) return;
+    // A foreground build preempts an idle prefetch fetch.
+    if (cache_fetch_active_) {
+        prefetch_yield_to_foreground();
+        if (cache_fetch_active_) return;  // a non-prefetch fetch is in flight; wait
+    }
+    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    if (build_queue_count_ > 0 &&
+        build_queue_[build_queue_head_].night_start_ms == job.night_start_ms) {
+        build_queue_head_ = (build_queue_head_ + 1) % AC_REPORT_BUILD_QUEUE_MAX;
+        build_queue_count_--;
+    }
+    xSemaphoreGive(build_queue_lock_);
+    prepare_result_by_therapy_index_internal(job.therapy_index, job.refresh);
+}
+
 void ReportManager::service_prefetch() {
     if (!prefetch_lock_) return;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
@@ -1284,7 +1555,8 @@ void ReportManager::service_prefetch() {
     const uint64_t active = prefetch_active_night_;
     xSemaphoreGive(prefetch_lock_);
 
-    if (cancel && phase == PrefetchPhase::Fetching) {
+    if (cancel && (phase == PrefetchPhase::Fetching ||
+                   phase == PrefetchPhase::Pending)) {
         if (cache_fetch_active_) {
             spool_.reset();
             cache_fetch_active_ = false;
@@ -1438,7 +1710,6 @@ bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
     summary_status_.error.clear();
 
     clear_result_prepare();
-    result_status_.revision++;
     return true;
 }
 
@@ -1471,7 +1742,6 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
     }
     if (result_status_.night_start_ms == night.start_ms) {
         clear_result_prepare();
-        result_status_.revision++;
     }
     return ok;
 }
@@ -1511,7 +1781,6 @@ bool ReportManager::ensure_result_chunks() {
 }
 
 void ReportManager::clear_result_prepare() {
-    const uint32_t previous_revision = result_status_.revision;
     reset_plot_build();
     if (result_chunks_ && result_chunk_capacity_) {
         memset(result_chunks_, 0,
@@ -1522,28 +1791,18 @@ void ReportManager::clear_result_prepare() {
     result_night_ = {};
     result_plot_bin_.clear();
     result_status_ = {};
-    result_status_.revision = previous_revision;
 }
 
 void ReportManager::fail_result_prepare(const char *message) {
     reset_plot_build();
     result_status_.state = ReportResultState::Error;
-    result_status_.revision++;
     result_status_.error = message ? message : "result_prepare_failed";
     Log::logf(CAT_RPC, LOG_WARN, "[REPORT] Result prepare failed: %s\n",
               result_status_.error.c_str());
 }
 
 const char *ReportManager::result_state_name() const {
-    switch (result_status_.state) {
-        case ReportResultState::Idle: return "idle";
-        case ReportResultState::Preparing: return "preparing";
-        case ReportResultState::Ready: return "ready";
-        case ReportResultState::Incomplete: return "incomplete";
-        case ReportResultState::Partial: return "partial";
-        case ReportResultState::Error: return "error";
-    }
-    return "unknown";
+    return result_state_name_for(result_status_.state);
 }
 
 bool ReportManager::add_result_stream(ReportStoreChunkKind kind,
@@ -1981,6 +2240,7 @@ bool ReportManager::start_result_plot_build() {
         build_empty_plot_bin(result_plot_bin_);
         result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
+        publish_result_to_slot();
         return true;
     }
 
@@ -1993,6 +2253,7 @@ bool ReportManager::start_result_plot_build() {
         build_empty_plot_bin(result_plot_bin_);
         result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
+        publish_result_to_slot();
         return true;
     }
 
@@ -2009,6 +2270,7 @@ bool ReportManager::start_result_plot_build() {
         build_empty_plot_bin(result_plot_bin_);
         result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
+        publish_result_to_slot();
         return true;
     }
     if (load_result_plot_cache()) {
@@ -2019,6 +2281,7 @@ bool ReportManager::start_result_plot_build() {
                   "[REPORT] Result plot cache hit index=%lu bytes=%lu\n",
                   static_cast<unsigned long>(result_status_.therapy_index),
                   static_cast<unsigned long>(result_plot_bin_.size()));
+        publish_result_to_slot();
         return true;
     }
 
@@ -2046,7 +2309,6 @@ bool ReportManager::start_result_plot_build() {
     plot_build_phase_ = ReportPlotBuildPhase::Events;
     result_status_.state = ReportResultState::Preparing;
     result_status_.error = "plot_preparing";
-    result_status_.revision++;
     return true;
 }
 
@@ -2240,7 +2502,7 @@ bool ReportManager::finish_result_plot_build() {
     reset_plot_build();
     result_status_.state = settled_result_state(result_status_.missing_required);
     result_status_.error.clear();
-    result_status_.revision++;
+    publish_result_to_slot();
     Log::logf(CAT_RPC,
               LOG_INFO,
               "[REPORT] Result plot ready index=%lu chunks=%lu bytes=%lu\n",
@@ -2364,7 +2626,6 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
         pending_result_therapy_index_ = therapy_index;
         clear_result_prepare();
         result_status_.state = ReportResultState::Preparing;
-        result_status_.revision++;
         result_status_.therapy_index = therapy_index;
         result_status_.error = "summary_fetching";
         return true;
@@ -2392,7 +2653,7 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
         result_status_.night_start_ms == night.start_ms &&
         result_status_.night_end_ms == night.end_ms &&
         result_plot_bin_.size() > 0) {
-        result_status_.revision++;
+        publish_result_to_slot();
         return true;
     }
 
@@ -2436,7 +2697,6 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
     ReportSessionRange night_range;
     if (!night_data_span(night, night_range.start_ms, night_range.end_ms)) {
         result_status_.state = ReportResultState::Incomplete;
-        result_status_.revision++;
         result_status_.error = "no_sessions";
         return true;
     }
@@ -2474,7 +2734,6 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
             pending_result_refresh_cache_ = false;
             pending_result_therapy_index_ = therapy_index;
             result_status_.state = ReportResultState::Preparing;
-            result_status_.revision++;
             result_status_.error = "cache_fetching";
             return true;
         }
@@ -2670,7 +2929,6 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
             return true;
         }
     }
-    result_status_.revision++;
     Log::logf(CAT_RPC, LOG_INFO,
               "[REPORT] Result prepared index=%lu state=%s chunks=%lu "
               "records=%lu bytes=%lu\n",
@@ -2680,10 +2938,6 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
               static_cast<unsigned long>(result_status_.record_count),
               static_cast<unsigned long>(result_status_.payload_bytes));
     return true;
-}
-
-bool ReportManager::prepare_latest_result() {
-    return prepare_result_by_therapy_index(0);
 }
 
 bool ReportManager::cache_source_supported(ReportSourceId source) const {
