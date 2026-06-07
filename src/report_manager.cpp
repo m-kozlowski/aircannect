@@ -168,13 +168,20 @@ bool night_data_span(const ReportSummaryRecord &night,
     return span_end > span_start;
 }
 
+static bool event_coverage_dropped(const ReportSummaryRecord &night,
+                                   const ReportSourceDef &source);
+
 bool source_complete_for_night(const ReportSummaryRecord &night,
                                const ReportSourceDef &source) {
     int64_t span_start = 0;
     int64_t span_end = 0;
     if (!night_data_span(night, span_start, span_end)) return false;
-    return ReportStore::coverage_complete(
-        source.spool_type, span_start, span_end, source.parser_schema);
+    if (!ReportStore::coverage_complete(
+            source.spool_type, span_start, span_end, source.parser_schema)) {
+        return false;
+    }
+    if (event_coverage_dropped(night, source)) return false;
+    return true;
 }
 
 // Series sources stream continuous samples; event sources are sparse (a covered
@@ -222,7 +229,13 @@ bool source_missing_start_for_night(const ReportSummaryRecord &night,
         out_start_ms = span_start;
         return true;
     }
-    if (missing_ms >= span_end) return false;
+    if (missing_ms >= span_end) {
+        if (event_coverage_dropped(night, source)) {
+            out_start_ms = span_start;
+            return true;
+        }
+        return false;
+    }
     out_start_ms = missing_ms;
     return true;
 }
@@ -309,6 +322,25 @@ bool source_latest_cached_end_for_night(const ReportSourceDef &source,
     if (!matched) return false;
     out_end_ms = earliest_latest_end;
     return true;
+}
+
+// Events outlive the 6.25Hz high-res, so event-coverage-complete but no cached
+// event chunks while the high-res is still cached means the fetch was dropped,
+// not a real zero -> report it as a gap to re-fetch.
+static bool event_coverage_dropped(const ReportSummaryRecord &night,
+                                   const ReportSourceDef &source) {
+    if (source.id != ReportSourceId::RespiratoryEvents &&
+        source.id != ReportSourceId::UsageEvents) {
+        return false;
+    }
+    int64_t end_ms = 0;
+    if (source_latest_cached_end_for_night(source, night, end_ms)) {
+        return false;  // event chunks present -- nothing was dropped
+    }
+    const ReportSourceDef *high_res =
+        report_source_def(ReportSourceId::RespiratoryFlow6p25Hz);
+    if (!high_res) return false;
+    return source_latest_cached_end_for_night(*high_res, night, end_ms);
 }
 
 bool source_required_for_report_result(ReportSourceId source) {
