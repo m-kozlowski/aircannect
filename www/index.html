@@ -2925,6 +2925,17 @@
     // Conditional GET by night index: returns {status, etag, json}. Polls while
     // the backend is still building (202). forceFresh (a refresh) keeps polling
     // through 304 until the version changes, so it waits for the rebuild.
+    function isTransientReportError(text) {
+      try {
+        const parsed = JSON.parse(text);
+        const code = parsed && parsed.error ? parsed.error : "";
+        return code === "report_cache_busy" ||
+               code === "report_queue_full";
+      } catch (error) {
+        return false;
+      }
+    }
+
     async function pollReportResult(token, index, inm, forceFresh) {
       for (let attempt = 0; attempt < 80; attempt++) {
         if (token !== reportLoadToken) return null;
@@ -2954,7 +2965,12 @@
           continue;
         }
         if (resp.status === 404) return {status: 404, etag: "", json: null};
-        throw new Error(await resp.text());
+        const text = await resp.text();
+        if (resp.status === 503 && isTransientReportError(text)) {
+          await new Promise((r) => setTimeout(r, 300));
+          continue;
+        }
+        throw new Error(text);
       }
       return {status: 0, etag: "", json: null};
     }
@@ -2975,8 +2991,13 @@
           await new Promise((resolve) => setTimeout(resolve, 300));
           continue;
         }
-        throw new Error(response.status === 404 ? "plot not found"
-                                                : await response.text());
+        if (response.status === 404) throw new Error("plot not found");
+        const text = await response.text();
+        if (response.status === 503 && isTransientReportError(text)) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          continue;
+        }
+        throw new Error(text);
       }
       if (token !== reportLoadToken) return false;
       if (!buf) throw new Error("plot not ready");
@@ -3117,6 +3138,11 @@
     async function loadReportSummary(autoRefresh) {
       try {
         const data = await (await api("/api/report/summary")).json();
+        if (data.state === "busy") {
+          msg("reportMsg", "Summary busy; retrying...", true, true);
+          scheduleReportPoll();
+          return;
+        }
         reportSummary = data;
         renderReportSummary();
         if (data.state === "fetching") {

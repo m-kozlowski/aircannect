@@ -15,6 +15,7 @@ public:
 
     bool reserve(size_t capacity);
     void clear();
+    void swap(LargeTextBuffer &other);
 
     size_t length() const { return length_; }
     size_t capacity() const { return capacity_; }

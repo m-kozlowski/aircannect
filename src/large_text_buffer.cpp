@@ -20,6 +20,24 @@ void LargeTextBuffer::clear() {
     if (data_) data_[0] = 0;
 }
 
+void LargeTextBuffer::swap(LargeTextBuffer &other) {
+    char *data = data_;
+    data_ = other.data_;
+    other.data_ = data;
+
+    size_t length = length_;
+    length_ = other.length_;
+    other.length_ = length;
+
+    size_t capacity = capacity_;
+    capacity_ = other.capacity_;
+    other.capacity_ = capacity;
+
+    bool overflowed = overflowed_;
+    overflowed_ = other.overflowed_;
+    other.overflowed_ = overflowed;
+}
+
 LargeTextBuffer &LargeTextBuffer::operator=(const char *text) {
     clear();
     append(text);

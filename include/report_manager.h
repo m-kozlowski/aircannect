@@ -26,9 +26,6 @@ static constexpr size_t AC_REPORT_RESULT_CHUNK_MAX = 512;
 static constexpr size_t AC_REPORT_RESULT_STREAM_MAX = 16;
 static constexpr size_t AC_REPORT_RESULT_SLOT_MAX = 4;
 static constexpr size_t AC_REPORT_BUILD_QUEUE_MAX = 4;
-// Per-night plot bytes held in PSRAM for keyed /plot serving (start small to
-// bound PSRAM; raise if free PSRAM allows).
-static constexpr size_t AC_REPORT_PLOT_BLOB_MAX = 2;
 
 enum class ReportSummaryState : uint8_t {
     Idle,
@@ -155,9 +152,7 @@ public:
     bool for_each_summary_night(ReportSummaryNightCallback callback, void *context) const;
     bool summary_night_by_therapy_index(size_t therapy_index, ReportSummaryRecord &out) const;
     bool latest_summary_night(ReportSummaryRecord &out) const;
-    const ReportSummaryStatus &summary_status() const {
-        return summary_status_;
-    }
+    ReportSummaryStatus summary_status() const;
     // Atomic mirror of summary_status_.revision, published each poll() so the
     // background prefetch job can watch for new nights without a cross-task read.
     uint32_t summary_revision() const { return summary_revision_pub_.load(); }
@@ -203,13 +198,28 @@ public:
     void build_result_chunks_json(LargeTextBuffer &json, size_t offset, size_t limit) const;
     // Stateless per-night result read: serves a materialized LRU entry by night
     // index with an ETag, without touching the single build-scratch slot.
-    enum class ResultRead : uint8_t { NotFound, NotModified, Ready, Building };
+    enum class ResultRead : uint8_t {
+        NotFound,
+        NotModified,
+        Ready,
+        Building,
+        QueueFull,
+        Unavailable,
+        Busy,
+    };
     ResultRead read_result(size_t therapy_index, const char *if_none_match,
                            char *etag_out, size_t etag_out_size,
                            LargeTextBuffer &json_out);
     // Stateless per-night plot read: serves the PSRAM blob for (night, version);
     // a miss queues a build and returns Building.
-    enum class PlotRead : uint8_t { NotFound, Ready, Building };
+    enum class PlotRead : uint8_t {
+        NotFound,
+        Ready,
+        Building,
+        QueueFull,
+        Unavailable,
+        Busy,
+    };
     PlotRead read_plot(size_t therapy_index, const char *version,
                        std::shared_ptr<ReportSpoolBuffer> &out);
     const ReportSpoolBuffer &result_plot_bin() const {
@@ -295,8 +305,6 @@ private:
     static constexpr size_t AC_REPORT_COALESCE_SLOTS = 8;
     static constexpr size_t AC_REPORT_COALESCE_TARGET_BYTES = 512 * 1024;
 
-    static bool store_summary_record(void *context,
-                                     const ReportSummaryRecord &record);
     static bool write_parsed_chunk(void *context,
                                    const ReportParsedChunk &chunk);
     static bool collect_result_chunk(void *context,
@@ -390,7 +398,23 @@ private:
     ReportSummaryRecord *records_ = nullptr;
     size_t record_count_ = 0;
     uint32_t nights_with_therapy_ = 0;
+    ReportSummaryRecord *summary_scratch_ = nullptr;
     ReportSummaryStatus summary_status_;
+    mutable SemaphoreHandle_t summary_lock_ = nullptr;
+    SemaphoreHandle_t summary_scratch_lock_ = nullptr;
+    LargeTextBuffer summary_json_snapshot_;
+    LargeTextBuffer summary_json_build_;
+    uint32_t next_summary_progress_snapshot_ms_ = 0;
+    bool take_summary_lock(TickType_t timeout) const;
+    void give_summary_lock() const;
+    bool take_summary_scratch(TickType_t timeout,
+                              ReportSummaryRecord *&out);
+    void give_summary_scratch();
+    void publish_summary_json_snapshot();
+    bool summary_night_by_therapy_index_unlocked(size_t therapy_index,
+                                                 ReportSummaryRecord &out) const;
+    bool summary_night_by_start_unlocked(uint64_t night_start_ms,
+                                         ReportSummaryRecord &out) const;
     std::atomic<uint32_t> summary_revision_pub_{0};  // see summary_revision()
     SpoolClient spool_;
     bool summary_fetch_active_ = false;
@@ -428,9 +452,12 @@ private:
     NightEpoch *night_epochs_ = nullptr;  // PSRAM, AC_REPORT_SUMMARY_RECORD_MAX
     size_t night_epoch_count_ = 0;
     void bump_night_epoch(uint64_t night_start_ms);
-    uint32_t night_epoch_for(uint64_t night_start_ms) const;
+    uint32_t night_epoch_for_unlocked(uint64_t night_start_ms) const;
     void format_night_etag(const ReportSummaryRecord &rec, char *out,
                            size_t out_size) const;
+    void format_night_etag_unlocked(const ReportSummaryRecord &rec,
+                                    char *out,
+                                    size_t out_size) const;
     uint32_t next_trash_cleanup_ms_ = 0;
 
     mutable SemaphoreHandle_t prefetch_lock_ = nullptr;
@@ -458,11 +485,14 @@ private:
         ReportSummaryRecord night;
         ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
         size_t stream_count = 0;
+        std::shared_ptr<ReportSpoolBuffer> plot;
     };
     MaterializedResult *result_slots_ = nullptr;  // PSRAM, AC_REPORT_RESULT_SLOT_MAX
     SemaphoreHandle_t result_slots_lock_ = nullptr;
     uint32_t result_slot_tick_ = 0;
     void publish_result_to_slot();
+    void invalidate_materialized_locked(uint64_t night_start_ms, bool all);
+    void invalidate_materialized(uint64_t night_start_ms, bool all);
     void build_result_json_from(const ReportResultStatus &status,
                                 const ReportSummaryRecord &night,
                                 const ReportResultStream *streams,
@@ -477,23 +507,21 @@ private:
         size_t therapy_index = 0;
         bool refresh = false;
     };
+    enum class BuildQueueResult : uint8_t {
+        Queued,
+        AlreadyQueued,
+        Full,
+        Unavailable,
+    };
     ResultBuildJob build_queue_[AC_REPORT_BUILD_QUEUE_MAX];
     size_t build_queue_head_ = 0;
     size_t build_queue_count_ = 0;
     SemaphoreHandle_t build_queue_lock_ = nullptr;
-    void enqueue_build(uint64_t night_start_ms, size_t therapy_index, bool refresh);
+    BuildQueueResult enqueue_build(uint64_t night_start_ms,
+                                   size_t therapy_index,
+                                   bool refresh);
+    void clear_build_queue(uint64_t night_start_ms, bool all);
     void service_build_queue();
-
-    // Per-night plot bytes (PSRAM), keyed by night+etag, served by GET /plot
-    // without touching SD or the build scratch. Shares result_slots_lock_.
-    struct PlotBlob {
-        bool valid = false;
-        uint64_t night_start_ms = 0;
-        char etag[48] = {};
-        uint32_t last_used = 0;
-        std::shared_ptr<ReportSpoolBuffer> bytes;
-    };
-    PlotBlob plot_blobs_[AC_REPORT_PLOT_BLOB_MAX];
 
     ReportSummaryRecord result_night_;
     ReportResultStatus result_status_;

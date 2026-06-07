@@ -105,7 +105,7 @@ private:
     void reserve_cached_json();
     void build_status_json(LargeTextBuffer &json) const;
     void build_oximetry_sensors_json(LargeTextBuffer &json) const;
-    void build_report_summary_json(LargeTextBuffer &json) const;
+    void send_report_summary(AsyncWebServerRequest *request) const;
     void send_report_chunks(AsyncWebServerRequest *request) const;
     void send_report_plot(AsyncWebServerRequest *request) const;
     void send_report_result(AsyncWebServerRequest *request) const;
@@ -182,12 +182,10 @@ private:
     static constexpr uint16_t SNAPSHOT_OTA = 1u << 6;
     static constexpr uint16_t SNAPSHOT_RESMED_OTA = 1u << 7;
     static constexpr uint16_t SNAPSHOT_SETTINGS = 1u << 8;
-    static constexpr uint16_t SNAPSHOT_REPORT_SUMMARY = 1u << 9;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONFIG |
         SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
-        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS |
-        SNAPSHOT_REPORT_SUMMARY;
+        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_WIFI |
         SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
@@ -237,10 +235,9 @@ private:
     LargeTextBuffer cached_ota_json_;
     LargeTextBuffer cached_resmed_ota_json_;
     LargeTextBuffer cached_settings_json_;
-    LargeTextBuffer cached_report_summary_json_;
-    // Render scratch for GET /api/report/result?index=N (per-night serve), held
-    // under cache_mutex_; mutable so the const handler can render into it.
-    mutable LargeTextBuffer result_by_index_json_;
+    // Render scratch for report GET handlers, held under cache_mutex_; mutable
+    // so const handlers can render into it.
+    mutable LargeTextBuffer report_request_json_;
     LargeTextBuffer live_json_;
 
     bool cached_http_auth_required_ = true;
@@ -251,7 +248,6 @@ private:
     int cached_settings_mode_ = -1;
     int requested_settings_mode_ = -1;
     bool cached_settings_refresh_queued_ = false;
-    uint32_t cached_report_summary_revision_ = UINT32_MAX;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;

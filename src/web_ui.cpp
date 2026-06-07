@@ -414,8 +414,7 @@ void WebUI::reserve_cached_json() {
     cached_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
     cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
     cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
-    cached_report_summary_json_.reserve(4096);
-    result_by_index_json_.reserve(2048);
+    report_request_json_.reserve(4096);
     live_json_.reserve(4096);
 }
 
@@ -463,7 +462,7 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.ota = capture(cached_ota_json_);
     out.resmed_ota = capture(cached_resmed_ota_json_);
     out.settings = capture(cached_settings_json_);
-    out.report_result = capture(result_by_index_json_);
+    out.report_result = capture(report_request_json_);
     out.live = capture(live_json_);
     out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
@@ -522,7 +521,6 @@ void WebUI::stop() {
     console_log_write_pos_ = 0;
     console_sse_pos_ = 0;
     console_sse_reset_pending_ = false;
-    cached_report_summary_revision_ = UINT32_MAX;
     if (sink_manager_) {
         sink_manager_->set_live_chart_enabled(false);
         sink_manager_->clear_live_chart_batch();
@@ -1099,7 +1097,7 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
     char etag[48] = {};
     const ReportManager::ResultRead st = report_manager_->read_result(
         static_cast<size_t>(index), inm.c_str(), etag, sizeof(etag),
-        result_by_index_json_);
+        report_request_json_);
     char etag_hdr[52];
     snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", etag);
     switch (st) {
@@ -1115,8 +1113,8 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
             response->addHeader("ETag", etag_hdr);
             response->addHeader("Cache-Control", "no-cache");
             response->write(
-                reinterpret_cast<const uint8_t *>(result_by_index_json_.c_str()),
-                result_by_index_json_.length());
+                reinterpret_cast<const uint8_t *>(report_request_json_.c_str()),
+                report_request_json_.length());
             xSemaphoreGive(cache_mutex_);
             request->send(response);
             return;
@@ -1129,6 +1127,21 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
             xSemaphoreGive(cache_mutex_);
             request->send(202, "application/json",
                           "{\"ok\":true,\"state\":\"preparing\"}");
+            return;
+        case ReportManager::ResultRead::QueueFull:
+            xSemaphoreGive(cache_mutex_);
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"report_queue_full\"}");
+            return;
+        case ReportManager::ResultRead::Unavailable:
+            xSemaphoreGive(cache_mutex_);
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"report_cache_unavailable\"}");
+            return;
+        case ReportManager::ResultRead::Busy:
+            xSemaphoreGive(cache_mutex_);
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"report_cache_busy\"}");
             return;
         case ReportManager::ResultRead::NotFound:
         default:
@@ -1359,13 +1372,32 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void WebUI::build_report_summary_json(LargeTextBuffer &json) const {
+void WebUI::send_report_summary(AsyncWebServerRequest *request) const {
     if (!report_manager_) {
-        json = "{\"state\":\"error\",\"error\":\"report unavailable\","
-               "\"nights\":[]}";
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"report unavailable\"}");
         return;
     }
-    report_manager_->build_summary_json(json);
+    if (!cache_mutex_ ||
+        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"cache busy\"}");
+        return;
+    }
+    report_manager_->build_summary_json(report_request_json_);
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        xSemaphoreGive(cache_mutex_);
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response alloc\"}");
+        return;
+    }
+    response->write(
+        reinterpret_cast<const uint8_t *>(report_request_json_.c_str()),
+        report_request_json_.length());
+    xSemaphoreGive(cache_mutex_);
+    request->send(response);
 }
 
 void WebUI::send_report_chunks(AsyncWebServerRequest *request) const {
@@ -1433,6 +1465,21 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
     if (st == ReportManager::PlotRead::NotFound) {
         request->send(404, "application/json",
                       "{\"ok\":false,\"error\":\"no such night\"}");
+        return;
+    }
+    if (st == ReportManager::PlotRead::QueueFull) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"report_queue_full\"}");
+        return;
+    }
+    if (st == ReportManager::PlotRead::Unavailable) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"report_cache_unavailable\"}");
+        return;
+    }
+    if (st == ReportManager::PlotRead::Busy) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"report_cache_busy\"}");
         return;
     }
     if (st == ReportManager::PlotRead::Building || !payload ||
@@ -1694,19 +1741,6 @@ void WebUI::publish_snapshots(bool force) {
         rebuild_mask |= SNAPSHOT_PERIODIC;
     }
 
-    if (report_manager_) {
-        const ReportSummaryStatus &summary_status =
-            report_manager_->summary_status();
-        const uint32_t summary_revision = summary_status.revision;
-        if (force ||
-            summary_revision != cached_report_summary_revision_ ||
-            (periodic_due &&
-             summary_status.state == ReportSummaryState::Fetching)) {
-            rebuild_mask |= SNAPSHOT_REPORT_SUMMARY;
-            cached_report_summary_revision_ = summary_revision;
-        }
-    }
-
     if (!rebuild_mask) {
         xSemaphoreGive(cache_mutex_);
         return;
@@ -1724,9 +1758,6 @@ void WebUI::publish_snapshots(bool force) {
     }
     if (rebuild_mask & SNAPSHOT_RESMED_OTA) {
         build_resmed_ota_json(cached_resmed_ota_json_, *resmed_ota_manager_);
-    }
-    if (rebuild_mask & SNAPSHOT_REPORT_SUMMARY) {
-        build_report_summary_json(cached_report_summary_json_);
     }
     if (rebuild_mask & SNAPSHOT_SETTINGS) {
         const int requested_mode = requested_settings_mode_;
@@ -1808,7 +1839,6 @@ void WebUI::execute_command(WebCommand &command) {
 void WebUI::execute_report_summary_refresh() {
     if (!report_manager_) return;
     report_manager_->request_summary_refresh(true);
-    mark_snapshots_dirty(SNAPSHOT_REPORT_SUMMARY);
 }
 
 void WebUI::execute_report_result_prepare(const std::string &body) {
@@ -2072,7 +2102,7 @@ void WebUI::register_routes() {
 
     server_->on("/api/report/summary", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
-        send_cached(request, cached_report_summary_json_);
+        send_report_summary(request);
     });
 
     server_->on("/api/report/summary", HTTP_POST,
