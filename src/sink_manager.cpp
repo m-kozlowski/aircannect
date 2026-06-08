@@ -9,6 +9,15 @@
 namespace aircannect {
 namespace {
 
+const char *const LIVE_CHART_STREAM_IDS =
+    "PatientFlow,"
+    "MaskPressure,"
+    "Leak,"
+    "InspiratoryPressure-TwoSecond,"
+    "ExpiratoryPressure-TwoSecond,"
+    "HeartRate,"
+    "SpO2";
+
 const char *acquire_status_name(StreamAcquireStatus status) {
     switch (status) {
         case StreamAcquireStatus::Acquired: return "acquired";
@@ -303,7 +312,7 @@ void SinkManager::attach_live_chart_stream(uint32_t now_ms) {
 
     next_live_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
     const std::string params =
-        build_stream_params(DEFAULT_EDF_STREAM_IDS, 10, 50);
+        build_stream_params(LIVE_CHART_STREAM_IDS, 40, 200);
     StreamAcquireResult result =
         arbiter_->acquire_stream(params, RpcSource::Sink);
     if (result.status == StreamAcquireStatus::Acquired ||
@@ -358,14 +367,14 @@ void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
         if (!arbiter_->next_stream_frame(live_chart_.handle, frame)) break;
         if (!frame) continue;
 
-        append_frame_signal(*frame, StreamSignalId::MaskPressure100Hz,
+        append_frame_signal(*frame, StreamSignalId::MaskPressure,
                             live_chart_.pressure, live_chart_.drops);
-        append_frame_signal(*frame, StreamSignalId::PatientFlow100Hz,
+        append_frame_signal(*frame, StreamSignalId::PatientFlow,
                             live_chart_.flow, live_chart_.drops, 60.0f);
-        append_frame_signal(*frame, StreamSignalId::Leak50Hz,
+        append_frame_signal(*frame, StreamSignalId::Leak,
                             live_chart_.leak, live_chart_.drops, 60.0f);
         if (!append_frame_signal(*frame,
-                                 StreamSignalId::InspiratoryPressure50Hz,
+                                 StreamSignalId::InspiratoryPressure,
                                  live_chart_.inspiratory_pressure,
                                  live_chart_.drops)) {
             append_frame_signal(*frame,
@@ -374,7 +383,7 @@ void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
                                 live_chart_.drops);
         }
         if (!append_frame_signal(*frame,
-                                 StreamSignalId::ExpiratoryPressure50Hz,
+                                 StreamSignalId::ExpiratoryPressure,
                                  live_chart_.expiratory_pressure,
                                  live_chart_.drops)) {
             append_frame_signal(*frame,

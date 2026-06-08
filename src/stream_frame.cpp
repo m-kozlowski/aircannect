@@ -482,20 +482,22 @@ void stream_frame_reset(StreamFrameData &frame) {
 
 StreamSignalId stream_signal_id_from_name(const char *name) {
     if (!name) return StreamSignalId::Unknown;
-    if (strcmp(name, "PatientFlow-100hz") == 0) {
-        return StreamSignalId::PatientFlow100Hz;
+    if (strcmp(name, "PatientFlow") == 0 ||
+        strcmp(name, "PatientFlow-100hz") == 0) {
+        return StreamSignalId::PatientFlow;
     }
-    if (strcmp(name, "MaskPressure-100hz") == 0) {
-        return StreamSignalId::MaskPressure100Hz;
+    if (strcmp(name, "MaskPressure") == 0 ||
+        strcmp(name, "MaskPressure-100hz") == 0) {
+        return StreamSignalId::MaskPressure;
     }
     if (strcmp(name, "MaskPressure-TwoSecond") == 0) {
         return StreamSignalId::MaskPressureTwoSecond;
     }
     if (strcmp(name, "InspiratoryPressure-50hz") == 0) {
-        return StreamSignalId::InspiratoryPressure50Hz;
+        return StreamSignalId::InspiratoryPressure;
     }
     if (strcmp(name, "ExpiratoryPressure-50hz") == 0) {
-        return StreamSignalId::ExpiratoryPressure50Hz;
+        return StreamSignalId::ExpiratoryPressure;
     }
     if (strcmp(name, "InspiratoryPressure-TwoSecond") == 0) {
         return StreamSignalId::InspiratoryPressureTwoSecond;
@@ -503,25 +505,31 @@ StreamSignalId stream_signal_id_from_name(const char *name) {
     if (strcmp(name, "ExpiratoryPressure-TwoSecond") == 0) {
         return StreamSignalId::ExpiratoryPressureTwoSecond;
     }
-    if (strcmp(name, "Leak-50hz") == 0) return StreamSignalId::Leak50Hz;
-    if (strcmp(name, "RespiratoryRate-50hz") == 0) {
-        return StreamSignalId::RespiratoryRate50Hz;
+    if (strcmp(name, "Leak") == 0 ||
+        strcmp(name, "Leak-50hz") == 0) return StreamSignalId::Leak;
+    if (strcmp(name, "RespiratoryRate") == 0 ||
+        strcmp(name, "RespiratoryRate-50hz") == 0) {
+        return StreamSignalId::RespiratoryRate;
     }
-    if (strcmp(name, "TidalVolume-50hz") == 0) {
-        return StreamSignalId::TidalVolume50Hz;
+    if (strcmp(name, "TidalVolume") == 0 ||
+        strcmp(name, "TidalVolume-50hz") == 0) {
+        return StreamSignalId::TidalVolume;
     }
-    if (strcmp(name, "MinuteVentilation-50hz") == 0) {
-        return StreamSignalId::MinuteVentilation50Hz;
+    if (strcmp(name, "MinuteVentilation") == 0 ||
+        strcmp(name, "MinuteVentilation-50hz") == 0) {
+        return StreamSignalId::MinuteVentilation;
     }
     if (strcmp(name, "TargetMinuteVentilation") == 0) {
         return StreamSignalId::TargetMinuteVentilation;
     }
     if (strcmp(name, "IeRatio") == 0) return StreamSignalId::IeRatio;
-    if (strcmp(name, "SnoreIndex-50hz") == 0) {
-        return StreamSignalId::SnoreIndex50Hz;
+    if (strcmp(name, "SnoreIndex") == 0 ||
+        strcmp(name, "SnoreIndex-50hz") == 0) {
+        return StreamSignalId::SnoreIndex;
     }
-    if (strcmp(name, "FlowLimitation-50hz") == 0) {
-        return StreamSignalId::FlowLimitation50Hz;
+    if (strcmp(name, "FlowLimitation") == 0 ||
+        strcmp(name, "FlowLimitation-50hz") == 0) {
+        return StreamSignalId::FlowLimitation;
     }
     if (strcmp(name, "InspiratoryDuration") == 0) {
         return StreamSignalId::InspiratoryDuration;
@@ -533,30 +541,30 @@ StreamSignalId stream_signal_id_from_name(const char *name) {
 
 const char *stream_signal_id_name(StreamSignalId id) {
     switch (id) {
-        case StreamSignalId::PatientFlow100Hz: return "PatientFlow-100hz";
-        case StreamSignalId::MaskPressure100Hz: return "MaskPressure-100hz";
+        case StreamSignalId::PatientFlow: return "PatientFlow";
+        case StreamSignalId::MaskPressure: return "MaskPressure";
         case StreamSignalId::MaskPressureTwoSecond:
             return "MaskPressure-TwoSecond";
-        case StreamSignalId::InspiratoryPressure50Hz:
-            return "InspiratoryPressure-50hz";
-        case StreamSignalId::ExpiratoryPressure50Hz:
-            return "ExpiratoryPressure-50hz";
+        case StreamSignalId::InspiratoryPressure:
+            return "InspiratoryPressure";
+        case StreamSignalId::ExpiratoryPressure:
+            return "ExpiratoryPressure";
         case StreamSignalId::InspiratoryPressureTwoSecond:
             return "InspiratoryPressure-TwoSecond";
         case StreamSignalId::ExpiratoryPressureTwoSecond:
             return "ExpiratoryPressure-TwoSecond";
-        case StreamSignalId::Leak50Hz: return "Leak-50hz";
-        case StreamSignalId::RespiratoryRate50Hz:
-            return "RespiratoryRate-50hz";
-        case StreamSignalId::TidalVolume50Hz: return "TidalVolume-50hz";
-        case StreamSignalId::MinuteVentilation50Hz:
-            return "MinuteVentilation-50hz";
+        case StreamSignalId::Leak: return "Leak";
+        case StreamSignalId::RespiratoryRate:
+            return "RespiratoryRate";
+        case StreamSignalId::TidalVolume: return "TidalVolume";
+        case StreamSignalId::MinuteVentilation:
+            return "MinuteVentilation";
         case StreamSignalId::TargetMinuteVentilation:
             return "TargetMinuteVentilation";
         case StreamSignalId::IeRatio: return "IeRatio";
-        case StreamSignalId::SnoreIndex50Hz: return "SnoreIndex-50hz";
-        case StreamSignalId::FlowLimitation50Hz:
-            return "FlowLimitation-50hz";
+        case StreamSignalId::SnoreIndex: return "SnoreIndex";
+        case StreamSignalId::FlowLimitation:
+            return "FlowLimitation";
         case StreamSignalId::InspiratoryDuration:
             return "InspiratoryDuration";
         case StreamSignalId::HeartRate: return "HeartRate";
