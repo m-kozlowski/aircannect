@@ -82,37 +82,6 @@ std::string current_utc_iso_nearest_second() {
     return format_utc_ms(rounded_ms);
 }
 
-const char *const SETTINGS_HISTORY_CHANGE_DATA_ID =
-    "SettingsHistoryChangeCount";
-
-const char *const AS11_EVENT_SUBSCRIBE_PARAMS =
-    "{\"dataIds\":[\"SystemActivityEvents-FrequentActivityEvents\","
-    "\"SystemActivityEvents-SporadicActivityEvents\","
-    "\"SettingsHistoryChangeCount\"]}";
-
-bool settings_history_change_notification(const std::string &payload) {
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
-    if (error) return false;
-
-    const char *method = doc["method"].as<const char *>();
-    if (!method || strcmp(method, "EventNotification") != 0) return false;
-
-    JsonObjectConst params = doc["params"].as<JsonObjectConst>();
-    if (params.isNull()) return false;
-    const char *data_id = params["dataId"].as<const char *>();
-    if (!data_id || strcmp(data_id, SETTINGS_HISTORY_CHANGE_DATA_ID) != 0) {
-        return false;
-    }
-
-    JsonArrayConst events = params["events"].as<JsonArrayConst>();
-    for (JsonObjectConst event : events) {
-        const char *name = event["event"].as<const char *>();
-        if (name && strcmp(name, "ValueChange") == 0) return true;
-    }
-    return false;
-}
-
 bool event_suggests_identity_refresh(const std::string &event) {
     return event == "PowerUp" ||
            event == "SettingsReset" ||
@@ -363,6 +332,7 @@ bool RpcArbiter::next_stream_payload(StreamConsumerHandle handle,
 void RpcArbiter::reset_stats() {
     stats_ = {};
     can_.reset_stats();
+    event_.reset_counters();
     stream_.reset_counters();
     consecutive_scheduler_timeouts_ = 0;
     background_backoff_until_ms_ = 0;
@@ -379,8 +349,9 @@ RpcRuntimeStatus RpcArbiter::runtime_status() const {
     out.background_backoff_ms = background_backoff_active(now)
         ? background_backoff_until_ms_ - now
         : 0;
-    out.event_subscription_active = event_subscription_active_;
-    out.event_subscription_id = event_subscription_id_;
+    const EventBrokerStatus event_status = event_.status();
+    out.event_subscription_active = event_status.subscription_active;
+    out.event_subscription_id = event_status.subscription_id;
     out.boot_notifications = boot_notifications_seen_;
     if (!last_boot_notification_.empty()) {
         out.last_boot_notification_age_ms = now - last_boot_notification_ms_;
@@ -394,9 +365,7 @@ bool RpcArbiter::recover_can(const char *reason) {
     log_rx_.reset();
     cancel_all_requests(reason ? reason : "can_recovery");
     stream_.mark_reattach();
-    event_subscription_active_ = false;
-    event_subscription_id_ = 0;
-    next_event_subscribe_ms_ = millis() + AC_AS11_EVENT_SUBSCRIBE_DELAY_MS;
+    event_.mark_reattach(millis());
     if (as11_state_.therapy_command_pending()) {
         as11_state_.clear_pending_therapy_command("can_recovery", millis());
     }
@@ -610,12 +579,8 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
     if (pending_.stream_command != StreamCommandType::None) {
         stream_.mark_command_timeout(millis());
     }
-    if (pending_.method == "SubscribeEvent") {
-        event_subscription_active_ = false;
-        event_subscription_id_ = 0;
-        next_event_subscribe_ms_ =
-            millis() + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-        stats_.event_subscribe_errors++;
+    if (pending_.event_command != EventCommandType::None) {
+        event_.mark_command_cancelled(millis());
     }
     as11_state_.mark_therapy_command_timeout(pending_.method, millis());
     if (pending_.method == "Set") {
@@ -650,12 +615,8 @@ void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
     if (request.stream_command != StreamCommandType::None) {
         stream_.mark_command_timeout(millis());
     }
-    if (request.method == "SubscribeEvent") {
-        event_subscription_active_ = false;
-        event_subscription_id_ = 0;
-        next_event_subscribe_ms_ =
-            millis() + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-        stats_.event_subscribe_errors++;
+    if (request.event_command != EventCommandType::None) {
+        event_.mark_command_cancelled(millis());
     }
 }
 
@@ -835,6 +796,7 @@ void RpcArbiter::dispatch_next_request() {
     pending_.source = request.source;
     pending_.method = request.method;
     pending_.stream_command = request.stream_command;
+    pending_.event_command = request.event_command;
     pending_.settings_refresh = request.settings_refresh;
     pending_.deadline_ms = millis() + request.timeout_ms;
     pending_.dispatch_epoch_ms = 0;
@@ -881,11 +843,8 @@ void RpcArbiter::check_pending_timeout() {
     if (pending_.stream_command != StreamCommandType::None) {
         stream_.mark_command_timeout(now);
     }
-    if (pending_.method == "SubscribeEvent") {
-        event_subscription_active_ = false;
-        event_subscription_id_ = 0;
-        next_event_subscribe_ms_ = now + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-        stats_.event_subscribe_errors++;
+    if (pending_.event_command != EventCommandType::None) {
+        event_.mark_command_timeout(now);
     }
     as11_state_.mark_therapy_command_timeout(pending_.method, now);
     if (pending_.method == "Set") {
@@ -896,28 +855,24 @@ void RpcArbiter::check_pending_timeout() {
 
 void RpcArbiter::poll_event_subscription() {
     const uint32_t now = millis();
-    if (event_subscription_active_) return;
     if (background_polls_suspended_) return;
     if (background_backoff_active(now)) return;
-
-    if (next_event_subscribe_ms_ == 0) {
-        next_event_subscribe_ms_ = now + AC_AS11_EVENT_SUBSCRIBE_DELAY_MS;
-        return;
-    }
-    if (static_cast<int32_t>(now - next_event_subscribe_ms_) < 0) return;
+    EventCommand command = event_.next_command(now);
+    if (command.type == EventCommandType::None) return;
     if (pending_.active || dispatch_retry_active_ || !requests_.empty()) {
         return;
     }
 
     QueuedRequest request;
     request.method = "SubscribeEvent";
-    request.params_json = AS11_EVENT_SUBSCRIBE_PARAMS;
+    request.params_json = command.params_json;
     request.source = RpcSource::Scheduler;
     request.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
+    request.event_command = command.type;
     if (enqueue_request(request)) {
-        next_event_subscribe_ms_ = now + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
+        event_.mark_command_queued(command.type, now);
     } else {
-        next_event_subscribe_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
+        event_.mark_command_deferred(now);
     }
 }
 
@@ -1082,31 +1037,23 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
             (void)current_epoch_ms(response_epoch_ms);
             as11_state_.apply_datetime_response(
                 payload, now, pending_.dispatch_epoch_ms, response_epoch_ms);
-        } else if (pending_.method == "SubscribeEvent") {
+        } else if (pending_.event_command != EventCommandType::None) {
             uint32_t subscription_id = 0;
-            if (as11_state_.apply_activity_subscription_response(
-                    payload, now, subscription_id)) {
-                event_subscription_active_ = true;
-                event_subscription_id_ = subscription_id;
-                next_event_subscribe_ms_ = 0;
+            const bool subscribed =
+                as11_state_.apply_activity_subscription_response(
+                    payload, now, subscription_id);
+            event_.mark_subscribe_response(!subscribed, subscription_id, now);
+            if (subscribed) {
                 Log::logf(CAT_RPC, LOG_INFO,
                           "[RPC] subscribed to activity events id=%lu\n",
                           static_cast<unsigned long>(subscription_id));
             } else {
-                event_subscription_active_ = false;
-                event_subscription_id_ = 0;
-                next_event_subscribe_ms_ =
-                    now + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-                stats_.event_subscribe_errors++;
                 Log::logf(CAT_RPC, LOG_WARN,
                           "[RPC] activity event subscription rejected\n");
             }
         }
-    } else if (pending_.method == "SubscribeEvent") {
-        event_subscription_active_ = false;
-        event_subscription_id_ = 0;
-        next_event_subscribe_ms_ = now + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-        stats_.event_subscribe_errors++;
+    } else if (pending_.event_command != EventCommandType::None) {
+        event_.mark_subscribe_response(true, 0, now);
     }
     as11_state_.mark_therapy_command_response(pending_.method,
                                               is_error,
@@ -1188,13 +1135,15 @@ bool RpcArbiter::request_as11_settings_refresh() {
 }
 
 bool RpcArbiter::handle_event_notification(const std::string &payload) {
-    if (!json_method_is(payload, "EventNotification")) return false;
     const uint32_t now = millis();
-    stats_.event_notifications++;
+    const EventPublishResult event_result =
+        event_.publish_notification(payload, now);
+    if (!event_result.accepted) return false;
+
     const As11TherapyState before_state = as11_state_.therapy_state();
     const bool activity_updated =
         as11_state_.apply_activity_event_notification(payload, now);
-    if (settings_history_change_notification(payload)) {
+    if (event_result.settings_history_change) {
         push_event(RpcEventKind::InternalSettingsStateInvalidated, "",
                    RpcSource::Scheduler);
         request_as11_settings_refresh();
@@ -1270,9 +1219,7 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
         cancel_all_requests("device_boot");
         as11_state_.reset();
         as11_settings_.clear();
-        event_subscription_active_ = false;
-        event_subscription_id_ = 0;
-        next_event_subscribe_ms_ = now + AC_AS11_EVENT_SUBSCRIBE_DELAY_MS;
+        event_.mark_reattach(now);
         as11_healthcheck_initialized_ = true;
         schedule_as11_identity_refresh(now,
                                        AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);

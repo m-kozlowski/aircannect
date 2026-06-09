@@ -10,6 +10,7 @@
 #include "as11_settings.h"
 #include "can_datagram.h"
 #include "can_driver.h"
+#include "event_broker.h"
 #include "fixed_queue.h"
 #include "stream_broker.h"
 
@@ -93,8 +94,6 @@ struct RpcArbiterStats {
     uint32_t stream_pool_exhaustions = 0;
     uint32_t stream_truncated_frames = 0;
 
-    uint32_t event_subscribe_errors = 0;
-    uint32_t event_notifications = 0;
     uint32_t activity_state_events = 0;
 };
 
@@ -161,6 +160,7 @@ public:
     const RpcArbiterStats &stats() const { return stats_; }
     RpcRuntimeStatus runtime_status() const;
     const CanDriver &can_driver() const { return can_; }
+    const EventBroker &event_broker() const { return event_; }
     const StreamBroker &stream_broker() const { return stream_; }
     const As11DeviceState &as11_state() const { return as11_state_; }
     const As11SettingsState &as11_settings() const { return as11_settings_; }
@@ -174,6 +174,7 @@ private:
         RpcSource source = RpcSource::Internal;
         std::string method;
         StreamCommandType stream_command = StreamCommandType::None;
+        EventCommandType event_command = EventCommandType::None;
         bool settings_refresh = false;
     };
 
@@ -185,6 +186,7 @@ private:
         std::string params_json;
         bool set_datetime_now = false;
         StreamCommandType stream_command = StreamCommandType::None;
+        EventCommandType event_command = EventCommandType::None;
         bool settings_refresh = false;
     };
 
@@ -290,13 +292,10 @@ private:
     uint32_t last_boot_notification_ms_ = 0;
     std::string last_boot_notification_;
 
+    EventBroker event_;
     StreamBroker stream_;
     As11DeviceState as11_state_;
     As11SettingsState as11_settings_;
-
-    bool event_subscription_active_ = false;
-    uint32_t event_subscription_id_ = 0;
-    uint32_t next_event_subscribe_ms_ = 0;
 
     bool as11_healthcheck_initialized_ = false;
     uint32_t next_as11_identity_poll_ms_ = 0;

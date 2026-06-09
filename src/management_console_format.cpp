@@ -90,6 +90,7 @@ void print_rpc_status(Print &out, const RpcArbiter &arbiter) {
 void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     const RpcRuntimeStatus runtime = arbiter.runtime_status();
     const RpcArbiterStats &stats = arbiter.stats();
+    const EventBrokerStats &event_stats = arbiter.event_broker().stats();
     const CanDriverStats &can_stats = arbiter.can_driver().stats();
     const StreamBroker &stream = arbiter.stream_broker();
     const uint32_t can_rx_fps =
@@ -182,9 +183,9 @@ void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     out.print(" event_subscription_id=");
     out.print(runtime.event_subscription_id);
     out.print(" event_subscribe_errors=");
-    out.print(stats.event_subscribe_errors);
+    out.print(event_stats.subscribe_errors);
     out.print(" event_notifications=");
-    out.print(stats.event_notifications);
+    out.print(event_stats.notifications);
     out.print(" activity_state_events=");
     out.print(stats.activity_state_events);
 }
