@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <string>
 
+#include "as11_event_frame.h"
+
 namespace aircannect {
 
 const char *as11_identity_get_params_json();
@@ -38,8 +40,8 @@ public:
     bool apply_activity_subscription_response(const std::string &payload,
                                               uint32_t now_ms,
                                               uint32_t &subscription_id);
-    bool apply_activity_event_notification(const std::string &payload,
-                                           uint32_t now_ms);
+    bool apply_activity_event_frame(const As11EventFrame &frame,
+                                    uint32_t now_ms);
 
     // Locally initiated therapy transitions
     void mark_therapy_command_sent(const std::string &method,

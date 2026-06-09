@@ -410,21 +410,21 @@ void ManagementConsole::handle_stream(Print &out, String rest,
     }
 
     std::string ids = DEFAULT_EDF_STREAM_IDS;
-    uint32_t sample_ms = 10;
-    uint32_t report_ms = 50;
+    uint32_t sample_ms = 40;
+    uint32_t report_ms = 200;
 
     if (rest == "fast" || rest == "pressure") {
-        ids = "PatientFlow-100hz,Leak-50hz,RespiratoryRate-50hz";
-        sample_ms = 10;
-        report_ms = 50;
+        ids = "PatientFlow,Leak,RespiratoryRate";
+        sample_ms = 40;
+        report_ms = 200;
     } else if (rest == "sample") {
-        ids = "Leak-50hz,RespiratoryRate-50hz";
-        sample_ms = 200;
-        report_ms = 1000;
+        ids = "Leak,RespiratoryRate";
+        sample_ms = 1000;
+        report_ms = 5000;
     } else if (rest == "edf" || rest == "full" || rest == "default") {
         ids = DEFAULT_EDF_STREAM_IDS;
-        sample_ms = 10;
-        report_ms = 50;
+        sample_ms = 40;
+        report_ms = 200;
     } else if (rest.length()) {
         int split = rest.indexOf(' ');
         ids = to_std(split < 0 ? rest : rest.substring(0, split));

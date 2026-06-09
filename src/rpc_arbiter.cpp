@@ -269,6 +269,11 @@ void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
     raw_rpc_events_enabled_ = enabled;
 }
 
+void RpcArbiter::set_event_frame_observer(EventFrameObserver observer,
+                                          void *context) {
+    event_.set_frame_observer(observer, context);
+}
+
 StreamAcquireResult RpcArbiter::acquire_stream(const std::string &params_json,
                                                RpcSource source) {
     StreamAcquireResult result = stream_.acquire(params_json, source_id(source));
@@ -1136,13 +1141,14 @@ bool RpcArbiter::request_as11_settings_refresh() {
 
 bool RpcArbiter::handle_event_notification(const std::string &payload) {
     const uint32_t now = millis();
+    As11EventFrame event_frame;
     const EventPublishResult event_result =
-        event_.publish_notification(payload, now);
+        event_.publish_notification(payload, now, event_frame);
     if (!event_result.accepted) return false;
 
     const As11TherapyState before_state = as11_state_.therapy_state();
     const bool activity_updated =
-        as11_state_.apply_activity_event_notification(payload, now);
+        as11_state_.apply_activity_event_frame(event_frame, now);
     if (event_result.settings_history_change) {
         push_event(RpcEventKind::InternalSettingsStateInvalidated, "",
                    RpcSource::Scheduler);

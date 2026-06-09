@@ -186,6 +186,8 @@ void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     out.print(event_stats.subscribe_errors);
     out.print(" event_notifications=");
     out.print(event_stats.notifications);
+    out.print(" event_truncated=");
+    out.print(event_stats.truncated_notifications);
     out.print(" activity_state_events=");
     out.print(stats.activity_state_events);
 }

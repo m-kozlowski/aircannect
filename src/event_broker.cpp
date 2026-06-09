@@ -1,9 +1,7 @@
 #include "event_broker.h"
 
 #include <ArduinoJson.h>
-#include <string.h>
 
-#include "as11_rpc.h"
 #include "board_can.h"
 
 namespace aircannect {
@@ -17,25 +15,97 @@ const char *const DEFAULT_EVENT_SUBSCRIBE_PARAMS =
     "\"SystemActivityEvents-SporadicActivityEvents\","
     "\"SettingsHistoryChangeCount\"]}";
 
-bool settings_history_change_notification(const std::string &payload) {
+bool variant_to_string(JsonVariantConst value, std::string &out) {
+    if (value.isNull()) return false;
+    if (value.is<const char *>()) {
+        out = value.as<const char *>();
+        return true;
+    }
+    if (value.is<int>()) {
+        out = std::to_string(value.as<int>());
+        return true;
+    }
+    if (value.is<unsigned int>()) {
+        out = std::to_string(value.as<unsigned int>());
+        return true;
+    }
+    if (value.is<long>()) {
+        out = std::to_string(value.as<long>());
+        return true;
+    }
+    if (value.is<unsigned long>()) {
+        out = std::to_string(value.as<unsigned long>());
+        return true;
+    }
+    if (value.is<bool>()) {
+        out = value.as<bool>() ? "true" : "false";
+        return true;
+    }
+    return false;
+}
+
+bool variant_to_uint32(JsonVariantConst value, uint32_t &out) {
+    if (value.isNull()) return false;
+    if (value.is<unsigned int>()) {
+        out = value.as<unsigned int>();
+        return true;
+    }
+    if (value.is<unsigned long>()) {
+        out = static_cast<uint32_t>(value.as<unsigned long>());
+        return true;
+    }
+    if (value.is<int>()) {
+        const int parsed = value.as<int>();
+        if (parsed < 0) return false;
+        out = static_cast<uint32_t>(parsed);
+        return true;
+    }
+    if (value.is<long>()) {
+        const long parsed = value.as<long>();
+        if (parsed < 0) return false;
+        out = static_cast<uint32_t>(parsed);
+        return true;
+    }
+    return false;
+}
+
+bool parse_event_notification(const std::string &payload,
+                              As11EventFrame &frame) {
+    frame = {};
+
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
     if (error) return false;
 
-    const char *method = doc["method"].as<const char *>();
-    if (!method || strcmp(method, "EventNotification") != 0) return false;
-
-    JsonObjectConst params = doc["params"].as<JsonObjectConst>();
-    if (params.isNull()) return false;
-    const char *data_id = params["dataId"].as<const char *>();
-    if (!data_id || strcmp(data_id, SETTINGS_HISTORY_CHANGE_DATA_ID) != 0) {
+    std::string method;
+    if (!variant_to_string(doc["method"], method) ||
+        method != "EventNotification") {
         return false;
     }
 
+    JsonObjectConst params = doc["params"].as<JsonObjectConst>();
+    if (params.isNull()) return false;
+    (void)variant_to_uint32(params["subscriptionId"], frame.subscription_id);
+    if (!variant_to_string(params["dataId"], frame.data_id)) return false;
+
     JsonArrayConst events = params["events"].as<JsonArrayConst>();
     for (JsonObjectConst event : events) {
-        const char *name = event["event"].as<const char *>();
-        if (name && strcmp(name, "ValueChange") == 0) return true;
+        if (frame.event_count >= AC_AS11_EVENT_FRAME_EVENTS_MAX) {
+            frame.truncated = true;
+            break;
+        }
+        As11EventRecord &record = frame.events[frame.event_count];
+        if (!variant_to_string(event["event"], record.name)) continue;
+        (void)variant_to_string(event["reportTime"], record.report_time);
+        frame.event_count++;
+    }
+    return true;
+}
+
+bool settings_history_change_notification(const As11EventFrame &frame) {
+    if (frame.data_id != SETTINGS_HISTORY_CHANGE_DATA_ID) return false;
+    for (size_t i = 0; i < frame.event_count; ++i) {
+        if (frame.events[i].name == "ValueChange") return true;
     }
     return false;
 }
@@ -108,22 +178,33 @@ void EventBroker::mark_reattach(uint32_t now_ms) {
     next_subscribe_ms_ = now_ms + AC_AS11_EVENT_SUBSCRIBE_DELAY_MS;
 }
 
-EventPublishResult EventBroker::publish_notification(
-    const std::string &payload,
-    uint32_t now_ms) {
+EventPublishResult EventBroker::publish_notification(const std::string &payload,
+                                                     uint32_t now_ms,
+                                                     As11EventFrame &frame) {
     EventPublishResult result;
-    if (!json_method_is(payload, "EventNotification")) return result;
+    if (!parse_event_notification(payload, frame)) return result;
 
     result.accepted = true;
+    result.truncated = frame.truncated;
     last_notification_ms_ = now_ms;
     stats_.notifications++;
+    if (frame.truncated) stats_.truncated_notifications++;
 
     result.settings_history_change =
-        settings_history_change_notification(payload);
+        settings_history_change_notification(frame);
     if (result.settings_history_change) {
         stats_.settings_history_changes++;
     }
+    if (frame_observer_) {
+        frame_observer_(frame_observer_context_, frame, now_ms);
+    }
     return result;
+}
+
+void EventBroker::set_frame_observer(EventFrameObserver observer,
+                                     void *context) {
+    frame_observer_ = observer;
+    frame_observer_context_ = context;
 }
 
 void EventBroker::reset_counters() {

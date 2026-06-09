@@ -133,6 +133,8 @@ public:
     void set_report_event_observer(RpcEventObserver observer,
                                    void *context);
     void set_raw_rpc_events_enabled(bool enabled);
+    void set_event_frame_observer(EventFrameObserver observer,
+                                  void *context);
 
     StreamAcquireResult acquire_stream(const std::string &params_json,
                                        RpcSource source);

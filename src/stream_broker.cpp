@@ -2,21 +2,52 @@
 
 #include <string.h>
 
+#include "as11_rpc.h"
+#include "json_cursor.h"
+
 namespace aircannect {
+namespace {
+
+void normalize_interval_pair(uint32_t &sample_ms, uint32_t &report_ms) {
+    if (sample_ms < 10) sample_ms = 10;
+    if (sample_ms > 65000) sample_ms = 65000;
+    sample_ms = (sample_ms / 10) * 10;
+    if (sample_ms == 0) sample_ms = 10;
+
+    if (report_ms == 0) report_ms = sample_ms * 5;
+    if (report_ms < sample_ms) report_ms = sample_ms;
+    if (report_ms > sample_ms * 5) report_ms = sample_ms * 5;
+    if (report_ms > 300000) report_ms = 300000;
+    report_ms = (report_ms / 10) * 10;
+    if (report_ms == 0) report_ms = sample_ms;
+}
+
+}  // namespace
 
 StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
                                           uint8_t source) {
     StreamAcquireResult result;
     if (params_json.empty()) return result;
+    Subscription requested;
+    if (!parse_subscription(params_json, requested) ||
+        requested.data_id_count == 0) {
+        return result;
+    }
 
-    const size_t consumers = consumer_count();
-    if ((consumers > 0 || external_active_) && params_json_ != params_json) {
+    Subscription desired;
+    if (!build_desired_with_extra(requested, desired)) {
         result.status = StreamAcquireStatus::Incompatible;
         return result;
     }
 
     // A matching consumer may attach while StartStream is pending; the in-flight
     // command satisfies all consumers that share params_json_.
+    const std::string desired_params = build_subscription_params(desired);
+    if (pending() && desired_params != params_json_) {
+        result.status = StreamAcquireStatus::Busy;
+        return result;
+    }
+
     const int slot = find_free_slot();
     if (slot < 0) {
         result.status = StreamAcquireStatus::Full;
@@ -29,13 +60,15 @@ StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
 
     consumers_[slot].active = true;
     consumers_[slot].source = source;
-    params_json_ = params_json;
+    consumers_[slot].subscription = requested;
+    apply_desired_subscription(desired);
     clear_error();
 
     result.handle = static_cast<StreamConsumerHandle>(slot);
     result.status =
-        consumers == 0 && !external_active_ ? StreamAcquireStatus::Acquired
-                       : StreamAcquireStatus::AlreadyActive;
+        desired_params == params_json_ && actual_active_
+            ? StreamAcquireStatus::AlreadyActive
+            : StreamAcquireStatus::Acquired;
     return result;
 }
 
@@ -48,9 +81,9 @@ StreamAcquireResult StreamBroker::update(StreamConsumerHandle handle,
         return result;
     }
 
-    if (params_json_ == params_json) {
-        result.handle = handle;
-        result.status = StreamAcquireStatus::AlreadyActive;
+    Subscription requested;
+    if (!parse_subscription(params_json, requested) ||
+        requested.data_id_count == 0) {
         return result;
     }
 
@@ -59,8 +92,21 @@ StreamAcquireResult StreamBroker::update(StreamConsumerHandle handle,
         return result;
     }
 
-    params_json_ = params_json;
-    actual_active_ = false;
+    Subscription desired;
+    if (!build_desired_with_replacement(handle, requested, desired)) {
+        result.status = StreamAcquireStatus::Incompatible;
+        return result;
+    }
+
+    const std::string desired_params = build_subscription_params(desired);
+    if (desired_params == params_json_ && actual_active_) {
+        result.handle = handle;
+        result.status = StreamAcquireStatus::AlreadyActive;
+        return result;
+    }
+
+    consumers_[handle].subscription = requested;
+    apply_desired_subscription(desired);
     consumers_[handle].queue.clear();
     clear_error();
 
@@ -73,6 +119,13 @@ void StreamBroker::release(StreamConsumerHandle handle) {
     if (!consumer_active(handle)) return;
     consumers_[handle].queue.clear();
     consumers_[handle] = {};
+    Subscription desired;
+    if (build_desired_subscription(desired)) {
+        apply_desired_subscription(desired);
+    } else {
+        params_json_.clear();
+        clear_subscription(desired_subscription_);
+    }
     if (consumer_count() == 0) {
         clear_error();
         frame_pool_.release_storage();
@@ -81,17 +134,37 @@ void StreamBroker::release(StreamConsumerHandle handle) {
 
 void StreamBroker::note_external_start(const std::string &params_json) {
     if (params_json.empty()) return;
+    Subscription requested;
+    if (!parse_subscription(params_json, requested)) return;
     external_active_ = true;
-    params_json_ = params_json;
-    actual_active_ = true;
+    external_subscription_ = requested;
+    Subscription desired;
+    if (build_desired_subscription(desired)) {
+        const std::string desired_params = build_subscription_params(desired);
+        const std::string external_params = build_subscription_params(requested);
+        params_json_ = desired_params;
+        desired_subscription_ = desired;
+        actual_active_ = desired_params == external_params;
+    } else {
+        params_json_ = build_subscription_params(requested);
+        desired_subscription_ = requested;
+        actual_active_ = true;
+    }
     if (pending_ == StreamCommandType::Stop) pending_ = StreamCommandType::None;
     clear_error();
 }
 
 void StreamBroker::note_external_stop() {
     external_active_ = false;
-    if (consumer_count() == 0) {
+    clear_subscription(external_subscription_);
+    Subscription desired;
+    if (build_desired_subscription(desired)) {
+        apply_desired_subscription(desired);
+        actual_active_ = false;
+    } else {
         params_json_.clear();
+        clear_subscription(desired_subscription_);
+        actual_active_ = false;
     }
 }
 
@@ -305,6 +378,226 @@ void StreamBroker::reset_counters() {
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         consumers_[i].queue_drops = 0;
     }
+}
+
+bool StreamBroker::parse_subscription(const std::string &params_json,
+                                      Subscription &subscription) {
+    clear_subscription(subscription);
+    JsonCursor json(params_json);
+    if (!json.consume('{')) return false;
+
+    bool saw_data_ids = false;
+    uint32_t sample_ms = 0;
+    uint32_t report_ms = 0;
+
+    json.skip_ws();
+    while (json.pos < json.end && *json.pos != '}') {
+        char key[64] = {};
+        if (!json.parse_string(key, sizeof(key))) return false;
+        if (!json.consume(':')) return false;
+
+        if (strcmp(key, "dataIds") == 0) {
+            if (!json.consume('[')) return false;
+            saw_data_ids = true;
+            json.skip_ws();
+            while (json.pos < json.end && *json.pos != ']') {
+                char data_id[AC_STREAM_FRAME_SIGNAL_NAME_MAX] = {};
+                if (!json.parse_string(data_id, sizeof(data_id))) {
+                    return false;
+                }
+                if (!add_data_id(subscription, data_id)) return false;
+
+                json.skip_ws();
+                if (json.pos < json.end && *json.pos == ',') {
+                    json.pos++;
+                    json.skip_ws();
+                    continue;
+                }
+                if (json.pos < json.end && *json.pos == ']') break;
+                return false;
+            }
+            if (!json.consume(']')) return false;
+        } else if (strcmp(key, "sampleIntervalMs") == 0) {
+            if (!json.parse_uint(sample_ms)) return false;
+        } else if (strcmp(key, "reportIntervalMs") == 0) {
+            if (!json.parse_uint(report_ms)) return false;
+        } else {
+            if (!json.skip_value()) return false;
+        }
+
+        json.skip_ws();
+        if (json.pos < json.end && *json.pos == ',') {
+            json.pos++;
+            json.skip_ws();
+            continue;
+        }
+        if (json.pos < json.end && *json.pos == '}') break;
+        return false;
+    }
+    if (!json.consume('}')) return false;
+    if (!saw_data_ids) return false;
+
+    normalize_interval_pair(sample_ms, report_ms);
+    subscription.sample_ms = sample_ms;
+    subscription.report_ms = report_ms;
+    return true;
+}
+
+std::string StreamBroker::build_subscription_params(
+    const Subscription &subscription) {
+    return build_stream_params(subscription.data_ids_csv, subscription.sample_ms,
+                               subscription.report_ms);
+}
+
+bool StreamBroker::add_data_id(Subscription &subscription,
+                               const std::string &data_id) {
+    if (data_id.empty()) return true;
+    size_t start = 0;
+    while (start <= subscription.data_ids_csv.size()) {
+        size_t comma = subscription.data_ids_csv.find(',', start);
+        if (comma == std::string::npos) {
+            comma = subscription.data_ids_csv.size();
+        }
+        if (comma > start &&
+            subscription.data_ids_csv.compare(start, comma - start,
+                                              data_id) == 0) {
+            return true;
+        }
+        if (comma == subscription.data_ids_csv.size()) break;
+        start = comma + 1;
+    }
+    if (subscription.data_id_count >= AC_STREAM_FRAME_SIGNAL_MAX) {
+        return false;
+    }
+    if (!subscription.data_ids_csv.empty()) subscription.data_ids_csv += ",";
+    subscription.data_ids_csv += data_id;
+    subscription.data_id_count++;
+    return true;
+}
+
+bool StreamBroker::merge_data_ids(Subscription &subscription,
+                                  const Subscription &input) {
+    size_t start = 0;
+    while (start <= input.data_ids_csv.size()) {
+        size_t comma = input.data_ids_csv.find(',', start);
+        if (comma == std::string::npos) comma = input.data_ids_csv.size();
+        if (comma > start &&
+            !add_data_id(subscription,
+                         input.data_ids_csv.substr(start, comma - start))) {
+            return false;
+        }
+        if (comma == input.data_ids_csv.size()) break;
+        start = comma + 1;
+    }
+    return true;
+}
+
+bool StreamBroker::compatible_interval(const Subscription &a,
+                                       const Subscription &b) {
+    return a.sample_ms == b.sample_ms && a.report_ms == b.report_ms;
+}
+
+bool StreamBroker::build_desired_subscription(
+    Subscription &subscription) const {
+    clear_subscription(subscription);
+    bool have_interval = false;
+
+    auto merge = [&](const Subscription &input) -> bool {
+        if (input.data_id_count == 0) return true;
+        if (!have_interval) {
+            subscription.sample_ms = input.sample_ms;
+            subscription.report_ms = input.report_ms;
+            have_interval = true;
+        } else if (!compatible_interval(subscription, input)) {
+            return false;
+        }
+        return merge_data_ids(subscription, input);
+    };
+
+    if (external_active_ && !merge(external_subscription_)) return false;
+    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
+        if (!consumers_[i].active) continue;
+        if (!merge(consumers_[i].subscription)) return false;
+    }
+
+    return have_interval;
+}
+
+bool StreamBroker::build_desired_with_extra(
+    const Subscription &extra,
+    Subscription &subscription) const {
+    clear_subscription(subscription);
+    bool have_interval = false;
+
+    auto merge = [&](const Subscription &input) -> bool {
+        if (input.data_id_count == 0) return true;
+        if (!have_interval) {
+            subscription.sample_ms = input.sample_ms;
+            subscription.report_ms = input.report_ms;
+            have_interval = true;
+        } else if (!compatible_interval(subscription, input)) {
+            return false;
+        }
+        return merge_data_ids(subscription, input);
+    };
+
+    if (external_active_ && !merge(external_subscription_)) return false;
+    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
+        if (!consumers_[i].active) continue;
+        if (!merge(consumers_[i].subscription)) return false;
+    }
+    if (!merge(extra)) return false;
+    if (!have_interval) return false;
+    return true;
+}
+
+bool StreamBroker::build_desired_with_replacement(
+    StreamConsumerHandle handle,
+    const Subscription &replacement,
+    Subscription &subscription) const {
+    clear_subscription(subscription);
+    bool have_interval = false;
+
+    auto merge = [&](const Subscription &input) -> bool {
+        if (input.data_id_count == 0) return true;
+        if (!have_interval) {
+            subscription.sample_ms = input.sample_ms;
+            subscription.report_ms = input.report_ms;
+            have_interval = true;
+        } else if (!compatible_interval(subscription, input)) {
+            return false;
+        }
+        return merge_data_ids(subscription, input);
+    };
+
+    if (external_active_ && !merge(external_subscription_)) return false;
+    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
+        if (!consumers_[i].active) continue;
+        if (static_cast<StreamConsumerHandle>(i) == handle) {
+            if (!merge(replacement)) return false;
+        } else if (!merge(consumers_[i].subscription)) {
+            return false;
+        }
+    }
+    if (!have_interval) subscription = replacement;
+    return true;
+}
+
+void StreamBroker::apply_desired_subscription(
+    const Subscription &subscription) {
+    const std::string new_params = build_subscription_params(subscription);
+    desired_subscription_ = subscription;
+    if (params_json_ != new_params) {
+        params_json_ = new_params;
+        actual_active_ = false;
+    }
+}
+
+void StreamBroker::clear_subscription(Subscription &subscription) {
+    subscription.sample_ms = 0;
+    subscription.report_ms = 0;
+    subscription.data_id_count = 0;
+    subscription.data_ids_csv.clear();
 }
 
 int StreamBroker::find_free_slot() const {

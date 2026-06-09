@@ -114,9 +114,17 @@ public:
     uint32_t last_notification_ms() const { return last_notification_ms_; }
 
 private:
+    struct Subscription {
+        uint32_t sample_ms = 0;
+        uint32_t report_ms = 0;
+        size_t data_id_count = 0;
+        std::string data_ids_csv;
+    };
+
     struct Consumer {
         bool active = false;
         uint8_t source = 0;
+        Subscription subscription;
         FixedQueue<StreamFrameRef, AC_STREAM_CONSUMER_QUEUE_DEPTH> queue;
         uint32_t queue_drops = 0;
     };
@@ -124,9 +132,29 @@ private:
     int find_free_slot() const;
     void clear_error();
     bool ensure_frame_pool();
+    static bool parse_subscription(const std::string &params_json,
+                                   Subscription &subscription);
+    static std::string build_subscription_params(
+        const Subscription &subscription);
+    static bool add_data_id(Subscription &subscription,
+                            const std::string &data_id);
+    static bool merge_data_ids(Subscription &subscription,
+                               const Subscription &input);
+    static bool compatible_interval(const Subscription &a,
+                                    const Subscription &b);
+    bool build_desired_subscription(Subscription &subscription) const;
+    bool build_desired_with_extra(const Subscription &extra,
+                                  Subscription &subscription) const;
+    bool build_desired_with_replacement(StreamConsumerHandle handle,
+                                        const Subscription &replacement,
+                                        Subscription &subscription) const;
+    void apply_desired_subscription(const Subscription &subscription);
+    static void clear_subscription(Subscription &subscription);
 
     StreamFramePool frame_pool_;
     Consumer consumers_[AC_STREAM_CONSUMERS_MAX];
+    Subscription external_subscription_;
+    Subscription desired_subscription_;
 
     std::string params_json_;
     std::string last_start_time_;

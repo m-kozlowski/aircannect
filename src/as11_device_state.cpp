@@ -365,40 +365,17 @@ bool As11DeviceState::apply_activity_subscription_response(
     return saw_supported_selector && accepted_supported_selector;
 }
 
-bool As11DeviceState::apply_activity_event_notification(
-    const std::string &payload,
-    uint32_t now_ms) {
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
-    if (error) return false;
-
-    std::string method;
-    if (!variant_to_string(doc["method"], method) ||
-        method != "EventNotification") {
-        return false;
-    }
-
-    JsonObjectConst params = doc["params"].as<JsonObjectConst>();
-    if (params.isNull()) return false;
-
-    std::string data_id;
-    if (!variant_to_string(params["dataId"], data_id) ||
-        (data_id != "SystemActivityEvents-FrequentActivityEvents" &&
-         data_id != "SystemActivityEvents-SporadicActivityEvents")) {
-        return false;
-    }
-
+bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
+                                                 uint32_t now_ms) {
+    if (!as11_event_data_id_is_activity(frame.data_id)) return false;
     bool updated = false;
-    JsonArrayConst events = params["events"].as<JsonArrayConst>();
-    for (JsonObjectConst item : events) {
-        std::string event_name;
-        if (!variant_to_string(item["event"], event_name)) continue;
-        As11TherapyState event_state = therapy_state_for_event(event_name);
+    for (size_t i = 0; i < frame.event_count; ++i) {
+        const As11EventRecord &event = frame.events[i];
+        if (event.name.empty()) continue;
+        As11TherapyState event_state = therapy_state_for_event(event.name);
 
-        last_activity_event_ = event_name;
-        last_activity_event_report_time_.clear();
-        variant_to_string(item["reportTime"],
-                          last_activity_event_report_time_);
+        last_activity_event_ = event.name;
+        last_activity_event_report_time_ = event.report_time;
         last_activity_event_ms_ = now_ms;
         if (event_state != As11TherapyState::Unknown) {
             therapy_state_ = event_state;

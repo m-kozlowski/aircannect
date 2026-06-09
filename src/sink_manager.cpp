@@ -213,7 +213,7 @@ void SinkManager::attach_debug_stream(uint32_t now_ms) {
     next_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
     status_.attach_attempts++;
     const std::string params =
-        build_stream_params(DEFAULT_EDF_STREAM_IDS, 10, 50);
+        build_stream_params(DEFAULT_EDF_STREAM_IDS, 40, 200);
     StreamAcquireResult result =
         arbiter_->acquire_stream(params, RpcSource::Sink);
     if (result.status == StreamAcquireStatus::Acquired ||
