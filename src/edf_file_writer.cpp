@@ -58,6 +58,19 @@ const EdfSignalSpec SA2_SIGNALS[] = {
      static_cast<uint16_t>(static_cast<int16_t>(-32768)), 32767, 1},
 };
 
+const EdfSignalSpec ANNOTATION_SIGNALS[] = {
+    {"EDF Annotations", "", "-32768.0", "32767.00", "-32768", "32767",
+     static_cast<uint16_t>(static_cast<int16_t>(-32768)),
+     static_cast<uint16_t>(static_cast<int16_t>(32767)), 31},
+    {"Crc16", "", "-32768.0", "32767.00", "-32768", "32767",
+     static_cast<uint16_t>(static_cast<int16_t>(-32768)),
+     static_cast<uint16_t>(static_cast<int16_t>(32767)), 1},
+};
+
+const EdfSignalSpec STR_SIGNALS[] = {
+#include "edf_str_signal_table.inc"
+};
+
 const EdfFileSchema BRP_SCHEMA = {
     EdfFileKind::Brp,
     EdfSeriesId::Brp,
@@ -154,6 +167,101 @@ bool bit_get(const uint8_t *bits, size_t index) {
     return (bits[index / 8] & static_cast<uint8_t>(1u << (index % 8))) != 0;
 }
 
+bool append_bytes(uint8_t *dst,
+                  size_t capacity,
+                  size_t &offset,
+                  const char *text) {
+    if (!dst || !text) return false;
+    const size_t len = strlen(text);
+    if (offset + len > capacity) return false;
+    memcpy(dst + offset, text, len);
+    offset += len;
+    return true;
+}
+
+bool append_byte(uint8_t *dst,
+                 size_t capacity,
+                 size_t &offset,
+                 uint8_t value) {
+    if (!dst || offset >= capacity) return false;
+    dst[offset++] = value;
+    return true;
+}
+
+bool render_header_common(const char *reserved,
+                          const EdfSignalSpec *signals,
+                          size_t signal_count,
+                          const char *record_duration,
+                          const EdfHeaderInfo &info,
+                          uint8_t *dst,
+                          size_t capacity,
+                          size_t &written) {
+    written = 0;
+    const size_t required = 256 + signal_count * 256;
+    if (!dst || capacity < required || !signals || signal_count == 0) {
+        return false;
+    }
+
+    memset(dst, ' ', required);
+    size_t offset = 0;
+    append_field(dst, capacity, offset, "0", 8);
+    append_field(dst, capacity, offset, info.patient_id, 80);
+    append_field(dst, capacity, offset, info.recording_id, 80);
+    append_field(dst, capacity, offset, info.start_date, 8);
+    append_field(dst, capacity, offset, info.start_time, 8);
+    append_u32_field(dst, capacity, offset, static_cast<uint32_t>(required), 8);
+    append_field(dst, capacity, offset, reserved, 44);
+    append_u32_field(dst, capacity, offset, info.record_count, 8);
+    append_field(dst, capacity, offset, record_duration, 8);
+    append_u32_field(dst, capacity, offset,
+                     static_cast<uint32_t>(signal_count), 4);
+
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, signals[i].label, 16);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, "", 80);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, signals[i].physical_dimension, 8);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, signals[i].physical_min, 8);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, signals[i].physical_max, 8);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, signals[i].digital_min, 8);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, signals[i].digital_max, 8);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, "", 80);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_u32_field(dst, capacity, offset,
+                         static_cast<uint32_t>(signals[i].samples_per_record),
+                         8);
+    }
+    for (size_t i = 0; i < signal_count; ++i) {
+        append_field(dst, capacity, offset, "", 32);
+    }
+
+    if (offset != required) return false;
+    written = offset;
+    return true;
+}
+
+const char *record_duration_text(uint32_t seconds) {
+    switch (seconds) {
+        case 60: return "60.00";
+        case 86400: return "86400.00";
+        default: return "0.00";
+    }
+}
+
 }  // namespace
 
 const EdfFileSchema &edf_numeric_schema(EdfFileKind kind) {
@@ -181,6 +289,12 @@ const EdfFileSchema *edf_numeric_schema_for_series(EdfSeriesId series) {
     }
 }
 
+const EdfSignalSpec *edf_str_signal_spec(size_t signal_index) {
+    const size_t count = sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]);
+    if (signal_index >= count) return nullptr;
+    return &STR_SIGNALS[signal_index];
+}
+
 size_t edf_header_size(const EdfFileSchema &schema) {
     return 256 + schema.signal_count * 256;
 }
@@ -191,6 +305,38 @@ size_t edf_record_size(const EdfFileSchema &schema) {
         samples += schema.signals[i].samples_per_record;
     }
     return samples * 2;
+}
+
+size_t edf_str_header_size() {
+    return 256 + (sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0])) * 256;
+}
+
+size_t edf_str_record_size() {
+    size_t samples = 0;
+    const size_t count = sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]);
+    for (size_t i = 0; i < count; ++i) {
+        samples += STR_SIGNALS[i].samples_per_record;
+    }
+    return samples * 2;
+}
+
+size_t edf_str_signal_sample_offset(size_t signal_index) {
+    const size_t count = sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]);
+    if (signal_index >= count) return AC_EDF_STR_SAMPLES_PER_RECORD;
+    size_t offset = 0;
+    for (size_t i = 0; i < signal_index; ++i) {
+        offset += STR_SIGNALS[i].samples_per_record;
+    }
+    return offset;
+}
+
+size_t edf_annotation_header_size() {
+    return 256 + sizeof(ANNOTATION_SIGNALS) / sizeof(ANNOTATION_SIGNALS[0]) *
+                     256;
+}
+
+size_t edf_annotation_record_size() {
+    return 64;
 }
 
 uint16_t edf_crc16_ccitt_false(const uint8_t *data, size_t len) {
@@ -207,71 +353,25 @@ uint16_t edf_crc16_ccitt_false(const uint8_t *data, size_t len) {
     return crc;
 }
 
+int16_t edf_encode_physical_sample(const EdfSignalSpec &spec,
+                                   float physical_value) {
+    return encode_sample(spec, physical_value);
+}
+
 bool edf_render_header(const EdfFileSchema &schema,
                        const EdfHeaderInfo &info,
                        uint8_t *dst,
                        size_t capacity,
                        size_t &written) {
-    written = 0;
-    const size_t required = edf_header_size(schema);
-    if (!dst || capacity < required || !schema.signals ||
-        schema.signal_count == 0) {
-        return false;
-    }
-
-    memset(dst, ' ', required);
-    size_t offset = 0;
-    append_field(dst, capacity, offset, "0", 8);
-    append_field(dst, capacity, offset, info.patient_id, 80);
-    append_field(dst, capacity, offset, info.recording_id, 80);
-    append_field(dst, capacity, offset, info.start_date, 8);
-    append_field(dst, capacity, offset, info.start_time, 8);
-    append_u32_field(dst, capacity, offset, static_cast<uint32_t>(required), 8);
-    append_field(dst, capacity, offset, schema.reserved, 44);
-    append_u32_field(dst, capacity, offset, info.record_count, 8);
-    append_field(dst, capacity, offset,
-                 schema.record_duration_seconds == 60 ? "60.00" : "0.00", 8);
-    append_u32_field(dst, capacity, offset,
-                     static_cast<uint32_t>(schema.signal_count), 4);
-
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, schema.signals[i].label, 16);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, "", 80);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset,
-                     schema.signals[i].physical_dimension, 8);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, schema.signals[i].physical_min, 8);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, schema.signals[i].physical_max, 8);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, schema.signals[i].digital_min, 8);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, schema.signals[i].digital_max, 8);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, "", 80);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_u32_field(dst, capacity, offset,
-                         static_cast<uint32_t>(
-                             schema.signals[i].samples_per_record),
-                         8);
-    }
-    for (size_t i = 0; i < schema.signal_count; ++i) {
-        append_field(dst, capacity, offset, "", 32);
-    }
-
-    if (offset != required) return false;
-    written = offset;
-    return true;
+    return render_header_common(
+        schema.reserved,
+        schema.signals,
+        schema.signal_count,
+        record_duration_text(schema.record_duration_seconds),
+        info,
+        dst,
+        capacity,
+        written);
 }
 
 bool edf_render_numeric_record(const EdfFileSchema &schema,
@@ -312,6 +412,139 @@ bool edf_render_numeric_record(const EdfFileSchema &schema,
     if (offset != required) return false;
     written = offset;
     return true;
+}
+
+bool edf_render_str_header(const EdfHeaderInfo &info,
+                           uint8_t *dst,
+                           size_t capacity,
+                           size_t &written) {
+    return render_header_common("EDF",
+                                STR_SIGNALS,
+                                sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]),
+                                "86400.00",
+                                info,
+                                dst,
+                                capacity,
+                                written);
+}
+
+bool edf_render_str_record(const EdfStrRecordView &record,
+                           uint8_t *dst,
+                           size_t capacity,
+                           size_t &written) {
+    written = 0;
+    const size_t required = edf_str_record_size();
+    if (!dst || capacity < required || !record.digital_samples ||
+        record.sample_count != AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
+        return false;
+    }
+
+    size_t offset = 0;
+    for (size_t i = 0; i < record.sample_count; ++i) {
+        append_i16_le(dst, capacity, offset, record.digital_samples[i]);
+    }
+
+    const uint16_t crc = edf_crc16_ccitt_false(dst, offset);
+    append_i16_le(dst, capacity, offset, static_cast<int16_t>(crc));
+    if (offset != required) return false;
+    written = offset;
+    return true;
+}
+
+bool edf_render_annotation_header(const EdfHeaderInfo &info,
+                                  uint8_t *dst,
+                                  size_t capacity,
+                                  size_t &written) {
+    return render_header_common("EDF+D",
+                                ANNOTATION_SIGNALS,
+                                sizeof(ANNOTATION_SIGNALS) /
+                                    sizeof(ANNOTATION_SIGNALS[0]),
+                                "0.00",
+                                info,
+                                dst,
+                                capacity,
+                                written);
+}
+
+bool edf_render_annotation_record(const EdfAnnotationRecord &record,
+                                  uint8_t *dst,
+                                  size_t capacity,
+                                  size_t &written) {
+    written = 0;
+    if (!dst || capacity < edf_annotation_record_size() || !record.label ||
+        record.onset_seconds < 0 || record.duration_seconds < 0) {
+        return false;
+    }
+
+    uint8_t payload[62] = {};
+    size_t offset = 0;
+    char tmp[20] = {};
+    if (!append_bytes(payload, sizeof(payload), offset, "+0") ||
+        !append_byte(payload, sizeof(payload), offset, 0x14) ||
+        !append_byte(payload, sizeof(payload), offset, 0x14) ||
+        !append_byte(payload, sizeof(payload), offset, 0x00)) {
+        return false;
+    }
+
+    snprintf(tmp, sizeof(tmp), "+%ld", static_cast<long>(record.onset_seconds));
+    if (!append_bytes(payload, sizeof(payload), offset, tmp) ||
+        !append_byte(payload, sizeof(payload), offset, 0x15)) {
+        return false;
+    }
+    snprintf(tmp, sizeof(tmp), "%ld", static_cast<long>(record.duration_seconds));
+    if (!append_bytes(payload, sizeof(payload), offset, tmp) ||
+        !append_byte(payload, sizeof(payload), offset, 0x14) ||
+        !append_bytes(payload, sizeof(payload), offset, record.label) ||
+        !append_byte(payload, sizeof(payload), offset, 0x14) ||
+        !append_byte(payload, sizeof(payload), offset, 0x00)) {
+        return false;
+    }
+
+    memcpy(dst, payload, sizeof(payload));
+    size_t out = sizeof(payload);
+    const uint16_t crc = edf_crc16_ccitt_false(payload, sizeof(payload));
+    append_i16_le(dst, capacity, out, static_cast<int16_t>(crc));
+    if (out != edf_annotation_record_size()) return false;
+    written = out;
+    return true;
+}
+
+bool edf_render_recording_start_annotation(uint8_t *dst,
+                                           size_t capacity,
+                                           size_t &written) {
+    EdfAnnotationRecord record;
+    record.onset_seconds = 0;
+    record.duration_seconds = 0;
+    record.label = "Recording starts";
+    return edf_render_annotation_record(record, dst, capacity, written);
+}
+
+bool edf_annotation_label_for_event(EdfAnnotationKind kind,
+                                    const char *event_name,
+                                    const char *&label) {
+    label = nullptr;
+    if (!event_name) return false;
+    if (kind == EdfAnnotationKind::Eve) {
+        if (strcmp(event_name, "Hypopnea") == 0) {
+            label = "Hypopnea";
+        } else if (strcmp(event_name, "CentralApnea") == 0) {
+            label = "Central Apnea";
+        } else if (strcmp(event_name, "ObstructiveApnea") == 0) {
+            label = "Obstructive Apnea";
+        } else if (strcmp(event_name, "Apnea") == 0) {
+            label = "Apnea";
+        } else if (strcmp(event_name, "Arousal") == 0 ||
+                   strcmp(event_name, "Rera") == 0) {
+            label = "Arousal";
+        }
+    } else if (kind == EdfAnnotationKind::Csl) {
+        if (strcmp(event_name, "CsrStart") == 0) {
+            label = "CSR Start";
+        } else if (strcmp(event_name, "CsrEnd") == 0) {
+            label = "CSR End";
+        }
+    }
+    return label != nullptr;
 }
 
 }  // namespace aircannect

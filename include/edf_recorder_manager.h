@@ -13,6 +13,8 @@
 
 namespace aircannect {
 
+struct ReportSummaryRecord;
+
 static constexpr size_t AC_EDF_STREAM_FRAME_BUDGET = 8;
 static constexpr uint32_t AC_EDF_ATTACH_RETRY_MS = 1000;
 static constexpr uint32_t AC_EDF_SESSION_RETRY_MS = 5000;
@@ -38,13 +40,27 @@ struct EdfRecorderStatus {
     uint32_t brp_records = 0;
     uint32_t pld_records = 0;
     uint32_t sa2_records = 0;
+    uint32_t eve_records = 0;
+    uint32_t csl_records = 0;
+    uint32_t str_records = 0;
+    uint32_t str_setting_requests = 0;
+    uint32_t str_setting_responses = 0;
+    uint32_t str_setting_timeouts = 0;
+    uint32_t str_setting_values = 0;
+    uint32_t str_setting_missing = 0;
+    uint32_t str_setting_unmapped = 0;
     uint32_t record_enqueue_failures = 0;
+    uint32_t annotation_enqueue_failures = 0;
+    uint32_t str_enqueue_failures = 0;
     uint32_t file_open_failures = 0;
     uint32_t last_frame_ms = 0;
     uint32_t last_event_ms = 0;
     char brp_path[80] = {};
     char pld_path[80] = {};
     char sa2_path[80] = {};
+    char eve_path[80] = {};
+    char csl_path[80] = {};
+    char str_path[80] = {};
     char last_event_data_id[64] = {};
     char last_event_name[48] = {};
     char last_error[80] = {};
@@ -69,8 +85,11 @@ private:
     static void event_frame_observer(void *context,
                                      const As11EventFrame &frame,
                                      uint32_t now_ms);
+    static void rpc_event_observer(void *context, const RpcEvent &event);
     static void record_observer(void *context,
                                 const EdfCompletedRecordView &record);
+    static bool summary_record_observer(void *context,
+                                        const ReportSummaryRecord &record);
 
     void dispatch_session_edges(uint32_t now_ms);
     void start_session(const SessionStatus &session,
@@ -79,17 +98,39 @@ private:
     void end_session(const SessionStatus &session,
                      uint32_t now_ms,
                      const char *reason);
-    bool open_numeric_files(const SessionStatus &session);
-    bool enqueue_file_open(EdfFileKind kind,
-                           const EdfLocalDateTime &start,
-                           const EdfHeaderInfo &info,
-                           char *path,
-                           size_t path_size);
-    void close_numeric_files();
+    bool open_session_files(const SessionStatus &session);
+    bool enqueue_numeric_file_open(EdfFileKind kind,
+                                   const EdfLocalDateTime &start,
+                                   const EdfHeaderInfo &info,
+                                   char *path,
+                                   size_t path_size);
+    bool enqueue_annotation_file_open(EdfAnnotationKind kind,
+                                      const EdfLocalDateTime &start,
+                                      const EdfHeaderInfo &info,
+                                      char *path,
+                                      size_t path_size);
+    bool enqueue_recording_start_annotations();
+    void close_session_files();
+    bool begin_str_session(const SessionStatus &session);
+    bool finish_str_session(const SessionStatus &session);
+    void reset_str_day(uint16_t epoch_days,
+                       const EdfLocalDateTime &sleep_day_start);
+    void request_str_settings(uint32_t now_ms);
+    void note_str_settings_timeout(uint32_t now_ms);
+    void handle_rpc_event(const RpcEvent &event);
+    void handle_str_settings_response(const std::string &payload);
+    bool set_str_signal_physical(size_t signal_index, float physical_value);
+    bool set_str_signal_digital(size_t signal_index, int16_t digital_value);
+    bool apply_str_summary_record(const ReportSummaryRecord &record);
+    bool apply_str_summary_from_store();
+    bool write_str_day_record();
+    bool parse_str_time(const char *text, EdfLocalDateTime &out);
     void attach_stream(uint32_t now_ms);
     void release_stream();
     void drain_stream(uint32_t now_ms);
     void handle_completed_record(const EdfCompletedRecordView &record);
+    bool enqueue_event_annotation(EdfAnnotationKind kind,
+                                  const As11EventRecord &record);
     void set_error(const char *error);
     static void copy_text(char *dst, size_t size, const char *src);
 
@@ -100,8 +141,19 @@ private:
     uint32_t last_queue_drops_ = 0;
     uint32_t next_attach_ms_ = 0;
     uint32_t next_session_start_ms_ = 0;
+    int64_t session_start_epoch_ms_ = 0;
     bool initialized_ = false;
     bool files_open_ = false;
+    bool str_day_active_ = false;
+    bool str_mask_open_ = false;
+    bool str_settings_pending_ = false;
+    uint16_t str_day_epoch_days_ = 0;
+    uint16_t str_current_on_minute_ = 0;
+    uint8_t str_mask_events_ = 0;
+    uint32_t str_settings_request_id_ = 0;
+    uint32_t str_settings_request_ms_ = 0;
+    EdfLocalDateTime str_day_start_;
+    int16_t str_samples_[AC_EDF_STR_DATA_SAMPLES_PER_RECORD] = {};
     EdfRecorderStatus status_;
     EdfStreamAssembler assembler_;
 };

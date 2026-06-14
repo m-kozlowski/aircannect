@@ -45,6 +45,22 @@ EdfLocalDateTime previous_day(EdfLocalDateTime dt) {
     return dt;
 }
 
+int64_t days_before_year(int year) {
+    int64_t days = 0;
+    for (int y = 1970; y < year; ++y) {
+        days += leap_year(y) ? 366 : 365;
+    }
+    return days;
+}
+
+int64_t epoch_days(const EdfLocalDateTime &dt) {
+    int64_t days = days_before_year(dt.year);
+    for (int month = 1; month < dt.month; ++month) {
+        days += days_in_month(dt.year, month);
+    }
+    return days + dt.day - 1;
+}
+
 bool write_yyyymmdd(const EdfLocalDateTime &dt,
                     char *dst,
                     size_t dst_size) {
@@ -61,6 +77,14 @@ const char *edf_file_tag(EdfFileKind kind) {
         case EdfFileKind::Brp: return "BRP";
         case EdfFileKind::Pld: return "PLD";
         case EdfFileKind::Sa2: return "SA2";
+        default: return "EDF";
+    }
+}
+
+const char *edf_annotation_file_tag(EdfAnnotationKind kind) {
+    switch (kind) {
+        case EdfAnnotationKind::Eve: return "EVE";
+        case EdfAnnotationKind::Csl: return "CSL";
         default: return "EDF";
     }
 }
@@ -124,6 +148,39 @@ bool edf_header_time(const EdfLocalDateTime &dt,
     return written == 8;
 }
 
+bool edf_sleep_day_start(const EdfLocalDateTime &dt,
+                         EdfLocalDateTime &start) {
+    if (!valid_date_time(dt)) return false;
+    start = dt.hour >= 12 ? dt : previous_day(dt);
+    start.hour = 12;
+    start.minute = 0;
+    start.second = 0;
+    return true;
+}
+
+bool edf_sleep_day_epoch_days(const EdfLocalDateTime &dt,
+                              uint16_t &days) {
+    if (!valid_date_time(dt)) return false;
+    EdfLocalDateTime sleep_day;
+    if (!edf_sleep_day_start(dt, sleep_day)) return false;
+    const int64_t parsed = epoch_days(sleep_day);
+    if (parsed < 0 || parsed > 24836) return false;
+    days = static_cast<uint16_t>(parsed);
+    return true;
+}
+
+bool edf_sleep_day_minute(const EdfLocalDateTime &dt,
+                          uint16_t &minute) {
+    if (!valid_date_time(dt)) return false;
+    const int parsed =
+        dt.hour >= 12
+            ? (dt.hour - 12) * 60 + dt.minute
+            : (dt.hour + 12) * 60 + dt.minute;
+    if (parsed < 0 || parsed > 1440) return false;
+    minute = static_cast<uint16_t>(parsed);
+    return true;
+}
+
 bool edf_datalog_dir(const EdfLocalDateTime &dt,
                      char *dst,
                      size_t dst_size) {
@@ -148,6 +205,28 @@ bool edf_datalog_path(EdfFileKind kind,
     const int written = snprintf(dst, dst_size, "%s/%s_%s.edf",
                                  dir, stamp, edf_file_tag(kind));
     return written > 0 && static_cast<size_t>(written) < dst_size;
+}
+
+bool edf_datalog_annotation_path(EdfAnnotationKind kind,
+                                 const EdfLocalDateTime &dt,
+                                 char *dst,
+                                 size_t dst_size) {
+    char dir[18] = {};
+    char stamp[16] = {};
+    if (!edf_datalog_dir(dt, dir, sizeof(dir)) ||
+        !edf_session_stamp(dt, stamp, sizeof(stamp))) {
+        return false;
+    }
+    if (!dst || dst_size == 0) return false;
+    const int written = snprintf(dst, dst_size, "%s/%s_%s.edf",
+                                 dir, stamp, edf_annotation_file_tag(kind));
+    return written > 0 && static_cast<size_t>(written) < dst_size;
+}
+
+bool edf_str_path(char *dst, size_t dst_size) {
+    if (!dst || dst_size < 9) return false;
+    const int written = snprintf(dst, dst_size, "/STR.edf");
+    return written == 8;
 }
 
 }  // namespace aircannect

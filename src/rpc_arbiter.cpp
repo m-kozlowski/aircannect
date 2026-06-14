@@ -262,6 +262,12 @@ void RpcArbiter::set_report_event_observer(RpcEventObserver observer,
     report_observer_context_ = context;
 }
 
+void RpcArbiter::set_edf_recorder_event_observer(RpcEventObserver observer,
+                                                 void *context) {
+    edf_recorder_observer_ = observer;
+    edf_recorder_observer_context_ = context;
+}
+
 void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
     if (raw_rpc_events_enabled_ && !enabled) {
         stream_.note_external_stop();
@@ -540,6 +546,22 @@ void RpcArbiter::push_report_event(RpcEventKind kind,
     event.payload = std::move(payload);
     if (report_observer_) {
         report_observer_(report_observer_context_, event);
+        return;
+    }
+    stats_.event_drops++;
+}
+
+void RpcArbiter::push_edf_recorder_event(RpcEventKind kind,
+                                         RpcPayloadRef payload,
+                                         RpcSource source,
+                                         uint32_t id) {
+    RpcEvent event;
+    event.kind = kind;
+    event.source = source;
+    event.id = id;
+    event.payload = std::move(payload);
+    if (edf_recorder_observer_) {
+        edf_recorder_observer_(edf_recorder_observer_context_, event);
         return;
     }
     stats_.event_drops++;
@@ -1315,6 +1337,12 @@ void RpcArbiter::handle_rpc_payload(std::string payload) {
                     push_report_event(RpcEventKind::RpcResponse,
                                       ref_payload(), response_source,
                                       matched_id);
+                    break;
+                }
+                if (response_source == RpcSource::EdfRecorder) {
+                    push_edf_recorder_event(RpcEventKind::RpcResponse,
+                                            ref_payload(), response_source,
+                                            matched_id);
                     break;
                 }
                 if (!emit_matched_response(response_source)) break;

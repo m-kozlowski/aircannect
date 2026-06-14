@@ -58,6 +58,10 @@ struct As11SettingDef {
     const char *const *wire_options = nullptr;
 };
 
+bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
+                                            const char *wire_value,
+                                            int16_t &index);
+
 class As11SettingsState {
 public:
     static constexpr size_t MaxSettings = 64;

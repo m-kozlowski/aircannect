@@ -7,7 +7,9 @@
 
 namespace aircannect {
 
-static constexpr size_t AC_EDF_STORAGE_QUEUE_CAPACITY = 8;
+// Session shutdown can enqueue 3 final numeric records, 1 STR day upsert, and
+// 5 close jobs before the worker task drains. Keep a little headroom.
+static constexpr size_t AC_EDF_STORAGE_QUEUE_CAPACITY = 12;
 static constexpr size_t AC_EDF_STORAGE_SLOT_BYTES = 6144;
 static constexpr uint32_t AC_EDF_STORAGE_TASK_STACK = 4096;
 static constexpr uint8_t AC_EDF_STORAGE_TASK_PRIO = 1;
@@ -48,9 +50,18 @@ void begin();
 bool enqueue_open_numeric(const char *path,
                           const EdfFileSchema &schema,
                           const EdfHeaderInfo &info);
+bool enqueue_open_annotation(const char *path,
+                             EdfAnnotationKind kind,
+                             const EdfHeaderInfo &info);
 bool enqueue_numeric_record(const EdfFileSchema &schema,
                             const EdfCompletedRecordView &record);
+bool enqueue_annotation_record(EdfAnnotationKind kind,
+                               const EdfAnnotationRecord &record);
+bool enqueue_str_record(const char *path,
+                        const EdfHeaderInfo &info,
+                        const EdfStrRecordView &record);
 bool enqueue_close_numeric(EdfFileKind kind);
+bool enqueue_close_annotation(EdfAnnotationKind kind);
 
 EdfStorageWorkerStatus status();
 

@@ -6,6 +6,11 @@
 namespace aircannect {
 
 static constexpr size_t AC_REPORT_SUMMARY_SESSION_MAX = 16;
+static constexpr size_t AC_REPORT_SUMMARY_STR_FIRST_SIGNAL = 76;
+static constexpr size_t AC_REPORT_SUMMARY_STR_LAST_SIGNAL = 132;
+static constexpr size_t AC_REPORT_SUMMARY_STR_VALUE_COUNT =
+    AC_REPORT_SUMMARY_STR_LAST_SIGNAL -
+    AC_REPORT_SUMMARY_STR_FIRST_SIGNAL + 1;
 
 struct ReportSummarySession {
     uint64_t start_ms = 0;
@@ -40,6 +45,9 @@ struct ReportSummaryRecord {
     uint32_t session_count = 0;
     uint32_t session_interval_count = 0;
     ReportSummarySession sessions[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+
+    uint64_t str_summary_mask = 0;
+    int16_t str_summary_digital[AC_REPORT_SUMMARY_STR_VALUE_COUNT] = {};
 };
 
 using ReportSummaryRecordCallback =
@@ -71,5 +79,8 @@ bool report_parse_summary_records(const uint8_t *data,
                                   void *context,
                                   char *error,
                                   size_t error_len);
+bool report_summary_str_sample(const ReportSummaryRecord &record,
+                               size_t signal_index,
+                               int16_t &out);
 
 }  // namespace aircannect

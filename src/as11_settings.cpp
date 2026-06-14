@@ -504,6 +504,25 @@ const char *known_var_alias(const char *name) {
     return nullptr;
 }
 
+bool rpc_name_matches_alias(const char *rpc_name, const char *alias) {
+    if (!rpc_name || !alias) return false;
+    if (*rpc_name == '_') rpc_name++;
+    if (*alias == '_') alias++;
+    return strcmp(rpc_name, alias) == 0;
+}
+
+const char *known_var_name_for_rpc_name(const char *rpc_name) {
+    if (!rpc_name) return nullptr;
+    for (size_t i = 0;
+         i < sizeof(KNOWN_VAR_ALIASES) / sizeof(KNOWN_VAR_ALIASES[0]);
+         ++i) {
+        if (rpc_name_matches_alias(rpc_name, KNOWN_VAR_ALIASES[i].alias)) {
+            return KNOWN_VAR_ALIASES[i].name;
+        }
+    }
+    return nullptr;
+}
+
 const char *profile_name_for_mode(int mode) {
     static const char *const names[] = {
         "CpapProfile",
@@ -523,6 +542,65 @@ const char *profile_name_for_mode(int mode) {
     }
     return names[mode];
 }
+
+const char *setting_field_name_from_known_var(const char *known_var) {
+    if (!known_var) return nullptr;
+    const char *dash = strrchr(known_var, '-');
+    return dash && dash[1] ? dash + 1 : known_var;
+}
+
+const As11SettingDef *setting_def_for_known_var(const char *known_var) {
+    const char *field = setting_field_name_from_known_var(known_var);
+    if (!field) return nullptr;
+    for (const As11SettingDef &def : SETTINGS) {
+        if ((def.name && strcmp(def.name, field) == 0) ||
+            (def.profile_field && strcmp(def.profile_field, field) == 0) ||
+            (def.feature_field && strcmp(def.feature_field, field) == 0) ||
+            (def.flat_name && strcmp(def.flat_name, field) == 0)) {
+            return &def;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
+                                            const char *wire_value,
+                                            int16_t &index) {
+    if (!rpc_name || !wire_value) return false;
+
+    const char *known_var = known_var_name_for_rpc_name(rpc_name);
+    if (!known_var) return false;
+
+    if (strcmp(known_var, "ActiveTherapyProfile") == 0) {
+        for (int mode = 0; mode <= 10; ++mode) {
+            const char *profile = profile_name_for_mode(mode);
+            if (profile && strcmp(profile, wire_value) == 0) {
+                index = static_cast<int16_t>(mode);
+                return true;
+            }
+            if (strcmp(MODE_OPTIONS[mode], wire_value) == 0) {
+                index = static_cast<int16_t>(mode);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const As11SettingDef *def = setting_def_for_known_var(known_var);
+    if (!def || !def->options || !def->option_count) return false;
+    for (uint8_t i = 0; i < def->option_count; ++i) {
+        const char *option = option_wire_value_at(*def, i);
+        if (option && strcmp(option, wire_value) == 0) {
+            index = static_cast<int16_t>(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
 
 uint16_t profile_modes_from_result(JsonObjectConst result) {
     uint16_t mask = 0;

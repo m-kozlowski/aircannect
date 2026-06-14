@@ -1,5 +1,6 @@
 #include "report_proto.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -13,6 +14,166 @@ void set_error(char *error, size_t error_len, const char *message) {
 
 float summary_index_value(uint64_t value) {
     return static_cast<float>(value) / 10.0f;
+}
+
+int16_t clamp_i16(int32_t value) {
+    if (value < -32768) return -32768;
+    if (value > 32767) return 32767;
+    return static_cast<int16_t>(value);
+}
+
+int16_t summary_scaled_digital(uint64_t value, float multiplier) {
+    const float scaled = static_cast<float>(value) * multiplier;
+    return clamp_i16(static_cast<int32_t>(lroundf(scaled)));
+}
+
+bool set_summary_str_sample(ReportSummaryRecord &record,
+                            size_t signal_index,
+                            int16_t digital) {
+    if (signal_index < AC_REPORT_SUMMARY_STR_FIRST_SIGNAL ||
+        signal_index > AC_REPORT_SUMMARY_STR_LAST_SIGNAL) {
+        return false;
+    }
+    const size_t slot = signal_index - AC_REPORT_SUMMARY_STR_FIRST_SIGNAL;
+    if (slot >= AC_REPORT_SUMMARY_STR_VALUE_COUNT || slot >= 64) {
+        return false;
+    }
+    record.str_summary_digital[slot] = digital;
+    record.str_summary_mask |= 1ULL << slot;
+    return true;
+}
+
+void set_summary_str_raw(ReportSummaryRecord &record,
+                         size_t signal_index,
+                         uint64_t value) {
+    (void)set_summary_str_sample(record,
+                                 signal_index,
+                                 clamp_i16(static_cast<int32_t>(value)));
+}
+
+void set_summary_str_scaled(ReportSummaryRecord &record,
+                            size_t signal_index,
+                            uint64_t value,
+                            float multiplier) {
+    (void)set_summary_str_sample(record,
+                                 signal_index,
+                                 summary_scaled_digital(value, multiplier));
+}
+
+struct SummaryScalarStrMap {
+    uint32_t field = 0;
+    size_t signal_index = 0;
+};
+
+static constexpr SummaryScalarStrMap SUMMARY_SCALAR_STR_MAP[] = {
+    {35, 76},   // ZHT Summary-TubeConnected
+    {34, 77},   // HUC Summary-HumidifierConnected
+    {17, 91},   // SAU SpO2Thresh
+    {18, 92},   // VSR SpontTrig%
+    {19, 93},   // VCR SpontCyc%
+    {7, 125},   // AHI
+    {9, 126},   // HSC HypopneaIndex
+    {8, 127},   // ASC ApneaIndex
+    {10, 128},  // CSC ObstructiveApneaIndex
+    {11, 129},  // OSC CentralApneaIndex
+    {12, 130},  // USC UnknownApneaIndex
+    {13, 131},  // RCC ReraIndex
+    {16, 132},  // CSD CSR
+};
+
+struct SummaryMetricStrMap {
+    uint32_t field = 0;
+    uint32_t subfield = 0;
+    size_t signal_index = 0;
+    float multiplier = 1.0f;
+};
+
+static constexpr SummaryMetricStrMap SUMMARY_METRIC_STR_MAP[] = {
+    {36, 3, 78, 2.0f},    // BP9
+    {36, 1, 79, 2.0f},    // BP5
+    {37, 3, 80, 0.2f},    // R95
+    {37, 1, 81, 0.2f},    // RFM
+    {38, 2, 82, 0.2f},    // BFM
+    {29, 2, 83, 10.0f},   // AUM
+    {30, 2, 84, 10.0f},   // HHE
+    {31, 2, 85, 10.0f},   // HTE
+    {33, 2, 86, 10.0f},   // AHM
+    {32, 2, 87, 10.0f},   // APM
+    {28, 2, 88, 1.0f},    // SOM
+    {28, 3, 89, 1.0f},    // SO9
+    {28, 4, 90, 1.0f},    // SOX
+    {21, 2, 94, 2.0f},    // MSP
+    {21, 3, 95, 2.0f},    // PM9
+    {21, 4, 96, 2.0f},    // PMA
+    {15, 2, 97, 2.0f},    // PIM
+    {15, 3, 98, 2.0f},    // PI9
+    {15, 4, 99, 2.0f},    // PIA
+    {20, 2, 100, 2.0f},   // PEM
+    {20, 3, 101, 2.0f},   // PE9
+    {20, 4, 102, 2.0f},   // PEA
+    {14, 2, 103, 2.0f},   // LKM
+    {14, 4, 104, 2.0f},   // LK9
+    {14, 3, 105, 2.0f},   // LK7
+    {14, 5, 106, 2.0f},   // LMX
+    {23, 2, 107, 8.0f},   // VTM
+    {23, 3, 108, 8.0f},   // VT9
+    {23, 4, 109, 8.0f},   // VTA
+    {25, 2, 110, 5.0f},   // RRM
+    {25, 3, 111, 5.0f},   // RR9
+    {25, 4, 112, 5.0f},   // RRA
+    {22, 2, 113, 2.0f},   // TVM
+    {22, 3, 114, 2.0f},   // TV9
+    {22, 4, 115, 2.0f},   // TVA
+    {24, 2, 116, 1.0f},   // VAM
+    {24, 3, 117, 1.0f},   // VA9
+    {24, 4, 118, 1.0f},   // VAA
+    {27, 2, 119, 1.0f},   // IEM
+    {27, 3, 120, 1.0f},   // IE9
+    {27, 4, 121, 1.0f},   // IEA
+    {26, 2, 122, 1.0f},   // ISM
+    {26, 3, 123, 1.0f},   // IS9
+    {26, 4, 124, 1.0f},   // ISA
+};
+
+void apply_summary_scalar_str_field(ReportSummaryRecord &record,
+                                    uint32_t field_id,
+                                    uint64_t value) {
+    for (const SummaryScalarStrMap &map : SUMMARY_SCALAR_STR_MAP) {
+        if (map.field == field_id) {
+            set_summary_str_raw(record, map.signal_index, value);
+            return;
+        }
+    }
+}
+
+void apply_summary_metric_str_field(ReportSummaryRecord &record,
+                                    uint32_t field_id,
+                                    uint32_t subfield_id,
+                                    uint64_t value) {
+    for (const SummaryMetricStrMap &map : SUMMARY_METRIC_STR_MAP) {
+        if (map.field == field_id && map.subfield == subfield_id) {
+            set_summary_str_scaled(record,
+                                   map.signal_index,
+                                   value,
+                                   map.multiplier);
+            return;
+        }
+    }
+}
+
+void parse_summary_metric_fields(uint32_t field_id,
+                                 const uint8_t *data,
+                                 size_t len,
+                                 ReportSummaryRecord &record) {
+    size_t index = 0;
+    ReportProtoField field;
+    while (report_proto_next(data, len, index, field)) {
+        if (field.wire != 0) continue;
+        apply_summary_metric_str_field(record,
+                                       field_id,
+                                       field.field,
+                                       field.value);
+    }
 }
 
 }  // namespace
@@ -92,6 +253,22 @@ bool report_proto_all_length_fields(const uint8_t *data,
     return any;
 }
 
+bool report_summary_str_sample(const ReportSummaryRecord &record,
+                               size_t signal_index,
+                               int16_t &out) {
+    if (signal_index < AC_REPORT_SUMMARY_STR_FIRST_SIGNAL ||
+        signal_index > AC_REPORT_SUMMARY_STR_LAST_SIGNAL) {
+        return false;
+    }
+    const size_t slot = signal_index - AC_REPORT_SUMMARY_STR_FIRST_SIGNAL;
+    if (slot >= AC_REPORT_SUMMARY_STR_VALUE_COUNT || slot >= 64) {
+        return false;
+    }
+    if ((record.str_summary_mask & (1ULL << slot)) == 0) return false;
+    out = record.str_summary_digital[slot];
+    return true;
+}
+
 namespace {
 
 void append_summary_session(ReportSummaryRecord &record,
@@ -155,11 +332,19 @@ bool parse_summary_record(const uint8_t *record,
     size_t index = 0;
     ReportProtoField field;
     while (report_proto_next(record, len, index, field)) {
-        if (field.field == 6 && field.wire == 2) {
-            parse_summary_sessions(field.data, field.len, out);
+        if (field.wire == 2) {
+            if (field.field == 6) {
+                parse_summary_sessions(field.data, field.len, out);
+            } else {
+                parse_summary_metric_fields(field.field,
+                                            field.data,
+                                            field.len,
+                                            out);
+            }
             continue;
         }
         if (field.wire != 0) continue;
+        apply_summary_scalar_str_field(out, field.field, field.value);
         switch (field.field) {
             case 2:
                 out.start_ms = field.value;

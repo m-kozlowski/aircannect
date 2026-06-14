@@ -133,6 +133,8 @@ public:
     bool next_resmed_ota_event(RpcEvent &event);
     void set_report_event_observer(RpcEventObserver observer,
                                    void *context);
+    void set_edf_recorder_event_observer(RpcEventObserver observer,
+                                         void *context);
     void set_raw_rpc_events_enabled(bool enabled);
     void set_event_frame_observer(EventFrameObserver observer,
                                   void *context);
@@ -219,6 +221,10 @@ private:
                            RpcPayloadRef payload,
                            RpcSource source = RpcSource::Internal,
                            uint32_t id = 0);
+    void push_edf_recorder_event(RpcEventKind kind,
+                                 RpcPayloadRef payload,
+                                 RpcSource source = RpcSource::Internal,
+                                 uint32_t id = 0);
     void push_resmed_ota_event(RpcEventKind kind,
                                const std::string &payload,
                                RpcSource source = RpcSource::Internal,
@@ -283,6 +289,8 @@ private:
     FixedQueue<RpcEvent, AC_RESMED_OTA_EVENT_QUEUE_DEPTH> resmed_ota_events_;
     RpcEventObserver report_observer_ = nullptr;
     void *report_observer_context_ = nullptr;
+    RpcEventObserver edf_recorder_observer_ = nullptr;
+    void *edf_recorder_observer_context_ = nullptr;
 
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
     PendingRequest pending_;

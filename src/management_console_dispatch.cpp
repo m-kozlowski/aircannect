@@ -279,8 +279,18 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.pld_records));
     out.print('/');
     out.print(static_cast<unsigned long>(status.sa2_records));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.eve_records));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.csl_records));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.str_records));
     out.print(" record_queue_failures=");
     out.print(static_cast<unsigned long>(status.record_enqueue_failures));
+    out.print(" annotation_queue_failures=");
+    out.print(static_cast<unsigned long>(status.annotation_enqueue_failures));
+    out.print(" str_queue_failures=");
+    out.print(static_cast<unsigned long>(status.str_enqueue_failures));
     out.print(" file_open_failures=");
     out.print(static_cast<unsigned long>(status.file_open_failures));
     out.print(" attach_failures=");

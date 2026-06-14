@@ -18,6 +18,7 @@ struct EdfLocalDateTime {
 };
 
 const char *edf_file_tag(EdfFileKind kind);
+const char *edf_annotation_file_tag(EdfAnnotationKind kind);
 
 bool edf_parse_as11_local_datetime(const char *text, EdfLocalDateTime &out);
 bool edf_sleep_day_yyyymmdd(const EdfLocalDateTime &dt,
@@ -32,6 +33,12 @@ bool edf_header_date(const EdfLocalDateTime &dt,
 bool edf_header_time(const EdfLocalDateTime &dt,
                      char *dst,
                      size_t dst_size);
+bool edf_sleep_day_start(const EdfLocalDateTime &dt,
+                         EdfLocalDateTime &start);
+bool edf_sleep_day_epoch_days(const EdfLocalDateTime &dt,
+                              uint16_t &days);
+bool edf_sleep_day_minute(const EdfLocalDateTime &dt,
+                          uint16_t &minute);
 bool edf_datalog_dir(const EdfLocalDateTime &dt,
                      char *dst,
                      size_t dst_size);
@@ -39,5 +46,10 @@ bool edf_datalog_path(EdfFileKind kind,
                       const EdfLocalDateTime &dt,
                       char *dst,
                       size_t dst_size);
+bool edf_datalog_annotation_path(EdfAnnotationKind kind,
+                                 const EdfLocalDateTime &dt,
+                                 char *dst,
+                                 size_t dst_size);
+bool edf_str_path(char *dst, size_t dst_size);
 
 }  // namespace aircannect
