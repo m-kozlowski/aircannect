@@ -83,6 +83,10 @@ static constexpr size_t AC_PROVISION_LINE_MAX = 256;
 #define AC_SPI_SD_FREQ_HZ 10000000
 #endif
 
+#ifndef AC_DEFAULT_EDF_CAPTURE_ENABLED
+#define AC_DEFAULT_EDF_CAPTURE_ENABLED 0
+#endif
+
 static constexpr uint32_t AC_STORAGE_STATUS_POLL_MS = 30000;
 static constexpr size_t AC_STORAGE_WRITE_QUEUE_INTERNAL = 4;
 static constexpr size_t AC_STORAGE_WRITE_QUEUE_PSRAM = 16;
@@ -92,4 +96,3 @@ static constexpr size_t AC_STORAGE_WRITE_BUDGET_ITEMS = 2;
 static constexpr size_t AC_STORAGE_WRITE_BUDGET_BYTES = 1024;
 static constexpr size_t AC_SINK_STREAM_FRAME_BUDGET = 4;
 static constexpr uint32_t AC_SINK_ATTACH_RETRY_MS = 2000;
-

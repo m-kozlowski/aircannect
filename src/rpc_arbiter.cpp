@@ -252,20 +252,20 @@ bool RpcArbiter::next_event(RpcEvent &event) {
     return events_.pop(event);
 }
 
-bool RpcArbiter::next_resmed_ota_event(RpcEvent &event) {
-    return resmed_ota_events_.pop(event);
+bool RpcArbiter::next_source_event(RpcSource source, RpcEvent &event) {
+    const SourceEventRoute *route = source_event_route(source);
+    if (!route) return false;
+    return pop_source_event_queue(route->queue, event);
 }
 
-void RpcArbiter::set_report_event_observer(RpcEventObserver observer,
+bool RpcArbiter::set_source_event_observer(RpcSource source,
+                                           RpcEventObserver observer,
                                            void *context) {
-    report_observer_ = observer;
-    report_observer_context_ = context;
-}
-
-void RpcArbiter::set_edf_recorder_event_observer(RpcEventObserver observer,
-                                                 void *context) {
-    edf_recorder_observer_ = observer;
-    edf_recorder_observer_context_ = context;
+    SourceEventRoute *route = source_event_route(source);
+    if (!route) return false;
+    route->observer = observer;
+    route->observer_context = observer ? context : nullptr;
+    return true;
 }
 
 void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
@@ -563,60 +563,83 @@ void RpcArbiter::push_event(RpcEventKind kind,
     if (!events_.push(std::move(event))) stats_.event_drops++;
 }
 
-void RpcArbiter::push_report_event(RpcEventKind kind,
+void RpcArbiter::push_source_event(RpcSource target,
+                                   RpcEventKind kind,
+                                   const std::string &payload,
+                                   RpcSource source,
+                                   uint32_t id) {
+    if (payload.empty()) {
+        push_source_event(target, kind, RpcPayloadRef(), source, id);
+        return;
+    }
+    push_source_event(target, kind, make_rpc_payload_ref(std::string(payload)),
+                      source, id);
+}
+
+void RpcArbiter::push_source_event(RpcSource target,
+                                   RpcEventKind kind,
                                    RpcPayloadRef payload,
                                    RpcSource source,
                                    uint32_t id) {
+    const SourceEventRoute *route = source_event_route(target);
+    if (!route) {
+        stats_.event_drops++;
+        return;
+    }
+
     RpcEvent event;
     event.kind = kind;
     event.source = source;
     event.id = id;
     event.payload = std::move(payload);
-    if (report_observer_) {
-        report_observer_(report_observer_context_, event);
-        return;
-    }
+    if (dispatch_source_event(*route, event)) return;
+    if (push_source_event_queue(route->queue, std::move(event))) return;
     stats_.event_drops++;
 }
 
-void RpcArbiter::push_edf_recorder_event(RpcEventKind kind,
-                                         RpcPayloadRef payload,
-                                         RpcSource source,
-                                         uint32_t id) {
-    RpcEvent event;
-    event.kind = kind;
-    event.source = source;
-    event.id = id;
-    event.payload = std::move(payload);
-    if (edf_recorder_observer_) {
-        edf_recorder_observer_(edf_recorder_observer_context_, event);
-        return;
+RpcArbiter::SourceEventRoute *RpcArbiter::source_event_route(
+    RpcSource source) {
+    for (auto &route : source_event_routes_) {
+        if (route.source == source) return &route;
     }
-    stats_.event_drops++;
+    return nullptr;
 }
 
-void RpcArbiter::push_resmed_ota_event(RpcEventKind kind,
-                                       const std::string &payload,
-                                       RpcSource source,
-                                       uint32_t id) {
-    if (payload.empty()) {
-        push_resmed_ota_event(kind, RpcPayloadRef(), source, id);
-        return;
+const RpcArbiter::SourceEventRoute *RpcArbiter::source_event_route(
+    RpcSource source) const {
+    for (const auto &route : source_event_routes_) {
+        if (route.source == source) return &route;
     }
-    push_resmed_ota_event(kind, make_rpc_payload_ref(std::string(payload)),
-                          source, id);
+    return nullptr;
 }
 
-void RpcArbiter::push_resmed_ota_event(RpcEventKind kind,
-                                       RpcPayloadRef payload,
-                                       RpcSource source,
-                                       uint32_t id) {
-    RpcEvent event;
-    event.kind = kind;
-    event.source = source;
-    event.id = id;
-    event.payload = std::move(payload);
-    if (!resmed_ota_events_.push(std::move(event))) stats_.event_drops++;
+bool RpcArbiter::dispatch_source_event(const SourceEventRoute &route,
+                                       const RpcEvent &event) {
+    if (!route.observer) return false;
+    route.observer(route.observer_context, event);
+    return true;
+}
+
+bool RpcArbiter::push_source_event_queue(SourceEventQueue queue,
+                                         RpcEvent &&event) {
+    switch (queue) {
+        case SourceEventQueue::ResmedOta:
+            return resmed_ota_events_.push(std::move(event));
+        case SourceEventQueue::None:
+        default:
+            return false;
+    }
+}
+
+bool RpcArbiter::pop_source_event_queue(SourceEventQueue queue,
+                                        RpcEvent &event) {
+    switch (queue) {
+        case SourceEventQueue::ResmedOta:
+            return resmed_ota_events_.pop(event);
+        case SourceEventQueue::None:
+        default:
+            return false;
+    }
 }
 
 void RpcArbiter::cancel_pending_request(const char *reason) {
@@ -630,7 +653,7 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
                  pending_.method.c_str(),
                  source_name(pending_.source),
                  reason ? reason : "unknown");
-        push_resmed_ota_event(RpcEventKind::Info, buf);
+        push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
     } else if (pending_.source != RpcSource::Scheduler) {
         char buf[160];
         snprintf(buf, sizeof(buf),
@@ -666,7 +689,7 @@ void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
                  request.method.c_str(),
                  source_name(request.source),
                  reason ? reason : "unknown");
-        push_resmed_ota_event(RpcEventKind::Info, buf);
+        push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
     } else if (request.source != RpcSource::Scheduler) {
         char buf[160];
         snprintf(buf, sizeof(buf),
@@ -899,7 +922,7 @@ void RpcArbiter::check_pending_timeout() {
              pending_.method.c_str(),
              source_name(pending_.source));
     if (pending_.source == RpcSource::ResmedOta) {
-        push_resmed_ota_event(RpcEventKind::Info, buf);
+        push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
     } else if (pending_.source != RpcSource::Scheduler) {
         push_event(RpcEventKind::Info, buf);
     }
@@ -1323,9 +1346,9 @@ void RpcArbiter::handle_rpc_payload(std::string payload) {
                                  payload);
             }
             if (spool_fragment) {
-                push_report_event(RpcEventKind::RpcNotification,
-                                  ref_payload(),
-                                  RpcSource::Report);
+                push_source_event(RpcSource::Report,
+                                  RpcEventKind::RpcNotification,
+                                  ref_payload(), RpcSource::Report);
             }
             if (!stream_data || raw_rpc_events_enabled_) {
                 if (!spool_fragment || raw_rpc_events_enabled_) {
@@ -1355,22 +1378,11 @@ void RpcArbiter::handle_rpc_payload(std::string payload) {
                 handle_matched_response(payload);
                 note_request_success(response_source, millis());
                 pending_ = {};
-                if (response_source == RpcSource::ResmedOta) {
-                    push_resmed_ota_event(RpcEventKind::RpcResponse,
-                                          ref_payload(), response_source,
-                                          matched_id);
-                    break;
-                }
-                if (response_source == RpcSource::Report) {
-                    push_report_event(RpcEventKind::RpcResponse,
+                if (source_event_route(response_source)) {
+                    push_source_event(response_source,
+                                      RpcEventKind::RpcResponse,
                                       ref_payload(), response_source,
                                       matched_id);
-                    break;
-                }
-                if (response_source == RpcSource::EdfRecorder) {
-                    push_edf_recorder_event(RpcEventKind::RpcResponse,
-                                            ref_payload(), response_source,
-                                            matched_id);
                     break;
                 }
                 if (!emit_matched_response(response_source)) break;

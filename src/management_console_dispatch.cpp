@@ -253,6 +253,8 @@ void print_edf_recorder_status(Print &out,
     out.print(status.stream_attached ? "attached" : "idle");
     out.print(" files=");
     out.print(status.files_open ? "open" : "closed");
+    out.print(" rpc_observer=");
+    out.print(status.rpc_observer_registered ? "yes" : "no");
     out.print(" event_observer=");
     out.print(status.event_observer_registered ? "yes" : "no");
     out.print(" event_subscription=");
@@ -297,6 +299,8 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.str_records));
     out.print(" record_queue_failures=");
     out.print(static_cast<unsigned long>(status.record_enqueue_failures));
+    out.print(" record_drops=");
+    out.print(static_cast<unsigned long>(status.numeric_record_drops));
     out.print(" annotation_queue_failures=");
     out.print(static_cast<unsigned long>(status.annotation_enqueue_failures));
     out.print(" str_queue_failures=");
@@ -318,6 +322,8 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(storage.records_written));
     out.print(" storage_drops=");
     out.print(static_cast<unsigned long>(storage.queue_drops));
+    out.print(" storage_stack_free=");
+    out.print(static_cast<unsigned long>(storage.stack_high_water_words));
     out.print(" assembly=");
     out.print(assembly.buffers_ready ? "ready" : "unavailable");
     out.print(" records=");
@@ -328,6 +334,8 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(assembly.samples_invalid));
     out.print(" dup=");
     out.print(static_cast<unsigned long>(assembly.samples_duplicate));
+    out.print(" late=");
+    out.print(static_cast<unsigned long>(assembly.samples_late));
     out.print(" ts_errors=");
     out.print(static_cast<unsigned long>(assembly.timestamp_errors));
     out.print(" last_error=");
@@ -825,11 +833,17 @@ void ManagementConsole::handle_edf_command(Print &out,
         return;
     }
     if (rest == "on" || rest == "enable") {
+        if (!ctx.app_config.set_edf_capture_enabled(true)) {
+            out.println("[EDF] warning: failed to persist enabled state");
+        }
         ctx.edf_recorder_manager.set_enabled(true);
         print_edf_recorder_status(out, ctx.edf_recorder_manager);
         return;
     }
     if (rest == "off" || rest == "disable") {
+        if (!ctx.app_config.set_edf_capture_enabled(false)) {
+            out.println("[EDF] warning: failed to persist disabled state");
+        }
         ctx.edf_recorder_manager.set_enabled(false);
         print_edf_recorder_status(out, ctx.edf_recorder_manager);
         return;

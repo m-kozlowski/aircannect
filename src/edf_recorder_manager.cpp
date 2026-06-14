@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include <stdio.h>
+#include <string.h>
 
 #include "as11_rpc.h"
 #include "debug_log.h"
@@ -19,6 +20,7 @@ namespace aircannect {
 namespace {
 
 static constexpr uint32_t AC_EDF_STR_SETTINGS_TIMEOUT_MS = 12000;
+static constexpr size_t AC_EDF_GAP_RECORD_BUDGET = 3;
 
 struct StrSummaryApplyContext {
     EdfRecorderManager *manager = nullptr;
@@ -65,9 +67,17 @@ void EdfRecorderManager::begin(RpcArbiter &arbiter,
     if (initialized_) return;
     arbiter_ = &arbiter;
     session_ = &session;
-    arbiter_->set_edf_recorder_event_observer(rpc_event_observer, this);
+    status_.rpc_observer_registered =
+        arbiter_->set_source_event_observer(RpcSource::EdfRecorder,
+                                            rpc_event_observer, this);
     status_.event_observer_registered =
         arbiter_->add_event_frame_observer(event_frame_observer, this);
+    if (!status_.rpc_observer_registered) {
+        set_error("rpc_observer_register_failed");
+    }
+    if (!status_.event_observer_registered) {
+        set_error("event_observer_register_failed");
+    }
     assembler_.set_record_observer(record_observer, this);
     (void)assembler_.begin();
     initialized_ = true;
@@ -91,6 +101,9 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
 
     attach_stream(now_ms);
     (void)ensure_numeric_files_open();
+    sync_annotation_open_status();
+    if (!numeric_files_open_) return;
+    if (!sync_numeric_open_status()) return;
     drain_stream(now_ms);
 }
 
@@ -232,6 +245,7 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     status_.annotation_enqueue_failures = 0;
     status_.str_enqueue_failures = 0;
     status_.file_open_failures = 0;
+    status_.numeric_record_drops = 0;
     status_.last_frame_ms = 0;
     status_.last_event_ms = 0;
     status_.brp_path[0] = 0;
@@ -248,6 +262,9 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     session_recording_id_[0] = 0;
     session_start_epoch_ms_ = 0;
     numeric_files_open_ = false;
+    annotation_open_synced_ = false;
+    numeric_open_synced_ = false;
+    pending_stream_frame_.reset();
     reset_numeric_schemas();
     next_attach_ms_ = now_ms;
     str_settings_pending_ = false;
@@ -329,7 +346,7 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
 bool EdfRecorderManager::open_session_annotation_files(
     const SessionStatus &session) {
     EdfLocalDateTime start;
-    if (!edf_parse_as11_local_datetime(session.start_device_time, start)) {
+    if (!parse_session_local_time(session.start_device_time, start)) {
         status_.file_open_failures++;
         set_error("bad_session_time");
         return false;
@@ -377,13 +394,6 @@ bool EdfRecorderManager::open_session_annotation_files(
                                                        sizeof(status_.csl_path));
     if (!csl_open) {
         (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Eve);
-        status_.file_open_failures++;
-        return false;
-    }
-
-    if (!enqueue_recording_start_annotations()) {
-        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Eve);
-        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Csl);
         status_.file_open_failures++;
         return false;
     }
@@ -493,6 +503,7 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
         status_.file_open_failures++;
         return false;
     }
+    numeric_open_synced_ = false;
 
     EdfHeaderInfo info;
     info.patient_id = "AirCANnect";
@@ -586,27 +597,6 @@ bool EdfRecorderManager::enqueue_annotation_file_open(
     return true;
 }
 
-bool EdfRecorderManager::enqueue_recording_start_annotations() {
-    EdfAnnotationRecord record;
-    record.onset_seconds = 0;
-    record.duration_seconds = 0;
-    record.label = "Recording starts";
-    const bool eve_ok =
-        EdfStorageWorker::enqueue_annotation_record(EdfAnnotationKind::Eve,
-                                                    record);
-    const bool csl_ok =
-        EdfStorageWorker::enqueue_annotation_record(EdfAnnotationKind::Csl,
-                                                    record);
-    if (!eve_ok || !csl_ok) {
-        status_.annotation_enqueue_failures++;
-        set_error("recording_start_queue_failed");
-        return false;
-    }
-    status_.eve_records++;
-    status_.csl_records++;
-    return true;
-}
-
 void EdfRecorderManager::close_session_files() {
     if (!files_open_ && !numeric_files_open_) {
         status_.files_open = false;
@@ -627,19 +617,121 @@ void EdfRecorderManager::close_session_files() {
     }
     numeric_files_open_ = false;
     files_open_ = false;
+    annotation_open_synced_ = false;
+    numeric_open_synced_ = false;
+    pending_stream_frame_.reset();
     status_.files_open = false;
     reset_numeric_schemas();
 }
 
-bool EdfRecorderManager::parse_str_time(const char *text,
-                                        EdfLocalDateTime &out) {
-    return text && text[0] &&
-           edf_parse_as11_local_datetime(text, out);
+bool EdfRecorderManager::storage_file_matches(
+    const EdfStorageOpenFileStatus &file,
+    const char *path) const {
+    return path && path[0] && file.open && strcmp(file.path, path) == 0;
+}
+
+void EdfRecorderManager::sync_annotation_open_status() {
+    if (!status_.active || !files_open_ || annotation_open_synced_) return;
+
+    const EdfStorageWorkerStatus storage = EdfStorageWorker::status();
+    const EdfStorageOpenFileStatus &eve =
+        storage.files[AC_EDF_STORAGE_FILE_EVE];
+    const EdfStorageOpenFileStatus &csl =
+        storage.files[AC_EDF_STORAGE_FILE_CSL];
+
+    if (storage_file_matches(eve, status_.eve_path) &&
+        storage_file_matches(csl, status_.csl_path)) {
+        annotation_open_synced_ = true;
+        if (status_.eve_records < eve.record_count) {
+            status_.eve_records = eve.record_count;
+        }
+        if (status_.csl_records < csl.record_count) {
+            status_.csl_records = csl.record_count;
+        }
+        return;
+    }
+
+    if (storage.queued == 0 && !storage.busy) {
+        status_.file_open_failures++;
+        set_error(storage.last_error[0] ? storage.last_error
+                                        : "annotation_open_failed");
+        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Eve);
+        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Csl);
+        files_open_ = false;
+        annotation_open_synced_ = true;
+        status_.files_open = numeric_files_open_;
+    }
+}
+
+bool EdfRecorderManager::sync_numeric_open_status() {
+    if (!numeric_files_open_) return true;
+    if (numeric_open_synced_) return true;
+
+    const EdfStorageWorkerStatus storage = EdfStorageWorker::status();
+    const EdfStorageOpenFileStatus &brp =
+        storage.files[AC_EDF_STORAGE_FILE_BRP];
+    const EdfStorageOpenFileStatus &pld =
+        storage.files[AC_EDF_STORAGE_FILE_PLD];
+    const EdfStorageOpenFileStatus &sa2 =
+        storage.files[AC_EDF_STORAGE_FILE_SA2];
+
+    const bool brp_ready =
+        !brp_schema_.open || storage_file_matches(brp, status_.brp_path);
+    const bool pld_ready =
+        !pld_schema_.open || storage_file_matches(pld, status_.pld_path);
+    const bool sa2_ready =
+        !sa2_schema_.open || storage_file_matches(sa2, status_.sa2_path);
+    if (!brp_ready || !pld_ready || !sa2_ready) {
+        if (storage.queued == 0 && !storage.busy) {
+            status_.file_open_failures++;
+            set_error(storage.last_error[0] ? storage.last_error
+                                            : "numeric_open_failed");
+            if (brp_schema_.open) {
+                (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Brp);
+            }
+            if (pld_schema_.open) {
+                (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Pld);
+            }
+            if (sa2_schema_.open) {
+                (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Sa2);
+            }
+            numeric_files_open_ = false;
+            numeric_open_synced_ = true;
+            reset_numeric_schemas();
+            status_.files_open = files_open_;
+        }
+        return false;
+    }
+
+    const uint32_t brp_records = brp_schema_.open ? brp.record_count : 0;
+    const uint32_t pld_records = pld_schema_.open ? pld.record_count : 0;
+    const uint32_t sa2_records = sa2_schema_.open ? sa2.record_count : 0;
+    assembler_.set_current_records(brp_records, pld_records, sa2_records);
+    status_.brp_records = brp_records;
+    status_.pld_records = pld_records;
+    status_.sa2_records = sa2_records;
+    numeric_open_synced_ = true;
+    return true;
+}
+
+bool EdfRecorderManager::parse_session_local_time(
+    const char *text,
+    EdfLocalDateTime &out) const {
+    if (!text || !text[0] || !arbiter_) return false;
+
+    const As11DeviceState &state = arbiter_->as11_state();
+    if (!state.timezone_offset_valid()) return false;
+
+    int64_t epoch_ms = 0;
+    if (!edf_parse_utc_ms(text, epoch_ms)) return false;
+    return edf_epoch_ms_to_local_datetime(epoch_ms,
+                                          state.timezone_offset_minutes(),
+                                          out);
 }
 
 bool EdfRecorderManager::begin_str_session(const SessionStatus &session) {
     EdfLocalDateTime start;
-    if (!parse_str_time(session.start_device_time, start)) {
+    if (!parse_session_local_time(session.start_device_time, start)) {
         set_error("bad_str_start_time");
         return false;
     }
@@ -765,9 +857,9 @@ bool EdfRecorderManager::finish_str_session(const SessionStatus &session) {
     if (!str_.active() || !str_.mask_open()) return true;
 
     EdfLocalDateTime end;
-    if (!parse_str_time(session.end_device_time, end) &&
-        !parse_str_time(session.last_stream_start_time, end) &&
-        !parse_str_time(session.start_device_time, end)) {
+    if (!parse_session_local_time(session.end_device_time, end) &&
+        !parse_session_local_time(session.last_stream_start_time, end) &&
+        !parse_session_local_time(session.start_device_time, end)) {
         set_error("bad_str_end_time");
         return false;
     }
@@ -956,6 +1048,7 @@ void EdfRecorderManager::release_stream() {
     status_.stream_handle = STREAM_CONSUMER_INVALID;
     status_.stream_attached = false;
     last_queue_drops_ = 0;
+    pending_stream_frame_.reset();
 }
 
 void EdfRecorderManager::drain_stream(uint32_t now_ms) {
@@ -976,9 +1069,23 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
     }
 
     for (size_t i = 0; i < AC_EDF_STREAM_FRAME_BUDGET; ++i) {
-        StreamFrameRef frame;
-        if (!arbiter_->next_stream_frame(status_.stream_handle, frame)) break;
+        StreamFrameRef frame = pending_stream_frame_;
+        if (frame) {
+            pending_stream_frame_.reset();
+        } else if (!arbiter_->next_stream_frame(status_.stream_handle, frame)) {
+            break;
+        }
         if (!frame) continue;
+        const EdfFramePrepareStatus prepared =
+            assembler_.prepare_frame(*frame, AC_EDF_GAP_RECORD_BUDGET);
+        if (prepared == EdfFramePrepareStatus::Deferred) {
+            pending_stream_frame_ = frame;
+            break;
+        }
+        if (prepared == EdfFramePrepareStatus::Rejected) {
+            status_.last_frame_ms = now_ms;
+            continue;
+        }
         assembler_.ingest_frame(*frame);
         status_.frames++;
         status_.last_frame_ms = now_ms;
@@ -999,12 +1106,20 @@ void EdfRecorderManager::handle_completed_record(
             state = &sa2_schema_;
             break;
     }
-    if (numeric_files_open_ && state && state->open &&
-        !EdfStorageWorker::enqueue_numeric_record(state->layout.schema,
-                                                  record)) {
-        status_.record_enqueue_failures++;
-        set_error("record_queue_failed");
+    bool enqueued = false;
+    if (numeric_files_open_ && state && state->open) {
+        if (EdfStorageWorker::enqueue_numeric_record(state->layout.schema,
+                                                     record)) {
+            enqueued = true;
+        } else {
+            status_.record_enqueue_failures++;
+            set_error("record_queue_failed");
+        }
+    } else {
+        status_.numeric_record_drops++;
     }
+
+    if (!enqueued) return;
 
     switch (record.series) {
         case EdfSeriesId::Brp:

@@ -235,10 +235,10 @@ EventCommand EventBroker::next_command(uint32_t now_ms) {
     EventCommand command;
     if (subscribe_pending_) return command;
 
-    std::string desired_params;
-    if (!build_desired_params(desired_params)) return command;
+    if (!refresh_desired_params()) return command;
 
-    if (subscription_active_ && desired_params == active_params_json_) {
+    if (subscription_active_ &&
+        desired_params_json_ == active_params_json_) {
         return command;
     }
 
@@ -252,7 +252,7 @@ EventCommand EventBroker::next_command(uint32_t now_ms) {
     }
 
     command.type = EventCommandType::Subscribe;
-    command.params_json = desired_params;
+    command.params_json = desired_params_json_;
     return command;
 }
 
@@ -306,7 +306,11 @@ void EventBroker::mark_subscribe_response(bool is_error,
     subscription_id_ = subscription_id;
     subscription_generation_++;
     if (pending_params_json_.empty()) {
-        (void)build_desired_params(active_params_json_);
+        if (refresh_desired_params()) {
+            active_params_json_ = desired_params_json_;
+        } else {
+            active_params_json_.clear();
+        }
     } else {
         active_params_json_ = pending_params_json_;
     }
@@ -342,11 +346,11 @@ EventAcquireResult EventBroker::acquire(const char *data_ids_csv) {
 
     consumers_[slot].active = true;
     consumers_[slot].data_ids_csv = parsed;
-    std::string desired_params;
+    mark_desired_params_dirty();
     const bool already_active =
         subscription_active_ &&
-        build_desired_params(desired_params) &&
-        desired_params == active_params_json_;
+        refresh_desired_params() &&
+        desired_params_json_ == active_params_json_;
     result.status = already_active
         ? EventAcquireStatus::AlreadyActive
         : EventAcquireStatus::Acquired;
@@ -359,7 +363,9 @@ void EventBroker::release(EventConsumerHandle handle) {
         handle >= static_cast<EventConsumerHandle>(AC_EVENT_CONSUMERS_MAX)) {
         return;
     }
+    if (!consumers_[handle].active) return;
     consumers_[handle] = {};
+    mark_desired_params_dirty();
 }
 
 bool EventBroker::consumer_active(EventConsumerHandle handle) const {
@@ -447,6 +453,20 @@ EventBrokerStatus EventBroker::status() const {
     return out;
 }
 
+bool EventBroker::refresh_desired_params() {
+    if (!desired_params_dirty_) return desired_params_valid_;
+
+    std::string params_json;
+    desired_params_valid_ = build_desired_params(params_json);
+    if (desired_params_valid_) {
+        desired_params_json_ = params_json;
+    } else {
+        desired_params_json_.clear();
+    }
+    desired_params_dirty_ = false;
+    return desired_params_valid_;
+}
+
 bool EventBroker::build_desired_params(std::string &params_json) const {
     std::string csv;
     for (const char *data_id : BASE_EVENT_DATA_IDS) {
@@ -460,6 +480,10 @@ bool EventBroker::build_desired_params(std::string &params_json) const {
     }
     build_subscribe_params_from_csv(csv, params_json);
     return true;
+}
+
+void EventBroker::mark_desired_params_dirty() {
+    desired_params_dirty_ = true;
 }
 
 int EventBroker::find_free_slot() const {

@@ -38,9 +38,11 @@ struct EdfSignalSpec {
     const char *physical_max = "";
     const char *digital_min = "";
     const char *digital_max = "";
-    uint16_t digital_min_value = 0;
-    uint16_t digital_max_value = 0;
+    int16_t digital_min_value = 0;
+    int16_t digital_max_value = 0;
     size_t samples_per_record = 0;
+    float physical_to_digital_scale = 0.0f;
+    float physical_to_digital_offset = 0.0f;
 };
 
 struct EdfFileSchema {

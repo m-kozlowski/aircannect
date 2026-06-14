@@ -17,6 +17,7 @@ struct EdfSeriesAssemblyStatus {
     uint32_t samples_accepted = 0;
     uint32_t samples_invalid = 0;
     uint32_t samples_duplicate = 0;
+    uint32_t samples_late = 0;
     uint16_t slots_filled = 0;
 };
 
@@ -29,6 +30,7 @@ struct EdfStreamAssemblerStatus {
     uint32_t samples_accepted = 0;
     uint32_t samples_invalid = 0;
     uint32_t samples_duplicate = 0;
+    uint32_t samples_late = 0;
     uint32_t records_completed = 0;
     int64_t session_start_epoch_ms = 0;
     int64_t last_sample_epoch_ms = 0;
@@ -51,6 +53,12 @@ struct EdfCompletedRecordView {
 using EdfRecordObserver = void (*)(void *context,
                                    const EdfCompletedRecordView &record);
 
+enum class EdfFramePrepareStatus : uint8_t {
+    Ready,
+    Deferred,
+    Rejected,
+};
+
 class EdfStreamAssembler {
 public:
     bool begin();
@@ -59,6 +67,11 @@ public:
 
     void set_record_observer(EdfRecordObserver observer, void *context);
     bool start_session(const char *device_start_time);
+    void set_current_records(uint32_t brp_record,
+                             uint32_t pld_record,
+                             uint32_t sa2_record);
+    EdfFramePrepareStatus prepare_frame(const StreamFrameData &frame,
+                                        size_t max_records_to_publish);
     void end_session();
     void ingest_frame(const StreamFrameData &frame);
 
@@ -83,14 +96,17 @@ private:
     bool record_has_samples(const SeriesBuffer &series) const;
     void publish_record(const SeriesBuffer &series);
     void publish_current_record(SeriesBuffer &series, bool skipped);
-    void advance_to_record(SeriesBuffer &series, uint32_t new_record);
+    bool advance_to_record(SeriesBuffer &series,
+                           uint32_t new_record,
+                           size_t *publish_budget = nullptr);
     void flush_partial_records();
     void store_sample(SeriesBuffer &series,
                       uint8_t signal_index,
                       uint32_t record_index,
                       uint16_t sample_index,
                       bool valid,
-                      float value);
+                      float value,
+                      bool count_duplicate);
     SeriesBuffer series(EdfSeriesId id);
     bool parse_frame_start_ms(const StreamFrameData &frame, int64_t &start_ms);
     bool ensure_session_epoch(int64_t frame_start_ms);

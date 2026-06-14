@@ -10,7 +10,7 @@
 
 namespace aircannect {
 
-static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 13;
+static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 14;
 
 struct AppConfigData {
     uint32_t schema_version = AC_CONFIG_SCHEMA_VERSION;
@@ -38,6 +38,8 @@ struct AppConfigData {
     uint16_t oximetry_udp_port = AC_OXIMETRY_UDP_PORT;
     OximetryAdvertiseMode oximetry_advertise_mode =
         OximetryAdvertiseMode::Auto;
+
+    bool edf_capture_enabled = AC_DEFAULT_EDF_CAPTURE_ENABLED != 0;
 
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
@@ -72,6 +74,7 @@ public:
     bool set_oximetry_enabled(bool enabled);
     bool set_oximetry_udp_port(uint16_t port);
     bool set_oximetry_advertise_mode(OximetryAdvertiseMode mode);
+    bool set_edf_capture_enabled(bool enabled);
 
     bool set_http_auth(const String &user, const String &password);
     bool set_auth_whitelist(const String &whitelist);

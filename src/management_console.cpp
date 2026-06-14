@@ -63,6 +63,8 @@ void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.print(" advertise=");
     out.println(oximetry_advertise_mode_name(
         cfg.oximetry_advertise_mode));
+    out.print("  edf_capture: ");
+    out.println(on_off_text(cfg.edf_capture_enabled));
     out.print("  http_auth: ");
     out.println(cfg.http_user.length() || cfg.http_password.length()
                     ? "protected"

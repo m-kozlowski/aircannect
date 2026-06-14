@@ -9,6 +9,7 @@
 
 #include "as11_rpc.h"
 #include "board.h"
+#include "calendar_utils.h"
 #include "debug_log.h"
 
 namespace aircannect {
@@ -36,29 +37,6 @@ bool sta_online(const WifiManager &wifi_manager) {
            mode == WifiModeState::StaRoamScanning;
 }
 
-bool leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
-
-uint8_t days_in_month(int year, int month) {
-    static const uint8_t days[] = {
-        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-    };
-    if (month == 2 && leap_year(year)) return 29;
-    return days[month - 1];
-}
-
-int64_t days_from_civil(int year, unsigned month, unsigned day) {
-    year -= month <= 2;
-    const int era = (year >= 0 ? year : year - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(year - era * 400);
-    const unsigned doy =
-        (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return static_cast<int64_t>(era) * 146097 +
-           static_cast<int64_t>(doe) - 719468;
-}
-
 time_t utc_fields_to_epoch(int year,
                            int month,
                            int day,
@@ -66,8 +44,8 @@ time_t utc_fields_to_epoch(int year,
                            int minute,
                            int second) {
     const int64_t days =
-        days_from_civil(year, static_cast<unsigned>(month),
-                        static_cast<unsigned>(day));
+        calendar_days_from_civil(year, static_cast<unsigned>(month),
+                                 static_cast<unsigned>(day));
     const int64_t seconds = days * 86400 +
                             static_cast<int64_t>(hour) * 3600 +
                             static_cast<int64_t>(minute) * 60 + second;
@@ -391,7 +369,7 @@ bool TimeSyncService::parse_resmed_datetime_ms(
     if (*p != 'Z' || p[1] != 0) return false;
 
     if (year < 2020 || month < 1 || month > 12 || day < 1 ||
-        day > days_in_month(year, month) ||
+        day > calendar_days_in_month(year, month) ||
         hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
         second < 0 || second > 59) {
         return false;

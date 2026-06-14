@@ -50,7 +50,8 @@ bool edf_build_event_annotation(EdfAnnotationKind kind,
     if (onset_ms < 0) onset_ms = 0;
 
     int32_t duration_ms = 0;
-    if (record.has_duration && record.duration_ms > 0) {
+    if (kind == EdfAnnotationKind::Eve &&
+        record.has_duration && record.duration_ms > 0) {
         duration_ms = record.duration_ms;
     }
 

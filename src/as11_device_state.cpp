@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "board.h"
+#include "calendar_utils.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -68,6 +69,52 @@ bool variant_to_int(JsonVariantConst value, int32_t &out) {
     return false;
 }
 
+bool parse_timezone_offset_text(const char *text, int32_t &out) {
+    if (!text || !*text) return false;
+
+    int sign = 1;
+    if (*text == '+') {
+        text++;
+    } else if (*text == '-') {
+        sign = -1;
+        text++;
+    } else {
+        return false;
+    }
+
+    if (text[0] < '0' || text[0] > '9' ||
+        text[1] < '0' || text[1] > '9' ||
+        text[2] != ':' ||
+        text[3] < '0' || text[3] > '9' ||
+        text[4] < '0' || text[4] > '9' ||
+        text[5] != 0) {
+        return false;
+    }
+
+    const int hours = (text[0] - '0') * 10 + (text[1] - '0');
+    const int minutes = (text[3] - '0') * 10 + (text[4] - '0');
+    if (hours > 24 || minutes > 59 || (hours == 24 && minutes != 0)) {
+        return false;
+    }
+
+    out = static_cast<int32_t>(sign * (hours * 60 + minutes));
+    return true;
+}
+
+bool parse_timezone_offset_minutes(JsonVariantConst value, int32_t &out) {
+    int32_t parsed = 0;
+    if (variant_to_int(value, parsed)) {
+        if (parsed < -24 * 60 || parsed > 24 * 60) return false;
+        out = parsed;
+        return true;
+    }
+
+    if (value.is<const char *>()) {
+        return parse_timezone_offset_text(value.as<const char *>(), out);
+    }
+    return false;
+}
+
 As11TherapyState classify_rop(const std::string &value) {
     const std::string normalized = lower_compact_copy(value);
     if (normalized.empty()) return As11TherapyState::Unknown;
@@ -103,29 +150,6 @@ As11TherapyState therapy_state_for_event(const std::string &event) {
     return As11TherapyState::Unknown;
 }
 
-bool leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
-
-uint8_t days_in_month(int year, int month) {
-    static const uint8_t days[] = {
-        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-    };
-    if (month == 2 && leap_year(year)) return 29;
-    return days[month - 1];
-}
-
-int64_t days_from_civil(int year, unsigned month, unsigned day) {
-    year -= month <= 2;
-    const int era = (year >= 0 ? year : year - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(year - era * 400);
-    const unsigned doy =
-        (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return static_cast<int64_t>(era) * 146097 +
-           static_cast<int64_t>(doe) - 719468;
-}
-
 bool utc_fields_to_epoch_ms(int year,
                             int month,
                             int day,
@@ -135,15 +159,15 @@ bool utc_fields_to_epoch_ms(int year,
                             int millisecond,
                             int64_t &epoch_ms) {
     if (year < 2020 || month < 1 || month > 12 || day < 1 ||
-        day > days_in_month(year, month) ||
+        day > calendar_days_in_month(year, month) ||
         hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
         second < 0 || second > 59 ||
         millisecond < 0 || millisecond > 999) {
         return false;
     }
     const int64_t days =
-        days_from_civil(year, static_cast<unsigned>(month),
-                        static_cast<unsigned>(day));
+        calendar_days_from_civil(year, static_cast<unsigned>(month),
+                                 static_cast<unsigned>(day));
     const int64_t seconds = days * 86400 +
                             static_cast<int64_t>(hour) * 3600 +
                             static_cast<int64_t>(minute) * 60 + second;
@@ -286,7 +310,7 @@ bool As11DeviceState::apply_status_get_response(const std::string &payload,
     }
 
     int32_t timezone = 0;
-    if (variant_to_int(result["_TZO"], timezone)) {
+    if (parse_timezone_offset_minutes(result["_TZO"], timezone)) {
         timezone_offset_minutes_ = timezone;
         timezone_offset_valid_ = true;
         updated = true;

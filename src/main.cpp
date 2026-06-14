@@ -179,10 +179,15 @@ void setup() {
     session_manager.begin();
     rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
                                           &session_manager);
-    rpc_arbiter.set_report_event_observer(handle_report_event,
-                                          &report_manager);
+    if (!rpc_arbiter.set_source_event_observer(RpcSource::Report,
+                                               handle_report_event,
+                                               &report_manager)) {
+        Log::logf(CAT_RPC, LOG_ERROR,
+                  "[INIT] report RPC event route unavailable\n");
+    }
     sink_manager.begin(rpc_arbiter, session_manager);
     edf_recorder_manager.begin(rpc_arbiter, session_manager);
+    edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
     oximetry_manager.begin(app_config);
     report_manager.begin();
     resmed_ota_manager.begin(rpc_arbiter);

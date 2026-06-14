@@ -1,6 +1,5 @@
 #include "report_proto.h"
 
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -16,146 +15,109 @@ float summary_index_value(uint64_t value) {
     return static_cast<float>(value) / 10.0f;
 }
 
-int16_t clamp_i16(int32_t value) {
-    if (value < -32768) return -32768;
-    if (value > 32767) return 32767;
-    return static_cast<int16_t>(value);
-}
-
-int16_t summary_scaled_digital(uint64_t value, float multiplier) {
-    const float scaled = static_cast<float>(value) * multiplier;
-    return clamp_i16(static_cast<int32_t>(lroundf(scaled)));
-}
-
-bool set_summary_str_sample(ReportSummaryRecord &record,
-                            size_t signal_index,
-                            int16_t digital) {
-    if (signal_index < AC_REPORT_SUMMARY_STR_FIRST_SIGNAL ||
-        signal_index > AC_REPORT_SUMMARY_STR_LAST_SIGNAL) {
-        return false;
-    }
-    const size_t slot = signal_index - AC_REPORT_SUMMARY_STR_FIRST_SIGNAL;
-    if (slot >= AC_REPORT_SUMMARY_STR_VALUE_COUNT || slot >= 64) {
-        return false;
-    }
-    record.str_summary_digital[slot] = digital;
-    record.str_summary_mask |= 1ULL << slot;
+bool set_summary_field_value(ReportSummaryRecord &record,
+                             ReportSummaryField field,
+                             uint64_t value) {
+    const size_t index = static_cast<size_t>(field);
+    if (index >= AC_REPORT_SUMMARY_FIELD_COUNT || index >= 64) return false;
+    record.summary_field_values[index] =
+        value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(value);
+    record.summary_field_mask |= 1ULL << index;
     return true;
 }
 
-void set_summary_str_raw(ReportSummaryRecord &record,
-                         size_t signal_index,
-                         uint64_t value) {
-    (void)set_summary_str_sample(record,
-                                 signal_index,
-                                 clamp_i16(static_cast<int32_t>(value)));
-}
-
-void set_summary_str_scaled(ReportSummaryRecord &record,
-                            size_t signal_index,
-                            uint64_t value,
-                            float multiplier) {
-    (void)set_summary_str_sample(record,
-                                 signal_index,
-                                 summary_scaled_digital(value, multiplier));
-}
-
-struct SummaryScalarStrMap {
+struct SummaryScalarFieldMap {
     uint32_t field = 0;
-    size_t signal_index = 0;
+    ReportSummaryField summary = ReportSummaryField::Count;
 };
 
-static constexpr SummaryScalarStrMap SUMMARY_SCALAR_STR_MAP[] = {
-    {35, 76},   // ZHT Summary-TubeConnected
-    {34, 77},   // HUC Summary-HumidifierConnected
-    {17, 91},   // SAU SpO2Thresh
-    {18, 92},   // VSR SpontTrig%
-    {19, 93},   // VCR SpontCyc%
-    {7, 125},   // AHI
-    {9, 126},   // HSC HypopneaIndex
-    {8, 127},   // ASC ApneaIndex
-    {10, 128},  // CSC ObstructiveApneaIndex
-    {11, 129},  // OSC CentralApneaIndex
-    {12, 130},  // USC UnknownApneaIndex
-    {13, 131},  // RCC ReraIndex
-    {16, 132},  // CSD CSR
+static constexpr SummaryScalarFieldMap SUMMARY_SCALAR_FIELD_MAP[] = {
+    {35, ReportSummaryField::TubeConnected},
+    {34, ReportSummaryField::HumidifierConnected},
+    {17, ReportSummaryField::Spo2ThresholdMinutes},
+    {18, ReportSummaryField::SpontaneousTriggerPercent},
+    {19, ReportSummaryField::SpontaneousCyclePercent},
+    {7, ReportSummaryField::Ahi},
+    {9, ReportSummaryField::HypopneaIndex},
+    {8, ReportSummaryField::ApneaIndex},
+    {10, ReportSummaryField::ObstructiveApneaIndex},
+    {11, ReportSummaryField::CentralApneaIndex},
+    {12, ReportSummaryField::UnknownApneaIndex},
+    {13, ReportSummaryField::ReraIndex},
+    {16, ReportSummaryField::Csr},
 };
 
-struct SummaryMetricStrMap {
+struct SummaryMetricFieldMap {
     uint32_t field = 0;
     uint32_t subfield = 0;
-    size_t signal_index = 0;
-    float multiplier = 1.0f;
+    ReportSummaryField summary = ReportSummaryField::Count;
 };
 
-static constexpr SummaryMetricStrMap SUMMARY_METRIC_STR_MAP[] = {
-    {36, 3, 78, 2.0f},    // BP9
-    {36, 1, 79, 2.0f},    // BP5
-    {37, 3, 80, 0.2f},    // R95
-    {37, 1, 81, 0.2f},    // RFM
-    {38, 2, 82, 0.2f},    // BFM
-    {29, 2, 83, 10.0f},   // AUM
-    {30, 2, 84, 10.0f},   // HHE
-    {31, 2, 85, 10.0f},   // HTE
-    {33, 2, 86, 10.0f},   // AHM
-    {32, 2, 87, 10.0f},   // APM
-    {28, 2, 88, 1.0f},    // SOM
-    {28, 3, 89, 1.0f},    // SO9
-    {28, 4, 90, 1.0f},    // SOX
-    {21, 2, 94, 2.0f},    // MSP
-    {21, 3, 95, 2.0f},    // PM9
-    {21, 4, 96, 2.0f},    // PMA
-    {15, 2, 97, 2.0f},    // PIM
-    {15, 3, 98, 2.0f},    // PI9
-    {15, 4, 99, 2.0f},    // PIA
-    {20, 2, 100, 2.0f},   // PEM
-    {20, 3, 101, 2.0f},   // PE9
-    {20, 4, 102, 2.0f},   // PEA
-    {14, 2, 103, 2.0f},   // LKM
-    {14, 4, 104, 2.0f},   // LK9
-    {14, 3, 105, 2.0f},   // LK7
-    {14, 5, 106, 2.0f},   // LMX
-    {23, 2, 107, 8.0f},   // VTM
-    {23, 3, 108, 8.0f},   // VT9
-    {23, 4, 109, 8.0f},   // VTA
-    {25, 2, 110, 5.0f},   // RRM
-    {25, 3, 111, 5.0f},   // RR9
-    {25, 4, 112, 5.0f},   // RRA
-    {22, 2, 113, 2.0f},   // TVM
-    {22, 3, 114, 2.0f},   // TV9
-    {22, 4, 115, 2.0f},   // TVA
-    {24, 2, 116, 1.0f},   // VAM
-    {24, 3, 117, 1.0f},   // VA9
-    {24, 4, 118, 1.0f},   // VAA
-    {27, 2, 119, 1.0f},   // IEM
-    {27, 3, 120, 1.0f},   // IE9
-    {27, 4, 121, 1.0f},   // IEA
-    {26, 2, 122, 1.0f},   // ISM
-    {26, 3, 123, 1.0f},   // IS9
-    {26, 4, 124, 1.0f},   // ISA
+static constexpr SummaryMetricFieldMap SUMMARY_METRIC_FIELD_MAP[] = {
+    {36, 3, ReportSummaryField::BlowPressure95},
+    {36, 1, ReportSummaryField::BlowPressure5},
+    {37, 3, ReportSummaryField::Flow95},
+    {37, 1, ReportSummaryField::Flow5},
+    {38, 2, ReportSummaryField::BlowerFlow50},
+    {29, 2, ReportSummaryField::AmbientHumidity50},
+    {30, 2, ReportSummaryField::HumidifierTemperature50},
+    {31, 2, ReportSummaryField::HeatedTubeTemperature50},
+    {33, 2, ReportSummaryField::HeatedTubePower50},
+    {32, 2, ReportSummaryField::HumidifierPower50},
+    {28, 2, ReportSummaryField::Spo2Median},
+    {28, 3, ReportSummaryField::Spo2_95},
+    {28, 4, ReportSummaryField::Spo2Max},
+    {21, 2, ReportSummaryField::MaskPressureMedian},
+    {21, 3, ReportSummaryField::MaskPressure95},
+    {21, 4, ReportSummaryField::MaskPressureMax},
+    {15, 2, ReportSummaryField::TargetIpapMedian},
+    {15, 3, ReportSummaryField::TargetIpap95},
+    {15, 4, ReportSummaryField::TargetIpapMax},
+    {20, 2, ReportSummaryField::TargetEpapMedian},
+    {20, 3, ReportSummaryField::TargetEpap95},
+    {20, 4, ReportSummaryField::TargetEpapMax},
+    {14, 2, ReportSummaryField::LeakMedian},
+    {14, 4, ReportSummaryField::Leak95},
+    {14, 3, ReportSummaryField::Leak70},
+    {14, 5, ReportSummaryField::LeakMax},
+    {23, 2, ReportSummaryField::MinuteVentMedian},
+    {23, 3, ReportSummaryField::MinuteVent95},
+    {23, 4, ReportSummaryField::MinuteVentMax},
+    {25, 2, ReportSummaryField::RespiratoryRateMedian},
+    {25, 3, ReportSummaryField::RespiratoryRate95},
+    {25, 4, ReportSummaryField::RespiratoryRateMax},
+    {22, 2, ReportSummaryField::TidalVolumeMedian},
+    {22, 3, ReportSummaryField::TidalVolume95},
+    {22, 4, ReportSummaryField::TidalVolumeMax},
+    {24, 2, ReportSummaryField::TargetVentMedian},
+    {24, 3, ReportSummaryField::TargetVent95},
+    {24, 4, ReportSummaryField::TargetVentMax},
+    {27, 2, ReportSummaryField::IeRatioMedian},
+    {27, 3, ReportSummaryField::IeRatio95},
+    {27, 4, ReportSummaryField::IeRatioMax},
+    {26, 2, ReportSummaryField::InspirationTimeMedian},
+    {26, 3, ReportSummaryField::InspirationTime95},
+    {26, 4, ReportSummaryField::InspirationTimeMax},
 };
 
-void apply_summary_scalar_str_field(ReportSummaryRecord &record,
-                                    uint32_t field_id,
-                                    uint64_t value) {
-    for (const SummaryScalarStrMap &map : SUMMARY_SCALAR_STR_MAP) {
+void apply_summary_scalar_field(ReportSummaryRecord &record,
+                                uint32_t field_id,
+                                uint64_t value) {
+    for (const SummaryScalarFieldMap &map : SUMMARY_SCALAR_FIELD_MAP) {
         if (map.field == field_id) {
-            set_summary_str_raw(record, map.signal_index, value);
+            (void)set_summary_field_value(record, map.summary, value);
             return;
         }
     }
 }
 
-void apply_summary_metric_str_field(ReportSummaryRecord &record,
-                                    uint32_t field_id,
-                                    uint32_t subfield_id,
-                                    uint64_t value) {
-    for (const SummaryMetricStrMap &map : SUMMARY_METRIC_STR_MAP) {
+void apply_summary_metric_field(ReportSummaryRecord &record,
+                                uint32_t field_id,
+                                uint32_t subfield_id,
+                                uint64_t value) {
+    for (const SummaryMetricFieldMap &map : SUMMARY_METRIC_FIELD_MAP) {
         if (map.field == field_id && map.subfield == subfield_id) {
-            set_summary_str_scaled(record,
-                                   map.signal_index,
-                                   value,
-                                   map.multiplier);
+            (void)set_summary_field_value(record, map.summary, value);
             return;
         }
     }
@@ -164,15 +126,15 @@ void apply_summary_metric_str_field(ReportSummaryRecord &record,
 void parse_summary_metric_fields(uint32_t field_id,
                                  const uint8_t *data,
                                  size_t len,
-                                 ReportSummaryRecord &record) {
+    ReportSummaryRecord &record) {
     size_t index = 0;
     ReportProtoField field;
     while (report_proto_next(data, len, index, field)) {
         if (field.wire != 0) continue;
-        apply_summary_metric_str_field(record,
-                                       field_id,
-                                       field.field,
-                                       field.value);
+        apply_summary_metric_field(record,
+                                   field_id,
+                                   field.field,
+                                   field.value);
     }
 }
 
@@ -253,19 +215,13 @@ bool report_proto_all_length_fields(const uint8_t *data,
     return any;
 }
 
-bool report_summary_str_sample(const ReportSummaryRecord &record,
-                               size_t signal_index,
-                               int16_t &out) {
-    if (signal_index < AC_REPORT_SUMMARY_STR_FIRST_SIGNAL ||
-        signal_index > AC_REPORT_SUMMARY_STR_LAST_SIGNAL) {
-        return false;
-    }
-    const size_t slot = signal_index - AC_REPORT_SUMMARY_STR_FIRST_SIGNAL;
-    if (slot >= AC_REPORT_SUMMARY_STR_VALUE_COUNT || slot >= 64) {
-        return false;
-    }
-    if ((record.str_summary_mask & (1ULL << slot)) == 0) return false;
-    out = record.str_summary_digital[slot];
+bool report_summary_field_value(const ReportSummaryRecord &record,
+                                ReportSummaryField field,
+                                uint32_t &out) {
+    const size_t index = static_cast<size_t>(field);
+    if (index >= AC_REPORT_SUMMARY_FIELD_COUNT || index >= 64) return false;
+    if ((record.summary_field_mask & (1ULL << index)) == 0) return false;
+    out = record.summary_field_values[index];
     return true;
 }
 
@@ -344,7 +300,7 @@ bool parse_summary_record(const uint8_t *record,
             continue;
         }
         if (field.wire != 0) continue;
-        apply_summary_scalar_str_field(out, field.field, field.value);
+        apply_summary_scalar_field(out, field.field, field.value);
         switch (field.field) {
             case 2:
                 out.start_ms = field.value;

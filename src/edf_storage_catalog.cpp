@@ -1,28 +1,19 @@
 #include "edf_storage_catalog.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "calendar_utils.h"
 
 namespace aircannect {
 namespace {
 
-bool leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
-
-int days_in_month(int year, int month) {
-    static const int days[] = {
-        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-    };
-    if (month == 2 && leap_year(year)) return 29;
-    if (month < 1 || month > 12) return 0;
-    return days[month - 1];
-}
-
 bool valid_date_time(const EdfLocalDateTime &dt) {
     return dt.year >= 2020 &&
            dt.month >= 1 && dt.month <= 12 &&
-           dt.day >= 1 && dt.day <= days_in_month(dt.year, dt.month) &&
+           dt.day >= 1 &&
+           dt.day <= calendar_days_in_month(dt.year, dt.month) &&
            dt.hour >= 0 && dt.hour <= 23 &&
            dt.minute >= 0 && dt.minute <= 59 &&
            dt.second >= 0 && dt.second <= 59;
@@ -36,7 +27,7 @@ EdfLocalDateTime previous_day(EdfLocalDateTime dt) {
     if (dt.day >= 1) return dt;
     dt.month--;
     if (dt.month >= 1) {
-        dt.day = days_in_month(dt.year, dt.month);
+        dt.day = calendar_days_in_month(dt.year, dt.month);
         return dt;
     }
     dt.year--;
@@ -48,7 +39,7 @@ EdfLocalDateTime previous_day(EdfLocalDateTime dt) {
 int64_t days_before_year(int year) {
     int64_t days = 0;
     for (int y = 1970; y < year; ++y) {
-        days += leap_year(y) ? 366 : 365;
+        days += calendar_is_leap_year(y) ? 366 : 365;
     }
     return days;
 }
@@ -56,9 +47,36 @@ int64_t days_before_year(int year) {
 int64_t epoch_days(const EdfLocalDateTime &dt) {
     int64_t days = days_before_year(dt.year);
     for (int month = 1; month < dt.month; ++month) {
-        days += days_in_month(dt.year, month);
+        days += calendar_days_in_month(dt.year, month);
     }
     return days + dt.day - 1;
+}
+
+bool date_from_epoch_days(int64_t days, EdfLocalDateTime &dt) {
+    if (days < 0) return false;
+
+    int year = 1970;
+    while (true) {
+        const int year_days = calendar_is_leap_year(year) ? 366 : 365;
+        if (days < year_days) break;
+        days -= year_days;
+        year++;
+        if (year > 9999) return false;
+    }
+
+    int month = 1;
+    while (month <= 12) {
+        const int month_days = calendar_days_in_month(year, month);
+        if (days < month_days) break;
+        days -= month_days;
+        month++;
+    }
+    if (month > 12) return false;
+
+    dt.year = year;
+    dt.month = month;
+    dt.day = static_cast<int>(days) + 1;
+    return true;
 }
 
 bool write_yyyymmdd(const EdfLocalDateTime &dt,
@@ -181,6 +199,49 @@ bool edf_parse_as11_local_datetime(const char *text,
     if (*p == 'Z') p++;
     if (*p != 0) return false;
     if (!valid_date_time(dt)) return false;
+    out = dt;
+    return true;
+}
+
+bool edf_epoch_ms_to_local_datetime(int64_t epoch_ms,
+                                    int32_t timezone_offset_minutes,
+                                    EdfLocalDateTime &out) {
+    static constexpr int32_t kMaxTimezoneOffsetMinutes = 24 * 60;
+    static constexpr int64_t kMsPerSecond = 1000;
+    static constexpr int64_t kMsPerMinute = 60 * kMsPerSecond;
+    static constexpr int64_t kSecondsPerDay = 86400;
+
+    if (timezone_offset_minutes < -kMaxTimezoneOffsetMinutes ||
+        timezone_offset_minutes > kMaxTimezoneOffsetMinutes) {
+        return false;
+    }
+
+    const int64_t offset_ms =
+        static_cast<int64_t>(timezone_offset_minutes) * kMsPerMinute;
+    if ((offset_ms > 0 && epoch_ms > INT64_MAX - offset_ms) ||
+        (offset_ms < 0 && epoch_ms < INT64_MIN - offset_ms)) {
+        return false;
+    }
+
+    const int64_t local_ms = epoch_ms + offset_ms;
+    int64_t local_seconds = local_ms / kMsPerSecond;
+    if (local_ms < 0 && local_ms % kMsPerSecond) local_seconds--;
+
+    int64_t days = local_seconds / kSecondsPerDay;
+    int64_t seconds_of_day = local_seconds % kSecondsPerDay;
+    if (seconds_of_day < 0) {
+        seconds_of_day += kSecondsPerDay;
+        days--;
+    }
+
+    EdfLocalDateTime dt;
+    if (!date_from_epoch_days(days, dt)) return false;
+    dt.hour = static_cast<int>(seconds_of_day / 3600);
+    seconds_of_day %= 3600;
+    dt.minute = static_cast<int>(seconds_of_day / 60);
+    dt.second = static_cast<int>(seconds_of_day % 60);
+    if (!valid_date_time(dt)) return false;
+
     out = dt;
     return true;
 }

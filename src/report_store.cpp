@@ -19,14 +19,18 @@ constexpr uint32_t CHUNK_MAGIC = 0x50524341u;  // "ACRP", little-endian.
 constexpr uint16_t CHUNK_SCHEMA = 3;  // bumped for chunk origin byte
 constexpr size_t CHUNK_HEADER_SIZE = 56;
 constexpr uint32_t SUMMARY_MAGIC = 0x53524341u;  // "ACRS", little-endian.
-constexpr uint16_t SUMMARY_SCHEMA = 4;
+constexpr uint16_t SUMMARY_SCHEMA = 5;
 constexpr size_t SUMMARY_HEADER_SIZE = 32;
-constexpr size_t SUMMARY_RECORD_SIZE = 384;
+constexpr size_t SUMMARY_RECORD_SIZE = 512;
 constexpr size_t SUMMARY_SESSION_OFFSET = 64;
 constexpr size_t SUMMARY_SESSION_SIZE = 12;
-constexpr size_t SUMMARY_STR_OFFSET = 256;
-constexpr size_t SUMMARY_STR_MASK_OFFSET = SUMMARY_STR_OFFSET;
-constexpr size_t SUMMARY_STR_VALUE_OFFSET = SUMMARY_STR_OFFSET + 8;
+constexpr size_t SUMMARY_FIELD_OFFSET = 256;
+constexpr size_t SUMMARY_FIELD_MASK_OFFSET = SUMMARY_FIELD_OFFSET;
+constexpr size_t SUMMARY_FIELD_VALUE_OFFSET = SUMMARY_FIELD_OFFSET + 8;
+static_assert(SUMMARY_FIELD_VALUE_OFFSET +
+                      AC_REPORT_SUMMARY_FIELD_COUNT * sizeof(uint32_t) <=
+                  SUMMARY_RECORD_SIZE,
+              "summary field block must fit in summary record");
 constexpr uint32_t COVERAGE_MAGIC = 0x56524341u;  // "ACRV", little-endian.
 constexpr uint16_t COVERAGE_SCHEMA = 3;  // bumped: night-partitioned chunk layout
 constexpr size_t COVERAGE_RECORD_SIZE = 48;
@@ -283,7 +287,7 @@ void encode_summary_record(uint8_t *raw,
     if (record.has_rera_index) flags |= 1u << 8;
     if (record.has_session_count) flags |= 1u << 9;
     if (record.session_interval_count > 0) flags |= 1u << 10;
-    if (record.str_summary_mask != 0) flags |= 1u << 11;
+    if (record.summary_field_mask != 0) flags |= 1u << 11;
 
     put_le32(raw + 0, flags);
     put_le64(raw + 4, record.start_ms);
@@ -317,11 +321,10 @@ void encode_summary_record(uint8_t *raw,
         put_le32(session + 8, record.sessions[i].duration_min);
     }
 
-    put_le64(raw + SUMMARY_STR_MASK_OFFSET, record.str_summary_mask);
-    for (size_t i = 0; i < AC_REPORT_SUMMARY_STR_VALUE_COUNT; ++i) {
-        const size_t offset = SUMMARY_STR_VALUE_OFFSET + i * 2;
-        put_le16(raw + offset,
-                 static_cast<uint16_t>(record.str_summary_digital[i]));
+    put_le64(raw + SUMMARY_FIELD_MASK_OFFSET, record.summary_field_mask);
+    for (size_t i = 0; i < AC_REPORT_SUMMARY_FIELD_COUNT; ++i) {
+        const size_t offset = SUMMARY_FIELD_VALUE_OFFSET + i * 4;
+        put_le32(raw + offset, record.summary_field_values[i]);
     }
 }
 
@@ -339,7 +342,7 @@ bool decode_summary_record(const uint8_t *raw,
     record.has_ua_index = (flags & (1u << 7)) != 0;
     record.has_rera_index = (flags & (1u << 8)) != 0;
     record.has_session_count = (flags & (1u << 9)) != 0;
-    const bool has_str_summary = (flags & (1u << 11)) != 0;
+    const bool has_summary_fields = (flags & (1u << 11)) != 0;
 
     record.start_ms = get_le64(raw + 4);
     record.end_ms = get_le64(raw + 12);
@@ -379,12 +382,11 @@ bool decode_summary_record(const uint8_t *raw,
         record.session_count = record.session_interval_count;
     }
 
-    if (has_str_summary) {
-        record.str_summary_mask = get_le64(raw + SUMMARY_STR_MASK_OFFSET);
-        for (size_t i = 0; i < AC_REPORT_SUMMARY_STR_VALUE_COUNT; ++i) {
-            const size_t offset = SUMMARY_STR_VALUE_OFFSET + i * 2;
-            record.str_summary_digital[i] =
-                static_cast<int16_t>(get_le16(raw + offset));
+    if (has_summary_fields) {
+        record.summary_field_mask = get_le64(raw + SUMMARY_FIELD_MASK_OFFSET);
+        for (size_t i = 0; i < AC_REPORT_SUMMARY_FIELD_COUNT; ++i) {
+            const size_t offset = SUMMARY_FIELD_VALUE_OFFSET + i * 4;
+            record.summary_field_values[i] = get_le32(raw + offset);
         }
     }
     return record.valid && record.start_ms > 0 &&

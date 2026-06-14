@@ -183,61 +183,71 @@ const char *basename_from_path(const char *path) {
     return slash ? slash + 1 : path;
 }
 
-bool build_child_path(const char *parent,
-                      const char *name,
-                      char *dst,
-                      size_t dst_size) {
-    if (!parent || !name || !*name || !dst || dst_size == 0) return false;
-    const int written =
-        strcmp(parent, "/") == 0
-            ? snprintf(dst, dst_size, "/%s", name)
-            : snprintf(dst, dst_size, "%s/%s", parent, name);
-    return written > 0 && static_cast<size_t>(written) < dst_size;
-}
-
 bool append_edf_list_entry(LargeTextBuffer &json,
-                           const char *name,
-                           const char *path,
-                           bool is_dir,
-                           uint64_t size,
+                           const EdfStorageInventoryEntry &entry,
                            bool first) {
     if (!first) json += ',';
     json += '{';
-    json_add_string(json, "name", name, false);
-    json_add_string(json, "path", path);
-    json_add_string(json, "type", is_dir ? "dir" : "file");
-    if (!is_dir) json_add_uint64(json, "size", size);
+    json_add_string(json, "name", entry.name, false);
+    json_add_string(json, "path", entry.path);
+    json_add_string(json, "type", entry.directory ? "dir" : "file");
+    if (!entry.directory) {
+        const EdfInventoryEntry &file = entry.file;
+        json_add_uint64(json, "size", entry.size);
+        json_add_string(json,
+                        "edf_status",
+                        edf_inventory_status_name(file.status));
+        json_add_string(json,
+                        "edf_kind",
+                        edf_inventory_file_kind_name(file.kind));
+        if (file.status == EdfInventoryStatus::Ok) {
+            json_add_uint64(json, "data_size", file.data_size);
+            json_add_uint64(json,
+                            "records",
+                            file.complete_records_from_size);
+            json_add_int(json,
+                         "header_records",
+                         static_cast<long>(file.header.record_count));
+            json_add_int(json,
+                         "signals",
+                         static_cast<long>(file.header.signal_count));
+            json_add_int(json,
+                         "record_size",
+                         static_cast<long>(file.header.record_size));
+            json_add_int(json,
+                         "warnings",
+                         static_cast<long>(file.warnings));
+            json_add_uint64(json,
+                            "partial_tail_bytes",
+                            file.partial_tail_bytes);
+            json_add_string(json, "start_date", file.header.start_date);
+            json_add_string(json, "start_time", file.header.start_time);
+            json_add_string(json,
+                            "record_duration",
+                            file.header.record_duration);
+        }
+    }
     json += '}';
     return !json.overflowed();
 }
 
-bool append_edf_list_entry_window(LargeTextBuffer &json,
-                                  const char *name,
-                                  const char *path,
-                                  bool is_dir,
-                                  uint64_t size,
-                                  size_t offset,
-                                  size_t limit,
-                                  size_t &matched,
-                                  size_t &returned,
-                                  bool &first,
-                                  bool &truncated) {
-    if (matched++ < offset) return true;
-    if (returned >= limit) {
-        truncated = true;
-        return false;
-    }
-    if (!append_edf_list_entry(json, name, path, is_dir, size, first)) {
-        return false;
-    }
-    first = false;
-    ++returned;
+struct EdfListJsonContext {
+    LargeTextBuffer *json = nullptr;
+    bool first = true;
+};
+
+bool append_edf_inventory_json(const EdfStorageInventoryEntry &entry,
+                               void *ctx) {
+    EdfListJsonContext *list = static_cast<EdfListJsonContext *>(ctx);
+    if (!list || !list->json) return false;
+    if (!append_edf_list_entry(*list->json, entry, list->first)) return false;
+    list->first = false;
     return true;
 }
 
-bool edf_storage_request_available(AsyncWebServerRequest *request,
-                                   const SessionManager *session_manager,
-                                   const RpcArbiter *arbiter) {
+bool edf_therapy_request_idle(AsyncWebServerRequest *request,
+                              const SessionManager *session_manager,
+                              const RpcArbiter *arbiter) {
     if (session_manager &&
         session_manager->status().state == SessionState::Active) {
         request->send(409, "application/json",
@@ -249,6 +259,15 @@ bool edf_storage_request_available(AsyncWebServerRequest *request,
             As11TherapyState::Running) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"therapy_active\"}");
+        return false;
+    }
+    return true;
+}
+
+bool edf_storage_request_available(AsyncWebServerRequest *request,
+                                   const SessionManager *session_manager,
+                                   const RpcArbiter *arbiter) {
+    if (!edf_therapy_request_idle(request, session_manager, arbiter)) {
         return false;
     }
     if (!Storage::mounted()) {
@@ -1632,12 +1651,12 @@ void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    if (!edf_storage_request_available(request, session_manager_, arbiter_)) {
+    if (!edf_therapy_request_idle(request, session_manager_, arbiter_)) {
         return;
     }
 
     LargeTextBuffer json;
-    json.reserve(512 + limit * 192);
+    json.reserve(512 + limit * 384);
     json = "{";
     json_add_bool(json, "ok", true, false);
     json_add_string(json, "path", path.c_str());
@@ -1645,88 +1664,42 @@ void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
     json_add_int(json, "limit", static_cast<long>(limit));
     json += ",\"entries\":[";
 
-    bool first = true;
-    bool truncated = false;
-    bool not_found = false;
-    bool not_dir = false;
-    size_t matched = 0;
-    size_t returned = 0;
-
-    {
-        Storage::Guard guard;
-        if (path == "/") {
-            File datalog = Storage::open("/DATALOG", "r");
-            if (datalog && datalog.isDirectory()) {
-                append_edf_list_entry_window(
-                    json, "DATALOG", "/DATALOG", true, 0, offset, limit,
-                    matched, returned, first, truncated);
-            }
-            if (datalog) datalog.close();
-
-            if (!truncated) {
-                File str = Storage::open("/STR.edf", "r");
-                if (str && !str.isDirectory()) {
-                    append_edf_list_entry_window(
-                        json, "STR.edf", "/STR.edf", false, str.size(),
-                        offset, limit, matched, returned, first, truncated);
-                }
-                if (str) str.close();
-            }
-        } else {
-            File dir = Storage::open(path.c_str(), "r");
-            if (!dir) {
-                not_found = true;
-            } else if (!dir.isDirectory()) {
-                not_dir = true;
-            } else {
-                while (!truncated) {
-                    File child = dir.openNextFile();
-                    if (!child) break;
-                    const bool child_dir = child.isDirectory();
-                    const char *name = basename_from_path(child.name());
-                    char child_path[AC_STORAGE_WRITE_PATH_MAX] = {};
-                    bool include = false;
-                    uint64_t size = 0;
-
-                    if (build_child_path(path.c_str(), name, child_path,
-                                         sizeof(child_path))) {
-                        if (path == "/DATALOG") {
-                            include = child_dir &&
-                                      edf_valid_browse_path(child_path);
-                        } else {
-                            include = !child_dir &&
-                                      edf_valid_pull_path(child_path);
-                            if (include) size = child.size();
-                        }
-                    }
-
-                    bool keep_going = true;
-                    if (include) {
-                        keep_going = append_edf_list_entry_window(
-                            json, name, child_path, child_dir, size, offset,
-                            limit, matched, returned, first, truncated);
-                    }
-                    child.close();
-                    if (!keep_going) break;
-                }
-            }
-            if (dir) dir.close();
-        }
-    }
-
-    if (not_found || not_dir) {
-        request->send(404, "application/json",
-                      "{\"ok\":false,\"error\":\"not_found\"}");
+    EdfListJsonContext list_ctx;
+    list_ctx.json = &json;
+    const EdfStorageInventoryResult result = EdfStorageWorker::list_inventory(
+        path.c_str(),
+        offset,
+        limit,
+        append_edf_inventory_json,
+        &list_ctx);
+    if (result.status != EdfStorageInventoryStatus::Ok) {
+        const char *error =
+            result.status == EdfStorageInventoryStatus::VisitorStopped
+                ? "list_alloc"
+                : EdfStorageWorker::inventory_status_name(result.status);
+        const int code =
+            result.status == EdfStorageInventoryStatus::BadPath ? 400 :
+            result.status == EdfStorageInventoryStatus::StorageUnavailable
+                ? 503 :
+            result.status == EdfStorageInventoryStatus::Busy ? 409 :
+            result.status == EdfStorageInventoryStatus::VisitorStopped ? 503 :
+            404;
+        char body[96] = {};
+        snprintf(body,
+                 sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 error);
+        request->send(code, "application/json", body);
         return;
     }
 
     json += ']';
-    json_add_int(json, "count", static_cast<long>(returned));
-    json_add_bool(json, "truncated", truncated);
-    if (truncated) {
+    json_add_int(json, "count", static_cast<long>(result.returned));
+    json_add_bool(json, "truncated", result.truncated);
+    if (result.truncated) {
         char next[24];
         snprintf(next, sizeof(next), "%llu",
-                 static_cast<unsigned long long>(offset + returned));
+                 static_cast<unsigned long long>(offset + result.returned));
         json += ",\"next_offset\":";
         json += next;
     } else {
@@ -1885,6 +1858,7 @@ void WebUI::build_config_json(LargeTextBuffer &json) const {
     json_add_string(json, "oximetry_advertise_mode",
                     oximetry_advertise_mode_name(
                         cfg.oximetry_advertise_mode));
+    json_add_bool(json, "edf_capture_enabled", cfg.edf_capture_enabled);
     json_add_bool(json, "http_auth_required", network_auth_required(cfg));
     json_add_string(json, "http_user", cfg.http_user.c_str());
     json_add_bool(json, "http_password_set", cfg.http_password.length() > 0);
@@ -2189,6 +2163,7 @@ void WebUI::execute_config_update(const std::string &body) {
                   "[WEB] failed to persist one or more config values\n");
     }
     apply_config_runtime_effects(result, *app_config_, *wifi_manager_,
+                                 console_ctx_->edf_recorder_manager,
                                  *ota_manager_);
     if (result.changed_fields) mark_snapshots_dirty(SNAPSHOT_ALL);
 }

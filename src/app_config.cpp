@@ -23,6 +23,7 @@ static constexpr const char *KEY_RESMED_TIME_SYNC = "resmed_time";
 static constexpr const char *KEY_OXIMETRY_ENABLED = "oxi_en";
 static constexpr const char *KEY_OXIMETRY_UDP_PORT = "oxi_udp";
 static constexpr const char *KEY_OXIMETRY_ADVERTISE_MODE = "oxi_adv";
+static constexpr const char *KEY_EDF_CAPTURE_ENABLED = "edf_cap";
 static constexpr const char *KEY_HTTP_USER = "http_user";
 static constexpr const char *KEY_HTTP_PASSWORD = "http_pass";
 static constexpr const char *KEY_AUTH_WHITELIST = "auth_wl";
@@ -44,13 +45,14 @@ static constexpr uint32_t DIRTY_AUTH_WHITELIST = 1UL << 7;
 static constexpr uint32_t DIRTY_TELNET = 1UL << 8;
 static constexpr uint32_t DIRTY_OTA_PASSWORD = 1UL << 9;
 static constexpr uint32_t DIRTY_OXIMETRY = 1UL << 10;
+static constexpr uint32_t DIRTY_EDF_CAPTURE = 1UL << 11;
 static constexpr uint32_t DIRTY_LOG_LEVELS = 1UL << 12;
 static constexpr uint32_t DIRTY_SYSLOG = 1UL << 13;
 static constexpr uint32_t DIRTY_ALL =
     DIRTY_HOSTNAME | DIRTY_TCP | DIRTY_SOFTAP | DIRTY_WIFI_COUNTRY |
     DIRTY_TIMEZONE | DIRTY_RESMED_TIME | DIRTY_HTTP_AUTH |
     DIRTY_AUTH_WHITELIST | DIRTY_TELNET | DIRTY_OTA_PASSWORD |
-    DIRTY_OXIMETRY | DIRTY_LOG_LEVELS | DIRTY_SYSLOG;
+    DIRTY_OXIMETRY | DIRTY_EDF_CAPTURE | DIRTY_LOG_LEVELS | DIRTY_SYSLOG;
 
 bool valid_hostname_char(char c) {
     return isalnum(static_cast<unsigned char>(c)) || c == '-';
@@ -226,6 +228,9 @@ bool AppConfig::load() {
         prefs.getUInt(KEY_OXIMETRY_UDP_PORT, defaults.oximetry_udp_port));
     data_.oximetry_advertise_mode = load_oximetry_advertise_mode(
         prefs, defaults.oximetry_advertise_mode);
+    data_.edf_capture_enabled =
+        prefs.getBool(KEY_EDF_CAPTURE_ENABLED,
+                      defaults.edf_capture_enabled);
     data_.http_user = prefs.getString(KEY_HTTP_USER, defaults.http_user);
     data_.http_password =
         prefs.getString(KEY_HTTP_PASSWORD, defaults.http_password);
@@ -303,6 +308,11 @@ bool AppConfig::save_fields(uint32_t dirty) const {
         ok = prefs.putUChar(
                  KEY_OXIMETRY_ADVERTISE_MODE,
                  static_cast<uint8_t>(data_.oximetry_advertise_mode)) != 0 &&
+             ok;
+    }
+    if (dirty & DIRTY_EDF_CAPTURE) {
+        ok = prefs.putBool(KEY_EDF_CAPTURE_ENABLED,
+                           data_.edf_capture_enabled) != 0 &&
              ok;
     }
     if (dirty & DIRTY_HTTP_AUTH) {
@@ -530,6 +540,12 @@ bool AppConfig::set_oximetry_advertise_mode(
     if (data_.oximetry_advertise_mode == mode) return true;
     data_.oximetry_advertise_mode = mode;
     return persist(DIRTY_OXIMETRY);
+}
+
+bool AppConfig::set_edf_capture_enabled(bool enabled) {
+    if (data_.edf_capture_enabled == enabled) return true;
+    data_.edf_capture_enabled = enabled;
+    return persist(DIRTY_EDF_CAPTURE);
 }
 
 bool AppConfig::set_http_auth(const String &user, const String &password) {

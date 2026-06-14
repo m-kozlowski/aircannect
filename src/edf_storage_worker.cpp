@@ -9,6 +9,10 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "edf_file_reader.h"
+#include "edf_file_resume.h"
+#include "edf_storage_catalog.h"
+#include "edf_storage_open_plan.h"
 #include "edf_str_file_layout.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
@@ -43,6 +47,8 @@ struct JobSlot {
     uint32_t record_count = 0;
     uint8_t *bytes = nullptr;
     size_t len = 0;
+    size_t record_size = 0;
+    bool recording_start = false;
 };
 
 struct OpenFile {
@@ -50,8 +56,12 @@ struct OpenFile {
     StoredFileKind kind = StoredFileKind::Brp;
     File file;
     uint32_t record_count = 0;
+    size_t record_size = 0;
+    bool resumed = false;
     char path[sizeof(EdfStorageWorkerStatus::last_path)] = {};
 };
+
+void close_file(OpenFile &state);
 
 EdfStorageWorkerStatus stats;
 SemaphoreHandle_t queue_lock = nullptr;
@@ -67,6 +77,24 @@ bool processing_job = false;
 void copy_text(char *dst, size_t size, const char *src) {
     if (!dst || size == 0) return;
     snprintf(dst, size, "%s", src ? src : "");
+}
+
+const char *basename_from_path(const char *path) {
+    if (!path) return "";
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+bool build_child_path(const char *parent,
+                      const char *name,
+                      char *dst,
+                      size_t dst_size) {
+    if (!parent || !name || !*name || !dst || dst_size == 0) return false;
+    const int written =
+        strcmp(parent, "/") == 0
+            ? snprintf(dst, dst_size, "/%s", name)
+            : snprintf(dst, dst_size, "%s/%s", parent, name);
+    return written > 0 && static_cast<size_t>(written) < dst_size;
 }
 
 void set_error(const char *error) {
@@ -102,6 +130,15 @@ size_t file_index(StoredFileKind kind) {
     }
 }
 
+EdfStorageOpenFileStatus open_file_status(const OpenFile &file) {
+    EdfStorageOpenFileStatus out;
+    out.open = file.open;
+    out.resumed = file.resumed;
+    out.record_count = file.record_count;
+    copy_text(out.path, sizeof(out.path), file.path);
+    return out;
+}
+
 EdfFileKind numeric_kind(StoredFileKind kind) {
     switch (kind) {
         case StoredFileKind::Pld: return EdfFileKind::Pld;
@@ -116,10 +153,219 @@ bool is_annotation_kind(StoredFileKind kind) {
     return kind == StoredFileKind::Eve || kind == StoredFileKind::Csl;
 }
 
+size_t open_header_size(const JobSlot &job) {
+    return is_annotation_kind(job.kind) ? edf_annotation_header_size()
+                                        : job.len;
+}
+
 bool valid_path(const char *path) {
     if (!path || path[0] != '/') return false;
     const size_t len = strlen(path);
     return len > 1 && len < sizeof(EdfStorageWorkerStatus::last_path);
+}
+
+void fill_inventory_entry_base(EdfStorageInventoryEntry &entry,
+                               const char *name,
+                               const char *path,
+                               bool directory,
+                               uint64_t size) {
+    entry = {};
+    entry.directory = directory;
+    entry.size = size;
+    copy_text(entry.name, sizeof(entry.name), name);
+    copy_text(entry.path, sizeof(entry.path), path);
+}
+
+void mark_inventory_file_status(EdfStorageInventoryEntry &entry,
+                                EdfInventoryStatus status,
+                                size_t file_size = 0,
+                                uint32_t header_size = 0) {
+    if (!edf_inventory_describe_path(entry.path, entry.file)) {
+        entry.file = {};
+    }
+    entry.file.status = status;
+    entry.file.file_size = file_size;
+    entry.file.header.header_size = header_size;
+}
+
+void describe_inventory_file_locked(EdfStorageInventoryEntry &entry,
+                                    File &file) {
+    const size_t file_size = static_cast<size_t>(file.size());
+    entry.size = file_size;
+
+    uint8_t fixed_header[AC_EDF_HEADER_SIGNAL_HEADER_OFFSET] = {};
+    if (file_size < sizeof(fixed_header)) {
+        mark_inventory_file_status(entry,
+                                   EdfInventoryStatus::FileTooSmall,
+                                   file_size);
+        return;
+    }
+    if (!file.seek(0) ||
+        file.read(fixed_header, sizeof(fixed_header)) !=
+            sizeof(fixed_header)) {
+        mark_inventory_file_status(entry,
+                                   EdfInventoryStatus::InvalidHeader,
+                                   file_size);
+        return;
+    }
+
+    uint32_t header_size = 0;
+    if (!edf_parse_header_declared_size(fixed_header,
+                                        sizeof(fixed_header),
+                                        header_size)) {
+        mark_inventory_file_status(entry,
+                                   EdfInventoryStatus::InvalidHeader,
+                                   file_size);
+        return;
+    }
+    if (header_size > AC_EDF_STORAGE_INVENTORY_HEADER_MAX) {
+        mark_inventory_file_status(entry,
+                                   EdfInventoryStatus::InvalidHeader,
+                                   file_size,
+                                   header_size);
+        return;
+    }
+    if (file_size < header_size) {
+        mark_inventory_file_status(entry,
+                                   EdfInventoryStatus::FileTooSmall,
+                                   file_size,
+                                   header_size);
+        return;
+    }
+
+    uint8_t *header = static_cast<uint8_t *>(
+        Memory::alloc_large(header_size, true));
+    if (!header) {
+        mark_inventory_file_status(entry,
+                                   EdfInventoryStatus::InvalidHeader,
+                                   file_size,
+                                   header_size);
+        return;
+    }
+    memcpy(header, fixed_header, sizeof(fixed_header));
+    const size_t rest = header_size - sizeof(fixed_header);
+    const bool read_ok =
+        rest == 0 ||
+        file.read(header + sizeof(fixed_header), rest) == rest;
+    if (read_ok) {
+        (void)edf_inventory_describe_file(entry.path,
+                                          header,
+                                          header_size,
+                                          file_size,
+                                          entry.file);
+    } else {
+        mark_inventory_file_status(entry,
+                                   EdfInventoryStatus::InvalidHeader,
+                                   file_size,
+                                   header_size);
+    }
+    Memory::free(header);
+}
+
+bool visit_inventory_entry(const EdfStorageInventoryEntry &entry,
+                           EdfStorageInventoryVisitor visitor,
+                           void *ctx,
+                           size_t offset,
+                           size_t limit,
+                           EdfStorageInventoryResult &result) {
+    if (result.matched++ < offset) return true;
+    if (result.returned >= limit) {
+        result.truncated = true;
+        return false;
+    }
+    if (!visitor(entry, ctx)) {
+        result.status = EdfStorageInventoryStatus::VisitorStopped;
+        return false;
+    }
+    ++result.returned;
+    return true;
+}
+
+void root_datalog_inventory_entry(EdfStorageInventoryEntry &entry,
+                                  bool &found) {
+    found = false;
+    Storage::Guard guard;
+    File datalog = Storage::open("/DATALOG", "r");
+    if (datalog && datalog.isDirectory()) {
+        fill_inventory_entry_base(entry, "DATALOG", "/DATALOG", true, 0);
+        found = true;
+    }
+    if (datalog) datalog.close();
+}
+
+void root_str_inventory_entry(EdfStorageInventoryEntry &entry,
+                              bool &found) {
+    found = false;
+    Storage::Guard guard;
+    File str = Storage::open("/STR.edf", "r");
+    if (str && !str.isDirectory()) {
+        fill_inventory_entry_base(entry,
+                                  "STR.edf",
+                                  "/STR.edf",
+                                  false,
+                                  str.size());
+        describe_inventory_file_locked(entry, str);
+        found = true;
+    }
+    if (str) str.close();
+}
+
+bool open_inventory_directory(const char *path,
+                              File &dir,
+                              EdfStorageInventoryResult &result) {
+    Storage::Guard guard;
+    dir = Storage::open(path, "r");
+    if (!dir) {
+        result.status = EdfStorageInventoryStatus::NotFound;
+        return false;
+    }
+    if (!dir.isDirectory()) {
+        dir.close();
+        result.status = EdfStorageInventoryStatus::NotDirectory;
+        return false;
+    }
+    return true;
+}
+
+bool read_inventory_directory_child(const char *path,
+                                    File &dir,
+                                    EdfStorageInventoryEntry &entry,
+                                    bool &have_child,
+                                    bool &include) {
+    have_child = false;
+    include = false;
+    Storage::Guard guard;
+    File child = dir.openNextFile();
+    if (!child) return true;
+    have_child = true;
+
+    const bool child_dir = child.isDirectory();
+    const char *name = basename_from_path(child.name());
+    char child_path[AC_EDF_STORAGE_INVENTORY_PATH_MAX] = {};
+
+    if (build_child_path(path, name, child_path, sizeof(child_path))) {
+        if (strcmp(path, "/DATALOG") == 0) {
+            include = child_dir && edf_valid_browse_path(child_path);
+        } else {
+            include = !child_dir && edf_valid_pull_path(child_path);
+        }
+    }
+
+    if (include) {
+        fill_inventory_entry_base(entry,
+                                  name,
+                                  child_path,
+                                  child_dir,
+                                  child_dir ? 0 : child.size());
+        if (!child_dir) describe_inventory_file_locked(entry, child);
+    }
+    child.close();
+    return true;
+}
+
+void close_inventory_directory(File &dir) {
+    Storage::Guard guard;
+    if (dir) dir.close();
 }
 
 bool lock_queue(uint32_t timeout_ms = 10) {
@@ -131,12 +377,32 @@ void unlock_queue() {
     if (queue_lock) xSemaphoreGive(queue_lock);
 }
 
-uint8_t open_file_count() {
+uint8_t count_open_files() {
     uint8_t count = 0;
     for (const OpenFile &file : open_files) {
         if (file.open) ++count;
     }
     return count;
+}
+
+void refresh_open_file_count() {
+    const uint8_t count = count_open_files();
+    EdfStorageOpenFileStatus files[AC_EDF_STORAGE_FILE_COUNT];
+    for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
+        files[i] = open_file_status(open_files[i]);
+    }
+    if (lock_queue(50)) {
+        stats.open_file_count = count;
+        for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
+            stats.files[i] = files[i];
+        }
+        unlock_queue();
+        return;
+    }
+    stats.open_file_count = count;
+    for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
+        stats.files[i] = files[i];
+    }
 }
 
 size_t free_slots() {
@@ -155,12 +421,14 @@ void clear_slot(JobSlot &slot) {
     slot.start_time[0] = 0;
     slot.record_count = 0;
     slot.len = 0;
+    slot.record_size = 0;
+    slot.recording_start = false;
 }
 
 bool allocate_slots() {
     if (slots && slot_bytes) return true;
-    slots = static_cast<JobSlot *>(Memory::alloc_internal(
-        sizeof(JobSlot) * AC_EDF_STORAGE_QUEUE_CAPACITY));
+    slots = static_cast<JobSlot *>(Memory::calloc_large(
+        AC_EDF_STORAGE_QUEUE_CAPACITY, sizeof(JobSlot), false));
     slot_bytes = static_cast<uint8_t *>(Memory::alloc_large(
         AC_EDF_STORAGE_SLOT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY, false));
     if (!slots || !slot_bytes) {
@@ -172,7 +440,6 @@ bool allocate_slots() {
         stats.available = false;
         return false;
     }
-    memset(slots, 0, sizeof(JobSlot) * AC_EDF_STORAGE_QUEUE_CAPACITY);
     for (size_t i = 0; i < AC_EDF_STORAGE_QUEUE_CAPACITY; ++i) {
         slots[i].bytes = slot_bytes + i * AC_EDF_STORAGE_SLOT_BYTES;
     }
@@ -235,6 +502,94 @@ bool patch_record_count(OpenFile &state) {
         reinterpret_cast<const uint8_t *>(field), sizeof(field));
     if (written != sizeof(field)) return false;
     state.file.flush();
+    state.file.seek(state.file.size());
+    return true;
+}
+
+bool render_resume_header(const JobSlot &job,
+                          uint8_t *dst,
+                          size_t header_size) {
+    if (!dst || header_size < AC_EDF_HEADER_SIGNAL_HEADER_OFFSET) return false;
+    if (!is_annotation_kind(job.kind)) {
+        if (!job.bytes || job.len != header_size) return false;
+        memcpy(dst, job.bytes, header_size);
+        return true;
+    }
+
+    EdfHeaderInfo info;
+    info.patient_id = job.patient_id;
+    info.recording_id = job.recording_id;
+    info.start_date = job.start_date;
+    info.start_time = job.start_time;
+    info.record_count = 0;
+    size_t written = 0;
+    return edf_render_annotation_header(info, dst, header_size, written) &&
+           written == header_size;
+}
+
+bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
+    const size_t header_size = open_header_size(job);
+    if (!valid_path(job.path) ||
+        header_size < AC_EDF_HEADER_SIGNAL_HEADER_OFFSET ||
+        header_size > SIZE_MAX / 2 ||
+        job.record_size == 0 || !Storage::exists(job.path)) {
+        return false;
+    }
+
+    state.file = Storage::open(job.path, "r+");
+    if (!state.file) return false;
+
+    const size_t file_size = state.file.size();
+    if (file_size < header_size) {
+        state.file.close();
+        return false;
+    }
+    uint8_t *headers = static_cast<uint8_t *>(
+        Memory::alloc_large(header_size * 2, false));
+    if (!headers) {
+        state.file.close();
+        return false;
+    }
+    uint8_t *actual = headers;
+    uint8_t *expected = headers + header_size;
+
+    bool ok = state.file.seek(0) &&
+              state.file.read(actual, header_size) == header_size &&
+              render_resume_header(job, expected, header_size);
+    const EdfResumeDecision resume =
+        ok ? edf_resume_check_file(actual,
+                                   expected,
+                                   header_size,
+                                   file_size,
+                                   job.record_size)
+           : EdfResumeDecision{};
+    Memory::free(headers);
+    EdfStorageOpenPlanRequest plan_request;
+    plan_request.annotation = is_annotation_kind(job.kind);
+    plan_request.recording_start_requested = job.recording_start;
+    plan_request.requested_record_count = job.record_count;
+    plan_request.resume = resume;
+    const EdfStorageOpenPlan plan = edf_storage_plan_open(plan_request);
+    if (!ok || !plan.resume_existing) {
+        state.file.close();
+        return false;
+    }
+
+    state.kind = job.kind;
+    state.record_count = plan.record_count;
+    state.record_size = job.record_size;
+    state.resumed = true;
+    copy_text(state.path, sizeof(state.path), job.path);
+    state.open = true;
+    if (plan.patch_header_record_count && !patch_record_count(state)) {
+        state.file.close();
+        state.open = false;
+        state.record_count = 0;
+        state.record_size = 0;
+        state.resumed = false;
+        state.path[0] = 0;
+        return false;
+    }
     state.file.seek(state.file.size());
     return true;
 }
@@ -340,7 +695,26 @@ void close_file(OpenFile &state) {
     }
     state.open = false;
     state.record_count = 0;
+    state.record_size = 0;
+    state.resumed = false;
     state.path[0] = 0;
+}
+
+bool write_recording_start(OpenFile &state) {
+    uint8_t record[64] = {};
+    size_t written = 0;
+    if (!edf_render_recording_start_annotation(record,
+                                               sizeof(record),
+                                               written) ||
+        written != state.record_size) {
+        return false;
+    }
+    if (state.file.write(record, written) != written) return false;
+    state.record_count++;
+    if (!patch_record_count(state)) return false;
+    stats.records_written++;
+    stats.bytes_written += written;
+    return true;
 }
 
 bool process_open(const JobSlot &job) {
@@ -362,6 +736,15 @@ bool process_open(const JobSlot &job) {
 
     OpenFile &state = open_files[file_index(job.kind)];
     close_file(state);
+    refresh_open_file_count();
+    if (try_resume_open_file(state, job)) {
+        refresh_open_file_count();
+        copy_text(stats.last_path, sizeof(stats.last_path), job.path);
+        stats.open_jobs++;
+        stats.last_error[0] = 0;
+        return true;
+    }
+
     (void)Storage::remove(job.path);
     state.file = Storage::open(job.path, "w+");
     if (!state.file) {
@@ -370,7 +753,14 @@ bool process_open(const JobSlot &job) {
         return false;
     }
     state.kind = job.kind;
-    state.record_count = job.record_count;
+    EdfStorageOpenPlanRequest plan_request;
+    plan_request.annotation = is_annotation_kind(job.kind);
+    plan_request.recording_start_requested = job.recording_start;
+    plan_request.requested_record_count = job.record_count;
+    const EdfStorageOpenPlan plan = edf_storage_plan_open(plan_request);
+    state.record_count = plan.record_count;
+    state.record_size = job.record_size;
+    state.resumed = false;
     copy_text(state.path, sizeof(state.path), job.path);
     if (!write_open_header(state, job)) {
         state.file.close();
@@ -378,8 +768,20 @@ bool process_open(const JobSlot &job) {
         set_error("header_write_failed");
         return false;
     }
-    state.file.flush();
     state.open = true;
+    if (plan.write_recording_start && !write_recording_start(state)) {
+        state.file.close();
+        state.open = false;
+        state.record_count = 0;
+        state.record_size = 0;
+        state.resumed = false;
+        state.path[0] = 0;
+        stats.write_errors++;
+        set_error("recording_start_write_failed");
+        return false;
+    }
+    state.file.flush();
+    refresh_open_file_count();
     copy_text(stats.last_path, sizeof(stats.last_path), job.path);
     stats.open_jobs++;
     stats.last_error[0] = 0;
@@ -391,6 +793,11 @@ bool process_record(const JobSlot &job) {
     if (!state.open || !state.file) {
         stats.write_errors++;
         set_error("file_not_open");
+        return false;
+    }
+    if (state.record_size != 0 && job.len != state.record_size) {
+        stats.write_errors++;
+        set_error("record_size_mismatch");
         return false;
     }
 
@@ -528,6 +935,7 @@ bool process_close(const JobSlot &job) {
     Storage::Guard guard;
     OpenFile &state = open_files[file_index(job.kind)];
     close_file(state);
+    refresh_open_file_count();
     stats.close_jobs++;
     stats.last_activity_ms = millis();
     stats.last_error[0] = 0;
@@ -594,6 +1002,47 @@ bool enqueue(JobSlot &job) {
     return true;
 }
 
+template <typename Prepare, typename Render>
+bool enqueue_rendered_slot(Prepare prepare,
+                           Render render,
+                           const char *render_error) {
+    if (!stats.initialized) begin();
+    if (!stats.available || !slots) return false;
+    if (!lock_queue()) {
+        stats.queue_drops++;
+        set_error("queue_lock_failed");
+        return false;
+    }
+    if (free_slots() == 0) {
+        unlock_queue();
+        stats.queue_drops++;
+        set_error("queue_full");
+        return false;
+    }
+
+    JobSlot &job = slots[tail];
+    clear_slot(job);
+    prepare(job);
+
+    size_t written = 0;
+    if (!render(job, written)) {
+        unlock_queue();
+        stats.render_errors++;
+        set_error(render_error);
+        return false;
+    }
+
+    job.len = written;
+    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
+    queued++;
+    stats.queued = queued;
+    unlock_queue();
+
+    stats.bytes_enqueued += written;
+    stats.last_activity_ms = millis();
+    return true;
+}
+
 }  // namespace
 
 void begin() {
@@ -621,48 +1070,31 @@ bool enqueue_open_numeric(const char *path,
     if (!valid_path(path) || schema.signal_count == 0) return false;
     const size_t header_size = edf_header_size(schema);
     if (header_size > AC_EDF_STORAGE_SLOT_BYTES) return false;
-    if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
-    if (!lock_queue()) {
-        stats.queue_drops++;
-        set_error("queue_lock_failed");
-        return false;
-    }
-    if (free_slots() == 0) {
-        unlock_queue();
-        stats.queue_drops++;
-        set_error("queue_full");
-        return false;
-    }
-
-    JobSlot &job = slots[tail];
-    clear_slot(job);
-    job.type = JobType::Open;
-    job.kind = stored_kind(schema.kind);
-    job.record_count = info.record_count;
-    copy_text(job.path, sizeof(job.path), path);
-    copy_text(job.patient_id, sizeof(job.patient_id), info.patient_id);
-    copy_text(job.recording_id, sizeof(job.recording_id), info.recording_id);
-    copy_text(job.start_date, sizeof(job.start_date), info.start_date);
-    copy_text(job.start_time, sizeof(job.start_time), info.start_time);
-    size_t written = 0;
-    const bool ok = edf_render_header(schema, info, job.bytes,
-                                      AC_EDF_STORAGE_SLOT_BYTES, written);
-    if (!ok || written != header_size) {
-        unlock_queue();
-        stats.render_errors++;
-        set_error("header_render_failed");
-        return false;
-    }
-    job.len = written;
-    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-    queued++;
-    stats.queued = queued;
-    unlock_queue();
-
-    stats.bytes_enqueued += written;
-    stats.last_activity_ms = millis();
-    return true;
+    return enqueue_rendered_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::Open;
+            job.kind = stored_kind(schema.kind);
+            job.record_count = info.record_count;
+            job.record_size = edf_record_size(schema);
+            copy_text(job.path, sizeof(job.path), path);
+            copy_text(job.patient_id, sizeof(job.patient_id),
+                      info.patient_id);
+            copy_text(job.recording_id, sizeof(job.recording_id),
+                      info.recording_id);
+            copy_text(job.start_date, sizeof(job.start_date),
+                      info.start_date);
+            copy_text(job.start_time, sizeof(job.start_time),
+                      info.start_time);
+        },
+        [&](JobSlot &job, size_t &written) {
+            return edf_render_header(schema,
+                                     info,
+                                     job.bytes,
+                                     AC_EDF_STORAGE_SLOT_BYTES,
+                                     written) &&
+                   written == header_size;
+        },
+        "header_render_failed");
 }
 
 bool enqueue_open_annotation(const char *path,
@@ -673,6 +1105,8 @@ bool enqueue_open_annotation(const char *path,
     job.type = JobType::Open;
     job.kind = stored_kind(kind);
     job.record_count = info.record_count;
+    job.record_size = edf_annotation_record_size();
+    job.recording_start = true;
     copy_text(job.path, sizeof(job.path), path);
     copy_text(job.patient_id, sizeof(job.patient_id), info.patient_id);
     copy_text(job.recording_id, sizeof(job.recording_id), info.recording_id);
@@ -684,85 +1118,36 @@ bool enqueue_open_annotation(const char *path,
 bool enqueue_numeric_record(const EdfFileSchema &schema,
                             const EdfCompletedRecordView &record) {
     if (edf_record_size(schema) > AC_EDF_STORAGE_SLOT_BYTES) return false;
-    if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
-    if (!lock_queue()) {
-        stats.queue_drops++;
-        set_error("queue_lock_failed");
-        return false;
-    }
-    if (free_slots() == 0) {
-        unlock_queue();
-        stats.queue_drops++;
-        set_error("queue_full");
-        return false;
-    }
-
-    JobSlot &job = slots[tail];
-    clear_slot(job);
-    job.type = JobType::Record;
-    job.kind = stored_kind(schema.kind);
-    size_t written = 0;
-    const bool ok = edf_render_numeric_record(schema, record, job.bytes,
-                                              AC_EDF_STORAGE_SLOT_BYTES,
-                                              written);
-    if (!ok) {
-        unlock_queue();
-        stats.render_errors++;
-        set_error("render_failed");
-        return false;
-    }
-    job.len = written;
-    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-    queued++;
-    stats.queued = queued;
-    unlock_queue();
-
-    stats.bytes_enqueued += written;
-    stats.last_activity_ms = millis();
-    return true;
+    return enqueue_rendered_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::Record;
+            job.kind = stored_kind(schema.kind);
+        },
+        [&](JobSlot &job, size_t &written) {
+            return edf_render_numeric_record(schema,
+                                             record,
+                                             job.bytes,
+                                             AC_EDF_STORAGE_SLOT_BYTES,
+                                             written);
+        },
+        "render_failed");
 }
 
 bool enqueue_annotation_record(EdfAnnotationKind kind,
                                const EdfAnnotationRecord &record) {
     if (edf_annotation_record_size() > AC_EDF_STORAGE_SLOT_BYTES) return false;
-    if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
-    if (!lock_queue()) {
-        stats.queue_drops++;
-        set_error("queue_lock_failed");
-        return false;
-    }
-    if (free_slots() == 0) {
-        unlock_queue();
-        stats.queue_drops++;
-        set_error("queue_full");
-        return false;
-    }
-
-    JobSlot &job = slots[tail];
-    clear_slot(job);
-    job.type = JobType::Record;
-    job.kind = stored_kind(kind);
-    size_t written = 0;
-    const bool ok = edf_render_annotation_record(record, job.bytes,
-                                                 AC_EDF_STORAGE_SLOT_BYTES,
-                                                 written);
-    if (!ok) {
-        unlock_queue();
-        stats.render_errors++;
-        set_error("annotation_render_failed");
-        return false;
-    }
-    job.len = written;
-    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-    queued++;
-    stats.queued = queued;
-    unlock_queue();
-
-    stats.bytes_enqueued += written;
-    stats.last_activity_ms = millis();
-    return true;
+    return enqueue_rendered_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::Record;
+            job.kind = stored_kind(kind);
+        },
+        [&](JobSlot &job, size_t &written) {
+            return edf_render_annotation_record(record,
+                                                job.bytes,
+                                                AC_EDF_STORAGE_SLOT_BYTES,
+                                                written);
+        },
+        "annotation_render_failed");
 }
 
 bool enqueue_str_record(const char *path,
@@ -771,46 +1156,26 @@ bool enqueue_str_record(const char *path,
     if (!valid_path(path) || edf_str_record_size() > AC_EDF_STORAGE_SLOT_BYTES) {
         return false;
     }
-    if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
-    if (!lock_queue()) {
-        stats.queue_drops++;
-        set_error("queue_lock_failed");
-        return false;
-    }
-    if (free_slots() == 0) {
-        unlock_queue();
-        stats.queue_drops++;
-        set_error("queue_full");
-        return false;
-    }
-
-    JobSlot &job = slots[tail];
-    clear_slot(job);
-    job.type = JobType::StrRecord;
-    copy_text(job.path, sizeof(job.path), path);
-    copy_text(job.patient_id, sizeof(job.patient_id), info.patient_id);
-    copy_text(job.recording_id, sizeof(job.recording_id), info.recording_id);
-    copy_text(job.start_date, sizeof(job.start_date), info.start_date);
-    copy_text(job.start_time, sizeof(job.start_time), info.start_time);
-    size_t written = 0;
-    const bool ok = edf_render_str_record(record, job.bytes,
-                                          AC_EDF_STORAGE_SLOT_BYTES, written);
-    if (!ok) {
-        unlock_queue();
-        stats.render_errors++;
-        set_error("str_render_failed");
-        return false;
-    }
-    job.len = written;
-    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-    queued++;
-    stats.queued = queued;
-    unlock_queue();
-
-    stats.bytes_enqueued += written;
-    stats.last_activity_ms = millis();
-    return true;
+    return enqueue_rendered_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::StrRecord;
+            copy_text(job.path, sizeof(job.path), path);
+            copy_text(job.patient_id, sizeof(job.patient_id),
+                      info.patient_id);
+            copy_text(job.recording_id, sizeof(job.recording_id),
+                      info.recording_id);
+            copy_text(job.start_date, sizeof(job.start_date),
+                      info.start_date);
+            copy_text(job.start_time, sizeof(job.start_time),
+                      info.start_time);
+        },
+        [&](JobSlot &job, size_t &written) {
+            return edf_render_str_record(record,
+                                         job.bytes,
+                                         AC_EDF_STORAGE_SLOT_BYTES,
+                                         written);
+        },
+        "str_render_failed");
 }
 
 bool enqueue_close_numeric(EdfFileKind kind) {
@@ -831,17 +1196,112 @@ EdfStorageWorkerStatus status() {
     if (!stats.initialized) begin();
     EdfStorageWorkerStatus out = stats;
     if (lock_queue()) {
+        out = stats;
         out.queued = queued;
         out.busy = processing_job;
         unlock_queue();
     } else {
         out.busy = processing_job;
     }
-    {
-        Storage::Guard guard;
-        out.open_file_count = open_file_count();
+    if (task) {
+        out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
     }
     return out;
+}
+
+EdfStorageInventoryResult list_inventory(
+    const char *path,
+    size_t offset,
+    size_t limit,
+    EdfStorageInventoryVisitor visitor,
+    void *ctx) {
+    EdfStorageInventoryResult result;
+    if (!visitor || !edf_valid_browse_path(path)) {
+        result.status = EdfStorageInventoryStatus::BadPath;
+        return result;
+    }
+    if (!Storage::mounted()) {
+        result.status = EdfStorageInventoryStatus::StorageUnavailable;
+        return result;
+    }
+
+    const EdfStorageWorkerStatus worker = status();
+    if (worker.busy || worker.queued > 0 || worker.open_file_count > 0) {
+        result.status = EdfStorageInventoryStatus::Busy;
+        return result;
+    }
+
+    if (strcmp(path, "/") == 0) {
+        EdfStorageInventoryEntry entry;
+        bool found = false;
+        root_datalog_inventory_entry(entry, found);
+        if (found) {
+            if (!visit_inventory_entry(entry,
+                                       visitor,
+                                       ctx,
+                                       offset,
+                                       limit,
+                                       result)) {
+                return result;
+            }
+        }
+
+        root_str_inventory_entry(entry, found);
+        if (found) {
+            if (!visit_inventory_entry(entry,
+                                       visitor,
+                                       ctx,
+                                       offset,
+                                       limit,
+                                       result)) {
+                return result;
+            }
+        }
+        return result;
+    }
+
+    File dir;
+    if (!open_inventory_directory(path, dir, result)) return result;
+
+    while (!result.truncated &&
+           result.status == EdfStorageInventoryStatus::Ok) {
+        EdfStorageInventoryEntry entry;
+        bool have_child = false;
+        bool include = false;
+        if (!read_inventory_directory_child(path,
+                                            dir,
+                                            entry,
+                                            have_child,
+                                            include) ||
+            !have_child) {
+            break;
+        }
+        if (!include) continue;
+        (void)visit_inventory_entry(entry,
+                                    visitor,
+                                    ctx,
+                                    offset,
+                                    limit,
+                                    result);
+    }
+    close_inventory_directory(dir);
+    return result;
+}
+
+const char *inventory_status_name(EdfStorageInventoryStatus status) {
+    switch (status) {
+        case EdfStorageInventoryStatus::Ok: return "ok";
+        case EdfStorageInventoryStatus::BadPath: return "bad_path";
+        case EdfStorageInventoryStatus::StorageUnavailable:
+            return "storage_unavailable";
+        case EdfStorageInventoryStatus::Busy: return "edf_storage_busy";
+        case EdfStorageInventoryStatus::NotFound: return "not_found";
+        case EdfStorageInventoryStatus::NotDirectory: return "not_directory";
+        case EdfStorageInventoryStatus::VisitorStopped:
+            return "visitor_stopped";
+        default:
+            return "unknown";
+    }
 }
 
 }  // namespace EdfStorageWorker

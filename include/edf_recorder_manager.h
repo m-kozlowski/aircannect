@@ -26,6 +26,7 @@ struct EdfRecorderStatus {
     bool active = false;
     bool stream_attached = false;
     bool files_open = false;
+    bool rpc_observer_registered = false;
     bool event_observer_registered = false;
     bool event_attached = false;
     bool event_coverage_uncertain = false;
@@ -61,6 +62,7 @@ struct EdfRecorderStatus {
     uint32_t annotation_enqueue_failures = 0;
     uint32_t str_enqueue_failures = 0;
     uint32_t file_open_failures = 0;
+    uint32_t numeric_record_drops = 0;
     uint32_t last_frame_ms = 0;
     uint32_t last_event_ms = 0;
     char brp_path[80] = {};
@@ -129,8 +131,11 @@ private:
     bool build_recording_id(const EdfLocalDateTime &start,
                             char *dst,
                             size_t dst_size) const;
-    bool enqueue_recording_start_annotations();
     void close_session_files();
+    void sync_annotation_open_status();
+    bool sync_numeric_open_status();
+    bool storage_file_matches(const EdfStorageOpenFileStatus &file,
+                              const char *path) const;
     bool begin_str_session(const SessionStatus &session);
     bool finish_str_session(const SessionStatus &session);
     void request_str_settings(uint32_t now_ms);
@@ -140,7 +145,7 @@ private:
     bool apply_str_summary_record(const ReportSummaryRecord &record);
     bool apply_str_summary_from_store();
     bool write_str_day_record();
-    bool parse_str_time(const char *text, EdfLocalDateTime &out);
+    bool parse_session_local_time(const char *text, EdfLocalDateTime &out) const;
     void attach_events();
     void release_events();
     void snapshot_event_coverage();
@@ -167,6 +172,8 @@ private:
     bool initialized_ = false;
     bool files_open_ = false;
     bool numeric_files_open_ = false;
+    bool annotation_open_synced_ = false;
+    bool numeric_open_synced_ = false;
     bool str_settings_pending_ = false;
     uint32_t str_settings_request_id_ = 0;
     uint32_t str_settings_request_ms_ = 0;
@@ -180,6 +187,7 @@ private:
     EdfStrSessionAccumulator str_;
     EdfRecorderStatus status_;
     EdfStreamAssembler assembler_;
+    StreamFrameRef pending_stream_frame_;
 };
 
 }  // namespace aircannect

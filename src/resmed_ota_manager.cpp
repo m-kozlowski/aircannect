@@ -235,7 +235,7 @@ void ResmedOtaManager::poll() {
     if (!lock) return;
     if (!arbiter_) return;
     RpcEvent event;
-    while (arbiter_->next_resmed_ota_event(event)) {
+    while (arbiter_->next_source_event(RpcSource::ResmedOta, event)) {
         handle_event(event);
     }
     pump_staged_upload();

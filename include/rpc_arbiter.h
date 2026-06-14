@@ -130,11 +130,10 @@ public:
     bool send_set_datetime_now(RpcSource source,
                                uint32_t timeout_ms = 0);
     bool next_event(RpcEvent &event);
-    bool next_resmed_ota_event(RpcEvent &event);
-    void set_report_event_observer(RpcEventObserver observer,
+    bool next_source_event(RpcSource source, RpcEvent &event);
+    bool set_source_event_observer(RpcSource source,
+                                   RpcEventObserver observer,
                                    void *context);
-    void set_edf_recorder_event_observer(RpcEventObserver observer,
-                                         void *context);
     void set_raw_rpc_events_enabled(bool enabled);
     void set_event_frame_observer(EventFrameObserver observer,
                                   void *context);
@@ -224,22 +223,16 @@ private:
                     RpcPayloadRef payload,
                     RpcSource source = RpcSource::Internal,
                     uint32_t id = 0);
-    void push_report_event(RpcEventKind kind,
+    void push_source_event(RpcSource target,
+                           RpcEventKind kind,
+                           const std::string &payload,
+                           RpcSource source = RpcSource::Internal,
+                           uint32_t id = 0);
+    void push_source_event(RpcSource target,
+                           RpcEventKind kind,
                            RpcPayloadRef payload,
                            RpcSource source = RpcSource::Internal,
                            uint32_t id = 0);
-    void push_edf_recorder_event(RpcEventKind kind,
-                                 RpcPayloadRef payload,
-                                 RpcSource source = RpcSource::Internal,
-                                 uint32_t id = 0);
-    void push_resmed_ota_event(RpcEventKind kind,
-                               const std::string &payload,
-                               RpcSource source = RpcSource::Internal,
-                               uint32_t id = 0);
-    void push_resmed_ota_event(RpcEventKind kind,
-                               RpcPayloadRef payload,
-                               RpcSource source = RpcSource::Internal,
-                               uint32_t id = 0);
 
     bool enqueue_request(QueuedRequest &request);
     bool enqueue_payload_frames(const std::string &payload, RpcSource source);
@@ -289,15 +282,37 @@ private:
     std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
 
+    enum class SourceEventQueue {
+        None,
+        ResmedOta,
+    };
+
+    struct SourceEventRoute {
+        RpcSource source = RpcSource::Internal;
+        SourceEventQueue queue = SourceEventQueue::None;
+        RpcEventObserver observer = nullptr;
+        void *observer_context = nullptr;
+    };
+
+    SourceEventRoute *source_event_route(RpcSource source);
+    const SourceEventRoute *source_event_route(RpcSource source) const;
+    bool dispatch_source_event(const SourceEventRoute &route,
+                               const RpcEvent &event);
+    bool push_source_event_queue(SourceEventQueue queue, RpcEvent &&event);
+    bool pop_source_event_queue(SourceEventQueue queue, RpcEvent &event);
+
     CanDriver &can_;
     DatagramRx rpc_rx_;
     DatagramRx log_rx_;
     FixedQueue<RpcEvent, AC_RPC_EVENT_QUEUE_DEPTH> events_;
     FixedQueue<RpcEvent, AC_RESMED_OTA_EVENT_QUEUE_DEPTH> resmed_ota_events_;
-    RpcEventObserver report_observer_ = nullptr;
-    void *report_observer_context_ = nullptr;
-    RpcEventObserver edf_recorder_observer_ = nullptr;
-    void *edf_recorder_observer_context_ = nullptr;
+    SourceEventRoute source_event_routes_[3] = {
+        {RpcSource::ResmedOta, SourceEventQueue::ResmedOta, nullptr,
+         nullptr},
+        {RpcSource::Report, SourceEventQueue::None, nullptr, nullptr},
+        {RpcSource::EdfRecorder, SourceEventQueue::None, nullptr,
+         nullptr},
+    };
 
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
     PendingRequest pending_;

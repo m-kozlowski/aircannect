@@ -1,9 +1,11 @@
 #include "edf_file_writer.h"
 
+#include <array>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <utility>
 
 namespace aircannect {
 namespace {
@@ -17,50 +19,49 @@ static constexpr size_t EDF_SIGNAL_HEADER_OFFSET = 0x100;
 
 const EdfSignalSpec BRP_SIGNALS[] = {
     {"Flow.40ms", "L/s", "-2.00", "3.00", "-1000", "1500",
-     static_cast<uint16_t>(static_cast<int16_t>(-1000)), 1500,
-     AC_EDF_BRP_SAMPLES_PER_RECORD},
+     -1000, 1500, AC_EDF_BRP_SAMPLES_PER_RECORD, 500.0f, 0.0f},
     {"Press.40ms", "cmH2O", "0.00", "40.00", "0", "2000",
-     0, 2000, AC_EDF_BRP_SAMPLES_PER_RECORD},
+     0, 2000, AC_EDF_BRP_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"Crc16", "", "-32768.0", "32767.00", "-32768", "32767",
-     static_cast<uint16_t>(static_cast<int16_t>(-32768)), 32767, 1},
+     -32768, 32767, 1, 1.0f, 0.0f},
 };
 
 const EdfSignalSpec PLD_SIGNALS[] = {
     {"MaskPress.2s", "cmH2O", "0.00", "40.00", "0", "2000",
-     0, 2000, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 2000, AC_EDF_PLD_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"Press.2s", "cmH2O", "0.00", "50.00", "0", "2500",
-     0, 2500, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 2500, AC_EDF_PLD_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"EprPress.2s", "cmH2O", "0.00", "30.00", "0", "1500",
-     0, 1500, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 1500, AC_EDF_PLD_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"Leak.2s", "L/s", "0.00", "2.00", "0", "100",
-     0, 100, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 100, AC_EDF_PLD_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"RespRate.2s", "bpm", "0.00", "90.00", "0", "450",
-     0, 450, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 450, AC_EDF_PLD_SAMPLES_PER_RECORD, 5.0f, 0.0f},
     {"TidVol.2s", "L", "0.00", "4.00", "0", "200",
-     0, 200, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 200, AC_EDF_PLD_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"MinVent.2s", "L/min", "0.00", "30.00", "0", "240",
-     0, 240, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 240, AC_EDF_PLD_SAMPLES_PER_RECORD, 8.0f, 0.0f},
     {"TgtVent.2s", "L/min", "0.00", "30.00", "0", "240",
-     0, 240, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 240, AC_EDF_PLD_SAMPLES_PER_RECORD, 8.0f, 0.0f},
     {"IERatio.2s", "%", "0.00", "400.00", "0", "400",
-     0, 400, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 400, AC_EDF_PLD_SAMPLES_PER_RECORD, 1.0f, 0.0f},
     {"Snore.2s", "", "0.00", "5.00", "0", "250",
-     0, 250, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 250, AC_EDF_PLD_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"FlowLim.2s", "", "0.00", "1.00", "0", "100",
-     0, 100, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 100, AC_EDF_PLD_SAMPLES_PER_RECORD, 100.0f, 0.0f},
     {"Ti.2s", "seconds", "0.00", "10.00", "0", "500",
-     0, 500, AC_EDF_PLD_SAMPLES_PER_RECORD},
+     0, 500, AC_EDF_PLD_SAMPLES_PER_RECORD, 50.0f, 0.0f},
     {"Crc16", "", "-32768.0", "32767.00", "-32768", "32767",
-     static_cast<uint16_t>(static_cast<int16_t>(-32768)), 32767, 1},
+     -32768, 32767, 1, 1.0f, 0.0f},
 };
 
 const EdfSignalSpec SA2_SIGNALS[] = {
     {"Pulse.1s", "bpm", "0.00", "300.00", "0", "300",
-     0, 300, AC_EDF_SA2_SAMPLES_PER_RECORD},
+     0, 300, AC_EDF_SA2_SAMPLES_PER_RECORD, 1.0f, 0.0f},
     {"SpO2.1s", "%", "0.00", "100.00", "0", "100",
-     0, 100, AC_EDF_SA2_SAMPLES_PER_RECORD},
+     0, 100, AC_EDF_SA2_SAMPLES_PER_RECORD, 1.0f, 0.0f},
     {"Crc16", "", "-32768.0", "32767.00", "-32768", "32767",
-     static_cast<uint16_t>(static_cast<int16_t>(-32768)), 32767, 1},
+     -32768, 32767, 1, 1.0f, 0.0f},
 };
 
 const uint8_t BRP_SOURCE_INDICES[] = {0, 1};
@@ -69,11 +70,9 @@ const uint8_t SA2_SOURCE_INDICES[] = {0, 1};
 
 const EdfSignalSpec ANNOTATION_SIGNALS[] = {
     {"EDF Annotations", "", "-32768.0", "32767.00", "-32768", "32767",
-     static_cast<uint16_t>(static_cast<int16_t>(-32768)),
-     static_cast<uint16_t>(static_cast<int16_t>(32767)), 31},
+     -32768, 32767, 31},
     {"Crc16", "", "-32768.0", "32767.00", "-32768", "32767",
-     static_cast<uint16_t>(static_cast<int16_t>(-32768)),
-     static_cast<uint16_t>(static_cast<int16_t>(32767)), 1},
+     -32768, 32767, 1},
 };
 
 const EdfSignalSpec STR_SIGNALS[] = {
@@ -119,16 +118,33 @@ const EdfFileSchema SA2_SCHEMA = {
     60,
 };
 
+constexpr uint16_t crc16_ccitt_false_table_value(size_t value) {
+    uint16_t crc = static_cast<uint16_t>(value << 8);
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+        crc = (crc & 0x8000)
+                  ? static_cast<uint16_t>((crc << 1) ^ 0x1021)
+                  : static_cast<uint16_t>(crc << 1);
+    }
+    return crc;
+}
+
+template <size_t... Index>
+constexpr std::array<uint16_t, sizeof...(Index)>
+make_crc16_ccitt_false_table(std::index_sequence<Index...>) {
+    return {{crc16_ccitt_false_table_value(Index)...}};
+}
+
+constexpr auto CRC16_CCITT_FALSE_TABLE =
+    make_crc16_ccitt_false_table(std::make_index_sequence<256>{});
+
 uint16_t crc16_ccitt_false_impl(const uint8_t *data, size_t len) {
     uint16_t crc = 0xffff;
     if (!data && len) return crc;
     for (size_t i = 0; i < len; ++i) {
-        crc ^= static_cast<uint16_t>(data[i]) << 8;
-        for (uint8_t bit = 0; bit < 8; ++bit) {
-            crc = (crc & 0x8000)
-                      ? static_cast<uint16_t>((crc << 1) ^ 0x1021)
-                      : static_cast<uint16_t>(crc << 1);
-        }
+        const uint8_t index =
+            static_cast<uint8_t>((crc >> 8) ^ data[i]);
+        crc = static_cast<uint16_t>(
+            (crc << 8) ^ CRC16_CCITT_FALSE_TABLE[index]);
     }
     return crc;
 }
@@ -157,24 +173,28 @@ void append_u32_field(uint8_t *dst,
     append_field(dst, capacity, offset, tmp, width);
 }
 
-int32_t signed_value(uint16_t raw) {
-    return static_cast<int16_t>(raw);
-}
-
 int16_t encode_sample(const EdfSignalSpec &spec, float physical_value) {
-    const float physical_min = strtof(spec.physical_min, nullptr);
-    const float physical_max = strtof(spec.physical_max, nullptr);
-    const int32_t digital_min = signed_value(spec.digital_min_value);
-    const int32_t digital_max = signed_value(spec.digital_max_value);
-    if (physical_max <= physical_min || digital_max <= digital_min) {
+    const int32_t digital_min = spec.digital_min_value;
+    const int32_t digital_max = spec.digital_max_value;
+    if (digital_max <= digital_min) {
         return static_cast<int16_t>(digital_min);
     }
 
-    const float scaled =
-        static_cast<float>(digital_min) +
-        (physical_value - physical_min) *
-            static_cast<float>(digital_max - digital_min) /
-            (physical_max - physical_min);
+    float scaled = physical_value * spec.physical_to_digital_scale +
+                   spec.physical_to_digital_offset;
+    if (spec.physical_to_digital_scale == 0.0f &&
+        spec.physical_to_digital_offset == 0.0f) {
+        const float physical_min = strtof(spec.physical_min, nullptr);
+        const float physical_max = strtof(spec.physical_max, nullptr);
+        if (physical_max <= physical_min) {
+            return static_cast<int16_t>(digital_min);
+        }
+        scaled = static_cast<float>(digital_min) +
+                 (physical_value - physical_min) *
+                     static_cast<float>(digital_max - digital_min) /
+                     (physical_max - physical_min);
+    }
+
     long digital = lroundf(scaled);
     if (digital < digital_min) digital = digital_min;
     if (digital > digital_max) digital = digital_max;

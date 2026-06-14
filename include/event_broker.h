@@ -106,7 +106,9 @@ private:
         void *context = nullptr;
     };
 
+    bool refresh_desired_params();
     bool build_desired_params(std::string &params_json) const;
+    void mark_desired_params_dirty();
     int find_free_slot() const;
     void note_subscription_gap(bool was_active);
 
@@ -119,6 +121,9 @@ private:
     uint32_t last_notification_ms_ = 0;
     std::string active_params_json_;
     std::string pending_params_json_;
+    std::string desired_params_json_;
+    bool desired_params_dirty_ = true;
+    bool desired_params_valid_ = false;
     Consumer consumers_[AC_EVENT_CONSUMERS_MAX];
     EventBrokerStats stats_ = {};
     FrameObserverSlot frame_observers_[AC_EVENT_FRAME_OBSERVERS_MAX];

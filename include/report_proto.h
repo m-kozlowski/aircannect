@@ -6,11 +6,72 @@
 namespace aircannect {
 
 static constexpr size_t AC_REPORT_SUMMARY_SESSION_MAX = 16;
-static constexpr size_t AC_REPORT_SUMMARY_STR_FIRST_SIGNAL = 76;
-static constexpr size_t AC_REPORT_SUMMARY_STR_LAST_SIGNAL = 132;
-static constexpr size_t AC_REPORT_SUMMARY_STR_VALUE_COUNT =
-    AC_REPORT_SUMMARY_STR_LAST_SIGNAL -
-    AC_REPORT_SUMMARY_STR_FIRST_SIGNAL + 1;
+
+enum class ReportSummaryField : uint8_t {
+    TubeConnected,
+    HumidifierConnected,
+    BlowPressure95,
+    BlowPressure5,
+    Flow95,
+    Flow5,
+    BlowerFlow50,
+    AmbientHumidity50,
+    HumidifierTemperature50,
+    HeatedTubeTemperature50,
+    HeatedTubePower50,
+    HumidifierPower50,
+    Spo2Median,
+    Spo2_95,
+    Spo2Max,
+    Spo2ThresholdMinutes,
+    SpontaneousTriggerPercent,
+    SpontaneousCyclePercent,
+    MaskPressureMedian,
+    MaskPressure95,
+    MaskPressureMax,
+    TargetIpapMedian,
+    TargetIpap95,
+    TargetIpapMax,
+    TargetEpapMedian,
+    TargetEpap95,
+    TargetEpapMax,
+    LeakMedian,
+    Leak95,
+    Leak70,
+    LeakMax,
+    MinuteVentMedian,
+    MinuteVent95,
+    MinuteVentMax,
+    RespiratoryRateMedian,
+    RespiratoryRate95,
+    RespiratoryRateMax,
+    TidalVolumeMedian,
+    TidalVolume95,
+    TidalVolumeMax,
+    TargetVentMedian,
+    TargetVent95,
+    TargetVentMax,
+    IeRatioMedian,
+    IeRatio95,
+    IeRatioMax,
+    InspirationTimeMedian,
+    InspirationTime95,
+    InspirationTimeMax,
+    Ahi,
+    HypopneaIndex,
+    ApneaIndex,
+    ObstructiveApneaIndex,
+    CentralApneaIndex,
+    UnknownApneaIndex,
+    ReraIndex,
+    Csr,
+    Count,
+};
+
+static constexpr size_t AC_REPORT_SUMMARY_FIELD_COUNT =
+    static_cast<size_t>(ReportSummaryField::Count);
+static_assert(AC_REPORT_SUMMARY_FIELD_COUNT <= 64,
+              "summary field mask is 64 bits");
 
 struct ReportSummarySession {
     uint64_t start_ms = 0;
@@ -46,8 +107,8 @@ struct ReportSummaryRecord {
     uint32_t session_interval_count = 0;
     ReportSummarySession sessions[AC_REPORT_SUMMARY_SESSION_MAX] = {};
 
-    uint64_t str_summary_mask = 0;
-    int16_t str_summary_digital[AC_REPORT_SUMMARY_STR_VALUE_COUNT] = {};
+    uint64_t summary_field_mask = 0;
+    uint32_t summary_field_values[AC_REPORT_SUMMARY_FIELD_COUNT] = {};
 };
 
 using ReportSummaryRecordCallback =
@@ -79,8 +140,8 @@ bool report_parse_summary_records(const uint8_t *data,
                                   void *context,
                                   char *error,
                                   size_t error_len);
-bool report_summary_str_sample(const ReportSummaryRecord &record,
-                               size_t signal_index,
-                               int16_t &out);
+bool report_summary_field_value(const ReportSummaryRecord &record,
+                                ReportSummaryField field,
+                                uint32_t &out);
 
 }  // namespace aircannect

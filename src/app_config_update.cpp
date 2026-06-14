@@ -2,6 +2,8 @@
 
 #include <ArduinoJson.h>
 
+#include "edf_recorder_manager.h"
+
 namespace aircannect {
 namespace {
 
@@ -121,6 +123,16 @@ bool apply_web_config_update(AppConfig &config,
             doc["oximetry_enabled"].as<bool>());
         note_bool_change(before, config.data().oximetry_enabled,
                          accepted, result);
+    }
+
+    if (doc["edf_capture_enabled"].is<bool>()) {
+        const bool before = config.data().edf_capture_enabled;
+        const bool accepted = config.set_edf_capture_enabled(
+            doc["edf_capture_enabled"].as<bool>());
+        if (note_bool_change(before, config.data().edf_capture_enabled,
+                             accepted, result)) {
+            result.edf_capture_changed = true;
+        }
     }
 
     uint16_t parsed_port = 0;
@@ -257,6 +269,7 @@ bool apply_web_config_update(AppConfig &config,
 void apply_config_runtime_effects(const AppConfigUpdateResult &result,
                                   AppConfig &config,
                                   WifiManager &wifi_manager,
+                                  EdfRecorderManager &edf_recorder_manager,
                                   OtaManager &ota_manager) {
     if (result.hostname_changed) {
         wifi_manager.set_hostname(config.data().hostname);
@@ -270,6 +283,9 @@ void apply_config_runtime_effects(const AppConfigUpdateResult &result,
     }
     if (result.ota_config_dirty) {
         ota_manager.mark_config_dirty();
+    }
+    if (result.edf_capture_changed) {
+        edf_recorder_manager.set_enabled(config.data().edf_capture_enabled);
     }
     if (result.wifi_reconnect_required) {
         wifi_manager.reconnect();
