@@ -36,11 +36,13 @@ void BackgroundWorker::note_activity() {
     last_activity_ms_.store(now);
 }
 
-void BackgroundWorker::publish_gate(bool foreground_busy, bool stream_active,
+void BackgroundWorker::publish_gate(bool foreground_busy, bool as11_ready,
+                                   bool stream_active,
                                    bool resmed_ota_active, bool esp_ota_active,
                                    bool therapy_running) {
     uint32_t v = 0;
     if (foreground_busy) v |= GATE_FOREGROUND;
+    if (!as11_ready) v |= GATE_AS11;
     if (stream_active) v |= GATE_STREAM;
     if (resmed_ota_active) v |= GATE_RESMED_OTA;
     if (esp_ota_active) v |= GATE_ESP_OTA;
@@ -57,6 +59,9 @@ bool BackgroundWorker::gate_open(const char **reason) const {
     // A user-initiated report op owns the spool/caches (the prefetch's own fetch
     // is excluded upstream in foreground_busy()).
     if (gi & GATE_FOREGROUND) { *reason = "report_busy"; return false; }
+    // Background AS11 fetches should not be the first traffic after boot. Let
+    // the main health lane establish identity/status first.
+    if (gi & GATE_AS11) { *reason = "as11"; return false; }
     // CAN must stay free for live streaming and therapy capture.
     if (gi & GATE_STREAM) { *reason = "stream"; return false; }
     if (gi & GATE_RESMED_OTA) { *reason = "resmed_ota"; return false; }

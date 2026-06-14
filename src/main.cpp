@@ -236,6 +236,8 @@ static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
 }
 
 void loop() {
+    const bool esp_reboot_pending = ota_manager.status().reboot_pending;
+    rpc_arbiter.set_esp_reboot_quiesce(esp_reboot_pending);
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
     rpc_arbiter.set_background_polls_suspended(
@@ -262,13 +264,17 @@ void loop() {
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }
-    ota_manager.poll(wifi_manager);
+    const bool esp_reboot_allowed =
+        !ota_manager.status().reboot_pending ||
+        rpc_arbiter.esp_reboot_quiesced();
+    ota_manager.poll(wifi_manager, esp_reboot_allowed);
     resmed_ota_manager.poll();
     Storage::poll();
     // Publish the worker's gate inputs from here (the owner thread) so the
     // background task reads a coherent snapshot instead of these managers.
     bg_worker.publish_gate(
         report_manager.foreground_busy(),
+        rpc_arbiter.as11_state().status_valid(),
         rpc_arbiter.stream_activity_active(),
         resmed_ota_manager.transport_active(),
         ota_manager.active(),

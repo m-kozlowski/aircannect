@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "calendar_utils.h"
 
@@ -242,6 +243,30 @@ bool edf_epoch_ms_to_local_datetime(int64_t epoch_ms,
     dt.second = static_cast<int>(seconds_of_day % 60);
     if (!valid_date_time(dt)) return false;
 
+    out = dt;
+    return true;
+}
+
+bool edf_epoch_ms_to_configured_local_datetime(int64_t epoch_ms,
+                                               EdfLocalDateTime &out) {
+    static constexpr int64_t kMsPerSecond = 1000;
+    if (epoch_ms < 0) return false;
+
+    const int64_t seconds64 = epoch_ms / kMsPerSecond;
+    const time_t seconds = static_cast<time_t>(seconds64);
+    if (static_cast<int64_t>(seconds) != seconds64) return false;
+
+    struct tm local = {};
+    if (!localtime_r(&seconds, &local)) return false;
+
+    EdfLocalDateTime dt;
+    dt.year = local.tm_year + 1900;
+    dt.month = local.tm_mon + 1;
+    dt.day = local.tm_mday;
+    dt.hour = local.tm_hour;
+    dt.minute = local.tm_min;
+    dt.second = local.tm_sec;
+    if (!valid_date_time(dt)) return false;
     out = dt;
     return true;
 }

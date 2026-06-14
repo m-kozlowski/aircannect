@@ -11,6 +11,9 @@ const char *as11_identity_get_params_json();
 const char *as11_runtime_get_params_json();
 const char *as11_motor_runtime_get_params_json();
 const char *as11_timezone_get_params_json();
+bool as11_parse_event_subscription_response(const std::string &payload,
+                                            bool require_activity_selectors,
+                                            uint32_t &subscription_id);
 
 enum class As11TherapyState {
     Unknown,

@@ -32,7 +32,7 @@ struct OtaManagerStatus {
 class OtaManager {
 public:
     void begin(AppConfig &app_config);
-    void poll(const WifiManager &wifi_manager);
+    void poll(const WifiManager &wifi_manager, bool reboot_allowed = true);
     void mark_config_dirty();
 
     bool begin_http_upload(const String &filename, size_t image_size);
@@ -61,6 +61,7 @@ private:
     bool arduino_active_ = false;
 
     uint32_t reboot_at_ms_ = 0;
+    bool reboot_wait_logged_ = false;
     uint32_t last_progress_log_percent_ = 255;
 
     esp_ota_handle_t http_handle_ = 0;

@@ -14,6 +14,7 @@
 #include "edf_storage_catalog.h"
 #include "edf_storage_open_plan.h"
 #include "edf_str_file_layout.h"
+#include "edf_str_record_merge.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
 
@@ -896,13 +897,46 @@ bool process_str_record(const JobSlot &job) {
         return false;
     }
 
+    const uint8_t *record_bytes = job.bytes;
+    uint8_t merged_record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
+    if (match.found) {
+        const size_t existing_offset = edf_str_record_offset(match.index);
+        uint8_t existing_record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
+        if (!file.seek(existing_offset) ||
+            file.read(existing_record, sizeof(existing_record)) !=
+                sizeof(existing_record)) {
+            file.close();
+            stats.write_errors++;
+            set_error("str_existing_read_failed");
+            return false;
+        }
+        memcpy(merged_record, job.bytes, sizeof(merged_record));
+        const EdfStrRecordMergeStatus merge_status =
+            edf_str_merge_existing_record(existing_record,
+                                          sizeof(existing_record),
+                                          merged_record,
+                                          sizeof(merged_record));
+        if (merge_status != EdfStrRecordMergeStatus::Ok) {
+            file.close();
+            stats.write_errors++;
+            char error[sizeof(stats.last_error)] = {};
+            snprintf(error,
+                     sizeof(error),
+                     "str_merge_%s",
+                     edf_str_record_merge_status_name(merge_status));
+            set_error(error);
+            return false;
+        }
+        record_bytes = merged_record;
+    }
+
     if (!file.seek(location.offset)) {
         file.close();
         stats.write_errors++;
         set_error("str_seek_failed");
         return false;
     }
-    const size_t written = file.write(job.bytes, job.len);
+    const size_t written = file.write(record_bytes, job.len);
     if (written != job.len) {
         file.close();
         stats.write_errors++;

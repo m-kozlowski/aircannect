@@ -36,9 +36,17 @@ void OtaManager::begin(AppConfig &app_config) {
     esp_ota_mark_app_valid_cancel_rollback();
 }
 
-void OtaManager::poll(const WifiManager &wifi_manager) {
+void OtaManager::poll(const WifiManager &wifi_manager, bool reboot_allowed) {
     if (reboot_at_ms_ &&
         static_cast<int32_t>(millis() - reboot_at_ms_) >= 0) {
+        if (!reboot_allowed) {
+            if (!reboot_wait_logged_) {
+                reboot_wait_logged_ = true;
+                Log::logf(CAT_OTA, LOG_INFO,
+                          "[OTA] reboot waiting for AS11 quiesce\n");
+            }
+            return;
+        }
         Log::logf(CAT_OTA, LOG_INFO, "[OTA] rebooting\n");
         delay(50);
         ESP.restart();
@@ -225,6 +233,7 @@ void OtaManager::abort_http_upload(const char *reason) {
 void OtaManager::schedule_reboot(uint32_t delay_ms) {
     if (!lock_status()) return;
     reboot_at_ms_ = millis() + delay_ms;
+    reboot_wait_logged_ = false;
     status_.reboot_pending = true;
     unlock_status();
 }
@@ -243,7 +252,7 @@ void OtaManager::start_arduino_ota() {
     arduino_ota_->setHostname(cfg.hostname.c_str());
     arduino_ota_->setPort(AC_ARDUINO_OTA_PORT);
     arduino_ota_->setMdnsEnabled(false);
-    arduino_ota_->setRebootOnSuccess(true);
+    arduino_ota_->setRebootOnSuccess(false);
     if (cfg.ota_password.length()) {
     arduino_ota_->setPassword(cfg.ota_password.c_str());
     }
@@ -269,6 +278,7 @@ void OtaManager::start_arduino_ota() {
             status_.progress_percent = 100;
             unlock_status();
         }
+        schedule_reboot(2000);
         Log::logf(CAT_OTA, LOG_INFO,
                   "[OTA] ArduinoOTA complete; rebooting\n");
     });

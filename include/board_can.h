@@ -99,3 +99,4 @@ static constexpr uint32_t AC_AS11_CLOCK_POLL_INTERVAL_MS = 60000;
 static constexpr uint32_t AC_AS11_THERAPY_CONFIRM_TIMEOUT_MS = 15000;
 static constexpr uint32_t AC_AS11_EVENT_SUBSCRIBE_DELAY_MS = 1000;
 static constexpr uint32_t AC_AS11_EVENT_SUBSCRIBE_RETRY_MS = 30000;
+static constexpr uint32_t AC_ESP_REBOOT_QUIESCE_TIMEOUT_MS = 8000;

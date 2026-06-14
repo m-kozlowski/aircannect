@@ -29,6 +29,7 @@ struct EventAcquireResult {
 enum class EventCommandType {
     None,
     Subscribe,
+    Quiesce,
 };
 
 struct EventCommand {
@@ -46,6 +47,9 @@ struct EventBrokerStats {
     uint32_t subscribe_requests = 0;
     uint32_t subscribe_successes = 0;
     uint32_t subscribe_errors = 0;
+    uint32_t quiesce_requests = 0;
+    uint32_t quiesce_successes = 0;
+    uint32_t quiesce_errors = 0;
     uint32_t coverage_gaps = 0;
     uint32_t notifications = 0;
     uint32_t settings_history_changes = 0;
@@ -55,6 +59,8 @@ struct EventBrokerStats {
 struct EventBrokerStatus {
     bool subscription_active = false;
     bool subscribe_pending = false;
+    bool quiesce_requested = false;
+    bool quiesced = false;
     uint32_t subscription_id = 0;
     uint32_t subscription_generation = 0;
     uint32_t coverage_gap_count = 0;
@@ -78,6 +84,9 @@ public:
                                  uint32_t subscription_id,
                                  uint32_t now_ms);
     void mark_reattach(uint32_t now_ms);
+    void request_quiesce(uint32_t now_ms);
+    void clear_quiesce(uint32_t now_ms);
+    bool quiesced() const { return quiesced_; }
 
     EventAcquireResult acquire(const char *data_ids_csv);
     void release(EventConsumerHandle handle);
@@ -119,6 +128,9 @@ private:
 
     bool subscription_active_ = false;
     bool subscribe_pending_ = false;
+    bool pending_quiesce_ = false;
+    bool quiesce_requested_ = false;
+    bool quiesced_ = false;
     uint32_t subscription_id_ = 0;
     uint32_t subscription_generation_ = 0;
     uint32_t coverage_gap_count_ = 0;

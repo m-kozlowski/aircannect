@@ -735,16 +735,18 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
 bool EdfRecorderManager::parse_session_local_time(
     const char *text,
     EdfLocalDateTime &out) const {
-    if (!text || !text[0] || !arbiter_) return false;
-
-    const As11DeviceState &state = arbiter_->as11_state();
-    if (!state.timezone_offset_valid()) return false;
+    if (!text || !text[0]) return false;
 
     int64_t epoch_ms = 0;
     if (!edf_parse_utc_ms(text, epoch_ms)) return false;
-    return edf_epoch_ms_to_local_datetime(epoch_ms,
-                                          state.timezone_offset_minutes(),
-                                          out);
+    if (arbiter_) {
+        const As11DeviceState &state = arbiter_->as11_state();
+        if (state.timezone_offset_valid()) {
+            return edf_epoch_ms_to_local_datetime(
+                epoch_ms, state.timezone_offset_minutes(), out);
+        }
+    }
+    return edf_epoch_ms_to_configured_local_datetime(epoch_ms, out);
 }
 
 bool EdfRecorderManager::begin_str_session(const SessionStatus &session) {

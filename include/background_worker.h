@@ -35,8 +35,8 @@ struct BackgroundWorkerStatus {
 };
 
 // Low-priority FreeRTOS task that runs registered jobs only while the device is
-// idle (no therapy, stream, OTA, foreground report fetch, or recent web
-// activity). One instance per device; see background_worker().
+// idle (AS11 health known, no therapy, stream, OTA, foreground report fetch, or
+// recent web activity). One instance per device; see background_worker().
 class BackgroundWorker {
 public:
     void begin();
@@ -44,7 +44,7 @@ public:
 
     // The main loop owns the gated subsystems; it publishes their state here
     // every iteration so the worker never reads them cross-task. Main loop only.
-    void publish_gate(bool foreground_busy, bool stream_active,
+    void publish_gate(bool foreground_busy, bool as11_ready, bool stream_active,
                       bool resmed_ota_active, bool esp_ota_active,
                       bool therapy_running);
 
@@ -70,6 +70,7 @@ private:
     static constexpr uint32_t GATE_RESMED_OTA = 1u << 2;
     static constexpr uint32_t GATE_ESP_OTA = 1u << 3;
     static constexpr uint32_t GATE_THERAPY = 1u << 4;
+    static constexpr uint32_t GATE_AS11 = 1u << 5;
     static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
     static constexpr size_t MAX_JOBS = 4;

@@ -84,6 +84,9 @@ public:
                                const std::string &payload,
                                uint32_t now_ms);
     void mark_reattach();
+    void request_quiesce(uint32_t now_ms);
+    void clear_quiesce();
+    bool quiesced() const { return quiesced_; }
 
     void note_stream_data(uint32_t stream_id,
                           const std::string &start_time,
@@ -185,6 +188,8 @@ private:
 
     bool actual_active_ = false;
     bool external_active_ = false;
+    bool quiesce_requested_ = false;
+    bool quiesced_ = false;
     bool error_ = false;
     StreamCommandType pending_ = StreamCommandType::None;
     StreamCommandType error_command_ = StreamCommandType::None;

@@ -253,6 +253,45 @@ const char *as11_timezone_get_params_json() {
     return "[\"_TZO\"]";
 }
 
+bool as11_parse_event_subscription_response(const std::string &payload,
+                                            bool require_activity_selectors,
+                                            uint32_t &subscription_id) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) return false;
+
+    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
+    if (result.isNull()) return false;
+
+    int32_t signed_id = 0;
+    if (variant_to_int(result["subscriptionId"], signed_id) &&
+        signed_id >= 0) {
+        subscription_id = static_cast<uint32_t>(signed_id);
+    } else if (result["subscriptionId"].is<unsigned int>()) {
+        subscription_id = result["subscriptionId"].as<unsigned int>();
+    } else {
+        return false;
+    }
+
+    JsonArrayConst ids = result["dataIds"].as<JsonArrayConst>();
+    if (!require_activity_selectors) return ids.isNull() || ids.size() == 0;
+    if (ids.isNull()) return true;
+
+    bool saw_supported_selector = false;
+    bool accepted_supported_selector = false;
+    for (JsonObjectConst item : ids) {
+        std::string data_id;
+        if (!variant_to_string(item["dataId"], data_id)) continue;
+        if (data_id != "SystemActivityEvents-FrequentActivityEvents" &&
+            data_id != "SystemActivityEvents-SporadicActivityEvents") {
+            continue;
+        }
+        saw_supported_selector = true;
+        if (item["valid"].as<bool>()) accepted_supported_selector = true;
+    }
+    return saw_supported_selector && accepted_supported_selector;
+}
+
 void As11DeviceState::reset() {
     *this = As11DeviceState{};
 }
@@ -366,38 +405,8 @@ bool As11DeviceState::apply_activity_subscription_response(
     uint32_t now_ms,
     uint32_t &subscription_id) {
     (void)now_ms;
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
-    if (error) return false;
-
-    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
-    if (result.isNull()) return false;
-
-    int32_t signed_id = 0;
-    if (variant_to_int(result["subscriptionId"], signed_id) &&
-        signed_id >= 0) {
-        subscription_id = static_cast<uint32_t>(signed_id);
-    } else if (result["subscriptionId"].is<unsigned int>()) {
-        subscription_id = result["subscriptionId"].as<unsigned int>();
-    } else {
-        return false;
-    }
-
-    JsonArrayConst ids = result["dataIds"].as<JsonArrayConst>();
-    if (ids.isNull()) return true;
-    bool saw_supported_selector = false;
-    bool accepted_supported_selector = false;
-    for (JsonObjectConst item : ids) {
-        std::string data_id;
-        if (!variant_to_string(item["dataId"], data_id)) continue;
-        if (data_id != "SystemActivityEvents-FrequentActivityEvents" &&
-            data_id != "SystemActivityEvents-SporadicActivityEvents") {
-            continue;
-        }
-        saw_supported_selector = true;
-        if (item["valid"].as<bool>()) accepted_supported_selector = true;
-    }
-    return saw_supported_selector && accepted_supported_selector;
+    return as11_parse_event_subscription_response(payload, true,
+                                                  subscription_id);
 }
 
 bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,

@@ -110,6 +110,14 @@ RpcArbiter::RpcArbiter(CanDriver &can) : can_(can) {
 void RpcArbiter::poll() {
     can_.poll();
     const uint32_t now = millis();
+    if (esp_reboot_quiesce_requested_ &&
+        esp_reboot_quiesce_deadline_ms_ &&
+        !esp_reboot_quiesce_timeout_logged_ &&
+        static_cast<int32_t>(now - esp_reboot_quiesce_deadline_ms_) >= 0) {
+        esp_reboot_quiesce_timeout_logged_ = true;
+        Log::logf(CAT_OTA, LOG_WARN,
+                  "[OTA] AS11 quiesce timed out; reboot will proceed\n");
+    }
 
     DatagramFeedResult rpc_timeout = rpc_rx_.poll(now);
     if (rpc_timeout.status == DatagramStatus::Error) {
@@ -143,6 +151,11 @@ void RpcArbiter::poll() {
 }
 
 bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source) {
+    if (esp_reboot_quiesce_requested_) {
+        push_event(RpcEventKind::Info,
+                   "raw RPC rejected while ESP reboot is pending");
+        return false;
+    }
     if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
         char prefix[80];
         snprintf(prefix, sizeof(prefix), "[RPC raw request source=%s] ",
@@ -425,6 +438,40 @@ void RpcArbiter::set_background_polls_suspended(bool suspended) {
     background_polls_suspended_ = suspended;
 }
 
+void RpcArbiter::set_esp_reboot_quiesce(bool requested) {
+    const uint32_t now = millis();
+    if (requested == esp_reboot_quiesce_requested_) return;
+
+    esp_reboot_quiesce_requested_ = requested;
+    esp_reboot_quiesce_timeout_logged_ = false;
+    if (!requested) {
+        esp_reboot_quiesce_deadline_ms_ = 0;
+        stream_.clear_quiesce();
+        event_.clear_quiesce(now);
+        return;
+    }
+
+    Log::logf(CAT_OTA, LOG_INFO,
+              "[OTA] quiescing AS11 push traffic before ESP reboot\n");
+    cancel_all_requests("esp_reboot");
+    stream_.request_quiesce(now);
+    event_.request_quiesce(now);
+    esp_reboot_quiesce_deadline_ms_ =
+        now + AC_ESP_REBOOT_QUIESCE_TIMEOUT_MS;
+}
+
+bool RpcArbiter::esp_reboot_quiesced() const {
+    if (!esp_reboot_quiesce_requested_) return true;
+    const uint32_t now = millis();
+    if (esp_reboot_quiesce_deadline_ms_ &&
+        static_cast<int32_t>(now - esp_reboot_quiesce_deadline_ms_) >= 0) {
+        return true;
+    }
+    return stream_.quiesced() && event_.quiesced() &&
+           !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
+           can_.tx_queue_depth() == 0;
+}
+
 void RpcArbiter::cancel_requests_from_source(RpcSource source,
                                              const char *reason) {
     const char *why = reason ? reason : "cancelled";
@@ -456,6 +503,20 @@ void RpcArbiter::cancel_requests_from_source(RpcSource source,
 bool RpcArbiter::background_backoff_active(uint32_t now) const {
     return background_backoff_until_ms_ &&
            static_cast<int32_t>(background_backoff_until_ms_ - now) > 0;
+}
+
+bool RpcArbiter::request_allowed_during_esp_reboot_quiesce(
+    const QueuedRequest &request) const {
+    if (!esp_reboot_quiesce_requested_) return true;
+    if (request.method == "StartStream" &&
+        request.stream_command == StreamCommandType::Stop) {
+        return true;
+    }
+    if (request.method == "SubscribeEvent" &&
+        request.event_command == EventCommandType::Quiesce) {
+        return true;
+    }
+    return false;
 }
 
 void RpcArbiter::note_request_success(RpcSource source, uint32_t now) {
@@ -817,9 +878,22 @@ void RpcArbiter::dispatch_next_request() {
     }
 
     QueuedRequest request;
+    const bool from_retry = dispatch_retry_active_;
     if (dispatch_retry_active_) {
         request = dispatch_retry_;
     } else if (!requests_.pop(request)) {
+        return;
+    }
+
+    if (esp_reboot_quiesce_requested_ &&
+        !request_allowed_during_esp_reboot_quiesce(request)) {
+        cancel_queued_request(request, "esp_reboot");
+        if (from_retry) {
+            dispatch_retry_ = {};
+            dispatch_retry_active_ = false;
+            dispatch_retry_deadline_ms_ = 0;
+            next_dispatch_retry_ms_ = 0;
+        }
         return;
     }
 
@@ -943,7 +1017,7 @@ void RpcArbiter::check_pending_timeout() {
 
 void RpcArbiter::poll_event_subscription() {
     const uint32_t now = millis();
-    if (background_polls_suspended_) return;
+    if (background_polls_suspended_ && !esp_reboot_quiesce_requested_) return;
     if (background_backoff_active(now)) return;
     EventCommand command = event_.next_command(now);
     if (command.type == EventCommandType::None) return;
@@ -995,6 +1069,7 @@ void RpcArbiter::poll_as11_healthcheck() {
     const uint32_t now = millis();
     as11_state_.poll(now);
 
+    if (esp_reboot_quiesce_requested_) return;
     if (background_polls_suspended_) return;
     if (background_backoff_active(now)) return;
 
@@ -1127,11 +1202,18 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
                 payload, now, pending_.dispatch_epoch_ms, response_epoch_ms);
         } else if (pending_.event_command != EventCommandType::None) {
             uint32_t subscription_id = 0;
-            const bool subscribed =
-                as11_state_.apply_activity_subscription_response(
-                    payload, now, subscription_id);
+            const bool subscribed = pending_.event_command ==
+                    EventCommandType::Quiesce
+                ? as11_parse_event_subscription_response(
+                      payload, false, subscription_id)
+                : as11_state_.apply_activity_subscription_response(
+                      payload, now, subscription_id);
             event_.mark_subscribe_response(!subscribed, subscription_id, now);
-            if (subscribed) {
+            if (subscribed &&
+                pending_.event_command == EventCommandType::Quiesce) {
+                Log::logf(CAT_RPC, LOG_INFO,
+                          "[RPC] AS11 event subscription quiesced\n");
+            } else if (subscribed) {
                 Log::logf(CAT_RPC, LOG_INFO,
                           "[RPC] subscribed to activity events id=%lu\n",
                           static_cast<unsigned long>(subscription_id));

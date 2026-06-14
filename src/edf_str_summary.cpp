@@ -20,6 +20,24 @@ int16_t summary_scaled_digital(uint32_t value, float multiplier) {
     return clamp_i16(static_cast<int32_t>(lroundf(scaled)));
 }
 
+bool summary_str_digital(ReportSummaryField field,
+                         uint32_t value,
+                         float multiplier,
+                         int16_t &digital) {
+    static constexpr int16_t kTubeConnectedCodes[] = {3, 4, 1, 5, 2};
+    if (field == ReportSummaryField::TubeConnected) {
+        if (value >= sizeof(kTubeConnectedCodes) /
+                         sizeof(kTubeConnectedCodes[0])) {
+            return false;
+        }
+        digital = kTubeConnectedCodes[value];
+        return true;
+    }
+
+    digital = summary_scaled_digital(value, multiplier);
+    return true;
+}
+
 struct SummaryStrMap {
     ReportSummaryField field = ReportSummaryField::Count;
     size_t signal_index = 0;
@@ -126,10 +144,10 @@ bool edf_str_apply_summary_record(const ReportSummaryRecord &record,
 
     for (const SummaryStrMap &map : SUMMARY_STR_MAP) {
         uint32_t value = 0;
+        int16_t digital = 0;
         if (report_summary_field_value(record, map.field, value) &&
-            session.set_signal_digital(
-                map.signal_index,
-                summary_scaled_digital(value, map.multiplier))) {
+            summary_str_digital(map.field, value, map.multiplier, digital) &&
+            session.set_signal_digital(map.signal_index, digital)) {
             result.values++;
         }
     }

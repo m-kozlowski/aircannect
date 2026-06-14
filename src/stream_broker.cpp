@@ -186,7 +186,15 @@ StreamCommand StreamBroker::next_command(uint32_t now_ms,
         return command;
     }
 
-    if (desired_active() && !actual_active_) {
+    if (quiesce_requested_) {
+        if (quiesced_) return command;
+        if (!actual_active_ && accepted_subscription_.data_id_count == 0) {
+            return command;
+        }
+        command.type = StreamCommandType::Stop;
+        command.params_json =
+            "{\"dataIds\":[],\"sampleIntervalMs\":200,\"reportIntervalMs\":1000}";
+    } else if (desired_active() && !actual_active_) {
         command.type = StreamCommandType::Start;
         command.params_json = params_json_;
     } else if (!desired_active() && actual_active_) {
@@ -221,6 +229,11 @@ void StreamBroker::mark_command_response(StreamCommandType type,
     pending_ = StreamCommandType::None;
     last_command_ms_ = now_ms;
 
+    if (is_error && quiesce_requested_ && type == StreamCommandType::Stop) {
+        quiesced_ = false;
+        return;
+    }
+
     if (is_error) {
         error_ = true;
         error_command_ = type;
@@ -248,6 +261,7 @@ void StreamBroker::mark_command_response(StreamCommandType type,
     } else if (type == StreamCommandType::Stop) {
         actual_active_ = false;
         clear_subscription(accepted_subscription_);
+        if (quiesce_requested_) quiesced_ = true;
         if (consumer_count() == 0) frame_pool_.release_storage();
     }
 }
@@ -257,10 +271,24 @@ void StreamBroker::mark_reattach() {
     actual_active_ = false;
     last_command_ms_ = 0;
     clear_subscription(accepted_subscription_);
+    quiesced_ = false;
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         consumers_[i].queue.clear();
     }
     clear_error();
+}
+
+void StreamBroker::request_quiesce(uint32_t now_ms) {
+    (void)now_ms;
+    quiesce_requested_ = true;
+    quiesced_ = !actual_active_ && accepted_subscription_.data_id_count == 0;
+    clear_error();
+    if (pending_ == StreamCommandType::Start) pending_ = StreamCommandType::None;
+}
+
+void StreamBroker::clear_quiesce() {
+    quiesce_requested_ = false;
+    quiesced_ = false;
 }
 
 void StreamBroker::note_stream_data(uint32_t stream_id,
