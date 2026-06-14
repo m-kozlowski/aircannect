@@ -1,5 +1,7 @@
 #include "ota_manager.h"
 
+#include <algorithm>
+
 #include <ArduinoOTA.h>
 #include <Update.h>
 #include <esp_err.h>
@@ -10,6 +12,8 @@
 namespace aircannect {
 
 namespace {
+
+static constexpr size_t kHttpOtaWriteChunkBytes = 4096;
 
 const char *arduino_ota_error_name(ota_error_t error) {
     switch (error) {
@@ -119,7 +123,8 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     }
 
     status_.partition = http_partition_->label;
-    esp_err_t err = esp_ota_begin(http_partition_, image_size, &http_handle_);
+    esp_err_t err = esp_ota_begin(http_partition_, OTA_WITH_SEQUENTIAL_WRITES,
+                                  &http_handle_);
     if (err != ESP_OK) {
         abort_http_upload(esp_err_to_name(err));
         unlock_status();
@@ -157,24 +162,24 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
         return false;
     }
 
-    esp_err_t err = esp_ota_write(http_handle_, data, len);
-    if (err != ESP_OK) {
-        abort_http_upload(esp_err_to_name(err));
-        unlock_status();
-        return false;
-    }
-
-    status_.bytes += len;
-    status_.progress_percent =
-        static_cast<uint8_t>((status_.bytes * 100ULL) / status_.total_size);
-    if (status_.progress_percent != last_progress_log_percent_ &&
-        (status_.progress_percent % 10 == 0 ||
-         status_.progress_percent == 100)) {
-        last_progress_log_percent_ = status_.progress_percent;
-        Log::logf(CAT_OTA, LOG_DEBUG, "[OTA] HTTP upload %u%%\n",
-                  static_cast<unsigned>(status_.progress_percent));
-    }
+    esp_ota_handle_t handle = http_handle_;
     unlock_status();
+
+    size_t offset = 0;
+    while (offset < len) {
+        const size_t chunk =
+            std::min(kHttpOtaWriteChunkBytes, len - offset);
+        esp_err_t err = esp_ota_write(handle, data + offset, chunk);
+        if (err != ESP_OK) {
+            abort_http_upload(esp_err_to_name(err));
+            return false;
+        }
+        if (!apply_http_progress(chunk)) {
+            return false;
+        }
+        offset += chunk;
+        yield();
+    }
     return true;
 }
 
@@ -333,6 +338,28 @@ void OtaManager::stop_arduino_ota() {
     arduino_active_ = false;
     status_.arduino_started = false;
     unlock_status();
+}
+
+bool OtaManager::apply_http_progress(size_t bytes) {
+    if (!lock_status()) return false;
+    if (!status_.http_active || status_.total_size == 0 ||
+        status_.bytes + bytes > status_.total_size) {
+        if (!status_.last_error.length()) set_error("upload_not_active");
+        unlock_status();
+        return false;
+    }
+    status_.bytes += bytes;
+    status_.progress_percent =
+        static_cast<uint8_t>((status_.bytes * 100ULL) / status_.total_size);
+    if (status_.progress_percent != last_progress_log_percent_ &&
+        (status_.progress_percent % 10 == 0 ||
+         status_.progress_percent == 100)) {
+        last_progress_log_percent_ = status_.progress_percent;
+        Log::logf(CAT_OTA, LOG_DEBUG, "[OTA] HTTP upload %u%%\n",
+                  static_cast<unsigned>(status_.progress_percent));
+    }
+    unlock_status();
+    return true;
 }
 
 void OtaManager::set_error(const char *error) {

@@ -49,6 +49,7 @@ private:
     void start_arduino_ota();
     void stop_arduino_ota();
 
+    bool apply_http_progress(size_t bytes);
     void set_error(const char *error);
     void clear_http_state();
     bool lock_status(TickType_t timeout = portMAX_DELAY) const;

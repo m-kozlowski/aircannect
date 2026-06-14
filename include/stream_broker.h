@@ -44,7 +44,6 @@ struct StreamPublishResult {
     bool accepted = false;
     bool parse_error = false;
     bool pool_exhausted = false;
-    bool raw_truncated = false;
     bool values_truncated = false;
 };
 
@@ -98,7 +97,6 @@ public:
                                             size_t payload_len,
                                             uint32_t now_ms);
     bool next_frame(StreamConsumerHandle handle, StreamFrameRef &frame);
-    bool next_payload(StreamConsumerHandle handle, std::string &payload);
     size_t consumer_queue_count(StreamConsumerHandle handle) const;
     uint32_t consumer_queue_drops(StreamConsumerHandle handle) const;
     uint8_t consumer_source(StreamConsumerHandle handle) const;

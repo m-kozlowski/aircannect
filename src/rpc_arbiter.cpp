@@ -107,6 +107,12 @@ RpcArbiter::RpcArbiter(CanDriver &can) : can_(can) {
     stats_started_ms_ = millis();
 }
 
+bool RpcArbiter::reserve_reassembly_buffers() {
+    const bool rpc_ok = rpc_rx_.reserve_initial();
+    const bool log_ok = log_rx_.reserve_initial();
+    return rpc_ok && log_ok;
+}
+
 void RpcArbiter::poll() {
     can_.poll();
     const uint32_t now = millis();
@@ -384,11 +390,6 @@ void RpcArbiter::set_stream_frame_observer(StreamFrameObserver observer,
 bool RpcArbiter::next_stream_frame(StreamConsumerHandle handle,
                                    StreamFrameRef &frame) {
     return stream_.next_frame(handle, frame);
-}
-
-bool RpcArbiter::next_stream_payload(StreamConsumerHandle handle,
-                                     std::string &payload) {
-    return stream_.next_payload(handle, payload);
 }
 
 void RpcArbiter::reset_stats() {
@@ -1351,9 +1352,7 @@ void RpcArbiter::handle_stream_notification(const char *payload,
     stats_.stream_fanout_drops += result.drops;
     if (result.parse_error) stats_.stream_parse_errors++;
     if (result.pool_exhausted) stats_.stream_pool_exhaustions++;
-    if (result.raw_truncated || result.values_truncated) {
-        stats_.stream_truncated_frames++;
-    }
+    if (result.values_truncated) stats_.stream_truncated_frames++;
 }
 
 void RpcArbiter::handle_frame(const RawCanFrame &frame) {

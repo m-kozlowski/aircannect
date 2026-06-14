@@ -115,6 +115,7 @@ class RpcArbiter {
 public:
     explicit RpcArbiter(CanDriver &can);
 
+    bool reserve_reassembly_buffers();
     void poll();
 
     bool submit_raw_payload(const std::string &payload, RpcSource source);
@@ -161,8 +162,6 @@ public:
                                    void *context);
     bool next_stream_frame(StreamConsumerHandle handle,
                            StreamFrameRef &frame);
-    bool next_stream_payload(StreamConsumerHandle handle,
-                             std::string &payload);
 
     void reset_stats();
 

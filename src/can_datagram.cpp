@@ -123,6 +123,11 @@ DatagramRx::~DatagramRx() {
     free_reassembly_bytes(parts_);
 }
 
+bool DatagramRx::reserve_initial() {
+    DatagramFeedResult result;
+    return reserve_parts(initial_reserve_, result);
+}
+
 void DatagramRx::reset() {
     parts_len_ = 0;
     expected_crc_ = 0;

@@ -47,7 +47,6 @@ struct StreamSignalSpan {
 
 struct StreamFrameData {
     bool in_use = false;
-    bool raw_truncated = false;
     bool values_truncated = false;
     uint8_t refcount = 0;
     uint32_t sequence = 0;
@@ -55,8 +54,6 @@ struct StreamFrameData {
     uint32_t stream_id = 0;
     uint32_t interval_ms = 0;
     char start_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
-    size_t raw_json_len = 0;
-    char raw_json[AC_STREAM_FRAME_RAW_MAX] = {};
     uint8_t signal_count = 0;
     uint16_t value_count = 0;
     StreamSignalSpan signals[AC_STREAM_FRAME_SIGNAL_MAX] = {};

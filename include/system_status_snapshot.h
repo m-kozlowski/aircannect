@@ -60,6 +60,7 @@ struct SystemStatusSnapshot {
     uint32_t uptime_s = 0;
     const char *version = "";
     const char *built = "";
+    const char *reset_reason = "";
     MemoryStatus memory;
     StorageStatus storage;
     WifiStatusSnapshot wifi;
@@ -80,5 +81,7 @@ struct SystemStatusSources {
 
 SystemStatusSnapshot collect_system_status(
     const SystemStatusSources &sources);
+
+const char *system_reset_reason_name();
 
 }  // namespace aircannect

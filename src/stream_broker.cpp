@@ -353,9 +353,8 @@ StreamPublishResult StreamBroker::publish_stream_data(
         note_stream_data(frame->stream_id, frame->start_time, now_ms);
     }
     result.accepted = true;
-    result.raw_truncated = frame->raw_truncated;
     result.values_truncated = frame->values_truncated;
-    if (result.raw_truncated || result.values_truncated) truncated_frames_++;
+    if (result.values_truncated) truncated_frames_++;
     published_payloads_++;
     if (frame_observer_) {
         frame_observer_(frame_observer_context_, *frame, now_ms);
@@ -390,14 +389,6 @@ bool StreamBroker::next_frame(StreamConsumerHandle handle,
                               StreamFrameRef &frame) {
     if (!consumer_active(handle)) return false;
     return consumers_[handle].queue.pop(frame);
-}
-
-bool StreamBroker::next_payload(StreamConsumerHandle handle,
-                                std::string &payload) {
-    StreamFrameRef frame;
-    if (!next_frame(handle, frame) || !frame) return false;
-    payload.assign(frame->raw_json, frame->raw_json + strlen(frame->raw_json));
-    return true;
 }
 
 size_t StreamBroker::consumer_queue_count(StreamConsumerHandle handle) const {

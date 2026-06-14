@@ -619,15 +619,6 @@ bool stream_parse_frame(const char *payload,
     const char *payload_data = payload ? payload : "";
     const size_t payload_size = payload ? payload_len : 0;
 
-    frame.raw_json_len = payload_size;
-    const size_t copy_len =
-        payload_size < AC_STREAM_FRAME_RAW_MAX - 1
-            ? payload_size
-            : AC_STREAM_FRAME_RAW_MAX - 1;
-    if (copy_len) memcpy(frame.raw_json, payload_data, copy_len);
-    frame.raw_json[copy_len] = 0;
-    frame.raw_truncated = copy_len != payload_size;
-
     JsonCursor json(payload_data, payload_size, error, error_len);
     if (!parse_top(json, &frame, nullptr)) return false;
     for (size_t i = 0; i < frame.signal_count; ++i) {

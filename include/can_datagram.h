@@ -50,6 +50,7 @@ public:
                             size_t len,
                             uint32_t now_ms = 0);
     DatagramFeedResult poll(uint32_t now_ms);
+    bool reserve_initial();
     void reset();
 
 private:

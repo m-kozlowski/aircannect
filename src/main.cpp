@@ -19,6 +19,7 @@
 #include "sink_manager.h"
 #include "storage_manager.h"
 #include "storage_writer.h"
+#include "system_status_snapshot.h"
 #include "tcp_bridge.h"
 #include "telnet_console.h"
 #include "time_sync_service.h"
@@ -136,6 +137,8 @@ void setup() {
               aircannect_version());
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] build=%s\n",
               aircannect_build_date());
+    Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] reset_reason=%s\n",
+              system_reset_reason_name());
     Log::logf(CAT_GENERAL, LOG_INFO,
               "[INIT] chip=%s heap_free=%u heap_total=%u\n",
               ESP.getChipModel(),
@@ -148,6 +151,10 @@ void setup() {
                   static_cast<unsigned>(mem.psram_total));
     } else {
         Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] psram=no\n");
+    }
+    if (!rpc_arbiter.reserve_reassembly_buffers()) {
+        Log::logf(CAT_RPC, LOG_WARN,
+                  "[INIT] datagram reassembly buffer prealloc failed\n");
     }
     Storage::begin();
     StorageWriter::begin();

@@ -1364,6 +1364,7 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json = "{";
     json_add_string(json, "version", snap.version, false);
     json_add_string(json, "built", snap.built);
+    json_add_string(json, "reset_reason", snap.reset_reason);
     json_add_int(json, "uptime", snap.uptime_s);
     json_add_int(json, "heap", static_cast<long>(mem.heap_free));
     json_add_bool(json, "psram_available", mem.psram_available);
