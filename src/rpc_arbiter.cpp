@@ -116,13 +116,13 @@ bool RpcArbiter::reserve_reassembly_buffers() {
 void RpcArbiter::poll() {
     can_.poll();
     const uint32_t now = millis();
-    if (esp_reboot_quiesce_requested_ &&
-        esp_reboot_quiesce_deadline_ms_ &&
-        !esp_reboot_quiesce_timeout_logged_ &&
-        static_cast<int32_t>(now - esp_reboot_quiesce_deadline_ms_) >= 0) {
-        esp_reboot_quiesce_timeout_logged_ = true;
+    if (esp_ota_quiesce_requested_ &&
+        esp_ota_quiesce_deadline_ms_ &&
+        !esp_ota_quiesce_timeout_logged_ &&
+        static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0) {
+        esp_ota_quiesce_timeout_logged_ = true;
         Log::logf(CAT_OTA, LOG_WARN,
-                  "[OTA] AS11 quiesce timed out; reboot will proceed\n");
+                  "[OTA] AS11 quiesce timed out\n");
     }
 
     DatagramFeedResult rpc_timeout = rpc_rx_.poll(now);
@@ -157,9 +157,9 @@ void RpcArbiter::poll() {
 }
 
 bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source) {
-    if (esp_reboot_quiesce_requested_) {
+    if (esp_ota_quiesce_requested_) {
         push_event(RpcEventKind::Info,
-                   "raw RPC rejected while ESP reboot is pending");
+                   "raw RPC rejected while ESP OTA quiesce is active");
         return false;
     }
     if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
@@ -444,38 +444,45 @@ void RpcArbiter::set_background_polls_suspended(bool suspended) {
     background_polls_suspended_ = suspended;
 }
 
-void RpcArbiter::set_esp_reboot_quiesce(bool requested) {
+void RpcArbiter::set_esp_ota_quiesce(bool requested) {
     const uint32_t now = millis();
-    if (requested == esp_reboot_quiesce_requested_) return;
+    if (requested == esp_ota_quiesce_requested_) return;
 
-    esp_reboot_quiesce_requested_ = requested;
-    esp_reboot_quiesce_timeout_logged_ = false;
+    esp_ota_quiesce_requested_ = requested;
+    esp_ota_quiesce_timeout_logged_ = false;
     if (!requested) {
-        esp_reboot_quiesce_deadline_ms_ = 0;
+        esp_ota_quiesce_deadline_ms_ = 0;
         stream_.clear_quiesce();
         event_.clear_quiesce(now);
         return;
     }
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "[OTA] quiescing AS11 push traffic before ESP reboot\n");
-    cancel_all_requests("esp_reboot");
+              "[OTA] quiescing AS11 push traffic before ESP OTA\n");
+    cancel_all_requests("esp_ota");
     stream_.request_quiesce(now);
     event_.request_quiesce(now);
-    esp_reboot_quiesce_deadline_ms_ =
-        now + AC_ESP_REBOOT_QUIESCE_TIMEOUT_MS;
+    esp_ota_quiesce_deadline_ms_ =
+        now + AC_ESP_OTA_QUIESCE_TIMEOUT_MS;
 }
 
-bool RpcArbiter::esp_reboot_quiesced() const {
-    if (!esp_reboot_quiesce_requested_) return true;
-    const uint32_t now = millis();
-    if (esp_reboot_quiesce_deadline_ms_ &&
-        static_cast<int32_t>(now - esp_reboot_quiesce_deadline_ms_) >= 0) {
-        return true;
-    }
+bool RpcArbiter::esp_ota_quiesce_complete() const {
+    if (!esp_ota_quiesce_requested_) return true;
     return stream_.quiesced() && event_.quiesced() &&
            !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
            can_.tx_queue_depth() == 0;
+}
+
+bool RpcArbiter::esp_ota_quiesce_timed_out() const {
+    if (!esp_ota_quiesce_requested_ || !esp_ota_quiesce_deadline_ms_) {
+        return false;
+    }
+    const uint32_t now = millis();
+    return static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0;
+}
+
+bool RpcArbiter::esp_ota_reboot_allowed() const {
+    return esp_ota_quiesce_complete() || esp_ota_quiesce_timed_out();
 }
 
 void RpcArbiter::cancel_requests_from_source(RpcSource source,
@@ -511,9 +518,9 @@ bool RpcArbiter::background_backoff_active(uint32_t now) const {
            static_cast<int32_t>(background_backoff_until_ms_ - now) > 0;
 }
 
-bool RpcArbiter::request_allowed_during_esp_reboot_quiesce(
+bool RpcArbiter::request_allowed_during_esp_ota_quiesce(
     const QueuedRequest &request) const {
-    if (!esp_reboot_quiesce_requested_) return true;
+    if (!esp_ota_quiesce_requested_) return true;
     if (request.method == "StartStream" &&
         request.stream_command == StreamCommandType::Stop) {
         return true;
@@ -891,9 +898,9 @@ void RpcArbiter::dispatch_next_request() {
         return;
     }
 
-    if (esp_reboot_quiesce_requested_ &&
-        !request_allowed_during_esp_reboot_quiesce(request)) {
-        cancel_queued_request(request, "esp_reboot");
+    if (esp_ota_quiesce_requested_ &&
+        !request_allowed_during_esp_ota_quiesce(request)) {
+        cancel_queued_request(request, "esp_ota");
         if (from_retry) {
             dispatch_retry_ = {};
             dispatch_retry_active_ = false;
@@ -1023,7 +1030,7 @@ void RpcArbiter::check_pending_timeout() {
 
 void RpcArbiter::poll_event_subscription() {
     const uint32_t now = millis();
-    if (background_polls_suspended_ && !esp_reboot_quiesce_requested_) return;
+    if (background_polls_suspended_ && !esp_ota_quiesce_requested_) return;
     if (background_backoff_active(now)) return;
     EventCommand command = event_.next_command(now);
     if (command.type == EventCommandType::None) return;
@@ -1075,7 +1082,7 @@ void RpcArbiter::poll_as11_healthcheck() {
     const uint32_t now = millis();
     as11_state_.poll(now);
 
-    if (esp_reboot_quiesce_requested_) return;
+    if (esp_ota_quiesce_requested_) return;
     if (background_polls_suspended_) return;
     if (background_backoff_active(now)) return;
 

@@ -620,12 +620,19 @@ void ManagementConsole::handle_ota(Print &out, String rest,
         const OtaManagerStatus ota = ota_manager.status();
         out.print("[OTA] arduino=");
         out.print(ota.arduino_started ? "started" : "stopped");
+        if (ota.arduino_active) out.print("/active");
         out.print(" port=");
         out.print(ota.arduino_port);
         out.print(" auth=");
         out.print(ota.auth_enabled ? "on" : "off");
         out.print(" http=");
-        out.print(ota.http_active ? "active" : (ota.http_ready ? "ready" : "idle"));
+        out.print(ota.http_prepare_pending
+                      ? "preparing"
+                      : (ota.http_prepared
+                             ? "prepared"
+                             : (ota.http_active
+                                    ? "active"
+                                    : (ota.http_ready ? "ready" : "idle"))));
         out.print(" method=");
         out.print(ota.method);
         out.print(" bytes=");

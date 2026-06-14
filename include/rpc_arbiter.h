@@ -179,8 +179,10 @@ public:
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
     void set_background_polls_suspended(bool suspended);
-    void set_esp_reboot_quiesce(bool requested);
-    bool esp_reboot_quiesced() const;
+    void set_esp_ota_quiesce(bool requested);
+    bool esp_ota_quiesce_complete() const;
+    bool esp_ota_quiesce_timed_out() const;
+    bool esp_ota_reboot_allowed() const;
 
     const RpcArbiterStats &stats() const { return stats_; }
     RpcRuntimeStatus runtime_status() const;
@@ -272,7 +274,7 @@ private:
     bool background_backoff_active(uint32_t now) const;
     void note_request_success(RpcSource source, uint32_t now);
     void note_request_timeout(RpcSource source, uint32_t now);
-    bool request_allowed_during_esp_reboot_quiesce(
+    bool request_allowed_during_esp_ota_quiesce(
         const QueuedRequest &request) const;
 
     void schedule_as11_identity_refresh(uint32_t now, uint32_t delay_ms);
@@ -364,10 +366,10 @@ private:
 
     bool background_polls_suspended_ = false;
     bool raw_rpc_events_enabled_ = false;
-    bool esp_reboot_quiesce_requested_ = false;
-    bool esp_reboot_quiesce_timeout_logged_ = false;
+    bool esp_ota_quiesce_requested_ = false;
+    bool esp_ota_quiesce_timeout_logged_ = false;
 
-    uint32_t esp_reboot_quiesce_deadline_ms_ = 0;
+    uint32_t esp_ota_quiesce_deadline_ms_ = 0;
     uint8_t consecutive_scheduler_timeouts_ = 0;
     uint32_t background_backoff_until_ms_ = 0;
 };

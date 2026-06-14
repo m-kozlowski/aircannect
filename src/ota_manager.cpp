@@ -14,6 +14,7 @@ namespace aircannect {
 namespace {
 
 static constexpr size_t kHttpOtaWriteChunkBytes = 4096;
+static constexpr uint32_t kHttpOtaPreparedTtlMs = 60000;
 
 const char *arduino_ota_error_name(ota_error_t error) {
     switch (error) {
@@ -40,7 +41,9 @@ void OtaManager::begin(AppConfig &app_config) {
     esp_ota_mark_app_valid_cancel_rollback();
 }
 
-void OtaManager::poll(const WifiManager &wifi_manager, bool reboot_allowed) {
+void OtaManager::poll(const WifiManager &wifi_manager,
+                      bool reboot_allowed,
+                      bool arduino_ota_allowed) {
     if (reboot_at_ms_ &&
         static_cast<int32_t>(millis() - reboot_at_ms_) >= 0) {
         if (!reboot_allowed) {
@@ -59,8 +62,36 @@ void OtaManager::poll(const WifiManager &wifi_manager, bool reboot_allowed) {
     if (!app_config_) return;
 
     if (!lock_status()) return;
+    const uint32_t now = millis();
     status_.auth_enabled = app_config_->data().ota_password.length() > 0;
+    if (status_.http_prepared && http_prepared_at_ms_ &&
+        static_cast<int32_t>(now - http_prepared_at_ms_) >=
+            static_cast<int32_t>(kHttpOtaPreparedTtlMs)) {
+        status_.http_prepared = false;
+        prepared_image_size_ = 0;
+        http_prepared_at_ms_ = 0;
+        http_partition_ = nullptr;
+        status_.method = "idle";
+        status_.partition = "";
+        status_.total_size = 0;
+        status_.last_error = "ota_prepare_expired";
+        Log::logf(CAT_OTA, LOG_WARN,
+                  "[OTA] HTTP upload prepare expired before upload\n");
+    }
     if (!wifi_manager.network_available()) {
+        const bool stop_ota = status_.arduino_started;
+        unlock_status();
+        if (stop_ota) stop_arduino_ota();
+        return;
+    }
+    if (!arduino_ota_allowed) {
+        const bool stop_ota = status_.arduino_started;
+        unlock_status();
+        if (stop_ota) stop_arduino_ota();
+        return;
+    }
+    if (status_.http_prepare_pending || status_.http_prepared ||
+        status_.http_active || status_.http_ready || status_.reboot_pending) {
         const bool stop_ota = status_.arduino_started;
         unlock_status();
         if (stop_ota) stop_arduino_ota();
@@ -81,8 +112,10 @@ void OtaManager::mark_config_dirty() {
 
 bool OtaManager::active() const {
     if (!lock_status()) return false;
-    const bool result =
-        status_.http_active || arduino_active_ || status_.reboot_pending;
+    const bool result = status_.http_prepare_pending ||
+                        status_.http_prepared || status_.http_active ||
+                        status_.http_ready || arduino_active_ ||
+                        status_.reboot_pending;
     unlock_status();
     return result;
 }
@@ -94,6 +127,101 @@ OtaManagerStatus OtaManager::status() const {
     return copy;
 }
 
+bool OtaManager::request_http_upload_prepare(size_t image_size) {
+    if (!lock_status()) return false;
+    if (status_.http_active || status_.http_ready || status_.reboot_pending) {
+        set_error("ota_busy");
+        unlock_status();
+        return false;
+    }
+    if (status_.http_prepared && prepared_image_size_ == image_size) {
+        unlock_status();
+        return true;
+    }
+
+    clear_http_state();
+    status_.method = "http_prepare";
+    status_.http_prepare_pending = true;
+    status_.bytes = 0;
+    status_.total_size = image_size;
+    status_.progress_percent = 0;
+    status_.partition = "";
+    status_.last_error = "";
+    prepared_image_size_ = image_size;
+    http_prepared_at_ms_ = 0;
+
+    http_partition_ = esp_ota_get_next_update_partition(nullptr);
+    if (!http_partition_) {
+        status_.http_prepare_pending = false;
+        prepared_image_size_ = 0;
+        status_.method = "idle";
+        set_error("no_ota_partition");
+        unlock_status();
+        return false;
+    }
+    if (image_size == 0 || image_size > http_partition_->size) {
+        status_.http_prepare_pending = false;
+        http_partition_ = nullptr;
+        prepared_image_size_ = 0;
+        status_.method = "idle";
+        set_error("image_size_invalid");
+        unlock_status();
+        return false;
+    }
+
+    status_.partition = http_partition_->label;
+    Log::logf(CAT_OTA, LOG_INFO,
+              "[OTA] HTTP upload prepare partition=%s image_size=%u\n",
+              http_partition_->label, static_cast<unsigned>(image_size));
+    unlock_status();
+    return true;
+}
+
+void OtaManager::poll_http_upload_prepare(bool as11_quiesced,
+                                          bool as11_quiesce_timed_out) {
+    if (!lock_status()) return;
+    if (!status_.http_prepare_pending || status_.http_prepared) {
+        unlock_status();
+        return;
+    }
+
+    if (as11_quiesced) {
+        status_.http_prepare_pending = false;
+        status_.http_prepared = true;
+        status_.method = "http";
+        http_prepared_at_ms_ = millis();
+        Log::logf(CAT_OTA, LOG_INFO,
+                  "[OTA] HTTP upload prepared; AS11 traffic quiesced\n");
+        unlock_status();
+        return;
+    }
+
+    if (as11_quiesce_timed_out) {
+        status_.http_prepare_pending = false;
+        status_.http_prepared = false;
+        status_.method = "idle";
+        status_.partition = "";
+        status_.total_size = 0;
+        http_partition_ = nullptr;
+        prepared_image_size_ = 0;
+        http_prepared_at_ms_ = 0;
+        set_error("as11_quiesce_timeout");
+        Log::logf(CAT_OTA, LOG_ERROR,
+                  "[OTA] HTTP upload prepare failed: AS11 quiesce timeout\n");
+    }
+    unlock_status();
+}
+
+bool OtaManager::as11_quiesce_required() const {
+    if (!lock_status()) return false;
+    const bool result = status_.http_prepare_pending ||
+                        status_.http_prepared || status_.http_active ||
+                        status_.http_ready || status_.reboot_pending ||
+                        arduino_active_;
+    unlock_status();
+    return result;
+}
+
 bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     if (!lock_status()) return false;
     if (status_.http_active) {
@@ -101,9 +229,15 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
         unlock_status();
         return false;
     }
+    if (!status_.http_prepared || prepared_image_size_ != image_size) {
+        set_error("ota_prepare_required");
+        unlock_status();
+        return false;
+    }
     clear_http_state();
     status_.method = "http";
     status_.http_active = true;
+    http_prepared_at_ms_ = 0;
     status_.bytes = 0;
     status_.total_size = image_size;
     status_.progress_percent = 0;
@@ -209,6 +343,10 @@ bool OtaManager::finish_http_upload() {
 
     status_.http_active = false;
     status_.http_ready = true;
+    status_.http_prepare_pending = false;
+    status_.http_prepared = false;
+    prepared_image_size_ = 0;
+    http_prepared_at_ms_ = 0;
     status_.progress_percent = 100;
     status_.last_error = "";
     Log::logf(CAT_OTA, LOG_INFO,
@@ -227,8 +365,14 @@ void OtaManager::abort_http_upload(const char *reason) {
     if (http_handle_) esp_ota_abort(http_handle_);
     http_handle_ = 0;
     http_partition_ = nullptr;
+    prepared_image_size_ = 0;
+    http_prepared_at_ms_ = 0;
+    status_.http_prepare_pending = false;
+    status_.http_prepared = false;
     status_.http_active = false;
     status_.http_ready = false;
+    status_.method = "idle";
+    status_.partition = "";
     set_error(reason ? reason : "aborted");
     Log::logf(CAT_OTA, LOG_ERROR, "[OTA] HTTP upload failed: %s\n",
               status_.last_error.c_str());
@@ -267,6 +411,7 @@ void OtaManager::start_arduino_ota() {
             arduino_ota_->getCommand() == U_FLASH ? "firmware" : "filesystem";
         if (lock_status()) {
             arduino_active_ = true;
+            status_.arduino_active = true;
             status_.method = "arduino";
             status_.bytes = 0;
             status_.total_size = 0;
@@ -280,6 +425,7 @@ void OtaManager::start_arduino_ota() {
     arduino_ota_->onEnd([this]() {
         if (lock_status()) {
             arduino_active_ = false;
+            status_.arduino_active = false;
             status_.progress_percent = 100;
             unlock_status();
         }
@@ -310,6 +456,7 @@ void OtaManager::start_arduino_ota() {
         const char *name = arduino_ota_error_name(error);
         if (lock_status()) {
             arduino_active_ = false;
+            status_.arduino_active = false;
             status_.last_error = name;
             unlock_status();
         }
@@ -336,6 +483,7 @@ void OtaManager::stop_arduino_ota() {
     }
     if (!lock_status()) return;
     arduino_active_ = false;
+    status_.arduino_active = false;
     status_.arduino_started = false;
     unlock_status();
 }
@@ -372,8 +520,14 @@ void OtaManager::clear_http_state() {
     if (!lock_status()) return;
     http_handle_ = 0;
     http_partition_ = nullptr;
+    prepared_image_size_ = 0;
+    http_prepared_at_ms_ = 0;
+    status_.http_prepare_pending = false;
+    status_.http_prepared = false;
     status_.http_active = false;
     status_.http_ready = false;
+    status_.method = "idle";
+    status_.partition = "";
     status_.bytes = 0;
     status_.total_size = 0;
     status_.progress_percent = 0;

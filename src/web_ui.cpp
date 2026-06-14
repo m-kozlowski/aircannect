@@ -409,6 +409,9 @@ void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
     json = "{";
     json_add_string(json, "version", aircannect_version(), false);
     json_add_bool(json, "arduino_started", ota.arduino_started);
+    json_add_bool(json, "arduino_active", ota.arduino_active);
+    json_add_bool(json, "http_prepare_pending", ota.http_prepare_pending);
+    json_add_bool(json, "http_prepared", ota.http_prepared);
     json_add_bool(json, "http_active", ota.http_active);
     json_add_bool(json, "http_ready", ota.http_ready);
     json_add_bool(json, "reboot_pending", ota.reboot_pending);
@@ -2602,6 +2605,33 @@ void WebUI::register_routes() {
     server_->on("/api/ota", HTTP_GET, [this](AsyncWebServerRequest *request) {
         send_cached(request, cached_ota_json_);
     });
+
+    server_->on("/api/ota/prepare", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            if (resmed_ota_manager_->transport_active()) {
+                ota_manager_->abort_http_upload("resmed_ota_active");
+                String json;
+                json.reserve(AC_WEB_OTA_JSON_RESERVE);
+                build_ota_json(json, ota_manager_->status());
+                request->send(409, "application/json", json);
+                return;
+            }
+            size_t declared_size = 0;
+            if (!request_size_arg(request, "size", declared_size)) {
+                ota_manager_->abort_http_upload("missing_size");
+                String json;
+                json.reserve(AC_WEB_OTA_JSON_RESERVE);
+                build_ota_json(json, ota_manager_->status());
+                request->send(400, "application/json", json);
+                return;
+            }
+            const bool ok =
+                ota_manager_->request_http_upload_prepare(declared_size);
+            String json;
+            json.reserve(AC_WEB_OTA_JSON_RESERVE);
+            build_ota_json(json, ota_manager_->status());
+            request->send(ok ? 202 : 400, "application/json", json);
+        });
 
     server_->on(
         "/api/ota/upload", HTTP_POST,

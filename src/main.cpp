@@ -270,8 +270,9 @@ static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
 }
 
 void loop() {
-    const bool esp_reboot_pending = ota_manager.status().reboot_pending;
-    rpc_arbiter.set_esp_reboot_quiesce(esp_reboot_pending);
+    const bool esp_ota_quiesce_requested =
+        ota_manager.as11_quiesce_required();
+    rpc_arbiter.set_esp_ota_quiesce(esp_ota_quiesce_requested);
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
     rpc_arbiter.set_background_polls_suspended(
@@ -279,6 +280,11 @@ void loop() {
     rpc_arbiter.set_raw_rpc_events_enabled(
         tcp_bridge.raw_client_connected());
     rpc_arbiter.poll();
+    ota_manager.poll_http_upload_prepare(
+        esp_ota_quiesce_requested &&
+            rpc_arbiter.esp_ota_quiesce_complete(),
+        esp_ota_quiesce_requested &&
+            rpc_arbiter.esp_ota_quiesce_timed_out());
     report_manager.poll(rpc_arbiter);
     resmed_ota_manager.poll();
     // First drain handles events produced by CAN/RPC/OTA work before services
@@ -301,8 +307,9 @@ void loop() {
     }
     const bool esp_reboot_allowed =
         !ota_manager.status().reboot_pending ||
-        rpc_arbiter.esp_reboot_quiesced();
-    ota_manager.poll(wifi_manager, esp_reboot_allowed);
+        rpc_arbiter.esp_ota_reboot_allowed();
+    ota_manager.poll(wifi_manager, esp_reboot_allowed,
+                     !resmed_ota_transport_active);
     resmed_ota_manager.poll();
     Storage::poll();
     // Publish the worker's gate inputs from here (the owner thread) so the

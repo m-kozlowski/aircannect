@@ -5223,11 +5223,20 @@
 
     function renderOta(data) {
       up("otaVersion", data.version || "--");
-      const active = data.http_active || data.http_ready ||
+      const active = data.http_prepare_pending || data.http_prepared ||
+        data.http_active || data.http_ready ||
         data.reboot_pending || data.method === "http" ||
-        data.method === "arduino";
+        data.method === "http_prepare" || data.method === "arduino";
       if (!active && !(data.bytes || data.progress)) {
         up("otaProgress", "--");
+        return;
+      }
+      if (data.http_prepare_pending) {
+        up("otaProgress", "Preparing / " + fmtBytes(data.total_size || 0));
+        return;
+      }
+      if (data.http_prepared && !data.http_active) {
+        up("otaProgress", "Ready / " + fmtBytes(data.total_size || 0));
         return;
       }
       up("otaProgress", (data.progress || 0) + "% / " +
@@ -5236,6 +5245,29 @@
 
     function setOtaUploadProgress(percent, bytes) {
       up("otaProgress", percent + "% / " + fmtBytes(bytes || 0));
+    }
+
+    async function prepareOtaUpload(size) {
+      const prepareResponse = await api("/api/ota/prepare?size=" +
+        encodeURIComponent(size), {method: "POST"});
+      let data = await prepareResponse.json();
+      renderOta(data);
+
+      const started = Date.now();
+      while (!data.http_prepared) {
+        if (data.last_error) throw new Error(data.last_error);
+        if (!data.http_prepare_pending) {
+          throw new Error("OTA prepare did not start");
+        }
+        if (Date.now() - started > 15000) {
+          throw new Error("OTA prepare timed out");
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+        const pollResponse = await api("/api/ota");
+        data = await pollResponse.json();
+        renderOta(data);
+      }
+      return data;
     }
 
     async function otaUpload() {
@@ -5252,6 +5284,10 @@
       setOtaUploadProgress(0, 0);
 
       try {
+        msg("otaMsg", "Preparing OTA...", true, true);
+        await prepareOtaUpload(file.size);
+        msg("otaMsg", "Uploading...", true, true);
+
         const xhr = new XMLHttpRequest();
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {

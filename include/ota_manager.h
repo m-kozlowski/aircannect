@@ -16,6 +16,9 @@ namespace aircannect {
 
 struct OtaManagerStatus {
     bool arduino_started = false;
+    bool arduino_active = false;
+    bool http_prepare_pending = false;
+    bool http_prepared = false;
     bool http_active = false;
     bool http_ready = false;
     bool reboot_pending = false;
@@ -32,9 +35,15 @@ struct OtaManagerStatus {
 class OtaManager {
 public:
     void begin(AppConfig &app_config);
-    void poll(const WifiManager &wifi_manager, bool reboot_allowed = true);
+    void poll(const WifiManager &wifi_manager,
+              bool reboot_allowed = true,
+              bool arduino_ota_allowed = true);
     void mark_config_dirty();
 
+    bool request_http_upload_prepare(size_t image_size);
+    void poll_http_upload_prepare(bool as11_quiesced,
+                                  bool as11_quiesce_timed_out);
+    bool as11_quiesce_required() const;
     bool begin_http_upload(const String &filename, size_t image_size);
     bool write_http_upload(const uint8_t *data, size_t len);
     bool finish_http_upload();
@@ -67,6 +76,8 @@ private:
 
     esp_ota_handle_t http_handle_ = 0;
     const esp_partition_t *http_partition_ = nullptr;
+    size_t prepared_image_size_ = 0;
+    uint32_t http_prepared_at_ms_ = 0;
     OtaManagerStatus status_;
     mutable SemaphoreHandle_t status_mutex_ = nullptr;
 };
