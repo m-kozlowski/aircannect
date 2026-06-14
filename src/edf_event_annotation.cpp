@@ -1,5 +1,7 @@
 #include "edf_event_annotation.h"
 
+#include <string.h>
+
 #include "edf_time.h"
 
 namespace aircannect {
@@ -10,6 +12,18 @@ void set_result(EdfEventAnnotationResult &result,
                 const char *error) {
     result.status = status;
     result.error = error;
+}
+
+bool string_ends_with(const std::string &value, const char *suffix) {
+    if (!suffix) return false;
+    const size_t suffix_len = strlen(suffix);
+    if (value.size() < suffix_len) return false;
+    return value.compare(value.size() - suffix_len, suffix_len, suffix) == 0;
+}
+
+bool eve_event_time_is_end_anchor(const As11EventRecord &record) {
+    if (!record.has_duration || record.duration_ms <= 0) return false;
+    return string_ends_with(record.name, "End");
 }
 
 }  // namespace
@@ -47,6 +61,10 @@ bool edf_build_event_annotation(EdfAnnotationKind kind,
     }
 
     int64_t onset_ms = event_ms - session_start_epoch_ms;
+    if (kind == EdfAnnotationKind::Eve &&
+        eve_event_time_is_end_anchor(record)) {
+        onset_ms -= record.duration_ms;
+    }
     if (onset_ms < 0) onset_ms = 0;
 
     int32_t duration_ms = 0;

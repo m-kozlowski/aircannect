@@ -332,12 +332,21 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(assembly.samples_accepted));
     out.print(" invalid=");
     out.print(static_cast<unsigned long>(assembly.samples_invalid));
+    out.print(" missing=");
+    out.print(static_cast<unsigned long>(assembly.samples_missing));
     out.print(" dup=");
     out.print(static_cast<unsigned long>(assembly.samples_duplicate));
     out.print(" late=");
     out.print(static_cast<unsigned long>(assembly.samples_late));
     out.print(" ts_errors=");
     out.print(static_cast<unsigned long>(assembly.timestamp_errors));
+    out.print(" ts_jitter_fix=");
+    out.print(static_cast<unsigned long>(
+        assembly.timestamp_jitter_corrections));
+    out.print(" ts_resync=");
+    out.print(static_cast<unsigned long>(assembly.timestamp_resyncs));
+    out.print(" ts_jitter_ms=");
+    out.print(static_cast<long>(assembly.last_timestamp_jitter_ms));
     out.print(" last_error=");
     if (status.last_error[0]) {
         out.print(status.last_error);

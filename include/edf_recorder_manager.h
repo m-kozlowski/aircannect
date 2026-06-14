@@ -114,7 +114,9 @@ private:
                      uint32_t now_ms,
                      const char *reason);
     bool open_session_annotation_files(const SessionStatus &session);
-    bool ensure_numeric_files_open(uint32_t now_ms);
+    bool open_numeric_files_from_stream(uint32_t now_ms);
+    bool ensure_numeric_files_open(uint32_t now_ms,
+                                   const char *numeric_start_time);
     bool numeric_stream_ready() const;
     bool build_numeric_schemas();
     void reset_numeric_schemas();
@@ -152,6 +154,7 @@ private:
     void update_event_coverage();
     void attach_stream(uint32_t now_ms);
     void release_stream();
+    void update_stream_queue_drops();
     void drain_stream(uint32_t now_ms);
     void handle_completed_record(const EdfCompletedRecordView &record);
     bool enqueue_event_annotation(EdfAnnotationKind kind,
@@ -178,10 +181,6 @@ private:
     bool str_settings_pending_ = false;
     uint32_t str_settings_request_id_ = 0;
     uint32_t str_settings_request_ms_ = 0;
-    EdfLocalDateTime session_start_local_;
-    char session_header_date_[9] = {};
-    char session_header_time_[9] = {};
-    char session_recording_id_[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
     NumericSchemaState brp_schema_;
     NumericSchemaState pld_schema_;
     NumericSchemaState sa2_schema_;

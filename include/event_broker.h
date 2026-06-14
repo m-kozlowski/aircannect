@@ -80,6 +80,8 @@ public:
     void mark_command_deferred(uint32_t now_ms);
     void mark_command_timeout(uint32_t now_ms);
     void mark_command_cancelled(uint32_t now_ms);
+    bool accept_subscribe_response(const std::string &payload,
+                                   uint32_t &subscription_id) const;
     void mark_subscribe_response(bool is_error,
                                  uint32_t subscription_id,
                                  uint32_t now_ms);

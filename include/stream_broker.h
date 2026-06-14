@@ -124,6 +124,7 @@ public:
         return accepted_subscription_.data_ids_csv;
     }
     bool accepted_data_id(const char *data_id) const;
+    bool accepted_data_ids_cover(const char *data_ids_csv) const;
 
 private:
     struct Subscription {

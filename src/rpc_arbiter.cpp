@@ -378,6 +378,11 @@ bool RpcArbiter::stream_accepted_data_id(const char *data_id) const {
     return stream_.accepted_data_id(data_id);
 }
 
+bool RpcArbiter::stream_accepted_data_ids_cover(
+    const char *data_ids_csv) const {
+    return stream_.accepted_data_ids_cover(data_ids_csv);
+}
+
 const std::string &RpcArbiter::stream_accepted_data_ids_csv() const {
     return stream_.accepted_data_ids_csv();
 }
@@ -1203,12 +1208,8 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
                 payload, now, pending_.dispatch_epoch_ms, response_epoch_ms);
         } else if (pending_.event_command != EventCommandType::None) {
             uint32_t subscription_id = 0;
-            const bool subscribed = pending_.event_command ==
-                    EventCommandType::Quiesce
-                ? as11_parse_event_subscription_response(
-                      payload, false, subscription_id)
-                : as11_state_.apply_activity_subscription_response(
-                      payload, now, subscription_id);
+            const bool subscribed =
+                event_.accept_subscribe_response(payload, subscription_id);
             event_.mark_subscribe_response(!subscribed, subscription_id, now);
             if (subscribed &&
                 pending_.event_command == EventCommandType::Quiesce) {
@@ -1216,11 +1217,11 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
                           "[RPC] AS11 event subscription quiesced\n");
             } else if (subscribed) {
                 Log::logf(CAT_RPC, LOG_INFO,
-                          "[RPC] subscribed to activity events id=%lu\n",
+                          "[RPC] subscribed to events id=%lu\n",
                           static_cast<unsigned long>(subscription_id));
             } else {
                 Log::logf(CAT_RPC, LOG_WARN,
-                          "[RPC] activity event subscription rejected\n");
+                          "[RPC] event subscription rejected\n");
             }
         }
     } else if (pending_.event_command != EventCommandType::None) {

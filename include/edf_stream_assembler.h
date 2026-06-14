@@ -16,8 +16,10 @@ struct EdfSeriesAssemblyStatus {
     uint32_t records_skipped = 0;
     uint32_t samples_accepted = 0;
     uint32_t samples_invalid = 0;
+    uint32_t samples_missing = 0;
     uint32_t samples_duplicate = 0;
     uint32_t samples_late = 0;
+    uint32_t records_dropped_partial = 0;
     uint16_t slots_filled = 0;
 };
 
@@ -29,9 +31,14 @@ struct EdfStreamAssemblerStatus {
     uint32_t unknown_signals = 0;
     uint32_t samples_accepted = 0;
     uint32_t samples_invalid = 0;
+    uint32_t samples_missing = 0;
     uint32_t samples_duplicate = 0;
     uint32_t samples_late = 0;
+    uint32_t records_dropped_partial = 0;
     uint32_t records_completed = 0;
+    uint32_t timestamp_jitter_corrections = 0;
+    uint32_t timestamp_resyncs = 0;
+    int32_t last_timestamp_jitter_ms = 0;
     int64_t session_start_epoch_ms = 0;
     int64_t last_sample_epoch_ms = 0;
     EdfSeriesAssemblyStatus brp;
@@ -89,11 +96,39 @@ private:
         EdfSeriesAssemblyStatus *status = nullptr;
     };
 
+    struct FrameTiming {
+        int64_t reported_start_ms = 0;
+        int64_t effective_start_ms = 0;
+        uint32_t coverage_ms = 0;
+        uint32_t tolerance_ms = 0;
+        int32_t jitter_ms = 0;
+        bool eligible = false;
+        bool corrected = false;
+        bool resync = false;
+    };
+
     bool allocate_buffers();
     void free_buffers();
     void reset_session_counters();
+    void reset_timeline();
     void reset_record(SeriesBuffer &series);
     bool record_has_samples(const SeriesBuffer &series) const;
+    bool last_present_sample(const SeriesBuffer &series,
+                             uint8_t signal_index,
+                             uint16_t &sample_index) const;
+    bool record_tail_complete(const SeriesBuffer &series) const;
+    uint32_t count_missing_record_samples(const SeriesBuffer &series) const;
+    void count_late_frame_samples(const StreamFrameData &frame,
+                                  int64_t frame_start_ms,
+                                  SeriesBuffer &series);
+    void ingest_series_frame(const StreamFrameData &frame,
+                             int64_t frame_start_ms,
+                             SeriesBuffer &series);
+    bool resolve_frame_timing(const StreamFrameData &frame,
+                              int64_t reported_start_ms,
+                              FrameTiming &timing) const;
+    void commit_frame_timing(const StreamFrameData &frame,
+                             const FrameTiming &timing);
     void publish_record(const SeriesBuffer &series);
     void publish_current_record(SeriesBuffer &series, bool skipped);
     bool advance_to_record(SeriesBuffer &series,
@@ -123,6 +158,9 @@ private:
     uint8_t *sa2_valid_ = nullptr;
     EdfRecordObserver record_observer_ = nullptr;
     void *record_observer_context_ = nullptr;
+    bool timeline_active_ = false;
+    uint32_t timeline_stream_id_ = 0;
+    int64_t timeline_next_frame_start_ms_ = 0;
     EdfStreamAssemblerStatus status_;
 };
 

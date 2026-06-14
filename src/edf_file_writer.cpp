@@ -585,15 +585,20 @@ bool edf_annotation_label_for_event(EdfAnnotationKind kind,
     label = nullptr;
     if (!event_name) return false;
     if (kind == EdfAnnotationKind::Eve) {
-        if (strcmp(event_name, "Hypopnea") == 0) {
+        if (strcmp(event_name, "Hypopnea") == 0 ||
+            strcmp(event_name, "HypopneaEnd") == 0) {
             label = "Hypopnea";
-        } else if (strcmp(event_name, "CentralApnea") == 0) {
+        } else if (strcmp(event_name, "CentralApnea") == 0 ||
+                   strcmp(event_name, "CentralApneaEnd") == 0) {
             label = "Central Apnea";
-        } else if (strcmp(event_name, "ObstructiveApnea") == 0) {
+        } else if (strcmp(event_name, "ObstructiveApnea") == 0 ||
+                   strcmp(event_name, "ObstructiveApneaEnd") == 0) {
             label = "Obstructive Apnea";
-        } else if (strcmp(event_name, "Apnea") == 0) {
+        } else if (strcmp(event_name, "Apnea") == 0 ||
+                   strcmp(event_name, "ApneaEnd") == 0) {
             label = "Apnea";
         } else if (strcmp(event_name, "Arousal") == 0 ||
+                   strcmp(event_name, "ReraEnd") == 0 ||
                    strcmp(event_name, "Rera") == 0) {
             label = "Arousal";
         }

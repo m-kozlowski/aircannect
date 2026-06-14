@@ -25,12 +25,21 @@ bool summary_str_digital(ReportSummaryField field,
                          float multiplier,
                          int16_t &digital) {
     static constexpr int16_t kTubeConnectedCodes[] = {3, 4, 1, 5, 2};
+    static constexpr int16_t kHumidifierConnectedCodes[] = {1, 2, 3};
     if (field == ReportSummaryField::TubeConnected) {
         if (value >= sizeof(kTubeConnectedCodes) /
                          sizeof(kTubeConnectedCodes[0])) {
             return false;
         }
         digital = kTubeConnectedCodes[value];
+        return true;
+    }
+    if (field == ReportSummaryField::HumidifierConnected) {
+        if (value >= sizeof(kHumidifierConnectedCodes) /
+                         sizeof(kHumidifierConnectedCodes[0])) {
+            return false;
+        }
+        digital = kHumidifierConnectedCodes[value];
         return true;
     }
 

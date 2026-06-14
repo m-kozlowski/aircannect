@@ -26,6 +26,10 @@ bool bit_get(const uint8_t *bits, size_t index) {
     return (bits[index / 8] & static_cast<uint8_t>(1u << (index % 8))) != 0;
 }
 
+int64_t abs_i64(int64_t value) {
+    return value < 0 ? -value : value;
+}
+
 void bit_set(uint8_t *bits, size_t index, bool value) {
     if (!bits) return;
     const uint8_t mask = static_cast<uint8_t>(1u << (index % 8));
@@ -69,6 +73,7 @@ void EdfStreamAssembler::reset() {
 
 void EdfStreamAssembler::release() {
     free_buffers();
+    reset_timeline();
     status_ = {};
 }
 
@@ -116,6 +121,11 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
         set_error("timestamp");
         return EdfFramePrepareStatus::Rejected;
     }
+    FrameTiming timing;
+    const bool have_timing =
+        resolve_frame_timing(frame, frame_start_ms, timing);
+    const int64_t effective_start_ms =
+        have_timing ? timing.effective_start_ms : frame_start_ms;
 
     struct TargetRecord {
         bool seen = false;
@@ -147,7 +157,7 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
 
         for (uint16_t sample = 0; sample < span.sample_count; ++sample) {
             const int64_t sample_ms =
-                frame_start_ms +
+                effective_start_ms +
                 static_cast<int64_t>(sample) * source_interval;
             if (sample_ms < status_.session_start_epoch_ms) continue;
 
@@ -200,6 +210,11 @@ void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
         set_error("timestamp");
         return;
     }
+    FrameTiming timing;
+    const bool have_timing =
+        resolve_frame_timing(frame, frame_start_ms, timing);
+    const int64_t effective_start_ms =
+        have_timing ? timing.effective_start_ms : frame_start_ms;
 
     status_.frames++;
 
@@ -208,49 +223,19 @@ void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
         EdfSignalTarget target;
         if (!edf_signal_target_for_stream(span.id, target)) {
             status_.unknown_signals++;
-            continue;
         }
+    }
 
-        SeriesBuffer dst = series(target.series);
-        if (!dst.values || !dst.present || !dst.valid || !dst.status) {
-            set_error("buffer_missing");
-            continue;
-        }
-
-        const uint32_t source_interval =
-            span.sample_interval_ms ? span.sample_interval_ms
-                                    : frame.interval_ms;
-        const uint32_t target_interval =
-            target.sample_ms ? target.sample_ms : source_interval;
-        const bool count_duplicate =
-            source_interval == 0 || source_interval >= target_interval;
-        uint32_t last_target_slot = UINT32_MAX;
-
-        for (uint16_t sample = 0; sample < span.sample_count; ++sample) {
-            const size_t value_index = span.value_offset + sample;
-            if (value_index >= frame.value_count) break;
-
-            const int64_t sample_ms =
-                frame_start_ms +
-                static_cast<int64_t>(sample) * source_interval;
-            if (sample_ms < status_.session_start_epoch_ms) continue;
-            const int64_t relative_ms =
-                sample_ms - status_.session_start_epoch_ms;
-            const uint32_t record_index =
-                static_cast<uint32_t>(relative_ms / AC_EDF_RECORD_MS);
-            const uint32_t record_ms =
-                static_cast<uint32_t>(relative_ms % AC_EDF_RECORD_MS);
-            const uint32_t target_slot = record_ms / target_interval;
-            if (target_slot == last_target_slot) continue;
-            last_target_slot = target_slot;
-            if (target_slot >= dst.samples_per_record) continue;
-
-            const bool valid = frame.value_valid(value_index);
-            const float value = valid ? frame.values[value_index] : 0.0f;
-            store_sample(dst, target.signal_index, record_index,
-                         static_cast<uint16_t>(target_slot), valid, value,
-                         count_duplicate);
-        }
+    SeriesBuffer buffers[] = {
+        series(EdfSeriesId::Brp),
+        series(EdfSeriesId::Pld),
+        series(EdfSeriesId::Sa2),
+    };
+    for (SeriesBuffer &buffer : buffers) {
+        ingest_series_frame(frame, effective_start_ms, buffer);
+    }
+    if (have_timing) {
+        commit_frame_timing(frame, timing);
     }
 }
 
@@ -331,6 +316,13 @@ void EdfStreamAssembler::reset_session_counters() {
     status_.brp.allocated = buffers_ready;
     status_.pld.allocated = buffers_ready;
     status_.sa2.allocated = buffers_ready;
+    reset_timeline();
+}
+
+void EdfStreamAssembler::reset_timeline() {
+    timeline_active_ = false;
+    timeline_stream_id_ = 0;
+    timeline_next_frame_start_ms_ = 0;
 }
 
 void EdfStreamAssembler::reset_record(SeriesBuffer &series) {
@@ -345,6 +337,254 @@ void EdfStreamAssembler::reset_record(SeriesBuffer &series) {
 bool EdfStreamAssembler::record_has_samples(
     const SeriesBuffer &series) const {
     return series.status && series.status->slots_filled > 0;
+}
+
+bool EdfStreamAssembler::last_present_sample(const SeriesBuffer &series,
+                                             uint8_t signal_index,
+                                             uint16_t &sample_index) const {
+    if (signal_index >= series.signal_count || !series.present) return false;
+    const size_t base =
+        static_cast<size_t>(signal_index) * series.samples_per_record;
+    for (size_t sample = series.samples_per_record; sample > 0; --sample) {
+        const size_t index = base + sample - 1;
+        if (bit_get(series.present, index)) {
+            sample_index = static_cast<uint16_t>(sample - 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool EdfStreamAssembler::record_tail_complete(
+    const SeriesBuffer &series) const {
+    if (!record_has_samples(series) || series.samples_per_record == 0) {
+        return false;
+    }
+
+    bool saw_signal = false;
+    for (uint8_t signal = 0; signal < series.signal_count; ++signal) {
+        uint16_t last = 0;
+        if (!last_present_sample(series, signal, last)) continue;
+        saw_signal = true;
+        const uint16_t final_sample =
+            static_cast<uint16_t>(series.samples_per_record - 1);
+        if (last != final_sample) return false;
+    }
+    return saw_signal;
+}
+
+uint32_t EdfStreamAssembler::count_missing_record_samples(
+    const SeriesBuffer &series) const {
+    if (!series.present) return 0;
+    const size_t slots = series_slot_count(series.signal_count,
+                                           series.samples_per_record);
+    uint32_t missing = 0;
+    for (size_t slot = 0; slot < slots; ++slot) {
+        if (!bit_get(series.present, slot)) missing++;
+    }
+    return missing;
+}
+
+void EdfStreamAssembler::count_late_frame_samples(
+    const StreamFrameData &frame,
+    int64_t frame_start_ms,
+    SeriesBuffer &series) {
+    if (!series.status) return;
+    const uint32_t current_record = series.status->current_record;
+    for (size_t i = 0; i < frame.signal_count; ++i) {
+        const StreamSignalSpan &span = frame.signals[i];
+        EdfSignalTarget target;
+        if (!edf_signal_target_for_stream(span.id, target) ||
+            target.series != series.id) {
+            continue;
+        }
+
+        const uint32_t source_interval =
+            span.sample_interval_ms ? span.sample_interval_ms
+                                    : frame.interval_ms;
+        const uint32_t target_interval =
+            target.sample_ms ? target.sample_ms : source_interval;
+        if (target_interval == 0) continue;
+
+        for (uint16_t sample = 0; sample < span.sample_count; ++sample) {
+            const int64_t sample_ms =
+                frame_start_ms +
+                static_cast<int64_t>(sample) * source_interval;
+            if (sample_ms < status_.session_start_epoch_ms) continue;
+            const int64_t relative_ms =
+                sample_ms - status_.session_start_epoch_ms;
+            const uint32_t record_index =
+                static_cast<uint32_t>(relative_ms / AC_EDF_RECORD_MS);
+            if (record_index >= current_record) continue;
+            const uint32_t record_ms =
+                static_cast<uint32_t>(relative_ms % AC_EDF_RECORD_MS);
+            const uint32_t target_slot = record_ms / target_interval;
+            if (target_slot >= series.samples_per_record) continue;
+            series.status->samples_late++;
+            status_.samples_late++;
+        }
+    }
+}
+
+void EdfStreamAssembler::ingest_series_frame(const StreamFrameData &frame,
+                                             int64_t frame_start_ms,
+                                             SeriesBuffer &series) {
+    if (!series.values || !series.present || !series.valid || !series.status ||
+        series.samples_per_record == 0) {
+        set_error("buffer_missing");
+        return;
+    }
+
+    count_late_frame_samples(frame, frame_start_ms, series);
+
+    while (true) {
+        const uint32_t current_record = series.status->current_record;
+        bool saw_future = false;
+        uint32_t next_record = UINT32_MAX;
+
+        for (size_t i = 0; i < frame.signal_count; ++i) {
+            const StreamSignalSpan &span = frame.signals[i];
+            EdfSignalTarget target;
+            if (!edf_signal_target_for_stream(span.id, target) ||
+                target.series != series.id) {
+                continue;
+            }
+
+            const uint32_t source_interval =
+                span.sample_interval_ms ? span.sample_interval_ms
+                                        : frame.interval_ms;
+            const uint32_t target_interval =
+                target.sample_ms ? target.sample_ms : source_interval;
+            if (target_interval == 0) continue;
+            const bool count_duplicate =
+                source_interval == 0 || source_interval >= target_interval;
+            uint32_t last_target_slot = UINT32_MAX;
+
+            for (uint16_t sample = 0; sample < span.sample_count; ++sample) {
+                const size_t value_index = span.value_offset + sample;
+                if (value_index >= frame.value_count) break;
+
+                const int64_t sample_ms =
+                    frame_start_ms +
+                    static_cast<int64_t>(sample) * source_interval;
+                if (sample_ms < status_.session_start_epoch_ms) continue;
+                const int64_t relative_ms =
+                    sample_ms - status_.session_start_epoch_ms;
+                const uint32_t record_index =
+                    static_cast<uint32_t>(relative_ms / AC_EDF_RECORD_MS);
+                const uint32_t record_ms =
+                    static_cast<uint32_t>(relative_ms % AC_EDF_RECORD_MS);
+                const uint32_t target_slot = record_ms / target_interval;
+                if (target_slot >= series.samples_per_record) continue;
+
+                if (record_index < current_record) continue;
+                if (record_index > current_record) {
+                    saw_future = true;
+                    if (record_index < next_record) next_record = record_index;
+                    continue;
+                }
+                if (target_slot == last_target_slot) continue;
+                last_target_slot = target_slot;
+
+                const bool valid = frame.value_valid(value_index);
+                const float value = valid ? frame.values[value_index] : 0.0f;
+                store_sample(series, target.signal_index, record_index,
+                             static_cast<uint16_t>(target_slot), valid, value,
+                             count_duplicate);
+            }
+        }
+
+        if (!saw_future) break;
+        if (!advance_to_record(series, next_record)) break;
+    }
+}
+
+bool EdfStreamAssembler::resolve_frame_timing(
+    const StreamFrameData &frame,
+    int64_t reported_start_ms,
+    FrameTiming &timing) const {
+    timing = {};
+    timing.reported_start_ms = reported_start_ms;
+    timing.effective_start_ms = reported_start_ms;
+
+    uint32_t coverage_ms = 0;
+    uint32_t min_interval_ms = UINT32_MAX;
+
+    for (size_t i = 0; i < frame.signal_count; ++i) {
+        const StreamSignalSpan &span = frame.signals[i];
+        EdfSignalTarget target;
+        if (!edf_signal_target_for_stream(span.id, target)) continue;
+        (void)target;
+
+        const uint32_t source_interval =
+            span.sample_interval_ms ? span.sample_interval_ms
+                                    : frame.interval_ms;
+        if (source_interval == 0 || span.sample_count == 0) continue;
+        if (source_interval < min_interval_ms) {
+            min_interval_ms = source_interval;
+        }
+        const uint64_t span_coverage =
+            static_cast<uint64_t>(source_interval) * span.sample_count;
+        if (span_coverage > coverage_ms) {
+            coverage_ms = span_coverage > UINT32_MAX
+                              ? UINT32_MAX
+                              : static_cast<uint32_t>(span_coverage);
+        }
+    }
+
+    if (coverage_ms == 0 || min_interval_ms == UINT32_MAX) {
+        return false;
+    }
+
+    timing.coverage_ms = coverage_ms;
+    timing.tolerance_ms =
+        min_interval_ms > 2 ? (min_interval_ms / 2u) - 1u : 0u;
+    timing.eligible = true;
+
+    const bool same_stream =
+        !timeline_active_ || timeline_stream_id_ == 0 || frame.stream_id == 0 ||
+        frame.stream_id == timeline_stream_id_;
+    if (!same_stream) {
+        return true;
+    }
+
+    if (!timeline_active_) return true;
+
+    // AS11 frame startTime wobbles by a few ms around the report cadence.
+    // Keep the continuous sample timeline when the error is below half a
+    // source sample; larger jumps are treated as real gaps/resyncs.
+    const int64_t jitter =
+        reported_start_ms - timeline_next_frame_start_ms_;
+    if (jitter >= INT32_MIN && jitter <= INT32_MAX) {
+        timing.jitter_ms = static_cast<int32_t>(jitter);
+    }
+    if (abs_i64(jitter) <= timing.tolerance_ms) {
+        timing.effective_start_ms = timeline_next_frame_start_ms_;
+        timing.corrected = jitter != 0;
+    } else {
+        timing.resync = true;
+    }
+    return true;
+}
+
+void EdfStreamAssembler::commit_frame_timing(
+    const StreamFrameData &frame,
+    const FrameTiming &timing) {
+    if (!timing.eligible || timing.coverage_ms == 0) return;
+
+    if (timing.corrected) {
+        status_.timestamp_jitter_corrections++;
+        status_.last_timestamp_jitter_ms = timing.jitter_ms;
+    } else if (timing.resync) {
+        status_.timestamp_resyncs++;
+        status_.last_timestamp_jitter_ms = timing.jitter_ms;
+    }
+
+    timeline_active_ = true;
+    timeline_stream_id_ = frame.stream_id;
+    timeline_next_frame_start_ms_ =
+        timing.effective_start_ms + timing.coverage_ms;
+    status_.last_sample_epoch_ms = timeline_next_frame_start_ms_;
 }
 
 void EdfStreamAssembler::publish_record(const SeriesBuffer &series) {
@@ -363,9 +603,12 @@ void EdfStreamAssembler::publish_record(const SeriesBuffer &series) {
 void EdfStreamAssembler::publish_current_record(SeriesBuffer &series,
                                                 bool skipped) {
     if (!series.status) return;
+    const uint32_t missing = count_missing_record_samples(series);
     publish_record(series);
     series.status->records_completed++;
     status_.records_completed++;
+    series.status->samples_missing += missing;
+    status_.samples_missing += missing;
     if (skipped) series.status->records_skipped++;
 }
 
@@ -396,7 +639,12 @@ void EdfStreamAssembler::flush_partial_records() {
     };
     for (SeriesBuffer &buffer : buffers) {
         if (!record_has_samples(buffer)) continue;
-        publish_current_record(buffer, false);
+        if (record_tail_complete(buffer)) {
+            publish_current_record(buffer, false);
+        } else if (buffer.status) {
+            buffer.status->records_dropped_partial++;
+            status_.records_dropped_partial++;
+        }
         reset_record(buffer);
     }
 }

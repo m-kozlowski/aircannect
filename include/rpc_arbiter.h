@@ -157,6 +157,7 @@ public:
     bool stream_actual_active() const;
     size_t stream_accepted_data_id_count() const;
     bool stream_accepted_data_id(const char *data_id) const;
+    bool stream_accepted_data_ids_cover(const char *data_ids_csv) const;
     const std::string &stream_accepted_data_ids_csv() const;
     void set_stream_frame_observer(StreamFrameObserver observer,
                                    void *context);

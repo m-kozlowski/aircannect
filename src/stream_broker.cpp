@@ -22,6 +22,26 @@ void normalize_interval_pair(uint32_t &sample_ms, uint32_t &report_ms) {
     if (report_ms == 0) report_ms = sample_ms;
 }
 
+bool csv_contains_token(const std::string &csv,
+                        const char *token,
+                        size_t token_len) {
+    if (!token || token_len == 0) return false;
+    size_t start = 0;
+    while (start <= csv.size()) {
+        size_t comma = csv.find(',', start);
+        if (comma == std::string::npos) {
+            comma = csv.size();
+        }
+        if (comma > start &&
+            csv.compare(start, comma - start, token, token_len) == 0) {
+            return true;
+        }
+        if (comma >= csv.size()) break;
+        start = comma + 1;
+    }
+    return false;
+}
+
 }  // namespace
 
 StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
@@ -408,20 +428,30 @@ uint8_t StreamBroker::consumer_source(StreamConsumerHandle handle) const {
 
 bool StreamBroker::accepted_data_id(const char *data_id) const {
     if (!data_id || !*data_id) return false;
-    size_t start = 0;
-    while (start <= accepted_subscription_.data_ids_csv.size()) {
-        size_t comma = accepted_subscription_.data_ids_csv.find(',', start);
-        if (comma == std::string::npos) {
-            comma = accepted_subscription_.data_ids_csv.size();
+    return csv_contains_token(accepted_subscription_.data_ids_csv,
+                              data_id,
+                              strlen(data_id));
+}
+
+bool StreamBroker::accepted_data_ids_cover(const char *data_ids_csv) const {
+    if (!data_ids_csv || !*data_ids_csv) return false;
+    bool saw_id = false;
+    const char *start = data_ids_csv;
+    while (*start) {
+        const char *comma = strchr(start, ',');
+        const char *end = comma ? comma : start + strlen(start);
+        if (end > start) {
+            saw_id = true;
+            if (!csv_contains_token(accepted_subscription_.data_ids_csv,
+                                    start,
+                                    static_cast<size_t>(end - start))) {
+                return false;
+            }
         }
-        if (accepted_subscription_.data_ids_csv.compare(
-                start, comma - start, data_id) == 0) {
-            return true;
-        }
-        if (comma >= accepted_subscription_.data_ids_csv.size()) break;
+        if (!comma) break;
         start = comma + 1;
     }
-    return false;
+    return saw_id;
 }
 
 void StreamBroker::reset_counters() {

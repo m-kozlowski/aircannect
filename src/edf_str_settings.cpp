@@ -104,6 +104,8 @@ static constexpr int16_t STR_SPONT_RESP_RATE_ENABLE_CODES[] = {1, 3};
 
 // Confirmed AS11/ResScan STR enum export maps. Labels resolve through the
 // setting option table; numeric DigitalCode values are already STR-native.
+// Some confirmed tags are not present in the currently frozen STR EDF schema,
+// but keeping the map complete makes future schema expansion explicit.
 static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
     {"_MOP", STR_MODE_CODES,
      sizeof(STR_MODE_CODES) / sizeof(STR_MODE_CODES[0]),
@@ -129,7 +131,16 @@ static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
     {"_ZZ9", STR_BOOL_CODES,
      sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
      EdfStrNumericInput::DigitalCode},
+    {"_Z16", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::DigitalCode},
+    {"_XAM", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::DigitalCode},
     {"_XB6", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::DigitalCode},
+    {"_XB9", STR_BOOL_CODES,
      sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
      EdfStrNumericInput::DigitalCode},
     {"_ZZ5", STR_SPONT_RESP_RATE_ENABLE_CODES,

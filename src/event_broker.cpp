@@ -141,6 +141,50 @@ bool variant_to_uint32(JsonVariantConst value, uint32_t &out) {
     return false;
 }
 
+bool json_data_ids(JsonDocument &doc, JsonArrayConst &out) {
+    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
+    if (result.isNull()) return false;
+    out = result["dataIds"].as<JsonArrayConst>();
+    return !out.isNull();
+}
+
+bool extract_subscription_id(JsonDocument &doc, uint32_t &subscription_id) {
+    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
+    if (result.isNull()) return false;
+    return variant_to_uint32(result["subscriptionId"], subscription_id);
+}
+
+bool event_data_id_is_base(const char *data_id) {
+    if (!data_id || !*data_id) return true;
+    for (const char *base : BASE_EVENT_DATA_IDS) {
+        if (strcmp(data_id, base) == 0) return true;
+    }
+    return false;
+}
+
+bool response_data_id_valid(JsonArrayConst ids, const char *data_id) {
+    if (!data_id || !*data_id) return true;
+    for (JsonObjectConst item : ids) {
+        std::string returned_id;
+        if (!variant_to_string(item["dataId"], returned_id)) continue;
+        if (returned_id == data_id && item["valid"].as<bool>()) return true;
+    }
+    return false;
+}
+
+bool response_has_valid_activity_selector(JsonArrayConst ids) {
+    for (JsonObjectConst item : ids) {
+        std::string returned_id;
+        if (!variant_to_string(item["dataId"], returned_id)) continue;
+        if ((returned_id == "SystemActivityEvents-FrequentActivityEvents" ||
+             returned_id == "SystemActivityEvents-SporadicActivityEvents") &&
+            item["valid"].as<bool>()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool variant_to_int32(JsonVariantConst value, int32_t &out) {
     if (value.isNull()) return false;
     if (value.is<int>()) {
@@ -315,6 +359,48 @@ void EventBroker::mark_command_timeout(uint32_t now_ms) {
 
 void EventBroker::mark_command_cancelled(uint32_t now_ms) {
     mark_command_timeout(now_ms);
+}
+
+bool EventBroker::accept_subscribe_response(
+    const std::string &payload,
+    uint32_t &subscription_id) const {
+    subscription_id = 0;
+
+    JsonDocument response_doc;
+    DeserializationError response_error =
+        deserializeJson(response_doc, payload);
+    if (response_error || !extract_subscription_id(response_doc,
+                                                   subscription_id)) {
+        return false;
+    }
+
+    JsonArrayConst response_ids;
+    const bool response_has_ids = json_data_ids(response_doc, response_ids);
+    if (pending_quiesce_) {
+        return !response_has_ids || response_ids.size() == 0;
+    }
+    if (!response_has_ids) return false;
+
+    if (!response_has_valid_activity_selector(response_ids)) return false;
+
+    JsonDocument request_doc;
+    DeserializationError request_error =
+        deserializeJson(request_doc, pending_params_json_);
+    if (request_error) return false;
+
+    JsonArrayConst requested_ids =
+        request_doc["dataIds"].as<JsonArrayConst>();
+    if (requested_ids.isNull()) return false;
+
+    for (JsonVariantConst item : requested_ids) {
+        std::string requested_id;
+        if (!variant_to_string(item, requested_id)) continue;
+        if (event_data_id_is_base(requested_id.c_str())) continue;
+        if (!response_data_id_valid(response_ids, requested_id.c_str())) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void EventBroker::mark_subscribe_response(bool is_error,

@@ -106,10 +106,12 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         return;
     }
 
-    attach_stream(now_ms);
-    (void)ensure_numeric_files_open(now_ms);
     sync_annotation_open_status();
-    if (!numeric_files_open_) return;
+    attach_stream(now_ms);
+    update_stream_queue_drops();
+    if (!numeric_files_open_ && !open_numeric_files_from_stream(now_ms)) {
+        return;
+    }
     if (!sync_numeric_open_status(now_ms)) return;
     drain_stream(now_ms);
 }
@@ -264,9 +266,6 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     status_.last_event_data_id[0] = 0;
     status_.last_event_name[0] = 0;
     status_.last_error[0] = 0;
-    session_header_date_[0] = 0;
-    session_header_time_[0] = 0;
-    session_recording_id_[0] = 0;
     session_start_epoch_ms_ = 0;
     numeric_files_open_ = false;
     annotation_open_synced_ = false;
@@ -291,16 +290,6 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     session_start_epoch_ms_ = session_start_ms;
 
     if (!open_session_annotation_files(session)) {
-        status_.active = false;
-        status_.sessions_started--;
-        session_start_epoch_ms_ = 0;
-        next_session_start_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-        return;
-    }
-
-    if (!assembler_.start_session(session.start_device_time)) {
-        set_error(assembler_.status().last_error);
-        close_session_files();
         status_.active = false;
         status_.sessions_started--;
         session_start_epoch_ms_ = 0;
@@ -375,12 +364,6 @@ bool EdfRecorderManager::open_session_annotation_files(
         set_error("identity_unavailable");
         return false;
     }
-    session_start_local_ = start;
-    copy_text(session_header_date_, sizeof(session_header_date_), date);
-    copy_text(session_header_time_, sizeof(session_header_time_), time);
-    copy_text(session_recording_id_, sizeof(session_recording_id_),
-              recording_id);
-
     EdfHeaderInfo info;
     info.patient_id = "AirCANnect";
     info.recording_id = recording_id;
@@ -494,10 +477,41 @@ bool EdfRecorderManager::numeric_stream_ready() const {
     if (!arbiter_->stream_actual_active()) {
         return false;
     }
-    return arbiter_->stream_accepted_data_id_count() > 0;
+    return arbiter_->stream_accepted_data_ids_cover(DEFAULT_EDF_STREAM_IDS);
 }
 
-bool EdfRecorderManager::ensure_numeric_files_open(uint32_t now_ms) {
+bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
+    if (numeric_files_open_) return true;
+    if (static_cast<int32_t>(now_ms - next_numeric_open_ms_) < 0) {
+        return false;
+    }
+    if (!numeric_stream_ready()) {
+        return false;
+    }
+
+    if (!pending_stream_frame_) {
+        if (!arbiter_->next_stream_frame(status_.stream_handle,
+                                         pending_stream_frame_)) {
+            return false;
+        }
+    }
+    if (!pending_stream_frame_) return false;
+
+    if (!pending_stream_frame_->start_time[0]) {
+        pending_stream_frame_.reset();
+        status_.file_open_failures++;
+        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+        set_error("missing_numeric_start_time");
+        return false;
+    }
+
+    return ensure_numeric_files_open(now_ms,
+                                     pending_stream_frame_->start_time);
+}
+
+bool EdfRecorderManager::ensure_numeric_files_open(
+    uint32_t now_ms,
+    const char *numeric_start_time) {
     if (numeric_files_open_) return true;
     if (static_cast<int32_t>(now_ms - next_numeric_open_ms_) < 0) {
         return true;
@@ -505,13 +519,42 @@ bool EdfRecorderManager::ensure_numeric_files_open(uint32_t now_ms) {
     if (!numeric_stream_ready()) {
         return true;
     }
-    if (!session_header_date_[0] || !session_header_time_[0]) {
+
+    EdfLocalDateTime numeric_start;
+    if (!parse_session_local_time(numeric_start_time, numeric_start)) {
         status_.file_open_failures++;
         next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-        set_error("missing_numeric_header");
+        set_error("bad_numeric_start_time");
         return false;
     }
+
+    char date[9] = {};
+    char time[9] = {};
+    if (!edf_header_date(numeric_start, date, sizeof(date)) ||
+        !edf_header_time(numeric_start, time, sizeof(time))) {
+        status_.file_open_failures++;
+        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+        set_error("bad_numeric_edf_time");
+        return false;
+    }
+
+    char recording_id[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
+    if (!build_recording_id(numeric_start, recording_id,
+                            sizeof(recording_id))) {
+        status_.file_open_failures++;
+        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+        set_error("numeric_identity_unavailable");
+        return false;
+    }
+
     if (!build_numeric_schemas()) {
+        status_.file_open_failures++;
+        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+        return false;
+    }
+
+    if (!assembler_.start_session(numeric_start_time)) {
+        set_error(assembler_.status().last_error);
         status_.file_open_failures++;
         next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
         return false;
@@ -520,14 +563,14 @@ bool EdfRecorderManager::ensure_numeric_files_open(uint32_t now_ms) {
 
     EdfHeaderInfo info;
     info.patient_id = "AirCANnect";
-    info.recording_id = session_recording_id_;
-    info.start_date = session_header_date_;
-    info.start_time = session_header_time_;
+    info.recording_id = recording_id;
+    info.start_date = date;
+    info.start_time = time;
     info.record_count = 0;
 
     if (brp_schema_.layout.enabled) {
         if (!enqueue_numeric_file_open(brp_schema_.layout.schema,
-                                       session_start_local_, info,
+                                       numeric_start, info,
                                        status_.brp_path,
                                        sizeof(status_.brp_path))) {
             status_.file_open_failures++;
@@ -538,7 +581,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(uint32_t now_ms) {
     }
     if (pld_schema_.layout.enabled) {
         if (!enqueue_numeric_file_open(pld_schema_.layout.schema,
-                                       session_start_local_, info,
+                                       numeric_start, info,
                                        status_.pld_path,
                                        sizeof(status_.pld_path))) {
             if (brp_schema_.open) {
@@ -554,7 +597,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(uint32_t now_ms) {
     }
     if (sa2_schema_.layout.enabled) {
         if (!enqueue_numeric_file_open(sa2_schema_.layout.schema,
-                                       session_start_local_, info,
+                                       numeric_start, info,
                                        status_.sa2_path,
                                        sizeof(status_.sa2_path))) {
             if (brp_schema_.open) {
@@ -579,8 +622,9 @@ bool EdfRecorderManager::ensure_numeric_files_open(uint32_t now_ms) {
     status_.files_open = files_open_ || numeric_files_open_;
     if (numeric_files_open_) {
         Log::logf(CAT_STREAM, LOG_INFO,
-                  "[EDF] numeric files open accepted=%s brp=%u pld=%u "
-                  "sa2=%u\n",
+                  "[EDF] numeric files open start=%s accepted=%s brp=%u "
+                  "pld=%u sa2=%u\n",
+                  numeric_start_time ? numeric_start_time : "--",
                   arbiter_->stream_accepted_data_ids_csv().c_str(),
                   static_cast<unsigned>(
                       brp_schema_.layout.schema.source_signal_count),
@@ -1071,7 +1115,7 @@ void EdfRecorderManager::release_stream() {
     pending_stream_frame_.reset();
 }
 
-void EdfRecorderManager::drain_stream(uint32_t now_ms) {
+void EdfRecorderManager::update_stream_queue_drops() {
     if (status_.stream_handle == STREAM_CONSUMER_INVALID ||
         !arbiter_->stream_consumer_active(status_.stream_handle)) {
         status_.stream_attached = false;
@@ -1087,6 +1131,16 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
         last_queue_drops_ = queue_drops;
         status_.frame_drops += delta;
     }
+}
+
+void EdfRecorderManager::drain_stream(uint32_t now_ms) {
+    if (status_.stream_handle == STREAM_CONSUMER_INVALID ||
+        !arbiter_->stream_consumer_active(status_.stream_handle)) {
+        status_.stream_attached = false;
+        return;
+    }
+
+    update_stream_queue_drops();
 
     for (size_t i = 0; i < AC_EDF_STREAM_FRAME_BUDGET; ++i) {
         StreamFrameRef frame = pending_stream_frame_;
