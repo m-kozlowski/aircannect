@@ -16,9 +16,13 @@ struct EdfStrSettingsApplyResult {
 };
 
 std::string edf_str_setting_get_names();
+std::string edf_str_summary_get_names();
 
 bool edf_str_apply_settings_response(const std::string &payload,
                                      EdfStrSessionAccumulator &session,
                                      EdfStrSettingsApplyResult &result);
+bool edf_str_apply_summary_get_response(const std::string &payload,
+                                        EdfStrSessionAccumulator &session,
+                                        EdfStrSettingsApplyResult &result);
 
 }  // namespace aircannect

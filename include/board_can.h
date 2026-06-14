@@ -62,7 +62,8 @@ static constexpr size_t AC_STREAM_CONSUMERS_MAX = 4;
 static constexpr size_t AC_STREAM_CONSUMER_QUEUE_DEPTH = 2;
 
 static constexpr size_t AC_STREAM_FRAME_POOL_INTERNAL = 3;
-static constexpr size_t AC_STREAM_FRAME_POOL_PSRAM = 8;
+// EDF keeps a short PSRAM-backed startup buffer while SD open jobs finish.
+static constexpr size_t AC_STREAM_FRAME_POOL_PSRAM = 48;
 static constexpr size_t AC_STREAM_FRAME_RAW_MAX = 6144;
 static constexpr size_t AC_STREAM_FRAME_SIGNAL_MAX = 24;
 static constexpr size_t AC_STREAM_FRAME_SIGNAL_NAME_MAX = 48;

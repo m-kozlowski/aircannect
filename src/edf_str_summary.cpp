@@ -1,6 +1,6 @@
 #include "edf_str_summary.h"
 
-#include <math.h>
+#include <stdint.h>
 #include <time.h>
 
 #include "edf_storage_catalog.h"
@@ -15,14 +15,21 @@ int16_t clamp_i16(int32_t value) {
     return static_cast<int16_t>(value);
 }
 
-int16_t summary_scaled_digital(uint32_t value, float multiplier) {
-    const float scaled = static_cast<float>(value) * multiplier;
-    return clamp_i16(static_cast<int32_t>(lroundf(scaled)));
+int16_t summary_scaled_digital(uint32_t value,
+                               uint16_t numerator,
+                               uint16_t denominator) {
+    if (denominator == 0) return 0;
+    const uint64_t scaled =
+        (static_cast<uint64_t>(value) * numerator + denominator / 2) /
+        denominator;
+    return clamp_i16(scaled > INT32_MAX ? INT32_MAX
+                                        : static_cast<int32_t>(scaled));
 }
 
 bool summary_str_digital(ReportSummaryField field,
                          uint32_t value,
-                         float multiplier,
+                         uint16_t numerator,
+                         uint16_t denominator,
                          int16_t &digital) {
     static constexpr int16_t kTubeConnectedCodes[] = {3, 4, 1, 5, 2};
     static constexpr int16_t kHumidifierConnectedCodes[] = {1, 2, 3};
@@ -43,74 +50,77 @@ bool summary_str_digital(ReportSummaryField field,
         return true;
     }
 
-    digital = summary_scaled_digital(value, multiplier);
+    digital = summary_scaled_digital(value, numerator, denominator);
     return true;
 }
 
 struct SummaryStrMap {
     ReportSummaryField field = ReportSummaryField::Count;
     size_t signal_index = 0;
-    float multiplier = 1.0f;
+    // Converts the raw integer stored in ReportSummaryRecord to the STR
+    // signal's EDF digital sample value.
+    uint16_t numerator = 1;
+    uint16_t denominator = 1;
 };
 
 static constexpr SummaryStrMap SUMMARY_STR_MAP[] = {
-    {ReportSummaryField::TubeConnected, 76, 1.0f},
-    {ReportSummaryField::HumidifierConnected, 77, 1.0f},
-    {ReportSummaryField::BlowPressure95, 78, 2.0f},
-    {ReportSummaryField::BlowPressure5, 79, 2.0f},
-    {ReportSummaryField::Flow95, 80, 0.2f},
-    {ReportSummaryField::Flow5, 81, 0.2f},
-    {ReportSummaryField::BlowerFlow50, 82, 0.2f},
-    {ReportSummaryField::AmbientHumidity50, 83, 10.0f},
-    {ReportSummaryField::HumidifierTemperature50, 84, 10.0f},
-    {ReportSummaryField::HeatedTubeTemperature50, 85, 10.0f},
-    {ReportSummaryField::HeatedTubePower50, 86, 10.0f},
-    {ReportSummaryField::HumidifierPower50, 87, 10.0f},
-    {ReportSummaryField::Spo2Median, 88, 1.0f},
-    {ReportSummaryField::Spo2_95, 89, 1.0f},
-    {ReportSummaryField::Spo2Max, 90, 1.0f},
-    {ReportSummaryField::Spo2ThresholdMinutes, 91, 1.0f},
-    {ReportSummaryField::SpontaneousTriggerPercent, 92, 1.0f},
-    {ReportSummaryField::SpontaneousCyclePercent, 93, 1.0f},
-    {ReportSummaryField::MaskPressureMedian, 94, 2.0f},
-    {ReportSummaryField::MaskPressure95, 95, 2.0f},
-    {ReportSummaryField::MaskPressureMax, 96, 2.0f},
-    {ReportSummaryField::TargetIpapMedian, 97, 2.0f},
-    {ReportSummaryField::TargetIpap95, 98, 2.0f},
-    {ReportSummaryField::TargetIpapMax, 99, 2.0f},
-    {ReportSummaryField::TargetEpapMedian, 100, 2.0f},
-    {ReportSummaryField::TargetEpap95, 101, 2.0f},
-    {ReportSummaryField::TargetEpapMax, 102, 2.0f},
-    {ReportSummaryField::LeakMedian, 103, 2.0f},
-    {ReportSummaryField::Leak95, 104, 2.0f},
-    {ReportSummaryField::Leak70, 105, 2.0f},
-    {ReportSummaryField::LeakMax, 106, 2.0f},
-    {ReportSummaryField::MinuteVentMedian, 107, 8.0f},
-    {ReportSummaryField::MinuteVent95, 108, 8.0f},
-    {ReportSummaryField::MinuteVentMax, 109, 8.0f},
-    {ReportSummaryField::RespiratoryRateMedian, 110, 5.0f},
-    {ReportSummaryField::RespiratoryRate95, 111, 5.0f},
-    {ReportSummaryField::RespiratoryRateMax, 112, 5.0f},
-    {ReportSummaryField::TidalVolumeMedian, 113, 2.0f},
-    {ReportSummaryField::TidalVolume95, 114, 2.0f},
-    {ReportSummaryField::TidalVolumeMax, 115, 2.0f},
-    {ReportSummaryField::TargetVentMedian, 116, 1.0f},
-    {ReportSummaryField::TargetVent95, 117, 1.0f},
-    {ReportSummaryField::TargetVentMax, 118, 1.0f},
-    {ReportSummaryField::IeRatioMedian, 119, 1.0f},
-    {ReportSummaryField::IeRatio95, 120, 1.0f},
-    {ReportSummaryField::IeRatioMax, 121, 1.0f},
-    {ReportSummaryField::InspirationTimeMedian, 122, 1.0f},
-    {ReportSummaryField::InspirationTime95, 123, 1.0f},
-    {ReportSummaryField::InspirationTimeMax, 124, 1.0f},
-    {ReportSummaryField::Ahi, 125, 1.0f},
-    {ReportSummaryField::HypopneaIndex, 126, 1.0f},
-    {ReportSummaryField::ApneaIndex, 127, 1.0f},
-    {ReportSummaryField::ObstructiveApneaIndex, 128, 1.0f},
-    {ReportSummaryField::CentralApneaIndex, 129, 1.0f},
-    {ReportSummaryField::UnknownApneaIndex, 130, 1.0f},
-    {ReportSummaryField::ReraIndex, 131, 1.0f},
-    {ReportSummaryField::Csr, 132, 1.0f},
+    {ReportSummaryField::TubeConnected, 76, 1, 1},
+    {ReportSummaryField::HumidifierConnected, 77, 1, 1},
+    {ReportSummaryField::BlowPressure95, 78, 1, 2},
+    {ReportSummaryField::BlowPressure5, 79, 1, 2},
+    {ReportSummaryField::Flow95, 80, 5, 1},
+    {ReportSummaryField::Flow5, 81, 5, 1},
+    {ReportSummaryField::BlowerFlow50, 82, 5, 1},
+    {ReportSummaryField::AmbientHumidity50, 83, 1, 10},
+    {ReportSummaryField::HumidifierTemperature50, 84, 1, 10},
+    {ReportSummaryField::HeatedTubeTemperature50, 85, 1, 10},
+    {ReportSummaryField::HeatedTubePower50, 86, 1, 10},
+    {ReportSummaryField::HumidifierPower50, 87, 1, 10},
+    {ReportSummaryField::Spo2Median, 88, 1, 1},
+    {ReportSummaryField::Spo2_95, 89, 1, 1},
+    {ReportSummaryField::Spo2Max, 90, 1, 1},
+    {ReportSummaryField::Spo2ThresholdMinutes, 91, 1, 1},
+    {ReportSummaryField::SpontaneousTriggerPercent, 92, 1, 50},
+    {ReportSummaryField::SpontaneousCyclePercent, 93, 1, 50},
+    {ReportSummaryField::MaskPressureMedian, 94, 1, 2},
+    {ReportSummaryField::MaskPressure95, 95, 1, 2},
+    {ReportSummaryField::MaskPressureMax, 96, 1, 2},
+    {ReportSummaryField::TargetIpapMedian, 97, 1, 2},
+    {ReportSummaryField::TargetIpap95, 98, 1, 2},
+    {ReportSummaryField::TargetIpapMax, 99, 1, 2},
+    {ReportSummaryField::TargetEpapMedian, 100, 1, 2},
+    {ReportSummaryField::TargetEpap95, 101, 1, 2},
+    {ReportSummaryField::TargetEpapMax, 102, 1, 2},
+    {ReportSummaryField::LeakMedian, 103, 1, 2},
+    {ReportSummaryField::Leak95, 104, 1, 2},
+    {ReportSummaryField::Leak70, 105, 1, 2},
+    {ReportSummaryField::LeakMax, 106, 1, 2},
+    {ReportSummaryField::MinuteVentMedian, 107, 2, 25},
+    {ReportSummaryField::MinuteVent95, 108, 2, 25},
+    {ReportSummaryField::MinuteVentMax, 109, 2, 25},
+    {ReportSummaryField::RespiratoryRateMedian, 110, 1, 20},
+    {ReportSummaryField::RespiratoryRate95, 111, 1, 20},
+    {ReportSummaryField::RespiratoryRateMax, 112, 1, 20},
+    {ReportSummaryField::TidalVolumeMedian, 113, 1, 2},
+    {ReportSummaryField::TidalVolume95, 114, 1, 2},
+    {ReportSummaryField::TidalVolumeMax, 115, 1, 2},
+    {ReportSummaryField::TargetVentMedian, 116, 2, 25},
+    {ReportSummaryField::TargetVent95, 117, 2, 25},
+    {ReportSummaryField::TargetVentMax, 118, 2, 25},
+    {ReportSummaryField::IeRatioMedian, 119, 1, 100},
+    {ReportSummaryField::IeRatio95, 120, 1, 100},
+    {ReportSummaryField::IeRatioMax, 121, 1, 100},
+    {ReportSummaryField::InspirationTimeMedian, 122, 1, 20},
+    {ReportSummaryField::InspirationTime95, 123, 1, 20},
+    {ReportSummaryField::InspirationTimeMax, 124, 1, 20},
+    {ReportSummaryField::Ahi, 125, 1, 1},
+    {ReportSummaryField::HypopneaIndex, 126, 1, 1},
+    {ReportSummaryField::ApneaIndex, 127, 1, 1},
+    {ReportSummaryField::ObstructiveApneaIndex, 128, 1, 1},
+    {ReportSummaryField::CentralApneaIndex, 129, 1, 1},
+    {ReportSummaryField::UnknownApneaIndex, 130, 1, 1},
+    {ReportSummaryField::ReraIndex, 131, 1, 1},
+    {ReportSummaryField::Csr, 132, 1, 1},
 };
 static_assert(sizeof(SUMMARY_STR_MAP) / sizeof(SUMMARY_STR_MAP[0]) ==
                   AC_REPORT_SUMMARY_FIELD_COUNT,
@@ -155,7 +165,11 @@ bool edf_str_apply_summary_record(const ReportSummaryRecord &record,
         uint32_t value = 0;
         int16_t digital = 0;
         if (report_summary_field_value(record, map.field, value) &&
-            summary_str_digital(map.field, value, map.multiplier, digital) &&
+            summary_str_digital(map.field,
+                                value,
+                                map.numerator,
+                                map.denominator,
+                                digital) &&
             session.set_signal_digital(map.signal_index, digital)) {
             result.values++;
         }

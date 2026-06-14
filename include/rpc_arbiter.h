@@ -36,6 +36,7 @@ enum class RpcEventKind {
     BootNotification,
     InternalSettingsStateInvalidated,
     InternalSettingsStateUpdated,
+    InternalDeviceStateUpdated,
     FramingError,
     Info,
 };

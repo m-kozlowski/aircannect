@@ -36,6 +36,13 @@ bool parse_iso8601_seconds(const char *text, float &out) {
     return true;
 }
 
+bool rpc_name_uses_msec_physical(const char *rpc_name) {
+    return rpc_name &&
+           (strcmp(rpc_name, "_Z10") == 0 ||
+            strcmp(rpc_name, "_XAA") == 0 ||
+            strcmp(rpc_name, "_XB7") == 0);
+}
+
 void rpc_name_for_str_tag(const char *tag, char *out, size_t out_size) {
     if (!out || !out_size) return;
     out[0] = 0;
@@ -62,8 +69,11 @@ bool physical_from_json_value(JsonVariantConst value,
 
     const char *text = value.as<const char *>();
     int16_t option_index = 0;
-    if (parse_iso8601_seconds(text, physical) ||
-        parse_float_text(text, physical)) {
+    if (parse_iso8601_seconds(text, physical)) {
+        if (rpc_name_uses_msec_physical(rpc_name)) physical *= 1000.0f;
+        return true;
+    }
+    if (parse_float_text(text, physical)) {
         return true;
     }
     if (as11_setting_option_index_for_rpc_name(rpc_name, text, option_index)) {
@@ -100,12 +110,14 @@ static constexpr int16_t STR_MODE_CODES[] = {
 };
 static constexpr int16_t STR_SENSITIVITY_CODES[] = {1, 2, 3, 4, 5, 6, 7};
 static constexpr int16_t STR_BOOL_CODES[] = {1, 2};
+static constexpr int16_t STR_THREE_OPTION_CODES[] = {1, 2, 3};
 static constexpr int16_t STR_SPONT_RESP_RATE_ENABLE_CODES[] = {1, 3};
+static constexpr int16_t STR_TUBE_TYPE_CODES[] = {3, 4, 1};
 
-// Confirmed AS11/ResScan STR enum export maps. Labels resolve through the
-// setting option table; numeric DigitalCode values are already STR-native.
-// Some confirmed tags are not present in the currently frozen STR EDF schema,
-// but keeping the map complete makes future schema expansion explicit.
+// AS11/ResScan STR enum export maps. Labels resolve through the setting option
+// table; numeric DigitalCode values are already STR-native. Some tags are
+// proven by firmware maps, others by native EDF comparison for the current AS11
+// setting strings.
 static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
     {"_MOP", STR_MODE_CODES,
      sizeof(STR_MODE_CODES) / sizeof(STR_MODE_CODES[0]),
@@ -125,6 +137,12 @@ static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
     {"_ZU1", STR_SENSITIVITY_CODES,
      sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
      EdfStrNumericInput::DigitalCode},
+    {"_XAB", STR_SENSITIVITY_CODES,
+     sizeof(STR_SENSITIVITY_CODES) / sizeof(STR_SENSITIVITY_CODES[0]),
+     EdfStrNumericInput::DigitalCode},
+    {"_AFC", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
     {"_ZZ4", STR_BOOL_CODES,
      sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
      EdfStrNumericInput::DigitalCode},
@@ -140,6 +158,9 @@ static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
     {"_XB6", STR_BOOL_CODES,
      sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
      EdfStrNumericInput::DigitalCode},
+    {"_XA9", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::DigitalCode},
     {"_XB9", STR_BOOL_CODES,
      sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
      EdfStrNumericInput::DigitalCode},
@@ -147,6 +168,36 @@ static constexpr EdfStrDigitalRemap STR_DIGITAL_REMAPS[] = {
      sizeof(STR_SPONT_RESP_RATE_ENABLE_CODES) /
          sizeof(STR_SPONT_RESP_RATE_ENABLE_CODES[0]),
      EdfStrNumericInput::DigitalCode},
+    {"_RMA", STR_THREE_OPTION_CODES,
+     sizeof(STR_THREE_OPTION_CODES) / sizeof(STR_THREE_OPTION_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_EPA", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_EPX", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_EPT", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_SST", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_ABF", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_TBT", STR_TUBE_TYPE_CODES,
+     sizeof(STR_TUBE_TYPE_CODES) / sizeof(STR_TUBE_TYPE_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_CCO", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_HMX", STR_BOOL_CODES,
+     sizeof(STR_BOOL_CODES) / sizeof(STR_BOOL_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
+    {"_HTX", STR_THREE_OPTION_CODES,
+     sizeof(STR_THREE_OPTION_CODES) / sizeof(STR_THREE_OPTION_CODES[0]),
+     EdfStrNumericInput::OptionIndex},
 };
 
 bool parse_integer_text(const char *text, int16_t &out) {
@@ -185,6 +236,25 @@ bool integer_from_json_value(JsonVariantConst value, int16_t &out) {
 
 bool text_equals(const char *a, const char *b) {
     return a && b && strcmp(a, b) == 0;
+}
+
+bool str_text_digital_from_json_value(JsonVariantConst value,
+                                      const char *rpc_name,
+                                      int16_t &digital) {
+    if (!text_equals(rpc_name, "_MSK") || !value.is<const char *>()) {
+        return false;
+    }
+
+    const char *text = value.as<const char *>();
+    if (text_equals(text, "Pillows")) {
+        digital = 2;
+        return true;
+    }
+    return false;
+}
+
+bool str_text_digital_map_is_exclusive(const char *rpc_name) {
+    return text_equals(rpc_name, "_MSK");
 }
 
 bool fallback_option_index_from_text(const char *text, int16_t &index) {
@@ -282,6 +352,101 @@ bool str_digital_from_json_value(JsonVariantConst value,
     return digital_from_option_index(remap, option_index, digital_value);
 }
 
+JsonObjectConst get_value_object(const JsonDocument &doc) {
+    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
+    if (!result.isNull()) return result;
+    return doc["error"]["data"].as<JsonObjectConst>();
+}
+
+bool append_str_get_name(std::string &names, const char *tag) {
+    char rpc_name[8] = {};
+    rpc_name_for_str_tag(tag, rpc_name, sizeof(rpc_name));
+    if (!rpc_name[0]) return false;
+    if (!names.empty()) names += ' ';
+    names += rpc_name;
+    return true;
+}
+
+bool summary_code_from_index(JsonVariantConst value,
+                             const int16_t *codes,
+                             size_t code_count,
+                             int16_t &digital) {
+    int16_t index = 0;
+    if (integer_from_json_value(value, index) ||
+        (value.is<const char *>() &&
+         parse_integer_text(value.as<const char *>(), index))) {
+        if (index < 0 || index >= static_cast<int16_t>(code_count)) {
+            return false;
+        }
+        digital = codes[index];
+        return true;
+    }
+    return false;
+}
+
+bool summary_tube_connected_code(JsonVariantConst value, int16_t &digital) {
+    static constexpr int16_t kCodes[] = {3, 4, 1, 5, 2};
+    if (summary_code_from_index(value,
+                                kCodes,
+                                sizeof(kCodes) / sizeof(kCodes[0]),
+                                digital)) {
+        return true;
+    }
+    if (!value.is<const char *>()) return false;
+    const char *text = value.as<const char *>();
+    if (text_equals(text, "15mmNonHeated")) {
+        digital = kCodes[0];
+        return true;
+    }
+    if (text_equals(text, "19mm")) {
+        digital = kCodes[1];
+        return true;
+    }
+    if (text_equals(text, "15mmHeated")) {
+        digital = kCodes[2];
+        return true;
+    }
+    return false;
+}
+
+bool summary_humidifier_connected_code(JsonVariantConst value,
+                                       int16_t &digital) {
+    static constexpr int16_t kCodes[] = {1, 2, 3};
+    if (summary_code_from_index(value,
+                                kCodes,
+                                sizeof(kCodes) / sizeof(kCodes[0]),
+                                digital)) {
+        return true;
+    }
+    if (!value.is<const char *>()) return false;
+    const char *text = value.as<const char *>();
+    if (text_equals(text, "EndCap")) {
+        digital = kCodes[0];
+        return true;
+    }
+    if (text_equals(text, "Internal")) {
+        digital = kCodes[1];
+        return true;
+    }
+    if (text_equals(text, "External")) {
+        digital = kCodes[2];
+        return true;
+    }
+    return false;
+}
+
+bool summary_digital_from_json_value(JsonVariantConst value,
+                                     const char *rpc_name,
+                                     int16_t &digital) {
+    if (strcmp(rpc_name, "_ZHT") == 0) {
+        return summary_tube_connected_code(value, digital);
+    }
+    if (strcmp(rpc_name, "_HUC") == 0) {
+        return summary_humidifier_connected_code(value, digital);
+    }
+    return false;
+}
+
 }  // namespace
 
 std::string edf_str_setting_get_names() {
@@ -294,11 +459,22 @@ std::string edf_str_setting_get_names() {
             continue;
         }
 
-        char rpc_name[8] = {};
-        rpc_name_for_str_tag(field.short_tag, rpc_name, sizeof(rpc_name));
-        if (!rpc_name[0]) continue;
-        if (!names.empty()) names += ' ';
-        names += rpc_name;
+        (void)append_str_get_name(names, field.short_tag);
+    }
+    return names;
+}
+
+std::string edf_str_summary_get_names() {
+    std::string names;
+    names.reserve(512);
+    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
+        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
+        if (field.source != EdfStrFieldSource::Summary ||
+            !field.short_tag) {
+            continue;
+        }
+
+        (void)append_str_get_name(names, field.short_tag);
     }
     return names;
 }
@@ -315,7 +491,7 @@ bool edf_str_apply_settings_response(const std::string &payload,
         return false;
     }
 
-    JsonObjectConst json_result = doc["result"].as<JsonObjectConst>();
+    JsonObjectConst json_result = get_value_object(doc);
     if (json_result.isNull()) {
         result.error = json_member_present(payload, "error")
                            ? "str_settings_rpc_error"
@@ -339,11 +515,82 @@ bool edf_str_apply_settings_response(const std::string &payload,
         }
 
         int16_t digital = 0;
+        if (str_text_digital_from_json_value(value, rpc_name, digital)) {
+            if (session.set_signal_digital(i, digital)) {
+                result.values++;
+            } else {
+                result.unmapped++;
+            }
+            continue;
+        }
+        if (str_text_digital_map_is_exclusive(rpc_name)) {
+            result.unmapped++;
+            continue;
+        }
+
         const EdfStrDigitalRemap *remap =
             str_digital_remap_for_rpc_name(rpc_name);
         if (remap) {
             if (str_digital_from_json_value(value, rpc_name, *remap, digital) &&
                 session.set_signal_digital(i, digital)) {
+                result.values++;
+            } else {
+                result.unmapped++;
+            }
+            continue;
+        }
+
+        float physical = 0.0f;
+        if (physical_from_json_value(value, rpc_name, physical) &&
+            session.set_signal_physical(i, physical)) {
+            result.values++;
+        } else {
+            result.unmapped++;
+        }
+    }
+
+    result.ok = true;
+    return true;
+}
+
+bool edf_str_apply_summary_get_response(const std::string &payload,
+                                        EdfStrSessionAccumulator &session,
+                                        EdfStrSettingsApplyResult &result) {
+    result = {};
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        result.error = "str_summary_json_failed";
+        return false;
+    }
+
+    JsonObjectConst json_result = get_value_object(doc);
+    if (json_result.isNull()) {
+        result.error = json_member_present(payload, "error")
+                           ? "str_summary_rpc_error"
+                           : "str_summary_missing_result";
+        return false;
+    }
+
+    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
+        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
+        if (field.source != EdfStrFieldSource::Summary ||
+            !field.short_tag) {
+            continue;
+        }
+
+        char rpc_name[8] = {};
+        rpc_name_for_str_tag(field.short_tag, rpc_name, sizeof(rpc_name));
+        JsonVariantConst value = json_result[rpc_name];
+        if (value.isNull()) {
+            result.missing++;
+            continue;
+        }
+
+        int16_t digital = 0;
+        if (summary_digital_from_json_value(value, rpc_name, digital)) {
+            if (session.set_signal_digital(i, digital)) {
                 result.values++;
             } else {
                 result.unmapped++;

@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "edf_str_field_map.h"
 #include "edf_file_writer.h"
 #include "edf_str_file_layout.h"
 
@@ -116,9 +117,20 @@ bool mask_session_sample(size_t sample_offset) {
            sample_offset == duration_offset;
 }
 
+bool summary_sample(size_t sample_offset) {
+    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
+        if (AC_EDF_STR_FIELD_MAP[i].source != EdfStrFieldSource::Summary) {
+            continue;
+        }
+        if (edf_str_signal_sample_offset(i) == sample_offset) return true;
+    }
+    return false;
+}
+
 void merge_non_session_samples(const uint8_t *existing, uint8_t *incoming) {
     for (size_t i = 0; i < AC_EDF_STR_DATA_SAMPLES_PER_RECORD; ++i) {
         if (mask_session_sample(i)) continue;
+        if (summary_sample(i)) continue;
         if (read_i16_le(incoming, i) == EDF_STR_MISSING) {
             const int16_t existing_value = read_i16_le(existing, i);
             if (existing_value != EDF_STR_MISSING) {

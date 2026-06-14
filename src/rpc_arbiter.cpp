@@ -1313,6 +1313,8 @@ bool RpcArbiter::handle_event_notification(const char *payload,
     const EventPublishResult event_result =
         event_.publish_notification(payload, payload_len, now, event_frame);
     if (!event_result.accepted) return false;
+    push_event(RpcEventKind::InternalDeviceStateUpdated, "",
+               RpcSource::Scheduler);
 
     const As11TherapyState before_state = as11_state_.therapy_state();
     const bool activity_updated =
@@ -1448,10 +1450,10 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                                   RpcEventKind::RpcNotification,
                                   ref_payload(), RpcSource::Report);
             }
-            if (!stream_data || raw_rpc_events_enabled_) {
-                if (!spool_fragment || raw_rpc_events_enabled_) {
-                    push_event(RpcEventKind::RpcNotification, ref_payload());
-                }
+            if (raw_rpc_events_enabled_) {
+                push_event(RpcEventKind::RpcNotification, ref_payload());
+            } else if (!stream_data && !event_notification && !spool_fragment) {
+                push_event(RpcEventKind::RpcNotification, ref_payload());
             }
             break;
         }

@@ -273,6 +273,8 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.sessions_started));
     out.print('/');
     out.print(static_cast<unsigned long>(status.sessions_ended));
+    out.print(" segment_rollovers=");
+    out.print(static_cast<unsigned long>(status.segment_rollovers));
     out.print(" frames=");
     out.print(static_cast<unsigned long>(status.frames));
     out.print(" drops=");
@@ -301,10 +303,37 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.record_enqueue_failures));
     out.print(" record_drops=");
     out.print(static_cast<unsigned long>(status.numeric_record_drops));
+    out.print(" numeric_start_deferred=");
+    out.print(static_cast<unsigned long>(
+        status.numeric_start_deferred_frames));
+    out.print(" numeric_start_forced=");
+    out.print(static_cast<unsigned long>(status.numeric_start_forced));
+    out.print(" numeric_open_buffered=");
+    out.print(static_cast<unsigned long>(
+        status.numeric_open_buffered_frames));
+    out.print(" numeric_open_buffer_drops=");
+    out.print(static_cast<unsigned long>(
+        status.numeric_open_buffer_drops));
     out.print(" annotation_queue_failures=");
     out.print(static_cast<unsigned long>(status.annotation_enqueue_failures));
     out.print(" str_queue_failures=");
     out.print(static_cast<unsigned long>(status.str_enqueue_failures));
+    out.print(" str_settings=");
+    out.print(static_cast<unsigned long>(status.str_setting_requests));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.str_setting_responses));
+    out.print(" values=");
+    out.print(static_cast<unsigned long>(status.str_setting_values));
+    out.print(" str_summary=");
+    out.print(static_cast<unsigned long>(status.str_summary_requests));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.str_summary_responses));
+    out.print(" values=");
+    out.print(static_cast<unsigned long>(status.str_summary_values));
+    out.print(" missing=");
+    out.print(static_cast<unsigned long>(status.str_summary_missing));
+    out.print(" unmapped=");
+    out.print(static_cast<unsigned long>(status.str_summary_unmapped));
     out.print(" file_open_failures=");
     out.print(static_cast<unsigned long>(status.file_open_failures));
     out.print(" attach_failures=");

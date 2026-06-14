@@ -32,8 +32,8 @@ struct SummaryScalarFieldMap {
 };
 
 static constexpr SummaryScalarFieldMap SUMMARY_SCALAR_FIELD_MAP[] = {
-    {35, ReportSummaryField::TubeConnected},
-    {34, ReportSummaryField::HumidifierConnected},
+    {34, ReportSummaryField::TubeConnected},
+    {35, ReportSummaryField::HumidifierConnected},
     {17, ReportSummaryField::Spo2ThresholdMinutes},
     {18, ReportSummaryField::SpontaneousTriggerPercent},
     {19, ReportSummaryField::SpontaneousCyclePercent},

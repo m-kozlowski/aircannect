@@ -88,8 +88,11 @@ bool EdfStreamAssembler::start_session(const char *device_start_time) {
     reset();
     status_.active = true;
     if (device_start_time && *device_start_time) {
-        (void)edf_parse_utc_ms(device_start_time,
-                               status_.session_start_epoch_ms);
+        int64_t start_ms = 0;
+        if (edf_parse_utc_ms(device_start_time, start_ms)) {
+            status_.session_start_epoch_ms =
+                edf_floor_epoch_ms_to_second(start_ms);
+        }
     }
     return true;
 }
@@ -720,7 +723,8 @@ bool EdfStreamAssembler::parse_frame_start_ms(const StreamFrameData &frame,
 
 bool EdfStreamAssembler::ensure_session_epoch(int64_t frame_start_ms) {
     if (status_.session_start_epoch_ms == 0) {
-        status_.session_start_epoch_ms = frame_start_ms;
+        status_.session_start_epoch_ms =
+            edf_floor_epoch_ms_to_second(frame_start_ms);
     }
     return true;
 }
