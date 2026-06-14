@@ -3,7 +3,21 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "edf_bytes.h"
+
 namespace aircannect {
+namespace {
+
+bool header_range_matches(const uint8_t *actual,
+                          const uint8_t *expected,
+                          size_t header_size,
+                          size_t begin,
+                          size_t end) {
+    return actual && expected && begin <= end && end <= header_size &&
+           memcmp(actual + begin, expected + begin, end - begin) == 0;
+}
+
+}  // namespace
 
 bool edf_str_file_layout_from_size(size_t file_size,
                                    EdfStrFileLayout &layout) {
@@ -27,10 +41,55 @@ bool edf_str_file_layout_from_size(size_t file_size,
     return true;
 }
 
+bool edf_str_header_schema_matches(const uint8_t *actual,
+                                   const uint8_t *expected,
+                                   size_t header_size) {
+    if (!actual || !expected ||
+        header_size < AC_EDF_HEADER_SIGNAL_HEADER_OFFSET) {
+        return false;
+    }
+
+    return header_range_matches(actual,
+                                expected,
+                                header_size,
+                                AC_EDF_HEADER_VERSION_OFFSET,
+                                AC_EDF_HEADER_VERSION_OFFSET +
+                                    AC_EDF_HEADER_VERSION_WIDTH) &&
+           header_range_matches(actual,
+                                expected,
+                                header_size,
+                                AC_EDF_HEADER_SIZE_OFFSET,
+                                AC_EDF_HEADER_SIZE_OFFSET +
+                                    AC_EDF_HEADER_SIZE_WIDTH) &&
+           header_range_matches(actual,
+                                expected,
+                                header_size,
+                                AC_EDF_HEADER_RESERVED_OFFSET,
+                                AC_EDF_HEADER_RESERVED_OFFSET +
+                                    AC_EDF_HEADER_RESERVED_WIDTH) &&
+           header_range_matches(actual,
+                                expected,
+                                header_size,
+                                AC_EDF_HEADER_RECORD_DURATION_OFFSET,
+                                AC_EDF_HEADER_RECORD_DURATION_OFFSET +
+                                    AC_EDF_HEADER_RECORD_DURATION_WIDTH) &&
+           header_range_matches(actual,
+                                expected,
+                                header_size,
+                                AC_EDF_HEADER_SIGNAL_COUNT_OFFSET,
+                                AC_EDF_HEADER_SIGNAL_COUNT_OFFSET +
+                                    AC_EDF_HEADER_SIGNAL_COUNT_WIDTH) &&
+           header_range_matches(actual,
+                                expected,
+                                header_size,
+                                AC_EDF_HEADER_SIGNAL_HEADER_OFFSET,
+                                header_size);
+}
+
 bool edf_str_format_record_count_field(uint32_t record_count,
                                        char *field,
                                        size_t field_size) {
-    if (!field || field_size != AC_EDF_STR_RECORD_COUNT_FIELD_WIDTH) {
+    if (!field || field_size != AC_EDF_HEADER_RECORD_COUNT_WIDTH) {
         return false;
     }
     memset(field, ' ', field_size);
@@ -54,8 +113,7 @@ size_t edf_str_append_offset(uint32_t record_count) {
 
 int16_t edf_str_record_date_sample(const uint8_t *record, size_t len) {
     if (!record || len < 2) return -1;
-    return static_cast<int16_t>(static_cast<uint16_t>(record[0]) |
-                                (static_cast<uint16_t>(record[1]) << 8));
+    return edf_read_i16_le(record);
 }
 
 bool edf_str_date_sample_valid(int16_t date_sample) {

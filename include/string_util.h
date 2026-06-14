@@ -13,6 +13,8 @@
 
 namespace aircannect {
 
+void copy_cstr(char *dst, size_t size, const char *src);
+
 #if AIRCANNECT_STRING_UTIL_HAS_ARDUINO
 void trim_inplace(String &value);
 void to_lower_inplace(String &value);

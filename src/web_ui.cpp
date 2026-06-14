@@ -200,7 +200,8 @@ bool append_edf_list_entry(LargeTextBuffer &json,
         json_add_string(json,
                         "edf_kind",
                         edf_inventory_file_kind_name(file.kind));
-        if (file.status == EdfInventoryStatus::Ok) {
+        if (file.status == EdfInventoryStatus::Ok &&
+            file.header.header_size > 0) {
             json_add_uint64(json, "data_size", file.data_size);
             json_add_uint64(json,
                             "records",
@@ -1644,6 +1645,11 @@ void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
     if (!request_size_arg_limited(request, "offset", 0, 65535, offset) ||
         !request_size_arg_limited(request, "limit", kEdfListDefaultLimit,
                                   kEdfListMaxLimit, limit)) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_range\"}");
+        return;
+    }
+    if (limit == 0) {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"bad_range\"}");
         return;

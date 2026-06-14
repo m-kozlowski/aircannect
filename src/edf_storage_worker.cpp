@@ -9,14 +9,17 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "can_datagram.h"
 #include "edf_file_reader.h"
 #include "edf_file_resume.h"
+#include "edf_identification.h"
 #include "edf_storage_catalog.h"
 #include "edf_storage_open_plan.h"
 #include "edf_str_file_layout.h"
 #include "edf_str_record_merge.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace EdfStorageWorker {
@@ -26,6 +29,7 @@ enum class JobType : uint8_t {
     Open,
     Record,
     StrRecord,
+    Identification,
     Close,
 };
 
@@ -75,11 +79,6 @@ size_t queued = 0;
 OpenFile open_files[5];
 bool processing_job = false;
 
-void copy_text(char *dst, size_t size, const char *src) {
-    if (!dst || size == 0) return;
-    snprintf(dst, size, "%s", src ? src : "");
-}
-
 const char *basename_from_path(const char *path) {
     if (!path) return "";
     const char *slash = strrchr(path, '/');
@@ -99,7 +98,7 @@ bool build_child_path(const char *parent,
 }
 
 void set_error(const char *error) {
-    copy_text(stats.last_error, sizeof(stats.last_error), error);
+    copy_cstr(stats.last_error, sizeof(stats.last_error), error);
     stats.last_activity_ms = millis();
 }
 
@@ -136,7 +135,7 @@ EdfStorageOpenFileStatus open_file_status(const OpenFile &file) {
     out.open = file.open;
     out.resumed = file.resumed;
     out.record_count = file.record_count;
-    copy_text(out.path, sizeof(out.path), file.path);
+    copy_cstr(out.path, sizeof(out.path), file.path);
     return out;
 }
 
@@ -173,8 +172,8 @@ void fill_inventory_entry_base(EdfStorageInventoryEntry &entry,
     entry = {};
     entry.directory = directory;
     entry.size = size;
-    copy_text(entry.name, sizeof(entry.name), name);
-    copy_text(entry.path, sizeof(entry.path), path);
+    copy_cstr(entry.name, sizeof(entry.name), name);
+    copy_cstr(entry.path, sizeof(entry.path), path);
 }
 
 void mark_inventory_file_status(EdfStorageInventoryEntry &entry,
@@ -309,6 +308,22 @@ void root_str_inventory_entry(EdfStorageInventoryEntry &entry,
         found = true;
     }
     if (str) str.close();
+}
+
+void root_metadata_inventory_entry(const char *path,
+                                   const char *name,
+                                   EdfStorageInventoryEntry &entry,
+                                   bool &found) {
+    found = false;
+    Storage::Guard guard;
+    File file = Storage::open(path, "r");
+    if (file && !file.isDirectory()) {
+        const size_t size = static_cast<size_t>(file.size());
+        fill_inventory_entry_base(entry, name, path, false, size);
+        (void)edf_inventory_describe_file(path, nullptr, 0, size, entry.file);
+        found = true;
+    }
+    if (file) file.close();
 }
 
 bool open_inventory_directory(const char *path,
@@ -446,7 +461,6 @@ bool allocate_slots() {
     }
     stats.using_psram = Memory::psram_available();
     stats.capacity = AC_EDF_STORAGE_QUEUE_CAPACITY;
-    stats.available = true;
     return true;
 }
 
@@ -474,7 +488,7 @@ bool pop_slot(JobSlot &job) {
 bool ensure_parent_dirs(const char *path) {
     if (!valid_path(path)) return false;
     char dir[sizeof(EdfStorageWorkerStatus::last_path)] = {};
-    copy_text(dir, sizeof(dir), path);
+    copy_cstr(dir, sizeof(dir), path);
     char *last_slash = strrchr(dir, '/');
     if (!last_slash) return false;
     if (last_slash == dir) return true;
@@ -490,7 +504,7 @@ bool ensure_parent_dirs(const char *path) {
 
 bool patch_record_count(OpenFile &state) {
     if (!state.open || !state.file) return false;
-    char field[8] = {};
+    char field[AC_EDF_HEADER_RECORD_COUNT_WIDTH] = {};
     memset(field, ' ', sizeof(field));
     char text[16] = {};
     snprintf(text, sizeof(text), "%lu",
@@ -498,7 +512,7 @@ bool patch_record_count(OpenFile &state) {
     const size_t len = strlen(text);
     if (len > sizeof(field)) return false;
     memcpy(field, text, len);
-    if (!state.file.seek(236)) return false;
+    if (!state.file.seek(AC_EDF_HEADER_RECORD_COUNT_OFFSET)) return false;
     const size_t written = state.file.write(
         reinterpret_cast<const uint8_t *>(field), sizeof(field));
     if (written != sizeof(field)) return false;
@@ -580,7 +594,7 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
     state.record_count = plan.record_count;
     state.record_size = job.record_size;
     state.resumed = true;
-    copy_text(state.path, sizeof(state.path), job.path);
+    copy_cstr(state.path, sizeof(state.path), job.path);
     state.open = true;
     if (plan.patch_header_record_count && !patch_record_count(state)) {
         state.file.close();
@@ -633,12 +647,10 @@ bool write_open_header(OpenFile &state, const JobSlot &job) {
     return write_header(state, job);
 }
 
-bool write_str_header(File &file, const JobSlot &job) {
-    const size_t header_size = edf_str_header_size();
-    uint8_t *header = static_cast<uint8_t *>(
-        Memory::alloc_large(header_size, false));
-    if (!header) return false;
-
+bool render_str_header_bytes(const JobSlot &job,
+                             uint8_t *header,
+                             size_t header_size) {
+    if (!header || header_size != edf_str_header_size()) return false;
     EdfHeaderInfo info;
     info.patient_id = job.patient_id;
     info.recording_id = job.recording_id;
@@ -646,24 +658,70 @@ bool write_str_header(File &file, const JobSlot &job) {
     info.start_time = job.start_time;
     info.record_count = job.record_count;
     size_t written = 0;
-    const bool rendered = edf_render_str_header(info, header, header_size,
-                                                written);
+    return edf_render_str_header(info, header, header_size, written) &&
+           written == header_size;
+}
+
+bool write_str_header(File &file, const JobSlot &job) {
+    const size_t header_size = edf_str_header_size();
+    uint8_t *header = static_cast<uint8_t *>(
+        Memory::alloc_large(header_size, false));
+    if (!header) return false;
+
     bool ok = false;
-    if (rendered && written == header_size) {
+    if (render_str_header_bytes(job, header, header_size)) {
         ok = file.write(header, header_size) == header_size;
     }
     Memory::free(header);
     return ok;
 }
 
+bool read_str_header(File &file, uint8_t *header, size_t header_size) {
+    return header && header_size == edf_str_header_size() &&
+           file.seek(0) &&
+           file.read(header, header_size) == header_size;
+}
+
+void collect_digits6(const char *src, char (&dst)[7]) {
+    size_t out = 0;
+    if (src) {
+        for (size_t i = 0; src[i] && out < 6; ++i) {
+            if (src[i] >= '0' && src[i] <= '9') {
+                dst[out++] = src[i];
+            }
+        }
+    }
+    while (out < 6) dst[out++] = '0';
+    dst[6] = 0;
+}
+
+bool build_str_backup_path(const JobSlot &job, char *dst, size_t dst_size) {
+    if (!dst || dst_size == 0) return false;
+    char date[7] = {};
+    char time[7] = {};
+    collect_digits6(job.start_date, date);
+    collect_digits6(job.start_time, time);
+    for (unsigned suffix = 0; suffix < 16; ++suffix) {
+        const int n = suffix == 0
+                          ? snprintf(dst, dst_size, "/STR-%s-%s.bak",
+                                     date, time)
+                          : snprintf(dst, dst_size, "/STR-%s-%s-%u.bak",
+                                     date, time, suffix);
+        if (n <= 0 || static_cast<size_t>(n) >= dst_size) return false;
+        if (!Storage::exists(dst)) return true;
+    }
+    dst[0] = 0;
+    return false;
+}
+
 bool patch_str_record_count(File &file, uint32_t record_count) {
-    char field[AC_EDF_STR_RECORD_COUNT_FIELD_WIDTH] = {};
+    char field[AC_EDF_HEADER_RECORD_COUNT_WIDTH] = {};
     if (!edf_str_format_record_count_field(record_count,
                                            field,
                                            sizeof(field))) {
         return false;
     }
-    if (!file.seek(AC_EDF_STR_RECORD_COUNT_FIELD_OFFSET)) return false;
+    if (!file.seek(AC_EDF_HEADER_RECORD_COUNT_OFFSET)) return false;
     return file.write(reinterpret_cast<const uint8_t *>(field),
                       sizeof(field)) == sizeof(field);
 }
@@ -740,7 +798,7 @@ bool process_open(const JobSlot &job) {
     refresh_open_file_count();
     if (try_resume_open_file(state, job)) {
         refresh_open_file_count();
-        copy_text(stats.last_path, sizeof(stats.last_path), job.path);
+        copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
         stats.open_jobs++;
         stats.last_error[0] = 0;
         return true;
@@ -762,7 +820,7 @@ bool process_open(const JobSlot &job) {
     state.record_count = plan.record_count;
     state.record_size = job.record_size;
     state.resumed = false;
-    copy_text(state.path, sizeof(state.path), job.path);
+    copy_cstr(state.path, sizeof(state.path), job.path);
     if (!write_open_header(state, job)) {
         state.file.close();
         stats.write_errors++;
@@ -783,7 +841,7 @@ bool process_open(const JobSlot &job) {
     }
     state.file.flush();
     refresh_open_file_count();
-    copy_text(stats.last_path, sizeof(stats.last_path), job.path);
+    copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
     stats.open_jobs++;
     stats.last_error[0] = 0;
     return true;
@@ -821,7 +879,7 @@ bool process_record(const JobSlot &job) {
     stats.bytes_written += written;
     stats.record_jobs++;
     stats.last_activity_ms = millis();
-    copy_text(stats.last_path, sizeof(stats.last_path), state.path);
+    copy_cstr(stats.last_path, sizeof(stats.last_path), state.path);
     stats.last_error[0] = 0;
     return true;
 }
@@ -870,6 +928,80 @@ bool process_str_record(const JobSlot &job) {
             return false;
         }
         record_count = layout.record_count;
+
+        const size_t header_size = edf_str_header_size();
+        uint8_t *actual_header = static_cast<uint8_t *>(
+            Memory::alloc_large(header_size, false));
+        uint8_t *expected_header = static_cast<uint8_t *>(
+            Memory::alloc_large(header_size, false));
+        const bool headers_available =
+            actual_header && expected_header &&
+            read_str_header(file, actual_header, header_size) &&
+            render_str_header_bytes(job, expected_header, header_size);
+        const bool schema_matches =
+            headers_available &&
+            edf_str_header_schema_matches(actual_header,
+                                          expected_header,
+                                          header_size);
+        uint32_t header_record_count = 0;
+        const bool header_count_valid =
+            headers_available &&
+            edf_resume_parse_record_count_field(actual_header,
+                                                header_size,
+                                                header_record_count);
+        Memory::free(actual_header);
+        Memory::free(expected_header);
+
+        if (!headers_available) {
+            file.close();
+            stats.write_errors++;
+            set_error("str_header_read_failed");
+            return false;
+        }
+
+        if (!schema_matches) {
+            char backup_path[64] = {};
+            if (!build_str_backup_path(job, backup_path,
+                                       sizeof(backup_path))) {
+                file.close();
+                stats.write_errors++;
+                set_error("str_backup_path_failed");
+                return false;
+            }
+            file.close();
+            if (!Storage::rename(job.path, backup_path)) {
+                stats.write_errors++;
+                set_error("str_backup_failed");
+                return false;
+            }
+            Log::logf(CAT_STREAM, LOG_WARN,
+                      "[EDF] rotated incompatible STR root file to %s\n",
+                      backup_path);
+
+            file = Storage::open(job.path, "w+");
+            if (!file) {
+                stats.open_errors++;
+                set_error("str_reopen_failed");
+                return false;
+            }
+            record_count = 0;
+            if (!write_str_header(file, job)) {
+                file.close();
+                stats.write_errors++;
+                set_error("str_header_write_failed");
+                return false;
+            }
+            file.flush();
+        } else if (!header_count_valid ||
+                   header_record_count != record_count) {
+            if (!patch_str_record_count(file, record_count)) {
+                file.close();
+                stats.patch_errors++;
+                set_error("str_count_patch_failed");
+                return false;
+            }
+            file.flush();
+        }
     }
 
     const int16_t date_sample = edf_str_record_date_sample(job.bytes,
@@ -960,7 +1092,57 @@ bool process_str_record(const JobSlot &job) {
     stats.bytes_written += written;
     stats.record_jobs++;
     stats.last_activity_ms = millis();
-    copy_text(stats.last_path, sizeof(stats.last_path), job.path);
+    copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
+    stats.last_error[0] = 0;
+    return true;
+}
+
+bool write_file_exact(const char *path, const uint8_t *data, size_t len) {
+    if (!valid_path(path) || (!data && len > 0)) return false;
+    File file = Storage::open(path, "w");
+    if (!file) return false;
+    const size_t written = len > 0 ? file.write(data, len) : 0;
+    file.flush();
+    file.close();
+    return written == len;
+}
+
+bool process_identification_files(const JobSlot &job) {
+    if (!job.bytes || job.len == 0) {
+        set_error("identification_empty");
+        return false;
+    }
+    if (!Storage::mounted()) {
+        stats.unavailable_drops++;
+        set_error("storage_not_mounted");
+        return false;
+    }
+
+    Storage::Guard guard;
+    if (!write_file_exact(AC_EDF_IDENTIFICATION_JSON_PATH,
+                          job.bytes,
+                          job.len)) {
+        stats.write_errors++;
+        set_error("identification_json_write_failed");
+        return false;
+    }
+
+    uint8_t crc_le[4] = {};
+    edf_identification_crc32_le(crc32_ieee(job.bytes, job.len), crc_le);
+    if (!write_file_exact(AC_EDF_IDENTIFICATION_CRC_PATH,
+                          crc_le,
+                          sizeof(crc_le))) {
+        stats.write_errors++;
+        set_error("identification_crc_write_failed");
+        return false;
+    }
+
+    stats.identification_jobs++;
+    stats.bytes_written += job.len + sizeof(crc_le);
+    stats.last_activity_ms = millis();
+    copy_cstr(stats.last_path,
+              sizeof(stats.last_path),
+              AC_EDF_IDENTIFICATION_JSON_PATH);
     stats.last_error[0] = 0;
     return true;
 }
@@ -989,6 +1171,9 @@ void process_job(const JobSlot &job) {
             break;
         case JobType::StrRecord:
             (void)process_str_record(job);
+            break;
+        case JobType::Identification:
+            (void)process_identification_files(job);
             break;
         default:
             (void)process_record(job);
@@ -1081,16 +1266,27 @@ bool enqueue_rendered_slot(Prepare prepare,
 
 void begin() {
     if (stats.initialized) return;
-    stats.initialized = true;
     if (!queue_lock) queue_lock = xSemaphoreCreateMutex();
     if (!queue_lock || !allocate_slots()) {
         stats.available = false;
         return;
     }
-    xTaskCreatePinnedToCore(task_entry, "ac_edf_storage",
-                            AC_EDF_STORAGE_TASK_STACK, nullptr,
-                            AC_EDF_STORAGE_TASK_PRIO, &task,
-                            AC_EDF_STORAGE_TASK_CORE);
+    if (!task) {
+        const BaseType_t created =
+            xTaskCreatePinnedToCore(task_entry, "ac_edf_storage",
+                                    AC_EDF_STORAGE_TASK_STACK, nullptr,
+                                    AC_EDF_STORAGE_TASK_PRIO, &task,
+                                    AC_EDF_STORAGE_TASK_CORE);
+        if (created != pdPASS || !task) {
+            stats.available = false;
+            set_error("task_create_failed");
+            Log::logf(CAT_STREAM, LOG_ERROR,
+                      "[EDF] storage worker task create failed\n");
+            return;
+        }
+    }
+    stats.initialized = true;
+    stats.available = true;
     Log::logf(CAT_STREAM, LOG_INFO,
               "[EDF] storage worker ready q=%u slot=%u psram=%s\n",
               static_cast<unsigned>(AC_EDF_STORAGE_QUEUE_CAPACITY),
@@ -1110,14 +1306,14 @@ bool enqueue_open_numeric(const char *path,
             job.kind = stored_kind(schema.kind);
             job.record_count = info.record_count;
             job.record_size = edf_record_size(schema);
-            copy_text(job.path, sizeof(job.path), path);
-            copy_text(job.patient_id, sizeof(job.patient_id),
+            copy_cstr(job.path, sizeof(job.path), path);
+            copy_cstr(job.patient_id, sizeof(job.patient_id),
                       info.patient_id);
-            copy_text(job.recording_id, sizeof(job.recording_id),
+            copy_cstr(job.recording_id, sizeof(job.recording_id),
                       info.recording_id);
-            copy_text(job.start_date, sizeof(job.start_date),
+            copy_cstr(job.start_date, sizeof(job.start_date),
                       info.start_date);
-            copy_text(job.start_time, sizeof(job.start_time),
+            copy_cstr(job.start_time, sizeof(job.start_time),
                       info.start_time);
         },
         [&](JobSlot &job, size_t &written) {
@@ -1141,11 +1337,11 @@ bool enqueue_open_annotation(const char *path,
     job.record_count = info.record_count;
     job.record_size = edf_annotation_record_size();
     job.recording_start = true;
-    copy_text(job.path, sizeof(job.path), path);
-    copy_text(job.patient_id, sizeof(job.patient_id), info.patient_id);
-    copy_text(job.recording_id, sizeof(job.recording_id), info.recording_id);
-    copy_text(job.start_date, sizeof(job.start_date), info.start_date);
-    copy_text(job.start_time, sizeof(job.start_time), info.start_time);
+    copy_cstr(job.path, sizeof(job.path), path);
+    copy_cstr(job.patient_id, sizeof(job.patient_id), info.patient_id);
+    copy_cstr(job.recording_id, sizeof(job.recording_id), info.recording_id);
+    copy_cstr(job.start_date, sizeof(job.start_date), info.start_date);
+    copy_cstr(job.start_time, sizeof(job.start_time), info.start_time);
     return enqueue(job);
 }
 
@@ -1193,14 +1389,14 @@ bool enqueue_str_record(const char *path,
     return enqueue_rendered_slot(
         [&](JobSlot &job) {
             job.type = JobType::StrRecord;
-            copy_text(job.path, sizeof(job.path), path);
-            copy_text(job.patient_id, sizeof(job.patient_id),
+            copy_cstr(job.path, sizeof(job.path), path);
+            copy_cstr(job.patient_id, sizeof(job.patient_id),
                       info.patient_id);
-            copy_text(job.recording_id, sizeof(job.recording_id),
+            copy_cstr(job.recording_id, sizeof(job.recording_id),
                       info.recording_id);
-            copy_text(job.start_date, sizeof(job.start_date),
+            copy_cstr(job.start_date, sizeof(job.start_date),
                       info.start_date);
-            copy_text(job.start_time, sizeof(job.start_time),
+            copy_cstr(job.start_time, sizeof(job.start_time),
                       info.start_time);
         },
         [&](JobSlot &job, size_t &written) {
@@ -1210,6 +1406,25 @@ bool enqueue_str_record(const char *path,
                                          written);
         },
         "str_render_failed");
+}
+
+bool enqueue_identification_files(const std::string &json) {
+    if (json.empty() || json.size() > AC_EDF_STORAGE_SLOT_BYTES) {
+        return false;
+    }
+    return enqueue_rendered_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::Identification;
+            copy_cstr(job.path,
+                      sizeof(job.path),
+                      AC_EDF_IDENTIFICATION_JSON_PATH);
+        },
+        [&](JobSlot &job, size_t &written) {
+            memcpy(job.bytes, json.data(), json.size());
+            written = json.size();
+            return true;
+        },
+        "identification_render_failed");
 }
 
 bool enqueue_close_numeric(EdfFileKind kind) {
@@ -1281,6 +1496,36 @@ EdfStorageInventoryResult list_inventory(
         }
 
         root_str_inventory_entry(entry, found);
+        if (found) {
+            if (!visit_inventory_entry(entry,
+                                       visitor,
+                                       ctx,
+                                       offset,
+                                       limit,
+                                       result)) {
+                return result;
+            }
+        }
+
+        root_metadata_inventory_entry(AC_EDF_IDENTIFICATION_CRC_PATH,
+                                      "Identification.crc",
+                                      entry,
+                                      found);
+        if (found) {
+            if (!visit_inventory_entry(entry,
+                                       visitor,
+                                       ctx,
+                                       offset,
+                                       limit,
+                                       result)) {
+                return result;
+            }
+        }
+
+        root_metadata_inventory_entry(AC_EDF_IDENTIFICATION_JSON_PATH,
+                                      "Identification.json",
+                                      entry,
+                                      found);
         if (found) {
             if (!visit_inventory_entry(entry,
                                        visitor,

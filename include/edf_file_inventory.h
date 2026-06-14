@@ -22,6 +22,8 @@ enum class EdfInventoryFileKind : uint8_t {
     Eve,
     Csl,
     Str,
+    IdentificationJson,
+    IdentificationCrc,
 };
 
 static constexpr uint32_t AC_EDF_INVENTORY_WARN_PARTIAL_TAIL = 1u << 0;

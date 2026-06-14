@@ -6,6 +6,7 @@
 #include "can_driver.h"
 #include "debug_log.h"
 #include "edf_recorder_manager.h"
+#include "edf_storage_worker.h"
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
@@ -158,6 +159,7 @@ void setup() {
     }
     Storage::begin();
     StorageWriter::begin();
+    EdfStorageWorker::begin();
     const StorageStatus storage = Storage::status();
     if (storage.mounted) {
         Log::logf(CAT_GENERAL, LOG_INFO,

@@ -4,11 +4,9 @@
 #include <stdint.h>
 
 #include "edf_file_writer.h"
+#include "edf_layout.h"
 
 namespace aircannect {
-
-static constexpr size_t AC_EDF_STR_RECORD_COUNT_FIELD_OFFSET = 236;
-static constexpr size_t AC_EDF_STR_RECORD_COUNT_FIELD_WIDTH = 8;
 
 enum class EdfStrFileSizeStatus : uint8_t {
     Ok,
@@ -35,6 +33,9 @@ struct EdfStrRecordLocation {
 
 bool edf_str_file_layout_from_size(size_t file_size,
                                    EdfStrFileLayout &layout);
+bool edf_str_header_schema_matches(const uint8_t *actual,
+                                   const uint8_t *expected,
+                                   size_t header_size);
 bool edf_str_format_record_count_field(uint32_t record_count,
                                        char *field,
                                        size_t field_size);

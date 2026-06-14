@@ -2,14 +2,16 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
 
 #include "edf_file_inventory.h"
 #include "edf_file_writer.h"
 
 namespace aircannect {
 
-// Session shutdown can enqueue 3 final numeric records, 1 STR day upsert, and
-// 5 close jobs before the worker task drains. Keep a little headroom.
+// Session shutdown can enqueue 3 final numeric records, 1 STR day upsert,
+// 1 metadata write, and 5 close jobs before the worker task drains.
+// Keep a little headroom.
 static constexpr size_t AC_EDF_STORAGE_QUEUE_CAPACITY = 12;
 static constexpr size_t AC_EDF_STORAGE_SLOT_BYTES = 6144;
 static constexpr uint32_t AC_EDF_STORAGE_TASK_STACK = 6144;
@@ -48,6 +50,7 @@ struct EdfStorageWorkerStatus {
     uint32_t open_jobs = 0;
     uint32_t record_jobs = 0;
     uint32_t close_jobs = 0;
+    uint32_t identification_jobs = 0;
     uint32_t records_written = 0;
     uint32_t queue_drops = 0;
     uint32_t render_errors = 0;
@@ -109,6 +112,7 @@ bool enqueue_annotation_record(EdfAnnotationKind kind,
 bool enqueue_str_record(const char *path,
                         const EdfHeaderInfo &info,
                         const EdfStrRecordView &record);
+bool enqueue_identification_files(const std::string &json);
 bool enqueue_close_numeric(EdfFileKind kind);
 bool enqueue_close_annotation(EdfAnnotationKind kind);
 

@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "edf_bytes.h"
 #include "edf_str_field_map.h"
 #include "edf_file_writer.h"
 #include "edf_str_file_layout.h"
@@ -15,20 +16,6 @@ struct MaskEvent {
     int16_t on = EDF_STR_MISSING;
     int16_t off = EDF_STR_MISSING;
 };
-
-int16_t read_i16_le(const uint8_t *bytes, size_t sample_offset) {
-    const size_t byte_offset = sample_offset * 2;
-    return static_cast<int16_t>(
-        static_cast<uint16_t>(bytes[byte_offset]) |
-        (static_cast<uint16_t>(bytes[byte_offset + 1]) << 8));
-}
-
-void write_i16_le(uint8_t *bytes, size_t sample_offset, int16_t value) {
-    const size_t byte_offset = sample_offset * 2;
-    const uint16_t raw = static_cast<uint16_t>(value);
-    bytes[byte_offset] = static_cast<uint8_t>(raw & 0xff);
-    bytes[byte_offset + 1] = static_cast<uint8_t>((raw >> 8) & 0xff);
-}
 
 bool valid_event_count(int16_t count) {
     return count >= 0 &&
@@ -77,7 +64,7 @@ EdfStrRecordMergeStatus collect_mask_events(const uint8_t *record,
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL);
     const size_t events_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_EVENTS_SIGNAL);
-    const int16_t declared = read_i16_le(record, events_offset);
+    const int16_t declared = edf_read_i16_le_sample(record, events_offset);
     if (declared == EDF_STR_MISSING) return EdfStrRecordMergeStatus::Ok;
     if (!valid_event_count(declared)) {
         return EdfStrRecordMergeStatus::BadMaskEvents;
@@ -85,8 +72,10 @@ EdfStrRecordMergeStatus collect_mask_events(const uint8_t *record,
 
     for (int16_t i = 0; i < declared; ++i) {
         MaskEvent event;
-        event.on = read_i16_le(record, on_offset + static_cast<size_t>(i));
-        event.off = read_i16_le(record, off_offset + static_cast<size_t>(i));
+        event.on = edf_read_i16_le_sample(record,
+                                          on_offset + static_cast<size_t>(i));
+        event.off = edf_read_i16_le_sample(record,
+                                           off_offset + static_cast<size_t>(i));
         if (!valid_event(event)) {
             return EdfStrRecordMergeStatus::BadMaskEvents;
         }
@@ -131,10 +120,11 @@ void merge_non_session_samples(const uint8_t *existing, uint8_t *incoming) {
     for (size_t i = 0; i < AC_EDF_STR_DATA_SAMPLES_PER_RECORD; ++i) {
         if (mask_session_sample(i)) continue;
         if (summary_sample(i)) continue;
-        if (read_i16_le(incoming, i) == EDF_STR_MISSING) {
-            const int16_t existing_value = read_i16_le(existing, i);
+        if (edf_read_i16_le_sample(incoming, i) == EDF_STR_MISSING) {
+            const int16_t existing_value =
+                edf_read_i16_le_sample(existing, i);
             if (existing_value != EDF_STR_MISSING) {
-                write_i16_le(incoming, i, existing_value);
+                edf_write_i16_le_sample(incoming, i, existing_value);
             }
         }
     }
@@ -153,32 +143,34 @@ void write_mask_events(uint8_t *record,
         edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
 
     for (size_t i = 0; i < AC_EDF_STR_MASK_EVENT_CAPACITY; ++i) {
-        write_i16_le(record, on_offset + i, EDF_STR_MISSING);
-        write_i16_le(record, off_offset + i, EDF_STR_MISSING);
+        edf_write_i16_le_sample(record, on_offset + i, EDF_STR_MISSING);
+        edf_write_i16_le_sample(record, off_offset + i, EDF_STR_MISSING);
     }
 
     int duration = 0;
     for (size_t i = 0; i < count; ++i) {
-        write_i16_le(record, on_offset + i, events[i].on);
-        write_i16_le(record, off_offset + i, events[i].off);
+        edf_write_i16_le_sample(record, on_offset + i, events[i].on);
+        edf_write_i16_le_sample(record, off_offset + i, events[i].off);
         duration += events[i].off > events[i].on
                         ? events[i].off - events[i].on
                         : 0;
     }
     if (duration > 1440) duration = 1440;
-    write_i16_le(record, events_offset, static_cast<int16_t>(count));
-    write_i16_le(record,
-                 duration_offset,
-                 count > 0 ? static_cast<int16_t>(duration)
-                           : EDF_STR_MISSING);
+    edf_write_i16_le_sample(record, events_offset,
+                            static_cast<int16_t>(count));
+    edf_write_i16_le_sample(record,
+                            duration_offset,
+                            count > 0 ? static_cast<int16_t>(duration)
+                                      : EDF_STR_MISSING);
 }
 
 void patch_crc(uint8_t *record) {
     const size_t data_bytes = AC_EDF_STR_DATA_SAMPLES_PER_RECORD * 2;
     const uint16_t crc = edf_crc16_ccitt_false(record, data_bytes);
-    write_i16_le(record,
-                 edf_str_signal_sample_offset(AC_EDF_STR_CRC_SIGNAL),
-                 static_cast<int16_t>(crc));
+    edf_write_i16_le_sample(
+        record,
+        edf_str_signal_sample_offset(AC_EDF_STR_CRC_SIGNAL),
+        static_cast<int16_t>(crc));
 }
 
 }  // namespace

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "edf_bytes.h"
 #include "edf_time.h"
 
 #ifdef ARDUINO
@@ -21,20 +22,8 @@ size_t bitset_size(size_t bits) {
     return (bits + 7) / 8;
 }
 
-bool bit_get(const uint8_t *bits, size_t index) {
-    if (!bits) return false;
-    return (bits[index / 8] & static_cast<uint8_t>(1u << (index % 8))) != 0;
-}
-
 int64_t abs_i64(int64_t value) {
     return value < 0 ? -value : value;
-}
-
-void bit_set(uint8_t *bits, size_t index, bool value) {
-    if (!bits) return;
-    const uint8_t mask = static_cast<uint8_t>(1u << (index % 8));
-    if (value) bits[index / 8] |= mask;
-    else bits[index / 8] &= static_cast<uint8_t>(~mask);
 }
 
 void *alloc_large_bytes(size_t bytes) {
@@ -350,7 +339,7 @@ bool EdfStreamAssembler::last_present_sample(const SeriesBuffer &series,
         static_cast<size_t>(signal_index) * series.samples_per_record;
     for (size_t sample = series.samples_per_record; sample > 0; --sample) {
         const size_t index = base + sample - 1;
-        if (bit_get(series.present, index)) {
+        if (edf_bit_get(series.present, index)) {
             sample_index = static_cast<uint16_t>(sample - 1);
             return true;
         }
@@ -383,7 +372,7 @@ uint32_t EdfStreamAssembler::count_missing_record_samples(
                                            series.samples_per_record);
     uint32_t missing = 0;
     for (size_t slot = 0; slot < slots; ++slot) {
-        if (!bit_get(series.present, slot)) missing++;
+        if (!edf_bit_get(series.present, slot)) missing++;
     }
     return missing;
 }
@@ -676,7 +665,7 @@ void EdfStreamAssembler::store_sample(SeriesBuffer &series,
     const size_t slot =
         static_cast<size_t>(signal_index) * series.samples_per_record +
         sample_index;
-    if (bit_get(series.present, slot)) {
+    if (edf_bit_get(series.present, slot)) {
         if (count_duplicate) {
             series.status->samples_duplicate++;
             status_.samples_duplicate++;
@@ -684,8 +673,8 @@ void EdfStreamAssembler::store_sample(SeriesBuffer &series,
         return;
     }
 
-    bit_set(series.present, slot, true);
-    bit_set(series.valid, slot, valid);
+    edf_bit_set(series.present, slot);
+    edf_bit_set(series.valid, slot, valid);
     series.values[slot] = value;
     series.status->slots_filled++;
 

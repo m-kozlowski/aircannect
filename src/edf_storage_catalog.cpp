@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "calendar_utils.h"
+#include "edf_identification.h"
 
 namespace aircannect {
 namespace {
@@ -437,7 +438,11 @@ bool edf_valid_pull_path(const char *path) {
     if (!path) return false;
     const size_t len = strlen(path);
     if (len == 0 || len >= AC_STORAGE_WRITE_PATH_MAX) return false;
-    if (strcmp(path, "/STR.edf") == 0) return true;
+    if (strcmp(path, "/STR.edf") == 0 ||
+        strcmp(path, AC_EDF_IDENTIFICATION_JSON_PATH) == 0 ||
+        strcmp(path, AC_EDF_IDENTIFICATION_CRC_PATH) == 0) {
+        return true;
+    }
 
     static constexpr size_t kPathLen = 41;
     static constexpr char kPrefix[] = "/DATALOG/";

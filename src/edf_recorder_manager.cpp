@@ -8,17 +8,20 @@
 #include "as11_rpc.h"
 #include "debug_log.h"
 #include "edf_event_annotation.h"
+#include "edf_identification.h"
 #include "edf_numeric_file_layout.h"
 #include "edf_storage_catalog.h"
 #include "edf_storage_worker.h"
 #include "edf_str_settings.h"
 #include "edf_time.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
 
 static constexpr uint32_t AC_EDF_STR_SETTINGS_TIMEOUT_MS = 12000;
 static constexpr uint32_t AC_EDF_STR_SUMMARY_TIMEOUT_MS = 12000;
+static constexpr uint32_t AC_EDF_IDENTIFICATION_TIMEOUT_MS = 12000;
 static constexpr size_t AC_EDF_GAP_RECORD_BUDGET = 3;
 
 const char *const EDF_CAPTURE_EVENT_IDS =
@@ -61,6 +64,8 @@ void EdfRecorderManager::begin(RpcArbiter &arbiter,
     if (initialized_) return;
     arbiter_ = &arbiter;
     session_ = &session;
+    // EdfRecorderManager is a program-lifetime singleton; these observer hooks
+    // intentionally stay registered until reboot.
     status_.rpc_observer_registered =
         arbiter_->set_source_event_observer(RpcSource::EdfRecorder,
                                             rpc_event_observer, this);
@@ -142,7 +147,7 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
     status_.event_frames++;
     status_.event_records += frame.event_count;
     status_.last_event_ms = now_ms;
-    copy_text(status_.last_event_data_id,
+    copy_cstr(status_.last_event_data_id,
               sizeof(status_.last_event_data_id),
               frame.data_id.c_str());
 
@@ -156,7 +161,7 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
                 (void)enqueue_event_annotation(EdfAnnotationKind::Csl, record);
             }
         }
-        copy_text(status_.last_event_name,
+        copy_cstr(status_.last_event_name,
                   sizeof(status_.last_event_name),
                   record.name.c_str());
     }
@@ -209,59 +214,38 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
                                        const char *reason) {
     if (status_.active && status_.session_id == session.session_id) return;
 
+    if (!flush_pending_str_record(reason ? reason : "session_start")) {
+        Log::logf(CAT_STREAM, LOG_WARN,
+                  "[EDF] pending STR record flush failed before session start "
+                  "id=%lu error=%s\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  status_.last_error[0] ? status_.last_error : "--");
+    }
+
     release_stream();
+    const bool enabled = status_.enabled;
+    const bool rpc_observer_registered = status_.rpc_observer_registered;
+    const bool event_observer_registered = status_.event_observer_registered;
+    const bool event_attached = status_.event_attached;
+    const EventConsumerHandle event_handle = status_.event_handle;
+    const uint32_t sessions_started = status_.sessions_started;
+    const uint32_t sessions_ended = status_.sessions_ended;
+    const uint32_t attach_attempts = status_.attach_attempts;
+    const uint32_t attach_failures = status_.attach_failures;
+
+    status_ = {};
+    status_.enabled = enabled;
+    status_.rpc_observer_registered = rpc_observer_registered;
+    status_.event_observer_registered = event_observer_registered;
+    status_.event_attached = event_attached;
+    status_.event_handle = event_handle;
+    status_.stream_handle = STREAM_CONSUMER_INVALID;
     status_.active = true;
     status_.session_id = session.session_id;
-    status_.sessions_started++;
-    status_.segment_rollovers = 0;
-    status_.frames = 0;
-    status_.frame_drops = 0;
-    status_.event_frames = 0;
-    status_.event_records = 0;
-    status_.event_subscription_generation = 0;
-    status_.event_coverage_gap_count = 0;
-    status_.event_coverage_session_gaps = 0;
-    status_.event_coverage_uncertain = false;
-    status_.respiratory_events = 0;
-    status_.csr_events = 0;
-    status_.brp_records = 0;
-    status_.pld_records = 0;
-    status_.sa2_records = 0;
-    status_.eve_records = 0;
-    status_.csl_records = 0;
-    status_.str_records = 0;
-    status_.str_setting_requests = 0;
-    status_.str_setting_responses = 0;
-    status_.str_setting_timeouts = 0;
-    status_.str_setting_values = 0;
-    status_.str_setting_missing = 0;
-    status_.str_setting_unmapped = 0;
-    status_.str_summary_requests = 0;
-    status_.str_summary_responses = 0;
-    status_.str_summary_timeouts = 0;
-    status_.str_summary_values = 0;
-    status_.str_summary_missing = 0;
-    status_.str_summary_unmapped = 0;
-    status_.record_enqueue_failures = 0;
-    status_.annotation_enqueue_failures = 0;
-    status_.str_enqueue_failures = 0;
-    status_.file_open_failures = 0;
-    status_.numeric_record_drops = 0;
-    status_.numeric_start_deferred_frames = 0;
-    status_.numeric_start_forced = 0;
-    status_.numeric_open_buffered_frames = 0;
-    status_.numeric_open_buffer_drops = 0;
-    status_.last_frame_ms = 0;
-    status_.last_event_ms = 0;
-    status_.brp_path[0] = 0;
-    status_.pld_path[0] = 0;
-    status_.sa2_path[0] = 0;
-    status_.eve_path[0] = 0;
-    status_.csl_path[0] = 0;
-    status_.str_path[0] = 0;
-    status_.last_event_data_id[0] = 0;
-    status_.last_event_name[0] = 0;
-    status_.last_error[0] = 0;
+    status_.sessions_started = sessions_started + 1;
+    status_.sessions_ended = sessions_ended;
+    status_.attach_attempts = attach_attempts;
+    status_.attach_failures = attach_failures;
     annotation_start_epoch_ms_ = 0;
     numeric_start_first_frame_epoch_ms_ = 0;
     numeric_start_ready_since_epoch_ms_ = 0;
@@ -278,6 +262,12 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     str_settings_pending_ = false;
     str_settings_request_id_ = 0;
     str_settings_request_ms_ = 0;
+    str_summary_pending_ = false;
+    str_summary_request_id_ = 0;
+    str_summary_request_ms_ = 0;
+    identification_pending_ = false;
+    identification_request_id_ = 0;
+    identification_request_ms_ = 0;
     snapshot_event_coverage();
 
     Log::logf(CAT_STREAM, LOG_INFO,
@@ -926,6 +916,7 @@ bool EdfRecorderManager::begin_str_session_at(const EdfLocalDateTime &start,
     }
 
     (void)request_str_settings(now_ms);
+    (void)request_identification(now_ms);
     return true;
 }
 
@@ -973,6 +964,27 @@ bool EdfRecorderManager::request_str_summary(uint32_t now_ms) {
     return true;
 }
 
+bool EdfRecorderManager::request_identification(uint32_t now_ms) {
+    if (!arbiter_ || identification_pending_) return false;
+
+    uint32_t id = 0;
+    if (!arbiter_->send_request_with_id(
+            "Get",
+            build_get_params("IdentificationProfiles"),
+            RpcSource::EdfRecorder,
+            AC_EDF_IDENTIFICATION_TIMEOUT_MS,
+            id)) {
+        status_.identification_failures++;
+        set_error("identification_queue_failed");
+        return false;
+    }
+    identification_pending_ = true;
+    identification_request_id_ = id;
+    identification_request_ms_ = now_ms;
+    status_.identification_requests++;
+    return true;
+}
+
 void EdfRecorderManager::note_str_get_timeouts(uint32_t now_ms) {
     if (str_settings_pending_ &&
         static_cast<int32_t>(now_ms - str_settings_request_ms_) >=
@@ -997,6 +1009,38 @@ void EdfRecorderManager::note_str_get_timeouts(uint32_t now_ms) {
             (void)write_str_day_record();
         }
     }
+
+    if (identification_pending_ &&
+        static_cast<int32_t>(now_ms - identification_request_ms_) >=
+            static_cast<int32_t>(AC_EDF_IDENTIFICATION_TIMEOUT_MS + 1000)) {
+        identification_pending_ = false;
+        identification_request_id_ = 0;
+        identification_request_ms_ = 0;
+        status_.identification_timeouts++;
+        status_.identification_failures++;
+        set_error("identification_timeout");
+    }
+}
+
+bool EdfRecorderManager::flush_pending_str_record(const char *reason) {
+    if (!str_record_pending_write_) return true;
+
+    const bool summary_was_pending = str_summary_pending_;
+    str_summary_pending_ = false;
+    str_summary_request_id_ = 0;
+    str_summary_request_ms_ = 0;
+    str_record_pending_write_ = false;
+
+    if (!write_str_day_record()) {
+        return false;
+    }
+
+    if (summary_was_pending) {
+        Log::logf(CAT_STREAM, LOG_WARN,
+                  "[EDF] STR record flushed without summary reason=%s\n",
+                  reason ? reason : "--");
+    }
+    return true;
 }
 
 void EdfRecorderManager::handle_rpc_event(const RpcEvent &event) {
@@ -1019,6 +1063,14 @@ void EdfRecorderManager::handle_rpc_event(const RpcEvent &event) {
         str_summary_request_ms_ = 0;
         status_.str_summary_responses++;
         handle_str_summary_response(event.payload_text());
+        return;
+    }
+    if (identification_pending_ && event.id == identification_request_id_) {
+        identification_pending_ = false;
+        identification_request_id_ = 0;
+        identification_request_ms_ = 0;
+        status_.identification_responses++;
+        handle_identification_response(event.payload_text());
         return;
     }
 }
@@ -1066,6 +1118,27 @@ void EdfRecorderManager::handle_str_summary_response(
         str_record_pending_write_ = false;
         (void)write_str_day_record();
     }
+}
+
+void EdfRecorderManager::handle_identification_response(
+    const std::string &payload) {
+    std::string json;
+    if (!edf_build_identification_json(payload, json)) {
+        status_.identification_failures++;
+        set_error("identification_json_failed");
+        return;
+    }
+    if (!EdfStorageWorker::enqueue_identification_files(json)) {
+        status_.identification_failures++;
+        set_error("identification_queue_failed");
+        return;
+    }
+
+    status_.identification_write_requests++;
+    Log::logf(CAT_STREAM,
+              LOG_DEBUG,
+              "[EDF] identification bytes=%u\n",
+              static_cast<unsigned>(json.size()));
 }
 
 bool EdfRecorderManager::finish_str_session(const SessionStatus &session,
@@ -1175,7 +1248,7 @@ bool EdfRecorderManager::write_str_day_record() {
         return false;
     }
 
-    copy_text(status_.str_path, sizeof(status_.str_path), path);
+    copy_cstr(status_.str_path, sizeof(status_.str_path), path);
     status_.str_records++;
     return true;
 }
@@ -1551,12 +1624,7 @@ bool EdfRecorderManager::enqueue_event_annotation(
 }
 
 void EdfRecorderManager::set_error(const char *error) {
-    copy_text(status_.last_error, sizeof(status_.last_error), error);
-}
-
-void EdfRecorderManager::copy_text(char *dst, size_t size, const char *src) {
-    if (!dst || size == 0) return;
-    snprintf(dst, size, "%s", src ? src : "");
+    copy_cstr(status_.last_error, sizeof(status_.last_error), error);
 }
 
 }  // namespace aircannect

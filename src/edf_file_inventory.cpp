@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "edf_identification.h"
 #include "edf_storage_catalog.h"
 
 namespace aircannect {
@@ -33,12 +34,27 @@ bool parse_path(const char *path, EdfInventoryEntry &out) {
         copy_fixed(out.tag, sizeof(out.tag), "STR", 3);
         return true;
     }
+    if (strcmp(path, AC_EDF_IDENTIFICATION_JSON_PATH) == 0) {
+        out.kind = EdfInventoryFileKind::IdentificationJson;
+        copy_fixed(out.tag, sizeof(out.tag), "IDJ", 3);
+        return true;
+    }
+    if (strcmp(path, AC_EDF_IDENTIFICATION_CRC_PATH) == 0) {
+        out.kind = EdfInventoryFileKind::IdentificationCrc;
+        copy_fixed(out.tag, sizeof(out.tag), "IDC", 3);
+        return true;
+    }
 
     copy_fixed(out.sleep_day, sizeof(out.sleep_day), path + 9, 8);
     copy_fixed(out.session_stamp, sizeof(out.session_stamp), path + 18, 15);
     copy_fixed(out.tag, sizeof(out.tag), path + 34, 3);
     out.kind = kind_from_tag(out.tag);
     return out.kind != EdfInventoryFileKind::Unknown;
+}
+
+bool metadata_kind(EdfInventoryFileKind kind) {
+    return kind == EdfInventoryFileKind::IdentificationJson ||
+           kind == EdfInventoryFileKind::IdentificationCrc;
 }
 
 }  // namespace
@@ -51,6 +67,10 @@ const char *edf_inventory_file_kind_name(EdfInventoryFileKind kind) {
         case EdfInventoryFileKind::Eve: return "EVE";
         case EdfInventoryFileKind::Csl: return "CSL";
         case EdfInventoryFileKind::Str: return "STR";
+        case EdfInventoryFileKind::IdentificationJson:
+            return "Identification.json";
+        case EdfInventoryFileKind::IdentificationCrc:
+            return "Identification.crc";
         case EdfInventoryFileKind::Unknown:
         default:
             return "unknown";
@@ -90,6 +110,11 @@ EdfInventoryStatus edf_inventory_describe_file(const char *path,
         return out.status;
     }
     out.file_size = file_size;
+    if (metadata_kind(out.kind)) {
+        out.data_size = file_size;
+        out.status = EdfInventoryStatus::Ok;
+        return out.status;
+    }
 
     if (!edf_parse_header_summary(header, header_size, out.header)) {
         out.status = EdfInventoryStatus::InvalidHeader;

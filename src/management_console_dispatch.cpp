@@ -334,6 +334,15 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.str_summary_missing));
     out.print(" unmapped=");
     out.print(static_cast<unsigned long>(status.str_summary_unmapped));
+    out.print(" identification=");
+    out.print(static_cast<unsigned long>(status.identification_requests));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.identification_responses));
+    out.print(" writes=");
+    out.print(static_cast<unsigned long>(
+        status.identification_write_requests));
+    out.print(" failures=");
+    out.print(static_cast<unsigned long>(status.identification_failures));
     out.print(" file_open_failures=");
     out.print(static_cast<unsigned long>(status.file_open_failures));
     out.print(" attach_failures=");
@@ -349,8 +358,12 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned>(storage.open_file_count));
     out.print(" storage_written=");
     out.print(static_cast<unsigned long>(storage.records_written));
+    out.print(" storage_identification=");
+    out.print(static_cast<unsigned long>(storage.identification_jobs));
     out.print(" storage_drops=");
     out.print(static_cast<unsigned long>(storage.queue_drops));
+    out.print(" storage_patch_errors=");
+    out.print(static_cast<unsigned long>(storage.patch_errors));
     out.print(" storage_stack_free=");
     out.print(static_cast<unsigned long>(storage.stack_high_water_words));
     out.print(" assembly=");

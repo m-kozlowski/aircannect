@@ -3,11 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-namespace aircannect {
+#include "edf_layout.h"
 
-static constexpr size_t AC_EDF_HEADER_RECORD_COUNT_OFFSET = 236;
-static constexpr size_t AC_EDF_HEADER_RECORD_COUNT_WIDTH = 8;
-static constexpr size_t AC_EDF_HEADER_SIGNAL_HEADER_OFFSET = 256;
+namespace aircannect {
 
 enum class EdfResumeStatus : uint8_t {
     Ok,

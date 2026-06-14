@@ -1,9 +1,15 @@
 #include "string_util.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 namespace aircannect {
+
+void copy_cstr(char *dst, size_t size, const char *src) {
+    if (!dst || size == 0) return;
+    snprintf(dst, size, "%s", src ? src : "");
+}
 
 #if AIRCANNECT_STRING_UTIL_HAS_ARDUINO
 void trim_inplace(String &value) {

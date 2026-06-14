@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "json_cursor.h"
+#include "string_util.h"
 
 #ifdef ARDUINO
 #include "memory_manager.h"
@@ -12,11 +13,6 @@
 
 namespace aircannect {
 namespace {
-
-void copy_text(char *dst, size_t size, const char *src) {
-    if (!dst || size == 0) return;
-    snprintf(dst, size, "%s", src ? src : "");
-}
 
 void set_valid(StreamFrameData &frame, size_t index, bool valid) {
     if (index >= AC_STREAM_FRAME_VALUES_MAX) return;
@@ -145,7 +141,7 @@ bool parse_signal_object(JsonCursor &json,
 
         if (first_member && frame.signal_count < AC_STREAM_FRAME_SIGNAL_MAX) {
             StreamSignalSpan &span = frame.signals[frame.signal_count++];
-            copy_text(span.name, sizeof(span.name), name);
+            copy_cstr(span.name, sizeof(span.name), name);
             span.id = stream_signal_id_from_name(name);
             span.value_offset = frame.value_count;
             span.sample_interval_ms =
@@ -246,11 +242,11 @@ bool parse_params(JsonCursor &json,
                 return false;
             }
             if (frame) {
-                copy_text(frame->start_time, sizeof(frame->start_time),
+                copy_cstr(frame->start_time, sizeof(frame->start_time),
                           start_time);
             }
             if (metadata) {
-                copy_text(metadata->start_time, sizeof(metadata->start_time),
+                copy_cstr(metadata->start_time, sizeof(metadata->start_time),
                           start_time);
             }
         } else if (strcmp(key, "data") == 0 && frame) {

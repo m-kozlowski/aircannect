@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
 
 #include "as11_event_frame.h"
 #include "edf_numeric_file_layout.h"
@@ -73,6 +74,11 @@ struct EdfRecorderStatus {
     uint32_t str_summary_values = 0;
     uint32_t str_summary_missing = 0;
     uint32_t str_summary_unmapped = 0;
+    uint32_t identification_requests = 0;
+    uint32_t identification_responses = 0;
+    uint32_t identification_timeouts = 0;
+    uint32_t identification_write_requests = 0;
+    uint32_t identification_failures = 0;
     uint32_t record_enqueue_failures = 0;
     uint32_t annotation_enqueue_failures = 0;
     uint32_t str_enqueue_failures = 0;
@@ -169,10 +175,13 @@ private:
                                bool request_summary);
     bool request_str_settings(uint32_t now_ms);
     bool request_str_summary(uint32_t now_ms);
+    bool request_identification(uint32_t now_ms);
     void note_str_get_timeouts(uint32_t now_ms);
+    bool flush_pending_str_record(const char *reason);
     void handle_rpc_event(const RpcEvent &event);
     void handle_str_settings_response(const std::string &payload);
     void handle_str_summary_response(const std::string &payload);
+    void handle_identification_response(const std::string &payload);
     bool write_str_day_record();
     bool parse_session_local_time(const char *text, EdfLocalDateTime &out) const;
     void attach_events();
@@ -195,7 +204,6 @@ private:
     bool enqueue_event_annotation(EdfAnnotationKind kind,
                                   const As11EventRecord &record);
     void set_error(const char *error);
-    static void copy_text(char *dst, size_t size, const char *src);
 
     RpcArbiter *arbiter_ = nullptr;
     SessionManager *session_ = nullptr;
@@ -223,6 +231,9 @@ private:
     bool str_summary_pending_ = false;
     uint32_t str_summary_request_id_ = 0;
     uint32_t str_summary_request_ms_ = 0;
+    bool identification_pending_ = false;
+    uint32_t identification_request_id_ = 0;
+    uint32_t identification_request_ms_ = 0;
     bool str_record_pending_write_ = false;
     NumericSchemaState brp_schema_;
     NumericSchemaState pld_schema_;

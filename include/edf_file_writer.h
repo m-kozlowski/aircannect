@@ -78,7 +78,6 @@ struct EdfStrRecordView {
 };
 
 const EdfFileSchema &edf_numeric_schema(EdfFileKind kind);
-const EdfFileSchema *edf_numeric_schema_for_series(EdfSeriesId series);
 const EdfSignalSpec *edf_str_signal_spec(size_t signal_index);
 
 size_t edf_header_size(const EdfFileSchema &schema);
@@ -92,6 +91,8 @@ size_t edf_annotation_record_size();
 uint16_t edf_crc16_ccitt_false(const uint8_t *data, size_t len);
 int16_t edf_encode_physical_sample(const EdfSignalSpec &spec,
                                    float physical_value);
+int16_t edf_encode_physical_sample_unclamped(const EdfSignalSpec &spec,
+                                             float physical_value);
 
 bool edf_render_header(const EdfFileSchema &schema,
                        const EdfHeaderInfo &info,

@@ -151,7 +151,8 @@ bool EdfStrSessionAccumulator::set_signal_physical(size_t signal_index,
     if (!spec || spec->samples_per_record != 1) return false;
     const size_t offset = edf_str_signal_sample_offset(signal_index);
     if (offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) return false;
-    samples_[offset] = edf_encode_physical_sample(*spec, physical_value);
+    samples_[offset] = edf_encode_physical_sample_unclamped(*spec,
+                                                            physical_value);
     return true;
 }
 
