@@ -12,6 +12,9 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
   - live dashboard with AS11 status and identity
   - read/write all therapy settings
   - live pressure / flow / leak / SpO2 charts
+- **EDF capture**
+  - record active therapy sessions to AS11-style EDF files on SD card
+  - browse and download captured EDF files over the Web UI
 - **Reports**
   - therapy-night charts with event flags, session toggles, zoom, and cached data
 - **Oximetry**
@@ -32,8 +35,8 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 
 ## Planned
 
-- **Live therapy data sinks** - HTTP, SMB, SleepHQ, MQTT... Plugin sinks subscribe through the stream broker; bounded per-consumer queues
-- **Local EDF capture** - record the active therapy session into set of EDF files on own SD card, indexed for remote retrieval over LAN.
+- **Live therapy data sinks** - HTTP, SleepHQ, MQTT... Plugin sinks subscribe through the stream broker; bounded per-consumer queues
+- **EDF file sync** - planned SMB share sync for locally captured EDF files.
 - **BLE provisioning** - replace SoftAP-only first-run with a BLE service for Wi-Fi scan, multi-profile setup, and basic device config from a phone.
 
 ## First setup
@@ -64,17 +67,17 @@ Both also support `-p /dev/ttyUSB0` for direct serial CAN tooling on hardware th
 
 ## Screenshots
 
-| Live charts | Reports |
+| Live charts | EDF |
 |---|---|
-| ![Live](docs/screenshots/charts.png) | ![Reports](docs/screenshots/report_charts.png) |
+| ![Live](docs/screenshots/charts.png) | ![EDF](docs/screenshots/edf_list.png) |
 
-| Oximetry | Clinical Settings |
+| Reports | Oximetry |
 |---|---|
-| ![Oximetry](docs/screenshots/oximetry.png) | ![Clinical](docs/screenshots/clinical.png) |
+| ![Reports](docs/screenshots/report_charts.png) | ![Oximetry](docs/screenshots/oximetry.png) |
 
-| ResMed OTA | Wifi |
+| Clinical settings | ResMed OTA |
 |---|---|
-| ![OTA](docs/screenshots/ota.png) | ![OTA](docs/screenshots/wifi.png) |
+| ![Clinical](docs/screenshots/clinical.png) | ![OTA](docs/screenshots/ota.png) |
 
 ## License
 
