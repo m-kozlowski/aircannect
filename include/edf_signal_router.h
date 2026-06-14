@@ -2,8 +2,8 @@
 
 #include <stdint.h>
 
+#include "as11_stream_signals.h"
 #include "edf_series.h"
-#include "stream_frame.h"
 
 namespace aircannect {
 

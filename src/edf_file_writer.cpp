@@ -9,6 +9,7 @@
 
 #include "edf_bytes.h"
 #include "edf_layout.h"
+#include "edf_str_signal_table.h"
 
 namespace aircannect {
 namespace {
@@ -64,10 +65,6 @@ const EdfSignalSpec SA2_SIGNALS[] = {
      -32768, 32767, 1, 1.0f, 0.0f},
 };
 
-const uint8_t BRP_SOURCE_INDICES[] = {0, 1};
-const uint8_t PLD_SOURCE_INDICES[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
-const uint8_t SA2_SOURCE_INDICES[] = {0, 1};
-
 const EdfSignalSpec ANNOTATION_SIGNALS[] = {
     {"EDF Annotations", "", "-32768.0", "32767.00", "-32768", "32767",
      -32768, 32767, 31},
@@ -75,9 +72,23 @@ const EdfSignalSpec ANNOTATION_SIGNALS[] = {
      -32768, 32767, 1},
 };
 
-const EdfSignalSpec STR_SIGNALS[] = {
+const EdfStrSignalDescriptor STR_SIGNAL_DESCRIPTORS[] = {
+#define EDF_STR_SIGNAL(source, short_tag, label, dimension, physical_min,      \
+                       physical_max, digital_min, digital_max,                 \
+                       digital_min_value, digital_max_value, samples)           \
+    {                                                                          \
+        EdfStrFieldSource::source,                                             \
+        short_tag,                                                             \
+        {label, dimension, physical_min, physical_max, digital_min,             \
+         digital_max, digital_min_value, digital_max_value, samples},           \
+    },
 #include "edf_str_signal_table.inc"
+#undef EDF_STR_SIGNAL
 };
+static_assert(sizeof(STR_SIGNAL_DESCRIPTORS) /
+                      sizeof(STR_SIGNAL_DESCRIPTORS[0]) ==
+                  AC_EDF_STR_SIGNAL_COUNT,
+              "STR signal descriptor table size must match STR layout");
 
 const EdfFileSchema BRP_SCHEMA = {
     EdfFileKind::Brp,
@@ -85,7 +96,7 @@ const EdfFileSchema BRP_SCHEMA = {
     "BRP",
     "EDF",
     BRP_SIGNALS,
-    BRP_SOURCE_INDICES,
+    nullptr,
     sizeof(BRP_SIGNALS) / sizeof(BRP_SIGNALS[0]),
     AC_EDF_BRP_SIGNAL_COUNT,
     AC_EDF_BRP_SAMPLES_PER_RECORD,
@@ -98,7 +109,7 @@ const EdfFileSchema PLD_SCHEMA = {
     "PLD",
     "EDF",
     PLD_SIGNALS,
-    PLD_SOURCE_INDICES,
+    nullptr,
     sizeof(PLD_SIGNALS) / sizeof(PLD_SIGNALS[0]),
     AC_EDF_PLD_SIGNAL_COUNT,
     AC_EDF_PLD_SAMPLES_PER_RECORD,
@@ -111,7 +122,7 @@ const EdfFileSchema SA2_SCHEMA = {
     "SA2",
     "EDF",
     SA2_SIGNALS,
-    SA2_SOURCE_INDICES,
+    nullptr,
     sizeof(SA2_SIGNALS) / sizeof(SA2_SIGNALS[0]),
     AC_EDF_SA2_SIGNAL_COUNT,
     AC_EDF_SA2_SAMPLES_PER_RECORD,
@@ -173,9 +184,7 @@ void append_u32_field(uint8_t *dst,
     append_field(dst, capacity, offset, tmp, width);
 }
 
-int16_t encode_sample(const EdfSignalSpec &spec,
-                      float physical_value,
-                      bool clamp_to_signal_range) {
+int16_t encode_sample(const EdfSignalSpec &spec, float physical_value) {
     const int32_t digital_min = spec.digital_min_value;
     const int32_t digital_max = spec.digital_max_value;
     if (digital_max <= digital_min) {
@@ -198,10 +207,6 @@ int16_t encode_sample(const EdfSignalSpec &spec,
     }
 
     long digital = lroundf(scaled);
-    if (clamp_to_signal_range) {
-        if (digital < digital_min) digital = digital_min;
-        if (digital > digital_max) digital = digital_max;
-    }
     if (digital < INT16_MIN) digital = INT16_MIN;
     if (digital > INT16_MAX) digital = INT16_MAX;
     return static_cast<int16_t>(digital);
@@ -252,9 +257,10 @@ void finalize_patient_id(uint8_t *header, size_t header_size) {
            strlen(patient_id));
 }
 
+template <typename SignalAt>
 bool render_header_common(const char *reserved,
-                          const EdfSignalSpec *signals,
                           size_t signal_count,
+                          SignalAt signal_at,
                           const char *record_duration,
                           const EdfHeaderInfo &info,
                           uint8_t *dst,
@@ -263,7 +269,7 @@ bool render_header_common(const char *reserved,
     written = 0;
     const size_t required =
         AC_EDF_HEADER_FIXED_SIZE + signal_count * AC_EDF_SIGNAL_HEADER_SIZE;
-    if (!dst || capacity < required || !signals || signal_count == 0) {
+    if (!dst || capacity < required || signal_count == 0) {
         return false;
     }
 
@@ -291,32 +297,33 @@ bool render_header_common(const char *reserved,
                      AC_EDF_HEADER_SIGNAL_COUNT_WIDTH);
 
     for (size_t i = 0; i < signal_count; ++i) {
-        append_field(dst, capacity, offset, signals[i].label, 16);
+        append_field(dst, capacity, offset, signal_at(i).label, 16);
     }
     for (size_t i = 0; i < signal_count; ++i) {
         append_field(dst, capacity, offset, "", 80);
     }
     for (size_t i = 0; i < signal_count; ++i) {
-        append_field(dst, capacity, offset, signals[i].physical_dimension, 8);
+        append_field(dst, capacity, offset, signal_at(i).physical_dimension, 8);
     }
     for (size_t i = 0; i < signal_count; ++i) {
-        append_field(dst, capacity, offset, signals[i].physical_min, 8);
+        append_field(dst, capacity, offset, signal_at(i).physical_min, 8);
     }
     for (size_t i = 0; i < signal_count; ++i) {
-        append_field(dst, capacity, offset, signals[i].physical_max, 8);
+        append_field(dst, capacity, offset, signal_at(i).physical_max, 8);
     }
     for (size_t i = 0; i < signal_count; ++i) {
-        append_field(dst, capacity, offset, signals[i].digital_min, 8);
+        append_field(dst, capacity, offset, signal_at(i).digital_min, 8);
     }
     for (size_t i = 0; i < signal_count; ++i) {
-        append_field(dst, capacity, offset, signals[i].digital_max, 8);
+        append_field(dst, capacity, offset, signal_at(i).digital_max, 8);
     }
     for (size_t i = 0; i < signal_count; ++i) {
         append_field(dst, capacity, offset, "", 80);
     }
     for (size_t i = 0; i < signal_count; ++i) {
         append_u32_field(dst, capacity, offset,
-                         static_cast<uint32_t>(signals[i].samples_per_record),
+                         static_cast<uint32_t>(
+                             signal_at(i).samples_per_record),
                          8);
     }
     for (size_t i = 0; i < signal_count; ++i) {
@@ -352,9 +359,16 @@ const EdfFileSchema &edf_numeric_schema(EdfFileKind kind) {
 }
 
 const EdfSignalSpec *edf_str_signal_spec(size_t signal_index) {
-    const size_t count = sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]);
+    const EdfStrSignalDescriptor *descriptor =
+        edf_str_signal_descriptor(signal_index);
+    return descriptor ? &descriptor->spec : nullptr;
+}
+
+const EdfStrSignalDescriptor *edf_str_signal_descriptor(size_t signal_index) {
+    const size_t count =
+        sizeof(STR_SIGNAL_DESCRIPTORS) / sizeof(STR_SIGNAL_DESCRIPTORS[0]);
     if (signal_index >= count) return nullptr;
-    return &STR_SIGNALS[signal_index];
+    return &STR_SIGNAL_DESCRIPTORS[signal_index];
 }
 
 size_t edf_header_size(const EdfFileSchema &schema) {
@@ -372,25 +386,28 @@ size_t edf_record_size(const EdfFileSchema &schema) {
 
 size_t edf_str_header_size() {
     return AC_EDF_HEADER_FIXED_SIZE +
-           (sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0])) *
+           (sizeof(STR_SIGNAL_DESCRIPTORS) /
+            sizeof(STR_SIGNAL_DESCRIPTORS[0])) *
                AC_EDF_SIGNAL_HEADER_SIZE;
 }
 
 size_t edf_str_record_size() {
     size_t samples = 0;
-    const size_t count = sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]);
+    const size_t count =
+        sizeof(STR_SIGNAL_DESCRIPTORS) / sizeof(STR_SIGNAL_DESCRIPTORS[0]);
     for (size_t i = 0; i < count; ++i) {
-        samples += STR_SIGNALS[i].samples_per_record;
+        samples += STR_SIGNAL_DESCRIPTORS[i].spec.samples_per_record;
     }
     return samples * 2;
 }
 
 size_t edf_str_signal_sample_offset(size_t signal_index) {
-    const size_t count = sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]);
+    const size_t count =
+        sizeof(STR_SIGNAL_DESCRIPTORS) / sizeof(STR_SIGNAL_DESCRIPTORS[0]);
     if (signal_index >= count) return AC_EDF_STR_SAMPLES_PER_RECORD;
     size_t offset = 0;
     for (size_t i = 0; i < signal_index; ++i) {
-        offset += STR_SIGNALS[i].samples_per_record;
+        offset += STR_SIGNAL_DESCRIPTORS[i].spec.samples_per_record;
     }
     return offset;
 }
@@ -411,12 +428,7 @@ uint16_t edf_crc16_ccitt_false(const uint8_t *data, size_t len) {
 
 int16_t edf_encode_physical_sample(const EdfSignalSpec &spec,
                                    float physical_value) {
-    return encode_sample(spec, physical_value, true);
-}
-
-int16_t edf_encode_physical_sample_unclamped(const EdfSignalSpec &spec,
-                                             float physical_value) {
-    return encode_sample(spec, physical_value, false);
+    return encode_sample(spec, physical_value);
 }
 
 bool edf_render_header(const EdfFileSchema &schema,
@@ -424,10 +436,13 @@ bool edf_render_header(const EdfFileSchema &schema,
                        uint8_t *dst,
                        size_t capacity,
                        size_t &written) {
+    if (!schema.signals) return false;
     return render_header_common(
         schema.reserved,
-        schema.signals,
         schema.signal_count,
+        [&schema](size_t i) -> const EdfSignalSpec & {
+            return schema.signals[i];
+        },
         record_duration_text(schema.record_duration_seconds),
         info,
         dst,
@@ -465,9 +480,8 @@ bool edf_render_numeric_record(const EdfFileSchema &schema,
             const bool present = edf_bit_get(record.present, source_index);
             const bool valid = edf_bit_get(record.valid, source_index);
             const int16_t digital =
-                (present && valid) ? encode_sample(spec,
-                                                   record.values[source_index],
-                                                   true)
+                (present && valid) ? encode_sample(
+                                         spec, record.values[source_index])
                                    : EDF_MISSING_DIGITAL;
             (void)edf_append_i16_le(dst, capacity, offset, digital);
         }
@@ -485,8 +499,10 @@ bool edf_render_str_header(const EdfHeaderInfo &info,
                            size_t capacity,
                            size_t &written) {
     return render_header_common("EDF",
-                                STR_SIGNALS,
-                                sizeof(STR_SIGNALS) / sizeof(STR_SIGNALS[0]),
+                                AC_EDF_STR_SIGNAL_COUNT,
+                                [](size_t i) -> const EdfSignalSpec & {
+                                    return STR_SIGNAL_DESCRIPTORS[i].spec;
+                                },
                                 "86400.00",
                                 info,
                                 dst,
@@ -523,9 +539,11 @@ bool edf_render_annotation_header(const EdfHeaderInfo &info,
                                   size_t capacity,
                                   size_t &written) {
     return render_header_common("EDF+D",
-                                ANNOTATION_SIGNALS,
                                 sizeof(ANNOTATION_SIGNALS) /
                                     sizeof(ANNOTATION_SIGNALS[0]),
+                                [](size_t i) -> const EdfSignalSpec & {
+                                    return ANNOTATION_SIGNALS[i];
+                                },
                                 "0.00",
                                 info,
                                 dst,

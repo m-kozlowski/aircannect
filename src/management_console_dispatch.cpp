@@ -252,7 +252,7 @@ void print_edf_recorder_status(Print &out,
     out.print(" stream=");
     out.print(status.stream_attached ? "attached" : "idle");
     out.print(" files=");
-    out.print(status.files_open ? "open" : "closed");
+    out.print(status.files_open() ? "open" : "closed");
     out.print(" rpc_observer=");
     out.print(status.rpc_observer_registered ? "yes" : "no");
     out.print(" event_observer=");
@@ -266,7 +266,7 @@ void print_edf_recorder_status(Print &out,
         status.event_subscription_generation));
     out.print(" event_gaps=");
     out.print(static_cast<unsigned long>(
-        status.event_coverage_session_gaps));
+        status.event_coverage_session_gaps()));
     out.print(" session=");
     out.print(static_cast<unsigned long>(status.session_id));
     out.print(" sessions=");
@@ -304,8 +304,8 @@ void print_edf_recorder_status(Print &out,
     out.print(" record_drops=");
     out.print(static_cast<unsigned long>(status.numeric_record_drops));
     out.print(" zle=");
-    out.print(status.recording_gate_open ? "open" :
-              (status.recording_gate_closed ? "closed" : "waiting"));
+    out.print(status.recording_gate_open() ? "open" :
+              (status.recording_gate_closed() ? "closed" : "waiting"));
     out.print(" zle_edges=");
     out.print(static_cast<unsigned long>(status.recording_gate_rises));
     out.print('/');
@@ -315,14 +315,14 @@ void print_edf_recorder_status(Print &out,
         out.print(static_cast<unsigned long>(
             status.recording_gate_recoveries));
     }
-    if (status.recording_gate_recovery_pending) {
+    if (status.recording_gate_recovery_pending()) {
         out.print(" zle_recovery=pending");
     }
     out.print(" zle_bad=");
     out.print(static_cast<unsigned long>(status.recording_gate_bad_events));
     out.print(" mask_start=");
     out.print(status.mask_start_time[0] ? status.mask_start_time : "--");
-    if (status.mask_start_pending) {
+    if (status.mask_start_pending()) {
         out.print(" mask_pending=yes");
     }
     out.print(" mask_events=");

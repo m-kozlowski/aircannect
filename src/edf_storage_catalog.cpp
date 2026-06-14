@@ -38,46 +38,20 @@ EdfLocalDateTime previous_day(EdfLocalDateTime dt) {
     return dt;
 }
 
-int64_t days_before_year(int year) {
-    int64_t days = 0;
-    for (int y = 1970; y < year; ++y) {
-        days += calendar_is_leap_year(y) ? 366 : 365;
-    }
-    return days;
-}
-
-int64_t epoch_days(const EdfLocalDateTime &dt) {
-    int64_t days = days_before_year(dt.year);
-    for (int month = 1; month < dt.month; ++month) {
-        days += calendar_days_in_month(dt.year, month);
-    }
-    return days + dt.day - 1;
-}
-
 bool date_from_epoch_days(int64_t days, EdfLocalDateTime &dt) {
     if (days < 0) return false;
 
-    int year = 1970;
-    while (true) {
-        const int year_days = calendar_is_leap_year(year) ? 366 : 365;
-        if (days < year_days) break;
-        days -= year_days;
-        year++;
-        if (year > 9999) return false;
+    int year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    if (!calendar_civil_from_days(days, year, month, day) ||
+        year > 9999) {
+        return false;
     }
-
-    int month = 1;
-    while (month <= 12) {
-        const int month_days = calendar_days_in_month(year, month);
-        if (days < month_days) break;
-        days -= month_days;
-        month++;
-    }
-    if (month > 12) return false;
 
     dt.year = year;
-    dt.month = month;
-    dt.day = static_cast<int>(days) + 1;
+    dt.month = static_cast<int>(month);
+    dt.day = static_cast<int>(day);
     return true;
 }
 
@@ -349,7 +323,10 @@ bool edf_sleep_day_epoch_days(const EdfLocalDateTime &dt,
     if (!valid_date_time(dt)) return false;
     EdfLocalDateTime sleep_day;
     if (!edf_sleep_day_start(dt, sleep_day)) return false;
-    const int64_t parsed = epoch_days(sleep_day);
+    const int64_t parsed =
+        calendar_days_from_civil(sleep_day.year,
+                                 static_cast<unsigned>(sleep_day.month),
+                                 static_cast<unsigned>(sleep_day.day));
     if (parsed < 0 || parsed > 24836) return false;
     days = static_cast<uint16_t>(parsed);
     return true;

@@ -2,33 +2,10 @@
 
 #include <string.h>
 
+#include "edf_stream_signal_table.h"
+
 namespace aircannect {
 namespace {
-
-struct NumericSignalMap {
-    EdfFileKind kind = EdfFileKind::Brp;
-    const char *short_tag = "";
-    uint8_t source_index = 0;
-};
-
-const NumericSignalMap EDF_NUMERIC_SIGNAL_MAP[] = {
-    {EdfFileKind::Brp, "_RFL", 0},
-    {EdfFileKind::Brp, "_MKP", 1},
-    {EdfFileKind::Pld, "_MKF", 0},
-    {EdfFileKind::Pld, "_MKI", 1},
-    {EdfFileKind::Pld, "_MKE", 2},
-    {EdfFileKind::Pld, "_LKF", 3},
-    {EdfFileKind::Pld, "_RR2", 4},
-    {EdfFileKind::Pld, "_TD2", 5},
-    {EdfFileKind::Pld, "_MV2", 6},
-    {EdfFileKind::Pld, "_TGT", 7},
-    {EdfFileKind::Pld, "_IE2", 8},
-    {EdfFileKind::Pld, "_SNI", 9},
-    {EdfFileKind::Pld, "_FFL", 10},
-    {EdfFileKind::Pld, "_INT", 11},
-    {EdfFileKind::Sa2, "_HRT", 0},
-    {EdfFileKind::Sa2, "_SAO", 1},
-};
 
 bool token_matches(const char *begin,
                    const char *end,
@@ -91,12 +68,13 @@ bool edf_build_numeric_file_layout(EdfFileKind kind,
         return false;
     }
 
+    size_t descriptor_count = 0;
+    const EdfStreamSignalDescriptor *descriptors =
+        edf_stream_signal_descriptors(descriptor_count);
     size_t count = 0;
-    for (size_t i = 0; i < sizeof(EDF_NUMERIC_SIGNAL_MAP) /
-                               sizeof(EDF_NUMERIC_SIGNAL_MAP[0]);
-         ++i) {
-        const NumericSignalMap &entry = EDF_NUMERIC_SIGNAL_MAP[i];
-        if (entry.kind != kind ||
+    for (size_t i = 0; i < descriptor_count; ++i) {
+        const EdfStreamSignalDescriptor &entry = descriptors[i];
+        if (entry.file_kind != kind ||
             !edf_short_tag_is_accepted(accepted_data_ids_csv,
                                        entry.short_tag)) {
             continue;

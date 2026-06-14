@@ -1,9 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <stddef.h>
 #include <stdint.h>
-#include <memory>
 #include <new>
 #include <string>
 
@@ -149,27 +149,38 @@ public:
 
     bool request_summary_refresh(bool force = false);
     void build_summary_json(LargeTextBuffer &json) const;
-    bool for_each_summary_night(ReportSummaryNightCallback callback, void *context) const;
-    bool summary_night_by_therapy_index(size_t therapy_index, ReportSummaryRecord &out) const;
+    bool for_each_summary_night(ReportSummaryNightCallback callback,
+                                void *context) const;
+    bool summary_night_by_therapy_index(size_t therapy_index,
+                                        ReportSummaryRecord &out) const;
     bool latest_summary_night(ReportSummaryRecord &out) const;
     ReportSummaryStatus summary_status() const;
+
     // Atomic mirror of summary_status_.revision, published each poll() so the
     // background prefetch job can watch for new nights without a cross-task read.
     uint32_t summary_revision() const { return summary_revision_pub_.load(); }
 
-    bool night_coverage(uint64_t night_start_ms, ReportNightCoverageStatus &out) const;
-    bool night_coverage_by_therapy_index(size_t therapy_index, ReportNightCoverageStatus &out) const;
+    bool night_coverage(uint64_t night_start_ms,
+                        ReportNightCoverageStatus &out) const;
+    bool night_coverage_by_therapy_index(
+        size_t therapy_index,
+        ReportNightCoverageStatus &out) const;
     bool latest_night_coverage(ReportNightCoverageStatus &out) const;
+
     bool request_night_cache(uint64_t night_start_ms, bool force = false);
-    bool request_night_cache_by_therapy_index(size_t therapy_index, bool force = false);
+    bool request_night_cache_by_therapy_index(size_t therapy_index,
+                                              bool force = false);
     bool request_latest_night_cache(bool force = false);
     bool cancel_cache_fetch();
+
     bool clear_cache_all(ReportCacheClearResult &out);
     bool clear_cache_night(uint64_t night_start_ms, ReportCacheClearResult &out);
+
     bool busy() const {
         return summary_fetch_active_ || cache_fetch_active_ ||
                plot_build_active_;
     }
+
     bool next_night_needing_cache(uint64_t &night_start_ms_out) const;
     const ReportCacheFetchStatus &cache_fetch_status() const {
         return cache_status_;
@@ -193,13 +204,18 @@ public:
         char last_source[48] = {};
         char last_error[48] = {};
     };
+
     bool prefetch_request_next();
     void prefetch_cancel();
     PrefetchSnapshot prefetch_snapshot() const;
     bool foreground_busy() const;
 
-    bool prepare_result_by_therapy_index(size_t therapy_index, bool refresh_cache = false);
-    void build_result_chunks_json(LargeTextBuffer &json, size_t offset, size_t limit) const;
+    bool prepare_result_by_therapy_index(size_t therapy_index,
+                                         bool refresh_cache = false);
+    void build_result_chunks_json(LargeTextBuffer &json,
+                                  size_t offset,
+                                  size_t limit) const;
+
     // Stateless per-night result read: serves a materialized LRU entry by night
     // index with an ETag, without touching the single build-scratch slot.
     enum class ResultRead : uint8_t {
@@ -211,9 +227,11 @@ public:
         Unavailable,
         Busy,
     };
+
     ResultRead read_result(size_t therapy_index, const char *if_none_match,
                            char *etag_out, size_t etag_out_size,
                            LargeTextBuffer &json_out);
+
     // Stateless per-night plot read: serves the PSRAM blob for (night, version);
     // a miss queues a build and returns Building.
     enum class PlotRead : uint8_t {
@@ -224,17 +242,20 @@ public:
         Unavailable,
         Busy,
     };
+
     PlotRead read_plot(size_t therapy_index, const char *version,
                        std::shared_ptr<ReportSpoolBuffer> &out);
     PlotRead read_plot_range(size_t therapy_index, int64_t from_ms,
                              int64_t to_ms,
                              std::shared_ptr<ReportSpoolBuffer> &out);
+
     const ReportSpoolBuffer &result_plot_bin() const {
         return result_plot_bin_;
     }
     const ReportResultStatus &result_status() const {
         return result_status_;
     }
+
     // Per-night content version "<start>-<dur>-<sessions>-<epoch>" for the HTTP
     // ETag; computed from the in-memory summary record + the per-night epoch (no SD).
     bool night_etag(size_t therapy_index, char *out, size_t out_size) const;
@@ -244,6 +265,7 @@ private:
         int64_t start_ms = 0;
         int64_t end_ms = 0;
     };
+
     struct ReportResultChunk {
         ReportStoreChunkKind kind = ReportStoreChunkKind::Series;
         ReportSourceId source = ReportSourceId::Summary;
@@ -255,6 +277,7 @@ private:
         uint32_t record_count = 0;
         uint32_t payload_len = 0;
     };
+
     struct ReportResultStream {
         ReportStoreChunkKind kind = ReportStoreChunkKind::Series;
         ReportSourceId source = ReportSourceId::Summary;
@@ -266,10 +289,12 @@ private:
         uint32_t record_count = 0;
         uint32_t payload_bytes = 0;
     };
+
     struct PrefetchSkip {
         uint64_t night_ms = 0;
         uint32_t until_ms = 0;
     };
+
     struct CacheCoalesceBuffer {
         bool active = false;
         ReportStoreChunkKind kind = ReportStoreChunkKind::Series;

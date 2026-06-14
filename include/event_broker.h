@@ -47,9 +47,11 @@ struct EventBrokerStats {
     uint32_t subscribe_requests = 0;
     uint32_t subscribe_successes = 0;
     uint32_t subscribe_errors = 0;
+
     uint32_t quiesce_requests = 0;
     uint32_t quiesce_successes = 0;
     uint32_t quiesce_errors = 0;
+
     uint32_t coverage_gaps = 0;
     uint32_t notifications = 0;
     uint32_t settings_history_changes = 0;
@@ -61,6 +63,7 @@ struct EventBrokerStatus {
     bool subscribe_pending = false;
     bool quiesce_requested = false;
     bool quiesced = false;
+
     uint32_t subscription_id = 0;
     uint32_t subscription_generation = 0;
     uint32_t coverage_gap_count = 0;
@@ -74,6 +77,7 @@ using EventFrameObserver = void (*)(void *context,
 class EventBroker {
 public:
     EventCommand next_command(uint32_t now_ms);
+
     void mark_command_queued(EventCommandType type,
                              const std::string &params_json,
                              uint32_t now_ms);
@@ -101,9 +105,11 @@ public:
                                             size_t payload_len,
                                             uint32_t now_ms,
                                             As11EventFrame &frame);
+
     void set_frame_observer(EventFrameObserver observer, void *context);
     bool add_frame_observer(EventFrameObserver observer, void *context);
     void remove_frame_observer(EventFrameObserver observer, void *context);
+
     void reset_counters();
 
     EventBrokerStatus status() const;
@@ -133,16 +139,20 @@ private:
     bool pending_quiesce_ = false;
     bool quiesce_requested_ = false;
     bool quiesced_ = false;
+
     uint32_t subscription_id_ = 0;
     uint32_t subscription_generation_ = 0;
     uint32_t coverage_gap_count_ = 0;
     uint32_t next_subscribe_ms_ = 0;
     uint32_t last_notification_ms_ = 0;
+
     std::string active_params_json_;
     std::string pending_params_json_;
     std::string desired_params_json_;
+
     bool desired_params_dirty_ = true;
     bool desired_params_valid_ = false;
+
     Consumer consumers_[AC_EVENT_CONSUMERS_MAX];
     EventBrokerStats stats_ = {};
     FrameObserverSlot frame_observers_[AC_EVENT_FRAME_OBSERVERS_MAX];

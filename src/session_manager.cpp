@@ -1,9 +1,7 @@
 #include "session_manager.h"
 
-#include <stdio.h>
-#include <string.h>
-
 #include "session_time.h"
+#include "string_util.h"
 
 #if __has_include(<Arduino.h>)
 #include "debug_log.h"
@@ -69,7 +67,7 @@ void SessionManager::note_stream_frame(const StreamFrameData &frame,
     status_.last_frame_ms = now_ms;
     if (frame.stream_id) status_.stream_id = frame.stream_id;
     if (frame.start_time[0]) {
-        copy_text(status_.last_stream_start_time,
+        copy_cstr(status_.last_stream_start_time,
                   sizeof(status_.last_stream_start_time),
                   frame.start_time);
     }
@@ -134,11 +132,11 @@ void SessionManager::end_session(const As11DeviceState &as11,
               as11.device_datetime());
     if (session_utc_timestamp_later(status_.last_stream_start_time,
                                     status_.end_device_time)) {
-        copy_text(status_.end_device_time,
+        copy_cstr(status_.end_device_time,
                   sizeof(status_.end_device_time),
                   status_.last_stream_start_time);
     }
-    copy_text(status_.end_reason, sizeof(status_.end_reason), reason);
+    copy_cstr(status_.end_reason, sizeof(status_.end_reason), reason);
     AC_SESSION_LOG(CAT_STREAM, LOG_INFO,
                    "[SESSION] ended id=%lu reason=%s frames=%lu drops=%lu\n",
                    static_cast<unsigned long>(status_.session_id),
@@ -150,12 +148,7 @@ void SessionManager::end_session(const As11DeviceState &as11,
 void SessionManager::copy_time(char *dst,
                                size_t size,
                                const std::string &value) {
-    copy_text(dst, size, value.c_str());
-}
-
-void SessionManager::copy_text(char *dst, size_t size, const char *value) {
-    if (!dst || size == 0) return;
-    snprintf(dst, size, "%s", value ? value : "");
+    copy_cstr(dst, size, value.c_str());
 }
 
 }  // namespace aircannect

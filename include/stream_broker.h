@@ -63,13 +63,17 @@ public:
     StreamAcquireResult update(StreamConsumerHandle handle,
                                const std::string &params_json);
     void release(StreamConsumerHandle handle);
+
     void note_external_start(const std::string &params_json);
     void note_external_stop(
         ExternalStreamStopMode mode = ExternalStreamStopMode::CommandSent);
 
     bool consumer_active(StreamConsumerHandle handle) const;
     size_t consumer_count() const;
-    bool desired_active() const { return consumer_count() > 0 || external_active_; }
+
+    bool desired_active() const {
+        return consumer_count() > 0 || external_active_;
+    }
     bool actual_active() const { return actual_active_; }
     bool external_active() const { return external_active_; }
     bool pending() const { return pending_ != StreamCommandType::None; }
@@ -81,6 +85,7 @@ public:
 
     StreamCommand next_command(uint32_t now_ms,
                                uint32_t retry_interval_ms) const;
+
     void mark_command_queued(StreamCommandType type, uint32_t now_ms);
     void mark_command_deferred(uint32_t now_ms);
     void mark_command_timeout(uint32_t now_ms);
@@ -96,16 +101,20 @@ public:
     void note_stream_data(uint32_t stream_id,
                           const std::string &start_time,
                           uint32_t now_ms);
+
     void set_frame_observer(StreamFrameObserver observer, void *context);
+
     StreamPublishResult publish_stream_data(const std::string &payload,
                                             uint32_t now_ms);
     StreamPublishResult publish_stream_data(const char *payload,
                                             size_t payload_len,
                                             uint32_t now_ms);
+
     bool next_frame(StreamConsumerHandle handle, StreamFrameRef &frame);
     size_t consumer_queue_count(StreamConsumerHandle handle) const;
     uint32_t consumer_queue_drops(StreamConsumerHandle handle) const;
     uint8_t consumer_source(StreamConsumerHandle handle) const;
+
     uint32_t published_payloads() const { return published_payloads_; }
     uint32_t fanout_targets() const { return fanout_targets_; }
     uint32_t total_queue_drops() const { return total_queue_drops_; }
@@ -118,11 +127,13 @@ public:
     uint32_t frame_pool_allocation_failures() const {
         return frame_pool_.allocation_failures();
     }
+
     void reset_counters();
 
     uint32_t last_stream_id() const { return last_stream_id_; }
     const std::string &last_start_time() const { return last_start_time_; }
     uint32_t last_notification_ms() const { return last_notification_ms_; }
+
     size_t accepted_data_id_count() const {
         return accepted_subscription_.data_id_count;
     }
@@ -151,6 +162,7 @@ private:
     int find_free_slot() const;
     void clear_error();
     bool ensure_frame_pool();
+
     static bool parse_subscription(const std::string &params_json,
                                    Subscription &subscription);
     static std::string build_subscription_params(
@@ -162,6 +174,7 @@ private:
     static bool parse_start_response(const std::string &payload,
                                      Subscription &accepted,
                                      uint32_t &stream_id);
+
     bool build_desired_subscription(Subscription &subscription) const;
     bool build_desired_with_extra(const Subscription &extra,
                                   Subscription &subscription) const;
@@ -173,21 +186,25 @@ private:
 
     StreamFramePool frame_pool_;
     Consumer consumers_[AC_STREAM_CONSUMERS_MAX];
+
     Subscription external_subscription_;
     Subscription desired_subscription_;
     Subscription accepted_subscription_;
 
     std::string params_json_;
     std::string last_start_time_;
+
     uint32_t last_stream_id_ = 0;
     uint32_t last_notification_ms_ = 0;
     uint32_t last_command_ms_ = 0;
+
     uint32_t published_payloads_ = 0;
     uint32_t fanout_targets_ = 0;
     uint32_t total_queue_drops_ = 0;
     uint32_t parse_errors_ = 0;
     uint32_t pool_exhaustions_ = 0;
     uint32_t truncated_frames_ = 0;
+
     StreamFrameObserver frame_observer_ = nullptr;
     void *frame_observer_context_ = nullptr;
 

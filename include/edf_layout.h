@@ -8,7 +8,6 @@ static constexpr size_t AC_EDF_HEADER_VERSION_OFFSET = 0;
 static constexpr size_t AC_EDF_HEADER_VERSION_WIDTH = 8;
 static constexpr size_t AC_EDF_HEADER_PATIENT_ID_OFFSET = 8;
 static constexpr size_t AC_EDF_HEADER_PATIENT_ID_WIDTH = 80;
-static constexpr size_t AC_EDF_HEADER_RECORDING_ID_OFFSET = 88;
 static constexpr size_t AC_EDF_HEADER_RECORDING_ID_WIDTH = 80;
 static constexpr size_t AC_EDF_HEADER_START_DATE_OFFSET = 168;
 static constexpr size_t AC_EDF_HEADER_START_DATE_WIDTH = 8;

@@ -5,9 +5,9 @@
 #include <stdint.h>
 #include <string>
 
-#include "board.h"
 #include "as11_device_state.h"
 #include "as11_settings.h"
+#include "board.h"
 #include "can_datagram.h"
 #include "can_driver.h"
 #include "event_broker.h"
@@ -120,6 +120,7 @@ public:
     void poll();
 
     bool submit_raw_payload(const std::string &payload, RpcSource source);
+
     bool send_request(const std::string &method,
                       const std::string &params_json,
                       RpcSource source,
@@ -131,18 +132,23 @@ public:
                               uint32_t &id);
     bool send_set_datetime_now(RpcSource source,
                                uint32_t timeout_ms = 0);
+
     bool next_event(RpcEvent &event);
     bool next_source_event(RpcSource source, RpcEvent &event);
+
     bool set_source_event_observer(RpcSource source,
                                    RpcEventObserver observer,
                                    void *context);
+
     void set_raw_rpc_events_enabled(bool enabled);
+
     void set_event_frame_observer(EventFrameObserver observer,
                                   void *context);
     bool add_event_frame_observer(EventFrameObserver observer,
                                   void *context);
     void remove_event_frame_observer(EventFrameObserver observer,
                                      void *context);
+
     EventAcquireResult acquire_events(const char *data_ids_csv);
     void release_events(EventConsumerHandle handle);
     bool event_consumer_active(EventConsumerHandle handle) const;
@@ -170,6 +176,7 @@ public:
     bool request_as11_healthcheck();
     bool request_as11_settings_refresh();
     bool recover_can(const char *reason);
+
     void cancel_requests_from_source(RpcSource source, const char *reason);
     void set_background_polls_suspended(bool suspended);
     void set_esp_reboot_quiesce(bool requested);
@@ -240,6 +247,7 @@ private:
     bool enqueue_request(QueuedRequest &request);
     bool enqueue_payload_frames(const std::string &payload, RpcSource source);
     bool enqueue_encoded_frames(const std::vector<DatagramFrame> &frames);
+
     void cancel_pending_request(const char *reason);
     void cancel_queued_request(const QueuedRequest &request,
                                const char *reason);
@@ -266,11 +274,13 @@ private:
     void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_esp_reboot_quiesce(
         const QueuedRequest &request) const;
+
     void schedule_as11_identity_refresh(uint32_t now, uint32_t delay_ms);
     void schedule_as11_status_refresh(uint32_t now, uint32_t delay_ms);
     void schedule_as11_motor_refresh(uint32_t now, uint32_t delay_ms);
     void schedule_as11_timezone_refresh(uint32_t now, uint32_t delay_ms);
     void update_as11_motor_refresh_after_state(uint32_t now);
+
     void dispatch_next_request();
     void check_pending_timeout();
     void poll_event_subscription();
@@ -282,8 +292,10 @@ private:
     void handle_stream_notification(const char *payload, size_t payload_len);
     uint8_t source_id(RpcSource source) const;
     void handle_frame(const RawCanFrame &frame);
+
     void handle_rpc_payload(const char *payload, size_t payload_len);
     void handle_debug_payload(const char *payload, size_t payload_len);
+
     std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
 
@@ -322,13 +334,16 @@ private:
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
     PendingRequest pending_;
     RawPassthroughRequest raw_passthrough_[RAW_PASSTHROUGH_PENDING_MAX];
+
     QueuedRequest dispatch_retry_;
     bool dispatch_retry_active_ = false;
     uint32_t dispatch_retry_deadline_ms_ = 0;
     uint32_t next_dispatch_retry_ms_ = 0;
+
     RpcArbiterStats stats_ = {};
     uint32_t next_rpc_id_ = 0;
     uint32_t last_integrated_tx_ms_ = 0;
+
     uint32_t stats_started_ms_ = 0;
     uint32_t boot_notifications_seen_ = 0;
     uint32_t last_boot_notification_ms_ = 0;
@@ -340,15 +355,18 @@ private:
     As11SettingsState as11_settings_;
 
     bool as11_healthcheck_initialized_ = false;
+
     uint32_t next_as11_identity_poll_ms_ = 0;
     uint32_t next_as11_status_poll_ms_ = 0;
     uint32_t next_as11_motor_poll_ms_ = 0;
     uint32_t next_as11_timezone_poll_ms_ = 0;
     uint32_t next_as11_clock_poll_ms_ = 0;
+
     bool background_polls_suspended_ = false;
     bool raw_rpc_events_enabled_ = false;
     bool esp_reboot_quiesce_requested_ = false;
     bool esp_reboot_quiesce_timeout_logged_ = false;
+
     uint32_t esp_reboot_quiesce_deadline_ms_ = 0;
     uint8_t consecutive_scheduler_timeouts_ = 0;
     uint32_t background_backoff_until_ms_ = 0;

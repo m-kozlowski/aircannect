@@ -6,6 +6,7 @@
 #include "as11_rpc.h"
 #include "board.h"
 #include "debug_log.h"
+#include "edf_stream_signal_table.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
 

@@ -27,55 +27,66 @@ struct EdfRecorderStatus {
     bool enabled = false;
     bool active = false;
     bool stream_attached = false;
-    bool files_open = false;
+    bool annotation_files_open = false;
+    bool numeric_files_open = false;
     bool rpc_observer_registered = false;
     bool event_observer_registered = false;
     bool event_attached = false;
     bool event_coverage_uncertain = false;
-    bool recording_gate_open = false;
-    bool recording_gate_closed = false;
-    bool recording_gate_recovery_pending = false;
-    bool mask_start_pending = false;
+    bool recording_gate_is_open = false;
+    bool recording_gate_is_closed = false;
+    bool recording_gate_recovery_is_pending = false;
+    bool mask_start_is_pending = false;
+
     StreamConsumerHandle stream_handle = STREAM_CONSUMER_INVALID;
     EventConsumerHandle event_handle = EVENT_CONSUMER_INVALID;
+
     uint32_t session_id = 0;
     uint32_t sessions_started = 0;
     uint32_t sessions_ended = 0;
     uint32_t segment_rollovers = 0;
+
     uint32_t attach_attempts = 0;
     uint32_t attach_failures = 0;
+
     uint32_t frames = 0;
     uint32_t frame_drops = 0;
+
     uint32_t event_frames = 0;
     uint32_t event_records = 0;
     uint32_t event_subscription_generation = 0;
     uint32_t event_coverage_gap_count = 0;
-    uint32_t event_coverage_session_gaps = 0;
+    uint32_t event_coverage_session_gap_count = 0;
     uint32_t respiratory_events = 0;
     uint32_t csr_events = 0;
+
     uint32_t brp_records = 0;
     uint32_t pld_records = 0;
     uint32_t sa2_records = 0;
     uint32_t eve_records = 0;
     uint32_t csl_records = 0;
     uint32_t str_records = 0;
+
     uint32_t str_setting_requests = 0;
     uint32_t str_setting_responses = 0;
     uint32_t str_setting_timeouts = 0;
     uint32_t str_setting_values = 0;
     uint32_t str_setting_missing = 0;
     uint32_t str_setting_unmapped = 0;
+
     uint32_t str_summary_requests = 0;
     uint32_t str_summary_responses = 0;
     uint32_t str_summary_timeouts = 0;
     uint32_t str_summary_values = 0;
     uint32_t str_summary_missing = 0;
     uint32_t str_summary_unmapped = 0;
+
     uint32_t identification_requests = 0;
     uint32_t identification_responses = 0;
     uint32_t identification_timeouts = 0;
     uint32_t identification_write_requests = 0;
     uint32_t identification_failures = 0;
+
     uint32_t record_enqueue_failures = 0;
     uint32_t annotation_enqueue_failures = 0;
     uint32_t str_enqueue_failures = 0;
@@ -83,14 +94,17 @@ struct EdfRecorderStatus {
     uint32_t numeric_record_drops = 0;
     uint32_t numeric_open_buffered_frames = 0;
     uint32_t numeric_open_buffer_drops = 0;
+
     uint32_t recording_gate_rises = 0;
     uint32_t recording_gate_falls = 0;
     uint32_t recording_gate_recoveries = 0;
     uint32_t recording_gate_bad_events = 0;
     uint32_t mask_start_events = 0;
     uint32_t mask_start_bad_events = 0;
+
     uint32_t last_frame_ms = 0;
     uint32_t last_event_ms = 0;
+
     char brp_path[80] = {};
     char pld_path[80] = {};
     char sa2_path[80] = {};
@@ -103,6 +117,19 @@ struct EdfRecorderStatus {
     char last_event_data_id[64] = {};
     char last_event_name[48] = {};
     char last_error[80] = {};
+
+    bool files_open() const {
+        return annotation_files_open || numeric_files_open;
+    }
+    bool recording_gate_open() const { return recording_gate_is_open; }
+    bool recording_gate_closed() const { return recording_gate_is_closed; }
+    bool recording_gate_recovery_pending() const {
+        return recording_gate_recovery_is_pending;
+    }
+    bool mask_start_pending() const { return mask_start_is_pending; }
+    uint32_t event_coverage_session_gaps() const {
+        return event_coverage_session_gap_count;
+    }
 };
 
 class EdfRecorderManager {
@@ -112,7 +139,7 @@ public:
 
     void set_enabled(bool enabled);
     bool enabled() const { return status_.enabled; }
-    const EdfRecorderStatus &status() const { return status_; }
+    EdfRecorderStatus status() const;
     EdfStorageWorkerStatus storage_status() const;
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
@@ -124,6 +151,35 @@ private:
     struct NumericSchemaState {
         bool open = false;
         EdfNumericFileLayout layout;
+        EdfStorageOpenHandle open_handle;
+    };
+
+    struct PendingRpc {
+        bool active = false;
+        uint32_t request_id = 0;
+        uint32_t request_ms = 0;
+
+        void mark(uint32_t id, uint32_t now_ms) {
+            active = true;
+            request_id = id;
+            request_ms = now_ms;
+        }
+
+        void clear() {
+            active = false;
+            request_id = 0;
+            request_ms = 0;
+        }
+
+        bool matches(uint32_t id) const {
+            return active && request_id == id;
+        }
+
+        bool timed_out(uint32_t now_ms, uint32_t timeout_ms) const {
+            return active &&
+                   static_cast<int32_t>(now_ms - request_ms) >=
+                       static_cast<int32_t>(timeout_ms + 1000);
+        }
     };
 
     static void event_frame_observer(void *context,
@@ -132,6 +188,7 @@ private:
     static void rpc_event_observer(void *context, const RpcEvent &event);
     static void record_observer(void *context,
                                 const EdfCompletedRecordView &record);
+
     void dispatch_session_edges(uint32_t now_ms);
     void start_session(const SessionStatus &session,
                        uint32_t now_ms,
@@ -148,6 +205,7 @@ private:
     bool ensure_mask_session_open(uint32_t now_ms);
     void begin_recording_gate(const char *start_time, uint32_t now_ms);
     void close_recording_gate(const char *end_time, uint32_t now_ms);
+
     bool open_session_annotation_files(const char *annotation_start_time);
     bool open_session_annotation_files_at(const EdfLocalDateTime &start,
                                           int64_t annotation_start_ms);
@@ -161,21 +219,24 @@ private:
                                    const EdfLocalDateTime &start,
                                    const EdfHeaderInfo &info,
                                    char *path,
-                                   size_t path_size);
+                                   size_t path_size,
+                                   EdfStorageOpenHandle &handle);
     bool enqueue_annotation_file_open(EdfAnnotationKind kind,
                                       const EdfLocalDateTime &start,
                                       const EdfHeaderInfo &info,
                                       char *path,
-                                      size_t path_size);
+                                      size_t path_size,
+                                      EdfStorageOpenHandle &handle);
     bool build_recording_id(const EdfLocalDateTime &start,
                             char *dst,
                             size_t dst_size) const;
+
     void close_session_files();
     void sync_annotation_open_status();
     bool sync_numeric_open_status(uint32_t now_ms);
     void buffer_numeric_open_stream(uint32_t now_ms);
-    bool storage_file_matches(const EdfStorageOpenFileStatus &file,
-                              const char *path) const;
+    uint32_t event_coverage_session_gaps() const;
+
     bool begin_str_session(const char *session_start_time);
     bool begin_str_session_at(const EdfLocalDateTime &start,
                               uint32_t now_ms);
@@ -195,16 +256,20 @@ private:
     void handle_str_summary_response(const std::string &payload);
     void handle_identification_response(const std::string &payload);
     bool write_str_day_record();
+
     bool as11_timezone_ready() const;
     bool parse_session_local_time(const char *text, EdfLocalDateTime &out) const;
+
     void attach_events();
     void release_events();
     void snapshot_event_coverage();
     void update_event_coverage();
+
     void attach_stream(uint32_t now_ms);
     void release_stream();
     void update_stream_queue_drops();
     void drain_stream(uint32_t now_ms);
+
     bool roll_segment_if_needed(const StreamFrameData &frame,
                                 uint32_t now_ms);
     bool frame_sleep_day(const StreamFrameData &frame,
@@ -216,20 +281,25 @@ private:
     void handle_completed_record(const EdfCompletedRecordView &record);
     bool enqueue_event_annotation(EdfAnnotationKind kind,
                                   const As11EventRecord &record);
+
     void set_error(const char *error);
 
     RpcArbiter *arbiter_ = nullptr;
     SessionManager *session_ = nullptr;
+
     uint32_t seen_session_starts_ = 0;
     uint32_t seen_session_ends_ = 0;
     uint32_t last_queue_drops_ = 0;
+
     uint32_t next_attach_ms_ = 0;
     uint32_t next_session_start_ms_ = 0;
     uint32_t next_numeric_open_ms_ = 0;
-    int64_t annotation_start_epoch_ms_ = 0;
     uint32_t next_annotation_open_ms_ = 0;
+
+    int64_t annotation_start_epoch_ms_ = 0;
     uint32_t session_event_subscription_generation_ = 0;
     uint32_t session_event_coverage_gap_count_ = 0;
+
     bool initialized_ = false;
     bool files_open_ = false;
     bool numeric_files_open_ = false;
@@ -240,24 +310,23 @@ private:
     char pending_mask_start_time_[AC_STREAM_FRAME_START_TIME_MAX] = {};
     bool annotation_open_synced_ = false;
     bool numeric_open_synced_ = false;
-    bool numeric_segment_day_valid_ = false;
+    EdfStorageOpenHandle eve_open_handle_;
+    EdfStorageOpenHandle csl_open_handle_;
     uint16_t numeric_segment_day_ = 0;
-    bool str_settings_pending_ = false;
-    uint32_t str_settings_request_id_ = 0;
-    uint32_t str_settings_request_ms_ = 0;
-    bool str_summary_pending_ = false;
-    uint32_t str_summary_request_id_ = 0;
-    uint32_t str_summary_request_ms_ = 0;
-    bool identification_pending_ = false;
-    uint32_t identification_request_id_ = 0;
-    uint32_t identification_request_ms_ = 0;
+
+    PendingRpc str_settings_rpc_;
+    PendingRpc str_summary_rpc_;
+    PendingRpc identification_rpc_;
     bool str_record_pending_write_ = false;
+
     NumericSchemaState brp_schema_;
     NumericSchemaState pld_schema_;
     NumericSchemaState sa2_schema_;
+
     EdfStrSessionAccumulator str_;
     EdfRecorderStatus status_;
     EdfStreamAssembler assembler_;
+
     StreamFrameRef pending_stream_frame_;
     FixedQueue<StreamFrameRef, AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH>
         numeric_open_frame_buffer_;

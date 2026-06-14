@@ -18,17 +18,19 @@ enum class EdfAnnotationKind : uint8_t {
     Csl,
 };
 
-static constexpr size_t AC_EDF_STR_SIGNAL_COUNT = 134;
 static constexpr size_t AC_EDF_STR_SAMPLES_PER_RECORD = 172;
 static constexpr size_t AC_EDF_STR_DATA_SAMPLES_PER_RECORD =
     AC_EDF_STR_SAMPLES_PER_RECORD - 1;
+
 static constexpr size_t AC_EDF_STR_DATE_SIGNAL = 0;
 static constexpr size_t AC_EDF_STR_MASK_ON_SIGNAL = 1;
 static constexpr size_t AC_EDF_STR_MASK_OFF_SIGNAL = 2;
 static constexpr size_t AC_EDF_STR_MASK_EVENTS_SIGNAL = 3;
 static constexpr size_t AC_EDF_STR_DURATION_SIGNAL = 4;
 static constexpr size_t AC_EDF_STR_CRC_SIGNAL = 133;
+
 static constexpr size_t AC_EDF_STR_MASK_EVENT_CAPACITY = 20;
+
 static constexpr size_t AC_EDF_NUMERIC_SIGNAL_MAX = AC_EDF_PLD_SIGNAL_COUNT;
 
 struct EdfSignalSpec {
@@ -89,17 +91,15 @@ size_t edf_annotation_header_size();
 size_t edf_annotation_record_size();
 
 uint16_t edf_crc16_ccitt_false(const uint8_t *data, size_t len);
+
 int16_t edf_encode_physical_sample(const EdfSignalSpec &spec,
                                    float physical_value);
-int16_t edf_encode_physical_sample_unclamped(const EdfSignalSpec &spec,
-                                             float physical_value);
 
 bool edf_render_header(const EdfFileSchema &schema,
                        const EdfHeaderInfo &info,
                        uint8_t *dst,
                        size_t capacity,
                        size_t &written);
-
 bool edf_render_numeric_record(const EdfFileSchema &schema,
                                const EdfCompletedRecordView &record,
                                uint8_t *dst,
@@ -110,7 +110,6 @@ bool edf_render_str_header(const EdfHeaderInfo &info,
                            uint8_t *dst,
                            size_t capacity,
                            size_t &written);
-
 bool edf_render_str_record(const EdfStrRecordView &record,
                            uint8_t *dst,
                            size_t capacity,
@@ -120,7 +119,6 @@ bool edf_render_annotation_header(const EdfHeaderInfo &info,
                                   uint8_t *dst,
                                   size_t capacity,
                                   size_t &written);
-
 bool edf_render_annotation_record(const EdfAnnotationRecord &record,
                                   uint8_t *dst,
                                   size_t capacity,

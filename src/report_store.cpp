@@ -10,6 +10,7 @@
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace ReportStore {
@@ -45,8 +46,7 @@ constexpr const char *REPORT_TRASH_PREFIX = "v2-trash-";
 ReportStoreStatus current;
 
 void set_error(char *dst, size_t size, const char *error) {
-    if (!dst || !size) return;
-    snprintf(dst, size, "%s", error ? error : "");
+    copy_cstr(dst, size, error);
 }
 
 void note_error(const char *error, uint32_t *counter) {

@@ -1,11 +1,10 @@
 #include "sink_manager.h"
 
-#include <stdio.h>
-#include <string.h>
-
 #include "as11_rpc.h"
 #include "board.h"
+#include "edf_stream_signal_table.h"
 #include "memory_manager.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
@@ -30,11 +29,6 @@ const char *acquire_status_name(StreamAcquireStatus status) {
         default:
             return "rejected";
     }
-}
-
-void copy_text(char *dst, size_t size, const char *src) {
-    if (!dst || size == 0) return;
-    snprintf(dst, size, "%s", src ? src : "");
 }
 
 void append_live_sample(LiveChartSeriesBatch &series,
@@ -474,11 +468,11 @@ void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
 }
 
 void SinkManager::set_error(const char *error) {
-    copy_text(status_.last_error, sizeof(status_.last_error), error);
+    copy_cstr(status_.last_error, sizeof(status_.last_error), error);
 }
 
 void SinkManager::set_live_error(const char *error) {
-    copy_text(live_chart_.last_error, sizeof(live_chart_.last_error), error);
+    copy_cstr(live_chart_.last_error, sizeof(live_chart_.last_error), error);
 }
 
 }  // namespace aircannect

@@ -49,6 +49,4 @@ bool json_extract_string_member(const std::string &json,
 bool json_member_present(const char *json, size_t len, const char *member);
 bool json_member_present(const std::string &json, const char *member);
 
-extern const char *const DEFAULT_EDF_STREAM_IDS;
-
 }  // namespace aircannect

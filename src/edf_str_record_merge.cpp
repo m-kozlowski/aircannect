@@ -3,8 +3,8 @@
 #include <string.h>
 
 #include "edf_bytes.h"
-#include "edf_str_field_map.h"
 #include "edf_file_writer.h"
+#include "edf_str_signal_table.h"
 #include "edf_str_file_layout.h"
 
 namespace aircannect {
@@ -107,8 +107,10 @@ bool mask_session_sample(size_t sample_offset) {
 }
 
 bool summary_sample(size_t sample_offset) {
-    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
-        if (AC_EDF_STR_FIELD_MAP[i].source != EdfStrFieldSource::Summary) {
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const EdfStrSignalDescriptor *signal =
+            edf_str_signal_descriptor(i);
+        if (!signal || signal->source != EdfStrFieldSource::Summary) {
             continue;
         }
         if (edf_str_signal_sample_offset(i) == sample_offset) return true;

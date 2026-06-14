@@ -10,7 +10,7 @@
 
 #include "as11_rpc.h"
 #include "as11_settings.h"
-#include "edf_str_field_map.h"
+#include "edf_str_signal_table.h"
 
 namespace aircannect {
 namespace {
@@ -452,14 +452,15 @@ bool summary_digital_from_json_value(JsonVariantConst value,
 std::string edf_str_setting_get_names() {
     std::string names;
     names.reserve(512);
-    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
-        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
-        if (field.source != EdfStrFieldSource::SettingGet ||
-            !field.short_tag) {
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const EdfStrSignalDescriptor *signal =
+            edf_str_signal_descriptor(i);
+        if (!signal || signal->source != EdfStrFieldSource::SettingGet ||
+            !signal->short_tag) {
             continue;
         }
 
-        (void)append_str_get_name(names, field.short_tag);
+        (void)append_str_get_name(names, signal->short_tag);
     }
     return names;
 }
@@ -467,14 +468,15 @@ std::string edf_str_setting_get_names() {
 std::string edf_str_summary_get_names() {
     std::string names;
     names.reserve(512);
-    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
-        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
-        if (field.source != EdfStrFieldSource::Summary ||
-            !field.short_tag) {
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const EdfStrSignalDescriptor *signal =
+            edf_str_signal_descriptor(i);
+        if (!signal || signal->source != EdfStrFieldSource::Summary ||
+            !signal->short_tag) {
             continue;
         }
 
-        (void)append_str_get_name(names, field.short_tag);
+        (void)append_str_get_name(names, signal->short_tag);
     }
     return names;
 }
@@ -499,15 +501,16 @@ bool edf_str_apply_settings_response(const std::string &payload,
         return false;
     }
 
-    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
-        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
-        if (field.source != EdfStrFieldSource::SettingGet ||
-            !field.short_tag) {
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const EdfStrSignalDescriptor *signal =
+            edf_str_signal_descriptor(i);
+        if (!signal || signal->source != EdfStrFieldSource::SettingGet ||
+            !signal->short_tag) {
             continue;
         }
 
         char rpc_name[8] = {};
-        rpc_name_for_str_tag(field.short_tag, rpc_name, sizeof(rpc_name));
+        rpc_name_for_str_tag(signal->short_tag, rpc_name, sizeof(rpc_name));
         JsonVariantConst value = json_result[rpc_name];
         if (value.isNull()) {
             result.missing++;
@@ -573,15 +576,16 @@ bool edf_str_apply_summary_get_response(const std::string &payload,
         return false;
     }
 
-    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
-        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
-        if (field.source != EdfStrFieldSource::Summary ||
-            !field.short_tag) {
+    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
+        const EdfStrSignalDescriptor *signal =
+            edf_str_signal_descriptor(i);
+        if (!signal || signal->source != EdfStrFieldSource::Summary ||
+            !signal->short_tag) {
             continue;
         }
 
         char rpc_name[8] = {};
-        rpc_name_for_str_tag(field.short_tag, rpc_name, sizeof(rpc_name));
+        rpc_name_for_str_tag(signal->short_tag, rpc_name, sizeof(rpc_name));
         JsonVariantConst value = json_result[rpc_name];
         if (value.isNull()) {
             result.missing++;

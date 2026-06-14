@@ -1,13 +1,13 @@
 #include "storage_writer.h"
 
 #include <FS.h>
-#include <stdio.h>
 #include <string.h>
 
 #include "board.h"
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
+#include "string_util.h"
 
 #if AC_STORAGE_SDMMC_ENABLED
 #include "soc/soc_caps.h"
@@ -39,13 +39,8 @@ size_t head = 0;
 size_t tail = 0;
 size_t queued = 0;
 
-void copy_text(char *dst, size_t size, const char *src) {
-    if (!dst || size == 0) return;
-    snprintf(dst, size, "%s", src ? src : "");
-}
-
 void set_error(const char *error) {
-    copy_text(stats.last_error, sizeof(stats.last_error), error);
+    copy_cstr(stats.last_error, sizeof(stats.last_error), error);
     stats.last_activity_ms = millis();
 }
 
@@ -120,7 +115,7 @@ bool push_chunk(const char *path, const uint8_t *data, size_t len) {
     }
 
     Slot &slot = slots[tail];
-    copy_text(slot.path, sizeof(slot.path), path);
+    copy_cstr(slot.path, sizeof(slot.path), path);
     memcpy(slot.data, data, len);
     slot.len = len;
     tail = (tail + 1) % capacity;
@@ -131,7 +126,7 @@ bool push_chunk(const char *path, const uint8_t *data, size_t len) {
 bool pop_chunk(Slot &slot) {
     if (!queued || !slots) return false;
     Slot &src = slots[head];
-    copy_text(slot.path, sizeof(slot.path), src.path);
+    copy_cstr(slot.path, sizeof(slot.path), src.path);
     slot.data = src.data;
     slot.len = src.len;
     src.path[0] = 0;
@@ -199,7 +194,7 @@ bool write_chunk(const Slot &slot) {
 
     const size_t written = file.write(slot.data, slot.len);
     file.close();
-    copy_text(stats.last_path, sizeof(stats.last_path), slot.path);
+    copy_cstr(stats.last_path, sizeof(stats.last_path), slot.path);
     stats.last_activity_ms = millis();
     if (written != slot.len) {
         stats.write_errors++;
@@ -303,7 +298,7 @@ bool enqueue_append(const char *path, const uint8_t *data, size_t len) {
     stats.bytes_enqueued += len;
     stats.queued = queued;
     stats.last_activity_ms = millis();
-    copy_text(stats.last_path, sizeof(stats.last_path), path);
+    copy_cstr(stats.last_path, sizeof(stats.last_path), path);
     return true;
 }
 

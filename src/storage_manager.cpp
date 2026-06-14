@@ -1,6 +1,5 @@
 #include "storage_manager.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #include <freertos/FreeRTOS.h>
@@ -8,6 +7,7 @@
 
 #include "board.h"
 #include "debug_log.h"
+#include "string_util.h"
 
 #if AC_STORAGE_SDMMC_ENABLED
 #include "soc/soc_caps.h"
@@ -33,14 +33,9 @@ SemaphoreHandle_t sd_mutex() {
     return m;
 }
 
-void copy_text(char *dst, size_t size, const char *src) {
-    if (!dst || size == 0) return;
-    snprintf(dst, size, "%s", src ? src : "");
-}
-
 void reset_status() {
     current = StorageStatus();
-    copy_text(current.mount_point, sizeof(current.mount_point),
+    copy_cstr(current.mount_point, sizeof(current.mount_point),
               AC_STORAGE_MOUNT_POINT);
     current.max_open_files = AC_STORAGE_MAX_OPEN_FILES;
 }
@@ -72,7 +67,7 @@ void set_state(StorageType type,
     current.type = type;
     current.state = state;
     current.mounted = state == StorageState::Mounted;
-    copy_text(current.last_error, sizeof(current.last_error), error);
+    copy_cstr(current.last_error, sizeof(current.last_error), error);
     current.last_checked_ms = millis();
 }
 
@@ -155,7 +150,7 @@ bool mount_sdmmc() {
     }
 
     const uint8_t card_type = SD_MMC.cardType();
-    copy_text(current.card_type, sizeof(current.card_type),
+    copy_cstr(current.card_type, sizeof(current.card_type),
               card_type_name(card_type));
     if (card_type == CARD_NONE) {
         SD_MMC.end();
@@ -195,7 +190,7 @@ bool mount_spi_sd() {
     }
 
     const uint8_t card_type = SD.cardType();
-    copy_text(current.card_type, sizeof(current.card_type),
+    copy_cstr(current.card_type, sizeof(current.card_type),
               card_type_name(card_type));
     if (card_type == CARD_NONE) {
         SD.end();

@@ -262,6 +262,7 @@ bool parse_event_notification(const char *payload,
         }
         As11EventRecord &record = frame.events[frame.event_count];
         if (!variant_to_string(event["event"], record.name)) continue;
+        record.kind = as11_event_record_kind_from_name(record.name);
         (void)variant_to_string(event["reportTime"], record.report_time);
         record.has_value = variant_to_int32(event["value"], record.value);
         record.has_duration =
@@ -274,7 +275,10 @@ bool parse_event_notification(const char *payload,
 bool settings_history_change_notification(const As11EventFrame &frame) {
     if (frame.data_id != SETTINGS_HISTORY_CHANGE_DATA_ID) return false;
     for (size_t i = 0; i < frame.event_count; ++i) {
-        if (frame.events[i].name == "ValueChange") return true;
+        int32_t value = 0;
+        if (as11_event_record_value_change(frame.events[i], value)) {
+            return true;
+        }
     }
     return false;
 }
