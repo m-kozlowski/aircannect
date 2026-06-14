@@ -3,6 +3,7 @@
 #include "app_config.h"
 #include "background_worker.h"
 #include "board.h"
+#include "board_report.h"
 #include "can_driver.h"
 #include "debug_log.h"
 #include "edf_recorder_manager.h"
@@ -232,15 +233,39 @@ void setup() {
     bg_worker.begin();
 }
 
-// On the therapy-stop edge, refresh the night index so the idle background backfills it
+// On the therapy-stop edge, refresh the night index so the idle background
+// backfills it. This is report work, not EDF finalization, so defer it briefly
+// after the stop edge and run it after the EDF recorder has seen the session
+// transition.
 static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
-                                            ReportManager &report) {
+                                            ReportManager &report,
+                                            uint32_t now_ms) {
     static As11TherapyState last_state = As11TherapyState::Unknown;
+    static uint32_t summary_refresh_due_ms = 0;
     const As11TherapyState state = arbiter.as11_state().therapy_state();
+
+    if (state == As11TherapyState::Running) {
+        summary_refresh_due_ms = 0;
+        last_state = state;
+        return;
+    }
+
     if (last_state == As11TherapyState::Running &&
         state != As11TherapyState::Running) {
-        report.request_summary_refresh();
+        summary_refresh_due_ms = now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS;
+        if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
     }
+
+    if (summary_refresh_due_ms != 0 &&
+        static_cast<int32_t>(now_ms - summary_refresh_due_ms) >= 0) {
+        if (report.request_summary_refresh()) {
+            summary_refresh_due_ms = 0;
+        } else {
+            summary_refresh_due_ms = now_ms + AC_BG_WORKER_BUSY_RECHECK_MS;
+            if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
+        }
+    }
+
     last_state = state;
 }
 
@@ -259,9 +284,10 @@ void loop() {
     // First drain handles events produced by CAN/RPC/OTA work before services
     // that depend on fresh state run below.
     drain_rpc_events();
-    refresh_summary_on_therapy_stop(rpc_arbiter, report_manager);
-    session_manager.poll(rpc_arbiter.as11_state(), millis());
-    edf_recorder_manager.poll(millis());
+    const uint32_t now_ms = millis();
+    session_manager.poll(rpc_arbiter.as11_state(), now_ms);
+    edf_recorder_manager.poll(now_ms);
+    refresh_summary_on_therapy_stop(rpc_arbiter, report_manager, now_ms);
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
     wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||

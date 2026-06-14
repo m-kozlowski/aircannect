@@ -21,13 +21,6 @@ namespace aircannect {
 static constexpr size_t AC_EDF_STREAM_FRAME_BUDGET = 8;
 static constexpr uint32_t AC_EDF_ATTACH_RETRY_MS = 1000;
 static constexpr uint32_t AC_EDF_SESSION_RETRY_MS = 5000;
-static constexpr uint32_t AC_EDF_NUMERIC_FLUSH_CHUNK_MS =
-    AC_EDF_RECORD_MS / 10;
-static constexpr uint32_t AC_EDF_NUMERIC_START_MAX_WAIT_MS =
-    AC_EDF_NUMERIC_FLUSH_CHUNK_MS * 2;
-static constexpr uint32_t AC_EDF_NUMERIC_START_STABLE_MS = 4000;
-static constexpr float AC_EDF_NUMERIC_START_MIN_NONZERO_PRESSURE_CM_H2O =
-    0.05f;
 static constexpr size_t AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH = 32;
 
 struct EdfRecorderStatus {
@@ -39,6 +32,10 @@ struct EdfRecorderStatus {
     bool event_observer_registered = false;
     bool event_attached = false;
     bool event_coverage_uncertain = false;
+    bool recording_gate_open = false;
+    bool recording_gate_closed = false;
+    bool recording_gate_recovery_pending = false;
+    bool mask_start_pending = false;
     StreamConsumerHandle stream_handle = STREAM_CONSUMER_INVALID;
     EventConsumerHandle event_handle = EVENT_CONSUMER_INVALID;
     uint32_t session_id = 0;
@@ -84,10 +81,14 @@ struct EdfRecorderStatus {
     uint32_t str_enqueue_failures = 0;
     uint32_t file_open_failures = 0;
     uint32_t numeric_record_drops = 0;
-    uint32_t numeric_start_deferred_frames = 0;
-    uint32_t numeric_start_forced = 0;
     uint32_t numeric_open_buffered_frames = 0;
     uint32_t numeric_open_buffer_drops = 0;
+    uint32_t recording_gate_rises = 0;
+    uint32_t recording_gate_falls = 0;
+    uint32_t recording_gate_recoveries = 0;
+    uint32_t recording_gate_bad_events = 0;
+    uint32_t mask_start_events = 0;
+    uint32_t mask_start_bad_events = 0;
     uint32_t last_frame_ms = 0;
     uint32_t last_event_ms = 0;
     char brp_path[80] = {};
@@ -96,6 +97,9 @@ struct EdfRecorderStatus {
     char eve_path[80] = {};
     char csl_path[80] = {};
     char str_path[80] = {};
+    char mask_start_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
+    char recording_start_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
+    char recording_end_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char last_event_data_id[64] = {};
     char last_event_name[48] = {};
     char last_error[80] = {};
@@ -134,7 +138,16 @@ private:
                        const char *reason);
     void end_session(const SessionStatus &session,
                      uint32_t now_ms,
-                     const char *reason);
+                     const char *reason,
+                     const char *recording_end_time = nullptr);
+    bool handle_recording_gate_frame(const As11EventFrame &frame,
+                                     uint32_t now_ms);
+    bool handle_mask_start_frame(const As11EventFrame &frame,
+                                 uint32_t now_ms);
+    void begin_mask_start(const char *start_time, uint32_t now_ms);
+    bool ensure_mask_session_open(uint32_t now_ms);
+    void begin_recording_gate(const char *start_time, uint32_t now_ms);
+    void close_recording_gate(const char *end_time, uint32_t now_ms);
     bool open_session_annotation_files(const char *annotation_start_time);
     bool open_session_annotation_files_at(const EdfLocalDateTime &start,
                                           int64_t annotation_start_ms);
@@ -142,9 +155,6 @@ private:
     bool ensure_numeric_files_open(uint32_t now_ms,
                                    const char *numeric_start_time);
     bool numeric_stream_ready() const;
-    bool numeric_start_frame_has_data(const StreamFrameData &frame) const;
-    bool numeric_start_frame_ready(const StreamFrameData &frame);
-    bool numeric_start_wait_expired(const StreamFrameData &frame);
     bool build_numeric_schemas();
     void reset_numeric_schemas();
     bool enqueue_numeric_file_open(const EdfFileSchema &schema,
@@ -169,7 +179,9 @@ private:
     bool begin_str_session(const char *session_start_time);
     bool begin_str_session_at(const EdfLocalDateTime &start,
                               uint32_t now_ms);
-    bool finish_str_session(const SessionStatus &session, uint32_t now_ms);
+    bool finish_str_session(const SessionStatus &session,
+                            uint32_t now_ms,
+                            const char *recording_end_time = nullptr);
     bool finish_str_session_at(const EdfLocalDateTime &end,
                                uint32_t now_ms,
                                bool request_summary);
@@ -183,6 +195,7 @@ private:
     void handle_str_summary_response(const std::string &payload);
     void handle_identification_response(const std::string &payload);
     bool write_str_day_record();
+    bool as11_timezone_ready() const;
     bool parse_session_local_time(const char *text, EdfLocalDateTime &out) const;
     void attach_events();
     void release_events();
@@ -213,14 +226,18 @@ private:
     uint32_t next_attach_ms_ = 0;
     uint32_t next_session_start_ms_ = 0;
     uint32_t next_numeric_open_ms_ = 0;
-    int64_t numeric_start_first_frame_epoch_ms_ = 0;
-    int64_t numeric_start_ready_since_epoch_ms_ = 0;
     int64_t annotation_start_epoch_ms_ = 0;
+    uint32_t next_annotation_open_ms_ = 0;
     uint32_t session_event_subscription_generation_ = 0;
     uint32_t session_event_coverage_gap_count_ = 0;
     bool initialized_ = false;
     bool files_open_ = false;
     bool numeric_files_open_ = false;
+    bool recording_gate_open_ = false;
+    bool recording_gate_closed_ = false;
+    bool recording_gate_recovery_pending_ = false;
+    bool mask_start_pending_ = false;
+    char pending_mask_start_time_[AC_STREAM_FRAME_START_TIME_MAX] = {};
     bool annotation_open_synced_ = false;
     bool numeric_open_synced_ = false;
     bool numeric_segment_day_valid_ = false;

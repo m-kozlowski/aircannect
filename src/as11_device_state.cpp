@@ -137,10 +137,10 @@ As11TherapyTarget target_for_method(const std::string &method) {
 }
 
 As11TherapyState therapy_state_for_event(const std::string &event) {
-    if (event == "TherapyStarted" || event == "TherapyStart") {
+    if (event == "TherapyStarted") {
         return As11TherapyState::Running;
     }
-    if (event == "StandbyStarted" || event == "TherapyStop") {
+    if (event == "StandbyStarted") {
         return As11TherapyState::Standby;
     }
     if (event == "MaskfitStarted" || event == "TestDriveStarted" ||

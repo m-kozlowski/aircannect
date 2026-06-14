@@ -1,6 +1,5 @@
 #pragma once
 
-#include <Arduino.h>
 #include <stdint.h>
 
 #include "as11_device_state.h"
@@ -25,6 +24,7 @@ struct SessionStatus {
     uint32_t frame_count = 0;
     uint32_t dropped_frames = 0;
     uint32_t stream_id = 0;
+    bool recovered_active_start = false;
     char start_device_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char end_device_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char last_stream_start_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
@@ -46,7 +46,8 @@ public:
 private:
     void start_session(const As11DeviceState &as11,
                        uint32_t now_ms,
-                       const char *reason);
+                       const char *reason,
+                       bool recovered_active_start);
     void end_session(const As11DeviceState &as11,
                      uint32_t now_ms,
                      const char *reason);

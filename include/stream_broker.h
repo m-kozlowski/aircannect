@@ -28,6 +28,11 @@ enum class StreamCommandType {
     Stop,
 };
 
+enum class ExternalStreamStopMode {
+    CommandSent,
+    CommandRequired,
+};
+
 struct StreamAcquireResult {
     StreamAcquireStatus status = StreamAcquireStatus::Rejected;
     StreamConsumerHandle handle = STREAM_CONSUMER_INVALID;
@@ -59,7 +64,8 @@ public:
                                const std::string &params_json);
     void release(StreamConsumerHandle handle);
     void note_external_start(const std::string &params_json);
-    void note_external_stop();
+    void note_external_stop(
+        ExternalStreamStopMode mode = ExternalStreamStopMode::CommandSent);
 
     bool consumer_active(StreamConsumerHandle handle) const;
     size_t consumer_count() const;

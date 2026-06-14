@@ -289,7 +289,7 @@ bool RpcArbiter::set_source_event_observer(RpcSource source,
 
 void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
     if (raw_rpc_events_enabled_ && !enabled) {
-        stream_.note_external_stop();
+        stream_.note_external_stop(ExternalStreamStopMode::CommandRequired);
     }
     raw_rpc_events_enabled_ = enabled;
 }

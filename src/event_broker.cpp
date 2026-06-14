@@ -263,6 +263,7 @@ bool parse_event_notification(const char *payload,
         As11EventRecord &record = frame.events[frame.event_count];
         if (!variant_to_string(event["event"], record.name)) continue;
         (void)variant_to_string(event["reportTime"], record.report_time);
+        record.has_value = variant_to_int32(event["value"], record.value);
         record.has_duration =
             parse_event_duration_ms(event, record.duration_ms);
         frame.event_count++;

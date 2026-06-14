@@ -507,6 +507,9 @@ void print_session_status(Print &out, const SessionStatus &s) {
     out.print(s.frame_count);
     out.print(" drops=");
     out.print(s.dropped_frames);
+    if (s.recovered_active_start) {
+        out.print(" recovered=yes");
+    }
     if (s.state == SessionState::Active && s.started_ms) {
         out.print(" age_ms=");
         out.print(millis() - s.started_ms);

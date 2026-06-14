@@ -303,11 +303,32 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.record_enqueue_failures));
     out.print(" record_drops=");
     out.print(static_cast<unsigned long>(status.numeric_record_drops));
-    out.print(" numeric_start_deferred=");
-    out.print(static_cast<unsigned long>(
-        status.numeric_start_deferred_frames));
-    out.print(" numeric_start_forced=");
-    out.print(static_cast<unsigned long>(status.numeric_start_forced));
+    out.print(" zle=");
+    out.print(status.recording_gate_open ? "open" :
+              (status.recording_gate_closed ? "closed" : "waiting"));
+    out.print(" zle_edges=");
+    out.print(static_cast<unsigned long>(status.recording_gate_rises));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.recording_gate_falls));
+    if (status.recording_gate_recoveries) {
+        out.print(" zle_recoveries=");
+        out.print(static_cast<unsigned long>(
+            status.recording_gate_recoveries));
+    }
+    if (status.recording_gate_recovery_pending) {
+        out.print(" zle_recovery=pending");
+    }
+    out.print(" zle_bad=");
+    out.print(static_cast<unsigned long>(status.recording_gate_bad_events));
+    out.print(" mask_start=");
+    out.print(status.mask_start_time[0] ? status.mask_start_time : "--");
+    if (status.mask_start_pending) {
+        out.print(" mask_pending=yes");
+    }
+    out.print(" mask_events=");
+    out.print(static_cast<unsigned long>(status.mask_start_events));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.mask_start_bad_events));
     out.print(" numeric_open_buffered=");
     out.print(static_cast<unsigned long>(
         status.numeric_open_buffered_frames));

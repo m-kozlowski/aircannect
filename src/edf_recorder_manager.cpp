@@ -24,8 +24,11 @@ static constexpr uint32_t AC_EDF_STR_SUMMARY_TIMEOUT_MS = 12000;
 static constexpr uint32_t AC_EDF_IDENTIFICATION_TIMEOUT_MS = 12000;
 static constexpr size_t AC_EDF_GAP_RECORD_BUDGET = 3;
 
+const char *const EDF_RECORDING_GATE_DATA_ID = "_ZLE";
+const char *const EDF_RECORDING_GATE_EVENT = "ValueChange";
+const char *const EDF_MASK_START_EVENT_THERAPY_STARTED = "TherapyStarted";
 const char *const EDF_CAPTURE_EVENT_IDS =
-    "TherapyEvents-RespiratoryEvents";
+    "_ZLE,TherapyEvents-RespiratoryEvents";
 
 const char *acquire_status_name(StreamAcquireStatus status) {
     switch (status) {
@@ -55,6 +58,15 @@ const char *annotation_kind_name(EdfAnnotationKind kind) {
         case EdfAnnotationKind::Csl: return "CSL";
         default: return "EDF";
     }
+}
+
+bool edf_event_record_is_mask_start(const As11EventFrame &frame,
+                                    const As11EventRecord &record) {
+    if (!as11_event_data_id_is_activity(frame.data_id) ||
+        record.report_time.empty()) {
+        return false;
+    }
+    return record.name == EDF_MASK_START_EVENT_THERAPY_STARTED;
 }
 
 }  // namespace
@@ -96,6 +108,10 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     if (!status_.enabled || !status_.active) {
         release_stream();
         return;
+    }
+
+    if (mask_start_pending_) {
+        (void)ensure_mask_session_open(now_ms);
     }
 
     if (!numeric_files_open_ &&
@@ -140,9 +156,164 @@ EdfStorageWorkerStatus EdfRecorderManager::storage_status() const {
     return EdfStorageWorker::status();
 }
 
+bool EdfRecorderManager::handle_recording_gate_frame(
+    const As11EventFrame &frame,
+    uint32_t now_ms) {
+    if (frame.data_id != EDF_RECORDING_GATE_DATA_ID) return false;
+
+    for (size_t i = 0; i < frame.event_count; ++i) {
+        const As11EventRecord &record = frame.events[i];
+        if (record.name != EDF_RECORDING_GATE_EVENT ||
+            !record.has_value ||
+            record.report_time.empty()) {
+            status_.recording_gate_bad_events++;
+            continue;
+        }
+
+        if (record.value != 0) {
+            status_.recording_gate_rises++;
+            if (!status_.active && session_ &&
+                session_->status().state == SessionState::Active) {
+                start_session(session_->status(), now_ms, "zle_rise");
+            }
+            if (status_.active) {
+                begin_recording_gate(record.report_time.c_str(), now_ms);
+            }
+        } else {
+            status_.recording_gate_falls++;
+            close_recording_gate(record.report_time.c_str(), now_ms);
+        }
+    }
+    return true;
+}
+
+bool EdfRecorderManager::handle_mask_start_frame(const As11EventFrame &frame,
+                                                 uint32_t now_ms) {
+    if (!as11_event_data_id_is_activity(frame.data_id)) return false;
+
+    bool handled = false;
+    for (size_t i = 0; i < frame.event_count; ++i) {
+        const As11EventRecord &record = frame.events[i];
+        if (!edf_event_record_is_mask_start(frame, record)) continue;
+        handled = true;
+        status_.mask_start_events++;
+        begin_mask_start(record.report_time.c_str(), now_ms);
+        break;
+    }
+    return handled;
+}
+
+void EdfRecorderManager::begin_mask_start(const char *start_time,
+                                          uint32_t now_ms) {
+    if (!start_time || !start_time[0]) {
+        status_.mask_start_bad_events++;
+        return;
+    }
+
+    if (!status_.active) {
+        copy_cstr(pending_mask_start_time_,
+                  sizeof(pending_mask_start_time_),
+                  start_time);
+        return;
+    }
+
+    if (!status_.mask_start_time[0]) {
+        copy_cstr(status_.mask_start_time,
+                  sizeof(status_.mask_start_time),
+                  start_time);
+    }
+    mask_start_pending_ = true;
+    status_.mask_start_pending = true;
+    next_annotation_open_ms_ = now_ms;
+    (void)ensure_mask_session_open(now_ms);
+}
+
+bool EdfRecorderManager::ensure_mask_session_open(uint32_t now_ms) {
+    if (!status_.active || !status_.mask_start_time[0]) return false;
+    if (!mask_start_pending_ && files_open_ && str_.mask_open()) return true;
+    if (static_cast<int32_t>(now_ms - next_annotation_open_ms_) < 0) {
+        return false;
+    }
+    if (!as11_timezone_ready()) {
+        next_annotation_open_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
+        set_error("timezone_unavailable");
+        return false;
+    }
+
+    bool ok = true;
+    if (!open_session_annotation_files(status_.mask_start_time)) {
+        ok = false;
+    }
+    if (!str_.mask_open() && !begin_str_session(status_.mask_start_time)) {
+        Log::logf(CAT_STREAM, LOG_WARN,
+                  "[EDF] STR mask start skipped id=%lu error=%s\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  status_.last_error[0] ? status_.last_error : "--");
+        ok = false;
+    }
+    if (!ok) {
+        next_annotation_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+        return false;
+    }
+
+    mask_start_pending_ = false;
+    status_.mask_start_pending = false;
+    status_.last_error[0] = 0;
+    return true;
+}
+
+void EdfRecorderManager::begin_recording_gate(const char *start_time,
+                                              uint32_t now_ms) {
+    if (!start_time || !start_time[0]) {
+        status_.recording_gate_bad_events++;
+        return;
+    }
+
+    recording_gate_open_ = true;
+    recording_gate_closed_ = false;
+    status_.recording_gate_open = true;
+    status_.recording_gate_closed = false;
+    copy_cstr(status_.recording_start_time,
+              sizeof(status_.recording_start_time),
+              start_time);
+    status_.recording_end_time[0] = 0;
+    pending_stream_frame_.reset();
+    numeric_open_frame_buffer_.clear();
+    next_numeric_open_ms_ = now_ms;
+
+    if (!status_.mask_start_time[0]) {
+        begin_mask_start(start_time, now_ms);
+    }
+}
+
+void EdfRecorderManager::close_recording_gate(const char *end_time,
+                                              uint32_t now_ms) {
+    if (!end_time || !end_time[0]) {
+        status_.recording_gate_bad_events++;
+        return;
+    }
+
+    recording_gate_open_ = false;
+    recording_gate_closed_ = true;
+    status_.recording_gate_open = false;
+    status_.recording_gate_closed = true;
+    copy_cstr(status_.recording_end_time,
+              sizeof(status_.recording_end_time),
+              end_time);
+
+    if (status_.active && session_) {
+        end_session(session_->status(), now_ms, "zle_fall", end_time);
+    }
+}
+
 void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
                                             uint32_t now_ms) {
-    if (!status_.enabled || !status_.active) return;
+    if (!status_.enabled) return;
+
+    const bool mask_start_frame = handle_mask_start_frame(frame, now_ms);
+    const bool recording_gate_frame =
+        handle_recording_gate_frame(frame, now_ms);
+    if (!status_.active) return;
 
     status_.event_frames++;
     status_.event_records += frame.event_count;
@@ -153,7 +324,8 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
 
     for (size_t i = 0; i < frame.event_count; ++i) {
         const As11EventRecord &record = frame.events[i];
-        if (edf_event_frame_is_respiratory(frame)) {
+        if (!recording_gate_frame && !mask_start_frame &&
+            edf_event_frame_is_respiratory(frame)) {
             status_.respiratory_events++;
             (void)enqueue_event_annotation(EdfAnnotationKind::Eve, record);
             if (edf_event_record_is_csr(record)) {
@@ -201,6 +373,7 @@ void EdfRecorderManager::dispatch_session_edges(uint32_t now_ms) {
 
     if (status_.enabled && session.state == SessionState::Active &&
         !status_.active &&
+        !recording_gate_closed_ &&
         static_cast<int32_t>(now_ms - next_session_start_ms_) >= 0) {
         start_session(session, now_ms, "active_session");
     }
@@ -232,6 +405,14 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     const uint32_t sessions_ended = status_.sessions_ended;
     const uint32_t attach_attempts = status_.attach_attempts;
     const uint32_t attach_failures = status_.attach_failures;
+    const uint32_t recording_gate_rises = status_.recording_gate_rises;
+    const uint32_t recording_gate_falls = status_.recording_gate_falls;
+    const uint32_t recording_gate_recoveries =
+        status_.recording_gate_recoveries;
+    const uint32_t recording_gate_bad_events =
+        status_.recording_gate_bad_events;
+    const uint32_t mask_start_events = status_.mask_start_events;
+    const uint32_t mask_start_bad_events = status_.mask_start_bad_events;
 
     status_ = {};
     status_.enabled = enabled;
@@ -246,9 +427,22 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     status_.sessions_ended = sessions_ended;
     status_.attach_attempts = attach_attempts;
     status_.attach_failures = attach_failures;
+    status_.recording_gate_rises = recording_gate_rises;
+    status_.recording_gate_falls = recording_gate_falls;
+    status_.recording_gate_recoveries = recording_gate_recoveries;
+    status_.recording_gate_bad_events = recording_gate_bad_events;
+    status_.mask_start_events = mask_start_events;
+    status_.mask_start_bad_events = mask_start_bad_events;
     annotation_start_epoch_ms_ = 0;
-    numeric_start_first_frame_epoch_ms_ = 0;
-    numeric_start_ready_since_epoch_ms_ = 0;
+    next_annotation_open_ms_ = now_ms;
+    recording_gate_open_ = false;
+    recording_gate_closed_ = false;
+    recording_gate_recovery_pending_ =
+        session.recovered_active_start ||
+        (reason && (strcmp(reason, "enabled_active") == 0 ||
+                    strcmp(reason, "active_session") == 0));
+    status_.recording_gate_recovery_pending =
+        recording_gate_recovery_pending_;
     numeric_files_open_ = false;
     annotation_open_synced_ = false;
     numeric_open_synced_ = false;
@@ -270,6 +464,11 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     identification_request_ms_ = 0;
     snapshot_event_coverage();
 
+    if (pending_mask_start_time_[0]) {
+        begin_mask_start(pending_mask_start_time_, now_ms);
+        pending_mask_start_time_[0] = 0;
+    }
+
     Log::logf(CAT_STREAM, LOG_INFO,
               "[EDF] recorder session start id=%lu reason=%s\n",
               static_cast<unsigned long>(status_.session_id),
@@ -278,12 +477,13 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
 
 void EdfRecorderManager::end_session(const SessionStatus &session,
                                      uint32_t now_ms,
-                                     const char *reason) {
+                                     const char *reason,
+                                     const char *recording_end_time) {
     (void)now_ms;
     if (!status_.active) return;
     update_event_coverage();
 
-    if (!finish_str_session(session, now_ms)) {
+    if (!finish_str_session(session, now_ms, recording_end_time)) {
         Log::logf(CAT_STREAM, LOG_WARN,
                   "[EDF] STR session end skipped id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
@@ -295,8 +495,14 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     close_session_files();
     status_.active = false;
     annotation_start_epoch_ms_ = 0;
-    numeric_start_first_frame_epoch_ms_ = 0;
-    numeric_start_ready_since_epoch_ms_ = 0;
+    next_annotation_open_ms_ = 0;
+    recording_gate_open_ = false;
+    recording_gate_recovery_pending_ = false;
+    mask_start_pending_ = false;
+    pending_mask_start_time_[0] = 0;
+    status_.recording_gate_open = false;
+    status_.recording_gate_recovery_pending = false;
+    status_.mask_start_pending = false;
     numeric_open_frame_buffer_.clear();
     status_.sessions_ended++;
     Log::logf(CAT_STREAM, LOG_INFO,
@@ -468,79 +674,55 @@ bool EdfRecorderManager::numeric_stream_ready() const {
     return arbiter_->stream_accepted_data_ids_cover(DEFAULT_EDF_STREAM_IDS);
 }
 
-bool EdfRecorderManager::numeric_start_frame_has_data(
-    const StreamFrameData &frame) const {
-    const StreamSignalSpan *pressure =
-        frame.find_signal(StreamSignalId::MaskPressure);
-    const StreamSignalSpan *flow =
-        frame.find_signal(StreamSignalId::PatientFlow);
-    if (!pressure || !flow || pressure->sample_count == 0 ||
-        flow->sample_count == 0) {
-        return false;
-    }
-
-    const uint16_t samples =
-        pressure->sample_count < flow->sample_count
-            ? pressure->sample_count
-            : flow->sample_count;
-    if (samples == 0) return false;
-
-    for (uint16_t sample = 0; sample < samples; ++sample) {
-        const size_t pressure_index = pressure->value_offset + sample;
-        const size_t flow_index = flow->value_offset + sample;
-        if (pressure_index >= frame.value_count ||
-            flow_index >= frame.value_count ||
-            !frame.value_valid(pressure_index) ||
-            !frame.value_valid(flow_index)) {
-            return false;
-        }
-        const float pressure_value = frame.values[pressure_index];
-        if (pressure_value <
-            AC_EDF_NUMERIC_START_MIN_NONZERO_PRESSURE_CM_H2O) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-bool EdfRecorderManager::numeric_start_frame_ready(
-    const StreamFrameData &frame) {
-    int64_t frame_start_ms = 0;
-    if (!edf_parse_utc_ms(frame.start_time, frame_start_ms)) {
-        numeric_start_ready_since_epoch_ms_ = 0;
-        return false;
-    }
-    if (!numeric_start_frame_has_data(frame)) {
-        numeric_start_ready_since_epoch_ms_ = 0;
-        return false;
-    }
-    if (numeric_start_ready_since_epoch_ms_ <= 0) {
-        numeric_start_ready_since_epoch_ms_ = frame_start_ms;
-    }
-    return frame_start_ms >= numeric_start_ready_since_epoch_ms_ &&
-           frame_start_ms - numeric_start_ready_since_epoch_ms_ >=
-               static_cast<int64_t>(AC_EDF_NUMERIC_START_STABLE_MS);
-}
-
-bool EdfRecorderManager::numeric_start_wait_expired(
-    const StreamFrameData &frame) {
-    int64_t frame_start_ms = 0;
-    if (!edf_parse_utc_ms(frame.start_time, frame_start_ms)) return false;
-    if (numeric_start_first_frame_epoch_ms_ <= 0) {
-        numeric_start_first_frame_epoch_ms_ = frame_start_ms;
-    }
-    return frame_start_ms >= numeric_start_first_frame_epoch_ms_ &&
-           frame_start_ms - numeric_start_first_frame_epoch_ms_ >=
-               static_cast<int64_t>(AC_EDF_NUMERIC_START_MAX_WAIT_MS);
-}
-
 bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
     if (numeric_files_open_) return true;
     if (static_cast<int32_t>(now_ms - next_numeric_open_ms_) < 0) {
         return false;
     }
     if (!numeric_stream_ready()) {
+        return false;
+    }
+
+    if (!recording_gate_open_ || !status_.recording_start_time[0]) {
+        if (!recording_gate_recovery_pending_) {
+            StreamFrameRef discarded;
+            while (arbiter_->next_stream_frame(status_.stream_handle,
+                                               discarded)) {
+            }
+            pending_stream_frame_.reset();
+            return false;
+        }
+
+        if (!pending_stream_frame_ &&
+            !arbiter_->next_stream_frame(status_.stream_handle,
+                                         pending_stream_frame_)) {
+            return false;
+        }
+        if (!pending_stream_frame_) return false;
+        if (!pending_stream_frame_->start_time[0]) {
+            pending_stream_frame_.reset();
+            status_.file_open_failures++;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+            set_error("missing_recovery_start_time");
+            return false;
+        }
+
+        StreamFrameRef recovery_frame = pending_stream_frame_;
+        recording_gate_recovery_pending_ = false;
+        status_.recording_gate_recovery_pending = false;
+        status_.recording_gate_recoveries++;
+        begin_recording_gate(recovery_frame->start_time, now_ms);
+        pending_stream_frame_ = recovery_frame;
+        Log::logf(CAT_STREAM, LOG_INFO,
+                  "[EDF] recording gate recovered id=%lu start=%s\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  status_.recording_start_time[0]
+                      ? status_.recording_start_time
+                      : "--");
+    }
+
+    if (!ensure_mask_session_open(now_ms)) {
+        next_numeric_open_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
         return false;
     }
 
@@ -560,32 +742,7 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
         return false;
     }
 
-    if (!open_session_annotation_files(pending_stream_frame_->start_time)) {
-        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-        return false;
-    }
-
-    if (!str_.mask_open() &&
-        !begin_str_session(pending_stream_frame_->start_time)) {
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] STR session start skipped id=%lu error=%s\n",
-                  static_cast<unsigned long>(status_.session_id),
-                  status_.last_error[0] ? status_.last_error : "--");
-    }
-
-    if (!numeric_start_frame_ready(*pending_stream_frame_)) {
-        if (!numeric_start_wait_expired(*pending_stream_frame_)) {
-            status_.numeric_start_deferred_frames++;
-            pending_stream_frame_.reset();
-            return false;
-        }
-        status_.numeric_start_forced++;
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] numeric start forced after startup wait id=%lu\n",
-                  static_cast<unsigned long>(status_.session_id));
-    }
-
-    return ensure_numeric_files_open(now_ms, pending_stream_frame_->start_time);
+    return ensure_numeric_files_open(now_ms, status_.recording_start_time);
 }
 
 bool EdfRecorderManager::ensure_numeric_files_open(
@@ -771,8 +928,6 @@ void EdfRecorderManager::close_session_files() {
     numeric_segment_day_ = 0;
     pending_stream_frame_.reset();
     numeric_open_frame_buffer_.clear();
-    numeric_start_first_frame_epoch_ms_ = 0;
-    numeric_start_ready_since_epoch_ms_ = 0;
     status_.files_open = false;
     reset_numeric_schemas();
 }
@@ -869,6 +1024,11 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     return true;
 }
 
+bool EdfRecorderManager::as11_timezone_ready() const {
+    if (!arbiter_) return true;
+    return arbiter_->as11_state().timezone_offset_valid();
+}
+
 bool EdfRecorderManager::parse_session_local_time(
     const char *text,
     EdfLocalDateTime &out) const {
@@ -882,6 +1042,7 @@ bool EdfRecorderManager::parse_session_local_time(
             return edf_epoch_ms_to_local_datetime(
                 epoch_ms, state.timezone_offset_minutes(), out);
         }
+        return false;
     }
     return edf_epoch_ms_to_configured_local_datetime(epoch_ms, out);
 }
@@ -1142,11 +1303,13 @@ void EdfRecorderManager::handle_identification_response(
 }
 
 bool EdfRecorderManager::finish_str_session(const SessionStatus &session,
-                                            uint32_t now_ms) {
+                                            uint32_t now_ms,
+                                            const char *recording_end_time) {
     if (!str_.active() || !str_.mask_open()) return true;
 
     EdfLocalDateTime end;
-    if (!parse_session_local_time(session.end_device_time, end) &&
+    if (!parse_session_local_time(recording_end_time, end) &&
+        !parse_session_local_time(session.end_device_time, end) &&
         !parse_session_local_time(session.last_stream_start_time, end) &&
         !parse_session_local_time(session.start_device_time, end)) {
         set_error("bad_str_end_time");

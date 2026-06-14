@@ -169,7 +169,10 @@ void StreamBroker::note_external_start(const std::string &params_json) {
     clear_error();
 }
 
-void StreamBroker::note_external_stop() {
+void StreamBroker::note_external_stop(ExternalStreamStopMode mode) {
+    const bool stop_required =
+        external_active_ && actual_active_ &&
+        mode == ExternalStreamStopMode::CommandRequired;
     external_active_ = false;
     clear_subscription(external_subscription_);
     Subscription desired;
@@ -179,7 +182,7 @@ void StreamBroker::note_external_stop() {
     } else {
         params_json_.clear();
         clear_subscription(desired_subscription_);
-        actual_active_ = false;
+        actual_active_ = stop_required;
     }
 }
 
