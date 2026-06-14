@@ -26,6 +26,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  time              ESP and AS11 clock sync commands");
         out.println("  stream            AS11 stream subscription controls");
         out.println("  sink              stream sink status and debug sink toggle");
+        out.println("  edf               live EDF recorder status and monitor toggle");
         out.println("  oxi               oximetry source and BLE injector status");
         out.println("  report            therapy report index/cache status");
         out.println("  storage           persistent storage and writer status");
@@ -167,6 +168,14 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP sink]");
         out.println("  sink status               show stream sink state");
         out.println("  sink debug on|off         enable/disable debug sink");
+        return;
+    }
+
+    if (topic == "edf") {
+        out.println("[HELP edf]");
+        out.println("  edf                       show live EDF recorder state");
+        out.println("  edf status                show live EDF recorder state");
+        out.println("  edf on|off                enable/disable recorder monitor");
         return;
     }
 

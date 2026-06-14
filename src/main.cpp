@@ -5,6 +5,7 @@
 #include "board.h"
 #include "can_driver.h"
 #include "debug_log.h"
+#include "edf_recorder_manager.h"
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
@@ -40,6 +41,7 @@ static OtaManager ota_manager;
 static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
+static EdfRecorderManager edf_recorder_manager;
 static OximetryManager oximetry_manager;
 static ReportManager report_manager;
 static BackgroundWorker bg_worker;
@@ -54,6 +56,7 @@ static ConsoleContext console_ctx{
     resmed_ota_manager,
     session_manager,
     sink_manager,
+    edf_recorder_manager,
     oximetry_manager,
     report_manager,
     &web_ui,
@@ -179,6 +182,7 @@ void setup() {
     rpc_arbiter.set_report_event_observer(handle_report_event,
                                           &report_manager);
     sink_manager.begin(rpc_arbiter, session_manager);
+    edf_recorder_manager.begin(rpc_arbiter, session_manager);
     oximetry_manager.begin(app_config);
     report_manager.begin();
     resmed_ota_manager.begin(rpc_arbiter);
@@ -241,6 +245,7 @@ void loop() {
     drain_rpc_events();
     refresh_summary_on_therapy_stop(rpc_arbiter, report_manager);
     session_manager.poll(rpc_arbiter.as11_state(), millis());
+    edf_recorder_manager.poll(millis());
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
     wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||

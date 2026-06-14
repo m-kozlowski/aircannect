@@ -241,6 +241,88 @@ void print_report_cache_clear_result(Print &out,
     out.println();
 }
 
+void print_edf_recorder_status(Print &out,
+                               const EdfRecorderManager &manager) {
+    const EdfRecorderStatus &status = manager.status();
+    const EdfStreamAssemblerStatus &assembly = manager.assembler_status();
+    out.print("[EDF] enabled=");
+    out.print(status.enabled ? "yes" : "no");
+    out.print(" active=");
+    out.print(status.active ? "yes" : "no");
+    out.print(" stream=");
+    out.print(status.stream_attached ? "attached" : "idle");
+    out.print(" files=");
+    out.print(status.files_open ? "open" : "closed");
+    out.print(" event_observer=");
+    out.print(status.event_observer_registered ? "yes" : "no");
+    out.print(" session=");
+    out.print(static_cast<unsigned long>(status.session_id));
+    out.print(" sessions=");
+    out.print(static_cast<unsigned long>(status.sessions_started));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.sessions_ended));
+    out.print(" frames=");
+    out.print(static_cast<unsigned long>(status.frames));
+    out.print(" drops=");
+    out.print(static_cast<unsigned long>(status.frame_drops));
+    out.print(" event_frames=");
+    out.print(static_cast<unsigned long>(status.event_frames));
+    out.print(" events=");
+    out.print(static_cast<unsigned long>(status.event_records));
+    out.print(" resp=");
+    out.print(static_cast<unsigned long>(status.respiratory_events));
+    out.print(" csr=");
+    out.print(static_cast<unsigned long>(status.csr_events));
+    out.print(" records=");
+    out.print(static_cast<unsigned long>(status.brp_records));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.pld_records));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.sa2_records));
+    out.print(" record_queue_failures=");
+    out.print(static_cast<unsigned long>(status.record_enqueue_failures));
+    out.print(" file_open_failures=");
+    out.print(static_cast<unsigned long>(status.file_open_failures));
+    out.print(" attach_failures=");
+    out.print(static_cast<unsigned long>(status.attach_failures));
+    const EdfStorageWorkerStatus storage = manager.storage_status();
+    out.print(" storage_q=");
+    out.print(static_cast<unsigned>(storage.queued));
+    out.print('/');
+    out.print(static_cast<unsigned>(storage.capacity));
+    out.print(" storage_written=");
+    out.print(static_cast<unsigned long>(storage.records_written));
+    out.print(" storage_drops=");
+    out.print(static_cast<unsigned long>(storage.queue_drops));
+    out.print(" assembly=");
+    out.print(assembly.buffers_ready ? "ready" : "unavailable");
+    out.print(" records=");
+    out.print(static_cast<unsigned long>(assembly.records_completed));
+    out.print(" samples=");
+    out.print(static_cast<unsigned long>(assembly.samples_accepted));
+    out.print(" invalid=");
+    out.print(static_cast<unsigned long>(assembly.samples_invalid));
+    out.print(" dup=");
+    out.print(static_cast<unsigned long>(assembly.samples_duplicate));
+    out.print(" ts_errors=");
+    out.print(static_cast<unsigned long>(assembly.timestamp_errors));
+    out.print(" last_error=");
+    if (status.last_error[0]) {
+        out.print(status.last_error);
+    } else if (assembly.last_error[0]) {
+        out.print(assembly.last_error);
+    } else if (storage.last_error[0]) {
+        out.print(storage.last_error);
+    } else {
+        out.print("--");
+    }
+    if (status.last_event_name[0]) {
+        out.print(" last_event=");
+        out.print(status.last_event_name);
+    }
+    out.println();
+}
+
 const char *report_summary_state_name(ReportSummaryState state) {
     switch (state) {
         case ReportSummaryState::Fetching: return "fetching";
@@ -587,6 +669,7 @@ void ManagementConsole::execute_line(String line,
         {"mem", &ManagementConsole::handle_memory_command},
         {"session", &ManagementConsole::handle_session_command},
         {"sink", &ManagementConsole::handle_sink_command},
+        {"edf", &ManagementConsole::handle_edf_command},
         {"oxi", &ManagementConsole::handle_oximetry_command},
         {"oximetry", &ManagementConsole::handle_oximetry_command},
         {"report", &ManagementConsole::handle_report_command},
@@ -641,6 +724,7 @@ void ManagementConsole::handle_status_command(Print &out,
     ConsoleFormat::print_as11_status(out, ctx.arbiter.as11_state());
     ConsoleFormat::print_session_status(out, ctx.session_manager.status());
     ConsoleFormat::print_sink_status(out, ctx.sink_manager);
+    print_edf_recorder_status(out, ctx.edf_recorder_manager);
     print_oximetry_status(out, ctx.oximetry_manager);
 }
 
@@ -666,6 +750,7 @@ void ManagementConsole::handle_stats_command(Print &out,
     ConsoleFormat::print_storage_writer_status(out, StorageWriter::status());
     ConsoleFormat::print_session_status(out, ctx.session_manager.status());
     ConsoleFormat::print_sink_status(out, ctx.sink_manager);
+    print_edf_recorder_status(out, ctx.edf_recorder_manager);
     print_oximetry_status(out, ctx.oximetry_manager);
 }
 
@@ -704,6 +789,28 @@ void ManagementConsole::handle_sink_command(Print &out,
                                             String rest,
                                             ConsoleContext &ctx) {
     handle_sink(out, rest, ctx.sink_manager);
+}
+
+void ManagementConsole::handle_edf_command(Print &out,
+                                           String rest,
+                                           ConsoleContext &ctx) {
+    trim_inplace(rest);
+    to_lower_inplace(rest);
+    if (!rest.length() || rest == "status") {
+        print_edf_recorder_status(out, ctx.edf_recorder_manager);
+        return;
+    }
+    if (rest == "on" || rest == "enable") {
+        ctx.edf_recorder_manager.set_enabled(true);
+        print_edf_recorder_status(out, ctx.edf_recorder_manager);
+        return;
+    }
+    if (rest == "off" || rest == "disable") {
+        ctx.edf_recorder_manager.set_enabled(false);
+        print_edf_recorder_status(out, ctx.edf_recorder_manager);
+        return;
+    }
+    print_unknown_command(out, "EDF", "edf, edf on, edf off");
 }
 
 void ManagementConsole::handle_oximetry_command(Print &out,

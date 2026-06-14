@@ -25,6 +25,7 @@ enum class RpcSource {
     ResmedOta,
     Sink,
     Report,
+    EdfRecorder,
 };
 
 enum class RpcEventKind {
@@ -135,6 +136,10 @@ public:
     void set_raw_rpc_events_enabled(bool enabled);
     void set_event_frame_observer(EventFrameObserver observer,
                                   void *context);
+    bool add_event_frame_observer(EventFrameObserver observer,
+                                  void *context);
+    void remove_event_frame_observer(EventFrameObserver observer,
+                                     void *context);
 
     StreamAcquireResult acquire_stream(const std::string &params_json,
                                        RpcSource source);

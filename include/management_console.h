@@ -4,6 +4,7 @@
 #include <string>
 
 #include "app_config.h"
+#include "edf_recorder_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
 #include "report_manager.h"
@@ -30,6 +31,7 @@ struct ConsoleContext {
     ResmedOtaManager &resmed_ota_manager;
     SessionManager &session_manager;
     SinkManager &sink_manager;
+    EdfRecorderManager &edf_recorder_manager;
     OximetryManager &oximetry_manager;
     ReportManager &report_manager;
     WebUI *web_ui = nullptr;
@@ -53,6 +55,7 @@ private:
     void handle_memory_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_session_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_sink_command(Print &out, String rest, ConsoleContext &ctx);
+    void handle_edf_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_oximetry_command(Print &out, String rest,
                                  ConsoleContext &ctx);
     void handle_report_command(Print &out, String rest, ConsoleContext &ctx);

@@ -13,6 +13,7 @@ const char *const SETTINGS_HISTORY_CHANGE_DATA_ID =
 const char *const DEFAULT_EVENT_SUBSCRIBE_PARAMS =
     "{\"dataIds\":[\"SystemActivityEvents-FrequentActivityEvents\","
     "\"SystemActivityEvents-SporadicActivityEvents\","
+    "\"TherapyEvents-RespiratoryEvents\","
     "\"SettingsHistoryChangeCount\"]}";
 
 bool variant_to_string(JsonVariantConst value, std::string &out) {
@@ -195,16 +196,49 @@ EventPublishResult EventBroker::publish_notification(const std::string &payload,
     if (result.settings_history_change) {
         stats_.settings_history_changes++;
     }
-    if (frame_observer_) {
-        frame_observer_(frame_observer_context_, frame, now_ms);
+    for (FrameObserverSlot &slot : frame_observers_) {
+        if (slot.observer) {
+            slot.observer(slot.context, frame, now_ms);
+        }
     }
     return result;
 }
 
 void EventBroker::set_frame_observer(EventFrameObserver observer,
                                      void *context) {
-    frame_observer_ = observer;
-    frame_observer_context_ = context;
+    for (FrameObserverSlot &slot : frame_observers_) {
+        slot = {};
+    }
+    if (observer) {
+        (void)add_frame_observer(observer, context);
+    }
+}
+
+bool EventBroker::add_frame_observer(EventFrameObserver observer,
+                                     void *context) {
+    if (!observer) return false;
+    for (FrameObserverSlot &slot : frame_observers_) {
+        if (slot.observer == observer && slot.context == context) {
+            return true;
+        }
+    }
+    for (FrameObserverSlot &slot : frame_observers_) {
+        if (!slot.observer) {
+            slot.observer = observer;
+            slot.context = context;
+            return true;
+        }
+    }
+    return false;
+}
+
+void EventBroker::remove_frame_observer(EventFrameObserver observer,
+                                        void *context) {
+    for (FrameObserverSlot &slot : frame_observers_) {
+        if (slot.observer == observer && slot.context == context) {
+            slot = {};
+        }
+    }
 }
 
 void EventBroker::reset_counters() {

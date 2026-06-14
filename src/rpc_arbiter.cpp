@@ -274,6 +274,16 @@ void RpcArbiter::set_event_frame_observer(EventFrameObserver observer,
     event_.set_frame_observer(observer, context);
 }
 
+bool RpcArbiter::add_event_frame_observer(EventFrameObserver observer,
+                                          void *context) {
+    return event_.add_frame_observer(observer, context);
+}
+
+void RpcArbiter::remove_event_frame_observer(EventFrameObserver observer,
+                                             void *context) {
+    event_.remove_frame_observer(observer, context);
+}
+
 StreamAcquireResult RpcArbiter::acquire_stream(const std::string &params_json,
                                                RpcSource source) {
     StreamAcquireResult result = stream_.acquire(params_json, source_id(source));
@@ -1383,6 +1393,7 @@ const char *RpcArbiter::source_name(RpcSource source) const {
         case RpcSource::ResmedOta: return "resmed_ota";
         case RpcSource::Sink: return "sink";
         case RpcSource::Report: return "report";
+        case RpcSource::EdfRecorder: return "edf_recorder";
         default: return "?";
     }
 }

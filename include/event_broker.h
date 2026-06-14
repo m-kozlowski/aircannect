@@ -7,6 +7,8 @@
 
 namespace aircannect {
 
+static constexpr size_t AC_EVENT_FRAME_OBSERVERS_MAX = 4;
+
 enum class EventCommandType {
     None,
     Subscribe,
@@ -59,6 +61,8 @@ public:
                                             uint32_t now_ms,
                                             As11EventFrame &frame);
     void set_frame_observer(EventFrameObserver observer, void *context);
+    bool add_frame_observer(EventFrameObserver observer, void *context);
+    void remove_frame_observer(EventFrameObserver observer, void *context);
     void reset_counters();
 
     EventBrokerStatus status() const;
@@ -67,14 +71,18 @@ public:
     uint32_t subscription_id() const { return subscription_id_; }
 
 private:
+    struct FrameObserverSlot {
+        EventFrameObserver observer = nullptr;
+        void *context = nullptr;
+    };
+
     bool subscription_active_ = false;
     bool subscribe_pending_ = false;
     uint32_t subscription_id_ = 0;
     uint32_t next_subscribe_ms_ = 0;
     uint32_t last_notification_ms_ = 0;
     EventBrokerStats stats_ = {};
-    EventFrameObserver frame_observer_ = nullptr;
-    void *frame_observer_context_ = nullptr;
+    FrameObserverSlot frame_observers_[AC_EVENT_FRAME_OBSERVERS_MAX];
 };
 
 }  // namespace aircannect
