@@ -154,6 +154,7 @@ public:
     bool stream_consumer_active(StreamConsumerHandle handle) const;
     uint32_t stream_consumer_queue_drops(StreamConsumerHandle handle) const;
     bool stream_activity_active() const;
+    bool stream_actual_active() const;
     size_t stream_accepted_data_id_count() const;
     bool stream_accepted_data_id(const char *data_id) const;
     const std::string &stream_accepted_data_ids_csv() const;

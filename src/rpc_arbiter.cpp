@@ -347,6 +347,10 @@ bool RpcArbiter::stream_activity_active() const {
                AC_WIFI_ROAM_STREAM_QUIET_MS;
 }
 
+bool RpcArbiter::stream_actual_active() const {
+    return stream_.actual_active();
+}
+
 size_t RpcArbiter::stream_accepted_data_id_count() const {
     return stream_.accepted_data_id_count();
 }

@@ -573,7 +573,6 @@ uint32_t stream_signal_sample_interval_ms(const char *name,
     if (!name) return fallback_interval_ms;
     if (strstr(name, "-100hz")) return 10;
     if (strstr(name, "-50hz")) return 20;
-    if (strstr(name, "-TwoSecond")) return 2000;
     return fallback_interval_ms;
 }
 

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "edf_str_file_layout.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
 
@@ -300,56 +301,33 @@ bool write_str_header(File &file, const JobSlot &job) {
 }
 
 bool patch_str_record_count(File &file, uint32_t record_count) {
-    char field[8] = {};
-    memset(field, ' ', sizeof(field));
-    char text[16] = {};
-    snprintf(text, sizeof(text), "%lu",
-             static_cast<unsigned long>(record_count));
-    const size_t len = strlen(text);
-    if (len > sizeof(field)) return false;
-    memcpy(field, text, len);
-    if (!file.seek(236)) return false;
+    char field[AC_EDF_STR_RECORD_COUNT_FIELD_WIDTH] = {};
+    if (!edf_str_format_record_count_field(record_count,
+                                           field,
+                                           sizeof(field))) {
+        return false;
+    }
+    if (!file.seek(AC_EDF_STR_RECORD_COUNT_FIELD_OFFSET)) return false;
     return file.write(reinterpret_cast<const uint8_t *>(field),
                       sizeof(field)) == sizeof(field);
 }
 
-uint32_t str_record_count_from_size(size_t size) {
-    const size_t header_size = edf_str_header_size();
-    const size_t record_size = edf_str_record_size();
-    if (size < header_size || record_size == 0) return 0;
-    return static_cast<uint32_t>((size - header_size) / record_size);
-}
-
-bool str_file_has_whole_records(size_t size) {
-    const size_t header_size = edf_str_header_size();
-    const size_t record_size = edf_str_record_size();
-    if (size < header_size || record_size == 0) return false;
-    return ((size - header_size) % record_size) == 0;
-}
-
-int16_t str_record_date_sample(const uint8_t *record) {
-    if (!record) return -1;
-    return static_cast<int16_t>(static_cast<uint16_t>(record[0]) |
-                                (static_cast<uint16_t>(record[1]) << 8));
-}
-
-bool find_str_record_offset(File &file,
-                            uint32_t record_count,
-                            int16_t date_sample,
-                            size_t &offset) {
-    const size_t header_size = edf_str_header_size();
-    const size_t record_size = edf_str_record_size();
+bool find_str_record_match(File &file,
+                           uint32_t record_count,
+                           int16_t date_sample,
+                           EdfStrRecordMatch &match) {
+    match = {};
     uint8_t raw[2] = {};
     for (uint32_t i = 0; i < record_count; ++i) {
-        const size_t pos = header_size + static_cast<size_t>(i) * record_size;
+        const size_t pos = edf_str_record_offset(i);
         if (!file.seek(pos)) return false;
         if (file.read(raw, sizeof(raw)) != sizeof(raw)) return false;
-        if (str_record_date_sample(raw) == date_sample) {
-            offset = pos;
+        if (edf_str_record_date_sample(raw, sizeof(raw)) == date_sample) {
+            match.found = true;
+            match.index = i;
             return true;
         }
     }
-    offset = header_size + static_cast<size_t>(record_count) * record_size;
     return true;
 }
 
@@ -476,37 +454,42 @@ bool process_str_record(const JobSlot &job) {
         }
         file.flush();
     } else {
-        if (!str_file_has_whole_records(initial_size)) {
+        EdfStrFileLayout layout;
+        if (!edf_str_file_layout_from_size(initial_size, layout)) {
             file.close();
             stats.write_errors++;
             set_error("str_partial_tail");
             return false;
         }
-        record_count = str_record_count_from_size(initial_size);
+        record_count = layout.record_count;
     }
 
-    const int16_t date_sample = str_record_date_sample(job.bytes);
-    if (date_sample < 0) {
+    const int16_t date_sample = edf_str_record_date_sample(job.bytes,
+                                                           job.len);
+    if (!edf_str_date_sample_valid(date_sample)) {
         file.close();
         stats.write_errors++;
         set_error("str_bad_date");
         return false;
     }
 
-    size_t write_offset = edf_str_header_size();
-    if (!find_str_record_offset(file, record_count, date_sample,
-                                write_offset)) {
+    EdfStrRecordMatch match;
+    if (!find_str_record_match(file, record_count, date_sample, match)) {
         file.close();
         stats.write_errors++;
         set_error("str_scan_failed");
         return false;
     }
-    const bool appending =
-        write_offset == edf_str_header_size() +
-                            static_cast<size_t>(record_count) *
-                                edf_str_record_size();
 
-    if (!file.seek(write_offset)) {
+    EdfStrRecordLocation location;
+    if (!edf_str_resolve_record_location(record_count, match, location)) {
+        file.close();
+        stats.write_errors++;
+        set_error("str_location_failed");
+        return false;
+    }
+
+    if (!file.seek(location.offset)) {
         file.close();
         stats.write_errors++;
         set_error("str_seek_failed");
@@ -520,7 +503,7 @@ bool process_str_record(const JobSlot &job) {
         return false;
     }
     file.flush();
-    if (appending) {
+    if (location.appending) {
         record_count++;
         if (!patch_str_record_count(file, record_count)) {
             file.close();

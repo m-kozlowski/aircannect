@@ -4,7 +4,9 @@
 #include <stdint.h>
 
 #include "as11_event_frame.h"
+#include "edf_numeric_file_layout.h"
 #include "edf_storage_catalog.h"
+#include "edf_str_session.h"
 #include "edf_storage_worker.h"
 #include "edf_stream_assembler.h"
 #include "rpc_arbiter.h"
@@ -89,11 +91,8 @@ public:
 
 private:
     struct NumericSchemaState {
-        bool enabled = false;
         bool open = false;
-        EdfSignalSpec signals[AC_EDF_NUMERIC_SIGNAL_MAX + 1] = {};
-        uint8_t source_indices[AC_EDF_NUMERIC_SIGNAL_MAX] = {};
-        EdfFileSchema schema;
+        EdfNumericFileLayout layout;
     };
 
     static void event_frame_observer(void *context,
@@ -114,10 +113,8 @@ private:
                      const char *reason);
     bool open_session_annotation_files(const SessionStatus &session);
     bool ensure_numeric_files_open();
+    bool numeric_stream_ready() const;
     bool build_numeric_schemas();
-    bool build_numeric_schema(EdfFileKind kind,
-                              NumericSchemaState &state);
-    bool accepted_short_tag(const char *short_tag) const;
     void reset_numeric_schemas();
     bool enqueue_numeric_file_open(const EdfFileSchema &schema,
                                    const EdfLocalDateTime &start,
@@ -136,14 +133,10 @@ private:
     void close_session_files();
     bool begin_str_session(const SessionStatus &session);
     bool finish_str_session(const SessionStatus &session);
-    void reset_str_day(uint16_t epoch_days,
-                       const EdfLocalDateTime &sleep_day_start);
     void request_str_settings(uint32_t now_ms);
     void note_str_settings_timeout(uint32_t now_ms);
     void handle_rpc_event(const RpcEvent &event);
     void handle_str_settings_response(const std::string &payload);
-    bool set_str_signal_physical(size_t signal_index, float physical_value);
-    bool set_str_signal_digital(size_t signal_index, int16_t digital_value);
     bool apply_str_summary_record(const ReportSummaryRecord &record);
     bool apply_str_summary_from_store();
     bool write_str_day_record();
@@ -174,12 +167,7 @@ private:
     bool initialized_ = false;
     bool files_open_ = false;
     bool numeric_files_open_ = false;
-    bool str_day_active_ = false;
-    bool str_mask_open_ = false;
     bool str_settings_pending_ = false;
-    uint16_t str_day_epoch_days_ = 0;
-    uint16_t str_current_on_minute_ = 0;
-    uint8_t str_mask_events_ = 0;
     uint32_t str_settings_request_id_ = 0;
     uint32_t str_settings_request_ms_ = 0;
     EdfLocalDateTime session_start_local_;
@@ -189,8 +177,7 @@ private:
     NumericSchemaState brp_schema_;
     NumericSchemaState pld_schema_;
     NumericSchemaState sa2_schema_;
-    EdfLocalDateTime str_day_start_;
-    int16_t str_samples_[AC_EDF_STR_DATA_SAMPLES_PER_RECORD] = {};
+    EdfStrSessionAccumulator str_;
     EdfRecorderStatus status_;
     EdfStreamAssembler assembler_;
 };

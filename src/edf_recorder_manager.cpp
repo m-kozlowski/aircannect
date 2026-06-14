@@ -1,19 +1,18 @@
 #include "edf_recorder_manager.h"
 
 #include <Arduino.h>
-#include <ArduinoJson.h>
 
-#include <math.h>
 #include <stdio.h>
-#include <string.h>
-#include <time.h>
 
 #include "as11_rpc.h"
-#include "as11_settings.h"
 #include "debug_log.h"
+#include "edf_event_annotation.h"
+#include "edf_numeric_file_layout.h"
 #include "edf_storage_catalog.h"
 #include "edf_storage_worker.h"
-#include "edf_str_field_map.h"
+#include "edf_str_summary.h"
+#include "edf_str_settings.h"
+#include "edf_time.h"
 #include "report_store.h"
 
 namespace aircannect {
@@ -26,33 +25,8 @@ struct StrSummaryApplyContext {
     uint32_t applied_records = 0;
 };
 
-struct NumericSignalMap {
-    EdfFileKind kind = EdfFileKind::Brp;
-    const char *short_tag = "";
-    uint8_t source_index = 0;
-};
-
 const char *const EDF_CAPTURE_EVENT_IDS =
     "TherapyEvents-RespiratoryEvents";
-
-const NumericSignalMap EDF_NUMERIC_SIGNAL_MAP[] = {
-    {EdfFileKind::Brp, "_RFL", 0},
-    {EdfFileKind::Brp, "_MKP", 1},
-    {EdfFileKind::Pld, "_MKF", 0},
-    {EdfFileKind::Pld, "_MKI", 1},
-    {EdfFileKind::Pld, "_MKE", 2},
-    {EdfFileKind::Pld, "_LKF", 3},
-    {EdfFileKind::Pld, "_RR2", 4},
-    {EdfFileKind::Pld, "_TD2", 5},
-    {EdfFileKind::Pld, "_MV2", 6},
-    {EdfFileKind::Pld, "_TGT", 7},
-    {EdfFileKind::Pld, "_IE2", 8},
-    {EdfFileKind::Pld, "_SNI", 9},
-    {EdfFileKind::Pld, "_FFL", 10},
-    {EdfFileKind::Pld, "_INT", 11},
-    {EdfFileKind::Sa2, "_HRT", 0},
-    {EdfFileKind::Sa2, "_SAO", 1},
-};
 
 const char *acquire_status_name(StreamAcquireStatus status) {
     switch (status) {
@@ -65,68 +39,6 @@ const char *acquire_status_name(StreamAcquireStatus status) {
         default:
             return "rejected";
     }
-}
-
-bool event_is_respiratory(const As11EventFrame &frame) {
-    return frame.data_id == "TherapyEvents-RespiratoryEvents";
-}
-
-bool event_is_csr(const As11EventRecord &record) {
-    return record.name == "CsrStart" || record.name == "CsrEnd";
-}
-
-bool summary_record_sleep_day(const ReportSummaryRecord &record,
-                              uint16_t &day) {
-    if (!record.start_ms || !record.has_tz_offset_min) return false;
-    const int64_t local_ms =
-        static_cast<int64_t>(record.start_ms) +
-        static_cast<int64_t>(record.tz_offset_min) * 60LL * 1000LL;
-    if (local_ms < 0) return false;
-
-    const time_t seconds = static_cast<time_t>(local_ms / 1000LL);
-    struct tm tmv;
-    if (!gmtime_r(&seconds, &tmv)) return false;
-
-    EdfLocalDateTime local;
-    local.year = tmv.tm_year + 1900;
-    local.month = tmv.tm_mon + 1;
-    local.day = tmv.tm_mday;
-    local.hour = tmv.tm_hour;
-    local.minute = tmv.tm_min;
-    local.second = tmv.tm_sec;
-    return edf_sleep_day_epoch_days(local, day);
-}
-
-bool parse_float_text(const char *text, float &out) {
-    if (!text || !text[0]) return false;
-    char *end = nullptr;
-    const float value = strtof(text, &end);
-    if (!end || *end != 0 || !isfinite(value)) return false;
-    out = value;
-    return true;
-}
-
-bool parse_iso8601_seconds(const char *text, float &out) {
-    if (!text || text[0] != 'P' || text[1] != 'T') return false;
-    const char *value = text + 2;
-    char *end = nullptr;
-    const float seconds = strtof(value, &end);
-    if (!end || *end != 'S' || end[1] != 0 || !isfinite(seconds)) {
-        return false;
-    }
-    out = seconds;
-    return true;
-}
-
-void rpc_name_for_str_tag(const char *tag, char *out, size_t out_size) {
-    if (!out || !out_size) return;
-    out[0] = 0;
-    if (!tag || !tag[0]) return;
-    if (tag[0] == '_') {
-        snprintf(out, out_size, "%s", tag);
-        return;
-    }
-    snprintf(out, out_size, "_%s", tag);
 }
 
 const char *file_kind_name(EdfFileKind kind) {
@@ -217,10 +129,10 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
 
     for (size_t i = 0; i < frame.event_count; ++i) {
         const As11EventRecord &record = frame.events[i];
-        if (event_is_respiratory(frame)) {
+        if (edf_event_frame_is_respiratory(frame)) {
             status_.respiratory_events++;
             (void)enqueue_event_annotation(EdfAnnotationKind::Eve, record);
-            if (event_is_csr(record)) {
+            if (edf_event_record_is_csr(record)) {
                 status_.csr_events++;
                 (void)enqueue_event_annotation(EdfAnnotationKind::Csl, record);
             }
@@ -519,88 +431,57 @@ bool EdfRecorderManager::enqueue_numeric_file_open(
     return true;
 }
 
-bool EdfRecorderManager::accepted_short_tag(const char *short_tag) const {
-    if (!arbiter_ || !short_tag || !short_tag[0]) return false;
-    if (arbiter_->stream_accepted_data_id(short_tag)) return true;
-    if (short_tag[0] == '_' && short_tag[1]) {
-        return arbiter_->stream_accepted_data_id(short_tag + 1);
-    }
-    return false;
-}
-
 void EdfRecorderManager::reset_numeric_schemas() {
     auto reset = [](NumericSchemaState &state) {
-        state.enabled = false;
         state.open = false;
-        memset(state.signals, 0, sizeof(state.signals));
-        memset(state.source_indices, 0, sizeof(state.source_indices));
-        state.schema = {};
+        edf_reset_numeric_file_layout(state.layout);
     };
     reset(brp_schema_);
     reset(pld_schema_);
     reset(sa2_schema_);
 }
 
-bool EdfRecorderManager::build_numeric_schema(EdfFileKind kind,
-                                              NumericSchemaState &state) {
-    state.enabled = false;
-    state.open = false;
-    const EdfFileSchema &base = edf_numeric_schema(kind);
-    if (!base.signals || base.source_signal_count > AC_EDF_NUMERIC_SIGNAL_MAX) {
-        return false;
-    }
-
-    size_t count = 0;
-    for (size_t i = 0; i < sizeof(EDF_NUMERIC_SIGNAL_MAP) /
-                               sizeof(EDF_NUMERIC_SIGNAL_MAP[0]);
-         ++i) {
-        const NumericSignalMap &entry = EDF_NUMERIC_SIGNAL_MAP[i];
-        if (entry.kind != kind || !accepted_short_tag(entry.short_tag)) {
-            continue;
-        }
-        if (entry.source_index >= base.source_signal_count ||
-            count >= AC_EDF_NUMERIC_SIGNAL_MAX) {
-            return false;
-        }
-        state.signals[count] = base.signals[entry.source_index];
-        state.source_indices[count] = entry.source_index;
-        count++;
-    }
-
-    if (count == 0) {
-        state.schema = {};
-        return true;
-    }
-
-    state.signals[count] = base.signals[base.source_signal_count];
-    state.schema = base;
-    state.schema.signals = state.signals;
-    state.schema.source_signal_indices = state.source_indices;
-    state.schema.signal_count = count + 1;
-    state.schema.source_signal_count = count;
-    state.enabled = true;
-    return true;
-}
-
 bool EdfRecorderManager::build_numeric_schemas() {
     reset_numeric_schemas();
-    if (!build_numeric_schema(EdfFileKind::Brp, brp_schema_) ||
-        !build_numeric_schema(EdfFileKind::Pld, pld_schema_) ||
-        !build_numeric_schema(EdfFileKind::Sa2, sa2_schema_)) {
+    const char *accepted = arbiter_
+                               ? arbiter_->stream_accepted_data_ids_csv().c_str()
+                               : "";
+    if (!edf_build_numeric_file_layout(EdfFileKind::Brp,
+                                       accepted,
+                                       brp_schema_.layout) ||
+        !edf_build_numeric_file_layout(EdfFileKind::Pld,
+                                       accepted,
+                                       pld_schema_.layout) ||
+        !edf_build_numeric_file_layout(EdfFileKind::Sa2,
+                                       accepted,
+                                       sa2_schema_.layout)) {
         set_error("numeric_schema_failed");
         return false;
     }
-    if (!brp_schema_.enabled && !pld_schema_.enabled &&
-        !sa2_schema_.enabled) {
+    if (!brp_schema_.layout.enabled && !pld_schema_.layout.enabled &&
+        !sa2_schema_.layout.enabled) {
         set_error("no_accepted_numeric_streams");
         return false;
     }
     return true;
 }
 
+bool EdfRecorderManager::numeric_stream_ready() const {
+    if (!arbiter_ || status_.stream_handle == STREAM_CONSUMER_INVALID) {
+        return false;
+    }
+    if (!arbiter_->stream_consumer_active(status_.stream_handle)) {
+        return false;
+    }
+    if (!arbiter_->stream_actual_active()) {
+        return false;
+    }
+    return arbiter_->stream_accepted_data_id_count() > 0;
+}
+
 bool EdfRecorderManager::ensure_numeric_files_open() {
     if (numeric_files_open_) return true;
-    if (!arbiter_ || arbiter_->stream_accepted_data_id_count() == 0) {
+    if (!numeric_stream_ready()) {
         return true;
     }
     if (!session_header_date_[0] || !session_header_time_[0]) {
@@ -620,8 +501,8 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
     info.start_time = session_header_time_;
     info.record_count = 0;
 
-    if (brp_schema_.enabled) {
-        if (!enqueue_numeric_file_open(brp_schema_.schema,
+    if (brp_schema_.layout.enabled) {
+        if (!enqueue_numeric_file_open(brp_schema_.layout.schema,
                                        session_start_local_, info,
                                        status_.brp_path,
                                        sizeof(status_.brp_path))) {
@@ -630,8 +511,8 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
         }
         brp_schema_.open = true;
     }
-    if (pld_schema_.enabled) {
-        if (!enqueue_numeric_file_open(pld_schema_.schema,
+    if (pld_schema_.layout.enabled) {
+        if (!enqueue_numeric_file_open(pld_schema_.layout.schema,
                                        session_start_local_, info,
                                        status_.pld_path,
                                        sizeof(status_.pld_path))) {
@@ -645,8 +526,8 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
         }
         pld_schema_.open = true;
     }
-    if (sa2_schema_.enabled) {
-        if (!enqueue_numeric_file_open(sa2_schema_.schema,
+    if (sa2_schema_.layout.enabled) {
+        if (!enqueue_numeric_file_open(sa2_schema_.layout.schema,
                                        session_start_local_, info,
                                        status_.sa2_path,
                                        sizeof(status_.sa2_path))) {
@@ -674,9 +555,12 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
                   "[EDF] numeric files open accepted=%s brp=%u pld=%u "
                   "sa2=%u\n",
                   arbiter_->stream_accepted_data_ids_csv().c_str(),
-                  static_cast<unsigned>(brp_schema_.schema.source_signal_count),
-                  static_cast<unsigned>(pld_schema_.schema.source_signal_count),
-                  static_cast<unsigned>(sa2_schema_.schema.source_signal_count));
+                  static_cast<unsigned>(
+                      brp_schema_.layout.schema.source_signal_count),
+                  static_cast<unsigned>(
+                      pld_schema_.layout.schema.source_signal_count),
+                  static_cast<unsigned>(
+                      sa2_schema_.layout.schema.source_signal_count));
     }
     return true;
 }
@@ -753,37 +637,6 @@ bool EdfRecorderManager::parse_str_time(const char *text,
            edf_parse_as11_local_datetime(text, out);
 }
 
-void EdfRecorderManager::reset_str_day(
-    uint16_t epoch_days,
-    const EdfLocalDateTime &sleep_day_start) {
-    for (size_t i = 0; i < AC_EDF_STR_DATA_SAMPLES_PER_RECORD; ++i) {
-        str_samples_[i] = -1;
-    }
-
-    const size_t date_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_DATE_SIGNAL);
-    const size_t events_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_MASK_EVENTS_SIGNAL);
-    const size_t duration_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
-    if (date_offset < AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
-        str_samples_[date_offset] = static_cast<int16_t>(epoch_days);
-    }
-    if (events_offset < AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
-        str_samples_[events_offset] = 0;
-    }
-    if (duration_offset < AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
-        str_samples_[duration_offset] = 0;
-    }
-
-    str_day_active_ = true;
-    str_mask_open_ = false;
-    str_day_epoch_days_ = epoch_days;
-    str_day_start_ = sleep_day_start;
-    str_current_on_minute_ = 0;
-    str_mask_events_ = 0;
-}
-
 bool EdfRecorderManager::begin_str_session(const SessionStatus &session) {
     EdfLocalDateTime start;
     if (!parse_str_time(session.start_device_time, start)) {
@@ -791,27 +644,23 @@ bool EdfRecorderManager::begin_str_session(const SessionStatus &session) {
         return false;
     }
 
-    uint16_t day = 0;
-    uint16_t minute = 0;
-    EdfLocalDateTime sleep_day_start;
-    if (!edf_sleep_day_epoch_days(start, day) ||
-        !edf_sleep_day_minute(start, minute) ||
-        !edf_sleep_day_start(start, sleep_day_start)) {
-        set_error("bad_str_sleep_day");
+    EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
+    if (!str_.begin_session(start, str_status)) {
+        switch (str_status) {
+            case EdfStrSessionStatus::MaskEventsFull:
+                set_error("str_mask_events_full");
+                break;
+            case EdfStrSessionStatus::OffsetError:
+                set_error("str_offset_failed");
+                break;
+            case EdfStrSessionStatus::BadSleepDay:
+            default:
+                set_error("bad_str_sleep_day");
+                break;
+        }
         return false;
     }
 
-    if (!str_day_active_ || str_day_epoch_days_ != day) {
-        reset_str_day(day, sleep_day_start);
-    }
-
-    if (str_mask_events_ >= AC_EDF_STR_MASK_EVENT_CAPACITY) {
-        set_error("str_mask_events_full");
-        return false;
-    }
-
-    str_current_on_minute_ = minute;
-    str_mask_open_ = true;
     request_str_settings(millis());
     return true;
 }
@@ -819,20 +668,7 @@ bool EdfRecorderManager::begin_str_session(const SessionStatus &session) {
 void EdfRecorderManager::request_str_settings(uint32_t now_ms) {
     if (!arbiter_ || str_settings_pending_) return;
 
-    std::string names;
-    names.reserve(512);
-    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
-        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
-        if (field.source != EdfStrFieldSource::SettingGet ||
-            !field.short_tag) {
-            continue;
-        }
-        char rpc_name[8] = {};
-        rpc_name_for_str_tag(field.short_tag, rpc_name, sizeof(rpc_name));
-        if (!rpc_name[0]) continue;
-        if (!names.empty()) names += ' ';
-        names += rpc_name;
-    }
+    const std::string names = edf_str_setting_get_names();
     if (names.empty()) return;
 
     uint32_t id = 0;
@@ -880,56 +716,20 @@ void EdfRecorderManager::handle_rpc_event(const RpcEvent &event) {
     handle_str_settings_response(event.payload_text());
 }
 
-bool EdfRecorderManager::set_str_signal_physical(size_t signal_index,
-                                                 float physical_value) {
-    const EdfSignalSpec *spec = edf_str_signal_spec(signal_index);
-    if (!spec || spec->samples_per_record != 1) return false;
-    const size_t offset = edf_str_signal_sample_offset(signal_index);
-    if (offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) return false;
-    str_samples_[offset] = edf_encode_physical_sample(*spec, physical_value);
-    return true;
-}
-
-bool EdfRecorderManager::set_str_signal_digital(size_t signal_index,
-                                                int16_t digital_value) {
-    const EdfSignalSpec *spec = edf_str_signal_spec(signal_index);
-    if (!spec || spec->samples_per_record != 1) return false;
-    const size_t offset = edf_str_signal_sample_offset(signal_index);
-    if (offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) return false;
-    str_samples_[offset] = digital_value;
-    return true;
-}
-
 bool EdfRecorderManager::apply_str_summary_record(
     const ReportSummaryRecord &record) {
-    if (!str_day_active_) return false;
-    uint16_t day = 0;
-    if (!summary_record_sleep_day(record, day) ||
-        day != str_day_epoch_days_) {
-        return false;
-    }
-
-    uint32_t values = 0;
-    for (size_t i = AC_REPORT_SUMMARY_STR_FIRST_SIGNAL;
-         i <= AC_REPORT_SUMMARY_STR_LAST_SIGNAL;
-         ++i) {
-        int16_t digital = 0;
-        if (report_summary_str_sample(record, i, digital) &&
-            set_str_signal_digital(i, digital)) {
-            values++;
-        }
-    }
-    if (values == 0) return false;
+    EdfStrSummaryApplyResult result;
+    if (!edf_str_apply_summary_record(record, str_, result)) return false;
 
     Log::logf(CAT_STREAM, LOG_DEBUG,
               "[EDF] STR summary values=%lu day=%u\n",
-              static_cast<unsigned long>(values),
-              static_cast<unsigned>(day));
+              static_cast<unsigned long>(result.values),
+              static_cast<unsigned>(result.day));
     return true;
 }
 
 bool EdfRecorderManager::apply_str_summary_from_store() {
-    if (!str_day_active_) return false;
+    if (!str_.active()) return false;
     StrSummaryApplyContext context;
     context.manager = this;
     if (!ReportStore::read_summary_records(summary_record_observer,
@@ -941,84 +741,28 @@ bool EdfRecorderManager::apply_str_summary_from_store() {
 
 void EdfRecorderManager::handle_str_settings_response(
     const std::string &payload) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, payload);
-    if (err) {
-        set_error("str_settings_json_failed");
+    EdfStrSettingsApplyResult result;
+    if (!edf_str_apply_settings_response(payload, str_, result)) {
+        set_error(result.error);
         return;
     }
 
-    JsonObjectConst result = doc["result"].as<JsonObjectConst>();
-    if (result.isNull()) {
-        set_error(json_member_present(payload, "error")
-                      ? "str_settings_rpc_error"
-                      : "str_settings_missing_result");
-        return;
-    }
-
-    uint32_t values = 0;
-    uint32_t missing = 0;
-    uint32_t unmapped = 0;
-    for (size_t i = 0; i < AC_EDF_STR_FIELD_MAP_COUNT; ++i) {
-        const EdfStrFieldMap &field = AC_EDF_STR_FIELD_MAP[i];
-        if (field.source != EdfStrFieldSource::SettingGet ||
-            !field.short_tag) {
-            continue;
-        }
-
-        char rpc_name[8] = {};
-        rpc_name_for_str_tag(field.short_tag, rpc_name, sizeof(rpc_name));
-        JsonVariantConst value = result[rpc_name];
-        if (value.isNull()) {
-            missing++;
-            continue;
-        }
-
-        bool mapped = false;
-        float physical = 0.0f;
-        if (value.is<bool>()) {
-            physical = value.as<bool>() ? 1.0f : 0.0f;
-            mapped = true;
-        } else if (value.is<float>() || value.is<int>() ||
-                   value.is<long>()) {
-            physical = value.as<float>();
-            mapped = true;
-        } else if (value.is<const char *>()) {
-            const char *text = value.as<const char *>();
-            int16_t option_index = 0;
-            if (parse_iso8601_seconds(text, physical) ||
-                parse_float_text(text, physical)) {
-                mapped = true;
-            } else if (as11_setting_option_index_for_rpc_name(
-                           rpc_name, text, option_index)) {
-                physical = static_cast<float>(option_index);
-                mapped = true;
-            }
-        }
-
-        if (mapped && set_str_signal_physical(i, physical)) {
-            values++;
-        } else {
-            unmapped++;
-        }
-    }
-
-    status_.str_setting_values += values;
-    status_.str_setting_missing += missing;
-    status_.str_setting_unmapped += unmapped;
+    status_.str_setting_values += result.values;
+    status_.str_setting_missing += result.missing;
+    status_.str_setting_unmapped += result.unmapped;
     Log::logf(CAT_STREAM, LOG_DEBUG,
               "[EDF] STR settings values=%lu missing=%lu unmapped=%lu\n",
-              static_cast<unsigned long>(values),
-              static_cast<unsigned long>(missing),
-              static_cast<unsigned long>(unmapped));
+              static_cast<unsigned long>(result.values),
+              static_cast<unsigned long>(result.missing),
+              static_cast<unsigned long>(result.unmapped));
 
-    if (str_day_active_ && !str_mask_open_) {
+    if (str_.active() && !str_.mask_open()) {
         (void)write_str_day_record();
     }
 }
 
 bool EdfRecorderManager::finish_str_session(const SessionStatus &session) {
-    if (!str_day_active_ || !str_mask_open_) return true;
+    if (!str_.active() || !str_.mask_open()) return true;
 
     EdfLocalDateTime end;
     if (!parse_str_time(session.end_device_time, end) &&
@@ -1028,60 +772,24 @@ bool EdfRecorderManager::finish_str_session(const SessionStatus &session) {
         return false;
     }
 
-    uint16_t end_day = 0;
-    uint16_t end_minute = 0;
-    if (!edf_sleep_day_epoch_days(end, end_day) ||
-        !edf_sleep_day_minute(end, end_minute)) {
-        set_error("bad_str_end_sleep_day");
+    bool record_ready = false;
+    EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
+    if (!str_.finish_session(end, record_ready, str_status)) {
+        switch (str_status) {
+            case EdfStrSessionStatus::MaskEventsFull:
+                set_error("str_mask_events_full");
+                break;
+            case EdfStrSessionStatus::OffsetError:
+                set_error("str_offset_failed");
+                break;
+            case EdfStrSessionStatus::BadSleepDay:
+            default:
+                set_error("bad_str_end_sleep_day");
+                break;
+        }
         return false;
     }
-
-    uint16_t off_minute = end_minute;
-    if (end_day != str_day_epoch_days_) {
-        off_minute = 1440;
-    } else if (off_minute < str_current_on_minute_) {
-        off_minute = str_current_on_minute_;
-    }
-
-    if (str_mask_events_ >= AC_EDF_STR_MASK_EVENT_CAPACITY) {
-        set_error("str_mask_events_full");
-        return false;
-    }
-
-    const size_t event_index = str_mask_events_;
-    const size_t on_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_MASK_ON_SIGNAL) +
-        event_index;
-    const size_t off_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL) +
-        event_index;
-    const size_t events_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_MASK_EVENTS_SIGNAL);
-    const size_t duration_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
-    if (on_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
-        off_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
-        events_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
-        duration_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
-        set_error("str_offset_failed");
-        return false;
-    }
-
-    str_samples_[on_offset] = static_cast<int16_t>(str_current_on_minute_);
-    str_samples_[off_offset] = static_cast<int16_t>(off_minute);
-    str_mask_events_++;
-    str_samples_[events_offset] = static_cast<int16_t>(str_mask_events_);
-
-    int duration = str_samples_[duration_offset];
-    if (duration < 0) duration = 0;
-    duration += off_minute > str_current_on_minute_
-                    ? off_minute - str_current_on_minute_
-                    : 0;
-    if (duration > 1440) duration = 1440;
-    str_samples_[duration_offset] = static_cast<int16_t>(duration);
-    str_mask_open_ = false;
-
-    return write_str_day_record();
+    return !record_ready || write_str_day_record();
 }
 
 bool EdfRecorderManager::write_str_day_record() {
@@ -1095,14 +803,14 @@ bool EdfRecorderManager::write_str_day_record() {
 
     char date[9] = {};
     char time[9] = {};
-    if (!edf_header_date(str_day_start_, date, sizeof(date)) ||
-        !edf_header_time(str_day_start_, time, sizeof(time))) {
+    if (!edf_header_date(str_.day_start(), date, sizeof(date)) ||
+        !edf_header_time(str_.day_start(), time, sizeof(time))) {
         set_error("bad_str_header_time");
         return false;
     }
 
     char recording_id[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
-    if (!build_recording_id(str_day_start_, recording_id,
+    if (!build_recording_id(str_.day_start(), recording_id,
                             sizeof(recording_id))) {
         set_error("str_identity_unavailable");
         return false;
@@ -1116,8 +824,8 @@ bool EdfRecorderManager::write_str_day_record() {
     info.record_count = 0;
 
     EdfStrRecordView record;
-    record.digital_samples = str_samples_;
-    record.sample_count = AC_EDF_STR_DATA_SAMPLES_PER_RECORD;
+    record.digital_samples = str_.samples();
+    record.sample_count = str_.sample_count();
     if (!EdfStorageWorker::enqueue_str_record(path, info, record)) {
         status_.str_enqueue_failures++;
         set_error("str_queue_failed");
@@ -1292,7 +1000,8 @@ void EdfRecorderManager::handle_completed_record(
             break;
     }
     if (numeric_files_open_ && state && state->open &&
-        !EdfStorageWorker::enqueue_numeric_record(state->schema, record)) {
+        !EdfStorageWorker::enqueue_numeric_record(state->layout.schema,
+                                                  record)) {
         status_.record_enqueue_failures++;
         set_error("record_queue_failed");
     }
@@ -1315,29 +1024,17 @@ bool EdfRecorderManager::enqueue_event_annotation(
     const As11EventRecord &record) {
     if (!files_open_) return false;
 
-    const char *label = nullptr;
-    if (!edf_annotation_label_for_event(kind, record.name.c_str(), label)) {
-        return false;
-    }
-
-    int64_t event_ms = 0;
-    if (session_start_epoch_ms_ <= 0 ||
-        !edf_parse_utc_ms(record.report_time.c_str(), event_ms)) {
-        status_.annotation_enqueue_failures++;
-        set_error("event_time_failed");
-        return false;
-    }
-
-    int64_t onset_ms = event_ms - session_start_epoch_ms_;
-    if (onset_ms < 0) onset_ms = 0;
-
     EdfAnnotationRecord annotation;
-    annotation.onset_seconds = static_cast<int32_t>(onset_ms / 1000);
-    annotation.duration_seconds =
-        record.has_duration
-            ? static_cast<int32_t>((record.duration_ms + 500) / 1000)
-            : 0;
-    annotation.label = label;
+    EdfEventAnnotationResult result;
+    if (!edf_build_event_annotation(kind, record, session_start_epoch_ms_,
+                                    annotation, result)) {
+        if (result.status != EdfEventAnnotationStatus::TimeError) {
+            return false;
+        }
+        status_.annotation_enqueue_failures++;
+        set_error(result.error);
+        return false;
+    }
     if (!EdfStorageWorker::enqueue_annotation_record(kind, annotation)) {
         status_.annotation_enqueue_failures++;
         set_error("event_queue_failed");
