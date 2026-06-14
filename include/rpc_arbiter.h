@@ -273,12 +273,12 @@ private:
     void poll_as11_healthcheck();
 
     void handle_matched_response(const std::string &payload);
-    bool handle_event_notification(const std::string &payload);
-    void handle_stream_notification(const std::string &payload);
+    bool handle_event_notification(const char *payload, size_t payload_len);
+    void handle_stream_notification(const char *payload, size_t payload_len);
     uint8_t source_id(RpcSource source) const;
     void handle_frame(const RawCanFrame &frame);
-    void handle_rpc_payload(std::string payload);
-    void handle_debug_payload(std::string payload);
+    void handle_rpc_payload(const char *payload, size_t payload_len);
+    void handle_debug_payload(const char *payload, size_t payload_len);
     std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
 
@@ -302,7 +302,7 @@ private:
     bool pop_source_event_queue(SourceEventQueue queue, RpcEvent &event);
 
     CanDriver &can_;
-    DatagramRx rpc_rx_;
+    DatagramRx rpc_rx_{AC_STREAM_FRAME_RAW_MAX};
     DatagramRx log_rx_;
     FixedQueue<RpcEvent, AC_RPC_EVENT_QUEUE_DEPTH> events_;
     FixedQueue<RpcEvent, AC_RESMED_OTA_EVENT_QUEUE_DEPTH> resmed_ota_events_;

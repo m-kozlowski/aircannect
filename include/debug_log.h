@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string>
 
@@ -63,5 +64,10 @@ void log_payload(log_cat_t cat,
                  log_level_t level,
                  const char *prefix,
                  const std::string &payload);
+void log_payload(log_cat_t cat,
+                 log_level_t level,
+                 const char *prefix,
+                 const char *payload,
+                 size_t payload_len);
 
 }  // namespace Log

@@ -24,8 +24,9 @@ struct SinkRuntimeStatus {
 };
 
 struct LiveChartSeriesBatch {
-    float values[AC_WEB_LIVE_BATCH_SAMPLES_MAX] = {};
-    uint8_t valid[AC_WEB_LIVE_BATCH_SAMPLES_MAX] = {};
+    float *values = nullptr;
+    uint8_t *valid = nullptr;
+    size_t capacity = 0;
     size_t count = 0;
 };
 
@@ -125,6 +126,8 @@ private:
     void drain_debug_stream(uint32_t now_ms);
     bool live_chart_should_run() const;
     void poll_live_chart(uint32_t now_ms);
+    bool ensure_live_chart_batches();
+    void release_live_chart_batches();
     void attach_live_chart_stream(uint32_t now_ms);
     void release_live_chart_stream();
     void drain_live_chart_stream(uint32_t now_ms);

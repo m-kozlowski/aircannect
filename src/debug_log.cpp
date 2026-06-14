@@ -9,6 +9,7 @@
 
 #include "board.h"
 #include "fixed_queue.h"
+#include "memory_manager.h"
 #include "string_util.h"
 
 using aircannect::FixedQueue;
@@ -29,7 +30,9 @@ struct LogRecord {
     char text[AC_LOG_LINE_MAX] = {};
 };
 
-FixedQueue<LogRecord, AC_SYSLOG_QUEUE_DEPTH> syslog_queue;
+using SyslogQueue = FixedQueue<LogRecord, AC_SYSLOG_QUEUE_DEPTH>;
+
+SyslogQueue *syslog_queue = nullptr;
 Log::Stats log_stats;
 IPAddress syslog_ip;
 String syslog_host_text;
@@ -71,8 +74,30 @@ void serial_dispatch(const char *buf, int len) {
     Serial.write(reinterpret_cast<const uint8_t *>(buf), len);
 }
 
+bool ensure_syslog_queue() {
+    if (syslog_queue) return true;
+    void *memory = aircannect::Memory::alloc_large(sizeof(SyslogQueue));
+    if (!memory) {
+        log_stats.syslog_errors++;
+        return false;
+    }
+    syslog_queue = new (memory) SyslogQueue();
+    return true;
+}
+
+void release_syslog_queue() {
+    if (!syslog_queue) return;
+    syslog_queue->~SyslogQueue();
+    aircannect::Memory::free(syslog_queue);
+    syslog_queue = nullptr;
+}
+
 void enqueue_syslog(log_cat_t cat, log_level_t level, const char *buf) {
     if (!syslog_enabled_value || !buf) return;
+    if (!syslog_queue) {
+        log_stats.syslog_drops++;
+        return;
+    }
     LogRecord record;
     record.ms = millis();
     record.cat = cat;
@@ -81,7 +106,7 @@ void enqueue_syslog(log_cat_t cat, log_level_t level, const char *buf) {
     record.text[sizeof(record.text) - 1] = 0;
     clean_message(record.text);
     if (!record.text[0]) return;
-    if (syslog_queue.push(record)) {
+    if (syslog_queue->push(record)) {
         log_stats.syslog_enqueued++;
     }
 }
@@ -256,7 +281,7 @@ void configure_syslog(bool enabled,
                       const String &hostname) {
     lock_log();
     syslog_enabled_value = false;
-    syslog_queue.clear();
+    release_syslog_queue();
     syslog_host_text = "";
     syslog_port_value = port ? port : AC_SYSLOG_PORT;
     if (hostname.length()) {
@@ -273,6 +298,10 @@ void configure_syslog(bool enabled,
         unlock_log();
         return;
     }
+    if (!ensure_syslog_queue()) {
+        unlock_log();
+        return;
+    }
     syslog_ip = parsed;
     syslog_host_text = host;
     syslog_enabled_value = true;
@@ -285,7 +314,8 @@ void poll(bool network_available) {
         LogRecord record;
         lock_log();
         const bool have_record = syslog_enabled_value &&
-                                 syslog_queue.pop(record);
+                                 syslog_queue &&
+                                 syslog_queue->pop(record);
         unlock_log();
         if (!have_record) return;
         send_syslog_record(record);
@@ -306,7 +336,7 @@ uint16_t syslog_port() {
 
 size_t syslog_queue_depth() {
     lock_log();
-    const size_t out = syslog_queue.count();
+    const size_t out = syslog_queue ? syslog_queue->count() : 0;
     unlock_log();
     return out;
 }
@@ -314,7 +344,7 @@ size_t syslog_queue_depth() {
 Stats stats() {
     lock_log();
     Stats out = log_stats;
-    out.syslog_drops = syslog_queue.dropped();
+    if (syslog_queue) out.syslog_drops += syslog_queue->dropped();
     unlock_log();
     return out;
 }
@@ -340,6 +370,14 @@ void log_payload(log_cat_t cat,
                  log_level_t level,
                  const char *prefix,
                  const std::string &payload) {
+    log_payload(cat, level, prefix, payload.data(), payload.size());
+}
+
+void log_payload(log_cat_t cat,
+                 log_level_t level,
+                 const char *prefix,
+                 const char *payload,
+                 size_t payload_len) {
     if (cat < 0 || cat >= CAT_COUNT ||
         level < LOG_ERROR || level > LOG_DEBUG ||
         level > levels[cat]) {
@@ -351,8 +389,8 @@ void log_payload(log_cat_t cat,
     lock_log();
     log_stats.emitted++;
     serial_dispatch(prefix, strlen(prefix));
-    if (!payload.empty()) {
-        serial_dispatch(payload.data(), static_cast<int>(payload.size()));
+    if (payload && payload_len) {
+        serial_dispatch(payload, static_cast<int>(payload_len));
     }
     serial_dispatch("\n", 1);
 
@@ -364,10 +402,12 @@ void log_payload(log_cat_t cat,
     const size_t prefix_len = strlen(prefix);
     const size_t room =
         prefix_len < sizeof(record) ? sizeof(record) - prefix_len - 1 : 0;
+    const size_t payload_room =
+        payload_len < room ? payload_len : room;
     const int len = snprintf(record, sizeof(record), "%s%.*s",
                              prefix,
-                             static_cast<int>(room),
-                             payload.c_str());
+                             static_cast<int>(payload_room),
+                             payload ? payload : "");
     if (len >= static_cast<int>(sizeof(record))) log_stats.truncated++;
     record[sizeof(record) - 1] = 0;
     enqueue_syslog(cat, level, record);

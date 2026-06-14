@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <string>
 
@@ -83,6 +84,10 @@ public:
     bool consumer_active(EventConsumerHandle handle) const;
 
     EventPublishResult publish_notification(const std::string &payload,
+                                            uint32_t now_ms,
+                                            As11EventFrame &frame);
+    EventPublishResult publish_notification(const char *payload,
+                                            size_t payload_len,
                                             uint32_t now_ms,
                                             As11EventFrame &frame);
     void set_frame_observer(EventFrameObserver observer, void *context);

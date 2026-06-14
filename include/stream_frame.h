@@ -133,7 +133,18 @@ bool stream_parse_metadata(const std::string &payload,
                            StreamFrameMetadata &metadata,
                            char *error = nullptr,
                            size_t error_len = 0);
+bool stream_parse_metadata(const char *payload,
+                           size_t payload_len,
+                           StreamFrameMetadata &metadata,
+                           char *error = nullptr,
+                           size_t error_len = 0);
 bool stream_parse_frame(const std::string &payload,
+                        uint32_t now_ms,
+                        StreamFrameData &frame,
+                        char *error = nullptr,
+                        size_t error_len = 0);
+bool stream_parse_frame(const char *payload,
+                        size_t payload_len,
                         uint32_t now_ms,
                         StreamFrameData &frame,
                         char *error = nullptr,

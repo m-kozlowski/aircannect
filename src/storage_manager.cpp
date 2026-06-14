@@ -42,6 +42,7 @@ void reset_status() {
     current = StorageStatus();
     copy_text(current.mount_point, sizeof(current.mount_point),
               AC_STORAGE_MOUNT_POINT);
+    current.max_open_files = AC_STORAGE_MAX_OPEN_FILES;
 }
 
 fs::FS *active_fs() {

@@ -434,6 +434,8 @@ void print_storage_status(Print &out, const StorageStatus &s) {
     out.print(s.card_type);
     out.print(" width=");
     out.print(s.width);
+    out.print(" max_open=");
+    out.print(s.max_open_files);
     out.print(" mount=");
     out.print(s.mount_point);
     out.print(" total_bytes=");

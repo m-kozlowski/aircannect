@@ -12,7 +12,7 @@ namespace aircannect {
 // 5 close jobs before the worker task drains. Keep a little headroom.
 static constexpr size_t AC_EDF_STORAGE_QUEUE_CAPACITY = 12;
 static constexpr size_t AC_EDF_STORAGE_SLOT_BYTES = 6144;
-static constexpr uint32_t AC_EDF_STORAGE_TASK_STACK = 4096;
+static constexpr uint32_t AC_EDF_STORAGE_TASK_STACK = 6144;
 static constexpr uint8_t AC_EDF_STORAGE_TASK_PRIO = 1;
 static constexpr uint8_t AC_EDF_STORAGE_TASK_CORE = 0;
 static constexpr uint32_t AC_EDF_STORAGE_IDLE_TICK_MS = 1000;

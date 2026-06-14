@@ -114,7 +114,7 @@ private:
                      uint32_t now_ms,
                      const char *reason);
     bool open_session_annotation_files(const SessionStatus &session);
-    bool ensure_numeric_files_open();
+    bool ensure_numeric_files_open(uint32_t now_ms);
     bool numeric_stream_ready() const;
     bool build_numeric_schemas();
     void reset_numeric_schemas();
@@ -133,7 +133,7 @@ private:
                             size_t dst_size) const;
     void close_session_files();
     void sync_annotation_open_status();
-    bool sync_numeric_open_status();
+    bool sync_numeric_open_status(uint32_t now_ms);
     bool storage_file_matches(const EdfStorageOpenFileStatus &file,
                               const char *path) const;
     bool begin_str_session(const SessionStatus &session);
@@ -166,6 +166,7 @@ private:
     uint32_t last_queue_drops_ = 0;
     uint32_t next_attach_ms_ = 0;
     uint32_t next_session_start_ms_ = 0;
+    uint32_t next_numeric_open_ms_ = 0;
     int64_t session_start_epoch_ms_ = 0;
     uint32_t session_event_subscription_generation_ = 0;
     uint32_t session_event_coverage_gap_count_ = 0;

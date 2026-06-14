@@ -8,6 +8,7 @@
 #include "board.h"
 #include "can_datagram.h"
 #include "debug_log.h"
+#include "memory_manager.h"
 #include "storage_manager.h"
 
 namespace aircannect {
@@ -684,9 +685,18 @@ bool read_coverage_record(File &file,
 // within the join tolerance; "missing" is simply a gap. A query is one walk for
 // the first gap; a write loads, merges, and atomically rewrites, so refreshing a
 // covered span never grows the file and old append-log files coalesce on first
-// read. cov_scratch is reused under the SD guard, which serialises every
-// coverage op, so a single shared buffer is safe.
-ReportStoreCoverageRecord cov_scratch[COVERAGE_MAX_INTERVALS];
+// read. coverage_scratch is reused under the SD guard, which serialises every
+// coverage op, so a single shared buffer is safe. It is lazy/PSRAM-backed:
+// report coverage is storage/report work, not a CAN timing path.
+ReportStoreCoverageRecord *coverage_scratch = nullptr;
+
+ReportStoreCoverageRecord *ensure_coverage_scratch() {
+    if (coverage_scratch) return coverage_scratch;
+    coverage_scratch = static_cast<ReportStoreCoverageRecord *>(
+        Memory::calloc_large(COVERAGE_MAX_INTERVALS,
+                             sizeof(ReportStoreCoverageRecord)));
+    return coverage_scratch;
+}
 
 bool coverage_same_tag(const ReportStoreCoverageRecord &a,
                        const ReportStoreCoverageRecord &b) {
@@ -1575,17 +1585,24 @@ bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed) {
 bool write_coverage_batch(const char *source,
                           const ReportStoreCoverageRecord *records,
                           size_t count) {
-    Storage::Guard g;
     if (!source || !source[0]) {
         note_error("bad_coverage_source", &current.coverage_write_errors);
         return false;
     }
+    ReportStoreCoverageRecord *scratch = ensure_coverage_scratch();
+    if (!scratch) {
+        note_error("coverage_scratch_alloc_failed",
+                   &current.coverage_write_errors);
+        return false;
+    }
+
+    Storage::Guard g;
     if (!ensure_layout()) return false;
 
     // One load -> coalesce ALL records -> one atomic rewrite. Doing this per
     // record (the old per-night call) re-read+rewrote the whole file each time,
     // O(nights x filesize) SD on the main loop -> CAN RX starves -> framing CRC.
-    size_t set_count = load_coverage(source, cov_scratch);
+    size_t set_count = load_coverage(source, scratch);
     size_t added = 0;
     for (size_t i = 0; i < count; ++i) {
         // Only Complete intervals are persisted; an Incomplete span is just a gap.
@@ -1594,14 +1611,14 @@ bool write_coverage_batch(const char *source,
             note_error("bad_coverage_record", &current.coverage_write_errors);
             continue;
         }
-        coverage_insert(cov_scratch, set_count, records[i]);
+        coverage_insert(scratch, set_count, records[i]);
         ++added;
     }
     if (added == 0) {
         set_error(current.last_error, sizeof(current.last_error), "");
         return true;
     }
-    if (!rewrite_coverage_file(source, cov_scratch, set_count)) {
+    if (!rewrite_coverage_file(source, scratch, set_count)) {
         note_error("coverage_write_failed", &current.coverage_write_errors);
         return false;
     }
@@ -1639,22 +1656,28 @@ bool coverage_first_missing(const char *source,
                             int64_t end_ms,
                             uint32_t parser_schema,
                             int64_t &missing_ms) {
-    Storage::Guard g;
     missing_ms = start_ms;
     if (!source || !source[0] || start_ms < 0 || end_ms <= start_ms ||
         parser_schema == 0) {
         note_error("bad_coverage_query", &current.coverage_read_errors);
         return false;
     }
+    ReportStoreCoverageRecord *scratch = ensure_coverage_scratch();
+    if (!scratch) {
+        note_error("coverage_scratch_alloc_failed",
+                   &current.coverage_read_errors);
+        return false;
+    }
 
-    const size_t count = load_coverage(source, cov_scratch);
+    Storage::Guard g;
+    const size_t count = load_coverage(source, scratch);
     const int64_t tol = AC_REPORT_COVERAGE_TOLERANCE_MS;
     int64_t covered_until = start_ms;
-    // cov_scratch is sorted by start and same-tag coalesced, so one walk over the
+    // scratch is sorted by start and same-tag coalesced, so one walk over the
     // matching-schema intervals finds the first gap. Tolerance absorbs small
     // joint/boundary slack; a real interior gap (minutes) is not masked.
     for (size_t i = 0; i < count; ++i) {
-        const ReportStoreCoverageRecord &iv = cov_scratch[i];
+        const ReportStoreCoverageRecord &iv = scratch[i];
         if (iv.parser_schema != parser_schema) continue;
         if (iv.start_ms > covered_until + tol) break;  // gap before this span
         if (iv.end_ms > covered_until) covered_until = iv.end_ms;

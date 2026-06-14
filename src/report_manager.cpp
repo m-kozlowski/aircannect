@@ -168,20 +168,15 @@ bool night_data_span(const ReportSummaryRecord &night,
     return span_end > span_start;
 }
 
-static bool event_coverage_dropped(const ReportSummaryRecord &night,
-                                   const ReportSourceDef &source);
-
 bool source_complete_for_night(const ReportSummaryRecord &night,
                                const ReportSourceDef &source) {
     int64_t span_start = 0;
     int64_t span_end = 0;
     if (!night_data_span(night, span_start, span_end)) return false;
-    if (!ReportStore::coverage_complete(
-            source.spool_type, span_start, span_end, source.parser_schema)) {
-        return false;
-    }
-    if (event_coverage_dropped(night, source)) return false;
-    return true;
+    return ReportStore::coverage_complete(source.spool_type,
+                                          span_start,
+                                          span_end,
+                                          source.parser_schema);
 }
 
 // Series sources stream continuous samples; event sources are sparse (a covered
@@ -191,6 +186,15 @@ bool source_is_sampled(const ReportSourceDef &source) {
     return (source.purposes &
             (REPORT_SOURCE_TREND_SERIES | REPORT_SOURCE_HIGH_RES_SERIES)) != 0;
 }
+
+bool source_is_sparse_event(const ReportSourceDef &source) {
+    return source.id == ReportSourceId::RespiratoryEvents ||
+           source.id == ReportSourceId::UsageEvents;
+}
+
+bool source_latest_cached_end_for_night(const ReportSourceDef &source,
+                                        const ReportSummaryRecord &night,
+                                        int64_t &out_end_ms);
 
 bool store_summary_record_to_buffer(void *context,
                                     const ReportSummaryRecord &record) {
@@ -214,7 +218,8 @@ ReportResultState settled_result_state(uint32_t missing_required) {
 
 bool source_missing_start_for_night(const ReportSummaryRecord &night,
                                     const ReportSourceDef &source,
-                                    int64_t &out_start_ms) {
+                                    int64_t &out_start_ms,
+                                    bool refresh_empty_sparse_event = false) {
     int64_t span_start = 0;
     int64_t span_end = 0;
     if (!night_data_span(night, span_start, span_end)) return false;
@@ -230,7 +235,9 @@ bool source_missing_start_for_night(const ReportSummaryRecord &night,
         return true;
     }
     if (missing_ms >= span_end) {
-        if (event_coverage_dropped(night, source)) {
+        int64_t cached_end_ms = 0;
+        if (refresh_empty_sparse_event && source_is_sparse_event(source) &&
+            !source_latest_cached_end_for_night(source, night, cached_end_ms)) {
             out_start_ms = span_start;
             return true;
         }
@@ -322,25 +329,6 @@ bool source_latest_cached_end_for_night(const ReportSourceDef &source,
     if (!matched) return false;
     out_end_ms = earliest_latest_end;
     return true;
-}
-
-// Events outlive the 6.25Hz high-res, so event-coverage-complete but no cached
-// event chunks while the high-res is still cached means the fetch was dropped,
-// not a real zero -> report it as a gap to re-fetch.
-static bool event_coverage_dropped(const ReportSummaryRecord &night,
-                                   const ReportSourceDef &source) {
-    if (source.id != ReportSourceId::RespiratoryEvents &&
-        source.id != ReportSourceId::UsageEvents) {
-        return false;
-    }
-    int64_t end_ms = 0;
-    if (source_latest_cached_end_for_night(source, night, end_ms)) {
-        return false;  // event chunks present, nothing was dropped
-    }
-    const ReportSourceDef *high_res =
-        report_source_def(ReportSourceId::RespiratoryFlow6p25Hz);
-    if (!high_res) return false;
-    return source_latest_cached_end_for_night(*high_res, night, end_ms);
 }
 
 bool source_required_for_report_result(ReportSourceId source) {
@@ -1651,6 +1639,8 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
 bool ReportManager::next_night_needing_cache(
     uint64_t &night_start_ms_out) const {
     const uint32_t now = millis();
+    ReportSummaryRecord latest;
+    const bool have_latest = latest_summary_night(latest);
     // Oldest-first: the spool is open-ended (fromDateTime -> now), so fetching
     // the OLDEST night with a gap streams every source from there forward and
     // backfills all newer nights in a single sweep (deduped on write)
@@ -1667,6 +1657,11 @@ bool ReportManager::next_night_needing_cache(
         ReportNightCoverageStatus coverage;
         if (!night_coverage(record.start_ms, coverage)) continue;
         if (coverage.missing_required > 0) {
+            night_start_ms_out = record.start_ms;
+            return true;
+        }
+        if (have_latest && record.start_ms == latest.start_ms &&
+            sparse_event_refresh_due_for_night(record, now)) {
             night_start_ms_out = record.start_ms;
             return true;
         }
@@ -1812,6 +1807,50 @@ bool ReportManager::prefetch_in_cooldown(uint64_t night_ms,
     return false;
 }
 
+bool ReportManager::sparse_event_refresh_in_cooldown(
+    uint64_t night_ms,
+    uint32_t now_ms) const {
+    return sparse_event_refresh_night_ == night_ms &&
+           sparse_event_refresh_until_ms_ != 0 &&
+           static_cast<int32_t>(now_ms - sparse_event_refresh_until_ms_) < 0;
+}
+
+void ReportManager::note_sparse_event_refresh(uint64_t night_ms) {
+    sparse_event_refresh_night_ = night_ms;
+    sparse_event_refresh_until_ms_ =
+        millis() + AC_REPORT_PREFETCH_RESCAN_MS;
+    if (sparse_event_refresh_until_ms_ == 0) {
+        sparse_event_refresh_until_ms_ = 1;
+    }
+}
+
+bool ReportManager::sparse_event_refresh_due(
+    const ReportSummaryRecord &night,
+    const ReportSourceDef &source,
+    uint32_t now_ms) const {
+    if (!source_required_for_report_result(source.id)) return false;
+    if (!source_is_sparse_event(source)) return false;
+    if (sparse_event_refresh_in_cooldown(night.start_ms, now_ms)) {
+        return false;
+    }
+    if (!source_complete_for_night(night, source)) return false;
+    int64_t cached_end_ms = 0;
+    return !source_latest_cached_end_for_night(source, night, cached_end_ms);
+}
+
+bool ReportManager::sparse_event_refresh_due_for_night(
+    const ReportSummaryRecord &night,
+    uint32_t now_ms) const {
+    size_t source_count = 0;
+    const ReportSourceDef *sources = report_source_defs(source_count);
+    for (size_t i = 0; i < source_count; ++i) {
+        if (sparse_event_refresh_due(night, sources[i], now_ms)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void ReportManager::prefetch_note_failure(uint64_t night_ms) {
     uint32_t until = millis() + AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS;
     if (until == 0) until = 1;
@@ -1834,10 +1873,26 @@ void ReportManager::set_prefetch_phase(PrefetchPhase phase,
                                        bool inc_failed) {
     if (!prefetch_lock_) return;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
+    const uint64_t phase_night =
+        night_ms != 0 ? night_ms : prefetch_active_night_;
     prefetch_phase_ = phase;
     prefetch_active_night_ = night_ms;
+    if (night_ms != 0) prefetch_last_night_ = night_ms;
     if (inc_completed) prefetch_completed_++;
-    if (inc_failed) prefetch_failed_++;
+    if (inc_failed) {
+        prefetch_failed_++;
+        prefetch_last_failed_night_ = phase_night;
+        if (phase_night != 0) prefetch_last_night_ = phase_night;
+        const char *source =
+            cache_status_.source_count
+                ? report_source_spool_type(cache_status_.active_source)
+                : "";
+        snprintf(prefetch_last_source_, sizeof(prefetch_last_source_), "%s",
+                 source ? source : "");
+        snprintf(prefetch_last_error_, sizeof(prefetch_last_error_), "%s",
+                 cache_status_.error.length() ? cache_status_.error.c_str()
+                                              : "");
+    }
     xSemaphoreGive(prefetch_lock_);
 }
 
@@ -1848,6 +1903,7 @@ bool ReportManager::prefetch_request_next() {
     if (prefetch_phase_ != PrefetchPhase::Pending &&
         prefetch_phase_ != PrefetchPhase::Fetching) {
         prefetch_phase_ = PrefetchPhase::Pending;
+        prefetch_active_night_ = 0;
         accepted = true;
     }
     xSemaphoreGive(prefetch_lock_);
@@ -1867,8 +1923,14 @@ ReportManager::PrefetchSnapshot ReportManager::prefetch_snapshot() const {
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
     snap.phase = prefetch_phase_;
     snap.night_ms = prefetch_active_night_;
+    snap.last_night_ms = prefetch_last_night_;
+    snap.last_failed_night_ms = prefetch_last_failed_night_;
     snap.completed = prefetch_completed_;
     snap.failed = prefetch_failed_;
+    snprintf(snap.last_source, sizeof(snap.last_source), "%s",
+             prefetch_last_source_);
+    snprintf(snap.last_error, sizeof(snap.last_error), "%s",
+             prefetch_last_error_);
     xSemaphoreGive(prefetch_lock_);
     return snap;
 }
@@ -1999,7 +2061,7 @@ void ReportManager::service_prefetch() {
             cache_status_.revision++;
             cache_status_.error = "prefetch_cancelled";
         }
-        set_prefetch_phase(PrefetchPhase::Failed, 0, false, true);
+        set_prefetch_phase(PrefetchPhase::Failed, active, false, true);
         return;
     }
 
@@ -2010,7 +2072,7 @@ void ReportManager::service_prefetch() {
             night_coverage(active, coverage) && coverage.missing_required == 0;
         if (!covered) prefetch_note_failure(active);
         set_prefetch_phase(covered ? PrefetchPhase::Done : PrefetchPhase::Failed,
-                           0, covered, !covered);
+                           active, covered, !covered);
         return;
     }
 
@@ -3401,6 +3463,7 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
     if (!night_data_span(night, night_range.start_ms, night_range.end_ms)) {
         result_status_.state = ReportResultState::Incomplete;
         result_status_.error = "no_sessions";
+        publish_result_to_slot();
         return true;
     }
 
@@ -3497,6 +3560,7 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
     if (result_status_.chunk_count == 0) {
         result_status_.state = ReportResultState::Incomplete;
         result_status_.error = "not_cached";
+        publish_result_to_slot();
     } else {
         std::sort(result_chunks_,
                   result_chunks_ + result_status_.chunk_count,
@@ -3703,7 +3767,12 @@ bool ReportManager::build_cache_plan(const ReportSummaryRecord &night,
         } else if (force) {
             from_ms = static_cast<int64_t>(night.start_ms);
         } else {
-            if (!source_missing_start_for_night(night, source, from_ms)) {
+            const bool refresh_empty_event =
+                sparse_event_refresh_due(night, source, millis());
+            if (!source_missing_start_for_night(night,
+                                                source,
+                                                from_ms,
+                                                refresh_empty_event)) {
                 continue;
             }
         }
@@ -3938,6 +4007,11 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
     if (!source_complete_for_night(cache_night_, *def)) {
         fail_cache_fetch("coverage_incomplete");
         return false;
+    }
+    int64_t cached_end_ms = 0;
+    if (source_is_sparse_event(*def) &&
+        !source_latest_cached_end_for_night(*def, cache_night_, cached_end_ms)) {
+        note_sparse_event_refresh(cache_night_.start_ms);
     }
     return true;
 }

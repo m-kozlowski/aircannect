@@ -280,10 +280,17 @@ void StreamBroker::set_frame_observer(StreamFrameObserver observer,
 StreamPublishResult StreamBroker::publish_stream_data(
     const std::string &payload,
     uint32_t now_ms) {
+    return publish_stream_data(payload.data(), payload.size(), now_ms);
+}
+
+StreamPublishResult StreamBroker::publish_stream_data(
+    const char *payload,
+    size_t payload_len,
+    uint32_t now_ms) {
     StreamPublishResult result;
 
     StreamFrameMetadata metadata;
-    if (stream_parse_metadata(payload, metadata)) {
+    if (stream_parse_metadata(payload, payload_len, metadata)) {
         note_stream_data(metadata.stream_id, metadata.start_time, now_ms);
     }
 
@@ -306,7 +313,7 @@ StreamPublishResult StreamBroker::publish_stream_data(
     }
 
     char error[96] = {};
-    if (!stream_parse_frame(payload, now_ms, *frame.mutable_data(),
+    if (!stream_parse_frame(payload, payload_len, now_ms, *frame.mutable_data(),
                             error, sizeof(error))) {
         (void)error;
         result.parse_error = true;

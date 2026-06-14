@@ -390,7 +390,9 @@ void append_live_series(JsonOut &json,
     json += '"';
     json += key;
     json += "\":[";
-    for (size_t i = 0; i < series.count; ++i) {
+    const size_t count =
+        series.count <= series.capacity ? series.count : series.capacity;
+    for (size_t i = 0; series.values && series.valid && i < count; ++i) {
         if (i) json += ',';
         if (!series.valid[i]) {
             json += "null";
@@ -2427,23 +2429,42 @@ void WebUI::register_routes() {
         const BackgroundWorkerStatus s = w->status();
         const ReportManager::PrefetchSnapshot p =
             report_manager_->prefetch_snapshot();
-        char buf[320];
-        snprintf(buf, sizeof(buf),
-                 "{\"ok\":true,\"started\":%s,\"enabled\":%s,\"idle\":%s,"
-                 "\"gate\":\"%s\",\"ticks\":%lu,\"stack_free\":%lu,"
-                 "\"phase\":%u,\"night_ms\":%llu,\"completed\":%lu,"
-                 "\"failed\":%lu}",
-                 s.task_started ? "true" : "false",
-                 s.enabled ? "true" : "false",
-                 s.idle ? "true" : "false",
-                 s.gate_reason,
-                 static_cast<unsigned long>(s.ticks),
-                 static_cast<unsigned long>(s.stack_high_water_words),
-                 static_cast<unsigned>(p.phase),
-                 static_cast<unsigned long long>(p.night_ms),
-                 static_cast<unsigned long>(p.completed),
-                 static_cast<unsigned long>(p.failed));
-        request->send(200, "application/json", buf);
+        LargeTextBuffer json;
+        json.reserve(512);
+        json = "{";
+        json_add_bool(json, "ok", true, false);
+        json_add_bool(json, "started", s.task_started);
+        json_add_bool(json, "enabled", s.enabled);
+        json_add_bool(json, "idle", s.idle);
+        json_add_string(json, "gate", s.gate_reason);
+        json_add_int(json, "ticks", static_cast<long>(s.ticks));
+        json_add_int(json, "stack_free",
+                     static_cast<long>(s.stack_high_water_words));
+        json_add_int(json, "phase", static_cast<long>(p.phase));
+        json_add_uint64(json, "night_ms", p.night_ms);
+        json_add_uint64(json, "last_night_ms", p.last_night_ms);
+        json_add_uint64(json, "last_failed_night_ms",
+                        p.last_failed_night_ms);
+        json_add_string(json, "last_source", p.last_source);
+        json_add_string(json, "last_error", p.last_error);
+        json_add_int(json, "completed", static_cast<long>(p.completed));
+        json_add_int(json, "failed", static_cast<long>(p.failed));
+        json += "}";
+        if (json.overflowed()) {
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"prefetch alloc\"}");
+            return;
+        }
+        AsyncResponseStream *response =
+            request->beginResponseStream("application/json");
+        if (!response) {
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"response alloc\"}");
+            return;
+        }
+        response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                        json.length());
+        request->send(response);
     });
 
     server_->on("/api/report/prefetch", HTTP_POST,

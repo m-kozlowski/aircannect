@@ -186,12 +186,15 @@ bool parse_event_duration_ms(JsonObjectConst event, int32_t &duration_ms) {
     return false;
 }
 
-bool parse_event_notification(const std::string &payload,
+bool parse_event_notification(const char *payload,
+                              size_t payload_len,
                               As11EventFrame &frame) {
     frame = {};
+    if (!payload && payload_len) return false;
 
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
+    DeserializationError error = deserializeJson(doc, payload ? payload : "",
+                                                 payload ? payload_len : 0);
     if (error) return false;
 
     std::string method;
@@ -379,8 +382,15 @@ bool EventBroker::consumer_active(EventConsumerHandle handle) const {
 EventPublishResult EventBroker::publish_notification(const std::string &payload,
                                                      uint32_t now_ms,
                                                      As11EventFrame &frame) {
+    return publish_notification(payload.data(), payload.size(), now_ms, frame);
+}
+
+EventPublishResult EventBroker::publish_notification(const char *payload,
+                                                     size_t payload_len,
+                                                     uint32_t now_ms,
+                                                     As11EventFrame &frame) {
     EventPublishResult result;
-    if (!parse_event_notification(payload, frame)) return result;
+    if (!parse_event_notification(payload, payload_len, frame)) return result;
 
     result.accepted = true;
     result.truncated = frame.truncated;

@@ -37,13 +37,12 @@ bool seek_top_member(JsonCursor &json, const char *member) {
     return false;
 }
 
-bool collect_rpc_top_flags(const std::string &payload,
+bool collect_rpc_top_flags(JsonCursor &json,
                            bool &has_id,
                            bool &has_method) {
     has_id = false;
     has_method = false;
 
-    JsonCursor json(payload);
     if (!json.consume('{')) return false;
 
     json.skip_ws();
@@ -241,49 +240,84 @@ std::string build_stream_params(const std::string &ids_csv,
     return params;
 }
 
-bool json_member_present(const std::string &json, const char *member) {
-    JsonCursor cursor(json);
+bool json_member_present(const char *json, size_t len, const char *member) {
+    JsonCursor cursor(json, len);
     return seek_top_member(cursor, member);
 }
 
-bool json_has_id(const std::string &json, uint32_t id) {
+bool json_member_present(const std::string &json, const char *member) {
+    return json_member_present(json.data(), json.size(), member);
+}
+
+bool json_has_id(const char *json, size_t len, uint32_t id) {
     uint32_t parsed = 0;
-    return json_extract_id(json, parsed) && parsed == id;
+    return json_extract_id(json, len, parsed) && parsed == id;
+}
+
+bool json_has_id(const std::string &json, uint32_t id) {
+    return json_has_id(json.data(), json.size(), id);
+}
+
+bool json_extract_id(const char *json, size_t len, uint32_t &id) {
+    return json_extract_uint_member(json, len, "id", id);
 }
 
 bool json_extract_id(const std::string &json, uint32_t &id) {
-    return json_extract_uint_member(json, "id", id);
+    return json_extract_id(json.data(), json.size(), id);
+}
+
+bool json_method_is(const char *json, size_t len, const char *method) {
+    std::string parsed;
+    return method && json_extract_string_member(json, len, "method", parsed) &&
+           parsed == method;
 }
 
 bool json_method_is(const std::string &json, const char *method) {
-    std::string parsed;
-    return method && json_extract_string_member(json, "method", parsed) &&
-           parsed == method;
+    return json_method_is(json.data(), json.size(), method);
+}
+
+bool json_extract_uint_member(const char *json,
+                              size_t len,
+                              const char *member,
+                              uint32_t &value) {
+    JsonCursor cursor(json, len);
+    return seek_top_member(cursor, member) && cursor.parse_uint(value);
 }
 
 bool json_extract_uint_member(const std::string &json,
                               const char *member,
                               uint32_t &value) {
-    JsonCursor cursor(json);
-    return seek_top_member(cursor, member) && cursor.parse_uint(value);
+    return json_extract_uint_member(json.data(), json.size(), member, value);
+}
+
+bool json_extract_string_member(const char *json,
+                                size_t len,
+                                const char *member,
+                                std::string &value) {
+    JsonCursor cursor(json, len);
+    return seek_top_member(cursor, member) && cursor.parse_string(value);
 }
 
 bool json_extract_string_member(const std::string &json,
                                 const char *member,
                                 std::string &value) {
-    JsonCursor cursor(json);
-    return seek_top_member(cursor, member) && cursor.parse_string(value);
+    return json_extract_string_member(json.data(), json.size(), member, value);
 }
 
-RpcPayloadKind classify_rpc_payload(const std::string &json) {
+RpcPayloadKind classify_rpc_payload(const char *json, size_t len) {
     bool has_id = false;
     bool has_method = false;
-    if (!collect_rpc_top_flags(json, has_id, has_method)) {
+    JsonCursor cursor(json, len);
+    if (!collect_rpc_top_flags(cursor, has_id, has_method)) {
         return RpcPayloadKind::Unknown;
     }
     if (has_method && !has_id) return RpcPayloadKind::Notification;
     if (has_id) return RpcPayloadKind::Response;
     return RpcPayloadKind::Unknown;
+}
+
+RpcPayloadKind classify_rpc_payload(const std::string &json) {
+    return classify_rpc_payload(json.data(), json.size());
 }
 
 }  // namespace aircannect

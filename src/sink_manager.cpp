@@ -5,6 +5,7 @@
 
 #include "as11_rpc.h"
 #include "board.h"
+#include "memory_manager.h"
 
 namespace aircannect {
 namespace {
@@ -40,13 +41,45 @@ void append_live_sample(LiveChartSeriesBatch &series,
                         bool valid,
                         float value,
                         uint32_t &drops) {
-    if (series.count >= AC_WEB_LIVE_BATCH_SAMPLES_MAX) {
+    if (!series.values || !series.valid ||
+        series.count >= series.capacity) {
         drops++;
         return;
     }
     const size_t index = series.count++;
     series.valid[index] = valid ? 1 : 0;
     series.values[index] = valid ? value : 0.0f;
+}
+
+void clear_live_series(LiveChartSeriesBatch &series) {
+    series.count = 0;
+}
+
+void release_live_series(LiveChartSeriesBatch &series) {
+    Memory::free(series.values);
+    Memory::free(series.valid);
+    series.values = nullptr;
+    series.valid = nullptr;
+    series.capacity = 0;
+    series.count = 0;
+}
+
+bool ensure_live_series(LiveChartSeriesBatch &series) {
+    if (series.values && series.valid &&
+        series.capacity >= AC_WEB_LIVE_BATCH_SAMPLES_MAX) {
+        return true;
+    }
+    release_live_series(series);
+    series.values = static_cast<float *>(
+        Memory::alloc_large(sizeof(float) * AC_WEB_LIVE_BATCH_SAMPLES_MAX));
+    series.valid = static_cast<uint8_t *>(
+        Memory::alloc_large(AC_WEB_LIVE_BATCH_SAMPLES_MAX));
+    if (!series.values || !series.valid) {
+        release_live_series(series);
+        return false;
+    }
+    series.capacity = AC_WEB_LIVE_BATCH_SAMPLES_MAX;
+    return true;
 }
 
 bool append_frame_signal(const StreamFrameData &frame,
@@ -160,7 +193,10 @@ void SinkManager::set_live_chart_enabled(bool enabled) {
     if (live_chart_.enabled == enabled) return;
     live_chart_.enabled = enabled;
     live_chart_.state_dirty = true;
-    if (!enabled) release_live_chart_stream();
+    if (!enabled) {
+        release_live_chart_stream();
+        release_live_chart_batches();
+    }
 }
 
 bool SinkManager::live_chart_enabled() const {
@@ -168,13 +204,13 @@ bool SinkManager::live_chart_enabled() const {
 }
 
 void SinkManager::clear_live_chart_batch() {
-    live_chart_.pressure.count = 0;
-    live_chart_.flow.count = 0;
-    live_chart_.leak.count = 0;
-    live_chart_.inspiratory_pressure.count = 0;
-    live_chart_.expiratory_pressure.count = 0;
-    live_chart_.spo2.count = 0;
-    live_chart_.pulse.count = 0;
+    clear_live_series(live_chart_.pressure);
+    clear_live_series(live_chart_.flow);
+    clear_live_series(live_chart_.leak);
+    clear_live_series(live_chart_.inspiratory_pressure);
+    clear_live_series(live_chart_.expiratory_pressure);
+    clear_live_series(live_chart_.spo2);
+    clear_live_series(live_chart_.pulse);
 }
 
 void SinkManager::mark_live_chart_sent() {
@@ -287,11 +323,47 @@ void SinkManager::poll_live_chart(uint32_t now_ms) {
     }
     if (!should_run) {
         release_live_chart_stream();
+        release_live_chart_batches();
+        return;
+    }
+    if (live_chart_.pressure.capacity == 0 &&
+        static_cast<int32_t>(now_ms - next_live_attach_ms_) < 0) {
+        return;
+    }
+    if (!ensure_live_chart_batches()) {
+        next_live_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
+        live_chart_.attach_failures++;
+        live_chart_.state_dirty = true;
+        release_live_chart_stream();
+        set_live_error("live_batch_alloc_failed");
         return;
     }
 
     attach_live_chart_stream(now_ms);
     drain_live_chart_stream(now_ms);
+}
+
+bool SinkManager::ensure_live_chart_batches() {
+    const bool ok =
+        ensure_live_series(live_chart_.pressure) &&
+        ensure_live_series(live_chart_.flow) &&
+        ensure_live_series(live_chart_.leak) &&
+        ensure_live_series(live_chart_.inspiratory_pressure) &&
+        ensure_live_series(live_chart_.expiratory_pressure) &&
+        ensure_live_series(live_chart_.spo2) &&
+        ensure_live_series(live_chart_.pulse);
+    if (!ok) release_live_chart_batches();
+    return ok;
+}
+
+void SinkManager::release_live_chart_batches() {
+    release_live_series(live_chart_.pressure);
+    release_live_series(live_chart_.flow);
+    release_live_series(live_chart_.leak);
+    release_live_series(live_chart_.inspiratory_pressure);
+    release_live_series(live_chart_.expiratory_pressure);
+    release_live_series(live_chart_.spo2);
+    release_live_series(live_chart_.pulse);
 }
 
 void SinkManager::attach_live_chart_stream(uint32_t now_ms) {

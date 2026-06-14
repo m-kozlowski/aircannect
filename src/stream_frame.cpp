@@ -580,12 +580,31 @@ bool stream_parse_metadata(const std::string &payload,
                            StreamFrameMetadata &metadata,
                            char *error,
                            size_t error_len) {
+    return stream_parse_metadata(payload.data(), payload.size(), metadata,
+                                 error, error_len);
+}
+
+bool stream_parse_metadata(const char *payload,
+                           size_t payload_len,
+                           StreamFrameMetadata &metadata,
+                           char *error,
+                           size_t error_len) {
     metadata = {};
-    JsonCursor json(payload, error, error_len);
+    JsonCursor json(payload, payload_len, error, error_len);
     return parse_top(json, nullptr, &metadata);
 }
 
 bool stream_parse_frame(const std::string &payload,
+                        uint32_t now_ms,
+                        StreamFrameData &frame,
+                        char *error,
+                        size_t error_len) {
+    return stream_parse_frame(payload.data(), payload.size(), now_ms, frame,
+                              error, error_len);
+}
+
+bool stream_parse_frame(const char *payload,
+                        size_t payload_len,
                         uint32_t now_ms,
                         StreamFrameData &frame,
                         char *error,
@@ -597,16 +616,19 @@ bool stream_parse_frame(const std::string &payload,
     frame.in_use = true;
     frame.refcount = 1;
 
-    frame.raw_json_len = payload.size();
-    const size_t copy_len =
-        payload.size() < AC_STREAM_FRAME_RAW_MAX - 1
-            ? payload.size()
-            : AC_STREAM_FRAME_RAW_MAX - 1;
-    if (copy_len) memcpy(frame.raw_json, payload.data(), copy_len);
-    frame.raw_json[copy_len] = 0;
-    frame.raw_truncated = copy_len != payload.size();
+    const char *payload_data = payload ? payload : "";
+    const size_t payload_size = payload ? payload_len : 0;
 
-    JsonCursor json(payload, error, error_len);
+    frame.raw_json_len = payload_size;
+    const size_t copy_len =
+        payload_size < AC_STREAM_FRAME_RAW_MAX - 1
+            ? payload_size
+            : AC_STREAM_FRAME_RAW_MAX - 1;
+    if (copy_len) memcpy(frame.raw_json, payload_data, copy_len);
+    frame.raw_json[copy_len] = 0;
+    frame.raw_truncated = copy_len != payload_size;
+
+    JsonCursor json(payload_data, payload_size, error, error_len);
     if (!parse_top(json, &frame, nullptr)) return false;
     for (size_t i = 0; i < frame.signal_count; ++i) {
         if (frame.signals[i].sample_interval_ms == 0) {

@@ -17,6 +17,16 @@ struct JsonCursor {
     char *error = nullptr;
     size_t error_len = 0;
 
+    JsonCursor(const char *payload,
+               size_t payload_len,
+               char *error_buf = nullptr,
+               size_t error_buf_len = 0)
+        : error(error_buf), error_len(error_buf_len) {
+        const char *base = payload ? payload : "";
+        pos = base;
+        end = base + (payload ? payload_len : 0);
+    }
+
     explicit JsonCursor(const std::string &payload,
                         char *error_buf = nullptr,
                         size_t error_buf_len = 0)
@@ -101,13 +111,32 @@ struct JsonCursor {
 
     bool parse_float(float &value) {
         skip_ws();
-        char *next = nullptr;
-        value = strtof(pos, &next);
-        if (next == pos || next > end) {
+        const char *start = pos;
+        while (pos < end) {
+            const char c = *pos;
+            if ((c >= '0' && c <= '9') || c == '-' || c == '+' ||
+                c == '.' || c == 'e' || c == 'E') {
+                pos++;
+                continue;
+            }
+            break;
+        }
+        const size_t len = static_cast<size_t>(pos - start);
+        if (len == 0 || len >= 64) {
             fail("expected number");
+            pos = start;
             return false;
         }
-        pos = next;
+        char buf[64];
+        memcpy(buf, start, len);
+        buf[len] = 0;
+        char *next = nullptr;
+        value = strtof(buf, &next);
+        if (next == buf || *next != 0) {
+            fail("expected number");
+            pos = start;
+            return false;
+        }
         return true;
     }
 

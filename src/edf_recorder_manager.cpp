@@ -99,11 +99,18 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         return;
     }
 
+    if (!numeric_files_open_ &&
+        static_cast<int32_t>(now_ms - next_numeric_open_ms_) < 0) {
+        release_stream();
+        sync_annotation_open_status();
+        return;
+    }
+
     attach_stream(now_ms);
-    (void)ensure_numeric_files_open();
+    (void)ensure_numeric_files_open(now_ms);
     sync_annotation_open_status();
     if (!numeric_files_open_) return;
-    if (!sync_numeric_open_status()) return;
+    if (!sync_numeric_open_status(now_ms)) return;
     drain_stream(now_ms);
 }
 
@@ -267,6 +274,7 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     pending_stream_frame_.reset();
     reset_numeric_schemas();
     next_attach_ms_ = now_ms;
+    next_numeric_open_ms_ = now_ms;
     str_settings_pending_ = false;
     str_settings_request_id_ = 0;
     str_settings_request_ms_ = 0;
@@ -489,18 +497,23 @@ bool EdfRecorderManager::numeric_stream_ready() const {
     return arbiter_->stream_accepted_data_id_count() > 0;
 }
 
-bool EdfRecorderManager::ensure_numeric_files_open() {
+bool EdfRecorderManager::ensure_numeric_files_open(uint32_t now_ms) {
     if (numeric_files_open_) return true;
+    if (static_cast<int32_t>(now_ms - next_numeric_open_ms_) < 0) {
+        return true;
+    }
     if (!numeric_stream_ready()) {
         return true;
     }
     if (!session_header_date_[0] || !session_header_time_[0]) {
         status_.file_open_failures++;
+        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
         set_error("missing_numeric_header");
         return false;
     }
     if (!build_numeric_schemas()) {
         status_.file_open_failures++;
+        next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
         return false;
     }
     numeric_open_synced_ = false;
@@ -518,6 +531,7 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
                                        status_.brp_path,
                                        sizeof(status_.brp_path))) {
             status_.file_open_failures++;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
             return false;
         }
         brp_schema_.open = true;
@@ -533,6 +547,7 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
                 brp_schema_.open = false;
             }
             status_.file_open_failures++;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
             return false;
         }
         pld_schema_.open = true;
@@ -553,6 +568,7 @@ bool EdfRecorderManager::ensure_numeric_files_open() {
                 pld_schema_.open = false;
             }
             status_.file_open_failures++;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
             return false;
         }
         sa2_schema_.open = true;
@@ -663,7 +679,7 @@ void EdfRecorderManager::sync_annotation_open_status() {
     }
 }
 
-bool EdfRecorderManager::sync_numeric_open_status() {
+bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     if (!numeric_files_open_) return true;
     if (numeric_open_synced_) return true;
 
@@ -699,6 +715,8 @@ bool EdfRecorderManager::sync_numeric_open_status() {
             numeric_open_synced_ = true;
             reset_numeric_schemas();
             status_.files_open = files_open_;
+            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+            release_stream();
         }
         return false;
     }

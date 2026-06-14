@@ -458,6 +458,15 @@ void print_report_prefetch_status(Print &out, const ReportManager &manager) {
              static_cast<unsigned long>(p.completed),
              static_cast<unsigned long>(p.failed));
     out.println(line);
+    out.print("[REPORT] prefetch last_night=");
+    print_uint64(out, p.last_night_ms);
+    out.print(" last_failed=");
+    print_uint64(out, p.last_failed_night_ms);
+    out.print(" source=");
+    out.print(p.last_source[0] ? p.last_source : "--");
+    out.print(" error=");
+    out.print(p.last_error[0] ? p.last_error : "--");
+    out.println();
 }
 
 void print_report_cache_status(Print &out,

@@ -2,10 +2,45 @@
 
 #include <algorithm>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "board.h"
 
+#ifdef ARDUINO
+#include "memory_manager.h"
+#endif
+
 namespace aircannect {
+namespace {
+
+void *alloc_reassembly_bytes(size_t bytes) {
+#ifdef ARDUINO
+    return Memory::alloc_large(bytes);
+#else
+    return malloc(bytes);
+#endif
+}
+
+void free_reassembly_bytes(void *ptr) {
+#ifdef ARDUINO
+    Memory::free(ptr);
+#else
+    free(ptr);
+#endif
+}
+
+size_t clamp_initial_reserve(size_t reserve) {
+    if (reserve < AC_DG_INITIAL_RESERVE_BYTES) {
+        return AC_DG_INITIAL_RESERVE_BYTES;
+    }
+    if (reserve > AC_DG_MAX_PAYLOAD_BYTES) {
+        return AC_DG_MAX_PAYLOAD_BYTES;
+    }
+    return reserve;
+}
+
+}  // namespace
 
 static constexpr uint8_t DG_MIDDLE = 0x00;
 static constexpr uint8_t DG_START = 0x01;
@@ -78,12 +113,18 @@ std::vector<DatagramFrame> encode_datagram(const std::string &payload) {
                            payload.size());
 }
 
+DatagramRx::DatagramRx()
+    : initial_reserve_(AC_DG_INITIAL_RESERVE_BYTES) {}
+
+DatagramRx::DatagramRx(size_t initial_reserve)
+    : initial_reserve_(clamp_initial_reserve(initial_reserve)) {}
+
+DatagramRx::~DatagramRx() {
+    free_reassembly_bytes(parts_);
+}
+
 void DatagramRx::reset() {
-    if (parts_.capacity() > AC_DG_INITIAL_RESERVE_BYTES) {
-        std::vector<uint8_t>().swap(parts_);
-    } else {
-        parts_.clear();
-    }
+    parts_len_ = 0;
     expected_crc_ = 0;
     last_frame_ms_ = 0;
     have_crc_ = false;
@@ -101,7 +142,7 @@ DatagramFeedResult DatagramRx::poll(uint32_t now_ms) {
         return result;
     }
 
-    const size_t len = parts_.size();
+    const size_t len = parts_len_;
     reset();
     result.status = DatagramStatus::Error;
     char buf[96];
@@ -111,23 +152,41 @@ DatagramFeedResult DatagramRx::poll(uint32_t now_ms) {
     return result;
 }
 
+bool DatagramRx::reserve_parts(size_t capacity, DatagramFeedResult &result) {
+    if (capacity <= parts_capacity_) return true;
+    if (capacity > AC_DG_MAX_PAYLOAD_BYTES) capacity = AC_DG_MAX_PAYLOAD_BYTES;
+
+    uint8_t *next = static_cast<uint8_t *>(alloc_reassembly_bytes(capacity));
+    if (!next) {
+        reset();
+        result.status = DatagramStatus::Error;
+        result.error = "datagram allocation failed";
+        return false;
+    }
+    if (parts_ && parts_len_) memcpy(next, parts_, parts_len_);
+    free_reassembly_bytes(parts_);
+    parts_ = next;
+    parts_capacity_ = capacity;
+    return true;
+}
+
 bool DatagramRx::append_bytes(const uint8_t *data,
                               size_t len,
                               DatagramFeedResult &result) {
     if (!len) return true;
     if (len > AC_DG_MAX_PAYLOAD_BYTES ||
-        parts_.size() > AC_DG_MAX_PAYLOAD_BYTES - len) {
+        parts_len_ > AC_DG_MAX_PAYLOAD_BYTES - len) {
         reset();
         result.status = DatagramStatus::Error;
         result.error = "datagram exceeds max payload";
         return false;
     }
 
-    const size_t needed = parts_.size() + len;
-    if (needed > parts_.capacity()) {
-        size_t target = parts_.capacity();
-        if (target < AC_DG_INITIAL_RESERVE_BYTES) {
-            target = AC_DG_INITIAL_RESERVE_BYTES;
+    const size_t needed = parts_len_ + len;
+    if (needed > parts_capacity_) {
+        size_t target = parts_capacity_;
+        if (target < initial_reserve_) {
+            target = initial_reserve_;
         }
         while (target < needed && target < AC_DG_MAX_PAYLOAD_BYTES) {
             target *= 2;
@@ -135,11 +194,17 @@ bool DatagramRx::append_bytes(const uint8_t *data,
         if (target > AC_DG_MAX_PAYLOAD_BYTES) {
             target = AC_DG_MAX_PAYLOAD_BYTES;
         }
-        parts_.reserve(target);
+        if (!reserve_parts(target, result)) return false;
     }
 
-    parts_.insert(parts_.end(), data, data + len);
+    memcpy(parts_ + parts_len_, data, len);
+    parts_len_ += len;
     return true;
+}
+
+void DatagramRx::set_payload_view(DatagramFeedResult &result) const {
+    result.payload_data = reinterpret_cast<const char *>(parts_);
+    result.payload_len = parts_len_;
 }
 
 DatagramFeedResult DatagramRx::feed(const uint8_t *data,
@@ -160,8 +225,8 @@ DatagramFeedResult DatagramRx::feed(const uint8_t *data,
         case DG_SINGLE:
             reset();
             result.status = DatagramStatus::Complete;
-            result.payload.assign(reinterpret_cast<const char *>(data + 1),
-                                  len - 1);
+            result.payload_data = reinterpret_cast<const char *>(data + 1);
+            result.payload_len = len - 1;
             return result;
 
         case DG_START:
@@ -171,7 +236,7 @@ DatagramFeedResult DatagramRx::feed(const uint8_t *data,
                 result.error = "start frame shorter than CRC field";
                 return result;
             }
-            parts_.clear();
+            parts_len_ = 0;
             expected_crc_ = static_cast<uint32_t>(data[1]) |
                             (static_cast<uint32_t>(data[2]) << 8) |
                             (static_cast<uint32_t>(data[3]) << 16) |
@@ -191,23 +256,24 @@ DatagramFeedResult DatagramRx::feed(const uint8_t *data,
             if (!have_crc_) return result;
             note_frame(now_ms);
             if (!append_bytes(data + 1, len - 1, result)) return result;
-            const uint32_t actual = crc32_ieee(parts_.data(), parts_.size());
+            const uint32_t actual = crc32_ieee(parts_, parts_len_);
             if (actual != expected_crc_) {
                 char buf[128];
                 snprintf(buf, sizeof(buf),
                          "CRC mismatch expected=0x%08lX actual=0x%08lX len=%u",
                          static_cast<unsigned long>(expected_crc_),
                          static_cast<unsigned long>(actual),
-                         static_cast<unsigned>(parts_.size()));
+                         static_cast<unsigned>(parts_len_));
                 reset();
                 result.status = DatagramStatus::Error;
                 result.error = buf;
                 return result;
             }
             result.status = DatagramStatus::Complete;
-            result.payload.assign(reinterpret_cast<const char *>(parts_.data()),
-                                  parts_.size());
-            reset();
+            set_payload_view(result);
+            have_crc_ = false;
+            expected_crc_ = 0;
+            last_frame_ms_ = 0;
             return result;
         }
 

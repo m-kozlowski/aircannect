@@ -29,6 +29,7 @@ struct StorageStatus {
     uint64_t free_bytes = 0;
     uint64_t card_size_bytes = 0;
     uint32_t last_checked_ms = 0;
+    uint8_t max_open_files = 0;
     uint8_t width = 0;
     char mount_point[16] = {};
     char card_type[16] = {};

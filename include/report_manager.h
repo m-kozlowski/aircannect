@@ -186,8 +186,12 @@ public:
     struct PrefetchSnapshot {
         PrefetchPhase phase = PrefetchPhase::Idle;
         uint64_t night_ms = 0;
+        uint64_t last_night_ms = 0;
+        uint64_t last_failed_night_ms = 0;
         uint32_t completed = 0;
         uint32_t failed = 0;
+        char last_source[48] = {};
+        char last_error[48] = {};
     };
     bool prefetch_request_next();
     void prefetch_cancel();
@@ -352,6 +356,14 @@ private:
                             bool inc_completed, bool inc_failed);
     void prefetch_note_failure(uint64_t night_ms);
     bool prefetch_in_cooldown(uint64_t night_ms, uint32_t now_ms) const;
+    bool sparse_event_refresh_in_cooldown(uint64_t night_ms,
+                                          uint32_t now_ms) const;
+    void note_sparse_event_refresh(uint64_t night_ms);
+    bool sparse_event_refresh_due(const ReportSummaryRecord &night,
+                                  const ReportSourceDef &source,
+                                  uint32_t now_ms) const;
+    bool sparse_event_refresh_due_for_night(const ReportSummaryRecord &night,
+                                            uint32_t now_ms) const;
 
     bool ensure_result_chunks();
     void clear_result_prepare();
@@ -467,10 +479,16 @@ private:
     mutable SemaphoreHandle_t prefetch_lock_ = nullptr;
     PrefetchPhase prefetch_phase_ = PrefetchPhase::Idle;
     uint64_t prefetch_active_night_ = 0;
+    uint64_t prefetch_last_night_ = 0;
+    uint64_t prefetch_last_failed_night_ = 0;
     bool prefetch_cancel_req_ = false;
     uint32_t prefetch_completed_ = 0;
     uint32_t prefetch_failed_ = 0;
+    char prefetch_last_source_[48] = {};
+    char prefetch_last_error_[48] = {};
     PrefetchSkip prefetch_skip_[PREFETCH_SKIP_MAX] = {};
+    uint64_t sparse_event_refresh_night_ = 0;
+    uint32_t sparse_event_refresh_until_ms_ = 0;
 
     ReportResultChunk *result_chunks_ = nullptr;
     size_t result_chunk_capacity_ = 0;

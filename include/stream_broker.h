@@ -91,6 +91,9 @@ public:
     void set_frame_observer(StreamFrameObserver observer, void *context);
     StreamPublishResult publish_stream_data(const std::string &payload,
                                             uint32_t now_ms);
+    StreamPublishResult publish_stream_data(const char *payload,
+                                            size_t payload_len,
+                                            uint32_t now_ms);
     bool next_frame(StreamConsumerHandle handle, StreamFrameRef &frame);
     bool next_payload(StreamConsumerHandle handle, std::string &payload);
     size_t consumer_queue_count(StreamConsumerHandle handle) const;
