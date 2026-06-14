@@ -29,6 +29,7 @@ static constexpr size_t AC_EDF_STR_MASK_EVENTS_SIGNAL = 3;
 static constexpr size_t AC_EDF_STR_DURATION_SIGNAL = 4;
 static constexpr size_t AC_EDF_STR_CRC_SIGNAL = 133;
 static constexpr size_t AC_EDF_STR_MASK_EVENT_CAPACITY = 20;
+static constexpr size_t AC_EDF_NUMERIC_SIGNAL_MAX = AC_EDF_PLD_SIGNAL_COUNT;
 
 struct EdfSignalSpec {
     const char *label = "";
@@ -48,6 +49,7 @@ struct EdfFileSchema {
     const char *suffix = "";
     const char *reserved = "EDF";
     const EdfSignalSpec *signals = nullptr;
+    const uint8_t *source_signal_indices = nullptr;
     size_t signal_count = 0;
     size_t source_signal_count = 0;
     size_t source_samples_per_record = 0;

@@ -15,6 +15,8 @@
 #include "as11_rpc.h"
 #include "background_worker.h"
 #include "debug_log.h"
+#include "edf_storage_catalog.h"
+#include "edf_storage_worker.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_records.h"
@@ -169,6 +171,98 @@ bool request_size_arg_limited(AsyncWebServerRequest *request,
         strtoull(value.c_str(), &end, 10);
     if (!end || *end != 0 || parsed > max_value) return false;
     out = static_cast<size_t>(parsed);
+    return true;
+}
+
+static constexpr size_t kEdfListDefaultLimit = 64;
+static constexpr size_t kEdfListMaxLimit = 128;
+
+const char *basename_from_path(const char *path) {
+    if (!path) return "";
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+bool build_child_path(const char *parent,
+                      const char *name,
+                      char *dst,
+                      size_t dst_size) {
+    if (!parent || !name || !*name || !dst || dst_size == 0) return false;
+    const int written =
+        strcmp(parent, "/") == 0
+            ? snprintf(dst, dst_size, "/%s", name)
+            : snprintf(dst, dst_size, "%s/%s", parent, name);
+    return written > 0 && static_cast<size_t>(written) < dst_size;
+}
+
+bool append_edf_list_entry(LargeTextBuffer &json,
+                           const char *name,
+                           const char *path,
+                           bool is_dir,
+                           uint64_t size,
+                           bool first) {
+    if (!first) json += ',';
+    json += '{';
+    json_add_string(json, "name", name, false);
+    json_add_string(json, "path", path);
+    json_add_string(json, "type", is_dir ? "dir" : "file");
+    if (!is_dir) json_add_uint64(json, "size", size);
+    json += '}';
+    return !json.overflowed();
+}
+
+bool append_edf_list_entry_window(LargeTextBuffer &json,
+                                  const char *name,
+                                  const char *path,
+                                  bool is_dir,
+                                  uint64_t size,
+                                  size_t offset,
+                                  size_t limit,
+                                  size_t &matched,
+                                  size_t &returned,
+                                  bool &first,
+                                  bool &truncated) {
+    if (matched++ < offset) return true;
+    if (returned >= limit) {
+        truncated = true;
+        return false;
+    }
+    if (!append_edf_list_entry(json, name, path, is_dir, size, first)) {
+        return false;
+    }
+    first = false;
+    ++returned;
+    return true;
+}
+
+bool edf_storage_request_available(AsyncWebServerRequest *request,
+                                   const SessionManager *session_manager,
+                                   const RpcArbiter *arbiter) {
+    if (session_manager &&
+        session_manager->status().state == SessionState::Active) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"therapy_active\"}");
+        return false;
+    }
+    if (arbiter &&
+        arbiter->as11_state().therapy_state() ==
+            As11TherapyState::Running) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"therapy_active\"}");
+        return false;
+    }
+    if (!Storage::mounted()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_unavailable\"}");
+        return false;
+    }
+    const EdfStorageWorkerStatus edf_storage = EdfStorageWorker::status();
+    if (edf_storage.busy || edf_storage.queued > 0 ||
+        edf_storage.open_file_count > 0) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"edf_storage_busy\"}");
+        return false;
+    }
     return true;
 }
 
@@ -1520,6 +1614,201 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
     request->send(response);
 }
 
+void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
+    if (BackgroundWorker *w = background_worker()) w->note_activity();
+
+    const String path = request->hasArg("path") ? request->arg("path") : "/";
+    size_t offset = 0;
+    size_t limit = kEdfListDefaultLimit;
+    if (!request_size_arg_limited(request, "offset", 0, 65535, offset) ||
+        !request_size_arg_limited(request, "limit", kEdfListDefaultLimit,
+                                  kEdfListMaxLimit, limit)) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_range\"}");
+        return;
+    }
+    if (!edf_valid_browse_path(path.c_str())) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_path\"}");
+        return;
+    }
+    if (!edf_storage_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+
+    LargeTextBuffer json;
+    json.reserve(512 + limit * 192);
+    json = "{";
+    json_add_bool(json, "ok", true, false);
+    json_add_string(json, "path", path.c_str());
+    json_add_int(json, "offset", static_cast<long>(offset));
+    json_add_int(json, "limit", static_cast<long>(limit));
+    json += ",\"entries\":[";
+
+    bool first = true;
+    bool truncated = false;
+    bool not_found = false;
+    bool not_dir = false;
+    size_t matched = 0;
+    size_t returned = 0;
+
+    {
+        Storage::Guard guard;
+        if (path == "/") {
+            File datalog = Storage::open("/DATALOG", "r");
+            if (datalog && datalog.isDirectory()) {
+                append_edf_list_entry_window(
+                    json, "DATALOG", "/DATALOG", true, 0, offset, limit,
+                    matched, returned, first, truncated);
+            }
+            if (datalog) datalog.close();
+
+            if (!truncated) {
+                File str = Storage::open("/STR.edf", "r");
+                if (str && !str.isDirectory()) {
+                    append_edf_list_entry_window(
+                        json, "STR.edf", "/STR.edf", false, str.size(),
+                        offset, limit, matched, returned, first, truncated);
+                }
+                if (str) str.close();
+            }
+        } else {
+            File dir = Storage::open(path.c_str(), "r");
+            if (!dir) {
+                not_found = true;
+            } else if (!dir.isDirectory()) {
+                not_dir = true;
+            } else {
+                while (!truncated) {
+                    File child = dir.openNextFile();
+                    if (!child) break;
+                    const bool child_dir = child.isDirectory();
+                    const char *name = basename_from_path(child.name());
+                    char child_path[AC_STORAGE_WRITE_PATH_MAX] = {};
+                    bool include = false;
+                    uint64_t size = 0;
+
+                    if (build_child_path(path.c_str(), name, child_path,
+                                         sizeof(child_path))) {
+                        if (path == "/DATALOG") {
+                            include = child_dir &&
+                                      edf_valid_browse_path(child_path);
+                        } else {
+                            include = !child_dir &&
+                                      edf_valid_pull_path(child_path);
+                            if (include) size = child.size();
+                        }
+                    }
+
+                    bool keep_going = true;
+                    if (include) {
+                        keep_going = append_edf_list_entry_window(
+                            json, name, child_path, child_dir, size, offset,
+                            limit, matched, returned, first, truncated);
+                    }
+                    child.close();
+                    if (!keep_going) break;
+                }
+            }
+            if (dir) dir.close();
+        }
+    }
+
+    if (not_found || not_dir) {
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"error\":\"not_found\"}");
+        return;
+    }
+
+    json += ']';
+    json_add_int(json, "count", static_cast<long>(returned));
+    json_add_bool(json, "truncated", truncated);
+    if (truncated) {
+        char next[24];
+        snprintf(next, sizeof(next), "%llu",
+                 static_cast<unsigned long long>(offset + returned));
+        json += ",\"next_offset\":";
+        json += next;
+    } else {
+        json += ",\"next_offset\":null";
+    }
+    json += '}';
+
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"list_alloc\"}");
+        return;
+    }
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    request->send(response);
+}
+
+void WebUI::send_edf_download(AsyncWebServerRequest *request) const {
+    if (BackgroundWorker *w = background_worker()) w->note_activity();
+
+    if (!request->hasArg("path")) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"missing_path\"}");
+        return;
+    }
+    const String path = request->arg("path");
+    if (!edf_valid_pull_path(path.c_str())) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_path\"}");
+        return;
+    }
+    if (!edf_storage_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+
+    std::shared_ptr<File> file_ref = std::make_shared<File>();
+    size_t file_size = 0;
+    {
+        Storage::Guard guard;
+        *file_ref = Storage::open(path.c_str(), "r");
+        if (!*file_ref || file_ref->isDirectory()) {
+            if (*file_ref) file_ref->close();
+            request->send(404, "application/json",
+                          "{\"ok\":false,\"error\":\"not_found\"}");
+            return;
+        }
+        file_size = static_cast<size_t>(file_ref->size());
+    }
+
+    AsyncWebServerResponse *response = request->beginResponse(
+        "application/octet-stream",
+        file_size,
+        [file_ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
+            if (!buffer || !file_ref || !*file_ref) return 0;
+            Storage::Guard guard;
+            const size_t size = static_cast<size_t>(file_ref->size());
+            if (offset >= size || !file_ref->seek(offset)) return 0;
+            const size_t remaining = size - offset;
+            const size_t wanted = remaining < max_len ? remaining : max_len;
+            return file_ref->read(buffer, wanted);
+        });
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    char disposition[96];
+    snprintf(disposition, sizeof(disposition),
+             "attachment; filename=\"%s\"",
+             basename_from_path(path.c_str()));
+    response->addHeader("Content-Disposition", disposition);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
 void WebUI::build_stream_json(LargeTextBuffer &json) const {
     const StreamBroker &stream = arbiter_->stream_broker();
     const RpcArbiterStats &stats = arbiter_->stats();
@@ -2108,6 +2397,16 @@ void WebUI::register_routes() {
 
     server_->on("/api/stream", HTTP_GET, [this](AsyncWebServerRequest *request) {
         send_cached(request, cached_stream_json_);
+    });
+
+    server_->on("/api/edf/list", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_edf_list(request);
+    });
+
+    server_->on("/api/edf/download", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_edf_download(request);
     });
 
     server_->on("/api/report/summary", HTTP_GET,

@@ -255,6 +255,16 @@ void print_edf_recorder_status(Print &out,
     out.print(status.files_open ? "open" : "closed");
     out.print(" event_observer=");
     out.print(status.event_observer_registered ? "yes" : "no");
+    out.print(" event_subscription=");
+    out.print(status.event_attached ? "attached" : "idle");
+    out.print(" event_coverage=");
+    out.print(status.event_coverage_uncertain ? "uncertain" : "clean");
+    out.print(" event_gen=");
+    out.print(static_cast<unsigned long>(
+        status.event_subscription_generation));
+    out.print(" event_gaps=");
+    out.print(static_cast<unsigned long>(
+        status.event_coverage_session_gaps));
     out.print(" session=");
     out.print(static_cast<unsigned long>(status.session_id));
     out.print(" sessions=");
@@ -300,6 +310,10 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned>(storage.queued));
     out.print('/');
     out.print(static_cast<unsigned>(storage.capacity));
+    out.print(" storage_busy=");
+    out.print(storage.busy ? "yes" : "no");
+    out.print(" storage_open=");
+    out.print(static_cast<unsigned>(storage.open_file_count));
     out.print(" storage_written=");
     out.print(static_cast<unsigned long>(storage.records_written));
     out.print(" storage_drops=");

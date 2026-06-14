@@ -72,22 +72,22 @@ bool collect_rpc_top_flags(const std::string &payload,
 }  // namespace
 
 const char *const DEFAULT_EDF_STREAM_IDS =
-    "PatientFlow,"
-    "MaskPressure,"
-    "MaskPressure-TwoSecond,"
-    "InspiratoryPressure-TwoSecond,"
-    "ExpiratoryPressure-TwoSecond,"
-    "Leak,"
-    "RespiratoryRate,"
-    "TidalVolume,"
-    "MinuteVentilation,"
-    "TargetMinuteVentilation,"
-    "IeRatio,"
-    "SnoreIndex,"
-    "FlowLimitation,"
-    "InspiratoryDuration,"
-    "HeartRate,"
-    "SpO2";
+    "_RFL,"
+    "_MKP,"
+    "_MKF,"
+    "_MKI,"
+    "_MKE,"
+    "_LKF,"
+    "_RR2,"
+    "_TD2,"
+    "_MV2,"
+    "_TGT,"
+    "_IE2,"
+    "_SNI,"
+    "_FFL,"
+    "_INT,"
+    "_HRT,"
+    "_SAO";
 
 const char *rpc_version_for_method(const std::string &method) {
     if (method == "GetVersion" || method == "EnterMaskFit") return "2.0";

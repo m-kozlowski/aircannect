@@ -81,6 +81,7 @@ public:
     void mark_command_timeout(uint32_t now_ms);
     void mark_command_response(StreamCommandType type,
                                bool is_error,
+                               const std::string &payload,
                                uint32_t now_ms);
     void mark_reattach();
 
@@ -112,6 +113,13 @@ public:
     uint32_t last_stream_id() const { return last_stream_id_; }
     const std::string &last_start_time() const { return last_start_time_; }
     uint32_t last_notification_ms() const { return last_notification_ms_; }
+    size_t accepted_data_id_count() const {
+        return accepted_subscription_.data_id_count;
+    }
+    const std::string &accepted_data_ids_csv() const {
+        return accepted_subscription_.data_ids_csv;
+    }
+    bool accepted_data_id(const char *data_id) const;
 
 private:
     struct Subscription {
@@ -140,8 +148,9 @@ private:
                             const std::string &data_id);
     static bool merge_data_ids(Subscription &subscription,
                                const Subscription &input);
-    static bool compatible_interval(const Subscription &a,
-                                    const Subscription &b);
+    static bool parse_start_response(const std::string &payload,
+                                     Subscription &accepted,
+                                     uint32_t &stream_id);
     bool build_desired_subscription(Subscription &subscription) const;
     bool build_desired_with_extra(const Subscription &extra,
                                   Subscription &subscription) const;
@@ -155,6 +164,7 @@ private:
     Consumer consumers_[AC_STREAM_CONSUMERS_MAX];
     Subscription external_subscription_;
     Subscription desired_subscription_;
+    Subscription accepted_subscription_;
 
     std::string params_json_;
     std::string last_start_time_;

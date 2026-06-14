@@ -25,7 +25,10 @@ struct EdfRecorderStatus {
     bool stream_attached = false;
     bool files_open = false;
     bool event_observer_registered = false;
+    bool event_attached = false;
+    bool event_coverage_uncertain = false;
     StreamConsumerHandle stream_handle = STREAM_CONSUMER_INVALID;
+    EventConsumerHandle event_handle = EVENT_CONSUMER_INVALID;
     uint32_t session_id = 0;
     uint32_t sessions_started = 0;
     uint32_t sessions_ended = 0;
@@ -35,6 +38,9 @@ struct EdfRecorderStatus {
     uint32_t frame_drops = 0;
     uint32_t event_frames = 0;
     uint32_t event_records = 0;
+    uint32_t event_subscription_generation = 0;
+    uint32_t event_coverage_gap_count = 0;
+    uint32_t event_coverage_session_gaps = 0;
     uint32_t respiratory_events = 0;
     uint32_t csr_events = 0;
     uint32_t brp_records = 0;
@@ -82,6 +88,14 @@ public:
     void handle_event_frame(const As11EventFrame &frame, uint32_t now_ms);
 
 private:
+    struct NumericSchemaState {
+        bool enabled = false;
+        bool open = false;
+        EdfSignalSpec signals[AC_EDF_NUMERIC_SIGNAL_MAX + 1] = {};
+        uint8_t source_indices[AC_EDF_NUMERIC_SIGNAL_MAX] = {};
+        EdfFileSchema schema;
+    };
+
     static void event_frame_observer(void *context,
                                      const As11EventFrame &frame,
                                      uint32_t now_ms);
@@ -98,8 +112,14 @@ private:
     void end_session(const SessionStatus &session,
                      uint32_t now_ms,
                      const char *reason);
-    bool open_session_files(const SessionStatus &session);
-    bool enqueue_numeric_file_open(EdfFileKind kind,
+    bool open_session_annotation_files(const SessionStatus &session);
+    bool ensure_numeric_files_open();
+    bool build_numeric_schemas();
+    bool build_numeric_schema(EdfFileKind kind,
+                              NumericSchemaState &state);
+    bool accepted_short_tag(const char *short_tag) const;
+    void reset_numeric_schemas();
+    bool enqueue_numeric_file_open(const EdfFileSchema &schema,
                                    const EdfLocalDateTime &start,
                                    const EdfHeaderInfo &info,
                                    char *path,
@@ -109,6 +129,9 @@ private:
                                       const EdfHeaderInfo &info,
                                       char *path,
                                       size_t path_size);
+    bool build_recording_id(const EdfLocalDateTime &start,
+                            char *dst,
+                            size_t dst_size) const;
     bool enqueue_recording_start_annotations();
     void close_session_files();
     bool begin_str_session(const SessionStatus &session);
@@ -125,6 +148,10 @@ private:
     bool apply_str_summary_from_store();
     bool write_str_day_record();
     bool parse_str_time(const char *text, EdfLocalDateTime &out);
+    void attach_events();
+    void release_events();
+    void snapshot_event_coverage();
+    void update_event_coverage();
     void attach_stream(uint32_t now_ms);
     void release_stream();
     void drain_stream(uint32_t now_ms);
@@ -142,8 +169,11 @@ private:
     uint32_t next_attach_ms_ = 0;
     uint32_t next_session_start_ms_ = 0;
     int64_t session_start_epoch_ms_ = 0;
+    uint32_t session_event_subscription_generation_ = 0;
+    uint32_t session_event_coverage_gap_count_ = 0;
     bool initialized_ = false;
     bool files_open_ = false;
+    bool numeric_files_open_ = false;
     bool str_day_active_ = false;
     bool str_mask_open_ = false;
     bool str_settings_pending_ = false;
@@ -152,6 +182,13 @@ private:
     uint8_t str_mask_events_ = 0;
     uint32_t str_settings_request_id_ = 0;
     uint32_t str_settings_request_ms_ = 0;
+    EdfLocalDateTime session_start_local_;
+    char session_header_date_[9] = {};
+    char session_header_time_[9] = {};
+    char session_recording_id_[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
+    NumericSchemaState brp_schema_;
+    NumericSchemaState pld_schema_;
+    NumericSchemaState sa2_schema_;
     EdfLocalDateTime str_day_start_;
     int16_t str_samples_[AC_EDF_STR_DATA_SAMPLES_PER_RECORD] = {};
     EdfRecorderStatus status_;

@@ -61,6 +61,7 @@ size_t head = 0;
 size_t tail = 0;
 size_t queued = 0;
 OpenFile open_files[5];
+bool processing_job = false;
 
 void copy_text(char *dst, size_t size, const char *src) {
     if (!dst || size == 0) return;
@@ -127,6 +128,14 @@ bool lock_queue(uint32_t timeout_ms = 10) {
 
 void unlock_queue() {
     if (queue_lock) xSemaphoreGive(queue_lock);
+}
+
+uint8_t open_file_count() {
+    uint8_t count = 0;
+    for (const OpenFile &file : open_files) {
+        if (file.open) ++count;
+    }
+    return count;
 }
 
 size_t free_slots() {
@@ -260,6 +269,13 @@ bool write_header(OpenFile &state, const JobSlot &job) {
     return ok;
 }
 
+bool write_open_header(OpenFile &state, const JobSlot &job) {
+    if (!is_annotation_kind(job.kind) && job.len > 0) {
+        return state.file.write(job.bytes, job.len) == job.len;
+    }
+    return write_header(state, job);
+}
+
 bool write_str_header(File &file, const JobSlot &job) {
     const size_t header_size = edf_str_header_size();
     uint8_t *header = static_cast<uint8_t *>(
@@ -378,7 +394,7 @@ bool process_open(const JobSlot &job) {
     state.kind = job.kind;
     state.record_count = job.record_count;
     copy_text(state.path, sizeof(state.path), job.path);
-    if (!write_header(state, job)) {
+    if (!write_open_header(state, job)) {
         state.file.close();
         stats.write_errors++;
         set_error("header_write_failed");
@@ -562,10 +578,12 @@ void task_entry(void *) {
         bool have_job = false;
         if (lock_queue(50)) {
             have_job = pop_slot(job);
+            if (have_job) processing_job = true;
             unlock_queue();
         }
         if (have_job) {
             process_job(job);
+            processing_job = false;
             vTaskDelay(pdMS_TO_TICKS(AC_EDF_STORAGE_WORK_TICK_MS));
         } else {
             vTaskDelay(pdMS_TO_TICKS(AC_EDF_STORAGE_IDLE_TICK_MS));
@@ -618,7 +636,24 @@ bool enqueue_open_numeric(const char *path,
                           const EdfFileSchema &schema,
                           const EdfHeaderInfo &info) {
     if (!valid_path(path) || schema.signal_count == 0) return false;
-    JobSlot job;
+    const size_t header_size = edf_header_size(schema);
+    if (header_size > AC_EDF_STORAGE_SLOT_BYTES) return false;
+    if (!stats.initialized) begin();
+    if (!stats.available || !slots) return false;
+    if (!lock_queue()) {
+        stats.queue_drops++;
+        set_error("queue_lock_failed");
+        return false;
+    }
+    if (free_slots() == 0) {
+        unlock_queue();
+        stats.queue_drops++;
+        set_error("queue_full");
+        return false;
+    }
+
+    JobSlot &job = slots[tail];
+    clear_slot(job);
     job.type = JobType::Open;
     job.kind = stored_kind(schema.kind);
     job.record_count = info.record_count;
@@ -627,7 +662,24 @@ bool enqueue_open_numeric(const char *path,
     copy_text(job.recording_id, sizeof(job.recording_id), info.recording_id);
     copy_text(job.start_date, sizeof(job.start_date), info.start_date);
     copy_text(job.start_time, sizeof(job.start_time), info.start_time);
-    return enqueue(job);
+    size_t written = 0;
+    const bool ok = edf_render_header(schema, info, job.bytes,
+                                      AC_EDF_STORAGE_SLOT_BYTES, written);
+    if (!ok || written != header_size) {
+        unlock_queue();
+        stats.render_errors++;
+        set_error("header_render_failed");
+        return false;
+    }
+    job.len = written;
+    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
+    queued++;
+    stats.queued = queued;
+    unlock_queue();
+
+    stats.bytes_enqueued += written;
+    stats.last_activity_ms = millis();
+    return true;
 }
 
 bool enqueue_open_annotation(const char *path,
@@ -797,7 +849,14 @@ EdfStorageWorkerStatus status() {
     EdfStorageWorkerStatus out = stats;
     if (lock_queue()) {
         out.queued = queued;
+        out.busy = processing_job;
         unlock_queue();
+    } else {
+        out.busy = processing_job;
+    }
+    {
+        Storage::Guard guard;
+        out.open_file_count = open_file_count();
     }
     return out;
 }

@@ -198,8 +198,8 @@ void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
 
     for (size_t i = 0; i < frame.signal_count; ++i) {
         const StreamSignalSpan &span = frame.signals[i];
-        const SignalTarget target = target_for(span.id);
-        if (!target.found) {
+        EdfSignalTarget target;
+        if (!edf_signal_target_for_stream(span.id, target)) {
             status_.unknown_signals++;
             continue;
         }
@@ -439,49 +439,6 @@ EdfStreamAssembler::SeriesBuffer EdfStreamAssembler::series(EdfSeriesId id) {
             return {id, AC_EDF_SA2_SIGNAL_COUNT,
                     AC_EDF_SA2_SAMPLES_PER_RECORD, AC_EDF_SA2_SAMPLE_MS,
                     sa2_values_, sa2_present_, sa2_valid_, &status_.sa2};
-    }
-}
-
-EdfStreamAssembler::SignalTarget EdfStreamAssembler::target_for(
-    StreamSignalId id) const {
-    switch (id) {
-        case StreamSignalId::PatientFlow:
-            return {true, EdfSeriesId::Brp, 0, AC_EDF_BRP_SAMPLE_MS};
-        case StreamSignalId::MaskPressure:
-            return {true, EdfSeriesId::Brp, 1, AC_EDF_BRP_SAMPLE_MS};
-        case StreamSignalId::MaskPressureTwoSecond:
-            return {true, EdfSeriesId::Pld, 0, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::InspiratoryPressureTwoSecond:
-            return {true, EdfSeriesId::Pld, 1, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::ExpiratoryPressureTwoSecond:
-            return {true, EdfSeriesId::Pld, 2, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::Leak:
-            return {true, EdfSeriesId::Pld, 3, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::RespiratoryRate:
-            return {true, EdfSeriesId::Pld, 4, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::TidalVolume:
-            return {true, EdfSeriesId::Pld, 5, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::MinuteVentilation:
-            return {true, EdfSeriesId::Pld, 6, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::TargetMinuteVentilation:
-            return {true, EdfSeriesId::Pld, 7, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::IeRatio:
-            return {true, EdfSeriesId::Pld, 8, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::SnoreIndex:
-            return {true, EdfSeriesId::Pld, 9, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::FlowLimitation:
-            return {true, EdfSeriesId::Pld, 10, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::InspiratoryDuration:
-            return {true, EdfSeriesId::Pld, 11, AC_EDF_PLD_SAMPLE_MS};
-        case StreamSignalId::HeartRate:
-            return {true, EdfSeriesId::Sa2, 0, AC_EDF_SA2_SAMPLE_MS};
-        case StreamSignalId::SpO2:
-            return {true, EdfSeriesId::Sa2, 1, AC_EDF_SA2_SAMPLE_MS};
-        case StreamSignalId::Unknown:
-        case StreamSignalId::InspiratoryPressure:
-        case StreamSignalId::ExpiratoryPressure:
-        default:
-            return {};
     }
 }
 

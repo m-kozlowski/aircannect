@@ -3,29 +3,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "edf_series.h"
+#include "edf_signal_router.h"
 #include "stream_frame.h"
 
 namespace aircannect {
-
-static constexpr uint32_t AC_EDF_RECORD_MS = 60000;
-static constexpr uint32_t AC_EDF_BRP_SAMPLE_MS = 40;
-static constexpr uint32_t AC_EDF_PLD_SAMPLE_MS = 2000;
-static constexpr uint32_t AC_EDF_SA2_SAMPLE_MS = 1000;
-static constexpr size_t AC_EDF_BRP_SIGNAL_COUNT = 2;
-static constexpr size_t AC_EDF_PLD_SIGNAL_COUNT = 12;
-static constexpr size_t AC_EDF_SA2_SIGNAL_COUNT = 2;
-static constexpr size_t AC_EDF_BRP_SAMPLES_PER_RECORD =
-    AC_EDF_RECORD_MS / AC_EDF_BRP_SAMPLE_MS;
-static constexpr size_t AC_EDF_PLD_SAMPLES_PER_RECORD =
-    AC_EDF_RECORD_MS / AC_EDF_PLD_SAMPLE_MS;
-static constexpr size_t AC_EDF_SA2_SAMPLES_PER_RECORD =
-    AC_EDF_RECORD_MS / AC_EDF_SA2_SAMPLE_MS;
-
-enum class EdfSeriesId : uint8_t {
-    Brp,
-    Pld,
-    Sa2,
-};
 
 struct EdfSeriesAssemblyStatus {
     bool allocated = false;
@@ -94,13 +76,6 @@ private:
         EdfSeriesAssemblyStatus *status = nullptr;
     };
 
-    struct SignalTarget {
-        bool found = false;
-        EdfSeriesId series = EdfSeriesId::Brp;
-        uint8_t signal_index = 0;
-        uint32_t sample_ms = 0;
-    };
-
     bool allocate_buffers();
     void free_buffers();
     void reset_session_counters();
@@ -117,7 +92,6 @@ private:
                       bool valid,
                       float value);
     SeriesBuffer series(EdfSeriesId id);
-    SignalTarget target_for(StreamSignalId id) const;
     bool parse_frame_start_ms(const StreamFrameData &frame, int64_t &start_ms);
     bool ensure_session_epoch(int64_t frame_start_ms);
     void set_error(const char *error);

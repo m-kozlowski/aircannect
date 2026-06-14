@@ -24,8 +24,10 @@ struct EdfStorageWorkerStatus {
     bool available = false;
     bool task_started = false;
     bool using_psram = false;
+    bool busy = false;
     size_t capacity = 0;
     size_t queued = 0;
+    uint8_t open_file_count = 0;
     uint32_t open_jobs = 0;
     uint32_t record_jobs = 0;
     uint32_t close_jobs = 0;

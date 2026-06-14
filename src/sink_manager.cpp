@@ -10,13 +10,13 @@ namespace aircannect {
 namespace {
 
 const char *const LIVE_CHART_STREAM_IDS =
-    "PatientFlow,"
-    "MaskPressure,"
-    "Leak,"
-    "InspiratoryPressure-TwoSecond,"
-    "ExpiratoryPressure-TwoSecond,"
-    "HeartRate,"
-    "SpO2";
+    "_RFL,"
+    "_MKP,"
+    "_LKF,"
+    "_MKI,"
+    "_MKE,"
+    "_HRT,"
+    "_SAO";
 
 const char *acquire_status_name(StreamAcquireStatus status) {
     switch (status) {

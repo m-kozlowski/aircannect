@@ -109,6 +109,8 @@ private:
     void send_report_chunks(AsyncWebServerRequest *request) const;
     void send_report_plot(AsyncWebServerRequest *request) const;
     void send_report_result(AsyncWebServerRequest *request) const;
+    void send_edf_list(AsyncWebServerRequest *request) const;
+    void send_edf_download(AsyncWebServerRequest *request) const;
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json) const;
     void build_wifi_json(LargeTextBuffer &json) const;

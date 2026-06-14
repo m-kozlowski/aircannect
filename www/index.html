@@ -469,6 +469,71 @@
       margin: 18px 0 8px;
     }
 
+    .edf-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .edf-path {
+      flex: 1 1 260px;
+      min-width: 0;
+      border: 1px solid #30364166;
+      border-radius: 6px;
+      background: #10111466;
+      padding: 8px 10px;
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 12px;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .edf-list {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #10111466;
+    }
+
+    .edf-entry {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 11px 12px;
+      border-bottom: 1px solid #30364166;
+    }
+
+    .edf-entry:last-child {
+      border-bottom: 0;
+    }
+
+    .edf-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 650;
+    }
+
+    .edf-meta {
+      margin-top: 3px;
+      color: var(--muted);
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 11px;
+    }
+
+    .edf-empty {
+      padding: 16px 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
     .report-actions {
       display: flex;
       align-items: center;
@@ -1002,6 +1067,15 @@
         justify-content: flex-start;
       }
 
+      .edf-entry {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+      }
+
+      .edf-entry .btn {
+        width: 100%;
+      }
+
       .row {
         align-items: flex-start;
         flex-direction: column;
@@ -1039,6 +1113,9 @@
         </a>
         <a class="nav" data-tab="report">
           <span class="ico">&#9638;</span>Report
+        </a>
+        <a class="nav" data-tab="edf">
+          <span class="ico">&#8681;</span>EDF
         </a>
         <a class="nav" data-tab="clinical">
           <span class="ico">&#9881;</span>Clinical
@@ -1314,6 +1391,28 @@
             <div class="report-sessions" id="reportSessions"></div>
           </div>
           <div id="reportCharts" class="report-charts"></div>
+        </section>
+
+        <section class="pane" id="p-edf">
+          <div class="card">
+            <div class="card-head">
+              <span class="label">EDF Files</span>
+              <span class="badge" id="edfBadge">--</span>
+            </div>
+            <div class="edf-toolbar">
+              <div class="edf-path" id="edfPath">/</div>
+              <div class="btns" style="margin-top: 0">
+                <button class="btn" id="edfUpBtn" onclick="edfUp()">Up</button>
+                <button class="btn" onclick="loadEdfList(true)">Refresh</button>
+              </div>
+            </div>
+            <div class="edf-list" id="edfList"></div>
+            <div class="btns">
+              <button class="btn" id="edfPrevBtn" onclick="edfPrevPage()">Prev</button>
+              <button class="btn" id="edfNextBtn" onclick="edfNextPage()">Next</button>
+            </div>
+            <div class="msg" id="edfMsg"></div>
+          </div>
         </section>
 
         <section class="pane" id="p-oxi">
@@ -1599,6 +1698,9 @@
     <a class="nav active" data-tab="dash">
       <span class="ico">&#9878;</span>Home
     </a>
+    <a class="nav" data-tab="edf">
+      <span class="ico">&#8681;</span>EDF
+    </a>
     <a class="nav" data-tab="clinical">
       <span class="ico">&#9881;</span>Clinical
     </a>
@@ -1687,6 +1789,10 @@
     let reportDrag = null;        // active drag-to-zoom selection state
     let reportSelectedNightId = ""; // user-picked night id; "" defaults to newest
     let reportCalView = null;     // Date at the 1st of the calendar's shown month
+    let edfPath = "/";
+    let edfOffset = 0;
+    let edfLimit = 64;
+    let edfNextOffset = null;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_CLIENT_CACHE_MAX = 4;
@@ -1747,6 +1853,7 @@
     const tabs = {
       dash: "Dashboard",
       report: "Report",
+      edf: "EDF Files",
       clinical: "Clinical",
       oxi: "Oximetry",
       wifi: "WiFi",
@@ -1775,6 +1882,7 @@
         loadReportSummary(true);
         scheduleReportDrawAfterReveal();
       }
+      if (id === "edf") loadEdfList(false);
       if (id === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -1803,6 +1911,7 @@
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       if (pane === "dash") loadStatus();
       if (pane === "report") refreshReportSummary(true);
+      if (pane === "edf") loadEdfList(true);
       if (pane === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -3255,6 +3364,145 @@
       } catch (error) {
         msg("reportMsg", error.message, false, true);
       }
+    }
+
+    function fmtBytes(bytes) {
+      const value = Number(bytes);
+      if (!Number.isFinite(value) || value < 0) return "--";
+      if (value < 1024) return Math.round(value) + " B";
+      if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KiB";
+      if (value < 1024 * 1024 * 1024) {
+        return (value / (1024 * 1024)).toFixed(1) + " MiB";
+      }
+      return (value / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
+    }
+
+    function edfErrorText(text, status) {
+      try {
+        const data = JSON.parse(text);
+        if (data && data.error) return data.error;
+      } catch (_) {}
+      return text || ("HTTP " + status);
+    }
+
+    function edfParentPath(path) {
+      if (!path || path === "/") return "/";
+      const index = path.lastIndexOf("/");
+      return index <= 0 ? "/" : path.slice(0, index);
+    }
+
+    function edfSetBadge(text, cls) {
+      const badge = document.getElementById("edfBadge");
+      if (!badge) return;
+      badge.textContent = text;
+      badge.className = "badge" + (cls ? " " + cls : "");
+    }
+
+    function renderEdfList(data) {
+      edfPath = data && data.path ? data.path : edfPath;
+      edfLimit = Number(data && data.limit) || edfLimit;
+      edfNextOffset =
+        data && data.next_offset !== null && data.next_offset !== undefined &&
+        Number.isFinite(Number(data.next_offset)) ?
+          Number(data.next_offset) : null;
+      const entries = data && Array.isArray(data.entries) ? data.entries : [];
+      up("edfPath", edfPath);
+      const upBtn = document.getElementById("edfUpBtn");
+      const prevBtn = document.getElementById("edfPrevBtn");
+      const nextBtn = document.getElementById("edfNextBtn");
+      if (upBtn) upBtn.disabled = edfPath === "/";
+      if (prevBtn) prevBtn.disabled = edfOffset <= 0;
+      if (nextBtn) nextBtn.disabled = edfNextOffset === null;
+      edfSetBadge((data && data.truncated ? "Page " : "") +
+                  entries.length + " item" + (entries.length === 1 ? "" : "s"),
+                  data && data.truncated ? "warn" : "good");
+
+      const message = document.getElementById("edfMsg");
+      if (message) message.className = "msg";
+      const root = document.getElementById("edfList");
+      if (!root) return;
+      root.innerHTML = "";
+      if (!entries.length) {
+        const empty = document.createElement("div");
+        empty.className = "edf-empty";
+        empty.textContent = "No EDF files";
+        root.appendChild(empty);
+        return;
+      }
+      entries.forEach((entry) => {
+        const row = document.createElement("div");
+        row.className = "edf-entry";
+        const info = document.createElement("div");
+        const name = document.createElement("div");
+        name.className = "edf-name";
+        name.textContent = entry.name || entry.path || "--";
+        const meta = document.createElement("div");
+        meta.className = "edf-meta";
+        meta.textContent = entry.type === "dir" ?
+          (entry.path || "") : fmtBytes(entry.size);
+        info.appendChild(name);
+        info.appendChild(meta);
+
+        const action = document.createElement("button");
+        action.className = entry.type === "dir" ? "btn" : "btn primary";
+        action.textContent = entry.type === "dir" ? "Open" : "Download";
+        action.onclick = () => {
+          if (entry.type === "dir") {
+            edfPath = entry.path || "/";
+            edfOffset = 0;
+            loadEdfList(false);
+          } else if (entry.path) {
+            edfDownload(entry.path);
+          }
+        };
+        row.appendChild(info);
+        row.appendChild(action);
+        root.appendChild(row);
+      });
+    }
+
+    async function loadEdfList(reset) {
+      if (reset) edfOffset = 0;
+      edfSetBadge("Loading", "warn");
+      try {
+        const url = "/api/edf/list?path=" + encodeURIComponent(edfPath) +
+          "&offset=" + encodeURIComponent(edfOffset) +
+          "&limit=" + encodeURIComponent(edfLimit);
+        const response = await fetch(url, {cache: "no-store"});
+        const text = await response.text();
+        if (!response.ok) throw new Error(edfErrorText(text, response.status));
+        renderEdfList(JSON.parse(text));
+      } catch (error) {
+        edfSetBadge("Unavailable", "bad");
+        msg("edfMsg", error.message, false, true);
+      }
+    }
+
+    function edfUp() {
+      if (edfPath === "/") return;
+      edfPath = edfParentPath(edfPath);
+      edfOffset = 0;
+      loadEdfList(false);
+    }
+
+    function edfPrevPage() {
+      edfOffset = Math.max(0, edfOffset - edfLimit);
+      loadEdfList(false);
+    }
+
+    function edfNextPage() {
+      if (edfNextOffset === null) return;
+      edfOffset = edfNextOffset;
+      loadEdfList(false);
+    }
+
+    function edfDownload(path) {
+      const link = document.createElement("a");
+      link.href = "/api/edf/download?path=" + encodeURIComponent(path);
+      link.download = path.split("/").pop() || "download.edf";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
     }
 
     function fmtRssi(rssi) {

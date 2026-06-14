@@ -33,6 +33,12 @@ bool edf_header_date(const EdfLocalDateTime &dt,
 bool edf_header_time(const EdfLocalDateTime &dt,
                      char *dst,
                      size_t dst_size);
+bool edf_recording_id(const EdfLocalDateTime &dt,
+                      const char *serial_number,
+                      int32_t platform_id,
+                      int32_t variant_id,
+                      char *dst,
+                      size_t dst_size);
 bool edf_sleep_day_start(const EdfLocalDateTime &dt,
                          EdfLocalDateTime &start);
 bool edf_sleep_day_epoch_days(const EdfLocalDateTime &dt,
@@ -51,5 +57,7 @@ bool edf_datalog_annotation_path(EdfAnnotationKind kind,
                                  char *dst,
                                  size_t dst_size);
 bool edf_str_path(char *dst, size_t dst_size);
+bool edf_valid_browse_path(const char *path);
+bool edf_valid_pull_path(const char *path);
 
 }  // namespace aircannect

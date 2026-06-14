@@ -26,6 +26,47 @@ void set_valid(StreamFrameData &frame, size_t index, bool valid) {
     else frame.valid_bits[byte] &= static_cast<uint8_t>(~mask);
 }
 
+struct SignalAlias {
+    const char *name;
+    StreamSignalId id;
+};
+
+const SignalAlias SIGNAL_ALIASES[] = {
+    {"PatientFlow", StreamSignalId::PatientFlow},
+    {"PatientFlow-100hz", StreamSignalId::PatientFlow},
+    {"MaskPressure", StreamSignalId::MaskPressure},
+    {"MaskPressure-100hz", StreamSignalId::MaskPressure},
+    {"MaskPressure-TwoSecond", StreamSignalId::MaskPressureTwoSecond},
+    {"InspiratoryPressure-50hz", StreamSignalId::InspiratoryPressure},
+    {"ExpiratoryPressure-50hz", StreamSignalId::ExpiratoryPressure},
+    {"InspiratoryPressure-TwoSecond",
+     StreamSignalId::InspiratoryPressureTwoSecond},
+    {"ExpiratoryPressure-TwoSecond",
+     StreamSignalId::ExpiratoryPressureTwoSecond},
+    {"Leak", StreamSignalId::Leak},
+    {"Leak-50hz", StreamSignalId::Leak},
+    {"RespiratoryRate", StreamSignalId::RespiratoryRate},
+    {"RespiratoryRate-50hz", StreamSignalId::RespiratoryRate},
+    {"_RR2", StreamSignalId::RespiratoryRate},
+    {"TidalVolume", StreamSignalId::TidalVolume},
+    {"TidalVolume-50hz", StreamSignalId::TidalVolume},
+    {"_TD2", StreamSignalId::TidalVolume},
+    {"MinuteVentilation", StreamSignalId::MinuteVentilation},
+    {"MinuteVentilation-50hz", StreamSignalId::MinuteVentilation},
+    {"_MV2", StreamSignalId::MinuteVentilation},
+    {"TargetMinuteVentilation", StreamSignalId::TargetMinuteVentilation},
+    {"_TGT", StreamSignalId::TargetMinuteVentilation},
+    {"IeRatio", StreamSignalId::IeRatio},
+    {"_IE2", StreamSignalId::IeRatio},
+    {"SnoreIndex", StreamSignalId::SnoreIndex},
+    {"SnoreIndex-50hz", StreamSignalId::SnoreIndex},
+    {"FlowLimitation", StreamSignalId::FlowLimitation},
+    {"FlowLimitation-50hz", StreamSignalId::FlowLimitation},
+    {"InspiratoryDuration", StreamSignalId::InspiratoryDuration},
+    {"HeartRate", StreamSignalId::HeartRate},
+    {"SpO2", StreamSignalId::SpO2},
+};
+
 bool parse_value_array(JsonCursor &json,
                        StreamFrameData &frame,
                        StreamSignalSpan &span) {
@@ -482,60 +523,13 @@ void stream_frame_reset(StreamFrameData &frame) {
 
 StreamSignalId stream_signal_id_from_name(const char *name) {
     if (!name) return StreamSignalId::Unknown;
-    if (strcmp(name, "PatientFlow") == 0 ||
-        strcmp(name, "PatientFlow-100hz") == 0) {
-        return StreamSignalId::PatientFlow;
+    for (size_t i = 0; i < sizeof(SIGNAL_ALIASES) /
+                               sizeof(SIGNAL_ALIASES[0]);
+         ++i) {
+        if (strcmp(name, SIGNAL_ALIASES[i].name) == 0) {
+            return SIGNAL_ALIASES[i].id;
+        }
     }
-    if (strcmp(name, "MaskPressure") == 0 ||
-        strcmp(name, "MaskPressure-100hz") == 0) {
-        return StreamSignalId::MaskPressure;
-    }
-    if (strcmp(name, "MaskPressure-TwoSecond") == 0) {
-        return StreamSignalId::MaskPressureTwoSecond;
-    }
-    if (strcmp(name, "InspiratoryPressure-50hz") == 0) {
-        return StreamSignalId::InspiratoryPressure;
-    }
-    if (strcmp(name, "ExpiratoryPressure-50hz") == 0) {
-        return StreamSignalId::ExpiratoryPressure;
-    }
-    if (strcmp(name, "InspiratoryPressure-TwoSecond") == 0) {
-        return StreamSignalId::InspiratoryPressureTwoSecond;
-    }
-    if (strcmp(name, "ExpiratoryPressure-TwoSecond") == 0) {
-        return StreamSignalId::ExpiratoryPressureTwoSecond;
-    }
-    if (strcmp(name, "Leak") == 0 ||
-        strcmp(name, "Leak-50hz") == 0) return StreamSignalId::Leak;
-    if (strcmp(name, "RespiratoryRate") == 0 ||
-        strcmp(name, "RespiratoryRate-50hz") == 0) {
-        return StreamSignalId::RespiratoryRate;
-    }
-    if (strcmp(name, "TidalVolume") == 0 ||
-        strcmp(name, "TidalVolume-50hz") == 0) {
-        return StreamSignalId::TidalVolume;
-    }
-    if (strcmp(name, "MinuteVentilation") == 0 ||
-        strcmp(name, "MinuteVentilation-50hz") == 0) {
-        return StreamSignalId::MinuteVentilation;
-    }
-    if (strcmp(name, "TargetMinuteVentilation") == 0) {
-        return StreamSignalId::TargetMinuteVentilation;
-    }
-    if (strcmp(name, "IeRatio") == 0) return StreamSignalId::IeRatio;
-    if (strcmp(name, "SnoreIndex") == 0 ||
-        strcmp(name, "SnoreIndex-50hz") == 0) {
-        return StreamSignalId::SnoreIndex;
-    }
-    if (strcmp(name, "FlowLimitation") == 0 ||
-        strcmp(name, "FlowLimitation-50hz") == 0) {
-        return StreamSignalId::FlowLimitation;
-    }
-    if (strcmp(name, "InspiratoryDuration") == 0) {
-        return StreamSignalId::InspiratoryDuration;
-    }
-    if (strcmp(name, "HeartRate") == 0) return StreamSignalId::HeartRate;
-    if (strcmp(name, "SpO2") == 0) return StreamSignalId::SpO2;
     return StreamSignalId::Unknown;
 }
 

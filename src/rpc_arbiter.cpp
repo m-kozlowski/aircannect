@@ -290,6 +290,18 @@ void RpcArbiter::remove_event_frame_observer(EventFrameObserver observer,
     event_.remove_frame_observer(observer, context);
 }
 
+EventAcquireResult RpcArbiter::acquire_events(const char *data_ids_csv) {
+    return event_.acquire(data_ids_csv);
+}
+
+void RpcArbiter::release_events(EventConsumerHandle handle) {
+    event_.release(handle);
+}
+
+bool RpcArbiter::event_consumer_active(EventConsumerHandle handle) const {
+    return event_.consumer_active(handle);
+}
+
 StreamAcquireResult RpcArbiter::acquire_stream(const std::string &params_json,
                                                RpcSource source) {
     StreamAcquireResult result = stream_.acquire(params_json, source_id(source));
@@ -333,6 +345,18 @@ bool RpcArbiter::stream_activity_active() const {
     return stream_.last_notification_ms() &&
            millis() - stream_.last_notification_ms() <
                AC_WIFI_ROAM_STREAM_QUIET_MS;
+}
+
+size_t RpcArbiter::stream_accepted_data_id_count() const {
+    return stream_.accepted_data_id_count();
+}
+
+bool RpcArbiter::stream_accepted_data_id(const char *data_id) const {
+    return stream_.accepted_data_id(data_id);
+}
+
+const std::string &RpcArbiter::stream_accepted_data_ids_csv() const {
+    return stream_.accepted_data_ids_csv();
 }
 
 void RpcArbiter::set_stream_frame_observer(StreamFrameObserver observer,
@@ -907,7 +931,7 @@ void RpcArbiter::poll_event_subscription() {
     request.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     request.event_command = command.type;
     if (enqueue_request(request)) {
-        event_.mark_command_queued(command.type, now);
+        event_.mark_command_queued(command.type, command.params_json, now);
     } else {
         event_.mark_command_deferred(now);
     }
@@ -1110,7 +1134,7 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
     }
     if (pending_.stream_command != StreamCommandType::None) {
         stream_.mark_command_response(pending_.stream_command,
-                                      is_error, now);
+                                      is_error, payload, now);
         if (is_error) stats_.stream_command_errors++;
     }
     if (settings_updated && pending_.settings_refresh) {

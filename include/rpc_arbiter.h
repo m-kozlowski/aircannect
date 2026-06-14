@@ -142,6 +142,9 @@ public:
                                   void *context);
     void remove_event_frame_observer(EventFrameObserver observer,
                                      void *context);
+    EventAcquireResult acquire_events(const char *data_ids_csv);
+    void release_events(EventConsumerHandle handle);
+    bool event_consumer_active(EventConsumerHandle handle) const;
 
     StreamAcquireResult acquire_stream(const std::string &params_json,
                                        RpcSource source);
@@ -151,6 +154,9 @@ public:
     bool stream_consumer_active(StreamConsumerHandle handle) const;
     uint32_t stream_consumer_queue_drops(StreamConsumerHandle handle) const;
     bool stream_activity_active() const;
+    size_t stream_accepted_data_id_count() const;
+    bool stream_accepted_data_id(const char *data_id) const;
+    const std::string &stream_accepted_data_ids_csv() const;
     void set_stream_frame_observer(StreamFrameObserver observer,
                                    void *context);
     bool next_stream_frame(StreamConsumerHandle handle,

@@ -70,6 +70,80 @@ bool write_yyyymmdd(const EdfLocalDateTime &dt,
     return written == 8;
 }
 
+const char *month_name(int month) {
+    static const char *const names[] = {
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    };
+    if (month < 1 || month > 12) return nullptr;
+    return names[month - 1];
+}
+
+bool is_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+bool parse_digits(const char *text, size_t len, int &out) {
+    if (!text || len == 0) return false;
+    int value = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (!is_digit(text[i])) return false;
+        value = value * 10 + (text[i] - '0');
+    }
+    out = value;
+    return true;
+}
+
+bool parse_yyyymmdd(const char *text, EdfLocalDateTime &out) {
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    if (!parse_digits(text, 4, year) ||
+        !parse_digits(text + 4, 2, month) ||
+        !parse_digits(text + 6, 2, day)) {
+        return false;
+    }
+    EdfLocalDateTime dt;
+    dt.year = year;
+    dt.month = month;
+    dt.day = day;
+    dt.hour = 0;
+    dt.minute = 0;
+    dt.second = 0;
+    if (!valid_date_time(dt)) return false;
+    out = dt;
+    return true;
+}
+
+bool parse_session_stamp(const char *text, EdfLocalDateTime &out) {
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    EdfLocalDateTime dt;
+    if (!parse_yyyymmdd(text, dt) ||
+        text[8] != '_' ||
+        !parse_digits(text + 9, 2, hour) ||
+        !parse_digits(text + 11, 2, minute) ||
+        !parse_digits(text + 13, 2, second)) {
+        return false;
+    }
+    dt.hour = hour;
+    dt.minute = minute;
+    dt.second = second;
+    if (!valid_date_time(dt)) return false;
+    out = dt;
+    return true;
+}
+
+bool pull_tag_allowed(const char *tag) {
+    return tag &&
+           (strncmp(tag, "BRP", 3) == 0 ||
+            strncmp(tag, "PLD", 3) == 0 ||
+            strncmp(tag, "SA2", 3) == 0 ||
+            strncmp(tag, "EVE", 3) == 0 ||
+            strncmp(tag, "CSL", 3) == 0);
+}
+
 }  // namespace
 
 const char *edf_file_tag(EdfFileKind kind) {
@@ -146,6 +220,31 @@ bool edf_header_time(const EdfLocalDateTime &dt,
     const int written = snprintf(dst, dst_size, "%02d.%02d.%02d",
                                  dt.hour, dt.minute, dt.second);
     return written == 8;
+}
+
+bool edf_recording_id(const EdfLocalDateTime &dt,
+                      const char *serial_number,
+                      int32_t platform_id,
+                      int32_t variant_id,
+                      char *dst,
+                      size_t dst_size) {
+    if (!dst || dst_size == 0 || !serial_number || !serial_number[0] ||
+        !valid_date_time(dt) || platform_id < 0 || variant_id < 0) {
+        return false;
+    }
+    const char *month = month_name(dt.month);
+    if (!month) return false;
+    const int written = snprintf(dst, dst_size,
+                                 "Startdate %02d-%s-%04d X X X SRN=%s "
+                                 "MID=%ld VID=%ld",
+                                 dt.day,
+                                 month,
+                                 dt.year,
+                                 serial_number,
+                                 static_cast<long>(platform_id),
+                                 static_cast<long>(variant_id));
+    return written > 0 && static_cast<size_t>(written) < dst_size &&
+           written <= 80;
 }
 
 bool edf_sleep_day_start(const EdfLocalDateTime &dt,
@@ -227,6 +326,59 @@ bool edf_str_path(char *dst, size_t dst_size) {
     if (!dst || dst_size < 9) return false;
     const int written = snprintf(dst, dst_size, "/STR.edf");
     return written == 8;
+}
+
+bool edf_valid_browse_path(const char *path) {
+    if (!path) return false;
+    const size_t len = strlen(path);
+    if (len == 0 || len >= AC_STORAGE_WRITE_PATH_MAX) return false;
+    if (strcmp(path, "/") == 0 || strcmp(path, "/DATALOG") == 0) {
+        return true;
+    }
+
+    static constexpr char kPrefix[] = "/DATALOG/";
+    static constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    if (len != kPrefixLen + 8 ||
+        strncmp(path, kPrefix, kPrefixLen) != 0) {
+        return false;
+    }
+
+    EdfLocalDateTime day;
+    return parse_yyyymmdd(path + kPrefixLen, day);
+}
+
+bool edf_valid_pull_path(const char *path) {
+    if (!path) return false;
+    const size_t len = strlen(path);
+    if (len == 0 || len >= AC_STORAGE_WRITE_PATH_MAX) return false;
+    if (strcmp(path, "/STR.edf") == 0) return true;
+
+    static constexpr size_t kPathLen = 41;
+    static constexpr char kPrefix[] = "/DATALOG/";
+    static constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    if (len != kPathLen || strncmp(path, kPrefix, kPrefixLen) != 0) {
+        return false;
+    }
+    if (path[17] != '/' || path[26] != '_' || path[33] != '_' ||
+        strcmp(path + 37, ".edf") != 0) {
+        return false;
+    }
+
+    EdfLocalDateTime path_day;
+    EdfLocalDateTime session;
+    if (!parse_yyyymmdd(path + 9, path_day) ||
+        !parse_session_stamp(path + 18, session) ||
+        !pull_tag_allowed(path + 34)) {
+        return false;
+    }
+
+    char expected_day[9] = {};
+    char actual_day[9] = {};
+    if (!edf_sleep_day_yyyymmdd(session, expected_day, sizeof(expected_day)) ||
+        !write_yyyymmdd(path_day, actual_day, sizeof(actual_day))) {
+        return false;
+    }
+    return strcmp(expected_day, actual_day) == 0;
 }
 
 }  // namespace aircannect

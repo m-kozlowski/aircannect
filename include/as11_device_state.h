@@ -71,6 +71,10 @@ public:
         return active_therapy_profile_;
     }
     const std::string &mhr() const { return mhr_; }
+    bool platform_id_valid() const { return platform_id_valid_; }
+    int32_t platform_id() const { return platform_id_; }
+    bool variant_id_valid() const { return variant_id_valid_; }
+    int32_t variant_id() const { return variant_id_; }
     bool timezone_offset_valid() const { return timezone_offset_valid_; }
     int32_t timezone_offset_minutes() const {
         return timezone_offset_minutes_;
@@ -121,6 +125,10 @@ private:
     std::string software_identifier_;
     std::string active_therapy_profile_;
     std::string mhr_;
+    bool platform_id_valid_ = false;
+    int32_t platform_id_ = 0;
+    bool variant_id_valid_ = false;
+    int32_t variant_id_ = 0;
     bool timezone_offset_valid_ = false;
     int32_t timezone_offset_minutes_ = 0;
 
