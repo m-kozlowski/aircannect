@@ -3553,7 +3553,7 @@
       const bytes = Number(data && data.bytes_done) || 0;
       const estimate = Number(data && data.estimated_archive_bytes) || 0;
       if (state === "preparing") {
-        return "Preparing " + files + " files";
+        return files > 0 ? "Preparing " + files + " files" : "Preparing file list";
       }
       if (state === "building") {
         const pct = estimate > 0 ? " " + Math.min(99, Math.floor(bytes * 100 / estimate)) + "%" : "";

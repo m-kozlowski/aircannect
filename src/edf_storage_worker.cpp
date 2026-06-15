@@ -111,6 +111,43 @@ bool build_child_path(const char *parent,
     return written > 0 && static_cast<size_t>(written) < dst_size;
 }
 
+bool str_backup_artifact_name(const char *name) {
+    if (!name || strncmp(name, "STR-", 4) != 0) return false;
+    const size_t len = strlen(name);
+    return len > 8 && strcmp(name + len - 4, ".bak") == 0;
+}
+
+void cleanup_str_backup_artifacts() {
+    if (!Storage::mounted()) return;
+    uint32_t removed = 0;
+    Storage::Guard guard;
+    File root = Storage::open("/", "r");
+    if (!root || !root.isDirectory()) {
+        if (root) root.close();
+        return;
+    }
+    for (;;) {
+        File child = root.openNextFile();
+        if (!child) break;
+        const bool is_dir = child.isDirectory();
+        const char *name = basename_from_path(child.name());
+        char path[64] = {};
+        const bool remove =
+            !is_dir &&
+            str_backup_artifact_name(name) &&
+            build_child_path("/", name, path, sizeof(path));
+        child.close();
+        if (remove && Storage::remove(path)) removed++;
+    }
+    root.close();
+    if (removed > 0) {
+        Log::logf(CAT_EDF,
+                  LOG_WARN,
+                  "removed stale STR backup artifacts count=%lu\n",
+                  static_cast<unsigned long>(removed));
+    }
+}
+
 void set_error(const char *error) {
     copy_cstr(stats.last_error, sizeof(stats.last_error), error);
     stats.last_activity_ms = millis();
@@ -780,38 +817,6 @@ bool read_str_header(File &file, uint8_t *header, size_t header_size) {
            file.read(header, header_size) == header_size;
 }
 
-void collect_digits6(const char *src, char (&dst)[7]) {
-    size_t out = 0;
-    if (src) {
-        for (size_t i = 0; src[i] && out < 6; ++i) {
-            if (src[i] >= '0' && src[i] <= '9') {
-                dst[out++] = src[i];
-            }
-        }
-    }
-    while (out < 6) dst[out++] = '0';
-    dst[6] = 0;
-}
-
-bool build_str_backup_path(const JobSlot &job, char *dst, size_t dst_size) {
-    if (!dst || dst_size == 0) return false;
-    char date[7] = {};
-    char time[7] = {};
-    collect_digits6(job.start_date, date);
-    collect_digits6(job.start_time, time);
-    for (unsigned suffix = 0; suffix < 16; ++suffix) {
-        const int n = suffix == 0
-                          ? snprintf(dst, dst_size, "/STR-%s-%s.bak",
-                                     date, time)
-                          : snprintf(dst, dst_size, "/STR-%s-%s-%u.bak",
-                                     date, time, suffix);
-        if (n <= 0 || static_cast<size_t>(n) >= dst_size) return false;
-        if (!Storage::exists(dst)) return true;
-    }
-    dst[0] = 0;
-    return false;
-}
-
 bool patch_str_record_count(File &file, uint32_t record_count) {
     char field[AC_EDF_HEADER_RECORD_COUNT_WIDTH] = {};
     if (!edf_str_format_record_count_field(record_count,
@@ -1077,23 +1082,15 @@ bool process_str_record(const JobSlot &job) {
         }
 
         if (!schema_matches) {
-            char backup_path[64] = {};
-            if (!build_str_backup_path(job, backup_path,
-                                       sizeof(backup_path))) {
-                file.close();
-                stats.write_errors++;
-                set_error("str_backup_path_failed");
-                return false;
-            }
             file.close();
-            if (!Storage::rename(job.path, backup_path)) {
+            if (!Storage::remove(job.path)) {
                 stats.write_errors++;
-                set_error("str_backup_failed");
+                set_error("str_replace_failed");
                 return false;
             }
             Log::logf(CAT_EDF, LOG_WARN,
-                      "rotated incompatible STR root file to %s\n",
-                      backup_path);
+                      "discarded incompatible STR root file path=%s\n",
+                      job.path);
 
             file = Storage::open(job.path, "w+");
             if (!file) {
@@ -1415,6 +1412,7 @@ void begin() {
     }
     stats.initialized = true;
     stats.available = true;
+    cleanup_str_backup_artifacts();
     Log::logf(CAT_EDF, LOG_INFO,
               "storage worker ready q=%u slot=%u psram=%s\n",
               static_cast<unsigned>(AC_EDF_STORAGE_QUEUE_CAPACITY),
