@@ -2867,13 +2867,17 @@ void WebUI::register_routes() {
         nullptr, handle_body);
 
     server_->on("/api/ota", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        send_cached(request, cached_ota_json_);
+        String json;
+        json.reserve(AC_WEB_OTA_JSON_RESERVE);
+        build_ota_json(json, ota_manager_->status());
+        request->send(200, "application/json", json);
     });
 
     server_->on("/api/ota/prepare", HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             if (resmed_ota_manager_->transport_active()) {
                 ota_manager_->abort_http_upload("resmed_ota_active");
+                mark_snapshots_dirty(SNAPSHOT_OTA);
                 String json;
                 json.reserve(AC_WEB_OTA_JSON_RESERVE);
                 build_ota_json(json, ota_manager_->status());
@@ -2883,6 +2887,7 @@ void WebUI::register_routes() {
             size_t declared_size = 0;
             if (!request_size_arg(request, "size", declared_size)) {
                 ota_manager_->abort_http_upload("missing_size");
+                mark_snapshots_dirty(SNAPSHOT_OTA);
                 String json;
                 json.reserve(AC_WEB_OTA_JSON_RESERVE);
                 build_ota_json(json, ota_manager_->status());
@@ -2891,6 +2896,7 @@ void WebUI::register_routes() {
             }
             const bool ok =
                 ota_manager_->request_http_upload_prepare(declared_size);
+            mark_snapshots_dirty(SNAPSHOT_OTA);
             String json;
             json.reserve(AC_WEB_OTA_JSON_RESERVE);
             build_ota_json(json, ota_manager_->status());
@@ -2901,6 +2907,7 @@ void WebUI::register_routes() {
         "/api/ota/upload", HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             const bool ok = ota_manager_->finish_http_upload();
+            mark_snapshots_dirty(SNAPSHOT_OTA);
             String json;
             json.reserve(AC_WEB_OTA_JSON_RESERVE);
             build_ota_json(json, ota_manager_->status());
@@ -2908,18 +2915,21 @@ void WebUI::register_routes() {
         },
         [this](AsyncWebServerRequest *request, const String &filename,
                size_t index, uint8_t *data, size_t len, bool final) {
-            (void)final;
             if (index == 0) {
                 size_t declared_size = 0;
                 if (!request_size_arg(request, "size", declared_size)) {
                     ota_manager_->abort_http_upload("missing_size");
+                    mark_snapshots_dirty(SNAPSHOT_OTA);
                     return;
                 }
                 if (!ota_manager_->begin_http_upload(filename, declared_size)) {
+                    mark_snapshots_dirty(SNAPSHOT_OTA);
                     return;
                 }
+                mark_snapshots_dirty(SNAPSHOT_OTA);
             }
             ota_manager_->write_http_upload(data, len);
+            if (final) mark_snapshots_dirty(SNAPSHOT_OTA);
         });
 
     server_->on("/api/resmed-ota", HTTP_GET,
