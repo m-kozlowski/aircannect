@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "board.h"
-#include "can_datagram.h"
+#include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "storage_manager.h"

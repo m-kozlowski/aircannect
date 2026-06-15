@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "crc32.h"
+
 namespace aircannect {
 
 struct DatagramFrame {
@@ -32,7 +34,6 @@ struct DatagramFeedResult {
     }
 };
 
-uint32_t crc32_ieee(const uint8_t *data, size_t len);
 std::vector<DatagramFrame> encode_datagram(const uint8_t *payload, size_t len);
 std::vector<DatagramFrame> encode_datagram(const std::string &payload);
 std::string hex_bytes(const uint8_t *data, size_t len);

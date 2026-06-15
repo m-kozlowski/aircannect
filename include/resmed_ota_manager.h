@@ -9,6 +9,7 @@
 #include <string>
 
 #include "board.h"
+#include "crc32.h"
 #include "rpc_arbiter.h"
 
 namespace aircannect {
@@ -149,7 +150,7 @@ private:
     size_t staging_payload_written_ = 0;
     size_t staging_source_offset_ = 0;
     uint32_t staging_flash_start_ = 0;
-    uint32_t staging_rest_crc_ = 0xFFFFFFFFu;
+    uint32_t staging_rest_crc_ = crc32_ieee_initial_state();
     uint32_t staging_desc2_ = 0;
     uint32_t staging_desc3_ = 0;
     char staging_target_code_[5] = {};

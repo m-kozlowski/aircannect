@@ -48,17 +48,6 @@ static constexpr uint8_t DG_END = 0x02;
 static constexpr uint8_t DG_SINGLE = 0x03;
 static constexpr uint8_t DG_FLAG_MASK = 0x03;
 
-uint32_t crc32_ieee(const uint8_t *data, size_t len) {
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
-        }
-    }
-    return ~crc;
-}
-
 std::string hex_bytes(const uint8_t *data, size_t len) {
     static const char *digits = "0123456789ABCDEF";
     std::string out;

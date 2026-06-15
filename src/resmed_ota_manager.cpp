@@ -8,7 +8,7 @@
 #include <ArduinoJson.h>
 
 #include "as11_rpc.h"
-#include "can_datagram.h"
+#include "crc32.h"
 #include "debug_log.h"
 #include "storage_manager.h"
 
@@ -86,20 +86,6 @@ void put_le32(uint8_t *out, size_t offset, uint32_t value) {
 
 bool file_write_exact(File &file, const uint8_t *data, size_t len) {
     return file && file.write(data, len) == len;
-}
-
-uint32_t crc32_update_state(uint32_t crc, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
-        }
-    }
-    return crc;
-}
-
-uint32_t crc32_finish_state(uint32_t crc) {
-    return ~crc;
 }
 
 bool starts_with_abc_magic(const String &magic_hex) {
@@ -887,7 +873,7 @@ void ResmedOtaManager::clear_session() {
     staging_payload_written_ = 0;
     staging_source_offset_ = 0;
     staging_flash_start_ = 0;
-    staging_rest_crc_ = 0xFFFFFFFFu;
+    staging_rest_crc_ = crc32_ieee_initial_state();
     staging_desc2_ = 0;
     staging_desc3_ = 0;
     staging_target_code_[0] = 0;
@@ -941,7 +927,7 @@ bool ResmedOtaManager::configure_staged_input(size_t input_size,
     staging_payload_size_ = 0;
     staging_payload_written_ = 0;
     staging_source_offset_ = 0;
-    staging_rest_crc_ = 0xFFFFFFFFu;
+    staging_rest_crc_ = crc32_ieee_initial_state();
     staging_passthrough_abc_ =
         starts_with_abc_magic(magic_hex) || filename_ends_with_abc(filename);
 
@@ -1022,7 +1008,7 @@ bool ResmedOtaManager::write_staging_header() {
         return false;
     }
     staging_rest_crc_ =
-        crc32_update_state(staging_rest_crc_, segment, sizeof(segment));
+        crc32_ieee_update_state(staging_rest_crc_, segment, sizeof(segment));
     return true;
 }
 
@@ -1049,7 +1035,7 @@ bool ResmedOtaManager::write_raw_payload_slice(size_t input_offset,
 
     if (!file_write_exact(staging_file_, payload, copy_len)) return false;
     staging_rest_crc_ =
-        crc32_update_state(staging_rest_crc_, payload, copy_len);
+        crc32_ieee_update_state(staging_rest_crc_, payload, copy_len);
     staging_payload_written_ += copy_len;
     return true;
 }
@@ -1072,7 +1058,7 @@ bool ResmedOtaManager::finalize_raw_abc() {
     put_le32(descriptor, 0x40,
              static_cast<uint32_t>(ABC_SEGMENT_ENTRY_SIZE +
                                    staging_payload_size_));
-    put_le32(descriptor, 0x44, crc32_finish_state(staging_rest_crc_));
+    put_le32(descriptor, 0x44, crc32_ieee_finish_state(staging_rest_crc_));
     put_le32(descriptor, 0x48, 1);
 
     uint8_t crc_input[ABC_PRIMARY_SIZE + 0x4C] = {};

@@ -8,8 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "crc32.h"
 #include "debug_log.h"
-#include "can_datagram.h"
 #include "edf_file_reader.h"
 #include "edf_file_resume.h"
 #include "edf_identification.h"

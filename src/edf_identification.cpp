@@ -2,7 +2,7 @@
 
 #include <ArduinoJson.h>
 
-#include "can_datagram.h"
+#include "crc32.h"
 
 namespace aircannect {
 namespace {
