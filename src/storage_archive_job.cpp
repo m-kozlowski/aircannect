@@ -162,14 +162,15 @@ bool storage_archive_valid_path(const char *path) {
 
 void StorageArchiveJob::begin() {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
-    if (lock() && !walk_stack_) {
+    if (!lock()) return;
+    if (!walk_stack_) {
         walk_capacity_ = ARCHIVE_MAX_DEPTH;
         walk_stack_ = new (std::nothrow) WalkFrame[walk_capacity_];
         if (!walk_stack_) {
             set_error_locked("metadata_alloc");
         }
-        unlock();
     }
+    unlock();
 }
 
 bool StorageArchiveJob::lock(uint32_t timeout_ms) const {
@@ -193,6 +194,7 @@ void StorageArchiveJob::set_error_locked(const char *error) {
 void StorageArchiveJob::reset_job_locked(bool keep_status) {
     close_active_files_locked();
     close_walk_locked();
+    preempt_requested_.store(false);
     if (entries_) {
         Memory::free(entries_);
         entries_ = nullptr;
@@ -245,6 +247,16 @@ void StorageArchiveJob::close_walk_locked() {
                 walk_stack_[i].opened = false;
             }
         }
+    }
+}
+
+void StorageArchiveJob::apply_preempt_locked() {
+    if (!preempt_requested_.exchange(false)) return;
+    if (status_.state == StorageArchiveState::Preparing ||
+        status_.state == StorageArchiveState::Building) {
+        close_active_files_locked();
+        close_walk_locked();
+        status_.updated_ms = millis_nonzero();
     }
 }
 
@@ -425,6 +437,8 @@ JobStep StorageArchiveJob::step() {
     begin();
     if (!lock(50)) return JobStep::Waiting;
 
+    apply_preempt_locked();
+
     const uint32_t now = millis_nonzero();
     if (status_.state == StorageArchiveState::Ready && cleanup_due_ms_ != 0 &&
         static_cast<int32_t>(now - cleanup_due_ms_) >= 0) {
@@ -450,18 +464,15 @@ JobStep StorageArchiveJob::step() {
     } else if (status_.state == StorageArchiveState::Building) {
         result = build_step_locked() ? JobStep::Working : JobStep::Idle;
     }
+    apply_preempt_locked();
     unlock();
     return result;
 }
 
 void StorageArchiveJob::on_preempt() {
+    preempt_requested_.store(true);
     if (!lock(20)) return;
-    if (status_.state == StorageArchiveState::Preparing ||
-        status_.state == StorageArchiveState::Building) {
-        close_active_files_locked();
-        close_walk_locked();
-        status_.updated_ms = millis_nonzero();
-    }
+    apply_preempt_locked();
     unlock();
 }
 

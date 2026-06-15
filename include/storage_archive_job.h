@@ -4,6 +4,7 @@
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -85,6 +86,7 @@ private:
     void reset_job_locked(bool keep_status);
     void close_active_files_locked();
     void close_walk_locked();
+    void apply_preempt_locked();
     bool cleanup_ready_archive_locked();
     void cleanup_stale_temp_locked();
 
@@ -105,6 +107,7 @@ private:
     bool write_eocd_locked();
 
     mutable SemaphoreHandle_t lock_ = nullptr;
+    std::atomic<bool> preempt_requested_{false};
     StorageArchiveStatus status_;
     uint32_t next_id_ = 1;
 
