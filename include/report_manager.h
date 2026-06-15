@@ -123,6 +123,8 @@ struct ReportResultStatus {
     uint32_t chunk_count = 0;
     uint32_t record_count = 0;
     uint32_t payload_bytes = 0;
+    uint32_t materialized_slots = 0;
+    uint32_t materialized_plot_slots = 0;
     bool event_metrics_valid = false;
     bool events_available = false;  // event source covered: counts are real, not unknown
     float ahi = 0.0f;
@@ -549,6 +551,7 @@ private:
     void service_range_plot();
     uint32_t result_slot_tick_ = 0;
     void publish_result_to_slot();
+    void update_materialized_status_locked();
     void invalidate_materialized_locked(uint64_t night_start_ms, bool all);
     void invalidate_materialized(uint64_t night_start_ms, bool all);
     void build_result_json_from(const ReportResultStatus &status,

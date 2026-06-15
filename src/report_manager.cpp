@@ -216,6 +216,11 @@ ReportResultState settled_result_state(uint32_t missing_required) {
                                  : ReportResultState::Partial;
 }
 
+bool result_state_http_cacheable(ReportResultState state) {
+    return state == ReportResultState::Ready ||
+           state == ReportResultState::Partial;
+}
+
 bool source_missing_start_for_night(const ReportSummaryRecord &night,
                                     const ReportSourceDef &source,
                                     int64_t &out_start_ms,
@@ -1366,11 +1371,19 @@ void ReportManager::build_result_json_from(
 
 void ReportManager::publish_result_to_slot() {
     if (!result_slots_lock_ || !result_slots_) return;
-    // The ETag is the materialized-result version. It must match the plot blob
-    // published beside it, so reads never recompute it from a different model
-    // such as the raw Summary record.
+    // A slot is fresh iff this summary-derived ETag matches the live summary
+    // ETag at read time. Use the live summary row, not result_night_, because
+    // result_night_ is adjusted for display from cached chunk coverage.
     char etag[48];
-    format_night_etag(result_night_, etag, sizeof(etag));
+    etag[0] = '\0';
+    if (take_summary_lock(portMAX_DELAY)) {
+        ReportSummaryRecord summary_night;
+        if (summary_night_by_start_unlocked(result_night_.start_ms,
+                                            summary_night)) {
+            format_night_etag_unlocked(summary_night, etag, sizeof(etag));
+        }
+        give_summary_lock();
+    }
     if (!etag[0]) return;
 
     // Snapshot the plot bytes outside the slot lock (the copy is the heavy
@@ -1428,7 +1441,24 @@ void ReportManager::publish_result_to_slot() {
     }
     slot.plot = plot;
     slot.last_used = ++result_slot_tick_;
+    update_materialized_status_locked();
     xSemaphoreGive(result_slots_lock_);
+}
+
+void ReportManager::update_materialized_status_locked() {
+    uint32_t slots = 0;
+    uint32_t plot_slots = 0;
+    if (result_slots_) {
+        for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
+            if (!result_slots_[i].valid) continue;
+            slots++;
+            if (result_slots_[i].plot && result_slots_[i].plot->size() > 0) {
+                plot_slots++;
+            }
+        }
+    }
+    result_status_.materialized_slots = slots;
+    result_status_.materialized_plot_slots = plot_slots;
 }
 
 void ReportManager::invalidate_materialized_locked(uint64_t night_start_ms,
@@ -1440,6 +1470,7 @@ void ReportManager::invalidate_materialized_locked(uint64_t night_start_ms,
             result_slots_[i] = MaterializedResult{};
         }
     }
+    update_materialized_status_locked();
 }
 
 void ReportManager::invalidate_materialized(uint64_t night_start_ms, bool all) {
@@ -1457,7 +1488,8 @@ ReportManager::ResultRead ReportManager::read_result(
         return ResultRead::Unavailable;
     }
     ReportSummaryRecord rec;
-    char etag[48];
+    char current_etag[48] = {};
+    char etag[48] = {};
     if (!take_summary_lock(pdMS_TO_TICKS(20))) {
         if (etag_out && etag_out_size) etag_out[0] = '\0';
         return ResultRead::Busy;
@@ -1467,6 +1499,7 @@ ReportManager::ResultRead ReportManager::read_result(
         if (etag_out && etag_out_size) etag_out[0] = '\0';
         return ResultRead::NotFound;
     }
+    format_night_etag_unlocked(rec, current_etag, sizeof(current_etag));
     give_summary_lock();
 
     ReportResultStatus status;
@@ -1478,6 +1511,11 @@ ReportManager::ResultRead ReportManager::read_result(
     for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
         if (result_slots_[i].valid &&
             result_slots_[i].night_start_ms == rec.start_ms) {
+            if (strcmp(result_slots_[i].etag, current_etag) != 0) {
+                result_slots_[i] = MaterializedResult{};
+                update_materialized_status_locked();
+                continue;
+            }
             result_slots_[i].last_used = ++result_slot_tick_;
             snprintf(etag, sizeof(etag), "%s", result_slots_[i].etag);
             status = result_slots_[i].status;
@@ -1495,10 +1533,11 @@ ReportManager::ResultRead ReportManager::read_result(
     }
     xSemaphoreGive(result_slots_lock_);
     if (found) {
+        const bool cacheable = result_state_http_cacheable(status.state);
         if (etag_out && etag_out_size) {
-            snprintf(etag_out, etag_out_size, "%s", etag);
+            snprintf(etag_out, etag_out_size, "%s", cacheable ? etag : "");
         }
-        if (if_none_match && if_none_match[0] &&
+        if (cacheable && if_none_match && if_none_match[0] &&
             strcmp(if_none_match, etag) == 0) {
             return ResultRead::NotModified;
         }
@@ -3473,6 +3512,7 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
     // duel the background sweep on the single-consumer CAN bus). Only an
     // explicit refresh fetches; otherwise we build from whatever is cached.
     const bool cache_needed = cache_refresh_requested;
+    bool cache_refresh_in_flight = false;
     if (cache_needed) {
         // A user-initiated prepare preempts a low-priority background prefetch
         // so it claims the fetch slot immediately instead of queuing behind it.
@@ -3494,8 +3534,10 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
                 cache_status_.error.clear();
             }
         }
+        cache_refresh_in_flight =
+            cache_fetch_active_ && cache_night_.start_ms == night.start_ms;
 
-        if (coverage.missing_required) {
+        if (cache_refresh_in_flight || coverage.missing_required) {
             pending_result_prepare_ = true;
             pending_result_refresh_cache_ = false;
             pending_result_therapy_index_ = therapy_index;
@@ -3785,6 +3827,9 @@ bool ReportManager::build_cache_plan(const ReportSummaryRecord &night,
         plan.from_ms = from_ms;
     }
     cache_status_.source_count = static_cast<uint32_t>(cache_source_count_);
+    if (cache_source_count_ > 0) {
+        invalidate_materialized(night.start_ms, false);
+    }
     discard_cache_coalesce_buffers();
     cache_fetch_active_ = true;
     cache_status_.active = true;

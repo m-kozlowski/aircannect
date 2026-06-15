@@ -495,6 +495,10 @@ void print_report_result_status(Print &out,
     out.print(static_cast<unsigned long>(status.record_count));
     out.print(" bytes=");
     out.print(static_cast<unsigned long>(status.payload_bytes));
+    out.print(" slots=");
+    out.print(static_cast<unsigned long>(status.materialized_slots));
+    out.print("/");
+    out.print(static_cast<unsigned long>(status.materialized_plot_slots));
     out.print(" error=");
     out.print(status.error.length() ? status.error.c_str() : "--");
     out.println();

@@ -1216,8 +1216,8 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
     const ReportManager::ResultRead st = report_manager_->read_result(
         static_cast<size_t>(index), inm.c_str(), etag, sizeof(etag),
         report_request_json_);
-    char etag_hdr[52];
-    snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", etag);
+    char etag_hdr[52] = {};
+    if (etag[0]) snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", etag);
     switch (st) {
         case ReportManager::ResultRead::Ready: {
             AsyncResponseStream *response =
@@ -1228,8 +1228,12 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
                               "{\"ok\":false,\"error\":\"response alloc\"}");
                 return;
             }
-            response->addHeader("ETag", etag_hdr);
-            response->addHeader("Cache-Control", "no-cache");
+            if (etag_hdr[0]) {
+                response->addHeader("ETag", etag_hdr);
+                response->addHeader("Cache-Control", "no-cache");
+            } else {
+                response->addHeader("Cache-Control", "no-store");
+            }
             response->write(
                 reinterpret_cast<const uint8_t *>(report_request_json_.c_str()),
                 report_request_json_.length());
