@@ -105,6 +105,14 @@ uint32_t millis_nonzero() {
     return now == 0 ? 1 : now;
 }
 
+void log_archive_alloc_failed(const char *context, size_t bytes) {
+    Log::logf(CAT_STORAGE,
+              LOG_ERROR,
+              "[ARCHIVE] allocation failed context=%s bytes=%u\n",
+              context ? context : "--",
+              static_cast<unsigned>(bytes));
+}
+
 }  // namespace
 
 struct StorageArchiveJob::ArchiveEntry {
@@ -187,7 +195,7 @@ void StorageArchiveJob::set_error_locked(const char *error) {
     status_.state = StorageArchiveState::Error;
     copy_cstr(status_.error, sizeof(status_.error), error);
     status_.updated_ms = millis_nonzero();
-    Log::logf(CAT_GENERAL, LOG_WARN, "[ARCHIVE] error=%s\n",
+    Log::logf(CAT_STORAGE, LOG_WARN, "[ARCHIVE] error=%s\n",
               status_.error[0] ? status_.error : "error");
 }
 
@@ -483,7 +491,11 @@ bool StorageArchiveJob::reserve_entries_locked(size_t needed) {
     while (next < needed) next *= 2;
     ArchiveEntry *entries = static_cast<ArchiveEntry *>(
         Memory::calloc_large(next, sizeof(ArchiveEntry), false));
-    if (!entries) return false;
+    if (!entries) {
+        log_archive_alloc_failed("metadata_entries",
+                                 next * sizeof(ArchiveEntry));
+        return false;
+    }
     if (entries_) {
         memcpy(entries, entries_, entry_count_ * sizeof(ArchiveEntry));
         Memory::free(entries_);
@@ -500,7 +512,10 @@ bool StorageArchiveJob::reserve_path_bytes_locked(size_t needed) {
                                        : ARCHIVE_INITIAL_PATH_BYTES;
     while (next < needed) next *= 2;
     char *bytes = static_cast<char *>(Memory::alloc_large(next, false));
-    if (!bytes) return false;
+    if (!bytes) {
+        log_archive_alloc_failed("metadata_paths", next);
+        return false;
+    }
     if (path_bytes_) {
         memcpy(bytes, path_bytes_, path_bytes_len_);
         Memory::free(path_bytes_);
@@ -679,6 +694,7 @@ bool StorageArchiveJob::finalize_prepare_locked() {
         io_buffer_ = static_cast<uint8_t *>(
             Memory::alloc_large(ARCHIVE_IO_BYTES, true));
         if (!io_buffer_) {
+            log_archive_alloc_failed("io_buffer", ARCHIVE_IO_BYTES);
             set_error_locked("buffer_alloc");
             return false;
         }
@@ -693,7 +709,7 @@ bool StorageArchiveJob::finalize_prepare_locked() {
     }
     status_.state = StorageArchiveState::Building;
     status_.updated_ms = millis_nonzero();
-    Log::logf(CAT_GENERAL,
+    Log::logf(CAT_STORAGE,
               LOG_INFO,
               "[ARCHIVE] build id=%lu path=%s recursive=%u files=%lu "
               "input=%llu estimate=%llu\n",
@@ -749,7 +765,7 @@ bool StorageArchiveJob::build_step_locked() {
         status_.state = StorageArchiveState::Ready;
         status_.archive_bytes = status_.bytes_done;
         status_.updated_ms = millis_nonzero();
-        Log::logf(CAT_GENERAL,
+        Log::logf(CAT_STORAGE,
                   LOG_INFO,
                   "[ARCHIVE] ready id=%lu files=%lu bytes=%llu path=%s\n",
                   static_cast<unsigned long>(status_.id),

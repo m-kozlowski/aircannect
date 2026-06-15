@@ -323,8 +323,8 @@ bool EdfRecorderManager::ensure_mask_session_open(uint32_t now_ms) {
         ok = false;
     }
     if (!str_.mask_open() && !begin_str_session(status_.mask_start_time)) {
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] STR mask start skipped id=%lu error=%s\n",
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "STR mask start skipped id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.last_error[0] ? status_.last_error : "--");
         ok = false;
@@ -461,8 +461,8 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     if (status_.active && status_.session_id == session.session_id) return;
 
     if (!flush_pending_str_record(reason ? reason : "session_start")) {
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] pending STR record flush failed before session start "
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "pending STR record flush failed before session start "
                   "id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.last_error[0] ? status_.last_error : "--");
@@ -504,8 +504,8 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
         pending_mask_start_time_[0] = 0;
     }
 
-    Log::logf(CAT_STREAM, LOG_INFO,
-              "[EDF] recorder session start id=%lu reason=%s\n",
+    Log::logf(CAT_EDF, LOG_INFO,
+              "recorder session start id=%lu reason=%s\n",
               static_cast<unsigned long>(status_.session_id),
               reason ? reason : "--");
 }
@@ -519,8 +519,8 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     update_event_coverage();
 
     if (!finish_str_session(session, now_ms, recording_end_time)) {
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] STR session end skipped id=%lu error=%s\n",
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "STR session end skipped id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.last_error[0] ? status_.last_error : "--");
     }
@@ -537,13 +537,37 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     pending_mask_start_time_[0] = 0;
     numeric_open_frame_buffer_.clear();
     status_.sessions_ended++;
-    Log::logf(CAT_STREAM, LOG_INFO,
-              "[EDF] recorder session end id=%lu reason=%s frames=%lu "
-              "drops=%lu events=%lu\n",
+    const uint32_t enqueue_failures =
+        status_.record_enqueue_failures +
+        status_.annotation_enqueue_failures +
+        status_.str_enqueue_failures;
+    const uint32_t rpc_failures =
+        status_.str_setting_timeouts +
+        status_.str_summary_timeouts +
+        status_.identification_timeouts +
+        status_.identification_failures;
+    const bool had_failures =
+        status_.frame_drops != 0 ||
+        status_.numeric_record_drops != 0 ||
+        status_.numeric_open_buffer_drops != 0 ||
+        enqueue_failures != 0 ||
+        status_.file_open_failures != 0 ||
+        status_.event_coverage_session_gap_count != 0 ||
+        rpc_failures != 0;
+    Log::logf(CAT_EDF, had_failures ? LOG_WARN : LOG_INFO,
+              "recorder session end id=%lu reason=%s frames=%lu "
+              "drops=%lu numeric_drops=%lu enqueue_failures=%lu "
+              "open_failures=%lu event_gaps=%lu rpc_failures=%lu events=%lu\n",
               static_cast<unsigned long>(status_.session_id),
               reason ? reason : "--",
               static_cast<unsigned long>(status_.frames),
               static_cast<unsigned long>(status_.frame_drops),
+              static_cast<unsigned long>(status_.numeric_record_drops),
+              static_cast<unsigned long>(enqueue_failures),
+              static_cast<unsigned long>(status_.file_open_failures),
+              static_cast<unsigned long>(
+                  status_.event_coverage_session_gap_count),
+              static_cast<unsigned long>(rpc_failures),
               static_cast<unsigned long>(status_.event_records));
 }
 
@@ -750,8 +774,8 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
         status_.recording_gate_recoveries++;
         begin_recording_gate(recovery_frame->start_time, now_ms);
         pending_stream_frame_ = recovery_frame;
-        Log::logf(CAT_STREAM, LOG_INFO,
-                  "[EDF] recording gate recovered id=%lu start=%s\n",
+        Log::logf(CAT_EDF, LOG_INFO,
+                  "recording gate recovered id=%lu start=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.recording_start_time[0]
                       ? status_.recording_start_time
@@ -904,8 +928,8 @@ bool EdfRecorderManager::ensure_numeric_files_open(
                           sa2_schema_.open;
     numeric_segment_day_ = numeric_day;
     if (numeric_files_open_) {
-        Log::logf(CAT_STREAM, LOG_INFO,
-                  "[EDF] numeric files open start=%s accepted=%s brp=%u "
+        Log::logf(CAT_EDF, LOG_INFO,
+                  "numeric files open start=%s accepted=%s brp=%u "
                   "pld=%u sa2=%u\n",
                   numeric_start_time ? numeric_start_time : "--",
                   arbiter_->stream_accepted_data_ids_csv().c_str(),
@@ -1249,8 +1273,8 @@ bool EdfRecorderManager::flush_pending_str_record(const char *reason) {
     }
 
     if (summary_was_pending) {
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] STR record flushed without summary reason=%s\n",
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "STR record flushed without summary reason=%s\n",
                   reason ? reason : "--");
     }
     return true;
@@ -1293,8 +1317,8 @@ void EdfRecorderManager::handle_str_settings_response(
     status_.str_setting_values += result.values;
     status_.str_setting_missing += result.missing;
     status_.str_setting_unmapped += result.unmapped;
-    Log::logf(CAT_STREAM, LOG_DEBUG,
-              "[EDF] STR settings values=%lu missing=%lu unmapped=%lu\n",
+    Log::logf(CAT_EDF, LOG_DEBUG,
+              "STR settings values=%lu missing=%lu unmapped=%lu\n",
               static_cast<unsigned long>(result.values),
               static_cast<unsigned long>(result.missing),
               static_cast<unsigned long>(result.unmapped));
@@ -1314,8 +1338,8 @@ void EdfRecorderManager::handle_str_summary_response(
         status_.str_summary_values += result.values;
         status_.str_summary_missing += result.missing;
         status_.str_summary_unmapped += result.unmapped;
-        Log::logf(CAT_STREAM, LOG_DEBUG,
-                  "[EDF] STR summary values=%lu missing=%lu unmapped=%lu\n",
+        Log::logf(CAT_EDF, LOG_DEBUG,
+                  "STR summary values=%lu missing=%lu unmapped=%lu\n",
                   static_cast<unsigned long>(result.values),
                   static_cast<unsigned long>(result.missing),
                   static_cast<unsigned long>(result.unmapped));
@@ -1342,9 +1366,9 @@ void EdfRecorderManager::handle_identification_response(
     }
 
     status_.identification_write_requests++;
-    Log::logf(CAT_STREAM,
+    Log::logf(CAT_EDF,
               LOG_DEBUG,
-              "[EDF] identification bytes=%u\n",
+              "identification bytes=%u\n",
               static_cast<unsigned>(json.size()));
 }
 
@@ -1730,15 +1754,15 @@ bool EdfRecorderManager::roll_segment_if_needed(
         return false;
     }
 
-    Log::logf(CAT_STREAM, LOG_INFO,
-              "[EDF] segment rollover old_day=%u new_day=%u frame=%s\n",
+    Log::logf(CAT_EDF, LOG_INFO,
+              "segment rollover old_day=%u new_day=%u frame=%s\n",
               static_cast<unsigned>(numeric_segment_day_),
               static_cast<unsigned>(frame_day),
               frame.start_time);
 
     if (!finish_str_session_at(boundary, now_ms, false)) {
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] STR rollover finish skipped id=%lu error=%s\n",
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "STR rollover finish skipped id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.last_error[0] ? status_.last_error : "--");
     }
@@ -1753,8 +1777,8 @@ bool EdfRecorderManager::roll_segment_if_needed(
     }
 
     if (!begin_str_session_at(boundary, now_ms)) {
-        Log::logf(CAT_STREAM, LOG_WARN,
-                  "[EDF] STR rollover start skipped id=%lu error=%s\n",
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "STR rollover start skipped id=%lu error=%s\n",
                   static_cast<unsigned long>(status_.session_id),
                   status_.last_error[0] ? status_.last_error : "--");
     }

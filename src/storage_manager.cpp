@@ -262,8 +262,8 @@ bool remount() {
 
 #if AC_STORAGE_SDMMC_ENABLED
     if (mount_sdmmc()) {
-        Log::logf(CAT_GENERAL, LOG_INFO,
-                  "[STORAGE] mounted type=%s card=%s mount=%s\n",
+        Log::logf(CAT_STORAGE, LOG_INFO,
+                  "mounted type=%s card=%s mount=%s\n",
                   type_name(current.type), current.card_type,
                   current.mount_point);
         return true;
@@ -271,8 +271,8 @@ bool remount() {
 #endif
 #if AC_STORAGE_SPI_SD_ENABLED
     if (mount_spi_sd()) {
-        Log::logf(CAT_GENERAL, LOG_INFO,
-                  "[STORAGE] mounted type=%s card=%s mount=%s\n",
+        Log::logf(CAT_STORAGE, LOG_INFO,
+                  "mounted type=%s card=%s mount=%s\n",
                   type_name(current.type), current.card_type,
                   current.mount_point);
         return true;
@@ -283,9 +283,9 @@ bool remount() {
         set_state(StorageType::None, StorageState::Disabled,
                   "storage backend disabled");
     }
-    Log::logf(CAT_GENERAL,
+    Log::logf(CAT_STORAGE,
               current.state == StorageState::Error ? LOG_WARN : LOG_DEBUG,
-              "[STORAGE] unavailable type=%s state=%s error=%s\n",
+              "unavailable type=%s state=%s error=%s\n",
               type_name(current.type), state_name(current.state),
               current.last_error[0] ? current.last_error : "--");
     return false;

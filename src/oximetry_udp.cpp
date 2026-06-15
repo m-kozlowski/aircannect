@@ -13,7 +13,7 @@ bool OximetryManager::ensure_udp(bool network_available) {
         return false;
     }
     status_.udp_started = true;
-    Log::logf(CAT_OXI, LOG_INFO, "[OXI] UDP listening on port %u\n",
+    Log::logf(CAT_OXI, LOG_INFO, "UDP listening on port %u\n",
               status_.udp_port);
     return true;
 }

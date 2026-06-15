@@ -3,6 +3,7 @@
 #include <string.h>
 #include <utility>
 
+#include "debug_log.h"
 #include "memory_manager.h"
 
 namespace aircannect {
@@ -34,7 +35,14 @@ void ReportSpoolBuffer::move_from(ReportSpoolBuffer &other) {
 bool ReportSpoolBuffer::reserve(size_t capacity) {
     if (capacity <= capacity_) return true;
     uint8_t *next = static_cast<uint8_t *>(Memory::alloc_large(capacity));
-    if (!next) return false;
+    if (!next) {
+        Log::logf(CAT_REPORT,
+                  LOG_ERROR,
+                  "spool buffer allocation failed bytes=%u current=%u\n",
+                  static_cast<unsigned>(capacity),
+                  static_cast<unsigned>(capacity_));
+        return false;
+    }
     if (data_ && size_) memcpy(next, data_, size_);
     Memory::free(data_);
     data_ = next;

@@ -8,6 +8,7 @@
 #include "edf_time.h"
 
 #ifdef ARDUINO
+#include "debug_log.h"
 #include "memory_manager.h"
 #endif
 
@@ -31,6 +32,19 @@ void *alloc_large_bytes(size_t bytes) {
     return Memory::calloc_large(1, bytes);
 #else
     return calloc(1, bytes);
+#endif
+}
+
+void log_alloc_failed(const char *name, size_t bytes) {
+#ifdef ARDUINO
+    Log::logf(CAT_EDF,
+              LOG_ERROR,
+              "assembler allocation failed name=%s bytes=%u\n",
+              name ? name : "--",
+              static_cast<unsigned>(bytes));
+#else
+    (void)name;
+    (void)bytes;
 #endif
 }
 
@@ -266,6 +280,33 @@ bool EdfStreamAssembler::allocate_buffers() {
     if (!brp_values_ || !pld_values_ || !sa2_values_ || !brp_present_ ||
         !pld_present_ || !sa2_present_ || !brp_valid_ || !pld_valid_ ||
         !sa2_valid_) {
+        if (!brp_values_) {
+            log_alloc_failed("brp_values", sizeof(float) * brp_slots);
+        }
+        if (!pld_values_) {
+            log_alloc_failed("pld_values", sizeof(float) * pld_slots);
+        }
+        if (!sa2_values_) {
+            log_alloc_failed("sa2_values", sizeof(float) * sa2_slots);
+        }
+        if (!brp_present_) {
+            log_alloc_failed("brp_present", bitset_size(brp_slots));
+        }
+        if (!pld_present_) {
+            log_alloc_failed("pld_present", bitset_size(pld_slots));
+        }
+        if (!sa2_present_) {
+            log_alloc_failed("sa2_present", bitset_size(sa2_slots));
+        }
+        if (!brp_valid_) {
+            log_alloc_failed("brp_valid", bitset_size(brp_slots));
+        }
+        if (!pld_valid_) {
+            log_alloc_failed("pld_valid", bitset_size(pld_slots));
+        }
+        if (!sa2_valid_) {
+            log_alloc_failed("sa2_valid", bitset_size(sa2_slots));
+        }
         free_buffers();
         set_error("alloc_failed");
         return false;

@@ -74,7 +74,7 @@ bool CanDriver::begin() {
     esp_err_t err = twai_driver_install(&general_config, &timing_config,
                                         &filter_config);
     if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_ERROR, "[CAN] driver install failed: %s\n",
+        Log::logf(CAT_CAN, LOG_ERROR, "driver install failed: %s\n",
                   esp_err_name_short(err));
         return false;
     }
@@ -83,7 +83,7 @@ bool CanDriver::begin() {
     if (!start_controller()) return false;
 
     Log::logf(CAT_CAN, LOG_INFO,
-              "[CAN] started bitrate=%d timing=%s tx_gpio=%d rx_gpio=%d tx_id=0x%03X rx_id=0x%03X\n",
+              "started bitrate=%d timing=%s tx_gpio=%d rx_gpio=%d tx_id=0x%03X rx_id=0x%03X\n",
               AC_CAN_BITRATE, can_timing_name(), AC_CAN_TX_GPIO,
               AC_CAN_RX_GPIO, AC_CAN_TX_ID, AC_CAN_RX_ID);
     return true;
@@ -92,7 +92,7 @@ bool CanDriver::begin() {
 bool CanDriver::start_controller() {
     esp_err_t err = twai_start();
     if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_ERROR, "[CAN] start failed: %s\n",
+        Log::logf(CAT_CAN, LOG_ERROR, "start failed: %s\n",
                   esp_err_name_short(err));
         return false;
     }
@@ -110,7 +110,7 @@ bool CanDriver::start_controller() {
                             TWAI_ALERT_BUS_RECOVERED;
     err = twai_reconfigure_alerts(alerts, nullptr);
     if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] alert config failed: %s\n",
+        Log::logf(CAT_CAN, LOG_WARN, "alert config failed: %s\n",
                   esp_err_name_short(err));
     }
     return true;
@@ -124,7 +124,7 @@ void CanDriver::poll() {
     if (err == ESP_OK && alerts) {
         handle_alerts(alerts);
     } else if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] alert read failed: %s\n",
+        Log::logf(CAT_CAN, LOG_WARN, "alert read failed: %s\n",
                   esp_err_name_short(err));
     }
 
@@ -174,7 +174,7 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
     if (busy_before && !last_tx_success_ms_) last_tx_success_ms_ = now;
     if (busy_before &&
         static_cast<int32_t>(now - last_tx_success_ms_) >= 100) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] TX confirmation timeout\n");
+        Log::logf(CAT_CAN, LOG_WARN, "TX confirmation timeout\n");
         stats_.tx_failures++;
         recover_or_restart("CAN TX timeout");
         return;
@@ -197,7 +197,7 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
             break;
         }
         if (err != ESP_OK) {
-            Log::logf(CAT_CAN, LOG_WARN, "[CAN] transmit failed: %s\n",
+            Log::logf(CAT_CAN, LOG_WARN, "transmit failed: %s\n",
                       esp_err_name_short(err));
             stats_.tx_failures++;
             recover_or_restart("CAN transmit failed");
@@ -223,7 +223,7 @@ bool CanDriver::receive(RawCanFrame &frame, uint32_t wait_ms) {
     esp_err_t err = twai_receive(&msg, pdMS_TO_TICKS(wait_ms));
     if (err == ESP_ERR_TIMEOUT) return false;
     if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] RX failed: %s\n",
+        Log::logf(CAT_CAN, LOG_WARN, "RX failed: %s\n",
                   esp_err_name_short(err));
         return false;
     }
@@ -255,7 +255,7 @@ void CanDriver::handle_alerts(uint32_t alerts) {
     suppressed_bus_error_alerts_ = 0;
     if (suppressed) {
         Log::logf(CAT_CAN, LOG_INFO,
-                  "[CAN] alert:%s%s%s%s%s%s%s%s%s%s "
+                  "alert:%s%s%s%s%s%s%s%s%s%s "
                   "suppressed_bus_errors=%lu\n",
                   (visible_alerts & TWAI_ALERT_TX_FAILED) ? " tx_failed" : "",
                   (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) ? " rx_queue_full" : "",
@@ -270,7 +270,7 @@ void CanDriver::handle_alerts(uint32_t alerts) {
                   static_cast<unsigned long>(suppressed));
     } else {
         Log::logf(CAT_CAN, LOG_INFO,
-                  "[CAN] alert:%s%s%s%s%s%s%s%s%s%s\n",
+                  "alert:%s%s%s%s%s%s%s%s%s%s\n",
                   (visible_alerts & TWAI_ALERT_TX_FAILED) ? " tx_failed" : "",
                   (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) ? " rx_queue_full" : "",
                   (visible_alerts & TWAI_ALERT_ERR_PASS) ? " err_passive" : "",
@@ -289,22 +289,22 @@ bool CanDriver::recover_or_restart(const char *reason) {
     if (!installed_) return false;
     if (recovery_active_) return true;
 
-    Log::logf(CAT_CAN, LOG_WARN, "[CAN] recovery requested: %s\n", reason);
+    Log::logf(CAT_CAN, LOG_WARN, "recovery requested: %s\n", reason);
 
     twai_status_info_t status = {};
     esp_err_t err = twai_get_status_info(&status);
     if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] status before recovery failed: %s\n",
+        Log::logf(CAT_CAN, LOG_WARN, "status before recovery failed: %s\n",
                   esp_err_name_short(err));
         stats_.recovery_failures++;
         return false;
     }
 
     if (status.state == TWAI_STATE_BUS_OFF) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] bus_off: initiating TWAI recovery\n");
+        Log::logf(CAT_CAN, LOG_WARN, "bus_off: initiating TWAI recovery\n");
         err = twai_initiate_recovery();
         if (err != ESP_OK) {
-            Log::logf(CAT_CAN, LOG_ERROR, "[CAN] initiate recovery failed: %s\n",
+            Log::logf(CAT_CAN, LOG_ERROR, "initiate recovery failed: %s\n",
                       esp_err_name_short(err));
             stats_.recovery_failures++;
             return false;
@@ -321,13 +321,13 @@ bool CanDriver::recover_or_restart(const char *reason) {
     } else if (status.state == TWAI_STATE_RUNNING) {
         err = twai_stop();
         if (err != ESP_OK) {
-            Log::logf(CAT_CAN, LOG_ERROR, "[CAN] stop failed: %s\n",
+            Log::logf(CAT_CAN, LOG_ERROR, "stop failed: %s\n",
                       esp_err_name_short(err));
             stats_.recovery_failures++;
             return false;
         }
     } else if (status.state != TWAI_STATE_STOPPED) {
-        Log::logf(CAT_CAN, LOG_ERROR, "[CAN] cannot recover from state %s\n",
+        Log::logf(CAT_CAN, LOG_ERROR, "cannot recover from state %s\n",
                   state_name(status.state));
         stats_.recovery_failures++;
         return false;
@@ -344,7 +344,7 @@ bool CanDriver::restart_after_recovery() {
 
     esp_err_t err = twai_start();
     if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_ERROR, "[CAN] start after recovery failed: %s\n",
+        Log::logf(CAT_CAN, LOG_ERROR, "start after recovery failed: %s\n",
                   esp_err_name_short(err));
         stats_.recovery_failures++;
         recovery_active_ = false;
@@ -354,7 +354,7 @@ bool CanDriver::restart_after_recovery() {
     recovery_active_ = false;
     recovery_timeout_reported_ = false;
     stats_.recoveries++;
-    Log::logf(CAT_CAN, LOG_INFO, "[CAN] controller restarted\n");
+    Log::logf(CAT_CAN, LOG_INFO, "controller restarted\n");
     return true;
 }
 
@@ -373,7 +373,7 @@ void CanDriver::poll_recovery(uint32_t alerts) {
 
     if (!recovery_timeout_reported_ &&
         static_cast<int32_t>(millis() - recovery_deadline_ms_) >= 0) {
-        Log::logf(CAT_CAN, LOG_WARN, "[CAN] bus-off recovery timed out\n");
+        Log::logf(CAT_CAN, LOG_WARN, "bus-off recovery timed out\n");
         stats_.recovery_failures++;
         recovery_timeout_reported_ = true;
     }

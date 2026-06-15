@@ -284,7 +284,7 @@ bool OximetryManager::note_source_packet(OximetrySource source,
 
     if (source_present_ && source_ != source) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] ignored %s sample while %s source is active\n",
+                  "ignored %s sample while %s source is active\n",
                   source_name(source), source_name(source_));
         return false;
     }
@@ -326,13 +326,13 @@ bool OximetryManager::note_source_packet(OximetrySource source,
 #endif
                 sensor_invalid_since_ms_ = now_ms;
                 Log::logf(CAT_OXI, LOG_INFO,
-                          "[OXI] Sensor invalid readings; disconnecting\n");
+                          "Sensor invalid readings; disconnecting\n");
             }
         }
     }
     if (!source_was_present) {
         Log::logf(CAT_OXI, LOG_INFO,
-                  "[OXI] source active type=%s detail=%s valid=%s\n",
+                  "source active type=%s detail=%s valid=%s\n",
                   source_name(source_),
                   status_.source_detail[0] ? status_.source_detail : "--",
                   valid ? "yes" : "no");
@@ -374,7 +374,7 @@ void OximetryManager::mark_source_stale(uint32_t now_ms) {
         disconnect_ble();
         stop_advertising();
         stop_ble_roles_if_idle(now_ms);
-        Log::logf(CAT_OXI, LOG_INFO, "[OXI] source stale; BLE stopped\n");
+        Log::logf(CAT_OXI, LOG_INFO, "source stale; BLE stopped\n");
     }
 }
 

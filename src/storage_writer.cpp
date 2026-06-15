@@ -95,8 +95,8 @@ bool allocate_buffers() {
         data_pool = nullptr;
         capacity = 0;
         set_error("allocation_failed");
-        Log::logf(CAT_GENERAL, LOG_ERROR,
-                  "[STORAGE_WRITER] allocation failed chunk=%u\n",
+        Log::logf(CAT_STORAGE, LOG_ERROR,
+                  "[WRITER] allocation failed chunk=%u\n",
                   static_cast<unsigned>(chunk_bytes));
         return false;
     }
@@ -142,8 +142,8 @@ void drop_all_unavailable() {
     stats.unavailable_drops += static_cast<uint32_t>(queued);
     reset_queue();
     set_error("storage_not_mounted");
-    Log::logf(CAT_GENERAL, LOG_WARN,
-              "[STORAGE_WRITER] dropped %u queued chunks: storage not mounted\n",
+    Log::logf(CAT_STORAGE, LOG_WARN,
+              "[WRITER] dropped %u queued chunks: storage not mounted\n",
               static_cast<unsigned>(dropped));
 }
 
@@ -186,8 +186,8 @@ bool write_chunk(const Slot &slot) {
     if (!file) {
         stats.open_errors++;
         set_error("open_failed");
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[STORAGE_WRITER] open failed path=%s type=%s\n",
+        Log::logf(CAT_STORAGE, LOG_WARN,
+                  "[WRITER] open failed path=%s type=%s\n",
                   slot.path, Storage::type_name(storage.type));
         return false;
     }
@@ -199,8 +199,8 @@ bool write_chunk(const Slot &slot) {
     if (written != slot.len) {
         stats.write_errors++;
         set_error("short_write");
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[STORAGE_WRITER] short write path=%s written=%u expected=%u\n",
+        Log::logf(CAT_STORAGE, LOG_WARN,
+                  "[WRITER] short write path=%s written=%u expected=%u\n",
                   slot.path,
                   static_cast<unsigned>(written),
                   static_cast<unsigned>(slot.len));
@@ -223,8 +223,8 @@ void begin() {
     stats.capacity = capacity;
     reset_queue();
     if (stats.available) {
-        Log::logf(CAT_GENERAL, LOG_INFO,
-                  "[STORAGE_WRITER] ready q=%u chunk=%u psram=%s\n",
+        Log::logf(CAT_STORAGE, LOG_INFO,
+                  "[WRITER] ready q=%u chunk=%u psram=%s\n",
                   static_cast<unsigned>(capacity),
                   static_cast<unsigned>(chunk_bytes),
                   stats.using_psram ? "yes" : "no");
@@ -257,15 +257,15 @@ bool enqueue_append(const char *path, const uint8_t *data, size_t len) {
     if (!valid_path(path)) {
         stats.queue_drops++;
         set_error("bad_path");
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[STORAGE_WRITER] rejected write: bad path\n");
+        Log::logf(CAT_STORAGE, LOG_WARN,
+                  "[WRITER] rejected write: bad path\n");
         return false;
     }
     if (!Storage::mounted()) {
         stats.unavailable_drops++;
         set_error("storage_not_mounted");
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[STORAGE_WRITER] rejected write path=%s: storage not mounted\n",
+        Log::logf(CAT_STORAGE, LOG_WARN,
+                  "[WRITER] rejected write path=%s: storage not mounted\n",
                   path);
         return false;
     }
@@ -274,8 +274,8 @@ bool enqueue_append(const char *path, const uint8_t *data, size_t len) {
     if (needed == 0 || needed > free_slots()) {
         stats.queue_drops++;
         set_error("queue_full");
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[STORAGE_WRITER] rejected write path=%s chunks=%u free=%u\n",
+        Log::logf(CAT_STORAGE, LOG_WARN,
+                  "[WRITER] rejected write path=%s chunks=%u free=%u\n",
                   path,
                   static_cast<unsigned>(needed),
                   static_cast<unsigned>(free_slots()));

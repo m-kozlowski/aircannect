@@ -2544,7 +2544,7 @@ void WebUI::execute_oximetry_action(const std::string &action,
             }
             if (!ok) {
                 Log::logf(CAT_OXI, LOG_WARN,
-                          "[OXI] Web sensor connect command rejected target=\"%s\" addr=\"%s\"\n",
+                          "[WEB] sensor connect command rejected target=\"%s\" addr=\"%s\"\n",
                           target.c_str(),
                           addr.c_str());
             }

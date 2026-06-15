@@ -182,7 +182,7 @@ bool AppConfig::load() {
 
     Preferences prefs;
     if (!prefs.begin(CFG_NS, true)) {
-        Log::logf(CAT_GENERAL, LOG_WARN, "[CONFIG] failed to open NVS\n");
+        Log::logf(CAT_CONFIG, LOG_WARN, "failed to open NVS\n");
         return false;
     }
 
@@ -195,8 +195,8 @@ bool AppConfig::load() {
 
     if (schema > AC_CONFIG_SCHEMA_VERSION) {
         prefs.end();
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[CONFIG] future schema %lu; using defaults\n",
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "future schema %lu; using defaults\n",
                   static_cast<unsigned long>(schema));
         set_defaults();
         return save();
@@ -269,7 +269,7 @@ bool AppConfig::save_fields(uint32_t dirty) const {
 
     Preferences prefs;
     if (!prefs.begin(CFG_NS, false)) {
-        Log::logf(CAT_GENERAL, LOG_ERROR, "[CONFIG] failed to open NVS RW\n");
+        Log::logf(CAT_CONFIG, LOG_ERROR, "failed to open NVS RW\n");
         return false;
     }
 
@@ -348,8 +348,8 @@ bool AppConfig::save_fields(uint32_t dirty) const {
     prefs.end();
 
     if (!ok) {
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[CONFIG] one or more values were not persisted\n");
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "one or more values were not persisted\n");
     }
     return ok;
 }

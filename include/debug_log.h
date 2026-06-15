@@ -22,6 +22,11 @@ enum log_cat_t {
     CAT_STREAM,
     CAT_OTA,
     CAT_OXI,
+    CAT_STORAGE,
+    CAT_BGWORKER,
+    CAT_REPORT,
+    CAT_EDF,
+    CAT_CONFIG,
     CAT_COUNT,
 };
 

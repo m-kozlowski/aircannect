@@ -442,6 +442,26 @@ bool remember_report_event(ReportSpoolBuffer &seen,
     return report_append_event_record(seen, event);
 }
 
+void log_report_alloc_failed(const char *context, size_t bytes) {
+    Log::logf(CAT_REPORT,
+              LOG_ERROR,
+              "allocation failed context=%s bytes=%u\n",
+              context ? context : "--",
+              static_cast<unsigned>(bytes));
+}
+
+const char *prefetch_phase_name(ReportManager::PrefetchPhase phase) {
+    switch (phase) {
+        case ReportManager::PrefetchPhase::Idle: return "idle";
+        case ReportManager::PrefetchPhase::Pending: return "pending";
+        case ReportManager::PrefetchPhase::Fetching: return "fetching";
+        case ReportManager::PrefetchPhase::Done: return "done";
+        case ReportManager::PrefetchPhase::Failed: return "failed";
+        case ReportManager::PrefetchPhase::Drained: return "drained";
+        default: return "?";
+    }
+}
+
 }  // namespace
 
 ReportManager::~ReportManager() {
@@ -494,8 +514,9 @@ void ReportManager::begin() {
         night_epochs_ = static_cast<NightEpoch *>(Memory::calloc_large(
             AC_REPORT_SUMMARY_RECORD_MAX, sizeof(NightEpoch)));
         if (!night_epochs_) {
-            Log::logf(CAT_RPC, LOG_WARN,
-                      "[REPORT] night epoch PSRAM allocation failed\n");
+            log_report_alloc_failed(
+                "night_epochs",
+                AC_REPORT_SUMMARY_RECORD_MAX * sizeof(NightEpoch));
         }
     }
     if (!result_slots_) {
@@ -506,8 +527,9 @@ void ReportManager::begin() {
                 new (&result_slots_[i]) MaterializedResult();
             }
         } else {
-            Log::logf(CAT_RPC, LOG_WARN,
-                      "[REPORT] materialized result PSRAM allocation failed\n");
+            log_report_alloc_failed(
+                "result_slots",
+                AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult));
         }
     }
     clear_summary_records();
@@ -539,6 +561,9 @@ bool ReportManager::take_summary_scratch(TickType_t timeout,
     }
     if (!summary_scratch_) {
         xSemaphoreGive(summary_scratch_lock_);
+        log_report_alloc_failed(
+            "summary_scratch",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
         return false;
     }
     out = summary_scratch_;
@@ -576,7 +601,7 @@ bool ReportManager::request_summary_refresh(bool force) {
         give_summary_lock();
     }
     publish_summary_json_snapshot();
-    Log::logf(CAT_RPC, LOG_INFO, "[REPORT] Summary refresh queued\n");
+    Log::logf(CAT_REPORT, LOG_INFO, "Summary refresh queued\n");
     return true;
 }
 
@@ -816,6 +841,9 @@ bool ReportManager::ensure_summary_records() {
         Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
                              sizeof(ReportSummaryRecord)));
     if (!records_) {
+        log_report_alloc_failed(
+            "summary_records",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
         fail_summary("summary_alloc_failed");
         return false;
     }
@@ -864,8 +892,8 @@ bool ReportManager::parse_summary_result(ReportSpoolResult &result) {
     give_summary_lock();
     if (write_count &&
         !ReportStore::write_summary_records(staging, write_count)) {
-        Log::logf(CAT_RPC, LOG_WARN,
-                  "[REPORT] Summary store write failed records=%lu\n",
+        Log::logf(CAT_REPORT, LOG_WARN,
+                  "Summary store write failed records=%lu\n",
                   static_cast<unsigned long>(write_count));
     }
     give_summary_scratch();
@@ -906,8 +934,8 @@ bool ReportManager::load_summary_from_store() {
     const uint32_t records_total = summary_status_.records_total;
     const uint32_t nights_with_therapy = summary_status_.nights_with_therapy;
     give_summary_lock();
-    Log::logf(CAT_RPC, LOG_INFO,
-              "[REPORT] Summary loaded from store records=%lu "
+    Log::logf(CAT_REPORT, LOG_INFO,
+              "Summary loaded from store records=%lu "
               "therapy_nights=%lu\n",
               static_cast<unsigned long>(records_total),
               static_cast<unsigned long>(nights_with_therapy));
@@ -950,8 +978,8 @@ void ReportManager::finish_summary_fetch() {
         give_summary_lock();
     }
     publish_summary_json_snapshot();
-    Log::logf(CAT_RPC, LOG_INFO,
-              "[REPORT] Summary ready records=%lu therapy_nights=%lu\n",
+    Log::logf(CAT_REPORT, LOG_INFO,
+              "Summary ready records=%lu therapy_nights=%lu\n",
               static_cast<unsigned long>(records_total),
               static_cast<unsigned long>(nights_with_therapy));
     if (pending_result_prepare_) {
@@ -978,7 +1006,7 @@ void ReportManager::fail_summary(const char *message) {
     } else {
         error = message ? message : "summary_error";
     }
-    Log::logf(CAT_RPC, LOG_WARN, "[REPORT] Summary failed: %s\n",
+    Log::logf(CAT_REPORT, LOG_WARN, "Summary failed: %s\n",
               error.c_str());
     publish_summary_json_snapshot();
     if (pending_result_prepare_) {
@@ -1170,8 +1198,8 @@ void ReportManager::publish_summary_json_snapshot() {
     if (have_scratch) give_summary_scratch();
 
     if (summary_json_build_.overflowed()) {
-        Log::logf(CAT_RPC, LOG_WARN,
-                  "[REPORT] Summary JSON snapshot allocation failed\n");
+        Log::logf(CAT_REPORT, LOG_WARN,
+                  "Summary JSON snapshot allocation failed\n");
         summary_json_build_ =
             "{\"state\":\"error\",\"error\":\"summary_snapshot_alloc\","
             "\"nights\":[]}";
@@ -1441,9 +1469,9 @@ void ReportManager::publish_result_to_slot() {
         }
     }
     if (result_plot_bin_.size() > 0 && !plot) {
-        Log::logf(CAT_RPC,
+        Log::logf(CAT_REPORT,
                   LOG_WARN,
-                  "[REPORT] Result publish skipped: plot snapshot failed "
+                  "Result publish skipped: plot snapshot failed "
                   "index=%lu bytes=%lu\n",
                   static_cast<unsigned long>(result_status_.therapy_index),
                   static_cast<unsigned long>(result_plot_bin_.size()));
@@ -1759,7 +1787,12 @@ bool ReportManager::for_each_summary_night(
     ReportSummaryRecord *snapshot =
         static_cast<ReportSummaryRecord *>(Memory::alloc_large(
             AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord)));
-    if (!snapshot) return false;
+    if (!snapshot) {
+        log_report_alloc_failed(
+            "summary_night_snapshot",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
+        return false;
+    }
 
     bool any = false;
     size_t therapy_index = 0;
@@ -1991,6 +2024,10 @@ void ReportManager::set_prefetch_phase(PrefetchPhase phase,
                                        bool inc_completed,
                                        bool inc_failed) {
     if (!prefetch_lock_) return;
+    uint64_t failed_night = 0;
+    uint32_t failed_total = 0;
+    char failed_source[32] = {};
+    char failed_error[64] = {};
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
     const uint64_t phase_night =
         night_ms != 0 ? night_ms : prefetch_active_night_;
@@ -2011,8 +2048,25 @@ void ReportManager::set_prefetch_phase(PrefetchPhase phase,
         snprintf(prefetch_last_error_, sizeof(prefetch_last_error_), "%s",
                  cache_status_.error.length() ? cache_status_.error.c_str()
                                               : "");
+        failed_night = phase_night;
+        failed_total = prefetch_failed_;
+        snprintf(failed_source, sizeof(failed_source), "%s",
+                 prefetch_last_source_);
+        snprintf(failed_error, sizeof(failed_error), "%s",
+                 prefetch_last_error_);
     }
     xSemaphoreGive(prefetch_lock_);
+    if (inc_failed) {
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "prefetch failed phase=%s night=%llu source=%s "
+                  "error=%s total=%lu\n",
+                  prefetch_phase_name(phase),
+                  static_cast<unsigned long long>(failed_night),
+                  failed_source[0] ? failed_source : "--",
+                  failed_error[0] ? failed_error : "--",
+                  static_cast<unsigned long>(failed_total));
+    }
 }
 
 bool ReportManager::prefetch_request_next() {
@@ -2085,8 +2139,8 @@ void ReportManager::prefetch_yield_to_foreground() {
         cache_status_.error = "preempted_by_user";
     }
     set_prefetch_phase(PrefetchPhase::Failed, 0, false, true);
-    Log::logf(CAT_RPC, LOG_INFO,
-              "[REPORT] prefetch yielded to foreground prepare\n");
+    Log::logf(CAT_REPORT, LOG_INFO,
+              "prefetch yielded to foreground prepare\n");
 }
 
 ReportManager::BuildQueueResult ReportManager::enqueue_build(
@@ -2431,9 +2485,9 @@ bool ReportManager::cancel_cache_fetch() {
     cache_status_.revision++;
     cache_status_.error = "cancelled";
     cache_status_.spool = spool_.status();
-    Log::logf(CAT_RPC,
+    Log::logf(CAT_REPORT,
               LOG_INFO,
-              "[REPORT] Cache fetch cancelled night=%llu source=%s\n",
+              "Cache fetch cancelled night=%llu source=%s\n",
               static_cast<unsigned long long>(cache_status_.night_start_ms),
               report_source_spool_type(cache_status_.active_source));
     if (pending_result_prepare_) {
@@ -2450,6 +2504,9 @@ bool ReportManager::ensure_result_chunks() {
         Memory::calloc_large(AC_REPORT_RESULT_CHUNK_MAX,
                              sizeof(ReportResultChunk)));
     if (!result_chunks_) {
+        log_report_alloc_failed(
+            "result_chunks",
+            AC_REPORT_RESULT_CHUNK_MAX * sizeof(ReportResultChunk));
         fail_result_prepare("result_manifest_alloc_failed");
         return false;
     }
@@ -2474,7 +2531,7 @@ void ReportManager::fail_result_prepare(const char *message) {
     reset_plot_build();
     result_status_.state = ReportResultState::Error;
     result_status_.error = message ? message : "result_prepare_failed";
-    Log::logf(CAT_RPC, LOG_WARN, "[REPORT] Result prepare failed: %s\n",
+    Log::logf(CAT_REPORT, LOG_WARN, "Result prepare failed: %s\n",
               result_status_.error.c_str());
 }
 
@@ -2955,9 +3012,9 @@ bool ReportManager::start_result_plot_build() {
     if (load_result_plot_cache()) {
         result_status_.state = settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
-        Log::logf(CAT_RPC,
+        Log::logf(CAT_REPORT,
                   LOG_INFO,
-                  "[REPORT] Result plot cache hit index=%lu bytes=%lu\n",
+                  "Result plot cache hit index=%lu bytes=%lu\n",
                   static_cast<unsigned long>(result_status_.therapy_index),
                   static_cast<unsigned long>(result_plot_bin_.size()));
         publish_result_to_slot();
@@ -3182,9 +3239,9 @@ bool ReportManager::finish_result_plot_build() {
     result_status_.state = settled_result_state(result_status_.missing_required);
     result_status_.error.clear();
     publish_result_to_slot();
-    Log::logf(CAT_RPC,
+    Log::logf(CAT_REPORT,
               LOG_INFO,
-              "[REPORT] Result plot ready index=%lu chunks=%lu bytes=%lu\n",
+              "Result plot ready index=%lu chunks=%lu bytes=%lu\n",
               static_cast<unsigned long>(result_status_.therapy_index),
               static_cast<unsigned long>(result_status_.chunk_count),
               static_cast<unsigned long>(result_plot_bin_.size()));
@@ -3842,9 +3899,9 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
         }
         if (!start_result_plot_build()) return false;
         if (plot_build_active_) {
-            Log::logf(CAT_RPC,
+            Log::logf(CAT_REPORT,
                       LOG_INFO,
-                      "[REPORT] Result prepared index=%lu state=%s chunks=%lu "
+                      "Result prepared index=%lu state=%s chunks=%lu "
                       "records=%lu bytes=%lu plot=building\n",
                       static_cast<unsigned long>(therapy_index),
                       result_state_name(),
@@ -3854,8 +3911,8 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
             return true;
         }
     }
-    Log::logf(CAT_RPC, LOG_INFO,
-              "[REPORT] Result prepared index=%lu state=%s chunks=%lu "
+    Log::logf(CAT_REPORT, LOG_INFO,
+              "Result prepared index=%lu state=%s chunks=%lu "
               "records=%lu bytes=%lu\n",
               static_cast<unsigned long>(therapy_index),
               result_state_name(),
@@ -3989,8 +4046,8 @@ bool ReportManager::start_next_cache_source() {
     cache_status_.active_source = source;
     cache_status_.source_index = static_cast<uint32_t>(cache_source_index_);
     cache_status_.spool = spool_.status();
-    Log::logf(CAT_RPC, LOG_INFO,
-              "[REPORT] Cache source queued source=%s from=%s night=%llu\n",
+    Log::logf(CAT_REPORT, LOG_INFO,
+              "Cache source queued source=%s from=%s night=%llu\n",
               def->spool_type,
               from_dt.c_str(),
               static_cast<unsigned long long>(cache_night_.start_ms));
@@ -4111,6 +4168,10 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
             AC_REPORT_SUMMARY_RECORD_MAX, sizeof(ReportStoreCoverageRecord)));
     }
     if (!cov_batch) {
+        log_report_alloc_failed(
+            "coverage_batch",
+            AC_REPORT_SUMMARY_RECORD_MAX *
+                sizeof(ReportStoreCoverageRecord));
         fail_cache_fetch("coverage_alloc_failed");
         return false;
     }
@@ -4222,8 +4283,8 @@ void ReportManager::finish_cache_fetch() {
     cache_status_.revision++;
     cache_status_.error.clear();
     cache_status_.spool = spool_.status();
-    Log::logf(CAT_RPC, LOG_INFO,
-              "[REPORT] Cache fetch complete night=%llu chunks=%lu\n",
+    Log::logf(CAT_REPORT, LOG_INFO,
+              "Cache fetch complete night=%llu chunks=%lu\n",
               static_cast<unsigned long long>(cache_status_.night_start_ms),
               static_cast<unsigned long>(cache_status_.chunks_written));
     if (pending_result_prepare_) {
@@ -4241,7 +4302,7 @@ void ReportManager::fail_cache_fetch(const char *message) {
     cache_status_.revision++;
     cache_status_.error = message ? message : "cache_fetch_failed";
     cache_status_.spool = spool_.status();
-    Log::logf(CAT_RPC, LOG_WARN, "[REPORT] Cache fetch failed: %s\n",
+    Log::logf(CAT_REPORT, LOG_WARN, "Cache fetch failed: %s\n",
               cache_status_.error.c_str());
     if (pending_result_prepare_) {
         pending_result_prepare_ = false;

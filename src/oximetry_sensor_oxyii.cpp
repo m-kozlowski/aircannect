@@ -142,7 +142,7 @@ bool oxyii_send_command(NimBLERemoteCharacteristic *write_chr,
         sensor_oxyii_pending_ms = now_ms;
     }
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor OxyII TX cmd=%s payload_len=%u\n",
+              "Sensor OxyII TX cmd=%s payload_len=%u\n",
               oxyii_cmd_name(cmd),
               static_cast<unsigned>(payload_len));
     return true;
@@ -227,7 +227,7 @@ void sensor_oxyii_notify_cb(NimBLERemoteCharacteristic *chr,
                 sensor_oxyii_rx_want = want;
             } else {
                 Log::logf(CAT_OXI, LOG_DEBUG,
-                          "[OXI] Sensor OxyII RX too large want=%u\n",
+                          "Sensor OxyII RX too large want=%u\n",
                           static_cast<unsigned>(want));
                 return;
             }
@@ -253,7 +253,7 @@ void sensor_oxyii_notify_cb(NimBLERemoteCharacteristic *chr,
                             payload,
                             payload_len)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor OxyII RX decode failed len=%u\n",
+                  "Sensor OxyII RX decode failed len=%u\n",
                   static_cast<unsigned>(sensor_oxyii_rx_len));
         oxyii_reset_rx();
         return;
@@ -272,7 +272,7 @@ void sensor_oxyii_notify_cb(NimBLERemoteCharacteristic *chr,
     if (pending_cmd != OXYII_CMD_LIVE_SAMPLES ||
         cmd != OXYII_CMD_LIVE_SAMPLES) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor OxyII RX ignored cmd=%s pending=%s\n",
+                  "Sensor OxyII RX ignored cmd=%s pending=%s\n",
                   oxyii_cmd_name(cmd),
                   oxyii_cmd_name(pending_cmd));
         return;
@@ -286,12 +286,12 @@ void sensor_oxyii_notify_cb(NimBLERemoteCharacteristic *chr,
     if (!oxyii_decode_reading(payload, payload_len, spo2, pulse,
                               spo2_raw, pulse_raw, invalid)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor OxyII live decode failed len=%u\n",
+                  "Sensor OxyII live decode failed len=%u\n",
                   static_cast<unsigned>(payload_len));
         return;
     }
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor OxyII reading %s spo2=%u pulse=%u\n",
+              "Sensor OxyII reading %s spo2=%u pulse=%u\n",
               invalid ? "invalid" : "valid",
               static_cast<unsigned>(spo2),
               static_cast<unsigned>(pulse));
@@ -311,13 +311,13 @@ bool sensor_subscribe_oxyii(NimBLEClient *client) {
     if (!oxyii_service) return false;
 
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor OxyII service found\n");
+              "Sensor OxyII service found\n");
     NimBLERemoteCharacteristic *notify =
         oxyii_service->getCharacteristic(NimBLEUUID(OXYII_NOTIFY_UUID));
     if (!notify || !notify->canNotify() ||
         !notify->subscribe(true, sensor_oxyii_notify_cb)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor OxyII notify subscribe failed\n");
+                  "Sensor OxyII notify subscribe failed\n");
         return false;
     }
 
@@ -325,12 +325,12 @@ bool sensor_subscribe_oxyii(NimBLEClient *client) {
         oxyii_service->getCharacteristic(NimBLEUUID(OXYII_WRITE_UUID));
     if (!sensor_oxyii_write) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor OxyII write missing\n");
+                  "Sensor OxyII write missing\n");
         return false;
     }
 
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor subscribed OxyII notify\n");
+              "Sensor subscribed OxyII notify\n");
     return true;
 }
 
@@ -366,7 +366,7 @@ void sensor_oxyii_poll(uint32_t now_ms) {
         static_cast<int32_t>(now_ms - sensor_oxyii_pending_ms) >=
             static_cast<int32_t>(OXYII_RESPONSE_TIMEOUT_MS)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor OxyII response timeout cmd=%s\n",
+                  "Sensor OxyII response timeout cmd=%s\n",
                   oxyii_cmd_name(sensor_oxyii_pending_cmd));
         oxyii_reset_rx();
         oxyii_clear_pending();
@@ -380,7 +380,7 @@ void sensor_oxyii_poll(uint32_t now_ms) {
             sensor_oxyii_need_setup = true;
         } else {
             Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor OxyII auth write failed\n");
+                      "Sensor OxyII auth write failed\n");
         }
         return;
     }
@@ -395,7 +395,7 @@ void sensor_oxyii_poll(uint32_t now_ms) {
             sensor_oxyii_need_setup = false;
         } else {
             Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor OxyII setup write failed\n");
+                      "Sensor OxyII setup write failed\n");
         }
         return;
     }
@@ -405,7 +405,7 @@ void sensor_oxyii_poll(uint32_t now_ms) {
             sensor_oxyii_need_time_sync = false;
         } else {
             Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor OxyII time write failed\n");
+                      "Sensor OxyII time write failed\n");
             sensor_oxyii_need_time_sync = false;
         }
         return;
@@ -424,7 +424,7 @@ void sensor_oxyii_poll(uint32_t now_ms) {
         sensor_oxyii_last_poll_ms = now_ms;
     } else {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor OxyII poll write failed\n");
+                  "Sensor OxyII poll write failed\n");
         sensor_oxyii_last_poll_ms = now_ms;
     }
 }

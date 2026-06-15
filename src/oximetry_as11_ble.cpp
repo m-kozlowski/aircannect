@@ -133,7 +133,7 @@ bool OximetryManager::ensure_ble() {
     status_.ble_available = true;
     rebuild_advertising_data();
     Log::logf(CAT_OXI, LOG_INFO,
-              "[OXI] PLX BLE peripheral ready name=%s\n", ble_name_);
+              "PLX BLE peripheral ready name=%s\n", ble_name_);
     return true;
 #else
     status_.ble_available = false;
@@ -218,7 +218,7 @@ void OximetryManager::update_pairing_state(uint32_t now_ms) {
         disconnect_ble();
         stop_advertising();
         stop_ble_roles_if_idle(now_ms);
-        Log::logf(CAT_OXI, LOG_INFO, "[OXI] pairing window expired\n");
+        Log::logf(CAT_OXI, LOG_INFO, "pairing window expired\n");
     }
 }
 
@@ -233,7 +233,7 @@ void OximetryManager::start_advertising() {
         return;
     }
     status_.advertising = true;
-    Log::logf(CAT_OXI, LOG_INFO, "[OXI] BLE advertising started\n");
+    Log::logf(CAT_OXI, LOG_INFO, "BLE advertising started\n");
 #endif
 }
 
@@ -409,7 +409,7 @@ void OximetryManager::enforce_source_required(uint32_t now_ms) {
     stop_advertising();
     stop_ble_roles_if_idle(now_ms);
     Log::logf(CAT_OXI, LOG_INFO,
-              "[OXI] no source after BLE connect; disconnected\n");
+              "no source after BLE connect; disconnected\n");
 }
 
 void OximetryManager::on_ble_connect(uint16_t conn_handle,

@@ -26,7 +26,7 @@ void sensor_plx_notify_cb(NimBLERemoteCharacteristic *chr,
     const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid);
     const bool valid = spo2_valid && pulse_valid;
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor PLX reading %s spo2=%d pulse=%d\n",
+              "Sensor PLX reading %s spo2=%d pulse=%d\n",
               valid ? "valid" : "invalid",
               static_cast<int>(spo2),
               static_cast<int>(pulse));
@@ -48,7 +48,7 @@ bool sensor_subscribe_plx(NimBLEClient *client) {
     if (continuous && continuous->canNotify() &&
         continuous->subscribe(true, sensor_plx_notify_cb)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor subscribed PLX continuous\n");
+                  "Sensor subscribed PLX continuous\n");
         return true;
     }
 
@@ -57,7 +57,7 @@ bool sensor_subscribe_plx(NimBLEClient *client) {
     if (spot && (spot->canNotify() || spot->canIndicate()) &&
         spot->subscribe(spot->canNotify(), sensor_plx_notify_cb)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor subscribed PLX spot\n");
+                  "Sensor subscribed PLX spot\n");
         return true;
     }
 

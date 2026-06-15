@@ -137,7 +137,7 @@ void setup() {
     Memory::begin();
     Log::init();
     const MemoryStatus mem = Memory::status();
-    Log::logf(CAT_GENERAL, LOG_INFO, "\n=== AirCANnect %s ===\n",
+    Log::logf(CAT_GENERAL, LOG_INFO, "AirCANnect %s\n",
               aircannect_version());
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] build=%s\n",
               aircannect_build_date());
@@ -165,19 +165,19 @@ void setup() {
     EdfStorageWorker::begin();
     const StorageStatus storage = Storage::status();
     if (storage.mounted) {
-        Log::logf(CAT_GENERAL, LOG_INFO,
+        Log::logf(CAT_STORAGE, LOG_INFO,
                   "[INIT] storage=%s/%s free_bytes=%llu\n",
                   Storage::type_name(storage.type),
                   Storage::state_name(storage.state),
                   static_cast<unsigned long long>(storage.free_bytes));
     } else if (storage.last_error[0]) {
-        Log::logf(CAT_GENERAL, LOG_INFO,
+        Log::logf(CAT_STORAGE, LOG_INFO,
                   "[INIT] storage=%s/%s error=%s\n",
                   Storage::type_name(storage.type),
                   Storage::state_name(storage.state),
                   storage.last_error);
     } else {
-        Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] storage=%s/%s\n",
+        Log::logf(CAT_STORAGE, LOG_INFO, "[INIT] storage=%s/%s\n",
                   Storage::type_name(storage.type),
                   Storage::state_name(storage.state));
     }
@@ -218,7 +218,7 @@ void setup() {
     wifi_manager.begin();
     if (!app_config.data().tcp_bridge_enabled) {
         Log::logf(CAT_TCP, LOG_INFO,
-                  "[TCP] raw bridge disabled by config\n");
+                  "raw bridge disabled by config\n");
     }
     sync_network_services();
     web_ui.begin(rpc_arbiter, wifi_manager, tcp_bridge, app_config,

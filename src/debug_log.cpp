@@ -69,6 +69,69 @@ int format_message(char *buf, size_t size, const char *fmt, va_list args) {
     return len;
 }
 
+size_t append_bytes(char *buf,
+                    size_t size,
+                    size_t pos,
+                    const char *text,
+                    size_t len) {
+    if (!buf || size == 0 || !text || len == 0) return pos;
+    if (pos < size - 1) {
+        const size_t room = size - 1 - pos;
+        const size_t copy_len = len < room ? len : room;
+        memcpy(buf + pos, text, copy_len);
+        buf[pos + copy_len] = 0;
+    }
+    return pos + len;
+}
+
+size_t append_text(char *buf, size_t size, size_t pos, const char *text) {
+    return append_bytes(buf, size, pos, text, text ? strlen(text) : 0);
+}
+
+size_t append_char(char *buf, size_t size, size_t pos, char value) {
+    return append_bytes(buf, size, pos, &value, 1);
+}
+
+int compose_line(log_cat_t cat,
+                 log_level_t level,
+                 const char *message,
+                 bool payload_follows,
+                 char *buf,
+                 size_t size) {
+    if (!buf || size == 0) return 0;
+    buf[0] = 0;
+
+    char prefix[48];
+    const int prefix_len = snprintf(prefix, sizeof(prefix), "[%s][%s]",
+                                    Log::level_name(level),
+                                    Log::cat_name(cat));
+    const size_t prefix_bytes =
+        prefix_len > 0
+            ? (prefix_len < static_cast<int>(sizeof(prefix))
+                   ? static_cast<size_t>(prefix_len)
+                   : sizeof(prefix) - 1)
+            : 0;
+    size_t pos = append_bytes(buf,
+                              size,
+                              0,
+                              prefix,
+                              prefix_bytes);
+
+    const char *text = message ? message : "";
+    if (text[0]) {
+        if (text[0] != '[') pos = append_char(buf, size, pos, ' ');
+        pos = append_text(buf, size, pos, text);
+    } else if (payload_follows) {
+        pos = append_char(buf, size, pos, ' ');
+    }
+
+    if (pos >= size) {
+        log_stats.truncated++;
+        return static_cast<int>(size - 1);
+    }
+    return static_cast<int>(pos);
+}
+
 void serial_dispatch(const char *buf, int len) {
     if (!buf || len <= 0) return;
     Serial.write(reinterpret_cast<const uint8_t *>(buf), len);
@@ -207,6 +270,11 @@ const char *cat_name(log_cat_t cat) {
         case CAT_STREAM: return "STREAM";
         case CAT_OTA: return "OTA";
         case CAT_OXI: return "OXI";
+        case CAT_STORAGE: return "STORAGE";
+        case CAT_BGWORKER: return "BGWORKER";
+        case CAT_REPORT: return "REPORT";
+        case CAT_EDF: return "EDF";
+        case CAT_CONFIG: return "CONFIG";
         default: return "?";
     }
 }
@@ -270,6 +338,26 @@ bool parse_cat(String value, log_cat_t &cat) {
     }
     if (value == "oxi" || value == "oximetry") {
         cat = CAT_OXI;
+        return true;
+    }
+    if (value == "storage") {
+        cat = CAT_STORAGE;
+        return true;
+    }
+    if (value == "bgworker") {
+        cat = CAT_BGWORKER;
+        return true;
+    }
+    if (value == "report") {
+        cat = CAT_REPORT;
+        return true;
+    }
+    if (value == "edf") {
+        cat = CAT_EDF;
+        return true;
+    }
+    if (value == "config") {
+        cat = CAT_CONFIG;
         return true;
     }
     return false;
@@ -356,13 +444,16 @@ void logf(log_cat_t cat, log_level_t level, const char *fmt, ...) {
         log_stats.filtered++;
         return;
     }
-    char buf[AC_LOG_LINE_MAX];
+    char buf[AC_LOG_LINE_MAX] = {};
     va_list args;
     va_start(args, fmt);
-    const int len = format_message(buf, sizeof(buf), fmt, args);
+    format_message(buf, sizeof(buf), fmt, args);
     va_end(args);
+
+    char line[AC_LOG_LINE_MAX];
+    const int len = compose_line(cat, level, buf, false, line, sizeof(line));
     lock_log();
-    dispatch_structured(cat, level, buf, len);
+    dispatch_structured(cat, level, line, len);
     unlock_log();
 }
 
@@ -386,9 +477,17 @@ void log_payload(log_cat_t cat,
     }
 
     if (!prefix) prefix = "";
+    char header[AC_LOG_LINE_MAX];
+    const int header_len = compose_line(cat,
+                                        level,
+                                        prefix,
+                                        payload && payload_len,
+                                        header,
+                                        sizeof(header));
+
     lock_log();
     log_stats.emitted++;
-    serial_dispatch(prefix, strlen(prefix));
+    serial_dispatch(header, header_len);
     if (payload && payload_len) {
         serial_dispatch(payload, static_cast<int>(payload_len));
     }
@@ -399,16 +498,18 @@ void log_payload(log_cat_t cat,
         return;
     }
     char record[AC_LOG_LINE_MAX];
-    const size_t prefix_len = strlen(prefix);
+    const size_t prefix_len = static_cast<size_t>(header_len);
+    memcpy(record, header, prefix_len);
+    record[prefix_len] = 0;
     const size_t room =
         prefix_len < sizeof(record) ? sizeof(record) - prefix_len - 1 : 0;
     const size_t payload_room =
         payload_len < room ? payload_len : room;
-    const int len = snprintf(record, sizeof(record), "%s%.*s",
-                             prefix,
-                             static_cast<int>(payload_room),
-                             payload ? payload : "");
-    if (len >= static_cast<int>(sizeof(record))) log_stats.truncated++;
+    if (payload && payload_room) {
+        memcpy(record + prefix_len, payload, payload_room);
+        record[prefix_len + payload_room] = 0;
+    }
+    if (payload_len > payload_room) log_stats.truncated++;
     record[sizeof(record) - 1] = 0;
     enqueue_syslog(cat, level, record);
     unlock_log();

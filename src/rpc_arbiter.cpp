@@ -122,7 +122,7 @@ void RpcArbiter::poll() {
         static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0) {
         esp_ota_quiesce_timeout_logged_ = true;
         Log::logf(CAT_OTA, LOG_WARN,
-                  "[OTA] AS11 quiesce timed out\n");
+                  "AS11 quiesce timed out\n");
     }
 
     DatagramFeedResult rpc_timeout = rpc_rx_.poll(now);
@@ -164,7 +164,7 @@ bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source
     }
     if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
         char prefix[80];
-        snprintf(prefix, sizeof(prefix), "[RPC raw request source=%s] ",
+        snprintf(prefix, sizeof(prefix), "[RAW request source=%s] ",
                  source_name(source));
         Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
     }
@@ -458,7 +458,7 @@ void RpcArbiter::set_esp_ota_quiesce(bool requested) {
     }
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "[OTA] quiescing AS11 push traffic before ESP OTA\n");
+              "quiescing AS11 push traffic before ESP OTA\n");
     cancel_all_requests("esp_ota");
     stream_.request_quiesce(now);
     event_.request_quiesce(now);
@@ -564,7 +564,7 @@ void RpcArbiter::note_request_timeout(RpcSource source, uint32_t now) {
     next_as11_clock_poll_ms_ =
         background_backoff_until_ms_ + (AC_RPC_DEFAULT_TIMEOUT_MS * 4);
     Log::logf(CAT_RPC, LOG_WARN,
-              "[RPC] background polling paused for %lu ms after %u timeouts\n",
+              "background polling paused for %lu ms after %u timeouts\n",
               static_cast<unsigned long>(AC_RPC_BACKGROUND_BACKOFF_MS),
               static_cast<unsigned>(consecutive_scheduler_timeouts_));
 }
@@ -985,13 +985,13 @@ void RpcArbiter::dispatch_next_request() {
                                         last_integrated_tx_ms_);
     }
 
-    Log::logf(CAT_RPC, LOG_DEBUG, "[RPC] dispatched id=%lu method=%s src=%s\n",
+    Log::logf(CAT_RPC, LOG_DEBUG, "dispatched id=%lu method=%s src=%s\n",
               static_cast<unsigned long>(request.id),
               request.method.c_str(),
               source_name(request.source));
     char prefix[112];
     snprintf(prefix, sizeof(prefix),
-             "[RPC request id=%lu method=%s source=%s] ",
+             "[REQUEST id=%lu method=%s source=%s] ",
              static_cast<unsigned long>(request.id),
              request.method.c_str(),
              source_name(request.source));
@@ -1221,14 +1221,14 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
             if (subscribed &&
                 pending_.event_command == EventCommandType::Quiesce) {
                 Log::logf(CAT_RPC, LOG_INFO,
-                          "[RPC] AS11 event subscription quiesced\n");
+                          "AS11 event subscription quiesced\n");
             } else if (subscribed) {
                 Log::logf(CAT_RPC, LOG_INFO,
-                          "[RPC] subscribed to events id=%lu\n",
+                          "subscribed to events id=%lu\n",
                           static_cast<unsigned long>(subscription_id));
             } else {
                 Log::logf(CAT_RPC, LOG_WARN,
-                          "[RPC] event subscription rejected\n");
+                          "event subscription rejected\n");
             }
         }
     } else if (pending_.event_command != EventCommandType::None) {
@@ -1442,7 +1442,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 handle_event_notification(payload, payload_len);
             }
             if (!stream_data && !spool_fragment) {
-                Log::log_payload(CAT_RPC, LOG_DEBUG, "[RPC notify] ",
+                Log::log_payload(CAT_RPC, LOG_DEBUG, "[NOTIFY] ",
                                  payload, payload_len);
             }
             RpcPayloadRef payload_ref;
@@ -1486,7 +1486,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 if (response_source != RpcSource::Console) {
                     char prefix[112];
                     snprintf(prefix, sizeof(prefix),
-                             "[RPC response id=%lu method=%s source=%s] ",
+                             "[RESPONSE id=%lu method=%s source=%s] ",
                              static_cast<unsigned long>(matched_id),
                              matched_method.c_str(),
                              source_name(response_source));
@@ -1520,7 +1520,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
                     char prefix[112];
                     snprintf(prefix, sizeof(prefix),
-                             "[RPC response id=%lu source=%s] ",
+                             "[RESPONSE id=%lu source=%s] ",
                              static_cast<unsigned long>(response_id),
                              source_name(passthrough_source));
                     Log::log_payload(CAT_RPC, LOG_DEBUG, prefix,
@@ -1533,10 +1533,10 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
             if (pending_.active) {
                 stats_.rpc_unmatched++;
                 Log::logf(CAT_RPC, LOG_DEBUG,
-                          "[RPC] response did not match pending id=%lu\n",
+                          "response did not match pending id=%lu\n",
                           static_cast<unsigned long>(pending_.id));
             }
-            Log::log_payload(CAT_RPC, LOG_DEBUG, "[RPC response unmatched] ",
+            Log::log_payload(CAT_RPC, LOG_DEBUG, "[RESPONSE_UNMATCHED] ",
                              owned_payload);
             push_event(RpcEventKind::RpcResponse, ref_payload());
             break;
@@ -1544,7 +1544,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
         case RpcPayloadKind::Unknown: {
             stats_.rpc_unmatched++;
             std::string owned_payload = make_payload_string();
-            Log::log_payload(CAT_RPC, LOG_DEBUG, "[RPC unmatched] ",
+            Log::log_payload(CAT_RPC, LOG_DEBUG, "[UNMATCHED] ",
                              owned_payload);
             RpcPayloadRef payload_ref =
                 make_rpc_payload_ref(std::move(owned_payload));
@@ -1556,7 +1556,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
 
 void RpcArbiter::handle_debug_payload(const char *payload, size_t payload_len) {
     stats_.log_datagrams++;
-    Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11 log] ", payload, payload_len);
+    Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11] ", payload, payload_len);
     if (raw_rpc_events_enabled_) {
         push_event(RpcEventKind::DebugLog,
                    make_rpc_payload_ref(

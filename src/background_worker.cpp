@@ -18,8 +18,8 @@ void BackgroundWorker::begin() {
                             AC_BG_WORKER_TASK_STACK, this,
                             AC_BG_WORKER_TASK_PRIO, &task_,
                             AC_BG_WORKER_TASK_CORE);
-    Log::logf(CAT_GENERAL, LOG_INFO,
-              "[BGWORKER] started core=%u prio=%u stack=%u\n",
+    Log::logf(CAT_BGWORKER, LOG_INFO,
+              "started core=%u prio=%u stack=%u\n",
               static_cast<unsigned>(AC_BG_WORKER_TASK_CORE),
               static_cast<unsigned>(AC_BG_WORKER_TASK_PRIO),
               static_cast<unsigned>(AC_BG_WORKER_TASK_STACK));
@@ -112,7 +112,7 @@ void BackgroundWorker::run() {
         const bool open = gate_open(&reason);
         // reason is always a string literal, so pointer compare detects changes.
         if (reason != last_reason) {
-            Log::logf(CAT_GENERAL, LOG_INFO, "[BGWORKER] gate=%s\n", reason);
+            Log::logf(CAT_BGWORKER, LOG_INFO, "gate=%s\n", reason);
             last_reason = reason;
         }
         publish(open, reason);
@@ -135,8 +135,8 @@ void BackgroundWorker::run() {
         }
 
         if (result == JobStep::Idle && (++idle_ticks % 30) == 0) {
-            Log::logf(CAT_GENERAL, LOG_INFO,
-                      "[BGWORKER] heartbeat idle jobs=%u\n",
+            Log::logf(CAT_BGWORKER, LOG_INFO,
+                      "heartbeat idle jobs=%u\n",
                       static_cast<unsigned>(job_count_));
         }
         uint32_t delay = AC_BG_WORKER_IDLE_TICK_MS;

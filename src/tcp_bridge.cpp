@@ -7,7 +7,7 @@
 namespace aircannect {
 
 bool TcpBridge::begin(uint16_t port) {
-    return begin_line_server(port, "TCP");
+    return begin_line_server(port, "BRIDGE");
 }
 
 bool TcpBridge::restart(uint16_t port) {
@@ -40,7 +40,7 @@ void TcpBridge::broadcast_rpc_payload(const RpcPayloadRef &payload) {
         if (!output_queues_[i].push(payload)) {
             stats_.queue_drops++;
             Log::logf(CAT_TCP, LOG_WARN,
-                      "[TCP %u] outbound queue full; dropping payload\n",
+                      "[CLIENT %u] outbound queue full; dropping payload\n",
                       static_cast<unsigned>(i));
         } else {
         }
@@ -92,7 +92,7 @@ void TcpBridge::accept_clients() {
         disconnect_slot(i);
         clients_[i] = incoming;
         stats_.accepted_clients++;
-        Log::logf(CAT_TCP, LOG_INFO, "[TCP %u] connected from %s\n",
+        Log::logf(CAT_TCP, LOG_INFO, "[CLIENT %u] connected from %s\n",
                   static_cast<unsigned>(i),
                   clients_[i].remoteIP().toString().c_str());
         return;
@@ -156,7 +156,7 @@ LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
             payload.data() + output_pos_[idx]);
     }
 
-    result.written = write_line_nonblocking(client, idx, "TCP", data,
+    result.written = write_line_nonblocking(client, idx, "CLIENT", data,
                                             chunk, result.fatal_error);
     if (result.fatal_error || result.written == 0) return result;
 
@@ -175,7 +175,7 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
         if (!clients_[i]) continue;
 
         if (!clients_[i].connected()) {
-            Log::logf(CAT_TCP, LOG_INFO, "[TCP %u] disconnected\n",
+            Log::logf(CAT_TCP, LOG_INFO, "[CLIENT %u] disconnected\n",
                       static_cast<unsigned>(i));
             stats_.disconnected_clients++;
             disconnect_slot(i);
@@ -197,14 +197,14 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
                 const std::string payload(line.c_str());
                 if (Log::get_cat_level(CAT_TCP) >= LOG_DEBUG) {
                     char prefix[32];
-                    snprintf(prefix, sizeof(prefix), "[TCP %u -> RPC] ",
+                    snprintf(prefix, sizeof(prefix), "[CLIENT %u -> RPC] ",
                              static_cast<unsigned>(i));
                     Log::log_payload(CAT_TCP, LOG_DEBUG, prefix, payload);
                 }
                 if (!arbiter.submit_raw_payload(payload, RpcSource::Tcp)) {
                     stats_.enqueue_failures++;
                     Log::logf(CAT_TCP, LOG_WARN,
-                              "[TCP %u] CAN queue rejected payload\n",
+                              "[CLIENT %u] CAN queue rejected payload\n",
                               static_cast<unsigned>(i));
                 }
             } else if (c != '\r') {
@@ -214,7 +214,7 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
                     stats_.overlong_lines++;
                     lines_[i] = "";
                     Log::logf(CAT_TCP, LOG_WARN,
-                              "[TCP %u] line too long; dropping partial payload\n",
+                              "[CLIENT %u] line too long; dropping partial payload\n",
                               static_cast<unsigned>(i));
                 }
             }

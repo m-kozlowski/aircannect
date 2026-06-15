@@ -109,7 +109,7 @@ void WifiManager::poll() {
         network_available_ = softap_running_;
         stats_.disconnects++;
         Log::logf(CAT_WIFI, LOG_WARN,
-                  "[WiFi] STA disconnected; reconnecting\n");
+                  "STA disconnected; reconnecting\n");
         if (active_profile_index_ >= 0) {
             start_profile(static_cast<size_t>(active_profile_index_));
         } else {
@@ -186,7 +186,7 @@ void WifiManager::load_config() {
 void WifiManager::save_config(size_t first_dirty_index) {
     Preferences prefs;
     if (!prefs.begin(WIFI_PREF_NS, false)) {
-        Log::logf(CAT_WIFI, LOG_ERROR, "[WiFi] failed to open NVS namespace\n");
+        Log::logf(CAT_WIFI, LOG_ERROR, "failed to open NVS namespace\n");
         return;
     }
     prefs.putBool(WIFI_PREF_HAS, sta_configured_);
@@ -237,7 +237,7 @@ bool WifiManager::start_profile(size_t index) {
     last_disconnect_reason = 0;
     stats_.connect_attempts++;
 
-    Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] connecting to profile %u SSID=%s\n",
+    Log::logf(CAT_WIFI, LOG_INFO, "connecting to profile %u SSID=%s\n",
               static_cast<unsigned>(index), profile.ssid.c_str());
     if (!profile.password.length()) {
         WiFi.begin(profile.ssid.c_str());
@@ -263,7 +263,7 @@ bool WifiManager::start_softap(bool with_sta) {
     bool ok = WiFi.softAP(ssid.c_str(), AC_DEV_SOFTAP_PASS);
     if (!ok) {
         mode_state_ = WifiModeState::Failed;
-        Log::logf(CAT_WIFI, LOG_ERROR, "[WiFi] SoftAP start failed\n");
+        Log::logf(CAT_WIFI, LOG_ERROR, "SoftAP start failed\n");
         return false;
     }
     softap_running_ = true;
@@ -273,7 +273,7 @@ bool WifiManager::start_softap(bool with_sta) {
         active_profile_index_ = -1;
     }
     Log::logf(CAT_WIFI, LOG_WARN,
-              "[WiFi] SoftAP %s SSID=%s IP=%s\n",
+              "SoftAP %s SSID=%s IP=%s\n",
               softap_mode_name(softap_mode_),
               ssid.c_str(), WiFi.softAPIP().toString().c_str());
     return true;
@@ -313,7 +313,7 @@ bool WifiManager::configure_sta(const String &ssid, const String &password) {
     sta_configured_ = true;
     save_config();
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] configured single STA profile SSID=%s auth=%s\n",
+              "configured single STA profile SSID=%s auth=%s\n",
               ssid.c_str(), password.length() ? "password" : "open");
     return reconnect();
 }
@@ -350,7 +350,7 @@ void WifiManager::apply_softap_mode() {
     softap_running_ = false;
     network_available_ = true;
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] SoftAP stopped after mode switch to auto\n");
+              "SoftAP stopped after mode switch to auto\n");
 }
 
 void WifiManager::set_country_code(const String &country) {
@@ -381,7 +381,7 @@ bool WifiManager::configure_open_sta(const String &ssid) {
     sta_configured_ = true;
     save_config();
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] configured single open STA profile SSID=%s\n",
+              "configured single open STA profile SSID=%s\n",
               ssid.c_str());
     return reconnect();
 }
@@ -398,7 +398,7 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
         sta_configured_ = true;
         save_config(i);
         Log::logf(CAT_WIFI, LOG_INFO,
-                  "[WiFi] updated STA profile %u SSID=%s auth=%s\n",
+                  "updated STA profile %u SSID=%s auth=%s\n",
                   static_cast<unsigned>(i), clean_ssid.c_str(),
                   open_network ? "open" : "password");
         return reconnect();
@@ -406,7 +406,7 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
 
     if (profile_count_ >= AC_WIFI_PROFILE_MAX) {
         Log::logf(CAT_WIFI, LOG_WARN,
-                  "[WiFi] cannot add STA profile SSID=%s: profile list full\n",
+                  "cannot add STA profile SSID=%s: profile list full\n",
                   clean_ssid.c_str());
         return false;
     }
@@ -417,7 +417,7 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
     sta_configured_ = true;
     save_config(index);
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] added STA profile %u SSID=%s auth=%s\n",
+              "added STA profile %u SSID=%s auth=%s\n",
               static_cast<unsigned>(index), clean_ssid.c_str(),
               open_network ? "open" : "password");
     return reconnect();
@@ -428,7 +428,7 @@ bool WifiManager::replace_profiles(const WifiProfile *profiles,
                                    bool reconnect_now) {
     if (count > AC_WIFI_PROFILE_MAX) {
         Log::logf(CAT_WIFI, LOG_WARN,
-                  "[WiFi] profile replace rejected: count=%u max=%u\n",
+                  "profile replace rejected: count=%u max=%u\n",
                   static_cast<unsigned>(count),
                   static_cast<unsigned>(AC_WIFI_PROFILE_MAX));
         return false;
@@ -461,7 +461,7 @@ bool WifiManager::replace_profiles(const WifiProfile *profiles,
     }
     save_config();
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] replaced STA profiles count=%u reconnect=%s\n",
+              "replaced STA profiles count=%u reconnect=%s\n",
               static_cast<unsigned>(profile_count_),
               reconnect_now ? "yes" : "no");
     return reconnect_now ? reconnect() : true;
@@ -478,7 +478,7 @@ bool WifiManager::remove_profile(size_t index) {
     sta_configured_ = profile_count_ > 0;
     save_config(index);
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] removed STA profile %u SSID=%s remaining=%u\n",
+              "removed STA profile %u SSID=%s remaining=%u\n",
               static_cast<unsigned>(index), removed_ssid.c_str(),
               static_cast<unsigned>(profile_count_));
     return reconnect();
@@ -492,7 +492,7 @@ void WifiManager::clear_sta_config() {
     active_profile_index_ = -1;
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     save_config();
-    Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] cleared STA profiles\n");
+    Log::logf(CAT_WIFI, LOG_INFO, "cleared STA profiles\n");
     reconnect();
 }
 
@@ -568,11 +568,11 @@ void WifiManager::apply_country_code() {
     if (country_code_.length() < 2) return;
     esp_err_t err = esp_wifi_set_country_code(country_code_.c_str(), true);
     if (err == ESP_OK) {
-        Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] country code=%s\n",
+        Log::logf(CAT_WIFI, LOG_INFO, "country code=%s\n",
                   country_code_.c_str());
     } else {
         Log::logf(CAT_WIFI, LOG_WARN,
-                  "[WiFi] country code %s rejected err=%d\n",
+                  "country code %s rejected err=%d\n",
                   country_code_.c_str(), static_cast<int>(err));
     }
 }
@@ -590,7 +590,7 @@ void WifiManager::handle_connected() {
         roam_connect_pending_ = false;
     }
     stats_.connect_successes++;
-    Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] STA connected, IP=%s\n",
+    Log::logf(CAT_WIFI, LOG_INFO, "STA connected, IP=%s\n",
               WiFi.localIP().toString().c_str());
 }
 
@@ -610,7 +610,7 @@ void WifiManager::maybe_start_roam_scan() {
 
     low_rssi_count_++;
     Log::logf(CAT_WIFI, LOG_DEBUG,
-              "[WiFi] low RSSI %ld dBm (%u/%u)\n",
+              "low RSSI %ld dBm (%u/%u)\n",
               static_cast<long>(current_rssi),
               static_cast<unsigned>(low_rssi_count_),
               static_cast<unsigned>(AC_WIFI_ROAM_CONSECUTIVE_LOW));
@@ -627,7 +627,7 @@ void WifiManager::maybe_start_roam_scan() {
     stats_.roam_scans++;
     mode_state_ = WifiModeState::StaRoamScanning;
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] roaming: async scan for better AP\n");
+              "roaming: async scan for better AP\n");
 }
 
 int8_t WifiManager::find_profile_by_ssid(const String &ssid) const {
@@ -693,7 +693,7 @@ bool WifiManager::start_scan_candidate(size_t candidate_index) {
     char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
     format_bssid(bssid_text, sizeof(bssid_text), candidate.bssid);
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] roaming to profile %u SSID=%s BSSID=%s ch=%u rssi=%d\n",
+              "roaming to profile %u SSID=%s BSSID=%s ch=%u rssi=%d\n",
               static_cast<unsigned>(candidate.profile_index),
               profile.ssid.c_str(), bssid_text,
               static_cast<unsigned>(candidate.channel),
@@ -738,7 +738,7 @@ void WifiManager::handle_roam_scan() {
                 char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
                 format_bssid(bssid_text, sizeof(bssid_text), best.bssid);
                 Log::logf(CAT_WIFI, LOG_INFO,
-                          "[WiFi] roam candidate BSSID=%s %ld dBm beats "
+                          "roam candidate BSSID=%s %ld dBm beats "
                           "current %ld dBm by >=%ld\n",
                           bssid_text,
                           static_cast<long>(candidate_rssi),
@@ -769,11 +769,11 @@ void WifiManager::cleanup_manual_scan() {
         manual_scan_completed_ms_ = millis();
         if (result < 0) {
             Log::logf(CAT_WIFI, LOG_WARN,
-                      "[WiFi] manual scan failed rc=%d\n",
+                      "manual scan failed rc=%d\n",
                       static_cast<int>(result));
         } else {
             Log::logf(CAT_WIFI, LOG_INFO,
-                      "[WiFi] manual scan complete count=%d\n",
+                      "manual scan complete count=%d\n",
                       static_cast<int>(result));
         }
         return;
@@ -801,7 +801,7 @@ void WifiManager::handle_connect_timeout() {
     roam_connect_pending_ = false;
     consecutive_profile_failures_++;
     Log::logf(CAT_WIFI, LOG_WARN,
-              "[WiFi] STA failed for SSID=%s reason=%u\n",
+              "STA failed for SSID=%s reason=%u\n",
               sta_ssid_.c_str(), static_cast<unsigned>(last_disconnect_reason_));
     WiFi.disconnect(true);
     network_available_ = softap_running_;
@@ -828,7 +828,7 @@ void WifiManager::retry_with_pmf_disabled() {
     last_disconnect_reason_ = 0;
     last_disconnect_reason = 0;
     Log::logf(CAT_WIFI, LOG_INFO,
-              "[WiFi] reason 208; retrying with PMF disabled\n");
+              "reason 208; retrying with PMF disabled\n");
     esp_wifi_disconnect();
     esp_wifi_connect();
 }
@@ -859,26 +859,26 @@ WifiScanStatus WifiManager::manual_scan_status() {
 WifiScanStartResult WifiManager::start_manual_scan() {
     if (mode_state_ == WifiModeState::StaRoamScanning) {
         Log::logf(CAT_WIFI, LOG_DEBUG,
-                  "[WiFi] manual scan deferred: roaming scan active\n");
+                  "manual scan deferred: roaming scan active\n");
         return WifiScanStartResult::RoamInProgress;
     }
 
     if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
         Log::logf(CAT_WIFI, LOG_DEBUG,
-                  "[WiFi] manual scan request ignored: scan already running\n");
+                  "manual scan request ignored: scan already running\n");
         return WifiScanStartResult::Running;
     }
 
     WiFi.scanDelete();
     int16_t rc = WiFi.scanNetworks(true);
     if (rc == WIFI_SCAN_FAILED) {
-        Log::logf(CAT_WIFI, LOG_WARN, "[WiFi] manual scan start failed\n");
+        Log::logf(CAT_WIFI, LOG_WARN, "manual scan start failed\n");
         return WifiScanStartResult::Failed;
     }
 
     manual_scan_active_ = true;
     manual_scan_completed_ms_ = 0;
-    Log::logf(CAT_WIFI, LOG_INFO, "[WiFi] manual scan started\n");
+    Log::logf(CAT_WIFI, LOG_INFO, "manual scan started\n");
     return WifiScanStartResult::Started;
 }
 

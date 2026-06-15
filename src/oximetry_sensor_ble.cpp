@@ -63,7 +63,7 @@ public:
         (void)client;
         if (params) {
             Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor conn params request min=%u max=%u latency=%u timeout=%u\n",
+                      "Sensor conn params request min=%u max=%u latency=%u timeout=%u\n",
                       static_cast<unsigned>(params->itvl_min),
                       static_cast<unsigned>(params->itvl_max),
                       static_cast<unsigned>(params->latency),
@@ -302,7 +302,7 @@ bool OximetryManager::resolve_sensor_target(
 bool OximetryManager::request_sensor_scan() {
     if (!status_.enabled) {
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor scan ignored: oximetry disabled\n");
+                  "Sensor scan ignored: oximetry disabled\n");
         return false;
     }
     ensure_sensor_task();
@@ -313,14 +313,14 @@ bool OximetryManager::request_sensor_scan() {
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(&sensor_mux_);
 #endif
-    Log::logf(CAT_OXI, LOG_INFO, "[OXI] Sensor scan queued\n");
+    Log::logf(CAT_OXI, LOG_INFO, "Sensor scan queued\n");
     return true;
 }
 
 bool OximetryManager::request_sensor_connect(const char *addr_or_index) {
     if (!status_.enabled || !addr_or_index || !addr_or_index[0]) {
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor connect ignored: invalid request\n");
+                  "Sensor connect ignored: invalid request\n");
         return false;
     }
     OximetrySensorDevice target;
@@ -347,14 +347,14 @@ bool OximetryManager::request_sensor_connect(const char *addr_or_index) {
     if (ok) {
         ensure_sensor_task();
         Log::logf(CAT_OXI, LOG_INFO,
-                  "[OXI] Sensor connect queued target=\"%s\" addr=%s type=%u name=\"%s\"\n",
+                  "Sensor connect queued target=\"%s\" addr=%s type=%u name=\"%s\"\n",
                   addr_or_index,
                   target.addr,
                   static_cast<unsigned>(target.addr_type),
                   target.name);
     } else {
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor connect target not found target=\"%s\" scan=%u known=%u\n",
+                  "Sensor connect target not found target=\"%s\" scan=%u known=%u\n",
                   addr_or_index,
                   static_cast<unsigned>(scan_count),
                   static_cast<unsigned>(known_count));
@@ -366,7 +366,7 @@ bool OximetryManager::request_sensor_connect_device(
     const OximetrySensorDevice &device) {
     if (!status_.enabled || !device.addr[0]) {
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor connect ignored: invalid device request\n");
+                  "Sensor connect ignored: invalid device request\n");
         return false;
     }
     OximetrySensorDevice target = device;
@@ -392,7 +392,7 @@ bool OximetryManager::request_sensor_connect_device(
 #endif
     ensure_sensor_task();
     Log::logf(CAT_OXI, LOG_INFO,
-              "[OXI] Sensor connect queued addr=%s type=%u name=\"%s\"\n",
+              "Sensor connect queued addr=%s type=%u name=\"%s\"\n",
               target.addr,
               static_cast<unsigned>(target.addr_type),
               target.name);
@@ -526,13 +526,13 @@ void OximetryManager::sensor_hold_autoconnect(const char *addr,
     if (!changed) return;
     if (until_absent) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor auto-connect holdoff addr=%s until=absent max_ms=%lu\n",
+                  "Sensor auto-connect holdoff addr=%s until=absent max_ms=%lu\n",
                   logged_addr[0] ? logged_addr : "*",
                   static_cast<unsigned long>(
                       AC_OXIMETRY_SENSOR_RECONNECT_HOLDOFF_MS));
     } else {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor auto-connect holdoff addr=%s ms=%lu\n",
+                  "Sensor auto-connect holdoff addr=%s ms=%lu\n",
                   logged_addr[0] ? logged_addr : "*",
                   static_cast<unsigned long>(
                       AC_OXIMETRY_SENSOR_RECONNECT_HOLDOFF_MS));
@@ -644,7 +644,7 @@ bool OximetryManager::sensor_pick_autoconnect_target(
 #endif
     if (holdoff_cleared) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor auto-connect holdoff cleared addr=%s\n",
+                  "Sensor auto-connect holdoff cleared addr=%s\n",
                   holdoff_cleared_addr);
     }
     return found;
@@ -768,7 +768,7 @@ void OximetryManager::sensor_task_loop() {
 
         if (manual_connect && manual_target_device.addr[0]) {
             Log::logf(CAT_OXI, LOG_INFO,
-                      "[OXI] Sensor manual connect starting addr=%s type=%u name=\"%s\"\n",
+                      "Sensor manual connect starting addr=%s type=%u name=\"%s\"\n",
                       manual_target_device.addr,
                       static_cast<unsigned>(manual_target_device.addr_type),
                       manual_target_device.name);
@@ -807,7 +807,7 @@ void OximetryManager::sensor_task_loop() {
         const log_level_t scan_log_level =
             (manual_scan || manual_connect) ? LOG_INFO : LOG_DEBUG;
         Log::logf(CAT_OXI, scan_log_level,
-                  "[OXI] Sensor scan started manual=%s connect=%s auto=%s\n",
+                  "Sensor scan started manual=%s connect=%s auto=%s\n",
                   manual_scan ? "yes" : "no",
                   manual_connect ? "yes" : "no",
                   auto_scan ? "yes" : "no");
@@ -839,11 +839,11 @@ void OximetryManager::sensor_task_loop() {
         portEXIT_CRITICAL(&sensor_mux_);
 #endif
         Log::logf(CAT_OXI, scan_log_level,
-                  "[OXI] Sensor scan complete count=%u\n",
+                  "Sensor scan complete count=%u\n",
                   static_cast<unsigned>(scan_log_count));
         for (size_t i = 0; i < scan_log_count; ++i) {
             Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor scan result %u addr=%s type=%u rssi=%d name=\"%s\"\n",
+                      "Sensor scan result %u addr=%s type=%u rssi=%d name=\"%s\"\n",
                       static_cast<unsigned>(i),
                       scan_log[i].addr,
                       static_cast<unsigned>(scan_log[i].addr_type),
@@ -870,16 +870,16 @@ void OximetryManager::sensor_task_loop() {
         } else {
             if (manual_connect) {
                 Log::logf(CAT_OXI, LOG_WARN,
-                          "[OXI] Sensor manual connect target not found target=%s count=%u\n",
+                          "Sensor manual connect target not found target=%s count=%u\n",
                           manual_target[0] ? manual_target : "--",
                           static_cast<unsigned>(scan_log_count));
             } else if (auto_scan) {
                 if (sensor_autoconnect_holdoff_active(millis())) {
                     Log::logf(CAT_OXI, LOG_DEBUG,
-                              "[OXI] Sensor auto-connect holdoff active\n");
+                              "Sensor auto-connect holdoff active\n");
                 }
                 Log::logf(CAT_OXI, LOG_DEBUG,
-                          "[OXI] Sensor auto scan found no autoconnect target count=%u\n",
+                          "Sensor auto scan found no autoconnect target count=%u\n",
                           static_cast<unsigned>(scan_log_count));
             }
             sensor_set_state(OximetrySensorState::Idle);
@@ -903,7 +903,7 @@ bool OximetryManager::sensor_connect_target(
 
     NimBLEAddress address(std::string(target.addr), target.addr_type);
     Log::logf(CAT_OXI, LOG_INFO,
-              "[OXI] Sensor connecting addr=%s type=%u name=\"%s\"\n",
+              "Sensor connecting addr=%s type=%u name=\"%s\"\n",
               target.addr,
               static_cast<unsigned>(target.addr_type),
               target.name);
@@ -916,7 +916,7 @@ bool OximetryManager::sensor_connect_target(
         portEXIT_CRITICAL(&sensor_mux_);
 #endif
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor connect failed addr=%s err=%d\n",
+                  "Sensor connect failed addr=%s err=%d\n",
                   target.addr,
                   sensor_client->getLastError());
         sensor_set_state(OximetrySensorState::Idle);
@@ -933,7 +933,7 @@ bool OximetryManager::sensor_connect_target(
         portEXIT_CRITICAL(&sensor_mux_);
 #endif
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor encryption failed addr=%s err=%d\n",
+                  "Sensor encryption failed addr=%s err=%d\n",
                   target.addr,
                   sensor_client->getLastError());
         sensor_client->disconnect();
@@ -950,7 +950,7 @@ bool OximetryManager::sensor_connect_target(
         portEXIT_CRITICAL(&sensor_mux_);
 #endif
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor has no supported oximetry service addr=%s\n",
+                  "Sensor has no supported oximetry service addr=%s\n",
                   target.addr);
         sensor_client->disconnect();
         sensor_set_state(OximetrySensorState::Idle);
@@ -996,7 +996,7 @@ bool OximetryManager::sensor_connect_target(
 #endif
     sensor_set_state(OximetrySensorState::Connected);
     Log::logf(CAT_OXI, LOG_INFO,
-              "[OXI] Sensor connected addr=%s name=\"%s\"\n",
+              "Sensor connected addr=%s name=\"%s\"\n",
               target.addr, target.name);
     return true;
 #else
@@ -1097,7 +1097,7 @@ void OximetryManager::drain_sensor_events(uint32_t now_ms) {
         }
         status_.sensor_disconnects++;
         Log::logf(CAT_OXI, LOG_INFO,
-                  "[OXI] Sensor disconnected addr=%s reason=%d\n",
+                  "Sensor disconnected addr=%s reason=%d\n",
                   disconnect_addr[0] ? disconnect_addr : "--",
                   disconnect_reason);
     }

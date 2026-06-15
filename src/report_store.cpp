@@ -913,8 +913,8 @@ bool write_chunk(const ReportStoreChunkKey &key,
         return false;
     }
     set_error(current.last_error, sizeof(current.last_error), "");
-    Log::logf(CAT_RPC, LOG_DEBUG,
-              "[REPORT] stored chunk kind=%s source=%s name=%s "
+    Log::logf(CAT_REPORT, LOG_DEBUG,
+              "stored chunk kind=%s source=%s name=%s "
               "start=%lld end=%lld schema=%lu bytes=%lu records=%lu\n",
               kind_name(key.kind), key.source, key.name,
               static_cast<long long>(key.start_ms),
@@ -1353,8 +1353,8 @@ bool write_summary_records(const ReportSummaryRecord *records,
     current.summary_records_written += static_cast<uint32_t>(count);
     current.bytes_written += payload.size();
     set_error(current.last_error, sizeof(current.last_error), "");
-    Log::logf(CAT_RPC, LOG_DEBUG,
-              "[REPORT] stored summary records=%lu bytes=%lu\n",
+    Log::logf(CAT_REPORT, LOG_DEBUG,
+              "stored summary records=%lu bytes=%lu\n",
               static_cast<unsigned long>(count),
               static_cast<unsigned long>(payload.size()));
     return true;
@@ -1624,8 +1624,8 @@ bool write_coverage_batch(const char *source,
     }
     current.coverage_records_written += static_cast<uint32_t>(added);
     set_error(current.last_error, sizeof(current.last_error), "");
-    Log::logf(CAT_RPC, LOG_DEBUG,
-              "[REPORT] coverage source=%s intervals=%u added=%u\n",
+    Log::logf(CAT_REPORT, LOG_DEBUG,
+              "coverage source=%s intervals=%u added=%u\n",
               source, static_cast<unsigned>(set_count),
               static_cast<unsigned>(added));
     return true;

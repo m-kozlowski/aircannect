@@ -116,6 +116,24 @@ void set_error(const char *error) {
     stats.last_activity_ms = millis();
 }
 
+void log_alloc_failed(const char *context, size_t bytes) {
+    Log::logf(CAT_EDF,
+              LOG_ERROR,
+              "storage allocation failed context=%s bytes=%u\n",
+              context ? context : "--",
+              static_cast<unsigned>(bytes));
+}
+
+void log_worker_failure(log_level_t level,
+                        const char *error,
+                        const char *path = nullptr) {
+    Log::logf(CAT_EDF,
+              level,
+              "storage worker failure error=%s path=%s\n",
+              error ? error : "--",
+              path && path[0] ? path : "--");
+}
+
 StoredFileKind stored_kind(EdfFileKind kind) {
     switch (kind) {
         case EdfFileKind::Brp: return StoredFileKind::Brp;
@@ -254,6 +272,7 @@ void describe_inventory_file_locked(EdfStorageInventoryEntry &entry,
     uint8_t *header = static_cast<uint8_t *>(
         Memory::alloc_large(header_size, true));
     if (!header) {
+        log_alloc_failed("inventory_header", header_size);
         mark_inventory_file_status(entry,
                                    EdfInventoryStatus::InvalidHeader,
                                    file_size,
@@ -511,6 +530,15 @@ bool allocate_slots() {
     slot_bytes = static_cast<uint8_t *>(Memory::alloc_large(
         AC_EDF_STORAGE_SLOT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY, false));
     if (!slots || !slot_bytes) {
+        if (!slots) {
+            log_alloc_failed("queue_slots",
+                             AC_EDF_STORAGE_QUEUE_CAPACITY * sizeof(JobSlot));
+        }
+        if (!slot_bytes) {
+            log_alloc_failed(
+                "queue_payloads",
+                AC_EDF_STORAGE_SLOT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY);
+        }
         Memory::free(slots);
         Memory::free(slot_bytes);
         slots = nullptr;
@@ -625,6 +653,7 @@ bool try_resume_open_file(OpenFile &state, const JobSlot &job) {
     uint8_t *headers = static_cast<uint8_t *>(
         Memory::alloc_large(header_size * 2, false));
     if (!headers) {
+        log_alloc_failed("resume_headers", header_size * 2);
         state.file.close();
         return false;
     }
@@ -681,7 +710,10 @@ bool write_header(OpenFile &state, const JobSlot &job) {
                    : edf_header_size(*numeric_schema);
     uint8_t *header = static_cast<uint8_t *>(
         Memory::alloc_large(header_size, false));
-    if (!header) return false;
+    if (!header) {
+        log_alloc_failed("open_header", header_size);
+        return false;
+    }
 
     EdfHeaderInfo info;
     info.patient_id = job.patient_id;
@@ -729,7 +761,10 @@ bool write_str_header(File &file, const JobSlot &job) {
     const size_t header_size = edf_str_header_size();
     uint8_t *header = static_cast<uint8_t *>(
         Memory::alloc_large(header_size, false));
-    if (!header) return false;
+    if (!header) {
+        log_alloc_failed("str_header", header_size);
+        return false;
+    }
 
     bool ok = false;
     if (render_str_header_bytes(job, header, header_size)) {
@@ -875,6 +910,7 @@ bool process_open(const JobSlot &job) {
     state.file = Storage::open(job.path, "w+");
     if (!state.file) {
         stats.open_errors++;
+        log_worker_failure(LOG_WARN, "open_failed", job.path);
         return fail("open_failed");
     }
     state.kind = job.kind;
@@ -890,6 +926,7 @@ bool process_open(const JobSlot &job) {
     if (!write_open_header(state, job)) {
         state.file.close();
         stats.write_errors++;
+        log_worker_failure(LOG_WARN, "header_write_failed", job.path);
         return fail("header_write_failed");
     }
     state.open = true;
@@ -901,6 +938,7 @@ bool process_open(const JobSlot &job) {
         state.resumed = false;
         state.path[0] = 0;
         stats.write_errors++;
+        log_worker_failure(LOG_WARN, "recording_start_write_failed", job.path);
         return fail("recording_start_write_failed");
     }
     state.file.flush();
@@ -917,11 +955,13 @@ bool process_record(const JobSlot &job) {
     if (!state.open || !state.file) {
         stats.write_errors++;
         set_error("file_not_open");
+        log_worker_failure(LOG_WARN, "file_not_open", job.path);
         return false;
     }
     if (state.record_size != 0 && job.len != state.record_size) {
         stats.write_errors++;
         set_error("record_size_mismatch");
+        log_worker_failure(LOG_WARN, "record_size_mismatch", job.path);
         return false;
     }
 
@@ -931,6 +971,13 @@ bool process_record(const JobSlot &job) {
     if (written != job.len) {
         stats.write_errors++;
         set_error("short_write");
+        Log::logf(CAT_EDF,
+                  LOG_WARN,
+                  "storage worker short write path=%s written=%u "
+                  "expected=%u\n",
+                  job.path[0] ? job.path : state.path,
+                  static_cast<unsigned>(written),
+                  static_cast<unsigned>(job.len));
         return false;
     }
     state.file.flush();
@@ -938,6 +985,7 @@ bool process_record(const JobSlot &job) {
     if (!patch_record_count(state)) {
         stats.patch_errors++;
         set_error("patch_failed");
+        log_worker_failure(LOG_WARN, "patch_failed", state.path);
         return false;
     }
     stats.records_written++;
@@ -999,6 +1047,10 @@ bool process_str_record(const JobSlot &job) {
             Memory::alloc_large(header_size, false));
         uint8_t *expected_header = static_cast<uint8_t *>(
             Memory::alloc_large(header_size, false));
+        if (!actual_header) log_alloc_failed("str_actual_header", header_size);
+        if (!expected_header) {
+            log_alloc_failed("str_expected_header", header_size);
+        }
         const bool headers_available =
             actual_header && expected_header &&
             read_str_header(file, actual_header, header_size) &&
@@ -1039,8 +1091,8 @@ bool process_str_record(const JobSlot &job) {
                 set_error("str_backup_failed");
                 return false;
             }
-            Log::logf(CAT_STREAM, LOG_WARN,
-                      "[EDF] rotated incompatible STR root file to %s\n",
+            Log::logf(CAT_EDF, LOG_WARN,
+                      "rotated incompatible STR root file to %s\n",
                       backup_path);
 
             file = Storage::open(job.path, "w+");
@@ -1189,6 +1241,9 @@ bool process_identification_files(const JobSlot &job) {
                           job.len)) {
         stats.write_errors++;
         set_error("identification_json_write_failed");
+        log_worker_failure(LOG_WARN,
+                           "identification_json_write_failed",
+                           AC_EDF_IDENTIFICATION_JSON_PATH);
         return false;
     }
 
@@ -1199,6 +1254,9 @@ bool process_identification_files(const JobSlot &job) {
                           sizeof(crc_le))) {
         stats.write_errors++;
         set_error("identification_crc_write_failed");
+        log_worker_failure(LOG_WARN,
+                           "identification_crc_write_failed",
+                           AC_EDF_IDENTIFICATION_CRC_PATH);
         return false;
     }
 
@@ -1272,6 +1330,7 @@ bool enqueue(JobSlot &job) {
     if (!lock_queue()) {
         stats.queue_drops++;
         set_error("queue_lock_failed");
+        log_worker_failure(LOG_WARN, "queue_lock_failed", job.path);
         return false;
     }
     const bool ok = push_slot(job);
@@ -1279,6 +1338,7 @@ bool enqueue(JobSlot &job) {
     if (!ok) {
         stats.queue_drops++;
         set_error("queue_full");
+        log_worker_failure(LOG_WARN, "queue_full", job.path);
         return false;
     }
     stats.bytes_enqueued += job.len;
@@ -1295,12 +1355,14 @@ bool enqueue_rendered_slot(Prepare prepare,
     if (!lock_queue()) {
         stats.queue_drops++;
         set_error("queue_lock_failed");
+        log_worker_failure(LOG_WARN, "queue_lock_failed");
         return false;
     }
     if (free_slots() == 0) {
         unlock_queue();
         stats.queue_drops++;
         set_error("queue_full");
+        log_worker_failure(LOG_WARN, "queue_full");
         return false;
     }
 
@@ -1313,6 +1375,7 @@ bool enqueue_rendered_slot(Prepare prepare,
         unlock_queue();
         stats.render_errors++;
         set_error(render_error);
+        log_worker_failure(LOG_WARN, render_error, job.path);
         return false;
     }
 
@@ -1345,15 +1408,15 @@ void begin() {
         if (created != pdPASS || !task) {
             stats.available = false;
             set_error("task_create_failed");
-            Log::logf(CAT_STREAM, LOG_ERROR,
-                      "[EDF] storage worker task create failed\n");
+            Log::logf(CAT_EDF, LOG_ERROR,
+                      "storage worker task create failed\n");
             return;
         }
     }
     stats.initialized = true;
     stats.available = true;
-    Log::logf(CAT_STREAM, LOG_INFO,
-              "[EDF] storage worker ready q=%u slot=%u psram=%s\n",
+    Log::logf(CAT_EDF, LOG_INFO,
+              "storage worker ready q=%u slot=%u psram=%s\n",
               static_cast<unsigned>(AC_EDF_STORAGE_QUEUE_CAPACITY),
               static_cast<unsigned>(AC_EDF_STORAGE_SLOT_BYTES),
               stats.using_psram ? "yes" : "no");

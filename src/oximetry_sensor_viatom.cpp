@@ -150,11 +150,11 @@ bool viatom_sync_datetime(NimBLERemoteCharacteristic *write_chr) {
         strlen(payload));
     if (ok) {
         Log::logf(CAT_OXI, LOG_INFO,
-                  "[OXI] Sensor Viatom datetime set: %s\n",
+                  "Sensor Viatom datetime set: %s\n",
                   payload);
     } else {
         Log::logf(CAT_OXI, LOG_WARN,
-                  "[OXI] Sensor Viatom datetime write failed\n");
+                  "Sensor Viatom datetime write failed\n");
     }
     return ok;
 }
@@ -170,7 +170,7 @@ bool viatom_send_command(NimBLERemoteCharacteristic *write_chr,
     sensor_viatom_pending_cmd = cmd;
     sensor_viatom_pending_ms = now_ms;
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor Viatom TX cmd=%s payload_len=%u\n",
+              "Sensor Viatom TX cmd=%s payload_len=%u\n",
               viatom_cmd_name(cmd),
               static_cast<unsigned>(payload_len));
     return true;
@@ -199,7 +199,7 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
                 sensor_viatom_rx_want = want;
             } else {
                 Log::logf(CAT_OXI, LOG_DEBUG,
-                          "[OXI] Sensor Viatom RX too large want=%u\n",
+                          "Sensor Viatom RX too large want=%u\n",
                           static_cast<unsigned>(want));
             }
         }
@@ -210,7 +210,7 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
     if (sensor_viatom_rx_want) {
         if (sensor_viatom_rx_len + len > sizeof(sensor_viatom_rx)) {
             Log::logf(CAT_OXI, LOG_DEBUG,
-                      "[OXI] Sensor Viatom RX overflow have=%u add=%u\n",
+                      "Sensor Viatom RX overflow have=%u add=%u\n",
                       static_cast<unsigned>(sensor_viatom_rx_len),
                       static_cast<unsigned>(len));
             viatom_reset_rx();
@@ -232,7 +232,7 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
     viatom_clear_pending();
     if (pending_cmd != VIATOM_CMD_READ_SENSORS) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor Viatom RX ignored for cmd=%s\n",
+                  "Sensor Viatom RX ignored for cmd=%s\n",
                   viatom_cmd_name(pending_cmd));
         if (buffered_packet_complete) viatom_reset_rx();
         return;
@@ -252,13 +252,13 @@ void sensor_viatom_notify_cb(NimBLERemoteCharacteristic *chr,
                                spo2_raw, pulse_raw,
                                invalid)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor Viatom RX read decode failed len=%u\n",
+                  "Sensor Viatom RX read decode failed len=%u\n",
                   static_cast<unsigned>(packet_len));
         if (buffered_packet_complete) viatom_reset_rx();
         return;
     }
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f\n",
+              "Sensor Viatom reading %s spo2=%u pulse=%u lead=%u battery=%u battery_state=%u pi=%.1f\n",
               invalid ? "invalid" : "valid",
               static_cast<unsigned>(spo2),
               static_cast<unsigned>(pulse),
@@ -287,13 +287,13 @@ bool sensor_subscribe_viatom(NimBLEClient *client) {
     if (!viatom_service) return false;
 
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor Viatom service found\n");
+              "Sensor Viatom service found\n");
     NimBLERemoteCharacteristic *read =
         viatom_service->getCharacteristic(NimBLEUUID(VIATOM_READ_UUID));
     if (!read || !read->canNotify() ||
         !read->subscribe(true, sensor_viatom_notify_cb)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor Viatom read subscribe failed\n");
+                  "Sensor Viatom read subscribe failed\n");
         return false;
     }
 
@@ -301,12 +301,12 @@ bool sensor_subscribe_viatom(NimBLEClient *client) {
         viatom_service->getCharacteristic(NimBLEUUID(VIATOM_WRITE_UUID));
     if (!sensor_viatom_write) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor Viatom write missing\n");
+                  "Sensor Viatom write missing\n");
         return false;
     }
 
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor subscribed Viatom read\n");
+              "Sensor subscribed Viatom read\n");
     return true;
 }
 
@@ -336,7 +336,7 @@ void sensor_viatom_poll(uint32_t now_ms) {
         static_cast<int32_t>(now_ms - sensor_viatom_pending_ms) >=
             static_cast<int32_t>(VIATOM_RESPONSE_TIMEOUT_MS)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor Viatom response timeout cmd=%s\n",
+                  "Sensor Viatom response timeout cmd=%s\n",
                   viatom_cmd_name(sensor_viatom_pending_cmd));
         viatom_reset_rx();
         viatom_clear_pending();
@@ -364,7 +364,7 @@ void sensor_viatom_poll(uint32_t now_ms) {
         sensor_viatom_last_poll_ms = now_ms;
     } else {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor Viatom poll write failed\n");
+                  "Sensor Viatom poll write failed\n");
         sensor_viatom_last_poll_ms = now_ms;
     }
 }

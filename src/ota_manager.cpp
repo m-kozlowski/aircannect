@@ -50,11 +50,11 @@ void OtaManager::poll(const WifiManager &wifi_manager,
             if (!reboot_wait_logged_) {
                 reboot_wait_logged_ = true;
                 Log::logf(CAT_OTA, LOG_INFO,
-                          "[OTA] reboot waiting for AS11 quiesce\n");
+                          "reboot waiting for AS11 quiesce\n");
             }
             return;
         }
-        Log::logf(CAT_OTA, LOG_INFO, "[OTA] rebooting\n");
+        Log::logf(CAT_OTA, LOG_INFO, "rebooting\n");
         delay(50);
         ESP.restart();
     }
@@ -76,7 +76,7 @@ void OtaManager::poll(const WifiManager &wifi_manager,
         status_.total_size = 0;
         status_.last_error = "ota_prepare_expired";
         Log::logf(CAT_OTA, LOG_WARN,
-                  "[OTA] HTTP upload prepare expired before upload\n");
+                  "HTTP upload prepare expired before upload\n");
     }
     if (!wifi_manager.network_available()) {
         const bool stop_ota = status_.arduino_started;
@@ -171,7 +171,7 @@ bool OtaManager::request_http_upload_prepare(size_t image_size) {
 
     status_.partition = http_partition_->label;
     Log::logf(CAT_OTA, LOG_INFO,
-              "[OTA] HTTP upload prepare partition=%s image_size=%u\n",
+              "HTTP upload prepare partition=%s image_size=%u\n",
               http_partition_->label, static_cast<unsigned>(image_size));
     unlock_status();
     return true;
@@ -191,7 +191,7 @@ void OtaManager::poll_http_upload_prepare(bool as11_quiesced,
         status_.method = "http";
         http_prepared_at_ms_ = millis();
         Log::logf(CAT_OTA, LOG_INFO,
-                  "[OTA] HTTP upload prepared; AS11 traffic quiesced\n");
+                  "HTTP upload prepared; AS11 traffic quiesced\n");
         unlock_status();
         return;
     }
@@ -207,7 +207,7 @@ void OtaManager::poll_http_upload_prepare(bool as11_quiesced,
         http_prepared_at_ms_ = 0;
         set_error("as11_quiesce_timeout");
         Log::logf(CAT_OTA, LOG_ERROR,
-                  "[OTA] HTTP upload prepare failed: AS11 quiesce timeout\n");
+                  "HTTP upload prepare failed: AS11 quiesce timeout\n");
     }
     unlock_status();
 }
@@ -266,7 +266,7 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     }
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "[OTA] HTTP upload start file=%s partition=%s image_size=%u\n",
+              "HTTP upload start file=%s partition=%s image_size=%u\n",
               filename.c_str(), http_partition_->label,
               static_cast<unsigned>(image_size));
     unlock_status();
@@ -350,7 +350,7 @@ bool OtaManager::finish_http_upload() {
     status_.progress_percent = 100;
     status_.last_error = "";
     Log::logf(CAT_OTA, LOG_INFO,
-              "[OTA] HTTP upload complete bytes=%u partition=%s; rebooting\n",
+              "HTTP upload complete bytes=%u partition=%s; rebooting\n",
               static_cast<unsigned>(status_.bytes),
               http_partition_->label);
     http_handle_ = 0;
@@ -374,7 +374,7 @@ void OtaManager::abort_http_upload(const char *reason) {
     status_.method = "idle";
     status_.partition = "";
     set_error(reason ? reason : "aborted");
-    Log::logf(CAT_OTA, LOG_ERROR, "[OTA] HTTP upload failed: %s\n",
+    Log::logf(CAT_OTA, LOG_ERROR, "HTTP upload failed: %s\n",
               status_.last_error.c_str());
     unlock_status();
 }
@@ -420,7 +420,7 @@ void OtaManager::start_arduino_ota() {
             last_progress_log_percent_ = 255;
             unlock_status();
         }
-        Log::logf(CAT_OTA, LOG_INFO, "[OTA] ArduinoOTA start %s\n", type);
+        Log::logf(CAT_OTA, LOG_INFO, "ArduinoOTA start %s\n", type);
     });
     arduino_ota_->onEnd([this]() {
         if (lock_status()) {
@@ -431,7 +431,7 @@ void OtaManager::start_arduino_ota() {
         }
         schedule_reboot(2000);
         Log::logf(CAT_OTA, LOG_INFO,
-                  "[OTA] ArduinoOTA complete; rebooting\n");
+                  "ArduinoOTA complete; rebooting\n");
     });
     arduino_ota_->onProgress([this](unsigned int progress,
                                     unsigned int total) {
@@ -446,7 +446,7 @@ void OtaManager::start_arduino_ota() {
             (status_.progress_percent % 10 == 0 ||
              status_.progress_percent == 100)) {
             last_progress_log_percent_ = status_.progress_percent;
-            Log::logf(CAT_OTA, LOG_DEBUG, "[OTA] ArduinoOTA %u%%\n",
+            Log::logf(CAT_OTA, LOG_DEBUG, "ArduinoOTA %u%%\n",
                       static_cast<unsigned>(status_.progress_percent));
         }
         unlock_status();
@@ -461,7 +461,7 @@ void OtaManager::start_arduino_ota() {
             unlock_status();
         }
         arduino_config_dirty_ = true;
-        Log::logf(CAT_OTA, LOG_ERROR, "[OTA] ArduinoOTA error: %s\n", name);
+        Log::logf(CAT_OTA, LOG_ERROR, "ArduinoOTA error: %s\n", name);
     });
 
     arduino_ota_->begin();
@@ -470,7 +470,7 @@ void OtaManager::start_arduino_ota() {
     unlock_status();
     arduino_config_dirty_ = false;
     Log::logf(CAT_OTA, LOG_INFO,
-              "[OTA] ArduinoOTA ready port=%u auth=%s mdns=off\n",
+              "ArduinoOTA ready port=%u auth=%s mdns=off\n",
               static_cast<unsigned>(AC_ARDUINO_OTA_PORT),
               cfg.ota_password.length() ? "on" : "off");
 }
@@ -503,7 +503,7 @@ bool OtaManager::apply_http_progress(size_t bytes) {
         (status_.progress_percent % 10 == 0 ||
          status_.progress_percent == 100)) {
         last_progress_log_percent_ = status_.progress_percent;
-        Log::logf(CAT_OTA, LOG_DEBUG, "[OTA] HTTP upload %u%%\n",
+        Log::logf(CAT_OTA, LOG_DEBUG, "HTTP upload %u%%\n",
                   static_cast<unsigned>(status_.progress_percent));
     }
     unlock_status();

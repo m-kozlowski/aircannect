@@ -279,7 +279,7 @@ bool ResmedOtaManager::begin_upload(size_t total_size,
         set_error("initiate_queue_failed");
         return false;
     }
-    Log::logf(CAT_OTA, LOG_INFO, "[RESMED OTA] initiate size=%u file=%s\n",
+    Log::logf(CAT_OTA, LOG_INFO, "[RESMED] initiate size=%u file=%s\n",
               static_cast<unsigned>(total_size), filename.c_str());
     return true;
 }
@@ -366,7 +366,7 @@ bool ResmedOtaManager::request_check() {
         set_error("check_queue_failed");
         return false;
     }
-    Log::logf(CAT_OTA, LOG_INFO, "[RESMED OTA] check sha256=%s\n",
+    Log::logf(CAT_OTA, LOG_INFO, "[RESMED] check sha256=%s\n",
               status_.computed_sha256.c_str());
     return true;
 }
@@ -402,7 +402,7 @@ bool ResmedOtaManager::request_apply_plain(bool reset_settings,
         set_error("apply_queue_failed");
         return false;
     }
-    Log::logf(CAT_OTA, LOG_WARN, "[RESMED OTA] ApplyUpgrade queued\n");
+    Log::logf(CAT_OTA, LOG_WARN, "[RESMED] ApplyUpgrade queued\n");
     return true;
 }
 
@@ -446,7 +446,7 @@ bool ResmedOtaManager::request_apply_authenticated(
         return false;
     }
     Log::logf(CAT_OTA, LOG_WARN,
-              "[RESMED OTA] ApplyAuthenticatedUpgrade queued\n");
+              "[RESMED] ApplyAuthenticatedUpgrade queued\n");
     return true;
 }
 
@@ -505,7 +505,7 @@ bool ResmedOtaManager::begin_staged_upload(size_t input_size,
     }
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "[RESMED OTA] staging input=%s target=%s size=%u file=%s\n",
+              "[RESMED] staging input=%s target=%s size=%u file=%s\n",
               status_.input_type.c_str(), status_.target.c_str(),
               static_cast<unsigned>(input_size), filename.c_str());
     return true;
@@ -575,7 +575,7 @@ bool ResmedOtaManager::finish_staged_upload() {
     status_.last_result = "staged";
     last_activity_ms_ = millis();
     Log::logf(CAT_OTA, LOG_INFO,
-              "[RESMED OTA] staged %s size=%u path=%s\n",
+              "[RESMED] staged %s size=%u path=%s\n",
               status_.target.c_str(),
               static_cast<unsigned>(staging_output_size_),
               status_.staged_path.c_str());
@@ -757,7 +757,7 @@ void ResmedOtaManager::handle_response(const std::string &payload) {
             status_.phase = ResmedOtaPhase::Verified;
             if (staged_auto_apply_) {
                 Log::logf(CAT_OTA, LOG_WARN,
-                          "[RESMED OTA] verified; auto-applying upgrade\n");
+                          "[RESMED] verified; auto-applying upgrade\n");
                 request_apply_plain(false, AC_RESMED_OTA_CONFIRM);
             }
             break;
@@ -900,7 +900,7 @@ void ResmedOtaManager::set_error(const char *error) {
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
     last_activity_ms_ = millis();
-    Log::logf(CAT_OTA, LOG_ERROR, "[RESMED OTA] %s\n",
+    Log::logf(CAT_OTA, LOG_ERROR, "[RESMED] %s\n",
               status_.last_error.c_str());
 }
 

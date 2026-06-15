@@ -20,7 +20,7 @@ void sensor_nonin_notify_cb(NimBLERemoteCharacteristic *chr,
         (static_cast<uint16_t>(data[4]) << 8);
     const bool valid = spo2 > 0 && spo2 <= 100 && pulse > 0 && pulse < 500;
     Log::logf(CAT_OXI, LOG_DEBUG,
-              "[OXI] Sensor Nonin reading %s spo2=%u pulse=%u\n",
+              "Sensor Nonin reading %s spo2=%u pulse=%u\n",
               valid ? "valid" : "invalid",
               static_cast<unsigned>(spo2),
               static_cast<unsigned>(pulse));
@@ -45,7 +45,7 @@ bool sensor_subscribe_nonin(NimBLEClient *client) {
     if (continuous && continuous->canNotify() &&
         continuous->subscribe(true, sensor_nonin_notify_cb)) {
         Log::logf(CAT_OXI, LOG_DEBUG,
-                  "[OXI] Sensor subscribed Nonin continuous\n");
+                  "Sensor subscribed Nonin continuous\n");
         return true;
     }
 
