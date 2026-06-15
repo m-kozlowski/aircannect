@@ -383,14 +383,14 @@ private:
                             bool inc_completed, bool inc_failed);
     void prefetch_note_failure(uint64_t night_ms);
     bool prefetch_in_cooldown(uint64_t night_ms, uint32_t now_ms) const;
-    bool sparse_event_refresh_in_cooldown(uint64_t night_ms,
-                                          uint32_t now_ms) const;
-    void note_sparse_event_refresh(uint64_t night_ms);
+    void note_sparse_event_confirmed_empty(const ReportSummaryRecord &night,
+                                           const ReportSourceDef &source);
+    bool sparse_event_confirmed_empty(const ReportSummaryRecord &night,
+                                      const ReportSourceDef &source) const;
     bool sparse_event_refresh_due(const ReportSummaryRecord &night,
-                                  const ReportSourceDef &source,
-                                  uint32_t now_ms) const;
-    bool sparse_event_refresh_due_for_night(const ReportSummaryRecord &night,
-                                            uint32_t now_ms) const;
+                                  const ReportSourceDef &source) const;
+    bool sparse_event_refresh_due_for_night(
+        const ReportSummaryRecord &night) const;
 
     bool ensure_result_chunks();
     void clear_result_prepare();
@@ -434,7 +434,7 @@ private:
                                           size_t path_size) const;
     bool result_plot_cache_path(char *path, size_t path_size) const;
     bool clear_plot_cache_for_night(const ReportSummaryRecord &night,
-                                    uint32_t &deleted);
+                                    uint32_t &deleted) const;
     bool load_result_plot_cache();
     bool save_result_plot_cache() const;
 
@@ -475,6 +475,9 @@ private:
     // Per-summary-night max observed chunk.end_ms during the current fetch
     // (0 = night received no data this sweep). Bounds how far coverage may be
     // claimed so a partial fetch never marks a whole night complete.
+    // Positional sidecar for records_: summary refresh is refused while a cache
+    // fetch is active, so record indices cannot change between chunk parsing
+    // and coverage writing.
     int64_t cache_source_night_extent_ms_[AC_REPORT_SUMMARY_RECORD_MAX] = {};
 
     // Write-side coalescing: buffer parsed chunks per (kind,name) and flush
@@ -514,8 +517,12 @@ private:
     char prefetch_last_source_[48] = {};
     char prefetch_last_error_[48] = {};
     PrefetchSkip prefetch_skip_[PREFETCH_SKIP_MAX] = {};
-    uint64_t sparse_event_refresh_night_ = 0;
-    uint32_t sparse_event_refresh_until_ms_ = 0;
+    struct SparseEventEmptyMarker {
+        ReportSourceId source = ReportSourceId::Summary;
+        uint64_t night_ms = 0;
+        char etag[48] = {};
+    };
+    SparseEventEmptyMarker sparse_event_empty_[4] = {};
 
     ReportResultChunk *result_chunks_ = nullptr;
     size_t result_chunk_capacity_ = 0;

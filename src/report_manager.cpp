@@ -196,6 +196,49 @@ bool source_latest_cached_end_for_night(const ReportSourceDef &source,
                                         const ReportSummaryRecord &night,
                                         int64_t &out_end_ms);
 
+bool deadline_before(uint32_t candidate, uint32_t current, uint32_t now_ms) {
+    return static_cast<int32_t>(candidate - now_ms) <
+           static_cast<int32_t>(current - now_ms);
+}
+
+const char *plot_cache_basename(const char *path) {
+    if (!path) return "";
+    const char *last = strrchr(path, '/');
+    return last ? last + 1 : path;
+}
+
+bool plot_cache_child_path(const char *child_name,
+                           char *out,
+                           size_t out_size) {
+    if (!child_name || !child_name[0] || !out || !out_size) {
+        return false;
+    }
+    if (child_name[0] == '/') {
+        const int written = snprintf(out, out_size, "%s", child_name);
+        return written > 0 && static_cast<size_t>(written) < out_size;
+    }
+    const int written =
+        snprintf(out, out_size, "%s/%s", REPORT_PLOT_CACHE_DIR, child_name);
+    return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool plot_cache_name_for_night(const char *name, uint64_t night_start_ms) {
+    const char *base = plot_cache_basename(name);
+    char prefix[32];
+    const int written = snprintf(prefix,
+                                 sizeof(prefix),
+                                 "%llu-",
+                                 static_cast<unsigned long long>(
+                                     night_start_ms));
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(prefix)) {
+        return false;
+    }
+    const size_t prefix_len = strlen(prefix);
+    if (strncmp(base, prefix, prefix_len) != 0) return false;
+    const char *dot = strrchr(base, '.');
+    return dot && (strcmp(dot, ".bin") == 0 || strcmp(dot, ".tmp") == 0);
+}
+
 bool store_summary_record_to_buffer(void *context,
                                     const ReportSummaryRecord &record) {
     SummaryRecordBufferContext *ctx =
@@ -1700,7 +1743,7 @@ bool ReportManager::next_night_needing_cache(
             return true;
         }
         if (have_latest && record.start_ms == latest.start_ms &&
-            sparse_event_refresh_due_for_night(record, now)) {
+            sparse_event_refresh_due_for_night(record)) {
             night_start_ms_out = record.start_ms;
             return true;
         }
@@ -1846,44 +1889,76 @@ bool ReportManager::prefetch_in_cooldown(uint64_t night_ms,
     return false;
 }
 
-bool ReportManager::sparse_event_refresh_in_cooldown(
-    uint64_t night_ms,
-    uint32_t now_ms) const {
-    return sparse_event_refresh_night_ == night_ms &&
-           sparse_event_refresh_until_ms_ != 0 &&
-           static_cast<int32_t>(now_ms - sparse_event_refresh_until_ms_) < 0;
+void ReportManager::note_sparse_event_confirmed_empty(
+    const ReportSummaryRecord &night,
+    const ReportSourceDef &source) {
+    char etag[48];
+    format_night_etag(night, etag, sizeof(etag));
+    if (!etag[0]) return;
+
+    size_t pick = 0;
+    bool found = false;
+    const size_t marker_count =
+        sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
+    for (size_t i = 0; i < marker_count; ++i) {
+        const SparseEventEmptyMarker &marker = sparse_event_empty_[i];
+        if ((marker.source == source.id && marker.night_ms == night.start_ms) ||
+            marker.night_ms == 0) {
+            pick = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) pick = 0;
+
+    SparseEventEmptyMarker &marker = sparse_event_empty_[pick];
+    marker.source = source.id;
+    marker.night_ms = night.start_ms;
+    snprintf(marker.etag,
+             sizeof(marker.etag),
+             "%s",
+             etag);
 }
 
-void ReportManager::note_sparse_event_refresh(uint64_t night_ms) {
-    sparse_event_refresh_night_ = night_ms;
-    sparse_event_refresh_until_ms_ =
-        millis() + AC_REPORT_PREFETCH_RESCAN_MS;
-    if (sparse_event_refresh_until_ms_ == 0) {
-        sparse_event_refresh_until_ms_ = 1;
+bool ReportManager::sparse_event_confirmed_empty(
+    const ReportSummaryRecord &night,
+    const ReportSourceDef &source) const {
+    char etag[48];
+    format_night_etag(night, etag, sizeof(etag));
+    if (!etag[0]) return false;
+    const size_t marker_count =
+        sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
+    for (size_t i = 0; i < marker_count; ++i) {
+        const SparseEventEmptyMarker &marker = sparse_event_empty_[i];
+        if (marker.source == source.id &&
+            marker.night_ms == night.start_ms &&
+            marker.etag[0] != '\0' &&
+            strcmp(etag, marker.etag) == 0) {
+            return true;
+        }
     }
+    return false;
 }
 
 bool ReportManager::sparse_event_refresh_due(
     const ReportSummaryRecord &night,
-    const ReportSourceDef &source,
-    uint32_t now_ms) const {
+    const ReportSourceDef &source) const {
     if (!source_required_for_report_result(source.id)) return false;
     if (!source_is_sparse_event(source)) return false;
-    if (sparse_event_refresh_in_cooldown(night.start_ms, now_ms)) {
-        return false;
-    }
     if (!source_complete_for_night(night, source)) return false;
     int64_t cached_end_ms = 0;
-    return !source_latest_cached_end_for_night(source, night, cached_end_ms);
+    if (source_latest_cached_end_for_night(source, night, cached_end_ms)) {
+        return false;
+    }
+    return !sparse_event_confirmed_empty(night, source);
 }
 
 bool ReportManager::sparse_event_refresh_due_for_night(
-    const ReportSummaryRecord &night,
-    uint32_t now_ms) const {
+    const ReportSummaryRecord &night) const {
     size_t source_count = 0;
     const ReportSourceDef *sources = report_source_defs(source_count);
     for (size_t i = 0; i < source_count; ++i) {
-        if (sparse_event_refresh_due(night, sources[i], now_ms)) {
+        if (sparse_event_refresh_due(night, sources[i])) {
             return true;
         }
     }
@@ -1891,7 +1966,8 @@ bool ReportManager::sparse_event_refresh_due_for_night(
 }
 
 void ReportManager::prefetch_note_failure(uint64_t night_ms) {
-    uint32_t until = millis() + AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS;
+    const uint32_t now_ms = millis();
+    uint32_t until = now_ms + AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS;
     if (until == 0) until = 1;
     size_t pick = 0;
     for (size_t i = 0; i < PREFETCH_SKIP_MAX; ++i) {
@@ -1900,7 +1976,11 @@ void ReportManager::prefetch_note_failure(uint64_t night_ms) {
             pick = i;
             break;
         }
-        if (prefetch_skip_[i].until_ms < prefetch_skip_[pick].until_ms) pick = i;
+        if (deadline_before(prefetch_skip_[i].until_ms,
+                            prefetch_skip_[pick].until_ms,
+                            now_ms)) {
+            pick = i;
+        }
     }
     prefetch_skip_[pick].night_ms = night_ms;
     prefetch_skip_[pick].until_ms = until;
@@ -2127,16 +2207,38 @@ void ReportManager::service_prefetch() {
 }
 
 bool ReportManager::clear_plot_cache_for_night(const ReportSummaryRecord &night,
-                                               uint32_t &deleted) {
+                                               uint32_t &deleted) const {
     deleted = 0;
-    char path[REPORT_PLOT_PATH_MAX];
-    if (!result_plot_cache_path_for_night(night, path, sizeof(path))) {
+    if (!night.start_ms) return false;
+    Storage::Guard g;
+    if (!Storage::mounted()) return false;
+    File dir = Storage::open(REPORT_PLOT_CACHE_DIR, "r");
+    if (!dir) return true;
+    if (!dir.isDirectory()) {
+        dir.close();
         return false;
     }
-    const bool existed = Storage::exists(path);
-    if (!Storage::remove(path)) return false;
-    if (existed) deleted = 1;
-    return true;
+
+    bool ok = true;
+    while (true) {
+        File file = dir.openNextFile();
+        if (!file) break;
+        const bool is_dir = file.isDirectory();
+        const bool match =
+            !is_dir && plot_cache_name_for_night(file.name(), night.start_ms);
+        char path[REPORT_PLOT_PATH_MAX];
+        const bool path_ok =
+            match && plot_cache_child_path(file.name(), path, sizeof(path));
+        file.close();
+        if (!match) continue;
+        if (!path_ok || !Storage::remove(path)) {
+            ok = false;
+            continue;
+        }
+        deleted++;
+    }
+    dir.close();
+    return ok;
 }
 
 bool ReportManager::clear_cache_range(int64_t start_ms,
@@ -2253,6 +2355,11 @@ bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
 
     clear_build_queue(0, true);
     invalidate_materialized(0, true);
+    const size_t sparse_marker_count =
+        sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
+    for (size_t i = 0; i < sparse_marker_count; ++i) {
+        sparse_event_empty_[i] = SparseEventEmptyMarker{};
+    }
 
     if (!take_summary_lock(portMAX_DELAY)) return false;
     clear_summary_records();
@@ -2289,6 +2396,13 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
     const bool ok = clear_cache_range(static_cast<int64_t>(night.start_ms),
                                       static_cast<int64_t>(night.end_ms),
                                       out);
+    const size_t sparse_marker_count =
+        sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
+    for (size_t i = 0; i < sparse_marker_count; ++i) {
+        if (sparse_event_empty_[i].night_ms == night.start_ms) {
+            sparse_event_empty_[i] = SparseEventEmptyMarker{};
+        }
+    }
     uint32_t plot_deleted = 0;
     if (clear_plot_cache_for_night(night, plot_deleted)) {
         out.plots_deleted += plot_deleted;
@@ -2656,6 +2770,8 @@ bool ReportManager::save_result_plot_cache() const {
     }
     char path[REPORT_PLOT_PATH_MAX];
     if (!result_plot_cache_path(path, sizeof(path))) return false;
+    uint32_t deleted = 0;
+    if (!clear_plot_cache_for_night(result_night_, deleted)) return false;
     char tmp[REPORT_PLOT_PATH_MAX + 8];
     const int written = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     if (written <= 0 || static_cast<size_t>(written) >= sizeof(tmp)) {
@@ -3810,7 +3926,7 @@ bool ReportManager::build_cache_plan(const ReportSummaryRecord &night,
             from_ms = static_cast<int64_t>(night.start_ms);
         } else {
             const bool refresh_empty_event =
-                sparse_event_refresh_due(night, source, millis());
+                sparse_event_refresh_due(night, source);
             if (!source_missing_start_for_night(night,
                                                 source,
                                                 from_ms,
@@ -4056,7 +4172,7 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
     int64_t cached_end_ms = 0;
     if (source_is_sparse_event(*def) &&
         !source_latest_cached_end_for_night(*def, cache_night_, cached_end_ms)) {
-        note_sparse_event_refresh(cache_night_.start_ms);
+        note_sparse_event_confirmed_empty(cache_night_, *def);
     }
     return true;
 }
