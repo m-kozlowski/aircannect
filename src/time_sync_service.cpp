@@ -288,7 +288,10 @@ void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
     if (!next_resmed_push_ms_) next_resmed_push_ms_ = now_ms;
     if (static_cast<int32_t>(now_ms - next_resmed_push_ms_) < 0) return;
     if (therapy_running()) {
-        last_status_ = "resmed_push_deferred_therapy_active";
+        next_resmed_push_ms_ = now_ms + TIME_SYNC_RETRY_MS;
+        if (last_status_ != "resmed_push_deferred_therapy_active") {
+            last_status_ = "resmed_push_deferred_therapy_active";
+        }
         return;
     }
     if (last_resmed_push_attempt_ms_ &&
