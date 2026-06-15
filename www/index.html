@@ -356,6 +356,21 @@
       min-width: 0;
     }
 
+    .check {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .check input {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+    }
+
     .btn {
       border: 1px solid var(--line);
       background: transparent;
@@ -491,6 +506,12 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .edf-toolbar .check {
+      min-height: 34px;
+      align-items: center;
+      margin: 0;
     }
 
     .edf-list {
@@ -1404,6 +1425,11 @@
               <div class="btns" style="margin-top: 0">
                 <button class="btn" id="edfUpBtn" onclick="edfUp()">Up</button>
                 <button class="btn" onclick="loadEdfList(true)">Refresh</button>
+                <label class="check">
+                  <input type="checkbox" id="edfArchiveRecursive" checked>
+                  <span>Subdirs</span>
+                </label>
+                <button class="btn primary" id="edfArchiveBtn" onclick="edfArchiveCurrent()">Download All</button>
               </div>
             </div>
             <div class="edf-list" id="edfList"></div>
@@ -1793,6 +1819,7 @@
     let edfOffset = 0;
     let edfLimit = 64;
     let edfNextOffset = null;
+    let edfArchivePollTimer = null;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_CLIENT_CACHE_MAX = 4;
@@ -3503,6 +3530,95 @@
       document.body.appendChild(link);
       link.click();
       link.remove();
+    }
+
+    function edfArchiveSetBusy(busy) {
+      const btn = document.getElementById("edfArchiveBtn");
+      if (btn) btn.disabled = !!busy;
+    }
+
+    function edfArchiveDownload(id) {
+      const link = document.createElement("a");
+      link.href = "/api/storage/archive/download?id=" + encodeURIComponent(id);
+      link.download = "archive.zip";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+
+    function edfArchiveStatusText(data) {
+      const state = data && data.state ? data.state : "unknown";
+      const filesDone = Number(data && data.files_done) || 0;
+      const files = Number(data && data.files) || 0;
+      const bytes = Number(data && data.bytes_done) || 0;
+      const estimate = Number(data && data.estimated_archive_bytes) || 0;
+      if (state === "preparing") {
+        return "Preparing " + files + " files";
+      }
+      if (state === "building") {
+        const pct = estimate > 0 ? " " + Math.min(99, Math.floor(bytes * 100 / estimate)) + "%" : "";
+        return "Building " + filesDone + "/" + files + pct;
+      }
+      if (state === "ready") return "Archive ready";
+      if (state === "downloading") return "Downloading";
+      if (state === "error") return data && data.error ? data.error : "Archive failed";
+      return state;
+    }
+
+    async function edfPollArchive(id) {
+      try {
+        const response = await fetch("/api/storage/archive/status", {cache: "no-store"});
+        const text = await response.text();
+        if (!response.ok) throw new Error(edfErrorText(text, response.status));
+        const data = JSON.parse(text);
+        if (Number(data.id) !== Number(id)) return false;
+        const state = data.state || "unknown";
+        msg("edfMsg", edfArchiveStatusText(data), state !== "error", state === "error");
+        if (state === "ready") {
+          clearInterval(edfArchivePollTimer);
+          edfArchivePollTimer = null;
+          edfArchiveSetBusy(false);
+          edfArchiveDownload(id);
+          return true;
+        } else if (state === "error" || state === "idle") {
+          clearInterval(edfArchivePollTimer);
+          edfArchivePollTimer = null;
+          edfArchiveSetBusy(false);
+          return true;
+        }
+        return false;
+      } catch (error) {
+        clearInterval(edfArchivePollTimer);
+        edfArchivePollTimer = null;
+        edfArchiveSetBusy(false);
+        msg("edfMsg", error.message, false, true);
+        return true;
+      }
+    }
+
+    async function edfArchiveCurrent() {
+      if (edfArchivePollTimer) clearInterval(edfArchivePollTimer);
+      edfArchivePollTimer = null;
+      edfArchiveSetBusy(true);
+      msg("edfMsg", "Starting archive", true, false);
+      const recursive = document.getElementById("edfArchiveRecursive")?.checked !== false;
+      try {
+        const url = "/api/storage/archive/start?path=" +
+          encodeURIComponent(edfPath) + "&recursive=" + (recursive ? "1" : "0");
+        const response = await fetch(url, {method: "POST", cache: "no-store"});
+        const text = await response.text();
+        if (!response.ok) throw new Error(edfErrorText(text, response.status));
+        const data = JSON.parse(text);
+        const id = Number(data.id);
+        if (!id) throw new Error("bad_archive_id");
+        const done = await edfPollArchive(id);
+        if (!done) {
+          edfArchivePollTimer = setInterval(() => edfPollArchive(id), 1000);
+        }
+      } catch (error) {
+        edfArchiveSetBusy(false);
+        msg("edfMsg", error.message, false, true);
+      }
     }
 
     function fmtRssi(rssi) {

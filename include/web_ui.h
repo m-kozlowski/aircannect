@@ -17,6 +17,7 @@
 #include "rpc_arbiter.h"
 #include "session_manager.h"
 #include "sink_manager.h"
+#include "storage_archive_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
 #include "wifi_manager.h"
@@ -91,6 +92,7 @@ public:
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
                ReportManager &report_manager,
+               StorageArchiveJob &storage_archive_job,
                ConsoleContext &console_ctx,
                uint16_t port = 80);
     void stop();
@@ -111,6 +113,9 @@ private:
     void send_report_result(AsyncWebServerRequest *request) const;
     void send_edf_list(AsyncWebServerRequest *request) const;
     void send_edf_download(AsyncWebServerRequest *request) const;
+    void send_storage_archive_start(AsyncWebServerRequest *request) const;
+    void send_storage_archive_status(AsyncWebServerRequest *request) const;
+    void send_storage_archive_download(AsyncWebServerRequest *request) const;
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json) const;
     void build_wifi_json(LargeTextBuffer &json) const;
@@ -204,6 +209,7 @@ private:
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
     ReportManager *report_manager_ = nullptr;
+    StorageArchiveJob *storage_archive_job_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     ManagementConsole web_console_;

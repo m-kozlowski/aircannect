@@ -23,6 +23,7 @@
 #include "report_store.h"
 #include "session_manager.h"
 #include "sink_manager.h"
+#include "storage_archive_job.h"
 #include "storage_manager.h"
 #include "storage_writer.h"
 #include "system_status_snapshot.h"
@@ -237,6 +238,17 @@ struct EdfListJsonContext {
     bool first = true;
 };
 
+struct ArchiveDownloadRef {
+    StorageArchiveJob *job = nullptr;
+    uint32_t id = 0;
+    File file;
+
+    ~ArchiveDownloadRef() {
+        if (file) file.close();
+        if (job && id != 0) job->mark_download_finished(id);
+    }
+};
+
 bool append_edf_inventory_json(const EdfStorageInventoryEntry &entry,
                                void *ctx) {
     EdfListJsonContext *list = static_cast<EdfListJsonContext *>(ctx);
@@ -246,9 +258,9 @@ bool append_edf_inventory_json(const EdfStorageInventoryEntry &entry,
     return true;
 }
 
-bool edf_therapy_request_idle(AsyncWebServerRequest *request,
-                              const SessionManager *session_manager,
-                              const RpcArbiter *arbiter) {
+bool therapy_request_idle(AsyncWebServerRequest *request,
+                          const SessionManager *session_manager,
+                          const RpcArbiter *arbiter) {
     if (session_manager &&
         session_manager->status().state == SessionState::Active) {
         request->send(409, "application/json",
@@ -268,7 +280,7 @@ bool edf_therapy_request_idle(AsyncWebServerRequest *request,
 bool edf_storage_request_available(AsyncWebServerRequest *request,
                                    const SessionManager *session_manager,
                                    const RpcArbiter *arbiter) {
-    if (!edf_therapy_request_idle(request, session_manager, arbiter)) {
+    if (!therapy_request_idle(request, session_manager, arbiter)) {
         return false;
     }
     if (!Storage::mounted()) {
@@ -281,6 +293,41 @@ bool edf_storage_request_available(AsyncWebServerRequest *request,
         edf_storage.open_file_count > 0) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"edf_storage_busy\"}");
+        return false;
+    }
+    return true;
+}
+
+bool storage_heavy_request_available(AsyncWebServerRequest *request,
+                                     const SessionManager *session_manager,
+                                     const RpcArbiter *arbiter) {
+    if (!therapy_request_idle(request, session_manager, arbiter)) {
+        return false;
+    }
+    if (!Storage::mounted()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_unavailable\"}");
+        return false;
+    }
+    const EdfStorageWorkerStatus edf_storage = EdfStorageWorker::status();
+    if (edf_storage.busy || edf_storage.queued > 0 ||
+        edf_storage.open_file_count > 0) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_busy\"}");
+        return false;
+    }
+    return true;
+}
+
+bool request_bool_arg_default(AsyncWebServerRequest *request,
+                              const char *name,
+                              bool default_value) {
+    if (!request || !name || !request->hasArg(name)) return default_value;
+    String value = request->arg(name);
+    value.trim();
+    value.toLowerCase();
+    if (value == "0" || value == "false" || value == "off" ||
+        value == "no") {
         return false;
     }
     return true;
@@ -466,6 +513,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
                   ReportManager &report_manager,
+                  StorageArchiveJob &storage_archive_job,
                   ConsoleContext &console_ctx,
                   uint16_t port) {
     if (started_) return true;
@@ -481,6 +529,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
     report_manager_ = &report_manager;
+    storage_archive_job_ = &storage_archive_job;
     console_ctx_ = &console_ctx;
 
     command_mutex_ = xSemaphoreCreateMutex();
@@ -1666,7 +1715,7 @@ void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    if (!edf_therapy_request_idle(request, session_manager_, arbiter_)) {
+    if (!therapy_request_idle(request, session_manager_, arbiter_)) {
         return;
     }
 
@@ -1792,6 +1841,202 @@ void WebUI::send_edf_download(AsyncWebServerRequest *request) const {
     snprintf(disposition, sizeof(disposition),
              "attachment; filename=\"%s\"",
              basename_from_path(path.c_str()));
+    response->addHeader("Content-Disposition", disposition);
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
+    if (!storage_archive_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"archive_unavailable\"}");
+        return;
+    }
+    if (!request->hasArg("path")) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"missing_path\"}");
+        return;
+    }
+    const String path = request->arg("path");
+    if (!storage_archive_valid_path(path.c_str())) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_path\"}");
+        return;
+    }
+    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+
+    const bool recursive =
+        request_bool_arg_default(request, "recursive", true);
+    uint32_t id = 0;
+    char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
+    if (!storage_archive_job_->start(path.c_str(),
+                                     recursive,
+                                     &id,
+                                     error,
+                                     sizeof(error))) {
+        char body[128] = {};
+        snprintf(body,
+                 sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 error[0] ? error : "archive_start_failed");
+        request->send(409, "application/json", body);
+        return;
+    }
+
+    char body[128] = {};
+    snprintf(body,
+             sizeof(body),
+             "{\"ok\":true,\"queued\":true,\"id\":%lu}",
+             static_cast<unsigned long>(id));
+    request->send(202, "application/json", body);
+}
+
+void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
+    if (!storage_archive_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"archive_unavailable\"}");
+        return;
+    }
+    const StorageArchiveStatus status = storage_archive_job_->status();
+    LargeTextBuffer json;
+    json.reserve(768);
+    json = "{";
+    json_add_bool(json, "ok", true, false);
+    json_add_string(json, "state",
+                    storage_archive_state_name(status.state));
+    json_add_int(json, "id", static_cast<long>(status.id));
+    json_add_bool(json, "recursive", status.recursive);
+    json_add_bool(json, "psram_metadata", status.psram_metadata);
+    json_add_string(json, "path", status.source_path);
+    json_add_string(json, "archive_path", status.archive_path);
+    json_add_string(json, "filename", status.filename);
+    json_add_string(json, "error", status.error);
+    json_add_int(json, "files", static_cast<long>(status.files));
+    json_add_int(json, "dirs", static_cast<long>(status.dirs));
+    json_add_int(json, "files_done", static_cast<long>(status.files_done));
+    json_add_uint64(json, "input_bytes", status.input_bytes);
+    json_add_uint64(json, "bytes_done", status.bytes_done);
+    json_add_uint64(json, "archive_bytes", status.archive_bytes);
+    json_add_uint64(json, "estimated_archive_bytes",
+                    status.estimated_archive_bytes);
+    json_add_uint64(json, "free_bytes_at_start",
+                    status.free_bytes_at_start);
+    json_add_int(json, "started_ms", static_cast<long>(status.started_ms));
+    json_add_int(json, "updated_ms", static_cast<long>(status.updated_ms));
+    json += '}';
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"status_alloc\"}");
+        return;
+    }
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    request->send(response);
+}
+
+void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const {
+    if (!storage_archive_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"archive_unavailable\"}");
+        return;
+    }
+    size_t id_arg = 0;
+    if (!request_size_arg_limited(request, "id", 0, 0xffffffffu, id_arg) ||
+        id_arg == 0) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_id\"}");
+        return;
+    }
+    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+
+    const uint32_t id = static_cast<uint32_t>(id_arg);
+    char path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
+    char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
+    uint64_t expected_size = 0;
+    if (!storage_archive_job_->download_info(id,
+                                             path,
+                                             sizeof(path),
+                                             filename,
+                                             sizeof(filename),
+                                             expected_size)) {
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"error\":\"not_ready\"}");
+        return;
+    }
+
+    std::shared_ptr<ArchiveDownloadRef> ref =
+        std::make_shared<ArchiveDownloadRef>();
+    if (!ref) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    ref->job = storage_archive_job_;
+    ref->id = id;
+    size_t file_size = 0;
+    {
+        Storage::Guard guard;
+        ref->file = Storage::open(path, "r");
+        if (!ref->file || ref->file.isDirectory()) {
+            if (ref->file) ref->file.close();
+            request->send(404, "application/json",
+                          "{\"ok\":false,\"error\":\"not_found\"}");
+            return;
+        }
+        file_size = static_cast<size_t>(ref->file.size());
+    }
+    if (expected_size != 0 && expected_size != file_size) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"size_changed\"}");
+        return;
+    }
+
+    char start_error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
+    if (!storage_archive_job_->mark_download_started(id,
+                                                     start_error,
+                                                     sizeof(start_error))) {
+        char body[128] = {};
+        snprintf(body,
+                 sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 start_error[0] ? start_error : "not_ready");
+        request->send(409, "application/json", body);
+        return;
+    }
+
+    AsyncWebServerResponse *response = request->beginResponse(
+        "application/zip",
+        file_size,
+        [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
+            if (!buffer || !ref || !ref->file) return 0;
+            Storage::Guard guard;
+            const size_t size = static_cast<size_t>(ref->file.size());
+            if (offset >= size || !ref->file.seek(offset)) return 0;
+            const size_t remaining = size - offset;
+            const size_t wanted = remaining < max_len ? remaining : max_len;
+            return ref->file.read(buffer, wanted);
+        });
+    if (!response) {
+        storage_archive_job_->mark_download_finished(id);
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    char disposition[128];
+    snprintf(disposition, sizeof(disposition),
+             "attachment; filename=\"%s\"",
+             filename[0] ? filename : "archive.zip");
     response->addHeader("Content-Disposition", disposition);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
@@ -2397,6 +2642,21 @@ void WebUI::register_routes() {
     server_->on("/api/edf/download", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_edf_download(request);
+    });
+
+    server_->on("/api/storage/archive/start", HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        send_storage_archive_start(request);
+    });
+
+    server_->on("/api/storage/archive/status", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_storage_archive_status(request);
+    });
+
+    server_->on("/api/storage/archive/download", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_storage_archive_download(request);
     });
 
     server_->on("/api/report/summary", HTTP_GET,
