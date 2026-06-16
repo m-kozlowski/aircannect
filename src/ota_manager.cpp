@@ -15,6 +15,7 @@ namespace {
 
 static constexpr size_t kHttpOtaWriteChunkBytes = 4096;
 static constexpr uint32_t kHttpOtaPreparedTtlMs = 60000;
+static constexpr uint32_t kHttpOtaUploadIdleTimeoutMs = 60000;
 
 const char *arduino_ota_error_name(ota_error_t error) {
     switch (error) {
@@ -77,6 +78,14 @@ void OtaManager::poll(const WifiManager &wifi_manager,
         status_.last_error = "ota_prepare_expired";
         Log::logf(CAT_OTA, LOG_WARN,
                   "HTTP upload prepare expired before upload\n");
+    }
+    if (status_.http_active && http_upload_last_activity_ms_ &&
+        !http_write_in_progress_ &&
+        static_cast<int32_t>(now - http_upload_last_activity_ms_) >=
+            static_cast<int32_t>(kHttpOtaUploadIdleTimeoutMs)) {
+        unlock_status();
+        abort_http_upload("http_upload_timeout");
+        return;
     }
     if (!wifi_manager.network_available()) {
         const bool stop_ota = status_.arduino_started;
@@ -238,6 +247,8 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     status_.method = "http";
     status_.http_active = true;
     http_prepared_at_ms_ = 0;
+    http_upload_last_activity_ms_ = millis();
+    http_write_in_progress_ = false;
     status_.bytes = 0;
     status_.total_size = image_size;
     status_.progress_percent = 0;
@@ -281,6 +292,7 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
         return false;
     }
     if (!data || len == 0) {
+        http_upload_last_activity_ms_ = millis();
         unlock_status();
         return true;
     }
@@ -297,23 +309,36 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
     }
 
     esp_ota_handle_t handle = http_handle_;
+    http_upload_last_activity_ms_ = millis();
+    http_write_in_progress_ = true;
     unlock_status();
 
+    const char *write_error = nullptr;
     size_t offset = 0;
     while (offset < len) {
         const size_t chunk =
             std::min(kHttpOtaWriteChunkBytes, len - offset);
         esp_err_t err = esp_ota_write(handle, data + offset, chunk);
         if (err != ESP_OK) {
-            abort_http_upload(esp_err_to_name(err));
-            return false;
+            write_error = esp_err_to_name(err);
+            break;
         }
         if (!apply_http_progress(chunk)) {
-            return false;
+            break;
         }
         offset += chunk;
         yield();
     }
+    if (lock_status()) {
+        http_write_in_progress_ = false;
+        http_upload_last_activity_ms_ = millis();
+        unlock_status();
+    }
+    if (write_error) {
+        abort_http_upload(write_error);
+        return false;
+    }
+    if (offset < len) return false;
     return true;
 }
 
@@ -347,6 +372,8 @@ bool OtaManager::finish_http_upload() {
     status_.http_prepared = false;
     prepared_image_size_ = 0;
     http_prepared_at_ms_ = 0;
+    http_upload_last_activity_ms_ = 0;
+    http_write_in_progress_ = false;
     status_.progress_percent = 100;
     status_.last_error = "";
     Log::logf(CAT_OTA, LOG_INFO,
@@ -367,6 +394,8 @@ void OtaManager::abort_http_upload(const char *reason) {
     http_partition_ = nullptr;
     prepared_image_size_ = 0;
     http_prepared_at_ms_ = 0;
+    http_upload_last_activity_ms_ = 0;
+    http_write_in_progress_ = false;
     status_.http_prepare_pending = false;
     status_.http_prepared = false;
     status_.http_active = false;
@@ -497,6 +526,7 @@ bool OtaManager::apply_http_progress(size_t bytes) {
         return false;
     }
     status_.bytes += bytes;
+    http_upload_last_activity_ms_ = millis();
     status_.progress_percent =
         static_cast<uint8_t>((status_.bytes * 100ULL) / status_.total_size);
     if (status_.progress_percent != last_progress_log_percent_ &&
@@ -522,6 +552,8 @@ void OtaManager::clear_http_state() {
     http_partition_ = nullptr;
     prepared_image_size_ = 0;
     http_prepared_at_ms_ = 0;
+    http_upload_last_activity_ms_ = 0;
+    http_write_in_progress_ = false;
     status_.http_prepare_pending = false;
     status_.http_prepared = false;
     status_.http_active = false;

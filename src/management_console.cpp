@@ -650,7 +650,13 @@ void ManagementConsole::handle_ota(Print &out, String rest,
         return;
     }
 
-    print_unknown_command(out, "OTA", "ota status");
+    if (rest == "abort") {
+        ota_manager.abort_http_upload("aborted_by_console");
+        out.println("[OTA] aborted");
+        return;
+    }
+
+    print_unknown_command(out, "OTA", "ota status, abort");
 }
 
 void ManagementConsole::handle_resmed_ota(

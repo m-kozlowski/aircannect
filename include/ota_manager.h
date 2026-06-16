@@ -78,6 +78,8 @@ private:
     const esp_partition_t *http_partition_ = nullptr;
     size_t prepared_image_size_ = 0;
     uint32_t http_prepared_at_ms_ = 0;
+    uint32_t http_upload_last_activity_ms_ = 0;
+    bool http_write_in_progress_ = false;
     OtaManagerStatus status_;
     mutable SemaphoreHandle_t status_mutex_ = nullptr;
 };
