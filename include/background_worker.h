@@ -54,6 +54,7 @@ public:
     // Push back the idle grace window so prefetch defers briefly after
     // foreground activity (e.g. a web request). Safe from any task.
     void note_activity();
+    void wake();
 
     BackgroundWorkerStatus status() const;
 

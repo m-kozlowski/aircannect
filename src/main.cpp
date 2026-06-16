@@ -20,6 +20,7 @@
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "storage_archive_job.h"
+#include "storage_delete_job.h"
 #include "storage_manager.h"
 #include "storage_writer.h"
 #include "system_status_snapshot.h"
@@ -50,6 +51,7 @@ static OximetryManager oximetry_manager;
 static ReportManager report_manager;
 static BackgroundWorker bg_worker;
 static StorageArchiveJob storage_archive_job;
+static StorageDeleteJob storage_delete_job;
 static ReportPrefetchJob report_prefetch_job(report_manager);
 static ConsoleContext console_ctx{
     rpc_arbiter,
@@ -226,6 +228,7 @@ void setup() {
                  session_manager, sink_manager, oximetry_manager,
                  report_manager,
                  storage_archive_job,
+                 storage_delete_job,
                  console_ctx);
 
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] architecture baseline ready\n");
@@ -233,7 +236,9 @@ void setup() {
     // Idle-time background storage worker (prefetch + plot build). Started last,
     // once every subsystem it gates on (report, CAN, OTA) is up.
     storage_archive_job.begin();
+    storage_delete_job.begin();
     bg_worker.add_job(&storage_archive_job);
+    bg_worker.add_job(&storage_delete_job);
     bg_worker.add_job(&report_prefetch_job);
     bg_worker.begin();
 }

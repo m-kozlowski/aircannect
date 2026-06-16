@@ -18,6 +18,7 @@
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "storage_archive_job.h"
+#include "storage_delete_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
 #include "wifi_manager.h"
@@ -93,6 +94,7 @@ public:
                OximetryManager &oximetry_manager,
                ReportManager &report_manager,
                StorageArchiveJob &storage_archive_job,
+               StorageDeleteJob &storage_delete_job,
                ConsoleContext &console_ctx,
                uint16_t port = 80);
     void stop();
@@ -111,11 +113,13 @@ private:
     void send_report_chunks(AsyncWebServerRequest *request) const;
     void send_report_plot(AsyncWebServerRequest *request) const;
     void send_report_result(AsyncWebServerRequest *request) const;
-    void send_edf_list(AsyncWebServerRequest *request) const;
-    void send_edf_download(AsyncWebServerRequest *request) const;
+    void send_storage_list(AsyncWebServerRequest *request) const;
+    void send_storage_download(AsyncWebServerRequest *request) const;
     void send_storage_archive_start(AsyncWebServerRequest *request) const;
     void send_storage_archive_status(AsyncWebServerRequest *request) const;
     void send_storage_archive_download(AsyncWebServerRequest *request) const;
+    void send_storage_delete_start(AsyncWebServerRequest *request) const;
+    void send_storage_delete_status(AsyncWebServerRequest *request) const;
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json) const;
     void build_wifi_json(LargeTextBuffer &json) const;
@@ -210,6 +214,7 @@ private:
     OximetryManager *oximetry_manager_ = nullptr;
     ReportManager *report_manager_ = nullptr;
     StorageArchiveJob *storage_archive_job_ = nullptr;
+    StorageDeleteJob *storage_delete_job_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     ManagementConsole web_console_;
@@ -226,6 +231,7 @@ private:
     SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;
+    SemaphoreHandle_t storage_job_mutex_ = nullptr;
 
     AsyncWebServer *server_ = nullptr;
     AsyncEventSource *events_ = nullptr;

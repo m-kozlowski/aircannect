@@ -5,23 +5,27 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <atomic>
+#include <memory>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "background_worker.h"
+#include "storage_path.h"
 
 namespace aircannect {
 
-static constexpr size_t AC_STORAGE_ARCHIVE_PATH_MAX = 192;
-static constexpr size_t AC_STORAGE_ARCHIVE_NAME_MAX = 80;
-static constexpr size_t AC_STORAGE_ARCHIVE_ERROR_MAX = 64;
-static constexpr const char *AC_STORAGE_ARCHIVE_TEMP_DIR =
-    "/aircannect/tmp/archive";
+struct StorageArchiveDownload;
+
+static constexpr size_t AC_STORAGE_ARCHIVE_PATH_MAX = AC_STORAGE_PATH_MAX;
+static constexpr size_t AC_STORAGE_ARCHIVE_NAME_MAX = AC_STORAGE_NAME_MAX;
+static constexpr size_t AC_STORAGE_ARCHIVE_ERROR_MAX = AC_STORAGE_ERROR_MAX;
+static constexpr size_t AC_STORAGE_ARCHIVE_MAX_SELECTIONS =
+    AC_STORAGE_MAX_SELECTIONS;
 
 enum class StorageArchiveState : uint8_t {
     Idle,
     Preparing,
-    Building,
     Ready,
     Downloading,
     Error,
@@ -35,7 +39,6 @@ struct StorageArchiveStatus {
     bool recursive = true;
     bool psram_metadata = false;
     char source_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-    char archive_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
     char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
     char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
     uint32_t files = 0;
@@ -63,18 +66,29 @@ public:
                uint32_t *id_out = nullptr,
                char *error_out = nullptr,
                size_t error_out_size = 0);
+    bool start_selected(const char *base_path,
+                        const char *const *names,
+                        size_t count,
+                        uint32_t *id_out = nullptr,
+                        char *error_out = nullptr,
+                        size_t error_out_size = 0);
+    bool status(StorageArchiveStatus &out,
+                uint32_t timeout_ms = 1000) const;
     StorageArchiveStatus status() const;
+    bool active() const;
 
-    bool download_info(uint32_t id,
-                       char *path_out,
-                       size_t path_out_size,
-                       char *filename_out,
-                       size_t filename_out_size,
-                       uint64_t &size_out) const;
-    bool mark_download_started(uint32_t id,
-                               char *error_out = nullptr,
-                               size_t error_out_size = 0);
-    void mark_download_finished(uint32_t id);
+    bool begin_download(uint32_t id,
+                        std::shared_ptr<StorageArchiveDownload> &download_out,
+                        char *filename_out,
+                        size_t filename_out_size,
+                        uint64_t &size_out,
+                        char *error_out = nullptr,
+                        size_t error_out_size = 0);
+    size_t read_download(StorageArchiveDownload &download,
+                         uint8_t *buffer,
+                         size_t max_len,
+                         size_t offset);
+    void finish_download(StorageArchiveDownload &download);
 
 private:
     struct ArchiveEntry;
@@ -84,27 +98,33 @@ private:
     void unlock() const;
     void set_error_locked(const char *error);
     void reset_job_locked(bool keep_status);
-    void close_active_files_locked();
+    void close_walk_files_locked();
     void close_walk_locked();
+    bool ensure_walk_stack_locked();
+    void release_walk_stack_locked();
+    void release_build_buffers_locked();
     void apply_preempt_locked();
-    bool cleanup_ready_archive_locked();
     void cleanup_stale_temp_locked();
+    bool begin_job_locked(const char *source_path,
+                          bool recursive,
+                          const char *filename_base,
+                          char *error_out,
+                          size_t error_out_size);
 
     bool prepare_step_locked();
-    bool build_step_locked();
-    bool ensure_temp_dirs_locked();
-    bool open_output_locked();
-    bool append_entry_locked(const char *path, uint64_t size, bool directory);
+    bool append_entry_locked(const char *path,
+                             uint64_t size,
+                             bool directory,
+                             time_t last_write);
     bool reserve_entries_locked(size_t needed);
     bool reserve_path_bytes_locked(size_t needed);
     bool push_walk_dir_locked(const char *path);
     bool ensure_walk_dir_open_locked(WalkFrame &frame);
     bool finalize_prepare_locked();
-    bool begin_current_file_locked();
-    bool copy_current_file_step_locked();
-    bool finish_current_file_locked();
-    bool write_central_step_locked();
-    bool write_eocd_locked();
+    size_t read_download_locked(StorageArchiveDownload &download,
+                                uint8_t *buffer,
+                                size_t max_len,
+                                size_t offset);
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     std::atomic<bool> preempt_requested_{false};
@@ -117,25 +137,11 @@ private:
     char *path_bytes_ = nullptr;
     size_t path_bytes_len_ = 0;
     size_t path_bytes_capacity_ = 0;
-    uint8_t *io_buffer_ = nullptr;
 
     WalkFrame *walk_stack_ = nullptr;
     size_t walk_depth_ = 0;
     size_t walk_capacity_ = 0;
 
-    File output_;
-    File input_;
-    bool output_open_ = false;
-    bool input_open_ = false;
-    bool current_file_active_ = false;
-    size_t current_file_index_ = 0;
-    uint64_t current_file_offset_ = 0;
-    uint32_t current_crc_ = 0;
-    size_t central_index_ = 0;
-    uint64_t central_start_offset_ = 0;
-    uint64_t central_size_ = 0;
-    bool central_started_ = false;
-    uint32_t cleanup_due_ms_ = 0;
     uint32_t stale_cleanup_due_ms_ = 1;
 };
 

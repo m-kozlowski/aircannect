@@ -484,7 +484,7 @@
       margin: 18px 0 8px;
     }
 
-    .edf-toolbar {
+    .storage-toolbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -493,7 +493,7 @@
       margin-bottom: 10px;
     }
 
-    .edf-path {
+    .storage-path {
       flex: 1 1 260px;
       min-width: 0;
       border: 1px solid #30364166;
@@ -508,48 +508,85 @@
       white-space: nowrap;
     }
 
-    .edf-toolbar .check {
+    .storage-toolbar .check {
       min-height: 34px;
       align-items: center;
       margin: 0;
     }
 
-    .edf-list {
+    .storage-selection-bar {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      margin: 8px 0;
+    }
+
+    .storage-selection-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .storage-select {
+      align-items: center;
+      display: flex;
+      justify-content: center;
+    }
+
+    .storage-select input {
+      width: auto;
+    }
+
+    .storage-list {
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
       background: #10111466;
     }
 
-    .edf-entry {
+    .storage-entry {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: auto minmax(0, 1fr) auto;
       gap: 12px;
       align-items: center;
       padding: 11px 12px;
       border-bottom: 1px solid #30364166;
     }
 
-    .edf-entry:last-child {
+    .storage-entry:last-child {
       border-bottom: 0;
     }
 
-    .edf-name {
+    .storage-name {
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       font-weight: 650;
+      cursor: pointer;
     }
 
-    .edf-meta {
+    .storage-name:hover {
+      color: var(--accent);
+    }
+
+    .storage-meta {
       margin-top: 3px;
       color: var(--muted);
       font-family: "SF Mono", Consolas, monospace;
       font-size: 11px;
     }
 
-    .edf-empty {
+    .storage-action {
+      width: 38px;
+      height: 34px;
+      padding: 0;
+      font-size: 17px;
+      line-height: 1;
+    }
+
+    .storage-empty {
       padding: 16px 12px;
       color: var(--muted);
       font-size: 13px;
@@ -1088,13 +1125,20 @@
         justify-content: flex-start;
       }
 
-      .edf-entry {
+      .storage-entry,
+      .storage-selection-bar {
         grid-template-columns: 1fr;
         align-items: stretch;
       }
 
-      .edf-entry .btn {
+      .storage-entry .btn,
+      .storage-selection-bar .btn {
         width: 100%;
+      }
+
+      .storage-entry .storage-action {
+        width: 38px;
+        justify-self: end;
       }
 
       .row {
@@ -1135,9 +1179,6 @@
         <a class="nav" data-tab="report">
           <span class="ico">&#9638;</span>Report
         </a>
-        <a class="nav" data-tab="edf">
-          <span class="ico">&#8681;</span>EDF
-        </a>
         <a class="nav" data-tab="clinical">
           <span class="ico">&#9881;</span>Clinical
         </a>
@@ -1152,6 +1193,9 @@
         </a>
         <a class="nav" data-tab="console">
           <span class="ico">&#9002;</span>Console
+        </a>
+        <a class="nav" data-tab="storage">
+          <span class="ico">&#8681;</span>Storage
         </a>
         <a class="nav" data-tab="config">
           <span class="ico">&#9000;</span>Config
@@ -1414,30 +1458,35 @@
           <div id="reportCharts" class="report-charts"></div>
         </section>
 
-        <section class="pane" id="p-edf">
+        <section class="pane" id="p-storage">
           <div class="card">
             <div class="card-head">
-              <span class="label">EDF Files</span>
-              <span class="badge" id="edfBadge">--</span>
+              <span class="label">Storage</span>
+              <span class="badge" id="storageBadge">--</span>
             </div>
-            <div class="edf-toolbar">
-              <div class="edf-path" id="edfPath">/</div>
+            <div class="storage-toolbar">
+              <div class="storage-path" id="storagePath">/</div>
               <div class="btns" style="margin-top: 0">
-                <button class="btn" id="edfUpBtn" onclick="edfUp()">Up</button>
-                <button class="btn" onclick="loadEdfList(true)">Refresh</button>
-                <label class="check">
-                  <input type="checkbox" id="edfArchiveRecursive" checked>
-                  <span>Subdirs</span>
-                </label>
-                <button class="btn primary" id="edfArchiveBtn" onclick="edfArchiveCurrent()">Download All</button>
+                <button class="btn" id="storageUpBtn" onclick="storageUp()">Up</button>
+                <button class="btn" onclick="loadStorageList(true)">Refresh</button>
               </div>
             </div>
-            <div class="edf-list" id="edfList"></div>
-            <div class="btns">
-              <button class="btn" id="edfPrevBtn" onclick="edfPrevPage()">Prev</button>
-              <button class="btn" id="edfNextBtn" onclick="edfNextPage()">Next</button>
+            <div class="storage-selection-bar">
+              <label class="storage-select">
+                <input type="checkbox" id="storageSelectAll" onchange="storageToggleSelectAll(this.checked)">
+              </label>
+              <div class="storage-selection-label">Select all</div>
+              <div class="btns" style="margin-top: 0">
+                <button class="btn danger" id="storageDeleteBtn" onclick="storageDeleteSelected()">Delete Selected</button>
+                <button class="btn primary" id="storageArchiveBtn" onclick="storageArchiveSelected()">Download Selected</button>
+              </div>
             </div>
-            <div class="msg" id="edfMsg"></div>
+            <div class="storage-list" id="storageList"></div>
+            <div class="btns">
+              <button class="btn" id="storagePrevBtn" onclick="storagePrevPage()">Prev</button>
+              <button class="btn" id="storageNextBtn" onclick="storageNextPage()">Next</button>
+            </div>
+            <div class="msg" id="storageMsg"></div>
           </div>
         </section>
 
@@ -1727,9 +1776,6 @@
     <a class="nav" data-tab="report">
       <span class="ico">&#9638;</span>Report
     </a>
-    <a class="nav" data-tab="edf">
-      <span class="ico">&#8681;</span>EDF
-    </a>
     <a class="nav" data-tab="clinical">
       <span class="ico">&#9881;</span>Clinical
     </a>
@@ -1744,6 +1790,9 @@
     </a>
     <a class="nav" data-tab="console">
       <span class="ico">&#9002;</span>CLI
+    </a>
+    <a class="nav" data-tab="storage">
+      <span class="ico">&#8681;</span>Storage
     </a>
     <a class="nav" data-tab="config">
       <span class="ico">&#9000;</span>Config
@@ -1818,11 +1867,16 @@
     let reportDrag = null;        // active drag-to-zoom selection state
     let reportSelectedNightId = ""; // user-picked night id; "" defaults to newest
     let reportCalView = null;     // Date at the 1st of the calendar's shown month
-    let edfPath = "/";
-    let edfOffset = 0;
-    let edfLimit = 64;
-    let edfNextOffset = null;
-    let edfArchivePollTimer = null;
+    let storagePath = "/";
+    let storageOffset = 0;
+    let storageLimit = 64;
+    let storageNextOffset = null;
+    let storageArchivePollTimer = null;
+    let storageDeletePollTimer = null;
+    let storageEntries = [];
+    let storageSelectedNames = new Set();
+    let storageArchiveBusy = false;
+    let storageDeleteBusy = false;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_CLIENT_CACHE_MAX = 4;
@@ -1883,7 +1937,7 @@
     const tabs = {
       dash: "Dashboard",
       report: "Report",
-      edf: "EDF Files",
+      storage: "Storage",
       clinical: "Clinical",
       oxi: "Oximetry",
       wifi: "WiFi",
@@ -1912,7 +1966,7 @@
         loadReportSummary(true);
         scheduleReportDrawAfterReveal();
       }
-      if (id === "edf") loadEdfList(false);
+      if (id === "storage") loadStorageList(false);
       if (id === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -1941,7 +1995,7 @@
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       if (pane === "dash") loadStatus();
       if (pane === "report") refreshReportSummary(true);
-      if (pane === "edf") loadEdfList(true);
+      if (pane === "storage") loadStorageList(true);
       if (pane === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -3407,7 +3461,19 @@
       return (value / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
     }
 
-    function edfErrorText(text, status) {
+    function fmtStorageModified(value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds <= 0) return "";
+      const date = new Date(seconds * 1000);
+      if (Number.isNaN(date.getTime())) return "";
+      return date.getFullYear() + "-" +
+        pad2(date.getMonth() + 1) + "-" +
+        pad2(date.getDate()) + " " +
+        pad2(date.getHours()) + ":" +
+        pad2(date.getMinutes());
+    }
+
+    function storageErrorText(text, status) {
       try {
         const data = JSON.parse(text);
         if (data && data.error) return data.error;
@@ -3415,132 +3481,243 @@
       return text || ("HTTP " + status);
     }
 
-    function edfParentPath(path) {
+    function storageParentPath(path) {
       if (!path || path === "/") return "/";
       const index = path.lastIndexOf("/");
       return index <= 0 ? "/" : path.slice(0, index);
     }
 
-    function edfSetBadge(text, cls) {
-      const badge = document.getElementById("edfBadge");
+    function storageSetBadge(text, cls) {
+      const badge = document.getElementById("storageBadge");
       if (!badge) return;
       badge.textContent = text;
       badge.className = "badge" + (cls ? " " + cls : "");
     }
 
-    function renderEdfList(data) {
-      edfPath = data && data.path ? data.path : edfPath;
-      edfLimit = Number(data && data.limit) || edfLimit;
-      edfNextOffset =
+    function storageSyncSelectionUi() {
+      const selected = storageSelectedNames.size;
+      const busy = storageArchiveBusy || storageDeleteBusy;
+      const selectAll = document.getElementById("storageSelectAll");
+      if (selectAll) {
+        const selectable = storageEntries.length;
+        selectAll.disabled = busy || selectable === 0;
+        selectAll.checked = selectable > 0 && selected === selectable;
+        selectAll.indeterminate = selected > 0 && selected < selectable;
+      }
+      document.querySelectorAll("[data-storage-select]").forEach((input) => {
+        input.disabled = busy;
+        input.checked = storageSelectedNames.has(input.dataset.storageSelect || "");
+      });
+      const archiveBtn = document.getElementById("storageArchiveBtn");
+      if (archiveBtn) {
+        archiveBtn.disabled = busy || selected === 0;
+        archiveBtn.textContent = selected > 0 ?
+          "Download Selected (" + selected + ")" : "Download Selected";
+      }
+      const deleteBtn = document.getElementById("storageDeleteBtn");
+      if (deleteBtn) {
+        deleteBtn.disabled = busy || selected === 0;
+        deleteBtn.textContent = selected > 0 ?
+          "Delete Selected (" + selected + ")" : "Delete Selected";
+      }
+      document.querySelectorAll("[data-storage-action]").forEach((button) => {
+        button.disabled = busy;
+      });
+    }
+
+    function storageClearSelection() {
+      storageSelectedNames.clear();
+      storageSyncSelectionUi();
+    }
+
+    function storageToggleSelected(name, checked) {
+      if (!name) return;
+      if (checked) {
+        storageSelectedNames.add(name);
+      } else {
+        storageSelectedNames.delete(name);
+      }
+      storageSyncSelectionUi();
+    }
+
+    function storageToggleSelectAll(checked) {
+      storageSelectedNames.clear();
+      if (checked) {
+        storageEntries.forEach((entry) => {
+          if (entry && entry.name) storageSelectedNames.add(entry.name);
+        });
+      }
+      storageSyncSelectionUi();
+    }
+
+    function storageOpenEntry(entry) {
+      if (!entry) return;
+      if (entry.type === "dir") {
+        storagePath = entry.path || "/";
+        storageOffset = 0;
+        storageClearSelection();
+        loadStorageList(false);
+      } else if (entry.path) {
+        storageDownload(entry.path);
+      }
+    }
+
+    function storageDownloadEntry(entry) {
+      if (!entry || !entry.path) return;
+      if (entry.type === "dir") {
+        storageArchivePath(entry.path);
+      } else {
+        storageDownload(entry.path);
+      }
+    }
+
+    function renderStorageList(data) {
+      storagePath = data && data.path ? data.path : storagePath;
+      storageLimit = Number(data && data.limit) || storageLimit;
+      storageNextOffset =
         data && data.next_offset !== null && data.next_offset !== undefined &&
         Number.isFinite(Number(data.next_offset)) ?
           Number(data.next_offset) : null;
       const entries = data && Array.isArray(data.entries) ? data.entries : [];
-      up("edfPath", edfPath);
-      const upBtn = document.getElementById("edfUpBtn");
-      const prevBtn = document.getElementById("edfPrevBtn");
-      const nextBtn = document.getElementById("edfNextBtn");
-      if (upBtn) upBtn.disabled = edfPath === "/";
-      if (prevBtn) prevBtn.disabled = edfOffset <= 0;
-      if (nextBtn) nextBtn.disabled = edfNextOffset === null;
-      edfSetBadge((data && data.truncated ? "Page " : "") +
+      storageEntries = entries;
+      const visibleNames = new Set(entries.map((entry) => entry.name));
+      storageSelectedNames.forEach((name) => {
+        if (!visibleNames.has(name)) storageSelectedNames.delete(name);
+      });
+      up("storagePath", storagePath);
+      const upBtn = document.getElementById("storageUpBtn");
+      const prevBtn = document.getElementById("storagePrevBtn");
+      const nextBtn = document.getElementById("storageNextBtn");
+      if (upBtn) upBtn.disabled = storagePath === "/";
+      if (prevBtn) prevBtn.disabled = storageOffset <= 0;
+      if (nextBtn) nextBtn.disabled = storageNextOffset === null;
+      storageSetBadge((data && data.truncated ? "Page " : "") +
                   entries.length + " item" + (entries.length === 1 ? "" : "s"),
                   data && data.truncated ? "warn" : "good");
 
-      const message = document.getElementById("edfMsg");
+      const message = document.getElementById("storageMsg");
       if (message) message.className = "msg";
-      const root = document.getElementById("edfList");
+      const root = document.getElementById("storageList");
       if (!root) return;
       root.innerHTML = "";
       if (!entries.length) {
         const empty = document.createElement("div");
-        empty.className = "edf-empty";
-        empty.textContent = "No EDF files";
+        empty.className = "storage-empty";
+        empty.textContent = "No files";
         root.appendChild(empty);
+        storageSyncSelectionUi();
         return;
       }
       entries.forEach((entry) => {
         const row = document.createElement("div");
-        row.className = "edf-entry";
+        row.className = "storage-entry";
+        const select = document.createElement("label");
+        select.className = "storage-select";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.dataset.storageSelect = entry.name || "";
+        checkbox.checked = storageSelectedNames.has(entry.name || "");
+        checkbox.onchange = () => storageToggleSelected(entry.name, checkbox.checked);
+        select.appendChild(checkbox);
         const info = document.createElement("div");
         const name = document.createElement("div");
-        name.className = "edf-name";
+        name.className = "storage-name";
         name.textContent = entry.name || entry.path || "--";
+        name.tabIndex = 0;
+        name.onclick = () => storageOpenEntry(entry);
+        name.onkeydown = (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            storageOpenEntry(entry);
+          }
+        };
         const meta = document.createElement("div");
-        meta.className = "edf-meta";
-        meta.textContent = entry.type === "dir" ?
-          (entry.path || "") : fmtBytes(entry.size);
+        meta.className = "storage-meta";
+        const metaParts = [entry.type === "dir" ?
+          (entry.path || "") : fmtBytes(entry.size)];
+        const modified = fmtStorageModified(entry.modified);
+        if (modified) metaParts.push(modified);
+        meta.textContent = metaParts.filter(Boolean).join(" | ");
         info.appendChild(name);
         info.appendChild(meta);
 
         const action = document.createElement("button");
-        action.className = entry.type === "dir" ? "btn" : "btn primary";
-        action.textContent = entry.type === "dir" ? "Open" : "Download";
-        action.onclick = () => {
-          if (entry.type === "dir") {
-            edfPath = entry.path || "/";
-            edfOffset = 0;
-            loadEdfList(false);
-          } else if (entry.path) {
-            edfDownload(entry.path);
-          }
-        };
+        action.className = "btn primary storage-action";
+        action.textContent = "\u2193";
+        action.title = entry.type === "dir" ?
+          "Download directory as ZIP" : "Download file";
+        action.setAttribute("aria-label", action.title);
+        action.dataset.storageAction = entry.type === "dir" ? "archive" : "download";
+        action.onclick = () => storageDownloadEntry(entry);
+        row.appendChild(select);
         row.appendChild(info);
         row.appendChild(action);
         root.appendChild(row);
       });
+      storageSyncSelectionUi();
     }
 
-    async function loadEdfList(reset) {
-      if (reset) edfOffset = 0;
-      edfSetBadge("Loading", "warn");
+    async function loadStorageList(reset) {
+      if (reset) {
+        storageOffset = 0;
+        storageClearSelection();
+      }
+      storageSetBadge("Loading", "warn");
       try {
-        const url = "/api/edf/list?path=" + encodeURIComponent(edfPath) +
-          "&offset=" + encodeURIComponent(edfOffset) +
-          "&limit=" + encodeURIComponent(edfLimit);
+        const url = "/api/storage/list?path=" + encodeURIComponent(storagePath) +
+          "&offset=" + encodeURIComponent(storageOffset) +
+          "&limit=" + encodeURIComponent(storageLimit);
         const response = await fetch(url, {cache: "no-store"});
         const text = await response.text();
-        if (!response.ok) throw new Error(edfErrorText(text, response.status));
-        renderEdfList(JSON.parse(text));
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
+        renderStorageList(JSON.parse(text));
       } catch (error) {
-        edfSetBadge("Unavailable", "bad");
-        msg("edfMsg", error.message, false, true);
+        storageSetBadge("Unavailable", "bad");
+        msg("storageMsg", error.message, false, true);
       }
     }
 
-    function edfUp() {
-      if (edfPath === "/") return;
-      edfPath = edfParentPath(edfPath);
-      edfOffset = 0;
-      loadEdfList(false);
+    function storageUp() {
+      if (storagePath === "/") return;
+      storagePath = storageParentPath(storagePath);
+      storageOffset = 0;
+      storageClearSelection();
+      loadStorageList(false);
     }
 
-    function edfPrevPage() {
-      edfOffset = Math.max(0, edfOffset - edfLimit);
-      loadEdfList(false);
+    function storagePrevPage() {
+      storageOffset = Math.max(0, storageOffset - storageLimit);
+      storageClearSelection();
+      loadStorageList(false);
     }
 
-    function edfNextPage() {
-      if (edfNextOffset === null) return;
-      edfOffset = edfNextOffset;
-      loadEdfList(false);
+    function storageNextPage() {
+      if (storageNextOffset === null) return;
+      storageOffset = storageNextOffset;
+      storageClearSelection();
+      loadStorageList(false);
     }
 
-    function edfDownload(path) {
+    function storageDownload(path) {
       const link = document.createElement("a");
-      link.href = "/api/edf/download?path=" + encodeURIComponent(path);
-      link.download = path.split("/").pop() || "download.edf";
+      link.href = "/api/storage/download?path=" + encodeURIComponent(path);
+      link.download = path.split("/").pop() || "download";
       document.body.appendChild(link);
       link.click();
       link.remove();
     }
 
-    function edfArchiveSetBusy(busy) {
-      const btn = document.getElementById("edfArchiveBtn");
-      if (btn) btn.disabled = !!busy;
+    function storageArchiveSetBusy(busy) {
+      storageArchiveBusy = !!busy;
+      storageSyncSelectionUi();
     }
 
-    function edfArchiveDownload(id) {
+    function storageDeleteSetBusy(busy) {
+      storageDeleteBusy = !!busy;
+      storageSyncSelectionUi();
+    }
+
+    function storageArchiveDownload(id) {
       const link = document.createElement("a");
       link.href = "/api/storage/archive/download?id=" + encodeURIComponent(id);
       link.download = "archive.zip";
@@ -3549,7 +3726,7 @@
       link.remove();
     }
 
-    function edfArchiveStatusText(data) {
+    function storageArchiveStatusText(data) {
       const state = data && data.state ? data.state : "unknown";
       const filesDone = Number(data && data.files_done) || 0;
       const files = Number(data && data.files) || 0;
@@ -3568,59 +3745,161 @@
       return state;
     }
 
-    async function edfPollArchive(id) {
+    async function storagePollArchive(id) {
       try {
         const response = await fetch("/api/storage/archive/status", {cache: "no-store"});
         const text = await response.text();
-        if (!response.ok) throw new Error(edfErrorText(text, response.status));
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
         if (Number(data.id) !== Number(id)) return false;
         const state = data.state || "unknown";
-        msg("edfMsg", edfArchiveStatusText(data), state !== "error", state === "error");
+        msg("storageMsg", storageArchiveStatusText(data), state !== "error", state === "error");
         if (state === "ready") {
-          clearInterval(edfArchivePollTimer);
-          edfArchivePollTimer = null;
-          edfArchiveSetBusy(false);
-          edfArchiveDownload(id);
+          clearInterval(storageArchivePollTimer);
+          storageArchivePollTimer = null;
+          storageArchiveSetBusy(false);
+          storageArchiveDownload(id);
           return true;
         } else if (state === "error" || state === "idle") {
-          clearInterval(edfArchivePollTimer);
-          edfArchivePollTimer = null;
-          edfArchiveSetBusy(false);
+          clearInterval(storageArchivePollTimer);
+          storageArchivePollTimer = null;
+          storageArchiveSetBusy(false);
           return true;
         }
         return false;
       } catch (error) {
-        clearInterval(edfArchivePollTimer);
-        edfArchivePollTimer = null;
-        edfArchiveSetBusy(false);
-        msg("edfMsg", error.message, false, true);
+        clearInterval(storageArchivePollTimer);
+        storageArchivePollTimer = null;
+        storageArchiveSetBusy(false);
+        msg("storageMsg", error.message, false, true);
         return true;
       }
     }
 
-    async function edfArchiveCurrent() {
-      if (edfArchivePollTimer) clearInterval(edfArchivePollTimer);
-      edfArchivePollTimer = null;
-      edfArchiveSetBusy(true);
-      msg("edfMsg", "Starting archive", true, false);
-      const recursive = document.getElementById("edfArchiveRecursive")?.checked !== false;
+    async function storageStartArchive(url, options) {
+      if (storageArchivePollTimer) clearInterval(storageArchivePollTimer);
+      storageArchivePollTimer = null;
+      storageArchiveSetBusy(true);
+      msg("storageMsg", "Starting archive", true, false);
       try {
-        const url = "/api/storage/archive/start?path=" +
-          encodeURIComponent(edfPath) + "&recursive=" + (recursive ? "1" : "0");
-        const response = await fetch(url, {method: "POST", cache: "no-store"});
+        const response = await fetch(url, Object.assign({
+          method: "POST",
+          cache: "no-store",
+        }, options || {}));
         const text = await response.text();
-        if (!response.ok) throw new Error(edfErrorText(text, response.status));
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
         const id = Number(data.id);
         if (!id) throw new Error("bad_archive_id");
-        const done = await edfPollArchive(id);
+        const done = await storagePollArchive(id);
         if (!done) {
-          edfArchivePollTimer = setInterval(() => edfPollArchive(id), 1000);
+          storageArchivePollTimer = setInterval(() => storagePollArchive(id), 1000);
         }
       } catch (error) {
-        edfArchiveSetBusy(false);
-        msg("edfMsg", error.message, false, true);
+        storageArchiveSetBusy(false);
+        msg("storageMsg", error.message, false, true);
+      }
+    }
+
+    async function storageArchivePath(path) {
+      if (!path) return;
+      await storageStartArchive(
+        "/api/storage/archive/start?path=" + encodeURIComponent(path));
+    }
+
+    async function storageArchiveSelected() {
+      const selected = storageEntries
+        .filter((entry) => entry && storageSelectedNames.has(entry.name))
+        .map((entry) => entry.name);
+      if (!selected.length) {
+        msg("storageMsg", "Select files or folders first", false, true);
+        return;
+      }
+      await storageStartArchive("/api/storage/archive/start", {
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({base: storagePath, items: selected}),
+      });
+    }
+
+    function storageDeleteStatusText(data) {
+      const state = data && data.state ? data.state : "unknown";
+      const rootsDone = Number(data && data.roots_done) || 0;
+      const roots = Number(data && data.roots) || 0;
+      const files = Number(data && data.files_deleted) || 0;
+      const dirs = Number(data && data.dirs_deleted) || 0;
+      if (state === "deleting") {
+        return "Deleting " + rootsDone + "/" + roots +
+          " selected, removed " + (files + dirs);
+      }
+      if (state === "done") return "Delete complete";
+      if (state === "error") return data && data.error ? data.error : "Delete failed";
+      return state;
+    }
+
+    async function storagePollDelete(id) {
+      try {
+        const response = await fetch("/api/storage/delete/status", {cache: "no-store"});
+        const text = await response.text();
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
+        const data = JSON.parse(text);
+        if (Number(data.id) !== Number(id)) return false;
+        const state = data.state || "unknown";
+        msg("storageMsg", storageDeleteStatusText(data), state !== "error", state === "error");
+        if (state === "done") {
+          clearInterval(storageDeletePollTimer);
+          storageDeletePollTimer = null;
+          storageDeleteSetBusy(false);
+          storageClearSelection();
+          loadStorageList(true);
+          return true;
+        } else if (state === "error" || state === "idle") {
+          clearInterval(storageDeletePollTimer);
+          storageDeletePollTimer = null;
+          storageDeleteSetBusy(false);
+          return true;
+        }
+        return false;
+      } catch (error) {
+        clearInterval(storageDeletePollTimer);
+        storageDeletePollTimer = null;
+        storageDeleteSetBusy(false);
+        msg("storageMsg", error.message, false, true);
+        return true;
+      }
+    }
+
+    async function storageDeleteSelected() {
+      const selected = storageEntries
+        .filter((entry) => entry && storageSelectedNames.has(entry.name))
+        .map((entry) => entry.name);
+      if (!selected.length) {
+        msg("storageMsg", "Select files or folders first", false, true);
+        return;
+      }
+      if (!confirm("Delete selected files and folders recursively?")) return;
+      if (storageDeletePollTimer) clearInterval(storageDeletePollTimer);
+      storageDeletePollTimer = null;
+      storageDeleteSetBusy(true);
+      msg("storageMsg", "Starting delete", true, false);
+      try {
+        const response = await fetch("/api/storage/delete/start", {
+          method: "POST",
+          cache: "no-store",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({base: storagePath, items: selected}),
+        });
+        const text = await response.text();
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
+        const data = JSON.parse(text);
+        const id = Number(data.id);
+        if (!id) throw new Error("bad_delete_id");
+        const done = await storagePollDelete(id);
+        if (!done) {
+          storageDeletePollTimer = setInterval(() => storagePollDelete(id), 1000);
+        }
+      } catch (error) {
+        storageDeleteSetBusy(false);
+        msg("storageMsg", error.message, false, true);
       }
     }
 

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string_view>
+#include <time.h>
 #include <utility>
 
 #include "auth_utils.h"
@@ -15,7 +16,6 @@
 #include "as11_rpc.h"
 #include "background_worker.h"
 #include "debug_log.h"
-#include "edf_storage_catalog.h"
 #include "edf_storage_worker.h"
 #include "json_util.h"
 #include "memory_manager.h"
@@ -25,6 +25,7 @@
 #include "sink_manager.h"
 #include "storage_archive_job.h"
 #include "storage_manager.h"
+#include "storage_path.h"
 #include "storage_writer.h"
 #include "system_status_snapshot.h"
 #include "string_util.h"
@@ -175,88 +176,78 @@ bool request_size_arg_limited(AsyncWebServerRequest *request,
     return true;
 }
 
-static constexpr size_t kEdfListDefaultLimit = 64;
-static constexpr size_t kEdfListMaxLimit = 128;
+static constexpr size_t kStorageListDefaultLimit = 64;
+static constexpr size_t kStorageListMaxLimit = 128;
 
-const char *basename_from_path(const char *path) {
-    if (!path) return "";
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
+struct StorageSelectionRequest {
+    JsonDocument doc;
+    std::string body;
+    const char *base = nullptr;
+    const char *names[AC_STORAGE_MAX_SELECTIONS] = {};
+    size_t count = 0;
+};
+
+bool parse_storage_selection_body(AsyncWebServerRequest *request,
+                                  StorageSelectionRequest &selection,
+                                  const char **error_out) {
+    if (error_out) *error_out = "";
+    if (!parse_body_copy(request, selection.doc, selection.body)) {
+        if (error_out) *error_out = "bad_json";
+        return false;
+    }
+    if (!selection.doc["base"].is<const char *>() ||
+        !selection.doc["items"].is<JsonArray>()) {
+        if (error_out) *error_out = "bad_selection";
+        return false;
+    }
+    selection.base = selection.doc["base"].as<const char *>();
+    JsonArray items = selection.doc["items"].as<JsonArray>();
+    if (!storage_user_path_valid(selection.base) || items.size() == 0 ||
+        items.size() > AC_STORAGE_MAX_SELECTIONS) {
+        if (error_out) *error_out = "bad_selection";
+        return false;
+    }
+    for (JsonVariant item : items) {
+        if (!item.is<const char *>()) {
+            if (error_out) *error_out = "bad_selection";
+            return false;
+        }
+        const char *name = item.as<const char *>();
+        if (!storage_valid_child_name(name)) {
+            if (error_out) *error_out = "bad_name";
+            return false;
+        }
+        selection.names[selection.count++] = name;
+    }
+    return true;
 }
 
-bool append_edf_list_entry(LargeTextBuffer &json,
-                           const EdfStorageInventoryEntry &entry,
-                           bool first) {
+bool append_storage_list_entry(LargeTextBuffer &json,
+                               const char *name,
+                               const char *path,
+                               bool directory,
+                               uint64_t size,
+                               uint64_t modified,
+                               bool first) {
     if (!first) json += ',';
     json += '{';
-    json_add_string(json, "name", entry.name, false);
-    json_add_string(json, "path", entry.path);
-    json_add_string(json, "type", entry.directory ? "dir" : "file");
-    if (!entry.directory) {
-        const EdfInventoryEntry &file = entry.file;
-        json_add_uint64(json, "size", entry.size);
-        json_add_string(json,
-                        "edf_status",
-                        edf_inventory_status_name(file.status));
-        json_add_string(json,
-                        "edf_kind",
-                        edf_inventory_file_kind_name(file.kind));
-        if (file.status == EdfInventoryStatus::Ok &&
-            file.header.header_size > 0) {
-            json_add_uint64(json, "data_size", file.data_size);
-            json_add_uint64(json,
-                            "records",
-                            file.complete_records_from_size);
-            json_add_int(json,
-                         "header_records",
-                         static_cast<long>(file.header.record_count));
-            json_add_int(json,
-                         "signals",
-                         static_cast<long>(file.header.signal_count));
-            json_add_int(json,
-                         "record_size",
-                         static_cast<long>(file.header.record_size));
-            json_add_int(json,
-                         "warnings",
-                         static_cast<long>(file.warnings));
-            json_add_uint64(json,
-                            "partial_tail_bytes",
-                            file.partial_tail_bytes);
-            json_add_string(json, "start_date", file.header.start_date);
-            json_add_string(json, "start_time", file.header.start_time);
-            json_add_string(json,
-                            "record_duration",
-                            file.header.record_duration);
-        }
-    }
+    json_add_string(json, "name", name, false);
+    json_add_string(json, "path", path);
+    json_add_string(json, "type", directory ? "dir" : "file");
+    if (!directory) json_add_uint64(json, "size", size);
+    json_add_uint64(json, "modified", modified);
     json += '}';
     return !json.overflowed();
 }
 
-struct EdfListJsonContext {
-    LargeTextBuffer *json = nullptr;
-    bool first = true;
-};
-
 struct ArchiveDownloadRef {
     StorageArchiveJob *job = nullptr;
-    uint32_t id = 0;
-    File file;
+    std::shared_ptr<StorageArchiveDownload> download;
 
     ~ArchiveDownloadRef() {
-        if (file) file.close();
-        if (job && id != 0) job->mark_download_finished(id);
+        if (job && download) job->finish_download(*download);
     }
 };
-
-bool append_edf_inventory_json(const EdfStorageInventoryEntry &entry,
-                               void *ctx) {
-    EdfListJsonContext *list = static_cast<EdfListJsonContext *>(ctx);
-    if (!list || !list->json) return false;
-    if (!append_edf_list_entry(*list->json, entry, list->first)) return false;
-    list->first = false;
-    return true;
-}
 
 bool therapy_request_idle(AsyncWebServerRequest *request,
                           const SessionManager *session_manager,
@@ -272,27 +263,6 @@ bool therapy_request_idle(AsyncWebServerRequest *request,
             As11TherapyState::Running) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"therapy_active\"}");
-        return false;
-    }
-    return true;
-}
-
-bool edf_storage_request_available(AsyncWebServerRequest *request,
-                                   const SessionManager *session_manager,
-                                   const RpcArbiter *arbiter) {
-    if (!therapy_request_idle(request, session_manager, arbiter)) {
-        return false;
-    }
-    if (!Storage::mounted()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_unavailable\"}");
-        return false;
-    }
-    const EdfStorageWorkerStatus edf_storage = EdfStorageWorker::status();
-    if (edf_storage.busy || edf_storage.queued > 0 ||
-        edf_storage.open_file_count > 0) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"edf_storage_busy\"}");
         return false;
     }
     return true;
@@ -318,6 +288,52 @@ bool storage_heavy_request_available(AsyncWebServerRequest *request,
     }
     return true;
 }
+
+bool storage_jobs_available(AsyncWebServerRequest *request,
+                            const StorageArchiveJob *archive_job,
+                            const StorageDeleteJob *delete_job) {
+    if (archive_job && archive_job->active()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_busy\"}");
+        return false;
+    }
+    if (delete_job && delete_job->active()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_busy\"}");
+        return false;
+    }
+    return true;
+}
+
+class StorageJobGate {
+public:
+    StorageJobGate(AsyncWebServerRequest *request, SemaphoreHandle_t mutex) :
+        mutex_(mutex) {
+        if (mutex_ &&
+            xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+            locked_ = true;
+            return;
+        }
+        if (request) {
+            request->send(409,
+                          "application/json",
+                          "{\"ok\":false,\"error\":\"storage_busy\"}");
+        }
+    }
+
+    StorageJobGate(const StorageJobGate &) = delete;
+    StorageJobGate &operator=(const StorageJobGate &) = delete;
+
+    ~StorageJobGate() {
+        if (locked_) xSemaphoreGive(mutex_);
+    }
+
+    bool locked() const { return locked_; }
+
+private:
+    SemaphoreHandle_t mutex_ = nullptr;
+    bool locked_ = false;
+};
 
 bool request_bool_arg_default(AsyncWebServerRequest *request,
                               const char *name,
@@ -514,6 +530,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   OximetryManager &oximetry_manager,
                   ReportManager &report_manager,
                   StorageArchiveJob &storage_archive_job,
+                  StorageDeleteJob &storage_delete_job,
                   ConsoleContext &console_ctx,
                   uint16_t port) {
     if (started_) return true;
@@ -530,12 +547,15 @@ bool WebUI::begin(RpcArbiter &arbiter,
     oximetry_manager_ = &oximetry_manager;
     report_manager_ = &report_manager;
     storage_archive_job_ = &storage_archive_job;
+    storage_delete_job_ = &storage_delete_job;
     console_ctx_ = &console_ctx;
 
     command_mutex_ = xSemaphoreCreateMutex();
     cache_mutex_ = xSemaphoreCreateMutex();
     sse_mutex_ = xSemaphoreCreateMutex();
-    if (!command_mutex_ || !cache_mutex_ || !sse_mutex_) {
+    storage_job_mutex_ = xSemaphoreCreateMutex();
+    if (!command_mutex_ || !cache_mutex_ || !sse_mutex_ ||
+        !storage_job_mutex_) {
         stop();
         return false;
     }
@@ -676,6 +696,11 @@ void WebUI::stop() {
     if (cache_mutex_) {
         vSemaphoreDelete(cache_mutex_);
         cache_mutex_ = nullptr;
+    }
+
+    if (storage_job_mutex_) {
+        vSemaphoreDelete(storage_job_mutex_);
+        storage_job_mutex_ = nullptr;
     }
 
     sse_enforce_needed_ = false;
@@ -1692,15 +1717,15 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
     request->send(response);
 }
 
-void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
+void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
     if (BackgroundWorker *w = background_worker()) w->note_activity();
 
     const String path = request->hasArg("path") ? request->arg("path") : "/";
     size_t offset = 0;
-    size_t limit = kEdfListDefaultLimit;
+    size_t limit = kStorageListDefaultLimit;
     if (!request_size_arg_limited(request, "offset", 0, 65535, offset) ||
-        !request_size_arg_limited(request, "limit", kEdfListDefaultLimit,
-                                  kEdfListMaxLimit, limit)) {
+        !request_size_arg_limited(request, "limit", kStorageListDefaultLimit,
+                                  kStorageListMaxLimit, limit)) {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"bad_range\"}");
         return;
@@ -1710,17 +1735,19 @@ void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad_range\"}");
         return;
     }
-    if (!edf_valid_browse_path(path.c_str())) {
+    if (!storage_user_path_valid(path.c_str())) {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    if (!therapy_request_idle(request, session_manager_, arbiter_)) {
+    StorageJobGate gate(request, storage_job_mutex_);
+    if (!gate.locked()) return;
+    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
         return;
     }
 
     LargeTextBuffer json;
-    json.reserve(512 + limit * 384);
+    json.reserve(512 + limit * 192);
     json = "{";
     json_add_bool(json, "ok", true, false);
     json_add_string(json, "path", path.c_str());
@@ -1728,42 +1755,99 @@ void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
     json_add_int(json, "limit", static_cast<long>(limit));
     json += ",\"entries\":[";
 
-    EdfListJsonContext list_ctx;
-    list_ctx.json = &json;
-    const EdfStorageInventoryResult result = EdfStorageWorker::list_inventory(
-        path.c_str(),
-        offset,
-        limit,
-        append_edf_inventory_json,
-        &list_ctx);
-    if (result.status != EdfStorageInventoryStatus::Ok) {
-        const char *error =
-            result.status == EdfStorageInventoryStatus::VisitorStopped
-                ? "list_alloc"
-                : EdfStorageWorker::inventory_status_name(result.status);
-        const int code =
-            result.status == EdfStorageInventoryStatus::BadPath ? 400 :
-            result.status == EdfStorageInventoryStatus::StorageUnavailable
-                ? 503 :
-            result.status == EdfStorageInventoryStatus::Busy ? 409 :
-            result.status == EdfStorageInventoryStatus::VisitorStopped ? 503 :
-            404;
-        char body[96] = {};
-        snprintf(body,
-                 sizeof(body),
-                 "{\"ok\":false,\"error\":\"%s\"}",
-                 error);
-        request->send(code, "application/json", body);
+    File dir;
+    {
+        Storage::Guard guard;
+        dir = Storage::open(path.c_str(), "r");
+    }
+    if (!dir) {
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"error\":\"not_found\"}");
+        return;
+    }
+    bool is_directory = false;
+    {
+        Storage::Guard guard;
+        is_directory = dir.isDirectory();
+    }
+    if (!is_directory) {
+        Storage::Guard guard;
+        dir.close();
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"error\":\"not_directory\"}");
         return;
     }
 
+    size_t matched = 0;
+    size_t returned = 0;
+    bool truncated = false;
+    bool first = true;
+    while (!truncated) {
+        char child_name[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
+        bool have_child = false;
+        bool directory = false;
+        uint64_t size = 0;
+        uint64_t modified = 0;
+        {
+            Storage::Guard guard;
+            File child = dir.openNextFile();
+            if (child) {
+                have_child = true;
+                copy_cstr(child_name,
+                          sizeof(child_name),
+                          storage_basename_from_path(child.name()));
+                directory = child.isDirectory();
+                size = directory ? 0 : static_cast<uint64_t>(child.size());
+                const time_t last_write = child.getLastWrite();
+                modified = last_write > 0 ? static_cast<uint64_t>(last_write)
+                                          : 0;
+                child.close();
+            }
+        }
+        if (!have_child) break;
+
+        char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
+        const bool path_ok = storage_append_child_path(path.c_str(),
+                                                      child_name,
+                                                      child_path,
+                                                      sizeof(child_path));
+
+        if (!path_ok || !storage_user_path_valid(child_path)) continue;
+        if (matched++ < offset) continue;
+        if (returned >= limit) {
+            truncated = true;
+            break;
+        }
+        if (!append_storage_list_entry(json,
+                                       child_name,
+                                       child_path,
+                                       directory,
+                                       size,
+                                       modified,
+                                       first)) {
+            {
+                Storage::Guard guard;
+                dir.close();
+            }
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"list_alloc\"}");
+            return;
+        }
+        first = false;
+        returned++;
+    }
+    {
+        Storage::Guard guard;
+        dir.close();
+    }
+
     json += ']';
-    json_add_int(json, "count", static_cast<long>(result.returned));
-    json_add_bool(json, "truncated", result.truncated);
-    if (result.truncated) {
+    json_add_int(json, "count", static_cast<long>(returned));
+    json_add_bool(json, "truncated", truncated);
+    if (truncated) {
         char next[24];
         snprintf(next, sizeof(next), "%llu",
-                 static_cast<unsigned long long>(offset + result.returned));
+                 static_cast<unsigned long long>(offset + returned));
         json += ",\"next_offset\":";
         json += next;
     } else {
@@ -1788,7 +1872,7 @@ void WebUI::send_edf_list(AsyncWebServerRequest *request) const {
     request->send(response);
 }
 
-void WebUI::send_edf_download(AsyncWebServerRequest *request) const {
+void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     if (BackgroundWorker *w = background_worker()) w->note_activity();
 
     if (!request->hasArg("path")) {
@@ -1797,12 +1881,17 @@ void WebUI::send_edf_download(AsyncWebServerRequest *request) const {
         return;
     }
     const String path = request->arg("path");
-    if (!edf_valid_pull_path(path.c_str())) {
+    if (!storage_user_path_valid(path.c_str())) {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    if (!edf_storage_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+    if (!storage_jobs_available(request,
+                                storage_archive_job_,
+                                storage_delete_job_)) {
         return;
     }
 
@@ -1840,7 +1929,7 @@ void WebUI::send_edf_download(AsyncWebServerRequest *request) const {
     char disposition[96];
     snprintf(disposition, sizeof(disposition),
              "attachment; filename=\"%s\"",
-             basename_from_path(path.c_str()));
+             storage_basename_from_path(path.c_str()));
     response->addHeader("Content-Disposition", disposition);
     response->addHeader("Cache-Control", "no-store");
     request->send(response);
@@ -1852,18 +1941,77 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
         return;
     }
+    if (request && request->_tempObject &&
+        static_cast<const char *>(request->_tempObject)[0] != 0) {
+        StorageSelectionRequest selection;
+        const char *parse_error = "bad_selection";
+        if (!parse_storage_selection_body(request, selection, &parse_error)) {
+            char body[96] = {};
+            snprintf(body,
+                     sizeof(body),
+                     "{\"ok\":false,\"error\":\"%s\"}",
+                     parse_error);
+            request->send(400, "application/json", body);
+            return;
+        }
+        StorageJobGate gate(request, storage_job_mutex_);
+        if (!gate.locked()) return;
+        if (!storage_heavy_request_available(request,
+                                             session_manager_,
+                                             arbiter_)) {
+            return;
+        }
+        if (!storage_jobs_available(request,
+                                    storage_archive_job_,
+                                    storage_delete_job_)) {
+            return;
+        }
+
+        uint32_t id = 0;
+        char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
+        if (!storage_archive_job_->start_selected(selection.base,
+                                                  selection.names,
+                                                  selection.count,
+                                                  &id,
+                                                  error,
+                                                  sizeof(error))) {
+            char body[128] = {};
+            snprintf(body,
+                     sizeof(body),
+                     "{\"ok\":false,\"error\":\"%s\"}",
+                     error[0] ? error : "archive_start_failed");
+            request->send(409, "application/json", body);
+            return;
+        }
+
+        char body[128] = {};
+        snprintf(body,
+                 sizeof(body),
+                 "{\"ok\":true,\"queued\":true,\"id\":%lu}",
+                 static_cast<unsigned long>(id));
+        request->send(202, "application/json", body);
+        return;
+    }
+    release_request_body(request);
     if (!request->hasArg("path")) {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"missing_path\"}");
         return;
     }
     const String path = request->arg("path");
-    if (!storage_archive_valid_path(path.c_str())) {
+    if (!storage_user_path_valid(path.c_str())) {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
+    StorageJobGate gate(request, storage_job_mutex_);
+    if (!gate.locked()) return;
     if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+    if (!storage_jobs_available(request,
+                                storage_archive_job_,
+                                storage_delete_job_)) {
         return;
     }
 
@@ -1899,32 +2047,29 @@ void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
         return;
     }
-    const StorageArchiveStatus status = storage_archive_job_->status();
+    StorageArchiveStatus status;
+    if (!storage_archive_job_->status(status)) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"status_busy\"}");
+        return;
+    }
     LargeTextBuffer json;
-    json.reserve(768);
+    json.reserve(512);
     json = "{";
     json_add_bool(json, "ok", true, false);
     json_add_string(json, "state",
                     storage_archive_state_name(status.state));
     json_add_int(json, "id", static_cast<long>(status.id));
     json_add_bool(json, "recursive", status.recursive);
-    json_add_bool(json, "psram_metadata", status.psram_metadata);
     json_add_string(json, "path", status.source_path);
-    json_add_string(json, "archive_path", status.archive_path);
     json_add_string(json, "filename", status.filename);
     json_add_string(json, "error", status.error);
     json_add_int(json, "files", static_cast<long>(status.files));
     json_add_int(json, "dirs", static_cast<long>(status.dirs));
     json_add_int(json, "files_done", static_cast<long>(status.files_done));
-    json_add_uint64(json, "input_bytes", status.input_bytes);
     json_add_uint64(json, "bytes_done", status.bytes_done);
-    json_add_uint64(json, "archive_bytes", status.archive_bytes);
     json_add_uint64(json, "estimated_archive_bytes",
                     status.estimated_archive_bytes);
-    json_add_uint64(json, "free_bytes_at_start",
-                    status.free_bytes_at_start);
-    json_add_int(json, "started_ms", static_cast<long>(status.started_ms));
-    json_add_int(json, "updated_ms", static_cast<long>(status.updated_ms));
     json += '}';
     if (json.overflowed()) {
         request->send(503, "application/json",
@@ -1956,25 +2101,19 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
                       "{\"ok\":false,\"error\":\"bad_id\"}");
         return;
     }
+    StorageJobGate gate(request, storage_job_mutex_);
+    if (!gate.locked()) return;
     if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+    if (!storage_jobs_available(request,
+                                nullptr,
+                                storage_delete_job_)) {
         return;
     }
 
     const uint32_t id = static_cast<uint32_t>(id_arg);
-    char path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
     char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
-    uint64_t expected_size = 0;
-    if (!storage_archive_job_->download_info(id,
-                                             path,
-                                             sizeof(path),
-                                             filename,
-                                             sizeof(filename),
-                                             expected_size)) {
-        request->send(404, "application/json",
-                      "{\"ok\":false,\"error\":\"not_ready\"}");
-        return;
-    }
-
     std::shared_ptr<ArchiveDownloadRef> ref =
         std::make_shared<ArchiveDownloadRef>();
     if (!ref) {
@@ -1983,52 +2122,40 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
         return;
     }
     ref->job = storage_archive_job_;
-    ref->id = id;
-    size_t file_size = 0;
-    {
-        Storage::Guard guard;
-        ref->file = Storage::open(path, "r");
-        if (!ref->file || ref->file.isDirectory()) {
-            if (ref->file) ref->file.close();
-            request->send(404, "application/json",
-                          "{\"ok\":false,\"error\":\"not_found\"}");
-            return;
-        }
-        file_size = static_cast<size_t>(ref->file.size());
-    }
-    if (expected_size != 0 && expected_size != file_size) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"size_changed\"}");
-        return;
-    }
-
-    char start_error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
-    if (!storage_archive_job_->mark_download_started(id,
-                                                     start_error,
-                                                     sizeof(start_error))) {
+    uint64_t archive_size = 0;
+    char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
+    if (!storage_archive_job_->begin_download(id,
+                                              ref->download,
+                                              filename,
+                                              sizeof(filename),
+                                              archive_size,
+                                              error,
+                                              sizeof(error))) {
         char body[128] = {};
         snprintf(body,
                  sizeof(body),
                  "{\"ok\":false,\"error\":\"%s\"}",
-                 start_error[0] ? start_error : "not_ready");
+                 error[0] ? error : "not_ready");
         request->send(409, "application/json", body);
+        return;
+    }
+    if (archive_size > static_cast<uint64_t>(SIZE_MAX)) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"archive_too_large\"}");
         return;
     }
 
     AsyncWebServerResponse *response = request->beginResponse(
         "application/zip",
-        file_size,
+        static_cast<size_t>(archive_size),
         [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
-            if (!buffer || !ref || !ref->file) return 0;
-            Storage::Guard guard;
-            const size_t size = static_cast<size_t>(ref->file.size());
-            if (offset >= size || !ref->file.seek(offset)) return 0;
-            const size_t remaining = size - offset;
-            const size_t wanted = remaining < max_len ? remaining : max_len;
-            return ref->file.read(buffer, wanted);
+            if (!buffer || !ref || !ref->job || !ref->download) return 0;
+            return ref->job->read_download(*ref->download,
+                                           buffer,
+                                           max_len,
+                                           offset);
         });
     if (!response) {
-        storage_archive_job_->mark_download_finished(id);
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
@@ -2039,6 +2166,106 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
              filename[0] ? filename : "archive.zip");
     response->addHeader("Content-Disposition", disposition);
     response->addHeader("Cache-Control", "no-store");
+    response->addHeader("Accept-Ranges", "none");
+    request->send(response);
+}
+
+void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
+    if (!storage_delete_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"delete_unavailable\"}");
+        return;
+    }
+    StorageSelectionRequest selection;
+    const char *parse_error = "bad_selection";
+    if (!parse_storage_selection_body(request, selection, &parse_error)) {
+        char body[96] = {};
+        snprintf(body,
+                 sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 parse_error);
+        request->send(400, "application/json", body);
+        return;
+    }
+    StorageJobGate gate(request, storage_job_mutex_);
+    if (!gate.locked()) return;
+    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+    if (!storage_jobs_available(request,
+                                storage_archive_job_,
+                                storage_delete_job_)) {
+        return;
+    }
+
+    uint32_t id = 0;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    if (!storage_delete_job_->start_selected(selection.base,
+                                             selection.names,
+                                             selection.count,
+                                             &id,
+                                             error,
+                                             sizeof(error))) {
+        char body[128] = {};
+        snprintf(body,
+                 sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 error[0] ? error : "delete_start_failed");
+        request->send(409, "application/json", body);
+        return;
+    }
+
+    char body[128] = {};
+    snprintf(body,
+             sizeof(body),
+             "{\"ok\":true,\"queued\":true,\"id\":%lu}",
+             static_cast<unsigned long>(id));
+    request->send(202, "application/json", body);
+}
+
+void WebUI::send_storage_delete_status(AsyncWebServerRequest *request) const {
+    if (!storage_delete_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"delete_unavailable\"}");
+        return;
+    }
+    StorageDeleteStatus status;
+    if (!storage_delete_job_->status(status)) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"status_busy\"}");
+        return;
+    }
+    LargeTextBuffer json;
+    json.reserve(384);
+    json = "{";
+    json_add_bool(json, "ok", true, false);
+    json_add_string(json, "state", storage_delete_state_name(status.state));
+    json_add_int(json, "id", static_cast<long>(status.id));
+    json_add_string(json, "base", status.base_path);
+    json_add_string(json, "error", status.error);
+    json_add_int(json, "roots", static_cast<long>(status.roots));
+    json_add_int(json, "roots_done", static_cast<long>(status.roots_done));
+    json_add_int(json,
+                 "files_deleted",
+                 static_cast<long>(status.files_deleted));
+    json_add_int(json,
+                 "dirs_deleted",
+                 static_cast<long>(status.dirs_deleted));
+    json += '}';
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"status_alloc\"}");
+        return;
+    }
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
     request->send(response);
 }
 
@@ -2634,20 +2861,22 @@ void WebUI::register_routes() {
         send_cached(request, cached_stream_json_);
     });
 
-    server_->on("/api/edf/list", HTTP_GET,
+    server_->on("/api/storage/list", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
-        send_edf_list(request);
+        send_storage_list(request);
     });
 
-    server_->on("/api/edf/download", HTTP_GET,
+    server_->on("/api/storage/download", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
-        send_edf_download(request);
+        send_storage_download(request);
     });
 
-    server_->on("/api/storage/archive/start", HTTP_POST,
-                [this](AsyncWebServerRequest *request) {
-        send_storage_archive_start(request);
-    });
+    server_->on(
+        "/api/storage/archive/start", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            send_storage_archive_start(request);
+        },
+        nullptr, handle_body);
 
     server_->on("/api/storage/archive/status", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
@@ -2657,6 +2886,18 @@ void WebUI::register_routes() {
     server_->on("/api/storage/archive/download", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_storage_archive_download(request);
+    });
+
+    server_->on(
+        "/api/storage/delete/start", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            send_storage_delete_start(request);
+        },
+        nullptr, handle_body);
+
+    server_->on("/api/storage/delete/status", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_storage_delete_status(request);
     });
 
     server_->on("/api/report/summary", HTTP_GET,

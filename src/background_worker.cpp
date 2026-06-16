@@ -34,6 +34,11 @@ void BackgroundWorker::note_activity() {
     uint32_t now = millis();
     if (now == 0) now = 1;  // 0 is the "never" sentinel
     last_activity_ms_.store(now);
+    wake();
+}
+
+void BackgroundWorker::wake() {
+    if (task_) xTaskNotifyGive(task_);
 }
 
 void BackgroundWorker::publish_gate(bool foreground_busy, bool as11_ready,
@@ -119,7 +124,8 @@ void BackgroundWorker::run() {
 
         if (!open) {
             for (size_t i = 0; i < job_count_; ++i) jobs_[i]->on_preempt();
-            vTaskDelay(pdMS_TO_TICKS(AC_BG_WORKER_BUSY_RECHECK_MS));
+            ulTaskNotifyTake(pdTRUE,
+                             pdMS_TO_TICKS(AC_BG_WORKER_BUSY_RECHECK_MS));
             continue;
         }
 
@@ -142,7 +148,7 @@ void BackgroundWorker::run() {
         uint32_t delay = AC_BG_WORKER_IDLE_TICK_MS;
         if (result == JobStep::Working) delay = AC_BG_WORKER_WORK_TICK_MS;
         else if (result == JobStep::Waiting) delay = AC_BG_WORKER_BUSY_RECHECK_MS;
-        vTaskDelay(pdMS_TO_TICKS(delay));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay));
     }
 }
 
