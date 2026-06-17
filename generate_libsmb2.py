@@ -16,7 +16,7 @@ PATCH_DIR = PROJECT_DIR / "patches" / "libsmb2"
 GENERATED_DIR = PROJECT_DIR / ".pio" / "generated-libs" / "libsmb2"
 STAMP_PATH = GENERATED_DIR / ".aircannect-stamp"
 
-SCRIPT_VERSION = "2"
+SCRIPT_VERSION = "3"
 
 
 def fail(message):
@@ -27,8 +27,12 @@ def run(cmd, cwd=None):
     return subprocess.check_output(cmd, cwd=cwd, text=True).strip()
 
 
-def run_checked(cmd, cwd=None):
-    subprocess.check_call(cmd, cwd=cwd)
+def run_completed(cmd, cwd=None):
+    return subprocess.run(cmd,
+                          cwd=cwd,
+                          text=True,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
 
 
 def hash_file(path, digest):
@@ -55,19 +59,32 @@ def patch_files():
 
 def upstream_commit():
     if not (UPSTREAM_DIR / ".git").exists():
-        try:
-            run_checked([
+        narrow = run_completed([
+            "git",
+            "submodule",
+            "update",
+            "--init",
+            "--",
+            "third_party/libsmb2",
+        ], cwd=PROJECT_DIR)
+        if narrow.returncode != 0:
+            broad = run_completed([
                 "git",
                 "submodule",
                 "update",
                 "--init",
-                "--",
-                "third_party/libsmb2",
+                "--recursive",
             ], cwd=PROJECT_DIR)
-        except subprocess.CalledProcessError as exc:
+            if broad.returncode != 0:
+                detail = (broad.stderr or narrow.stderr).strip()
+                if detail:
+                    detail = f": {detail}"
+                fail("third_party/libsmb2 auto-init failed; "
+                     "run git submodule update --init --recursive"
+                     f"{detail}")
+        if not (UPSTREAM_DIR / ".git").exists():
             fail("third_party/libsmb2 auto-init failed; "
-                 "run git submodule update --init "
-                 f"(exit {exc.returncode})")
+                 "run git submodule update --init --recursive")
     if not (UPSTREAM_DIR / ".git").exists():
         fail("third_party/libsmb2 is not initialized")
     return run(["git", "rev-parse", "HEAD"], cwd=UPSTREAM_DIR)
