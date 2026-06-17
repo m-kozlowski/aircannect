@@ -64,8 +64,10 @@ public:
                                const std::string &params_json);
     void release(StreamConsumerHandle handle);
 
-    void note_external_start(const std::string &params_json);
+    void note_external_start(const std::string &params_json,
+                             uint32_t now_ms);
     void note_external_stop(
+        uint32_t now_ms,
         ExternalStreamStopMode mode = ExternalStreamStopMode::CommandSent);
 
     bool consumer_active(StreamConsumerHandle handle) const;
@@ -93,7 +95,7 @@ public:
                                bool is_error,
                                const std::string &payload,
                                uint32_t now_ms);
-    void mark_reattach();
+    void mark_reattach(uint32_t now_ms);
     void request_quiesce(uint32_t now_ms);
     void clear_quiesce();
     bool quiesced() const { return quiesced_; }
@@ -133,6 +135,9 @@ public:
     uint32_t last_stream_id() const { return last_stream_id_; }
     const std::string &last_start_time() const { return last_start_time_; }
     uint32_t last_notification_ms() const { return last_notification_ms_; }
+    uint32_t last_owned_activity_ms() const {
+        return last_owned_activity_ms_;
+    }
 
     size_t accepted_data_id_count() const {
         return accepted_subscription_.data_id_count;
@@ -196,6 +201,7 @@ private:
 
     uint32_t last_stream_id_ = 0;
     uint32_t last_notification_ms_ = 0;
+    uint32_t last_owned_activity_ms_ = 0;
     uint32_t last_command_ms_ = 0;
 
     uint32_t published_payloads_ = 0;

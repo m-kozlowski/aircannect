@@ -147,10 +147,12 @@ void StreamBroker::release(StreamConsumerHandle handle) {
     }
 }
 
-void StreamBroker::note_external_start(const std::string &params_json) {
+void StreamBroker::note_external_start(const std::string &params_json,
+                                       uint32_t now_ms) {
     if (params_json.empty()) return;
     Subscription requested;
     if (!parse_subscription(params_json, requested)) return;
+    last_owned_activity_ms_ = now_ms;
     external_active_ = true;
     external_subscription_ = requested;
     Subscription desired;
@@ -169,7 +171,9 @@ void StreamBroker::note_external_start(const std::string &params_json) {
     clear_error();
 }
 
-void StreamBroker::note_external_stop(ExternalStreamStopMode mode) {
+void StreamBroker::note_external_stop(uint32_t now_ms,
+                                      ExternalStreamStopMode mode) {
+    last_owned_activity_ms_ = now_ms;
     const bool stop_required =
         external_active_ && actual_active_ &&
         mode == ExternalStreamStopMode::CommandRequired;
@@ -233,15 +237,18 @@ void StreamBroker::mark_command_queued(StreamCommandType type,
     if (type == StreamCommandType::None) return;
     pending_ = type;
     last_command_ms_ = now_ms;
+    last_owned_activity_ms_ = now_ms;
 }
 
 void StreamBroker::mark_command_deferred(uint32_t now_ms) {
     last_command_ms_ = now_ms;
+    last_owned_activity_ms_ = now_ms;
 }
 
 void StreamBroker::mark_command_timeout(uint32_t now_ms) {
     pending_ = StreamCommandType::None;
     last_command_ms_ = now_ms;
+    last_owned_activity_ms_ = now_ms;
 }
 
 void StreamBroker::mark_command_response(StreamCommandType type,
@@ -251,6 +258,7 @@ void StreamBroker::mark_command_response(StreamCommandType type,
     if (pending_ != type) return;
     pending_ = StreamCommandType::None;
     last_command_ms_ = now_ms;
+    last_owned_activity_ms_ = now_ms;
 
     if (is_error && quiesce_requested_ && type == StreamCommandType::Stop) {
         quiesced_ = false;
@@ -289,10 +297,11 @@ void StreamBroker::mark_command_response(StreamCommandType type,
     }
 }
 
-void StreamBroker::mark_reattach() {
+void StreamBroker::mark_reattach(uint32_t now_ms) {
     pending_ = StreamCommandType::None;
     actual_active_ = false;
     last_command_ms_ = 0;
+    if (desired_active()) last_owned_activity_ms_ = now_ms;
     clear_subscription(accepted_subscription_);
     quiesced_ = false;
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
@@ -302,7 +311,7 @@ void StreamBroker::mark_reattach() {
 }
 
 void StreamBroker::request_quiesce(uint32_t now_ms) {
-    (void)now_ms;
+    last_owned_activity_ms_ = now_ms;
     quiesce_requested_ = true;
     quiesced_ = !actual_active_ && accepted_subscription_.data_id_count == 0;
     clear_error();

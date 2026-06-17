@@ -289,7 +289,8 @@ bool RpcArbiter::set_source_event_observer(RpcSource source,
 
 void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
     if (raw_rpc_events_enabled_ && !enabled) {
-        stream_.note_external_stop(ExternalStreamStopMode::CommandRequired);
+        stream_.note_external_stop(millis(),
+                                   ExternalStreamStopMode::CommandRequired);
     }
     raw_rpc_events_enabled_ = enabled;
 }
@@ -361,8 +362,8 @@ bool RpcArbiter::stream_activity_active() const {
         stream_.pending()) {
         return true;
     }
-    return stream_.last_notification_ms() &&
-           millis() - stream_.last_notification_ms() <
+    return stream_.last_owned_activity_ms() &&
+           millis() - stream_.last_owned_activity_ms() <
                AC_WIFI_ROAM_STREAM_QUIET_MS;
 }
 
@@ -432,10 +433,11 @@ bool RpcArbiter::recover_can(const char *reason) {
     rpc_rx_.reset();
     log_rx_.reset();
     cancel_all_requests(reason ? reason : "can_recovery");
-    stream_.mark_reattach();
-    event_.mark_reattach(millis());
+    const uint32_t now = millis();
+    stream_.mark_reattach(now);
+    event_.mark_reattach(now);
     if (as11_state_.therapy_command_pending()) {
-        as11_state_.clear_pending_therapy_command("can_recovery", millis());
+        as11_state_.clear_pending_therapy_command("can_recovery", now);
     }
     return can_.recover_or_restart(reason);
 }
@@ -863,10 +865,11 @@ bool RpcArbiter::match_raw_passthrough(uint32_t id,
 
 void RpcArbiter::note_raw_stream_request(StreamCommandType command,
                                          const std::string &params_json) {
+    const uint32_t now = millis();
     if (command == StreamCommandType::Start) {
-        stream_.note_external_start(params_json);
+        stream_.note_external_start(params_json, now);
     } else if (command == StreamCommandType::Stop) {
-        stream_.note_external_stop();
+        stream_.note_external_stop(now);
     }
 }
 
@@ -874,7 +877,7 @@ void RpcArbiter::note_raw_stream_response(StreamCommandType command,
                                           bool is_error) {
     if (!is_error) return;
     if (command == StreamCommandType::Start) {
-        stream_.note_external_stop();
+        stream_.note_external_stop(millis());
     }
 }
 
@@ -1413,7 +1416,7 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
                                        AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);
         next_as11_clock_poll_ms_ = now + AC_AS11_INITIAL_STATUS_POLL_DELAY_MS +
             AC_RPC_DEFAULT_TIMEOUT_MS;
-        if (stream_.desired_active()) stream_.mark_reattach();
+        if (stream_.desired_active()) stream_.mark_reattach(now);
         push_event(RpcEventKind::BootNotification, last_boot_notification_);
     }
 }
