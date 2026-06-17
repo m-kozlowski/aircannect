@@ -11,6 +11,12 @@ Import("env")
 
 def minify_html(html):
     html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+    blocks = []
+
+    def stash(block):
+        token = f"@@AC_WEB_BLOCK_{len(blocks)}@@"
+        blocks.append(block)
+        return token
 
     def minify_css(match):
         css = match.group(1)
@@ -21,33 +27,38 @@ def minify_html(html):
         return "<style>" + css + "</style>"
 
     def minify_js(match):
-        js = match.group(1)
-        js = re.sub(r"//[^\n]*", "", js)
-        js = re.sub(r"/\*.*?\*/", "", js, flags=re.DOTALL)
-        js = "\n".join(line.strip() for line in js.splitlines() if line.strip())
-        js = re.sub(r"\s*([{}();,=<>+\-*/?:&|!])\s*", r"\1", js)
-        js = re.sub(
-            r"\b(const|let|var|return|typeof|new|await|async|function|else)\b(?=[^\s({;,])",
-            r"\1 ",
-            js,
-        )
+        js = match.group(1).strip()
         return "<script>" + js + "</script>"
 
-    html = re.sub(r"<style>(.*?)</style>", minify_css, html, flags=re.DOTALL)
-    html = re.sub(r"<script>(.*?)</script>", minify_js, html, flags=re.DOTALL)
+    html = re.sub(
+        r"<style>(.*?)</style>",
+        lambda match: stash(minify_css(match)),
+        html,
+        flags=re.DOTALL,
+    )
+    html = re.sub(
+        r"<script>(.*?)</script>",
+        lambda match: stash(minify_js(match)),
+        html,
+        flags=re.DOTALL,
+    )
     html = re.sub(r">\s+<", "><", html)
     html = re.sub(r"\s+", " ", html).strip()
+    for index, block in enumerate(blocks):
+        html = html.replace(f"@@AC_WEB_BLOCK_{index}@@", block)
     return html
 
 
 project_dir = env.get("PROJECT_DIR", ".")
 html_path = os.path.join(project_dir, "www", "index.html")
 header_path = os.path.join(project_dir, "src", "web_ui_html.h")
+generator_path = os.path.join(project_dir, "generate_web_ui.py")
 
 if os.path.exists(html_path):
     needs_update = (
         not os.path.exists(header_path)
         or os.path.getmtime(html_path) > os.path.getmtime(header_path)
+        or os.path.getmtime(generator_path) > os.path.getmtime(header_path)
     )
     if needs_update:
         with open(html_path, "r", encoding="utf-8") as f:
