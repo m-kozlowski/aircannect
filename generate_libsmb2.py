@@ -16,7 +16,7 @@ PATCH_DIR = PROJECT_DIR / "patches" / "libsmb2"
 GENERATED_DIR = PROJECT_DIR / ".pio" / "generated-libs" / "libsmb2"
 STAMP_PATH = GENERATED_DIR / ".aircannect-stamp"
 
-SCRIPT_VERSION = "1"
+SCRIPT_VERSION = "2"
 
 
 def fail(message):
@@ -25,6 +25,10 @@ def fail(message):
 
 def run(cmd, cwd=None):
     return subprocess.check_output(cmd, cwd=cwd, text=True).strip()
+
+
+def run_checked(cmd, cwd=None):
+    subprocess.check_call(cmd, cwd=cwd)
 
 
 def hash_file(path, digest):
@@ -51,7 +55,21 @@ def patch_files():
 
 def upstream_commit():
     if not (UPSTREAM_DIR / ".git").exists():
-        fail("third_party/libsmb2 is not initialized; run git submodule update --init")
+        try:
+            run_checked([
+                "git",
+                "submodule",
+                "update",
+                "--init",
+                "--",
+                "third_party/libsmb2",
+            ], cwd=PROJECT_DIR)
+        except subprocess.CalledProcessError as exc:
+            fail("third_party/libsmb2 auto-init failed; "
+                 "run git submodule update --init "
+                 f"(exit {exc.returncode})")
+    if not (UPSTREAM_DIR / ".git").exists():
+        fail("third_party/libsmb2 is not initialized")
     return run(["git", "rev-parse", "HEAD"], cwd=UPSTREAM_DIR)
 
 
