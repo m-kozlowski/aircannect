@@ -135,6 +135,40 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
+    if (doc["smb_endpoint"].is<const char *>() ||
+        doc["smb_user"].is<const char *>() ||
+        doc["smb_password"].is<const char *>()) {
+        String endpoint = config.data().smb_endpoint;
+        String user = config.data().smb_user;
+        String password = config.data().smb_password;
+        if (doc["smb_endpoint"].is<const char *>()) {
+            endpoint = doc["smb_endpoint"].as<const char *>();
+        }
+        if (doc["smb_user"].is<const char *>()) {
+            user = doc["smb_user"].as<const char *>();
+        }
+        if (doc["smb_password"].is<const char *>()) {
+            password = doc["smb_password"].as<const char *>();
+            if (password == "********" &&
+                config.data().smb_password.length() > 0) {
+                password = config.data().smb_password;
+            }
+        }
+        const String before_endpoint = config.data().smb_endpoint;
+        const String before_user = config.data().smb_user;
+        const String before_password = config.data().smb_password;
+        const bool accepted =
+            config.set_smb_credentials(endpoint, user, password);
+        if (accepted) {
+            result.accepted_fields++;
+            if (before_endpoint != config.data().smb_endpoint ||
+                before_user != config.data().smb_user ||
+                before_password != config.data().smb_password) {
+                result.changed_fields++;
+            }
+        }
+    }
+
     uint16_t parsed_port = 0;
     if (valid_port_from_json(doc, "oximetry_udp_port", parsed_port)) {
         const uint16_t before = config.data().oximetry_udp_port;

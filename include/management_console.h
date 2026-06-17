@@ -95,7 +95,12 @@ private:
                      TcpBridge &tcp_bridge, const AppConfig &app_config);
     void handle_config(Print &out, String rest, AppConfig &app_config,
                        WifiManager &wifi_manager, TcpBridge &tcp_bridge,
-                       OtaManager &ota_manager);
+                       OtaManager &ota_manager,
+                       EdfRecorderManager &edf_recorder_manager);
+    bool handle_config_key(Print &out, String rest, AppConfig &app_config,
+                           WifiManager &wifi_manager, TcpBridge &tcp_bridge,
+                           OtaManager &ota_manager,
+                           EdfRecorderManager &edf_recorder_manager);
 
     void print_oximetry_status(Print &out,
                                const OximetryManager &oximetry_manager) const;

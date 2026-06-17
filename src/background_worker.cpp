@@ -141,7 +141,7 @@ void BackgroundWorker::run() {
         }
 
         if (result == JobStep::Idle && (++idle_ticks % 30) == 0) {
-            Log::logf(CAT_BGWORKER, LOG_INFO,
+            Log::logf(CAT_BGWORKER, LOG_DEBUG,
                       "heartbeat idle jobs=%u\n",
                       static_cast<unsigned>(job_count_));
         }

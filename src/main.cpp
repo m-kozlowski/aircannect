@@ -1,5 +1,7 @@
 #include <Arduino.h>
 
+#include <new>
+
 #include "app_config.h"
 #include "background_worker.h"
 #include "board.h"
@@ -22,6 +24,7 @@
 #include "storage_archive_job.h"
 #include "storage_delete_job.h"
 #include "storage_manager.h"
+#include "storage_sync_job.h"
 #include "storage_writer.h"
 #include "system_status_snapshot.h"
 #include "tcp_bridge.h"
@@ -52,6 +55,7 @@ static ReportManager report_manager;
 static BackgroundWorker bg_worker;
 static StorageArchiveJob storage_archive_job;
 static StorageDeleteJob storage_delete_job;
+static StorageSyncJob *storage_sync_job = nullptr;
 static ReportPrefetchJob report_prefetch_job(report_manager);
 static ConsoleContext console_ctx{
     rpc_arbiter,
@@ -131,6 +135,16 @@ static void drain_rpc_events() {
     }
 }
 
+static StorageSyncJob *create_storage_sync_job() {
+    void *memory = Memory::alloc_large(sizeof(StorageSyncJob), false);
+    if (!memory) {
+        Log::logf(CAT_STORAGE, LOG_ERROR,
+                  "[SYNC] failed to allocate sync job in PSRAM\n");
+        return nullptr;
+    }
+    return new (memory) StorageSyncJob();
+}
+
 void setup() {
     Serial.begin(AC_SERIAL_BAUD);
     delay(500);
@@ -188,6 +202,7 @@ void setup() {
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] management CLI ready\n");
 
     app_config.begin();
+    storage_sync_job = create_storage_sync_job();
     apply_storage_provisioning(app_config, wifi_manager);
     app_config.apply_log_config();
     session_manager.begin();
@@ -229,6 +244,7 @@ void setup() {
                  report_manager,
                  storage_archive_job,
                  storage_delete_job,
+                 storage_sync_job,
                  console_ctx);
 
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] architecture baseline ready\n");
@@ -237,8 +253,14 @@ void setup() {
     // once every subsystem it gates on (report, CAN, OTA) is up.
     storage_archive_job.begin();
     storage_delete_job.begin();
+    if (storage_sync_job) {
+        storage_sync_job->begin(app_config.data());
+    }
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
+    if (storage_sync_job) {
+        bg_worker.add_job(storage_sync_job);
+    }
     bg_worker.add_job(&report_prefetch_job);
     bg_worker.begin();
 }
@@ -249,6 +271,7 @@ void setup() {
 // transition.
 static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
                                             ReportManager &report,
+                                            StorageSyncJob *sync_job,
                                             uint32_t now_ms) {
     static As11TherapyState last_state = As11TherapyState::Unknown;
     static uint32_t summary_refresh_due_ms = 0;
@@ -264,6 +287,9 @@ static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
         state != As11TherapyState::Running) {
         summary_refresh_due_ms = now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS;
         if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
+        if (sync_job) {
+            (void)sync_job->request_post_therapy_sync();
+        }
     }
 
     if (summary_refresh_due_ms != 0 &&
@@ -303,7 +329,10 @@ void loop() {
     const uint32_t now_ms = millis();
     session_manager.poll(rpc_arbiter.as11_state(), now_ms);
     edf_recorder_manager.poll(now_ms);
-    refresh_summary_on_therapy_stop(rpc_arbiter, report_manager, now_ms);
+    refresh_summary_on_therapy_stop(rpc_arbiter,
+                                    report_manager,
+                                    storage_sync_job,
+                                    now_ms);
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
     wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||
@@ -322,6 +351,11 @@ void loop() {
                      !resmed_ota_transport_active);
     resmed_ota_manager.poll();
     Storage::poll();
+    if (storage_sync_job) {
+        storage_sync_job->set_network_available(
+            wifi_manager.mode_state() == WifiModeState::StaConnected);
+        storage_sync_job->refresh_config(app_config.data(), now_ms);
+    }
     // Publish the worker's gate inputs from here (the owner thread) so the
     // background task reads a coherent snapshot instead of these managers.
     bg_worker.publish_gate(

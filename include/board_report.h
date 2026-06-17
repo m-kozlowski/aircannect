@@ -11,7 +11,7 @@
 // core 0 so its CPU-heavy work runs parallel to the main loop on core 1; the
 // SD-bus mutex serializes card access. Priority below AsyncTCP (3) and the
 // loop, so the web UI and CAN servicing always win.
-static constexpr uint32_t AC_BG_WORKER_TASK_STACK = 4096;
+static constexpr uint32_t AC_BG_WORKER_TASK_STACK = 8192;
 static constexpr uint8_t AC_BG_WORKER_TASK_PRIO = 1;
 static constexpr uint8_t AC_BG_WORKER_TASK_CORE = 0;
 // Re-check cadence when foreground is active (gate closed).
@@ -54,4 +54,3 @@ static constexpr int64_t AC_REPORT_LATEST_TAIL_OVERLAP_MS = 60000;
 // within this many ms count as covered (served from SD, not re-spooled).
 // Seconds only - a genuine interior gap (minutes) is NOT masked.
 static constexpr int64_t AC_REPORT_COVERAGE_TOLERANCE_MS = 5000;
-

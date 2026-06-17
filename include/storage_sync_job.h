@@ -1,0 +1,296 @@
+#pragma once
+
+#include <Arduino.h>
+#include <FS.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <atomic>
+#include <stdint.h>
+
+#include "app_config.h"
+#include "background_worker.h"
+#include "storage_path.h"
+#include "storage_smb_client.h"
+
+namespace aircannect {
+
+static constexpr size_t AC_STORAGE_SYNC_ENDPOINT_MAX = 161;
+static constexpr size_t AC_STORAGE_SYNC_USER_MAX = 65;
+static constexpr size_t AC_STORAGE_SYNC_PASSWORD_MAX = 129;
+static constexpr size_t AC_STORAGE_SYNC_REASON_MAX = 24;
+static constexpr size_t AC_STORAGE_SYNC_STATE_PATH_MAX = AC_STORAGE_PATH_MAX;
+static constexpr size_t AC_STORAGE_SYNC_UPLOAD_CHUNK = 16 * 1024;
+
+enum class StorageSyncState : uint8_t {
+    Disabled,
+    Idle,
+    Pending,
+    Working,
+    Error,
+};
+
+const char *storage_sync_state_name(StorageSyncState state);
+
+struct StorageSyncStatus {
+    StorageSyncState state = StorageSyncState::Disabled;
+    bool enabled = false;
+    bool configured = false;
+    bool endpoint_set = false;
+    bool user_set = false;
+    bool password_set = false;
+    bool auto_after_therapy = true;
+    bool reconcile_enabled = true;
+    bool network_available = false;
+    bool pending = false;
+    bool last_run_verify = false;
+    bool last_run_reconcile = false;
+    char pending_reason[AC_STORAGE_SYNC_REASON_MAX] = {};
+    char last_error[AC_STORAGE_ERROR_MAX] = {};
+    char current_path[AC_STORAGE_PATH_MAX] = {};
+    uint32_t config_generation = 0;
+    uint32_t files_seen = 0;
+    uint32_t files_uploaded = 0;
+    uint32_t files_skipped = 0;
+    uint32_t files_failed = 0;
+    uint64_t bytes_uploaded = 0;
+    uint64_t last_sync_epoch = 0;
+    uint32_t last_sync_files_seen = 0;
+    uint32_t last_sync_files_uploaded = 0;
+    uint32_t last_sync_files_skipped = 0;
+    uint32_t last_sync_files_failed = 0;
+    uint64_t last_sync_bytes_uploaded = 0;
+    uint64_t last_verify_epoch = 0;
+    uint32_t last_verify_files_seen = 0;
+    uint64_t last_reconcile_epoch = 0;
+    uint32_t last_reconcile_files_seen = 0;
+    uint64_t last_failure_epoch = 0;
+    char last_failure_error[AC_STORAGE_ERROR_MAX] = {};
+    uint32_t started_ms = 0;
+    uint32_t updated_ms = 0;
+    uint32_t retry_due_ms = 0;
+    uint8_t retry_attempt = 0;
+};
+
+class StorageSyncJob : public BackgroundJob {
+public:
+    void begin(const AppConfigData &config);
+
+    const char *name() const override { return "storage_sync"; }
+    JobStep step() override;
+    void on_preempt() override;
+
+    void configure(const AppConfigData &config);
+    void refresh_config(const AppConfigData &config, uint32_t now_ms);
+    void set_network_available(bool available);
+
+    bool request_manual_sync();
+    bool request_verify_recent();
+    bool request_post_therapy_sync();
+
+    StorageSyncStatus status() const;
+    bool active() const;
+
+private:
+    enum class WorkPhase : uint8_t {
+        Idle,
+        Connect,
+        VerifyLatestStart,
+        VerifyLatestFile,
+        VerifyLatestInvalidate,
+        NextFile,
+        EnsureRemoteDir,
+        OpenLocal,
+        OpenRemote,
+        UploadChunk,
+        CloseRemote,
+        MarkState,
+        Finish,
+    };
+
+    enum class StateWriteMode : uint8_t {
+        Append,
+        Replace,
+    };
+
+    struct ConfigSnapshot {
+        bool enabled = false;
+        bool auto_after_therapy = true;
+        bool reconcile_enabled = true;
+        char endpoint[AC_STORAGE_SYNC_ENDPOINT_MAX] = {};
+        char user[AC_STORAGE_SYNC_USER_MAX] = {};
+        char password[AC_STORAGE_SYNC_PASSWORD_MAX] = {};
+    };
+
+    struct WalkFrame {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        uint32_t next_index = 0;
+        bool opened = false;
+        File dir;
+    };
+
+    struct CurrentFile {
+        char path[AC_STORAGE_PATH_MAX] = {};
+        char remote_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+        char remote_dir[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+        char state_path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+        uint64_t size = 0;
+        uint64_t mtime = 0;
+        uint64_t offset = 0;
+        StateWriteMode state_write_mode = StateWriteMode::Append;
+        bool local_open = false;
+        File local;
+    };
+
+    struct LatestVerify {
+        char day_path[AC_STORAGE_PATH_MAX] = {};
+        char state_path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+        bool opened = false;
+        bool invalidate_state = false;
+        File dir;
+    };
+
+    struct StateCacheEntry {
+        uint64_t size = 0;
+        uint64_t mtime = 0;
+        char path[AC_STORAGE_PATH_MAX] = {};
+    };
+
+    struct StateCache {
+        char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+        StateCacheEntry *entries = nullptr;
+        size_t count = 0;
+        size_t capacity = 0;
+        bool loaded = false;
+    };
+
+    bool lock(uint32_t timeout_ms = 20) const;
+    void unlock() const;
+    void apply_config_locked(const ConfigSnapshot &config);
+    bool config_matches_locked(const ConfigSnapshot &config) const;
+    static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
+    static bool snapshot_configured(const ConfigSnapshot &config);
+    static void copy_string(char *dst, size_t dst_size, const String &src);
+    static const char *work_phase_name(WorkPhase phase);
+    static bool reason_is_verify(const char *reason);
+    static bool reason_is_reconcile(const char *reason);
+    bool request_sync_with_reason(const char *reason,
+                                  const char *label);
+
+    void reset_run_locked(bool keep_status);
+    bool build_endpoint_state_dir_locked(const ConfigSnapshot &config,
+                                         char *out,
+                                         size_t out_size,
+                                         uint32_t *hash_out = nullptr) const;
+    bool begin_run_locked(const char *reason);
+    void finish_run_locked();
+    void fail_locked(const char *error);
+    void clear_result_metadata_locked();
+    bool load_result_metadata_locked();
+    bool save_result_metadata_locked();
+    bool verify_endpoint_base_locked(char *error_out, size_t error_out_size);
+    bool latest_datalog_day_locked(char *out,
+                                   size_t out_size,
+                                   char *error_out,
+                                   size_t error_out_size) const;
+    void close_latest_verify_locked();
+    bool begin_latest_verify_locked(char *error_out, size_t error_out_size);
+    bool latest_verify_file_step_locked(char *error_out,
+                                        size_t error_out_size);
+    bool invalidate_latest_state_locked(char *error_out,
+                                        size_t error_out_size);
+
+    bool ensure_walk_stack_locked();
+    void release_walk_stack_locked();
+    void close_walk_locked();
+    bool push_dir_locked(const char *path);
+    bool ensure_dir_open_locked(WalkFrame &frame);
+    bool next_file_locked();
+    bool plan_file_locked(const char *path);
+    bool root_step_locked();
+    bool walk_step_locked();
+    bool datalog_day_allowed(const char *name) const;
+
+    bool ensure_state_dir_locked();
+    bool build_state_path_locked(const char *path,
+                                 char *out,
+                                 size_t out_size,
+                                 StateWriteMode *write_mode = nullptr) const;
+    bool state_contains_locked(const char *state_path,
+                               const char *path,
+                               uint64_t size,
+                               uint64_t mtime);
+    bool load_state_cache_locked(const char *state_path);
+    bool reserve_state_cache_locked(size_t needed);
+    void clear_state_cache_locked();
+    bool add_state_cache_entry_locked(uint64_t size,
+                                      uint64_t mtime,
+                                      const char *path);
+    void note_state_written_locked(const char *state_path,
+                                   const char *path,
+                                   uint64_t size,
+                                   uint64_t mtime,
+                                   StateWriteMode mode);
+    bool write_state_locked(const char *state_path,
+                            const char *path,
+                            uint64_t size,
+                            uint64_t mtime,
+                            StateWriteMode mode);
+    bool append_state_locked(const char *state_path,
+                             const char *path,
+                             uint64_t size,
+                             uint64_t mtime);
+    bool replace_state_locked(const char *state_path,
+                              const char *path,
+                              uint64_t size,
+                              uint64_t mtime);
+
+    bool local_ensure_dir_locked(const char *path);
+    bool remote_parent_dir_locked(const char *remote_path,
+                                  char *out,
+                                  size_t out_size) const;
+    bool datalog_day_name_from_path(const char *path,
+                                    char *out,
+                                    size_t out_size) const;
+    bool datalog_day_done_path_locked(const char *day,
+                                      char *out,
+                                      size_t out_size) const;
+    bool datalog_day_done_locked(const char *day) const;
+    bool mark_datalog_day_done_locked(const char *day);
+    bool datalog_day_is_finalized_locked(const char *day) const;
+    void refresh_latest_datalog_day_name_locked();
+    void maybe_mark_completed_datalog_day_locked(const char *path);
+    bool prepare_upload_buffer_locked();
+    void release_upload_buffer_locked();
+    void close_local_locked();
+    void clear_current_file_locked();
+
+    mutable SemaphoreHandle_t lock_ = nullptr;
+    ConfigSnapshot config_;
+    StorageSyncStatus status_;
+    uint32_t next_config_generation_ = 1;
+    uint32_t last_config_check_ms_ = 0;
+    WorkPhase phase_ = WorkPhase::Idle;
+    StorageSmbClient smb_;
+    std::atomic<bool> network_available_{false};
+    bool current_run_verify_ = false;
+    bool current_run_reconcile_ = false;
+    bool sync_after_verify_ = false;
+
+    WalkFrame *walk_stack_ = nullptr;
+    size_t walk_depth_ = 0;
+    size_t walk_capacity_ = 0;
+    size_t root_index_ = 0;
+    CurrentFile current_file_;
+    LatestVerify latest_verify_;
+    uint8_t *upload_buffer_ = nullptr;
+    size_t upload_buffer_size_ = 0;
+    StateCache state_cache_;
+    char ensured_remote_dir_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+    char latest_datalog_day_[9] = {};
+    char state_dir_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+    uint32_t endpoint_hash_ = 0;
+    uint32_t retry_due_ms_ = 0;
+    uint8_t retry_attempt_ = 0;
+};
+
+}  // namespace aircannect

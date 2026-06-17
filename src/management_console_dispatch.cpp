@@ -1168,7 +1168,8 @@ void ManagementConsole::handle_config_command(Print &out,
                                               String rest,
                                               ConsoleContext &ctx) {
     handle_config(out, rest, ctx.app_config, ctx.wifi_manager,
-                  ctx.tcp_bridge, ctx.ota_manager);
+                  ctx.tcp_bridge, ctx.ota_manager,
+                  ctx.edf_recorder_manager);
 }
 
 void ManagementConsole::handle_wifi_command(Print &out,

@@ -291,13 +291,19 @@ bool storage_heavy_request_available(AsyncWebServerRequest *request,
 
 bool storage_jobs_available(AsyncWebServerRequest *request,
                             const StorageArchiveJob *archive_job,
-                            const StorageDeleteJob *delete_job) {
+                            const StorageDeleteJob *delete_job,
+                            const StorageSyncJob *sync_job) {
     if (archive_job && archive_job->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
     }
     if (delete_job && delete_job->active()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_busy\"}");
+        return false;
+    }
+    if (sync_job && sync_job->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
@@ -531,6 +537,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   ReportManager &report_manager,
                   StorageArchiveJob &storage_archive_job,
                   StorageDeleteJob &storage_delete_job,
+                  StorageSyncJob *storage_sync_job,
                   ConsoleContext &console_ctx,
                   uint16_t port) {
     if (started_) return true;
@@ -548,6 +555,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     report_manager_ = &report_manager;
     storage_archive_job_ = &storage_archive_job;
     storage_delete_job_ = &storage_delete_job;
+    storage_sync_job_ = storage_sync_job;
     console_ctx_ = &console_ctx;
 
     command_mutex_ = xSemaphoreCreateMutex();
@@ -1459,6 +1467,79 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_uint64(json, "storage_total", storage.total_bytes);
     json_add_uint64(json, "storage_used", storage.used_bytes);
     json_add_uint64(json, "storage_free", storage.free_bytes);
+    json_add_bool(json, "edf_capture_enabled",
+                  app_config_->data().edf_capture_enabled);
+    if (storage_sync_job_) {
+        const StorageSyncStatus sync = storage_sync_job_->status();
+        json += ",\"smb_sync\":{";
+        json_add_bool(json, "enabled", sync.enabled, false);
+        json_add_bool(json, "configured", sync.configured);
+        json_add_string(json, "endpoint",
+                        app_config_->data().smb_endpoint.c_str());
+        json_add_string(json, "state",
+                        storage_sync_state_name(sync.state));
+        json_add_bool(json, "endpoint_set", sync.endpoint_set);
+        json_add_bool(json, "user_set", sync.user_set);
+        json_add_bool(json, "password_set", sync.password_set);
+        json_add_bool(json, "auto_after_therapy",
+                      sync.auto_after_therapy);
+        json_add_bool(json, "reconcile_enabled",
+                      sync.reconcile_enabled);
+        json_add_bool(json, "network_available",
+                      sync.network_available);
+        json_add_bool(json, "pending", sync.pending);
+        json_add_bool(json, "last_run_verify",
+                      sync.last_run_verify);
+        json_add_bool(json, "last_run_reconcile",
+                      sync.last_run_reconcile);
+        json_add_string(json, "pending_reason", sync.pending_reason);
+        json_add_string(json, "last_error", sync.last_error);
+        json_add_string(json, "current_path", sync.current_path);
+        json_add_int(json, "config_generation",
+                     static_cast<long>(sync.config_generation));
+        json_add_int(json, "files_seen",
+                     static_cast<long>(sync.files_seen));
+        json_add_int(json, "files_uploaded",
+                     static_cast<long>(sync.files_uploaded));
+        json_add_int(json, "files_skipped",
+                     static_cast<long>(sync.files_skipped));
+        json_add_int(json, "files_failed",
+                     static_cast<long>(sync.files_failed));
+        json_add_uint64(json, "bytes_uploaded", sync.bytes_uploaded);
+        json_add_uint64(json, "last_sync_epoch",
+                        sync.last_sync_epoch);
+        json_add_int(json, "last_sync_files_seen",
+                     static_cast<long>(sync.last_sync_files_seen));
+        json_add_int(json, "last_sync_files_uploaded",
+                     static_cast<long>(sync.last_sync_files_uploaded));
+        json_add_int(json, "last_sync_files_skipped",
+                     static_cast<long>(sync.last_sync_files_skipped));
+        json_add_int(json, "last_sync_files_failed",
+                     static_cast<long>(sync.last_sync_files_failed));
+        json_add_uint64(json, "last_sync_bytes_uploaded",
+                        sync.last_sync_bytes_uploaded);
+        json_add_uint64(json, "last_verify_epoch",
+                        sync.last_verify_epoch);
+        json_add_int(json, "last_verify_files_seen",
+                     static_cast<long>(sync.last_verify_files_seen));
+        json_add_uint64(json, "last_reconcile_epoch",
+                        sync.last_reconcile_epoch);
+        json_add_int(json, "last_reconcile_files_seen",
+                     static_cast<long>(sync.last_reconcile_files_seen));
+        json_add_uint64(json, "last_failure_epoch",
+                        sync.last_failure_epoch);
+        json_add_string(json, "last_failure_error",
+                        sync.last_failure_error);
+        json_add_int(json, "started_ms",
+                     static_cast<long>(sync.started_ms));
+        json_add_int(json, "updated_ms",
+                     static_cast<long>(sync.updated_ms));
+        json_add_int(json, "retry_due_ms",
+                     static_cast<long>(sync.retry_due_ms));
+        json_add_int(json, "retry_attempt",
+                     static_cast<long>(sync.retry_attempt));
+        json += '}';
+    }
     json_add_string_view(json, "wifi_state", wifi.state);
     json_add_string_view(json, "wifi_ssid", wifi.ssid);
     json_add_string(json, "wifi_ip", wifi.ip);
@@ -1891,7 +1972,8 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     }
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
-                                storage_delete_job_)) {
+                                storage_delete_job_,
+                                storage_sync_job_)) {
         return;
     }
 
@@ -1963,7 +2045,8 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
         }
         if (!storage_jobs_available(request,
                                     storage_archive_job_,
-                                    storage_delete_job_)) {
+                                    storage_delete_job_,
+                                    storage_sync_job_)) {
             return;
         }
 
@@ -2011,7 +2094,8 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
     }
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
-                                storage_delete_job_)) {
+                                storage_delete_job_,
+                                storage_sync_job_)) {
         return;
     }
 
@@ -2108,7 +2192,8 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
     }
     if (!storage_jobs_available(request,
                                 nullptr,
-                                storage_delete_job_)) {
+                                storage_delete_job_,
+                                storage_sync_job_)) {
         return;
     }
 
@@ -2194,7 +2279,8 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
     }
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
-                                storage_delete_job_)) {
+                                storage_delete_job_,
+                                storage_sync_job_)) {
         return;
     }
 
@@ -2251,6 +2337,140 @@ void WebUI::send_storage_delete_status(AsyncWebServerRequest *request) const {
     json_add_int(json,
                  "dirs_deleted",
                  static_cast<long>(status.dirs_deleted));
+    json += '}';
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"status_alloc\"}");
+        return;
+    }
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    request->send(response);
+}
+
+void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
+    if (!storage_sync_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"sync_unavailable\"}");
+        return;
+    }
+    StorageJobGate gate(request, storage_job_mutex_);
+    if (!gate.locked()) return;
+    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+    if (!storage_jobs_available(request,
+                                storage_archive_job_,
+                                storage_delete_job_,
+                                storage_sync_job_)) {
+        return;
+    }
+    if (!storage_sync_job_->request_manual_sync()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"sync_not_ready\"}");
+        return;
+    }
+    request->send(202, "application/json",
+                  "{\"ok\":true,\"queued\":true}");
+}
+
+void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
+    if (!storage_sync_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"sync_unavailable\"}");
+        return;
+    }
+    StorageJobGate gate(request, storage_job_mutex_);
+    if (!gate.locked()) return;
+    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+        return;
+    }
+    if (!storage_jobs_available(request,
+                                storage_archive_job_,
+                                storage_delete_job_,
+                                storage_sync_job_)) {
+        return;
+    }
+    if (!storage_sync_job_->request_verify_recent()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"sync_not_ready\"}");
+        return;
+    }
+    request->send(202, "application/json",
+                  "{\"ok\":true,\"queued\":true}");
+}
+
+void WebUI::send_storage_sync_status(AsyncWebServerRequest *request) const {
+    if (!storage_sync_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"sync_unavailable\"}");
+        return;
+    }
+    const StorageSyncStatus status = storage_sync_job_->status();
+    LargeTextBuffer json;
+    json.reserve(1536);
+    json = "{";
+    json_add_bool(json, "ok", true, false);
+    json_add_string(json, "state",
+                    storage_sync_state_name(status.state));
+    json_add_bool(json, "enabled", status.enabled);
+    json_add_bool(json, "configured", status.configured);
+    json_add_string(json, "endpoint",
+                    app_config_->data().smb_endpoint.c_str());
+    json_add_bool(json, "network_available", status.network_available);
+    json_add_bool(json, "pending", status.pending);
+    json_add_bool(json, "last_run_verify", status.last_run_verify);
+    json_add_bool(json, "last_run_reconcile",
+                  status.last_run_reconcile);
+    json_add_string(json, "pending_reason", status.pending_reason);
+    json_add_string(json, "error", status.last_error);
+    json_add_string(json, "current_path", status.current_path);
+    json_add_int(json, "files_seen",
+                 static_cast<long>(status.files_seen));
+    json_add_int(json, "files_uploaded",
+                 static_cast<long>(status.files_uploaded));
+    json_add_int(json, "files_skipped",
+                 static_cast<long>(status.files_skipped));
+    json_add_int(json, "files_failed",
+                 static_cast<long>(status.files_failed));
+    json_add_uint64(json, "bytes_uploaded", status.bytes_uploaded);
+    json_add_uint64(json, "last_sync_epoch", status.last_sync_epoch);
+    json_add_int(json, "last_sync_files_seen",
+                 static_cast<long>(status.last_sync_files_seen));
+    json_add_int(json, "last_sync_files_uploaded",
+                 static_cast<long>(status.last_sync_files_uploaded));
+    json_add_int(json, "last_sync_files_skipped",
+                 static_cast<long>(status.last_sync_files_skipped));
+    json_add_int(json, "last_sync_files_failed",
+                 static_cast<long>(status.last_sync_files_failed));
+    json_add_uint64(json, "last_sync_bytes_uploaded",
+                    status.last_sync_bytes_uploaded);
+    json_add_uint64(json, "last_verify_epoch", status.last_verify_epoch);
+    json_add_int(json, "last_verify_files_seen",
+                 static_cast<long>(status.last_verify_files_seen));
+    json_add_uint64(json, "last_reconcile_epoch",
+                    status.last_reconcile_epoch);
+    json_add_int(json, "last_reconcile_files_seen",
+                 static_cast<long>(status.last_reconcile_files_seen));
+    json_add_uint64(json, "last_failure_epoch",
+                    status.last_failure_epoch);
+    json_add_string(json, "last_failure_error",
+                    status.last_failure_error);
+    json_add_int(json, "started_ms",
+                 static_cast<long>(status.started_ms));
+    json_add_int(json, "updated_ms",
+                 static_cast<long>(status.updated_ms));
+    json_add_int(json, "retry_due_ms",
+                 static_cast<long>(status.retry_due_ms));
+    json_add_int(json, "retry_attempt",
+                 static_cast<long>(status.retry_attempt));
     json += '}';
     if (json.overflowed()) {
         request->send(503, "application/json",
@@ -2346,6 +2566,11 @@ void WebUI::build_config_json(LargeTextBuffer &json) const {
                     oximetry_advertise_mode_name(
                         cfg.oximetry_advertise_mode));
     json_add_bool(json, "edf_capture_enabled", cfg.edf_capture_enabled);
+    json_add_string(json, "smb_endpoint", cfg.smb_endpoint.c_str());
+    json_add_string(json, "smb_user", cfg.smb_user.c_str());
+    json_add_bool(json, "smb_password_set",
+                  cfg.smb_password.length() > 0);
+    json_add_string(json, "smb_password", "");
     json_add_bool(json, "http_auth_required", network_auth_required(cfg));
     json_add_string(json, "http_user", cfg.http_user.c_str());
     json_add_bool(json, "http_password_set", cfg.http_password.length() > 0);
@@ -2898,6 +3123,21 @@ void WebUI::register_routes() {
     server_->on("/api/storage/delete/status", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_storage_delete_status(request);
+    });
+
+    server_->on("/api/storage/sync/start", HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        send_storage_sync_start(request);
+    });
+
+    server_->on("/api/storage/sync/verify", HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        send_storage_sync_verify(request);
+    });
+
+    server_->on("/api/storage/sync/status", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_storage_sync_status(request);
     });
 
     server_->on("/api/report/summary", HTTP_GET,

@@ -192,6 +192,10 @@
       gap: 14px;
     }
 
+    .edf-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -329,6 +333,12 @@
       font-size: 13px;
       text-align: right;
       color: var(--text);
+    }
+
+    .value.wrap {
+      max-width: min(620px, 68vw);
+      overflow-wrap: anywhere;
+      white-space: normal;
     }
 
     input,
@@ -1179,6 +1189,9 @@
         <a class="nav" data-tab="report">
           <span class="ico">&#9638;</span>Report
         </a>
+        <a class="nav" data-tab="edf">
+          <span class="ico">&#9635;</span>EDF
+        </a>
         <a class="nav" data-tab="clinical">
           <span class="ico">&#9881;</span>Clinical
         </a>
@@ -1456,6 +1469,57 @@
             <div class="report-sessions" id="reportSessions"></div>
           </div>
           <div id="reportCharts" class="report-charts"></div>
+        </section>
+
+        <section class="pane" id="p-edf">
+          <div class="grid edf-grid">
+            <div class="card">
+              <div class="card-head">
+                <span class="label">EDF Capture</span>
+                <span class="badge" id="edfCaptureBadge">--</span>
+              </div>
+              <div class="row">
+                <label>Latest session</label>
+                <span class="value" id="edfLastSession">--</span>
+              </div>
+              <div class="row">
+                <label>Recorded data</label>
+                <span class="value wrap" id="edfLastFiles">--</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="label">SMB Sync</span>
+                <span class="badge" id="edfSyncBadge">--</span>
+              </div>
+              <div class="row">
+                <label>Endpoint</label>
+                <span class="value wrap" id="edfSyncEndpoint">--</span>
+              </div>
+              <div class="row">
+                <label>Status</label>
+                <span class="value wrap" id="edfSyncResult">--</span>
+              </div>
+              <div class="row">
+                <label>Last sync</label>
+                <span class="value wrap" id="edfSyncLast">--</span>
+              </div>
+              <div class="row">
+                <label>Last check</label>
+                <span class="value wrap" id="edfSyncCheck">--</span>
+              </div>
+              <div class="row">
+                <label>Activity</label>
+                <span class="value wrap" id="edfSyncCurrent">--</span>
+              </div>
+              <div class="btns">
+                <button class="btn primary" id="edfSyncBtn" onclick="smbStartSync()">Sync SMB</button>
+                <button class="btn" id="edfVerifyBtn" onclick="smbVerifyRecent()">Verify Share</button>
+              </div>
+              <div class="msg" id="edfMsg"></div>
+            </div>
+          </div>
         </section>
 
         <section class="pane" id="p-storage">
@@ -1776,6 +1840,9 @@
     <a class="nav" data-tab="report">
       <span class="ico">&#9638;</span>Report
     </a>
+    <a class="nav" data-tab="edf">
+      <span class="ico">&#9635;</span>EDF
+    </a>
     <a class="nav" data-tab="clinical">
       <span class="ico">&#9881;</span>Clinical
     </a>
@@ -1873,10 +1940,16 @@
     let storageNextOffset = null;
     let storageArchivePollTimer = null;
     let storageDeletePollTimer = null;
+    let smbSyncPollTimer = null;
     let storageEntries = [];
     let storageSelectedNames = new Set();
     let storageArchiveBusy = false;
     let storageDeleteBusy = false;
+    let smbSyncBusy = false;
+    let smbSyncEnabled = false;
+    let smbSyncConfigured = false;
+    let smbSyncCompleteMessage = "SMB sync complete";
+    let edfOverviewLoading = false;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_CLIENT_CACHE_MAX = 4;
@@ -1937,6 +2010,7 @@
     const tabs = {
       dash: "Dashboard",
       report: "Report",
+      edf: "EDF",
       storage: "Storage",
       clinical: "Clinical",
       oxi: "Oximetry",
@@ -1966,7 +2040,15 @@
         loadReportSummary(true);
         scheduleReportDrawAfterReveal();
       }
-      if (id === "storage") loadStorageList(false);
+      if (id === "edf") {
+        loadStatus();
+        loadEdfOverview();
+        loadSmbSyncStatus();
+      }
+      if (id === "storage") {
+        loadStorageList(false);
+        loadSmbSyncStatus();
+      }
       if (id === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -1995,7 +2077,15 @@
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
       if (pane === "dash") loadStatus();
       if (pane === "report") refreshReportSummary(true);
-      if (pane === "storage") loadStorageList(true);
+      if (pane === "edf") {
+        loadStatus();
+        loadEdfOverview();
+        loadSmbSyncStatus();
+      }
+      if (pane === "storage") {
+        loadStorageList(true);
+        loadSmbSyncStatus();
+      }
       if (pane === "oxi") {
         loadStatus();
         loadOximetrySensors();
@@ -3481,6 +3571,32 @@
       return text || ("HTTP " + status);
     }
 
+    async function fetchStorageList(path, offset, limit) {
+      const url = "/api/storage/list?path=" + encodeURIComponent(path) +
+        "&offset=" + encodeURIComponent(offset || 0) +
+        "&limit=" + encodeURIComponent(limit || 128);
+      const response = await fetch(url, {cache: "no-store"});
+      const text = await response.text();
+      if (!response.ok) throw new Error(storageErrorText(text, response.status));
+      return JSON.parse(text);
+    }
+
+    async function fetchStorageEntries(path, maxPages) {
+      let offset = 0;
+      const entries = [];
+      const pages = maxPages || 4;
+      for (let page = 0; page < pages; page++) {
+        const data = await fetchStorageList(path, offset, 128);
+        if (data && Array.isArray(data.entries)) {
+          data.entries.forEach((entry) => entries.push(entry));
+        }
+        if (!data || data.next_offset === null || data.next_offset === undefined) break;
+        offset = Number(data.next_offset);
+        if (!Number.isFinite(offset)) break;
+      }
+      return entries;
+    }
+
     function storageParentPath(path) {
       if (!path || path === "/") return "/";
       const index = path.lastIndexOf("/");
@@ -3494,9 +3610,80 @@
       badge.className = "badge" + (cls ? " " + cls : "");
     }
 
-    function storageSyncSelectionUi() {
+    function edfSessionLabel(prefix) {
+      const match = String(prefix || "").match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
+      if (!match) return prefix || "--";
+      return match[1] + "-" + match[2] + "-" + match[3] + " " +
+        match[4] + ":" + match[5] + ":" + match[6];
+    }
+
+    function edfFileKind(name) {
+      const match = String(name || "").match(/^(\d{8}_\d{6})_(BRP|PLD|SA2|EVE|CSL)\.edf$/i);
+      if (!match) return null;
+      return {prefix: match[1], kind: match[2].toUpperCase()};
+    }
+
+    async function loadEdfOverview() {
+      if (edfOverviewLoading) return;
+      edfOverviewLoading = true;
+      up("edfLastSession", "Loading");
+      up("edfLastFiles", "--");
+      try {
+        let datalogEntries = [];
+        try {
+          datalogEntries = await fetchStorageEntries("/DATALOG", 1);
+        } catch (error) {
+          if (String(error && error.message || "") !== "not_found") throw error;
+        }
+        const days = datalogEntries
+          .filter((entry) => entry.type === "dir" && /^\d{8}$/.test(entry.name || ""))
+          .map((entry) => entry.name)
+          .sort()
+          .reverse();
+
+        let bestPrefix = "";
+        let bestFiles = null;
+        for (const day of days.slice(0, 8)) {
+          const entries = await fetchStorageEntries("/DATALOG/" + day, 8);
+          const sessions = new Map();
+          entries.forEach((entry) => {
+            const parsed = edfFileKind(entry.name);
+            if (!parsed) return;
+            if (!sessions.has(parsed.prefix)) sessions.set(parsed.prefix, []);
+            sessions.get(parsed.prefix).push(entry);
+          });
+          Array.from(sessions.keys()).sort().reverse().some((prefix) => {
+            if (!bestPrefix || prefix > bestPrefix) {
+              bestPrefix = prefix;
+              bestFiles = sessions.get(prefix);
+            }
+            return true;
+          });
+          if (bestPrefix) break;
+        }
+
+        if (!bestPrefix || !bestFiles) {
+          up("edfLastSession", "No EDF sessions");
+          up("edfLastFiles", "--");
+          return;
+        }
+
+        const totalBytes = bestFiles.reduce((sum, entry) =>
+          sum + (Number(entry.size) || 0), 0);
+        up("edfLastSession", edfSessionLabel(bestPrefix));
+        up("edfLastFiles", bestFiles.length + " file" +
+          (bestFiles.length === 1 ? "" : "s") + ", " + fmtBytes(totalBytes));
+      } catch (error) {
+        up("edfLastSession", "Unavailable");
+        up("edfLastFiles", error.message || "Storage error");
+      } finally {
+        edfOverviewLoading = false;
+      }
+    }
+
+    function storageSelectionUi() {
       const selected = storageSelectedNames.size;
-      const busy = storageArchiveBusy || storageDeleteBusy;
+      const busy = storageArchiveBusy || storageDeleteBusy || smbSyncBusy;
       const selectAll = document.getElementById("storageSelectAll");
       if (selectAll) {
         const selectable = storageEntries.length;
@@ -3520,6 +3707,10 @@
         deleteBtn.textContent = selected > 0 ?
           "Delete Selected (" + selected + ")" : "Delete Selected";
       }
+      const syncBtn = document.getElementById("edfSyncBtn");
+      if (syncBtn) syncBtn.disabled = busy || !smbSyncEnabled || !smbSyncConfigured;
+      const verifyBtn = document.getElementById("edfVerifyBtn");
+      if (verifyBtn) verifyBtn.disabled = busy || !smbSyncEnabled || !smbSyncConfigured;
       document.querySelectorAll("[data-storage-action]").forEach((button) => {
         button.disabled = busy;
       });
@@ -3527,7 +3718,7 @@
 
     function storageClearSelection() {
       storageSelectedNames.clear();
-      storageSyncSelectionUi();
+      storageSelectionUi();
     }
 
     function storageToggleSelected(name, checked) {
@@ -3537,7 +3728,7 @@
       } else {
         storageSelectedNames.delete(name);
       }
-      storageSyncSelectionUi();
+      storageSelectionUi();
     }
 
     function storageToggleSelectAll(checked) {
@@ -3547,7 +3738,7 @@
           if (entry && entry.name) storageSelectedNames.add(entry.name);
         });
       }
-      storageSyncSelectionUi();
+      storageSelectionUi();
     }
 
     function storageOpenEntry(entry) {
@@ -3605,7 +3796,7 @@
         empty.className = "storage-empty";
         empty.textContent = "No files";
         root.appendChild(empty);
-        storageSyncSelectionUi();
+        storageSelectionUi();
         return;
       }
       entries.forEach((entry) => {
@@ -3654,7 +3845,7 @@
         row.appendChild(action);
         root.appendChild(row);
       });
-      storageSyncSelectionUi();
+      storageSelectionUi();
     }
 
     async function loadStorageList(reset) {
@@ -3709,12 +3900,289 @@
 
     function storageArchiveSetBusy(busy) {
       storageArchiveBusy = !!busy;
-      storageSyncSelectionUi();
+      storageSelectionUi();
     }
 
     function storageDeleteSetBusy(busy) {
       storageDeleteBusy = !!busy;
-      storageSyncSelectionUi();
+      storageSelectionUi();
+    }
+
+    function smbSyncSetBusy(busy) {
+      smbSyncBusy = !!busy;
+      storageSelectionUi();
+    }
+
+    function runtimeAgeText(ms) {
+      const current = statusData && Number(statusData.uptime) > 0 ?
+        Number(statusData.uptime) * 1000 : 0;
+      const value = Number(ms) || 0;
+      if (!current || !value || current < value) return "";
+      const age = Math.max(0, Math.round((current - value) / 1000));
+      return age < 5 ? "just now" : fmtDuration(age) + " ago";
+    }
+
+    function retryInText(ms) {
+      const current = statusData && Number(statusData.uptime) > 0 ?
+        Number(statusData.uptime) * 1000 : 0;
+      const value = Number(ms) || 0;
+      if (!current || !value || value <= current) return "";
+      return "Retry in " + fmtDuration(Math.ceil((value - current) / 1000));
+    }
+
+    function smbFriendlyError(error) {
+      const text = String(error || "");
+      if (!text) return "Sync failed";
+      if (/timed out/i.test(text)) return "Connection timed out";
+      if (/auth|access|denied|logon/i.test(text)) return "Authentication failed";
+      if (/resolve|address|host/i.test(text)) return "Host not found";
+      if (/No such file|not found|PATH_NOT_FOUND/i.test(text)) return "Remote path not found";
+      return text.replace(/^[a-z_]+:/i, "");
+    }
+
+    function smbSyncCheckingShare(data) {
+      return !!data && data.pending_reason === "verify_recent";
+    }
+
+    function smbSyncResultText(data) {
+      if (!data || data.ok === false) return "Unavailable";
+      if (!data.enabled || !data.configured) return "Configure an SMB endpoint first";
+      const state = data.state || "unknown";
+      const seen = Number(data.files_seen) || 0;
+      const uploaded = Number(data.files_uploaded) || 0;
+      const skipped = Number(data.files_skipped) || 0;
+      const failed = Number(data.files_failed) || 0;
+      const verify = !!data.last_run_verify ||
+        data.pending_reason === "startup_check";
+      if (state === "working") {
+        if (smbSyncCheckingShare(data)) {
+          return seen ? "Checking share: " + seen + " files checked" :
+            "Checking share";
+        }
+        if (verify) return "Checking latest data";
+        return seen ? "Checking files: " + seen + " seen" : "Starting sync";
+      }
+      if (state === "pending") {
+        if (smbSyncCheckingShare(data)) {
+          return data.network_available ? "Waiting to check share" :
+            "Waiting for network";
+        }
+        if (data.pending_reason === "startup_check") {
+          return data.network_available ? "Checking latest data" :
+            "Waiting for network";
+        }
+        return "Waiting to sync";
+      }
+      if (state === "error") {
+        const retry = retryInText(data.retry_due_ms);
+        const age = runtimeAgeText(data.updated_ms);
+        return "Last sync failed" + (age ? " " + age : "") + ": " +
+          smbFriendlyError(data.error || data.last_error) +
+          (retry ? ". " + retry : "");
+      }
+      if (!data.started_ms) return "Not checked yet";
+      const age = runtimeAgeText(data.updated_ms);
+      const when = age ? " " + age : "";
+      if (data.last_run_verify) {
+        if (seen) {
+          return (data.last_run_reconcile ? "Share checked" :
+            "Latest data checked") + when + " (" + seen +
+            " file" + (seen === 1 ? "" : "s") + ")";
+        }
+        return (data.last_run_reconcile ? "Share reachable" :
+          "Endpoint reachable") + when;
+      }
+      if (failed) {
+        return "Last sync finished" + when + " with " + failed +
+          " failed file" +
+          (failed === 1 ? "" : "s");
+      }
+      if (uploaded) {
+        return "Synced" + when + ": uploaded " + uploaded + " file" +
+          (uploaded === 1 ? "" : "s") + " (" +
+          fmtBytes(Number(data.bytes_uploaded) || 0) + ")";
+      }
+      if (seen && skipped === seen) {
+        return "Up to date" + when + " (" + seen + " files checked)";
+      }
+      return seen ? "Checked" + when + ": " + seen + " files" :
+        "Ready";
+    }
+
+    function smbSyncNowText(data) {
+      if (!data || data.ok === false) return "--";
+      if (!data.enabled || !data.configured) return "--";
+      const state = data.state || "unknown";
+      if (state === "working") {
+        if (smbSyncCheckingShare(data)) {
+          return data.current_path ? "Checking " + data.current_path :
+            "Checking share";
+        }
+        if (data.last_run_verify) return "Checking latest data";
+        return data.current_path ? "Syncing " + data.current_path : "Syncing";
+      }
+      if (state === "pending") {
+        if (smbSyncCheckingShare(data)) {
+          return data.network_available ? "Queued" : "Waiting for network";
+        }
+        if (data.pending_reason === "startup_check") {
+          return data.network_available ? "Queued" : "Waiting for network";
+        }
+        return "Queued";
+      }
+      if (state === "error") return retryInText(data.retry_due_ms) || "--";
+      return "--";
+    }
+
+    function smbSyncLastText(data) {
+      if (!data || data.ok === false || !data.enabled || !data.configured) {
+        return "--";
+      }
+      const seen = Number(data.last_sync_files_seen) || 0;
+      const uploaded = Number(data.last_sync_files_uploaded) || 0;
+      const failed = Number(data.last_sync_files_failed) || 0;
+      const bytes = Number(data.last_sync_bytes_uploaded) || 0;
+      const when = fmtStorageModified(data.last_sync_epoch);
+      if (!when && !seen) return "--";
+      let text = when || "Completed";
+      if (failed) {
+        text += ", " + failed + " failed";
+      } else if (uploaded) {
+        text += ", uploaded " + uploaded + " file" +
+          (uploaded === 1 ? "" : "s") + " (" + fmtBytes(bytes) + ")";
+      } else if (seen) {
+        text += ", up to date";
+      }
+      return text;
+    }
+
+    function smbSyncCheckText(data) {
+      if (!data || data.ok === false || !data.enabled || !data.configured) {
+        return "--";
+      }
+      const reconcileSeen = Number(data.last_reconcile_files_seen) || 0;
+      const reconcileWhen = fmtStorageModified(data.last_reconcile_epoch);
+      if (reconcileWhen || reconcileSeen) {
+        let text = reconcileWhen || "Share checked";
+        if (reconcileSeen) {
+          text += ", " + reconcileSeen + " file" +
+            (reconcileSeen === 1 ? "" : "s");
+        }
+        return text;
+      }
+      const seen = Number(data.last_verify_files_seen) || 0;
+      const when = fmtStorageModified(data.last_verify_epoch);
+      if (!when && !seen) return "--";
+      let text = when || "Latest data checked";
+      if (seen) {
+        text += ", latest " + seen + " file" +
+          (seen === 1 ? "" : "s");
+      }
+      return text;
+    }
+
+    function smbSyncStatusActive(data) {
+      if (!data || data.ok === false) return false;
+      return data.state === "working" || data.state === "pending" || !!data.pending;
+    }
+
+    function smbSyncBadgeText(data) {
+      if (!data || data.ok === false) return "--";
+      if (!data.enabled || !data.configured) return "Setup";
+      const state = data.state || "unknown";
+      if (state === "working") return "Syncing";
+      if (state === "pending") return "Queued";
+      if (state === "error") return "Error";
+      if (state === "disabled") return "Off";
+      return "Ready";
+    }
+
+    function renderSmbSyncStatus(data) {
+      const state = data && data.state ? data.state : "unknown";
+      up("edfSyncEndpoint", data && data.endpoint ? data.endpoint :
+        (configData && configData.smb_endpoint ? configData.smb_endpoint : "--"));
+      up("edfSyncResult", smbSyncResultText(data));
+      up("edfSyncLast", smbSyncLastText(data));
+      up("edfSyncCheck", smbSyncCheckText(data));
+      up("edfSyncCurrent", smbSyncNowText(data));
+      const badge = document.getElementById("edfSyncBadge");
+      if (badge) {
+        badge.textContent = smbSyncBadgeText(data);
+        badge.className = "badge" +
+          (state === "error" ? " bad" :
+           (!data || !data.enabled || !data.configured) ? " warn" :
+           (state === "working" || state === "pending") ? " warn" : " good");
+      }
+    }
+
+    async function loadSmbSyncStatus() {
+      try {
+        const response = await fetch("/api/storage/sync/status", {cache: "no-store"});
+        const text = await response.text();
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
+        const data = JSON.parse(text);
+        smbSyncEnabled = !!data.enabled;
+        smbSyncConfigured = !!data.configured;
+        renderSmbSyncStatus(data);
+        smbSyncSetBusy(smbSyncStatusActive(data));
+        return data;
+      } catch (error) {
+        smbSyncEnabled = false;
+        smbSyncConfigured = false;
+        up("edfSyncResult", error.message);
+        up("edfSyncLast", "--");
+        up("edfSyncCheck", "--");
+        up("edfSyncCurrent", "--");
+        smbSyncSetBusy(false);
+        return null;
+      }
+    }
+
+    async function smbPollSync() {
+      const data = await loadSmbSyncStatus();
+      const active = smbSyncStatusActive(data);
+      if (!active && smbSyncPollTimer) {
+        clearInterval(smbSyncPollTimer);
+        smbSyncPollTimer = null;
+      }
+      if (data && data.state === "error") {
+        msg("edfMsg", data.error || "SMB sync failed", false, true);
+      } else if (data && !active && data.state === "idle") {
+        msg("edfMsg", smbSyncCompleteMessage, true, false);
+      }
+      return !active;
+    }
+
+    async function smbQueueAction(url, startMessage, completeMessage) {
+      if (smbSyncPollTimer) clearInterval(smbSyncPollTimer);
+      smbSyncPollTimer = null;
+      smbSyncCompleteMessage = completeMessage || "SMB sync complete";
+      smbSyncSetBusy(true);
+      msg("edfMsg", startMessage, true, false);
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          cache: "no-store",
+        });
+        const text = await response.text();
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
+        const done = await smbPollSync();
+        if (!done) smbSyncPollTimer = setInterval(smbPollSync, 1000);
+      } catch (error) {
+        smbSyncSetBusy(false);
+        await loadSmbSyncStatus();
+        msg("edfMsg", error.message, false, true);
+      }
+    }
+
+    async function smbStartSync() {
+      await smbQueueAction("/api/storage/sync/start",
+        "Starting SMB sync", "SMB sync complete");
+    }
+
+    async function smbVerifyRecent() {
+      await smbQueueAction("/api/storage/sync/verify",
+        "Checking SMB share", "SMB check complete");
     }
 
     function storageArchiveDownload(id) {
@@ -4383,6 +4851,18 @@
       meter.title = percent.toFixed(1) + "% used";
     }
 
+    function renderEdfStatus(data) {
+      const captureEnabled = !!(data && data.edf_capture_enabled);
+      const badge = document.getElementById("edfCaptureBadge");
+      if (badge) {
+        badge.textContent = captureEnabled ? "On" : "Off";
+        badge.className = "badge" + (captureEnabled ? " good" : "");
+      }
+      if (data && data.smb_sync) {
+        renderSmbSyncStatus(Object.assign({ok: true}, data.smb_sync));
+      }
+    }
+
     function renderOximetryRuntime(data) {
       const oxi = data && data.oximetry ? data.oximetry : {};
       const sourceValid = !!(oxi.source_fresh && oxi.valid);
@@ -4706,6 +5186,7 @@
         data.device_datetime_age_ms));
       up("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
       renderStorageStatus(data);
+      renderEdfStatus(data);
       up("timeSync", fmtSync(data));
       renderOximetryRuntime(data);
 
@@ -6059,6 +6540,9 @@
           ["oximetry_enabled", "Oximetry Bridge", "bool"],
           ["oximetry_udp_port", "Oximetry UDP Port", "number"],
           ["edf_capture_enabled", "EDF Capture", "bool"],
+          ["smb_endpoint", "SMB Endpoint", "text"],
+          ["smb_user", "SMB User", "text"],
+          ["smb_password", "SMB Password", "password"],
           ["http_auth_required", "HTTP Auth", "bool"],
           ["http_user", "HTTP User", "text"],
           ["http_password", "HTTP Password", "password"],
@@ -6093,6 +6577,15 @@
             if (field[0] === "http_password") {
               control.placeholder = configData.http_password_set ? "set" : "empty";
             }
+            if (field[0] === "smb_password") {
+              control.placeholder = configData.smb_password_set ? "set" : "empty";
+              if (configData.smb_password_set) {
+                control.value = "********";
+              }
+            }
+            if (field[0] === "smb_endpoint") {
+              control.placeholder = "smb://host/share/path";
+            }
             if (field[0] === "ota_password") {
               control.placeholder = configData.ota_password_set ? "set" : "empty";
               if (configData.ota_password_set) {
@@ -6114,22 +6607,80 @@
       }
     }
 
+    function configFieldApplied(data, key, value) {
+      if (!data) return false;
+      if (key === "smb_password" ||
+          key === "http_password" ||
+          key === "ota_password") {
+        if (value === "********") return true;
+        const setKey = key + "_set";
+        const expectedSet = String(value || "").length > 0;
+        return !!data[setKey] === expectedSet;
+      }
+      if (typeof value === "boolean") return !!data[key] === value;
+      if (typeof value === "number") return Number(data[key]) === value;
+      return String(data[key] || "") === String(value || "");
+    }
+
+    function configChangesApplied(data, changes) {
+      return Object.keys(changes).every((key) =>
+        configFieldApplied(data, key, changes[key]));
+    }
+
+    async function waitForConfigChanges(changes) {
+      const started = Date.now();
+      let latest = null;
+      while (Date.now() - started < 5000) {
+        const response = await api("/api/config");
+        latest = await response.json();
+        if (configChangesApplied(latest, changes)) return latest;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      return latest;
+    }
+
+    function normalizeSmbEndpoint(value) {
+      let endpoint = String(value || "").trim().replace(/\\/g, "/");
+      if (endpoint.toLowerCase().startsWith("smb://")) {
+        endpoint = "//" + endpoint.slice(6);
+      }
+      return endpoint;
+    }
+
+    function validSmbEndpoint(value) {
+      const endpoint = normalizeSmbEndpoint(value);
+      if (!endpoint.length) return true;
+      if (!endpoint.startsWith("//")) return false;
+      const parts = endpoint.slice(2).split("/");
+      return parts.length >= 2 && parts[0].length > 0 && parts[1].length > 0;
+    }
+
     async function saveConfig() {
       const changes = {};
       document.querySelectorAll("#configFields [data-key]").forEach((input) => {
-        if (String(input.value) === String(input.dataset.orig)) return;
+        const rawValue = input.dataset.key === "smb_endpoint" ?
+          normalizeSmbEndpoint(input.value) : input.value;
+        const originalValue = input.dataset.key === "smb_endpoint" ?
+          normalizeSmbEndpoint(input.dataset.orig) : input.dataset.orig;
+        if (String(rawValue) === String(originalValue)) return;
         if (input.dataset.type === "bool") {
-          changes[input.dataset.key] = input.value === "true";
+          changes[input.dataset.key] = rawValue === "true";
         } else if (input.dataset.type === "number") {
-          changes[input.dataset.key] = Number(input.value);
+          changes[input.dataset.key] = Number(rawValue);
         } else {
-          changes[input.dataset.key] = input.value;
+          changes[input.dataset.key] = rawValue;
         }
       });
 
       if (changes.http_auth_required === false) {
         changes.http_user = "";
         changes.http_password = "";
+      }
+
+      if (Object.prototype.hasOwnProperty.call(changes, "smb_endpoint") &&
+          !validSmbEndpoint(changes.smb_endpoint)) {
+        msg("configMsg", "SMB endpoint must be smb://host/share[/path]", false);
+        return;
       }
 
       if (!Object.keys(changes).length) {
@@ -6144,8 +6695,19 @@
           body: JSON.stringify(changes),
         });
         const data = await response.json();
-        msg("configMsg", data.queued ? "Config update queued" : "Saved", true);
-        setTimeout(loadConfig, 600);
+        if (data.queued) {
+          const latest = await waitForConfigChanges(changes);
+          if (latest) {
+            configData = latest;
+            await loadConfig();
+          }
+          msg("configMsg",
+            latest && configChangesApplied(latest, changes) ?
+              "Saved" : "Config update queued", true);
+        } else {
+          msg("configMsg", "Saved", true);
+          await loadConfig();
+        }
       } catch (error) {
         msg("configMsg", error.message, false);
       }

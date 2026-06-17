@@ -45,7 +45,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "config") {
         out.println("[HELP config]");
         out.println("  config                    show persistent config");
-        out.println("  config KEY                show one config value");
+        out.println("  config KEY [VALUE]        show/set one config value");
         out.println("  config reset              reset app config, keep Wi-Fi profiles");
         out.println("  config factory-reset      reset app config and Wi-Fi profiles");
         out.println("  config hostname NAME      set network hostname");
@@ -57,6 +57,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config oximetry on|off    enable oximetry bridge");
         out.println("  config oximetry udp-port P        set UDP source port");
         out.println("  config oximetry advertise auto|manual  set BLE advertising policy");
+        out.println("  config smb ENDPOINT USER PASSWORD set SMB target");
+        out.println("  config smb clear          clear SMB target");
         out.println("  config http-auth U P      set Web UI auth; empty U/P disables auth");
         out.println("  config http-whitelist L   bypass auth for IP/range list, or clear");
         out.println("  config telnet on|off [P]  enable management telnet console");

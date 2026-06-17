@@ -92,7 +92,7 @@ static constexpr size_t AC_WEB_CONSOLE_LOG_MAX = 4096;
 
 static constexpr size_t AC_WEB_STATUS_JSON_RESERVE = 4096;
 static constexpr size_t AC_WEB_STREAM_JSON_RESERVE = 1536;
-static constexpr size_t AC_WEB_CONFIG_JSON_RESERVE = 1024;
+static constexpr size_t AC_WEB_CONFIG_JSON_RESERVE = 1536;
 static constexpr size_t AC_WEB_WIFI_JSON_RESERVE = 1024;
 static constexpr size_t AC_WEB_OTA_JSON_RESERVE = 768;
 static constexpr size_t AC_WEB_RESMED_OTA_JSON_RESERVE = 1024;
@@ -114,4 +114,3 @@ static constexpr int32_t AC_WIFI_ROAM_HYSTERESIS_DB = 8;
 static constexpr uint32_t AC_WIFI_ROAM_STREAM_QUIET_MS = 30000;
 static constexpr size_t AC_WIFI_BSSID_TEXT_MAX = 18;
 static constexpr uint32_t AC_WIFI_MANUAL_SCAN_RESULT_TTL_MS = 30000;
-

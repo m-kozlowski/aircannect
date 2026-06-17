@@ -24,6 +24,9 @@ static constexpr const char *KEY_OXIMETRY_ENABLED = "oxi_en";
 static constexpr const char *KEY_OXIMETRY_UDP_PORT = "oxi_udp";
 static constexpr const char *KEY_OXIMETRY_ADVERTISE_MODE = "oxi_adv";
 static constexpr const char *KEY_EDF_CAPTURE_ENABLED = "edf_cap";
+static constexpr const char *KEY_SMB_ENDPOINT = "smb_ep";
+static constexpr const char *KEY_SMB_USER = "smb_user";
+static constexpr const char *KEY_SMB_PASSWORD = "smb_pass";
 static constexpr const char *KEY_HTTP_USER = "http_user";
 static constexpr const char *KEY_HTTP_PASSWORD = "http_pass";
 static constexpr const char *KEY_AUTH_WHITELIST = "auth_wl";
@@ -48,11 +51,13 @@ static constexpr uint32_t DIRTY_OXIMETRY = 1UL << 10;
 static constexpr uint32_t DIRTY_EDF_CAPTURE = 1UL << 11;
 static constexpr uint32_t DIRTY_LOG_LEVELS = 1UL << 12;
 static constexpr uint32_t DIRTY_SYSLOG = 1UL << 13;
+static constexpr uint32_t DIRTY_SMB_SYNC = 1UL << 14;
 static constexpr uint32_t DIRTY_ALL =
     DIRTY_HOSTNAME | DIRTY_TCP | DIRTY_SOFTAP | DIRTY_WIFI_COUNTRY |
     DIRTY_TIMEZONE | DIRTY_RESMED_TIME | DIRTY_HTTP_AUTH |
     DIRTY_AUTH_WHITELIST | DIRTY_TELNET | DIRTY_OTA_PASSWORD |
-    DIRTY_OXIMETRY | DIRTY_EDF_CAPTURE | DIRTY_LOG_LEVELS | DIRTY_SYSLOG;
+    DIRTY_OXIMETRY | DIRTY_EDF_CAPTURE | DIRTY_LOG_LEVELS | DIRTY_SYSLOG |
+    DIRTY_SMB_SYNC;
 
 bool valid_hostname_char(char c) {
     return isalnum(static_cast<unsigned char>(c)) || c == '-';
@@ -93,6 +98,82 @@ bool valid_optional_secret(const String &secret) {
         if (c < 0x20 || c >= 0x7F) return false;
     }
     return true;
+}
+
+bool starts_with_ignore_case(const String &value, const char *prefix) {
+    if (!prefix) return false;
+    const size_t prefix_len = strlen(prefix);
+    if (value.length() < prefix_len) return false;
+    for (size_t i = 0; i < prefix_len; ++i) {
+        char a = value[i];
+        char b = prefix[i];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+bool normalize_smb_endpoint(String &endpoint) {
+    endpoint.trim();
+    if (!endpoint.length()) return true;
+
+    endpoint.replace('\\', '/');
+    if (starts_with_ignore_case(endpoint, "smb://")) {
+        endpoint = String("//") + endpoint.substring(6);
+    }
+    return true;
+}
+
+const char *smb_endpoint_reject_reason(const String &endpoint) {
+    if (!endpoint.length()) return nullptr;
+    if (endpoint.length() > 160) return "endpoint_too_long";
+    if (!endpoint.startsWith("//")) return "endpoint_must_be_unc";
+    for (size_t i = 0; i < endpoint.length(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(endpoint[i]);
+        if (c < 0x20 || c >= 0x7F) return "endpoint_bad_char";
+        if (c == '\\') return "endpoint_backslash_not_normalized";
+    }
+    const int host_start = 2;
+    const int share_start = endpoint.indexOf('/', host_start);
+    if (share_start <= host_start) return "endpoint_missing_host";
+    const int share_end = endpoint.indexOf('/', share_start + 1);
+    if (share_end == share_start + 1) return "endpoint_missing_share";
+    if (share_end < 0 &&
+        share_start == static_cast<int>(endpoint.length()) - 1) {
+        return "endpoint_missing_share";
+    }
+    return nullptr;
+}
+
+bool valid_smb_endpoint(const String &endpoint) {
+    return smb_endpoint_reject_reason(endpoint) == nullptr;
+}
+
+const char *smb_user_reject_reason(const String &user) {
+    if (user.length() > 64) return "user_too_long";
+    for (size_t i = 0; i < user.length(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(user[i]);
+        if (c < 0x20 || c >= 0x7F) return "user_bad_char";
+    }
+    return nullptr;
+}
+
+bool valid_smb_user(const String &user) {
+    return smb_user_reject_reason(user) == nullptr;
+}
+
+const char *smb_password_reject_reason(const String &password) {
+    if (password.length() > 128) return "password_too_long";
+    for (size_t i = 0; i < password.length(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(password[i]);
+        if (c < 0x20 || c >= 0x7F) return "password_bad_char";
+    }
+    return nullptr;
+}
+
+bool valid_smb_password(const String &password) {
+    return smb_password_reject_reason(password) == nullptr;
 }
 
 bool valid_log_level(log_level_t level) {
@@ -231,6 +312,11 @@ bool AppConfig::load() {
     data_.edf_capture_enabled =
         prefs.getBool(KEY_EDF_CAPTURE_ENABLED,
                       defaults.edf_capture_enabled);
+    data_.smb_endpoint =
+        prefs.getString(KEY_SMB_ENDPOINT, defaults.smb_endpoint);
+    data_.smb_user = prefs.getString(KEY_SMB_USER, defaults.smb_user);
+    data_.smb_password =
+        prefs.getString(KEY_SMB_PASSWORD, defaults.smb_password);
     data_.http_user = prefs.getString(KEY_HTTP_USER, defaults.http_user);
     data_.http_password =
         prefs.getString(KEY_HTTP_PASSWORD, defaults.http_password);
@@ -314,6 +400,11 @@ bool AppConfig::save_fields(uint32_t dirty) const {
         ok = prefs.putBool(KEY_EDF_CAPTURE_ENABLED,
                            data_.edf_capture_enabled) != 0 &&
              ok;
+    }
+    if (dirty & DIRTY_SMB_SYNC) {
+        ok = put_string(prefs, KEY_SMB_ENDPOINT, data_.smb_endpoint) && ok;
+        ok = put_string(prefs, KEY_SMB_USER, data_.smb_user) && ok;
+        ok = put_string(prefs, KEY_SMB_PASSWORD, data_.smb_password) && ok;
     }
     if (dirty & DIRTY_HTTP_AUTH) {
         ok = put_string(prefs, KEY_HTTP_USER, data_.http_user) && ok;
@@ -421,6 +512,20 @@ bool AppConfig::normalize() {
     if (!oximetry_advertise_mode_valid(data_.oximetry_advertise_mode)) {
         data_.oximetry_advertise_mode =
             defaults.oximetry_advertise_mode;
+        unchanged = false;
+    }
+    normalize_smb_endpoint(data_.smb_endpoint);
+    data_.smb_user.trim();
+    if (!valid_smb_endpoint(data_.smb_endpoint)) {
+        data_.smb_endpoint = "";
+        unchanged = false;
+    }
+    if (!valid_smb_user(data_.smb_user)) {
+        data_.smb_user = "";
+        unchanged = false;
+    }
+    if (!valid_smb_password(data_.smb_password)) {
+        data_.smb_password = "";
         unchanged = false;
     }
     if (!valid_optional_secret(data_.http_user)) {
@@ -546,6 +651,48 @@ bool AppConfig::set_edf_capture_enabled(bool enabled) {
     if (data_.edf_capture_enabled == enabled) return true;
     data_.edf_capture_enabled = enabled;
     return persist(DIRTY_EDF_CAPTURE);
+}
+
+bool AppConfig::set_smb_credentials(const String &endpoint,
+                                    const String &user,
+                                    const String &password) {
+    String parsed_endpoint = endpoint;
+    String parsed_user = user;
+    String parsed_password = password;
+    normalize_smb_endpoint(parsed_endpoint);
+    parsed_user.trim();
+    const char *reject_reason = smb_endpoint_reject_reason(parsed_endpoint);
+    if (!reject_reason) reject_reason = smb_user_reject_reason(parsed_user);
+    if (!reject_reason) {
+        reject_reason = smb_password_reject_reason(parsed_password);
+    }
+    if (reject_reason) {
+        Log::logf(CAT_CONFIG,
+                  LOG_WARN,
+                  "rejected smb config reason=%s endpoint=%s user_set=%u "
+                  "password_set=%u\n",
+                  reject_reason,
+                  parsed_endpoint.length() ? parsed_endpoint.c_str() : "<empty>",
+                  parsed_user.length() ? 1u : 0u,
+                  parsed_password.length() ? 1u : 0u);
+        return false;
+    }
+    if (data_.smb_endpoint == parsed_endpoint &&
+        data_.smb_user == parsed_user &&
+        data_.smb_password == parsed_password) {
+        return true;
+    }
+    data_.smb_endpoint = parsed_endpoint;
+    data_.smb_user = parsed_user;
+    data_.smb_password = parsed_password;
+    Log::logf(CAT_CONFIG,
+              LOG_INFO,
+              "updated smb config endpoint=%s user_set=%u password_set=%u\n",
+              data_.smb_endpoint.length() ? data_.smb_endpoint.c_str()
+                                          : "<empty>",
+              data_.smb_user.length() ? 1u : 0u,
+              data_.smb_password.length() ? 1u : 0u);
+    return persist(DIRTY_SMB_SYNC);
 }
 
 bool AppConfig::set_http_auth(const String &user, const String &password) {
