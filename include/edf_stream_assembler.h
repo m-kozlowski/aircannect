@@ -142,6 +142,8 @@ private:
                               FrameTiming &timing) const;
     void commit_frame_timing(const StreamFrameData &frame,
                              const FrameTiming &timing);
+    void maybe_rebase_initial_epoch(const StreamFrameData &frame,
+                                    int64_t frame_start_ms);
 
     void publish_record(const SeriesBuffer &series);
     void publish_current_record(SeriesBuffer &series, bool skipped);
@@ -161,6 +163,7 @@ private:
     SeriesBuffer series(EdfSeriesId id);
     bool parse_frame_start_ms(const StreamFrameData &frame, int64_t &start_ms);
     bool ensure_session_epoch(int64_t frame_start_ms);
+    bool initial_epoch_can_rebase() const;
     void set_error(const char *error);
 
     float *brp_values_ = nullptr;
@@ -179,6 +182,8 @@ private:
     bool timeline_active_ = false;
     uint32_t timeline_stream_id_ = 0;
     int64_t timeline_next_frame_start_ms_ = 0;
+    int64_t declared_start_epoch_ms_ = 0;
+    bool initial_epoch_rebase_allowed_ = false;
 
     EdfStreamAssemblerStatus status_;
 };

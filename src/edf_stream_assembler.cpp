@@ -90,11 +90,15 @@ bool EdfStreamAssembler::start_session(const char *device_start_time) {
     if (!allocate_buffers()) return false;
     reset();
     status_.active = true;
+    declared_start_epoch_ms_ = 0;
+    initial_epoch_rebase_allowed_ = false;
     if (device_start_time && *device_start_time) {
         int64_t start_ms = 0;
         if (edf_parse_utc_ms(device_start_time, start_ms)) {
+            declared_start_epoch_ms_ = start_ms;
             status_.session_start_epoch_ms =
                 edf_floor_epoch_ms_to_second(start_ms);
+            initial_epoch_rebase_allowed_ = true;
         }
     }
     return true;
@@ -113,6 +117,9 @@ void EdfStreamAssembler::set_current_records(uint32_t brp_record,
     if (brp.status) brp.status->current_record = brp_record;
     if (pld.status) pld.status->current_record = pld_record;
     if (sa2.status) sa2.status->current_record = sa2_record;
+    if (brp_record != 0 || pld_record != 0 || sa2_record != 0) {
+        initial_epoch_rebase_allowed_ = false;
+    }
 }
 
 EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
@@ -132,6 +139,7 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
         resolve_frame_timing(frame, frame_start_ms, timing);
     const int64_t effective_start_ms =
         have_timing ? timing.effective_start_ms : frame_start_ms;
+    maybe_rebase_initial_epoch(frame, effective_start_ms);
 
     struct TargetRecord {
         bool seen = false;
@@ -221,6 +229,7 @@ void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
         resolve_frame_timing(frame, frame_start_ms, timing);
     const int64_t effective_start_ms =
         have_timing ? timing.effective_start_ms : frame_start_ms;
+    maybe_rebase_initial_epoch(frame, effective_start_ms);
 
     status_.frames++;
 
@@ -349,6 +358,8 @@ void EdfStreamAssembler::reset_session_counters() {
     status_.brp.allocated = buffers_ready;
     status_.pld.allocated = buffers_ready;
     status_.sa2.allocated = buffers_ready;
+    declared_start_epoch_ms_ = 0;
+    initial_epoch_rebase_allowed_ = false;
     reset_timeline();
 }
 
@@ -618,6 +629,65 @@ void EdfStreamAssembler::commit_frame_timing(
     timeline_next_frame_start_ms_ =
         timing.effective_start_ms + timing.coverage_ms;
     status_.last_sample_epoch_ms = timeline_next_frame_start_ms_;
+}
+
+bool EdfStreamAssembler::initial_epoch_can_rebase() const {
+    if (!initial_epoch_rebase_allowed_) return false;
+    if (status_.brp.current_record != 0 ||
+        status_.pld.current_record != 0 ||
+        status_.sa2.current_record != 0) {
+        return false;
+    }
+    if (status_.brp.records_completed != 0 ||
+        status_.pld.records_completed != 0 ||
+        status_.sa2.records_completed != 0) {
+        return false;
+    }
+    return status_.brp.slots_filled == 0 &&
+           status_.pld.slots_filled == 0 &&
+           status_.sa2.slots_filled == 0;
+}
+
+void EdfStreamAssembler::maybe_rebase_initial_epoch(
+    const StreamFrameData &frame,
+    int64_t frame_start_ms) {
+    if (!initial_epoch_can_rebase()) return;
+
+    int64_t first_sample_ms = 0;
+    bool found = false;
+    for (size_t i = 0; i < frame.signal_count; ++i) {
+        const StreamSignalSpan &span = frame.signals[i];
+        EdfSignalTarget target;
+        if (!edf_signal_target_for_stream(span.id, target)) continue;
+
+        const uint32_t source_interval =
+            span.sample_interval_ms ? span.sample_interval_ms
+                                    : frame.interval_ms;
+        if (source_interval == 0) continue;
+
+        for (uint16_t sample = 0; sample < span.sample_count; ++sample) {
+            const size_t value_index = span.value_offset + sample;
+            if (value_index >= frame.value_count) break;
+            if (!frame.value_valid(value_index)) continue;
+
+            const int64_t sample_ms =
+                frame_start_ms +
+                static_cast<int64_t>(sample) * source_interval;
+            if (declared_start_epoch_ms_ > 0 &&
+                sample_ms < declared_start_epoch_ms_) {
+                continue;
+            }
+            if (!found || sample_ms < first_sample_ms) {
+                first_sample_ms = sample_ms;
+                found = true;
+            }
+            break;
+        }
+    }
+
+    if (!found) return;
+    status_.session_start_epoch_ms = first_sample_ms;
+    initial_epoch_rebase_allowed_ = false;
 }
 
 void EdfStreamAssembler::publish_record(const SeriesBuffer &series) {
