@@ -504,7 +504,7 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
         pending_mask_start_time_[0] = 0;
     }
 
-    Log::logf(CAT_EDF, LOG_INFO,
+    Log::logf(CAT_EDF, LOG_DEBUG,
               "recorder session start id=%lu reason=%s\n",
               static_cast<unsigned long>(status_.session_id),
               reason ? reason : "--");
@@ -554,7 +554,7 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
         status_.file_open_failures != 0 ||
         status_.event_coverage_session_gap_count != 0 ||
         rpc_failures != 0;
-    Log::logf(CAT_EDF, had_failures ? LOG_WARN : LOG_INFO,
+    Log::logf(CAT_EDF, had_failures ? LOG_WARN : LOG_DEBUG,
               "recorder session end id=%lu reason=%s frames=%lu "
               "drops=%lu numeric_drops=%lu enqueue_failures=%lu "
               "open_failures=%lu event_gaps=%lu rpc_failures=%lu events=%lu\n",
@@ -928,7 +928,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(
                           sa2_schema_.open;
     numeric_segment_day_ = numeric_day;
     if (numeric_files_open_) {
-        Log::logf(CAT_EDF, LOG_INFO,
+        Log::logf(CAT_EDF, LOG_DEBUG,
                   "numeric files open start=%s accepted=%s brp=%u "
                   "pld=%u sa2=%u\n",
                   numeric_start_time ? numeric_start_time : "--",

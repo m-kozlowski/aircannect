@@ -50,12 +50,18 @@
 // datagram frames after ASCII-hex JSON wrapping.
 static constexpr size_t AC_CAN_TX_QUEUE_DEPTH = 224;
 static constexpr size_t AC_CAN_TX_DRAIN_BUDGET = 32;
-static constexpr size_t AC_CAN_RX_QUEUE_LEN = 128;
-static constexpr size_t AC_CAN_RX_DRAIN_BUDGET = 128;
+// Report spool replies can arrive as one large base64/JSON notification burst.
+// Keep enough TWAI RX slack that a short main-loop pass or callback cannot
+// overflow the TWAI queue before the next drain checkpoint.
+static constexpr size_t AC_CAN_RX_QUEUE_LEN = 512;
+static constexpr size_t AC_CAN_RX_DRAIN_BUDGET = 512;
+static constexpr size_t AC_RPC_PAYLOAD_QUEUE_DEPTH = 8;
+static constexpr size_t AC_RPC_PAYLOAD_DRAIN_BUDGET = 2;
 static constexpr size_t AC_DG_MAX_PAYLOAD_BYTES = 8192;
 static constexpr size_t AC_DG_INITIAL_RESERVE_BYTES = 256;
 static constexpr uint32_t AC_DG_IDLE_TIMEOUT_MS = 2000;
 static constexpr size_t AC_RPC_EVENT_QUEUE_DEPTH = 48;
+static constexpr size_t AC_REPORT_EVENT_QUEUE_DEPTH = 32;
 static constexpr size_t AC_RESMED_OTA_EVENT_QUEUE_DEPTH = 8;
 static constexpr size_t AC_RPC_REQUEST_QUEUE_DEPTH = 8;
 static constexpr size_t AC_STREAM_CONSUMERS_MAX = 4;
@@ -88,6 +94,7 @@ static constexpr const char *AC_RESMED_OTA_CONFIRM = "APPLY_RESMED_OTA";
 static constexpr uint32_t AC_RPC_MIN_TX_INTERVAL_MS = 20;
 static constexpr uint8_t AC_RPC_BACKGROUND_TIMEOUTS_BEFORE_BACKOFF = 2;
 static constexpr uint32_t AC_RPC_BACKGROUND_BACKOFF_MS = 120000;
+static constexpr uint32_t AC_RPC_BACKGROUND_RX_PRESSURE_BACKOFF_MS = 500;
 static constexpr uint32_t AC_STREAM_RESYNC_INTERVAL_MS = 2000;
 
 static constexpr uint32_t AC_AS11_INITIAL_STATUS_POLL_DELAY_MS = 3000;

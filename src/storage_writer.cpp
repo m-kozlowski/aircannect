@@ -223,7 +223,7 @@ void begin() {
     stats.capacity = capacity;
     reset_queue();
     if (stats.available) {
-        Log::logf(CAT_STORAGE, LOG_INFO,
+        Log::logf(CAT_STORAGE, LOG_DEBUG,
                   "[WRITER] ready q=%u chunk=%u psram=%s\n",
                   static_cast<unsigned>(capacity),
                   static_cast<unsigned>(chunk_bytes),

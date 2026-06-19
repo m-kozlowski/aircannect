@@ -99,5 +99,4 @@ static constexpr size_t AC_STORAGE_WRITE_CHUNK_BYTES = 512;
 static constexpr size_t AC_STORAGE_WRITE_PATH_MAX = 80;
 static constexpr size_t AC_STORAGE_WRITE_BUDGET_ITEMS = 2;
 static constexpr size_t AC_STORAGE_WRITE_BUDGET_BYTES = 1024;
-static constexpr size_t AC_SINK_STREAM_FRAME_BUDGET = 4;
 static constexpr uint32_t AC_SINK_ATTACH_RETRY_MS = 2000;

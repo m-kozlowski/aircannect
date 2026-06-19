@@ -10,6 +10,7 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "board_report.h"
 
 namespace aircannect {
 namespace {
@@ -209,6 +210,7 @@ void SpoolClient::reset() {
     active_spool_id_ = 0;
     state_started_ms_ = 0;
     fetch_started_ms_ = 0;
+    next_pull_submit_ms_ = 0;
     next_spool_address_json_.clear();
     clear_round_fragments(true);
     round_start_offset_ = 0;
@@ -244,6 +246,16 @@ void SpoolClient::poll(RpcArbiter &arbiter) {
     }
 
     if (pending_submit_ != PendingSubmit::None) {
+        if (request_.pace_on_backpressure &&
+            arbiter.background_backpressure_active()) {
+            return;
+        }
+        if (request_.pace_on_backpressure &&
+            pending_submit_ == PendingSubmit::Pull &&
+            next_pull_submit_ms_ != 0 &&
+            static_cast<int32_t>(now - next_pull_submit_ms_) < 0) {
+            return;
+        }
         submit_pending(arbiter);
         return;
     }
@@ -333,6 +345,11 @@ bool SpoolClient::submit_pull(RpcArbiter &arbiter) {
     pending_id_ = id;
     pending_submit_ = PendingSubmit::None;
     state_started_ms_ = millis();
+    if (request_.pace_on_backpressure) {
+        next_pull_submit_ms_ = state_started_ms_ +
+            AC_REPORT_SPOOL_PULL_PACE_MS;
+        if (next_pull_submit_ms_ == 0) next_pull_submit_ms_ = 1;
+    }
     return true;
 }
 
@@ -435,6 +452,9 @@ bool SpoolClient::handle_spool_fragment(const RpcEvent &event) {
     JsonStringView status_view;
     if (!json_string_view(payload, "status", status_view) ||
         json_string_equals(status_view, "SPOOL_INCOMPLETE")) {
+        if (request_.max_notifications > 0) {
+            schedule_pull();
+        }
         return true;
     }
 
@@ -865,7 +885,9 @@ std::string SpoolClient::build_pull_params() const {
     params += std::to_string(active_spool_id_);
     params += ",\"maxFragmentSize\":";
     params += std::to_string(request_.fragment_max);
-    params += ",\"maxNotifications\":0}";
+    params += ",\"maxNotifications\":";
+    params += std::to_string(request_.max_notifications);
+    params += "}";
     return params;
 }
 

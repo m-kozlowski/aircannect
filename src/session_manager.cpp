@@ -113,6 +113,10 @@ void SessionManager::start_session(const As11DeviceState &as11,
               as11.device_datetime());
     AC_SESSION_LOG(
         CAT_STREAM, LOG_INFO,
+        "[THERAPY] started time=%s\n",
+        status_.start_device_time[0] ? status_.start_device_time : "--");
+    AC_SESSION_LOG(
+        CAT_STREAM, LOG_DEBUG,
         "[SESSION] started id=%lu reason=%s recovered=%u device_time=%s\n",
         static_cast<unsigned long>(status_.session_id),
         reason ? reason : "--",
@@ -137,7 +141,14 @@ void SessionManager::end_session(const As11DeviceState &as11,
                   status_.last_stream_start_time);
     }
     copy_cstr(status_.end_reason, sizeof(status_.end_reason), reason);
+    const uint32_t duration_s = status_.started_ms
+        ? (now_ms - status_.started_ms) / 1000
+        : 0;
     AC_SESSION_LOG(CAT_STREAM, LOG_INFO,
+                   "[THERAPY] stopped time=%s duration_s=%lu\n",
+                   status_.end_device_time[0] ? status_.end_device_time : "--",
+                   static_cast<unsigned long>(duration_s));
+    AC_SESSION_LOG(CAT_STREAM, LOG_DEBUG,
                    "[SESSION] ended id=%lu reason=%s frames=%lu drops=%lu\n",
                    static_cast<unsigned long>(status_.session_id),
                    status_.end_reason[0] ? status_.end_reason : "--",

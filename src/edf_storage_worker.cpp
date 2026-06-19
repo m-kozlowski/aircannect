@@ -28,6 +28,7 @@ namespace {
 enum class JobType : uint8_t {
     Open,
     Record,
+    NumericRecord,
     StrRecord,
     Identification,
     Close,
@@ -55,6 +56,17 @@ struct JobSlot {
     size_t len = 0;
     size_t record_size = 0;
     bool recording_start = false;
+
+    EdfFileSchema numeric_schema;
+    EdfSignalSpec numeric_signals[AC_EDF_NUMERIC_SIGNAL_MAX + 1] = {};
+    uint8_t numeric_source_indices[AC_EDF_NUMERIC_SIGNAL_MAX] = {};
+    EdfSeriesId numeric_series = EdfSeriesId::Brp;
+    uint32_t numeric_record_index = 0;
+    size_t numeric_signal_count = 0;
+    size_t numeric_samples_per_record = 0;
+    float *numeric_values = nullptr;
+    uint8_t *numeric_present = nullptr;
+    uint8_t *numeric_valid = nullptr;
 };
 
 struct OpenFile {
@@ -85,6 +97,9 @@ SemaphoreHandle_t queue_lock = nullptr;
 TaskHandle_t task = nullptr;
 JobSlot *slots = nullptr;
 uint8_t *slot_bytes = nullptr;
+float *slot_numeric_values = nullptr;
+uint8_t *slot_numeric_present = nullptr;
+uint8_t *slot_numeric_valid = nullptr;
 size_t head = 0;
 size_t tail = 0;
 size_t queued = 0;
@@ -92,6 +107,18 @@ OpenFile open_files[AC_EDF_STORAGE_FILE_COUNT];
 OpenRequestResult open_results[AC_EDF_STORAGE_FILE_COUNT];
 uint32_t next_open_request_id = 0;
 bool processing_job = false;
+
+constexpr size_t max_size(size_t a, size_t b) {
+    return a > b ? a : b;
+}
+
+static constexpr size_t AC_EDF_STORAGE_NUMERIC_VALUE_MAX = max_size(
+    max_size(AC_EDF_BRP_SIGNAL_COUNT * AC_EDF_BRP_SAMPLES_PER_RECORD,
+             AC_EDF_PLD_SIGNAL_COUNT * AC_EDF_PLD_SAMPLES_PER_RECORD),
+    AC_EDF_SA2_SIGNAL_COUNT * AC_EDF_SA2_SAMPLES_PER_RECORD);
+
+static constexpr size_t AC_EDF_STORAGE_NUMERIC_BIT_BYTES =
+    (AC_EDF_STORAGE_NUMERIC_VALUE_MAX + 7u) / 8u;
 
 const char *basename_from_path(const char *path) {
     if (!path) return "";
@@ -540,33 +567,69 @@ void refresh_open_file_count() {
 }
 
 size_t free_slots() {
-    return AC_EDF_STORAGE_QUEUE_CAPACITY > queued
-               ? AC_EDF_STORAGE_QUEUE_CAPACITY - queued
+    const size_t used = queued + (processing_job ? 1u : 0u);
+    return AC_EDF_STORAGE_QUEUE_CAPACITY > used
+               ? AC_EDF_STORAGE_QUEUE_CAPACITY - used
                : 0;
 }
 
 void clear_slot(JobSlot &slot) {
-    slot.type = JobType::Record;
-    slot.kind = StoredFileKind::Brp;
-    slot.request_id = 0;
-    slot.path[0] = 0;
-    slot.patient_id[0] = 0;
-    slot.recording_id[0] = 0;
-    slot.start_date[0] = 0;
-    slot.start_time[0] = 0;
-    slot.record_count = 0;
-    slot.len = 0;
-    slot.record_size = 0;
-    slot.recording_start = false;
+    uint8_t *bytes = slot.bytes;
+    float *numeric_values = slot.numeric_values;
+    uint8_t *numeric_present = slot.numeric_present;
+    uint8_t *numeric_valid = slot.numeric_valid;
+    slot = JobSlot{};
+    slot.bytes = bytes;
+    slot.numeric_values = numeric_values;
+    slot.numeric_present = numeric_present;
+    slot.numeric_valid = numeric_valid;
+}
+
+void free_slot_storage() {
+    Memory::free(slots);
+    Memory::free(slot_bytes);
+    Memory::free(slot_numeric_values);
+    Memory::free(slot_numeric_present);
+    Memory::free(slot_numeric_valid);
+    slots = nullptr;
+    slot_bytes = nullptr;
+    slot_numeric_values = nullptr;
+    slot_numeric_present = nullptr;
+    slot_numeric_valid = nullptr;
+}
+
+bool slot_storage_available() {
+    return slots && slot_bytes && slot_numeric_values &&
+           slot_numeric_present && slot_numeric_valid;
+}
+
+void bind_slot_storage(size_t index) {
+    slots[index].bytes = slot_bytes + index * AC_EDF_STORAGE_SLOT_BYTES;
+    slots[index].numeric_values =
+        slot_numeric_values + index * AC_EDF_STORAGE_NUMERIC_VALUE_MAX;
+    slots[index].numeric_present =
+        slot_numeric_present + index * AC_EDF_STORAGE_NUMERIC_BIT_BYTES;
+    slots[index].numeric_valid =
+        slot_numeric_valid + index * AC_EDF_STORAGE_NUMERIC_BIT_BYTES;
 }
 
 bool allocate_slots() {
-    if (slots && slot_bytes) return true;
+    if (slot_storage_available()) return true;
     slots = static_cast<JobSlot *>(Memory::calloc_large(
         AC_EDF_STORAGE_QUEUE_CAPACITY, sizeof(JobSlot), false));
     slot_bytes = static_cast<uint8_t *>(Memory::alloc_large(
         AC_EDF_STORAGE_SLOT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY, false));
-    if (!slots || !slot_bytes) {
+    slot_numeric_values = static_cast<float *>(Memory::alloc_large(
+        AC_EDF_STORAGE_NUMERIC_VALUE_MAX * AC_EDF_STORAGE_QUEUE_CAPACITY *
+            sizeof(float),
+        false));
+    slot_numeric_present = static_cast<uint8_t *>(Memory::alloc_large(
+        AC_EDF_STORAGE_NUMERIC_BIT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY,
+        false));
+    slot_numeric_valid = static_cast<uint8_t *>(Memory::alloc_large(
+        AC_EDF_STORAGE_NUMERIC_BIT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY,
+        false));
+    if (!slot_storage_available()) {
         if (!slots) {
             log_alloc_failed("queue_slots",
                              AC_EDF_STORAGE_QUEUE_CAPACITY * sizeof(JobSlot));
@@ -576,16 +639,30 @@ bool allocate_slots() {
                 "queue_payloads",
                 AC_EDF_STORAGE_SLOT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY);
         }
-        Memory::free(slots);
-        Memory::free(slot_bytes);
-        slots = nullptr;
-        slot_bytes = nullptr;
+        if (!slot_numeric_values) {
+            log_alloc_failed("queue_numeric_values",
+                             AC_EDF_STORAGE_NUMERIC_VALUE_MAX *
+                                 AC_EDF_STORAGE_QUEUE_CAPACITY *
+                                 sizeof(float));
+        }
+        if (!slot_numeric_present) {
+            log_alloc_failed("queue_numeric_present",
+                             AC_EDF_STORAGE_NUMERIC_BIT_BYTES *
+                                 AC_EDF_STORAGE_QUEUE_CAPACITY);
+        }
+        if (!slot_numeric_valid) {
+            log_alloc_failed("queue_numeric_valid",
+                             AC_EDF_STORAGE_NUMERIC_BIT_BYTES *
+                                 AC_EDF_STORAGE_QUEUE_CAPACITY);
+        }
+        free_slot_storage();
         set_error("allocation_failed");
         stats.available = false;
         return false;
     }
     for (size_t i = 0; i < AC_EDF_STORAGE_QUEUE_CAPACITY; ++i) {
-        slots[i].bytes = slot_bytes + i * AC_EDF_STORAGE_SLOT_BYTES;
+        bind_slot_storage(i);
+        clear_slot(slots[i]);
     }
     stats.using_psram = Memory::psram_available();
     stats.capacity = AC_EDF_STORAGE_QUEUE_CAPACITY;
@@ -595,20 +672,16 @@ bool allocate_slots() {
 bool push_slot(const JobSlot &job) {
     if (!slots || queued >= AC_EDF_STORAGE_QUEUE_CAPACITY) return false;
     uint8_t *bytes = slots[tail].bytes;
+    float *numeric_values = slots[tail].numeric_values;
+    uint8_t *numeric_present = slots[tail].numeric_present;
+    uint8_t *numeric_valid = slots[tail].numeric_valid;
     slots[tail] = job;
     slots[tail].bytes = bytes;
+    slots[tail].numeric_values = numeric_values;
+    slots[tail].numeric_present = numeric_present;
+    slots[tail].numeric_valid = numeric_valid;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
-    stats.queued = queued;
-    return true;
-}
-
-bool pop_slot(JobSlot &job) {
-    if (!slots || queued == 0) return false;
-    job = slots[head];
-    clear_slot(slots[head]);
-    head = (head + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-    queued--;
     stats.queued = queued;
     return true;
 }
@@ -1002,6 +1075,99 @@ bool process_record(const JobSlot &job) {
     return true;
 }
 
+bool copy_numeric_schema(JobSlot &job, const EdfFileSchema &schema) {
+    if (!schema.signals || schema.signal_count == 0 ||
+        schema.signal_count > AC_EDF_NUMERIC_SIGNAL_MAX + 1 ||
+        schema.source_signal_count > AC_EDF_NUMERIC_SIGNAL_MAX) {
+        return false;
+    }
+    job.numeric_schema = schema;
+    memcpy(job.numeric_signals,
+           schema.signals,
+           schema.signal_count * sizeof(EdfSignalSpec));
+    job.numeric_schema.signals = job.numeric_signals;
+
+    if (schema.source_signal_indices && schema.source_signal_count > 0) {
+        memcpy(job.numeric_source_indices,
+               schema.source_signal_indices,
+               schema.source_signal_count * sizeof(uint8_t));
+        job.numeric_schema.source_signal_indices =
+            job.numeric_source_indices;
+    } else {
+        job.numeric_schema.source_signal_indices = nullptr;
+    }
+    return true;
+}
+
+bool copy_numeric_record(JobSlot &job,
+                         const EdfCompletedRecordView &record) {
+    if (!record.values || !record.present || !record.valid ||
+        record.signal_count == 0 || record.samples_per_record == 0 ||
+        !job.numeric_values || !job.numeric_present || !job.numeric_valid) {
+        return false;
+    }
+    if (record.signal_count > SIZE_MAX / record.samples_per_record) {
+        return false;
+    }
+    const size_t value_count =
+        record.signal_count * record.samples_per_record;
+    const size_t bit_bytes = (value_count + 7u) / 8u;
+    if (value_count > AC_EDF_STORAGE_NUMERIC_VALUE_MAX ||
+        bit_bytes > AC_EDF_STORAGE_NUMERIC_BIT_BYTES) {
+        return false;
+    }
+
+    memcpy(job.numeric_values,
+           record.values,
+           value_count * sizeof(float));
+    memcpy(job.numeric_present, record.present, bit_bytes);
+    memcpy(job.numeric_valid, record.valid, bit_bytes);
+    job.numeric_series = record.series;
+    job.numeric_record_index = record.record_index;
+    job.numeric_signal_count = record.signal_count;
+    job.numeric_samples_per_record = record.samples_per_record;
+    return true;
+}
+
+bool prepare_numeric_record_job(JobSlot &job,
+                                const EdfFileSchema &schema,
+                                const EdfCompletedRecordView &record) {
+    const size_t record_size = edf_record_size(schema);
+    if (record_size > AC_EDF_STORAGE_SLOT_BYTES) return false;
+    if (!copy_numeric_schema(job, schema)) return false;
+    if (!copy_numeric_record(job, record)) return false;
+    job.type = JobType::NumericRecord;
+    job.kind = stored_kind(schema.kind);
+    job.record_size = record_size;
+    job.len = record_size;
+    return true;
+}
+
+bool process_numeric_record(JobSlot &job) {
+    EdfCompletedRecordView record;
+    record.series = job.numeric_series;
+    record.record_index = job.numeric_record_index;
+    record.signal_count = job.numeric_signal_count;
+    record.samples_per_record = job.numeric_samples_per_record;
+    record.values = job.numeric_values;
+    record.present = job.numeric_present;
+    record.valid = job.numeric_valid;
+
+    size_t written = 0;
+    if (!edf_render_numeric_record(job.numeric_schema,
+                                   record,
+                                   job.bytes,
+                                   AC_EDF_STORAGE_SLOT_BYTES,
+                                   written)) {
+        stats.render_errors++;
+        set_error("render_failed");
+        log_worker_failure(LOG_WARN, "render_failed");
+        return false;
+    }
+    job.len = written;
+    return process_record(job);
+}
+
 bool process_str_record(const JobSlot &job) {
     if (!valid_path(job.path)) {
         set_error("bad_str_path");
@@ -1278,7 +1444,7 @@ bool process_close(const JobSlot &job) {
     return true;
 }
 
-void process_job(const JobSlot &job) {
+void process_job(JobSlot &job) {
     switch (job.type) {
         case JobType::Open:
             (void)process_open(job);
@@ -1288,6 +1454,9 @@ void process_job(const JobSlot &job) {
             break;
         case JobType::Record:
             (void)process_record(job);
+            break;
+        case JobType::NumericRecord:
+            (void)process_numeric_record(job);
             break;
         case JobType::StrRecord:
             (void)process_str_record(job);
@@ -1304,16 +1473,28 @@ void process_job(const JobSlot &job) {
 void task_entry(void *) {
     stats.task_started = true;
     for (;;) {
-        JobSlot job;
         bool have_job = false;
+        size_t slot_index = SIZE_MAX;
         if (lock_queue(50)) {
-            have_job = pop_slot(job);
-            if (have_job) processing_job = true;
+            if (slots && queued > 0 && !processing_job) {
+                slot_index = head;
+                head = (head + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
+                queued--;
+                stats.queued = queued;
+                processing_job = true;
+                have_job = true;
+            }
             unlock_queue();
         }
         if (have_job) {
-            process_job(job);
-            processing_job = false;
+            process_job(slots[slot_index]);
+            if (lock_queue(50)) {
+                clear_slot(slots[slot_index]);
+                processing_job = false;
+                unlock_queue();
+            } else {
+                processing_job = false;
+            }
             vTaskDelay(pdMS_TO_TICKS(AC_EDF_STORAGE_WORK_TICK_MS));
         } else {
             vTaskDelay(pdMS_TO_TICKS(AC_EDF_STORAGE_IDLE_TICK_MS));
@@ -1413,7 +1594,7 @@ void begin() {
     stats.initialized = true;
     stats.available = true;
     cleanup_str_backup_artifacts();
-    Log::logf(CAT_EDF, LOG_INFO,
+    Log::logf(CAT_EDF, LOG_DEBUG,
               "storage worker ready q=%u slot=%u psram=%s\n",
               static_cast<unsigned>(AC_EDF_STORAGE_QUEUE_CAPACITY),
               static_cast<unsigned>(AC_EDF_STORAGE_SLOT_BYTES),
@@ -1496,20 +1677,41 @@ bool enqueue_open_annotation(const char *path,
 
 bool enqueue_numeric_record(const EdfFileSchema &schema,
                             const EdfCompletedRecordView &record) {
-    if (edf_record_size(schema) > AC_EDF_STORAGE_SLOT_BYTES) return false;
-    return enqueue_rendered_slot(
-        [&](JobSlot &job) {
-            job.type = JobType::Record;
-            job.kind = stored_kind(schema.kind);
-        },
-        [&](JobSlot &job, size_t &written) {
-            return edf_render_numeric_record(schema,
-                                             record,
-                                             job.bytes,
-                                             AC_EDF_STORAGE_SLOT_BYTES,
-                                             written);
-        },
-        "render_failed");
+    if (!stats.initialized) begin();
+    if (!stats.available || !slots) return false;
+    if (!lock_queue()) {
+        stats.queue_drops++;
+        set_error("queue_lock_failed");
+        log_worker_failure(LOG_WARN, "queue_lock_failed");
+        return false;
+    }
+    if (free_slots() == 0) {
+        unlock_queue();
+        stats.queue_drops++;
+        set_error("queue_full");
+        log_worker_failure(LOG_WARN, "queue_full");
+        return false;
+    }
+
+    JobSlot &job = slots[tail];
+    clear_slot(job);
+    if (!prepare_numeric_record_job(job, schema, record)) {
+        unlock_queue();
+        stats.render_errors++;
+        set_error("record_snapshot_failed");
+        log_worker_failure(LOG_WARN, "record_snapshot_failed");
+        return false;
+    }
+
+    const size_t queued_len = job.len;
+    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
+    queued++;
+    stats.queued = queued;
+    unlock_queue();
+
+    stats.bytes_enqueued += queued_len;
+    stats.last_activity_ms = millis();
+    return true;
 }
 
 bool enqueue_annotation_record(EdfAnnotationKind kind,

@@ -22,6 +22,7 @@ public:
     virtual ~BackgroundJob() = default;
     virtual const char *name() const = 0;
     virtual JobStep step() = 0;
+    virtual bool run_when_foreground_busy() const { return false; }
     virtual void on_preempt() {}
 };
 
@@ -74,7 +75,7 @@ private:
     static constexpr uint32_t GATE_AS11 = 1u << 5;
     static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
-    static constexpr size_t MAX_JOBS = 4;
+    static constexpr size_t MAX_JOBS = 5;
     BackgroundJob *jobs_[MAX_JOBS] = {};
     size_t job_count_ = 0;
 

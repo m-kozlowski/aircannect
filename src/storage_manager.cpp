@@ -207,12 +207,14 @@ bool mount_spi_sd() {
 #endif
 }
 
-void update_capacity_if_due() {
-    if (!current.mounted) return;
-    if (static_cast<int32_t>(millis() - current.last_checked_ms) <
-        static_cast<int32_t>(AC_STORAGE_STATUS_POLL_MS)) {
-        return;
-    }
+bool capacity_update_due(uint32_t now_ms) {
+    if (!current.mounted) return false;
+    return static_cast<int32_t>(now_ms - current.last_checked_ms) >=
+        static_cast<int32_t>(AC_STORAGE_STATUS_POLL_MS);
+}
+
+void update_capacity_if_due(uint32_t now_ms) {
+    if (!capacity_update_due(now_ms)) return;
 
     switch (current.type) {
         case StorageType::SdMmc:
@@ -251,9 +253,20 @@ void begin() {
 }
 
 void poll() {
+    poll(true);
+}
+
+void poll(bool allow_capacity_update) {
+    const bool need_begin = !initialized;
+    const uint32_t now = millis();
+    if (!need_begin &&
+        (!allow_capacity_update || !capacity_update_due(now))) {
+        return;
+    }
+
     Guard g;
     if (!initialized) begin();
-    update_capacity_if_due();
+    if (allow_capacity_update) update_capacity_if_due(now);
 }
 
 bool remount() {

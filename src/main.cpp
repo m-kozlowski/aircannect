@@ -14,6 +14,7 @@
 #include "memory_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
+#include "report_cache_writer_job.h"
 #include "provisioning.h"
 #include "report_manager.h"
 #include "report_prefetch_job.h"
@@ -56,7 +57,10 @@ static BackgroundWorker bg_worker;
 static StorageArchiveJob storage_archive_job;
 static StorageDeleteJob storage_delete_job;
 static StorageSyncJob *storage_sync_job = nullptr;
+static ReportCacheWriterJob report_cache_writer_job(report_manager);
 static ReportPrefetchJob report_prefetch_job(report_manager);
+static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
+static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
     rpc_arbiter,
     tcp_bridge,
@@ -83,10 +87,6 @@ static void note_session_stream_frame(void *context,
                                       const StreamFrameData &frame,
                                       uint32_t now_ms) {
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
-}
-
-static void handle_report_event(void *context, const RpcEvent &event) {
-    static_cast<ReportManager *>(context)->handle_event(event);
 }
 
 static void sync_network_services() {
@@ -135,6 +135,42 @@ static void drain_rpc_events() {
     }
 }
 
+static bool main_loop_drain_timing_active() {
+    return session_manager.status().state == SessionState::Active ||
+           rpc_arbiter.as11_state().therapy_state() ==
+               As11TherapyState::Running;
+}
+
+static void drain_can_rx_after(const char *section) {
+    static uint32_t last_checkpoint_ms = 0;
+    static uint32_t last_warn_ms = 0;
+
+    const uint32_t before_ms = millis();
+    const uint32_t gap_ms = last_checkpoint_ms == 0
+                                ? 0
+                                : before_ms - last_checkpoint_ms;
+    const size_t drained = rpc_arbiter.drain_can_rx();
+    const uint32_t after_drain_ms = millis();
+    const uint32_t drain_ms = after_drain_ms - before_ms;
+
+    if (gap_ms > AC_MAIN_LOOP_CAN_DRAIN_WARN_MS &&
+        main_loop_drain_timing_active() &&
+        (last_warn_ms == 0 ||
+         after_drain_ms - last_warn_ms >=
+             AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS)) {
+        last_warn_ms = after_drain_ms;
+        Log::logf(CAT_CAN, LOG_WARN,
+                  "main-loop CAN drain gap section=%s gap_ms=%u "
+                  "drained=%u drain_ms=%u\n",
+                  section ? section : "--",
+                  static_cast<unsigned>(gap_ms),
+                  static_cast<unsigned>(drained),
+                  static_cast<unsigned>(drain_ms));
+    }
+
+    last_checkpoint_ms = millis();
+}
+
 static StorageSyncJob *create_storage_sync_job() {
     void *memory = Memory::alloc_large(sizeof(StorageSyncJob), false);
     if (!memory) {
@@ -152,12 +188,13 @@ void setup() {
 
     Memory::begin();
     Log::init();
+    app_config.begin();
+    app_config.apply_log_config();
     const MemoryStatus mem = Memory::status();
-    Log::logf(CAT_GENERAL, LOG_INFO, "AirCANnect %s\n",
-              aircannect_version());
-    Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] build=%s\n",
-              aircannect_build_date());
-    Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] reset_reason=%s\n",
+    Log::logf(CAT_GENERAL, LOG_INFO,
+              "[BOOT] version=%s build=%s reset_reason=%s\n",
+              aircannect_version(),
+              aircannect_build_date(),
               system_reset_reason_name());
     Log::logf(CAT_GENERAL, LOG_INFO,
               "[INIT] chip=%s heap_free=%u heap_total=%u\n",
@@ -201,19 +238,11 @@ void setup() {
     serial_management_console.begin(Serial);
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] management CLI ready\n");
 
-    app_config.begin();
     storage_sync_job = create_storage_sync_job();
     apply_storage_provisioning(app_config, wifi_manager);
-    app_config.apply_log_config();
     session_manager.begin();
     rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
                                           &session_manager);
-    if (!rpc_arbiter.set_source_event_observer(RpcSource::Report,
-                                               handle_report_event,
-                                               &report_manager)) {
-        Log::logf(CAT_RPC, LOG_ERROR,
-                  "[INIT] report RPC event route unavailable\n");
-    }
     sink_manager.begin(rpc_arbiter, session_manager);
     edf_recorder_manager.begin(rpc_arbiter, session_manager);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
@@ -247,8 +276,6 @@ void setup() {
                  storage_sync_job,
                  console_ctx);
 
-    Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] architecture baseline ready\n");
-
     // Idle-time background storage worker (prefetch + plot build). Started last,
     // once every subsystem it gates on (report, CAN, OTA) is up.
     storage_archive_job.begin();
@@ -258,10 +285,11 @@ void setup() {
     }
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
+    bg_worker.add_job(&report_cache_writer_job);
+    bg_worker.add_job(&report_prefetch_job);
     if (storage_sync_job) {
         bg_worker.add_job(storage_sync_job);
     }
-    bg_worker.add_job(&report_prefetch_job);
     bg_worker.begin();
 }
 
@@ -275,30 +303,81 @@ static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
                                             uint32_t now_ms) {
     static As11TherapyState last_state = As11TherapyState::Unknown;
     static uint32_t summary_refresh_due_ms = 0;
+    static bool post_therapy_sync_pending = false;
+    static bool post_report_prefetch_requested = false;
+    static uint32_t post_report_sync_due_ms = 0;
     const As11TherapyState state = arbiter.as11_state().therapy_state();
 
     if (state == As11TherapyState::Running) {
         summary_refresh_due_ms = 0;
+        post_therapy_sync_pending = false;
+        post_report_prefetch_requested = false;
+        post_report_sync_due_ms = 0;
         last_state = state;
         return;
     }
 
     if (last_state == As11TherapyState::Running &&
         state != As11TherapyState::Running) {
-        summary_refresh_due_ms = now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS;
+        summary_refresh_due_ms =
+            now_ms + AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS;
         if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
+        post_therapy_sync_pending = sync_job != nullptr;
+        post_report_prefetch_requested = false;
+        post_report_sync_due_ms = 0;
         if (sync_job) {
-            (void)sync_job->request_post_therapy_sync();
+            sync_job->defer_idle_work_until(summary_refresh_due_ms);
         }
     }
 
     if (summary_refresh_due_ms != 0 &&
         static_cast<int32_t>(now_ms - summary_refresh_due_ms) >= 0) {
+        if (arbiter.stream_activity_active()) {
+            summary_refresh_due_ms = now_ms + AC_BG_WORKER_BUSY_RECHECK_MS;
+            if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
+            if (sync_job) {
+                sync_job->defer_idle_work_until(summary_refresh_due_ms);
+            }
+            last_state = state;
+            return;
+        }
         if (report.request_summary_refresh()) {
             summary_refresh_due_ms = 0;
+            post_report_prefetch_requested = false;
+            post_report_sync_due_ms = 0;
         } else {
             summary_refresh_due_ms = now_ms + AC_BG_WORKER_BUSY_RECHECK_MS;
             if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
+        }
+    }
+
+    if (post_therapy_sync_pending && summary_refresh_due_ms == 0) {
+        if (!sync_job) {
+            post_therapy_sync_pending = false;
+            post_report_sync_due_ms = 0;
+        } else if (arbiter.stream_activity_active() ||
+                   report.background_work_active()) {
+            post_report_sync_due_ms = 0;
+            sync_job->defer_idle_work_until(
+                now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS);
+        } else if (!post_report_prefetch_requested) {
+            post_report_prefetch_requested = true;
+            post_report_sync_due_ms =
+                now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS;
+            if (post_report_sync_due_ms == 0) post_report_sync_due_ms = 1;
+            sync_job->defer_idle_work_until(post_report_sync_due_ms);
+        } else {
+            if (post_report_sync_due_ms == 0) {
+                post_report_sync_due_ms =
+                    now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS;
+                if (post_report_sync_due_ms == 0) post_report_sync_due_ms = 1;
+                sync_job->defer_idle_work_until(post_report_sync_due_ms);
+            } else if (static_cast<int32_t>(
+                           now_ms - post_report_sync_due_ms) >= 0) {
+                (void)sync_job->request_post_therapy_sync();
+                post_therapy_sync_pending = false;
+                post_report_sync_due_ms = 0;
+            }
         }
     }
 
@@ -321,11 +400,17 @@ void loop() {
             rpc_arbiter.esp_ota_quiesce_complete(),
         esp_ota_quiesce_requested &&
             rpc_arbiter.esp_ota_quiesce_timed_out());
+    drain_can_rx_after("arbiter_ota_prepare");
     report_manager.poll(rpc_arbiter);
+    drain_can_rx_after("report");
     resmed_ota_manager.poll();
+    // Long loop sections can otherwise let TWAI RX overflow during bursty
+    // stream/RPC traffic. Keep service points bounded and owned by RpcArbiter.
+    drain_can_rx_after("resmed_ota");
     // First drain handles events produced by CAN/RPC/OTA work before services
     // that depend on fresh state run below.
     drain_rpc_events();
+    drain_can_rx_after("rpc_events_pre_state");
     const uint32_t now_ms = millis();
     session_manager.poll(rpc_arbiter.as11_state(), now_ms);
     edf_recorder_manager.poll(now_ms);
@@ -333,6 +418,7 @@ void loop() {
                                     report_manager,
                                     storage_sync_job,
                                     now_ms);
+    drain_can_rx_after("session_edf");
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
     wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||
@@ -344,18 +430,22 @@ void loop() {
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }
+    drain_can_rx_after("network_services");
     const bool esp_reboot_allowed =
         !ota_manager.status().reboot_pending ||
         rpc_arbiter.esp_ota_reboot_allowed();
     ota_manager.poll(wifi_manager, esp_reboot_allowed,
                      !resmed_ota_transport_active);
     resmed_ota_manager.poll();
-    Storage::poll();
+    Storage::poll(!rpc_arbiter.stream_activity_active() &&
+                  rpc_arbiter.as11_state().therapy_state() !=
+                      As11TherapyState::Running);
     if (storage_sync_job) {
         storage_sync_job->set_network_available(
             wifi_manager.mode_state() == WifiModeState::StaConnected);
         storage_sync_job->refresh_config(app_config.data(), now_ms);
     }
+    drain_can_rx_after("ota_storage_sync");
     // Publish the worker's gate inputs from here (the owner thread) so the
     // background task reads a coherent snapshot instead of these managers.
     bg_worker.publish_gate(
@@ -365,18 +455,19 @@ void loop() {
         resmed_ota_manager.transport_active(),
         ota_manager.active(),
         rpc_arbiter.as11_state().therapy_state() == As11TherapyState::Running);
-    web_ui.poll();
+    drain_can_rx_after("bgworker_gate");
+    web_ui.poll(drain_can_rx_after);
+    drain_can_rx_after("web_ui");
     tcp_bridge.poll(rpc_arbiter);
     telnet_console.poll(console_ctx);
     serial_management_console.poll(Serial, Serial, console_ctx);
+    drain_can_rx_after("frontends");
     // Second drain handles events produced by network and console frontends
     // during this loop turn.
     drain_rpc_events();
+    drain_can_rx_after("rpc_events_post_frontends");
     StorageWriter::poll();
+    drain_can_rx_after("storage_writer");
 
-    if (resmed_ota_transport_active) {
-        delay(0);
-    } else {
-        delay(2);
-    }
+    delay(0);
 }

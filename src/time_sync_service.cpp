@@ -91,6 +91,8 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
     }
     if (therapy_running()) {
         last_status_ = "resmed_push_deferred_therapy_active";
+        Log::logf(CAT_GENERAL, LOG_INFO,
+                  "[TIME] AS11 time push deferred: therapy active\n");
         return false;
     }
 
@@ -100,6 +102,11 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
         resmed_push_readback_awaiting_response_ = false;
         next_resmed_push_readback_ms_ =
             millis() + TIME_SYNC_RESMED_PUSH_READBACK_DELAY_MS;
+        Log::logf(CAT_GENERAL, LOG_DEBUG,
+                  "[TIME] AS11 time push queued\n");
+    } else {
+        Log::logf(CAT_GENERAL, LOG_WARN,
+                  "[TIME] AS11 time push queue full\n");
     }
     last_status_ = queued ? "esp_to_resmed_queued" : "esp_to_resmed_queue_full";
     return queued;
@@ -241,6 +248,9 @@ void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
         if (resmed_push_readback_awaiting_response_) {
             resmed_push_readback_awaiting_response_ = false;
             last_status_ = "esp_to_resmed_readback_ok";
+            Log::logf(CAT_GENERAL, LOG_INFO,
+                      "[TIME] AS11 time push readback ok UTC=%s\n",
+                      state.device_datetime().c_str());
         } else if (manual_resmed_pull_pending_ ||
                    resmed_fallback_ready(now_ms)) {
             if (set_esp_time_from_resmed(state.device_datetime())) {
@@ -273,6 +283,8 @@ void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
         resmed_push_readback_awaiting_response_ = true;
         next_resmed_push_readback_ms_ = 0;
         last_status_ = "esp_to_resmed_readback_queued";
+        Log::logf(CAT_GENERAL, LOG_DEBUG,
+                  "[TIME] AS11 time push readback queued\n");
     }
 }
 
@@ -291,6 +303,8 @@ void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
         next_resmed_push_ms_ = now_ms + TIME_SYNC_RETRY_MS;
         if (last_status_ != "resmed_push_deferred_therapy_active") {
             last_status_ = "resmed_push_deferred_therapy_active";
+            Log::logf(CAT_GENERAL, LOG_INFO,
+                      "[TIME] AS11 time push deferred: therapy active\n");
         }
         return;
     }

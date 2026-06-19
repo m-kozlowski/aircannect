@@ -26,7 +26,14 @@ JobStep ReportPrefetchJob::step() {
             return JobStep::Idle;
         }
         rescan_after_ms_ = 0;
-        if (!report_->prefetch_request_next()) {
+        uint64_t night = 0;
+        if (!report_->next_night_needing_cache(night)) {
+            report_->prefetch_mark_drained();
+            rescan_after_ms_ = millis() + AC_REPORT_PREFETCH_RESCAN_MS;
+            if (rescan_after_ms_ == 0) rescan_after_ms_ = 1;
+            return JobStep::Idle;
+        }
+        if (!report_->prefetch_request_night(night)) {
             return JobStep::Waiting;  // a request is already in flight
         }
         state_ = State::Wait;
@@ -64,7 +71,7 @@ JobStep ReportPrefetchJob::step() {
 void ReportPrefetchJob::on_preempt() {
     // Foreground needs the bus; abort any in-flight prefetch and re-pick later.
     if (state_ == State::Wait) {
-        report_->prefetch_cancel();
+        report_->prefetch_preempt();
         state_ = State::Pick;
     }
 }

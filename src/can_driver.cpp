@@ -253,10 +253,32 @@ void CanDriver::handle_alerts(uint32_t alerts) {
 
     const uint32_t suppressed = suppressed_bus_error_alerts_;
     suppressed_bus_error_alerts_ = 0;
+    const log_level_t alert_level =
+        (visible_alerts & (TWAI_ALERT_RX_QUEUE_FULL |
+                           TWAI_ALERT_TX_FAILED |
+                           TWAI_ALERT_BUS_OFF |
+                           TWAI_ALERT_ERR_PASS |
+                           TWAI_ALERT_ABOVE_ERR_WARN))
+            ? LOG_WARN
+            : LOG_INFO;
+    twai_status_info_t status = {};
+    const bool have_status =
+        (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) &&
+        twai_get_status_info(&status) == ESP_OK;
+    char detail[96] = {};
+    if (have_status) {
+        snprintf(detail, sizeof(detail),
+                 " rx_q=%lu tx_q=%lu rx_missed=%lu rx_overrun=%lu",
+                 static_cast<unsigned long>(status.msgs_to_rx),
+                 static_cast<unsigned long>(status.msgs_to_tx),
+                 static_cast<unsigned long>(status.rx_missed_count),
+                 static_cast<unsigned long>(status.rx_overrun_count));
+    }
+
     if (suppressed) {
-        Log::logf(CAT_CAN, LOG_INFO,
+        Log::logf(CAT_CAN, alert_level,
                   "alert:%s%s%s%s%s%s%s%s%s%s "
-                  "suppressed_bus_errors=%lu\n",
+                  "suppressed_bus_errors=%lu%s\n",
                   (visible_alerts & TWAI_ALERT_TX_FAILED) ? " tx_failed" : "",
                   (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) ? " rx_queue_full" : "",
                   (visible_alerts & TWAI_ALERT_ERR_PASS) ? " err_passive" : "",
@@ -267,10 +289,11 @@ void CanDriver::handle_alerts(uint32_t alerts) {
                   (visible_alerts & TWAI_ALERT_ABOVE_ERR_WARN) ? " above_err_warn" : "",
                   (visible_alerts & TWAI_ALERT_BELOW_ERR_WARN) ? " below_err_warn" : "",
                   (visible_alerts & TWAI_ALERT_BUS_RECOVERED) ? " bus_recovered" : "",
-                  static_cast<unsigned long>(suppressed));
+                  static_cast<unsigned long>(suppressed),
+                  detail);
     } else {
-        Log::logf(CAT_CAN, LOG_INFO,
-                  "alert:%s%s%s%s%s%s%s%s%s%s\n",
+        Log::logf(CAT_CAN, alert_level,
+                  "alert:%s%s%s%s%s%s%s%s%s%s%s\n",
                   (visible_alerts & TWAI_ALERT_TX_FAILED) ? " tx_failed" : "",
                   (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) ? " rx_queue_full" : "",
                   (visible_alerts & TWAI_ALERT_ERR_PASS) ? " err_passive" : "",
@@ -280,7 +303,8 @@ void CanDriver::handle_alerts(uint32_t alerts) {
                   (visible_alerts & TWAI_ALERT_ARB_LOST) ? " arb_lost" : "",
                   (visible_alerts & TWAI_ALERT_ABOVE_ERR_WARN) ? " above_err_warn" : "",
                   (visible_alerts & TWAI_ALERT_BELOW_ERR_WARN) ? " below_err_warn" : "",
-                  (visible_alerts & TWAI_ALERT_BUS_RECOVERED) ? " bus_recovered" : "");
+                  (visible_alerts & TWAI_ALERT_BUS_RECOVERED) ? " bus_recovered" : "",
+                  detail);
     }
     if (visible_alerts & TWAI_ALERT_BUS_ERROR) last_bus_error_log_ms_ = millis();
 }

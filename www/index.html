@@ -6543,6 +6543,9 @@
           ["smb_endpoint", "SMB Endpoint", "text"],
           ["smb_user", "SMB User", "text"],
           ["smb_password", "SMB Password", "password"],
+          ["syslog_enabled", "Syslog", "bool"],
+          ["syslog_host", "Syslog Host", "text"],
+          ["syslog_port", "Syslog Port", "number"],
           ["http_auth_required", "HTTP Auth", "bool"],
           ["http_user", "HTTP User", "text"],
           ["http_password", "HTTP Password", "password"],
@@ -6585,6 +6588,9 @@
             }
             if (field[0] === "smb_endpoint") {
               control.placeholder = "smb://host/share/path";
+            }
+            if (field[0] === "syslog_host") {
+              control.placeholder = "IPv4 address";
             }
             if (field[0] === "ota_password") {
               control.placeholder = configData.ota_password_set ? "set" : "empty";
@@ -6655,13 +6661,31 @@
       return parts.length >= 2 && parts[0].length > 0 && parts[1].length > 0;
     }
 
+    function validIpv4(value) {
+      const text = String(value || "").trim();
+      if (!text.length) return true;
+      const parts = text.split(".");
+      if (parts.length !== 4) return false;
+      return parts.every((part) => {
+        if (!/^\d+$/.test(part)) return false;
+        const byte = Number(part);
+        return byte >= 0 && byte <= 255;
+      });
+    }
+
     async function saveConfig() {
       const changes = {};
       document.querySelectorAll("#configFields [data-key]").forEach((input) => {
-        const rawValue = input.dataset.key === "smb_endpoint" ?
-          normalizeSmbEndpoint(input.value) : input.value;
-        const originalValue = input.dataset.key === "smb_endpoint" ?
-          normalizeSmbEndpoint(input.dataset.orig) : input.dataset.orig;
+        let rawValue = input.value;
+        let originalValue = input.dataset.orig;
+        if (input.dataset.key === "smb_endpoint") {
+          rawValue = normalizeSmbEndpoint(rawValue);
+          originalValue = normalizeSmbEndpoint(originalValue);
+        }
+        if (input.dataset.key === "syslog_host") {
+          rawValue = String(rawValue || "").trim();
+          originalValue = String(originalValue || "").trim();
+        }
         if (String(rawValue) === String(originalValue)) return;
         if (input.dataset.type === "bool") {
           changes[input.dataset.key] = rawValue === "true";
@@ -6680,6 +6704,19 @@
       if (Object.prototype.hasOwnProperty.call(changes, "smb_endpoint") &&
           !validSmbEndpoint(changes.smb_endpoint)) {
         msg("configMsg", "SMB endpoint must be smb://host/share[/path]", false);
+        return;
+      }
+
+      const syslogHost = Object.prototype.hasOwnProperty.call(changes, "syslog_host") ?
+        changes.syslog_host : (configData ? configData.syslog_host : "");
+      const syslogEnabled = Object.prototype.hasOwnProperty.call(changes, "syslog_enabled") ?
+        changes.syslog_enabled : !!(configData && configData.syslog_enabled);
+      if (!validIpv4(syslogHost)) {
+        msg("configMsg", "Syslog host must be an IPv4 address", false);
+        return;
+      }
+      if (syslogEnabled && !String(syslogHost || "").trim().length) {
+        msg("configMsg", "Syslog host is required when syslog is enabled", false);
         return;
       }
 

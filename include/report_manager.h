@@ -182,6 +182,7 @@ public:
         return summary_fetch_active_ || cache_fetch_active_ ||
                plot_build_active_;
     }
+    bool background_work_active() const;
 
     bool next_night_needing_cache(uint64_t &night_start_ms_out) const;
     const ReportCacheFetchStatus &cache_fetch_status() const {
@@ -207,10 +208,12 @@ public:
         char last_error[48] = {};
     };
 
-    bool prefetch_request_next();
-    void prefetch_cancel();
+    bool prefetch_request_night(uint64_t night_start_ms);
+    void prefetch_mark_drained();
+    void prefetch_preempt();
     PrefetchSnapshot prefetch_snapshot() const;
     bool foreground_busy() const;
+    bool service_cache_writer();
 
     bool prepare_result_by_therapy_index(size_t therapy_index,
                                          bool refresh_cache = false);
@@ -337,7 +340,19 @@ private:
 
     static constexpr size_t PREFETCH_SKIP_MAX = 8;
     static constexpr size_t AC_REPORT_COALESCE_SLOTS = 8;
-    static constexpr size_t AC_REPORT_COALESCE_TARGET_BYTES = 512 * 1024;
+    static constexpr size_t AC_REPORT_COALESCE_TARGET_BYTES = 64 * 1024;
+    static constexpr size_t AC_REPORT_CACHE_WRITE_QUEUE_MAX = 8;
+
+    enum class CacheWriteEnqueueResult : uint8_t {
+        Queued,
+        Blocked,
+        Failed,
+    };
+    enum class CacheFlushResult : uint8_t {
+        Flushed,
+        Blocked,
+        Failed,
+    };
 
     static bool write_parsed_chunk(void *context,
                                    const ReportParsedChunk &chunk);
@@ -360,7 +375,9 @@ private:
     bool write_cache_source_coverage(ReportSourceId source, int64_t from_ms);
     void reset_cache_source_coverage_marks();
     void note_cache_chunk_coverage(const ReportParsedChunk &chunk);
+    bool drain_source_events(RpcArbiter &arbiter);
     void poll_cache_fetch(RpcArbiter &arbiter);
+    void log_spool_can_pressure(const RpcArbiter &arbiter);
     void finish_cache_fetch();
     void fail_cache_fetch(const char *message);
     bool source_chunk_extent(const ReportSummaryRecord &night,
@@ -369,15 +386,26 @@ private:
                              int64_t &min_start,
                              int64_t &max_end) const;
     bool buffer_parsed_chunk(const ReportParsedChunk &chunk);
-    bool flush_cache_coalesce_buffer(size_t slot);
-    bool flush_all_cache_coalesce_buffers();
+    CacheFlushResult flush_cache_coalesce_buffer(size_t slot);
+    CacheFlushResult flush_all_cache_coalesce_buffers();
     void discard_cache_coalesce_buffers();
+    CacheWriteEnqueueResult enqueue_cache_write(
+        CacheCoalesceBuffer &buf,
+        const ReportStoreChunkKey &key,
+        const ReportStoreChunkMeta &meta);
+    void begin_cache_write_fetch();
+    void abort_cache_write_fetch();
+    bool cache_write_backpressure_active() const;
+    bool cache_writes_pending_for_active_fetch() const;
+    bool cache_write_failed_for_active_fetch(std::string &error) const;
+    bool finalize_cache_source_if_ready();
+    void note_cache_chunk_committed(uint64_t night_start_ms);
     bool clear_cache_range(int64_t start_ms,
                            int64_t end_ms,
                            ReportCacheClearResult &out);
     int64_t night_start_for_timestamp(int64_t timestamp_ms) const;
 
-    void service_prefetch();
+    void service_prefetch(bool realtime_active);
     void prefetch_yield_to_foreground();
     void set_prefetch_phase(PrefetchPhase phase, uint64_t night_ms,
                             bool inc_completed, bool inc_failed);
@@ -460,6 +488,7 @@ private:
                                          ReportSummaryRecord &out) const;
     std::atomic<uint32_t> summary_revision_pub_{0};  // see summary_revision()
     SpoolClient spool_;
+    uint32_t observed_spool_rx_queue_full_alerts_ = 0;
     bool summary_fetch_active_ = false;
     uint32_t summary_started_ms_ = 0;
 
@@ -481,8 +510,27 @@ private:
     int64_t cache_source_night_extent_ms_[AC_REPORT_SUMMARY_RECORD_MAX] = {};
 
     // Write-side coalescing: buffer parsed chunks per (kind,name) and flush
-    // ~512 KB files, so a night reads back as a few files instead of hundreds.
+    // larger files, so a night reads back as a few files instead of hundreds.
     CacheCoalesceBuffer cache_coalesce_[AC_REPORT_COALESCE_SLOTS];
+    struct CacheWriteQueueSlot {
+        bool active = false;
+        uint32_t fetch_id = 0;
+        ReportStoreChunkKey key;
+        ReportStoreChunkMeta meta;
+        ReportSpoolBuffer payload;
+    };
+    CacheWriteQueueSlot cache_write_queue_[AC_REPORT_CACHE_WRITE_QUEUE_MAX];
+    mutable SemaphoreHandle_t cache_write_lock_ = nullptr;
+    size_t cache_write_head_ = 0;
+    size_t cache_write_tail_ = 0;
+    size_t cache_write_count_ = 0;
+    uint32_t cache_write_fetch_id_ = 0;
+    uint32_t cache_write_pending_ = 0;
+    uint32_t cache_write_inflight_ = 0;
+    uint32_t cache_write_failed_fetch_id_ = 0;
+    std::string cache_write_error_;
+    bool cache_source_finalizing_ = false;
+    ReportCacheSourcePlan cache_finalizing_plan_;
     ReportCacheFetchStatus cache_status_;
     // Monotonic count of chunks ever written this boot (survives the per-fetch
     // cache_status_ reset). Exposed in the summary so the browser can drop a
@@ -497,7 +545,6 @@ private:
     };
     NightEpoch *night_epochs_ = nullptr;  // PSRAM, AC_REPORT_SUMMARY_RECORD_MAX
     size_t night_epoch_count_ = 0;
-    void bump_night_epoch(uint64_t night_start_ms);
     uint32_t night_epoch_for_unlocked(uint64_t night_start_ms) const;
     void format_night_etag(const ReportSummaryRecord &rec, char *out,
                            size_t out_size) const;
@@ -511,7 +558,7 @@ private:
     uint64_t prefetch_active_night_ = 0;
     uint64_t prefetch_last_night_ = 0;
     uint64_t prefetch_last_failed_night_ = 0;
-    bool prefetch_cancel_req_ = false;
+    bool prefetch_preempt_req_ = false;
     uint32_t prefetch_completed_ = 0;
     uint32_t prefetch_failed_ = 0;
     char prefetch_last_source_[48] = {};
@@ -520,7 +567,7 @@ private:
     struct SparseEventEmptyMarker {
         ReportSourceId source = ReportSourceId::Summary;
         uint64_t night_ms = 0;
-        char etag[48] = {};
+        char night_key[48] = {};
     };
     SparseEventEmptyMarker sparse_event_empty_[4] = {};
 
@@ -555,7 +602,7 @@ private:
     size_t range_plot_index_ = 0;
     int64_t range_plot_from_ = 0;
     int64_t range_plot_to_ = 0;
-    void service_range_plot();
+    void service_range_plot(bool realtime_active);
     uint32_t result_slot_tick_ = 0;
     void publish_result_to_slot();
     void update_materialized_status_locked();
@@ -589,7 +636,7 @@ private:
                                    size_t therapy_index,
                                    bool refresh);
     void clear_build_queue(uint64_t night_start_ms, bool all);
-    void service_build_queue();
+    void service_build_queue(bool realtime_active);
 
     ReportSummaryRecord result_night_;
     ReportResultStatus result_status_;

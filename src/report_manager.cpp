@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "board.h"
+#include "background_worker.h"
 #include "debug_log.h"
 #include "json_util.h"
 #include "memory_manager.h"
@@ -23,7 +24,6 @@ constexpr size_t REPORT_PLOT_PATH_MAX = 128;
 struct ChunkWriteContext {
     ReportManager *manager = nullptr;
     ReportSourceId source = ReportSourceId::Summary;
-    uint32_t chunks = 0;
 };
 
 struct ResultChunkContext {
@@ -64,6 +64,16 @@ void append_long(LargeTextBuffer &out, long value) {
     char buf[24];
     snprintf(buf, sizeof(buf), "%ld", value);
     out += buf;
+}
+
+void format_stable_night_key(const ReportSummaryRecord &rec,
+                             char *out,
+                             size_t out_size) {
+    if (!out || !out_size) return;
+    snprintf(out, out_size, "%llu-%lu-%lu",
+             static_cast<unsigned long long>(rec.start_ms),
+             static_cast<unsigned long>(rec.duration_min),
+             static_cast<unsigned long>(rec.session_interval_count));
 }
 
 // Plot binary wire format (little-endian), served at /api/report/plot:
@@ -502,6 +512,10 @@ ReportManager::~ReportManager() {
         vSemaphoreDelete(prefetch_lock_);
         prefetch_lock_ = nullptr;
     }
+    if (cache_write_lock_) {
+        vSemaphoreDelete(cache_write_lock_);
+        cache_write_lock_ = nullptr;
+    }
 }
 
 void ReportManager::begin() {
@@ -510,6 +524,7 @@ void ReportManager::begin() {
     if (!prefetch_lock_) prefetch_lock_ = xSemaphoreCreateMutex();
     if (!result_slots_lock_) result_slots_lock_ = xSemaphoreCreateMutex();
     if (!build_queue_lock_) build_queue_lock_ = xSemaphoreCreateMutex();
+    if (!cache_write_lock_) cache_write_lock_ = xSemaphoreCreateMutex();
     if (!night_epochs_) {
         night_epochs_ = static_cast<NightEpoch *>(Memory::calloc_large(
             AC_REPORT_SUMMARY_RECORD_MAX, sizeof(NightEpoch)));
@@ -581,9 +596,11 @@ bool ReportManager::request_summary_refresh(bool force) {
     SpoolClientRequest request;
     request.spool_type = "Summary";
     request.from_dt = REPORT_SUMMARY_FROM;
-    request.max_size = 65536;
-    request.fragment_max = 2808;
-    request.max_rounds = 16;
+    request.max_size = AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES;
+    request.fragment_max = AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES;
+    request.max_notifications = AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL;
+    request.max_rounds = 64;
+    request.pace_on_backpressure = true;
     request.stream_rounds = false;
 
     if (!spool_.begin(request)) {
@@ -606,15 +623,25 @@ bool ReportManager::request_summary_refresh(bool force) {
 }
 
 void ReportManager::poll(RpcArbiter &arbiter) {
-    service_build_queue();
-    service_range_plot();
-    service_prefetch();
+    const bool realtime_active =
+        arbiter.stream_activity_active() ||
+        arbiter.as11_state().therapy_state() == As11TherapyState::Running;
+
+    if (drain_source_events(arbiter)) return;
+    service_build_queue(realtime_active);
+    service_range_plot(realtime_active);
+    service_prefetch(realtime_active);
     // Publish the summary revision for the background prefetch job (cross-task).
     if (take_summary_lock(0)) {
         summary_revision_pub_.store(summary_status_.revision);
         give_summary_lock();
     }
-    if (!summary_fetch_active_ && !cache_fetch_active_ &&
+    if (!spool_.active()) {
+        observed_spool_rx_queue_full_alerts_ =
+            arbiter.can_driver().stats().rx_queue_full_alerts;
+    }
+    if (!realtime_active &&
+        !summary_fetch_active_ && !cache_fetch_active_ &&
         !plot_build_active_ &&
         static_cast<int32_t>(millis() - next_trash_cleanup_ms_) >= 0) {
         next_trash_cleanup_ms_ = millis() + 250;
@@ -632,6 +659,7 @@ void ReportManager::poll(RpcArbiter &arbiter) {
     if (!summary_fetch_active_) return;
 
     spool_.poll(arbiter);
+    log_spool_can_pressure(arbiter);
     bool publish_progress = false;
     const uint32_t now_ms = millis();
     if (take_summary_lock(0)) {
@@ -659,6 +687,17 @@ bool ReportManager::handle_event(const RpcEvent &event) {
     if (cache_fetch_active_ && spool_.handle_event(event)) return true;
     if (summary_fetch_active_ && spool_.handle_event(event)) return true;
     return false;
+}
+
+bool ReportManager::drain_source_events(RpcArbiter &arbiter) {
+    bool handled = false;
+    for (size_t i = 0; i < AC_REPORT_SOURCE_EVENT_DRAIN_BUDGET; ++i) {
+        RpcEvent event;
+        if (!arbiter.next_source_event(RpcSource::Report, event)) break;
+        (void)handle_event(event);
+        handled = true;
+    }
+    return handled;
 }
 
 bool ReportManager::write_parsed_chunk(void *context,
@@ -731,7 +770,10 @@ bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
         if (buf.night_start_ms != night || session_gap ||
             buf.payload.size() + chunk.payload_len >
                 AC_REPORT_COALESCE_TARGET_BYTES) {
-            if (!flush_cache_coalesce_buffer(slot)) return false;
+            if (flush_cache_coalesce_buffer(slot) !=
+                CacheFlushResult::Flushed) {
+                return false;
+            }
             slot = AC_REPORT_COALESCE_SLOTS;
         }
     }
@@ -744,7 +786,10 @@ bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
             }
         }
         if (slot == AC_REPORT_COALESCE_SLOTS) {
-            if (!flush_cache_coalesce_buffer(0)) return false;
+            if (flush_cache_coalesce_buffer(0) !=
+                CacheFlushResult::Flushed) {
+                return false;
+            }
             slot = 0;
         }
         CacheCoalesceBuffer &buf = cache_coalesce_[slot];
@@ -773,12 +818,13 @@ bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
     return true;
 }
 
-bool ReportManager::flush_cache_coalesce_buffer(size_t slot) {
-    if (slot >= AC_REPORT_COALESCE_SLOTS) return true;
+ReportManager::CacheFlushResult ReportManager::flush_cache_coalesce_buffer(
+    size_t slot) {
+    if (slot >= AC_REPORT_COALESCE_SLOTS) return CacheFlushResult::Flushed;
     CacheCoalesceBuffer &buf = cache_coalesce_[slot];
-    if (!buf.active) return true;
+    if (!buf.active) return CacheFlushResult::Flushed;
 
-    bool ok = true;
+    CacheFlushResult result = CacheFlushResult::Flushed;
     if (buf.record_count > 0 && buf.payload.size() > 0 &&
         buf.last_ms > buf.first_ms) {
         ReportStoreChunkKey key;
@@ -789,17 +835,18 @@ bool ReportManager::flush_cache_coalesce_buffer(size_t slot) {
         key.end_ms = buf.last_ms;
         key.night_start_ms = buf.night_start_ms;
         if (!key.source || !key.source[0]) {
-            ok = false;
+            result = CacheFlushResult::Failed;
         } else {
             ReportStoreChunkMeta meta;
             meta.payload_schema = buf.payload_schema;
             meta.record_count = buf.record_count;
-            ok = ReportStore::write_chunk(key, meta, buf.payload.data(),
-                                          buf.payload.size());
-            if (ok) {
-                cache_status_.chunks_written++;
-                ++cache_data_epoch_;
-                bump_night_epoch(buf.night_start_ms);
+            const CacheWriteEnqueueResult queued =
+                enqueue_cache_write(buf, key, meta);
+            if (queued == CacheWriteEnqueueResult::Blocked) {
+                return CacheFlushResult::Blocked;
+            }
+            if (queued == CacheWriteEnqueueResult::Failed) {
+                result = CacheFlushResult::Failed;
             }
         }
     }
@@ -811,15 +858,58 @@ bool ReportManager::flush_cache_coalesce_buffer(size_t slot) {
     buf.last_ms = 0;
     buf.night_start_ms = 0;
     buf.name = nullptr;
-    return ok;
+    return result;
 }
 
-bool ReportManager::flush_all_cache_coalesce_buffers() {
-    bool ok = true;
-    for (size_t i = 0; i < AC_REPORT_COALESCE_SLOTS; ++i) {
-        if (!flush_cache_coalesce_buffer(i)) ok = false;
+ReportManager::CacheWriteEnqueueResult ReportManager::enqueue_cache_write(
+    CacheCoalesceBuffer &buf,
+    const ReportStoreChunkKey &key,
+    const ReportStoreChunkMeta &meta) {
+    if (!cache_write_lock_) {
+        return CacheWriteEnqueueResult::Failed;
     }
-    return ok;
+    if (!xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(5))) {
+        return CacheWriteEnqueueResult::Blocked;
+    }
+    if (cache_write_count_ >= AC_REPORT_CACHE_WRITE_QUEUE_MAX) {
+        xSemaphoreGive(cache_write_lock_);
+        Log::logf(CAT_REPORT, LOG_DEBUG,
+                  "Cache chunk writer backpressure source=%s name=%s\n",
+                  key.source ? key.source : "",
+                  key.name ? key.name : "");
+        return CacheWriteEnqueueResult::Blocked;
+    }
+
+    CacheWriteQueueSlot &job = cache_write_queue_[cache_write_tail_];
+    job.active = true;
+    job.fetch_id = cache_write_fetch_id_;
+    job.key = key;
+    job.meta = meta;
+    job.payload.clear();
+    job.payload.move_from(buf.payload);
+    cache_write_tail_ =
+        (cache_write_tail_ + 1) % AC_REPORT_CACHE_WRITE_QUEUE_MAX;
+    cache_write_count_++;
+    cache_write_pending_++;
+    xSemaphoreGive(cache_write_lock_);
+
+    if (BackgroundWorker *worker = background_worker()) {
+        worker->wake();
+    }
+    return CacheWriteEnqueueResult::Queued;
+}
+
+ReportManager::CacheFlushResult
+ReportManager::flush_all_cache_coalesce_buffers() {
+    CacheFlushResult result = CacheFlushResult::Flushed;
+    for (size_t i = 0; i < AC_REPORT_COALESCE_SLOTS; ++i) {
+        const CacheFlushResult flush = flush_cache_coalesce_buffer(i);
+        if (flush == CacheFlushResult::Failed) return flush;
+        if (flush == CacheFlushResult::Blocked) {
+            result = CacheFlushResult::Blocked;
+        }
+    }
+    return result;
 }
 
 void ReportManager::discard_cache_coalesce_buffers() {
@@ -833,6 +923,166 @@ void ReportManager::discard_cache_coalesce_buffers() {
         buf.night_start_ms = 0;
         buf.name = nullptr;
     }
+}
+
+void ReportManager::begin_cache_write_fetch() {
+    if (!cache_write_lock_) return;
+    xSemaphoreTake(cache_write_lock_, portMAX_DELAY);
+    for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
+        CacheWriteQueueSlot &job = cache_write_queue_[i];
+        job.active = false;
+        job.payload.clear();
+    }
+    cache_write_head_ = 0;
+    cache_write_tail_ = 0;
+    cache_write_count_ = 0;
+    cache_write_pending_ = 0;
+    cache_write_failed_fetch_id_ = 0;
+    cache_write_error_.clear();
+    ++cache_write_fetch_id_;
+    if (cache_write_fetch_id_ == 0) ++cache_write_fetch_id_;
+    xSemaphoreGive(cache_write_lock_);
+    cache_source_finalizing_ = false;
+    cache_finalizing_plan_ = {};
+}
+
+void ReportManager::abort_cache_write_fetch() {
+    if (!cache_write_lock_) return;
+    xSemaphoreTake(cache_write_lock_, portMAX_DELAY);
+    for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
+        CacheWriteQueueSlot &job = cache_write_queue_[i];
+        job.active = false;
+        job.payload.clear();
+    }
+    cache_write_head_ = 0;
+    cache_write_tail_ = 0;
+    cache_write_count_ = 0;
+    cache_write_pending_ = 0;
+    cache_write_failed_fetch_id_ = 0;
+    cache_write_error_.clear();
+    ++cache_write_fetch_id_;
+    if (cache_write_fetch_id_ == 0) ++cache_write_fetch_id_;
+    xSemaphoreGive(cache_write_lock_);
+    cache_source_finalizing_ = false;
+    cache_finalizing_plan_ = {};
+}
+
+bool ReportManager::cache_writes_pending_for_active_fetch() const {
+    if (!cache_write_lock_ ||
+        !xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(5))) {
+        return true;
+    }
+    const bool pending = cache_write_pending_ > 0;
+    xSemaphoreGive(cache_write_lock_);
+    return pending;
+}
+
+bool ReportManager::cache_write_failed_for_active_fetch(
+    std::string &error) const {
+    if (!cache_write_lock_ ||
+        !xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(5))) {
+        return false;
+    }
+    const bool failed =
+        cache_write_failed_fetch_id_ != 0 &&
+        cache_write_failed_fetch_id_ == cache_write_fetch_id_;
+    if (failed) error = cache_write_error_;
+    xSemaphoreGive(cache_write_lock_);
+    return failed;
+}
+
+bool ReportManager::cache_write_backpressure_active() const {
+    if (!cache_write_lock_ ||
+        !xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(5))) {
+        return true;
+    }
+    const bool active =
+        cache_write_count_ >= (AC_REPORT_CACHE_WRITE_QUEUE_MAX / 2);
+    xSemaphoreGive(cache_write_lock_);
+    return active;
+}
+
+void ReportManager::note_cache_chunk_committed(uint64_t night_start_ms) {
+    cache_status_.chunks_written++;
+    if (!take_summary_lock(portMAX_DELAY)) return;
+    cache_data_epoch_++;
+    if (night_start_ms && night_epochs_) {
+        for (size_t i = 0; i < night_epoch_count_; ++i) {
+            if (night_epochs_[i].night_start_ms == night_start_ms) {
+                night_epochs_[i].epoch++;
+                give_summary_lock();
+                return;
+            }
+        }
+        if (night_epoch_count_ < AC_REPORT_SUMMARY_RECORD_MAX) {
+            night_epochs_[night_epoch_count_].night_start_ms = night_start_ms;
+            night_epochs_[night_epoch_count_].epoch = 1;
+            ++night_epoch_count_;
+        }
+    }
+    give_summary_lock();
+}
+
+bool ReportManager::service_cache_writer() {
+    if (!cache_write_lock_) return false;
+
+    CacheWriteQueueSlot job;
+    if (!xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(20))) return false;
+    if (cache_write_count_ == 0) {
+        xSemaphoreGive(cache_write_lock_);
+        return false;
+    }
+
+    CacheWriteQueueSlot &slot = cache_write_queue_[cache_write_head_];
+    job.active = slot.active;
+    job.fetch_id = slot.fetch_id;
+    job.key = slot.key;
+    job.meta = slot.meta;
+    job.payload.move_from(slot.payload);
+    slot.active = false;
+    cache_write_head_ =
+        (cache_write_head_ + 1) % AC_REPORT_CACHE_WRITE_QUEUE_MAX;
+    cache_write_count_--;
+    cache_write_inflight_++;
+    xSemaphoreGive(cache_write_lock_);
+
+    const uint64_t night_start_ms =
+        static_cast<uint64_t>(job.key.night_start_ms);
+    const size_t payload_size = job.payload.size();
+    const bool ok = job.active &&
+                    ReportStore::write_chunk(job.key,
+                                             job.meta,
+                                             job.payload.data(),
+                                             job.payload.size());
+    job.payload.clear();
+
+    bool current_fetch = false;
+    if (xSemaphoreTake(cache_write_lock_, portMAX_DELAY)) {
+        current_fetch = job.fetch_id == cache_write_fetch_id_;
+        if (current_fetch) {
+            if (cache_write_pending_ > 0) cache_write_pending_--;
+            if (!ok) {
+                cache_write_failed_fetch_id_ = job.fetch_id;
+                cache_write_error_ = "cache_write_failed";
+            }
+        }
+        if (cache_write_inflight_ > 0) cache_write_inflight_--;
+        xSemaphoreGive(cache_write_lock_);
+    }
+
+    if (ok && current_fetch) {
+        note_cache_chunk_committed(night_start_ms);
+    } else if (!ok && current_fetch) {
+        Log::logf(CAT_REPORT, LOG_WARN,
+                  "Cache chunk write failed source=%s name=%s "
+                  "start=%lld end=%lld bytes=%u\n",
+                  job.key.source ? job.key.source : "",
+                  job.key.name ? job.key.name : "",
+                  static_cast<long long>(job.key.start_ms),
+                  static_cast<long long>(job.key.end_ms),
+                  static_cast<unsigned>(payload_size));
+    }
+    return true;
 }
 
 bool ReportManager::ensure_summary_records() {
@@ -1215,24 +1465,6 @@ void ReportManager::build_summary_json(LargeTextBuffer &json) const {
     }
     json.clear();
     json.append(summary_json_snapshot_.c_str(), summary_json_snapshot_.length());
-}
-
-void ReportManager::bump_night_epoch(uint64_t night_start_ms) {
-    if (!night_start_ms || !night_epochs_) return;
-    if (!take_summary_lock(portMAX_DELAY)) return;
-    for (size_t i = 0; i < night_epoch_count_; ++i) {
-        if (night_epochs_[i].night_start_ms == night_start_ms) {
-            night_epochs_[i].epoch++;
-            give_summary_lock();
-            return;
-        }
-    }
-    if (night_epoch_count_ < AC_REPORT_SUMMARY_RECORD_MAX) {
-        night_epochs_[night_epoch_count_].night_start_ms = night_start_ms;
-        night_epochs_[night_epoch_count_].epoch = 1;
-        ++night_epoch_count_;
-    }
-    give_summary_lock();
 }
 
 uint32_t ReportManager::night_epoch_for_unlocked(uint64_t night_start_ms) const {
@@ -1912,23 +2144,32 @@ bool ReportManager::request_latest_night_cache(bool force) {
 
 bool ReportManager::prefetch_in_cooldown(uint64_t night_ms,
                                          uint32_t now_ms) const {
+    const bool locked = prefetch_lock_ &&
+                        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) ==
+                            pdTRUE;
+    bool in_cooldown = false;
     for (size_t i = 0; i < PREFETCH_SKIP_MAX; ++i) {
         if (prefetch_skip_[i].night_ms == night_ms &&
             prefetch_skip_[i].until_ms != 0 &&
             static_cast<int32_t>(now_ms - prefetch_skip_[i].until_ms) < 0) {
-            return true;
+            in_cooldown = true;
+            break;
         }
     }
-    return false;
+    if (locked) xSemaphoreGive(prefetch_lock_);
+    return in_cooldown;
 }
 
 void ReportManager::note_sparse_event_confirmed_empty(
     const ReportSummaryRecord &night,
     const ReportSourceDef &source) {
-    char etag[48];
-    format_night_etag(night, etag, sizeof(etag));
-    if (!etag[0]) return;
+    char night_key[48];
+    format_stable_night_key(night, night_key, sizeof(night_key));
+    if (!night_key[0]) return;
 
+    const bool locked = prefetch_lock_ &&
+                        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) ==
+                            pdTRUE;
     size_t pick = 0;
     bool found = false;
     const size_t marker_count =
@@ -1947,30 +2188,37 @@ void ReportManager::note_sparse_event_confirmed_empty(
     SparseEventEmptyMarker &marker = sparse_event_empty_[pick];
     marker.source = source.id;
     marker.night_ms = night.start_ms;
-    snprintf(marker.etag,
-             sizeof(marker.etag),
+    snprintf(marker.night_key,
+             sizeof(marker.night_key),
              "%s",
-             etag);
+             night_key);
+    if (locked) xSemaphoreGive(prefetch_lock_);
 }
 
 bool ReportManager::sparse_event_confirmed_empty(
     const ReportSummaryRecord &night,
     const ReportSourceDef &source) const {
-    char etag[48];
-    format_night_etag(night, etag, sizeof(etag));
-    if (!etag[0]) return false;
+    char night_key[48];
+    format_stable_night_key(night, night_key, sizeof(night_key));
+    if (!night_key[0]) return false;
+    const bool locked = prefetch_lock_ &&
+                        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) ==
+                            pdTRUE;
+    bool confirmed = false;
     const size_t marker_count =
         sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
     for (size_t i = 0; i < marker_count; ++i) {
         const SparseEventEmptyMarker &marker = sparse_event_empty_[i];
         if (marker.source == source.id &&
             marker.night_ms == night.start_ms &&
-            marker.etag[0] != '\0' &&
-            strcmp(etag, marker.etag) == 0) {
-            return true;
+            marker.night_key[0] != '\0' &&
+            strcmp(night_key, marker.night_key) == 0) {
+            confirmed = true;
+            break;
         }
     }
-    return false;
+    if (locked) xSemaphoreGive(prefetch_lock_);
+    return confirmed;
 }
 
 bool ReportManager::sparse_event_refresh_due(
@@ -2002,6 +2250,9 @@ void ReportManager::prefetch_note_failure(uint64_t night_ms) {
     const uint32_t now_ms = millis();
     uint32_t until = now_ms + AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS;
     if (until == 0) until = 1;
+    const bool locked = prefetch_lock_ &&
+                        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) ==
+                            pdTRUE;
     size_t pick = 0;
     for (size_t i = 0; i < PREFETCH_SKIP_MAX; ++i) {
         if (prefetch_skip_[i].night_ms == night_ms ||
@@ -2017,6 +2268,7 @@ void ReportManager::prefetch_note_failure(uint64_t night_ms) {
     }
     prefetch_skip_[pick].night_ms = night_ms;
     prefetch_skip_[pick].until_ms = until;
+    if (locked) xSemaphoreGive(prefetch_lock_);
 }
 
 void ReportManager::set_prefetch_phase(PrefetchPhase phase,
@@ -2069,24 +2321,36 @@ void ReportManager::set_prefetch_phase(PrefetchPhase phase,
     }
 }
 
-bool ReportManager::prefetch_request_next() {
-    if (!prefetch_lock_) return false;
+bool ReportManager::prefetch_request_night(uint64_t night_start_ms) {
+    if (!prefetch_lock_ || night_start_ms == 0) return false;
     bool accepted = false;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
     if (prefetch_phase_ != PrefetchPhase::Pending &&
         prefetch_phase_ != PrefetchPhase::Fetching) {
         prefetch_phase_ = PrefetchPhase::Pending;
-        prefetch_active_night_ = 0;
+        prefetch_active_night_ = night_start_ms;
+        prefetch_last_night_ = night_start_ms;
         accepted = true;
     }
     xSemaphoreGive(prefetch_lock_);
     return accepted;
 }
 
-void ReportManager::prefetch_cancel() {
+void ReportManager::prefetch_mark_drained() {
     if (!prefetch_lock_) return;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
-    prefetch_cancel_req_ = true;
+    if (prefetch_phase_ != PrefetchPhase::Pending &&
+        prefetch_phase_ != PrefetchPhase::Fetching) {
+        prefetch_phase_ = PrefetchPhase::Drained;
+        prefetch_active_night_ = 0;
+    }
+    xSemaphoreGive(prefetch_lock_);
+}
+
+void ReportManager::prefetch_preempt() {
+    if (!prefetch_lock_) return;
+    xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
+    prefetch_preempt_req_ = true;
     xSemaphoreGive(prefetch_lock_);
 }
 
@@ -2125,6 +2389,49 @@ bool ReportManager::foreground_busy() const {
     return !prefetch_owned;
 }
 
+bool ReportManager::background_work_active() const {
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+        return true;
+    }
+    if (build_queue_lock_) {
+        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+        const bool queued = build_queue_count_ > 0;
+        xSemaphoreGive(build_queue_lock_);
+        if (queued) return true;
+    }
+    if (!prefetch_lock_) return false;
+    xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
+    const PrefetchPhase phase = prefetch_phase_;
+    xSemaphoreGive(prefetch_lock_);
+    return phase == PrefetchPhase::Pending ||
+           phase == PrefetchPhase::Fetching ||
+           phase == PrefetchPhase::Done;
+}
+
+void ReportManager::log_spool_can_pressure(const RpcArbiter &arbiter) {
+    const uint32_t alerts =
+        arbiter.can_driver().stats().rx_queue_full_alerts;
+    if (alerts == observed_spool_rx_queue_full_alerts_) return;
+    observed_spool_rx_queue_full_alerts_ = alerts;
+    if (!spool_.active()) return;
+
+    const SpoolClientStatus &spool = spool_.status();
+    Log::logf(CAT_REPORT,
+              LOG_WARN,
+              "spool CAN RX pressure source=%s state=%s round=%u "
+              "spool_id=%lu round_fragments=%lu round_bytes=%lu "
+              "total_fragments=%lu total_bytes=%lu alerts=%lu\n",
+              spool.spool_type.c_str(),
+              spool_client_state_name(spool.state),
+              static_cast<unsigned>(spool.current_round),
+              static_cast<unsigned long>(spool.active_spool_id),
+              static_cast<unsigned long>(spool.round_fragments),
+              static_cast<unsigned long>(spool.round_bytes),
+              static_cast<unsigned long>(spool.fragments),
+              static_cast<unsigned long>(spool.bytes),
+              static_cast<unsigned long>(alerts));
+}
+
 void ReportManager::prefetch_yield_to_foreground() {
     if (!prefetch_lock_) return;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
@@ -2133,13 +2440,14 @@ void ReportManager::prefetch_yield_to_foreground() {
     if (!owns) return;
     if (cache_fetch_active_) {
         spool_.reset();
+        abort_cache_write_fetch();
         cache_fetch_active_ = false;
         cache_status_.active = false;
         cache_status_.revision++;
         cache_status_.error = "preempted_by_user";
     }
-    set_prefetch_phase(PrefetchPhase::Failed, 0, false, true);
-    Log::logf(CAT_REPORT, LOG_INFO,
+    set_prefetch_phase(PrefetchPhase::Idle, 0, false, false);
+    Log::logf(CAT_REPORT, LOG_DEBUG,
               "prefetch yielded to foreground prepare\n");
 }
 
@@ -2193,9 +2501,10 @@ void ReportManager::clear_build_queue(uint64_t night_start_ms, bool all) {
     xSemaphoreGive(build_queue_lock_);
 }
 
-void ReportManager::service_build_queue() {
+void ReportManager::service_build_queue(bool realtime_active) {
     if (!build_queue_lock_) return;
     if (summary_fetch_active_ || plot_build_active_) return;
+    if (realtime_active) return;
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
     const bool have = build_queue_count_ > 0;
     ResultBuildJob job = have ? build_queue_[build_queue_head_] : ResultBuildJob{};
@@ -2216,25 +2525,26 @@ void ReportManager::service_build_queue() {
     prepare_result_by_therapy_index_internal(job.therapy_index, job.refresh);
 }
 
-void ReportManager::service_prefetch() {
+void ReportManager::service_prefetch(bool realtime_active) {
     if (!prefetch_lock_) return;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
     const PrefetchPhase phase = prefetch_phase_;
-    const bool cancel = prefetch_cancel_req_;
-    prefetch_cancel_req_ = false;
+    const bool preempt = prefetch_preempt_req_;
+    prefetch_preempt_req_ = false;
     const uint64_t active = prefetch_active_night_;
     xSemaphoreGive(prefetch_lock_);
 
-    if (cancel && (phase == PrefetchPhase::Fetching ||
-                   phase == PrefetchPhase::Pending)) {
+    if (preempt && (phase == PrefetchPhase::Fetching ||
+                    phase == PrefetchPhase::Pending)) {
         if (cache_fetch_active_) {
             spool_.reset();
+            abort_cache_write_fetch();
             cache_fetch_active_ = false;
             cache_status_.active = false;
             cache_status_.revision++;
-            cache_status_.error = "prefetch_cancelled";
+            cache_status_.error = "prefetch_preempted";
         }
-        set_prefetch_phase(PrefetchPhase::Failed, active, false, true);
+        set_prefetch_phase(PrefetchPhase::Idle, 0, false, false);
         return;
     }
 
@@ -2249,11 +2559,26 @@ void ReportManager::service_prefetch() {
         return;
     }
 
+    if (realtime_active) {
+        if (phase == PrefetchPhase::Fetching && cache_fetch_active_) {
+            spool_.reset();
+            abort_cache_write_fetch();
+            cache_fetch_active_ = false;
+            cache_status_.active = false;
+            cache_status_.revision++;
+            cache_status_.error = "preempted_by_stream";
+            set_prefetch_phase(PrefetchPhase::Idle, 0, false, false);
+            Log::logf(CAT_REPORT, LOG_DEBUG,
+                      "prefetch yielded to stream activity\n");
+        }
+        return;
+    }
+
     if (phase == PrefetchPhase::Pending && !busy()) {
-        uint64_t night = 0;
-        if (next_night_needing_cache(night) &&
-            request_night_cache(night, false)) {
-            set_prefetch_phase(PrefetchPhase::Fetching, night, false, false);
+        if (active != 0 && request_night_cache(active, false)) {
+            set_prefetch_phase(PrefetchPhase::Fetching, active, false, false);
+        } else if (active != 0) {
+            set_prefetch_phase(PrefetchPhase::Failed, active, false, true);
         } else {
             set_prefetch_phase(PrefetchPhase::Drained, 0, false, false);
         }
@@ -2411,9 +2736,13 @@ bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
     invalidate_materialized(0, true);
     const size_t sparse_marker_count =
         sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
+    const bool sparse_locked =
+        prefetch_lock_ &&
+        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) == pdTRUE;
     for (size_t i = 0; i < sparse_marker_count; ++i) {
         sparse_event_empty_[i] = SparseEventEmptyMarker{};
     }
+    if (sparse_locked) xSemaphoreGive(prefetch_lock_);
 
     if (!take_summary_lock(portMAX_DELAY)) return false;
     clear_summary_records();
@@ -2452,11 +2781,15 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
                                       out);
     const size_t sparse_marker_count =
         sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
+    const bool sparse_locked =
+        prefetch_lock_ &&
+        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) == pdTRUE;
     for (size_t i = 0; i < sparse_marker_count; ++i) {
         if (sparse_event_empty_[i].night_ms == night.start_ms) {
             sparse_event_empty_[i] = SparseEventEmptyMarker{};
         }
     }
+    if (sparse_locked) xSemaphoreGive(prefetch_lock_);
     uint32_t plot_deleted = 0;
     if (clear_plot_cache_for_night(night, plot_deleted)) {
         out.plots_deleted += plot_deleted;
@@ -2480,6 +2813,7 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
 bool ReportManager::cancel_cache_fetch() {
     if (!cache_fetch_active_) return false;
     spool_.reset();
+    abort_cache_write_fetch();
     cache_fetch_active_ = false;
     cache_status_.active = false;
     cache_status_.revision++;
@@ -3432,7 +3766,7 @@ ReportManager::PlotRead ReportManager::read_plot_range(
     return PlotRead::Building;
 }
 
-void ReportManager::service_range_plot() {
+void ReportManager::service_range_plot(bool realtime_active) {
     if (!result_slots_lock_) return;
     xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
     const bool active = range_req_active_;
@@ -3441,6 +3775,7 @@ void ReportManager::service_range_plot() {
     const int64_t to_ms = range_req_to_;
     xSemaphoreGive(result_slots_lock_);
     if (!active) return;
+    if (realtime_active) return;
     // Defer while a night build or summary fetch owns the shared state + SD bus.
     if (plot_build_active_ || summary_fetch_active_) return;
     // Yield an idle prefetch so the range builds now; a real foreground fetch is
@@ -4004,6 +4339,7 @@ bool ReportManager::build_cache_plan(const ReportSummaryRecord &night,
         invalidate_materialized(night.start_ms, false);
     }
     discard_cache_coalesce_buffers();
+    begin_cache_write_fetch();
     cache_fetch_active_ = true;
     cache_status_.active = true;
     return true;
@@ -4033,9 +4369,11 @@ bool ReportManager::start_next_cache_source() {
     SpoolClientRequest request;
     request.spool_type = def->spool_type;
     request.from_dt = from_dt;
-    request.max_size = 65536;
-    request.fragment_max = 2808;
+    request.max_size = AC_REPORT_CACHE_SPOOL_ROUND_BYTES;
+    request.fragment_max = AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES;
+    request.max_notifications = AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL;
     request.max_rounds = 128;
+    request.pace_on_backpressure = true;
     request.stream_rounds = true;
     if (!spool_.begin(request)) {
         fail_cache_fetch("cache_spool_start_failed");
@@ -4046,7 +4384,7 @@ bool ReportManager::start_next_cache_source() {
     cache_status_.active_source = source;
     cache_status_.source_index = static_cast<uint32_t>(cache_source_index_);
     cache_status_.spool = spool_.status();
-    Log::logf(CAT_REPORT, LOG_INFO,
+    Log::logf(CAT_REPORT, LOG_DEBUG,
               "Cache source queued source=%s from=%s night=%llu\n",
               def->spool_type,
               from_dt.c_str(),
@@ -4102,7 +4440,6 @@ bool ReportManager::store_cache_round(ReportSpoolResult &result) {
         return false;
     }
 
-    cache_status_.chunks_written += context.chunks;
     return true;
 }
 
@@ -4238,17 +4575,58 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
     return true;
 }
 
+bool ReportManager::finalize_cache_source_if_ready() {
+    std::string write_error;
+    if (cache_write_failed_for_active_fetch(write_error)) {
+        fail_cache_fetch(write_error.empty() ? "cache_write_failed"
+                                             : write_error.c_str());
+        return false;
+    }
+    const CacheFlushResult flush = flush_all_cache_coalesce_buffers();
+    if (flush == CacheFlushResult::Blocked) return true;
+    if (flush == CacheFlushResult::Failed) {
+        fail_cache_fetch("cache_flush_failed");
+        return false;
+    }
+    if (cache_writes_pending_for_active_fetch()) return true;
+
+    if (!write_cache_source_coverage(cache_finalizing_plan_.source,
+                                     cache_finalizing_plan_.from_ms)) {
+        return false;
+    }
+    cache_source_finalizing_ = false;
+    cache_finalizing_plan_ = {};
+    cache_source_index_++;
+    start_next_cache_source();
+    return true;
+}
+
 void ReportManager::poll_cache_fetch(RpcArbiter &arbiter) {
     if (!cache_fetch_active_) return;
 
+    if (cache_source_finalizing_) {
+        (void)finalize_cache_source_if_ready();
+        return;
+    }
+
+    std::string write_error;
+    if (cache_write_failed_for_active_fetch(write_error)) {
+        fail_cache_fetch(write_error.empty() ? "cache_write_failed"
+                                             : write_error.c_str());
+        return;
+    }
+
     spool_.poll(arbiter);
+    log_spool_can_pressure(arbiter);
     cache_status_.spool = spool_.status();
+    if (cache_write_backpressure_active()) return;
 
     ReportSpoolResult round;
     while (spool_.take_completed_round(round)) {
         if (!store_cache_round(round)) return;
         round.clear();
         cache_status_.spool = spool_.status();
+        if (cache_write_backpressure_active()) return;
     }
 
     if (spool_.complete()) {
@@ -4259,19 +4637,9 @@ void ReportManager::poll_cache_fetch(RpcArbiter &arbiter) {
             return;
         }
         // Flush before claiming coverage, so coverage never marks unpersisted data.
-        if (!flush_all_cache_coalesce_buffers()) {
-            fail_cache_fetch("cache_flush_failed");
-            return;
-        }
-        const ReportCacheSourcePlan completed_plan =
-            cache_plan_[cache_source_index_];
-        if (!write_cache_source_coverage(
-                completed_plan.source,
-                completed_plan.from_ms)) {
-            return;
-        }
-        cache_source_index_++;
-        start_next_cache_source();
+        cache_finalizing_plan_ = cache_plan_[cache_source_index_];
+        cache_source_finalizing_ = true;
+        (void)finalize_cache_source_if_ready();
     } else if (spool_.failed()) {
         fail_cache_fetch(spool_.status().error.c_str());
     }
@@ -4297,6 +4665,7 @@ void ReportManager::finish_cache_fetch() {
 
 void ReportManager::fail_cache_fetch(const char *message) {
     discard_cache_coalesce_buffers();
+    abort_cache_write_fetch();
     cache_fetch_active_ = false;
     cache_status_.active = false;
     cache_status_.revision++;

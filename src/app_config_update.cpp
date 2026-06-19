@@ -189,6 +189,41 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
+    const bool syslog_enabled_present = doc["syslog_enabled"].is<bool>() ||
+                                        doc["syslog"].is<bool>();
+    const bool syslog_host_present = doc["syslog_host"].is<const char *>();
+    const bool syslog_port_present =
+        valid_port_from_json(doc, "syslog_port", parsed_port);
+    if (syslog_enabled_present || syslog_host_present || syslog_port_present) {
+        bool enabled = config.data().syslog_enabled;
+        String host = config.data().syslog_host;
+        uint16_t port = config.data().syslog_port;
+        if (syslog_enabled_present) {
+            enabled = doc["syslog_enabled"].is<bool>()
+                ? doc["syslog_enabled"].as<bool>()
+                : doc["syslog"].as<bool>();
+        }
+        if (syslog_host_present) {
+            host = doc["syslog_host"].as<const char *>();
+            if (!syslog_enabled_present) enabled = host.length() > 0;
+        }
+        if (syslog_port_present) port = parsed_port;
+
+        const bool before_enabled = config.data().syslog_enabled;
+        const String before_host = config.data().syslog_host;
+        const uint16_t before_port = config.data().syslog_port;
+        const bool accepted = config.set_syslog(enabled, host, port);
+        if (accepted) {
+            result.accepted_fields++;
+            if (before_enabled != config.data().syslog_enabled ||
+                before_host != config.data().syslog_host ||
+                before_port != config.data().syslog_port) {
+                result.changed_fields++;
+                result.log_config_changed = true;
+            }
+        }
+    }
+
     if (json_get_string(doc, "softap_mode", s)) {
         SoftApMode softap_mode;
         if (parse_softap_mode(s, softap_mode)) {
@@ -317,6 +352,9 @@ void apply_config_runtime_effects(const AppConfigUpdateResult &result,
     }
     if (result.ota_config_dirty) {
         ota_manager.mark_config_dirty();
+    }
+    if (result.log_config_changed) {
+        config.apply_log_config();
     }
     if (result.edf_capture_changed) {
         edf_recorder_manager.set_enabled(config.data().edf_capture_enabled);

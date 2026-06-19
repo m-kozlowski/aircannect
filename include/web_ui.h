@@ -83,6 +83,8 @@ struct WebUiMemoryStatus {
 
 class WebUI {
 public:
+    using PollCheckpoint = void (*)(const char *section);
+
     bool begin(RpcArbiter &arbiter,
                WifiManager &wifi_manager,
                TcpBridge &tcp_bridge,
@@ -100,7 +102,7 @@ public:
                ConsoleContext &console_ctx,
                uint16_t port = 80);
     void stop();
-    void poll();
+    void poll(PollCheckpoint checkpoint = nullptr);
     void handle_event(const RpcEvent &event);
     bool started() const { return started_; }
     WebUiMemoryStatus memory_status();
@@ -147,7 +149,9 @@ private:
                               int requested_mode);
     void mark_snapshots_dirty(uint16_t mask);
     void request_sse_push();
-    void publish_snapshots(bool force);
+    void publish_snapshots(bool force,
+                           bool realtime_active = false,
+                           PollCheckpoint checkpoint = nullptr);
 
     // Deferred command queue
     bool enqueue_command(WebCommand &&command);

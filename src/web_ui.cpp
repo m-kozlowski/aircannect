@@ -735,23 +735,33 @@ void WebUI::stop() {
     started_ = false;
 }
 
-void WebUI::poll() {
+void WebUI::poll(PollCheckpoint checkpoint) {
     if (!started_) return;
+    const bool realtime_active =
+        arbiter_ &&
+        (arbiter_->stream_activity_active() ||
+         arbiter_->as11_state().therapy_state() == As11TherapyState::Running);
     drain_commands();
+    if (checkpoint) checkpoint("web_ui.commands");
     enforce_sse_limits();
+    if (checkpoint) checkpoint("web_ui.sse_limits");
     poll_live_stream();
-    publish_snapshots(false);
+    if (checkpoint) checkpoint("web_ui.live");
+    publish_snapshots(false, realtime_active, checkpoint);
+    if (checkpoint) checkpoint("web_ui.snapshots");
 
     if (!events_ || events_->count() == 0) return;
     const bool push_requested = sse_push_requested_;
     if (!push_requested &&
         static_cast<int32_t>(millis() - last_sse_push_ms_) <
         static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS)) {
+        if (checkpoint) checkpoint("web_ui.sse_idle");
         return;
     }
     last_sse_push_ms_ = millis();
     if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         sse_push_requested_ = push_requested;
+        if (checkpoint) checkpoint("web_ui.sse_lock");
         return;
     }
     sse_push_requested_ = false;
@@ -788,9 +798,11 @@ void WebUI::poll() {
         }
     }
     xSemaphoreGive(cache_mutex_);
+    if (checkpoint) checkpoint("web_ui.sse_send");
     if (sse_backpressure) {
         sse_enforce_needed_ = true;
         enforce_sse_limits();
+        if (checkpoint) checkpoint("web_ui.sse_backpressure");
     }
 }
 
@@ -1453,15 +1465,12 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json = "{";
     json_add_string(json, "version", snap.version, false);
     json_add_string(json, "built", snap.built);
-    json_add_string(json, "reset_reason", snap.reset_reason);
     json_add_int(json, "uptime", snap.uptime_s);
     json_add_int(json, "heap", static_cast<long>(mem.heap_free));
     json_add_bool(json, "psram_available", mem.psram_available);
     json_add_int(json, "psram_free", static_cast<long>(mem.psram_free));
     json_add_bool(json, "storage_configured", storage.configured);
     json_add_bool(json, "storage_mounted", storage.mounted);
-    json_add_string(json, "storage_type",
-                    Storage::type_name(storage.type));
     json_add_string(json, "storage_state",
                     Storage::state_name(storage.state));
     json_add_uint64(json, "storage_total", storage.total_bytes);
@@ -1478,13 +1487,6 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                         app_config_->data().smb_endpoint.c_str());
         json_add_string(json, "state",
                         storage_sync_state_name(sync.state));
-        json_add_bool(json, "endpoint_set", sync.endpoint_set);
-        json_add_bool(json, "user_set", sync.user_set);
-        json_add_bool(json, "password_set", sync.password_set);
-        json_add_bool(json, "auto_after_therapy",
-                      sync.auto_after_therapy);
-        json_add_bool(json, "reconcile_enabled",
-                      sync.reconcile_enabled);
         json_add_bool(json, "network_available",
                       sync.network_available);
         json_add_bool(json, "pending", sync.pending);
@@ -1495,8 +1497,6 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
         json_add_string(json, "pending_reason", sync.pending_reason);
         json_add_string(json, "last_error", sync.last_error);
         json_add_string(json, "current_path", sync.current_path);
-        json_add_int(json, "config_generation",
-                     static_cast<long>(sync.config_generation));
         json_add_int(json, "files_seen",
                      static_cast<long>(sync.files_seen));
         json_add_int(json, "files_uploaded",
@@ -1512,8 +1512,6 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                      static_cast<long>(sync.last_sync_files_seen));
         json_add_int(json, "last_sync_files_uploaded",
                      static_cast<long>(sync.last_sync_files_uploaded));
-        json_add_int(json, "last_sync_files_skipped",
-                     static_cast<long>(sync.last_sync_files_skipped));
         json_add_int(json, "last_sync_files_failed",
                      static_cast<long>(sync.last_sync_files_failed));
         json_add_uint64(json, "last_sync_bytes_uploaded",
@@ -1526,33 +1524,22 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                         sync.last_reconcile_epoch);
         json_add_int(json, "last_reconcile_files_seen",
                      static_cast<long>(sync.last_reconcile_files_seen));
-        json_add_uint64(json, "last_failure_epoch",
-                        sync.last_failure_epoch);
-        json_add_string(json, "last_failure_error",
-                        sync.last_failure_error);
         json_add_int(json, "started_ms",
                      static_cast<long>(sync.started_ms));
         json_add_int(json, "updated_ms",
                      static_cast<long>(sync.updated_ms));
         json_add_int(json, "retry_due_ms",
                      static_cast<long>(sync.retry_due_ms));
-        json_add_int(json, "retry_attempt",
-                     static_cast<long>(sync.retry_attempt));
         json += '}';
     }
     json_add_string_view(json, "wifi_state", wifi.state);
     json_add_string_view(json, "wifi_ssid", wifi.ssid);
     json_add_string(json, "wifi_ip", wifi.ip);
-    json_add_string(json, "softap_mode",
-                    softap_mode_name(wifi.softap_mode));
-    json_add_bool(json, "softap_running", wifi.softap_running);
     json_add_int(json, "wifi_rssi", wifi.rssi);
     json_add_int(json, "wifi_channel", wifi.channel);
     json_add_string(json, "wifi_bssid", wifi.bssid);
     json_add_int(json, "wifi_profile", wifi.active_profile);
     json_add_bool(json, "wifi_roam", wifi.roaming_enabled);
-    json_add_bool(json, "wifi_roam_suspended", wifi.roaming_suspended);
-    json_add_bool(json, "ota_active", snap.ota_active);
     json_add_string_view(json, "device_name", as11.product_name);
     json_add_string_view(json, "serial", as11.serial_number);
     json_add_string_view(json, "software_id", as11.software_identifier);
@@ -1561,7 +1548,6 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_string(json, "therapy_pending",
                     As11DeviceState::therapy_target_name(
                         as11.pending_therapy_target));
-    json_add_string_view(json, "rop", as11.rop);
     json_add_string_view(json, "profile", as11.active_therapy_profile);
     char hours[16];
     motor_hours(as11.motor_run_meter, hours, sizeof(hours));
@@ -2571,6 +2557,9 @@ void WebUI::build_config_json(LargeTextBuffer &json) const {
     json_add_bool(json, "smb_password_set",
                   cfg.smb_password.length() > 0);
     json_add_string(json, "smb_password", "");
+    json_add_bool(json, "syslog_enabled", cfg.syslog_enabled);
+    json_add_string(json, "syslog_host", cfg.syslog_host.c_str());
+    json_add_int(json, "syslog_port", cfg.syslog_port);
     json_add_bool(json, "http_auth_required", network_auth_required(cfg));
     json_add_string(json, "http_user", cfg.http_user.c_str());
     json_add_bool(json, "http_password_set", cfg.http_password.length() > 0);
@@ -2713,7 +2702,9 @@ void WebUI::build_settings_catalog_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void WebUI::publish_snapshots(bool force) {
+void WebUI::publish_snapshots(bool force,
+                              bool realtime_active,
+                              PollCheckpoint checkpoint) {
     const uint32_t now = millis();
     if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
     const bool periodic_due =
@@ -2726,23 +2717,42 @@ void WebUI::publish_snapshots(bool force) {
         rebuild_mask |= SNAPSHOT_PERIODIC;
     }
 
+    if (!force && snapshots_ready_ && realtime_active) {
+        rebuild_mask &= SNAPSHOT_STATUS | SNAPSHOT_STREAM;
+    }
+
     if (!rebuild_mask) {
         xSemaphoreGive(cache_mutex_);
         return;
     }
 
-    if (rebuild_mask & SNAPSHOT_STATUS) build_status_json(cached_status_json_);
-    if (rebuild_mask & SNAPSHOT_STREAM) build_stream_json(cached_stream_json_);
-    if (rebuild_mask & SNAPSHOT_CONFIG) build_config_json(cached_config_json_);
-    if (rebuild_mask & SNAPSHOT_WIFI) build_wifi_json(cached_wifi_json_);
+    if (rebuild_mask & SNAPSHOT_STATUS) {
+        build_status_json(cached_status_json_);
+        if (checkpoint) checkpoint("web_ui.snapshots.status");
+    }
+    if (rebuild_mask & SNAPSHOT_STREAM) {
+        build_stream_json(cached_stream_json_);
+        if (checkpoint) checkpoint("web_ui.snapshots.stream");
+    }
+    if (rebuild_mask & SNAPSHOT_CONFIG) {
+        build_config_json(cached_config_json_);
+        if (checkpoint) checkpoint("web_ui.snapshots.config");
+    }
+    if (rebuild_mask & SNAPSHOT_WIFI) {
+        build_wifi_json(cached_wifi_json_);
+        if (checkpoint) checkpoint("web_ui.snapshots.wifi");
+    }
     if (rebuild_mask & SNAPSHOT_OXIMETRY_SENSORS) {
         build_oximetry_sensors_json(cached_oximetry_sensors_json_);
+        if (checkpoint) checkpoint("web_ui.snapshots.oximetry_sensors");
     }
     if (rebuild_mask & SNAPSHOT_OTA) {
         build_ota_json(cached_ota_json_, ota_manager_->status());
+        if (checkpoint) checkpoint("web_ui.snapshots.ota");
     }
     if (rebuild_mask & SNAPSHOT_RESMED_OTA) {
         build_resmed_ota_json(cached_resmed_ota_json_, *resmed_ota_manager_);
+        if (checkpoint) checkpoint("web_ui.snapshots.resmed_ota");
     }
     if (rebuild_mask & SNAPSHOT_SETTINGS) {
         const int requested_mode = requested_settings_mode_;
@@ -2756,6 +2766,7 @@ void WebUI::publish_snapshots(bool force) {
                             requested_mode,
                             refresh_queued);
         cached_settings_mode_ = published_settings_mode;
+        if (checkpoint) checkpoint("web_ui.snapshots.settings");
     }
     if (rebuild_mask & SNAPSHOT_CONFIG) {
         cached_http_auth_required_ = network_auth_required(app_config_->data());

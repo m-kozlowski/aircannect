@@ -25,7 +25,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  therapy           start/stop therapy commands");
         out.println("  time              ESP and AS11 clock sync commands");
         out.println("  stream            AS11 stream subscription controls");
-        out.println("  sink              stream sink status and debug sink toggle");
+        out.println("  sink              stream sink status");
         out.println("  edf               live EDF recorder status and monitor toggle");
         out.println("  oxi               oximetry source and BLE injector status");
         out.println("  report            therapy report index/cache status");
@@ -125,8 +125,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  stream                    show stream broker state");
         out.println("  stream status             show stream broker state");
         out.println("  stream edf|full|default   subscribe EDF-oriented stream set");
-        out.println("  stream sample             subscribe low-rate sample stream");
-        out.println("  stream fast               subscribe focused fast stream");
         out.println("  stream stop               release console stream consumer");
         out.println("  stream IDS [SAMPLE] [REP] subscribe custom IDs and intervals");
         out.println("  stream {JSON_PARAMS}      subscribe with raw StartStream params");
@@ -169,7 +167,6 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "sink") {
         out.println("[HELP sink]");
         out.println("  sink status               show stream sink state");
-        out.println("  sink debug on|off         enable/disable debug sink");
         return;
     }
 

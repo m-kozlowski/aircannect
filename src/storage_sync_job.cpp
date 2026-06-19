@@ -604,7 +604,7 @@ void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     Log::logf(CAT_STORAGE,
-              LOG_INFO,
+              LOG_DEBUG,
               "[SYNC] config enabled=%u configured=%u auto=%u reconcile=%u\n",
               status_.enabled ? 1u : 0u,
               status_.configured ? 1u : 0u,
@@ -621,6 +621,10 @@ void StorageSyncJob::set_network_available(bool available) {
     if (available) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
+}
+
+void StorageSyncJob::defer_idle_work_until(uint32_t until_ms) {
+    idle_defer_until_ms_.store(until_ms);
 }
 
 void StorageSyncJob::configure(const AppConfigData &config) {
@@ -673,12 +677,9 @@ bool StorageSyncJob::begin_run_locked(const char *reason) {
     phase_ = WorkPhase::Connect;
     Log::logf(CAT_STORAGE,
               LOG_INFO,
-              "[SYNC] run start reason=%s state_dir=%s endpoint=%s "
-              "user_set=%u\n",
+              "[SYNC] started reason=%s endpoint=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
-              state_dir_,
-              config_.endpoint,
-              config_.user[0] ? 1u : 0u);
+              config_.endpoint);
     return true;
 }
 
@@ -1809,8 +1810,16 @@ bool StorageSyncJob::verify_endpoint_base_locked(char *error_out,
 
 JobStep StorageSyncJob::step() {
     if (!lock(20)) return JobStep::Waiting;
+    const uint32_t now_ms = millis_nonzero();
+    const uint32_t defer_until = idle_defer_until_ms_.load();
+    if (defer_until != 0 &&
+        static_cast<int32_t>(now_ms - defer_until) < 0 &&
+        status_.state != StorageSyncState::Working) {
+        unlock();
+        return status_.pending ? JobStep::Waiting : JobStep::Idle;
+    }
     if (status_.state == StorageSyncState::Error && retry_due_ms_ != 0 &&
-        static_cast<int32_t>(millis_nonzero() - retry_due_ms_) >= 0) {
+        static_cast<int32_t>(now_ms - retry_due_ms_) >= 0) {
         status_.pending = true;
         status_.state = StorageSyncState::Pending;
         if (!status_.pending_reason[0]) {
@@ -1819,7 +1828,7 @@ JobStep StorageSyncJob::step() {
                       status_.last_run_verify ? SYNC_REASON_STARTUP_CHECK :
                                                  "retry");
         }
-        status_.updated_ms = millis_nonzero();
+        status_.updated_ms = now_ms;
     }
     if (status_.state == StorageSyncState::Idle &&
         status_.enabled &&

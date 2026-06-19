@@ -74,6 +74,9 @@ struct RpcArbiterStats {
     uint32_t log_datagrams = 0;
     uint32_t log_framing_errors = 0;
     uint32_t boot_notifications = 0;
+    uint32_t deferred_payloads = 0;
+    uint32_t deferred_payload_drops = 0;
+    uint32_t deferred_payload_alloc_failures = 0;
 
     uint32_t queued_requests = 0;
     uint32_t dispatched_requests = 0;
@@ -102,6 +105,7 @@ struct RpcArbiterStats {
 struct RpcRuntimeStatus {
     uint32_t stats_elapsed_ms = 0;
     size_t request_queue_depth = 0;
+    size_t payload_queue_depth = 0;
     uint32_t pending_request_id = 0;
     uint32_t dispatch_retry_id = 0;
     uint32_t background_backoff_ms = 0;
@@ -118,6 +122,7 @@ public:
 
     bool reserve_reassembly_buffers();
     void poll();
+    size_t drain_can_rx();
 
     bool submit_raw_payload(const std::string &payload, RpcSource source);
 
@@ -179,6 +184,7 @@ public:
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
     void set_background_polls_suspended(bool suspended);
+    bool background_backpressure_active() const;
     void set_esp_ota_quiesce(bool requested);
     bool esp_ota_quiesce_complete() const;
     bool esp_ota_quiesce_timed_out() const;
@@ -223,6 +229,30 @@ private:
         uint32_t deadline_ms = 0;
         RpcSource source = RpcSource::Internal;
         StreamCommandType stream_command = StreamCommandType::None;
+    };
+
+    struct DeferredPayload {
+        enum class Kind : uint8_t {
+            Rpc,
+            DebugLog,
+        };
+
+        Kind kind = Kind::Rpc;
+        char *data = nullptr;
+        size_t len = 0;
+
+        DeferredPayload() = default;
+        ~DeferredPayload();
+        DeferredPayload(const DeferredPayload &) = delete;
+        DeferredPayload &operator=(const DeferredPayload &) = delete;
+        DeferredPayload(DeferredPayload &&other) noexcept;
+        DeferredPayload &operator=(DeferredPayload &&other) noexcept;
+
+        bool copy_from(Kind next_kind, const char *payload, size_t payload_len);
+        void clear();
+
+    private:
+        void move_from(DeferredPayload &other);
     };
 
     static constexpr size_t RAW_PASSTHROUGH_PENDING_MAX = 8;
@@ -272,6 +302,8 @@ private:
                                   bool is_error);
 
     bool background_backoff_active(uint32_t now) const;
+    bool background_rx_pressure_active(uint32_t now) const;
+    void note_can_rx_pressure(uint32_t now);
     void note_request_success(RpcSource source, uint32_t now);
     void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_esp_ota_quiesce(
@@ -288,12 +320,16 @@ private:
     void poll_event_subscription();
     void poll_stream_subscription();
     void poll_as11_healthcheck();
+    void process_deferred_payloads(size_t budget);
 
     void handle_matched_response(const std::string &payload);
     bool handle_event_notification(const char *payload, size_t payload_len);
     void handle_stream_notification(const char *payload, size_t payload_len);
     uint8_t source_id(RpcSource source) const;
     void handle_frame(const RawCanFrame &frame);
+    void enqueue_deferred_payload(DeferredPayload::Kind kind,
+                                  const char *payload,
+                                  size_t payload_len);
 
     void handle_rpc_payload(const char *payload, size_t payload_len);
     void handle_debug_payload(const char *payload, size_t payload_len);
@@ -303,6 +339,7 @@ private:
 
     enum class SourceEventQueue {
         None,
+        Report,
         ResmedOta,
     };
 
@@ -323,12 +360,15 @@ private:
     CanDriver &can_;
     DatagramRx rpc_rx_{AC_STREAM_FRAME_RAW_MAX};
     DatagramRx log_rx_;
+    FixedQueue<DeferredPayload, AC_RPC_PAYLOAD_QUEUE_DEPTH>
+        deferred_payloads_;
     FixedQueue<RpcEvent, AC_RPC_EVENT_QUEUE_DEPTH> events_;
+    FixedQueue<RpcEvent, AC_REPORT_EVENT_QUEUE_DEPTH> report_events_;
     FixedQueue<RpcEvent, AC_RESMED_OTA_EVENT_QUEUE_DEPTH> resmed_ota_events_;
     SourceEventRoute source_event_routes_[3] = {
         {RpcSource::ResmedOta, SourceEventQueue::ResmedOta, nullptr,
          nullptr},
-        {RpcSource::Report, SourceEventQueue::None, nullptr, nullptr},
+        {RpcSource::Report, SourceEventQueue::Report, nullptr, nullptr},
         {RpcSource::EdfRecorder, SourceEventQueue::None, nullptr,
          nullptr},
     };
@@ -372,6 +412,8 @@ private:
     uint32_t esp_ota_quiesce_deadline_ms_ = 0;
     uint8_t consecutive_scheduler_timeouts_ = 0;
     uint32_t background_backoff_until_ms_ = 0;
+    uint32_t background_rx_pressure_until_ms_ = 0;
+    uint32_t observed_rx_queue_full_alerts_ = 0;
 };
 
 }  // namespace aircannect

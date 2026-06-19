@@ -24,7 +24,6 @@ StaticSemaphore_t log_mutex_storage;
 SemaphoreHandle_t log_mutex = nullptr;
 
 struct LogRecord {
-    uint32_t ms = 0;
     log_cat_t cat = CAT_GENERAL;
     log_level_t level = LOG_INFO;
     char text[AC_LOG_LINE_MAX] = {};
@@ -162,7 +161,6 @@ void enqueue_syslog(log_cat_t cat, log_level_t level, const char *buf) {
         return;
     }
     LogRecord record;
-    record.ms = millis();
     record.cat = cat;
     record.level = level;
     strncpy(record.text, buf, sizeof(record.text) - 1);
@@ -177,10 +175,11 @@ void enqueue_syslog(log_cat_t cat, log_level_t level, const char *buf) {
 void dispatch_structured(log_cat_t cat,
                          log_level_t level,
                          const char *buf,
-                         int len) {
+                         int len,
+                         const char *syslog_text) {
     log_stats.emitted++;
     serial_dispatch(buf, len);
-    enqueue_syslog(cat, level, buf);
+    enqueue_syslog(cat, level, syslog_text);
 }
 
 void lock_log() {
@@ -200,12 +199,9 @@ void send_syslog_record(const LogRecord &record) {
     const int facility_local0 = 16;
     const int pri = facility_local0 * 8 + syslog_severity(record.level);
     snprintf(payload, sizeof(payload),
-             "<%d>1 - %s aircannect - - - [%s %s uptime_ms=%lu] %s",
+             "<%d>1 - %s aircannect - - - - %s",
              pri,
              syslog_hostname,
-             Log::level_name(record.level),
-             Log::cat_name(record.cat),
-             static_cast<unsigned long>(record.ms),
              record.text);
 
     if (!syslog_udp.beginPacket(syslog_ip, syslog_port_value)) {
@@ -453,7 +449,7 @@ void logf(log_cat_t cat, log_level_t level, const char *fmt, ...) {
     char line[AC_LOG_LINE_MAX];
     const int len = compose_line(cat, level, buf, false, line, sizeof(line));
     lock_log();
-    dispatch_structured(cat, level, line, len);
+    dispatch_structured(cat, level, line, len, line);
     unlock_log();
 }
 
@@ -493,14 +489,12 @@ void log_payload(log_cat_t cat,
     }
     serial_dispatch("\n", 1);
 
-    if (!syslog_enabled_value) {
-        unlock_log();
-        return;
-    }
-    char record[AC_LOG_LINE_MAX];
-    const size_t prefix_len = static_cast<size_t>(header_len);
-    memcpy(record, header, prefix_len);
-    record[prefix_len] = 0;
+    char record[AC_LOG_LINE_MAX] = {};
+    const size_t prefix_len = append_bytes(record,
+                                           sizeof(record),
+                                           0,
+                                           header,
+                                           static_cast<size_t>(header_len));
     const size_t room =
         prefix_len < sizeof(record) ? sizeof(record) - prefix_len - 1 : 0;
     const size_t payload_room =

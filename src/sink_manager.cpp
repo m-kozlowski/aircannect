@@ -2,7 +2,6 @@
 
 #include "as11_rpc.h"
 #include "board.h"
-#include "edf_stream_signal_table.h"
 #include "memory_manager.h"
 #include "string_util.h"
 
@@ -96,41 +95,6 @@ bool append_frame_signal(const StreamFrameData &frame,
 
 }  // namespace
 
-void SinkManager::DebugSink::on_session_start(
-    const SessionStatus &session) {
-    if (!enabled_) return;
-    sessions_started_++;
-    last_session_id_ = session.session_id;
-}
-
-void SinkManager::DebugSink::on_stream_frame(
-    const SessionStatus &session,
-    const StreamFrameData &frame) {
-    if (!enabled_) return;
-    (void)session;
-    frames_++;
-    if (frame.stream_id) last_stream_id_ = frame.stream_id;
-    last_frame_ms_ = millis();
-}
-
-void SinkManager::DebugSink::on_session_end(const SessionStatus &session) {
-    if (!enabled_) return;
-    sessions_ended_++;
-    last_session_id_ = session.session_id;
-}
-
-DebugSinkRuntimeStatus SinkManager::DebugSink::status() const {
-    DebugSinkRuntimeStatus out;
-    out.enabled = enabled_;
-    out.sessions_started = sessions_started_;
-    out.sessions_ended = sessions_ended_;
-    out.frames = frames_;
-    out.last_session_id = last_session_id_;
-    out.last_stream_id = last_stream_id_;
-    out.last_frame_ms = last_frame_ms_;
-    return out;
-}
-
 void SinkManager::begin(RpcArbiter &arbiter, SessionManager &session) {
     if (initialized_) return;
     arbiter_ = &arbiter;
@@ -142,45 +106,7 @@ void SinkManager::poll() {
     if (!initialized_ || !arbiter_ || !session_) return;
     const uint32_t now = millis();
 
-    dispatch_session_edges();
     poll_live_chart(now);
-
-    if (!debug_sink_.enabled()) {
-        release_debug_stream();
-        debug_sink_.poll();
-        return;
-    }
-
-    attach_debug_stream(now);
-    drain_debug_stream(now);
-    debug_sink_.poll();
-}
-
-void SinkManager::set_debug_enabled(bool enabled) {
-    const bool was_enabled = debug_sink_.enabled();
-    debug_sink_.set_enabled(enabled);
-    status_.debug_enabled = enabled;
-    if (!enabled) {
-        release_debug_stream();
-        return;
-    }
-    if (was_enabled || !session_) return;
-
-    const SessionStatus &session = session_->status();
-    seen_session_starts_ = session.start_count;
-    seen_session_ends_ = session.end_count;
-    if (session.state == SessionState::Active) {
-        debug_sink_.on_session_start(session);
-        status_.sessions_started++;
-    }
-}
-
-bool SinkManager::debug_enabled() const {
-    return debug_sink_.enabled();
-}
-
-DebugSinkRuntimeStatus SinkManager::debug_status() const {
-    return debug_sink_.status();
 }
 
 void SinkManager::set_live_chart_enabled(bool enabled) {
@@ -210,95 +136,6 @@ void SinkManager::clear_live_chart_batch() {
 void SinkManager::mark_live_chart_sent() {
     live_chart_.state_dirty = false;
     clear_live_chart_batch();
-}
-
-void SinkManager::dispatch_session_edges() {
-    const SessionStatus &session = session_->status();
-    if (session.start_count != seen_session_starts_) {
-        seen_session_starts_ = session.start_count;
-        if (debug_sink_.enabled()) {
-            debug_sink_.on_session_start(session);
-            status_.sessions_started++;
-        }
-    }
-    if (session.end_count != seen_session_ends_) {
-        seen_session_ends_ = session.end_count;
-        if (debug_sink_.enabled()) {
-            debug_sink_.on_session_end(session);
-            status_.sessions_ended++;
-        }
-    }
-}
-
-void SinkManager::attach_debug_stream(uint32_t now_ms) {
-    if (status_.debug_stream_handle != STREAM_CONSUMER_INVALID &&
-        arbiter_->stream_consumer_active(status_.debug_stream_handle)) {
-        status_.debug_stream_attached = true;
-        return;
-    }
-    status_.debug_stream_handle = STREAM_CONSUMER_INVALID;
-    status_.debug_stream_attached = false;
-    if (static_cast<int32_t>(now_ms - next_attach_ms_) < 0) return;
-
-    next_attach_ms_ = now_ms + AC_SINK_ATTACH_RETRY_MS;
-    status_.attach_attempts++;
-    const std::string params =
-        build_stream_params(DEFAULT_EDF_STREAM_IDS, 40, 200);
-    StreamAcquireResult result =
-        arbiter_->acquire_stream(params, RpcSource::Sink);
-    if (result.status == StreamAcquireStatus::Acquired ||
-        result.status == StreamAcquireStatus::AlreadyActive) {
-        status_.debug_stream_handle = result.handle;
-        status_.debug_stream_attached = true;
-        last_debug_queue_drops_ = 0;
-        status_.last_error[0] = 0;
-        return;
-    }
-
-    status_.attach_failures++;
-    set_error(acquire_status_name(result.status));
-}
-
-void SinkManager::release_debug_stream() {
-    if (!arbiter_) return;
-    if (status_.debug_stream_handle != STREAM_CONSUMER_INVALID &&
-        arbiter_->stream_consumer_active(status_.debug_stream_handle)) {
-        arbiter_->release_stream(status_.debug_stream_handle);
-    }
-    status_.debug_stream_handle = STREAM_CONSUMER_INVALID;
-    status_.debug_stream_attached = false;
-    last_debug_queue_drops_ = 0;
-}
-
-void SinkManager::drain_debug_stream(uint32_t now_ms) {
-    if (status_.debug_stream_handle == STREAM_CONSUMER_INVALID ||
-        !arbiter_->stream_consumer_active(status_.debug_stream_handle)) {
-        status_.debug_stream_attached = false;
-        return;
-    }
-
-    const uint32_t queue_drops =
-        arbiter_->stream_consumer_queue_drops(status_.debug_stream_handle);
-    if (queue_drops < last_debug_queue_drops_) {
-        last_debug_queue_drops_ = queue_drops;
-    } else if (queue_drops != last_debug_queue_drops_) {
-        const uint32_t delta = queue_drops - last_debug_queue_drops_;
-        last_debug_queue_drops_ = queue_drops;
-        status_.frame_drops += delta;
-        session_->note_frame_drops(delta, now_ms);
-    }
-
-    for (size_t i = 0; i < AC_SINK_STREAM_FRAME_BUDGET; ++i) {
-        StreamFrameRef frame;
-        if (!arbiter_->next_stream_frame(status_.debug_stream_handle,
-                                         frame)) {
-            break;
-        }
-        if (!frame) continue;
-        debug_sink_.on_stream_frame(session_->status(), *frame);
-        status_.frames++;
-        status_.last_frame_ms = now_ms;
-    }
 }
 
 bool SinkManager::live_chart_should_run() const {
@@ -465,10 +302,6 @@ void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
         live_chart_.frames++;
         live_chart_.last_frame_ms = now_ms;
     }
-}
-
-void SinkManager::set_error(const char *error) {
-    copy_cstr(status_.last_error, sizeof(status_.last_error), error);
 }
 
 void SinkManager::set_live_error(const char *error) {

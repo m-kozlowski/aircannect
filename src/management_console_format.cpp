@@ -122,8 +122,16 @@ void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     out.print(stats.log_framing_errors);
     out.print(" boot_notifications=");
     out.print(runtime.boot_notifications);
+    out.print(" deferred_payloads=");
+    out.print(stats.deferred_payloads);
+    out.print(" deferred_payload_drops=");
+    out.print(stats.deferred_payload_drops);
+    out.print(" deferred_payload_alloc_failures=");
+    out.print(stats.deferred_payload_alloc_failures);
     out.print(" rpc_req_q=");
     out.print(runtime.request_queue_depth);
+    out.print(" rpc_payload_q=");
+    out.print(runtime.payload_queue_depth);
     out.print(" rpc_pending=");
     out.print(runtime.pending_request_id);
     out.print(" rpc_dispatch_retry=");
@@ -540,38 +548,10 @@ void print_session_status(Print &out, const SessionStatus &s) {
 }
 
 void print_sink_status(Print &out, const SinkManager &sink_manager) {
-    const SinkRuntimeStatus &s = sink_manager.status();
     const LiveChartRuntimeStatus &live = sink_manager.live_chart_status();
-    const DebugSinkRuntimeStatus debug = sink_manager.debug_status();
 
-    out.print("[SINK] debug=");
-    out.print(debug.enabled ? "on" : "off");
-    out.print(" live=");
+    out.print("[SINK] live=");
     out.print(live.enabled ? "on" : "off");
-    out.print(" stream=");
-    out.print(s.debug_stream_attached ? "attached" : "detached");
-    out.print(" handle=");
-    out.print(s.debug_stream_handle);
-    out.print(" attach_attempts=");
-    out.print(s.attach_attempts);
-    out.print(" attach_failures=");
-    out.print(s.attach_failures);
-    out.print(" frames=");
-    out.print(s.frames);
-    out.print(" drops=");
-    out.print(s.frame_drops);
-    out.print(" sessions_started=");
-    out.print(s.sessions_started);
-    out.print(" sessions_ended=");
-    out.print(s.sessions_ended);
-    if (s.last_frame_ms) {
-        out.print(" last_frame_age_ms=");
-        out.print(millis() - s.last_frame_ms);
-    }
-    if (s.last_error[0]) {
-        out.print(" error=");
-        out.print(s.last_error);
-    }
     out.println();
 
     out.print("[SINK live] enabled=");
@@ -595,26 +575,6 @@ void print_sink_status(Print &out, const SinkManager &sink_manager) {
     if (live.last_error[0]) {
         out.print(" error=");
         out.print(live.last_error);
-    }
-    out.println();
-
-    out.print("[SINK debug] enabled=");
-    out.print(debug.enabled ? "yes" : "no");
-    out.print(" sessions_started=");
-    out.print(debug.sessions_started);
-    out.print(" sessions_ended=");
-    out.print(debug.sessions_ended);
-    out.print(" frames=");
-    out.print(debug.frames);
-    out.print(" last_session=");
-    out.print(debug.last_session_id);
-    if (debug.last_stream_id) {
-        out.print(" last_stream=");
-        out.print(debug.last_stream_id);
-    }
-    if (debug.last_frame_ms) {
-        out.print(" last_frame_age_ms=");
-        out.print(millis() - debug.last_frame_ms);
     }
     out.println();
 }

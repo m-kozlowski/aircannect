@@ -82,6 +82,7 @@ public:
     void configure(const AppConfigData &config);
     void refresh_config(const AppConfigData &config, uint32_t now_ms);
     void set_network_available(bool available);
+    void defer_idle_work_until(uint32_t until_ms);
 
     bool request_manual_sync();
     bool request_verify_recent();
@@ -272,6 +273,7 @@ private:
     WorkPhase phase_ = WorkPhase::Idle;
     StorageSmbClient smb_;
     std::atomic<bool> network_available_{false};
+    std::atomic<uint32_t> idle_defer_until_ms_{0};
     bool current_run_verify_ = false;
     bool current_run_reconcile_ = false;
     bool sync_after_verify_ = false;

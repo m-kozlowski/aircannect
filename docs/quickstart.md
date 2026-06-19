@@ -18,10 +18,10 @@ Open the serial console at `921600` baud. The boot banner prints version,
 chip, PSRAM, and storage state. Look for:
 
 ```
-[INIT] architecture baseline ready
+[BOOT] version=
 ```
 
-near the end. If you see repeated `[CAN] alert:` lines with `bus_error` or
+near the start. If you see repeated `[CAN] alert:` lines with `bus_error` or
 `tx_failed` right after boot, re-check transceiver pin labels,
 `CANH` / `CANL` polarity, and ground connections (see
 [hardware.md](hardware.md#can-transceiver)).

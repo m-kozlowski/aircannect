@@ -28,7 +28,9 @@ struct SpoolClientRequest {
     std::string from_dt;
     size_t max_size = 65536;
     size_t fragment_max = 2808;
+    size_t max_notifications = 0;
     uint16_t max_rounds = 64;
+    bool pace_on_backpressure = false;
     bool stream_rounds = false;
 };
 
@@ -116,6 +118,7 @@ private:
     uint32_t active_spool_id_ = 0;
     uint32_t state_started_ms_ = 0;
     uint32_t fetch_started_ms_ = 0;
+    uint32_t next_pull_submit_ms_ = 0;
     std::string next_spool_address_json_;
     FragmentSlice *round_fragments_ = nullptr;
     size_t round_fragment_capacity_ = 0;

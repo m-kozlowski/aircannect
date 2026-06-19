@@ -1,5 +1,7 @@
 #include "background_worker.h"
 
+#include <string.h>
+
 #include "board.h"
 #include "debug_log.h"
 
@@ -117,13 +119,39 @@ void BackgroundWorker::run() {
         const bool open = gate_open(&reason);
         // reason is always a string literal, so pointer compare detects changes.
         if (reason != last_reason) {
-            Log::logf(CAT_BGWORKER, LOG_INFO, "gate=%s\n", reason);
+            Log::logf(CAT_BGWORKER, LOG_DEBUG, "gate=%s\n", reason);
             last_reason = reason;
         }
         publish(open, reason);
 
         if (!open) {
-            for (size_t i = 0; i < job_count_; ++i) jobs_[i]->on_preempt();
+            JobStep foreground_result = JobStep::Idle;
+            const bool foreground_busy =
+                reason && strcmp(reason, "report_busy") == 0;
+            for (size_t i = 0; i < job_count_; ++i) {
+                if (!foreground_busy ||
+                    !jobs_[i]->run_when_foreground_busy()) {
+                    jobs_[i]->on_preempt();
+                }
+            }
+            if (foreground_busy) {
+                for (size_t i = 0; i < job_count_; ++i) {
+                    if (!jobs_[i]->run_when_foreground_busy()) continue;
+                    const JobStep s = jobs_[i]->step();
+                    if (s != JobStep::Idle) {
+                        foreground_result = s;
+                        break;
+                    }
+                }
+            }
+            if (foreground_result != JobStep::Idle) {
+                const uint32_t delay =
+                    foreground_result == JobStep::Working
+                        ? AC_BG_WORKER_WORK_TICK_MS
+                        : AC_BG_WORKER_BUSY_RECHECK_MS;
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay));
+                continue;
+            }
             ulTaskNotifyTake(pdTRUE,
                              pdMS_TO_TICKS(AC_BG_WORKER_BUSY_RECHECK_MS));
             continue;

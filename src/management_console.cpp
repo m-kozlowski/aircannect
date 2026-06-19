@@ -684,15 +684,7 @@ void ManagementConsole::handle_stream(Print &out, String rest,
     uint32_t sample_ms = 40;
     uint32_t report_ms = 200;
 
-    if (rest == "fast" || rest == "pressure") {
-        ids = "PatientFlow,Leak,RespiratoryRate";
-        sample_ms = 40;
-        report_ms = 200;
-    } else if (rest == "sample") {
-        ids = "Leak,RespiratoryRate";
-        sample_ms = 1000;
-        report_ms = 5000;
-    } else if (rest == "edf" || rest == "full" || rest == "default") {
+    if (rest == "edf" || rest == "full" || rest == "default") {
         ids = DEFAULT_EDF_STREAM_IDS;
         sample_ms = 40;
         report_ms = 200;
@@ -1035,23 +1027,7 @@ void ManagementConsole::handle_sink(Print &out,
         return;
     }
 
-    if (rest == "debug on" || rest == "debug enable" ||
-        rest == "debug enabled") {
-        sink_manager.set_debug_enabled(true);
-        out.println("[SINK] debug sink enabled");
-        ConsoleFormat::print_sink_status(out, sink_manager);
-        return;
-    }
-
-    if (rest == "debug off" || rest == "debug disable" ||
-        rest == "debug disabled") {
-        sink_manager.set_debug_enabled(false);
-        out.println("[SINK] debug sink disabled");
-        ConsoleFormat::print_sink_status(out, sink_manager);
-        return;
-    }
-
-    print_unknown_command(out, "SINK", "sink status, sink debug on|off");
+    print_unknown_command(out, "SINK", "sink status");
 }
 
 void ManagementConsole::handle_oximetry(

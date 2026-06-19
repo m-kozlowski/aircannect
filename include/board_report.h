@@ -22,6 +22,10 @@ static constexpr uint32_t AC_BG_WORKER_WORK_TICK_MS = 20;
 static constexpr uint32_t AC_BG_WORKER_IDLE_TICK_MS = 10000;
 // Defer prefetch briefly after foreground (e.g. web) activity.
 static constexpr uint32_t AC_BG_WORKER_ACTIVITY_GRACE_MS = 3000;
+// After therapy stops, AS11 may still be draining live stream/report traffic and
+// AirCANnect is closing EDF/SMB work. Let the bus settle before refreshing the
+// report summary index that triggers cache backfill.
+static constexpr uint32_t AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS = 30000;
 // Fallback rescan: the prefetch job rescans coverage promptly when the night
 // index changes (e.g. after therapy stops), so this periodic poll is just a
 // safety net. FAIL_COOLDOWN is how long a night whose fetch failed is skipped
@@ -33,6 +37,20 @@ static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS = 600000;
 // instead of churning the bus; a single success resets it.
 static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_BURST = 3;
 static constexpr uint32_t AC_REPORT_PREFETCH_OFFLINE_BACKOFF_MS = 600000;
+static constexpr size_t AC_REPORT_SOURCE_EVENT_DRAIN_BUDGET = 1;
+// AS11 rejects too-small PullSpoolFragments maxFragmentSize values. Keep the
+// observed protocol default here; burst pacing belongs between spool rounds.
+static constexpr size_t AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES = 2808;
+// Limit each PullSpoolFragments response burst. A single AS11 SpoolFragment is
+// already large after base64/JSON wrapping; request boundaries give the arbiter
+// a chance to observe CAN/RPC backpressure before asking for more.
+static constexpr size_t AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL = 1;
+// Minimum spacing between PullSpoolFragments requests. The response is a CAN
+// burst; this keeps report backfill from immediately requesting the next burst
+// before the arbiter has observed queue pressure from the previous one.
+static constexpr uint32_t AC_REPORT_SPOOL_PULL_PACE_MS = 100;
+static constexpr size_t AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES = 8192;
+static constexpr size_t AC_REPORT_CACHE_SPOOL_ROUND_BYTES = 8192;
 
 // Report result assembly and plot build.
 // Plot decimation: target buckets across a night's session span.
