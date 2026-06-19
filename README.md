@@ -69,7 +69,7 @@ Both also support `-p /dev/ttyUSB0` for direct serial CAN tooling on hardware th
 
 | Live charts | EDF |
 |---|---|
-| ![Live](docs/screenshots/charts.png) | ![EDF](docs/screenshots/edf_list.png) |
+| ![Live](docs/screenshots/charts.png) | ![EDF](docs/screenshots/edf_tab.png) |
 
 | Reports | Oximetry |
 |---|---|
