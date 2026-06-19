@@ -24,6 +24,7 @@
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "storage_archive_job.h"
+#include "storage_directory.h"
 #include "storage_manager.h"
 #include "storage_path.h"
 #include "storage_writer.h"
@@ -758,12 +759,12 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         if (checkpoint) checkpoint("web_ui.sse_idle");
         return;
     }
-    last_sse_push_ms_ = millis();
     if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         sse_push_requested_ = push_requested;
         if (checkpoint) checkpoint("web_ui.sse_lock");
         return;
     }
+    last_sse_push_ms_ = millis();
     sse_push_requested_ = false;
     const uint32_t event_id = millis();
     bool sse_backpressure = false;
@@ -1850,34 +1851,14 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
     bool truncated = false;
     bool first = true;
     while (!truncated) {
-        char child_name[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-        bool have_child = false;
-        bool directory = false;
-        uint64_t size = 0;
-        uint64_t modified = 0;
-        {
-            Storage::Guard guard;
-            File child = dir.openNextFile();
-            if (child) {
-                have_child = true;
-                copy_cstr(child_name,
-                          sizeof(child_name),
-                          storage_basename_from_path(child.name()));
-                directory = child.isDirectory();
-                size = directory ? 0 : static_cast<uint64_t>(child.size());
-                const time_t last_write = child.getLastWrite();
-                modified = last_write > 0 ? static_cast<uint64_t>(last_write)
-                                          : 0;
-                child.close();
-            }
-        }
-        if (!have_child) break;
+        StorageDirChild child;
+        if (!storage_read_next_dir_child(dir, child)) break;
 
         char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
         const bool path_ok = storage_append_child_path(path.c_str(),
-                                                      child_name,
-                                                      child_path,
-                                                      sizeof(child_path));
+                                                       child.name,
+                                                       child_path,
+                                                       sizeof(child_path));
 
         if (!path_ok || !storage_user_path_valid(child_path)) continue;
         if (matched++ < offset) continue;
@@ -1885,11 +1866,14 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
             truncated = true;
             break;
         }
+        const uint64_t modified = child.last_write > 0
+            ? static_cast<uint64_t>(child.last_write)
+            : 0;
         if (!append_storage_list_entry(json,
-                                       child_name,
+                                       child.name,
                                        child_path,
-                                       directory,
-                                       size,
+                                       child.is_dir,
+                                       child.size,
                                        modified,
                                        first)) {
             {

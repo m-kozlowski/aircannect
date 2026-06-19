@@ -31,28 +31,17 @@ enum class StorageSyncState : uint8_t {
 
 const char *storage_sync_state_name(StorageSyncState state);
 
-struct StorageSyncStatus {
-    StorageSyncState state = StorageSyncState::Disabled;
+struct StorageSyncConfigStatus {
     bool enabled = false;
     bool configured = false;
     bool endpoint_set = false;
     bool user_set = false;
     bool password_set = false;
-    bool auto_after_therapy = true;
-    bool reconcile_enabled = true;
     bool network_available = false;
-    bool pending = false;
-    bool last_run_verify = false;
-    bool last_run_reconcile = false;
-    char pending_reason[AC_STORAGE_SYNC_REASON_MAX] = {};
-    char last_error[AC_STORAGE_ERROR_MAX] = {};
-    char current_path[AC_STORAGE_PATH_MAX] = {};
     uint32_t config_generation = 0;
-    uint32_t files_seen = 0;
-    uint32_t files_uploaded = 0;
-    uint32_t files_skipped = 0;
-    uint32_t files_failed = 0;
-    uint64_t bytes_uploaded = 0;
+};
+
+struct StorageSyncResultStatus {
     uint64_t last_sync_epoch = 0;
     uint32_t last_sync_files_seen = 0;
     uint32_t last_sync_files_uploaded = 0;
@@ -65,11 +54,34 @@ struct StorageSyncStatus {
     uint32_t last_reconcile_files_seen = 0;
     uint64_t last_failure_epoch = 0;
     char last_failure_error[AC_STORAGE_ERROR_MAX] = {};
+};
+
+struct StorageSyncPersistentStatus
+    : StorageSyncConfigStatus,
+      StorageSyncResultStatus {};
+
+struct StorageSyncTransientStatus {
+    StorageSyncState state = StorageSyncState::Disabled;
+    bool pending = false;
+    bool last_run_verify = false;
+    bool last_run_reconcile = false;
+    char pending_reason[AC_STORAGE_SYNC_REASON_MAX] = {};
+    char last_error[AC_STORAGE_ERROR_MAX] = {};
+    char current_path[AC_STORAGE_PATH_MAX] = {};
+    uint32_t files_seen = 0;
+    uint32_t files_uploaded = 0;
+    uint32_t files_skipped = 0;
+    uint32_t files_failed = 0;
+    uint64_t bytes_uploaded = 0;
     uint32_t started_ms = 0;
     uint32_t updated_ms = 0;
     uint32_t retry_due_ms = 0;
     uint8_t retry_attempt = 0;
 };
+
+struct StorageSyncStatus
+    : StorageSyncPersistentStatus,
+      StorageSyncTransientStatus {};
 
 class StorageSyncJob : public BackgroundJob {
 public:
@@ -113,10 +125,17 @@ private:
         Replace,
     };
 
+    enum class RunKind : uint8_t {
+        Manual,
+        PostTherapy,
+        StartupCheck,
+        StartupSync,
+        VerifyRecent,
+        Retry,
+    };
+
     struct ConfigSnapshot {
         bool enabled = false;
-        bool auto_after_therapy = true;
-        bool reconcile_enabled = true;
         char endpoint[AC_STORAGE_SYNC_ENDPOINT_MAX] = {};
         char user[AC_STORAGE_SYNC_USER_MAX] = {};
         char password[AC_STORAGE_SYNC_PASSWORD_MAX] = {};
@@ -172,17 +191,35 @@ private:
     static bool snapshot_configured(const ConfigSnapshot &config);
     static void copy_string(char *dst, size_t dst_size, const String &src);
     static const char *work_phase_name(WorkPhase phase);
-    static bool reason_is_verify(const char *reason);
-    static bool reason_is_reconcile(const char *reason);
-    bool request_sync_with_reason(const char *reason,
-                                  const char *label);
+    static const char *run_kind_reason(RunKind kind);
+    static bool run_kind_is_verify(RunKind kind);
+    static bool run_kind_is_reconcile(RunKind kind);
+    bool request_sync_with_kind(RunKind kind, const char *label);
 
     void reset_run_locked(bool keep_status);
+    bool prepare_step_locked(uint32_t now_ms, JobStep &result);
+    void queue_retry_locked(uint32_t now_ms);
+    void queue_reconcile_if_due_locked(uint32_t now_ms);
+    JobStep step_work_phase_locked();
+    JobStep step_connect_locked(char *error_out, size_t error_out_size);
+    JobStep step_verify_latest_start_locked(char *error_out,
+                                            size_t error_out_size);
+    JobStep step_verify_latest_file_locked(char *error_out,
+                                           size_t error_out_size);
+    JobStep step_verify_latest_invalidate_locked(char *error_out,
+                                                 size_t error_out_size);
+    JobStep step_ensure_remote_dir_locked(char *error_out,
+                                          size_t error_out_size);
+    JobStep step_open_local_locked();
+    JobStep step_open_remote_locked(char *error_out, size_t error_out_size);
+    JobStep step_upload_chunk_locked(char *error_out, size_t error_out_size);
+    JobStep step_close_remote_locked(char *error_out, size_t error_out_size);
+    JobStep step_mark_state_locked();
     bool build_endpoint_state_dir_locked(const ConfigSnapshot &config,
                                          char *out,
                                          size_t out_size,
                                          uint32_t *hash_out = nullptr) const;
-    bool begin_run_locked(const char *reason);
+    bool begin_run_locked();
     void finish_run_locked();
     void fail_locked(const char *error);
     void clear_result_metadata_locked();
@@ -274,8 +311,8 @@ private:
     StorageSmbClient smb_;
     std::atomic<bool> network_available_{false};
     std::atomic<uint32_t> idle_defer_until_ms_{0};
-    bool current_run_verify_ = false;
-    bool current_run_reconcile_ = false;
+    RunKind pending_run_kind_ = RunKind::Manual;
+    RunKind current_run_kind_ = RunKind::Manual;
     bool sync_after_verify_ = false;
 
     WalkFrame *walk_stack_ = nullptr;

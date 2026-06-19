@@ -265,13 +265,18 @@ void CanDriver::handle_alerts(uint32_t alerts) {
     const bool have_status =
         (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) &&
         twai_get_status_info(&status) == ESP_OK;
-    char detail[96] = {};
+    char detail[128] = {};
     if (have_status) {
+        const uint32_t missed_delta =
+            status.rx_missed_count - last_rx_queue_full_missed_count_;
+        last_rx_queue_full_missed_count_ = status.rx_missed_count;
         snprintf(detail, sizeof(detail),
-                 " rx_q=%lu tx_q=%lu rx_missed=%lu rx_overrun=%lu",
+                 " rx_q=%lu tx_q=%lu rx_missed=%lu rx_missed_delta=%lu"
+                 " rx_overrun=%lu",
                  static_cast<unsigned long>(status.msgs_to_rx),
                  static_cast<unsigned long>(status.msgs_to_tx),
                  static_cast<unsigned long>(status.rx_missed_count),
+                 static_cast<unsigned long>(missed_delta),
                  static_cast<unsigned long>(status.rx_overrun_count));
     }
 
@@ -433,6 +438,7 @@ bool CanDriver::controller_status(CanControllerStatus &out) const {
 void CanDriver::reset_stats() {
     stats_ = {};
     tx_queue_.reset_dropped();
+    last_rx_queue_full_missed_count_ = 0;
 }
 
 size_t CanDriver::tx_queue_free() const {

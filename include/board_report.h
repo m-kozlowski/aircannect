@@ -26,6 +26,11 @@ static constexpr uint32_t AC_BG_WORKER_ACTIVITY_GRACE_MS = 3000;
 // AirCANnect is closing EDF/SMB work. Let the bus settle before refreshing the
 // report summary index that triggers cache backfill.
 static constexpr uint32_t AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS = 30000;
+// Post-therapy SMB sync normally waits for the report refresh/backfill to go
+// idle so STR/journal/report-derived files have settled first. Do not let a
+// wedged report backfill suppress auto-sync forever; after this, queue sync
+// anyway while still respecting the background worker's stream/therapy/OTA gate.
+static constexpr uint32_t AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS = 180000;
 // Fallback rescan: the prefetch job rescans coverage promptly when the night
 // index changes (e.g. after therapy stops), so this periodic poll is just a
 // safety net. FAIL_COOLDOWN is how long a night whose fetch failed is skipped
@@ -38,6 +43,9 @@ static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS = 600000;
 static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_BURST = 3;
 static constexpr uint32_t AC_REPORT_PREFETCH_OFFLINE_BACKOFF_MS = 600000;
 static constexpr size_t AC_REPORT_SOURCE_EVENT_DRAIN_BUDGET = 1;
+// Report spool backfill is intentionally guarded at three layers:
+// fragment size keeps AS11 happy, max-notifications bounds each CAN burst, and
+// pull pacing gives the arbiter time to observe RX pressure before next pull.
 // AS11 rejects too-small PullSpoolFragments maxFragmentSize values. Keep the
 // observed protocol default here; burst pacing belongs between spool rounds.
 static constexpr size_t AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES = 2808;

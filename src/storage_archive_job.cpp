@@ -9,6 +9,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "storage_directory.h"
 #include "storage_manager.h"
 #include "string_util.h"
 
@@ -326,30 +327,40 @@ void StorageArchiveJob::apply_preempt_locked() {
 
 void StorageArchiveJob::cleanup_stale_temp_locked() {
     if (!Storage::mounted()) return;
-    Storage::Guard guard;
-    File dir = Storage::open(AC_STORAGE_ARCHIVE_TEMP_DIR, "r");
-    if (!dir || !dir.isDirectory()) {
-        if (dir) dir.close();
+    File dir;
+    {
+        Storage::Guard guard;
+        dir = Storage::open(AC_STORAGE_ARCHIVE_TEMP_DIR, "r");
+    }
+    bool is_dir = false;
+    {
+        Storage::Guard guard;
+        is_dir = dir && dir.isDirectory();
+    }
+    if (!dir || !is_dir) {
+        if (dir) {
+            Storage::Guard guard;
+            dir.close();
+        }
         return;
     }
     for (;;) {
-        File child = dir.openNextFile();
-        if (!child) break;
-        const bool is_dir = child.isDirectory();
+        StorageDirChild child;
+        if (!storage_read_next_dir_child(dir, child)) break;
         char path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-        const char *name = storage_basename_from_path(child.name());
-        if (!is_dir && storage_append_child_path(AC_STORAGE_ARCHIVE_TEMP_DIR,
-                                         name,
-                                         path,
-                                         sizeof(path)) &&
+        if (!child.is_dir &&
+            storage_append_child_path(AC_STORAGE_ARCHIVE_TEMP_DIR,
+                                      child.name,
+                                      path,
+                                      sizeof(path)) &&
             archive_temp_name(path)) {
-            child.close();
             (void)Storage::remove(path);
-        } else {
-            child.close();
         }
     }
-    dir.close();
+    {
+        Storage::Guard guard;
+        dir.close();
+    }
 }
 
 bool StorageArchiveJob::begin_job_locked(const char *source_path,
@@ -766,14 +777,10 @@ bool StorageArchiveJob::ensure_walk_dir_open_locked(WalkFrame &frame) {
         set_error_locked("not_directory");
         return false;
     }
-    for (uint32_t i = 0; i < frame.next_index; ++i) {
-        File skipped = frame.dir.openNextFile();
-        if (!skipped) {
-            frame.dir.close();
-            set_error_locked("walk_resume_failed");
-            return false;
-        }
-        skipped.close();
+    if (!storage_skip_dir_children(frame.dir, frame.next_index)) {
+        frame.dir.close();
+        set_error_locked("walk_resume_failed");
+        return false;
     }
     frame.opened = true;
     return true;
@@ -791,24 +798,8 @@ bool StorageArchiveJob::prepare_step_locked() {
         WalkFrame &frame = walk_stack_[walk_depth_ - 1];
         if (!ensure_walk_dir_open_locked(frame)) return false;
 
-        char name[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-        bool have_child = false;
-        bool is_dir = false;
-        uint64_t size = 0;
-        time_t last_write = 0;
-        {
-            Storage::Guard guard;
-            File child = frame.dir.openNextFile();
-            if (child) {
-                have_child = true;
-                copy_cstr(name, sizeof(name), storage_basename_from_path(child.name()));
-                is_dir = child.isDirectory();
-                size = is_dir ? 0 : static_cast<uint64_t>(child.size());
-                last_write = child.getLastWrite();
-                child.close();
-            }
-        }
-        if (!have_child) {
+        StorageDirChild child;
+        if (!storage_read_next_dir_child(frame.dir, child)) {
             if (frame.opened) {
                 Storage::Guard guard;
                 frame.dir.close();
@@ -822,9 +813,9 @@ bool StorageArchiveJob::prepare_step_locked() {
 
         char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
         const bool path_ok = storage_append_child_path(frame.path,
-                                               name,
-                                               child_path,
-                                               sizeof(child_path));
+                                                       child.name,
+                                                       child_path,
+                                                       sizeof(child_path));
 
         if (!path_ok) {
             set_error_locked("bad_child_path");
@@ -837,16 +828,18 @@ bool StorageArchiveJob::prepare_step_locked() {
             set_error_locked("bad_child_path");
             return false;
         }
-        if (is_dir) {
+        if (child.is_dir) {
             if (status_.recursive) {
-                if (!append_entry_locked(child_path, 0, true, last_write) ||
+                if (!append_entry_locked(child_path, 0, true,
+                                         child.last_write) ||
                     !push_walk_dir_locked(child_path)) {
                     return false;
                 }
             }
             continue;
         }
-        if (!append_entry_locked(child_path, size, false, last_write)) {
+        if (!append_entry_locked(child_path, child.size, false,
+                                 child.last_write)) {
             return false;
         }
     }

@@ -342,6 +342,8 @@ private:
     static constexpr size_t AC_REPORT_COALESCE_SLOTS = 8;
     static constexpr size_t AC_REPORT_COALESCE_TARGET_BYTES = 64 * 1024;
     static constexpr size_t AC_REPORT_CACHE_WRITE_QUEUE_MAX = 8;
+    static constexpr size_t AC_REPORT_CACHE_WRITE_BACKPRESSURE_WATERMARK =
+        AC_REPORT_CACHE_WRITE_QUEUE_MAX / 2;
 
     enum class CacheWriteEnqueueResult : uint8_t {
         Queued,
@@ -378,6 +380,9 @@ private:
     bool drain_source_events(RpcArbiter &arbiter);
     void poll_cache_fetch(RpcArbiter &arbiter);
     void log_spool_can_pressure(const RpcArbiter &arbiter);
+    bool fail_cache_fetch_if_write_failed();
+    bool drain_cache_spool_rounds();
+    void finish_cache_spool_if_terminal();
     void finish_cache_fetch();
     void fail_cache_fetch(const char *message);
     bool source_chunk_extent(const ReportSummaryRecord &night,
@@ -393,6 +398,7 @@ private:
         CacheCoalesceBuffer &buf,
         const ReportStoreChunkKey &key,
         const ReportStoreChunkMeta &meta);
+    void reset_cache_write_fetch_state_locked();
     void begin_cache_write_fetch();
     void abort_cache_write_fetch();
     bool cache_write_backpressure_active() const;
@@ -411,6 +417,7 @@ private:
                             bool inc_completed, bool inc_failed);
     void prefetch_note_failure(uint64_t night_ms);
     bool prefetch_in_cooldown(uint64_t night_ms, uint32_t now_ms) const;
+    void clear_sparse_event_empty_markers(uint64_t night_start_ms);
     void note_sparse_event_confirmed_empty(const ReportSummaryRecord &night,
                                            const ReportSourceDef &source);
     bool sparse_event_confirmed_empty(const ReportSummaryRecord &night,
@@ -440,6 +447,26 @@ private:
                                      bool required);
     bool prepare_result_by_therapy_index_internal(size_t therapy_index,
                                                   bool refresh_cache);
+    bool defer_result_prepare_for_summary(size_t therapy_index,
+                                          bool refresh_cache);
+    bool load_result_night(size_t therapy_index,
+                           ReportSummaryRecord &night);
+    bool publish_existing_result_if_current(size_t therapy_index,
+                                            const ReportSummaryRecord &night,
+                                            bool refresh_cache);
+    void begin_result_prepare_for_night(size_t therapy_index,
+                                        const ReportSummaryRecord &night);
+    bool refresh_result_cache_if_needed(const ReportSummaryRecord &night,
+                                        const ReportNightCoverageStatus &coverage,
+                                        size_t therapy_index,
+                                        bool refresh_cache,
+                                        bool &deferred);
+    bool add_result_chunks_for_night(const ReportSummaryRecord &night,
+                                     int64_t range_start_ms,
+                                     int64_t range_end_ms);
+    bool count_result_events_from_chunks();
+    void apply_result_event_indices_from_counts();
+    bool finalize_result_prepare(size_t therapy_index);
     size_t derive_result_session_ranges(PlotRange *ranges, size_t max_ranges) const;
     void apply_result_session_ranges(const PlotRange *ranges, size_t range_count);
     const char *result_state_name() const;
@@ -526,7 +553,6 @@ private:
     size_t cache_write_count_ = 0;
     uint32_t cache_write_fetch_id_ = 0;
     uint32_t cache_write_pending_ = 0;
-    uint32_t cache_write_inflight_ = 0;
     uint32_t cache_write_failed_fetch_id_ = 0;
     std::string cache_write_error_;
     bool cache_source_finalizing_ = false;

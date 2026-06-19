@@ -181,6 +181,153 @@ static StorageSyncJob *create_storage_sync_job() {
     return new (memory) StorageSyncJob();
 }
 
+struct PostTherapyReportSyncHandoff {
+    As11TherapyState last_state = As11TherapyState::Unknown;
+    uint32_t summary_refresh_due_ms = 0;
+    bool sync_pending = false;
+    bool sync_grace_armed = false;
+    uint32_t sync_due_ms = 0;
+    uint32_t sync_deadline_ms = 0;
+
+    void poll(RpcArbiter &arbiter,
+              ReportManager &report,
+              StorageSyncJob *sync_job,
+              uint32_t now_ms) {
+        const As11TherapyState state =
+            arbiter.as11_state().therapy_state();
+
+        if (state == As11TherapyState::Running) {
+            reset_after_running();
+            last_state = state;
+            return;
+        }
+
+        if (last_state == As11TherapyState::Running &&
+            state != As11TherapyState::Running) {
+            arm_after_stop(sync_job, now_ms);
+        }
+
+        maybe_refresh_summary(arbiter, report, sync_job, now_ms);
+        maybe_queue_sync(arbiter, report, sync_job, now_ms);
+        last_state = state;
+    }
+
+private:
+    static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms) {
+        uint32_t due = now_ms + delay_ms;
+        if (due == 0) due = 1;
+        return due;
+    }
+
+    void reset_after_running() {
+        summary_refresh_due_ms = 0;
+        sync_pending = false;
+        sync_grace_armed = false;
+        sync_due_ms = 0;
+        sync_deadline_ms = 0;
+    }
+
+    void arm_after_stop(StorageSyncJob *sync_job, uint32_t now_ms) {
+        summary_refresh_due_ms =
+            due_after(now_ms, AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS);
+        sync_pending = sync_job != nullptr;
+        sync_grace_armed = false;
+        sync_due_ms = 0;
+        sync_deadline_ms =
+            due_after(now_ms, AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS);
+        if (sync_job) {
+            sync_job->defer_idle_work_until(summary_refresh_due_ms);
+        }
+    }
+
+    void maybe_refresh_summary(RpcArbiter &arbiter,
+                               ReportManager &report,
+                               StorageSyncJob *sync_job,
+                               uint32_t now_ms) {
+        if (summary_refresh_due_ms == 0 ||
+            static_cast<int32_t>(now_ms - summary_refresh_due_ms) < 0) {
+            return;
+        }
+        if (arbiter.stream_activity_active()) {
+            summary_refresh_due_ms =
+                due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
+            if (sync_job) {
+                sync_job->defer_idle_work_until(summary_refresh_due_ms);
+            }
+            return;
+        }
+        if (report.request_summary_refresh()) {
+            summary_refresh_due_ms = 0;
+            sync_grace_armed = false;
+            sync_due_ms = 0;
+        } else {
+            summary_refresh_due_ms =
+                due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
+        }
+    }
+
+    void maybe_queue_sync(RpcArbiter &arbiter,
+                          ReportManager &report,
+                          StorageSyncJob *sync_job,
+                          uint32_t now_ms) {
+        if (!sync_pending || summary_refresh_due_ms != 0) return;
+
+        if (!sync_job) {
+            sync_pending = false;
+            sync_due_ms = 0;
+            sync_deadline_ms = 0;
+            return;
+        }
+        if (arbiter.stream_activity_active()) {
+            sync_due_ms = 0;
+            sync_job->defer_idle_work_until(
+                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS));
+            return;
+        }
+        if (report.background_work_active()) {
+            const bool deadline_reached =
+                sync_deadline_ms != 0 &&
+                static_cast<int32_t>(now_ms - sync_deadline_ms) >= 0;
+            if (!deadline_reached) {
+                sync_due_ms = 0;
+                sync_job->defer_idle_work_until(
+                    due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS));
+                return;
+            }
+            Log::logf(CAT_STORAGE,
+                      LOG_WARN,
+                      "[SYNC] post-therapy sync fallback after report wait\n");
+            queue_sync(sync_job);
+            return;
+        }
+        if (!sync_grace_armed) {
+            sync_grace_armed = true;
+            sync_due_ms =
+                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
+            sync_job->defer_idle_work_until(sync_due_ms);
+            return;
+        }
+        if (sync_due_ms == 0) {
+            sync_due_ms =
+                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
+            sync_job->defer_idle_work_until(sync_due_ms);
+            return;
+        }
+        if (static_cast<int32_t>(now_ms - sync_due_ms) >= 0) {
+            queue_sync(sync_job);
+        }
+    }
+
+    void queue_sync(StorageSyncJob *sync_job) {
+        (void)sync_job->request_post_therapy_sync();
+        sync_pending = false;
+        sync_due_ms = 0;
+        sync_deadline_ms = 0;
+    }
+};
+
+static PostTherapyReportSyncHandoff post_therapy_handoff;
+
 void setup() {
     Serial.begin(AC_SERIAL_BAUD);
     delay(500);
@@ -293,97 +440,6 @@ void setup() {
     bg_worker.begin();
 }
 
-// On the therapy-stop edge, refresh the night index so the idle background
-// backfills it. This is report work, not EDF finalization, so defer it briefly
-// after the stop edge and run it after the EDF recorder has seen the session
-// transition.
-static void refresh_summary_on_therapy_stop(RpcArbiter &arbiter,
-                                            ReportManager &report,
-                                            StorageSyncJob *sync_job,
-                                            uint32_t now_ms) {
-    static As11TherapyState last_state = As11TherapyState::Unknown;
-    static uint32_t summary_refresh_due_ms = 0;
-    static bool post_therapy_sync_pending = false;
-    static bool post_report_prefetch_requested = false;
-    static uint32_t post_report_sync_due_ms = 0;
-    const As11TherapyState state = arbiter.as11_state().therapy_state();
-
-    if (state == As11TherapyState::Running) {
-        summary_refresh_due_ms = 0;
-        post_therapy_sync_pending = false;
-        post_report_prefetch_requested = false;
-        post_report_sync_due_ms = 0;
-        last_state = state;
-        return;
-    }
-
-    if (last_state == As11TherapyState::Running &&
-        state != As11TherapyState::Running) {
-        summary_refresh_due_ms =
-            now_ms + AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS;
-        if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
-        post_therapy_sync_pending = sync_job != nullptr;
-        post_report_prefetch_requested = false;
-        post_report_sync_due_ms = 0;
-        if (sync_job) {
-            sync_job->defer_idle_work_until(summary_refresh_due_ms);
-        }
-    }
-
-    if (summary_refresh_due_ms != 0 &&
-        static_cast<int32_t>(now_ms - summary_refresh_due_ms) >= 0) {
-        if (arbiter.stream_activity_active()) {
-            summary_refresh_due_ms = now_ms + AC_BG_WORKER_BUSY_RECHECK_MS;
-            if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
-            if (sync_job) {
-                sync_job->defer_idle_work_until(summary_refresh_due_ms);
-            }
-            last_state = state;
-            return;
-        }
-        if (report.request_summary_refresh()) {
-            summary_refresh_due_ms = 0;
-            post_report_prefetch_requested = false;
-            post_report_sync_due_ms = 0;
-        } else {
-            summary_refresh_due_ms = now_ms + AC_BG_WORKER_BUSY_RECHECK_MS;
-            if (summary_refresh_due_ms == 0) summary_refresh_due_ms = 1;
-        }
-    }
-
-    if (post_therapy_sync_pending && summary_refresh_due_ms == 0) {
-        if (!sync_job) {
-            post_therapy_sync_pending = false;
-            post_report_sync_due_ms = 0;
-        } else if (arbiter.stream_activity_active() ||
-                   report.background_work_active()) {
-            post_report_sync_due_ms = 0;
-            sync_job->defer_idle_work_until(
-                now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS);
-        } else if (!post_report_prefetch_requested) {
-            post_report_prefetch_requested = true;
-            post_report_sync_due_ms =
-                now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS;
-            if (post_report_sync_due_ms == 0) post_report_sync_due_ms = 1;
-            sync_job->defer_idle_work_until(post_report_sync_due_ms);
-        } else {
-            if (post_report_sync_due_ms == 0) {
-                post_report_sync_due_ms =
-                    now_ms + AC_BG_WORKER_ACTIVITY_GRACE_MS;
-                if (post_report_sync_due_ms == 0) post_report_sync_due_ms = 1;
-                sync_job->defer_idle_work_until(post_report_sync_due_ms);
-            } else if (static_cast<int32_t>(
-                           now_ms - post_report_sync_due_ms) >= 0) {
-                (void)sync_job->request_post_therapy_sync();
-                post_therapy_sync_pending = false;
-                post_report_sync_due_ms = 0;
-            }
-        }
-    }
-
-    last_state = state;
-}
-
 void loop() {
     const bool esp_ota_quiesce_requested =
         ota_manager.as11_quiesce_required();
@@ -414,10 +470,10 @@ void loop() {
     const uint32_t now_ms = millis();
     session_manager.poll(rpc_arbiter.as11_state(), now_ms);
     edf_recorder_manager.poll(now_ms);
-    refresh_summary_on_therapy_stop(rpc_arbiter,
-                                    report_manager,
-                                    storage_sync_job,
-                                    now_ms);
+    post_therapy_handoff.poll(rpc_arbiter,
+                              report_manager,
+                              storage_sync_job,
+                              now_ms);
     drain_can_rx_after("session_edf");
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());

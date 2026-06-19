@@ -76,6 +76,7 @@ private:
 
     uint32_t last_bus_error_log_ms_ = 0;
     uint32_t suppressed_bus_error_alerts_ = 0;
+    uint32_t last_rx_queue_full_missed_count_ = 0;
 
     uint32_t recovery_deadline_ms_ = 0;
     bool recovery_active_ = false;

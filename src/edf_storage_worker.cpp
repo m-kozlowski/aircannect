@@ -1793,7 +1793,6 @@ bool enqueue_close_annotation(EdfAnnotationKind kind) {
 }
 
 EdfStorageWorkerStatus status() {
-    if (!stats.initialized) begin();
     EdfStorageWorkerStatus out = stats;
     if (lock_queue()) {
         out = stats;

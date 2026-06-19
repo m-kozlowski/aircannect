@@ -82,22 +82,21 @@ bool valid_timezone(const String &timezone) {
     return true;
 }
 
-bool valid_secret(const String &secret) {
-    if (!secret.length() || secret.length() > 64) return false;
-    for (size_t i = 0; i < secret.length(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(secret[i]);
-        if (c < 0x20 || c >= 0x7F) return false;
+const char *printable_ascii_reject_reason(const String &value,
+                                          size_t max_len,
+                                          const char *too_long,
+                                          const char *bad_char) {
+    if (value.length() > max_len) return too_long;
+    for (size_t i = 0; i < value.length(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (c < 0x20 || c >= 0x7F) return bad_char;
     }
-    return true;
+    return nullptr;
 }
 
 bool valid_optional_secret(const String &secret) {
-    if (secret.length() > 64) return false;
-    for (size_t i = 0; i < secret.length(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(secret[i]);
-        if (c < 0x20 || c >= 0x7F) return false;
-    }
-    return true;
+    return printable_ascii_reject_reason(secret, 64, "too_long",
+                                         "bad_char") == nullptr;
 }
 
 bool starts_with_ignore_case(const String &value, const char *prefix) {
@@ -151,12 +150,8 @@ bool valid_smb_endpoint(const String &endpoint) {
 }
 
 const char *smb_user_reject_reason(const String &user) {
-    if (user.length() > 64) return "user_too_long";
-    for (size_t i = 0; i < user.length(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(user[i]);
-        if (c < 0x20 || c >= 0x7F) return "user_bad_char";
-    }
-    return nullptr;
+    return printable_ascii_reject_reason(user, 64, "user_too_long",
+                                         "user_bad_char");
 }
 
 bool valid_smb_user(const String &user) {
@@ -164,12 +159,9 @@ bool valid_smb_user(const String &user) {
 }
 
 const char *smb_password_reject_reason(const String &password) {
-    if (password.length() > 128) return "password_too_long";
-    for (size_t i = 0; i < password.length(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(password[i]);
-        if (c < 0x20 || c >= 0x7F) return "password_bad_char";
-    }
-    return nullptr;
+    return printable_ascii_reject_reason(password, 128,
+                                         "password_too_long",
+                                         "password_bad_char");
 }
 
 bool valid_smb_password(const String &password) {
@@ -293,8 +285,6 @@ bool AppConfig::load() {
     if (!parse_softap_mode(softap_mode, data_.softap_mode)) {
         // The old boolean had no "forced" state. Migrate either legacy value
         // to auto so saved devices keep STA-first AP recovery behavior.
-        (void)prefs.getBool(KEY_SOFTAP_LEGACY,
-                            AC_ENABLE_SOFTAP_FALLBACK != 0);
         data_.softap_mode = SoftApMode::Auto;
     }
     data_.wifi_country =

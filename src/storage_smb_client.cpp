@@ -664,8 +664,4 @@ void StorageSmbClient::abort_connection() {
     ctx_ = nullptr;
 }
 
-uint32_t StorageSmbClient::negotiated_max_write_size() const {
-    return connected_ && ctx_ ? smb2_get_max_write_size(ctx_) : 0;
-}
-
 }  // namespace aircannect

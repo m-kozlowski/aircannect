@@ -10,6 +10,18 @@ namespace aircannect {
 static constexpr uint32_t REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V1 = 1;
 static constexpr uint32_t REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 = 1;
 
+enum class ReportEventCode : uint16_t {
+    Hypopnea = 2,
+    CentralApnea = 3,
+    ObstructiveApnea = 4,
+    UnclassifiedApnea = 5,
+    Arousal = 6,
+};
+
+constexpr uint16_t report_event_code_value(ReportEventCode code) {
+    return static_cast<uint16_t>(code);
+}
+
 struct ReportSeriesSample {
     int64_t timestamp_ms = 0;
     int32_t value_milli = 0;

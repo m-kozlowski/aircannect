@@ -40,6 +40,10 @@ void print_yes_no(Print &out, bool value) {
     out.print(value ? "yes" : "no");
 }
 
+const char *secret_state_text(const String &value) {
+    return value.length() ? "<set>" : "<empty>";
+}
+
 void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.println("[CONFIG]");
     out.print("  schema: ");
@@ -74,7 +78,7 @@ void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.print("  smb_user: ");
     out.println(cfg.smb_user.length() ? cfg.smb_user : "<empty>");
     out.print("  smb_password: ");
-    out.println(cfg.smb_password.length() ? "<set>" : "<empty>");
+    out.println(secret_state_text(cfg.smb_password));
     out.print("  http_auth: ");
     out.println(cfg.http_user.length() || cfg.http_password.length()
                     ? "protected"
@@ -82,7 +86,7 @@ void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.print("  http_user: ");
     out.println(cfg.http_user.length() ? cfg.http_user : "<empty>");
     out.print("  http_password: ");
-    out.println(cfg.http_password.length() ? "<set>" : "<empty>");
+    out.println(secret_state_text(cfg.http_password));
     out.print("  http_whitelist: ");
     out.println(cfg.auth_whitelist.length() ? cfg.auth_whitelist : "<empty>");
     out.print("  telnet: ");
@@ -92,7 +96,7 @@ void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.print("  ota: ");
     out.println(cfg.ota_password.length() ? "protected" : "open");
     out.print("  ota_password: ");
-    out.println(cfg.ota_password.length() ? "<set>" : "<empty>");
+    out.println(secret_state_text(cfg.ota_password));
 }
 
 String normalized_config_key(String key) {
@@ -115,7 +119,7 @@ void print_config_value(Print &out, const char *key, const String &value) {
 
 void print_config_secret(Print &out, const char *key, const String &value) {
     print_config_value_header(out, key);
-    out.println(value.length() ? "<set>" : "<empty>");
+    out.println(secret_state_text(value));
 }
 
 bool print_app_config_value(Print &out,
@@ -2158,8 +2162,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
                       ? app_config.data().http_user.c_str()
                       : "<empty>");
         out.print(" password=");
-        out.println(app_config.data().http_password.length() ? "<set>"
-                                                             : "<empty>");
+        out.println(secret_state_text(app_config.data().http_password));
         return;
     }
 
@@ -2177,8 +2180,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
                       ? app_config.data().smb_user.c_str()
                       : "<empty>");
         out.print(" password=");
-        out.println(app_config.data().smb_password.length() ? "<set>"
-                                                            : "<empty>");
+        out.println(secret_state_text(app_config.data().smb_password));
         return;
     }
 
@@ -2216,8 +2218,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
                       ? app_config.data().smb_user.c_str()
                       : "<empty>");
         out.print(" password=");
-        out.println(app_config.data().smb_password.length() ? "<set>"
-                                                            : "<empty>");
+        out.println(secret_state_text(app_config.data().smb_password));
         return;
     }
 
@@ -2323,8 +2324,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
 
     if (rest == "ota-password") {
         out.print("[CONFIG] ota_password=");
-        out.println(app_config.data().ota_password.length() ? "<set>"
-                                                            : "<empty>");
+        out.println(secret_state_text(app_config.data().ota_password));
         return;
     }
 
@@ -2343,8 +2343,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
         }
         ota_manager.mark_config_dirty();
         out.print("[CONFIG] ota_password=");
-        out.println(app_config.data().ota_password.length() ? "<set>"
-                                                            : "<empty>");
+        out.println(secret_state_text(app_config.data().ota_password));
         return;
     }
 

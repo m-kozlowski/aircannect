@@ -223,10 +223,14 @@ void RpcArbiter::poll() {
 
 size_t RpcArbiter::drain_can_rx() {
     size_t drained = 0;
-    for (; drained < AC_CAN_RX_DRAIN_BUDGET; ++drained) {
+    const uint32_t start_ms = millis();
+    for (; drained < AC_CAN_RX_DRAIN_PRESSURE_BUDGET; ++drained) {
         RawCanFrame frame;
         if (!can_.receive(frame, 0)) break;
         handle_frame(frame);
+        if (drained + 1 < AC_CAN_RX_DRAIN_BASE_BUDGET) continue;
+        if (!can_rx_queue_pressure_active()) break;
+        if (millis() - start_ms >= AC_CAN_RX_DRAIN_PRESSURE_MAX_MS) break;
     }
     return drained;
 }
@@ -368,18 +372,21 @@ bool RpcArbiter::next_source_event(RpcSource source, RpcEvent &event) {
 bool RpcArbiter::background_backpressure_active() const {
     if (background_rx_pressure_active(millis())) return true;
 
-    CanControllerStatus can_status;
-    if (can_.controller_status(can_status) && can_status.valid &&
-        can_status.msgs_to_rx >= AC_CAN_RX_QUEUE_LEN / 4) {
+    if (can_rx_queue_pressure_active()) return true;
+    if (deferred_payloads_.count() >=
+        AC_RPC_PAYLOAD_BACKPRESSURE_WATERMARK) {
         return true;
     }
-    if (deferred_payloads_.count() >= AC_RPC_PAYLOAD_QUEUE_DEPTH / 2) {
-        return true;
-    }
-    if (report_events_.count() >= AC_REPORT_EVENT_QUEUE_DEPTH / 2) {
+    if (report_events_.count() >= AC_REPORT_EVENT_BACKPRESSURE_WATERMARK) {
         return true;
     }
     return false;
+}
+
+bool RpcArbiter::can_rx_queue_pressure_active() const {
+    CanControllerStatus can_status;
+    return can_.controller_status(can_status) && can_status.valid &&
+           can_status.msgs_to_rx >= AC_CAN_RX_BACKPRESSURE_WATERMARK;
 }
 
 bool RpcArbiter::set_source_event_observer(RpcSource source,

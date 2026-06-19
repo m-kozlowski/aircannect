@@ -925,9 +925,7 @@ void ReportManager::discard_cache_coalesce_buffers() {
     }
 }
 
-void ReportManager::begin_cache_write_fetch() {
-    if (!cache_write_lock_) return;
-    xSemaphoreTake(cache_write_lock_, portMAX_DELAY);
+void ReportManager::reset_cache_write_fetch_state_locked() {
     for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
         CacheWriteQueueSlot &job = cache_write_queue_[i];
         job.active = false;
@@ -941,6 +939,12 @@ void ReportManager::begin_cache_write_fetch() {
     cache_write_error_.clear();
     ++cache_write_fetch_id_;
     if (cache_write_fetch_id_ == 0) ++cache_write_fetch_id_;
+}
+
+void ReportManager::begin_cache_write_fetch() {
+    if (!cache_write_lock_) return;
+    xSemaphoreTake(cache_write_lock_, portMAX_DELAY);
+    reset_cache_write_fetch_state_locked();
     xSemaphoreGive(cache_write_lock_);
     cache_source_finalizing_ = false;
     cache_finalizing_plan_ = {};
@@ -949,19 +953,7 @@ void ReportManager::begin_cache_write_fetch() {
 void ReportManager::abort_cache_write_fetch() {
     if (!cache_write_lock_) return;
     xSemaphoreTake(cache_write_lock_, portMAX_DELAY);
-    for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
-        CacheWriteQueueSlot &job = cache_write_queue_[i];
-        job.active = false;
-        job.payload.clear();
-    }
-    cache_write_head_ = 0;
-    cache_write_tail_ = 0;
-    cache_write_count_ = 0;
-    cache_write_pending_ = 0;
-    cache_write_failed_fetch_id_ = 0;
-    cache_write_error_.clear();
-    ++cache_write_fetch_id_;
-    if (cache_write_fetch_id_ == 0) ++cache_write_fetch_id_;
+    reset_cache_write_fetch_state_locked();
     xSemaphoreGive(cache_write_lock_);
     cache_source_finalizing_ = false;
     cache_finalizing_plan_ = {};
@@ -997,7 +989,8 @@ bool ReportManager::cache_write_backpressure_active() const {
         return true;
     }
     const bool active =
-        cache_write_count_ >= (AC_REPORT_CACHE_WRITE_QUEUE_MAX / 2);
+        cache_write_count_ >=
+        AC_REPORT_CACHE_WRITE_BACKPRESSURE_WATERMARK;
     xSemaphoreGive(cache_write_lock_);
     return active;
 }
@@ -1043,7 +1036,6 @@ bool ReportManager::service_cache_writer() {
     cache_write_head_ =
         (cache_write_head_ + 1) % AC_REPORT_CACHE_WRITE_QUEUE_MAX;
     cache_write_count_--;
-    cache_write_inflight_++;
     xSemaphoreGive(cache_write_lock_);
 
     const uint64_t night_start_ms =
@@ -1066,7 +1058,6 @@ bool ReportManager::service_cache_writer() {
                 cache_write_error_ = "cache_write_failed";
             }
         }
-        if (cache_write_inflight_ > 0) cache_write_inflight_--;
         xSemaphoreGive(cache_write_lock_);
     }
 
@@ -2160,6 +2151,22 @@ bool ReportManager::prefetch_in_cooldown(uint64_t night_ms,
     return in_cooldown;
 }
 
+void ReportManager::clear_sparse_event_empty_markers(
+    uint64_t night_start_ms) {
+    const bool locked = prefetch_lock_ &&
+                        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) ==
+                            pdTRUE;
+    const size_t marker_count =
+        sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
+    for (size_t i = 0; i < marker_count; ++i) {
+        if (night_start_ms == 0 ||
+            sparse_event_empty_[i].night_ms == night_start_ms) {
+            sparse_event_empty_[i] = SparseEventEmptyMarker{};
+        }
+    }
+    if (locked) xSemaphoreGive(prefetch_lock_);
+}
+
 void ReportManager::note_sparse_event_confirmed_empty(
     const ReportSummaryRecord &night,
     const ReportSourceDef &source) {
@@ -2734,15 +2741,7 @@ bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
 
     clear_build_queue(0, true);
     invalidate_materialized(0, true);
-    const size_t sparse_marker_count =
-        sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
-    const bool sparse_locked =
-        prefetch_lock_ &&
-        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) == pdTRUE;
-    for (size_t i = 0; i < sparse_marker_count; ++i) {
-        sparse_event_empty_[i] = SparseEventEmptyMarker{};
-    }
-    if (sparse_locked) xSemaphoreGive(prefetch_lock_);
+    clear_sparse_event_empty_markers(0);
 
     if (!take_summary_lock(portMAX_DELAY)) return false;
     clear_summary_records();
@@ -2779,17 +2778,7 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
     const bool ok = clear_cache_range(static_cast<int64_t>(night.start_ms),
                                       static_cast<int64_t>(night.end_ms),
                                       out);
-    const size_t sparse_marker_count =
-        sizeof(sparse_event_empty_) / sizeof(sparse_event_empty_[0]);
-    const bool sparse_locked =
-        prefetch_lock_ &&
-        xSemaphoreTake(prefetch_lock_, portMAX_DELAY) == pdTRUE;
-    for (size_t i = 0; i < sparse_marker_count; ++i) {
-        if (sparse_event_empty_[i].night_ms == night.start_ms) {
-            sparse_event_empty_[i] = SparseEventEmptyMarker{};
-        }
-    }
-    if (sparse_locked) xSemaphoreGive(prefetch_lock_);
+    clear_sparse_event_empty_markers(night.start_ms);
     uint32_t plot_deleted = 0;
     if (clear_plot_cache_for_night(night, plot_deleted)) {
         out.plots_deleted += plot_deleted;
@@ -3929,29 +3918,31 @@ bool ReportManager::prepare_result_by_therapy_index(size_t therapy_index,
                                                    refresh_cache);
 }
 
-bool ReportManager::prepare_result_by_therapy_index_internal(
+bool ReportManager::defer_result_prepare_for_summary(size_t therapy_index,
+                                                     bool refresh_cache) {
+    if (!summary_fetch_active_) return false;
+    pending_result_prepare_ = true;
+    pending_result_refresh_cache_ = refresh_cache;
+    pending_result_therapy_index_ = therapy_index;
+    clear_result_prepare();
+    result_status_.state = ReportResultState::Preparing;
+    result_status_.therapy_index = therapy_index;
+    result_status_.error = "summary_fetching";
+    return true;
+}
+
+bool ReportManager::load_result_night(size_t therapy_index,
+                                      ReportSummaryRecord &night) {
+    if (summary_night_by_therapy_index(therapy_index, night)) return true;
+    clear_result_prepare();
+    fail_result_prepare("night_not_found");
+    return false;
+}
+
+bool ReportManager::publish_existing_result_if_current(
     size_t therapy_index,
+    const ReportSummaryRecord &night,
     bool refresh_cache) {
-    if (summary_fetch_active_) {
-        pending_result_prepare_ = true;
-        pending_result_refresh_cache_ = refresh_cache;
-        pending_result_therapy_index_ = therapy_index;
-        clear_result_prepare();
-        result_status_.state = ReportResultState::Preparing;
-        result_status_.therapy_index = therapy_index;
-        result_status_.error = "summary_fetching";
-        return true;
-    }
-
-    if (!ensure_result_chunks()) return false;
-
-    ReportSummaryRecord night;
-    if (!summary_night_by_therapy_index(therapy_index, night)) {
-        clear_result_prepare();
-        fail_result_prepare("night_not_found");
-        return false;
-    }
-
     // Idempotent re-prepare: same night already prepared with a plot -> keep it,
     // bump revision. Identity is (therapy_index, start_ms, end_ms); duration_min
     // is deliberately excluded - the plot build overwrites it with the session
@@ -3968,7 +3959,12 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
         publish_result_to_slot();
         return true;
     }
+    return false;
+}
 
+void ReportManager::begin_result_prepare_for_night(
+    size_t therapy_index,
+    const ReportSummaryRecord &night) {
     clear_result_prepare();
     result_status_.state = ReportResultState::Preparing;
     result_status_.therapy_index = therapy_index;
@@ -3988,81 +3984,60 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
             night.has_rera_index ? night.rera_index : 0.0f;
         result_status_.event_metrics_valid = true;
     }
+}
 
-    ReportNightCoverageStatus coverage;
-    if (!night_coverage(night.start_ms, coverage)) {
-        fail_result_prepare("coverage_unavailable");
-        return false;
-    }
-    result_status_.missing_required = coverage.missing_required;
-    // Event counts come from cached event chunks; if the event source is not
-    // covered for this night, zero counts are unknown (not real) -> flag
-    // unavailable so the UI shows that rather than reporting zero events.
-    const ReportSourceDef *events_def =
-        report_source_def(ReportSourceId::RespiratoryEvents);
-    result_status_.events_available =
-        events_def && source_complete_for_night(night, *events_def);
+bool ReportManager::refresh_result_cache_if_needed(
+    const ReportSummaryRecord &night,
+    const ReportNightCoverageStatus &coverage,
+    size_t therapy_index,
+    bool refresh_cache,
+    bool &deferred) {
+    deferred = false;
+    if (!refresh_cache) return true;
 
-    // Use the session data span, not night.end_ms (a 24h day bucket far past the
-    // therapy data) coverage is only written/checked over the session span,
-    // so the result chunk range and its coverage check must match.
-    ReportSessionRange night_range;
-    if (!night_data_span(night, night_range.start_ms, night_range.end_ms)) {
-        result_status_.state = ReportResultState::Incomplete;
-        result_status_.error = "no_sessions";
-        publish_result_to_slot();
-        return true;
-    }
-
-    const bool latest_tail_refresh = refresh_cache && therapy_index == 0;
-    const bool cache_refresh_requested = refresh_cache;
-    // Reports are read-only: opening a night never triggers a spool (that would
-    // duel the background sweep on the single-consumer CAN bus). Only an
-    // explicit refresh fetches; otherwise we build from whatever is cached.
-    const bool cache_needed = cache_refresh_requested;
-    bool cache_refresh_in_flight = false;
-    if (cache_needed) {
-        // A user-initiated prepare preempts a low-priority background prefetch
-        // so it claims the fetch slot immediately instead of queuing behind it.
-        prefetch_yield_to_foreground();
-        if (!cache_fetch_active_) {
-            if (!build_cache_plan(night,
-                                  cache_refresh_requested,
-                                  latest_tail_refresh)) {
+    const bool latest_tail_refresh = therapy_index == 0;
+    prefetch_yield_to_foreground();
+    if (!cache_fetch_active_) {
+        if (!build_cache_plan(night, true, latest_tail_refresh)) {
+            return false;
+        }
+        if (cache_source_count_ > 0) {
+            if (!start_next_cache_source()) {
                 return false;
             }
-            if (cache_source_count_ > 0) {
-                if (!start_next_cache_source()) {
-                    return false;
-                }
-            } else {
-                cache_fetch_active_ = false;
-                cache_status_.active = false;
-                cache_status_.revision++;
-                cache_status_.error.clear();
-            }
-        }
-        cache_refresh_in_flight =
-            cache_fetch_active_ && cache_night_.start_ms == night.start_ms;
-
-        if (cache_refresh_in_flight || coverage.missing_required) {
-            pending_result_prepare_ = true;
-            pending_result_refresh_cache_ = false;
-            pending_result_therapy_index_ = therapy_index;
-            result_status_.state = ReportResultState::Preparing;
-            result_status_.error = "cache_fetching";
-            return true;
+        } else {
+            cache_fetch_active_ = false;
+            cache_status_.active = false;
+            cache_status_.revision++;
+            cache_status_.error.clear();
         }
     }
 
+    const bool cache_refresh_in_flight =
+        cache_fetch_active_ && cache_night_.start_ms == night.start_ms;
+    if (cache_refresh_in_flight || coverage.missing_required) {
+        pending_result_prepare_ = true;
+        pending_result_refresh_cache_ = false;
+        pending_result_therapy_index_ = therapy_index;
+        result_status_.state = ReportResultState::Preparing;
+        result_status_.error = "cache_fetching";
+        deferred = true;
+    }
+    return true;
+}
+
+bool ReportManager::add_result_chunks_for_night(
+    const ReportSummaryRecord &night,
+    int64_t range_start_ms,
+    int64_t range_end_ms) {
     if (!add_result_chunks_for_range(
             ReportStoreChunkKind::Events,
             ReportSourceId::RespiratoryEvents,
             ReportSignalId::Flow,
             report_source_spool_type(ReportSourceId::RespiratoryEvents),
             static_cast<int64_t>(night.start_ms),
-            night_range.start_ms,
-            night_range.end_ms,
+            range_start_ms,
+            range_end_ms,
             true)) {
         return false;
     }
@@ -4094,13 +4069,126 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
                                          signal.id,
                                          signal.store_name,
                                          static_cast<int64_t>(night.start_ms),
-                                         night_range.start_ms,
-                                         night_range.end_ms,
+                                         range_start_ms,
+                                         range_end_ms,
                                          true)) {
             return false;
         }
     }
+    return true;
+}
 
+bool ReportManager::count_result_events_from_chunks() {
+    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
+    const size_t range_count =
+        collect_session_ranges(result_night_,
+                               ranges,
+                               AC_REPORT_SUMMARY_SESSION_MAX);
+    result_status_.oa_count = 0;
+    result_status_.ca_count = 0;
+    result_status_.ua_count = 0;
+    result_status_.hypopnea_count = 0;
+    result_status_.arousal_count = 0;
+    ReportSpoolBuffer counted_events;
+    counted_events.set_max_size(64 * 1024);
+    for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
+        const ReportResultChunk &chunk = result_chunks_[i];
+        if (chunk.kind != ReportStoreChunkKind::Events) continue;
+        const char *source = report_source_spool_type(chunk.source);
+        if (!source || !source[0] || !chunk.name || !chunk.name[0]) {
+            fail_result_prepare("event_chunk_key_failed");
+            return false;
+        }
+        ReportStoreChunkKey key;
+        key.kind = chunk.kind;
+        key.source = source;
+        key.name = chunk.name;
+        key.start_ms = chunk.start_ms;
+        key.end_ms = chunk.end_ms;
+        key.night_start_ms = static_cast<int64_t>(result_night_.start_ms);
+        ReportStoreChunkMeta meta;
+        ReportSpoolBuffer payload;
+        if (!ReportStore::read_chunk(key, meta, payload)) {
+            fail_result_prepare("event_chunk_read_failed");
+            return false;
+        }
+        const size_t count =
+            payload.size() / report_event_record_wire_size();
+        for (size_t index = 0; index < count; ++index) {
+            ReportEventRecord event;
+            if (!report_read_event_record(payload.data(),
+                                          payload.size(),
+                                          index,
+                                          event)) {
+                continue;
+            }
+            if (!report_time_in_ranges(event.start_ms,
+                                       ranges,
+                                       range_count)) {
+                continue;
+            }
+            if (event.duration_ms < 0) continue;
+            if (report_event_seen(counted_events, event)) continue;
+            if (!remember_report_event(counted_events, event)) {
+                fail_result_prepare("event_dedupe_failed");
+                return false;
+            }
+            switch (event.code) {
+                case report_event_code_value(ReportEventCode::Hypopnea):
+                    result_status_.hypopnea_count++;
+                    break;
+                case report_event_code_value(
+                    ReportEventCode::CentralApnea):
+                    result_status_.ca_count++;
+                    break;
+                case report_event_code_value(
+                    ReportEventCode::ObstructiveApnea):
+                    result_status_.oa_count++;
+                    break;
+                case report_event_code_value(
+                    ReportEventCode::UnclassifiedApnea):
+                    result_status_.ua_count++;
+                    break;
+                case report_event_code_value(ReportEventCode::Arousal):
+                    result_status_.arousal_count++;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    return true;
+}
+
+void ReportManager::apply_result_event_indices_from_counts() {
+    result_status_.event_metrics_valid = false;
+    if (result_status_.duration_min <= 0) return;
+
+    const float hours =
+        static_cast<float>(result_status_.duration_min) / 60.0f;
+    if (hours <= 0.0f) return;
+
+    result_status_.oa_index =
+        static_cast<float>(result_status_.oa_count) / hours;
+    result_status_.ca_index =
+        static_cast<float>(result_status_.ca_count) / hours;
+    result_status_.ua_index =
+        static_cast<float>(result_status_.ua_count) / hours;
+    result_status_.hypopnea_index =
+        static_cast<float>(result_status_.hypopnea_count) / hours;
+    result_status_.arousal_index =
+        static_cast<float>(result_status_.arousal_count) / hours;
+    result_status_.ahi =
+        result_status_.oa_index +
+        result_status_.ca_index +
+        result_status_.ua_index +
+        result_status_.hypopnea_index;
+    // Trust chunk-derived indices only when events are covered; otherwise the
+    // counts are zero-by-absence, so omit the AHI.
+    result_status_.event_metrics_valid = result_status_.events_available;
+}
+
+bool ReportManager::finalize_result_prepare(size_t therapy_index) {
     if (result_status_.state == ReportResultState::Error) return false;
     // Build a best-effort plot from whatever is cached: aged-out signals leave
     // missing_streams>0 and not-yet-swept sources leave missing_required>0, but
@@ -4131,107 +4219,8 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
             apply_result_session_ranges(derived_ranges, derived_range_count);
         }
 
-        ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
-        const size_t range_count =
-            collect_session_ranges(result_night_,
-                                   ranges,
-                                   AC_REPORT_SUMMARY_SESSION_MAX);
-        result_status_.oa_count = 0;
-        result_status_.ca_count = 0;
-        result_status_.ua_count = 0;
-        result_status_.hypopnea_count = 0;
-        result_status_.arousal_count = 0;
-        ReportSpoolBuffer counted_events;
-        counted_events.set_max_size(64 * 1024);
-        for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
-            const ReportResultChunk &chunk = result_chunks_[i];
-            if (chunk.kind != ReportStoreChunkKind::Events) continue;
-            const char *source = report_source_spool_type(chunk.source);
-            if (!source || !source[0] || !chunk.name || !chunk.name[0]) {
-                fail_result_prepare("event_chunk_key_failed");
-                return false;
-            }
-            ReportStoreChunkKey key;
-            key.kind = chunk.kind;
-            key.source = source;
-            key.name = chunk.name;
-            key.start_ms = chunk.start_ms;
-            key.end_ms = chunk.end_ms;
-            key.night_start_ms = static_cast<int64_t>(result_night_.start_ms);
-            ReportStoreChunkMeta meta;
-            ReportSpoolBuffer payload;
-            if (!ReportStore::read_chunk(key, meta, payload)) {
-                fail_result_prepare("event_chunk_read_failed");
-                return false;
-            }
-            const size_t count =
-                payload.size() / report_event_record_wire_size();
-            for (size_t index = 0; index < count; ++index) {
-                ReportEventRecord event;
-                if (!report_read_event_record(payload.data(),
-                                              payload.size(),
-                                              index,
-                                              event)) {
-                    continue;
-                }
-                if (!report_time_in_ranges(event.start_ms,
-                                           ranges,
-                                           range_count)) {
-                    continue;
-                }
-                if (event.duration_ms < 0) continue;
-                if (report_event_seen(counted_events, event)) continue;
-                if (!remember_report_event(counted_events, event)) {
-                    fail_result_prepare("event_dedupe_failed");
-                    return false;
-                }
-                switch (event.code) {
-                    case 2:
-                        result_status_.hypopnea_count++;
-                        break;
-                    case 3:
-                        result_status_.ca_count++;
-                        break;
-                    case 4:
-                        result_status_.oa_count++;
-                        break;
-                    case 5:
-                        result_status_.ua_count++;
-                        break;
-                    case 6:
-                        result_status_.arousal_count++;
-                        break;
-                    default:
-                        break;
-                }
-            }
-        }
-        result_status_.event_metrics_valid = false;
-        if (result_status_.duration_min > 0) {
-            const float hours =
-                static_cast<float>(result_status_.duration_min) / 60.0f;
-            if (hours > 0.0f) {
-                result_status_.oa_index =
-                    static_cast<float>(result_status_.oa_count) / hours;
-                result_status_.ca_index =
-                    static_cast<float>(result_status_.ca_count) / hours;
-                result_status_.ua_index =
-                    static_cast<float>(result_status_.ua_count) / hours;
-                result_status_.hypopnea_index =
-                    static_cast<float>(result_status_.hypopnea_count) / hours;
-                result_status_.arousal_index =
-                    static_cast<float>(result_status_.arousal_count) / hours;
-                result_status_.ahi =
-                    result_status_.oa_index +
-                    result_status_.ca_index +
-                    result_status_.ua_index +
-                    result_status_.hypopnea_index;
-                // Trust chunk-derived indices only when events are covered;
-                // otherwise the counts are zero-by-absence, so omit the AHI.
-                result_status_.event_metrics_valid =
-                    result_status_.events_available;
-            }
-        }
+        if (!count_result_events_from_chunks()) return false;
+        apply_result_event_indices_from_counts();
         if (!start_result_plot_build()) return false;
         if (plot_build_active_) {
             Log::logf(CAT_REPORT,
@@ -4255,6 +4244,67 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
               static_cast<unsigned long>(result_status_.record_count),
               static_cast<unsigned long>(result_status_.payload_bytes));
     return true;
+}
+
+bool ReportManager::prepare_result_by_therapy_index_internal(
+    size_t therapy_index,
+    bool refresh_cache) {
+    if (defer_result_prepare_for_summary(therapy_index, refresh_cache)) {
+        return true;
+    }
+    if (!ensure_result_chunks()) return false;
+
+    ReportSummaryRecord night;
+    if (!load_result_night(therapy_index, night)) return false;
+    if (publish_existing_result_if_current(therapy_index,
+                                           night,
+                                           refresh_cache)) {
+        return true;
+    }
+
+    begin_result_prepare_for_night(therapy_index, night);
+
+    ReportNightCoverageStatus coverage;
+    if (!night_coverage(night.start_ms, coverage)) {
+        fail_result_prepare("coverage_unavailable");
+        return false;
+    }
+    result_status_.missing_required = coverage.missing_required;
+    // Event counts come from cached event chunks; if the event source is not
+    // covered for this night, zero counts are unknown (not real) -> flag
+    // unavailable so the UI shows that rather than reporting zero events.
+    const ReportSourceDef *events_def =
+        report_source_def(ReportSourceId::RespiratoryEvents);
+    result_status_.events_available =
+        events_def && source_complete_for_night(night, *events_def);
+
+    // Use the session data span, not night.end_ms (a 24h day bucket far past the
+    // therapy data) coverage is only written/checked over the session span,
+    // so the result chunk range and its coverage check must match.
+    ReportSessionRange night_range;
+    if (!night_data_span(night, night_range.start_ms, night_range.end_ms)) {
+        result_status_.state = ReportResultState::Incomplete;
+        result_status_.error = "no_sessions";
+        publish_result_to_slot();
+        return true;
+    }
+
+    bool deferred = false;
+    if (!refresh_result_cache_if_needed(night,
+                                        coverage,
+                                        therapy_index,
+                                        refresh_cache,
+                                        deferred)) {
+        return false;
+    }
+    if (deferred) return true;
+
+    if (!add_result_chunks_for_night(night,
+                                     night_range.start_ms,
+                                     night_range.end_ms)) {
+        return false;
+    }
+    return finalize_result_prepare(therapy_index);
 }
 
 bool ReportManager::cache_source_supported(ReportSourceId source) const {
@@ -4576,12 +4626,7 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
 }
 
 bool ReportManager::finalize_cache_source_if_ready() {
-    std::string write_error;
-    if (cache_write_failed_for_active_fetch(write_error)) {
-        fail_cache_fetch(write_error.empty() ? "cache_write_failed"
-                                             : write_error.c_str());
-        return false;
-    }
+    if (fail_cache_fetch_if_write_failed()) return false;
     const CacheFlushResult flush = flush_all_cache_coalesce_buffers();
     if (flush == CacheFlushResult::Blocked) return true;
     if (flush == CacheFlushResult::Failed) {
@@ -4597,38 +4642,31 @@ bool ReportManager::finalize_cache_source_if_ready() {
     cache_source_finalizing_ = false;
     cache_finalizing_plan_ = {};
     cache_source_index_++;
-    start_next_cache_source();
-    return true;
+    return start_next_cache_source();
 }
 
-void ReportManager::poll_cache_fetch(RpcArbiter &arbiter) {
-    if (!cache_fetch_active_) return;
-
-    if (cache_source_finalizing_) {
-        (void)finalize_cache_source_if_ready();
-        return;
-    }
-
+bool ReportManager::fail_cache_fetch_if_write_failed() {
     std::string write_error;
     if (cache_write_failed_for_active_fetch(write_error)) {
         fail_cache_fetch(write_error.empty() ? "cache_write_failed"
                                              : write_error.c_str());
-        return;
+        return true;
     }
+    return false;
+}
 
-    spool_.poll(arbiter);
-    log_spool_can_pressure(arbiter);
-    cache_status_.spool = spool_.status();
-    if (cache_write_backpressure_active()) return;
-
+bool ReportManager::drain_cache_spool_rounds() {
     ReportSpoolResult round;
     while (spool_.take_completed_round(round)) {
-        if (!store_cache_round(round)) return;
+        if (!store_cache_round(round)) return false;
         round.clear();
         cache_status_.spool = spool_.status();
-        if (cache_write_backpressure_active()) return;
+        if (cache_write_backpressure_active()) return false;
     }
+    return true;
+}
 
+void ReportManager::finish_cache_spool_if_terminal() {
     if (spool_.complete()) {
         ReportSpoolResult final_result;
         spool_.move_result_to(final_result);
@@ -4643,6 +4681,24 @@ void ReportManager::poll_cache_fetch(RpcArbiter &arbiter) {
     } else if (spool_.failed()) {
         fail_cache_fetch(spool_.status().error.c_str());
     }
+}
+
+void ReportManager::poll_cache_fetch(RpcArbiter &arbiter) {
+    if (!cache_fetch_active_) return;
+
+    if (cache_source_finalizing_) {
+        (void)finalize_cache_source_if_ready();
+        return;
+    }
+    if (fail_cache_fetch_if_write_failed()) return;
+
+    spool_.poll(arbiter);
+    log_spool_can_pressure(arbiter);
+    cache_status_.spool = spool_.status();
+    if (cache_write_backpressure_active()) return;
+
+    if (!drain_cache_spool_rounds()) return;
+    finish_cache_spool_if_terminal();
 }
 
 void ReportManager::finish_cache_fetch() {

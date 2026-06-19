@@ -61,8 +61,6 @@ public:
                       size_t error_out_size = 0);
     void abort_connection();
 
-    uint32_t negotiated_max_write_size() const;
-
 private:
     bool parse_endpoint(const char *endpoint,
                         char *error_out,

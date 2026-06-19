@@ -6,6 +6,7 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "storage_directory.h"
 #include "storage_manager.h"
 #include "string_util.h"
 
@@ -403,23 +404,8 @@ bool StorageDeleteJob::delete_dir_step_locked(uint32_t &budget) {
     WalkFrame &frame = walk_stack_[walk_depth_ - 1];
     if (!ensure_dir_open_locked(frame)) return false;
 
-    char child_name[AC_STORAGE_PATH_MAX] = {};
-    bool have_child = false;
-    bool child_is_dir = false;
-    {
-        Storage::Guard guard;
-        File child = frame.dir.openNextFile();
-        if (child) {
-            have_child = true;
-            copy_cstr(child_name,
-                      sizeof(child_name),
-                      storage_basename_from_path(child.name()));
-            child_is_dir = child.isDirectory();
-            child.close();
-        }
-    }
-
-    if (!have_child) {
+    StorageDirChild child;
+    if (!storage_read_next_dir_child(frame.dir, child)) {
         {
             Storage::Guard guard;
             frame.dir.close();
@@ -444,14 +430,14 @@ bool StorageDeleteJob::delete_dir_step_locked(uint32_t &budget) {
 
     char child_path[AC_STORAGE_PATH_MAX] = {};
     if (!storage_append_child_path(frame.path,
-                                   child_name,
+                                   child.name,
                                    child_path,
                                    sizeof(child_path)) ||
         !storage_user_path_valid(child_path)) {
         set_error_locked("bad_child_path");
         return false;
     }
-    if (child_is_dir) {
+    if (child.is_dir) {
         if (!push_dir_locked(child_path)) return false;
         budget--;
         return true;

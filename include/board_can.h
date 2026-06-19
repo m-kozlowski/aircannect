@@ -54,14 +54,22 @@ static constexpr size_t AC_CAN_TX_DRAIN_BUDGET = 32;
 // Keep enough TWAI RX slack that a short main-loop pass or callback cannot
 // overflow the TWAI queue before the next drain checkpoint.
 static constexpr size_t AC_CAN_RX_QUEUE_LEN = 512;
-static constexpr size_t AC_CAN_RX_DRAIN_BUDGET = 512;
+static constexpr size_t AC_CAN_RX_DRAIN_BASE_BUDGET = 128;
+static constexpr size_t AC_CAN_RX_DRAIN_PRESSURE_BUDGET = 512;
+static constexpr uint32_t AC_CAN_RX_DRAIN_PRESSURE_MAX_MS = 2;
+static constexpr size_t AC_CAN_RX_BACKPRESSURE_WATERMARK =
+    AC_CAN_RX_QUEUE_LEN / 4;
 static constexpr size_t AC_RPC_PAYLOAD_QUEUE_DEPTH = 8;
 static constexpr size_t AC_RPC_PAYLOAD_DRAIN_BUDGET = 2;
+static constexpr size_t AC_RPC_PAYLOAD_BACKPRESSURE_WATERMARK =
+    AC_RPC_PAYLOAD_QUEUE_DEPTH / 2;
 static constexpr size_t AC_DG_MAX_PAYLOAD_BYTES = 8192;
 static constexpr size_t AC_DG_INITIAL_RESERVE_BYTES = 256;
 static constexpr uint32_t AC_DG_IDLE_TIMEOUT_MS = 2000;
 static constexpr size_t AC_RPC_EVENT_QUEUE_DEPTH = 48;
 static constexpr size_t AC_REPORT_EVENT_QUEUE_DEPTH = 32;
+static constexpr size_t AC_REPORT_EVENT_BACKPRESSURE_WATERMARK =
+    AC_REPORT_EVENT_QUEUE_DEPTH / 2;
 static constexpr size_t AC_RESMED_OTA_EVENT_QUEUE_DEPTH = 8;
 static constexpr size_t AC_RPC_REQUEST_QUEUE_DEPTH = 8;
 static constexpr size_t AC_STREAM_CONSUMERS_MAX = 4;

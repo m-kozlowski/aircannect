@@ -303,6 +303,7 @@ private:
 
     bool background_backoff_active(uint32_t now) const;
     bool background_rx_pressure_active(uint32_t now) const;
+    bool can_rx_queue_pressure_active() const;
     void note_can_rx_pressure(uint32_t now);
     void note_request_success(RpcSource source, uint32_t now);
     void note_request_timeout(RpcSource source, uint32_t now);
