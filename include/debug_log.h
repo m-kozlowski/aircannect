@@ -40,6 +40,11 @@ struct Stats {
     uint32_t syslog_sent = 0;
     uint32_t syslog_drops = 0;
     uint32_t syslog_errors = 0;
+    uint32_t file_enqueued = 0;
+    uint32_t file_dequeued = 0;
+    uint32_t file_drops = 0;
+    uint32_t file_errors = 0;
+    uint32_t file_backpressure = 0;
 };
 
 void init();
@@ -56,11 +61,14 @@ void configure_syslog(bool enabled,
                       const String &host,
                       uint16_t port,
                       const String &hostname);
-void poll(bool network_available);
+void poll(bool network_available, bool storage_draining_allowed = true);
 bool syslog_enabled();
 String syslog_host();
 uint16_t syslog_port();
 size_t syslog_queue_depth();
+bool filelog_enabled();
+const char *filelog_path();
+size_t filelog_queue_depth();
 
 Stats stats();
 

@@ -482,7 +482,12 @@ void loop() {
                                        resmed_ota_transport_active);
     wifi_manager.poll();
     sync_network_services();
-    Log::poll(wifi_manager.network_available());
+    const bool storage_writer_idle_allowed =
+        !rpc_arbiter.stream_activity_active() &&
+        rpc_arbiter.as11_state().therapy_state() !=
+            As11TherapyState::Running;
+    Log::poll(wifi_manager.network_available(),
+              storage_writer_idle_allowed);
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }
@@ -493,9 +498,7 @@ void loop() {
     ota_manager.poll(wifi_manager, esp_reboot_allowed,
                      !resmed_ota_transport_active);
     resmed_ota_manager.poll();
-    Storage::poll(!rpc_arbiter.stream_activity_active() &&
-                  rpc_arbiter.as11_state().therapy_state() !=
-                      As11TherapyState::Running);
+    Storage::poll(storage_writer_idle_allowed);
     if (storage_sync_job) {
         storage_sync_job->set_network_available(
             wifi_manager.mode_state() == WifiModeState::StaConnected);
@@ -522,7 +525,9 @@ void loop() {
     // during this loop turn.
     drain_rpc_events();
     drain_can_rx_after("rpc_events_post_frontends");
-    StorageWriter::poll();
+    if (storage_writer_idle_allowed) {
+        StorageWriter::poll();
+    }
     drain_can_rx_after("storage_writer");
 
     delay(0);

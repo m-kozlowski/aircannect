@@ -10,6 +10,8 @@
 #include "board.h"
 #include "fixed_queue.h"
 #include "memory_manager.h"
+#include "storage_manager.h"
+#include "storage_writer.h"
 #include "string_util.h"
 
 using aircannect::FixedQueue;
@@ -30,13 +32,16 @@ struct LogRecord {
 };
 
 using SyslogQueue = FixedQueue<LogRecord, AC_SYSLOG_QUEUE_DEPTH>;
+using FileLogQueue = FixedQueue<LogRecord, AC_FILE_LOG_QUEUE_DEPTH>;
 
 SyslogQueue *syslog_queue = nullptr;
+FileLogQueue *file_log_queue = nullptr;
 Log::Stats log_stats;
 IPAddress syslog_ip;
 String syslog_host_text;
 uint16_t syslog_port_value = AC_SYSLOG_PORT;
 bool syslog_enabled_value = false;
+bool file_log_dir_ready = false;
 char syslog_hostname[64] = "aircannect";
 
 int syslog_severity(log_level_t level) {
@@ -172,6 +177,57 @@ void enqueue_syslog(log_cat_t cat, log_level_t level, const char *buf) {
     }
 }
 
+bool ensure_file_log_queue() {
+#if AC_FILE_LOG_ENABLED
+    if (file_log_queue) return true;
+    void *memory = aircannect::Memory::alloc_large(sizeof(FileLogQueue));
+    if (!memory) {
+        log_stats.file_errors++;
+        return false;
+    }
+    file_log_queue = new (memory) FileLogQueue();
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool ensure_file_log_dir() {
+#if AC_FILE_LOG_ENABLED
+    if (file_log_dir_ready) return true;
+    if (!aircannect::Storage::mounted()) return false;
+    if (!aircannect::Storage::ensure_dir("/aircannect") ||
+        !aircannect::Storage::ensure_dir(AC_FILE_LOG_DIR)) {
+        log_stats.file_errors++;
+        return false;
+    }
+    file_log_dir_ready = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+void enqueue_file_log(log_cat_t cat, log_level_t level, const char *buf) {
+#if AC_FILE_LOG_ENABLED
+    if (!buf || !file_log_queue) return;
+    LogRecord record;
+    record.cat = cat;
+    record.level = level;
+    strncpy(record.text, buf, sizeof(record.text) - 1);
+    record.text[sizeof(record.text) - 1] = 0;
+    clean_message(record.text);
+    if (!record.text[0]) return;
+    if (file_log_queue->push(record)) {
+        log_stats.file_enqueued++;
+    }
+#else
+    (void)cat;
+    (void)level;
+    (void)buf;
+#endif
+}
+
 void dispatch_structured(log_cat_t cat,
                          log_level_t level,
                          const char *buf,
@@ -180,6 +236,7 @@ void dispatch_structured(log_cat_t cat,
     log_stats.emitted++;
     serial_dispatch(buf, len);
     enqueue_syslog(cat, level, syslog_text);
+    enqueue_file_log(cat, level, syslog_text);
 }
 
 void lock_log() {
@@ -217,6 +274,50 @@ void send_syslog_record(const LogRecord &record) {
     log_stats.syslog_sent++;
 }
 
+void poll_file_log() {
+#if AC_FILE_LOG_ENABLED
+    lock_log();
+    const bool empty = !file_log_queue || file_log_queue->empty();
+    unlock_log();
+    if (empty) return;
+    if (!ensure_file_log_dir()) return;
+
+    for (size_t i = 0; i < AC_FILE_LOG_DRAIN_BUDGET; ++i) {
+        LogRecord record;
+        lock_log();
+        const bool have_record = file_log_queue &&
+                                 file_log_queue->pop(record);
+        unlock_log();
+        if (!have_record) return;
+
+        char line[AC_LOG_LINE_MAX + 2] = {};
+        const size_t len = strnlen(record.text, sizeof(record.text));
+        memcpy(line, record.text, len);
+        line[len] = '\n';
+        line[len + 1] = 0;
+
+        if (aircannect::StorageWriter::enqueue_rotating_append(
+                AC_FILE_LOG_PATH,
+                reinterpret_cast<const uint8_t *>(line),
+                len + 1,
+                AC_FILE_LOG_ROTATE_BYTES,
+                AC_FILE_LOG_ARCHIVES,
+                false)) {
+            log_stats.file_dequeued++;
+            continue;
+        }
+
+        log_stats.file_backpressure++;
+        lock_log();
+        if (!file_log_queue || !file_log_queue->push_front(record)) {
+            log_stats.file_drops++;
+        }
+        unlock_log();
+        return;
+    }
+#endif
+}
+
 }  // namespace
 
 namespace Log {
@@ -226,6 +327,9 @@ void init() {
         log_mutex = xSemaphoreCreateMutexStatic(&log_mutex_storage);
     }
     for (int i = 0; i < CAT_COUNT; ++i) levels[i] = LOG_INFO;
+    lock_log();
+    ensure_file_log_queue();
+    unlock_log();
 }
 
 void set_level(log_level_t level) {
@@ -392,7 +496,10 @@ void configure_syslog(bool enabled,
     unlock_log();
 }
 
-void poll(bool network_available) {
+void poll(bool network_available, bool storage_draining_allowed) {
+    if (storage_draining_allowed) {
+        poll_file_log();
+    }
     if (!syslog_enabled_value || !network_available) return;
     for (size_t i = 0; i < AC_SYSLOG_SEND_BUDGET; ++i) {
         LogRecord record;
@@ -425,10 +532,34 @@ size_t syslog_queue_depth() {
     return out;
 }
 
+bool filelog_enabled() {
+#if AC_FILE_LOG_ENABLED
+    return true;
+#else
+    return false;
+#endif
+}
+
+const char *filelog_path() {
+#if AC_FILE_LOG_ENABLED
+    return AC_FILE_LOG_PATH;
+#else
+    return "";
+#endif
+}
+
+size_t filelog_queue_depth() {
+    lock_log();
+    const size_t out = file_log_queue ? file_log_queue->count() : 0;
+    unlock_log();
+    return out;
+}
+
 Stats stats() {
     lock_log();
     Stats out = log_stats;
     if (syslog_queue) out.syslog_drops += syslog_queue->dropped();
+    if (file_log_queue) out.file_drops += file_log_queue->dropped();
     unlock_log();
     return out;
 }
@@ -506,6 +637,7 @@ void log_payload(log_cat_t cat,
     if (payload_len > payload_room) log_stats.truncated++;
     record[sizeof(record) - 1] = 0;
     enqueue_syslog(cat, level, record);
+    enqueue_file_log(cat, level, record);
     unlock_log();
 }
 

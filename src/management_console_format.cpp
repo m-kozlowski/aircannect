@@ -354,6 +354,18 @@ void print_log_status(Print &out) {
     out.print(stats.syslog_drops);
     out.print(" errors=");
     out.println(stats.syslog_errors);
+
+    out.print("[FILELOG] enabled=");
+    out.print(Log::filelog_enabled() ? "yes" : "no");
+    out.print(" path=");
+    const char *path = Log::filelog_path();
+    out.print(path && path[0] ? path : "--");
+    out.print(" queued=");
+    out.print(Log::filelog_queue_depth());
+    out.print(" drops=");
+    out.print(stats.file_drops);
+    out.print(" errors=");
+    out.println(stats.file_errors);
 }
 
 void print_log_stats(Print &out) {
@@ -376,6 +388,20 @@ void print_log_stats(Print &out) {
     out.print(stats.syslog_drops);
     out.print(" syslog_errors=");
     out.print(stats.syslog_errors);
+    out.print(" filelog_enabled=");
+    out.print(Log::filelog_enabled() ? "yes" : "no");
+    out.print(" filelog_q=");
+    out.print(Log::filelog_queue_depth());
+    out.print(" filelog_enqueued=");
+    out.print(stats.file_enqueued);
+    out.print(" filelog_forwarded=");
+    out.print(stats.file_dequeued);
+    out.print(" filelog_drops=");
+    out.print(stats.file_drops);
+    out.print(" filelog_backpressure=");
+    out.print(stats.file_backpressure);
+    out.print(" filelog_errors=");
+    out.print(stats.file_errors);
 }
 
 void print_memory_status(Print &out, const MemoryStatus &mem) {
@@ -489,6 +515,10 @@ void print_storage_writer_status(Print &out,
     out.print(s.open_errors);
     out.print(" write_errors=");
     out.print(s.write_errors);
+    if (s.rotate_errors) {
+        out.print(" rotate_errors=");
+        out.print(s.rotate_errors);
+    }
     if (s.last_path[0]) {
         out.print(" last_path=");
         out.print(s.last_path);

@@ -21,6 +21,8 @@ struct StorageWriterStatus {
     uint32_t unavailable_drops = 0;
     uint32_t open_errors = 0;
     uint32_t write_errors = 0;
+    uint32_t rotations = 0;
+    uint32_t rotate_errors = 0;
     uint64_t bytes_enqueued = 0;
     uint64_t bytes_written = 0;
     uint32_t last_activity_ms = 0;
@@ -34,6 +36,12 @@ void begin();
 void poll();
 
 bool enqueue_append(const char *path, const uint8_t *data, size_t len);
+bool enqueue_rotating_append(const char *path,
+                             const uint8_t *data,
+                             size_t len,
+                             size_t rotate_bytes,
+                             uint8_t archive_count,
+                             bool report_errors = true);
 
 StorageWriterStatus status();
 

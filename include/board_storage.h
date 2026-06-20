@@ -99,4 +99,17 @@ static constexpr size_t AC_STORAGE_WRITE_CHUNK_BYTES = 512;
 static constexpr size_t AC_STORAGE_WRITE_PATH_MAX = 80;
 static constexpr size_t AC_STORAGE_WRITE_BUDGET_ITEMS = 2;
 static constexpr size_t AC_STORAGE_WRITE_BUDGET_BYTES = 1024;
+
+#ifndef AC_FILE_LOG_ENABLED
+#define AC_FILE_LOG_ENABLED AC_STORAGE_HAS_SDCARD
+#endif
+
+static constexpr const char *AC_FILE_LOG_DIR = "/aircannect/log";
+static constexpr const char *AC_FILE_LOG_PATH =
+    "/aircannect/log/aircannect.log";
+static constexpr size_t AC_FILE_LOG_QUEUE_DEPTH = 64;
+static constexpr size_t AC_FILE_LOG_DRAIN_BUDGET = 4;
+static constexpr size_t AC_FILE_LOG_ROTATE_BYTES = 256 * 1024;
+static constexpr uint8_t AC_FILE_LOG_ARCHIVES = 8;
+
 static constexpr uint32_t AC_SINK_ATTACH_RETRY_MS = 2000;

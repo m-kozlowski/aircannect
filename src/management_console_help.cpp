@@ -20,7 +20,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  can               CAN controller recovery helpers");
         out.println("  config            persistent app configuration");
         out.println("  wifi              Wi-Fi profiles, scan, and reconnect");
-        out.println("  log               log levels and syslog configuration");
+        out.println("  log               log levels and sink status");
         out.println("  as11              AS11 state, polling, and device version");
         out.println("  therapy           start/stop therapy commands");
         out.println("  time              ESP and AS11 clock sync commands");
@@ -83,7 +83,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "log") {
         out.println("[HELP log]");
-        out.println("  log                       show log levels and syslog config");
+        out.println("  log                       show log levels and sink status");
         out.println("  log level LEVEL           set all categories");
         out.println("  log level CATEGORY LEVEL  set one category");
         out.println("  log syslog off            disable syslog");
