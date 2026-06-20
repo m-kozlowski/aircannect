@@ -61,7 +61,9 @@ void configure_syslog(bool enabled,
                       const String &host,
                       uint16_t port,
                       const String &hostname);
-void poll(bool network_available, bool storage_draining_allowed = true);
+void poll(bool network_available,
+          bool storage_draining_allowed = true,
+          size_t file_log_drain_budget = 0);
 bool syslog_enabled();
 String syslog_host();
 uint16_t syslog_port();

@@ -458,6 +458,27 @@ bool enqueue_append_internal(const char *path,
 
 }  // namespace
 
+void poll_with_budget(size_t max_items, size_t max_bytes) {
+    if (!stats.initialized) begin();
+    if (!stats.available || !queued || max_items == 0 || max_bytes == 0) {
+        return;
+    }
+    if (!Storage::mounted()) {
+        drop_all_unavailable();
+        return;
+    }
+
+    size_t items = 0;
+    size_t bytes = 0;
+    while (queued && items < max_items && bytes < max_bytes) {
+        Slot slot;
+        if (!pop_chunk(slot)) break;
+        bytes += slot.len;
+        write_chunk(slot);
+        items++;
+    }
+}
+
 void begin() {
     if (stats.initialized) return;
     stats.initialized = true;
@@ -475,23 +496,12 @@ void begin() {
 }
 
 void poll() {
-    if (!stats.initialized) begin();
-    if (!stats.available || !queued) return;
-    if (!Storage::mounted()) {
-        drop_all_unavailable();
-        return;
-    }
+    poll_with_budget(AC_STORAGE_WRITE_BUDGET_ITEMS,
+                     AC_STORAGE_WRITE_BUDGET_BYTES);
+}
 
-    size_t items = 0;
-    size_t bytes = 0;
-    while (queued && items < AC_STORAGE_WRITE_BUDGET_ITEMS &&
-           bytes < AC_STORAGE_WRITE_BUDGET_BYTES) {
-        Slot slot;
-        if (!pop_chunk(slot)) break;
-        bytes += slot.len;
-        write_chunk(slot);
-        items++;
-    }
+void poll_limited(size_t max_items, size_t max_bytes) {
+    poll_with_budget(max_items, max_bytes);
 }
 
 bool enqueue_append(const char *path, const uint8_t *data, size_t len) {

@@ -34,6 +34,7 @@ namespace StorageWriter {
 
 void begin();
 void poll();
+void poll_limited(size_t max_items, size_t max_bytes);
 
 bool enqueue_append(const char *path, const uint8_t *data, size_t len);
 bool enqueue_rotating_append(const char *path,

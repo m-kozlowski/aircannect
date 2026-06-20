@@ -274,15 +274,16 @@ void send_syslog_record(const LogRecord &record) {
     log_stats.syslog_sent++;
 }
 
-void poll_file_log() {
+void poll_file_log(size_t max_records) {
 #if AC_FILE_LOG_ENABLED
+    if (max_records == 0) max_records = AC_FILE_LOG_DRAIN_BUDGET;
     lock_log();
     const bool empty = !file_log_queue || file_log_queue->empty();
     unlock_log();
     if (empty) return;
     if (!ensure_file_log_dir()) return;
 
-    for (size_t i = 0; i < AC_FILE_LOG_DRAIN_BUDGET; ++i) {
+    for (size_t i = 0; i < max_records; ++i) {
         LogRecord record;
         lock_log();
         const bool have_record = file_log_queue &&
@@ -315,6 +316,8 @@ void poll_file_log() {
         unlock_log();
         return;
     }
+#else
+    (void)max_records;
 #endif
 }
 
@@ -496,9 +499,11 @@ void configure_syslog(bool enabled,
     unlock_log();
 }
 
-void poll(bool network_available, bool storage_draining_allowed) {
+void poll(bool network_available,
+          bool storage_draining_allowed,
+          size_t file_log_drain_budget) {
     if (storage_draining_allowed) {
-        poll_file_log();
+        poll_file_log(file_log_drain_budget);
     }
     if (!syslog_enabled_value || !network_available) return;
     for (size_t i = 0; i < AC_SYSLOG_SEND_BUDGET; ++i) {
