@@ -159,19 +159,25 @@ void release_syslog_queue() {
     syslog_queue = nullptr;
 }
 
-void enqueue_syslog(log_cat_t cat, log_level_t level, const char *buf) {
-    if (!syslog_enabled_value || !buf) return;
-    if (!syslog_queue) {
-        log_stats.syslog_drops++;
-        return;
-    }
-    LogRecord record;
+bool make_log_record(log_cat_t cat,
+                     log_level_t level,
+                     const char *buf,
+                     LogRecord &record) {
+    if (!buf) return false;
     record.cat = cat;
     record.level = level;
     strncpy(record.text, buf, sizeof(record.text) - 1);
     record.text[sizeof(record.text) - 1] = 0;
     clean_message(record.text);
-    if (!record.text[0]) return;
+    return record.text[0] != 0;
+}
+
+void enqueue_syslog_record(const LogRecord &record) {
+    if (!syslog_enabled_value) return;
+    if (!syslog_queue) {
+        log_stats.syslog_drops++;
+        return;
+    }
     if (syslog_queue->push(record)) {
         log_stats.syslog_enqueued++;
     }
@@ -208,24 +214,23 @@ bool ensure_file_log_dir() {
 #endif
 }
 
-void enqueue_file_log(log_cat_t cat, log_level_t level, const char *buf) {
+void enqueue_file_log_record(const LogRecord &record) {
 #if AC_FILE_LOG_ENABLED
-    if (!buf || !file_log_queue) return;
-    LogRecord record;
-    record.cat = cat;
-    record.level = level;
-    strncpy(record.text, buf, sizeof(record.text) - 1);
-    record.text[sizeof(record.text) - 1] = 0;
-    clean_message(record.text);
-    if (!record.text[0]) return;
+    if (!file_log_queue) return;
     if (file_log_queue->push(record)) {
         log_stats.file_enqueued++;
     }
 #else
-    (void)cat;
-    (void)level;
-    (void)buf;
+    (void)record;
 #endif
+}
+
+void enqueue_log_sinks(log_cat_t cat, log_level_t level, const char *buf) {
+    if (!syslog_enabled_value && !file_log_queue) return;
+    LogRecord record;
+    if (!make_log_record(cat, level, buf, record)) return;
+    enqueue_syslog_record(record);
+    enqueue_file_log_record(record);
 }
 
 void dispatch_structured(log_cat_t cat,
@@ -235,8 +240,7 @@ void dispatch_structured(log_cat_t cat,
                          const char *syslog_text) {
     log_stats.emitted++;
     serial_dispatch(buf, len);
-    enqueue_syslog(cat, level, syslog_text);
-    enqueue_file_log(cat, level, syslog_text);
+    enqueue_log_sinks(cat, level, syslog_text);
 }
 
 void lock_log() {
@@ -641,8 +645,7 @@ void log_payload(log_cat_t cat,
     }
     if (payload_len > payload_room) log_stats.truncated++;
     record[sizeof(record) - 1] = 0;
-    enqueue_syslog(cat, level, record);
-    enqueue_file_log(cat, level, record);
+    enqueue_log_sinks(cat, level, record);
     unlock_log();
 }
 
