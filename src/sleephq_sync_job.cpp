@@ -28,6 +28,8 @@ static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
     6UL * 60UL * 60UL * 1000UL,
 };
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
+static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PER_PAGE = 100;
+static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PAGE_LIMIT = 5;
 
 void sleep_hq_digest_to_hex(const uint8_t digest[16],
                             char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
@@ -436,12 +438,28 @@ void SleepHqSyncJob::clear_staged_locked() {
     mark_index_ = 0;
 }
 
+void SleepHqSyncJob::clear_remote_files_locked() {
+    if (remote_files_) {
+        for (size_t i = 0; i < remote_file_capacity_; ++i) {
+            remote_files_[i].~RemoteFile();
+        }
+        Memory::free(remote_files_);
+    }
+    remote_files_ = nullptr;
+    remote_file_count_ = 0;
+    remote_file_capacity_ = 0;
+    remote_file_next_page_ = 1;
+    remote_file_pages_loaded_ = 0;
+    remote_file_cache_complete_ = false;
+}
+
 void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     client_.disconnect();
     close_local_locked();
     export_planner_.reset();
     clear_current_file_locked();
     clear_staged_locked();
+    clear_remote_files_locked();
     state_cache_.clear();
     phase_ = WorkPhase::Idle;
     import_batch_active_ = false;
@@ -1150,6 +1168,113 @@ bool SleepHqSyncJob::add_staged_locked(const SleepHqUploadResult &upload) {
     return true;
 }
 
+bool SleepHqSyncJob::reserve_remote_files_locked(size_t needed) {
+    if (needed <= remote_file_capacity_) return true;
+    size_t next = remote_file_capacity_ == 0 ? 32 : remote_file_capacity_ * 2;
+    while (next < needed) next *= 2;
+    RemoteFile *items = static_cast<RemoteFile *>(
+        Memory::alloc_large(sizeof(RemoteFile) * next, false));
+    if (!items) {
+        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
+                  "remote file cache allocation failed entries=%u bytes=%u\n",
+                  static_cast<unsigned>(next),
+                  static_cast<unsigned>(sizeof(RemoteFile) * next));
+        return false;
+    }
+    for (size_t i = 0; i < next; ++i) new (&items[i]) RemoteFile();
+    for (size_t i = 0; i < remote_file_count_; ++i) {
+        items[i] = remote_files_[i];
+    }
+    if (remote_files_) Memory::free(remote_files_);
+    remote_files_ = items;
+    remote_file_capacity_ = next;
+    return true;
+}
+
+bool SleepHqSyncJob::add_remote_file_locked(const SleepHqRemoteFile &file) {
+    if (!file.name[0] || !file.path[0] || !file.content_hash[0]) {
+        return true;
+    }
+    for (size_t i = 0; i < remote_file_count_; ++i) {
+        const RemoteFile &entry = remote_files_[i];
+        if (entry.size == file.size &&
+            strcmp(entry.name, file.name) == 0 &&
+            strcmp(entry.path, file.path) == 0 &&
+            strcmp(entry.content_hash, file.content_hash) == 0) {
+            return true;
+        }
+    }
+    if (!reserve_remote_files_locked(remote_file_count_ + 1)) {
+        return false;
+    }
+    RemoteFile &entry = remote_files_[remote_file_count_++];
+    entry.id = file.id;
+    entry.size = file.size;
+    copy_cstr(entry.name, sizeof(entry.name), file.name);
+    copy_cstr(entry.path, sizeof(entry.path), file.path);
+    copy_cstr(entry.content_hash,
+              sizeof(entry.content_hash),
+              file.content_hash);
+    return true;
+}
+
+bool SleepHqSyncJob::remote_file_cache_contains_locked(
+    const CurrentFile &file) const {
+    if (!file.name[0] || !file.sleep_path[0] || !file.content_hash[0]) {
+        return false;
+    }
+    for (size_t i = 0; i < remote_file_count_; ++i) {
+        const RemoteFile &entry = remote_files_[i];
+        if (entry.size == file.size &&
+            strcmp(entry.name, file.name) == 0 &&
+            strcmp(entry.path, file.sleep_path) == 0 &&
+            strcmp(entry.content_hash, file.content_hash) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SleepHqSyncJob::remote_file_list_cb(void *ctx,
+                                         const SleepHqRemoteFile &file) {
+    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
+    return job && job->add_remote_file_locked(file);
+}
+
+bool SleepHqSyncJob::fetch_next_remote_file_page_locked(char *error,
+                                                        size_t error_size) {
+    if (remote_file_cache_complete_ ||
+        remote_file_pages_loaded_ >= SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
+        remote_file_cache_complete_ = true;
+        return true;
+    }
+    size_t count = 0;
+    bool has_more = false;
+    if (!client_.list_team_files(status_.team_id,
+                                 remote_file_next_page_,
+                                 SLEEPHQ_REMOTE_FILE_PER_PAGE,
+                                 &SleepHqSyncJob::remote_file_list_cb,
+                                 this,
+                                 count,
+                                 has_more)) {
+        copy_cstr(error, error_size, client_.last_error());
+        return false;
+    }
+    remote_file_pages_loaded_++;
+    remote_file_next_page_++;
+    if (!has_more ||
+        remote_file_pages_loaded_ >= SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
+        remote_file_cache_complete_ = true;
+    }
+    Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
+              "remote file page loaded page=%lu count=%u total=%u complete=%u\n",
+              static_cast<unsigned long>(remote_file_next_page_ - 1),
+              static_cast<unsigned>(count),
+              static_cast<unsigned>(remote_file_count_),
+              remote_file_cache_complete_ ? 1U : 0U);
+    return true;
+}
+
 JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
     (void)error;
     (void)error_size;
@@ -1234,6 +1359,46 @@ JobStep SleepHqSyncJob::step_open_local_locked() {
     }
     current_file_.local_open = true;
     current_file_.offset = 0;
+    phase_ = WorkPhase::ResolveRemoteFile;
+    return JobStep::Working;
+}
+
+JobStep SleepHqSyncJob::step_resolve_remote_file_locked(char *error,
+                                                        size_t error_size) {
+    if (!current_file_.content_hash[0]) {
+        if (!compute_current_file_content_hash_locked(
+                current_file_.content_hash,
+                sizeof(current_file_.content_hash))) {
+            fail_locked("hash_failed");
+            return JobStep::Idle;
+        }
+    }
+
+    if (current_file_.attach_by_hash ||
+        remote_file_cache_contains_locked(current_file_)) {
+        current_file_.attach_by_hash = true;
+        phase_ = WorkPhase::UploadFile;
+        return JobStep::Working;
+    }
+
+    while (!remote_file_cache_complete_ &&
+           remote_file_pages_loaded_ < SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
+        if (!fetch_next_remote_file_page_locked(error, error_size)) {
+            Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                      "remote file lookup failed; falling back to upload: %s\n",
+                      error[0] ? error : "remote_file_list_failed");
+            remote_file_cache_complete_ = true;
+            break;
+        }
+        if (remote_file_cache_contains_locked(current_file_)) {
+            current_file_.attach_by_hash = true;
+            break;
+        }
+        if (!remote_file_cache_complete_) {
+            return JobStep::Working;
+        }
+    }
+
     phase_ = WorkPhase::UploadFile;
     return JobStep::Working;
 }
@@ -1295,6 +1460,9 @@ JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
         request.import_id = status_.import_id;
         request.name = current_file_.name;
         request.path = current_file_.sleep_path;
+        request.content_hash = current_file_.content_hash[0]
+            ? current_file_.content_hash
+            : nullptr;
         request.size = current_file_.size;
         request.read = &SleepHqSyncJob::upload_read_cb;
         request.reset = &SleepHqSyncJob::upload_reset_cb;
@@ -1446,6 +1614,8 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
             return step_create_import_locked(error, sizeof(error));
         case WorkPhase::OpenLocal:
             return step_open_local_locked();
+        case WorkPhase::ResolveRemoteFile:
+            return step_resolve_remote_file_locked(error, sizeof(error));
         case WorkPhase::UploadFile:
             return step_upload_file_locked(error, sizeof(error));
         case WorkPhase::ProcessImport:

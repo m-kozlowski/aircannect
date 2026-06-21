@@ -7,6 +7,7 @@
 
 #include "app_config.h"
 #include "large_text_buffer.h"
+#include "storage_path.h"
 
 namespace aircannect {
 
@@ -21,6 +22,17 @@ using SleepHqUploadReadCallback =
     bool (*)(void *ctx, uint8_t *out, size_t len, size_t &read);
 using SleepHqUploadResetCallback = bool (*)(void *ctx);
 using SleepHqUploadAbortCallback = bool (*)(void *ctx);
+
+struct SleepHqRemoteFile {
+    uint32_t id = 0;
+    uint64_t size = 0;
+    char name[AC_STORAGE_NAME_MAX] = {};
+    char path[AC_STORAGE_PATH_MAX] = {};
+    char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
+};
+
+using SleepHqRemoteFileCallback =
+    bool (*)(void *ctx, const SleepHqRemoteFile &file);
 
 struct SleepHqConfig {
     char client_id[AC_SLEEPHQ_SECRET_MAX] = {};
@@ -39,6 +51,7 @@ struct SleepHqUploadRequest {
     uint32_t import_id = 0;
     const char *name = nullptr;
     const char *path = nullptr;
+    const char *content_hash = nullptr;
     uint64_t size = 0;
     SleepHqUploadReadCallback read = nullptr;
     SleepHqUploadResetCallback reset = nullptr;
@@ -83,6 +96,13 @@ public:
                      SleepHqUploadResult &out);
     bool upload_file(const SleepHqUploadRequest &request,
                      SleepHqUploadResult &out);
+    bool list_team_files(uint32_t team_id,
+                         uint32_t page,
+                         uint32_t per_page,
+                         SleepHqRemoteFileCallback callback,
+                         void *ctx,
+                         size_t &count,
+                         bool &has_more);
     bool process_import(uint32_t import_id, SleepHqImportInfo *out = nullptr);
     bool get_import(uint32_t import_id, SleepHqImportInfo &out);
 
@@ -121,6 +141,12 @@ private:
                        uint32_t &team_id);
     bool parse_import(const SleepHqHttpResponse &response,
                       SleepHqImportInfo &out);
+    bool parse_file_list(const SleepHqHttpResponse &response,
+                         uint32_t per_page,
+                         SleepHqRemoteFileCallback callback,
+                         void *ctx,
+                         size_t &count,
+                         bool &has_more);
     bool upload_file_once(const SleepHqUploadRequest &request,
                           SleepHqUploadResult &out,
                           SleepHqHttpResponse &response);

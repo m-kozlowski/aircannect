@@ -85,6 +85,23 @@ bool json_string_to_u32(JsonVariantConst value, uint32_t &out) {
     return false;
 }
 
+bool json_string_to_u64(JsonVariantConst value, uint64_t &out) {
+    if (value.is<uint64_t>()) {
+        out = value.as<uint64_t>();
+        return true;
+    }
+    if (value.is<const char *>()) {
+        const char *text = value.as<const char *>();
+        if (!text || !*text) return false;
+        char *end = nullptr;
+        const unsigned long long parsed = strtoull(text, &end, 10);
+        if (!end || *end != '\0') return false;
+        out = static_cast<uint64_t>(parsed);
+        return true;
+    }
+    return false;
+}
+
 const char *json_string_or_empty(JsonVariantConst value) {
     return value.is<const char *>() ? value.as<const char *>() : "";
 }
@@ -878,8 +895,10 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         disconnect();
         return false;
     }
+    const bool hash_precomputed =
+        request.content_hash && strlen(request.content_hash) == 32;
     md5_context_t md5;
-    esp_rom_md5_init(&md5);
+    if (!hash_precomputed) esp_rom_md5_init(&md5);
     uint64_t sent = 0;
     bool ok = true;
     while (sent < request.size) {
@@ -901,7 +920,7 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
             ok = false;
             break;
         }
-        esp_rom_md5_update(&md5, buffer, read);
+        if (!hash_precomputed) esp_rom_md5_update(&md5, buffer, read);
         if (!write_bytes(buffer, read)) {
             ok = false;
             disconnect();
@@ -914,12 +933,17 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
     Memory::free(buffer);
     if (!ok) return false;
 
-    esp_rom_md5_update(&md5,
-                       reinterpret_cast<const uint8_t *>(request.name),
-                       strlen(request.name));
-    uint8_t digest[16];
-    esp_rom_md5_final(digest, &md5);
-    digest_to_hex(digest, out.content_hash);
+    if (hash_precomputed) {
+        copy_cstr(out.content_hash, sizeof(out.content_hash),
+                  request.content_hash);
+    } else {
+        esp_rom_md5_update(&md5,
+                           reinterpret_cast<const uint8_t *>(request.name),
+                           strlen(request.name));
+        uint8_t digest[16];
+        esp_rom_md5_final(digest, &md5);
+        digest_to_hex(digest, out.content_hash);
+    }
 
     len = snprintf(part, sizeof(part),
                    "\r\n--%s\r\n"
@@ -950,6 +974,32 @@ bool SleepHqClient::upload_file(const SleepHqUploadRequest &request,
     return upload_file_once(request, out, response);
 }
 
+bool SleepHqClient::list_team_files(uint32_t team_id,
+                                    uint32_t page,
+                                    uint32_t per_page,
+                                    SleepHqRemoteFileCallback callback,
+                                    void *ctx,
+                                    size_t &count,
+                                    bool &has_more) {
+    count = 0;
+    has_more = false;
+    if (!team_id || !callback || per_page == 0 || per_page > 100) {
+        set_error("bad_file_list_request");
+        return false;
+    }
+    char path[96];
+    snprintf(path, sizeof(path),
+             "/api/v1/teams/%lu/files?page=%lu&per_page=%lu",
+             static_cast<unsigned long>(team_id),
+             static_cast<unsigned long>(page ? page : 1),
+             static_cast<unsigned long>(per_page));
+    SleepHqHttpResponse response;
+    if (!request("GET", path, nullptr, nullptr, true, response)) {
+        return false;
+    }
+    return parse_file_list(response, per_page, callback, ctx, count, has_more);
+}
+
 bool SleepHqClient::process_import(uint32_t import_id,
                                    SleepHqImportInfo *out) {
     char path[64];
@@ -972,6 +1022,53 @@ bool SleepHqClient::get_import(uint32_t import_id, SleepHqImportInfo &out) {
         return false;
     }
     return parse_import(response, out);
+}
+
+bool SleepHqClient::parse_file_list(const SleepHqHttpResponse &response,
+                                    uint32_t per_page,
+                                    SleepHqRemoteFileCallback callback,
+                                    void *ctx,
+                                    size_t &count,
+                                    bool &has_more) {
+    count = 0;
+    has_more = false;
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, response.body.c_str());
+    if (err) {
+        set_error("file_list_json_parse");
+        return false;
+    }
+    JsonArrayConst data = doc["data"].as<JsonArrayConst>();
+    if (data.isNull()) {
+        set_error("file_list_missing");
+        return false;
+    }
+
+    for (JsonVariantConst item : data) {
+        JsonVariantConst attr = item["attributes"];
+        SleepHqRemoteFile file;
+        json_string_to_u32(attr["id"], file.id);
+        json_string_to_u64(attr["size"], file.size);
+        copy_cstr(file.name,
+                  sizeof(file.name),
+                  json_string_or_empty(attr["name"]));
+        copy_cstr(file.path,
+                  sizeof(file.path),
+                  json_string_or_empty(attr["path"]));
+        copy_cstr(file.content_hash,
+                  sizeof(file.content_hash),
+                  json_string_or_empty(attr["content_hash"]));
+        if (file.id == 0) {
+            json_string_to_u32(item["id"], file.id);
+        }
+        if (!callback(ctx, file)) {
+            set_error("file_list_callback_failed");
+            return false;
+        }
+        count++;
+    }
+    has_more = count >= per_page;
+    return true;
 }
 
 bool SleepHqClient::parse_import(const SleepHqHttpResponse &response,

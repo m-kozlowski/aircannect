@@ -84,6 +84,7 @@ private:
         NextFile,
         CreateImport,
         OpenLocal,
+        ResolveRemoteFile,
         UploadFile,
         ProcessImport,
         WaitImport,
@@ -140,6 +141,14 @@ private:
         StateWriteMode state_write_mode = StateWriteMode::Append;
     };
 
+    struct RemoteFile {
+        uint32_t id = 0;
+        uint64_t size = 0;
+        char name[AC_STORAGE_NAME_MAX] = {};
+        char path[AC_STORAGE_PATH_MAX] = {};
+        char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
+    };
+
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
@@ -189,6 +198,12 @@ private:
     bool reserve_staged_locked(size_t needed);
     bool add_staged_locked(const SleepHqUploadResult &upload);
     void clear_staged_locked();
+    bool reserve_remote_files_locked(size_t needed);
+    bool add_remote_file_locked(const SleepHqRemoteFile &file);
+    bool remote_file_cache_contains_locked(const CurrentFile &file) const;
+    bool fetch_next_remote_file_page_locked(char *error,
+                                            size_t error_size);
+    void clear_remote_files_locked();
     bool local_ensure_dir_locked(const char *path);
     bool build_sleep_path_locked(const char *local_path,
                                  char *path_out,
@@ -202,6 +217,8 @@ private:
     JobStep step_check_locked(char *error, size_t error_size);
     JobStep step_create_import_locked(char *error, size_t error_size);
     JobStep step_open_local_locked();
+    JobStep step_resolve_remote_file_locked(char *error,
+                                            size_t error_size);
     JobStep step_upload_file_locked(char *error, size_t error_size);
     JobStep step_process_import_locked(char *error, size_t error_size);
     JobStep step_wait_import_locked(char *error, size_t error_size);
@@ -212,6 +229,8 @@ private:
                                size_t len, size_t &read);
     static bool upload_reset_cb(void *ctx);
     static bool upload_abort_cb(void *ctx);
+    static bool remote_file_list_cb(void *ctx,
+                                    const SleepHqRemoteFile &file);
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     SleepHqSyncStatus status_;
@@ -230,6 +249,12 @@ private:
     StagedFile *staged_ = nullptr;
     size_t staged_count_ = 0;
     size_t staged_capacity_ = 0;
+    RemoteFile *remote_files_ = nullptr;
+    size_t remote_file_count_ = 0;
+    size_t remote_file_capacity_ = 0;
+    uint32_t remote_file_next_page_ = 1;
+    uint32_t remote_file_pages_loaded_ = 0;
+    bool remote_file_cache_complete_ = false;
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;
