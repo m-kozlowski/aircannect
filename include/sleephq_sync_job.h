@@ -10,6 +10,7 @@
 #include "app_config.h"
 #include "background_worker.h"
 #include "sleephq_client.h"
+#include "storage_export_plan.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -134,20 +135,6 @@ private:
         StateWriteMode state_write_mode = StateWriteMode::Append;
     };
 
-    struct StateCacheEntry {
-        uint64_t size = 0;
-        uint64_t mtime = 0;
-        char path[AC_STORAGE_PATH_MAX] = {};
-    };
-
-    struct StateCache {
-        char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
-        StateCacheEntry *entries = nullptr;
-        size_t count = 0;
-        size_t capacity = 0;
-        bool loaded = false;
-    };
-
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
@@ -187,12 +174,6 @@ private:
                                const char *path,
                                uint64_t size,
                                uint64_t mtime);
-    bool load_state_cache_locked(const char *state_path);
-    bool reserve_state_cache_locked(size_t needed);
-    bool add_state_cache_entry_locked(uint64_t size,
-                                      uint64_t mtime,
-                                      const char *path);
-    void clear_state_cache_locked();
     void note_state_written_locked(const char *state_path,
                                    const char *path,
                                    uint64_t size,
@@ -248,7 +229,7 @@ private:
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;
-    StateCache state_cache_;
+    StorageExportStateCache state_cache_;
     char state_dir_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
 };
 

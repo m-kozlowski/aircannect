@@ -9,6 +9,7 @@
 
 #include "app_config.h"
 #include "background_worker.h"
+#include "storage_export_plan.h"
 #include "storage_path.h"
 #include "storage_smb_client.h"
 
@@ -169,20 +170,6 @@ private:
         File dir;
     };
 
-    struct StateCacheEntry {
-        uint64_t size = 0;
-        uint64_t mtime = 0;
-        char path[AC_STORAGE_PATH_MAX] = {};
-    };
-
-    struct StateCache {
-        char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
-        StateCacheEntry *entries = nullptr;
-        size_t count = 0;
-        size_t capacity = 0;
-        bool loaded = false;
-    };
-
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void apply_config_locked(const ConfigSnapshot &config);
@@ -257,12 +244,6 @@ private:
                                const char *path,
                                uint64_t size,
                                uint64_t mtime);
-    bool load_state_cache_locked(const char *state_path);
-    bool reserve_state_cache_locked(size_t needed);
-    void clear_state_cache_locked();
-    bool add_state_cache_entry_locked(uint64_t size,
-                                      uint64_t mtime,
-                                      const char *path);
     void note_state_written_locked(const char *state_path,
                                    const char *path,
                                    uint64_t size,
@@ -323,7 +304,7 @@ private:
     LatestVerify latest_verify_;
     uint8_t *upload_buffer_ = nullptr;
     size_t upload_buffer_size_ = 0;
-    StateCache state_cache_;
+    StorageExportStateCache state_cache_;
     char ensured_remote_dir_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
     char latest_datalog_day_[9] = {};
     char state_dir_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
