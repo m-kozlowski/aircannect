@@ -31,6 +31,10 @@ static constexpr uint32_t AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS = 30000;
 // wedged report backfill suppress auto-sync forever; after this, queue sync
 // anyway while still respecting the background worker's stream/therapy/OTA gate.
 static constexpr uint32_t AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS = 180000;
+// SleepHQ runs after report settle and SMB sync. If that serialized post-
+// therapy window never opens, drop this immediate trigger and let idle backfill
+// recover later instead of keeping the post-therapy lane armed forever.
+static constexpr uint32_t AC_SLEEPHQ_POST_THERAPY_SYNC_MAX_WAIT_MS = 180000;
 // Fallback rescan: the prefetch job rescans coverage promptly when the night
 // index changes (e.g. after therapy stops), so this periodic poll is just a
 // safety net. FAIL_COOLDOWN is how long a night whose fetch failed is skipped

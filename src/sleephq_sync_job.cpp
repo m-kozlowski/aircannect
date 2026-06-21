@@ -26,6 +26,7 @@ static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
     6UL * 60UL * 60UL * 1000UL,
 };
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
+static constexpr uint32_t SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT = 1;
 static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PER_PAGE = 25;
 static constexpr uint32_t SLEEPHQ_REMOTE_FILE_LOOKUP_LIMIT = 500;
 static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PAGE_LIMIT =
@@ -293,6 +294,20 @@ bool SleepHqSyncJob::request_sync(const char *reason) {
     return queued;
 }
 
+bool SleepHqSyncJob::request_post_therapy_sync() {
+    if (!lock(0)) return false;
+    const bool queued = request_locked(RunKind::PostTherapySync,
+                                       "post_therapy");
+    publish_runtime_locked();
+    unlock();
+    if (queued) {
+        Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                  "sync queued reason=post_therapy scope=latest_day\n");
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+    }
+    return queued;
+}
+
 bool SleepHqSyncJob::build_endpoint_state_dir_locked(uint32_t team_id,
                                                      char *out,
                                                      size_t out_size) const {
@@ -353,7 +368,11 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
     publish_runtime_locked();
     Log::logf(CAT_SLEEPHQ, LOG_INFO, "started reason=%s mode=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
-              current_run_kind_ == RunKind::Check ? "check" : "sync");
+              current_run_kind_ == RunKind::Check
+                  ? "check"
+                  : current_run_kind_ == RunKind::PostTherapySync
+                        ? "post_therapy_sync"
+                        : "sync");
     return true;
 }
 
@@ -574,6 +593,9 @@ bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
     config.state_dir = state_dir_;
     config.state_cache = &state_cache_;
     config.require_pending_datalog_file = true;
+    if (current_run_kind_ == RunKind::PostTherapySync) {
+        config.max_datalog_days = SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT;
+    }
     return export_planner_.begin(config, error_out, error_out_size);
 }
 
@@ -1077,6 +1099,12 @@ bool SleepHqSyncJob::replace_state_locked(const StagedFile &file_info) {
 }
 
 bool SleepHqSyncJob::write_state_locked(const StagedFile &file_info) {
+    if (state_cache_.contains(file_info.state_path,
+                              file_info.path,
+                              file_info.size,
+                              file_info.mtime)) {
+        return true;
+    }
     const bool ok = file_info.state_write_mode == StateWriteMode::Replace
         ? replace_state_locked(file_info)
         : append_state_locked(file_info);

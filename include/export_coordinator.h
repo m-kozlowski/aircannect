@@ -42,6 +42,7 @@ private:
         bool sleephq_pending = false;
         bool sleephq_grace_armed = false;
         uint32_t sleephq_due_ms = 0;
+        uint32_t sleephq_deadline_ms = 0;
     };
 
     struct StartupCheckState {
@@ -75,6 +76,7 @@ private:
                                           bool storage_sync_active,
                                           uint32_t now_ms);
     void queue_post_therapy_storage_sync(uint32_t now_ms);
+    void clear_post_therapy_sleephq();
 
     void maybe_queue_sleephq_startup_check(bool network_connected,
                                            bool storage_sync_active,

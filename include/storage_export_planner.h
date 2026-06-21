@@ -30,6 +30,7 @@ struct StorageExportPlannerConfig {
     const char *state_dir = nullptr;
     StorageExportStateCache *state_cache = nullptr;
     const char *latest_datalog_day = nullptr;
+    uint32_t max_datalog_days = 0;
     bool skip_completed_finalized_datalog_days = false;
     bool require_pending_datalog_file = false;
 };
@@ -139,6 +140,7 @@ private:
     size_t datalog_day_count_ = 0;
     size_t datalog_day_capacity_ = 0;
     size_t datalog_day_index_ = 0;
+    uint32_t datalog_days_started_ = 0;
     bool day_active_ = false;
     size_t day_root_index_ = 0;
     char day_path_[AC_STORAGE_PATH_MAX] = {};

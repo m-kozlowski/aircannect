@@ -76,6 +76,7 @@ void StorageExportPlanner::reset() {
     datalog_day_count_ = 0;
     datalog_day_capacity_ = 0;
     datalog_day_index_ = 0;
+    datalog_days_started_ = 0;
     root_index_ = 0;
     day_active_ = false;
     day_root_index_ = 0;
@@ -513,10 +514,15 @@ bool StorageExportPlanner::select_next_datalog_day(char *error_out,
             !datalog_day_has_pending_files(day, error_out, error_out_size)) {
             continue;
         }
+        if (config_.max_datalog_days != 0 &&
+            datalog_days_started_ >= config_.max_datalog_days) {
+            return false;
+        }
         copy_cstr(day_name_, sizeof(day_name_), day.day);
         copy_cstr(day_path_, sizeof(day_path_), day.path);
         day_active_ = true;
         day_root_index_ = 0;
+        datalog_days_started_++;
         return true;
     }
     return false;

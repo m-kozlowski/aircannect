@@ -93,6 +93,7 @@ public:
     void set_runtime_blocked(bool blocked);
     bool request_check(const char *reason = "manual");
     bool request_sync(const char *reason = "manual");
+    bool request_post_therapy_sync();
 
     SleepHqSyncStatus status() const;
     SleepHqSyncRuntimeStatus runtime_status() const;
@@ -117,6 +118,7 @@ private:
     enum class RunKind : uint8_t {
         Check,
         Sync,
+        PostTherapySync,
     };
 
     enum class StateWriteMode : uint8_t {

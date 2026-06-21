@@ -140,6 +140,7 @@ void ExportCoordinator::reset_post_therapy_after_running() {
     post_therapy_.sleephq_pending = false;
     post_therapy_.sleephq_grace_armed = false;
     post_therapy_.sleephq_due_ms = 0;
+    post_therapy_.sleephq_deadline_ms = 0;
 }
 
 void ExportCoordinator::arm_post_therapy_after_stop(uint32_t now_ms) {
@@ -162,6 +163,8 @@ void ExportCoordinator::arm_post_therapy_after_stop(uint32_t now_ms) {
     post_therapy_.sleephq_due_ms = 0;
     post_therapy_.storage_deadline_ms =
         due_after(now_ms, AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS);
+    post_therapy_.sleephq_deadline_ms =
+        due_after(now_ms, AC_SLEEPHQ_POST_THERAPY_SYNC_MAX_WAIT_MS);
     if (storage_sync_) {
         storage_sync_->defer_idle_work_until(
             post_therapy_.summary_refresh_due_ms);
@@ -255,19 +258,36 @@ void ExportCoordinator::maybe_queue_post_therapy_sleephq(
     ReportManager &report,
     bool storage_sync_active,
     uint32_t now_ms) {
-    if (!post_therapy_.sleephq_pending ||
-        post_therapy_.summary_refresh_due_ms != 0 ||
-        post_therapy_.storage_pending) {
+    if (!post_therapy_.sleephq_pending) {
+        return;
+    }
+    const bool deadline_reached =
+        post_therapy_.sleephq_deadline_ms != 0 &&
+        static_cast<int32_t>(now_ms -
+                             post_therapy_.sleephq_deadline_ms) >= 0;
+    if (post_therapy_.summary_refresh_due_ms != 0) {
+        if (deadline_reached) {
+            Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                      "post-therapy sync skipped after summary wait\n");
+            clear_post_therapy_sleephq();
+        }
         return;
     }
     if (!sleephq_sync_) {
-        post_therapy_.sleephq_pending = false;
-        post_therapy_.sleephq_due_ms = 0;
+        clear_post_therapy_sleephq();
         return;
     }
+    const bool storage_blocking = post_therapy_.storage_pending ||
+                                  storage_sync_active;
     if (arbiter.stream_activity_active() ||
         report.background_work_active() ||
-        storage_sync_active) {
+        storage_blocking) {
+        if (deadline_reached) {
+            Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                      "post-therapy sync skipped after endpoint wait\n");
+            clear_post_therapy_sleephq();
+            return;
+        }
         post_therapy_.sleephq_due_ms = 0;
         return;
     }
@@ -283,10 +303,15 @@ void ExportCoordinator::maybe_queue_post_therapy_sleephq(
         return;
     }
     if (static_cast<int32_t>(now_ms - post_therapy_.sleephq_due_ms) >= 0) {
-        if (sleephq_sync_->request_sync("post_therapy")) {
-            post_therapy_.sleephq_pending = false;
-            post_therapy_.sleephq_due_ms = 0;
+        if (sleephq_sync_->request_post_therapy_sync()) {
+            clear_post_therapy_sleephq();
         } else {
+            if (deadline_reached) {
+                Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                          "post-therapy sync skipped after queue wait\n");
+                clear_post_therapy_sleephq();
+                return;
+            }
             post_therapy_.sleephq_due_ms =
                 due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
         }
@@ -308,6 +333,13 @@ void ExportCoordinator::queue_post_therapy_storage_sync(uint32_t now_ms) {
         post_therapy_.storage_due_ms =
             due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
     }
+}
+
+void ExportCoordinator::clear_post_therapy_sleephq() {
+    post_therapy_.sleephq_pending = false;
+    post_therapy_.sleephq_grace_armed = false;
+    post_therapy_.sleephq_due_ms = 0;
+    post_therapy_.sleephq_deadline_ms = 0;
 }
 
 void ExportCoordinator::maybe_queue_sleephq_startup_check(
