@@ -98,6 +98,12 @@ private:
         Replace,
     };
 
+    enum class InflightPhase : uint8_t {
+        None,
+        Uploading,
+        Processing,
+    };
+
     struct ConfigSnapshot {
         char client_id[AC_SLEEPHQ_SECRET_MAX] = {};
         char client_secret[AC_SLEEPHQ_SECRET_MAX] = {};
@@ -142,6 +148,8 @@ private:
     static SleepHqConfig client_config_from_snapshot(
         const ConfigSnapshot &config);
     static void copy_string(char *dst, size_t dst_size, const String &src);
+    static const char *inflight_phase_name(InflightPhase phase);
+    static bool parse_inflight_phase(const char *text, InflightPhase &out);
 
     void apply_config_locked(const ConfigSnapshot &config);
     bool config_matches_locked(const ConfigSnapshot &config) const;
@@ -179,6 +187,13 @@ private:
                                    uint64_t size,
                                    uint64_t mtime,
                                    StateWriteMode mode);
+    bool build_inflight_path_locked(char *out, size_t out_size) const;
+    bool load_inflight_locked(InflightPhase &phase_out);
+    bool write_inflight_locked(InflightPhase phase);
+    void remove_inflight_locked();
+    bool staged_contains_locked(const char *path,
+                                uint64_t size,
+                                uint64_t mtime) const;
     bool write_state_locked(const StagedFile &file);
     bool append_state_locked(const StagedFile &file);
     bool replace_state_locked(const StagedFile &file);
@@ -229,6 +244,7 @@ private:
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;
+    InflightPhase inflight_phase_ = InflightPhase::None;
     StorageExportStateCache state_cache_;
     char state_dir_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
 };

@@ -22,6 +22,7 @@ static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
 static constexpr size_t SLEEPHQ_WALK_MAX_DEPTH = 16;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_INTERVAL_MS = 2000;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_TIMEOUT_MS = 120000;
+static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
 
 enum class ImportStatusKind : uint8_t {
     Success,
@@ -72,6 +73,7 @@ ImportStatusKind classify_import_status(const char *status) {
         "ready",
         "uploading",
         "uploaded",
+        "unpacking",
         "processing",
         "importing",
     };
@@ -154,6 +156,33 @@ SleepHqConfig SleepHqSyncJob::client_config_from_snapshot(
     copy_cstr(out.team_id, sizeof(out.team_id), config.team_id);
     copy_cstr(out.device_id, sizeof(out.device_id), config.device_id);
     return out;
+}
+
+const char *SleepHqSyncJob::inflight_phase_name(InflightPhase phase) {
+    switch (phase) {
+        case InflightPhase::Uploading: return "uploading";
+        case InflightPhase::Processing: return "processing";
+        case InflightPhase::None: break;
+    }
+    return "none";
+}
+
+bool SleepHqSyncJob::parse_inflight_phase(const char *text,
+                                          InflightPhase &out) {
+    if (!text) return false;
+    if (strcmp(text, "uploading") == 0) {
+        out = InflightPhase::Uploading;
+        return true;
+    }
+    if (strcmp(text, "processing") == 0) {
+        out = InflightPhase::Processing;
+        return true;
+    }
+    if (strcmp(text, "none") == 0) {
+        out = InflightPhase::None;
+        return true;
+    }
+    return false;
 }
 
 void SleepHqSyncJob::begin(const AppConfigData &config) {
@@ -380,6 +409,7 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     root_index_ = 0;
     import_process_started_ms_ = 0;
     import_poll_due_ms_ = 0;
+    inflight_phase_ = InflightPhase::None;
     state_dir_[0] = 0;
     current_run_kind_ = RunKind::Check;
     abort_requested_.store(false);
@@ -421,6 +451,7 @@ void SleepHqSyncJob::finish_check_locked(uint32_t team_id) {
 }
 
 void SleepHqSyncJob::finish_sync_locked() {
+    remove_inflight_locked();
     status_.last_sync_epoch = storage_export_current_epoch_seconds_or_zero();
     status_.last_sync_files_seen = status_.files_seen;
     status_.last_sync_files_uploaded = status_.files_uploaded;
@@ -654,6 +685,14 @@ bool SleepHqSyncJob::plan_file_locked(const char *path) {
         phase_ = WorkPhase::NextFile;
         return true;
     }
+    if (status_.import_id != 0 &&
+        staged_contains_locked(path, current_file_.size,
+                               current_file_.mtime)) {
+        status_.files_skipped++;
+        clear_current_file_locked();
+        phase_ = WorkPhase::NextFile;
+        return true;
+    }
     phase_ = status_.import_id == 0 ? WorkPhase::CreateImport
                                     : WorkPhase::OpenLocal;
     return true;
@@ -707,6 +746,233 @@ void SleepHqSyncJob::note_state_written_locked(const char *state_path,
         mode == StateWriteMode::Append
             ? StorageExportStateWriteMode::Append
             : StorageExportStateWriteMode::Replace);
+}
+
+bool SleepHqSyncJob::build_inflight_path_locked(char *out,
+                                                size_t out_size) const {
+    if (!state_dir_[0] || !out || out_size == 0) return false;
+    const int written = snprintf(out, out_size, "%s/%s",
+                                 state_dir_, SLEEPHQ_INFLIGHT_FILE);
+    return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool SleepHqSyncJob::staged_contains_locked(const char *path,
+                                            uint64_t size,
+                                            uint64_t mtime) const {
+    if (!path) return false;
+    for (size_t i = 0; i < staged_count_; ++i) {
+        const StagedFile &entry = staged_[i];
+        if (entry.size == size &&
+            entry.mtime == mtime &&
+            strcmp(entry.path, path) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SleepHqSyncJob::write_inflight_locked(InflightPhase phase) {
+    if (!ensure_state_dir_locked() || !status_.team_id ||
+        !status_.import_id || phase == InflightPhase::None) {
+        return false;
+    }
+    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    if (!build_inflight_path_locked(path, sizeof(path))) return false;
+    File file;
+    {
+        Storage::Guard guard;
+        file = Storage::open(path, "w");
+        if (!file) return false;
+        size_t written =
+            file.printf("v1\t%lu\t%lu\t%s\n",
+                        static_cast<unsigned long>(status_.team_id),
+                        static_cast<unsigned long>(status_.import_id),
+                        inflight_phase_name(phase));
+        if (written == 0) {
+            file.close();
+            return false;
+        }
+        for (size_t i = 0; i < staged_count_; ++i) {
+            const StagedFile &entry = staged_[i];
+            const char mode =
+                entry.state_write_mode == StateWriteMode::Replace ? 'r' : 'a';
+            written =
+                file.printf("%llu\t%llu\t%s\t%lu\t%c\t%s\t%s\n",
+                            static_cast<unsigned long long>(entry.size),
+                            static_cast<unsigned long long>(entry.mtime),
+                            entry.content_hash,
+                            static_cast<unsigned long>(entry.import_id),
+                            mode,
+                            entry.path,
+                            entry.state_path);
+            if (written == 0) {
+                file.close();
+                return false;
+            }
+        }
+        file.close();
+    }
+    inflight_phase_ = phase;
+    return true;
+}
+
+void SleepHqSyncJob::remove_inflight_locked() {
+    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    if (!build_inflight_path_locked(path, sizeof(path))) return;
+    (void)Storage::remove(path);
+    inflight_phase_ = InflightPhase::None;
+}
+
+bool SleepHqSyncJob::load_inflight_locked(InflightPhase &phase_out) {
+    phase_out = InflightPhase::None;
+    clear_staged_locked();
+    if (!state_dir_[0]) return true;
+
+    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    if (!build_inflight_path_locked(path, sizeof(path))) return false;
+
+    File file;
+    {
+        Storage::Guard guard;
+        file = Storage::open(path, "r");
+    }
+    if (!file) return true;
+
+    uint8_t buffer[512] = {};
+    char line[AC_STORAGE_PATH_MAX * 2 + 160] = {};
+    size_t line_len = 0;
+    bool header_seen = false;
+    bool ok = true;
+
+    auto parse_line = [&](char *text) -> bool {
+        if (!text || !text[0]) return true;
+        if (!header_seen) {
+            char *version = strtok(text, "\t");
+            char *team = strtok(nullptr, "\t");
+            char *import_id = strtok(nullptr, "\t");
+            char *phase = strtok(nullptr, "\t");
+            if (!version || !team || !import_id || !phase ||
+                strcmp(version, "v1") != 0) {
+                return false;
+            }
+            char *end = nullptr;
+            const unsigned long parsed_team = strtoul(team, &end, 10);
+            if (!end || *end != '\0' || parsed_team == 0) return false;
+            end = nullptr;
+            const unsigned long parsed_import = strtoul(import_id, &end, 10);
+            if (!end || *end != '\0' || parsed_import == 0) return false;
+            InflightPhase parsed_phase = InflightPhase::None;
+            if (!parse_inflight_phase(phase, parsed_phase) ||
+                parsed_phase == InflightPhase::None) {
+                return false;
+            }
+            if (status_.team_id != 0 &&
+                status_.team_id != static_cast<uint32_t>(parsed_team)) {
+                return false;
+            }
+            status_.team_id = static_cast<uint32_t>(parsed_team);
+            status_.import_id = static_cast<uint32_t>(parsed_import);
+            phase_out = parsed_phase;
+            header_seen = true;
+            return true;
+        }
+
+        char *size_text = strtok(text, "\t");
+        char *mtime_text = strtok(nullptr, "\t");
+        char *hash = strtok(nullptr, "\t");
+        char *import_text = strtok(nullptr, "\t");
+        char *mode_text = strtok(nullptr, "\t");
+        char *local_path = strtok(nullptr, "\t");
+        char *state_path = strtok(nullptr, "\t");
+        if (!size_text || !mtime_text || !hash || !import_text ||
+            !mode_text || !local_path || !state_path) {
+            return false;
+        }
+        char *end = nullptr;
+        const unsigned long long parsed_size = strtoull(size_text, &end, 10);
+        if (!end || *end != '\0') return false;
+        end = nullptr;
+        const unsigned long long parsed_mtime = strtoull(mtime_text, &end, 10);
+        if (!end || *end != '\0') return false;
+        end = nullptr;
+        const unsigned long parsed_import = strtoul(import_text, &end, 10);
+        if (!end || *end != '\0' || parsed_import == 0 ||
+            parsed_import != status_.import_id) {
+            return false;
+        }
+        if (strlen(hash) >= AC_SLEEPHQ_CONTENT_HASH_MAX ||
+            (mode_text[0] != 'a' && mode_text[0] != 'r') ||
+            mode_text[1] != '\0') {
+            return false;
+        }
+        if (!reserve_staged_locked(staged_count_ + 1)) return false;
+        StagedFile &entry = staged_[staged_count_++];
+        entry.size = static_cast<uint64_t>(parsed_size);
+        entry.mtime = static_cast<uint64_t>(parsed_mtime);
+        entry.import_id = static_cast<uint32_t>(parsed_import);
+        entry.state_write_mode =
+            mode_text[0] == 'r' ? StateWriteMode::Replace
+                                : StateWriteMode::Append;
+        copy_cstr(entry.content_hash, sizeof(entry.content_hash), hash);
+        copy_cstr(entry.path, sizeof(entry.path), local_path);
+        copy_cstr(entry.state_path, sizeof(entry.state_path), state_path);
+        return true;
+    };
+
+    for (;;) {
+        size_t read = 0;
+        {
+            Storage::Guard guard;
+            read = file.read(buffer, sizeof(buffer));
+        }
+        if (read == 0) break;
+        for (size_t i = 0; i < read; ++i) {
+            const char ch = static_cast<char>(buffer[i]);
+            if (ch == '\n') {
+                line[line_len] = '\0';
+                if (!parse_line(line)) {
+                    ok = false;
+                    break;
+                }
+                line_len = 0;
+                continue;
+            }
+            if (line_len + 1 < sizeof(line)) {
+                line[line_len++] = ch;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) break;
+    }
+    if (ok && line_len > 0) {
+        line[line_len] = '\0';
+        ok = parse_line(line);
+    }
+    {
+        Storage::Guard guard;
+        file.close();
+    }
+    if (!ok || !header_seen) {
+        clear_staged_locked();
+        status_.import_id = 0;
+        phase_out = InflightPhase::None;
+        inflight_phase_ = InflightPhase::None;
+        return false;
+    }
+    inflight_phase_ = phase_out;
+    status_.files_uploaded = staged_count_;
+    status_.bytes_uploaded = 0;
+    for (size_t i = 0; i < staged_count_; ++i) {
+        status_.bytes_uploaded += staged_[i].size;
+    }
+    Log::logf(CAT_SLEEPHQ, LOG_INFO,
+              "resuming import=%lu phase=%s files=%u\n",
+              static_cast<unsigned long>(status_.import_id),
+              inflight_phase_name(phase_out),
+              static_cast<unsigned>(staged_count_));
+    return true;
 }
 
 bool SleepHqSyncJob::append_state_locked(const StagedFile &file_info) {
@@ -817,6 +1083,21 @@ JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
         fail_locked("state_path_failed");
         return JobStep::Idle;
     }
+    InflightPhase restored_phase = InflightPhase::None;
+    if (!load_inflight_locked(restored_phase)) {
+        remove_inflight_locked();
+        clear_staged_locked();
+        status_.import_id = 0;
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "discarded corrupt inflight state\n");
+    }
+    if (restored_phase == InflightPhase::Processing &&
+        status_.import_id != 0) {
+        import_process_started_ms_ = millis_nonzero();
+        import_poll_due_ms_ = import_process_started_ms_;
+        phase_ = WorkPhase::WaitImport;
+        return JobStep::Waiting;
+    }
     phase_ = WorkPhase::NextFile;
     return JobStep::Working;
 }
@@ -841,6 +1122,10 @@ JobStep SleepHqSyncJob::step_create_import_locked(char *error,
         return JobStep::Idle;
     }
     status_.import_id = import.id;
+    if (!write_inflight_locked(InflightPhase::Uploading)) {
+        fail_locked("inflight_write_failed");
+        return JobStep::Idle;
+    }
     phase_ = WorkPhase::OpenLocal;
     return JobStep::Working;
 }
@@ -915,6 +1200,10 @@ JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
         fail_locked("staged_alloc");
         return JobStep::Idle;
     }
+    if (!write_inflight_locked(InflightPhase::Uploading)) {
+        fail_locked("inflight_write_failed");
+        return JobStep::Idle;
+    }
     status_.bytes_uploaded += upload.bytes;
     status_.files_uploaded++;
     clear_current_file_locked();
@@ -931,6 +1220,10 @@ JobStep SleepHqSyncJob::step_process_import_locked(char *error,
     if (!client_.process_import(status_.import_id, nullptr)) {
         copy_cstr(error, error_size, client_.last_error());
         fail_locked(error[0] ? error : "process_import_failed");
+        return JobStep::Idle;
+    }
+    if (!write_inflight_locked(InflightPhase::Processing)) {
+        fail_locked("inflight_write_failed");
         return JobStep::Idle;
     }
     import_process_started_ms_ = millis_nonzero();
@@ -956,9 +1249,15 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
     SleepHqImportInfo import;
     if (!client_.get_import(status_.import_id, import)) {
         copy_cstr(error, error_size, client_.last_error());
+        if (strcmp(error, "http_404") == 0) {
+            remove_inflight_locked();
+        }
         fail_locked(error[0] ? error : "import_status_failed");
         return JobStep::Idle;
     }
+    char previous_status[AC_SLEEPHQ_STATUS_MAX] = {};
+    copy_cstr(previous_status, sizeof(previous_status),
+              status_.import_status);
     copy_cstr(status_.import_status, sizeof(status_.import_status),
               import.status);
     if (import.id) status_.import_id = import.id;
@@ -973,17 +1272,16 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
             copy_cstr(error, error_size,
                       import.failed_reason[0] ? import.failed_reason
                                                : "import_failed");
+            remove_inflight_locked();
             fail_locked(error);
             return JobStep::Idle;
         case ImportStatusKind::Unknown:
-            if (import.status[0]) {
-                snprintf(error, error_size, "unknown_status:%s",
-                         import.status);
-            } else {
-                copy_cstr(error, error_size, "unknown_status");
+            if (strcmp(previous_status, import.status) != 0) {
+                Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                          "unknown import status treated as transient: %s\n",
+                          import.status[0] ? import.status : "<empty>");
             }
-            fail_locked(error);
-            return JobStep::Idle;
+            break;
         case ImportStatusKind::Transient:
             break;
     }
