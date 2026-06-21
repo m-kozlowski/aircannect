@@ -116,6 +116,14 @@ void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.println(cfg.ota_password.length() ? "protected" : "open");
     out.print("  ota_password: ");
     out.println(secret_state_text(cfg.ota_password));
+    out.print("  syslog: ");
+    out.print(on_off_text(cfg.syslog_enabled));
+    out.print(" host=");
+    out.print(cfg.syslog_host.length() ? cfg.syslog_host : "<empty>");
+    out.print(" port=");
+    out.println(cfg.syslog_port);
+    out.print("  file_log_en: ");
+    out.println(on_off_text(cfg.file_log_enabled));
 }
 
 String normalized_config_key(String key) {
@@ -123,6 +131,96 @@ String normalized_config_key(String key) {
     key.toLowerCase();
     key.replace('-', '_');
     return key;
+}
+
+struct BoolConfigRuntime {
+    EdfRecorderManager &edf_recorder_manager;
+};
+
+struct BoolConfigKey {
+    const char *key;
+    const char *canonical;
+    bool (*get)(const AppConfigData &cfg);
+    bool (*set)(AppConfig &config, bool enabled);
+    void (*apply)(AppConfig &config, BoolConfigRuntime &runtime);
+};
+
+bool get_resmed_time_sync(const AppConfigData &cfg) {
+    return cfg.resmed_time_sync_enabled;
+}
+
+bool set_resmed_time_sync(AppConfig &config, bool enabled) {
+    return config.set_resmed_time_sync(enabled);
+}
+
+bool get_oximetry_enabled(const AppConfigData &cfg) {
+    return cfg.oximetry_enabled;
+}
+
+bool set_oximetry_enabled(AppConfig &config, bool enabled) {
+    return config.set_oximetry_enabled(enabled);
+}
+
+bool get_edf_capture_enabled(const AppConfigData &cfg) {
+    return cfg.edf_capture_enabled;
+}
+
+bool set_edf_capture_enabled(AppConfig &config, bool enabled) {
+    return config.set_edf_capture_enabled(enabled);
+}
+
+bool get_syslog_enabled(const AppConfigData &cfg) {
+    return cfg.syslog_enabled;
+}
+
+bool set_syslog_enabled(AppConfig &config, bool enabled) {
+    return config.set_syslog(enabled, config.data().syslog_host,
+                             config.data().syslog_port);
+}
+
+bool get_file_log_enabled(const AppConfigData &cfg) {
+    return cfg.file_log_enabled;
+}
+
+bool set_file_log_enabled(AppConfig &config, bool enabled) {
+    return config.set_file_log(enabled);
+}
+
+void apply_noop(AppConfig &, BoolConfigRuntime &) {}
+
+void apply_edf_capture(AppConfig &config, BoolConfigRuntime &runtime) {
+    runtime.edf_recorder_manager.set_enabled(
+        config.data().edf_capture_enabled);
+}
+
+void apply_log_config(AppConfig &config, BoolConfigRuntime &) {
+    config.apply_log_config();
+}
+
+const BoolConfigKey *find_bool_config_key(const String &key) {
+    static const BoolConfigKey keys[] = {
+        {"resmed_time_sync", "resmed_time_sync", get_resmed_time_sync,
+         set_resmed_time_sync, apply_noop},
+        {"resmed_time_sync_enabled", "resmed_time_sync",
+         get_resmed_time_sync, set_resmed_time_sync, apply_noop},
+        {"oximetry_enabled", "oximetry_enabled", get_oximetry_enabled,
+         set_oximetry_enabled, apply_noop},
+        {"edf_capture", "edf_capture", get_edf_capture_enabled,
+         set_edf_capture_enabled, apply_edf_capture},
+        {"edf_capture_enabled", "edf_capture", get_edf_capture_enabled,
+         set_edf_capture_enabled, apply_edf_capture},
+        {"syslog", "syslog", get_syslog_enabled, set_syslog_enabled,
+         apply_log_config},
+        {"syslog_enabled", "syslog_enabled", get_syslog_enabled,
+         set_syslog_enabled, apply_log_config},
+        {"file_log_en", "file_log_en", get_file_log_enabled,
+         set_file_log_enabled, apply_log_config},
+    };
+
+    for (const auto &entry : keys) {
+        if (key == entry.key) return &entry;
+    }
+    return nullptr;
 }
 
 void print_config_value_header(Print &out, const char *key) {
@@ -150,6 +248,11 @@ bool print_app_config_value(Print &out,
     if (key == "schema" || key == "schema_version") {
         print_config_value_header(out, "schema");
         out.println(cfg.schema_version);
+        return true;
+    }
+    if (const BoolConfigKey *bool_key = find_bool_config_key(key)) {
+        print_config_value_header(out, bool_key->canonical);
+        out.println(on_off_text(bool_key->get(cfg)));
         return true;
     }
     if (key == "hostname" || key == "host") {
@@ -186,12 +289,6 @@ bool print_app_config_value(Print &out,
         print_config_value(out, "timezone", cfg.timezone);
         return true;
     }
-    if (key == "resmed_time_sync" ||
-        key == "resmed_time_sync_enabled") {
-        print_config_value_header(out, "resmed_time_sync");
-        out.println(on_off_text(cfg.resmed_time_sync_enabled));
-        return true;
-    }
     if (key == "oximetry") {
         print_config_value_header(out, "oximetry");
         out.print(on_off_text(cfg.oximetry_enabled));
@@ -200,11 +297,6 @@ bool print_app_config_value(Print &out,
         out.print(" advertise=");
         out.println(oximetry_advertise_mode_name(
             cfg.oximetry_advertise_mode));
-        return true;
-    }
-    if (key == "oximetry_enabled") {
-        print_config_value_header(out, "oximetry_enabled");
-        out.println(on_off_text(cfg.oximetry_enabled));
         return true;
     }
     if (key == "oximetry_udp_port") {
@@ -217,11 +309,6 @@ bool print_app_config_value(Print &out,
         print_config_value_header(out, "oximetry_advertise");
         out.println(oximetry_advertise_mode_name(
             cfg.oximetry_advertise_mode));
-        return true;
-    }
-    if (key == "edf_capture" || key == "edf_capture_enabled") {
-        print_config_value_header(out, "edf_capture");
-        out.println(on_off_text(cfg.edf_capture_enabled));
         return true;
     }
     if (key == "smb") {
@@ -312,12 +399,6 @@ bool print_app_config_value(Print &out,
         print_config_secret(out, "ota_password", cfg.ota_password);
         return true;
     }
-    if (key == "syslog" || key == "syslog_enabled") {
-        print_config_value_header(out, key == "syslog" ? "syslog"
-                                                       : "syslog_enabled");
-        out.println(on_off_text(cfg.syslog_enabled));
-        return true;
-    }
     if (key == "syslog_host") {
         print_config_value(out, "syslog_host", cfg.syslog_host);
         return true;
@@ -327,7 +408,6 @@ bool print_app_config_value(Print &out,
         out.println(cfg.syslog_port);
         return true;
     }
-
     return false;
 }
 
@@ -1540,6 +1620,23 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
+    if (const BoolConfigKey *bool_key = find_bool_config_key(key)) {
+        bool enabled = false;
+        if (!parse_config_bool_value(value, enabled)) {
+            print_config_invalid(out, bool_key->canonical);
+            return true;
+        }
+        ok = bool_key->set(app_config, enabled);
+        if (!ok) {
+            print_config_invalid(out, bool_key->canonical);
+            return true;
+        }
+        BoolConfigRuntime runtime{edf_recorder_manager};
+        bool_key->apply(app_config, runtime);
+        print_app_config_value(out, app_config.data(), key);
+        return true;
+    }
+
     if (key == "hostname" || key == "host") {
         ok = app_config.set_hostname(value);
         if (!ok) {
@@ -1633,37 +1730,6 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "resmed_time_sync" ||
-        key == "resmed_time_sync_enabled") {
-        bool enabled = false;
-        if (!parse_config_bool_value(value, enabled)) {
-            print_config_invalid(out, "resmed_time_sync");
-            return true;
-        }
-        ok = app_config.set_resmed_time_sync(enabled);
-        if (!ok) {
-            print_config_invalid(out, "resmed_time_sync");
-            return true;
-        }
-        print_app_config_value(out, app_config.data(), key);
-        return true;
-    }
-
-    if (key == "oximetry_enabled") {
-        bool enabled = false;
-        if (!parse_config_bool_value(value, enabled)) {
-            print_config_invalid(out, "oximetry_enabled");
-            return true;
-        }
-        ok = app_config.set_oximetry_enabled(enabled);
-        if (!ok) {
-            print_config_invalid(out, "oximetry_enabled");
-            return true;
-        }
-        print_app_config_value(out, app_config.data(), key);
-        return true;
-    }
-
     if (key == "oximetry_udp_port") {
         uint16_t port = 0;
         if (!parse_uint16_arg(value, port)) {
@@ -1691,22 +1757,6 @@ bool ManagementConsole::handle_config_key(
             print_config_invalid(out, "oximetry_advertise");
             return true;
         }
-        print_app_config_value(out, app_config.data(), key);
-        return true;
-    }
-
-    if (key == "edf_capture" || key == "edf_capture_enabled") {
-        bool enabled = false;
-        if (!parse_config_bool_value(value, enabled)) {
-            print_config_invalid(out, "edf_capture");
-            return true;
-        }
-        ok = app_config.set_edf_capture_enabled(enabled);
-        if (!ok) {
-            print_config_invalid(out, "edf_capture");
-            return true;
-        }
-        edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
@@ -1925,22 +1975,6 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "syslog" || key == "syslog_enabled") {
-        bool enabled = false;
-        if (!parse_config_bool_value(value, enabled)) {
-            print_config_invalid(out, "syslog");
-            return true;
-        }
-        ok = app_config.set_syslog(enabled, app_config.data().syslog_host,
-                                   app_config.data().syslog_port);
-        if (!ok) {
-            print_config_invalid(out, "syslog");
-            return true;
-        }
-        app_config.apply_log_config();
-        print_app_config_value(out, app_config.data(), key);
-        return true;
-    }
     if (key == "syslog_host") {
         ok = app_config.set_syslog(value.length() > 0, value,
                                    app_config.data().syslog_port);
@@ -1968,7 +2002,6 @@ bool ManagementConsole::handle_config_key(
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-
     return false;
 }
 

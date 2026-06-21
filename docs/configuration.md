@@ -77,6 +77,7 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `syslog_en` | boolean | `off` | Enable UDP syslog forwarding. |
 | `syslog_host` | Empty, or IPv4 address | empty | Syslog destination host. |
 | `syslog_port` | UDP port `1` to `65535` | `514` | Syslog destination port. |
+| `file_log_en` | boolean | storage build default | Enable persistent SD-card log files when storage is available. |
 | `log0` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `GENERAL` category log level. |
 | `log1` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `CAN` category log level. |
 | `log2` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `RPC` category log level. |

@@ -24,6 +24,9 @@ static constexpr uint32_t SLEEPHQ_HTTP_TIMEOUT_MS = 15000;
 static constexpr size_t SLEEPHQ_IO_CHUNK = 384;
 static constexpr size_t SLEEPHQ_UPLOAD_CHUNK = 4096;
 static constexpr size_t SLEEPHQ_TOKEN_RESERVE = 2048;
+static constexpr size_t SLEEPHQ_RESPONSE_BODY_INITIAL_RESERVE = 512;
+static constexpr size_t SLEEPHQ_AUTH_BODY_RESERVE = 384;
+static constexpr size_t SLEEPHQ_CREATE_IMPORT_BODY_RESERVE = 96;
 static constexpr size_t SLEEPHQ_MIN_INTERNAL_FREE = 60 * 1024;
 static constexpr size_t SLEEPHQ_MIN_INTERNAL_MAX_ALLOC = 36 * 1024;
 
@@ -294,7 +297,7 @@ bool SleepHqClient::read_response_body(size_t content_length,
                                        bool chunked,
                                        SleepHqHttpResponse &out) {
     out.body.clear();
-    if (!out.body.reserve(512)) {
+    if (!out.body.reserve(SLEEPHQ_RESPONSE_BODY_INITIAL_RESERVE)) {
         set_error("response_alloc_failed");
         return false;
     }
@@ -540,7 +543,7 @@ bool SleepHqClient::authenticate() {
     }
 
     LargeTextBuffer body;
-    if (!body.reserve(384)) {
+    if (!body.reserve(SLEEPHQ_AUTH_BODY_RESERVE)) {
         set_error("request_alloc_failed");
         return false;
     }
@@ -626,7 +629,7 @@ bool SleepHqClient::create_import(uint32_t team_id, SleepHqImportInfo &out) {
              static_cast<unsigned long>(team_id));
 
     LargeTextBuffer body;
-    if (!body.reserve(96)) {
+    if (!body.reserve(SLEEPHQ_CREATE_IMPORT_BODY_RESERVE)) {
         set_error("request_alloc_failed");
         return false;
     }

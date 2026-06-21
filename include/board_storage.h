@@ -104,6 +104,10 @@ static constexpr size_t AC_STORAGE_WRITE_BUDGET_BYTES = 1024;
 #define AC_FILE_LOG_ENABLED AC_STORAGE_HAS_SDCARD
 #endif
 
+#ifndef AC_DEFAULT_FILE_LOG_ENABLED
+#define AC_DEFAULT_FILE_LOG_ENABLED AC_FILE_LOG_ENABLED
+#endif
+
 static constexpr const char *AC_FILE_LOG_DIR = "/aircannect/log";
 static constexpr const char *AC_FILE_LOG_PATH =
     "/aircannect/log/aircannect.log";

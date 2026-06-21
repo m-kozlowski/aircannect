@@ -15,6 +15,8 @@
 namespace aircannect {
 namespace {
 
+static constexpr size_t EDF_STR_GET_NAMES_RESERVE = 512;
+
 bool parse_float_text(const char *text, float &out) {
     if (!text || !text[0]) return false;
     char *end = nullptr;
@@ -451,7 +453,7 @@ bool summary_digital_from_json_value(JsonVariantConst value,
 
 std::string edf_str_setting_get_names() {
     std::string names;
-    names.reserve(512);
+    names.reserve(EDF_STR_GET_NAMES_RESERVE);
     for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
         const EdfStrSignalDescriptor *signal =
             edf_str_signal_descriptor(i);
@@ -467,7 +469,7 @@ std::string edf_str_setting_get_names() {
 
 std::string edf_str_summary_get_names() {
     std::string names;
-    names.reserve(512);
+    names.reserve(EDF_STR_GET_NAMES_RESERVE);
     for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
         const EdfStrSignalDescriptor *signal =
             edf_str_signal_descriptor(i);

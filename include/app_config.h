@@ -10,7 +10,7 @@
 
 namespace aircannect {
 
-static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 16;
+static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 17;
 
 struct AppConfigData {
     uint32_t schema_version = AC_CONFIG_SCHEMA_VERSION;
@@ -53,6 +53,7 @@ struct AppConfigData {
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
     uint16_t syslog_port = AC_SYSLOG_PORT;
+    bool file_log_enabled = AC_DEFAULT_FILE_LOG_ENABLED != 0;
 
     log_level_t log_levels[CAT_COUNT] = {
         LOG_INFO,
@@ -106,6 +107,7 @@ public:
     bool set_log_level(log_cat_t cat, log_level_t level);
     bool set_all_log_levels(log_level_t level);
     bool set_syslog(bool enabled, const String &host, uint16_t port);
+    bool set_file_log(bool enabled);
 
     void begin_update();
     bool commit_update();

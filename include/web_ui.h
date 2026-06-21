@@ -133,7 +133,11 @@ private:
     void send_sleephq_sync_check(AsyncWebServerRequest *request) const;
     void send_sleephq_sync_status(AsyncWebServerRequest *request) const;
     void build_stream_json(LargeTextBuffer &json) const;
-    void build_config_json(LargeTextBuffer &json) const;
+    void build_config_json(LargeTextBuffer &json,
+                           const char *section = nullptr) const;
+    void send_config_json(AsyncWebServerRequest *request,
+                          const char *section = nullptr) const;
+    void send_config_update(AsyncWebServerRequest *request);
     void build_wifi_json(LargeTextBuffer &json) const;
     void build_settings_json(LargeTextBuffer &json,
                              int requested_mode,
@@ -259,7 +263,6 @@ private:
 
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer cached_stream_json_;
-    LargeTextBuffer cached_config_json_;
     LargeTextBuffer cached_wifi_json_;
     LargeTextBuffer cached_oximetry_sensors_json_;
     LargeTextBuffer cached_ota_json_;

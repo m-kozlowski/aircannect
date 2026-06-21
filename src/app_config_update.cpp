@@ -267,6 +267,16 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
+    if (doc["file_log_en"].is<bool>()) {
+        const bool before = config.data().file_log_enabled;
+        const bool accepted =
+            config.set_file_log(doc["file_log_en"].as<bool>());
+        if (note_bool_change(before, config.data().file_log_enabled,
+                             accepted, result)) {
+            result.log_config_changed = true;
+        }
+    }
+
     if (json_get_string(doc, "softap_mode", s)) {
         SoftApMode softap_mode;
         if (parse_softap_mode(s, softap_mode)) {

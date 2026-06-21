@@ -1904,6 +1904,89 @@
     let settingsCatalog = [];
     let settingsCatalogPromise = null;
     let configData = null;
+    const configSections = [
+      {
+        id: "device",
+        title: "Device",
+        fields: [
+          ["hostname", "Hostname", "text"],
+          ["edf_capture_enabled", "EDF Capture", "bool"],
+        ],
+      },
+      {
+        id: "network",
+        title: "Network",
+        fields: [
+          ["softap_mode", "SoftAP Mode", "enum", ["auto", "forced"]],
+          ["wifi_country", "WiFi Country", "text"],
+        ],
+      },
+      {
+        id: "access",
+        title: "Access",
+        fields: [
+          ["tcp_enabled", "Raw TCP", "bool"],
+          ["tcp_port", "Raw TCP Port", "number"],
+          ["telnet_enabled", "Telnet", "bool"],
+          ["telnet_port", "Telnet Port", "number"],
+          ["http_auth_required", "HTTP Auth", "bool"],
+          ["http_user", "HTTP User", "text"],
+          ["http_password", "HTTP Password", "password"],
+          ["auth_whitelist", "Auth Whitelist", "text"],
+          ["ota_password", "ArduinoOTA Password", "password"],
+        ],
+      },
+      {
+        id: "logging",
+        title: "Logging",
+        fields: [
+          ["syslog_enabled", "Syslog", "bool"],
+          ["syslog_host", "Syslog Host", "text"],
+          ["syslog_port", "Syslog Port", "number"],
+          ["file_log_en", "File Logging", "bool"],
+        ],
+      },
+      {
+        id: "time",
+        title: "Time",
+        fields: [
+          ["timezone", "Timezone", "text"],
+          ["resmed_time_sync_enabled", "Sync AS11 Time", "bool"],
+        ],
+      },
+      {
+        id: "oximetry",
+        title: "Oximetry",
+        fields: [
+          ["oximetry_enabled", "Oximetry Bridge", "bool"],
+          ["oximetry_udp_port", "Oximetry UDP Port", "number"],
+        ],
+      },
+      {
+        id: "smb",
+        title: "SMB",
+        fields: [
+          ["smb_endpoint", "SMB Endpoint", "text"],
+          ["smb_user", "SMB User", "text"],
+          ["smb_password", "SMB Password", "password"],
+        ],
+      },
+      {
+        id: "sleephq",
+        title: "SleepHQ",
+        fields: [
+          ["sleephq_client_id", "SleepHQ Client ID", "text"],
+          ["sleephq_client_secret", "SleepHQ Client Secret", "password"],
+          ["sleephq_team_id", "SleepHQ Team ID", "text"],
+          ["sleephq_device_id", "SleepHQ Device ID", "text"],
+        ],
+      },
+    ];
+    const configSectionByKey = {};
+    configSections.forEach((section) =>
+      section.fields.forEach((field) => {
+        configSectionByKey[field[0]] = section.id;
+      }));
     let oxiSensorData = {sensor_scan_results: [], sensor_known: []};
     let oxiSensorsLoading = false;
     let evtSrc = null;
@@ -6772,107 +6855,96 @@
       }
     }
 
+    async function fetchConfigData() {
+      const parts = await Promise.all(configSections.map(async (section) => {
+        const response = await api("/api/config/" +
+          encodeURIComponent(section.id));
+        return await response.json();
+      }));
+      return Object.assign({}, ...parts);
+    }
+
+    function renderConfigField(root, section, field) {
+      let control;
+      if (field[2] === "bool") {
+        control = document.createElement("select");
+        ["false", "true"].forEach((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value === "true" ? "On" : "Off";
+          if (String(configData[field[0]]) === value) option.selected = true;
+          control.appendChild(option);
+        });
+      } else if (field[2] === "enum") {
+        control = document.createElement("select");
+        field[3].forEach((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value;
+          if (String(configData[field[0]]) === value) option.selected = true;
+          control.appendChild(option);
+        });
+      } else {
+        control = document.createElement("input");
+        control.type = field[2];
+        control.value = configData[field[0]] || "";
+        if (field[0] === "http_password") {
+          control.placeholder = configData.http_password_set ? "set" : "empty";
+        }
+        if (field[0] === "smb_password") {
+          control.placeholder = configData.smb_password_set ? "set" : "empty";
+          if (configData.smb_password_set) {
+            control.value = "********";
+          }
+        }
+        if (field[0] === "smb_endpoint") {
+          control.placeholder = "smb://host/share/path";
+        }
+        if (field[0] === "sleephq_client_secret") {
+          control.placeholder = configData.sleephq_client_secret_set ?
+            "set" : "empty";
+          if (configData.sleephq_client_secret_set) {
+            control.value = "********";
+          }
+        }
+        if (field[0] === "sleephq_team_id" ||
+            field[0] === "sleephq_device_id") {
+          control.placeholder = "optional numeric id";
+        }
+        if (field[0] === "syslog_host") {
+          control.placeholder = "IPv4 address";
+        }
+        if (field[0] === "ota_password") {
+          control.placeholder = configData.ota_password_set ? "set" : "empty";
+          if (configData.ota_password_set) {
+            control.value = "********";
+          }
+        }
+      }
+
+      control.dataset.key = field[0];
+      control.dataset.section = section.id;
+      control.dataset.type = field[2];
+      control.dataset.orig = String(control.value || "");
+      let rendered = control;
+      if (field[0] === "timezone") rendered = timezoneHelper(control);
+      if (field[0] === "wifi_country") rendered = wifiCountryHelper(control);
+      root.appendChild(row(field[1], rendered, field[0]));
+    }
+
     async function loadConfig() {
       try {
-        const response = await api("/api/config");
-        configData = await response.json();
+        configData = await fetchConfigData();
 
         const root = document.getElementById("configFields");
         root.innerHTML = "";
-        const fields = [
-          ["hostname", "Hostname", "text"],
-          ["tcp_enabled", "Raw TCP", "bool"],
-          ["tcp_port", "Raw TCP Port", "number"],
-          ["telnet_enabled", "Telnet", "bool"],
-          ["telnet_port", "Telnet Port", "number"],
-          ["softap_mode", "SoftAP Mode", "enum", ["auto", "forced"]],
-          ["wifi_country", "WiFi Country", "text"],
-          ["timezone", "Timezone", "text"],
-          ["resmed_time_sync_enabled", "Sync AS11 Time", "bool"],
-          ["oximetry_enabled", "Oximetry Bridge", "bool"],
-          ["oximetry_udp_port", "Oximetry UDP Port", "number"],
-          ["edf_capture_enabled", "EDF Capture", "bool"],
-          ["smb_endpoint", "SMB Endpoint", "text"],
-          ["smb_user", "SMB User", "text"],
-          ["smb_password", "SMB Password", "password"],
-          ["sleephq_client_id", "SleepHQ Client ID", "text"],
-          ["sleephq_client_secret", "SleepHQ Client Secret", "password"],
-          ["sleephq_team_id", "SleepHQ Team ID", "text"],
-          ["sleephq_device_id", "SleepHQ Device ID", "text"],
-          ["syslog_enabled", "Syslog", "bool"],
-          ["syslog_host", "Syslog Host", "text"],
-          ["syslog_port", "Syslog Port", "number"],
-          ["http_auth_required", "HTTP Auth", "bool"],
-          ["http_user", "HTTP User", "text"],
-          ["http_password", "HTTP Password", "password"],
-          ["auth_whitelist", "Auth Whitelist", "text"],
-          ["ota_password", "ArduinoOTA Password", "password"],
-        ];
-
-        fields.forEach((field) => {
-          let control;
-          if (field[2] === "bool") {
-            control = document.createElement("select");
-            ["false", "true"].forEach((value) => {
-              const option = document.createElement("option");
-              option.value = value;
-              option.textContent = value === "true" ? "On" : "Off";
-              if (String(configData[field[0]]) === value) option.selected = true;
-              control.appendChild(option);
-            });
-          } else if (field[2] === "enum") {
-            control = document.createElement("select");
-            field[3].forEach((value) => {
-              const option = document.createElement("option");
-              option.value = value;
-              option.textContent = value;
-              if (String(configData[field[0]]) === value) option.selected = true;
-              control.appendChild(option);
-            });
-          } else {
-            control = document.createElement("input");
-            control.type = field[2];
-            control.value = configData[field[0]] || "";
-            if (field[0] === "http_password") {
-              control.placeholder = configData.http_password_set ? "set" : "empty";
-            }
-            if (field[0] === "smb_password") {
-              control.placeholder = configData.smb_password_set ? "set" : "empty";
-              if (configData.smb_password_set) {
-                control.value = "********";
-              }
-            }
-            if (field[0] === "smb_endpoint") {
-              control.placeholder = "smb://host/share/path";
-            }
-            if (field[0] === "sleephq_client_secret") {
-              control.placeholder = configData.sleephq_client_secret_set ? "set" : "empty";
-              if (configData.sleephq_client_secret_set) {
-                control.value = "********";
-              }
-            }
-            if (field[0] === "sleephq_team_id" ||
-                field[0] === "sleephq_device_id") {
-              control.placeholder = "optional numeric id";
-            }
-            if (field[0] === "syslog_host") {
-              control.placeholder = "IPv4 address";
-            }
-            if (field[0] === "ota_password") {
-              control.placeholder = configData.ota_password_set ? "set" : "empty";
-              if (configData.ota_password_set) {
-                control.value = "********";
-              }
-            }
-          }
-
-          control.dataset.key = field[0];
-          control.dataset.type = field[2];
-          control.dataset.orig = String(control.value || "");
-          let rendered = control;
-          if (field[0] === "timezone") rendered = timezoneHelper(control);
-          if (field[0] === "wifi_country") rendered = wifiCountryHelper(control);
-          root.appendChild(row(field[1], rendered, field[0]));
+        configSections.forEach((section) => {
+          const heading = document.createElement("div");
+          heading.className = "section-title";
+          heading.textContent = section.title;
+          root.appendChild(heading);
+          section.fields.forEach((field) =>
+            renderConfigField(root, section, field));
         });
       } catch (error) {
         msg("configMsg", error.message, false);
@@ -6904,8 +6976,7 @@
       const started = Date.now();
       let latest = null;
       while (Date.now() - started < 5000) {
-        const response = await api("/api/config");
-        latest = await response.json();
+        latest = await fetchConfigData();
         if (configChangesApplied(latest, changes)) return latest;
         await new Promise(resolve => setTimeout(resolve, 250));
       }
@@ -7008,13 +7079,31 @@
       }
 
       try {
-        const response = await api("/api/config", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(changes),
+        const sections = {};
+        Object.keys(changes).forEach((key) => {
+          const section = configSectionByKey[key] || "device";
+          if (!sections[section]) sections[section] = {};
+          sections[section][key] = changes[key];
         });
-        const data = await response.json();
-        if (data.queued) {
+        const sectionOrder = configSections
+          .map((section) => section.id)
+          .filter((id) => id !== "access");
+        sectionOrder.push("access");
+
+        let queued = false;
+        for (const section of sectionOrder) {
+          if (!sections[section]) continue;
+          const response = await api("/api/config/" +
+            encodeURIComponent(section), {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(sections[section]),
+          });
+          const data = await response.json();
+          queued = queued || !!data.queued;
+        }
+
+        if (queued) {
           const latest = await waitForConfigChanges(changes);
           if (latest) {
             configData = latest;

@@ -41,6 +41,7 @@ static constexpr const char *KEY_OTA_PASSWORD = "ota_pass";
 static constexpr const char *KEY_SYSLOG_ENABLED = "syslog_en";
 static constexpr const char *KEY_SYSLOG_HOST = "syslog_host";
 static constexpr const char *KEY_SYSLOG_PORT = "syslog_port";
+static constexpr const char *KEY_FILE_LOG_ENABLED = "file_log_en";
 
 static constexpr uint32_t DIRTY_HOSTNAME = 1UL << 0;
 static constexpr uint32_t DIRTY_TCP = 1UL << 1;
@@ -58,12 +59,13 @@ static constexpr uint32_t DIRTY_LOG_LEVELS = 1UL << 12;
 static constexpr uint32_t DIRTY_SYSLOG = 1UL << 13;
 static constexpr uint32_t DIRTY_SMB_SYNC = 1UL << 14;
 static constexpr uint32_t DIRTY_SLEEPHQ_SYNC = 1UL << 15;
+static constexpr uint32_t DIRTY_FILE_LOG = 1UL << 16;
 static constexpr uint32_t DIRTY_ALL =
     DIRTY_HOSTNAME | DIRTY_TCP | DIRTY_SOFTAP | DIRTY_WIFI_COUNTRY |
     DIRTY_TIMEZONE | DIRTY_RESMED_TIME | DIRTY_HTTP_AUTH |
     DIRTY_AUTH_WHITELIST | DIRTY_TELNET | DIRTY_OTA_PASSWORD |
     DIRTY_OXIMETRY | DIRTY_EDF_CAPTURE | DIRTY_LOG_LEVELS | DIRTY_SYSLOG |
-    DIRTY_SMB_SYNC | DIRTY_SLEEPHQ_SYNC;
+    DIRTY_SMB_SYNC | DIRTY_SLEEPHQ_SYNC | DIRTY_FILE_LOG;
 
 bool valid_hostname_char(char c) {
     return isalnum(static_cast<unsigned char>(c)) || c == '-';
@@ -364,6 +366,8 @@ bool AppConfig::load() {
     data_.syslog_host = prefs.getString(KEY_SYSLOG_HOST, defaults.syslog_host);
     data_.syslog_port = static_cast<uint16_t>(
         prefs.getUInt(KEY_SYSLOG_PORT, defaults.syslog_port));
+    data_.file_log_enabled =
+        prefs.getBool(KEY_FILE_LOG_ENABLED, defaults.file_log_enabled);
     prefs.end();
 
     if (!normalize()) return save();
@@ -469,6 +473,11 @@ bool AppConfig::save_fields(uint32_t dirty) const {
              ok;
         ok = put_string(prefs, KEY_SYSLOG_HOST, data_.syslog_host) && ok;
         ok = prefs.putUInt(KEY_SYSLOG_PORT, data_.syslog_port) != 0 && ok;
+    }
+    if (dirty & DIRTY_FILE_LOG) {
+        ok = prefs.putBool(KEY_FILE_LOG_ENABLED,
+                           data_.file_log_enabled) != 0 &&
+             ok;
     }
     prefs.end();
 
@@ -894,6 +903,12 @@ bool AppConfig::set_syslog(bool enabled, const String &host, uint16_t port) {
     return persist(DIRTY_SYSLOG);
 }
 
+bool AppConfig::set_file_log(bool enabled) {
+    if (data_.file_log_enabled == enabled) return true;
+    data_.file_log_enabled = enabled;
+    return persist(DIRTY_FILE_LOG);
+}
+
 bool AppConfig::factory_reset() {
     Preferences prefs;
     bool cleared = false;
@@ -913,6 +928,7 @@ void AppConfig::apply_log_config() const {
     }
     Log::configure_syslog(data_.syslog_enabled, data_.syslog_host,
                           data_.syslog_port, data_.hostname);
+    Log::configure_filelog(data_.file_log_enabled);
 }
 
 }  // namespace aircannect

@@ -199,6 +199,10 @@ bool apply_app_key(AppConfig &app_config,
         state.syslog_dirty = true;
         return true;
     }
+    if (key == "file_log_en") {
+        if (!parse_bool_value(value, bool_value)) return false;
+        return app_config.set_file_log(bool_value);
+    }
 
     known = false;
     return true;

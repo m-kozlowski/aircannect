@@ -38,6 +38,12 @@ namespace aircannect {
 
 namespace {
 
+static constexpr size_t WEB_JSON_RESERVE_SMALL = 512;
+static constexpr size_t WEB_JSON_RESERVE_MEDIUM = 1024;
+static constexpr size_t WEB_CONFIG_FULL_JSON_RESERVE = 2304;
+static constexpr size_t WEB_CONFIG_SYNC_JSON_RESERVE = 640;
+static constexpr size_t WEB_CONFIG_SMALL_JSON_RESERVE = 384;
+
 const char *web_command_name(uint8_t kind) {
     switch (kind) {
         case WebCommandConsoleLine: return "console_line";
@@ -61,6 +67,33 @@ const char *web_command_name(uint8_t kind) {
         case WebCommandResmedOtaStartStaged: return "resmed_ota_start_staged";
         default: return "unknown";
     }
+}
+
+bool web_config_section_known(const char *section) {
+    if (!section || !section[0] || strcmp(section, "all") == 0) return true;
+    return strcmp(section, "device") == 0 ||
+           strcmp(section, "network") == 0 ||
+           strcmp(section, "access") == 0 ||
+           strcmp(section, "logging") == 0 ||
+           strcmp(section, "time") == 0 ||
+           strcmp(section, "oximetry") == 0 ||
+           strcmp(section, "smb") == 0 ||
+           strcmp(section, "sleephq") == 0;
+}
+
+size_t web_config_json_reserve(const char *section) {
+    if (!section || !section[0] || strcmp(section, "all") == 0) {
+        return WEB_CONFIG_FULL_JSON_RESERVE;
+    }
+    if (strcmp(section, "access") == 0 ||
+        strcmp(section, "logging") == 0) {
+        return WEB_JSON_RESERVE_MEDIUM;
+    }
+    if (strcmp(section, "smb") == 0 ||
+        strcmp(section, "sleephq") == 0) {
+        return WEB_CONFIG_SYNC_JSON_RESERVE;
+    }
+    return WEB_CONFIG_SMALL_JSON_RESERVE;
 }
 
 void release_request_body(AsyncWebServerRequest *request) {
@@ -665,9 +698,9 @@ bool WebUI::begin(RpcArbiter &arbiter,
 void WebUI::reserve_cached_json() {
     cached_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     cached_stream_json_.reserve(AC_WEB_STREAM_JSON_RESERVE);
-    cached_config_json_.reserve(AC_WEB_CONFIG_JSON_RESERVE);
     cached_wifi_json_.reserve(AC_WEB_WIFI_JSON_RESERVE);
-    cached_oximetry_sensors_json_.reserve(2048);
+    cached_oximetry_sensors_json_.reserve(
+        AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
     cached_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
     cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
     cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
@@ -713,7 +746,6 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.stream = capture(cached_stream_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
-    out.config = capture(cached_config_json_);
     out.wifi = capture(cached_wifi_json_);
     out.oximetry_sensors = capture(cached_oximetry_sensors_json_);
     out.ota = capture(cached_ota_json_);
@@ -1330,6 +1362,53 @@ void WebUI::send_cached(AsyncWebServerRequest *request,
                     json.length());
     xSemaphoreGive(cache_mutex_);
     request->send(response);
+}
+
+void WebUI::send_config_json(AsyncWebServerRequest *request,
+                             const char *section) const {
+    if (!web_config_section_known(section)) {
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"error\":\"unknown_section\"}");
+        return;
+    }
+
+    LargeTextBuffer json;
+    if (!json.reserve(web_config_json_reserve(section))) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"config_alloc\"}");
+        return;
+    }
+    build_config_json(json, section);
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"config_overflow\"}");
+        return;
+    }
+
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    request->send(response);
+}
+
+void WebUI::send_config_update(AsyncWebServerRequest *request) {
+    JsonDocument doc;
+    std::string body;
+    if (!parse_body_copy(request, doc, body)) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad json\"}");
+        return;
+    }
+    WebCommand queued;
+    queued.kind = WebCommandConfigUpdate;
+    queued.body = std::move(body);
+    send_queue_result(request, enqueue_command(std::move(queued)));
 }
 
 void WebUI::send_report_result(AsyncWebServerRequest *request) const {
@@ -2177,7 +2256,7 @@ void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
         return;
     }
     LargeTextBuffer json;
-    json.reserve(512);
+    json.reserve(WEB_JSON_RESERVE_SMALL);
     json = "{";
     json_add_bool(json, "ok", true, false);
     json_add_string(json, "state",
@@ -2363,7 +2442,7 @@ void WebUI::send_storage_delete_status(AsyncWebServerRequest *request) const {
         return;
     }
     LargeTextBuffer json;
-    json.reserve(384);
+    json.reserve(WEB_JSON_RESERVE_SMALL);
     json = "{";
     json_add_bool(json, "ok", true, false);
     json_add_string(json, "state", storage_delete_state_name(status.state));
@@ -2570,7 +2649,7 @@ void WebUI::send_sleephq_sync_status(AsyncWebServerRequest *request) const {
     }
     const SleepHqSyncStatus status = sleephq_sync_job_->status();
     LargeTextBuffer json;
-    json.reserve(1024);
+    json.reserve(WEB_JSON_RESERVE_MEDIUM);
     json = "{";
     append_sleephq_sync_json(json, status, app_config_->data(), true);
     json += '}';
@@ -2651,49 +2730,85 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void WebUI::build_config_json(LargeTextBuffer &json) const {
+void WebUI::build_config_json(LargeTextBuffer &json,
+                              const char *section) const {
     const AppConfigData &cfg = app_config_->data();
+    const bool all = !section || !section[0] || strcmp(section, "all") == 0;
+    const auto include = [all, section](const char *name) {
+        return all || strcmp(section, name) == 0;
+    };
     json = "{";
-    json_add_string(json, "hostname", cfg.hostname.c_str(), false);
-    json_add_bool(json, "tcp_enabled", cfg.tcp_bridge_enabled);
-    json_add_int(json, "tcp_port", cfg.tcp_bridge_port);
-    json_add_string(json, "softap_mode", softap_mode_name(cfg.softap_mode));
-    json_add_string(json, "wifi_country", cfg.wifi_country.c_str());
-    json_add_string(json, "timezone", cfg.timezone.c_str());
-    json_add_bool(json, "resmed_time_sync_enabled",
-                  cfg.resmed_time_sync_enabled);
-    json_add_bool(json, "oximetry_enabled", cfg.oximetry_enabled);
-    json_add_int(json, "oximetry_udp_port", cfg.oximetry_udp_port);
-    json_add_string(json, "oximetry_advertise_mode",
-                    oximetry_advertise_mode_name(
-                        cfg.oximetry_advertise_mode));
-    json_add_bool(json, "edf_capture_enabled", cfg.edf_capture_enabled);
-    json_add_string(json, "smb_endpoint", cfg.smb_endpoint.c_str());
-    json_add_string(json, "smb_user", cfg.smb_user.c_str());
-    json_add_bool(json, "smb_password_set",
-                  cfg.smb_password.length() > 0);
-    json_add_string(json, "smb_password", "");
-    json_add_string(json, "sleephq_client_id",
-                    cfg.sleephq_client_id.c_str());
-    json_add_bool(json, "sleephq_client_secret_set",
-                  cfg.sleephq_client_secret.length() > 0);
-    json_add_string(json, "sleephq_client_secret", "");
-    json_add_string(json, "sleephq_team_id",
-                    cfg.sleephq_team_id.c_str());
-    json_add_string(json, "sleephq_device_id",
-                    cfg.sleephq_device_id.c_str());
-    json_add_bool(json, "syslog_enabled", cfg.syslog_enabled);
-    json_add_string(json, "syslog_host", cfg.syslog_host.c_str());
-    json_add_int(json, "syslog_port", cfg.syslog_port);
-    json_add_bool(json, "http_auth_required", network_auth_required(cfg));
-    json_add_string(json, "http_user", cfg.http_user.c_str());
-    json_add_bool(json, "http_password_set", cfg.http_password.length() > 0);
-    json_add_string(json, "http_password", "");
-    json_add_string(json, "auth_whitelist", cfg.auth_whitelist.c_str());
-    json_add_bool(json, "telnet_enabled", cfg.telnet_console_enabled);
-    json_add_int(json, "telnet_port", cfg.telnet_console_port);
-    json_add_bool(json, "ota_password_set", cfg.ota_password.length() > 0);
-    json_add_string(json, "ota_password", "");
+    bool comma = false;
+    const auto add_string = [&json, &comma](const char *key,
+                                            const char *value) {
+        json_add_string(json, key, value, comma);
+        comma = true;
+    };
+    const auto add_bool = [&json, &comma](const char *key, bool value) {
+        json_add_bool(json, key, value, comma);
+        comma = true;
+    };
+    const auto add_int = [&json, &comma](const char *key, long value) {
+        json_add_int(json, key, value, comma);
+        comma = true;
+    };
+
+    if (include("device")) {
+        add_string("hostname", cfg.hostname.c_str());
+        add_bool("edf_capture_enabled", cfg.edf_capture_enabled);
+    }
+    if (include("access")) {
+        add_bool("tcp_enabled", cfg.tcp_bridge_enabled);
+        add_int("tcp_port", cfg.tcp_bridge_port);
+        add_bool("telnet_enabled", cfg.telnet_console_enabled);
+        add_int("telnet_port", cfg.telnet_console_port);
+        add_bool("http_auth_required", network_auth_required(cfg));
+        add_string("http_user", cfg.http_user.c_str());
+        add_bool("http_password_set", cfg.http_password.length() > 0);
+        add_string("http_password", "");
+        add_string("auth_whitelist", cfg.auth_whitelist.c_str());
+        add_bool("ota_password_set", cfg.ota_password.length() > 0);
+        add_string("ota_password", "");
+    }
+    if (include("logging")) {
+        add_bool("syslog_enabled", cfg.syslog_enabled);
+        add_string("syslog_host", cfg.syslog_host.c_str());
+        add_int("syslog_port", cfg.syslog_port);
+        add_bool("file_log_en", cfg.file_log_enabled);
+    }
+    if (include("network")) {
+        add_string("softap_mode", softap_mode_name(cfg.softap_mode));
+        add_string("wifi_country", cfg.wifi_country.c_str());
+    }
+    if (include("time")) {
+        add_string("timezone", cfg.timezone.c_str());
+        add_bool("resmed_time_sync_enabled",
+                 cfg.resmed_time_sync_enabled);
+    }
+    if (include("oximetry")) {
+        add_bool("oximetry_enabled", cfg.oximetry_enabled);
+        add_int("oximetry_udp_port", cfg.oximetry_udp_port);
+        add_string("oximetry_advertise_mode",
+                   oximetry_advertise_mode_name(
+                       cfg.oximetry_advertise_mode));
+    }
+    if (include("smb")) {
+        add_string("smb_endpoint", cfg.smb_endpoint.c_str());
+        add_string("smb_user", cfg.smb_user.c_str());
+        add_bool("smb_password_set", cfg.smb_password.length() > 0);
+        add_string("smb_password", "");
+    }
+    if (include("sleephq")) {
+        add_string("sleephq_client_id",
+                   cfg.sleephq_client_id.c_str());
+        add_bool("sleephq_client_secret_set",
+                 cfg.sleephq_client_secret.length() > 0);
+        add_string("sleephq_client_secret", "");
+        add_string("sleephq_team_id",
+                   cfg.sleephq_team_id.c_str());
+        add_string("sleephq_device_id",
+                   cfg.sleephq_device_id.c_str());
+    }
     json += '}';
 }
 
@@ -2860,7 +2975,6 @@ void WebUI::publish_snapshots(bool force,
         if (checkpoint) checkpoint("web_ui.snapshots.stream");
     }
     if (rebuild_mask & SNAPSHOT_CONFIG) {
-        build_config_json(cached_config_json_);
         if (checkpoint) checkpoint("web_ui.snapshots.config");
     }
     if (rebuild_mask & SNAPSHOT_WIFI) {
@@ -3335,7 +3449,7 @@ void WebUI::register_routes() {
         const ReportManager::PrefetchSnapshot p =
             report_manager_->prefetch_snapshot();
         LargeTextBuffer json;
-        json.reserve(512);
+        json.reserve(WEB_JSON_RESERVE_SMALL);
         json = "{";
         json_add_bool(json, "ok", true, false);
         json_add_bool(json, "started", s.task_started);
@@ -3478,25 +3592,37 @@ void WebUI::register_routes() {
         });
 
     server_->on("/api/config", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        send_cached(request, cached_config_json_);
+        send_config_json(request);
     });
 
     server_->on(
         "/api/config", HTTP_POST,
         [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!parse_body_copy(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            WebCommand queued;
-            queued.kind = WebCommandConfigUpdate;
-            queued.body = std::move(body);
-            send_queue_result(request, enqueue_command(std::move(queued)));
+            send_config_update(request);
         },
         nullptr, handle_body);
+
+    const auto register_config_section =
+        [this](const char *path, const char *section) {
+            server_->on(path, HTTP_GET,
+                        [this, section](AsyncWebServerRequest *request) {
+                send_config_json(request, section);
+            });
+            server_->on(
+                path, HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+                    send_config_update(request);
+                },
+                nullptr, handle_body);
+        };
+    register_config_section("/api/config/device", "device");
+    register_config_section("/api/config/network", "network");
+    register_config_section("/api/config/access", "access");
+    register_config_section("/api/config/logging", "logging");
+    register_config_section("/api/config/time", "time");
+    register_config_section("/api/config/oximetry", "oximetry");
+    register_config_section("/api/config/smb", "smb");
+    register_config_section("/api/config/sleephq", "sleephq");
 
     server_->on("/api/ota", HTTP_GET, [this](AsyncWebServerRequest *request) {
         String json;

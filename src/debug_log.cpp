@@ -41,6 +41,7 @@ IPAddress syslog_ip;
 String syslog_host_text;
 uint16_t syslog_port_value = AC_SYSLOG_PORT;
 bool syslog_enabled_value = false;
+bool file_log_enabled_value = false;
 bool file_log_dir_ready = false;
 char syslog_hostname[64] = "aircannect";
 
@@ -198,6 +199,15 @@ bool ensure_file_log_queue() {
 #endif
 }
 
+void release_file_log_queue() {
+#if AC_FILE_LOG_ENABLED
+    if (!file_log_queue) return;
+    file_log_queue->~FileLogQueue();
+    aircannect::Memory::free(file_log_queue);
+    file_log_queue = nullptr;
+#endif
+}
+
 bool ensure_file_log_dir() {
 #if AC_FILE_LOG_ENABLED
     if (file_log_dir_ready) return true;
@@ -216,6 +226,7 @@ bool ensure_file_log_dir() {
 
 void enqueue_file_log_record(const LogRecord &record) {
 #if AC_FILE_LOG_ENABLED
+    if (!file_log_enabled_value) return;
     if (!file_log_queue) return;
     if (file_log_queue->push(record)) {
         log_stats.file_enqueued++;
@@ -226,7 +237,7 @@ void enqueue_file_log_record(const LogRecord &record) {
 }
 
 void enqueue_log_sinks(log_cat_t cat, log_level_t level, const char *buf) {
-    if (!syslog_enabled_value && !file_log_queue) return;
+    if (!syslog_enabled_value && !file_log_enabled_value) return;
     LogRecord record;
     if (!make_log_record(cat, level, buf, record)) return;
     enqueue_syslog_record(record);
@@ -280,6 +291,7 @@ void send_syslog_record(const LogRecord &record) {
 
 void poll_file_log(size_t max_records) {
 #if AC_FILE_LOG_ENABLED
+    if (!file_log_enabled_value) return;
     if (max_records == 0) max_records = AC_FILE_LOG_DRAIN_BUDGET;
     lock_log();
     const bool empty = !file_log_queue || file_log_queue->empty();
@@ -334,9 +346,6 @@ void init() {
         log_mutex = xSemaphoreCreateMutexStatic(&log_mutex_storage);
     }
     for (int i = 0; i < CAT_COUNT; ++i) levels[i] = LOG_INFO;
-    lock_log();
-    ensure_file_log_queue();
-    unlock_log();
 }
 
 void set_level(log_level_t level) {
@@ -508,6 +517,25 @@ void configure_syslog(bool enabled,
     unlock_log();
 }
 
+void configure_filelog(bool enabled) {
+    lock_log();
+#if AC_FILE_LOG_ENABLED
+    file_log_enabled_value = false;
+    if (!enabled) {
+        release_file_log_queue();
+        unlock_log();
+        return;
+    }
+    if (ensure_file_log_queue()) {
+        file_log_enabled_value = true;
+    }
+#else
+    (void)enabled;
+    file_log_enabled_value = false;
+#endif
+    unlock_log();
+}
+
 void poll(bool network_available,
           bool storage_draining_allowed,
           size_t file_log_drain_budget) {
@@ -548,7 +576,7 @@ size_t syslog_queue_depth() {
 
 bool filelog_enabled() {
 #if AC_FILE_LOG_ENABLED
-    return true;
+    return file_log_enabled_value;
 #else
     return false;
 #endif
