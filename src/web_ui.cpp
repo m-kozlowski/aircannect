@@ -397,6 +397,10 @@ void append_sleephq_sync_json(LargeTextBuffer &json,
     json_add_uint64(json, "last_sync_bytes_uploaded",
                     status.last_sync_bytes_uploaded);
     json_add_uint64(json, "last_failure_epoch", status.last_failure_epoch);
+    json_add_int(json, "retry_due_ms",
+                 static_cast<long>(status.retry_due_ms));
+    json_add_int(json, "retry_attempt",
+                 static_cast<long>(status.retry_attempt));
     json_add_int(json, "started_ms",
                  static_cast<long>(status.started_ms));
     json_add_int(json, "updated_ms",

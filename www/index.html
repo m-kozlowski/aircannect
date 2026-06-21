@@ -4353,8 +4353,10 @@
       }
       if (state === "error") {
         const age = runtimeAgeText(data.updated_ms);
+        const retry = retryInText(data.retry_due_ms);
         return "Last sync failed" + (age ? " " + age : "") + ": " +
-          sleepHqFriendlyError(data.error);
+          sleepHqFriendlyError(data.error) +
+          (retry ? ". " + retry : "");
       }
       if (!data.started_ms && !data.last_check_epoch) return "Not checked yet";
       if (failed) {
@@ -4410,6 +4412,7 @@
       if (state === "pending") {
         return data.network_available ? "Queued" : "Waiting for network";
       }
+      if (state === "error") return retryInText(data.retry_due_ms) || "--";
       return "--";
     }
 

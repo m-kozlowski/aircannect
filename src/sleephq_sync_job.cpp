@@ -25,6 +25,11 @@ static constexpr size_t SLEEPHQ_WALK_MAX_DEPTH = 16;
 static constexpr uint32_t SLEEPHQ_DATALOG_SCAN_BUDGET = 16;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_INTERVAL_MS = 2000;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_TIMEOUT_MS = 120000;
+static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
+    15UL * 60UL * 1000UL,
+    60UL * 60UL * 1000UL,
+    6UL * 60UL * 60UL * 1000UL,
+};
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
 
 const char *const SLEEPHQ_ROOT_METADATA_FILES[] = {
@@ -73,6 +78,49 @@ bool status_contains_failure_token(const char *status) {
     }
     return strstr(lower, "fail") || strstr(lower, "error") ||
            strstr(lower, "reject") || strstr(lower, "cancel");
+}
+
+bool parse_http_error_code(const char *error, int &code) {
+    code = 0;
+    if (!error || strncmp(error, "http_", 5) != 0) return false;
+    char *end = nullptr;
+    const long value = strtol(error + 5, &end, 10);
+    if (!end || *end != '\0' || value <= 0 || value > 999) {
+        return false;
+    }
+    code = static_cast<int>(value);
+    return true;
+}
+
+bool sleep_hq_error_retryable(const char *error) {
+    if (!error || !*error) return true;
+    int http_code = 0;
+    if (parse_http_error_code(error, http_code)) {
+        if (http_code == 408 || http_code == 429 || http_code >= 500) {
+            return true;
+        }
+        return http_code == 404;
+    }
+
+    static const char *const PERMANENT[] = {
+        "bad_attach_request",
+        "bad_child_path",
+        "bad_upload_request",
+        "import_failed",
+        "import_id_missing",
+        "multipart_size_failed",
+        "not_configured",
+        "request_header_too_long",
+        "sleep_path_failed",
+        "state_path_failed",
+        "team_id_missing",
+        "token_json_parse",
+        "token_missing",
+    };
+    for (const char *item : PERMANENT) {
+        if (strcmp(error, item) == 0) return false;
+    }
+    return true;
 }
 
 ImportStatusKind classify_import_status(const char *status) {
@@ -232,6 +280,8 @@ void SleepHqSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     status_.last_error[0] = 0;
     state_dir_[0] = 0;
     state_cache_.clear();
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
     status_.state = status_.configured ? SleepHqSyncState::Idle
                                        : SleepHqSyncState::Disabled;
     phase_ = WorkPhase::Idle;
@@ -279,6 +329,8 @@ bool SleepHqSyncJob::request_locked(RunKind kind, const char *reason) {
               reason && *reason ? reason : "manual");
     status_.last_error[0] = 0;
     status_.updated_ms = millis_nonzero();
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
     return true;
 }
 
@@ -343,6 +395,7 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
 
     reset_run_locked(false);
     current_run_kind_ = kind;
+    retry_due_ms_ = 0;
     status_.state = SleepHqSyncState::Working;
     status_.pending = false;
     copy_cstr(status_.pending_reason, sizeof(status_.pending_reason), reason);
@@ -487,6 +540,8 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
 void SleepHqSyncJob::finish_check_locked(uint32_t team_id) {
     status_.team_id = team_id;
     status_.last_check_epoch = storage_export_current_epoch_seconds_or_zero();
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
     status_.state = status_.configured ? SleepHqSyncState::Idle
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
@@ -503,6 +558,8 @@ void SleepHqSyncJob::finish_sync_locked() {
     status_.last_sync_files_uploaded = status_.files_uploaded;
     status_.last_sync_files_failed = status_.files_failed;
     status_.last_sync_bytes_uploaded = status_.bytes_uploaded;
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
     status_.state = status_.configured ? SleepHqSyncState::Idle
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
@@ -518,25 +575,88 @@ void SleepHqSyncJob::finish_sync_locked() {
 }
 
 void SleepHqSyncJob::fail_locked(const char *error) {
+    if (error && strcmp(error, "preempted") == 0) {
+        const RunKind kind = current_run_kind_;
+        char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
+        copy_cstr(reason, sizeof(reason),
+                  status_.pending_reason[0]
+                      ? status_.pending_reason
+                      : "preempted");
+        reset_run_locked(true);
+        pending_run_kind_ = kind;
+        status_.state = SleepHqSyncState::Pending;
+        status_.pending = true;
+        copy_cstr(status_.pending_reason,
+                  sizeof(status_.pending_reason),
+                  reason);
+        status_.last_error[0] = '\0';
+        status_.updated_ms = millis_nonzero();
+        retry_due_ms_ = 0;
+        retry_attempt_ = 0;
+        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
+                  "preempted; queued reason=%s\n",
+                  status_.pending_reason);
+        return;
+    }
+
     copy_cstr(status_.last_error, sizeof(status_.last_error),
               error && *error ? error : "failed");
     status_.last_failure_epoch = storage_export_current_epoch_seconds_or_zero();
     status_.state = SleepHqSyncState::Error;
     status_.pending = false;
-    status_.pending_reason[0] = 0;
     status_.updated_ms = millis_nonzero();
     status_.files_failed++;
+    const bool retryable =
+        status_.configured && sleep_hq_error_retryable(status_.last_error);
+    if (retryable) {
+        const size_t backoff_count =
+            sizeof(SLEEPHQ_RETRY_BACKOFF_MS) /
+            sizeof(SLEEPHQ_RETRY_BACKOFF_MS[0]);
+        const size_t index = retry_attempt_ < backoff_count
+            ? retry_attempt_
+            : backoff_count - 1;
+        retry_due_ms_ = status_.updated_ms + SLEEPHQ_RETRY_BACKOFF_MS[index];
+        if (retry_attempt_ < 255) retry_attempt_++;
+    } else {
+        retry_due_ms_ = 0;
+        retry_attempt_ = 0;
+    }
+    const uint32_t retry_in_ms =
+        retry_due_ms_ ? static_cast<uint32_t>(retry_due_ms_ -
+                                              status_.updated_ms) : 0;
     Log::logf(CAT_SLEEPHQ, LOG_WARN,
               "failed phase=%u error=%s current=%s seen=%u uploaded=%u "
-              "skipped=%u bytes=%llu\n",
+              "skipped=%u bytes=%llu retry_ms=%lu attempt=%u\n",
               static_cast<unsigned>(phase_),
               status_.last_error,
               current_file_.path[0] ? current_file_.path : "--",
               static_cast<unsigned>(status_.files_seen),
               static_cast<unsigned>(status_.files_uploaded),
               static_cast<unsigned>(status_.files_skipped),
-              static_cast<unsigned long long>(status_.bytes_uploaded));
+              static_cast<unsigned long long>(status_.bytes_uploaded),
+              static_cast<unsigned long>(retry_in_ms),
+              static_cast<unsigned>(retry_attempt_));
     reset_run_locked(true);
+}
+
+void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
+    if (status_.state != SleepHqSyncState::Error ||
+        retry_due_ms_ == 0 ||
+        static_cast<int32_t>(now_ms - retry_due_ms_) < 0) {
+        return;
+    }
+    status_.pending = true;
+    status_.state = SleepHqSyncState::Pending;
+    if (!status_.pending_reason[0]) {
+        copy_cstr(status_.pending_reason,
+                  sizeof(status_.pending_reason),
+                  "retry");
+    }
+    status_.updated_ms = now_ms;
+    Log::logf(CAT_SLEEPHQ, LOG_INFO,
+              "retry queued reason=%s attempt=%u\n",
+              status_.pending_reason,
+              static_cast<unsigned>(retry_attempt_));
 }
 
 bool SleepHqSyncJob::ensure_walk_stack_locked() {
@@ -1664,6 +1784,8 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
 
 JobStep SleepHqSyncJob::step() {
     if (!lock(20)) return JobStep::Waiting;
+    const uint32_t now = millis_nonzero();
+    queue_retry_locked(now);
     if (runtime_blocked_.load() && status_.state == SleepHqSyncState::Working) {
         abort_requested_.store(true);
         fail_locked("preempted");
@@ -1671,7 +1793,7 @@ JobStep SleepHqSyncJob::step() {
         return JobStep::Idle;
     }
     if (status_.pending && phase_ == WorkPhase::Idle) {
-        if (!begin_run_locked(millis_nonzero())) {
+        if (!begin_run_locked(now)) {
             unlock();
             return status_.pending ? JobStep::Waiting : JobStep::Idle;
         }
@@ -1703,6 +1825,7 @@ void SleepHqSyncJob::on_preempt() {
                   sizeof(status_.pending_reason),
                   reason);
         status_.updated_ms = millis_nonzero();
+        retry_due_ms_ = 0;
     }
     unlock();
 }
@@ -1711,10 +1834,14 @@ SleepHqSyncStatus SleepHqSyncJob::status() const {
     SleepHqSyncStatus out;
     if (lock(20)) {
         out = status_;
+        out.retry_due_ms = retry_due_ms_;
+        out.retry_attempt = retry_attempt_;
         out.network_available = network_available_.load();
         unlock();
     } else {
         out = status_;
+        out.retry_due_ms = retry_due_ms_;
+        out.retry_attempt = retry_attempt_;
         out.network_available = network_available_.load();
         out.state = SleepHqSyncState::Working;
     }
@@ -1723,8 +1850,10 @@ SleepHqSyncStatus SleepHqSyncJob::status() const {
 
 bool SleepHqSyncJob::active() const {
     if (!lock(20)) return true;
-    const bool out = status_.state == SleepHqSyncState::Pending ||
-                     status_.state == SleepHqSyncState::Working;
+    const bool out =
+        status_.state == SleepHqSyncState::Working ||
+        ((status_.state == SleepHqSyncState::Pending || status_.pending) &&
+         network_available_.load());
     unlock();
     return out;
 }

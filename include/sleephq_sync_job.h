@@ -52,6 +52,8 @@ struct SleepHqSyncStatus {
     uint32_t last_sync_files_failed = 0;
     uint64_t last_sync_bytes_uploaded = 0;
     uint64_t last_failure_epoch = 0;
+    uint32_t retry_due_ms = 0;
+    uint8_t retry_attempt = 0;
     uint32_t started_ms = 0;
     uint32_t updated_ms = 0;
 };
@@ -163,6 +165,7 @@ private:
     bool config_matches_locked(const ConfigSnapshot &config) const;
     bool request_locked(RunKind kind, const char *reason);
     bool begin_run_locked(uint32_t now_ms);
+    void queue_retry_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
     void finish_check_locked(uint32_t team_id);
     void finish_sync_locked();
@@ -273,6 +276,8 @@ private:
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;
+    uint32_t retry_due_ms_ = 0;
+    uint8_t retry_attempt_ = 0;
     InflightPhase inflight_phase_ = InflightPhase::None;
     StorageExportStateCache state_cache_;
     char state_dir_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
