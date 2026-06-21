@@ -240,6 +240,20 @@ private:
     bool cached_remote_date_exists_locked(const char *day,
                                           bool &exists) const;
     void clear_remote_dates_locked();
+    bool build_datalog_rebuild_marker_path_locked(const char *day,
+                                                  char *out,
+                                                  size_t out_size) const;
+    bool read_datalog_rebuild_marker_locked(const char *day,
+                                            uint64_t &epoch) const;
+    bool datalog_rebuild_marker_recent_locked(const char *day,
+                                              uint64_t now_epoch,
+                                              uint64_t &marker_epoch) const;
+    bool mark_datalog_rebuild_attempt_locked(const char *day,
+                                             uint64_t now_epoch);
+    void maybe_mark_datalog_rebuild_success_locked();
+    bool force_remote_missing_datalog_day_locked(const char *day,
+                                                 bool local_complete,
+                                                 bool &force_export);
     bool read_local_machine_serial_locked(char *out,
                                           size_t out_size,
                                           char *error,
@@ -330,6 +344,7 @@ private:
     bool remote_reconcile_enabled_ = false;
     bool remote_reconcile_all_missing_ = false;
     char remote_serial_[AC_SLEEPHQ_SERIAL_MAX] = {};
+    char pending_rebuild_day_[9] = {};
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;

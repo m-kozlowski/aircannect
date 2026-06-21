@@ -42,6 +42,8 @@ static constexpr uint32_t SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT =
     (SLEEPHQ_REMOTE_MACHINE_LOOKUP_LIMIT + SLEEPHQ_REMOTE_MACHINE_PER_PAGE -
      1) /
     SLEEPHQ_REMOTE_MACHINE_PER_PAGE;
+static constexpr uint32_t SLEEPHQ_DATALOG_REBUILD_COOLDOWN_SECONDS =
+    6UL * 60UL * 60UL;
 
 void sleep_hq_digest_to_hex(const uint8_t digest[16],
                             char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
@@ -530,6 +532,122 @@ void SleepHqSyncJob::clear_remote_dates_locked() {
     remote_serial_[0] = '\0';
 }
 
+bool SleepHqSyncJob::build_datalog_rebuild_marker_path_locked(
+    const char *day,
+    char *out,
+    size_t out_size) const {
+    if (!state_dir_[0] || !day || strlen(day) != 8 ||
+        !storage_export_all_digits(day, 8) || !out || out_size == 0) {
+        return false;
+    }
+    const int written = snprintf(out, out_size, "%s/%s.rebuild",
+                                 state_dir_, day);
+    return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool SleepHqSyncJob::read_datalog_rebuild_marker_locked(
+    const char *day,
+    uint64_t &epoch) const {
+    epoch = 0;
+    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    if (!build_datalog_rebuild_marker_path_locked(day, path, sizeof(path))) {
+        return false;
+    }
+
+    char raw[32] = {};
+    {
+        Storage::Guard guard;
+        File file = Storage::open(path, "r");
+        if (!file) return false;
+        const int read =
+            file.read(reinterpret_cast<uint8_t *>(raw), sizeof(raw) - 1);
+        file.close();
+        if (read <= 0) return false;
+        raw[read] = '\0';
+    }
+
+    char *end = nullptr;
+    const unsigned long long parsed = strtoull(raw, &end, 10);
+    if (end == raw) return false;
+    epoch = static_cast<uint64_t>(parsed);
+    return epoch != 0;
+}
+
+bool SleepHqSyncJob::datalog_rebuild_marker_recent_locked(
+    const char *day,
+    uint64_t now_epoch,
+    uint64_t &marker_epoch) const {
+    marker_epoch = 0;
+    if (now_epoch == 0) return false;
+    if (!read_datalog_rebuild_marker_locked(day, marker_epoch)) return false;
+    if (marker_epoch > now_epoch) return true;
+    return now_epoch - marker_epoch <
+           SLEEPHQ_DATALOG_REBUILD_COOLDOWN_SECONDS;
+}
+
+bool SleepHqSyncJob::mark_datalog_rebuild_attempt_locked(
+    const char *day,
+    uint64_t now_epoch) {
+    if (now_epoch == 0) return false;
+    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    if (!build_datalog_rebuild_marker_path_locked(day, path, sizeof(path))) {
+        return false;
+    }
+    if (!ensure_state_dir_locked()) return false;
+
+    {
+        Storage::Guard guard;
+        File file = Storage::open(path, "w");
+        if (!file) return false;
+        const size_t written =
+            file.printf("%llu\n",
+                        static_cast<unsigned long long>(now_epoch));
+        file.close();
+        return written != 0;
+    }
+}
+
+void SleepHqSyncJob::maybe_mark_datalog_rebuild_success_locked() {
+    if (!pending_rebuild_day_[0]) return;
+    const uint64_t now_epoch = storage_export_current_epoch_seconds_or_zero();
+    if (!mark_datalog_rebuild_attempt_locked(pending_rebuild_day_,
+                                             now_epoch)) {
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "remote rebuild marker write failed day=%s\n",
+                  pending_rebuild_day_);
+    }
+    pending_rebuild_day_[0] = '\0';
+}
+
+bool SleepHqSyncJob::force_remote_missing_datalog_day_locked(
+    const char *day,
+    bool local_complete,
+    bool &force_export) {
+    force_export = false;
+    const uint64_t now_epoch = storage_export_current_epoch_seconds_or_zero();
+    uint64_t marker_epoch = 0;
+    if (local_complete &&
+        datalog_rebuild_marker_recent_locked(day, now_epoch, marker_epoch)) {
+        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
+                  "remote machine-date still missing day=%s serial=%s; "
+                  "rebuild suppressed marker_epoch=%llu\n",
+                  day,
+                  remote_serial_,
+                  static_cast<unsigned long long>(marker_epoch));
+        return true;
+    }
+
+    if (local_complete) {
+        copy_cstr(pending_rebuild_day_, sizeof(pending_rebuild_day_), day);
+    }
+    force_export = true;
+    Log::logf(CAT_SLEEPHQ, LOG_INFO,
+              "remote machine-date missing day=%s serial=%s; rebuilding day\n",
+              day,
+              remote_serial_);
+    return true;
+}
+
 void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     client_.disconnect();
     close_local_locked();
@@ -544,6 +662,7 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     import_process_started_ms_ = 0;
     import_poll_due_ms_ = 0;
     inflight_phase_ = InflightPhase::None;
+    pending_rebuild_day_[0] = '\0';
     state_dir_[0] = 0;
     current_run_kind_ = RunKind::Check;
     abort_requested_.store(false);
@@ -725,6 +844,7 @@ void SleepHqSyncJob::reset_import_batch_locked() {
     import_process_started_ms_ = 0;
     import_poll_due_ms_ = 0;
     mark_index_ = 0;
+    pending_rebuild_day_[0] = '\0';
     import_batch_active_ = false;
     phase_ = WorkPhase::NextFile;
 }
@@ -1511,7 +1631,6 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
                                                  char *error,
                                                  size_t error_size) {
     force_export = false;
-    (void)local_complete;
     if (!remote_reconcile_enabled_) return true;
     if (!day || !day[0]) {
         copy_cstr(error, error_size, "bad_datalog_day");
@@ -1524,8 +1643,13 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
 
     bool exists = false;
     if (cached_remote_date_exists_locked(day, exists)) {
-        force_export = !exists;
-        return true;
+        if (exists) {
+            force_export = false;
+            return true;
+        }
+        return force_remote_missing_datalog_day_locked(day,
+                                                       local_complete,
+                                                       force_export);
     }
 
     char iso_date[11] = {};
@@ -1550,12 +1674,9 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
             copy_cstr(error, error_size, "remote_date_cache_alloc");
             return false;
         }
-        force_export = true;
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "remote machine-date missing day=%s serial=%s; rebuilding day\n",
-                  day,
-                  remote_serial_);
-        return true;
+        return force_remote_missing_datalog_day_locked(day,
+                                                       local_complete,
+                                                       force_export);
     }
 
     copy_cstr(error, error_size,
@@ -1914,6 +2035,7 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
 
     switch (sleephq_classify_import_status(import.status)) {
         case SleepHqImportStatusKind::Success:
+            maybe_mark_datalog_rebuild_success_locked();
             mark_index_ = 0;
             phase_ = WorkPhase::MarkState;
             return JobStep::Working;
