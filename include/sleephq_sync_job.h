@@ -11,6 +11,7 @@
 #include "background_worker.h"
 #include "sleephq_client.h"
 #include "storage_export_plan.h"
+#include "storage_export_planner.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -113,18 +114,6 @@ private:
         char device_id[AC_SLEEPHQ_ID_MAX] = {};
     };
 
-    struct WalkFrame {
-        char path[AC_STORAGE_PATH_MAX] = {};
-        uint32_t next_index = 0;
-        bool opened = false;
-        File dir;
-    };
-
-    struct DatalogDay {
-        char day[9] = {};
-        char path[AC_STORAGE_PATH_MAX] = {};
-    };
-
     struct CurrentFile {
         char path[AC_STORAGE_PATH_MAX] = {};
         char sleep_path[AC_STORAGE_PATH_MAX] = {};
@@ -171,37 +160,17 @@ private:
     void finish_sync_locked();
     void fail_locked(const char *error);
     void close_local_locked();
-    void close_walk_locked();
-    void release_walk_stack_locked();
-    void close_datalog_scan_locked();
-    void clear_datalog_days_locked();
     void clear_current_file_locked();
-    bool ensure_walk_stack_locked();
-    bool push_dir_locked(const char *path);
-    bool ensure_dir_open_locked(WalkFrame &frame);
-    bool reserve_datalog_days_locked(size_t needed);
-    bool add_datalog_day_locked(const char *day);
-    bool scan_datalog_days_step_locked();
-    bool datalog_day_has_pending_files_locked(const DatalogDay &day);
-    bool select_next_datalog_day_locked();
+    bool begin_export_planner_locked(char *error_out,
+                                     size_t error_out_size);
     void reset_import_batch_locked();
     JobStep finish_import_or_sync_locked();
-    bool root_step_locked();
-    bool walk_step_locked();
     bool next_file_locked();
-    bool plan_file_locked(const char *path, bool force_upload = false);
+    bool plan_file_locked(const StorageExportPlannerItem &item);
     bool build_endpoint_state_dir_locked(uint32_t team_id,
                                          char *out,
                                          size_t out_size) const;
     bool ensure_state_dir_locked();
-    bool build_state_path_locked(const char *path,
-                                 char *out,
-                                 size_t out_size,
-                                 StateWriteMode *mode = nullptr) const;
-    bool state_contains_locked(const char *state_path,
-                               const char *path,
-                               uint64_t size,
-                               uint64_t mtime);
     void note_state_written_locked(const char *state_path,
                                    const char *path,
                                    uint64_t size,
@@ -255,20 +224,8 @@ private:
     std::atomic<bool> network_available_{false};
     std::atomic<bool> runtime_blocked_{false};
     std::atomic<bool> abort_requested_{false};
-    WalkFrame *walk_stack_ = nullptr;
-    size_t walk_depth_ = 0;
-    size_t walk_capacity_ = 0;
-    File datalog_scan_dir_;
-    bool datalog_scan_opened_ = false;
-    bool datalog_scan_complete_ = false;
-    uint32_t datalog_scan_next_index_ = 0;
-    DatalogDay *datalog_days_ = nullptr;
-    size_t datalog_day_count_ = 0;
-    size_t datalog_day_capacity_ = 0;
-    size_t datalog_day_index_ = 0;
-    bool day_batch_active_ = false;
-    size_t day_root_index_ = 0;
-    char day_batch_path_[AC_STORAGE_PATH_MAX] = {};
+    StorageExportPlanner export_planner_;
+    bool import_batch_active_ = false;
     CurrentFile current_file_;
     StagedFile *staged_ = nullptr;
     size_t staged_count_ = 0;

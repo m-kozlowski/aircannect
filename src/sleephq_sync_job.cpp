@@ -12,7 +12,6 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
-#include "storage_directory.h"
 #include "storage_export_plan.h"
 #include "storage_manager.h"
 #include "string_util.h"
@@ -21,8 +20,6 @@ namespace aircannect {
 namespace {
 
 static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
-static constexpr size_t SLEEPHQ_WALK_MAX_DEPTH = 16;
-static constexpr uint32_t SLEEPHQ_DATALOG_SCAN_BUDGET = 16;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_INTERVAL_MS = 2000;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_TIMEOUT_MS = 120000;
 static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
@@ -31,12 +28,6 @@ static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
     6UL * 60UL * 60UL * 1000UL,
 };
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
-
-const char *const SLEEPHQ_ROOT_METADATA_FILES[] = {
-    "/STR.edf",
-    "/Identification.json",
-    "/Identification.crc",
-};
 
 void sleep_hq_digest_to_hex(const uint8_t digest[16],
                             char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
@@ -432,56 +423,6 @@ void SleepHqSyncJob::clear_current_file_locked() {
     status_.current_path[0] = 0;
 }
 
-void SleepHqSyncJob::close_walk_locked() {
-    if (!walk_stack_) return;
-    for (size_t i = 0; i < walk_depth_; ++i) {
-        if (walk_stack_[i].opened) {
-            Storage::Guard guard;
-            walk_stack_[i].dir.close();
-            walk_stack_[i].opened = false;
-        }
-    }
-}
-
-void SleepHqSyncJob::release_walk_stack_locked() {
-    close_walk_locked();
-    if (walk_stack_) {
-        for (size_t i = 0; i < walk_capacity_; ++i) {
-            walk_stack_[i].~WalkFrame();
-        }
-        Memory::free(walk_stack_);
-    }
-    walk_stack_ = nullptr;
-    walk_capacity_ = 0;
-    walk_depth_ = 0;
-}
-
-void SleepHqSyncJob::close_datalog_scan_locked() {
-    if (!datalog_scan_opened_) return;
-    Storage::Guard guard;
-    datalog_scan_dir_.close();
-    datalog_scan_opened_ = false;
-}
-
-void SleepHqSyncJob::clear_datalog_days_locked() {
-    close_datalog_scan_locked();
-    if (datalog_days_) {
-        for (size_t i = 0; i < datalog_day_capacity_; ++i) {
-            datalog_days_[i].~DatalogDay();
-        }
-        Memory::free(datalog_days_);
-    }
-    datalog_days_ = nullptr;
-    datalog_day_count_ = 0;
-    datalog_day_capacity_ = 0;
-    datalog_day_index_ = 0;
-    datalog_scan_complete_ = false;
-    datalog_scan_next_index_ = 0;
-    day_batch_active_ = false;
-    day_root_index_ = 0;
-    day_batch_path_[0] = '\0';
-}
-
 void SleepHqSyncJob::clear_staged_locked() {
     if (staged_) {
         for (size_t i = 0; i < staged_capacity_; ++i) {
@@ -498,14 +439,12 @@ void SleepHqSyncJob::clear_staged_locked() {
 void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     client_.disconnect();
     close_local_locked();
-    close_walk_locked();
-    release_walk_stack_locked();
-    clear_datalog_days_locked();
+    export_planner_.reset();
     clear_current_file_locked();
     clear_staged_locked();
     state_cache_.clear();
     phase_ = WorkPhase::Idle;
-    day_root_index_ = 0;
+    import_batch_active_ = false;
     import_process_started_ms_ = 0;
     import_poll_due_ms_ = 0;
     inflight_phase_ = InflightPhase::None;
@@ -659,219 +598,19 @@ void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
               static_cast<unsigned>(retry_attempt_));
 }
 
-bool SleepHqSyncJob::ensure_walk_stack_locked() {
-    if (walk_stack_) return true;
-    walk_capacity_ = SLEEPHQ_WALK_MAX_DEPTH;
-    walk_stack_ = static_cast<WalkFrame *>(
-        Memory::alloc_large(sizeof(WalkFrame) * walk_capacity_, false));
-    if (!walk_stack_) {
-        fail_locked("walk_alloc");
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "walk stack allocation failed bytes=%u\n",
-                  static_cast<unsigned>(sizeof(WalkFrame) * walk_capacity_));
-        return false;
-    }
-    for (size_t i = 0; i < walk_capacity_; ++i) {
-        new (&walk_stack_[i]) WalkFrame();
-    }
-    return true;
-}
-
-bool SleepHqSyncJob::push_dir_locked(const char *path) {
-    if (!ensure_walk_stack_locked()) return false;
-    if (walk_depth_ >= walk_capacity_) {
-        fail_locked("max_depth");
-        return false;
-    }
-    WalkFrame &frame = walk_stack_[walk_depth_++];
-    frame = WalkFrame();
-    copy_cstr(frame.path, sizeof(frame.path), path);
-    return true;
-}
-
-bool SleepHqSyncJob::ensure_dir_open_locked(WalkFrame &frame) {
-    if (frame.opened) return true;
-    Storage::Guard guard;
-    frame.dir = Storage::open(frame.path, "r");
-    if (!frame.dir) {
-        fail_locked("local_not_found");
-        return false;
-    }
-    if (!frame.dir.isDirectory()) {
-        frame.dir.close();
-        fail_locked("local_not_directory");
-        return false;
-    }
-    if (!storage_skip_dir_children(frame.dir, frame.next_index)) {
-        frame.dir.close();
-        fail_locked("walk_resume_failed");
-        return false;
-    }
-    frame.opened = true;
-    return true;
-}
-
-bool SleepHqSyncJob::reserve_datalog_days_locked(size_t needed) {
-    if (needed <= datalog_day_capacity_) return true;
-    size_t next = datalog_day_capacity_ == 0 ? 16 : datalog_day_capacity_ * 2;
-    while (next < needed) next *= 2;
-    DatalogDay *items = static_cast<DatalogDay *>(
-        Memory::alloc_large(sizeof(DatalogDay) * next, false));
-    if (!items) {
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "DATALOG day allocation failed entries=%u bytes=%u\n",
-                  static_cast<unsigned>(next),
-                  static_cast<unsigned>(sizeof(DatalogDay) * next));
-        fail_locked("datalog_day_alloc");
-        return false;
-    }
-    for (size_t i = 0; i < next; ++i) new (&items[i]) DatalogDay();
-    for (size_t i = 0; i < datalog_day_count_; ++i) {
-        items[i] = datalog_days_[i];
-    }
-    if (datalog_days_) Memory::free(datalog_days_);
-    datalog_days_ = items;
-    datalog_day_capacity_ = next;
-    return true;
-}
-
-bool SleepHqSyncJob::add_datalog_day_locked(const char *day) {
-    if (!day || !storage_export_is_datalog_day_name(day)) return true;
-    for (size_t i = 0; i < datalog_day_count_; ++i) {
-        if (strcmp(datalog_days_[i].day, day) == 0) return true;
-    }
-    if (!reserve_datalog_days_locked(datalog_day_count_ + 1)) return false;
-
-    size_t pos = 0;
-    while (pos < datalog_day_count_ &&
-           strcmp(datalog_days_[pos].day, day) > 0) {
-        pos++;
-    }
-    for (size_t i = datalog_day_count_; i > pos; --i) {
-        datalog_days_[i] = datalog_days_[i - 1];
-    }
-    DatalogDay &entry = datalog_days_[pos];
-    copy_cstr(entry.day, sizeof(entry.day), day);
-    const int written = snprintf(entry.path, sizeof(entry.path),
-                                 "/DATALOG/%s", day);
-    if (written <= 0 || static_cast<size_t>(written) >= sizeof(entry.path)) {
-        fail_locked("datalog_day_path");
-        return false;
-    }
-    datalog_day_count_++;
-    return true;
-}
-
-bool SleepHqSyncJob::scan_datalog_days_step_locked() {
-    if (datalog_scan_complete_) return true;
-    if (!datalog_scan_opened_) {
-        Storage::Guard guard;
-        datalog_scan_dir_ = Storage::open("/DATALOG", "r");
-        if (!datalog_scan_dir_) {
-            datalog_scan_complete_ = true;
-            return true;
-        }
-        if (!datalog_scan_dir_.isDirectory()) {
-            datalog_scan_dir_.close();
-            datalog_scan_complete_ = true;
-            return true;
-        }
-        if (!storage_skip_dir_children(datalog_scan_dir_,
-                                       datalog_scan_next_index_)) {
-            datalog_scan_dir_.close();
-            fail_locked("datalog_scan_resume_failed");
-            return false;
-        }
-        datalog_scan_opened_ = true;
-    }
-
-    for (uint32_t i = 0; i < SLEEPHQ_DATALOG_SCAN_BUDGET; ++i) {
-        StorageDirChild child;
-        if (!storage_read_next_dir_child(datalog_scan_dir_, child)) {
-            close_datalog_scan_locked();
-            datalog_scan_complete_ = true;
-            datalog_day_index_ = 0;
-            return true;
-        }
-        datalog_scan_next_index_++;
-        if (!child.is_dir ||
-            !storage_export_datalog_day_allowed(child.name)) {
-            continue;
-        }
-        if (!add_datalog_day_locked(child.name)) return false;
-    }
-    return true;
-}
-
-bool SleepHqSyncJob::datalog_day_has_pending_files_locked(
-    const DatalogDay &day) {
-    if (!day.path[0]) return false;
-    File dir;
-    {
-        Storage::Guard guard;
-        dir = Storage::open(day.path, "r");
-    }
-    if (!dir || !dir.isDirectory()) {
-        if (dir) {
-            Storage::Guard guard;
-            dir.close();
-        }
-        return false;
-    }
-
-    bool pending = false;
-    for (;;) {
-        StorageDirChild child;
-        if (!storage_read_next_dir_child(dir, child)) break;
-        if (child.is_dir) continue;
-
-        char child_path[AC_STORAGE_PATH_MAX] = {};
-        if (!storage_append_child_path(day.path,
-                                       child.name,
-                                       child_path,
-                                       sizeof(child_path)) ||
-            !storage_user_path_valid(child_path)) {
-            continue;
-        }
-        char state_path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
-        StateWriteMode mode = StateWriteMode::Append;
-        if (!build_state_path_locked(child_path,
-                                     state_path,
-                                     sizeof(state_path),
-                                     &mode)) {
-            continue;
-        }
-        const uint64_t mtime =
-            child.last_write > 0 ? static_cast<uint64_t>(child.last_write) : 0;
-        if (!state_contains_locked(state_path, child_path, child.size, mtime)) {
-            pending = true;
-            break;
-        }
-    }
-    {
-        Storage::Guard guard;
-        dir.close();
-    }
-    return pending;
-}
-
-bool SleepHqSyncJob::select_next_datalog_day_locked() {
-    while (datalog_day_index_ < datalog_day_count_) {
-        const DatalogDay &day = datalog_days_[datalog_day_index_++];
-        if (!datalog_day_has_pending_files_locked(day)) continue;
-        copy_cstr(day_batch_path_, sizeof(day_batch_path_), day.path);
-        day_batch_active_ = true;
-        day_root_index_ = 0;
-        return true;
-    }
-    return false;
+bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
+                                                 size_t error_out_size) {
+    StorageExportPlannerConfig config;
+    config.scope = StorageExportPlannerScope::SleepHq;
+    config.state_dir = state_dir_;
+    config.state_cache = &state_cache_;
+    config.require_pending_datalog_file = true;
+    return export_planner_.begin(config, error_out, error_out_size);
 }
 
 void SleepHqSyncJob::reset_import_batch_locked() {
     remove_inflight_locked();
     close_local_locked();
-    close_walk_locked();
-    release_walk_stack_locked();
     clear_current_file_locked();
     clear_staged_locked();
     status_.import_id = 0;
@@ -879,84 +618,17 @@ void SleepHqSyncJob::reset_import_batch_locked() {
     import_process_started_ms_ = 0;
     import_poll_due_ms_ = 0;
     mark_index_ = 0;
-    day_batch_active_ = false;
-    day_root_index_ = 0;
-    day_batch_path_[0] = '\0';
+    import_batch_active_ = false;
     phase_ = WorkPhase::NextFile;
 }
 
 JobStep SleepHqSyncJob::finish_import_or_sync_locked() {
-    if (current_run_kind_ == RunKind::Sync && day_batch_active_) {
+    if (current_run_kind_ == RunKind::Sync && import_batch_active_) {
         reset_import_batch_locked();
         return JobStep::Working;
     }
     finish_sync_locked();
     return JobStep::Idle;
-}
-
-bool SleepHqSyncJob::root_step_locked() {
-    if (!datalog_scan_complete_) {
-        return scan_datalog_days_step_locked();
-    }
-    if (!day_batch_active_ && !select_next_datalog_day_locked()) {
-        phase_ = WorkPhase::Finish;
-        return true;
-    }
-
-    const size_t root_count = sizeof(SLEEPHQ_ROOT_METADATA_FILES) /
-                              sizeof(SLEEPHQ_ROOT_METADATA_FILES[0]);
-    while (day_root_index_ < root_count) {
-        const char *path = SLEEPHQ_ROOT_METADATA_FILES[day_root_index_++];
-        const StorageLocalNodeInfo info = storage_stat_local_node(path);
-        if (!info.exists) continue;
-        if (info.is_dir) continue;
-        return plan_file_locked(path, true);
-    }
-
-    if (!day_batch_path_[0]) {
-        phase_ = staged_count_ == 0 ? WorkPhase::Finish
-                                    : WorkPhase::ProcessImport;
-        return true;
-    }
-    if (push_dir_locked(day_batch_path_)) return true;
-    if (status_.state == SleepHqSyncState::Error) return false;
-    phase_ = staged_count_ == 0 ? WorkPhase::Finish
-                                : WorkPhase::ProcessImport;
-    return true;
-}
-
-bool SleepHqSyncJob::walk_step_locked() {
-    if (walk_depth_ == 0) return root_step_locked();
-    WalkFrame &frame = walk_stack_[walk_depth_ - 1];
-    if (!ensure_dir_open_locked(frame)) return false;
-
-    StorageDirChild child;
-    if (!storage_read_next_dir_child(frame.dir, child)) {
-        {
-            Storage::Guard guard;
-            frame.dir.close();
-            frame.opened = false;
-        }
-        walk_depth_--;
-        if (walk_depth_ == 0 && day_batch_active_) {
-            phase_ = staged_count_ == 0 ? WorkPhase::Finish
-                                        : WorkPhase::ProcessImport;
-        }
-        return true;
-    }
-    frame.next_index++;
-
-    char child_path[AC_STORAGE_PATH_MAX] = {};
-    if (!storage_append_child_path(frame.path,
-                                   child.name,
-                                   child_path,
-                                   sizeof(child_path)) ||
-        !storage_user_path_valid(child_path)) {
-        fail_locked("bad_child_path");
-        return false;
-    }
-    if (child.is_dir) return push_dir_locked(child_path);
-    return plan_file_locked(child_path);
 }
 
 bool SleepHqSyncJob::next_file_locked() {
@@ -968,7 +640,32 @@ bool SleepHqSyncJob::next_file_locked() {
         fail_locked("storage_unavailable");
         return false;
     }
-    if (!walk_step_locked()) return false;
+
+    StorageExportPlannerItem item;
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    const StorageExportPlannerResult result =
+        export_planner_.next(item, error, sizeof(error));
+    switch (result) {
+        case StorageExportPlannerResult::Item:
+            if (item.kind ==
+                StorageExportPlannerItemKind::DatalogDayComplete) {
+                phase_ = staged_count_ == 0 ? WorkPhase::NextFile
+                                            : WorkPhase::ProcessImport;
+                if (staged_count_ != 0) import_batch_active_ = true;
+                return true;
+            }
+            return plan_file_locked(item);
+        case StorageExportPlannerResult::Yield:
+            return true;
+        case StorageExportPlannerResult::Done:
+            phase_ = staged_count_ == 0 ? WorkPhase::Finish
+                                        : WorkPhase::ProcessImport;
+            if (staged_count_ != 0) import_batch_active_ = true;
+            return true;
+        case StorageExportPlannerResult::Error:
+            fail_locked(error[0] ? error : "planner_failed");
+            return false;
+    }
     return true;
 }
 
@@ -1039,42 +736,21 @@ bool SleepHqSyncJob::compute_current_file_content_hash_locked(char *out,
     return ok;
 }
 
-bool SleepHqSyncJob::build_state_path_locked(const char *path,
-                                             char *out,
-                                             size_t out_size,
-                                             StateWriteMode *mode_out) const {
-    if (!path || !out || out_size == 0 || !state_dir_[0]) return false;
-    StorageExportStateWriteMode export_mode =
-        StorageExportStateWriteMode::Replace;
-    const bool ok = storage_export_build_state_path(state_dir_,
-                                                    path,
-                                                    out,
-                                                    out_size,
-                                                    &export_mode);
-    if (mode_out) {
-        *mode_out =
-            export_mode == StorageExportStateWriteMode::Append
-                ? StateWriteMode::Append
-                : StateWriteMode::Replace;
-    }
-    return ok;
-}
-
-bool SleepHqSyncJob::plan_file_locked(const char *path, bool force_upload) {
+bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
+    const char *path = item.path;
     clear_current_file_locked();
     copy_cstr(current_file_.path, sizeof(current_file_.path), path);
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
-    current_file_.force_upload = force_upload;
+    current_file_.force_upload = item.force_export;
     status_.files_seen++;
     status_.updated_ms = millis_nonzero();
 
-    const StorageLocalNodeInfo info = storage_stat_local_node(path);
-    if (!info.exists || info.is_dir) {
+    if (!item.info.exists || item.info.is_dir) {
         phase_ = WorkPhase::NextFile;
         return true;
     }
-    current_file_.size = info.size;
-    current_file_.mtime = info.mtime;
+    current_file_.size = item.info.size;
+    current_file_.mtime = item.info.mtime;
     if (!build_sleep_path_locked(path,
                                  current_file_.sleep_path,
                                  sizeof(current_file_.sleep_path),
@@ -1083,18 +759,18 @@ bool SleepHqSyncJob::plan_file_locked(const char *path, bool force_upload) {
         fail_locked("sleep_path_failed");
         return false;
     }
-    if (!build_state_path_locked(path,
-                                 current_file_.state_path,
-                                 sizeof(current_file_.state_path),
-                                 &current_file_.state_write_mode)) {
+    if (!item.state_path[0]) {
         fail_locked("state_path_failed");
         return false;
     }
-    const bool state_has_file =
-        state_contains_locked(current_file_.state_path,
-                              path,
-                              current_file_.size,
-                              current_file_.mtime);
+    copy_cstr(current_file_.state_path,
+              sizeof(current_file_.state_path),
+              item.state_path);
+    current_file_.state_write_mode =
+        item.state_write_mode == StorageExportStateWriteMode::Append
+            ? StateWriteMode::Append
+            : StateWriteMode::Replace;
+    const bool state_has_file = item.local_state_complete;
     if (!current_file_.force_upload && state_has_file) {
         status_.files_skipped++;
         clear_current_file_locked();
@@ -1112,6 +788,7 @@ bool SleepHqSyncJob::plan_file_locked(const char *path, bool force_upload) {
     }
     phase_ = status_.import_id == 0 ? WorkPhase::CreateImport
                                     : WorkPhase::OpenLocal;
+    import_batch_active_ = true;
     return true;
 }
 
@@ -1141,13 +818,6 @@ bool SleepHqSyncJob::local_ensure_dir_locked(const char *path) {
 
 bool SleepHqSyncJob::ensure_state_dir_locked() {
     return state_dir_[0] && local_ensure_dir_locked(state_dir_);
-}
-
-bool SleepHqSyncJob::state_contains_locked(const char *state_path,
-                                           const char *path,
-                                           uint64_t size,
-                                           uint64_t mtime) {
-    return state_cache_.contains(state_path, path, size, mtime);
 }
 
 void SleepHqSyncJob::note_state_written_locked(const char *state_path,
@@ -1500,6 +1170,11 @@ JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
         fail_locked("state_path_failed");
         return JobStep::Idle;
     }
+    char planner_error[AC_SLEEPHQ_ERROR_MAX] = {};
+    if (!begin_export_planner_locked(planner_error, sizeof(planner_error))) {
+        fail_locked(planner_error[0] ? planner_error : "planner_failed");
+        return JobStep::Idle;
+    }
     InflightPhase restored_phase = InflightPhase::None;
     if (!load_inflight_locked(restored_phase)) {
         remove_inflight_locked();
@@ -1507,6 +1182,9 @@ JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
         status_.import_id = 0;
         Log::logf(CAT_SLEEPHQ, LOG_WARN,
                   "discarded corrupt inflight state\n");
+    }
+    if (restored_phase != InflightPhase::None && status_.import_id != 0) {
+        import_batch_active_ = true;
     }
     if (restored_phase == InflightPhase::Processing &&
         status_.import_id != 0) {

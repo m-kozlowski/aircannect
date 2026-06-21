@@ -10,6 +10,7 @@
 #include "app_config.h"
 #include "background_worker.h"
 #include "storage_export_plan.h"
+#include "storage_export_planner.h"
 #include "storage_path.h"
 #include "storage_smb_client.h"
 
@@ -142,13 +143,6 @@ private:
         char password[AC_STORAGE_SYNC_PASSWORD_MAX] = {};
     };
 
-    struct WalkFrame {
-        char path[AC_STORAGE_PATH_MAX] = {};
-        uint32_t next_index = 0;
-        bool opened = false;
-        File dir;
-    };
-
     struct CurrentFile {
         char path[AC_STORAGE_PATH_MAX] = {};
         char remote_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
@@ -224,16 +218,10 @@ private:
     bool invalidate_latest_state_locked(char *error_out,
                                         size_t error_out_size);
 
-    bool ensure_walk_stack_locked();
-    void release_walk_stack_locked();
-    void close_walk_locked();
-    bool push_dir_locked(const char *path);
-    bool ensure_dir_open_locked(WalkFrame &frame);
+    bool begin_export_planner_locked(char *error_out,
+                                     size_t error_out_size);
     bool next_file_locked();
-    bool plan_file_locked(const char *path);
-    bool root_step_locked();
-    bool walk_step_locked();
-    bool datalog_day_allowed(const char *name) const;
+    bool plan_file_locked(const StorageExportPlannerItem &item);
 
     bool ensure_state_dir_locked();
     bool build_state_path_locked(const char *path,
@@ -277,7 +265,7 @@ private:
     bool mark_datalog_day_done_locked(const char *day);
     bool datalog_day_is_finalized_locked(const char *day) const;
     void refresh_latest_datalog_day_name_locked();
-    void maybe_mark_completed_datalog_day_locked(const char *path);
+    void maybe_mark_completed_datalog_day_locked(const char *day);
     bool prepare_upload_buffer_locked();
     void release_upload_buffer_locked();
     void close_local_locked();
@@ -296,10 +284,7 @@ private:
     RunKind current_run_kind_ = RunKind::Manual;
     bool sync_after_verify_ = false;
 
-    WalkFrame *walk_stack_ = nullptr;
-    size_t walk_depth_ = 0;
-    size_t walk_capacity_ = 0;
-    size_t root_index_ = 0;
+    StorageExportPlanner export_planner_;
     CurrentFile current_file_;
     LatestVerify latest_verify_;
     uint8_t *upload_buffer_ = nullptr;

@@ -19,7 +19,6 @@ namespace aircannect {
 namespace {
 
 static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
-static constexpr size_t SYNC_WALK_MAX_DEPTH = 16;
 static constexpr const char *SYNC_METADATA_FILE = "meta.state";
 static constexpr const char *SYNC_REASON_STARTUP_CHECK = "startup_check";
 static constexpr const char *SYNC_REASON_STARTUP_SYNC = "startup_sync";
@@ -154,14 +153,12 @@ bool StorageSyncJob::config_matches_locked(
 
 void StorageSyncJob::reset_run_locked(bool keep_status) {
     close_local_locked();
-    close_walk_locked();
     close_latest_verify_locked();
-    release_walk_stack_locked();
+    export_planner_.reset();
     release_upload_buffer_locked();
     smb_.abort_connection();
     clear_current_file_locked();
     phase_ = WorkPhase::Idle;
-    root_index_ = 0;
     endpoint_hash_ = 0;
     state_dir_[0] = '\0';
     current_run_kind_ = RunKind::Manual;
@@ -465,6 +462,11 @@ bool StorageSyncJob::begin_run_locked() {
         return false;
     }
     refresh_latest_datalog_day_name_locked();
+    char planner_error[AC_STORAGE_ERROR_MAX] = {};
+    if (!begin_export_planner_locked(planner_error, sizeof(planner_error))) {
+        fail_locked(planner_error[0] ? planner_error : "planner_failed");
+        return false;
+    }
     phase_ = WorkPhase::Connect;
     Log::logf(CAT_STORAGE,
               LOG_INFO,
@@ -571,86 +573,6 @@ void StorageSyncJob::release_upload_buffer_locked() {
         upload_buffer_ = nullptr;
     }
     upload_buffer_size_ = 0;
-}
-
-bool StorageSyncJob::ensure_walk_stack_locked() {
-    if (walk_stack_) return true;
-    walk_capacity_ = SYNC_WALK_MAX_DEPTH;
-    walk_stack_ = static_cast<WalkFrame *>(
-        Memory::alloc_large(sizeof(WalkFrame) * walk_capacity_, true));
-    if (!walk_stack_) {
-        fail_locked("walk_alloc");
-        Log::logf(CAT_STORAGE, LOG_ERROR,
-                  "[SYNC] walk stack allocation failed bytes=%u\n",
-                  static_cast<unsigned>(sizeof(WalkFrame) * walk_capacity_));
-        return false;
-    }
-    for (size_t i = 0; i < walk_capacity_; ++i) {
-        new (&walk_stack_[i]) WalkFrame();
-    }
-    return true;
-}
-
-void StorageSyncJob::close_walk_locked() {
-    if (!walk_stack_) return;
-    for (size_t i = 0; i < walk_depth_; ++i) {
-        if (walk_stack_[i].opened) {
-            Storage::Guard guard;
-            walk_stack_[i].dir.close();
-            walk_stack_[i].opened = false;
-        }
-    }
-}
-
-void StorageSyncJob::release_walk_stack_locked() {
-    close_walk_locked();
-    if (walk_stack_) {
-        for (size_t i = 0; i < walk_capacity_; ++i) {
-            walk_stack_[i].~WalkFrame();
-        }
-        Memory::free(walk_stack_);
-    }
-    walk_stack_ = nullptr;
-    walk_capacity_ = 0;
-    walk_depth_ = 0;
-}
-
-bool StorageSyncJob::push_dir_locked(const char *path) {
-    if (!ensure_walk_stack_locked()) return false;
-    if (walk_depth_ >= walk_capacity_) {
-        fail_locked("max_depth");
-        return false;
-    }
-    WalkFrame &frame = walk_stack_[walk_depth_++];
-    frame = WalkFrame();
-    copy_cstr(frame.path, sizeof(frame.path), path);
-    return true;
-}
-
-bool StorageSyncJob::ensure_dir_open_locked(WalkFrame &frame) {
-    if (frame.opened) return true;
-    Storage::Guard guard;
-    frame.dir = Storage::open(frame.path, "r");
-    if (!frame.dir) {
-        fail_locked("local_not_found");
-        return false;
-    }
-    if (!frame.dir.isDirectory()) {
-        frame.dir.close();
-        fail_locked("local_not_directory");
-        return false;
-    }
-    if (!storage_skip_dir_children(frame.dir, frame.next_index)) {
-        frame.dir.close();
-        fail_locked("walk_resume_failed");
-        return false;
-    }
-    frame.opened = true;
-    return true;
-}
-
-bool StorageSyncJob::datalog_day_allowed(const char *name) const {
-    return storage_export_datalog_day_allowed(name);
 }
 
 bool StorageSyncJob::latest_datalog_day_locked(char *out,
@@ -835,72 +757,46 @@ bool StorageSyncJob::invalidate_latest_state_locked(char *error_out,
     return true;
 }
 
-bool StorageSyncJob::root_step_locked() {
-    while (root_index_ < storage_export_root_count()) {
-        const StorageExportRoot &root =
-            storage_export_root_at(root_index_++);
-        const StorageLocalNodeInfo info = storage_stat_local_node(root.path);
-        if (!info.exists) continue;
-        if (info.is_dir) {
-            if (root.recursive && push_dir_locked(root.path)) return true;
-            if (status_.state == StorageSyncState::Error) return false;
-            continue;
-        }
-        return plan_file_locked(root.path);
+bool StorageSyncJob::next_file_locked() {
+    if (!Storage::mounted()) {
+        fail_locked("storage_unavailable");
+        return false;
     }
-    phase_ = WorkPhase::Finish;
+
+    StorageExportPlannerItem item;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    const StorageExportPlannerResult result =
+        export_planner_.next(item, error, sizeof(error));
+    switch (result) {
+        case StorageExportPlannerResult::Item:
+            if (item.kind ==
+                StorageExportPlannerItemKind::DatalogDayComplete) {
+                maybe_mark_completed_datalog_day_locked(item.datalog_day);
+                return true;
+            }
+            return plan_file_locked(item);
+        case StorageExportPlannerResult::Yield:
+            return true;
+        case StorageExportPlannerResult::Done:
+            phase_ = WorkPhase::Finish;
+            return true;
+        case StorageExportPlannerResult::Error:
+            fail_locked(error[0] ? error : "planner_failed");
+            return false;
+    }
     return true;
 }
 
-bool StorageSyncJob::walk_step_locked() {
-    if (walk_depth_ == 0) return root_step_locked();
-    WalkFrame &frame = walk_stack_[walk_depth_ - 1];
-    if (!ensure_dir_open_locked(frame)) return false;
-
-    StorageDirChild child;
-    if (!storage_read_next_dir_child(frame.dir, child)) {
-        maybe_mark_completed_datalog_day_locked(frame.path);
-        {
-            Storage::Guard guard;
-            frame.dir.close();
-            frame.opened = false;
-        }
-        walk_depth_--;
-        return true;
-    }
-    frame.next_index++;
-
-    char child_path[AC_STORAGE_PATH_MAX] = {};
-    if (!storage_append_child_path(frame.path,
-                                   child.name,
-                                   child_path,
-                                   sizeof(child_path)) ||
-        !storage_user_path_valid(child_path)) {
-        fail_locked("bad_child_path");
-        return false;
-    }
-    if (strcmp(frame.path, "/DATALOG") == 0) {
-        if (!child.is_dir || !datalog_day_allowed(child.name)) return true;
-        if (!run_kind_is_reconcile(current_run_kind_) &&
-            datalog_day_is_finalized_locked(child.name) &&
-            datalog_day_done_locked(child.name)) {
-            return true;
-        }
-    }
-    if (child.is_dir) return push_dir_locked(child_path);
-    return plan_file_locked(child_path);
-}
-
-bool StorageSyncJob::next_file_locked() {
-    for (;;) {
-        if (!Storage::mounted()) {
-            fail_locked("storage_unavailable");
-            return false;
-        }
-        if (!walk_step_locked()) return false;
-        if (phase_ != WorkPhase::NextFile) return true;
-        return true;
-    }
+bool StorageSyncJob::begin_export_planner_locked(char *error_out,
+                                                 size_t error_out_size) {
+    StorageExportPlannerConfig config;
+    config.scope = StorageExportPlannerScope::FullCard;
+    config.state_dir = state_dir_;
+    config.state_cache = &state_cache_;
+    config.latest_datalog_day = latest_datalog_day_;
+    config.skip_completed_finalized_datalog_days =
+        !run_kind_is_reconcile(current_run_kind_);
+    return export_planner_.begin(config, error_out, error_out_size);
 }
 
 bool StorageSyncJob::build_state_path_locked(const char *path,
@@ -1108,10 +1004,9 @@ void StorageSyncJob::refresh_latest_datalog_day_name_locked() {
 }
 
 void StorageSyncJob::maybe_mark_completed_datalog_day_locked(
-    const char *path) {
+    const char *day) {
     if (run_kind_is_reconcile(current_run_kind_)) return;
-    char day[9] = {};
-    if (!datalog_day_name_from_path(path, day, sizeof(day))) return;
+    if (!day || !day[0]) return;
     if (!datalog_day_is_finalized_locked(day)) return;
     if (datalog_day_done_locked(day)) return;
     if (!mark_datalog_day_done_locked(day)) {
@@ -1127,33 +1022,33 @@ void StorageSyncJob::maybe_mark_completed_datalog_day_locked(
               day);
 }
 
-bool StorageSyncJob::plan_file_locked(const char *path) {
+bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
+    const char *path = item.path;
     clear_current_file_locked();
     copy_cstr(current_file_.path, sizeof(current_file_.path), path);
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
     status_.files_seen++;
     status_.updated_ms = millis_nonzero();
 
-    const StorageLocalNodeInfo info = storage_stat_local_node(path);
-    if (!info.exists || info.is_dir) {
+    if (!item.info.exists || item.info.is_dir) {
         phase_ = WorkPhase::NextFile;
         return true;
     }
-    current_file_.size = info.size;
-    current_file_.mtime = info.mtime;
+    current_file_.size = item.info.size;
+    current_file_.mtime = item.info.mtime;
 
-    if (!build_state_path_locked(path,
-                                 current_file_.state_path,
-                                 sizeof(current_file_.state_path),
-                                 &current_file_.state_write_mode)) {
+    if (!item.state_path[0]) {
         fail_locked("state_path_failed");
         return false;
     }
-    const bool local_state_complete =
-        state_contains_locked(current_file_.state_path,
-                              path,
-                              info.size,
-                              info.mtime);
+    copy_cstr(current_file_.state_path,
+              sizeof(current_file_.state_path),
+              item.state_path);
+    current_file_.state_write_mode =
+        item.state_write_mode == StorageExportStateWriteMode::Append
+            ? StateWriteMode::Append
+            : StateWriteMode::Replace;
+    const bool local_state_complete = item.local_state_complete;
     if (local_state_complete) {
         if (!run_kind_is_reconcile(current_run_kind_)) {
             status_.files_skipped++;
@@ -1182,7 +1077,7 @@ bool StorageSyncJob::plan_file_locked(const char *path) {
             return false;
         }
         if (remote.exists && !remote.directory &&
-            remote.size == info.size) {
+            remote.size == item.info.size) {
             if (!local_state_complete) {
                 if (!write_state_locked(current_file_.state_path,
                                         current_file_.path,
@@ -1209,7 +1104,7 @@ bool StorageSyncJob::plan_file_locked(const char *path) {
                   remote.exists ? 1u : 0u,
                   remote.directory ? 1u : 0u,
                   static_cast<unsigned long long>(remote.size),
-                  static_cast<unsigned long long>(info.size));
+                  static_cast<unsigned long long>(item.info.size));
     }
     phase_ = WorkPhase::EnsureRemoteDir;
     return true;
@@ -1232,7 +1127,7 @@ void StorageSyncJob::clear_current_file_locked() {
 void StorageSyncJob::finish_run_locked() {
     smb_.disconnect();
     close_latest_verify_locked();
-    release_walk_stack_locked();
+    export_planner_.reset();
     release_upload_buffer_locked();
     state_cache_.clear();
     clear_current_file_locked();
@@ -1319,7 +1214,7 @@ void StorageSyncJob::fail_locked(const char *error) {
     const bool failed_verify_only =
         current_run_verify && !current_run_reconcile;
     close_local_locked();
-    close_walk_locked();
+    export_planner_.reset();
     close_latest_verify_locked();
     smb_.abort_connection();
     release_upload_buffer_locked();
