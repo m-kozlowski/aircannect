@@ -14,6 +14,7 @@
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "string_util.h"
+#include "tls_memory.h"
 
 namespace aircannect {
 namespace {
@@ -29,6 +30,8 @@ static constexpr size_t SLEEPHQ_AUTH_BODY_RESERVE = 384;
 static constexpr size_t SLEEPHQ_CREATE_IMPORT_BODY_RESERVE = 96;
 static constexpr size_t SLEEPHQ_MIN_INTERNAL_FREE = 60 * 1024;
 static constexpr size_t SLEEPHQ_MIN_INTERNAL_MAX_ALLOC = 36 * 1024;
+static constexpr size_t SLEEPHQ_MIN_INTERNAL_FREE_WITH_PSRAM_TLS = 48 * 1024;
+static constexpr size_t SLEEPHQ_MIN_INTERNAL_MAX_ALLOC_WITH_PSRAM_TLS = 8 * 1024;
 
 // SleepHQ currently serves a Google Trust Services WE1 chain rooted at GTS
 // Root R4. This intentionally fails closed if SleepHQ changes CA families; do
@@ -151,15 +154,28 @@ void SleepHqClient::disconnect() {
 
 bool SleepHqClient::tls_heap_available() {
     const MemoryStatus mem = Memory::status();
-    if (mem.heap_free >= SLEEPHQ_MIN_INTERNAL_FREE &&
-        mem.heap_max_alloc >= SLEEPHQ_MIN_INTERNAL_MAX_ALLOC) {
+    const TlsMemoryStatus tls = TlsMemory::status();
+    const bool psram_tls =
+        tls.installed && tls.psram_enabled && tls.install_result == 0;
+    const size_t min_free =
+        psram_tls ? SLEEPHQ_MIN_INTERNAL_FREE_WITH_PSRAM_TLS
+                  : SLEEPHQ_MIN_INTERNAL_FREE;
+    const size_t min_max_alloc =
+        psram_tls ? SLEEPHQ_MIN_INTERNAL_MAX_ALLOC_WITH_PSRAM_TLS
+                  : SLEEPHQ_MIN_INTERNAL_MAX_ALLOC;
+    if (mem.heap_free >= min_free &&
+        mem.heap_max_alloc >= min_max_alloc) {
         return true;
     }
     set_error("tls_heap_guard");
     Log::logf(CAT_SLEEPHQ, LOG_WARN,
-              "TLS heap guard free=%u max_alloc=%u\n",
+              "TLS heap guard free=%u max_alloc=%u min_free=%u "
+              "min_max_alloc=%u psram_tls=%u\n",
               static_cast<unsigned>(mem.heap_free),
-              static_cast<unsigned>(mem.heap_max_alloc));
+              static_cast<unsigned>(mem.heap_max_alloc),
+              static_cast<unsigned>(min_free),
+              static_cast<unsigned>(min_max_alloc),
+              psram_tls ? 1u : 0u);
     return false;
 }
 
