@@ -126,15 +126,6 @@ SleepHqImportStatusKind sleephq_classify_import_status(const char *status) {
     return SleepHqImportStatusKind::Unknown;
 }
 
-SleepHqDatalogReconcileAction sleephq_datalog_reconcile_action(
-    bool local_complete,
-    bool remote_missing) {
-    if (!remote_missing) return SleepHqDatalogReconcileAction::None;
-    return local_complete
-               ? SleepHqDatalogReconcileAction::ManualRebuildRequired
-               : SleepHqDatalogReconcileAction::ForceExport;
-}
-
 bool sleephq_parse_remote_file_list_json(const char *json,
                                          uint32_t per_page,
                                          SleepHqRemoteFileCallback callback,

@@ -1511,32 +1511,20 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
                                                  char *error,
                                                  size_t error_size) {
     force_export = false;
+    (void)local_complete;
     if (!remote_reconcile_enabled_) return true;
     if (!day || !day[0]) {
         copy_cstr(error, error_size, "bad_datalog_day");
         return false;
     }
     if (remote_reconcile_all_missing_) {
-        const SleepHqDatalogReconcileAction action =
-            sleephq_datalog_reconcile_action(local_complete, true);
-        force_export =
-            action == SleepHqDatalogReconcileAction::ForceExport;
-        if (action ==
-            SleepHqDatalogReconcileAction::ManualRebuildRequired) {
-            Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                      "remote machine missing for local-complete day=%s serial=%s; manual rebuild required\n",
-                      day,
-                      remote_serial_);
-        }
+        force_export = true;
         return true;
     }
 
     bool exists = false;
     if (cached_remote_date_exists_locked(day, exists)) {
-        const SleepHqDatalogReconcileAction action =
-            sleephq_datalog_reconcile_action(local_complete, !exists);
-        force_export =
-            action == SleepHqDatalogReconcileAction::ForceExport;
+        force_export = !exists;
         return true;
     }
 
@@ -1562,22 +1550,11 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
             copy_cstr(error, error_size, "remote_date_cache_alloc");
             return false;
         }
-        const SleepHqDatalogReconcileAction action =
-            sleephq_datalog_reconcile_action(local_complete, true);
-        force_export =
-            action == SleepHqDatalogReconcileAction::ForceExport;
-        if (action ==
-            SleepHqDatalogReconcileAction::ManualRebuildRequired) {
-            Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                      "remote machine-date missing for local-complete day=%s serial=%s; manual rebuild required\n",
-                      day,
-                      remote_serial_);
-        } else {
-            Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                      "remote machine-date missing day=%s serial=%s; rebuilding pending day\n",
-                      day,
-                      remote_serial_);
-        }
+        force_export = true;
+        Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                  "remote machine-date missing day=%s serial=%s; rebuilding day\n",
+                  day,
+                  remote_serial_);
         return true;
     }
 

@@ -22,12 +22,6 @@ enum class SleepHqImportStatusKind : uint8_t {
     Unknown,
 };
 
-enum class SleepHqDatalogReconcileAction : uint8_t {
-    None,
-    ForceExport,
-    ManualRebuildRequired,
-};
-
 struct SleepHqRemoteFile {
     uint32_t id = 0;
     uint64_t size = 0;
@@ -53,10 +47,6 @@ using SleepHqMachineCallback =
     bool (*)(void *ctx, const SleepHqMachine &machine);
 
 SleepHqImportStatusKind sleephq_classify_import_status(const char *status);
-
-SleepHqDatalogReconcileAction sleephq_datalog_reconcile_action(
-    bool local_complete,
-    bool remote_missing);
 
 bool sleephq_parse_remote_file_list_json(const char *json,
                                          uint32_t per_page,
