@@ -204,6 +204,14 @@ bool SleepHqClient::write_all(const char *data, size_t len) {
     return write_bytes(reinterpret_cast<const uint8_t *>(data), len);
 }
 
+bool SleepHqClient::write_authorization_header() {
+    static constexpr char PREFIX[] = "Authorization: Bearer ";
+    static constexpr char CRLF[] = "\r\n";
+    return write_all(PREFIX, sizeof(PREFIX) - 1) &&
+           write_all(access_token_.c_str(), access_token_.length()) &&
+           write_all(CRLF, sizeof(CRLF) - 1);
+}
+
 bool SleepHqClient::write_bytes(const uint8_t *data, size_t len) {
     if (!data && len) return false;
     size_t offset = 0;
@@ -419,56 +427,50 @@ bool SleepHqClient::raw_request(const char *method,
     if (!ensure_connected()) return false;
 
     const size_t body_len = body ? strlen(body) : 0;
-    char header[768];
-    int len = snprintf(header, sizeof(header),
-                       "%s %s HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "User-Agent: AirCANnect\r\n"
-                       "Accept: application/vnd.api+json, application/json\r\n"
-                       "Connection: keep-alive\r\n",
-                       method ? method : "GET",
-                       path ? path : "/",
-                       SLEEPHQ_HOST);
-    if (len <= 0 || len >= static_cast<int>(sizeof(header))) {
+    char request_head[384];
+    int len = snprintf(
+        request_head, sizeof(request_head),
+        "%s %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: AirCANnect\r\n"
+        "Accept: application/vnd.api+json, application/json\r\n"
+        "Connection: keep-alive\r\n",
+        method ? method : "GET",
+        path ? path : "/",
+        SLEEPHQ_HOST);
+    if (len <= 0 || len >= static_cast<int>(sizeof(request_head))) {
         set_error("request_header_too_long");
         return false;
     }
-    if (authorize && access_token_.length()) {
-        const int n = snprintf(header + len, sizeof(header) - len,
-                               "Authorization: Bearer %s\r\n",
-                               access_token_.c_str());
-        if (n <= 0 || n >= static_cast<int>(sizeof(header) - len)) {
-            set_error("request_header_too_long");
-            return false;
-        }
-        len += n;
-    }
-    if (body_len) {
-        const int n = snprintf(header + len, sizeof(header) - len,
-                               "Content-Type: %s\r\n"
-                               "Content-Length: %u\r\n",
-                               content_type ? content_type
-                                            : "application/json",
-                               static_cast<unsigned>(body_len));
-        if (n <= 0 || n >= static_cast<int>(sizeof(header) - len)) {
-            set_error("request_header_too_long");
-            return false;
-        }
-        len += n;
-    }
-    if (len + 2 >= static_cast<int>(sizeof(header))) {
-        set_error("request_header_too_long");
-        return false;
-    }
-    header[len++] = '\r';
-    header[len++] = '\n';
-    header[len] = 0;
-
-    if (!write_all(header, static_cast<size_t>(len))) {
+    if (!write_all(request_head, static_cast<size_t>(len))) {
         disconnect();
         return false;
     }
-    if (body_len && !write_all(body, body_len)) {
+    if (authorize && access_token_.length()) {
+        if (!write_authorization_header()) {
+            disconnect();
+            return false;
+        }
+    }
+    if (body_len) {
+        char content_header[128];
+        len = snprintf(content_header, sizeof(content_header),
+                       "Content-Type: %s\r\n"
+                       "Content-Length: %u\r\n",
+                       content_type ? content_type : "application/json",
+                       static_cast<unsigned>(body_len));
+        if (len <= 0 || len >= static_cast<int>(sizeof(content_header))) {
+            set_error("request_header_too_long");
+            return false;
+        }
+        if (!write_all(content_header, static_cast<size_t>(len))) {
+            disconnect();
+            return false;
+        }
+    }
+    static constexpr char HEADER_END[] = "\r\n";
+    if (!write_all(HEADER_END, sizeof(HEADER_END) - 1) ||
+        (body_len && !write_all(body, body_len))) {
         disconnect();
         return false;
     }
@@ -814,26 +816,35 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         32ULL +
         static_cast<uint64_t>(tail_len);
 
-    char header[768];
-    int len = snprintf(header, sizeof(header),
+    char request_head[384];
+    int len = snprintf(request_head, sizeof(request_head),
                        "POST %s HTTP/1.1\r\n"
                        "Host: %s\r\n"
                        "User-Agent: AirCANnect\r\n"
-                       "Accept: application/vnd.api+json, application/json\r\n"
-                       "Authorization: Bearer %s\r\n"
-                       "Content-Type: multipart/form-data; boundary=%s\r\n"
-                       "Content-Length: %llu\r\n"
-                       "Connection: keep-alive\r\n\r\n",
+                       "Accept: application/vnd.api+json, application/json\r\n",
                        api_path,
-                       SLEEPHQ_HOST,
-                       access_token_.c_str(),
-                       boundary,
-                       static_cast<unsigned long long>(content_length));
-    if (len <= 0 || static_cast<size_t>(len) >= sizeof(header)) {
+                       SLEEPHQ_HOST);
+    if (len <= 0 || static_cast<size_t>(len) >= sizeof(request_head)) {
         set_error("request_header_too_long");
         return false;
     }
-    if (!write_all(header, static_cast<size_t>(len))) {
+    if (!write_all(request_head, static_cast<size_t>(len)) ||
+        !write_authorization_header()) {
+        disconnect();
+        return false;
+    }
+    char request_tail[192];
+    len = snprintf(request_tail, sizeof(request_tail),
+                   "Content-Type: multipart/form-data; boundary=%s\r\n"
+                   "Content-Length: %llu\r\n"
+                   "Connection: keep-alive\r\n\r\n",
+                   boundary,
+                   static_cast<unsigned long long>(content_length));
+    if (len <= 0 || static_cast<size_t>(len) >= sizeof(request_tail)) {
+        set_error("request_header_too_long");
+        return false;
+    }
+    if (!write_all(request_tail, static_cast<size_t>(len))) {
         disconnect();
         return false;
     }
