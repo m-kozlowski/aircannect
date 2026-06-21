@@ -46,6 +46,13 @@ struct SleepHqUploadRequest {
     void *ctx = nullptr;
 };
 
+struct SleepHqAttachRequest {
+    uint32_t import_id = 0;
+    const char *name = nullptr;
+    const char *path = nullptr;
+    const char *content_hash = nullptr;
+};
+
 struct SleepHqUploadResult {
     uint64_t bytes = 0;
     char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
@@ -72,6 +79,8 @@ public:
     bool authenticate();
     bool resolve_team_id(uint32_t &team_id);
     bool create_import(uint32_t team_id, SleepHqImportInfo &out);
+    bool attach_file(const SleepHqAttachRequest &request,
+                     SleepHqUploadResult &out);
     bool upload_file(const SleepHqUploadRequest &request,
                      SleepHqUploadResult &out);
     bool process_import(uint32_t import_id, SleepHqImportInfo *out = nullptr);

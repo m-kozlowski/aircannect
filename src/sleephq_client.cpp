@@ -681,6 +681,78 @@ bool SleepHqClient::create_import(uint32_t team_id, SleepHqImportInfo &out) {
     return parse_import(response, out);
 }
 
+bool SleepHqClient::attach_file(const SleepHqAttachRequest &attach,
+                                SleepHqUploadResult &out) {
+    out = SleepHqUploadResult{};
+    if (!attach.import_id || !attach.name || !attach.name[0] ||
+        !attach.path || !attach.path[0] || !attach.content_hash ||
+        strlen(attach.content_hash) != 32) {
+        set_error("bad_attach_request");
+        return false;
+    }
+
+    char api_path[64];
+    snprintf(api_path, sizeof(api_path), "/api/v1/imports/%lu/files",
+             static_cast<unsigned long>(attach.import_id));
+    char boundary[40];
+    snprintf(boundary, sizeof(boundary), "----AirCANnect%08lx",
+             static_cast<unsigned long>(millis()));
+
+    LargeTextBuffer body;
+    if (!body.reserve(512)) {
+        set_error("request_alloc_failed");
+        return false;
+    }
+    char part[256];
+    int len = snprintf(part, sizeof(part),
+                       "--%s\r\n"
+                       "Content-Disposition: form-data; name=\"name\"\r\n\r\n"
+                       "%s\r\n",
+                       boundary, attach.name);
+    if (len <= 0 || static_cast<size_t>(len) >= sizeof(part)) {
+        set_error("multipart_size_failed");
+        return false;
+    }
+    body += part;
+    len = snprintf(part, sizeof(part),
+                   "--%s\r\n"
+                   "Content-Disposition: form-data; name=\"path\"\r\n\r\n"
+                   "%s\r\n",
+                   boundary, attach.path);
+    if (len <= 0 || static_cast<size_t>(len) >= sizeof(part)) {
+        set_error("multipart_size_failed");
+        return false;
+    }
+    body += part;
+    len = snprintf(part, sizeof(part),
+                   "--%s\r\n"
+                   "Content-Disposition: form-data; name=\"content_hash\"\r\n"
+                   "\r\n%s\r\n--%s--\r\n",
+                   boundary, attach.content_hash, boundary);
+    if (len <= 0 || static_cast<size_t>(len) >= sizeof(part)) {
+        set_error("multipart_size_failed");
+        return false;
+    }
+    body += part;
+
+    char content_type[96];
+    len = snprintf(content_type, sizeof(content_type),
+                   "multipart/form-data; boundary=%s", boundary);
+    if (len <= 0 || static_cast<size_t>(len) >= sizeof(content_type)) {
+        set_error("multipart_size_failed");
+        return false;
+    }
+    SleepHqHttpResponse response;
+    if (!request("POST", api_path, body.c_str(), content_type, true,
+                 response)) {
+        return false;
+    }
+    copy_cstr(out.content_hash, sizeof(out.content_hash),
+              attach.content_hash);
+    out.bytes = 0;
+    return true;
+}
+
 bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
                                      SleepHqUploadResult &out,
                                      SleepHqHttpResponse &response) {

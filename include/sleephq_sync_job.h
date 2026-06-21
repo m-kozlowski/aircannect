@@ -118,6 +118,11 @@ private:
         File dir;
     };
 
+    struct DatalogDay {
+        char day[9] = {};
+        char path[AC_STORAGE_PATH_MAX] = {};
+    };
+
     struct CurrentFile {
         char path[AC_STORAGE_PATH_MAX] = {};
         char sleep_path[AC_STORAGE_PATH_MAX] = {};
@@ -128,6 +133,9 @@ private:
         uint64_t offset = 0;
         StateWriteMode state_write_mode = StateWriteMode::Append;
         bool local_open = false;
+        bool force_upload = false;
+        bool attach_by_hash = false;
+        char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
         File local;
     };
 
@@ -162,14 +170,23 @@ private:
     void close_local_locked();
     void close_walk_locked();
     void release_walk_stack_locked();
+    void close_datalog_scan_locked();
+    void clear_datalog_days_locked();
     void clear_current_file_locked();
     bool ensure_walk_stack_locked();
     bool push_dir_locked(const char *path);
     bool ensure_dir_open_locked(WalkFrame &frame);
+    bool reserve_datalog_days_locked(size_t needed);
+    bool add_datalog_day_locked(const char *day);
+    bool scan_datalog_days_step_locked();
+    bool datalog_day_has_pending_files_locked(const DatalogDay &day);
+    bool select_next_datalog_day_locked();
+    void reset_import_batch_locked();
+    JobStep finish_import_or_sync_locked();
     bool root_step_locked();
     bool walk_step_locked();
     bool next_file_locked();
-    bool plan_file_locked(const char *path);
+    bool plan_file_locked(const char *path, bool force_upload = false);
     bool build_endpoint_state_dir_locked(uint32_t team_id,
                                          char *out,
                                          size_t out_size) const;
@@ -206,6 +223,8 @@ private:
                                  size_t path_out_size,
                                  char *name_out,
                                  size_t name_out_size) const;
+    bool compute_current_file_content_hash_locked(char *out,
+                                                  size_t out_size);
 
     JobStep step_connect_locked(char *error, size_t error_size);
     JobStep step_check_locked(char *error, size_t error_size);
@@ -236,7 +255,17 @@ private:
     WalkFrame *walk_stack_ = nullptr;
     size_t walk_depth_ = 0;
     size_t walk_capacity_ = 0;
-    size_t root_index_ = 0;
+    File datalog_scan_dir_;
+    bool datalog_scan_opened_ = false;
+    bool datalog_scan_complete_ = false;
+    uint32_t datalog_scan_next_index_ = 0;
+    DatalogDay *datalog_days_ = nullptr;
+    size_t datalog_day_count_ = 0;
+    size_t datalog_day_capacity_ = 0;
+    size_t datalog_day_index_ = 0;
+    bool day_batch_active_ = false;
+    size_t day_root_index_ = 0;
+    char day_batch_path_[AC_STORAGE_PATH_MAX] = {};
     CurrentFile current_file_;
     StagedFile *staged_ = nullptr;
     size_t staged_count_ = 0;

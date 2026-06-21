@@ -7,6 +7,8 @@
 #include <string.h>
 #include <strings.h>
 
+#include <esp_rom_md5.h>
+
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
@@ -20,9 +22,26 @@ namespace {
 
 static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
 static constexpr size_t SLEEPHQ_WALK_MAX_DEPTH = 16;
+static constexpr uint32_t SLEEPHQ_DATALOG_SCAN_BUDGET = 16;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_INTERVAL_MS = 2000;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_TIMEOUT_MS = 120000;
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
+
+const char *const SLEEPHQ_ROOT_METADATA_FILES[] = {
+    "/STR.edf",
+    "/Identification.json",
+    "/Identification.crc",
+};
+
+void sleep_hq_digest_to_hex(const uint8_t digest[16],
+                            char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
+    static const char HEX_DIGITS[] = "0123456789abcdef";
+    for (size_t i = 0; i < 16; ++i) {
+        out[i * 2] = HEX_DIGITS[(digest[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = HEX_DIGITS[digest[i] & 0x0F];
+    }
+    out[32] = '\0';
+}
 
 enum class ImportStatusKind : uint8_t {
     Success,
@@ -384,6 +403,32 @@ void SleepHqSyncJob::release_walk_stack_locked() {
     walk_depth_ = 0;
 }
 
+void SleepHqSyncJob::close_datalog_scan_locked() {
+    if (!datalog_scan_opened_) return;
+    Storage::Guard guard;
+    datalog_scan_dir_.close();
+    datalog_scan_opened_ = false;
+}
+
+void SleepHqSyncJob::clear_datalog_days_locked() {
+    close_datalog_scan_locked();
+    if (datalog_days_) {
+        for (size_t i = 0; i < datalog_day_capacity_; ++i) {
+            datalog_days_[i].~DatalogDay();
+        }
+        Memory::free(datalog_days_);
+    }
+    datalog_days_ = nullptr;
+    datalog_day_count_ = 0;
+    datalog_day_capacity_ = 0;
+    datalog_day_index_ = 0;
+    datalog_scan_complete_ = false;
+    datalog_scan_next_index_ = 0;
+    day_batch_active_ = false;
+    day_root_index_ = 0;
+    day_batch_path_[0] = '\0';
+}
+
 void SleepHqSyncJob::clear_staged_locked() {
     if (staged_) {
         for (size_t i = 0; i < staged_capacity_; ++i) {
@@ -402,11 +447,12 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     close_local_locked();
     close_walk_locked();
     release_walk_stack_locked();
+    clear_datalog_days_locked();
     clear_current_file_locked();
     clear_staged_locked();
     state_cache_.clear();
     phase_ = WorkPhase::Idle;
-    root_index_ = 0;
+    day_root_index_ = 0;
     import_process_started_ms_ = 0;
     import_poll_due_ms_ = 0;
     inflight_phase_ = InflightPhase::None;
@@ -545,19 +591,215 @@ bool SleepHqSyncJob::ensure_dir_open_locked(WalkFrame &frame) {
     return true;
 }
 
-bool SleepHqSyncJob::root_step_locked() {
-    while (root_index_ < storage_export_root_count()) {
-        const StorageExportRoot &root =
-            storage_export_root_at(root_index_++);
-        const StorageLocalNodeInfo info = storage_stat_local_node(root.path);
-        if (!info.exists) continue;
-        if (info.is_dir) {
-            if (root.recursive && push_dir_locked(root.path)) return true;
-            if (status_.state == SleepHqSyncState::Error) return false;
+bool SleepHqSyncJob::reserve_datalog_days_locked(size_t needed) {
+    if (needed <= datalog_day_capacity_) return true;
+    size_t next = datalog_day_capacity_ == 0 ? 16 : datalog_day_capacity_ * 2;
+    while (next < needed) next *= 2;
+    DatalogDay *items = static_cast<DatalogDay *>(
+        Memory::alloc_large(sizeof(DatalogDay) * next, false));
+    if (!items) {
+        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
+                  "DATALOG day allocation failed entries=%u bytes=%u\n",
+                  static_cast<unsigned>(next),
+                  static_cast<unsigned>(sizeof(DatalogDay) * next));
+        fail_locked("datalog_day_alloc");
+        return false;
+    }
+    for (size_t i = 0; i < next; ++i) new (&items[i]) DatalogDay();
+    for (size_t i = 0; i < datalog_day_count_; ++i) {
+        items[i] = datalog_days_[i];
+    }
+    if (datalog_days_) Memory::free(datalog_days_);
+    datalog_days_ = items;
+    datalog_day_capacity_ = next;
+    return true;
+}
+
+bool SleepHqSyncJob::add_datalog_day_locked(const char *day) {
+    if (!day || !storage_export_is_datalog_day_name(day)) return true;
+    for (size_t i = 0; i < datalog_day_count_; ++i) {
+        if (strcmp(datalog_days_[i].day, day) == 0) return true;
+    }
+    if (!reserve_datalog_days_locked(datalog_day_count_ + 1)) return false;
+
+    size_t pos = 0;
+    while (pos < datalog_day_count_ &&
+           strcmp(datalog_days_[pos].day, day) > 0) {
+        pos++;
+    }
+    for (size_t i = datalog_day_count_; i > pos; --i) {
+        datalog_days_[i] = datalog_days_[i - 1];
+    }
+    DatalogDay &entry = datalog_days_[pos];
+    copy_cstr(entry.day, sizeof(entry.day), day);
+    const int written = snprintf(entry.path, sizeof(entry.path),
+                                 "/DATALOG/%s", day);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(entry.path)) {
+        fail_locked("datalog_day_path");
+        return false;
+    }
+    datalog_day_count_++;
+    return true;
+}
+
+bool SleepHqSyncJob::scan_datalog_days_step_locked() {
+    if (datalog_scan_complete_) return true;
+    if (!datalog_scan_opened_) {
+        Storage::Guard guard;
+        datalog_scan_dir_ = Storage::open("/DATALOG", "r");
+        if (!datalog_scan_dir_) {
+            datalog_scan_complete_ = true;
+            return true;
+        }
+        if (!datalog_scan_dir_.isDirectory()) {
+            datalog_scan_dir_.close();
+            datalog_scan_complete_ = true;
+            return true;
+        }
+        if (!storage_skip_dir_children(datalog_scan_dir_,
+                                       datalog_scan_next_index_)) {
+            datalog_scan_dir_.close();
+            fail_locked("datalog_scan_resume_failed");
+            return false;
+        }
+        datalog_scan_opened_ = true;
+    }
+
+    for (uint32_t i = 0; i < SLEEPHQ_DATALOG_SCAN_BUDGET; ++i) {
+        StorageDirChild child;
+        if (!storage_read_next_dir_child(datalog_scan_dir_, child)) {
+            close_datalog_scan_locked();
+            datalog_scan_complete_ = true;
+            datalog_day_index_ = 0;
+            return true;
+        }
+        datalog_scan_next_index_++;
+        if (!child.is_dir ||
+            !storage_export_datalog_day_allowed(child.name)) {
             continue;
         }
-        return plan_file_locked(root.path);
+        if (!add_datalog_day_locked(child.name)) return false;
     }
+    return true;
+}
+
+bool SleepHqSyncJob::datalog_day_has_pending_files_locked(
+    const DatalogDay &day) {
+    if (!day.path[0]) return false;
+    File dir;
+    {
+        Storage::Guard guard;
+        dir = Storage::open(day.path, "r");
+    }
+    if (!dir || !dir.isDirectory()) {
+        if (dir) {
+            Storage::Guard guard;
+            dir.close();
+        }
+        return false;
+    }
+
+    bool pending = false;
+    for (;;) {
+        StorageDirChild child;
+        if (!storage_read_next_dir_child(dir, child)) break;
+        if (child.is_dir) continue;
+
+        char child_path[AC_STORAGE_PATH_MAX] = {};
+        if (!storage_append_child_path(day.path,
+                                       child.name,
+                                       child_path,
+                                       sizeof(child_path)) ||
+            !storage_user_path_valid(child_path)) {
+            continue;
+        }
+        char state_path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+        StateWriteMode mode = StateWriteMode::Append;
+        if (!build_state_path_locked(child_path,
+                                     state_path,
+                                     sizeof(state_path),
+                                     &mode)) {
+            continue;
+        }
+        const uint64_t mtime =
+            child.last_write > 0 ? static_cast<uint64_t>(child.last_write) : 0;
+        if (!state_contains_locked(state_path, child_path, child.size, mtime)) {
+            pending = true;
+            break;
+        }
+    }
+    {
+        Storage::Guard guard;
+        dir.close();
+    }
+    return pending;
+}
+
+bool SleepHqSyncJob::select_next_datalog_day_locked() {
+    while (datalog_day_index_ < datalog_day_count_) {
+        const DatalogDay &day = datalog_days_[datalog_day_index_++];
+        if (!datalog_day_has_pending_files_locked(day)) continue;
+        copy_cstr(day_batch_path_, sizeof(day_batch_path_), day.path);
+        day_batch_active_ = true;
+        day_root_index_ = 0;
+        return true;
+    }
+    return false;
+}
+
+void SleepHqSyncJob::reset_import_batch_locked() {
+    remove_inflight_locked();
+    close_local_locked();
+    close_walk_locked();
+    release_walk_stack_locked();
+    clear_current_file_locked();
+    clear_staged_locked();
+    status_.import_id = 0;
+    status_.import_status[0] = '\0';
+    import_process_started_ms_ = 0;
+    import_poll_due_ms_ = 0;
+    mark_index_ = 0;
+    day_batch_active_ = false;
+    day_root_index_ = 0;
+    day_batch_path_[0] = '\0';
+    phase_ = WorkPhase::NextFile;
+}
+
+JobStep SleepHqSyncJob::finish_import_or_sync_locked() {
+    if (current_run_kind_ == RunKind::Sync && day_batch_active_) {
+        reset_import_batch_locked();
+        return JobStep::Working;
+    }
+    finish_sync_locked();
+    return JobStep::Idle;
+}
+
+bool SleepHqSyncJob::root_step_locked() {
+    if (!datalog_scan_complete_) {
+        return scan_datalog_days_step_locked();
+    }
+    if (!day_batch_active_ && !select_next_datalog_day_locked()) {
+        phase_ = WorkPhase::Finish;
+        return true;
+    }
+
+    const size_t root_count = sizeof(SLEEPHQ_ROOT_METADATA_FILES) /
+                              sizeof(SLEEPHQ_ROOT_METADATA_FILES[0]);
+    while (day_root_index_ < root_count) {
+        const char *path = SLEEPHQ_ROOT_METADATA_FILES[day_root_index_++];
+        const StorageLocalNodeInfo info = storage_stat_local_node(path);
+        if (!info.exists) continue;
+        if (info.is_dir) continue;
+        return plan_file_locked(path, true);
+    }
+
+    if (!day_batch_path_[0]) {
+        phase_ = staged_count_ == 0 ? WorkPhase::Finish
+                                    : WorkPhase::ProcessImport;
+        return true;
+    }
+    if (push_dir_locked(day_batch_path_)) return true;
+    if (status_.state == SleepHqSyncState::Error) return false;
     phase_ = staged_count_ == 0 ? WorkPhase::Finish
                                 : WorkPhase::ProcessImport;
     return true;
@@ -576,6 +818,10 @@ bool SleepHqSyncJob::walk_step_locked() {
             frame.opened = false;
         }
         walk_depth_--;
+        if (walk_depth_ == 0 && day_batch_active_) {
+            phase_ = staged_count_ == 0 ? WorkPhase::Finish
+                                        : WorkPhase::ProcessImport;
+        }
         return true;
     }
     frame.next_index++;
@@ -589,28 +835,20 @@ bool SleepHqSyncJob::walk_step_locked() {
         fail_locked("bad_child_path");
         return false;
     }
-    if (strcmp(frame.path, "/DATALOG") == 0) {
-        if (!child.is_dir ||
-            !storage_export_datalog_day_allowed(child.name)) {
-            return true;
-        }
-    }
     if (child.is_dir) return push_dir_locked(child_path);
     return plan_file_locked(child_path);
 }
 
 bool SleepHqSyncJob::next_file_locked() {
-    while (phase_ == WorkPhase::NextFile) {
-        if (runtime_blocked_.load()) {
-            fail_locked("preempted");
-            return false;
-        }
-        if (!Storage::mounted()) {
-            fail_locked("storage_unavailable");
-            return false;
-        }
-        if (!walk_step_locked()) return false;
+    if (runtime_blocked_.load()) {
+        fail_locked("preempted");
+        return false;
     }
+    if (!Storage::mounted()) {
+        fail_locked("storage_unavailable");
+        return false;
+    }
+    if (!walk_step_locked()) return false;
     return true;
 }
 
@@ -624,6 +862,61 @@ bool SleepHqSyncJob::build_sleep_path_locked(const char *local_path,
                                                    path_out_size,
                                                    name_out,
                                                    name_out_size);
+}
+
+bool SleepHqSyncJob::compute_current_file_content_hash_locked(char *out,
+                                                              size_t out_size) {
+    if (!out || out_size < AC_SLEEPHQ_CONTENT_HASH_MAX ||
+        !current_file_.local_open || !current_file_.name[0]) {
+        return false;
+    }
+    uint8_t *buffer = static_cast<uint8_t *>(Memory::alloc_large(4096, false));
+    if (!buffer) {
+        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
+                  "hash buffer allocation failed bytes=4096\n");
+        return false;
+    }
+
+    md5_context_t md5;
+    esp_rom_md5_init(&md5);
+    uint64_t read_total = 0;
+    bool ok = true;
+    {
+        Storage::Guard guard;
+        ok = current_file_.local.seek(0);
+    }
+    while (ok && read_total < current_file_.size) {
+        const uint64_t remaining = current_file_.size - read_total;
+        const size_t wanted =
+            remaining > 4096 ? 4096 : static_cast<size_t>(remaining);
+        size_t read = 0;
+        {
+            Storage::Guard guard;
+            read = current_file_.local.read(buffer, wanted);
+        }
+        if (read != wanted) {
+            ok = false;
+            break;
+        }
+        esp_rom_md5_update(&md5, buffer, read);
+        read_total += read;
+        taskYIELD();
+    }
+    Memory::free(buffer);
+    if (!ok) return false;
+
+    esp_rom_md5_update(&md5,
+                       reinterpret_cast<const uint8_t *>(current_file_.name),
+                       strlen(current_file_.name));
+    uint8_t digest[16];
+    esp_rom_md5_final(digest, &md5);
+    sleep_hq_digest_to_hex(digest, out);
+    {
+        Storage::Guard guard;
+        ok = current_file_.local.seek(0);
+    }
+    current_file_.offset = 0;
+    return ok;
 }
 
 bool SleepHqSyncJob::build_state_path_locked(const char *path,
@@ -647,10 +940,11 @@ bool SleepHqSyncJob::build_state_path_locked(const char *path,
     return ok;
 }
 
-bool SleepHqSyncJob::plan_file_locked(const char *path) {
+bool SleepHqSyncJob::plan_file_locked(const char *path, bool force_upload) {
     clear_current_file_locked();
     copy_cstr(current_file_.path, sizeof(current_file_.path), path);
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
+    current_file_.force_upload = force_upload;
     status_.files_seen++;
     status_.updated_ms = millis_nonzero();
 
@@ -676,15 +970,18 @@ bool SleepHqSyncJob::plan_file_locked(const char *path) {
         fail_locked("state_path_failed");
         return false;
     }
-    if (state_contains_locked(current_file_.state_path,
+    const bool state_has_file =
+        state_contains_locked(current_file_.state_path,
                               path,
                               current_file_.size,
-                              current_file_.mtime)) {
+                              current_file_.mtime);
+    if (!current_file_.force_upload && state_has_file) {
         status_.files_skipped++;
         clear_current_file_locked();
         phase_ = WorkPhase::NextFile;
         return true;
     }
+    current_file_.attach_by_hash = current_file_.force_upload && state_has_file;
     if (status_.import_id != 0 &&
         staged_contains_locked(path, current_file_.size,
                                current_file_.mtime)) {
@@ -1173,20 +1470,43 @@ bool SleepHqSyncJob::upload_abort_cb(void *ctx) {
 
 JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
                                                 size_t error_size) {
-    SleepHqUploadRequest request;
-    request.import_id = status_.import_id;
-    request.name = current_file_.name;
-    request.path = current_file_.sleep_path;
-    request.size = current_file_.size;
-    request.read = &SleepHqSyncJob::upload_read_cb;
-    request.reset = &SleepHqSyncJob::upload_reset_cb;
-    request.should_abort = &SleepHqSyncJob::upload_abort_cb;
-    request.ctx = this;
     SleepHqUploadResult upload;
-    if (!client_.upload_file(request, upload)) {
-        copy_cstr(error, error_size, client_.last_error());
-        fail_locked(error[0] ? error : "upload_failed");
-        return JobStep::Idle;
+    bool attached = false;
+    if (current_file_.attach_by_hash) {
+        if (!compute_current_file_content_hash_locked(
+                current_file_.content_hash,
+                sizeof(current_file_.content_hash))) {
+            fail_locked("hash_failed");
+            return JobStep::Idle;
+        }
+        SleepHqAttachRequest attach;
+        attach.import_id = status_.import_id;
+        attach.name = current_file_.name;
+        attach.path = current_file_.sleep_path;
+        attach.content_hash = current_file_.content_hash;
+        if (client_.attach_file(attach, upload)) {
+            attached = true;
+        } else if (!upload_reset_cb(this)) {
+            copy_cstr(error, error_size, client_.last_error());
+            fail_locked(error[0] ? error : "attach_failed");
+            return JobStep::Idle;
+        }
+    }
+    if (!attached) {
+        SleepHqUploadRequest request;
+        request.import_id = status_.import_id;
+        request.name = current_file_.name;
+        request.path = current_file_.sleep_path;
+        request.size = current_file_.size;
+        request.read = &SleepHqSyncJob::upload_read_cb;
+        request.reset = &SleepHqSyncJob::upload_reset_cb;
+        request.should_abort = &SleepHqSyncJob::upload_abort_cb;
+        request.ctx = this;
+        if (!client_.upload_file(request, upload)) {
+            copy_cstr(error, error_size, client_.last_error());
+            fail_locked(error[0] ? error : "upload_failed");
+            return JobStep::Idle;
+        }
     }
     close_local_locked();
     const StorageLocalNodeInfo info = storage_stat_local_node(current_file_.path);
@@ -1337,8 +1657,7 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
         case WorkPhase::MarkState:
             return step_mark_state_locked(error, sizeof(error));
         case WorkPhase::Finish:
-            finish_sync_locked();
-            return JobStep::Idle;
+            return finish_import_or_sync_locked();
     }
     return JobStep::Idle;
 }
