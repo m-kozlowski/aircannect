@@ -30,6 +30,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  oxi               oximetry source and BLE injector status");
         out.println("  report            therapy report index/cache status");
         out.println("  storage           persistent storage and writer status");
+        out.println("  sleephq           SleepHQ sync status and connectivity check");
         out.println("  session           therapy session tracking state");
         out.println("  tcp               raw JSON-RPC TCP bridge status");
         out.println("  ota               AirCANnect firmware OTA status");
@@ -59,6 +60,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  config oximetry advertise auto|manual  set BLE advertising policy");
         out.println("  config smb ENDPOINT USER PASSWORD set SMB target");
         out.println("  config smb clear          clear SMB target");
+        out.println("  config sleephq CLIENT_ID CLIENT_SECRET [TEAM_ID] [DEVICE_ID]");
+        out.println("  config sleephq clear      clear SleepHQ credentials");
         out.println("  config http-auth U P      set Web UI auth; empty U/P disables auth");
         out.println("  config http-whitelist L   bypass auth for IP/range list, or clear");
         out.println("  config telnet on|off [P]  enable management telnet console");
@@ -137,6 +140,14 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  storage remount           retry storage mount");
         out.println("  storage queue             show async writer queue state");
         out.println("  storage write-test P T    append test text through writer");
+        return;
+    }
+
+    if (topic == "sleephq") {
+        out.println("[HELP sleephq]");
+        out.println("  sleephq status            show SleepHQ sync status");
+        out.println("  sleephq check             queue OAuth/API connectivity check");
+        out.println("  sleephq sync              queue manual SleepHQ export sync");
         return;
     }
 

@@ -79,6 +79,25 @@ void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.println(cfg.smb_user.length() ? cfg.smb_user : "<empty>");
     out.print("  smb_password: ");
     out.println(secret_state_text(cfg.smb_password));
+    out.print("  sleephq: ");
+    out.println(cfg.sleephq_client_id.length() &&
+                        cfg.sleephq_client_secret.length()
+                    ? "configured"
+                    : "not_configured");
+    out.print("  sleephq_client_id: ");
+    out.println(cfg.sleephq_client_id.length()
+                    ? cfg.sleephq_client_id
+                    : "<empty>");
+    out.print("  sleephq_client_secret: ");
+    out.println(secret_state_text(cfg.sleephq_client_secret));
+    out.print("  sleephq_team_id: ");
+    out.println(cfg.sleephq_team_id.length()
+                    ? cfg.sleephq_team_id
+                    : "<empty>");
+    out.print("  sleephq_device_id: ");
+    out.println(cfg.sleephq_device_id.length()
+                    ? cfg.sleephq_device_id
+                    : "<empty>");
     out.print("  http_auth: ");
     out.println(cfg.http_user.length() || cfg.http_password.length()
                     ? "protected"
@@ -221,6 +240,31 @@ bool print_app_config_value(Print &out,
     }
     if (key == "smb_password") {
         print_config_secret(out, "smb_password", cfg.smb_password);
+        return true;
+    }
+    if (key == "sleephq") {
+        print_config_value_header(out, "sleephq");
+        out.println(cfg.sleephq_client_id.length() &&
+                            cfg.sleephq_client_secret.length()
+                        ? "configured"
+                        : "not_configured");
+        return true;
+    }
+    if (key == "sleephq_client_id") {
+        print_config_value(out, "sleephq_client_id", cfg.sleephq_client_id);
+        return true;
+    }
+    if (key == "sleephq_client_secret") {
+        print_config_secret(out, "sleephq_client_secret",
+                            cfg.sleephq_client_secret);
+        return true;
+    }
+    if (key == "sleephq_team_id") {
+        print_config_value(out, "sleephq_team_id", cfg.sleephq_team_id);
+        return true;
+    }
+    if (key == "sleephq_device_id") {
+        print_config_value(out, "sleephq_device_id", cfg.sleephq_device_id);
         return true;
     }
     if (key == "http_auth" || key == "http_auth_required") {
@@ -1704,6 +1748,58 @@ bool ManagementConsole::handle_config_key(
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
+    if (key == "sleephq") {
+        print_config_read_only(out, "sleephq");
+        return true;
+    }
+    if (key == "sleephq_client_id") {
+        ok = app_config.set_sleephq_credentials(
+            value, app_config.data().sleephq_client_secret,
+            app_config.data().sleephq_team_id,
+            app_config.data().sleephq_device_id);
+        if (!ok) {
+            print_config_invalid(out, "sleephq_client_id");
+            return true;
+        }
+        print_app_config_value(out, app_config.data(), key);
+        return true;
+    }
+    if (key == "sleephq_client_secret") {
+        ok = app_config.set_sleephq_credentials(
+            app_config.data().sleephq_client_id, value,
+            app_config.data().sleephq_team_id,
+            app_config.data().sleephq_device_id);
+        if (!ok) {
+            print_config_invalid(out, "sleephq_client_secret");
+            return true;
+        }
+        print_app_config_value(out, app_config.data(), key);
+        return true;
+    }
+    if (key == "sleephq_team_id") {
+        ok = app_config.set_sleephq_credentials(
+            app_config.data().sleephq_client_id,
+            app_config.data().sleephq_client_secret, value,
+            app_config.data().sleephq_device_id);
+        if (!ok) {
+            print_config_invalid(out, "sleephq_team_id");
+            return true;
+        }
+        print_app_config_value(out, app_config.data(), key);
+        return true;
+    }
+    if (key == "sleephq_device_id") {
+        ok = app_config.set_sleephq_credentials(
+            app_config.data().sleephq_client_id,
+            app_config.data().sleephq_client_secret,
+            app_config.data().sleephq_team_id, value);
+        if (!ok) {
+            print_config_invalid(out, "sleephq_device_id");
+            return true;
+        }
+        print_app_config_value(out, app_config.data(), key);
+        return true;
+    }
 
     if (key == "http_auth" || key == "http_auth_required") {
         String lower = value;
@@ -2184,6 +2280,29 @@ void ManagementConsole::handle_config(Print &out, String rest,
         return;
     }
 
+    if (rest == "sleephq") {
+        out.print("[CONFIG] sleephq=");
+        out.print(app_config.data().sleephq_client_id.length() &&
+                          app_config.data().sleephq_client_secret.length()
+                      ? "configured"
+                      : "not_configured");
+        out.print(" client_id=");
+        out.print(app_config.data().sleephq_client_id.length()
+                      ? app_config.data().sleephq_client_id.c_str()
+                      : "<empty>");
+        out.print(" secret=");
+        out.print(secret_state_text(app_config.data().sleephq_client_secret));
+        out.print(" team_id=");
+        out.print(app_config.data().sleephq_team_id.length()
+                      ? app_config.data().sleephq_team_id.c_str()
+                      : "<empty>");
+        out.print(" device_id=");
+        out.println(app_config.data().sleephq_device_id.length()
+                        ? app_config.data().sleephq_device_id.c_str()
+                        : "<empty>");
+        return;
+    }
+
     if (rest.startsWith("smb ")) {
         String args = rest.substring(4);
         args.trim();
@@ -2219,6 +2338,59 @@ void ManagementConsole::handle_config(Print &out, String rest,
                       : "<empty>");
         out.print(" password=");
         out.println(secret_state_text(app_config.data().smb_password));
+        return;
+    }
+
+    if (rest.startsWith("sleephq ")) {
+        String args = rest.substring(8);
+        args.trim();
+        if (args == "clear" || args == "off" || args == "disable") {
+            if (!app_config.set_sleephq_credentials("", "", "", "")) {
+                out.println("[CONFIG] failed to clear SleepHQ config");
+                return;
+            }
+            out.println("[CONFIG] sleephq=not_configured");
+            return;
+        }
+
+        int pos = 0;
+        String client_id;
+        String client_secret;
+        String team_id;
+        String device_id;
+        if (!parse_console_arg(args, pos, client_id) ||
+            !parse_console_arg(args, pos, client_secret)) {
+            out.println("[CONFIG] usage: config sleephq CLIENT_ID "
+                        "CLIENT_SECRET [TEAM_ID] [DEVICE_ID]");
+            out.println("[CONFIG] use: config sleephq clear to clear SleepHQ");
+            return;
+        }
+        (void)parse_console_arg(args, pos, team_id);
+        (void)parse_console_arg(args, pos, device_id);
+        if (!app_config.set_sleephq_credentials(
+                client_id, client_secret, team_id, device_id)) {
+            out.println("[CONFIG] invalid SleepHQ config");
+            return;
+        }
+        out.print("[CONFIG] sleephq=");
+        out.print(app_config.data().sleephq_client_id.length() &&
+                          app_config.data().sleephq_client_secret.length()
+                      ? "configured"
+                      : "not_configured");
+        out.print(" client_id=");
+        out.print(app_config.data().sleephq_client_id.length()
+                      ? app_config.data().sleephq_client_id.c_str()
+                      : "<empty>");
+        out.print(" secret=");
+        out.print(secret_state_text(app_config.data().sleephq_client_secret));
+        out.print(" team_id=");
+        out.print(app_config.data().sleephq_team_id.length()
+                      ? app_config.data().sleephq_team_id.c_str()
+                      : "<empty>");
+        out.print(" device_id=");
+        out.println(app_config.data().sleephq_device_id.length()
+                        ? app_config.data().sleephq_device_id.c_str()
+                        : "<empty>");
         return;
     }
 
@@ -2353,7 +2525,7 @@ void ManagementConsole::handle_config(Print &out, String rest,
     }
 
     print_unknown_command(out, "CONFIG",
-                          "config, KEY, hostname, tcp, softap, wifi-country, timezone, resmed-time-sync, oximetry, smb, http-auth, http-whitelist, telnet, ota-password, reset, factory-reset");
+                          "config, KEY, hostname, tcp, softap, wifi-country, timezone, resmed-time-sync, oximetry, smb, sleephq, http-auth, http-whitelist, telnet, ota-password, reset, factory-reset");
 }
 
 void ManagementConsole::apply_runtime_config(const AppConfig &app_config,

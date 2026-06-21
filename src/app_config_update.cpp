@@ -169,6 +169,49 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
+    if (doc["sleephq_client_id"].is<const char *>() ||
+        doc["sleephq_client_secret"].is<const char *>() ||
+        doc["sleephq_team_id"].is<const char *>() ||
+        doc["sleephq_device_id"].is<const char *>()) {
+        String client_id = config.data().sleephq_client_id;
+        String client_secret = config.data().sleephq_client_secret;
+        String team_id = config.data().sleephq_team_id;
+        String device_id = config.data().sleephq_device_id;
+        if (doc["sleephq_client_id"].is<const char *>()) {
+            client_id = doc["sleephq_client_id"].as<const char *>();
+        }
+        if (doc["sleephq_client_secret"].is<const char *>()) {
+            client_secret = doc["sleephq_client_secret"].as<const char *>();
+            if (client_secret == "********" &&
+                config.data().sleephq_client_secret.length() > 0) {
+                client_secret = config.data().sleephq_client_secret;
+            }
+        }
+        if (doc["sleephq_team_id"].is<const char *>()) {
+            team_id = doc["sleephq_team_id"].as<const char *>();
+        }
+        if (doc["sleephq_device_id"].is<const char *>()) {
+            device_id = doc["sleephq_device_id"].as<const char *>();
+        }
+        const String before_client_id = config.data().sleephq_client_id;
+        const String before_client_secret =
+            config.data().sleephq_client_secret;
+        const String before_team_id = config.data().sleephq_team_id;
+        const String before_device_id = config.data().sleephq_device_id;
+        const bool accepted = config.set_sleephq_credentials(
+            client_id, client_secret, team_id, device_id);
+        if (accepted) {
+            result.accepted_fields++;
+            if (before_client_id != config.data().sleephq_client_id ||
+                before_client_secret !=
+                    config.data().sleephq_client_secret ||
+                before_team_id != config.data().sleephq_team_id ||
+                before_device_id != config.data().sleephq_device_id) {
+                result.changed_fields++;
+            }
+        }
+    }
+
     uint16_t parsed_port = 0;
     if (valid_port_from_json(doc, "oximetry_udp_port", parsed_port)) {
         const uint16_t before = config.data().oximetry_udp_port;

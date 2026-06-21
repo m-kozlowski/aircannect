@@ -3,6 +3,7 @@
 #include <IPAddress.h>
 #include <Preferences.h>
 #include <ctype.h>
+#include <string.h>
 
 #include "debug_log.h"
 
@@ -27,6 +28,10 @@ static constexpr const char *KEY_EDF_CAPTURE_ENABLED = "edf_cap";
 static constexpr const char *KEY_SMB_ENDPOINT = "smb_ep";
 static constexpr const char *KEY_SMB_USER = "smb_user";
 static constexpr const char *KEY_SMB_PASSWORD = "smb_pass";
+static constexpr const char *KEY_SLEEPHQ_CLIENT_ID = "shq_id";
+static constexpr const char *KEY_SLEEPHQ_CLIENT_SECRET = "shq_secret";
+static constexpr const char *KEY_SLEEPHQ_TEAM_ID = "shq_team";
+static constexpr const char *KEY_SLEEPHQ_DEVICE_ID = "shq_device";
 static constexpr const char *KEY_HTTP_USER = "http_user";
 static constexpr const char *KEY_HTTP_PASSWORD = "http_pass";
 static constexpr const char *KEY_AUTH_WHITELIST = "auth_wl";
@@ -52,12 +57,13 @@ static constexpr uint32_t DIRTY_EDF_CAPTURE = 1UL << 11;
 static constexpr uint32_t DIRTY_LOG_LEVELS = 1UL << 12;
 static constexpr uint32_t DIRTY_SYSLOG = 1UL << 13;
 static constexpr uint32_t DIRTY_SMB_SYNC = 1UL << 14;
+static constexpr uint32_t DIRTY_SLEEPHQ_SYNC = 1UL << 15;
 static constexpr uint32_t DIRTY_ALL =
     DIRTY_HOSTNAME | DIRTY_TCP | DIRTY_SOFTAP | DIRTY_WIFI_COUNTRY |
     DIRTY_TIMEZONE | DIRTY_RESMED_TIME | DIRTY_HTTP_AUTH |
     DIRTY_AUTH_WHITELIST | DIRTY_TELNET | DIRTY_OTA_PASSWORD |
     DIRTY_OXIMETRY | DIRTY_EDF_CAPTURE | DIRTY_LOG_LEVELS | DIRTY_SYSLOG |
-    DIRTY_SMB_SYNC;
+    DIRTY_SMB_SYNC | DIRTY_SLEEPHQ_SYNC;
 
 bool valid_hostname_char(char c) {
     return isalnum(static_cast<unsigned char>(c)) || c == '-';
@@ -166,6 +172,26 @@ const char *smb_password_reject_reason(const String &password) {
 
 bool valid_smb_password(const String &password) {
     return smb_password_reject_reason(password) == nullptr;
+}
+
+const char *sleephq_secret_reject_reason(const String &value) {
+    if (!value.length()) return nullptr;
+    const char *reason = printable_ascii_reject_reason(
+        value, 192, "too_long", "bad_char");
+    if (!reason) return nullptr;
+    return strcmp(reason, "too_long") == 0 ? "sleephq_value_too_long"
+                                           : "sleephq_value_bad_char";
+}
+
+const char *sleephq_id_reject_reason(const String &value) {
+    if (!value.length()) return nullptr;
+    if (value.length() > 20) return "sleephq_id_too_long";
+    for (size_t i = 0; i < value.length(); ++i) {
+        if (!isdigit(static_cast<unsigned char>(value[i]))) {
+            return "sleephq_id_bad_char";
+        }
+    }
+    return nullptr;
 }
 
 bool valid_log_level(log_level_t level) {
@@ -307,6 +333,14 @@ bool AppConfig::load() {
     data_.smb_user = prefs.getString(KEY_SMB_USER, defaults.smb_user);
     data_.smb_password =
         prefs.getString(KEY_SMB_PASSWORD, defaults.smb_password);
+    data_.sleephq_client_id = prefs.getString(
+        KEY_SLEEPHQ_CLIENT_ID, defaults.sleephq_client_id);
+    data_.sleephq_client_secret = prefs.getString(
+        KEY_SLEEPHQ_CLIENT_SECRET, defaults.sleephq_client_secret);
+    data_.sleephq_team_id = prefs.getString(
+        KEY_SLEEPHQ_TEAM_ID, defaults.sleephq_team_id);
+    data_.sleephq_device_id = prefs.getString(
+        KEY_SLEEPHQ_DEVICE_ID, defaults.sleephq_device_id);
     data_.http_user = prefs.getString(KEY_HTTP_USER, defaults.http_user);
     data_.http_password =
         prefs.getString(KEY_HTTP_PASSWORD, defaults.http_password);
@@ -395,6 +429,16 @@ bool AppConfig::save_fields(uint32_t dirty) const {
         ok = put_string(prefs, KEY_SMB_ENDPOINT, data_.smb_endpoint) && ok;
         ok = put_string(prefs, KEY_SMB_USER, data_.smb_user) && ok;
         ok = put_string(prefs, KEY_SMB_PASSWORD, data_.smb_password) && ok;
+    }
+    if (dirty & DIRTY_SLEEPHQ_SYNC) {
+        ok = put_string(prefs, KEY_SLEEPHQ_CLIENT_ID,
+                        data_.sleephq_client_id) && ok;
+        ok = put_string(prefs, KEY_SLEEPHQ_CLIENT_SECRET,
+                        data_.sleephq_client_secret) && ok;
+        ok = put_string(prefs, KEY_SLEEPHQ_TEAM_ID,
+                        data_.sleephq_team_id) && ok;
+        ok = put_string(prefs, KEY_SLEEPHQ_DEVICE_ID,
+                        data_.sleephq_device_id) && ok;
     }
     if (dirty & DIRTY_HTTP_AUTH) {
         ok = put_string(prefs, KEY_HTTP_USER, data_.http_user) && ok;
@@ -516,6 +560,26 @@ bool AppConfig::normalize() {
     }
     if (!valid_smb_password(data_.smb_password)) {
         data_.smb_password = "";
+        unchanged = false;
+    }
+    data_.sleephq_client_id.trim();
+    data_.sleephq_client_secret.trim();
+    data_.sleephq_team_id.trim();
+    data_.sleephq_device_id.trim();
+    if (sleephq_secret_reject_reason(data_.sleephq_client_id)) {
+        data_.sleephq_client_id = "";
+        unchanged = false;
+    }
+    if (sleephq_secret_reject_reason(data_.sleephq_client_secret)) {
+        data_.sleephq_client_secret = "";
+        unchanged = false;
+    }
+    if (sleephq_id_reject_reason(data_.sleephq_team_id)) {
+        data_.sleephq_team_id = "";
+        unchanged = false;
+    }
+    if (sleephq_id_reject_reason(data_.sleephq_device_id)) {
+        data_.sleephq_device_id = "";
         unchanged = false;
     }
     if (!valid_optional_secret(data_.http_user)) {
@@ -683,6 +747,65 @@ bool AppConfig::set_smb_credentials(const String &endpoint,
               data_.smb_user.length() ? 1u : 0u,
               data_.smb_password.length() ? 1u : 0u);
     return persist(DIRTY_SMB_SYNC);
+}
+
+bool AppConfig::set_sleephq_credentials(const String &client_id,
+                                        const String &client_secret,
+                                        const String &team_id,
+                                        const String &device_id) {
+    String parsed_client_id = client_id;
+    String parsed_client_secret = client_secret;
+    String parsed_team_id = team_id;
+    String parsed_device_id = device_id;
+    parsed_client_id.trim();
+    parsed_client_secret.trim();
+    parsed_team_id.trim();
+    parsed_device_id.trim();
+
+    const char *reject_reason =
+        sleephq_secret_reject_reason(parsed_client_id);
+    if (!reject_reason) {
+        reject_reason = sleephq_secret_reject_reason(parsed_client_secret);
+    }
+    if (!reject_reason) {
+        reject_reason = sleephq_id_reject_reason(parsed_team_id);
+    }
+    if (!reject_reason) {
+        reject_reason = sleephq_id_reject_reason(parsed_device_id);
+    }
+    if (reject_reason) {
+        Log::logf(CAT_CONFIG,
+                  LOG_WARN,
+                  "rejected sleephq config reason=%s client_id_set=%u "
+                  "secret_set=%u team_id_set=%u device_id_set=%u\n",
+                  reject_reason,
+                  parsed_client_id.length() ? 1u : 0u,
+                  parsed_client_secret.length() ? 1u : 0u,
+                  parsed_team_id.length() ? 1u : 0u,
+                  parsed_device_id.length() ? 1u : 0u);
+        return false;
+    }
+
+    if (data_.sleephq_client_id == parsed_client_id &&
+        data_.sleephq_client_secret == parsed_client_secret &&
+        data_.sleephq_team_id == parsed_team_id &&
+        data_.sleephq_device_id == parsed_device_id) {
+        return true;
+    }
+
+    data_.sleephq_client_id = parsed_client_id;
+    data_.sleephq_client_secret = parsed_client_secret;
+    data_.sleephq_team_id = parsed_team_id;
+    data_.sleephq_device_id = parsed_device_id;
+    Log::logf(CAT_CONFIG,
+              LOG_INFO,
+              "updated sleephq config client_id_set=%u secret_set=%u "
+              "team_id_set=%u device_id_set=%u\n",
+              data_.sleephq_client_id.length() ? 1u : 0u,
+              data_.sleephq_client_secret.length() ? 1u : 0u,
+              data_.sleephq_team_id.length() ? 1u : 0u,
+              data_.sleephq_device_id.length() ? 1u : 0u);
+    return persist(DIRTY_SLEEPHQ_SYNC);
 }
 
 bool AppConfig::set_http_auth(const String &user, const String &password) {

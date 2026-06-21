@@ -815,6 +815,7 @@ void ManagementConsole::execute_line(String line,
         {"oximetry", &ManagementConsole::handle_oximetry_command},
         {"report", &ManagementConsole::handle_report_command},
         {"storage", &ManagementConsole::handle_storage_command},
+        {"sleephq", &ManagementConsole::handle_sleephq_command},
         {"as11", &ManagementConsole::handle_as11_command},
         {"therapy", &ManagementConsole::handle_therapy_command},
         {"config", &ManagementConsole::handle_config_command},
@@ -1174,6 +1175,77 @@ void ManagementConsole::handle_storage_command(Print &out,
     }
     print_unknown_command(out, "STORAGE",
                           "storage status, remount, queue, write-test");
+}
+
+void ManagementConsole::handle_sleephq_command(Print &out,
+                                               String rest,
+                                               ConsoleContext &ctx) {
+    trim_inplace(rest);
+    to_lower_inplace(rest);
+    SleepHqSyncJob *job = ctx.sleephq_sync_job;
+    if (!job) {
+        out.println("[SLEEPHQ] unavailable");
+        return;
+    }
+    if (!rest.length() || rest == "status") {
+        const SleepHqSyncStatus status = job->status();
+        out.print("[SLEEPHQ] state=");
+        out.print(sleephq_sync_state_name(status.state));
+        out.print(" configured=");
+        out.print(status.configured ? "yes" : "no");
+        out.print(" network=");
+        out.print(status.network_available ? "yes" : "no");
+        out.print(" pending=");
+        out.print(status.pending ? "yes" : "no");
+        out.print(" reason=");
+        out.print(status.pending_reason[0] ? status.pending_reason : "--");
+        out.print(" team_id=");
+        if (status.team_id) {
+            out.print(static_cast<unsigned long>(status.team_id));
+        } else {
+            out.print("--");
+        }
+        out.print(" last_check=");
+        print_uint64(out, status.last_check_epoch);
+        out.print(" last_sync=");
+        print_uint64(out, status.last_sync_epoch);
+        out.print(" last_failure=");
+        print_uint64(out, status.last_failure_epoch);
+        out.print(" error=");
+        out.print(status.last_error[0] ? status.last_error : "--");
+        out.print(" import=");
+        if (status.import_id) {
+            out.print(static_cast<unsigned long>(status.import_id));
+        } else {
+            out.print("--");
+        }
+        out.print(" files=");
+        out.print(static_cast<unsigned>(status.files_uploaded));
+        out.print("/");
+        out.print(static_cast<unsigned>(status.files_seen));
+        out.print(" skipped=");
+        out.print(static_cast<unsigned>(status.files_skipped));
+        out.print(" bytes=");
+        print_uint64(out, status.bytes_uploaded);
+        out.print(" current=");
+        out.print(status.current_path[0] ? status.current_path : "--");
+        out.println();
+        return;
+    }
+    if (rest == "check" || rest == "verify") {
+        const bool queued = job->request_check(rest.c_str());
+        out.print("[SLEEPHQ] check ");
+        out.println(queued ? "queued" : "rejected");
+        return;
+    }
+    if (rest == "sync") {
+        const bool queued = job->request_sync("manual");
+        out.print("[SLEEPHQ] sync ");
+        out.println(queued ? "queued" : "rejected");
+        return;
+    }
+    print_unknown_command(out, "SLEEPHQ",
+                          "sleephq status, sleephq check, sleephq sync");
 }
 
 void ManagementConsole::handle_as11_command(Print &out,

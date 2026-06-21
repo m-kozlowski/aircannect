@@ -293,7 +293,8 @@ bool storage_heavy_request_available(AsyncWebServerRequest *request,
 bool storage_jobs_available(AsyncWebServerRequest *request,
                             const StorageArchiveJob *archive_job,
                             const StorageDeleteJob *delete_job,
-                            const StorageSyncJob *sync_job) {
+                            const StorageSyncJob *sync_job,
+                            const SleepHqSyncJob *sleephq_job) {
     if (archive_job && archive_job->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
@@ -309,7 +310,64 @@ bool storage_jobs_available(AsyncWebServerRequest *request,
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
     }
+    if (sleephq_job && sleephq_job->active()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_busy\"}");
+        return false;
+    }
     return true;
+}
+
+void append_sleephq_sync_json(LargeTextBuffer &json,
+                              const SleepHqSyncStatus &status,
+                              const AppConfigData &config,
+                              bool include_ok) {
+    bool comma = false;
+    if (include_ok) {
+        json_add_bool(json, "ok", true, false);
+        comma = true;
+    }
+    json_add_string(json, "state", sleephq_sync_state_name(status.state),
+                    comma);
+    json_add_bool(json, "configured", status.configured);
+    json_add_bool(json, "network_available", status.network_available);
+    json_add_bool(json, "pending", status.pending);
+    json_add_string(json, "pending_reason", status.pending_reason);
+    json_add_string(json, "error", status.last_error);
+    json_add_string(json, "current_path", status.current_path);
+    json_add_string(json, "configured_team_id",
+                    config.sleephq_team_id.c_str());
+    json_add_string(json, "device_id",
+                    config.sleephq_device_id.c_str());
+    json_add_int(json, "team_id",
+                 static_cast<long>(status.team_id));
+    json_add_int(json, "import_id",
+                 static_cast<long>(status.import_id));
+    json_add_string(json, "import_status", status.import_status);
+    json_add_int(json, "files_seen",
+                 static_cast<long>(status.files_seen));
+    json_add_int(json, "files_uploaded",
+                 static_cast<long>(status.files_uploaded));
+    json_add_int(json, "files_skipped",
+                 static_cast<long>(status.files_skipped));
+    json_add_int(json, "files_failed",
+                 static_cast<long>(status.files_failed));
+    json_add_uint64(json, "bytes_uploaded", status.bytes_uploaded);
+    json_add_uint64(json, "last_check_epoch", status.last_check_epoch);
+    json_add_uint64(json, "last_sync_epoch", status.last_sync_epoch);
+    json_add_int(json, "last_sync_files_seen",
+                 static_cast<long>(status.last_sync_files_seen));
+    json_add_int(json, "last_sync_files_uploaded",
+                 static_cast<long>(status.last_sync_files_uploaded));
+    json_add_int(json, "last_sync_files_failed",
+                 static_cast<long>(status.last_sync_files_failed));
+    json_add_uint64(json, "last_sync_bytes_uploaded",
+                    status.last_sync_bytes_uploaded);
+    json_add_uint64(json, "last_failure_epoch", status.last_failure_epoch);
+    json_add_int(json, "started_ms",
+                 static_cast<long>(status.started_ms));
+    json_add_int(json, "updated_ms",
+                 static_cast<long>(status.updated_ms));
 }
 
 class StorageJobGate {
@@ -539,6 +597,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   StorageArchiveJob &storage_archive_job,
                   StorageDeleteJob &storage_delete_job,
                   StorageSyncJob *storage_sync_job,
+                  SleepHqSyncJob *sleephq_sync_job,
                   ConsoleContext &console_ctx,
                   uint16_t port) {
     if (started_) return true;
@@ -557,6 +616,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     storage_archive_job_ = &storage_archive_job;
     storage_delete_job_ = &storage_delete_job;
     storage_sync_job_ = storage_sync_job;
+    sleephq_sync_job_ = sleephq_sync_job;
     console_ctx_ = &console_ctx;
 
     command_mutex_ = xSemaphoreCreateMutex();
@@ -1533,6 +1593,12 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
                      static_cast<long>(sync.retry_due_ms));
         json += '}';
     }
+    if (sleephq_sync_job_) {
+        const SleepHqSyncStatus sync = sleephq_sync_job_->status();
+        json += ",\"sleephq_sync\":{";
+        append_sleephq_sync_json(json, sync, app_config_->data(), false);
+        json += '}';
+    }
     json_add_string_view(json, "wifi_state", wifi.state);
     json_add_string_view(json, "wifi_ssid", wifi.ssid);
     json_add_string(json, "wifi_ip", wifi.ip);
@@ -1943,7 +2009,8 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
                                 storage_delete_job_,
-                                storage_sync_job_)) {
+                                storage_sync_job_,
+                                sleephq_sync_job_)) {
         return;
     }
 
@@ -2016,7 +2083,8 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
         if (!storage_jobs_available(request,
                                     storage_archive_job_,
                                     storage_delete_job_,
-                                    storage_sync_job_)) {
+                                    storage_sync_job_,
+                                    sleephq_sync_job_)) {
             return;
         }
 
@@ -2065,7 +2133,8 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
                                 storage_delete_job_,
-                                storage_sync_job_)) {
+                                storage_sync_job_,
+                                sleephq_sync_job_)) {
         return;
     }
 
@@ -2163,7 +2232,8 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
     if (!storage_jobs_available(request,
                                 nullptr,
                                 storage_delete_job_,
-                                storage_sync_job_)) {
+                                storage_sync_job_,
+                                sleephq_sync_job_)) {
         return;
     }
 
@@ -2250,7 +2320,8 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
                                 storage_delete_job_,
-                                storage_sync_job_)) {
+                                storage_sync_job_,
+                                sleephq_sync_job_)) {
         return;
     }
 
@@ -2339,7 +2410,8 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
                                 storage_delete_job_,
-                                storage_sync_job_)) {
+                                storage_sync_job_,
+                                sleephq_sync_job_)) {
         return;
     }
     if (!storage_sync_job_->request_manual_sync()) {
@@ -2365,7 +2437,8 @@ void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
                                 storage_delete_job_,
-                                storage_sync_job_)) {
+                                storage_sync_job_,
+                                sleephq_sync_job_)) {
         return;
     }
     if (!storage_sync_job_->request_verify_recent()) {
@@ -2441,6 +2514,65 @@ void WebUI::send_storage_sync_status(AsyncWebServerRequest *request) const {
                  static_cast<long>(status.retry_due_ms));
     json_add_int(json, "retry_attempt",
                  static_cast<long>(status.retry_attempt));
+    json += '}';
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"status_alloc\"}");
+        return;
+    }
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    request->send(response);
+}
+
+void WebUI::send_sleephq_sync_start(AsyncWebServerRequest *request) const {
+    if (!sleephq_sync_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
+        return;
+    }
+    if (!sleephq_sync_job_->request_sync("manual")) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"sync_not_ready\"}");
+        return;
+    }
+    request->send(200, "application/json",
+                  "{\"ok\":true,\"queued\":true}");
+}
+
+void WebUI::send_sleephq_sync_check(AsyncWebServerRequest *request) const {
+    if (!sleephq_sync_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
+        return;
+    }
+    if (!sleephq_sync_job_->request_check("manual")) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"check_not_ready\"}");
+        return;
+    }
+    request->send(200, "application/json",
+                  "{\"ok\":true,\"queued\":true}");
+}
+
+void WebUI::send_sleephq_sync_status(AsyncWebServerRequest *request) const {
+    if (!sleephq_sync_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
+        return;
+    }
+    const SleepHqSyncStatus status = sleephq_sync_job_->status();
+    LargeTextBuffer json;
+    json.reserve(1024);
+    json = "{";
+    append_sleephq_sync_json(json, status, app_config_->data(), true);
     json += '}';
     if (json.overflowed()) {
         request->send(503, "application/json",
@@ -2541,6 +2673,15 @@ void WebUI::build_config_json(LargeTextBuffer &json) const {
     json_add_bool(json, "smb_password_set",
                   cfg.smb_password.length() > 0);
     json_add_string(json, "smb_password", "");
+    json_add_string(json, "sleephq_client_id",
+                    cfg.sleephq_client_id.c_str());
+    json_add_bool(json, "sleephq_client_secret_set",
+                  cfg.sleephq_client_secret.length() > 0);
+    json_add_string(json, "sleephq_client_secret", "");
+    json_add_string(json, "sleephq_team_id",
+                    cfg.sleephq_team_id.c_str());
+    json_add_string(json, "sleephq_device_id",
+                    cfg.sleephq_device_id.c_str());
     json_add_bool(json, "syslog_enabled", cfg.syslog_enabled);
     json_add_string(json, "syslog_host", cfg.syslog_host.c_str());
     json_add_int(json, "syslog_port", cfg.syslog_port);
@@ -3133,6 +3274,21 @@ void WebUI::register_routes() {
     server_->on("/api/storage/sync/status", HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_storage_sync_status(request);
+    });
+
+    server_->on("/api/sleephq/sync/start", HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        send_sleephq_sync_start(request);
+    });
+
+    server_->on("/api/sleephq/sync/check", HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        send_sleephq_sync_check(request);
+    });
+
+    server_->on("/api/sleephq/sync/status", HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_sleephq_sync_status(request);
     });
 
     server_->on("/api/report/summary", HTTP_GET,

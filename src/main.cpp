@@ -22,6 +22,7 @@
 #include "rpc_arbiter.h"
 #include "session_manager.h"
 #include "sink_manager.h"
+#include "sleephq_sync_job.h"
 #include "storage_archive_job.h"
 #include "storage_delete_job.h"
 #include "storage_manager.h"
@@ -58,6 +59,7 @@ static BackgroundWorker bg_worker;
 static StorageArchiveJob storage_archive_job;
 static StorageDeleteJob storage_delete_job;
 static StorageSyncJob *storage_sync_job = nullptr;
+static SleepHqSyncJob *sleephq_sync_job = nullptr;
 static ReportCacheWriterJob report_cache_writer_job(report_manager);
 static ReportPrefetchJob report_prefetch_job(report_manager);
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
@@ -75,6 +77,7 @@ static ConsoleContext console_ctx{
     edf_recorder_manager,
     oximetry_manager,
     report_manager,
+    nullptr,
     &web_ui,
 };
 
@@ -180,6 +183,16 @@ static StorageSyncJob *create_storage_sync_job() {
         return nullptr;
     }
     return new (memory) StorageSyncJob();
+}
+
+static SleepHqSyncJob *create_sleephq_sync_job() {
+    void *memory = Memory::alloc_large(sizeof(SleepHqSyncJob), false);
+    if (!memory) {
+        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
+                  "failed to allocate sync job in PSRAM\n");
+        return nullptr;
+    }
+    return new (memory) SleepHqSyncJob();
 }
 
 struct PostTherapyReportSyncHandoff {
@@ -397,6 +410,8 @@ void setup() {
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] management CLI ready\n");
 
     storage_sync_job = create_storage_sync_job();
+    sleephq_sync_job = create_sleephq_sync_job();
+    console_ctx.sleephq_sync_job = sleephq_sync_job;
     apply_storage_provisioning(app_config, wifi_manager);
     session_manager.begin();
     rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
@@ -432,6 +447,7 @@ void setup() {
                  storage_archive_job,
                  storage_delete_job,
                  storage_sync_job,
+                 sleephq_sync_job,
                  console_ctx);
 
     // Idle-time background storage worker (prefetch + plot build). Started last,
@@ -441,12 +457,18 @@ void setup() {
     if (storage_sync_job) {
         storage_sync_job->begin(app_config.data());
     }
+    if (sleephq_sync_job) {
+        sleephq_sync_job->begin(app_config.data());
+    }
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
     bg_worker.add_job(&report_cache_writer_job);
     bg_worker.add_job(&report_prefetch_job);
     if (storage_sync_job) {
         bg_worker.add_job(storage_sync_job);
+    }
+    if (sleephq_sync_job) {
+        bg_worker.add_job(sleephq_sync_job);
     }
     bg_worker.begin();
 }
@@ -527,6 +549,18 @@ void loop() {
         storage_sync_job->set_network_available(
             wifi_manager.mode_state() == WifiModeState::StaConnected);
         storage_sync_job->refresh_config(app_config.data(), now_ms);
+    }
+    if (sleephq_sync_job) {
+        sleephq_sync_job->set_network_available(
+            wifi_manager.mode_state() == WifiModeState::StaConnected);
+        sleephq_sync_job->set_runtime_blocked(
+            report_manager.foreground_busy() ||
+            rpc_arbiter.stream_activity_active() ||
+            resmed_ota_manager.transport_active() ||
+            ota_manager.active() ||
+            rpc_arbiter.as11_state().therapy_state() ==
+                As11TherapyState::Running);
+        sleephq_sync_job->refresh_config(app_config.data(), now_ms);
     }
     drain_can_rx_after("ota_storage_sync");
     // Publish the worker's gate inputs from here (the owner thread) so the

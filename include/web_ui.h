@@ -17,6 +17,7 @@
 #include "rpc_arbiter.h"
 #include "session_manager.h"
 #include "sink_manager.h"
+#include "sleephq_sync_job.h"
 #include "storage_archive_job.h"
 #include "storage_delete_job.h"
 #include "storage_sync_job.h"
@@ -99,6 +100,7 @@ public:
                StorageArchiveJob &storage_archive_job,
                StorageDeleteJob &storage_delete_job,
                StorageSyncJob *storage_sync_job,
+               SleepHqSyncJob *sleephq_sync_job,
                ConsoleContext &console_ctx,
                uint16_t port = 80);
     void stop();
@@ -127,6 +129,9 @@ private:
     void send_storage_sync_start(AsyncWebServerRequest *request) const;
     void send_storage_sync_verify(AsyncWebServerRequest *request) const;
     void send_storage_sync_status(AsyncWebServerRequest *request) const;
+    void send_sleephq_sync_start(AsyncWebServerRequest *request) const;
+    void send_sleephq_sync_check(AsyncWebServerRequest *request) const;
+    void send_sleephq_sync_status(AsyncWebServerRequest *request) const;
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json) const;
     void build_wifi_json(LargeTextBuffer &json) const;
@@ -225,6 +230,7 @@ private:
     StorageArchiveJob *storage_archive_job_ = nullptr;
     StorageDeleteJob *storage_delete_job_ = nullptr;
     StorageSyncJob *storage_sync_job_ = nullptr;
+    SleepHqSyncJob *sleephq_sync_job_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     ManagementConsole web_console_;

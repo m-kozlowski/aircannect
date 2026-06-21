@@ -1519,6 +1519,37 @@
               </div>
               <div class="msg" id="edfMsg"></div>
             </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="label">SleepHQ Sync</span>
+                <span class="badge" id="edfSleepHqBadge">--</span>
+              </div>
+              <div class="row">
+                <label>Endpoint</label>
+                <span class="value wrap" id="edfSleepHqEndpoint">--</span>
+              </div>
+              <div class="row">
+                <label>Status</label>
+                <span class="value wrap" id="edfSleepHqResult">--</span>
+              </div>
+              <div class="row">
+                <label>Last sync</label>
+                <span class="value wrap" id="edfSleepHqLast">--</span>
+              </div>
+              <div class="row">
+                <label>Last check</label>
+                <span class="value wrap" id="edfSleepHqCheck">--</span>
+              </div>
+              <div class="row">
+                <label>Activity</label>
+                <span class="value wrap" id="edfSleepHqCurrent">--</span>
+              </div>
+              <div class="btns">
+                <button class="btn primary" id="edfSleepHqSyncBtn" onclick="sleepHqStartSync()">Sync SleepHQ</button>
+                <button class="btn" id="edfSleepHqCheckBtn" onclick="sleepHqCheckAccount()">Check Account</button>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1941,6 +1972,7 @@
     let storageArchivePollTimer = null;
     let storageDeletePollTimer = null;
     let smbSyncPollTimer = null;
+    let sleepHqSyncPollTimer = null;
     let storageEntries = [];
     let storageSelectedNames = new Set();
     let storageArchiveBusy = false;
@@ -1949,6 +1981,9 @@
     let smbSyncEnabled = false;
     let smbSyncConfigured = false;
     let smbSyncCompleteMessage = "SMB sync complete";
+    let sleepHqSyncBusy = false;
+    let sleepHqSyncConfigured = false;
+    let sleepHqSyncCompleteMessage = "SleepHQ sync complete";
     let edfOverviewLoading = false;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
@@ -2044,6 +2079,7 @@
         loadStatus();
         loadEdfOverview();
         loadSmbSyncStatus();
+        loadSleepHqSyncStatus();
       }
       if (id === "storage") {
         loadStorageList(false);
@@ -3683,7 +3719,8 @@
 
     function storageSelectionUi() {
       const selected = storageSelectedNames.size;
-      const busy = storageArchiveBusy || storageDeleteBusy || smbSyncBusy;
+      const busy = storageArchiveBusy || storageDeleteBusy || smbSyncBusy ||
+        sleepHqSyncBusy;
       const selectAll = document.getElementById("storageSelectAll");
       if (selectAll) {
         const selectable = storageEntries.length;
@@ -3711,6 +3748,10 @@
       if (syncBtn) syncBtn.disabled = busy || !smbSyncEnabled || !smbSyncConfigured;
       const verifyBtn = document.getElementById("edfVerifyBtn");
       if (verifyBtn) verifyBtn.disabled = busy || !smbSyncEnabled || !smbSyncConfigured;
+      const sleepSyncBtn = document.getElementById("edfSleepHqSyncBtn");
+      if (sleepSyncBtn) sleepSyncBtn.disabled = busy || !sleepHqSyncConfigured;
+      const sleepCheckBtn = document.getElementById("edfSleepHqCheckBtn");
+      if (sleepCheckBtn) sleepCheckBtn.disabled = busy || !sleepHqSyncConfigured;
       document.querySelectorAll("[data-storage-action]").forEach((button) => {
         button.disabled = busy;
       });
@@ -3910,6 +3951,11 @@
 
     function smbSyncSetBusy(busy) {
       smbSyncBusy = !!busy;
+      storageSelectionUi();
+    }
+
+    function sleepHqSyncSetBusy(busy) {
+      sleepHqSyncBusy = !!busy;
       storageSelectionUi();
     }
 
@@ -4183,6 +4229,209 @@
     async function smbVerifyRecent() {
       await smbQueueAction("/api/storage/sync/verify",
         "Checking SMB share", "SMB check complete");
+    }
+
+    function sleepHqEndpointText(data) {
+      if (!data || data.ok === false) return "--";
+      if (!data.configured) return "Configure SleepHQ account first";
+      const team = data.team_id || data.configured_team_id;
+      return team ? "SleepHQ team " + team : "SleepHQ account";
+    }
+
+    function sleepHqFriendlyError(error) {
+      const text = String(error || "");
+      if (!text) return "Sync failed";
+      if (/tls_heap|heap/i.test(text)) return "Not enough free heap for TLS";
+      if (/auth|unauthor|token/i.test(text)) return "Authentication failed";
+      if (/connect|timed out|timeout/i.test(text)) return "Connection failed";
+      if (/team/i.test(text)) return "Team not found";
+      return text.replace(/^[a-z_]+:/i, "");
+    }
+
+    function sleepHqSyncResultText(data) {
+      if (!data || data.ok === false) return "Unavailable";
+      if (!data.configured) return "Configure SleepHQ account first";
+      const state = data.state || "unknown";
+      const seen = Number(data.files_seen) || 0;
+      const uploaded = Number(data.files_uploaded) || 0;
+      const failed = Number(data.files_failed) || 0;
+      if (state === "working") {
+        if (uploaded) {
+          return "Uploading: " + uploaded + " file" +
+            (uploaded === 1 ? "" : "s");
+        }
+        return seen ? "Checking files: " + seen + " seen" :
+          "Connecting to SleepHQ";
+      }
+      if (state === "pending") {
+        return data.network_available ? "Waiting to sync" :
+          "Waiting for network";
+      }
+      if (state === "error") {
+        const age = runtimeAgeText(data.updated_ms);
+        return "Last sync failed" + (age ? " " + age : "") + ": " +
+          sleepHqFriendlyError(data.error);
+      }
+      if (!data.started_ms && !data.last_check_epoch) return "Not checked yet";
+      if (failed) {
+        return "Last sync finished with " + failed + " failed file" +
+          (failed === 1 ? "" : "s");
+      }
+      if (uploaded) {
+        return "Synced: uploaded " + uploaded + " file" +
+          (uploaded === 1 ? "" : "s") + " (" +
+          fmtBytes(Number(data.bytes_uploaded) || 0) + ")";
+      }
+      if (seen && Number(data.files_skipped) === seen) {
+        return "Up to date (" + seen + " files checked)";
+      }
+      return "Ready";
+    }
+
+    function sleepHqSyncLastText(data) {
+      if (!data || data.ok === false || !data.configured) return "--";
+      const when = fmtStorageModified(data.last_sync_epoch);
+      const seen = Number(data.last_sync_files_seen) || 0;
+      const uploaded = Number(data.last_sync_files_uploaded) || 0;
+      const failed = Number(data.last_sync_files_failed) || 0;
+      const bytes = Number(data.last_sync_bytes_uploaded) || 0;
+      if (!when && !seen) return "--";
+      let text = when || "Completed";
+      if (failed) {
+        text += ", " + failed + " failed";
+      } else if (uploaded) {
+        text += ", uploaded " + uploaded + " file" +
+          (uploaded === 1 ? "" : "s") + " (" + fmtBytes(bytes) + ")";
+      } else if (seen) {
+        text += ", up to date";
+      }
+      return text;
+    }
+
+    function sleepHqSyncCheckText(data) {
+      if (!data || data.ok === false || !data.configured) return "--";
+      const when = fmtStorageModified(data.last_check_epoch);
+      return when || "--";
+    }
+
+    function sleepHqSyncNowText(data) {
+      if (!data || data.ok === false || !data.configured) return "--";
+      const state = data.state || "unknown";
+      if (state === "working") {
+        if (data.import_status) return "Processing import: " +
+          data.import_status;
+        return data.current_path ? "Uploading " + data.current_path :
+          "Working";
+      }
+      if (state === "pending") {
+        return data.network_available ? "Queued" : "Waiting for network";
+      }
+      return "--";
+    }
+
+    function sleepHqSyncStatusActive(data) {
+      if (!data || data.ok === false) return false;
+      return data.state === "working" || data.state === "pending" ||
+        !!data.pending;
+    }
+
+    function sleepHqSyncBadgeText(data) {
+      if (!data || data.ok === false) return "--";
+      if (!data.configured) return "Setup";
+      const state = data.state || "unknown";
+      if (state === "working") return "Syncing";
+      if (state === "pending") return "Queued";
+      if (state === "error") return "Error";
+      if (state === "disabled") return "Off";
+      return "Ready";
+    }
+
+    function renderSleepHqSyncStatus(data) {
+      const state = data && data.state ? data.state : "unknown";
+      up("edfSleepHqEndpoint", sleepHqEndpointText(data));
+      up("edfSleepHqResult", sleepHqSyncResultText(data));
+      up("edfSleepHqLast", sleepHqSyncLastText(data));
+      up("edfSleepHqCheck", sleepHqSyncCheckText(data));
+      up("edfSleepHqCurrent", sleepHqSyncNowText(data));
+      const badge = document.getElementById("edfSleepHqBadge");
+      if (badge) {
+        badge.textContent = sleepHqSyncBadgeText(data);
+        badge.className = "badge" +
+          (state === "error" ? " bad" :
+           (!data || !data.configured) ? " warn" :
+           (state === "working" || state === "pending") ? " warn" : " good");
+      }
+    }
+
+    async function loadSleepHqSyncStatus() {
+      try {
+        const response = await fetch("/api/sleephq/sync/status", {cache: "no-store"});
+        const text = await response.text();
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
+        const data = JSON.parse(text);
+        sleepHqSyncConfigured = !!data.configured;
+        renderSleepHqSyncStatus(data);
+        sleepHqSyncSetBusy(sleepHqSyncStatusActive(data));
+        return data;
+      } catch (error) {
+        sleepHqSyncConfigured = false;
+        up("edfSleepHqResult", error.message);
+        up("edfSleepHqLast", "--");
+        up("edfSleepHqCheck", "--");
+        up("edfSleepHqCurrent", "--");
+        sleepHqSyncSetBusy(false);
+        return null;
+      }
+    }
+
+    async function sleepHqPollSync() {
+      const data = await loadSleepHqSyncStatus();
+      const active = sleepHqSyncStatusActive(data);
+      if (!active && sleepHqSyncPollTimer) {
+        clearInterval(sleepHqSyncPollTimer);
+        sleepHqSyncPollTimer = null;
+      }
+      if (data && data.state === "error") {
+        msg("edfMsg", data.error || "SleepHQ sync failed", false, true);
+      } else if (data && !active && data.state === "idle") {
+        msg("edfMsg", sleepHqSyncCompleteMessage, true, false);
+      }
+      return !active;
+    }
+
+    async function sleepHqQueueAction(url, startMessage, completeMessage) {
+      if (sleepHqSyncPollTimer) clearInterval(sleepHqSyncPollTimer);
+      sleepHqSyncPollTimer = null;
+      sleepHqSyncCompleteMessage = completeMessage ||
+        "SleepHQ sync complete";
+      sleepHqSyncSetBusy(true);
+      msg("edfMsg", startMessage, true, false);
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          cache: "no-store",
+        });
+        const text = await response.text();
+        if (!response.ok) throw new Error(storageErrorText(text, response.status));
+        const done = await sleepHqPollSync();
+        if (!done) {
+          sleepHqSyncPollTimer = setInterval(sleepHqPollSync, 1000);
+        }
+      } catch (error) {
+        sleepHqSyncSetBusy(false);
+        await loadSleepHqSyncStatus();
+        msg("edfMsg", error.message, false, true);
+      }
+    }
+
+    async function sleepHqStartSync() {
+      await sleepHqQueueAction("/api/sleephq/sync/start",
+        "Starting SleepHQ sync", "SleepHQ sync complete");
+    }
+
+    async function sleepHqCheckAccount() {
+      await sleepHqQueueAction("/api/sleephq/sync/check",
+        "Checking SleepHQ account", "SleepHQ account check complete");
     }
 
     function storageArchiveDownload(id) {
@@ -4860,6 +5109,9 @@
       }
       if (data && data.smb_sync) {
         renderSmbSyncStatus(Object.assign({ok: true}, data.smb_sync));
+      }
+      if (data && data.sleephq_sync) {
+        renderSleepHqSyncStatus(Object.assign({ok: true}, data.sleephq_sync));
       }
     }
 
@@ -6543,6 +6795,10 @@
           ["smb_endpoint", "SMB Endpoint", "text"],
           ["smb_user", "SMB User", "text"],
           ["smb_password", "SMB Password", "password"],
+          ["sleephq_client_id", "SleepHQ Client ID", "text"],
+          ["sleephq_client_secret", "SleepHQ Client Secret", "password"],
+          ["sleephq_team_id", "SleepHQ Team ID", "text"],
+          ["sleephq_device_id", "SleepHQ Device ID", "text"],
           ["syslog_enabled", "Syslog", "bool"],
           ["syslog_host", "Syslog Host", "text"],
           ["syslog_port", "Syslog Port", "number"],
@@ -6589,6 +6845,16 @@
             if (field[0] === "smb_endpoint") {
               control.placeholder = "smb://host/share/path";
             }
+            if (field[0] === "sleephq_client_secret") {
+              control.placeholder = configData.sleephq_client_secret_set ? "set" : "empty";
+              if (configData.sleephq_client_secret_set) {
+                control.value = "********";
+              }
+            }
+            if (field[0] === "sleephq_team_id" ||
+                field[0] === "sleephq_device_id") {
+              control.placeholder = "optional numeric id";
+            }
             if (field[0] === "syslog_host") {
               control.placeholder = "IPv4 address";
             }
@@ -6616,6 +6882,7 @@
     function configFieldApplied(data, key, value) {
       if (!data) return false;
       if (key === "smb_password" ||
+          key === "sleephq_client_secret" ||
           key === "http_password" ||
           key === "ota_password") {
         if (value === "********") return true;
@@ -6661,6 +6928,11 @@
       return parts.length >= 2 && parts[0].length > 0 && parts[1].length > 0;
     }
 
+    function validOptionalNumericId(value) {
+      const text = String(value || "").trim();
+      return !text.length || /^\d+$/.test(text);
+    }
+
     function validIpv4(value) {
       const text = String(value || "").trim();
       if (!text.length) return true;
@@ -6704,6 +6976,16 @@
       if (Object.prototype.hasOwnProperty.call(changes, "smb_endpoint") &&
           !validSmbEndpoint(changes.smb_endpoint)) {
         msg("configMsg", "SMB endpoint must be smb://host/share[/path]", false);
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, "sleephq_team_id") &&
+          !validOptionalNumericId(changes.sleephq_team_id)) {
+        msg("configMsg", "SleepHQ team id must be numeric", false);
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, "sleephq_device_id") &&
+          !validOptionalNumericId(changes.sleephq_device_id)) {
+        msg("configMsg", "SleepHQ device id must be numeric", false);
         return;
       }
 

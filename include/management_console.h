@@ -12,6 +12,7 @@
 #include "rpc_arbiter.h"
 #include "session_manager.h"
 #include "sink_manager.h"
+#include "sleephq_sync_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
 #include "wifi_manager.h"
@@ -34,6 +35,7 @@ struct ConsoleContext {
     EdfRecorderManager &edf_recorder_manager;
     OximetryManager &oximetry_manager;
     ReportManager &report_manager;
+    SleepHqSyncJob *sleephq_sync_job = nullptr;
     WebUI *web_ui = nullptr;
 };
 
@@ -60,6 +62,7 @@ private:
                                  ConsoleContext &ctx);
     void handle_report_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_storage_command(Print &out, String rest, ConsoleContext &ctx);
+    void handle_sleephq_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_as11_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_therapy_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_config_command(Print &out, String rest, ConsoleContext &ctx);

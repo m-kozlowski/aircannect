@@ -382,6 +382,7 @@ const char *cat_name(log_cat_t cat) {
         case CAT_REPORT: return "REPORT";
         case CAT_EDF: return "EDF";
         case CAT_CONFIG: return "CONFIG";
+        case CAT_SLEEPHQ: return "SLEEPHQ";
         default: return "?";
     }
 }
@@ -465,6 +466,10 @@ bool parse_cat(String value, log_cat_t &cat) {
     }
     if (value == "config") {
         cat = CAT_CONFIG;
+        return true;
+    }
+    if (value == "sleephq" || value == "sleep-hq" || value == "shq") {
+        cat = CAT_SLEEPHQ;
         return true;
     }
     return false;

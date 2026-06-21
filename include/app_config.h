@@ -10,7 +10,7 @@
 
 namespace aircannect {
 
-static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 15;
+static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 16;
 
 struct AppConfigData {
     uint32_t schema_version = AC_CONFIG_SCHEMA_VERSION;
@@ -45,11 +45,17 @@ struct AppConfigData {
     String smb_user;
     String smb_password;
 
+    String sleephq_client_id;
+    String sleephq_client_secret;
+    String sleephq_team_id;
+    String sleephq_device_id;
+
     bool syslog_enabled = AC_DEFAULT_SYSLOG_ENABLED != 0;
     String syslog_host;
     uint16_t syslog_port = AC_SYSLOG_PORT;
 
     log_level_t log_levels[CAT_COUNT] = {
+        LOG_INFO,
         LOG_INFO,
         LOG_INFO,
         LOG_INFO,
@@ -87,6 +93,10 @@ public:
     bool set_smb_credentials(const String &endpoint,
                              const String &user,
                              const String &password);
+    bool set_sleephq_credentials(const String &client_id,
+                                 const String &client_secret,
+                                 const String &team_id,
+                                 const String &device_id);
 
     bool set_http_auth(const String &user, const String &password);
     bool set_auth_whitelist(const String &whitelist);
