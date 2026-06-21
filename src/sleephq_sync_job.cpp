@@ -1,11 +1,9 @@
 #include "sleephq_sync_job.h"
 
-#include <ctype.h>
 #include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include <esp_rom_md5.h>
 
@@ -41,36 +39,9 @@ void sleep_hq_digest_to_hex(const uint8_t digest[16],
     out[32] = '\0';
 }
 
-enum class ImportStatusKind : uint8_t {
-    Success,
-    Transient,
-    Failure,
-    Unknown,
-};
-
 uint32_t millis_nonzero() {
     const uint32_t now = millis();
     return now == 0 ? 1 : now;
-}
-
-bool status_is_one_of(const char *status, const char *const *values,
-                      size_t count) {
-    if (!status || !status[0]) return false;
-    for (size_t i = 0; i < count; ++i) {
-        if (strcasecmp(status, values[i]) == 0) return true;
-    }
-    return false;
-}
-
-bool status_contains_failure_token(const char *status) {
-    if (!status || !status[0]) return false;
-    char lower[AC_SLEEPHQ_STATUS_MAX] = {};
-    copy_cstr(lower, sizeof(lower), status);
-    for (char *p = lower; *p; ++p) {
-        *p = static_cast<char>(tolower(static_cast<unsigned char>(*p)));
-    }
-    return strstr(lower, "fail") || strstr(lower, "error") ||
-           strstr(lower, "reject") || strstr(lower, "cancel");
 }
 
 bool parse_http_error_code(const char *error, int &code) {
@@ -114,53 +85,6 @@ bool sleep_hq_error_retryable(const char *error) {
         if (strcmp(error, item) == 0) return false;
     }
     return true;
-}
-
-ImportStatusKind classify_import_status(const char *status) {
-    static const char *const SUCCESS[] = {
-        "processed",
-        "complete",
-        "completed",
-        "finished",
-        "success",
-        "succeeded",
-    };
-    static const char *const TRANSIENT[] = {
-        "created",
-        "new",
-        "pending",
-        "queued",
-        "ready",
-        "uploading",
-        "uploaded",
-        "unpacking",
-        "processing",
-        "importing",
-    };
-    static const char *const FAILURE[] = {
-        "failed",
-        "failure",
-        "error",
-        "errored",
-        "rejected",
-        "cancelled",
-        "canceled",
-    };
-
-    if (status_is_one_of(status, SUCCESS,
-                         sizeof(SUCCESS) / sizeof(SUCCESS[0]))) {
-        return ImportStatusKind::Success;
-    }
-    if (status_is_one_of(status, TRANSIENT,
-                         sizeof(TRANSIENT) / sizeof(TRANSIENT[0]))) {
-        return ImportStatusKind::Transient;
-    }
-    if (status_is_one_of(status, FAILURE,
-                         sizeof(FAILURE) / sizeof(FAILURE[0])) ||
-        status_contains_failure_token(status)) {
-        return ImportStatusKind::Failure;
-    }
-    return ImportStatusKind::Unknown;
 }
 
 }  // namespace
@@ -1549,26 +1473,26 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
     if (import.id) status_.import_id = import.id;
     status_.updated_ms = now;
 
-    switch (classify_import_status(import.status)) {
-        case ImportStatusKind::Success:
+    switch (sleephq_classify_import_status(import.status)) {
+        case SleepHqImportStatusKind::Success:
             mark_index_ = 0;
             phase_ = WorkPhase::MarkState;
             return JobStep::Working;
-        case ImportStatusKind::Failure:
+        case SleepHqImportStatusKind::Failure:
             copy_cstr(error, error_size,
                       import.failed_reason[0] ? import.failed_reason
                                                : "import_failed");
             remove_inflight_locked();
             fail_locked(error);
             return JobStep::Idle;
-        case ImportStatusKind::Unknown:
+        case SleepHqImportStatusKind::Unknown:
             if (strcmp(previous_status, import.status) != 0) {
                 Log::logf(CAT_SLEEPHQ, LOG_WARN,
                           "unknown import status treated as transient: %s\n",
                           import.status[0] ? import.status : "<empty>");
             }
             break;
-        case ImportStatusKind::Transient:
+        case SleepHqImportStatusKind::Transient:
             break;
     }
 

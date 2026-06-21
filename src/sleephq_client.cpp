@@ -85,23 +85,6 @@ bool json_string_to_u32(JsonVariantConst value, uint32_t &out) {
     return false;
 }
 
-bool json_string_to_u64(JsonVariantConst value, uint64_t &out) {
-    if (value.is<uint64_t>()) {
-        out = value.as<uint64_t>();
-        return true;
-    }
-    if (value.is<const char *>()) {
-        const char *text = value.as<const char *>();
-        if (!text || !*text) return false;
-        char *end = nullptr;
-        const unsigned long long parsed = strtoull(text, &end, 10);
-        if (!end || *end != '\0') return false;
-        out = static_cast<uint64_t>(parsed);
-        return true;
-    }
-    return false;
-}
-
 const char *json_string_or_empty(JsonVariantConst value) {
     return value.is<const char *>() ? value.as<const char *>() : "";
 }
@@ -1030,45 +1013,17 @@ bool SleepHqClient::parse_file_list(const SleepHqHttpResponse &response,
                                     void *ctx,
                                     size_t &count,
                                     bool &has_more) {
-    count = 0;
-    has_more = false;
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, response.body.c_str());
-    if (err) {
-        set_error("file_list_json_parse");
-        return false;
-    }
-    JsonArrayConst data = doc["data"].as<JsonArrayConst>();
-    if (data.isNull()) {
-        set_error("file_list_missing");
-        return false;
-    }
-
-    for (JsonVariantConst item : data) {
-        JsonVariantConst attr = item["attributes"];
-        SleepHqRemoteFile file;
-        json_string_to_u32(attr["id"], file.id);
-        json_string_to_u64(attr["size"], file.size);
-        copy_cstr(file.name,
-                  sizeof(file.name),
-                  json_string_or_empty(attr["name"]));
-        copy_cstr(file.path,
-                  sizeof(file.path),
-                  json_string_or_empty(attr["path"]));
-        copy_cstr(file.content_hash,
-                  sizeof(file.content_hash),
-                  json_string_or_empty(attr["content_hash"]));
-        if (file.id == 0) {
-            json_string_to_u32(item["id"], file.id);
-        }
-        if (!callback(ctx, file)) {
-            set_error("file_list_callback_failed");
-            return false;
-        }
-        count++;
-    }
-    has_more = count >= per_page;
-    return true;
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    const bool ok = sleephq_parse_remote_file_list_json(response.body.c_str(),
+                                                        per_page,
+                                                        callback,
+                                                        ctx,
+                                                        count,
+                                                        has_more,
+                                                        error,
+                                                        sizeof(error));
+    if (!ok) set_error(error);
+    return ok;
 }
 
 bool SleepHqClient::parse_import(const SleepHqHttpResponse &response,
