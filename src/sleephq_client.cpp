@@ -30,7 +30,10 @@ static constexpr size_t SLEEPHQ_CREATE_IMPORT_BODY_RESERVE = 96;
 static constexpr size_t SLEEPHQ_MIN_INTERNAL_FREE = 60 * 1024;
 static constexpr size_t SLEEPHQ_MIN_INTERNAL_MAX_ALLOC = 36 * 1024;
 
-static const char *GTS_ROOT_R4_CA =
+// SleepHQ currently serves a Google Trust Services WE1 chain rooted at GTS
+// Root R4. This intentionally fails closed if SleepHQ changes CA families; do
+// not replace it with setInsecure().
+static const char *SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA =
     "-----BEGIN CERTIFICATE-----\n"
     "MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n"
     "VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
@@ -169,7 +172,7 @@ bool SleepHqClient::ensure_connected() {
     if (!tls_heap_available()) return false;
 
     client_.stop();
-    client_.setCACert(GTS_ROOT_R4_CA);
+    client_.setCACert(SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA);
     client_.setTimeout(SLEEPHQ_HTTP_TIMEOUT_MS / 1000);
     if (!client_.connect(SLEEPHQ_HOST, SLEEPHQ_PORT)) {
         set_error("connect_failed");
