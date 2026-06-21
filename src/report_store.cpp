@@ -105,7 +105,9 @@ float milli_to_float(int32_t value) {
 
 bool valid_key(const ReportStoreChunkKey &key) {
     return key.source && key.source[0] && key.name && key.name[0] &&
-           key.start_ms >= 0 && key.end_ms > key.start_ms;
+           key.start_ms >= 0 && key.end_ms > key.start_ms &&
+           (key.origin == ReportStoreChunkOrigin::Spool ||
+            key.origin == ReportStoreChunkOrigin::Live);
 }
 
 bool valid_chunk_meta(const ReportStoreChunkMeta &meta) {
@@ -428,11 +430,23 @@ bool decode_header(const uint8_t *header,
                    const ReportStoreChunkKey &key,
                    ReportStoreChunkMeta &meta,
                    uint32_t &payload_len,
-                   uint32_t &payload_crc) {
+                   uint32_t &payload_crc,
+                   ReportStoreChunkOrigin *origin_out = nullptr) {
     if (get_le32(header + 0) != CHUNK_MAGIC) return false;
     if (get_le16(header + 4) != CHUNK_SCHEMA) return false;
     if (get_le16(header + 6) != CHUNK_HEADER_SIZE) return false;
     if (header[8] != static_cast<uint8_t>(key.kind)) return false;
+    const ReportStoreChunkOrigin origin =
+        static_cast<ReportStoreChunkOrigin>(header[9]);
+    if (origin != ReportStoreChunkOrigin::Spool &&
+        origin != ReportStoreChunkOrigin::Live) {
+        return false;
+    }
+    if (origin_out) {
+        *origin_out = origin;
+    } else if (origin != key.origin) {
+        return false;
+    }
     if (static_cast<int64_t>(get_le64(header + 12)) != key.start_ms) {
         return false;
     }
@@ -479,6 +493,12 @@ bool decode_chunk_index_record(const uint8_t *raw,
         return false;
     }
     if (raw[8] != static_cast<uint8_t>(query.kind)) return false;
+    const ReportStoreChunkOrigin origin =
+        static_cast<ReportStoreChunkOrigin>(raw[9]);
+    if (origin != ReportStoreChunkOrigin::Spool &&
+        origin != ReportStoreChunkOrigin::Live) {
+        return false;
+    }
     if (get_le32(raw + 12) != string_hash(query.source)) return false;
     if (get_le32(raw + 16) != string_hash(query.name)) return false;
 
@@ -486,13 +506,248 @@ bool decode_chunk_index_record(const uint8_t *raw,
     info.key.kind = query.kind;
     info.key.source = query.source;
     info.key.name = query.name;
-    info.key.origin = static_cast<ReportStoreChunkOrigin>(raw[9]);
+    info.key.origin = origin;
     info.key.start_ms = static_cast<int64_t>(get_le64(raw + 20));
     info.key.end_ms = static_cast<int64_t>(get_le64(raw + 28));
+    info.key.night_start_ms = query.night_start_ms;
     info.meta.payload_schema = get_le32(raw + 36);
     info.meta.record_count = get_le32(raw + 40);
     info.payload_len = get_le32(raw + 44);
     return valid_key(info.key) && valid_chunk_meta(info.meta);
+}
+
+bool parse_chunk_filename(const char *name,
+                          int64_t &start_ms,
+                          int64_t &end_ms);
+
+bool read_chunk_file_info(const ReportStoreChunkKey &key,
+                          ReportStoreChunkInfo &info) {
+    char path[REPORT_PATH_MAX];
+    if (!build_chunk_path(key, path, sizeof(path))) return false;
+    File file = Storage::open(path, "r");
+    if (!file) return false;
+
+    uint8_t header[CHUNK_HEADER_SIZE];
+    uint32_t payload_crc = 0;
+    ReportStoreChunkOrigin origin = ReportStoreChunkOrigin::Spool;
+    bool ok = read_all(file, header, sizeof(header)) &&
+              decode_header(header,
+                            key,
+                            info.meta,
+                            info.payload_len,
+                            payload_crc,
+                            &origin);
+    if (ok) {
+        const size_t expected_size =
+            CHUNK_HEADER_SIZE + static_cast<size_t>(info.payload_len);
+        ok = file.size() == expected_size;
+    }
+    file.close();
+    if (!ok) {
+        info = {};
+        return false;
+    }
+    info.key = key;
+    info.key.origin = origin;
+    return true;
+}
+
+bool chunk_index_record_matches(const ReportStoreChunkInfo &info,
+                                const ReportStoreChunkKey &key,
+                                const ReportStoreChunkMeta &meta,
+                                uint32_t payload_len) {
+    return info.key.origin == key.origin && info.key.start_ms == key.start_ms &&
+           info.key.end_ms == key.end_ms &&
+           info.key.night_start_ms == key.night_start_ms &&
+           info.meta.payload_schema == meta.payload_schema &&
+           info.meta.record_count == meta.record_count &&
+           info.payload_len == payload_len;
+}
+
+bool chunk_index_record_same_file(const ReportStoreChunkInfo &info,
+                                  const ReportStoreChunkKey &key) {
+    return info.key.start_ms == key.start_ms &&
+           info.key.end_ms == key.end_ms &&
+           info.key.night_start_ms == key.night_start_ms;
+}
+
+bool chunk_index_record_matches_payload(const ReportStoreChunkInfo &info) {
+    ReportStoreChunkInfo actual;
+    if (!read_chunk_file_info(info.key, actual)) return false;
+    return chunk_index_record_matches(actual,
+                                      info.key,
+                                      info.meta,
+                                      info.payload_len);
+}
+
+bool rewrite_chunk_index_with_record(const ReportStoreChunkKey &key,
+                                     const ReportStoreChunkMeta &meta,
+                                     uint32_t payload_len) {
+    char path[REPORT_PATH_MAX];
+    if (!build_chunk_index_path(key, path, sizeof(path))) {
+        note_error("bad_chunk_index_path", &current.write_errors);
+        return false;
+    }
+
+    char tmp_path[REPORT_PATH_MAX + 8];
+    const int tmp_written =
+        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    if (tmp_written <= 0 ||
+        static_cast<size_t>(tmp_written) >= sizeof(tmp_path)) {
+        note_error("bad_chunk_index_tmp", &current.write_errors);
+        return false;
+    }
+
+    Storage::remove(tmp_path);
+    File tmp = Storage::open(tmp_path, "w");
+    if (!tmp) {
+        note_error("chunk_index_tmp_open_failed", &current.write_errors);
+        return false;
+    }
+
+    bool ok = true;
+    uint8_t raw[CHUNK_INDEX_RECORD_SIZE];
+    if (Storage::exists(path)) {
+        File index = Storage::open(path, "r");
+        if (!index) {
+            tmp.close();
+            Storage::remove(tmp_path);
+            note_error("chunk_index_open_failed", &current.write_errors);
+            return false;
+        }
+
+        for (;;) {
+            const int got = index.read(raw, sizeof(raw));
+            if (got == 0) break;
+            if (got != static_cast<int>(sizeof(raw))) {
+                break;
+            }
+
+            ReportStoreChunkInfo info;
+            if (!decode_chunk_index_record(raw, key, info)) continue;
+            if (chunk_index_record_same_file(info, key)) continue;
+            if (!chunk_index_record_matches_payload(info)) continue;
+            if (!write_all(tmp, raw, sizeof(raw))) {
+                ok = false;
+                note_error("chunk_index_rewrite_failed",
+                           &current.write_errors);
+                break;
+            }
+        }
+        index.close();
+    }
+
+    if (ok) {
+        encode_chunk_index_record(raw, key, meta, payload_len);
+        ok = write_all(tmp, raw, sizeof(raw));
+        if (!ok) {
+            note_error("chunk_index_write_failed", &current.write_errors);
+        }
+    }
+    tmp.close();
+    if (!ok) {
+        Storage::remove(tmp_path);
+        return false;
+    }
+
+    Storage::remove(path);
+    if (!Storage::rename(tmp_path, path)) {
+        Storage::remove(tmp_path);
+        note_error("chunk_index_commit_failed", &current.write_errors);
+        return false;
+    }
+    return true;
+}
+
+bool rebuild_chunk_index_from_directory(const ReportStoreChunkKey &dir_key) {
+    char dir_path[REPORT_PATH_MAX];
+    char index_path[REPORT_PATH_MAX];
+    if (!build_dir_path(dir_key, dir_path, sizeof(dir_path)) ||
+        !build_chunk_index_path(dir_key, index_path, sizeof(index_path))) {
+        note_error("bad_chunk_index_path", &current.write_errors);
+        return false;
+    }
+
+    char tmp_path[REPORT_PATH_MAX + 8];
+    const int tmp_written =
+        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", index_path);
+    if (tmp_written <= 0 ||
+        static_cast<size_t>(tmp_written) >= sizeof(tmp_path)) {
+        note_error("bad_chunk_index_tmp", &current.write_errors);
+        return false;
+    }
+
+    File dir = Storage::open(dir_path, "r");
+    if (!dir) {
+        Storage::remove(index_path);
+        return true;
+    }
+    if (!dir.isDirectory()) {
+        dir.close();
+        note_error("chunk_path_not_dir", &current.write_errors);
+        return false;
+    }
+
+    Storage::remove(tmp_path);
+    File tmp = Storage::open(tmp_path, "w");
+    if (!tmp) {
+        dir.close();
+        note_error("chunk_index_tmp_open_failed", &current.write_errors);
+        return false;
+    }
+
+    bool ok = true;
+    bool wrote = false;
+    while (ok) {
+        File child = dir.openNextFile();
+        if (!child) break;
+        const bool child_is_dir = child.isDirectory();
+        char child_name[REPORT_PATH_MAX];
+        copy_cstr(child_name, sizeof(child_name), child.name());
+        child.close();
+        if (child_is_dir) continue;
+
+        int64_t chunk_start = 0;
+        int64_t chunk_end = 0;
+        if (!parse_chunk_filename(child_name, chunk_start, chunk_end)) {
+            continue;
+        }
+
+        ReportStoreChunkKey key = dir_key;
+        key.start_ms = chunk_start;
+        key.end_ms = chunk_end;
+
+        ReportStoreChunkInfo info;
+        if (!read_chunk_file_info(key, info)) continue;
+
+        uint8_t raw[CHUNK_INDEX_RECORD_SIZE];
+        encode_chunk_index_record(raw, info.key, info.meta, info.payload_len);
+        if (!write_all(tmp, raw, sizeof(raw))) {
+            ok = false;
+            note_error("chunk_index_rebuild_failed", &current.write_errors);
+            break;
+        }
+        wrote = true;
+    }
+    dir.close();
+    tmp.close();
+
+    if (!ok) {
+        Storage::remove(tmp_path);
+        return false;
+    }
+
+    Storage::remove(index_path);
+    if (!wrote) {
+        Storage::remove(tmp_path);
+        return true;
+    }
+    if (!Storage::rename(tmp_path, index_path)) {
+        Storage::remove(tmp_path);
+        note_error("chunk_index_commit_failed", &current.write_errors);
+        return false;
+    }
+    return true;
 }
 
 bool chunk_index_contains(const ReportStoreChunkKey &key,
@@ -512,11 +767,8 @@ bool chunk_index_contains(const ReportStoreChunkKey &key,
     while (file.read(raw, sizeof(raw)) == static_cast<int>(sizeof(raw))) {
         ReportStoreChunkInfo info;
         if (!decode_chunk_index_record(raw, key, info)) continue;
-        if (info.key.start_ms == key.start_ms &&
-            info.key.end_ms == key.end_ms &&
-            info.meta.payload_schema == meta.payload_schema &&
-            info.meta.record_count == meta.record_count &&
-            info.payload_len == payload_len) {
+        if (chunk_index_record_matches(info, key, meta, payload_len) &&
+            chunk_index_record_matches_payload(info)) {
             found = true;
             break;
         }
@@ -529,27 +781,7 @@ bool ensure_chunk_index_record(const ReportStoreChunkKey &key,
                                const ReportStoreChunkMeta &meta,
                                uint32_t payload_len) {
     if (chunk_index_contains(key, meta, payload_len)) return true;
-
-    char path[REPORT_PATH_MAX];
-    if (!build_chunk_index_path(key, path, sizeof(path))) {
-        note_error("bad_chunk_index_path", &current.write_errors);
-        return false;
-    }
-
-    File file = Storage::open(path, "a");
-    if (!file) {
-        note_error("chunk_index_open_failed", &current.write_errors);
-        return false;
-    }
-    uint8_t raw[CHUNK_INDEX_RECORD_SIZE];
-    encode_chunk_index_record(raw, key, meta, payload_len);
-    const bool ok = write_all(file, raw, sizeof(raw));
-    file.close();
-    if (!ok) {
-        note_error("chunk_index_write_failed", &current.write_errors);
-        return false;
-    }
-    return true;
+    return rewrite_chunk_index_with_record(key, meta, payload_len);
 }
 
 bool parse_int64_until(const char *&cursor,
@@ -876,8 +1108,13 @@ bool write_chunk(const ReportStoreChunkKey &key,
         return false;
     }
     if (Storage::exists(final_path)) {
+        ReportStoreChunkInfo existing;
+        if (!read_chunk_file_info(key, existing)) {
+            note_error("chunk_header_failed", &current.write_errors);
+            return false;
+        }
         return ensure_chunk_index_record(
-            key, meta, static_cast<uint32_t>(len));
+            existing.key, existing.meta, existing.payload_len);
     }
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path);
     Storage::remove(tmp_path);
@@ -1020,20 +1257,25 @@ bool for_each_chunk(ReportStoreChunkKind kind,
         }
 
         bool ok = true;
+        bool dirty = false;
         while (true) {
             uint8_t raw[CHUNK_INDEX_RECORD_SIZE];
             const int got = index.read(raw, sizeof(raw));
             if (got == 0) break;
             if (got != static_cast<int>(sizeof(raw))) {
-                ok = false;
+                dirty = true;
                 note_error("chunk_index_short_read", &current.read_errors);
                 break;
             }
             ReportStoreChunkInfo info;
             if (!decode_chunk_index_record(raw, dir_key, info)) {
-                ok = false;
-                note_error("chunk_index_bad_record", &current.read_errors);
-                break;
+                dirty = true;
+                current.read_errors++;
+                continue;
+            }
+            if (!chunk_index_record_matches_payload(info)) {
+                dirty = true;
+                continue;
             }
             if (!ranges_overlap(info.key.start_ms,
                                 info.key.end_ms,
@@ -1049,6 +1291,9 @@ bool for_each_chunk(ReportStoreChunkKind kind,
             }
         }
         index.close();
+        if (ok && dirty && !rebuild_chunk_index_from_directory(dir_key)) {
+            ok = false;
+        }
         if (ok) set_error(current.last_error, sizeof(current.last_error), "");
         return ok;
     }
@@ -1065,16 +1310,16 @@ bool for_each_chunk(ReportStoreChunkKind kind,
     while (true) {
         File file = dir.openNextFile();
         if (!file) break;
-        if (file.isDirectory()) {
-            file.close();
-            continue;
-        }
+        const bool child_is_dir = file.isDirectory();
+        char child_name[REPORT_PATH_MAX];
+        copy_cstr(child_name, sizeof(child_name), file.name());
+        file.close();
+        if (child_is_dir) continue;
 
         int64_t chunk_start = 0;
         int64_t chunk_end = 0;
-        if (!parse_chunk_filename(file.name(), chunk_start, chunk_end) ||
+        if (!parse_chunk_filename(child_name, chunk_start, chunk_end) ||
             !ranges_overlap(chunk_start, chunk_end, start_ms, end_ms)) {
-            file.close();
             continue;
         }
 
@@ -1084,37 +1329,25 @@ bool for_each_chunk(ReportStoreChunkKind kind,
         key.name = name;
         key.start_ms = chunk_start;
         key.end_ms = chunk_end;
+        key.night_start_ms = night_start_ms;
 
-        uint8_t header[CHUNK_HEADER_SIZE];
         ReportStoreChunkInfo info;
-        uint32_t payload_crc = 0;
-        if (!read_all(file, header, sizeof(header)) ||
-            !decode_header(header,
-                           key,
-                           info.meta,
-                           info.payload_len,
-                           payload_crc)) {
+        if (!read_chunk_file_info(key, info)) {
             ok = false;
-            file.close();
             note_error("chunk_header_failed", &current.read_errors);
-            break;
-        }
-        info.key = key;
-        if (!ensure_chunk_index_record(key, info.meta, info.payload_len)) {
-            ok = false;
-            file.close();
             break;
         }
         current.chunks_listed++;
         if (!callback(context, info)) {
             ok = false;
-            file.close();
             note_error("chunk_callback_rejected", &current.read_errors);
             break;
         }
-        file.close();
     }
     dir.close();
+    if (ok && !rebuild_chunk_index_from_directory(dir_key)) {
+        ok = false;
+    }
     if (ok) set_error(current.last_error, sizeof(current.last_error), "");
     return ok;
 }
@@ -1187,10 +1420,9 @@ bool clear_chunks(ReportStoreChunkKind kind,
             }
             ReportStoreChunkInfo info;
             if (!decode_chunk_index_record(raw, dir_key, info)) {
-                ok = false;
-                note_error("chunk_index_bad_record", &current.write_errors);
-                break;
+                continue;
             }
+            if (!chunk_index_record_matches_payload(info)) continue;
             if (ranges_overlap(info.key.start_ms,
                                info.key.end_ms,
                                start_ms,
@@ -1204,7 +1436,7 @@ bool clear_chunks(ReportStoreChunkKind kind,
                     break;
                 }
                 const bool existed = Storage::exists(chunk_path);
-                if (!Storage::remove(chunk_path)) {
+                if (existed && !Storage::remove(chunk_path)) {
                     ok = false;
                     note_error("chunk_remove_failed", &current.write_errors);
                     break;
@@ -1258,15 +1490,16 @@ bool clear_chunks(ReportStoreChunkKind kind,
     while (true) {
         File file = dir.openNextFile();
         if (!file) break;
-        if (file.isDirectory()) {
-            file.close();
-            continue;
-        }
+        const bool child_is_dir = file.isDirectory();
+        char child_name[REPORT_PATH_MAX];
+        copy_cstr(child_name, sizeof(child_name), file.name());
+        file.close();
+        if (child_is_dir) continue;
+
         int64_t chunk_start = 0;
         int64_t chunk_end = 0;
-        if (!parse_chunk_filename(file.name(), chunk_start, chunk_end) ||
+        if (!parse_chunk_filename(child_name, chunk_start, chunk_end) ||
             !ranges_overlap(chunk_start, chunk_end, start_ms, end_ms)) {
-            file.close();
             continue;
         }
         ReportStoreChunkKey key;
@@ -1275,10 +1508,10 @@ bool clear_chunks(ReportStoreChunkKind kind,
         key.name = name;
         key.start_ms = chunk_start;
         key.end_ms = chunk_end;
+        key.night_start_ms = night_start_ms;
         char chunk_path[REPORT_PATH_MAX];
         const bool path_ok =
             build_chunk_path(key, chunk_path, sizeof(chunk_path));
-        file.close();
         if (!path_ok || !Storage::remove(chunk_path)) {
             ok = false;
             note_error("chunk_remove_failed", &current.write_errors);
