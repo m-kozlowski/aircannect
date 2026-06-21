@@ -223,6 +223,15 @@ private:
     bool staged_contains_locked(const char *path,
                                 uint64_t size,
                                 uint64_t mtime) const;
+    bool datalog_day_done_path_locked(const char *day,
+                                      char *out,
+                                      size_t out_size) const;
+    bool datalog_day_done_locked(const char *day) const;
+    bool mark_datalog_day_done_locked(const char *day);
+    bool datalog_day_is_finalized_locked(const char *day) const;
+    void refresh_latest_datalog_day_name_locked();
+    void note_completed_datalog_day_locked(const char *day);
+    void maybe_mark_completed_datalog_day_locked();
     bool write_state_locked(const StagedFile &file);
     bool append_state_locked(const StagedFile &file);
     bool replace_state_locked(const StagedFile &file);
@@ -345,6 +354,8 @@ private:
     bool remote_reconcile_all_missing_ = false;
     char remote_serial_[AC_SLEEPHQ_SERIAL_MAX] = {};
     char pending_rebuild_day_[9] = {};
+    char pending_done_day_[9] = {};
+    char latest_datalog_day_[9] = {};
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;

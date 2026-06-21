@@ -596,42 +596,10 @@ bool StorageSyncJob::latest_datalog_day_locked(char *out,
                                                size_t out_size,
                                                char *error_out,
                                                size_t error_out_size) const {
-    if (!out || out_size == 0) return false;
-    out[0] = '\0';
-    File dir;
-    StorageLocalNodeInfo dir_info;
-    {
-        Storage::Guard guard;
-        dir = Storage::open("/DATALOG", "r");
-        storage_read_local_node_info(dir, dir_info);
-    }
-    if (!dir_info.exists) return true;
-    if (!dir_info.is_dir) {
-        Storage::Guard guard;
-        dir.close();
-        return true;
-    }
-
-    char best[9] = {};
-    for (;;) {
-        StorageDirChild child;
-        if (!storage_read_next_dir_child(dir, child)) break;
-        if (child.is_dir && storage_export_is_datalog_day_name(child.name) &&
-            (best[0] == '\0' || strcmp(child.name, best) > 0)) {
-            copy_cstr(best, sizeof(best), child.name);
-        }
-    }
-    {
-        Storage::Guard guard;
-        dir.close();
-    }
-    if (!best[0]) return true;
-    const int written = snprintf(out, out_size, "/DATALOG/%s", best);
-    if (written <= 0 || static_cast<size_t>(written) >= out_size) {
-        copy_cstr(error_out, error_out_size, "latest_day_path_too_long");
-        return false;
-    }
-    return true;
+    return storage_export_latest_datalog_day_path(out,
+                                                  out_size,
+                                                  error_out,
+                                                  error_out_size);
 }
 
 void StorageSyncJob::close_latest_verify_locked() {

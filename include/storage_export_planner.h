@@ -42,6 +42,7 @@ struct StorageExportPlannerConfig {
     void *datalog_day_decision_ctx = nullptr;
     uint32_t max_datalog_days = 0;
     bool skip_completed_finalized_datalog_days = false;
+    bool trust_completed_finalized_datalog_days = false;
     bool require_pending_datalog_file = false;
 };
 

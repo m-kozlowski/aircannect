@@ -663,6 +663,8 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     import_poll_due_ms_ = 0;
     inflight_phase_ = InflightPhase::None;
     pending_rebuild_day_[0] = '\0';
+    pending_done_day_[0] = '\0';
+    latest_datalog_day_[0] = '\0';
     state_dir_[0] = 0;
     current_run_kind_ = RunKind::Check;
     abort_requested_.store(false);
@@ -820,10 +822,13 @@ void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
 
 bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
                                                  size_t error_out_size) {
+    refresh_latest_datalog_day_name_locked();
     StorageExportPlannerConfig config;
     config.scope = StorageExportPlannerScope::SleepHq;
     config.state_dir = state_dir_;
     config.state_cache = &state_cache_;
+    config.latest_datalog_day = latest_datalog_day_;
+    config.trust_completed_finalized_datalog_days = true;
     config.require_pending_datalog_file = true;
     config.datalog_day_decision =
         &SleepHqSyncJob::datalog_day_decision_cb;
@@ -845,6 +850,7 @@ void SleepHqSyncJob::reset_import_batch_locked() {
     import_poll_due_ms_ = 0;
     mark_index_ = 0;
     pending_rebuild_day_[0] = '\0';
+    pending_done_day_[0] = '\0';
     import_batch_active_ = false;
     phase_ = WorkPhase::NextFile;
 }
@@ -876,8 +882,12 @@ bool SleepHqSyncJob::next_file_locked() {
         case StorageExportPlannerResult::Item:
             if (item.kind ==
                 StorageExportPlannerItemKind::DatalogDayComplete) {
+                note_completed_datalog_day_locked(item.datalog_day);
                 phase_ = staged_count_ == 0 ? WorkPhase::NextFile
                                             : WorkPhase::ProcessImport;
+                if (staged_count_ == 0) {
+                    maybe_mark_completed_datalog_day_locked();
+                }
                 if (staged_count_ != 0) import_batch_active_ = true;
                 return true;
             }
@@ -1090,6 +1100,80 @@ bool SleepHqSyncJob::staged_contains_locked(const char *path,
         }
     }
     return false;
+}
+
+bool SleepHqSyncJob::datalog_day_done_path_locked(const char *day,
+                                                  char *out,
+                                                  size_t out_size) const {
+    return storage_export_build_done_path(state_dir_, day, out, out_size);
+}
+
+bool SleepHqSyncJob::datalog_day_done_locked(const char *day) const {
+    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    if (!datalog_day_done_path_locked(day, path, sizeof(path))) return false;
+    const StorageLocalNodeInfo info = storage_stat_local_node(path);
+    return info.exists && !info.is_dir;
+}
+
+bool SleepHqSyncJob::mark_datalog_day_done_locked(const char *day) {
+    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    if (!datalog_day_done_path_locked(day, path, sizeof(path))) return false;
+    if (!ensure_state_dir_locked()) return false;
+    {
+        Storage::Guard guard;
+        File file = Storage::open(path, "w");
+        if (!file) return false;
+        const size_t written = file.printf("done\n");
+        file.close();
+        return written != 0;
+    }
+}
+
+bool SleepHqSyncJob::datalog_day_is_finalized_locked(const char *day) const {
+    if (!day || strlen(day) != 8 ||
+        !storage_export_all_digits(day, 8) ||
+        !latest_datalog_day_[0]) {
+        return false;
+    }
+    return strcmp(day, latest_datalog_day_) < 0;
+}
+
+void SleepHqSyncJob::refresh_latest_datalog_day_name_locked() {
+    latest_datalog_day_[0] = '\0';
+    char path[AC_STORAGE_PATH_MAX] = {};
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    if (!storage_export_latest_datalog_day_path(path, sizeof(path),
+                                                error, sizeof(error))) {
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "latest DATALOG day scan failed error=%s\n",
+                  error[0] ? error : "latest_day_failed");
+        return;
+    }
+    (void)storage_export_datalog_day_from_path(path,
+                                               latest_datalog_day_,
+                                               sizeof(latest_datalog_day_));
+}
+
+void SleepHqSyncJob::note_completed_datalog_day_locked(const char *day) {
+    pending_done_day_[0] = '\0';
+    if (!datalog_day_is_finalized_locked(day)) return;
+    if (datalog_day_done_locked(day)) return;
+    copy_cstr(pending_done_day_, sizeof(pending_done_day_), day);
+}
+
+void SleepHqSyncJob::maybe_mark_completed_datalog_day_locked() {
+    if (!pending_done_day_[0]) return;
+    if (!mark_datalog_day_done_locked(pending_done_day_)) {
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "DATALOG done marker write failed day=%s\n",
+                  pending_done_day_);
+        pending_done_day_[0] = '\0';
+        return;
+    }
+    Log::logf(CAT_SLEEPHQ, LOG_INFO,
+              "DATALOG day complete day=%s\n",
+              pending_done_day_);
+    pending_done_day_[0] = '\0';
 }
 
 bool SleepHqSyncJob::write_inflight_locked(InflightPhase phase) {
@@ -2035,7 +2119,6 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
 
     switch (sleephq_classify_import_status(import.status)) {
         case SleepHqImportStatusKind::Success:
-            maybe_mark_datalog_rebuild_success_locked();
             mark_index_ = 0;
             phase_ = WorkPhase::MarkState;
             return JobStep::Working;
@@ -2070,6 +2153,8 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
 JobStep SleepHqSyncJob::step_mark_state_locked(char *error,
                                                size_t error_size) {
     if (mark_index_ >= staged_count_) {
+        maybe_mark_datalog_rebuild_success_locked();
+        maybe_mark_completed_datalog_day_locked();
         phase_ = WorkPhase::Finish;
         return JobStep::Working;
     }

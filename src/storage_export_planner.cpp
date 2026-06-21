@@ -532,12 +532,19 @@ bool StorageExportPlanner::select_next_datalog_day(char *error_out,
             return false;
         }
         const DatalogDay &day = datalog_days_[datalog_day_index_++];
-        const bool has_pending =
-            datalog_day_has_pending_files(day, error_out, error_out_size);
-        if (error_out && error_out[0]) {
-            return false;
+        bool has_pending = false;
+        const bool trusted_done =
+            config_.trust_completed_finalized_datalog_days &&
+            datalog_day_finalized(day.day) &&
+            datalog_day_done(day.day);
+        if (!trusted_done) {
+            has_pending =
+                datalog_day_has_pending_files(day, error_out, error_out_size);
+            if (error_out && error_out[0]) {
+                return false;
+            }
         }
-        const bool local_complete = !has_pending;
+        const bool local_complete = trusted_done || !has_pending;
         bool force_export = false;
         if (!datalog_day_force_export(day.day,
                                       local_complete,

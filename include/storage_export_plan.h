@@ -46,6 +46,10 @@ bool storage_export_path_starts_with(const char *path, const char *prefix);
 bool storage_export_datalog_day_from_path(const char *path,
                                           char *out,
                                           size_t out_size);
+bool storage_export_latest_datalog_day_path(char *out,
+                                            size_t out_size,
+                                            char *error_out,
+                                            size_t error_out_size);
 bool storage_export_build_done_path(const char *state_dir,
                                     const char *day,
                                     char *out,
