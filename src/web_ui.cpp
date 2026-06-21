@@ -17,6 +17,7 @@
 #include "background_worker.h"
 #include "debug_log.h"
 #include "edf_storage_worker.h"
+#include "export_coordinator.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_records.h"
@@ -633,6 +634,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   ReportManager &report_manager,
                   StorageArchiveJob &storage_archive_job,
                   StorageDeleteJob &storage_delete_job,
+                  ExportCoordinator &export_coordinator,
                   StorageSyncJob *storage_sync_job,
                   SleepHqSyncJob *sleephq_sync_job,
                   ConsoleContext &console_ctx,
@@ -652,6 +654,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     report_manager_ = &report_manager;
     storage_archive_job_ = &storage_archive_job;
     storage_delete_job_ = &storage_delete_job;
+    export_coordinator_ = &export_coordinator;
     storage_sync_job_ = storage_sync_job;
     sleephq_sync_job_ = sleephq_sync_job;
     console_ctx_ = &console_ctx;
@@ -2480,7 +2483,7 @@ void WebUI::send_storage_delete_status(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
-    if (!storage_sync_job_) {
+    if (!storage_sync_job_ || !export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sync_unavailable\"}");
         return;
@@ -2493,11 +2496,11 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
                                 storage_delete_job_,
-                                storage_sync_job_,
-                                sleephq_sync_job_)) {
+                                nullptr,
+                                nullptr)) {
         return;
     }
-    if (!storage_sync_job_->request_manual_sync()) {
+    if (!export_coordinator_->request_smb_sync()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"sync_not_ready\"}");
         return;
@@ -2507,7 +2510,7 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
-    if (!storage_sync_job_) {
+    if (!storage_sync_job_ || !export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sync_unavailable\"}");
         return;
@@ -2520,11 +2523,11 @@ void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
                                 storage_delete_job_,
-                                storage_sync_job_,
-                                sleephq_sync_job_)) {
+                                nullptr,
+                                nullptr)) {
         return;
     }
-    if (!storage_sync_job_->request_verify_recent()) {
+    if (!export_coordinator_->request_smb_verify()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"sync_not_ready\"}");
         return;
@@ -2616,12 +2619,12 @@ void WebUI::send_storage_sync_status(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_sleephq_sync_start(AsyncWebServerRequest *request) const {
-    if (!sleephq_sync_job_) {
+    if (!sleephq_sync_job_ || !export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
         return;
     }
-    if (!sleephq_sync_job_->request_sync("manual")) {
+    if (!export_coordinator_->request_sleephq_sync()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"sync_not_ready\"}");
         return;
@@ -2631,12 +2634,12 @@ void WebUI::send_sleephq_sync_start(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_sleephq_sync_check(AsyncWebServerRequest *request) const {
-    if (!sleephq_sync_job_) {
+    if (!sleephq_sync_job_ || !export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
         return;
     }
-    if (!sleephq_sync_job_->request_check("manual")) {
+    if (!export_coordinator_->request_sleephq_check()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"check_not_ready\"}");
         return;

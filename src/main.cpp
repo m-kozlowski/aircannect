@@ -79,6 +79,7 @@ static ConsoleContext console_ctx{
     oximetry_manager,
     report_manager,
     nullptr,
+    nullptr,
     &web_ui,
 };
 
@@ -265,7 +266,9 @@ void setup() {
 
     storage_sync_job = create_storage_sync_job();
     sleephq_sync_job = create_sleephq_sync_job();
+    export_coordinator.begin(storage_sync_job, sleephq_sync_job);
     console_ctx.sleephq_sync_job = sleephq_sync_job;
+    console_ctx.export_coordinator = &export_coordinator;
     apply_storage_provisioning(app_config, wifi_manager);
     session_manager.begin();
     rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
@@ -300,6 +303,7 @@ void setup() {
                  report_manager,
                  storage_archive_job,
                  storage_delete_job,
+                 export_coordinator,
                  storage_sync_job,
                  sleephq_sync_job,
                  console_ctx);
@@ -398,8 +402,6 @@ void loop() {
     export_coordinator.poll(
         rpc_arbiter,
         report_manager,
-        storage_sync_job,
-        sleephq_sync_job,
         app_config.data(),
         wifi_manager.mode_state() == WifiModeState::StaConnected,
         resmed_ota_manager.transport_active(),

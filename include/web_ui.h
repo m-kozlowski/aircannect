@@ -32,6 +32,8 @@ class AsyncWebServer;
 
 namespace aircannect {
 
+class ExportCoordinator;
+
 enum WebCommandKind : uint8_t {
     WebCommandConsoleLine,
     WebCommandConsoleClear,
@@ -99,6 +101,7 @@ public:
                ReportManager &report_manager,
                StorageArchiveJob &storage_archive_job,
                StorageDeleteJob &storage_delete_job,
+               ExportCoordinator &export_coordinator,
                StorageSyncJob *storage_sync_job,
                SleepHqSyncJob *sleephq_sync_job,
                ConsoleContext &console_ctx,
@@ -233,6 +236,7 @@ private:
     ReportManager *report_manager_ = nullptr;
     StorageArchiveJob *storage_archive_job_ = nullptr;
     StorageDeleteJob *storage_delete_job_ = nullptr;
+    ExportCoordinator *export_coordinator_ = nullptr;
     StorageSyncJob *storage_sync_job_ = nullptr;
     SleepHqSyncJob *sleephq_sync_job_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;

@@ -15,15 +15,21 @@ namespace aircannect {
 // what order.
 class ExportCoordinator {
 public:
+    void begin(StorageSyncJob *storage_sync,
+               SleepHqSyncJob *sleephq_sync);
+
     void poll(RpcArbiter &arbiter,
               ReportManager &report,
-              StorageSyncJob *storage_sync,
-              SleepHqSyncJob *sleephq_sync,
               const AppConfigData &config,
               bool network_connected,
               bool resmed_ota_active,
               bool esp_ota_active,
               uint32_t now_ms);
+
+    bool request_smb_sync();
+    bool request_smb_verify();
+    bool request_sleephq_sync();
+    bool request_sleephq_check();
 
 private:
     struct PostTherapyState {
@@ -54,40 +60,31 @@ private:
 
     void poll_post_therapy(RpcArbiter &arbiter,
                            ReportManager &report,
-                           StorageSyncJob *storage_sync,
-                           SleepHqSyncJob *sleephq_sync,
                            uint32_t now_ms);
     void reset_post_therapy_after_running();
-    void arm_post_therapy_after_stop(StorageSyncJob *storage_sync,
-                                     SleepHqSyncJob *sleephq_sync,
-                                     uint32_t now_ms);
+    void arm_post_therapy_after_stop(uint32_t now_ms);
     void maybe_refresh_summary(RpcArbiter &arbiter,
                                ReportManager &report,
-                               StorageSyncJob *storage_sync,
                                uint32_t now_ms);
     void maybe_queue_storage_sync(RpcArbiter &arbiter,
                                   ReportManager &report,
-                                  StorageSyncJob *storage_sync,
                                   uint32_t now_ms);
     void maybe_queue_post_therapy_sleephq(RpcArbiter &arbiter,
                                           ReportManager &report,
-                                          StorageSyncJob *storage_sync,
-                                          SleepHqSyncJob *sleephq_sync,
                                           uint32_t now_ms);
-    void queue_post_therapy_storage_sync(StorageSyncJob *storage_sync);
+    void queue_post_therapy_storage_sync();
 
-    void maybe_queue_sleephq_startup_check(SleepHqSyncJob *sleephq_sync,
-                                           bool network_connected,
+    void maybe_queue_sleephq_startup_check(bool network_connected,
                                            bool storage_sync_active);
     void poll_sleephq_idle_backfill(RpcArbiter &arbiter,
                                     ReportManager &report,
-                                    StorageSyncJob *storage_sync,
-                                    SleepHqSyncJob *sleephq_sync,
                                     bool network_connected,
                                     bool storage_sync_active,
                                     uint32_t now_ms);
     void clear_idle_backfill();
 
+    StorageSyncJob *storage_sync_ = nullptr;
+    SleepHqSyncJob *sleephq_sync_ = nullptr;
     PostTherapyState post_therapy_;
     StartupCheckState startup_check_;
     IdleBackfillState idle_backfill_;

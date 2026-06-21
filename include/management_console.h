@@ -19,6 +19,7 @@
 
 namespace aircannect {
 
+class ExportCoordinator;
 class WebUI;
 
 struct ConsoleContext {
@@ -36,6 +37,7 @@ struct ConsoleContext {
     OximetryManager &oximetry_manager;
     ReportManager &report_manager;
     SleepHqSyncJob *sleephq_sync_job = nullptr;
+    ExportCoordinator *export_coordinator = nullptr;
     WebUI *web_ui = nullptr;
 };
 

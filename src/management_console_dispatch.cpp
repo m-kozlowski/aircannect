@@ -10,6 +10,7 @@
 #include "as11_settings.h"
 #include "background_worker.h"
 #include "debug_log.h"
+#include "export_coordinator.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "memory_manager.h"
@@ -1233,13 +1234,23 @@ void ManagementConsole::handle_sleephq_command(Print &out,
         return;
     }
     if (rest == "check" || rest == "verify") {
-        const bool queued = job->request_check(rest.c_str());
+        ExportCoordinator *coordinator = ctx.export_coordinator;
+        if (!coordinator) {
+            out.println("[SLEEPHQ] check rejected");
+            return;
+        }
+        const bool queued = coordinator->request_sleephq_check();
         out.print("[SLEEPHQ] check ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
     if (rest == "sync") {
-        const bool queued = job->request_sync("manual");
+        ExportCoordinator *coordinator = ctx.export_coordinator;
+        if (!coordinator) {
+            out.println("[SLEEPHQ] sync rejected");
+            return;
+        }
+        const bool queued = coordinator->request_sleephq_sync();
         out.print("[SLEEPHQ] sync ");
         out.println(queued ? "queued" : "rejected");
         return;
