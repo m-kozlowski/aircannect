@@ -1517,7 +1517,7 @@
                 <button class="btn primary" id="edfSyncBtn" onclick="smbStartSync()">Sync SMB</button>
                 <button class="btn" id="edfVerifyBtn" onclick="smbVerifyRecent()">Verify Share</button>
               </div>
-              <div class="msg" id="edfMsg"></div>
+              <div class="msg" id="edfSmbMsg"></div>
             </div>
 
             <div class="card">
@@ -1549,6 +1549,7 @@
                 <button class="btn primary" id="edfSleepHqSyncBtn" onclick="sleepHqStartSync()">Sync SleepHQ</button>
                 <button class="btn" id="edfSleepHqCheckBtn" onclick="sleepHqCheckAccount()">Check Account</button>
               </div>
+              <div class="msg" id="edfSleepHqMsg"></div>
             </div>
           </div>
         </section>
@@ -4275,9 +4276,9 @@
         smbSyncPollTimer = null;
       }
       if (data && data.state === "error") {
-        msg("edfMsg", data.error || "SMB sync failed", false, true);
+        msg("edfSmbMsg", data.error || "SMB sync failed", false, true);
       } else if (data && !active && data.state === "idle") {
-        msg("edfMsg", smbSyncCompleteMessage, true, false);
+        msg("edfSmbMsg", smbSyncCompleteMessage, true, false);
       }
       return !active;
     }
@@ -4287,7 +4288,7 @@
       smbSyncPollTimer = null;
       smbSyncCompleteMessage = completeMessage || "SMB sync complete";
       smbSyncSetBusy(true);
-      msg("edfMsg", startMessage, true, false);
+      msg("edfSmbMsg", startMessage, true, false);
       try {
         const response = await fetch(url, {
           method: "POST",
@@ -4300,7 +4301,7 @@
       } catch (error) {
         smbSyncSetBusy(false);
         await loadSmbSyncStatus();
-        msg("edfMsg", error.message, false, true);
+        msg("edfSmbMsg", error.message, false, true);
       }
     }
 
@@ -4475,9 +4476,9 @@
         sleepHqSyncPollTimer = null;
       }
       if (data && data.state === "error") {
-        msg("edfMsg", data.error || "SleepHQ sync failed", false, true);
+        msg("edfSleepHqMsg", data.error || "SleepHQ sync failed", false, true);
       } else if (data && !active && data.state === "idle") {
-        msg("edfMsg", sleepHqSyncCompleteMessage, true, false);
+        msg("edfSleepHqMsg", sleepHqSyncCompleteMessage, true, false);
       }
       return !active;
     }
@@ -4488,7 +4489,7 @@
       sleepHqSyncCompleteMessage = completeMessage ||
         "SleepHQ sync complete";
       sleepHqSyncSetBusy(true);
-      msg("edfMsg", startMessage, true, false);
+      msg("edfSleepHqMsg", startMessage, true, false);
       try {
         const response = await fetch(url, {
           method: "POST",
@@ -4503,7 +4504,7 @@
       } catch (error) {
         sleepHqSyncSetBusy(false);
         await loadSleepHqSyncStatus();
-        msg("edfMsg", error.message, false, true);
+        msg("edfSleepHqMsg", error.message, false, true);
       }
     }
 
