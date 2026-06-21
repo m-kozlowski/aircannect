@@ -103,6 +103,7 @@ private:
     enum class WorkPhase : uint8_t {
         Idle,
         Connect,
+        FindRemoteMachine,
         Check,
         NextFile,
         CreateImport,
@@ -245,7 +246,9 @@ private:
                                           size_t error_size);
     bool prepare_remote_reconcile_locked(char *error, size_t error_size);
     bool note_remote_machine_locked(const SleepHqMachine &machine);
-    bool find_remote_machine_locked(char *error, size_t error_size);
+    void note_remote_machine_missing_locked();
+    JobStep begin_export_work_locked();
+    JobStep step_find_remote_machine_locked(char *error, size_t error_size);
     bool datalog_day_decision_locked(const char *day,
                                      bool local_complete,
                                      bool &force_export,
@@ -322,6 +325,8 @@ private:
     size_t remote_date_count_ = 0;
     size_t remote_date_capacity_ = 0;
     uint32_t remote_machine_id_ = 0;
+    uint32_t remote_machine_next_page_ = 1;
+    uint32_t remote_machine_pages_loaded_ = 0;
     bool remote_reconcile_enabled_ = false;
     bool remote_reconcile_all_missing_ = false;
     char remote_serial_[AC_SLEEPHQ_SERIAL_MAX] = {};

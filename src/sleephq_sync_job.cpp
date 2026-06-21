@@ -523,6 +523,8 @@ void SleepHqSyncJob::clear_remote_dates_locked() {
     remote_date_count_ = 0;
     remote_date_capacity_ = 0;
     remote_machine_id_ = 0;
+    remote_machine_next_page_ = 1;
+    remote_machine_pages_loaded_ = 0;
     remote_reconcile_enabled_ = false;
     remote_reconcile_all_missing_ = false;
     remote_serial_[0] = '\0';
@@ -1465,44 +1467,19 @@ bool SleepHqSyncJob::note_remote_machine_locked(
     return true;
 }
 
-bool SleepHqSyncJob::find_remote_machine_locked(char *error,
-                                                size_t error_size) {
-    if (!remote_serial_[0]) return true;
-    uint32_t page = 1;
-    for (uint32_t pages = 0; pages < SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT;
-         ++pages, ++page) {
-        size_t count = 0;
-        bool has_more = false;
-        if (!client_.list_team_machines(status_.team_id,
-                                        page,
-                                        SLEEPHQ_REMOTE_MACHINE_PER_PAGE,
-                                        &SleepHqSyncJob::remote_machine_list_cb,
-                                        this,
-                                        count,
-                                        has_more)) {
-            copy_cstr(error, error_size, client_.last_error());
-            return false;
-        }
-        if (remote_machine_id_) {
-            Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
-                      "remote machine matched serial=%s id=%lu\n",
-                      remote_serial_,
-                      static_cast<unsigned long>(remote_machine_id_));
-            return true;
-        }
-        if (!has_more) break;
-    }
-
+void SleepHqSyncJob::note_remote_machine_missing_locked() {
+    if (remote_reconcile_all_missing_) return;
     remote_reconcile_all_missing_ = true;
     Log::logf(CAT_SLEEPHQ, LOG_INFO,
               "remote machine missing serial=%s; pending DATALOG days will rebuild\n",
               remote_serial_);
-    return true;
 }
 
 bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
                                                      size_t error_size) {
     remote_machine_id_ = 0;
+    remote_machine_next_page_ = 1;
+    remote_machine_pages_loaded_ = 0;
     remote_reconcile_enabled_ = false;
     remote_reconcile_all_missing_ = false;
     remote_serial_[0] = '\0';
@@ -1525,9 +1502,6 @@ bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
 
     copy_cstr(remote_serial_, sizeof(remote_serial_), serial);
     remote_reconcile_enabled_ = true;
-    if (!find_remote_machine_locked(error, error_size)) {
-        return false;
-    }
     return true;
 }
 
@@ -1611,31 +1585,18 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
               client_error && client_error[0]
                   ? client_error
                   : "machine_date_lookup_failed");
+    if (sleep_hq_error_retryable(error)) {
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "remote machine-date lookup skipped day=%s error=%s\n",
+                  day,
+                  error[0] ? error : "machine_date_lookup_failed");
+        force_export = false;
+        return true;
+    }
     return false;
 }
 
-JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
-    client_.configure(client_config_from_snapshot(config_));
-    uint32_t team_id = 0;
-    if (!client_.resolve_team_id(team_id)) {
-        fail_locked(client_.last_error());
-        return JobStep::Idle;
-    }
-    status_.team_id = team_id;
-    if (current_run_kind_ == RunKind::Check) {
-        finish_check_locked(team_id);
-        return JobStep::Idle;
-    }
-    if (!build_endpoint_state_dir_locked(team_id,
-                                         state_dir_,
-                                         sizeof(state_dir_))) {
-        fail_locked("state_path_failed");
-        return JobStep::Idle;
-    }
-    if (!prepare_remote_reconcile_locked(error, error_size)) {
-        fail_locked(error[0] ? error : "remote_reconcile_failed");
-        return JobStep::Idle;
-    }
+JobStep SleepHqSyncJob::begin_export_work_locked() {
     char planner_error[AC_SLEEPHQ_ERROR_MAX] = {};
     if (!begin_export_planner_locked(planner_error, sizeof(planner_error))) {
         fail_locked(planner_error[0] ? planner_error : "planner_failed");
@@ -1660,6 +1621,92 @@ JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
         return JobStep::Waiting;
     }
     phase_ = WorkPhase::NextFile;
+    return JobStep::Working;
+}
+
+JobStep SleepHqSyncJob::step_find_remote_machine_locked(char *error,
+                                                        size_t error_size) {
+    if (abort_requested_.load() || runtime_blocked_.load()) {
+        fail_locked("preempted");
+        return JobStep::Idle;
+    }
+    if (!remote_reconcile_enabled_ || !remote_serial_[0] ||
+        remote_machine_id_ || remote_reconcile_all_missing_) {
+        return begin_export_work_locked();
+    }
+    if (remote_machine_pages_loaded_ >= SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT) {
+        note_remote_machine_missing_locked();
+        return begin_export_work_locked();
+    }
+
+    size_t count = 0;
+    bool has_more = false;
+    const uint32_t page = remote_machine_next_page_;
+    if (!client_.list_team_machines(status_.team_id,
+                                    page,
+                                    SLEEPHQ_REMOTE_MACHINE_PER_PAGE,
+                                    &SleepHqSyncJob::remote_machine_list_cb,
+                                    this,
+                                    count,
+                                    has_more)) {
+        const char *client_error = client_.last_error();
+        if (sleep_hq_error_retryable(client_error)) {
+            Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                      "remote machine lookup skipped: %s\n",
+                      client_error && client_error[0]
+                          ? client_error
+                          : "machine_list_failed");
+            remote_reconcile_enabled_ = false;
+            return begin_export_work_locked();
+        }
+        copy_cstr(error, error_size,
+                  client_error && client_error[0]
+                      ? client_error
+                      : "machine_list_failed");
+        fail_locked(error[0] ? error : "machine_list_failed");
+        return JobStep::Idle;
+    }
+
+    remote_machine_pages_loaded_++;
+    remote_machine_next_page_++;
+    if (remote_machine_id_) {
+        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
+                  "remote machine matched serial=%s id=%lu\n",
+                  remote_serial_,
+                  static_cast<unsigned long>(remote_machine_id_));
+        return begin_export_work_locked();
+    }
+    if (!has_more ||
+        remote_machine_pages_loaded_ >= SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT) {
+        note_remote_machine_missing_locked();
+        return begin_export_work_locked();
+    }
+    return JobStep::Working;
+}
+
+JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
+    client_.configure(client_config_from_snapshot(config_));
+    uint32_t team_id = 0;
+    if (!client_.resolve_team_id(team_id)) {
+        fail_locked(client_.last_error());
+        return JobStep::Idle;
+    }
+    status_.team_id = team_id;
+    if (current_run_kind_ == RunKind::Check) {
+        finish_check_locked(team_id);
+        return JobStep::Idle;
+    }
+    if (!build_endpoint_state_dir_locked(team_id,
+                                         state_dir_,
+                                         sizeof(state_dir_))) {
+        fail_locked("state_path_failed");
+        return JobStep::Idle;
+    }
+    if (!prepare_remote_reconcile_locked(error, error_size)) {
+        fail_locked(error[0] ? error : "remote_reconcile_failed");
+        return JobStep::Idle;
+    }
+    phase_ = WorkPhase::FindRemoteMachine;
     return JobStep::Working;
 }
 
@@ -1945,6 +1992,8 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
             return JobStep::Working;
         case WorkPhase::Connect:
             return step_connect_locked(error, sizeof(error));
+        case WorkPhase::FindRemoteMachine:
+            return step_find_remote_machine_locked(error, sizeof(error));
         case WorkPhase::Check:
             return step_check_locked(error, sizeof(error));
         case WorkPhase::NextFile:
