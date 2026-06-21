@@ -233,6 +233,7 @@ private:
                                  size_t path_out_size,
                                  char *name_out,
                                  size_t name_out_size) const;
+    bool current_file_matches_snapshot_locked() const;
     bool compute_current_file_content_hash_locked(char *out,
                                                   size_t out_size);
 

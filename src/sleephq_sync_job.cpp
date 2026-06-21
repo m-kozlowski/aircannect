@@ -647,6 +647,13 @@ bool SleepHqSyncJob::build_sleep_path_locked(const char *local_path,
                                                    name_out_size);
 }
 
+bool SleepHqSyncJob::current_file_matches_snapshot_locked() const {
+    const StorageLocalNodeInfo info = storage_stat_local_node(current_file_.path);
+    return info.exists && !info.is_dir &&
+           info.size == current_file_.size &&
+           info.mtime == current_file_.mtime;
+}
+
 bool SleepHqSyncJob::compute_current_file_content_hash_locked(char *out,
                                                               size_t out_size) {
     if (!out || out_size < AC_SLEEPHQ_CONTENT_HASH_MAX ||
@@ -1381,6 +1388,11 @@ bool SleepHqSyncJob::upload_abort_cb(void *ctx) {
 
 JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
                                                 size_t error_size) {
+    if (!current_file_matches_snapshot_locked()) {
+        fail_locked("local_changed");
+        return JobStep::Idle;
+    }
+
     SleepHqUploadResult upload;
     bool attached = false;
     if (current_file_.attach_by_hash) {
@@ -1423,13 +1435,6 @@ JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
         }
     }
     close_local_locked();
-    const StorageLocalNodeInfo info = storage_stat_local_node(current_file_.path);
-    if (!info.exists || info.is_dir ||
-        info.size != current_file_.size ||
-        info.mtime != current_file_.mtime) {
-        fail_locked("local_changed");
-        return JobStep::Idle;
-    }
     if (!add_staged_locked(upload)) {
         fail_locked("staged_alloc");
         return JobStep::Idle;
