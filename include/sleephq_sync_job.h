@@ -59,6 +59,27 @@ struct SleepHqSyncStatus {
     uint32_t updated_ms = 0;
 };
 
+struct SleepHqSyncRuntimeStatus {
+    SleepHqSyncState state = SleepHqSyncState::Disabled;
+    bool pending = false;
+    bool configured = false;
+    bool network_available = false;
+    uint32_t config_generation = 0;
+    uint32_t team_id = 0;
+    uint32_t completed_check_generation = 0;
+
+    bool active() const {
+        return state == SleepHqSyncState::Working ||
+               ((state == SleepHqSyncState::Pending || pending) &&
+                network_available);
+    }
+
+    bool check_complete() const {
+        return config_generation != 0 &&
+               completed_check_generation == config_generation;
+    }
+};
+
 class SleepHqSyncJob : public BackgroundJob {
 public:
     void begin(const AppConfigData &config);
@@ -74,6 +95,7 @@ public:
     bool request_sync(const char *reason = "manual");
 
     SleepHqSyncStatus status() const;
+    SleepHqSyncRuntimeStatus runtime_status() const;
     bool active() const;
 
 private:
@@ -170,6 +192,7 @@ private:
     void fail_locked(const char *error);
     void close_local_locked();
     void clear_current_file_locked();
+    void publish_runtime_locked();
     bool begin_export_planner_locked(char *error_out,
                                      size_t error_out_size);
     void reset_import_batch_locked();
@@ -243,6 +266,13 @@ private:
     std::atomic<bool> network_available_{false};
     std::atomic<bool> runtime_blocked_{false};
     std::atomic<bool> abort_requested_{false};
+    std::atomic<uint8_t> runtime_state_{
+        static_cast<uint8_t>(SleepHqSyncState::Disabled)};
+    std::atomic<bool> runtime_pending_{false};
+    std::atomic<bool> runtime_configured_{false};
+    std::atomic<uint32_t> runtime_config_generation_{0};
+    std::atomic<uint32_t> runtime_team_id_{0};
+    std::atomic<uint32_t> runtime_completed_check_generation_{0};
     StorageExportPlanner export_planner_;
     bool import_batch_active_ = false;
     CurrentFile current_file_;

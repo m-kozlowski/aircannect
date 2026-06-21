@@ -79,6 +79,13 @@ void StorageSyncJob::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
 }
 
+void StorageSyncJob::publish_runtime_locked() {
+    runtime_state_.store(static_cast<uint8_t>(status_.state));
+    runtime_pending_.store(status_.pending);
+    runtime_enabled_.store(status_.enabled);
+    runtime_configured_.store(status_.configured);
+}
+
 void StorageSyncJob::copy_string(char *dst, size_t dst_size,
                                  const String &src) {
     if (!dst || dst_size == 0) return;
@@ -401,13 +408,15 @@ void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
               "[SYNC] config enabled=%u configured=%u\n",
               status_.enabled ? 1u : 0u,
               status_.configured ? 1u : 0u);
+    publish_runtime_locked();
 }
 
 void StorageSyncJob::set_network_available(bool available) {
     const bool was_available = network_available_.exchange(available);
     if (was_available == available) return;
-    if (!lock(5)) return;
+    if (!lock(0)) return;
     status_.network_available = available;
+    publish_runtime_locked();
     unlock();
     if (available) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
@@ -434,8 +443,13 @@ void StorageSyncJob::refresh_config(const AppConfigData &config,
             CONFIG_REFRESH_INTERVAL_MS) {
         return;
     }
+    const ConfigSnapshot snapshot = make_config_snapshot(config);
+    if (!lock(0)) return;
     last_config_check_ms_ = now_ms == 0 ? 1 : now_ms;
-    configure(config);
+    if (!config_matches_locked(snapshot)) {
+        apply_config_locked(snapshot);
+    }
+    unlock();
 }
 
 bool StorageSyncJob::begin_run_locked() {
@@ -453,6 +467,7 @@ bool StorageSyncJob::begin_run_locked() {
     status_.last_run_reconcile = run_kind_is_reconcile(current_run_kind_);
     status_.started_ms = millis_nonzero();
     status_.updated_ms = status_.started_ms;
+    publish_runtime_locked();
 
     if (!build_endpoint_state_dir_locked(config_,
                                          state_dir_,
@@ -477,7 +492,7 @@ bool StorageSyncJob::begin_run_locked() {
 }
 
 bool StorageSyncJob::request_sync_with_kind(RunKind kind, const char *label) {
-    if (!lock(50)) {
+    if (!lock(0)) {
         Log::logf(CAT_STORAGE, LOG_WARN,
                   "[SYNC] %s request rejected reason=lock_timeout\n",
                   label ? label : "sync");
@@ -508,6 +523,7 @@ bool StorageSyncJob::request_sync_with_kind(RunKind kind, const char *label) {
                   status_.pending_reason,
                   storage_sync_state_name(status_.state));
     }
+    publish_runtime_locked();
     unlock();
     if (BackgroundWorker *worker = background_worker()) worker->wake();
     return true;
@@ -522,7 +538,7 @@ bool StorageSyncJob::request_verify_recent() {
 }
 
 bool StorageSyncJob::request_post_therapy_sync() {
-    if (!lock(50)) {
+    if (!lock(0)) {
         Log::logf(CAT_STORAGE, LOG_WARN,
                   "[SYNC] post-therapy request rejected reason=lock_timeout\n");
         return false;
@@ -548,6 +564,7 @@ bool StorageSyncJob::request_post_therapy_sync() {
                   LOG_INFO,
                   "[SYNC] queued reason=post_therapy\n");
     }
+    publish_runtime_locked();
     unlock();
     if (BackgroundWorker *worker = background_worker()) worker->wake();
     return true;
@@ -1203,6 +1220,7 @@ void StorageSyncJob::finish_run_locked() {
     }
     current_run_kind_ = RunKind::Manual;
     sync_after_verify_ = false;
+    publish_runtime_locked();
 }
 
 void StorageSyncJob::fail_locked(const char *error) {
@@ -1272,6 +1290,7 @@ void StorageSyncJob::fail_locked(const char *error) {
     }
     pending_run_kind_ = failed_kind;
     current_run_kind_ = RunKind::Manual;
+    publish_runtime_locked();
 }
 
 bool StorageSyncJob::verify_endpoint_base_locked(char *error_out,
@@ -1306,6 +1325,7 @@ void StorageSyncJob::queue_retry_locked(uint32_t now_ms) {
                   run_kind_reason(pending_run_kind_));
     }
     status_.updated_ms = now_ms;
+    publish_runtime_locked();
 }
 
 void StorageSyncJob::queue_reconcile_if_due_locked(uint32_t now_ms) {
@@ -1330,6 +1350,7 @@ void StorageSyncJob::queue_reconcile_if_due_locked(uint32_t now_ms) {
               sizeof(status_.pending_reason),
               run_kind_reason(pending_run_kind_));
     status_.updated_ms = now_ms;
+    publish_runtime_locked();
     Log::logf(CAT_STORAGE,
               LOG_INFO,
               "[SYNC] queued reason=%s last_reconcile=%llu\n",
@@ -1608,6 +1629,7 @@ void StorageSyncJob::on_preempt() {
         copy_cstr(status_.pending_reason,
                   sizeof(status_.pending_reason),
                   run_kind_reason(pending_run_kind_));
+        publish_runtime_locked();
     }
     unlock();
 }
@@ -1632,14 +1654,18 @@ StorageSyncStatus StorageSyncJob::status() const {
     return out;
 }
 
-bool StorageSyncJob::active() const {
-    if (!lock(20)) return true;
-    const bool out = status_.state == StorageSyncState::Working ||
-                     ((status_.state == StorageSyncState::Pending ||
-                       status_.pending) &&
-                      network_available_.load());
-    unlock();
+StorageSyncRuntimeStatus StorageSyncJob::runtime_status() const {
+    StorageSyncRuntimeStatus out;
+    out.state = static_cast<StorageSyncState>(runtime_state_.load());
+    out.pending = runtime_pending_.load();
+    out.enabled = runtime_enabled_.load();
+    out.configured = runtime_configured_.load();
+    out.network_available = network_available_.load();
     return out;
+}
+
+bool StorageSyncJob::active() const {
+    return runtime_status().active();
 }
 
 }  // namespace aircannect

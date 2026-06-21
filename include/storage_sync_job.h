@@ -85,6 +85,20 @@ struct StorageSyncStatus
     : StorageSyncPersistentStatus,
       StorageSyncTransientStatus {};
 
+struct StorageSyncRuntimeStatus {
+    StorageSyncState state = StorageSyncState::Disabled;
+    bool pending = false;
+    bool enabled = false;
+    bool configured = false;
+    bool network_available = false;
+
+    bool active() const {
+        return state == StorageSyncState::Working ||
+               ((state == StorageSyncState::Pending || pending) &&
+                network_available);
+    }
+};
+
 class StorageSyncJob : public BackgroundJob {
 public:
     void begin(const AppConfigData &config);
@@ -103,6 +117,7 @@ public:
     bool request_post_therapy_sync();
 
     StorageSyncStatus status() const;
+    StorageSyncRuntimeStatus runtime_status() const;
     bool active() const;
 
 private:
@@ -270,6 +285,7 @@ private:
     void release_upload_buffer_locked();
     void close_local_locked();
     void clear_current_file_locked();
+    void publish_runtime_locked();
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     ConfigSnapshot config_;
@@ -279,6 +295,11 @@ private:
     WorkPhase phase_ = WorkPhase::Idle;
     StorageSmbClient smb_;
     std::atomic<bool> network_available_{false};
+    std::atomic<uint8_t> runtime_state_{
+        static_cast<uint8_t>(StorageSyncState::Disabled)};
+    std::atomic<bool> runtime_pending_{false};
+    std::atomic<bool> runtime_enabled_{false};
+    std::atomic<bool> runtime_configured_{false};
     std::atomic<uint32_t> idle_defer_until_ms_{0};
     RunKind pending_run_kind_ = RunKind::Manual;
     RunKind current_run_kind_ = RunKind::Manual;

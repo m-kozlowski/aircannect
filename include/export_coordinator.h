@@ -60,6 +60,7 @@ private:
 
     void poll_post_therapy(RpcArbiter &arbiter,
                            ReportManager &report,
+                           bool storage_sync_active,
                            uint32_t now_ms);
     void reset_post_therapy_after_running();
     void arm_post_therapy_after_stop(uint32_t now_ms);
@@ -71,15 +72,18 @@ private:
                                   uint32_t now_ms);
     void maybe_queue_post_therapy_sleephq(RpcArbiter &arbiter,
                                           ReportManager &report,
+                                          bool storage_sync_active,
                                           uint32_t now_ms);
-    void queue_post_therapy_storage_sync();
+    void queue_post_therapy_storage_sync(uint32_t now_ms);
 
     void maybe_queue_sleephq_startup_check(bool network_connected,
-                                           bool storage_sync_active);
+                                           bool storage_sync_active,
+                                           SleepHqSyncRuntimeStatus status);
     void poll_sleephq_idle_backfill(RpcArbiter &arbiter,
                                     ReportManager &report,
                                     bool network_connected,
                                     bool storage_sync_active,
+                                    SleepHqSyncRuntimeStatus status,
                                     uint32_t now_ms);
     void clear_idle_backfill();
 

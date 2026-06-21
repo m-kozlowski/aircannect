@@ -108,6 +108,19 @@ void SleepHqSyncJob::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
 }
 
+void SleepHqSyncJob::publish_runtime_locked() {
+    const uint32_t generation = status_.config_generation;
+    runtime_state_.store(static_cast<uint8_t>(status_.state));
+    runtime_pending_.store(status_.pending);
+    runtime_configured_.store(status_.configured);
+    runtime_config_generation_.store(generation);
+    runtime_team_id_.store(status_.team_id);
+    runtime_completed_check_generation_.store(
+        status_.team_id != 0 && status_.last_check_epoch != 0
+            ? generation
+            : 0);
+}
+
 void SleepHqSyncJob::copy_string(char *dst,
                                  size_t dst_size,
                                  const String &src) {
@@ -202,6 +215,7 @@ void SleepHqSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     status_.state = status_.configured ? SleepHqSyncState::Idle
                                        : SleepHqSyncState::Disabled;
     phase_ = WorkPhase::Idle;
+    publish_runtime_locked();
 }
 
 void SleepHqSyncJob::refresh_config(const AppConfigData &config,
@@ -211,17 +225,18 @@ void SleepHqSyncJob::refresh_config(const AppConfigData &config,
             CONFIG_REFRESH_INTERVAL_MS) {
         return;
     }
-    last_config_check_ms_ = now_ms == 0 ? 1 : now_ms;
     const ConfigSnapshot snapshot = make_config_snapshot(config);
-    if (!lock()) return;
+    if (!lock(0)) return;
+    last_config_check_ms_ = now_ms == 0 ? 1 : now_ms;
     apply_config_locked(snapshot);
     unlock();
 }
 
 void SleepHqSyncJob::set_network_available(bool available) {
     network_available_.store(available);
-    if (!lock(5)) return;
+    if (!lock(0)) return;
     status_.network_available = available;
+    publish_runtime_locked();
     unlock();
     if (available) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
@@ -252,8 +267,9 @@ bool SleepHqSyncJob::request_locked(RunKind kind, const char *reason) {
 }
 
 bool SleepHqSyncJob::request_check(const char *reason) {
-    if (!lock()) return false;
+    if (!lock(0)) return false;
     const bool queued = request_locked(RunKind::Check, reason);
+    publish_runtime_locked();
     unlock();
     if (queued) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
@@ -262,8 +278,9 @@ bool SleepHqSyncJob::request_check(const char *reason) {
 }
 
 bool SleepHqSyncJob::request_sync(const char *reason) {
-    if (!lock()) return false;
+    if (!lock(0)) return false;
     const bool queued = request_locked(RunKind::Sync, reason);
+    publish_runtime_locked();
     unlock();
     if (queued) {
         Log::logf(CAT_SLEEPHQ, LOG_INFO, "sync queued reason=%s\n",
@@ -297,6 +314,7 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
     if (!status_.configured) {
         status_.state = SleepHqSyncState::Disabled;
         status_.pending = false;
+        publish_runtime_locked();
         return false;
     }
     if (!network_available_.load()) {
@@ -329,6 +347,7 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
     status_.import_status[0] = 0;
     abort_requested_.store(false);
     phase_ = WorkPhase::Connect;
+    publish_runtime_locked();
     Log::logf(CAT_SLEEPHQ, LOG_INFO, "started reason=%s mode=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
               current_run_kind_ == RunKind::Check ? "check" : "sync");
@@ -430,6 +449,7 @@ void SleepHqSyncJob::finish_check_locked(uint32_t team_id) {
     Log::logf(CAT_SLEEPHQ, LOG_INFO, "check ok team_id=%lu\n",
               static_cast<unsigned long>(team_id));
     reset_run_locked(true);
+    publish_runtime_locked();
 }
 
 void SleepHqSyncJob::finish_sync_locked() {
@@ -453,6 +473,7 @@ void SleepHqSyncJob::finish_sync_locked() {
               static_cast<unsigned>(status_.files_failed),
               static_cast<unsigned long long>(status_.bytes_uploaded));
     reset_run_locked(true);
+    publish_runtime_locked();
 }
 
 void SleepHqSyncJob::fail_locked(const char *error) {
@@ -477,6 +498,7 @@ void SleepHqSyncJob::fail_locked(const char *error) {
         Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
                   "preempted; queued reason=%s\n",
                   status_.pending_reason);
+        publish_runtime_locked();
         return;
     }
 
@@ -518,6 +540,7 @@ void SleepHqSyncJob::fail_locked(const char *error) {
               static_cast<unsigned long>(retry_in_ms),
               static_cast<unsigned>(retry_attempt_));
     reset_run_locked(true);
+    publish_runtime_locked();
 }
 
 void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
@@ -538,6 +561,7 @@ void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
               "retry queued reason=%s attempt=%u\n",
               status_.pending_reason,
               static_cast<unsigned>(retry_attempt_));
+    publish_runtime_locked();
 }
 
 bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
@@ -1598,6 +1622,7 @@ void SleepHqSyncJob::on_preempt() {
                   reason);
         status_.updated_ms = millis_nonzero();
         retry_due_ms_ = 0;
+        publish_runtime_locked();
     }
     unlock();
 }
@@ -1620,14 +1645,21 @@ SleepHqSyncStatus SleepHqSyncJob::status() const {
     return out;
 }
 
-bool SleepHqSyncJob::active() const {
-    if (!lock(20)) return true;
-    const bool out =
-        status_.state == SleepHqSyncState::Working ||
-        ((status_.state == SleepHqSyncState::Pending || status_.pending) &&
-         network_available_.load());
-    unlock();
+SleepHqSyncRuntimeStatus SleepHqSyncJob::runtime_status() const {
+    SleepHqSyncRuntimeStatus out;
+    out.state = static_cast<SleepHqSyncState>(runtime_state_.load());
+    out.pending = runtime_pending_.load();
+    out.configured = runtime_configured_.load();
+    out.network_available = network_available_.load();
+    out.config_generation = runtime_config_generation_.load();
+    out.team_id = runtime_team_id_.load();
+    out.completed_check_generation =
+        runtime_completed_check_generation_.load();
     return out;
+}
+
+bool SleepHqSyncJob::active() const {
+    return runtime_status().active();
 }
 
 }  // namespace aircannect
