@@ -25,11 +25,20 @@ enum class StorageExportPlannerItemKind : uint8_t {
     DatalogDayComplete,
 };
 
+using StorageExportDatalogDayDecisionCallback =
+    bool (*)(void *ctx,
+             const char *day,
+             bool &force_export,
+             char *error_out,
+             size_t error_out_size);
+
 struct StorageExportPlannerConfig {
     StorageExportPlannerScope scope = StorageExportPlannerScope::FullCard;
     const char *state_dir = nullptr;
     StorageExportStateCache *state_cache = nullptr;
     const char *latest_datalog_day = nullptr;
+    StorageExportDatalogDayDecisionCallback datalog_day_decision = nullptr;
+    void *datalog_day_decision_ctx = nullptr;
     uint32_t max_datalog_days = 0;
     bool skip_completed_finalized_datalog_days = false;
     bool require_pending_datalog_file = false;
@@ -97,6 +106,10 @@ private:
     bool datalog_day_has_pending_files(const DatalogDay &day,
                                        char *error_out,
                                        size_t error_out_size);
+    bool datalog_day_force_export(const char *day,
+                                  bool &force_export,
+                                  char *error_out,
+                                  size_t error_out_size);
 
     StorageExportPlannerResult next_full_card(StorageExportPlannerItem &out,
                                               char *error_out,
@@ -142,6 +155,7 @@ private:
     size_t datalog_day_index_ = 0;
     uint32_t datalog_days_started_ = 0;
     bool day_active_ = false;
+    bool day_force_export_ = false;
     size_t day_root_index_ = 0;
     char day_path_[AC_STORAGE_PATH_MAX] = {};
     char day_name_[9] = {};

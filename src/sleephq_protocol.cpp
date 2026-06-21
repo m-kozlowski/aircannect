@@ -180,4 +180,95 @@ bool sleephq_parse_remote_file_list_json(const char *json,
     return true;
 }
 
+bool sleephq_parse_machine_list_json(const char *json,
+                                     uint32_t per_page,
+                                     SleepHqMachineCallback callback,
+                                     void *ctx,
+                                     size_t &count,
+                                     bool &has_more,
+                                     char *error,
+                                     size_t error_size) {
+    count = 0;
+    has_more = false;
+    if (!json || !callback || per_page == 0) {
+        set_error(error, error_size, "bad_machine_list_request");
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+        set_error(error, error_size, "machine_list_json_parse");
+        return false;
+    }
+    JsonArrayConst data = doc["data"].as<JsonArrayConst>();
+    if (data.isNull()) {
+        set_error(error, error_size, "machine_list_missing");
+        return false;
+    }
+
+    for (JsonObjectConst item : data) {
+        SleepHqMachine machine;
+        JsonVariantConst id = item["id"];
+        if (!json_string_to_u32(id, machine.id)) {
+            id = item["attributes"]["id"];
+            (void)json_string_to_u32(id, machine.id);
+        }
+        copy_cstr(machine.serial_number,
+                  sizeof(machine.serial_number),
+                  json_string_or_empty(
+                      item["attributes"]["serial_number"]));
+        if (!callback(ctx, machine)) {
+            set_error(error, error_size, "machine_list_callback_failed");
+            return false;
+        }
+        count++;
+    }
+
+    has_more = count >= per_page;
+    set_error(error, error_size, "");
+    return true;
+}
+
+bool sleephq_parse_machine_date_json(const char *json,
+                                     SleepHqMachineDate &out,
+                                     char *error,
+                                     size_t error_size) {
+    out = SleepHqMachineDate();
+    if (!json) {
+        set_error(error, error_size, "bad_machine_date_request");
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+        set_error(error, error_size, "machine_date_json_parse");
+        return false;
+    }
+
+    JsonObjectConst data = doc["data"].as<JsonObjectConst>();
+    if (data.isNull()) {
+        set_error(error, error_size, "machine_date_missing");
+        return false;
+    }
+
+    JsonVariantConst id = data["id"];
+    if (!json_string_to_u32(id, out.id)) {
+        id = data["attributes"]["id"];
+        (void)json_string_to_u32(id, out.id);
+    }
+    (void)json_string_to_u32(data["attributes"]["machine_id"],
+                             out.machine_id);
+    copy_cstr(out.date,
+              sizeof(out.date),
+              json_string_or_empty(data["attributes"]["date"]));
+    if (!out.id || !out.date[0]) {
+        set_error(error, error_size, "machine_date_incomplete");
+        return false;
+    }
+    set_error(error, error_size, "");
+    return true;
+}
+
 }  // namespace aircannect

@@ -173,6 +173,11 @@ private:
         char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
     };
 
+    struct RemoteMachineDateCache {
+        char day[9] = {};
+        bool exists = false;
+    };
+
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
@@ -229,6 +234,22 @@ private:
     bool fetch_next_remote_file_page_locked(char *error,
                                             size_t error_size);
     void clear_remote_files_locked();
+    bool reserve_remote_dates_locked(size_t needed);
+    bool cache_remote_date_locked(const char *day, bool exists);
+    bool cached_remote_date_exists_locked(const char *day,
+                                          bool &exists) const;
+    void clear_remote_dates_locked();
+    bool read_local_machine_serial_locked(char *out,
+                                          size_t out_size,
+                                          char *error,
+                                          size_t error_size);
+    bool prepare_remote_reconcile_locked(char *error, size_t error_size);
+    bool note_remote_machine_locked(const SleepHqMachine &machine);
+    bool find_remote_machine_locked(char *error, size_t error_size);
+    bool datalog_day_decision_locked(const char *day,
+                                     bool &force_export,
+                                     char *error,
+                                     size_t error_size);
     bool local_ensure_dir_locked(const char *path);
     bool build_sleep_path_locked(const char *local_path,
                                  char *path_out,
@@ -257,6 +278,13 @@ private:
     static bool upload_abort_cb(void *ctx);
     static bool remote_file_list_cb(void *ctx,
                                     const SleepHqRemoteFile &file);
+    static bool remote_machine_list_cb(void *ctx,
+                                       const SleepHqMachine &machine);
+    static bool datalog_day_decision_cb(void *ctx,
+                                        const char *day,
+                                        bool &force_export,
+                                        char *error,
+                                        size_t error_size);
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     SleepHqSyncStatus status_;
@@ -288,6 +316,13 @@ private:
     uint32_t remote_file_next_page_ = 1;
     uint32_t remote_file_pages_loaded_ = 0;
     bool remote_file_cache_complete_ = false;
+    RemoteMachineDateCache *remote_dates_ = nullptr;
+    size_t remote_date_count_ = 0;
+    size_t remote_date_capacity_ = 0;
+    uint32_t remote_machine_id_ = 0;
+    bool remote_reconcile_enabled_ = false;
+    bool remote_reconcile_all_missing_ = false;
+    char remote_serial_[AC_SLEEPHQ_SERIAL_MAX] = {};
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;

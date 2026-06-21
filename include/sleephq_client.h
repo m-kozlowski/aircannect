@@ -85,6 +85,16 @@ public:
                          void *ctx,
                          size_t &count,
                          bool &has_more);
+    bool list_team_machines(uint32_t team_id,
+                            uint32_t page,
+                            uint32_t per_page,
+                            SleepHqMachineCallback callback,
+                            void *ctx,
+                            size_t &count,
+                            bool &has_more);
+    bool get_machine_date(uint32_t machine_id,
+                          const char *date,
+                          SleepHqMachineDate &out);
     bool process_import(uint32_t import_id, SleepHqImportInfo *out = nullptr);
     bool get_import(uint32_t import_id, SleepHqImportInfo &out);
 
@@ -130,6 +140,14 @@ private:
                          void *ctx,
                          size_t &count,
                          bool &has_more);
+    bool parse_machine_list(const SleepHqHttpResponse &response,
+                            uint32_t per_page,
+                            SleepHqMachineCallback callback,
+                            void *ctx,
+                            size_t &count,
+                            bool &has_more);
+    bool parse_machine_date(const SleepHqHttpResponse &response,
+                            SleepHqMachineDate &out);
     bool upload_file_once(const SleepHqUploadRequest &request,
                           SleepHqUploadResult &out,
                           SleepHqHttpResponse &response);

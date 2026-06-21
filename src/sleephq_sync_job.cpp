@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <ArduinoJson.h>
 #include <esp_rom_md5.h>
 
 #include "crc32.h"
@@ -32,6 +33,15 @@ static constexpr uint32_t SLEEPHQ_REMOTE_FILE_LOOKUP_LIMIT = 500;
 static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PAGE_LIMIT =
     (SLEEPHQ_REMOTE_FILE_LOOKUP_LIMIT + SLEEPHQ_REMOTE_FILE_PER_PAGE - 1) /
     SLEEPHQ_REMOTE_FILE_PER_PAGE;
+static constexpr const char *SLEEPHQ_IDENTIFICATION_PATH =
+    "/Identification.json";
+static constexpr size_t SLEEPHQ_IDENTIFICATION_JSON_MAX = 8192;
+static constexpr uint32_t SLEEPHQ_REMOTE_MACHINE_PER_PAGE = 25;
+static constexpr uint32_t SLEEPHQ_REMOTE_MACHINE_LOOKUP_LIMIT = 250;
+static constexpr uint32_t SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT =
+    (SLEEPHQ_REMOTE_MACHINE_LOOKUP_LIMIT + SLEEPHQ_REMOTE_MACHINE_PER_PAGE -
+     1) /
+    SLEEPHQ_REMOTE_MACHINE_PER_PAGE;
 
 void sleep_hq_digest_to_hex(const uint8_t digest[16],
                             char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
@@ -89,6 +99,35 @@ bool sleep_hq_error_retryable(const char *error) {
         if (strcmp(error, item) == 0) return false;
     }
     return true;
+}
+
+bool datalog_day_to_iso_date(const char *day, char *out, size_t out_size) {
+    if (!day || !out || out_size < 11) return false;
+    for (size_t i = 0; i < 8; ++i) {
+        if (day[i] < '0' || day[i] > '9') return false;
+    }
+    if (day[8] != '\0') return false;
+    out[0] = day[0];
+    out[1] = day[1];
+    out[2] = day[2];
+    out[3] = day[3];
+    out[4] = '-';
+    out[5] = day[4];
+    out[6] = day[5];
+    out[7] = '-';
+    out[8] = day[6];
+    out[9] = day[7];
+    out[10] = '\0';
+    return true;
+}
+
+const char *json_serial_or_empty(JsonDocument &doc) {
+    const char *serial =
+        doc["FlowGenerator"]["IdentificationProfiles"]["Product"]
+           ["SerialNumber"] |
+        "";
+    if (serial[0]) return serial;
+    return doc["IdentificationProfiles"]["Product"]["SerialNumber"] | "";
 }
 
 }  // namespace
@@ -418,6 +457,77 @@ void SleepHqSyncJob::clear_remote_files_locked() {
     remote_file_cache_complete_ = false;
 }
 
+bool SleepHqSyncJob::reserve_remote_dates_locked(size_t needed) {
+    if (needed <= remote_date_capacity_) return true;
+    size_t next = remote_date_capacity_ == 0 ? 16 : remote_date_capacity_ * 2;
+    while (next < needed) next *= 2;
+    RemoteMachineDateCache *items = static_cast<RemoteMachineDateCache *>(
+        Memory::alloc_large(sizeof(RemoteMachineDateCache) * next, false));
+    if (!items) {
+        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
+                  "remote date cache allocation failed entries=%u bytes=%u\n",
+                  static_cast<unsigned>(next),
+                  static_cast<unsigned>(sizeof(RemoteMachineDateCache) *
+                                        next));
+        return false;
+    }
+    for (size_t i = 0; i < next; ++i) {
+        new (&items[i]) RemoteMachineDateCache();
+    }
+    for (size_t i = 0; i < remote_date_count_; ++i) {
+        items[i] = remote_dates_[i];
+    }
+    if (remote_dates_) Memory::free(remote_dates_);
+    remote_dates_ = items;
+    remote_date_capacity_ = next;
+    return true;
+}
+
+bool SleepHqSyncJob::cache_remote_date_locked(const char *day, bool exists) {
+    if (!day || !day[0]) return false;
+    for (size_t i = 0; i < remote_date_count_; ++i) {
+        RemoteMachineDateCache &entry = remote_dates_[i];
+        if (strcmp(entry.day, day) == 0) {
+            entry.exists = exists;
+            return true;
+        }
+    }
+    if (!reserve_remote_dates_locked(remote_date_count_ + 1)) return false;
+    RemoteMachineDateCache &entry = remote_dates_[remote_date_count_++];
+    copy_cstr(entry.day, sizeof(entry.day), day);
+    entry.exists = exists;
+    return true;
+}
+
+bool SleepHqSyncJob::cached_remote_date_exists_locked(const char *day,
+                                                      bool &exists) const {
+    if (!day || !day[0]) return false;
+    for (size_t i = 0; i < remote_date_count_; ++i) {
+        const RemoteMachineDateCache &entry = remote_dates_[i];
+        if (strcmp(entry.day, day) == 0) {
+            exists = entry.exists;
+            return true;
+        }
+    }
+    return false;
+}
+
+void SleepHqSyncJob::clear_remote_dates_locked() {
+    if (remote_dates_) {
+        for (size_t i = 0; i < remote_date_capacity_; ++i) {
+            remote_dates_[i].~RemoteMachineDateCache();
+        }
+        Memory::free(remote_dates_);
+    }
+    remote_dates_ = nullptr;
+    remote_date_count_ = 0;
+    remote_date_capacity_ = 0;
+    remote_machine_id_ = 0;
+    remote_reconcile_enabled_ = false;
+    remote_reconcile_all_missing_ = false;
+    remote_serial_[0] = '\0';
+}
+
 void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     client_.disconnect();
     close_local_locked();
@@ -425,6 +535,7 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     clear_current_file_locked();
     clear_staged_locked();
     clear_remote_files_locked();
+    clear_remote_dates_locked();
     state_cache_.clear();
     phase_ = WorkPhase::Idle;
     import_batch_active_ = false;
@@ -593,6 +704,9 @@ bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
     config.state_dir = state_dir_;
     config.state_cache = &state_cache_;
     config.require_pending_datalog_file = true;
+    config.datalog_day_decision =
+        &SleepHqSyncJob::datalog_day_decision_cb;
+    config.datalog_day_decision_ctx = this;
     if (current_run_kind_ == RunKind::PostTherapySync) {
         config.max_datalog_days = SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT;
     }
@@ -1227,6 +1341,26 @@ bool SleepHqSyncJob::remote_file_list_cb(void *ctx,
     return job && job->add_remote_file_locked(file);
 }
 
+bool SleepHqSyncJob::remote_machine_list_cb(void *ctx,
+                                            const SleepHqMachine &machine) {
+    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
+    return job && job->note_remote_machine_locked(machine);
+}
+
+bool SleepHqSyncJob::datalog_day_decision_cb(void *ctx,
+                                             const char *day,
+                                             bool &force_export,
+                                             char *error,
+                                             size_t error_size) {
+    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
+    if (!job) {
+        copy_cstr(error, error_size, "reconcile_context_missing");
+        return false;
+    }
+    return job->datalog_day_decision_locked(day, force_export,
+                                            error, error_size);
+}
+
 bool SleepHqSyncJob::fetch_next_remote_file_page_locked(char *error,
                                                         size_t error_size) {
     if (remote_file_cache_complete_ ||
@@ -1261,9 +1395,199 @@ bool SleepHqSyncJob::fetch_next_remote_file_page_locked(char *error,
     return true;
 }
 
+bool SleepHqSyncJob::read_local_machine_serial_locked(char *out,
+                                                      size_t out_size,
+                                                      char *error,
+                                                      size_t error_size) {
+    if (!out || out_size == 0) {
+        copy_cstr(error, error_size, "bad_serial_buffer");
+        return false;
+    }
+    out[0] = '\0';
+    const StorageLocalNodeInfo info =
+        storage_stat_local_node(SLEEPHQ_IDENTIFICATION_PATH);
+    if (!info.exists) return true;
+    if (info.is_dir || info.size == 0 ||
+        info.size > SLEEPHQ_IDENTIFICATION_JSON_MAX) {
+        copy_cstr(error, error_size, "identification_invalid");
+        return false;
+    }
+
+    const size_t size = static_cast<size_t>(info.size);
+    char *json = static_cast<char *>(Memory::alloc_large(size + 1, false));
+    if (!json) {
+        copy_cstr(error, error_size, "identification_alloc");
+        return false;
+    }
+
+    bool ok = true;
+    {
+        Storage::Guard guard;
+        File file = Storage::open(SLEEPHQ_IDENTIFICATION_PATH, "r");
+        if (!file || file.isDirectory()) {
+            ok = false;
+        } else {
+            const size_t read = file.read(reinterpret_cast<uint8_t *>(json),
+                                          size);
+            file.close();
+            ok = read == size;
+        }
+    }
+    if (!ok) {
+        Memory::free(json);
+        copy_cstr(error, error_size, "identification_read");
+        return false;
+    }
+    json[size] = '\0';
+
+    JsonDocument doc;
+    DeserializationError parse_error = deserializeJson(doc, json);
+    Memory::free(json);
+    if (parse_error) {
+        copy_cstr(error, error_size, "identification_json");
+        return false;
+    }
+
+    const char *serial = json_serial_or_empty(doc);
+    if (serial && serial[0]) {
+        copy_cstr(out, out_size, serial);
+    }
+    return true;
+}
+
+bool SleepHqSyncJob::note_remote_machine_locked(
+    const SleepHqMachine &machine) {
+    if (remote_machine_id_ || !remote_serial_[0]) return true;
+    if (machine.id && strcmp(machine.serial_number, remote_serial_) == 0) {
+        remote_machine_id_ = machine.id;
+    }
+    return true;
+}
+
+bool SleepHqSyncJob::find_remote_machine_locked(char *error,
+                                                size_t error_size) {
+    if (!remote_serial_[0]) return true;
+    uint32_t page = 1;
+    for (uint32_t pages = 0; pages < SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT;
+         ++pages, ++page) {
+        size_t count = 0;
+        bool has_more = false;
+        if (!client_.list_team_machines(status_.team_id,
+                                        page,
+                                        SLEEPHQ_REMOTE_MACHINE_PER_PAGE,
+                                        &SleepHqSyncJob::remote_machine_list_cb,
+                                        this,
+                                        count,
+                                        has_more)) {
+            copy_cstr(error, error_size, client_.last_error());
+            return false;
+        }
+        if (remote_machine_id_) {
+            Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
+                      "remote machine matched serial=%s id=%lu\n",
+                      remote_serial_,
+                      static_cast<unsigned long>(remote_machine_id_));
+            return true;
+        }
+        if (!has_more) break;
+    }
+
+    remote_reconcile_all_missing_ = true;
+    Log::logf(CAT_SLEEPHQ, LOG_INFO,
+              "remote machine missing serial=%s; forcing DATALOG export\n",
+              remote_serial_);
+    return true;
+}
+
+bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
+                                                     size_t error_size) {
+    remote_machine_id_ = 0;
+    remote_reconcile_enabled_ = false;
+    remote_reconcile_all_missing_ = false;
+    remote_serial_[0] = '\0';
+    remote_date_count_ = 0;
+
+    char serial[AC_SLEEPHQ_SERIAL_MAX] = {};
+    if (!read_local_machine_serial_locked(serial, sizeof(serial),
+                                          error, error_size)) {
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "remote reconcile disabled: %s\n",
+                  error && error[0] ? error : "identification_failed");
+        error[0] = '\0';
+        return true;
+    }
+    if (!serial[0]) {
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "remote reconcile disabled: identification serial missing\n");
+        return true;
+    }
+
+    copy_cstr(remote_serial_, sizeof(remote_serial_), serial);
+    remote_reconcile_enabled_ = true;
+    if (!find_remote_machine_locked(error, error_size)) {
+        return false;
+    }
+    return true;
+}
+
+bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
+                                                 bool &force_export,
+                                                 char *error,
+                                                 size_t error_size) {
+    force_export = false;
+    if (!remote_reconcile_enabled_) return true;
+    if (!day || !day[0]) {
+        copy_cstr(error, error_size, "bad_datalog_day");
+        return false;
+    }
+    if (remote_reconcile_all_missing_) {
+        force_export = true;
+        return true;
+    }
+
+    bool exists = false;
+    if (cached_remote_date_exists_locked(day, exists)) {
+        force_export = !exists;
+        return true;
+    }
+
+    char iso_date[11] = {};
+    if (!datalog_day_to_iso_date(day, iso_date, sizeof(iso_date))) {
+        copy_cstr(error, error_size, "bad_datalog_day");
+        return false;
+    }
+
+    SleepHqMachineDate remote_date;
+    if (client_.get_machine_date(remote_machine_id_, iso_date, remote_date)) {
+        if (!cache_remote_date_locked(day, true)) {
+            copy_cstr(error, error_size, "remote_date_cache_alloc");
+            return false;
+        }
+        force_export = false;
+        return true;
+    }
+
+    const char *client_error = client_.last_error();
+    if (strcmp(client_error, "http_404") == 0) {
+        if (!cache_remote_date_locked(day, false)) {
+            copy_cstr(error, error_size, "remote_date_cache_alloc");
+            return false;
+        }
+        force_export = true;
+        Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                  "remote machine-date missing day=%s serial=%s\n",
+                  day, remote_serial_);
+        return true;
+    }
+
+    copy_cstr(error, error_size,
+              client_error && client_error[0]
+                  ? client_error
+                  : "machine_date_lookup_failed");
+    return false;
+}
+
 JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
-    (void)error;
-    (void)error_size;
     client_.configure(client_config_from_snapshot(config_));
     uint32_t team_id = 0;
     if (!client_.resolve_team_id(team_id)) {
@@ -1279,6 +1603,10 @@ JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
                                          state_dir_,
                                          sizeof(state_dir_))) {
         fail_locked("state_path_failed");
+        return JobStep::Idle;
+    }
+    if (!prepare_remote_reconcile_locked(error, error_size)) {
+        fail_locked(error[0] ? error : "remote_reconcile_failed");
         return JobStep::Idle;
     }
     char planner_error[AC_SLEEPHQ_ERROR_MAX] = {};

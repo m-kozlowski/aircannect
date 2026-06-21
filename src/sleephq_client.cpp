@@ -997,6 +997,53 @@ bool SleepHqClient::list_team_files(uint32_t team_id,
     return parse_file_list(response, per_page, callback, ctx, count, has_more);
 }
 
+bool SleepHqClient::list_team_machines(uint32_t team_id,
+                                       uint32_t page,
+                                       uint32_t per_page,
+                                       SleepHqMachineCallback callback,
+                                       void *ctx,
+                                       size_t &count,
+                                       bool &has_more) {
+    count = 0;
+    has_more = false;
+    if (!team_id || !callback || per_page == 0 || per_page > 100) {
+        set_error("bad_machine_list_request");
+        return false;
+    }
+    char path[104];
+    snprintf(path, sizeof(path),
+             "/api/v1/teams/%lu/machines?page=%lu&per_page=%lu",
+             static_cast<unsigned long>(team_id),
+             static_cast<unsigned long>(page ? page : 1),
+             static_cast<unsigned long>(per_page));
+    SleepHqHttpResponse response;
+    if (!request("GET", path, nullptr, nullptr, true, response)) {
+        return false;
+    }
+    return parse_machine_list(response, per_page, callback, ctx,
+                              count, has_more);
+}
+
+bool SleepHqClient::get_machine_date(uint32_t machine_id,
+                                     const char *date,
+                                     SleepHqMachineDate &out) {
+    out = SleepHqMachineDate();
+    if (!machine_id || !date || strlen(date) != 10) {
+        set_error("bad_machine_date_request");
+        return false;
+    }
+    char path[80];
+    snprintf(path, sizeof(path),
+             "/api/v1/machines/%lu/machine_dates/%s",
+             static_cast<unsigned long>(machine_id),
+             date);
+    SleepHqHttpResponse response;
+    if (!request("GET", path, nullptr, nullptr, true, response)) {
+        return false;
+    }
+    return parse_machine_date(response, out);
+}
+
 bool SleepHqClient::process_import(uint32_t import_id,
                                    SleepHqImportInfo *out) {
     char path[64];
@@ -1036,6 +1083,36 @@ bool SleepHqClient::parse_file_list(const SleepHqHttpResponse &response,
                                                         has_more,
                                                         error,
                                                         sizeof(error));
+    if (!ok) set_error(error);
+    return ok;
+}
+
+bool SleepHqClient::parse_machine_list(const SleepHqHttpResponse &response,
+                                       uint32_t per_page,
+                                       SleepHqMachineCallback callback,
+                                       void *ctx,
+                                       size_t &count,
+                                       bool &has_more) {
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    const bool ok = sleephq_parse_machine_list_json(response.body.c_str(),
+                                                    per_page,
+                                                    callback,
+                                                    ctx,
+                                                    count,
+                                                    has_more,
+                                                    error,
+                                                    sizeof(error));
+    if (!ok) set_error(error);
+    return ok;
+}
+
+bool SleepHqClient::parse_machine_date(const SleepHqHttpResponse &response,
+                                       SleepHqMachineDate &out) {
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    const bool ok = sleephq_parse_machine_date_json(response.body.c_str(),
+                                                   out,
+                                                   error,
+                                                   sizeof(error));
     if (!ok) set_error(error);
     return ok;
 }

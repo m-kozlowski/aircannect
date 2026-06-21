@@ -79,6 +79,7 @@ void StorageExportPlanner::reset() {
     datalog_days_started_ = 0;
     root_index_ = 0;
     day_active_ = false;
+    day_force_export_ = false;
     day_root_index_ = 0;
     day_path_[0] = '\0';
     day_name_[0] = '\0';
@@ -269,6 +270,20 @@ bool StorageExportPlanner::datalog_day_has_pending_files(
     return pending;
 }
 
+bool StorageExportPlanner::datalog_day_force_export(
+    const char *day,
+    bool &force_export,
+    char *error_out,
+    size_t error_out_size) {
+    force_export = false;
+    if (!config_.datalog_day_decision) return true;
+    return config_.datalog_day_decision(config_.datalog_day_decision_ctx,
+                                        day,
+                                        force_export,
+                                        error_out,
+                                        error_out_size);
+}
+
 StorageExportPlannerResult StorageExportPlanner::next(
     StorageExportPlannerItem &out,
     char *error_out,
@@ -393,7 +408,8 @@ StorageExportPlannerResult StorageExportPlanner::next_walk_item(
             continue;
         }
 
-        if (build_file_item(child_path, false, out, error_out,
+        const bool force_export = day_name_[0] && day_force_export_;
+        if (build_file_item(child_path, force_export, out, error_out,
                             error_out_size)) {
             return StorageExportPlannerResult::Item;
         }
@@ -509,18 +525,27 @@ StorageExportPlannerResult StorageExportPlanner::scan_datalog_days(
 bool StorageExportPlanner::select_next_datalog_day(char *error_out,
                                                    size_t error_out_size) {
     while (datalog_day_index_ < datalog_day_count_) {
-        const DatalogDay &day = datalog_days_[datalog_day_index_++];
-        if (config_.require_pending_datalog_file &&
-            !datalog_day_has_pending_files(day, error_out, error_out_size)) {
-            continue;
-        }
         if (config_.max_datalog_days != 0 &&
             datalog_days_started_ >= config_.max_datalog_days) {
             return false;
         }
+        const DatalogDay &day = datalog_days_[datalog_day_index_++];
+        bool force_export = false;
+        if (!datalog_day_force_export(day.day,
+                                      force_export,
+                                      error_out,
+                                      error_out_size)) {
+            return false;
+        }
+        if (config_.require_pending_datalog_file &&
+            !force_export &&
+            !datalog_day_has_pending_files(day, error_out, error_out_size)) {
+            continue;
+        }
         copy_cstr(day_name_, sizeof(day_name_), day.day);
         copy_cstr(day_path_, sizeof(day_path_), day.path);
         day_active_ = true;
+        day_force_export_ = force_export;
         day_root_index_ = 0;
         datalog_days_started_++;
         return true;
@@ -545,6 +570,9 @@ StorageExportPlannerResult StorageExportPlanner::next_sleep_hq(
 
         if (!day_active_) {
             if (!select_next_datalog_day(error_out, error_out_size)) {
+                if (error_out && error_out[0]) {
+                    return StorageExportPlannerResult::Error;
+                }
                 return StorageExportPlannerResult::Done;
             }
         }
@@ -573,6 +601,7 @@ StorageExportPlannerResult StorageExportPlanner::next_sleep_hq(
         if (walked == StorageExportPlannerResult::Item &&
             out.kind == StorageExportPlannerItemKind::DatalogDayComplete) {
             day_active_ = false;
+            day_force_export_ = false;
             day_path_[0] = '\0';
             day_name_[0] = '\0';
             return walked;
