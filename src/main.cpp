@@ -31,6 +31,7 @@
 #include "tcp_bridge.h"
 #include "telnet_console.h"
 #include "time_sync_service.h"
+#include "tls_memory.h"
 #include "version.h"
 #include "web_ui.h"
 #include "wifi_manager.h"
@@ -335,6 +336,16 @@ void setup() {
 
     Memory::begin();
     Log::init();
+    const bool tls_allocator_ready = TlsMemory::begin();
+    const TlsMemoryStatus tls_mem = TlsMemory::status();
+    Log::logf(CAT_GENERAL,
+              tls_allocator_ready ? LOG_INFO : LOG_WARN,
+              "[TLS] mbedTLS allocator installed=%u psram=%u "
+              "large_threshold=%u result=%d\n",
+              tls_mem.installed ? 1u : 0u,
+              tls_mem.psram_enabled ? 1u : 0u,
+              static_cast<unsigned>(tls_mem.large_threshold),
+              tls_mem.install_result);
     app_config.begin();
     app_config.apply_log_config();
     const MemoryStatus mem = Memory::status();

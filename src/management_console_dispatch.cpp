@@ -17,6 +17,7 @@
 #include "storage_manager.h"
 #include "storage_writer.h"
 #include "string_util.h"
+#include "tls_memory.h"
 #include "version.h"
 #include "web_ui.h"
 
@@ -184,6 +185,29 @@ void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
     out.print(" data_bytes=");
     out.print(static_cast<unsigned long>(
         storage.capacity * storage.chunk_bytes));
+    out.println();
+
+    const TlsMemoryStatus tls = TlsMemory::status();
+    out.print("[MEM owner] tls installed=");
+    out.print(tls.installed ? "yes" : "no");
+    out.print(" psram=");
+    out.print(tls.psram_enabled ? "yes" : "no");
+    out.print(" threshold=");
+    out.print(static_cast<unsigned long>(tls.large_threshold));
+    out.print(" large_psram=");
+    out.print(static_cast<unsigned long>(tls.large_psram));
+    out.print(" large_internal_fallback=");
+    out.print(static_cast<unsigned long>(tls.large_internal_fallback));
+    out.print(" large_internal_no_psram=");
+    out.print(static_cast<unsigned long>(tls.large_internal_no_psram));
+    out.print(" large_fail=");
+    out.print(static_cast<unsigned long>(tls.large_fail));
+    out.print(" small_internal=");
+    out.print(static_cast<unsigned long>(tls.small_internal));
+    out.print(" small_fail=");
+    out.print(static_cast<unsigned long>(tls.small_fail));
+    out.print(" frees=");
+    out.print(static_cast<unsigned long>(tls.frees));
     out.println();
 }
 
