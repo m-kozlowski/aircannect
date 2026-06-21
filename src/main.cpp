@@ -5,11 +5,11 @@
 #include "app_config.h"
 #include "background_worker.h"
 #include "board.h"
-#include "board_report.h"
 #include "can_driver.h"
 #include "debug_log.h"
 #include "edf_recorder_manager.h"
 #include "edf_storage_worker.h"
+#include "export_coordinator.h"
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
@@ -60,6 +60,7 @@ static StorageArchiveJob storage_archive_job;
 static StorageDeleteJob storage_delete_job;
 static StorageSyncJob *storage_sync_job = nullptr;
 static SleepHqSyncJob *sleephq_sync_job = nullptr;
+static ExportCoordinator export_coordinator;
 static ReportCacheWriterJob report_cache_writer_job(report_manager);
 static ReportPrefetchJob report_prefetch_job(report_manager);
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
@@ -193,221 +194,6 @@ static SleepHqSyncJob *create_sleephq_sync_job() {
         return nullptr;
     }
     return new (memory) SleepHqSyncJob();
-}
-
-struct PostTherapyReportSyncHandoff {
-    As11TherapyState last_state = As11TherapyState::Unknown;
-    uint32_t summary_refresh_due_ms = 0;
-    bool sync_pending = false;
-    bool sync_grace_armed = false;
-    uint32_t sync_due_ms = 0;
-    uint32_t sync_deadline_ms = 0;
-    bool sleephq_pending = false;
-    bool sleephq_grace_armed = false;
-    uint32_t sleephq_due_ms = 0;
-
-    void poll(RpcArbiter &arbiter,
-              ReportManager &report,
-              StorageSyncJob *sync_job,
-              SleepHqSyncJob *sleephq_job,
-              uint32_t now_ms) {
-        const As11TherapyState state =
-            arbiter.as11_state().therapy_state();
-
-        if (state == As11TherapyState::Running) {
-            reset_after_running();
-            last_state = state;
-            return;
-        }
-
-        if (last_state == As11TherapyState::Running &&
-            state != As11TherapyState::Running) {
-            arm_after_stop(sync_job, sleephq_job, now_ms);
-        }
-
-        maybe_refresh_summary(arbiter, report, sync_job, now_ms);
-        maybe_queue_sync(arbiter, report, sync_job, now_ms);
-        maybe_queue_sleephq(arbiter, report, sync_job, sleephq_job, now_ms);
-        last_state = state;
-    }
-
-private:
-    static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms) {
-        uint32_t due = now_ms + delay_ms;
-        if (due == 0) due = 1;
-        return due;
-    }
-
-    void reset_after_running() {
-        summary_refresh_due_ms = 0;
-        sync_pending = false;
-        sync_grace_armed = false;
-        sync_due_ms = 0;
-        sync_deadline_ms = 0;
-        sleephq_pending = false;
-        sleephq_grace_armed = false;
-        sleephq_due_ms = 0;
-    }
-
-    void arm_after_stop(StorageSyncJob *sync_job,
-                        SleepHqSyncJob *sleephq_job,
-                        uint32_t now_ms) {
-        summary_refresh_due_ms =
-            due_after(now_ms, AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS);
-        sync_pending = sync_job != nullptr;
-        sleephq_pending = sleephq_job != nullptr;
-        sync_grace_armed = false;
-        sleephq_grace_armed = false;
-        sync_due_ms = 0;
-        sleephq_due_ms = 0;
-        sync_deadline_ms =
-            due_after(now_ms, AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS);
-        if (sync_job) {
-            sync_job->defer_idle_work_until(summary_refresh_due_ms);
-        }
-    }
-
-    void maybe_refresh_summary(RpcArbiter &arbiter,
-                               ReportManager &report,
-                               StorageSyncJob *sync_job,
-                               uint32_t now_ms) {
-        if (summary_refresh_due_ms == 0 ||
-            static_cast<int32_t>(now_ms - summary_refresh_due_ms) < 0) {
-            return;
-        }
-        if (arbiter.stream_activity_active()) {
-            summary_refresh_due_ms =
-                due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
-            if (sync_job) {
-                sync_job->defer_idle_work_until(summary_refresh_due_ms);
-            }
-            return;
-        }
-        if (report.request_summary_refresh()) {
-            summary_refresh_due_ms = 0;
-            sync_grace_armed = false;
-            sync_due_ms = 0;
-        } else {
-            summary_refresh_due_ms =
-                due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
-        }
-    }
-
-    void maybe_queue_sync(RpcArbiter &arbiter,
-                          ReportManager &report,
-                          StorageSyncJob *sync_job,
-                          uint32_t now_ms) {
-        if (!sync_pending || summary_refresh_due_ms != 0) return;
-
-        if (!sync_job) {
-            sync_pending = false;
-            sync_due_ms = 0;
-            sync_deadline_ms = 0;
-            return;
-        }
-        if (arbiter.stream_activity_active()) {
-            sync_due_ms = 0;
-            sync_job->defer_idle_work_until(
-                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS));
-            return;
-        }
-        if (report.background_work_active()) {
-            const bool deadline_reached =
-                sync_deadline_ms != 0 &&
-                static_cast<int32_t>(now_ms - sync_deadline_ms) >= 0;
-            if (!deadline_reached) {
-                sync_due_ms = 0;
-                sync_job->defer_idle_work_until(
-                    due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS));
-                return;
-            }
-            Log::logf(CAT_STORAGE,
-                      LOG_WARN,
-                      "[SYNC] post-therapy sync fallback after report wait\n");
-            queue_sync(sync_job);
-            return;
-        }
-        if (!sync_grace_armed) {
-            sync_grace_armed = true;
-            sync_due_ms =
-                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
-            sync_job->defer_idle_work_until(sync_due_ms);
-            return;
-        }
-        if (sync_due_ms == 0) {
-            sync_due_ms =
-                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
-            sync_job->defer_idle_work_until(sync_due_ms);
-            return;
-        }
-        if (static_cast<int32_t>(now_ms - sync_due_ms) >= 0) {
-            queue_sync(sync_job);
-        }
-    }
-
-    void maybe_queue_sleephq(RpcArbiter &arbiter,
-                             ReportManager &report,
-                             StorageSyncJob *sync_job,
-                             SleepHqSyncJob *sleephq_job,
-                             uint32_t now_ms) {
-        if (!sleephq_pending || summary_refresh_due_ms != 0 ||
-            sync_pending) {
-            return;
-        }
-        if (!sleephq_job) {
-            sleephq_pending = false;
-            sleephq_due_ms = 0;
-            return;
-        }
-        if (arbiter.stream_activity_active() ||
-            report.background_work_active() ||
-            (sync_job && sync_job->active())) {
-            sleephq_due_ms = 0;
-            return;
-        }
-        if (!sleephq_grace_armed) {
-            sleephq_grace_armed = true;
-            sleephq_due_ms =
-                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
-            return;
-        }
-        if (sleephq_due_ms == 0) {
-            sleephq_due_ms =
-                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
-            return;
-        }
-        if (static_cast<int32_t>(now_ms - sleephq_due_ms) >= 0) {
-            (void)sleephq_job->request_sync("post_therapy");
-            sleephq_pending = false;
-            sleephq_due_ms = 0;
-        }
-    }
-
-    void queue_sync(StorageSyncJob *sync_job) {
-        (void)sync_job->request_post_therapy_sync();
-        sync_pending = false;
-        sync_due_ms = 0;
-        sync_deadline_ms = 0;
-    }
-};
-
-static PostTherapyReportSyncHandoff post_therapy_handoff;
-
-static void maybe_queue_sleephq_startup_check(SleepHqSyncJob *job,
-                                              bool network_available) {
-    static uint32_t checked_generation = 0;
-    if (!job || !network_available) return;
-    const SleepHqSyncStatus status = job->status();
-    if (!status.configured ||
-        status.config_generation == 0 ||
-        checked_generation == status.config_generation ||
-        status.state == SleepHqSyncState::Pending ||
-        status.state == SleepHqSyncState::Working) {
-        return;
-    }
-    if (job->request_check("startup_check")) {
-        checked_generation = status.config_generation;
-    }
 }
 
 void setup() {
@@ -573,11 +359,6 @@ void loop() {
     const uint32_t now_ms = millis();
     session_manager.poll(rpc_arbiter.as11_state(), now_ms);
     edf_recorder_manager.poll(now_ms);
-    post_therapy_handoff.poll(rpc_arbiter,
-                              report_manager,
-                              storage_sync_job,
-                              sleephq_sync_job,
-                              now_ms);
     drain_can_rx_after("session_edf");
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
@@ -614,36 +395,16 @@ void loop() {
                      !resmed_ota_transport_active);
     resmed_ota_manager.poll();
     Storage::poll(storage_writer_idle_allowed);
-    if (storage_sync_job) {
-        storage_sync_job->set_network_available(
-            wifi_manager.mode_state() == WifiModeState::StaConnected);
-        storage_sync_job->refresh_config(app_config.data(), now_ms);
-    }
-    const bool sleephq_working =
-        sleephq_sync_job &&
-        sleephq_sync_job->status().state == SleepHqSyncState::Working;
-    if (storage_sync_job && sleephq_working) {
-        storage_sync_job->defer_idle_work_until(
-            now_ms + AC_BG_WORKER_BUSY_RECHECK_MS);
-    }
-    const bool storage_sync_active =
-        storage_sync_job && storage_sync_job->active();
-    if (sleephq_sync_job) {
-        const bool network_connected =
-            wifi_manager.mode_state() == WifiModeState::StaConnected;
-        sleephq_sync_job->set_network_available(network_connected);
-        sleephq_sync_job->set_runtime_blocked(
-            report_manager.foreground_busy() ||
-            storage_sync_active ||
-            rpc_arbiter.stream_activity_active() ||
-            resmed_ota_manager.transport_active() ||
-            ota_manager.active() ||
-            rpc_arbiter.as11_state().therapy_state() ==
-                As11TherapyState::Running);
-        sleephq_sync_job->refresh_config(app_config.data(), now_ms);
-        maybe_queue_sleephq_startup_check(sleephq_sync_job,
-                                          network_connected);
-    }
+    export_coordinator.poll(
+        rpc_arbiter,
+        report_manager,
+        storage_sync_job,
+        sleephq_sync_job,
+        app_config.data(),
+        wifi_manager.mode_state() == WifiModeState::StaConnected,
+        resmed_ota_manager.transport_active(),
+        ota_manager.active(),
+        now_ms);
     drain_can_rx_after("ota_storage_sync");
     // Publish the worker's gate inputs from here (the owner thread) so the
     // background task reads a coherent snapshot instead of these managers.
