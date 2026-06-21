@@ -28,6 +28,7 @@ enum class StorageExportPlannerItemKind : uint8_t {
 using StorageExportDatalogDayDecisionCallback =
     bool (*)(void *ctx,
              const char *day,
+             bool local_complete,
              bool &force_export,
              char *error_out,
              size_t error_out_size);
@@ -107,6 +108,7 @@ private:
                                        char *error_out,
                                        size_t error_out_size);
     bool datalog_day_force_export(const char *day,
+                                  bool local_complete,
                                   bool &force_export,
                                   char *error_out,
                                   size_t error_out_size);

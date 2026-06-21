@@ -1349,6 +1349,7 @@ bool SleepHqSyncJob::remote_machine_list_cb(void *ctx,
 
 bool SleepHqSyncJob::datalog_day_decision_cb(void *ctx,
                                              const char *day,
+                                             bool local_complete,
                                              bool &force_export,
                                              char *error,
                                              size_t error_size) {
@@ -1357,7 +1358,7 @@ bool SleepHqSyncJob::datalog_day_decision_cb(void *ctx,
         copy_cstr(error, error_size, "reconcile_context_missing");
         return false;
     }
-    return job->datalog_day_decision_locked(day, force_export,
+    return job->datalog_day_decision_locked(day, local_complete, force_export,
                                             error, error_size);
 }
 
@@ -1494,7 +1495,7 @@ bool SleepHqSyncJob::find_remote_machine_locked(char *error,
 
     remote_reconcile_all_missing_ = true;
     Log::logf(CAT_SLEEPHQ, LOG_INFO,
-              "remote machine missing serial=%s; forcing DATALOG export\n",
+              "remote machine missing serial=%s; pending DATALOG days will rebuild\n",
               remote_serial_);
     return true;
 }
@@ -1531,6 +1532,7 @@ bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
 }
 
 bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
+                                                 bool local_complete,
                                                  bool &force_export,
                                                  char *error,
                                                  size_t error_size) {
@@ -1541,13 +1543,26 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
         return false;
     }
     if (remote_reconcile_all_missing_) {
-        force_export = true;
+        const SleepHqDatalogReconcileAction action =
+            sleephq_datalog_reconcile_action(local_complete, true);
+        force_export =
+            action == SleepHqDatalogReconcileAction::ForceExport;
+        if (action ==
+            SleepHqDatalogReconcileAction::ManualRebuildRequired) {
+            Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                      "remote machine missing for local-complete day=%s serial=%s; manual rebuild required\n",
+                      day,
+                      remote_serial_);
+        }
         return true;
     }
 
     bool exists = false;
     if (cached_remote_date_exists_locked(day, exists)) {
-        force_export = !exists;
+        const SleepHqDatalogReconcileAction action =
+            sleephq_datalog_reconcile_action(local_complete, !exists);
+        force_export =
+            action == SleepHqDatalogReconcileAction::ForceExport;
         return true;
     }
 
@@ -1573,10 +1588,22 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
             copy_cstr(error, error_size, "remote_date_cache_alloc");
             return false;
         }
-        force_export = true;
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "remote machine-date missing day=%s serial=%s\n",
-                  day, remote_serial_);
+        const SleepHqDatalogReconcileAction action =
+            sleephq_datalog_reconcile_action(local_complete, true);
+        force_export =
+            action == SleepHqDatalogReconcileAction::ForceExport;
+        if (action ==
+            SleepHqDatalogReconcileAction::ManualRebuildRequired) {
+            Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                      "remote machine-date missing for local-complete day=%s serial=%s; manual rebuild required\n",
+                      day,
+                      remote_serial_);
+        } else {
+            Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                      "remote machine-date missing day=%s serial=%s; rebuilding pending day\n",
+                      day,
+                      remote_serial_);
+        }
         return true;
     }
 

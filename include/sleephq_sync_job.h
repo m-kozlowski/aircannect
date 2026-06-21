@@ -247,6 +247,7 @@ private:
     bool note_remote_machine_locked(const SleepHqMachine &machine);
     bool find_remote_machine_locked(char *error, size_t error_size);
     bool datalog_day_decision_locked(const char *day,
+                                     bool local_complete,
                                      bool &force_export,
                                      char *error,
                                      size_t error_size);
@@ -282,6 +283,7 @@ private:
                                        const SleepHqMachine &machine);
     static bool datalog_day_decision_cb(void *ctx,
                                         const char *day,
+                                        bool local_complete,
                                         bool &force_export,
                                         char *error,
                                         size_t error_size);

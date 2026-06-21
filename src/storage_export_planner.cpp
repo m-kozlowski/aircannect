@@ -272,6 +272,7 @@ bool StorageExportPlanner::datalog_day_has_pending_files(
 
 bool StorageExportPlanner::datalog_day_force_export(
     const char *day,
+    bool local_complete,
     bool &force_export,
     char *error_out,
     size_t error_out_size) {
@@ -279,6 +280,7 @@ bool StorageExportPlanner::datalog_day_force_export(
     if (!config_.datalog_day_decision) return true;
     return config_.datalog_day_decision(config_.datalog_day_decision_ctx,
                                         day,
+                                        local_complete,
                                         force_export,
                                         error_out,
                                         error_out_size);
@@ -530,8 +532,15 @@ bool StorageExportPlanner::select_next_datalog_day(char *error_out,
             return false;
         }
         const DatalogDay &day = datalog_days_[datalog_day_index_++];
+        const bool has_pending =
+            datalog_day_has_pending_files(day, error_out, error_out_size);
+        if (error_out && error_out[0]) {
+            return false;
+        }
+        const bool local_complete = !has_pending;
         bool force_export = false;
         if (!datalog_day_force_export(day.day,
+                                      local_complete,
                                       force_export,
                                       error_out,
                                       error_out_size)) {
@@ -539,7 +548,7 @@ bool StorageExportPlanner::select_next_datalog_day(char *error_out,
         }
         if (config_.require_pending_datalog_file &&
             !force_export &&
-            !datalog_day_has_pending_files(day, error_out, error_out_size)) {
+            !has_pending) {
             continue;
         }
         copy_cstr(day_name_, sizeof(day_name_), day.day);
