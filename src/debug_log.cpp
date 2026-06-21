@@ -5,7 +5,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "board.h"
 #include "fixed_queue.h"
@@ -28,8 +31,13 @@ SemaphoreHandle_t log_mutex = nullptr;
 struct LogRecord {
     log_cat_t cat = CAT_GENERAL;
     log_level_t level = LOG_INFO;
+    int64_t epoch_ms = 0;
     char text[AC_LOG_LINE_MAX] = {};
 };
+
+static constexpr size_t FILE_LOG_TIMESTAMP_BYTES = 23;
+static constexpr size_t FILE_LOG_LINE_MAX =
+    FILE_LOG_TIMESTAMP_BYTES + 1 + AC_LOG_LINE_MAX + 2;
 
 using SyslogQueue = FixedQueue<LogRecord, AC_SYSLOG_QUEUE_DEPTH>;
 using FileLogQueue = FixedQueue<LogRecord, AC_FILE_LOG_QUEUE_DEPTH>;
@@ -53,6 +61,13 @@ int syslog_severity(log_level_t level) {
         case LOG_DEBUG: return 7;
         default: return 6;
     }
+}
+
+int64_t current_epoch_ms() {
+    timeval now = {};
+    if (gettimeofday(&now, nullptr) != 0) return 0;
+    return static_cast<int64_t>(now.tv_sec) * 1000 +
+           static_cast<int64_t>(now.tv_usec / 1000);
 }
 
 void clean_message(char *text) {
@@ -167,6 +182,7 @@ bool make_log_record(log_cat_t cat,
     if (!buf) return false;
     record.cat = cat;
     record.level = level;
+    record.epoch_ms = current_epoch_ms();
     strncpy(record.text, buf, sizeof(record.text) - 1);
     record.text[sizeof(record.text) - 1] = 0;
     clean_message(record.text);
@@ -289,6 +305,31 @@ void send_syslog_record(const LogRecord &record) {
     log_stats.syslog_sent++;
 }
 
+void format_file_log_timestamp(int64_t epoch_ms, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = 0;
+
+    const int64_t seconds_part = epoch_ms / 1000;
+    const int64_t millis_part = epoch_ms >= 0 ? epoch_ms % 1000 : 0;
+    time_t seconds = static_cast<time_t>(seconds_part);
+    tm local = {};
+    if (!localtime_r(&seconds, &local)) {
+        snprintf(out, out_size, "1970-01-01T00:00:00.000");
+        return;
+    }
+
+    snprintf(out,
+             out_size,
+             "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
+             local.tm_year + 1900,
+             local.tm_mon + 1,
+             local.tm_mday,
+             local.tm_hour,
+             local.tm_min,
+             local.tm_sec,
+             static_cast<long>(millis_part));
+}
+
 void poll_file_log(size_t max_records) {
 #if AC_FILE_LOG_ENABLED
     if (!file_log_enabled_value) return;
@@ -307,16 +348,32 @@ void poll_file_log(size_t max_records) {
         unlock_log();
         if (!have_record) return;
 
-        char line[AC_LOG_LINE_MAX + 2] = {};
-        const size_t len = strnlen(record.text, sizeof(record.text));
-        memcpy(line, record.text, len);
-        line[len] = '\n';
-        line[len + 1] = 0;
+        char timestamp[FILE_LOG_TIMESTAMP_BYTES + 1] = {};
+        format_file_log_timestamp(record.epoch_ms,
+                                  timestamp,
+                                  sizeof(timestamp));
+        char line[FILE_LOG_LINE_MAX] = {};
+        const int line_len = snprintf(line,
+                                      sizeof(line),
+                                      "%s %s\n",
+                                      timestamp,
+                                      record.text);
+        if (line_len <= 0) {
+            log_stats.file_errors++;
+            continue;
+        }
+        const size_t write_len =
+            line_len < static_cast<int>(sizeof(line))
+                ? static_cast<size_t>(line_len)
+                : sizeof(line) - 1;
+        if (line_len >= static_cast<int>(sizeof(line))) {
+            log_stats.truncated++;
+        }
 
         if (aircannect::StorageWriter::enqueue_rotating_append(
                 AC_FILE_LOG_PATH,
                 reinterpret_cast<const uint8_t *>(line),
-                len + 1,
+                write_len,
                 AC_FILE_LOG_ROTATE_BYTES,
                 AC_FILE_LOG_ARCHIVES,
                 false)) {
