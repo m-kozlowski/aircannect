@@ -98,6 +98,7 @@ private:
     bool write_all(const char *data, size_t len);
     bool write_bytes(const uint8_t *data, size_t len);
     bool read_line(char *out, size_t out_size);
+    bool read_header_line(char *out, size_t out_size, bool &truncated);
     bool read_exact(uint8_t *out, size_t len);
     bool read_response_body(size_t content_length,
                             bool has_content_length,

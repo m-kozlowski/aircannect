@@ -259,6 +259,39 @@ bool SleepHqClient::read_line(char *out, size_t out_size) {
     }
 }
 
+bool SleepHqClient::read_header_line(char *out,
+                                     size_t out_size,
+                                     bool &truncated) {
+    if (!out || out_size == 0) return false;
+    size_t len = 0;
+    truncated = false;
+    const uint32_t started_ms = millis();
+    while (true) {
+        if (client_.available()) {
+            const int c = client_.read();
+            if (c < 0) continue;
+            if (c == '\r') continue;
+            if (c == '\n') {
+                out[len] = 0;
+                return true;
+            }
+            if (len + 1 < out_size) {
+                out[len++] = static_cast<char>(c);
+            } else {
+                truncated = true;
+            }
+            continue;
+        }
+        if (!client_.connected() ||
+            static_cast<uint32_t>(millis() - started_ms) >=
+                SLEEPHQ_HTTP_TIMEOUT_MS) {
+            set_error("read_timeout");
+            return false;
+        }
+        vTaskDelay(1);
+    }
+}
+
 bool SleepHqClient::read_exact(uint8_t *out, size_t len) {
     if (!out && len) return false;
     size_t offset = 0;
@@ -462,11 +495,13 @@ bool SleepHqClient::read_response(SleepHqHttpResponse &out) {
     bool connection_close = false;
     size_t content_length = 0;
     while (true) {
-        if (!read_line(line, sizeof(line))) {
+        bool truncated = false;
+        if (!read_header_line(line, sizeof(line), truncated)) {
             disconnect();
             return false;
         }
         if (line[0] == 0) break;
+        if (truncated) continue;
         char *colon = strchr(line, ':');
         if (!colon) continue;
         *colon = 0;
