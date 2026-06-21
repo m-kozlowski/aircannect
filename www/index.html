@@ -428,6 +428,16 @@
       margin-top: 12px;
     }
 
+    .endpoint-config {
+      border-top: 1px solid #30364166;
+      margin-top: 12px;
+      padding-top: 10px;
+    }
+
+    .endpoint-config .row:last-child {
+      border-bottom: 1px solid #30364166;
+    }
+
     .config-helper {
       display: flex;
       justify-content: flex-end;
@@ -1516,8 +1526,17 @@
               <div class="btns">
                 <button class="btn primary" id="edfSyncBtn" onclick="smbStartSync()">Sync SMB</button>
                 <button class="btn" id="edfVerifyBtn" onclick="smbVerifyRecent()">Verify Share</button>
+                <button class="btn" id="edfSmbEditBtn" onclick="toggleEndpointConfig('smb')">Edit</button>
               </div>
               <div class="msg" id="edfSmbMsg"></div>
+              <div class="endpoint-config" id="edfSmbConfig" hidden>
+                <div id="edfSmbConfigFields"></div>
+                <div class="btns">
+                  <button class="btn primary" id="edfSmbSaveBtn" onclick="saveEndpointConfig('smb')">Save</button>
+                  <button class="btn" onclick="cancelEndpointConfig('smb')">Cancel</button>
+                </div>
+                <div class="msg" id="edfSmbConfigMsg"></div>
+              </div>
             </div>
 
             <div class="card">
@@ -1548,8 +1567,17 @@
               <div class="btns">
                 <button class="btn primary" id="edfSleepHqSyncBtn" onclick="sleepHqStartSync()">Sync SleepHQ</button>
                 <button class="btn" id="edfSleepHqCheckBtn" onclick="sleepHqCheckAccount()">Check Account</button>
+                <button class="btn" id="edfSleepHqEditBtn" onclick="toggleEndpointConfig('sleephq')">Edit</button>
               </div>
               <div class="msg" id="edfSleepHqMsg"></div>
+              <div class="endpoint-config" id="edfSleepHqConfig" hidden>
+                <div id="edfSleepHqConfigFields"></div>
+                <div class="btns">
+                  <button class="btn primary" id="edfSleepHqSaveBtn" onclick="saveEndpointConfig('sleephq')">Save</button>
+                  <button class="btn" onclick="cancelEndpointConfig('sleephq')">Cancel</button>
+                </div>
+                <div class="msg" id="edfSleepHqConfigMsg"></div>
+              </div>
             </div>
           </div>
         </section>
@@ -1983,11 +2011,32 @@
         ],
       },
     ];
+    const configSectionById = {};
     const configSectionByKey = {};
-    configSections.forEach((section) =>
+    configSections.forEach((section) => {
+      configSectionById[section.id] = section;
       section.fields.forEach((field) => {
         configSectionByKey[field[0]] = section.id;
-      }));
+      });
+    });
+    const endpointConfigPanels = {
+      smb: {
+        section: "smb",
+        panel: "edfSmbConfig",
+        fields: "edfSmbConfigFields",
+        msg: "edfSmbConfigMsg",
+        save: "edfSmbSaveBtn",
+        status: loadSmbSyncStatus,
+      },
+      sleephq: {
+        section: "sleephq",
+        panel: "edfSleepHqConfig",
+        fields: "edfSleepHqConfigFields",
+        msg: "edfSleepHqConfigMsg",
+        save: "edfSleepHqSaveBtn",
+        status: loadSleepHqSyncStatus,
+      },
+    };
     let oxiSensorData = {sensor_scan_results: [], sensor_known: []};
     let oxiSensorsLoading = false;
     let evtSrc = null;
@@ -6859,16 +6908,20 @@
       }
     }
 
+    async function fetchConfigSection(sectionId) {
+      const response = await api("/api/config/" + encodeURIComponent(sectionId));
+      return await response.json();
+    }
+
     async function fetchConfigData() {
       const parts = await Promise.all(configSections.map(async (section) => {
-        const response = await api("/api/config/" +
-          encodeURIComponent(section.id));
-        return await response.json();
+        return await fetchConfigSection(section.id);
       }));
       return Object.assign({}, ...parts);
     }
 
-    function renderConfigField(root, section, field) {
+    function renderConfigField(root, section, field, data) {
+      data = data || configData || {};
       let control;
       if (field[2] === "bool") {
         control = document.createElement("select");
@@ -6876,7 +6929,7 @@
           const option = document.createElement("option");
           option.value = value;
           option.textContent = value === "true" ? "On" : "Off";
-          if (String(configData[field[0]]) === value) option.selected = true;
+          if (String(data[field[0]]) === value) option.selected = true;
           control.appendChild(option);
         });
       } else if (field[2] === "enum") {
@@ -6885,19 +6938,19 @@
           const option = document.createElement("option");
           option.value = value;
           option.textContent = value;
-          if (String(configData[field[0]]) === value) option.selected = true;
+          if (String(data[field[0]]) === value) option.selected = true;
           control.appendChild(option);
         });
       } else {
         control = document.createElement("input");
         control.type = field[2];
-        control.value = configData[field[0]] || "";
+        control.value = data[field[0]] || "";
         if (field[0] === "http_password") {
-          control.placeholder = configData.http_password_set ? "set" : "empty";
+          control.placeholder = data.http_password_set ? "set" : "empty";
         }
         if (field[0] === "smb_password") {
-          control.placeholder = configData.smb_password_set ? "set" : "empty";
-          if (configData.smb_password_set) {
+          control.placeholder = data.smb_password_set ? "set" : "empty";
+          if (data.smb_password_set) {
             control.value = "********";
           }
         }
@@ -6905,9 +6958,9 @@
           control.placeholder = "smb://host/share/path";
         }
         if (field[0] === "sleephq_client_secret") {
-          control.placeholder = configData.sleephq_client_secret_set ?
+          control.placeholder = data.sleephq_client_secret_set ?
             "set" : "empty";
-          if (configData.sleephq_client_secret_set) {
+          if (data.sleephq_client_secret_set) {
             control.value = "********";
           }
         }
@@ -6919,8 +6972,8 @@
           control.placeholder = "IPv4 address";
         }
         if (field[0] === "ota_password") {
-          control.placeholder = configData.ota_password_set ? "set" : "empty";
-          if (configData.ota_password_set) {
+          control.placeholder = data.ota_password_set ? "set" : "empty";
+          if (data.ota_password_set) {
             control.value = "********";
           }
         }
@@ -6976,11 +7029,28 @@
         configFieldApplied(data, key, changes[key]));
     }
 
-    async function waitForConfigChanges(changes) {
+    async function fetchConfigSections(sectionIds) {
+      const parts = await Promise.all(sectionIds.map((sectionId) =>
+        fetchConfigSection(sectionId)));
+      return Object.assign({}, ...parts);
+    }
+
+    function configSectionsForChanges(changes) {
+      const ids = [];
+      Object.keys(changes).forEach((key) => {
+        const section = configSectionByKey[key] || "device";
+        if (!ids.includes(section)) ids.push(section);
+      });
+      return ids;
+    }
+
+    async function waitForConfigChanges(changes, sectionIds) {
       const started = Date.now();
       let latest = null;
       while (Date.now() - started < 5000) {
-        latest = await fetchConfigData();
+        const fetched = sectionIds && sectionIds.length ?
+          await fetchConfigSections(sectionIds) : await fetchConfigData();
+        latest = Object.assign({}, configData || {}, fetched);
         if (configChangesApplied(latest, changes)) return latest;
         await new Promise(resolve => setTimeout(resolve, 250));
       }
@@ -7020,9 +7090,10 @@
       });
     }
 
-    async function saveConfig() {
+    function collectConfigChanges(root) {
       const changes = {};
-      document.querySelectorAll("#configFields [data-key]").forEach((input) => {
+      if (!root) return changes;
+      root.querySelectorAll("[data-key]").forEach((input) => {
         let rawValue = input.value;
         let originalValue = input.dataset.orig;
         if (input.dataset.key === "smb_endpoint") {
@@ -7042,7 +7113,10 @@
           changes[input.dataset.key] = rawValue;
         }
       });
+      return changes;
+    }
 
+    function validateConfigChanges(changes, messageId) {
       if (changes.http_auth_required === false) {
         changes.http_user = "";
         changes.http_password = "";
@@ -7050,18 +7124,18 @@
 
       if (Object.prototype.hasOwnProperty.call(changes, "smb_endpoint") &&
           !validSmbEndpoint(changes.smb_endpoint)) {
-        msg("configMsg", "SMB endpoint must be smb://host/share[/path]", false);
-        return;
+        msg(messageId, "SMB endpoint must be smb://host/share[/path]", false);
+        return false;
       }
       if (Object.prototype.hasOwnProperty.call(changes, "sleephq_team_id") &&
           !validOptionalNumericId(changes.sleephq_team_id)) {
-        msg("configMsg", "SleepHQ team id must be numeric", false);
-        return;
+        msg(messageId, "SleepHQ team id must be numeric", false);
+        return false;
       }
       if (Object.prototype.hasOwnProperty.call(changes, "sleephq_device_id") &&
           !validOptionalNumericId(changes.sleephq_device_id)) {
-        msg("configMsg", "SleepHQ device id must be numeric", false);
-        return;
+        msg(messageId, "SleepHQ device id must be numeric", false);
+        return false;
       }
 
       const syslogHost = Object.prototype.hasOwnProperty.call(changes, "syslog_host") ?
@@ -7069,59 +7143,149 @@
       const syslogEnabled = Object.prototype.hasOwnProperty.call(changes, "syslog_enabled") ?
         changes.syslog_enabled : !!(configData && configData.syslog_enabled);
       if (!validIpv4(syslogHost)) {
-        msg("configMsg", "Syslog host must be an IPv4 address", false);
-        return;
+        msg(messageId, "Syslog host must be an IPv4 address", false);
+        return false;
       }
       if (syslogEnabled && !String(syslogHost || "").trim().length) {
-        msg("configMsg", "Syslog host is required when syslog is enabled", false);
-        return;
+        msg(messageId, "Syslog host is required when syslog is enabled", false);
+        return false;
       }
+      return true;
+    }
+
+    async function postConfigChanges(changes) {
+      const sections = {};
+      Object.keys(changes).forEach((key) => {
+        const section = configSectionByKey[key] || "device";
+        if (!sections[section]) sections[section] = {};
+        sections[section][key] = changes[key];
+      });
+      const sectionOrder = configSections
+        .map((section) => section.id)
+        .filter((id) => id !== "access");
+      sectionOrder.push("access");
+
+      let queued = false;
+      for (const section of sectionOrder) {
+        if (!sections[section]) continue;
+        const response = await api("/api/config/" +
+          encodeURIComponent(section), {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(sections[section]),
+        });
+        const data = await response.json();
+        queued = queued || !!data.queued;
+      }
+      return queued;
+    }
+
+    async function saveConfigFields(root, messageId, reload) {
+      const changes = collectConfigChanges(root);
+      if (!validateConfigChanges(changes, messageId)) return false;
 
       if (!Object.keys(changes).length) {
-        msg("configMsg", "No changes", true);
-        return;
+        msg(messageId, "No changes", true);
+        return false;
       }
 
       try {
-        const sections = {};
-        Object.keys(changes).forEach((key) => {
-          const section = configSectionByKey[key] || "device";
-          if (!sections[section]) sections[section] = {};
-          sections[section][key] = changes[key];
-        });
-        const sectionOrder = configSections
-          .map((section) => section.id)
-          .filter((id) => id !== "access");
-        sectionOrder.push("access");
-
-        let queued = false;
-        for (const section of sectionOrder) {
-          if (!sections[section]) continue;
-          const response = await api("/api/config/" +
-            encodeURIComponent(section), {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(sections[section]),
-          });
-          const data = await response.json();
-          queued = queued || !!data.queued;
-        }
+        const sectionIds = configSectionsForChanges(changes);
+        const queued = await postConfigChanges(changes);
 
         if (queued) {
-          const latest = await waitForConfigChanges(changes);
+          const latest = await waitForConfigChanges(changes, sectionIds);
           if (latest) {
-            configData = latest;
-            await loadConfig();
+            configData = Object.assign({}, configData || {}, latest);
           }
-          msg("configMsg",
+          if (reload) await reload();
+          msg(messageId,
             latest && configChangesApplied(latest, changes) ?
               "Saved" : "Config update queued", true);
         } else {
-          msg("configMsg", "Saved", true);
-          await loadConfig();
+          const latest = await fetchConfigSections(sectionIds);
+          configData = Object.assign({}, configData || {}, latest);
+          if (reload) await reload();
+          msg(messageId, "Saved", true);
         }
+        return true;
       } catch (error) {
-        msg("configMsg", error.message, false);
+        msg(messageId, error.message, false);
+        return false;
+      }
+    }
+
+    async function saveConfig() {
+      await saveConfigFields(document.getElementById("configFields"),
+        "configMsg", loadConfig);
+    }
+
+    function clearMsg(id) {
+      const element = document.getElementById(id);
+      if (!element) return;
+      if (msgTimers[id]) {
+        clearTimeout(msgTimers[id]);
+        msgTimers[id] = null;
+      }
+      element.textContent = "";
+      element.className = "msg";
+    }
+
+    async function loadEndpointConfig(id, clearMessage) {
+      const panel = endpointConfigPanels[id];
+      if (!panel) return false;
+      const section = configSectionById[panel.section];
+      const root = document.getElementById(panel.fields);
+      if (!section || !root) return false;
+      if (clearMessage) clearMsg(panel.msg);
+      try {
+        const data = await fetchConfigSection(panel.section);
+        configData = Object.assign({}, configData || {}, data);
+        root.innerHTML = "";
+        section.fields.forEach((field) =>
+          renderConfigField(root, section, field, configData));
+        return true;
+      } catch (error) {
+        msg(panel.msg, error.message, false, true);
+        return false;
+      }
+    }
+
+    async function toggleEndpointConfig(id) {
+      const panel = endpointConfigPanels[id];
+      if (!panel) return;
+      const element = document.getElementById(panel.panel);
+      if (!element) return;
+      if (!element.hidden) {
+        element.hidden = true;
+        clearMsg(panel.msg);
+        return;
+      }
+      element.hidden = false;
+      await loadEndpointConfig(id, true);
+    }
+
+    function cancelEndpointConfig(id) {
+      const panel = endpointConfigPanels[id];
+      if (!panel) return;
+      const element = document.getElementById(panel.panel);
+      if (element) element.hidden = true;
+      clearMsg(panel.msg);
+    }
+
+    async function saveEndpointConfig(id) {
+      const panel = endpointConfigPanels[id];
+      if (!panel) return;
+      const root = document.getElementById(panel.fields);
+      const save = document.getElementById(panel.save);
+      if (save) save.disabled = true;
+      try {
+        await saveConfigFields(root, panel.msg, async () => {
+          await loadEndpointConfig(id, false);
+          if (panel.status) await panel.status();
+        });
+      } finally {
+        if (save) save.disabled = false;
       }
     }
 
