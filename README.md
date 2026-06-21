@@ -16,6 +16,7 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
   - record active therapy sessions to AS11-style EDF files on SD card
   - browse and download captured EDF files over the Web UI
   - SMB share sync
+  - SleepHQ sync
 - **Reports**
   - therapy-night charts with event flags, session toggles, zoom, and cached data
 - **Oximetry**
@@ -33,11 +34,6 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
   - flash AirSense firmware from web UI or CLI. \
     (Autodetects firmware format (raw or .abc container) and target memory block)
 
-
-## Planned
-
-- **Live therapy data sinks** - HTTP, SleepHQ, MQTT... Plugin sinks subscribe through the stream broker; bounded per-consumer queues
-- **BLE provisioning** - replace SoftAP-only first-run with a BLE service for Wi-Fi scan, multi-profile setup, and basic device config from a phone.
 
 ## First setup
 
