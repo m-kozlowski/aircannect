@@ -26,8 +26,11 @@ static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
     6UL * 60UL * 60UL * 1000UL,
 };
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
-static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PER_PAGE = 100;
-static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PAGE_LIMIT = 5;
+static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PER_PAGE = 25;
+static constexpr uint32_t SLEEPHQ_REMOTE_FILE_LOOKUP_LIMIT = 500;
+static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PAGE_LIMIT =
+    (SLEEPHQ_REMOTE_FILE_LOOKUP_LIMIT + SLEEPHQ_REMOTE_FILE_PER_PAGE - 1) /
+    SLEEPHQ_REMOTE_FILE_PER_PAGE;
 
 void sleep_hq_digest_to_hex(const uint8_t digest[16],
                             char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
