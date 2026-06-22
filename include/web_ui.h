@@ -187,6 +187,10 @@ private:
     void handle_sse_disconnect(AsyncEventSourceClient *client);
     void enforce_sse_limits();
     size_t sse_client_count();
+    size_t healthy_sse_client_count();
+    enum class SseSendResult : uint8_t { Skipped, Sent, Failed };
+    SseSendResult send_sse_to_clients(const char *payload, const char *event,
+                                      uint32_t id, bool status_heartbeat);
 
     // Dashboard live stream sink
     void poll_live_stream();
@@ -204,6 +208,7 @@ private:
     struct SseClientRef {
         AsyncEventSourceClient *client = nullptr;
         uint32_t connected_ms = 0;
+        uint32_t last_status_ms = 0;
     };
 
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;

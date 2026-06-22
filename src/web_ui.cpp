@@ -867,12 +867,12 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     sse_push_requested_ = false;
     const uint32_t event_id = millis();
     bool sse_backpressure = false;
-    if (events_->send(cached_status_json_.c_str(), "status", event_id) !=
-        AsyncEventSource::ENQUEUED) {
+    if (send_sse_to_clients(cached_status_json_.c_str(), "status", event_id,
+                            true) == SseSendResult::Failed) {
         sse_backpressure = true;
     }
-    if (events_->send(cached_stream_json_.c_str(), "stream", event_id) !=
-        AsyncEventSource::ENQUEUED) {
+    if (send_sse_to_clients(cached_stream_json_.c_str(), "stream", event_id,
+                            false) == SseSendResult::Failed) {
         sse_backpressure = true;
     }
     if (console_sse_seq_ != console_seq_) {
@@ -889,11 +889,14 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         LargeTextBuffer console_json;
         console_json.reserve(payload_len + 128);
         build_console_sse_json(console_json);
-        if (console_json.overflowed() ||
-            events_->send(console_json.c_str(), "console", event_id) !=
-                AsyncEventSource::ENQUEUED) {
+        const SseSendResult console_result =
+            console_json.overflowed()
+                ? SseSendResult::Failed
+                : send_sse_to_clients(console_json.c_str(), "console",
+                                      event_id, false);
+        if (console_result == SseSendResult::Failed) {
             sse_backpressure = true;
-        } else {
+        } else if (console_result == SseSendResult::Sent) {
             note_console_sse_sent();
         }
     }
@@ -915,6 +918,7 @@ void WebUI::handle_sse_connect(AsyncEventSourceClient *client) {
             if (ref.client && !ref.client->connected()) {
                 ref.client = nullptr;
                 ref.connected_ms = 0;
+                ref.last_status_ms = 0;
             }
         }
         for (SseClientRef &ref : sse_clients_) {
@@ -928,6 +932,7 @@ void WebUI::handle_sse_connect(AsyncEventSourceClient *client) {
                 if (ref.client) continue;
                 ref.client = client;
                 ref.connected_ms = millis();
+                ref.last_status_ms = 0;
                 stored = true;
                 break;
             }
@@ -949,6 +954,7 @@ void WebUI::handle_sse_disconnect(AsyncEventSourceClient *client) {
             if (ref.client != client) continue;
             ref.client = nullptr;
             ref.connected_ms = 0;
+            ref.last_status_ms = 0;
             break;
         }
         xSemaphoreGive(sse_mutex_);
@@ -971,6 +977,7 @@ void WebUI::enforce_sse_limits() {
             if (!client->connected()) {
                 ref.client = nullptr;
                 ref.connected_ms = 0;
+                ref.last_status_ms = 0;
                 continue;
             }
 
@@ -989,7 +996,7 @@ void WebUI::enforce_sse_limits() {
         }
 
         const bool overflow = connected_count > AC_WEB_SSE_CLIENTS_MAX;
-        const bool slow = worst_pending > AC_WEB_SSE_CLIENT_PENDING_MAX;
+        const bool slow = worst_pending > AC_WEB_SSE_CLIENT_PENDING_HARD_MAX;
         if (!overflow && !slow) {
             sse_enforce_needed_ = false;
             xSemaphoreGive(sse_mutex_);
@@ -1018,6 +1025,7 @@ size_t WebUI::sse_client_count() {
         if (!client->connected()) {
             ref.client = nullptr;
             ref.connected_ms = 0;
+            ref.last_status_ms = 0;
             continue;
         }
         count++;
@@ -1026,8 +1034,75 @@ size_t WebUI::sse_client_count() {
     return count;
 }
 
+size_t WebUI::healthy_sse_client_count() {
+    if (!sse_mutex_) return 0;
+    size_t count = 0;
+    if (xSemaphoreTake(sse_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return 0;
+    }
+    for (SseClientRef &ref : sse_clients_) {
+        AsyncEventSourceClient *client = ref.client;
+        if (!client) continue;
+        if (!client->connected()) {
+            ref.client = nullptr;
+            ref.connected_ms = 0;
+            ref.last_status_ms = 0;
+            continue;
+        }
+        if (client->packetsWaiting() <= AC_WEB_SSE_CLIENT_PENDING_MAX) {
+            count++;
+        }
+    }
+    xSemaphoreGive(sse_mutex_);
+    return count;
+}
+
+WebUI::SseSendResult WebUI::send_sse_to_clients(const char *payload,
+                                                const char *event,
+                                                uint32_t id,
+                                                bool status_heartbeat) {
+    if (!payload || !event || !sse_mutex_) return SseSendResult::Skipped;
+
+    const uint32_t now = millis();
+    SseSendResult result = SseSendResult::Skipped;
+    if (xSemaphoreTake(sse_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return SseSendResult::Failed;
+    }
+
+    for (SseClientRef &ref : sse_clients_) {
+        AsyncEventSourceClient *client = ref.client;
+        if (!client) continue;
+        if (!client->connected()) {
+            ref.client = nullptr;
+            ref.connected_ms = 0;
+            ref.last_status_ms = 0;
+            continue;
+        }
+
+        const size_t pending = client->packetsWaiting();
+        if (pending > AC_WEB_SSE_CLIENT_PENDING_MAX) {
+            if (!status_heartbeat) continue;
+            if (ref.last_status_ms &&
+                static_cast<int32_t>(now - ref.last_status_ms) <
+                    static_cast<int32_t>(AC_WEB_SSE_BACKPRESSURE_STATUS_MS)) {
+                continue;
+            }
+        }
+
+        if (!client->send(payload, event, id)) {
+            result = SseSendResult::Failed;
+            continue;
+        }
+        if (result != SseSendResult::Failed) result = SseSendResult::Sent;
+        if (status_heartbeat) ref.last_status_ms = now;
+    }
+
+    xSemaphoreGive(sse_mutex_);
+    return result;
+}
+
 void WebUI::poll_live_stream() {
-    const size_t clients = sse_client_count();
+    const size_t clients = healthy_sse_client_count();
     if (sink_manager_) sink_manager_->set_live_chart_enabled(clients > 0);
     send_live_batch(millis());
 }
@@ -1048,7 +1123,7 @@ void WebUI::send_live_batch(uint32_t now_ms) {
         static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
     if (has_samples && !interval_due) return;
     if (!has_samples && !live.state_dirty && !heartbeat_due) return;
-    if (sse_client_count() == 0) {
+    if (healthy_sse_client_count() == 0) {
         sink_manager_->clear_live_chart_batch();
         return;
     }
@@ -1079,8 +1154,8 @@ void WebUI::send_live_batch(uint32_t now_ms) {
     append_live_series(live_json_, "pulse", live.pulse);
     live_json_ += "}}";
 
-    if (events_->send(live_json_.c_str(), "live", now_ms) !=
-        AsyncEventSource::ENQUEUED) {
+    if (send_sse_to_clients(live_json_.c_str(), "live", now_ms,
+                            false) == SseSendResult::Failed) {
         sse_enforce_needed_ = true;
     }
     live_last_send_ms_ = now_ms;
@@ -1091,8 +1166,8 @@ void WebUI::handle_event(const RpcEvent &event) {
     if (event.kind == RpcEventKind::BootNotification) {
         mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_SETTINGS);
         if (events_ &&
-            events_->send("{}", "device_boot", millis()) !=
-                AsyncEventSource::ENQUEUED) {
+            send_sse_to_clients("{}", "device_boot", millis(),
+                                true) == SseSendResult::Failed) {
             sse_enforce_needed_ = true;
         }
     } else if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
