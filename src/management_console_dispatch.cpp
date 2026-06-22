@@ -9,6 +9,7 @@
 #include "as11_rpc.h"
 #include "as11_settings.h"
 #include "background_worker.h"
+#include "board_report.h"
 #include "debug_log.h"
 #include "export_coordinator.h"
 #include "management_console_format.h"
@@ -251,12 +252,43 @@ void print_report_store_status(Print &out) {
     out.println();
 }
 
+void print_report_store_integrity(Print &out,
+                                  const ReportStoreIntegrityResult &result) {
+    out.print("[REPORT_STORE] integrity ");
+    out.print(result.ok ? "ok" : "dirty");
+    out.print(" repaired=");
+    out.print(result.repaired ? "yes" : "no");
+    out.print(" summary_invalid=");
+    out.print(static_cast<unsigned long>(result.summary_invalid));
+    out.print(" chunks_invalid=");
+    out.print(static_cast<unsigned long>(result.chunks_invalid));
+    out.print(" chunks_removed=");
+    out.print(static_cast<unsigned long>(result.chunks_removed));
+    out.print(" indexes_missing=");
+    out.print(static_cast<unsigned long>(result.chunk_indexes_missing));
+    out.print(" indexes_invalid=");
+    out.print(static_cast<unsigned long>(result.chunk_indexes_invalid));
+    out.print(" indexes_rebuilt=");
+    out.print(static_cast<unsigned long>(result.chunk_indexes_rebuilt));
+    out.print(" coverage_dropped=");
+    out.print(static_cast<unsigned long>(result.coverage_records_dropped));
+    out.print(" coverage_rewritten=");
+    out.print(static_cast<unsigned long>(result.coverage_files_rewritten));
+    out.print(" errors=");
+    out.print(static_cast<unsigned long>(result.errors));
+    out.print(" last_error=");
+    out.print(result.last_error[0] ? result.last_error : "--");
+    out.println();
+}
+
 void print_report_cache_clear_result(Print &out,
                                      const ReportCacheClearResult &result) {
     out.print("[REPORT] cache cleared reset=");
     out.print(static_cast<unsigned long>(result.store_reset));
     out.print(" summary=");
     out.print(static_cast<unsigned long>(result.summary_deleted));
+    out.print(" nights=");
+    out.print(static_cast<unsigned long>(result.nights_cleared));
     out.print(" chunks=");
     out.print(static_cast<unsigned long>(result.chunks_deleted));
     out.print(" coverage=");
@@ -547,6 +579,7 @@ void print_report_prefetch_status(Print &out, const ReportManager &manager) {
     const char *phase = "?";
     switch (p.phase) {
         case ReportManager::PrefetchPhase::Idle: phase = "idle"; break;
+        case ReportManager::PrefetchPhase::Selecting: phase = "selecting"; break;
         case ReportManager::PrefetchPhase::Pending: phase = "pending"; break;
         case ReportManager::PrefetchPhase::Fetching: phase = "fetching"; break;
         case ReportManager::PrefetchPhase::Done: phase = "done"; break;
@@ -985,6 +1018,14 @@ void ManagementConsole::handle_report_command(Print &out,
         print_report_store_status(out);
         return;
     }
+    if (rest == "store check" || rest == "store repair") {
+        const bool repair = rest == "store repair";
+        ReportStoreIntegrityResult result;
+        ReportStore::check_integrity(repair, result);
+        print_report_store_integrity(out, result);
+        print_report_store_status(out);
+        return;
+    }
     if (rest == "nights" || rest == "list") {
         print_report_nights(out, ctx.report_manager);
         return;
@@ -1014,6 +1055,9 @@ void ManagementConsole::handle_report_command(Print &out,
         out.println("[REPORT] usage: report cache [force] latest|INDEX|ms VALUE|NIGHT_START_MS");
         out.println("[REPORT] usage: report cache cancel");
         out.println("[REPORT] usage: report cache clear all|latest|INDEX|ms VALUE|NIGHT_START_MS");
+        out.println("[REPORT] usage: report cache clear oldest N");
+        out.println("[REPORT] usage: report cache prune [KEEP_LATEST]");
+        out.println("[REPORT] usage: report store check|repair");
         return;
     }
     if (rest == "result") {
@@ -1058,6 +1102,30 @@ void ManagementConsole::handle_report_command(Print &out,
             print_report_cache_status(out, ctx.report_manager);
             return;
         }
+        if (value == "prune" || value.startsWith("prune ")) {
+            size_t keep_latest = AC_REPORT_CACHE_QUOTA_NIGHTS;
+            if (value.startsWith("prune ")) {
+                value.remove(0, strlen("prune "));
+                trim_inplace(value);
+                uint64_t parsed = 0;
+                if (!parse_u64_arg(value, parsed) ||
+                    parsed > static_cast<uint64_t>(SIZE_MAX)) {
+                    out.println("[REPORT] usage: report cache prune [KEEP_LATEST]");
+                    return;
+                }
+                keep_latest = static_cast<size_t>(parsed);
+            }
+            ReportCacheClearResult clear_result;
+            if (!ctx.report_manager.prune_cache_to_latest_nights(keep_latest,
+                                                                  clear_result)) {
+                out.println("[REPORT] cache prune rejected");
+                print_report_cache_status(out, ctx.report_manager);
+                return;
+            }
+            print_report_cache_clear_result(out, clear_result);
+            print_report_store_status(out);
+            return;
+        }
         if (value.startsWith("clear ")) {
             value.remove(0, strlen("clear "));
             trim_inplace(value);
@@ -1065,6 +1133,18 @@ void ManagementConsole::handle_report_command(Print &out,
             bool ok = false;
             if (value == "all") {
                 ok = ctx.report_manager.clear_cache_all(clear_result);
+            } else if (value.startsWith("oldest ")) {
+                value.remove(0, strlen("oldest "));
+                trim_inplace(value);
+                uint64_t parsed = 0;
+                if (!parse_u64_arg(value, parsed) ||
+                    parsed > static_cast<uint64_t>(SIZE_MAX)) {
+                    out.println("[REPORT] usage: report cache clear oldest N");
+                    return;
+                }
+                ok = ctx.report_manager.clear_oldest_cache_nights(
+                    static_cast<size_t>(parsed),
+                    clear_result);
             } else {
                 uint64_t night_start_ms = 0;
                 if (!parse_report_coverage_target(value,
@@ -1120,10 +1200,12 @@ void ManagementConsole::handle_report_command(Print &out,
     }
     print_unknown_command(out, "REPORT",
                           "report, report status, report store, "
+                          "report store check|repair, "
                           "report nights, report coverage latest|INDEX|ms VALUE, "
                           "report cache latest|INDEX|ms VALUE, "
                           "report cache cancel, "
-                          "report cache clear all|latest|INDEX|ms VALUE, "
+                          "report cache clear all|oldest N|latest|INDEX|ms VALUE, "
+                          "report cache prune [KEEP_LATEST], "
                           "report result latest|INDEX, "
                           "report prefetch [status|on|off]");
 }

@@ -26,14 +26,7 @@ JobStep ReportPrefetchJob::step() {
             return JobStep::Idle;
         }
         rescan_after_ms_ = 0;
-        uint64_t night = 0;
-        if (!report_->next_night_needing_cache(night)) {
-            report_->prefetch_mark_drained();
-            rescan_after_ms_ = millis() + AC_REPORT_PREFETCH_RESCAN_MS;
-            if (rescan_after_ms_ == 0) rescan_after_ms_ = 1;
-            return JobStep::Idle;
-        }
-        if (!report_->prefetch_request_night(night)) {
+        if (!report_->prefetch_request_candidate()) {
             return JobStep::Waiting;  // a request is already in flight
         }
         state_ = State::Wait;
@@ -41,7 +34,8 @@ JobStep ReportPrefetchJob::step() {
     }
 
     case State::Wait:
-        if (snap.phase == ReportManager::PrefetchPhase::Pending ||
+        if (snap.phase == ReportManager::PrefetchPhase::Selecting ||
+            snap.phase == ReportManager::PrefetchPhase::Pending ||
             snap.phase == ReportManager::PrefetchPhase::Fetching) {
             return JobStep::Waiting;  // main loop is spooling it
         }

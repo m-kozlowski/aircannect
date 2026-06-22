@@ -79,6 +79,27 @@ struct ReportStoreStatus {
     char last_error[96] = {};
 };
 
+struct ReportStoreIntegrityResult {
+    bool ok = false;
+    bool repaired = false;
+    uint32_t summary_checked = 0;
+    uint32_t summary_invalid = 0;
+    uint32_t summary_removed = 0;
+    uint32_t chunk_dirs_checked = 0;
+    uint32_t chunks_checked = 0;
+    uint32_t chunks_invalid = 0;
+    uint32_t chunks_removed = 0;
+    uint32_t chunk_indexes_missing = 0;
+    uint32_t chunk_indexes_invalid = 0;
+    uint32_t chunk_indexes_rebuilt = 0;
+    uint32_t coverage_files_checked = 0;
+    uint32_t coverage_records_checked = 0;
+    uint32_t coverage_records_dropped = 0;
+    uint32_t coverage_files_rewritten = 0;
+    uint32_t errors = 0;
+    char last_error[96] = {};
+};
+
 namespace ReportStore {
 
 void begin();
@@ -139,6 +160,7 @@ bool clear_summary_records(uint32_t &deleted);
 
 bool reset_cache_store(uint32_t &renamed);
 bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed);
+bool check_integrity(bool repair, ReportStoreIntegrityResult &out);
 
 const char *kind_name(ReportStoreChunkKind kind);
 

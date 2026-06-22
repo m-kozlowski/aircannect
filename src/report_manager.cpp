@@ -463,6 +463,7 @@ void log_report_alloc_failed(const char *context, size_t bytes) {
 const char *prefetch_phase_name(ReportManager::PrefetchPhase phase) {
     switch (phase) {
         case ReportManager::PrefetchPhase::Idle: return "idle";
+        case ReportManager::PrefetchPhase::Selecting: return "selecting";
         case ReportManager::PrefetchPhase::Pending: return "pending";
         case ReportManager::PrefetchPhase::Fetching: return "fetching";
         case ReportManager::PrefetchPhase::Done: return "done";
@@ -2333,6 +2334,7 @@ bool ReportManager::prefetch_request_night(uint64_t night_start_ms) {
     bool accepted = false;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
     if (prefetch_phase_ != PrefetchPhase::Pending &&
+        prefetch_phase_ != PrefetchPhase::Selecting &&
         prefetch_phase_ != PrefetchPhase::Fetching) {
         prefetch_phase_ = PrefetchPhase::Pending;
         prefetch_active_night_ = night_start_ms;
@@ -2343,10 +2345,26 @@ bool ReportManager::prefetch_request_night(uint64_t night_start_ms) {
     return accepted;
 }
 
+bool ReportManager::prefetch_request_candidate() {
+    if (!prefetch_lock_) return false;
+    bool accepted = false;
+    xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
+    if (prefetch_phase_ != PrefetchPhase::Selecting &&
+        prefetch_phase_ != PrefetchPhase::Pending &&
+        prefetch_phase_ != PrefetchPhase::Fetching) {
+        prefetch_phase_ = PrefetchPhase::Selecting;
+        prefetch_active_night_ = 0;
+        accepted = true;
+    }
+    xSemaphoreGive(prefetch_lock_);
+    return accepted;
+}
+
 void ReportManager::prefetch_mark_drained() {
     if (!prefetch_lock_) return;
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
     if (prefetch_phase_ != PrefetchPhase::Pending &&
+        prefetch_phase_ != PrefetchPhase::Selecting &&
         prefetch_phase_ != PrefetchPhase::Fetching) {
         prefetch_phase_ = PrefetchPhase::Drained;
         prefetch_active_night_ = 0;
@@ -2410,7 +2428,8 @@ bool ReportManager::background_work_active() const {
     xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
     const PrefetchPhase phase = prefetch_phase_;
     xSemaphoreGive(prefetch_lock_);
-    return phase == PrefetchPhase::Pending ||
+    return phase == PrefetchPhase::Selecting ||
+           phase == PrefetchPhase::Pending ||
            phase == PrefetchPhase::Fetching ||
            phase == PrefetchPhase::Done;
 }
@@ -2541,7 +2560,8 @@ void ReportManager::service_prefetch(bool realtime_active) {
     const uint64_t active = prefetch_active_night_;
     xSemaphoreGive(prefetch_lock_);
 
-    if (preempt && (phase == PrefetchPhase::Fetching ||
+    if (preempt && (phase == PrefetchPhase::Selecting ||
+                    phase == PrefetchPhase::Fetching ||
                     phase == PrefetchPhase::Pending)) {
         if (cache_fetch_active_) {
             spool_.reset();
@@ -2552,6 +2572,17 @@ void ReportManager::service_prefetch(bool realtime_active) {
             cache_status_.error = "prefetch_preempted";
         }
         set_prefetch_phase(PrefetchPhase::Idle, 0, false, false);
+        return;
+    }
+
+    if (phase == PrefetchPhase::Selecting) {
+        if (realtime_active || busy()) return;
+        uint64_t night = 0;
+        if (next_night_needing_cache(night) && night != 0) {
+            set_prefetch_phase(PrefetchPhase::Pending, night, false, false);
+        } else {
+            set_prefetch_phase(PrefetchPhase::Drained, 0, false, false);
+        }
         return;
     }
 
@@ -2760,6 +2791,16 @@ bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
     return true;
 }
 
+static void merge_cache_clear_result(ReportCacheClearResult &dst,
+                                     const ReportCacheClearResult &src) {
+    dst.store_reset += src.store_reset;
+    dst.summary_deleted += src.summary_deleted;
+    dst.nights_cleared += src.nights_cleared;
+    dst.chunks_deleted += src.chunks_deleted;
+    dst.coverage_deleted += src.coverage_deleted;
+    dst.plots_deleted += src.plots_deleted;
+}
+
 bool ReportManager::clear_cache_night(uint64_t night_start_ms,
                                       ReportCacheClearResult &out) {
     out = {};
@@ -2796,7 +2837,82 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
         }
         give_summary_lock();
     }
+    if (ok) out.nights_cleared = 1;
     return ok;
+}
+
+bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
+                                              ReportCacheClearResult &out) {
+    out = {};
+    if (max_nights == 0) return true;
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+        return false;
+    }
+
+    ReportSummaryRecord *snapshot =
+        static_cast<ReportSummaryRecord *>(Memory::alloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord)));
+    if (!snapshot) {
+        log_report_alloc_failed(
+            "cache_prune_snapshot",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
+        return false;
+    }
+
+    size_t count = 0;
+    if (!take_summary_lock(pdMS_TO_TICKS(20))) {
+        Memory::free(snapshot);
+        return false;
+    }
+    for (size_t i = 0; records_ && i < record_count_ &&
+                       i < AC_REPORT_SUMMARY_RECORD_MAX; ++i) {
+        const ReportSummaryRecord &record = records_[i];
+        if (!record.valid || record.end_ms <= record.start_ms) continue;
+        snapshot[count++] = record;
+    }
+    give_summary_lock();
+
+    bool ok = true;
+    const size_t limit = count < max_nights ? count : max_nights;
+    for (size_t i = 0; i < limit; ++i) {
+        ReportCacheClearResult current_clear;
+        if (!clear_cache_night(snapshot[i].start_ms, current_clear)) {
+            ok = false;
+            break;
+        }
+        merge_cache_clear_result(out, current_clear);
+    }
+    Memory::free(snapshot);
+    if (out.nights_cleared > 0) {
+        Log::logf(CAT_REPORT,
+                  LOG_INFO,
+                  "Cache pruned oldest nights=%lu chunks=%lu coverage=%lu "
+                  "plots=%lu\n",
+                  static_cast<unsigned long>(out.nights_cleared),
+                  static_cast<unsigned long>(out.chunks_deleted),
+                  static_cast<unsigned long>(out.coverage_deleted),
+                  static_cast<unsigned long>(out.plots_deleted));
+    }
+    return ok;
+}
+
+bool ReportManager::prune_cache_to_latest_nights(size_t keep_latest,
+                                                 ReportCacheClearResult &out) {
+    out = {};
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+        return false;
+    }
+    size_t report_nights = 0;
+    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
+    for (size_t i = 0; records_ && i < record_count_ &&
+                       i < AC_REPORT_SUMMARY_RECORD_MAX; ++i) {
+        const ReportSummaryRecord &record = records_[i];
+        if (!record.valid || record.end_ms <= record.start_ms) continue;
+        report_nights++;
+    }
+    give_summary_lock();
+    if (report_nights <= keep_latest) return true;
+    return clear_oldest_cache_nights(report_nights - keep_latest, out);
 }
 
 bool ReportManager::cancel_cache_fetch() {

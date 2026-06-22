@@ -91,6 +91,7 @@ struct ReportCacheSourcePlan {
 struct ReportCacheClearResult {
     uint32_t store_reset = 0;
     uint32_t summary_deleted = 0;
+    uint32_t nights_cleared = 0;
     uint32_t chunks_deleted = 0;
     uint32_t coverage_deleted = 0;
     uint32_t plots_deleted = 0;
@@ -177,6 +178,10 @@ public:
 
     bool clear_cache_all(ReportCacheClearResult &out);
     bool clear_cache_night(uint64_t night_start_ms, ReportCacheClearResult &out);
+    bool clear_oldest_cache_nights(size_t max_nights,
+                                   ReportCacheClearResult &out);
+    bool prune_cache_to_latest_nights(size_t keep_latest,
+                                      ReportCacheClearResult &out);
 
     bool busy() const {
         return summary_fetch_active_ || cache_fetch_active_ ||
@@ -191,6 +196,7 @@ public:
 
     enum class PrefetchPhase : uint8_t {
         Idle,      // nothing requested
+        Selecting, // worker asked; main loop chooses the next night
         Pending,   // worker asked; main loop starts it when not busy
         Fetching,  // main loop is spooling a night
         Done,      // last fetch fully covered its night
@@ -208,6 +214,7 @@ public:
         char last_error[48] = {};
     };
 
+    bool prefetch_request_candidate();
     bool prefetch_request_night(uint64_t night_start_ms);
     void prefetch_mark_drained();
     void prefetch_preempt();

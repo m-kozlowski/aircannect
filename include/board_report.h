@@ -46,6 +46,9 @@ static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS = 600000;
 // instead of churning the bus; a single success resets it.
 static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_BURST = 3;
 static constexpr uint32_t AC_REPORT_PREFETCH_OFFLINE_BACKOFF_MS = 600000;
+// Default manual quota policy: keep roughly the last 90 therapy nights of
+// cached report payloads. Summary records remain intact.
+static constexpr size_t AC_REPORT_CACHE_QUOTA_NIGHTS = 90;
 static constexpr size_t AC_REPORT_SOURCE_EVENT_DRAIN_BUDGET = 1;
 // Report spool backfill is intentionally guarded at three layers:
 // fragment size keeps AS11 happy, max-notifications bounds each CAN burst, and

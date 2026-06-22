@@ -156,6 +156,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  report                    show report store status");
         out.println("  report status             show report store status");
         out.println("  report store              show durable report store status");
+        out.println("  report store check        validate report store indexes");
+        out.println("  report store repair       repair report store indexes/cache metadata");
         out.println("  report nights             list indexed therapy nights");
         out.println("  report coverage latest    show latest night cache coverage");
         out.println("  report coverage INDEX     show coverage for report nights index");
@@ -165,9 +167,11 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  report cache force INDEX  refetch supported cached sources");
         out.println("  report cache cancel       cancel active cache fetch");
         out.println("  report cache clear all    clear all report cache");
+        out.println("  report cache clear oldest N clear oldest cached report nights");
         out.println("  report cache clear latest clear latest night cache");
         out.println("  report cache clear INDEX  clear cache for report night");
         out.println("  report cache clear ms VAL clear cache for raw start ms");
+        out.println("  report cache prune [KEEP] keep only latest cached report nights");
         out.println("  report result latest      prepare latest report manifest");
         out.println("  report result INDEX       prepare report manifest by index");
         out.println("  report prefetch           show background prefetch status");

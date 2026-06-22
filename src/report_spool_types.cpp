@@ -1,19 +1,54 @@
 #include "report_spool_types.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <utility>
 
+#ifdef ARDUINO
 #include "debug_log.h"
 #include "memory_manager.h"
+#endif
 
 namespace aircannect {
+namespace {
+
+void *alloc_report_buffer(size_t size) {
+#ifdef ARDUINO
+    return Memory::alloc_large(size);
+#else
+    return malloc(size);
+#endif
+}
+
+void free_report_buffer(void *ptr) {
+#ifdef ARDUINO
+    Memory::free(ptr);
+#else
+    free(ptr);
+#endif
+}
+
+void log_report_alloc_failure(size_t capacity, size_t current) {
+#ifdef ARDUINO
+    Log::logf(CAT_REPORT,
+              LOG_ERROR,
+              "spool buffer allocation failed bytes=%u current=%u\n",
+              static_cast<unsigned>(capacity),
+              static_cast<unsigned>(current));
+#else
+    (void)capacity;
+    (void)current;
+#endif
+}
+
+}  // namespace
 
 ReportSpoolBuffer::~ReportSpoolBuffer() {
-    Memory::free(data_);
+    free_report_buffer(data_);
 }
 
 void ReportSpoolBuffer::clear() {
-    Memory::free(data_);
+    free_report_buffer(data_);
     data_ = nullptr;
     size_ = 0;
     capacity_ = 0;
@@ -34,17 +69,13 @@ void ReportSpoolBuffer::move_from(ReportSpoolBuffer &other) {
 
 bool ReportSpoolBuffer::reserve(size_t capacity) {
     if (capacity <= capacity_) return true;
-    uint8_t *next = static_cast<uint8_t *>(Memory::alloc_large(capacity));
+    uint8_t *next = static_cast<uint8_t *>(alloc_report_buffer(capacity));
     if (!next) {
-        Log::logf(CAT_REPORT,
-                  LOG_ERROR,
-                  "spool buffer allocation failed bytes=%u current=%u\n",
-                  static_cast<unsigned>(capacity),
-                  static_cast<unsigned>(capacity_));
+        log_report_alloc_failure(capacity, capacity_);
         return false;
     }
     if (data_ && size_) memcpy(next, data_, size_);
-    Memory::free(data_);
+    free_report_buffer(data_);
     data_ = next;
     capacity_ = capacity;
     return true;
