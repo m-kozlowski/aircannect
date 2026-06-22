@@ -394,12 +394,10 @@ void print_log_stats(Print &out) {
     out.print(Log::filelog_queue_depth());
     out.print(" filelog_enqueued=");
     out.print(stats.file_enqueued);
-    out.print(" filelog_forwarded=");
+    out.print(" filelog_written=");
     out.print(stats.file_dequeued);
     out.print(" filelog_drops=");
     out.print(stats.file_drops);
-    out.print(" filelog_backpressure=");
-    out.print(stats.file_backpressure);
     out.print(" filelog_errors=");
     out.print(stats.file_errors);
 }

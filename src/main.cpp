@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include <new>
+#include <string.h>
 
 #include "app_config.h"
 #include "background_worker.h"
@@ -63,6 +64,26 @@ static SleepHqSyncJob *sleephq_sync_job = nullptr;
 static ExportCoordinator export_coordinator;
 static ReportCacheWriterJob report_cache_writer_job(report_manager);
 static ReportPrefetchJob report_prefetch_job(report_manager);
+
+class FileLogBackgroundJob : public BackgroundJob {
+public:
+    const char *name() const override { return "filelog"; }
+
+    JobStep step() override {
+        return Log::service_filelog(true) ? JobStep::Working : JobStep::Idle;
+    }
+
+    bool run_when_gate_closed(const char *reason) const override {
+        return !reason || strcmp(reason, "disabled") != 0;
+    }
+
+    JobStep step_when_gate_closed(const char *reason) override {
+        (void)reason;
+        return Log::service_filelog(false) ? JobStep::Working : JobStep::Idle;
+    }
+};
+
+static FileLogBackgroundJob file_log_job;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
@@ -318,6 +339,7 @@ void setup() {
     if (sleephq_sync_job) {
         sleephq_sync_job->begin(app_config.data());
     }
+    bg_worker.add_job(&file_log_job);
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
     bg_worker.add_job(&report_cache_writer_job);
@@ -374,9 +396,7 @@ void loop() {
         !rpc_arbiter.stream_activity_active() &&
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
-    Log::poll(wifi_manager.network_available(),
-              storage_writer_idle_allowed,
-              0);
+    Log::poll(wifi_manager.network_available());
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }

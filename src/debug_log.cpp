@@ -14,12 +14,12 @@
 #include "fixed_queue.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
-#include "storage_writer.h"
 #include "string_util.h"
 
 using aircannect::FixedQueue;
 using aircannect::to_lower_inplace;
 using aircannect::trim_inplace;
+namespace Storage = aircannect::Storage;
 
 namespace {
 
@@ -27,6 +27,8 @@ log_level_t levels[CAT_COUNT];
 WiFiUDP syslog_udp;
 StaticSemaphore_t log_mutex_storage;
 SemaphoreHandle_t log_mutex = nullptr;
+StaticSemaphore_t file_log_sink_mutex_storage;
+SemaphoreHandle_t file_log_sink_mutex = nullptr;
 
 struct LogRecord {
     log_cat_t cat = CAT_GENERAL;
@@ -51,6 +53,11 @@ uint16_t syslog_port_value = AC_SYSLOG_PORT;
 bool syslog_enabled_value = false;
 bool file_log_enabled_value = false;
 bool file_log_dir_ready = false;
+File file_log_file;
+bool file_log_file_open = false;
+uint64_t file_log_size = 0;
+uint32_t file_log_last_flush_ms = 0;
+bool file_log_rotation_pending = false;
 char syslog_hostname[64] = "aircannect";
 
 int syslog_severity(log_level_t level) {
@@ -282,6 +289,18 @@ void unlock_log() {
     }
 }
 
+void lock_file_log_sink() {
+    if (file_log_sink_mutex) {
+        xSemaphoreTake(file_log_sink_mutex, portMAX_DELAY);
+    }
+}
+
+void unlock_file_log_sink() {
+    if (file_log_sink_mutex) {
+        xSemaphoreGive(file_log_sink_mutex);
+    }
+}
+
 void send_syslog_record(const LogRecord &record) {
     char payload[AC_LOG_LINE_MAX + 96];
     const int facility_local0 = 16;
@@ -330,23 +349,178 @@ void format_file_log_timestamp(int64_t epoch_ms, char *out, size_t out_size) {
              static_cast<long>(millis_part));
 }
 
-void poll_file_log(size_t max_records) {
-#if AC_FILE_LOG_ENABLED
-    if (!file_log_enabled_value) return;
-    if (max_records == 0) max_records = AC_FILE_LOG_DRAIN_BUDGET;
-    lock_log();
-    const bool empty = !file_log_queue || file_log_queue->empty();
-    unlock_log();
-    if (empty) return;
-    if (!ensure_file_log_dir()) return;
+bool format_file_log_archive_path(uint8_t index, char *out, size_t out_size) {
+    if (!out || out_size == 0 || index == 0) return false;
+    const int len = snprintf(out, out_size, "%s.%u", AC_FILE_LOG_PATH,
+                             static_cast<unsigned>(index));
+    return len > 0 && len < static_cast<int>(out_size);
+}
 
+void close_file_log_locked(bool flush) {
+#if AC_FILE_LOG_ENABLED
+    if (!file_log_file_open) return;
+    Storage::Guard guard;
+    if (flush) file_log_file.flush();
+    file_log_file.close();
+    file_log_file_open = false;
+    file_log_last_flush_ms = 0;
+#else
+    (void)flush;
+#endif
+}
+
+bool rotate_file_log_locked() {
+#if AC_FILE_LOG_ENABLED
+    close_file_log_locked(true);
+    if (!ensure_file_log_dir()) return false;
+
+    char src[AC_STORAGE_WRITE_PATH_MAX + 8] = {};
+    char dst[AC_STORAGE_WRITE_PATH_MAX + 8] = {};
+    if (AC_FILE_LOG_ARCHIVES > 0 &&
+        format_file_log_archive_path(AC_FILE_LOG_ARCHIVES,
+                                     dst,
+                                     sizeof(dst))) {
+        if (!Storage::remove(dst)) return false;
+    }
+    for (int i = static_cast<int>(AC_FILE_LOG_ARCHIVES); i >= 2; --i) {
+        if (!format_file_log_archive_path(static_cast<uint8_t>(i - 1),
+                                          src,
+                                          sizeof(src)) ||
+            !format_file_log_archive_path(static_cast<uint8_t>(i),
+                                          dst,
+                                          sizeof(dst))) {
+            return false;
+        }
+        if (!Storage::exists(src)) continue;
+        if (!Storage::remove(dst) || !Storage::rename(src, dst)) return false;
+    }
+    if (Storage::exists(AC_FILE_LOG_PATH)) {
+        if (AC_FILE_LOG_ARCHIVES == 0) {
+            if (!Storage::remove(AC_FILE_LOG_PATH)) return false;
+        } else {
+            if (!format_file_log_archive_path(1, dst, sizeof(dst))) {
+                return false;
+            }
+            if (!Storage::remove(dst) ||
+                !Storage::rename(AC_FILE_LOG_PATH, dst)) {
+                return false;
+            }
+        }
+    }
+    file_log_size = 0;
+    file_log_rotation_pending = false;
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool open_file_log_locked(bool allow_rotation, size_t next_write_len) {
+#if AC_FILE_LOG_ENABLED
+    if (file_log_file_open) return true;
+    if (!ensure_file_log_dir()) return false;
+
+    if (allow_rotation &&
+        (file_log_rotation_pending ||
+         (AC_FILE_LOG_ROTATE_BYTES > 0 &&
+          Storage::exists(AC_FILE_LOG_PATH)))) {
+        File existing = Storage::open(AC_FILE_LOG_PATH, "r");
+        uint64_t existing_size = 0;
+        if (existing) {
+            Storage::Guard guard;
+            existing_size = existing.size();
+            existing.close();
+        }
+        if (file_log_rotation_pending ||
+            existing_size + next_write_len > AC_FILE_LOG_ROTATE_BYTES) {
+            if (!rotate_file_log_locked()) return false;
+        } else {
+            file_log_size = existing_size;
+        }
+    }
+
+    file_log_file = Storage::open(AC_FILE_LOG_PATH, FILE_APPEND);
+    if (!file_log_file) return false;
+    file_log_file_open = true;
+    {
+        Storage::Guard guard;
+        file_log_size = file_log_file.size();
+    }
+    file_log_last_flush_ms = millis();
+    return true;
+#else
+    (void)allow_rotation;
+    (void)next_write_len;
+    return false;
+#endif
+}
+
+bool write_file_log_line_locked(const char *line,
+                                size_t len,
+                                bool allow_rotation) {
+#if AC_FILE_LOG_ENABLED
+    if (!line || len == 0) return true;
+    if (AC_FILE_LOG_ROTATE_BYTES > 0 &&
+        file_log_size + len > AC_FILE_LOG_ROTATE_BYTES) {
+        if (allow_rotation) {
+            if (!rotate_file_log_locked()) return false;
+        } else {
+            file_log_rotation_pending = true;
+        }
+    } else if (allow_rotation && file_log_rotation_pending) {
+        if (!rotate_file_log_locked()) return false;
+    }
+
+    if (!open_file_log_locked(allow_rotation, len)) return false;
+    Storage::Guard guard;
+    const size_t written =
+        file_log_file.write(reinterpret_cast<const uint8_t *>(line), len);
+    if (written != len) return false;
+    file_log_size += written;
+    const uint32_t now = millis();
+    if (static_cast<int32_t>(now - file_log_last_flush_ms) >=
+        static_cast<int32_t>(AC_FILE_LOG_FLUSH_MS)) {
+        file_log_file.flush();
+        file_log_last_flush_ms = now;
+    }
+    return true;
+#else
+    (void)line;
+    (void)len;
+    (void)allow_rotation;
+    return false;
+#endif
+}
+
+bool service_file_log(bool allow_rotation) {
+#if AC_FILE_LOG_ENABLED
+    if (!file_log_enabled_value) {
+        lock_file_log_sink();
+        close_file_log_locked(true);
+        unlock_file_log_sink();
+        return false;
+    }
+
+    if (!Storage::mounted()) {
+        lock_file_log_sink();
+        close_file_log_locked(false);
+        file_log_dir_ready = false;
+        file_log_size = 0;
+        unlock_file_log_sink();
+        return false;
+    }
+
+    bool did_work = false;
+    const size_t max_records =
+        allow_rotation ? AC_FILE_LOG_DRAIN_BUDGET : 1;
     for (size_t i = 0; i < max_records; ++i) {
         LogRecord record;
         lock_log();
-        const bool have_record = file_log_queue &&
+        const bool have_record = file_log_enabled_value &&
+                                 file_log_queue &&
                                  file_log_queue->pop(record);
         unlock_log();
-        if (!have_record) return;
+        if (!have_record) break;
 
         char timestamp[FILE_LOG_TIMESTAMP_BYTES + 1] = {};
         format_file_log_timestamp(record.epoch_ms,
@@ -360,6 +534,7 @@ void poll_file_log(size_t max_records) {
                                       record.text);
         if (line_len <= 0) {
             log_stats.file_errors++;
+            did_work = true;
             continue;
         }
         const size_t write_len =
@@ -370,27 +545,47 @@ void poll_file_log(size_t max_records) {
             log_stats.truncated++;
         }
 
-        if (aircannect::StorageWriter::enqueue_rotating_append(
-                AC_FILE_LOG_PATH,
-                reinterpret_cast<const uint8_t *>(line),
-                write_len,
-                AC_FILE_LOG_ROTATE_BYTES,
-                AC_FILE_LOG_ARCHIVES,
-                false)) {
+        lock_file_log_sink();
+        const bool written =
+            write_file_log_line_locked(line, write_len, allow_rotation);
+        unlock_file_log_sink();
+        if (written) {
             log_stats.file_dequeued++;
+            did_work = true;
             continue;
         }
 
-        log_stats.file_backpressure++;
+        log_stats.file_errors++;
         lock_log();
-        if (!file_log_queue || !file_log_queue->push_front(record)) {
+        if (!file_log_queue) {
             log_stats.file_drops++;
+        } else {
+            file_log_queue->push_front(record);
         }
         unlock_log();
-        return;
+        break;
     }
+
+    if (!did_work) {
+        lock_file_log_sink();
+        if (allow_rotation && file_log_rotation_pending) {
+            did_work = rotate_file_log_locked();
+            if (!did_work) log_stats.file_errors++;
+        } else if (file_log_file_open &&
+                   static_cast<int32_t>(millis() - file_log_last_flush_ms) >=
+                       static_cast<int32_t>(AC_FILE_LOG_FLUSH_MS)) {
+            Storage::Guard guard;
+            file_log_file.flush();
+            file_log_last_flush_ms = millis();
+            did_work = true;
+        }
+        unlock_file_log_sink();
+    }
+
+    return did_work;
 #else
-    (void)max_records;
+    (void)allow_rotation;
+    return false;
 #endif
 }
 
@@ -401,6 +596,10 @@ namespace Log {
 void init() {
     if (!log_mutex) {
         log_mutex = xSemaphoreCreateMutexStatic(&log_mutex_storage);
+    }
+    if (!file_log_sink_mutex) {
+        file_log_sink_mutex =
+            xSemaphoreCreateMutexStatic(&file_log_sink_mutex_storage);
     }
     for (int i = 0; i < CAT_COUNT; ++i) levels[i] = LOG_INFO;
 }
@@ -575,30 +774,28 @@ void configure_syslog(bool enabled,
 }
 
 void configure_filelog(bool enabled) {
-    lock_log();
 #if AC_FILE_LOG_ENABLED
+    lock_log();
     file_log_enabled_value = false;
     if (!enabled) {
         release_file_log_queue();
         unlock_log();
+        lock_file_log_sink();
+        close_file_log_locked(true);
+        unlock_file_log_sink();
         return;
     }
     if (ensure_file_log_queue()) {
         file_log_enabled_value = true;
     }
+    unlock_log();
 #else
     (void)enabled;
     file_log_enabled_value = false;
 #endif
-    unlock_log();
 }
 
-void poll(bool network_available,
-          bool storage_draining_allowed,
-          size_t file_log_drain_budget) {
-    if (storage_draining_allowed) {
-        poll_file_log(file_log_drain_budget);
-    }
+void poll(bool network_available) {
     if (!syslog_enabled_value || !network_available) return;
     for (size_t i = 0; i < AC_SYSLOG_SEND_BUDGET; ++i) {
         LogRecord record;
@@ -610,6 +807,10 @@ void poll(bool network_available,
         if (!have_record) return;
         send_syslog_record(record);
     }
+}
+
+bool service_filelog(bool allow_rotation) {
+    return service_file_log(allow_rotation);
 }
 
 bool syslog_enabled() {

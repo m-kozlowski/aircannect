@@ -129,6 +129,7 @@ void BackgroundWorker::run() {
             const bool foreground_busy =
                 reason && strcmp(reason, "report_busy") == 0;
             for (size_t i = 0; i < job_count_; ++i) {
+                if (jobs_[i]->run_when_gate_closed(reason)) continue;
                 if (!foreground_busy ||
                     !jobs_[i]->run_when_foreground_busy()) {
                     jobs_[i]->on_preempt();
@@ -142,6 +143,15 @@ void BackgroundWorker::run() {
                         foreground_result = s;
                         break;
                     }
+                }
+            }
+            for (size_t i = 0; i < job_count_; ++i) {
+                if (foreground_result != JobStep::Idle) break;
+                if (!jobs_[i]->run_when_gate_closed(reason)) continue;
+                const JobStep s = jobs_[i]->step_when_gate_closed(reason);
+                if (s != JobStep::Idle) {
+                    foreground_result = s;
+                    break;
                 }
             }
             if (foreground_result != JobStep::Idle) {

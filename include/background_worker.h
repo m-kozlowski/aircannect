@@ -23,6 +23,14 @@ public:
     virtual const char *name() const = 0;
     virtual JobStep step() = 0;
     virtual bool run_when_foreground_busy() const { return false; }
+    virtual bool run_when_gate_closed(const char *reason) const {
+        (void)reason;
+        return false;
+    }
+    virtual JobStep step_when_gate_closed(const char *reason) {
+        (void)reason;
+        return step();
+    }
     virtual void on_preempt() {}
 };
 
@@ -75,7 +83,7 @@ private:
     static constexpr uint32_t GATE_AS11 = 1u << 5;
     static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
-    static constexpr size_t MAX_JOBS = 6;
+    static constexpr size_t MAX_JOBS = 7;
     BackgroundJob *jobs_[MAX_JOBS] = {};
     size_t job_count_ = 0;
 
