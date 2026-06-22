@@ -113,13 +113,15 @@ private:
     void load_config();
     void save_config(size_t first_dirty_index = 0);
 
-    bool start_profile(size_t index);
-    bool start_next_profile(size_t start_index);
+    bool start_profile(size_t index, bool keep_softap = false);
+    bool start_next_profile(size_t start_index, bool keep_softap = false);
     bool start_softap(bool with_sta);
     void stop_wifi();
     void apply_country_code();
     void handle_connected();
     void handle_connect_timeout();
+    void enter_softap_fallback();
+    void maybe_retry_softap_sta();
     void maybe_start_roam_scan();
     void handle_roam_scan();
     void cleanup_manual_scan();
@@ -142,12 +144,14 @@ private:
     bool sta_configured_ = false;
     SoftApMode softap_mode_ = SoftApMode::Auto;
     bool softap_running_ = false;
+    bool softap_auto_close_deferred_ = false;
     bool roaming_suspended_ = false;
     bool roam_connect_pending_ = false;
     bool manual_scan_active_ = false;
     bool pmf_retry_attempted_ = false;
     uint8_t last_disconnect_reason_ = 0;
     uint32_t connect_deadline_ms_ = 0;
+    uint32_t softap_retry_deadline_ms_ = 0;
     uint32_t last_roam_check_ms_ = 0;
     uint32_t manual_scan_completed_ms_ = 0;
 

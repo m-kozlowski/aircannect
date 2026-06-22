@@ -108,6 +108,7 @@ static constexpr uint16_t AC_SYSLOG_PORT = 514;
 
 static constexpr uint32_t AC_WIFI_CONNECT_TIMEOUT_MS = 15000;
 static constexpr uint32_t AC_WIFI_PMF_RETRY_TIMEOUT_MS = 15000;
+static constexpr uint32_t AC_WIFI_SOFTAP_RETRY_MS = 60000;
 static constexpr size_t AC_WIFI_SCAN_CANDIDATES_MAX = 16;
 static constexpr uint32_t AC_WIFI_ROAM_CHECK_INTERVAL_MS = 60000;
 static constexpr int32_t AC_WIFI_ROAM_RSSI_THRESHOLD_DBM = -73;

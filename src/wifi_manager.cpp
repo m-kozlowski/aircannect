@@ -110,6 +110,11 @@ bool WifiManager::begin() {
 void WifiManager::poll() {
     cleanup_manual_scan();
 
+    if (mode_state_ == WifiModeState::SoftAp) {
+        maybe_retry_softap_sta();
+        return;
+    }
+
     if (mode_state_ != WifiModeState::StaConnecting &&
         mode_state_ != WifiModeState::StaPmfRetry &&
         mode_state_ != WifiModeState::StaRoamScanning &&
@@ -127,6 +132,9 @@ void WifiManager::poll() {
             handle_connected();
         }
         if (mode_state_ == WifiModeState::StaConnected) {
+            if (softap_mode_ == SoftApMode::Auto && softap_running_) {
+                apply_softap_mode();
+            }
             maybe_start_roam_scan();
         }
         return;
@@ -141,9 +149,10 @@ void WifiManager::poll() {
                   "STA disconnected reason=%u; reconnecting\n",
                   static_cast<unsigned>(last_disconnect_reason_));
         if (active_profile_index_ >= 0) {
-            start_profile(static_cast<size_t>(active_profile_index_));
+            start_profile(static_cast<size_t>(active_profile_index_),
+                          softap_running_);
         } else {
-            start_next_profile(0);
+            start_next_profile(0, softap_running_);
         }
         return;
     }
@@ -244,19 +253,25 @@ void WifiManager::save_config(size_t first_dirty_index) {
     prefs.end();
 }
 
-bool WifiManager::start_profile(size_t index) {
+bool WifiManager::start_profile(size_t index, bool keep_softap) {
     if (index >= profile_count_) return false;
     WifiProfile &profile = profiles_[index];
     if (!profile.ssid.length()) return false;
 
-    if (softap_mode_ == SoftApMode::Forced && !softap_running_) {
+    const bool with_softap =
+        softap_mode_ == SoftApMode::Forced || keep_softap;
+    if (with_softap && !softap_running_) {
         start_softap(true);
+    } else if (!with_softap && softap_running_) {
+        WiFi.softAPdisconnect(true);
+        softap_running_ = false;
     }
-    WiFi.mode(softap_mode_ == SoftApMode::Forced ? WIFI_AP_STA : WIFI_STA);
+    WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
     apply_country_code();
     WiFi.setHostname(hostname_.c_str());
     mode_state_ = WifiModeState::StaConnecting;
     network_available_ = softap_running_;
+    softap_retry_deadline_ms_ = 0;
     roam_connect_pending_ = false;
     active_profile_index_ = static_cast<int8_t>(index);
     sta_ssid_ = profile.ssid;
@@ -277,11 +292,11 @@ bool WifiManager::start_profile(size_t index) {
     return true;
 }
 
-bool WifiManager::start_next_profile(size_t start_index) {
+bool WifiManager::start_next_profile(size_t start_index, bool keep_softap) {
     if (profile_count_ == 0) return false;
     for (size_t offset = 0; offset < profile_count_; ++offset) {
         const size_t index = (start_index + offset) % profile_count_;
-        if (start_profile(index)) return true;
+        if (start_profile(index, keep_softap)) return true;
     }
     return false;
 }
@@ -297,6 +312,7 @@ bool WifiManager::start_softap(bool with_sta) {
         return false;
     }
     softap_running_ = true;
+    softap_auto_close_deferred_ = false;
     network_available_ = true;
     if (!with_sta) {
         mode_state_ = WifiModeState::SoftAp;
@@ -326,9 +342,11 @@ void WifiManager::stop_wifi() {
     WiFi.mode(WIFI_OFF);
     network_available_ = false;
     softap_running_ = false;
+    softap_auto_close_deferred_ = false;
     pmf_retry_attempted_ = false;
     roam_connect_pending_ = false;
     active_profile_index_ = -1;
+    softap_retry_deadline_ms_ = 0;
     last_disconnect_reason_ = 0;
     last_disconnect_reason = 0;
     mode_state_ = WifiModeState::Off;
@@ -375,12 +393,25 @@ void WifiManager::apply_softap_mode() {
     }
 
     if (!softap_running_ || WiFi.status() != WL_CONNECTED) return;
+    const uint8_t clients = WiFi.softAPgetStationNum();
+    if (clients > 0) {
+        WiFi.mode(WIFI_AP_STA);
+        network_available_ = true;
+        if (!softap_auto_close_deferred_) {
+            Log::logf(CAT_WIFI, LOG_INFO,
+                      "SoftAP auto stop deferred: clients=%u\n",
+                      static_cast<unsigned>(clients));
+        }
+        softap_auto_close_deferred_ = true;
+        return;
+    }
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_STA);
     softap_running_ = false;
+    softap_auto_close_deferred_ = false;
     network_available_ = true;
     Log::logf(CAT_WIFI, LOG_INFO,
-              "SoftAP stopped after mode switch to auto\n");
+              "SoftAP stopped after STA connect\n");
 }
 
 void WifiManager::set_country_code(const String &country) {
@@ -610,6 +641,7 @@ void WifiManager::apply_country_code() {
 void WifiManager::handle_connected() {
     mode_state_ = WifiModeState::StaConnected;
     network_available_ = true;
+    softap_retry_deadline_ms_ = 0;
     consecutive_profile_failures_ = 0;
     last_disconnect_reason_ = 0;
     last_disconnect_reason = 0;
@@ -622,6 +654,37 @@ void WifiManager::handle_connected() {
     stats_.connect_successes++;
     Log::logf(CAT_WIFI, LOG_INFO, "STA connected, IP=%s\n",
               WiFi.localIP().toString().c_str());
+    apply_softap_mode();
+}
+
+void WifiManager::enter_softap_fallback() {
+    if (!start_softap(false)) return;
+    if (!sta_configured_ || profile_count_ == 0) {
+        softap_retry_deadline_ms_ = 0;
+        return;
+    }
+    softap_retry_deadline_ms_ = millis() + AC_WIFI_SOFTAP_RETRY_MS;
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "STA retry scheduled from SoftAP in %us\n",
+              static_cast<unsigned>(AC_WIFI_SOFTAP_RETRY_MS / 1000));
+}
+
+void WifiManager::maybe_retry_softap_sta() {
+    if (!softap_running_ || !sta_configured_ || profile_count_ == 0) return;
+    if (softap_retry_deadline_ms_ == 0) {
+        softap_retry_deadline_ms_ = millis() + AC_WIFI_SOFTAP_RETRY_MS;
+        return;
+    }
+    if (static_cast<int32_t>(millis() - softap_retry_deadline_ms_) < 0) {
+        return;
+    }
+
+    consecutive_profile_failures_ = 0;
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "retrying STA profiles from SoftAP\n");
+    if (!start_next_profile(0, true)) {
+        softap_retry_deadline_ms_ = millis() + AC_WIFI_SOFTAP_RETRY_MS;
+    }
 }
 
 void WifiManager::maybe_start_roam_scan() {
@@ -748,9 +811,10 @@ void WifiManager::handle_roam_scan() {
         if (WiFi.status() == WL_CONNECTED) {
             mode_state_ = WifiModeState::StaConnected;
         } else if (active_profile_index_ >= 0) {
-            start_profile(static_cast<size_t>(active_profile_index_));
+            start_profile(static_cast<size_t>(active_profile_index_),
+                          softap_running_);
         } else {
-            start_next_profile(0);
+            start_next_profile(0, softap_running_);
         }
         return;
     }
@@ -826,9 +890,10 @@ void WifiManager::handle_roam_scan() {
     if (WiFi.status() == WL_CONNECTED) {
         mode_state_ = WifiModeState::StaConnected;
     } else if (active_profile_index_ >= 0) {
-        start_profile(static_cast<size_t>(active_profile_index_));
+        start_profile(static_cast<size_t>(active_profile_index_),
+                      softap_running_);
     } else {
-        start_next_profile(0);
+        start_next_profile(0, softap_running_);
     }
 }
 
@@ -881,10 +946,11 @@ void WifiManager::handle_connect_timeout() {
     if (profile_count_ > 1 &&
         consecutive_profile_failures_ < profile_count_ &&
         active_profile_index_ >= 0 &&
-        start_next_profile(static_cast<size_t>(active_profile_index_ + 1))) {
+        start_next_profile(static_cast<size_t>(active_profile_index_ + 1),
+                           softap_running_)) {
         return;
     }
-    start_softap(false);
+    enter_softap_fallback();
 }
 
 void WifiManager::retry_with_pmf_disabled() {
