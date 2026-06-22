@@ -91,7 +91,9 @@ public:
     void apply_softap_mode();
     void set_country_code(const String &country);
     void set_roaming_suspended(bool suspended);
-    bool roaming_enabled() const { return profile_count_ > 1; }
+    bool roaming_enabled() const {
+        return sta_configured_ && profile_count_ > 0;
+    }
     bool roaming_suspended() const { return roaming_suspended_; }
     bool configure_sta(const String &ssid, const String &password);
     bool configure_open_sta(const String &ssid);
@@ -123,7 +125,8 @@ private:
     void cleanup_manual_scan();
 
     int8_t find_profile_by_ssid(const String &ssid) const;
-    void collect_scan_candidates(int16_t scan_count);
+    void collect_scan_candidates(int16_t scan_count,
+                                 int8_t profile_filter = -1);
     bool start_scan_candidate(size_t candidate_index);
     void retry_with_pmf_disabled();
     const char *mode_name() const;
