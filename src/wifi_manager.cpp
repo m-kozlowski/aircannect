@@ -108,8 +108,11 @@ void WifiManager::poll() {
     if (mode_state_ == WifiModeState::StaConnected) {
         network_available_ = softap_running_;
         stats_.disconnects++;
+        last_disconnect_reason_ = last_disconnect_reason;
+        stats_.last_disconnect_reason = last_disconnect_reason_;
         Log::logf(CAT_WIFI, LOG_WARN,
-                  "STA disconnected; reconnecting\n");
+                  "STA disconnected reason=%u; reconnecting\n",
+                  static_cast<unsigned>(last_disconnect_reason_));
         if (active_profile_index_ >= 0) {
             start_profile(static_cast<size_t>(active_profile_index_));
         } else {
@@ -626,7 +629,7 @@ void WifiManager::maybe_start_roam_scan() {
 
     stats_.roam_scans++;
     mode_state_ = WifiModeState::StaRoamScanning;
-    Log::logf(CAT_WIFI, LOG_INFO,
+    Log::logf(CAT_WIFI, LOG_DEBUG,
               "roaming: async scan for better AP\n");
 }
 

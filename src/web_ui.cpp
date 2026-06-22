@@ -998,7 +998,7 @@ void WebUI::enforce_sse_limits() {
         xSemaphoreGive(sse_mutex_);
 
         if (!drop) return;
-        Log::logf(CAT_GENERAL, LOG_WARN,
+        Log::logf(CAT_GENERAL, LOG_DEBUG,
                   "[WEB] closing SSE client count=%u pending=%u\n",
                   static_cast<unsigned>(connected_count),
                   static_cast<unsigned>(worst_pending));
