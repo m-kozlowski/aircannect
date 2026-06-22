@@ -2,6 +2,7 @@
 
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <esp_wifi.h>
 #include <string.h>
 
@@ -31,9 +32,35 @@ void format_bssid(char *out, size_t size, const uint8_t *bssid) {
              bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 }
 
+bool mac_is_zero(const uint8_t *mac) {
+    if (!mac) return true;
+    for (size_t i = 0; i < 6; ++i) {
+        if (mac[i] != 0) return false;
+    }
+    return true;
+}
+
+void efuse_mac_bytes(uint8_t *mac) {
+    if (!mac) return;
+    const uint64_t efuse = ESP.getEfuseMac();
+    for (size_t i = 0; i < 6; ++i) {
+        mac[i] = static_cast<uint8_t>((efuse >> (8 * (5 - i))) & 0xff);
+    }
+}
+
+void read_softap_identity_mac(uint8_t *mac) {
+    if (!mac) return;
+    memset(mac, 0, 6);
+    if (esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP) == ESP_OK &&
+        !mac_is_zero(mac)) {
+        return;
+    }
+    efuse_mac_bytes(mac);
+}
+
 String ap_ssid(const String &hostname) {
     uint8_t mac[6] = {};
-    WiFi.macAddress(mac);
+    read_softap_identity_mac(mac);
     char suffix[7];
     snprintf(suffix, sizeof(suffix), "%02X%02X%02X",
              mac[3], mac[4], mac[5]);
