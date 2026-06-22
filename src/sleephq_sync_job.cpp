@@ -715,6 +715,10 @@ void SleepHqSyncJob::finish_sync_locked() {
     status_.last_sync_files_uploaded = status_.files_uploaded;
     status_.last_sync_files_failed = status_.files_failed;
     status_.last_sync_bytes_uploaded = status_.bytes_uploaded;
+    if (status_.last_sync_epoch != 0 &&
+        status_.last_sync_epoch > status_.last_check_epoch) {
+        status_.last_check_epoch = status_.last_sync_epoch;
+    }
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     status_.state = status_.configured ? SleepHqSyncState::Idle
@@ -2265,6 +2269,10 @@ SleepHqSyncStatus SleepHqSyncJob::status() const {
         out.retry_attempt = retry_attempt_;
         out.network_available = network_available_.load();
         out.state = SleepHqSyncState::Working;
+    }
+    if (out.last_sync_epoch != 0 &&
+        out.last_sync_epoch > out.last_check_epoch) {
+        out.last_check_epoch = out.last_sync_epoch;
     }
     return out;
 }

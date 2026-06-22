@@ -1169,6 +1169,11 @@ void StorageSyncJob::finish_run_locked() {
         status_.last_sync_files_skipped = status_.files_skipped;
         status_.last_sync_files_failed = status_.files_failed;
         status_.last_sync_bytes_uploaded = status_.bytes_uploaded;
+        if (status_.last_sync_epoch != 0 &&
+            status_.last_sync_epoch > status_.last_verify_epoch) {
+            status_.last_verify_epoch = status_.last_sync_epoch;
+            status_.last_verify_files_seen = status_.files_seen;
+        }
         Log::logf(CAT_STORAGE,
                   LOG_INFO,
                   "[SYNC] done seen=%u uploaded=%u skipped=%u failed=%u "
@@ -1618,6 +1623,11 @@ StorageSyncStatus StorageSyncJob::status() const {
         out.pending = true;
         out.network_available = network_available_.load();
         out.updated_ms = millis_nonzero();
+    }
+    if (out.last_sync_epoch != 0 &&
+        out.last_sync_epoch > out.last_verify_epoch) {
+        out.last_verify_epoch = out.last_sync_epoch;
+        out.last_verify_files_seen = out.last_sync_files_seen;
     }
     return out;
 }
