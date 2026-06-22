@@ -157,6 +157,9 @@ bool pop_chunk(Slot &slot) {
     copy_cstr(slot.path, sizeof(slot.path), src.path);
     slot.data = src.data;
     slot.len = src.len;
+    slot.rotating = src.rotating;
+    slot.rotate_bytes = src.rotate_bytes;
+    slot.archive_count = src.archive_count;
     src.path[0] = 0;
     src.len = 0;
     src.rotating = false;

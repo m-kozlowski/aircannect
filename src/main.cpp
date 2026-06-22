@@ -332,7 +332,6 @@ void setup() {
 }
 
 void loop() {
-    static uint32_t next_active_file_log_drain_ms = 0;
 
     const bool esp_ota_quiesce_requested =
         ota_manager.as11_quiesce_required();
@@ -375,19 +374,9 @@ void loop() {
         !rpc_arbiter.stream_activity_active() &&
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
-    const bool active_file_log_drain_allowed =
-        !storage_writer_idle_allowed &&
-        !rpc_arbiter.background_backpressure_active() &&
-        (next_active_file_log_drain_ms == 0 ||
-         static_cast<int32_t>(now_ms - next_active_file_log_drain_ms) >= 0);
-    if (active_file_log_drain_allowed) {
-        next_active_file_log_drain_ms =
-            now_ms + AC_FILE_LOG_ACTIVE_DRAIN_INTERVAL_MS;
-    }
     Log::poll(wifi_manager.network_available(),
-              storage_writer_idle_allowed || active_file_log_drain_allowed,
-              storage_writer_idle_allowed ? 0
-                                          : AC_FILE_LOG_ACTIVE_DRAIN_BUDGET);
+              storage_writer_idle_allowed,
+              0);
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }
@@ -430,10 +419,6 @@ void loop() {
     drain_can_rx_after("rpc_events_post_frontends");
     if (storage_writer_idle_allowed) {
         StorageWriter::poll();
-    } else if (active_file_log_drain_allowed &&
-               !rpc_arbiter.background_backpressure_active()) {
-        StorageWriter::poll_limited(AC_FILE_LOG_ACTIVE_WRITE_BUDGET_ITEMS,
-                                    AC_FILE_LOG_ACTIVE_WRITE_BUDGET_BYTES);
     }
     drain_can_rx_after("storage_writer");
 

@@ -113,10 +113,6 @@ static constexpr const char *AC_FILE_LOG_PATH =
     "/aircannect/log/aircannect.log";
 static constexpr size_t AC_FILE_LOG_QUEUE_DEPTH = 512;
 static constexpr size_t AC_FILE_LOG_DRAIN_BUDGET = 4;
-static constexpr uint32_t AC_FILE_LOG_ACTIVE_DRAIN_INTERVAL_MS = 10000;
-static constexpr size_t AC_FILE_LOG_ACTIVE_DRAIN_BUDGET = 1;
-static constexpr size_t AC_FILE_LOG_ACTIVE_WRITE_BUDGET_ITEMS = 1;
-static constexpr size_t AC_FILE_LOG_ACTIVE_WRITE_BUDGET_BYTES = 512;
 static constexpr size_t AC_FILE_LOG_ROTATE_BYTES = 256 * 1024;
 static constexpr uint8_t AC_FILE_LOG_ARCHIVES = 8;
 
