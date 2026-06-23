@@ -3808,18 +3808,20 @@ bool ReportManager::open_plot_series(const ReportResultStream &stream) {
     return plot_bin_ok_;
 }
 
-void ReportManager::flush_plot_bucket() {
-    if (!plot_bucket_.have) return;
-
+uint8_t ReportManager::flush_plot_bucket_to(ReportSpoolBuffer &out,
+                                            PlotBuildBucket &bucket,
+                                            int64_t base_ms,
+                                            bool &ok) {
+    if (!bucket.have) return 0;
     struct PlotPoint {
         int64_t t = 0;
         int32_t value = 0;
     };
     PlotPoint points[4] = {
-        {plot_bucket_.start_t, plot_bucket_.start_value},
-        {plot_bucket_.min_t, plot_bucket_.min_value},
-        {plot_bucket_.max_t, plot_bucket_.max_value},
-        {plot_bucket_.end_t, plot_bucket_.end_value},
+        {bucket.start_t, bucket.start_value},
+        {bucket.min_t, bucket.min_value},
+        {bucket.max_t, bucket.max_value},
+        {bucket.end_t, bucket.end_value},
     };
     std::sort(points,
               points + 4,
@@ -3827,17 +3829,26 @@ void ReportManager::flush_plot_bucket() {
                   return a.t < b.t;
               });
     bool emitted[4] = {};
+    uint8_t count = 0;
     for (uint8_t i = 0; i < 4; ++i) {
         if (emitted[i]) continue;
-        plot_bin_ok_ &= bin_put_i32(
-            plot_tmp_, static_cast<int32_t>(points[i].t - plot_start_ms_));
-        plot_bin_ok_ &= bin_put_i32(plot_tmp_, points[i].value);
+        ok &= bin_put_i32(out, static_cast<int32_t>(points[i].t - base_ms));
+        ok &= bin_put_i32(out, points[i].value);
+        count++;
         for (uint8_t j = i + 1; j < 4; ++j) {
             if (points[j].t == points[i].t) emitted[j] = true;
         }
     }
 
-    plot_bucket_.clear();
+    bucket.clear();
+    return count;
+}
+
+void ReportManager::flush_plot_bucket() {
+    (void)flush_plot_bucket_to(plot_tmp_,
+                               plot_bucket_,
+                               plot_start_ms_,
+                               plot_bin_ok_);
 }
 
 bool ReportManager::process_plot_series_chunk(const ReportResultChunk &chunk) {
@@ -3950,6 +3961,9 @@ void ReportManager::reset_range_plot_build(bool clear_ready) {
     range_stream_index_ = 0;
     range_series_open_ = false;
     range_series_points_ = 0;
+    range_bucket_ms_ = 1;
+    range_current_bucket_ = -1;
+    range_bucket_.clear();
     range_build_ok_ = true;
 
     if (!clear_ready) return;
@@ -3979,6 +3993,10 @@ bool ReportManager::start_range_plot_build(size_t therapy_index,
     range_build_index_ = therapy_index;
     range_build_from_ = from_ms;
     range_build_to_ = to_ms;
+    range_bucket_ms_ = std::max<int64_t>(
+        1,
+        (to_ms - from_ms) /
+            static_cast<int64_t>(AC_REPORT_RANGE_PLOT_BUCKETS));
     range_build_bytes_ = std::make_shared<ReportSpoolBuffer>();
     if (!range_build_bytes_) {
         fail_range_plot_build("range_alloc_failed");
@@ -4073,6 +4091,8 @@ bool ReportManager::open_range_series(const ReportResultStream &stream) {
     }
     range_tmp_.clear();
     range_series_points_ = 0;
+    range_current_bucket_ = -1;
+    range_bucket_.clear();
     range_series_open_ = true;
     return range_build_ok_;
 }
@@ -4092,9 +4112,7 @@ bool ReportManager::process_range_series_chunk(
          chunk.source == ReportSourceId::Leak0p5Hz)
             ? 60
             : 1;
-    for (size_t index = 0;
-         index < count && range_series_points_ < AC_REPORT_RANGE_MAX_POINTS;
-         ++index) {
+    for (size_t index = 0; index < count; ++index) {
         ReportSeriesSample sample;
         if (!report_read_series_sample(payload.data(),
                                        payload.size(),
@@ -4106,29 +4124,65 @@ bool ReportManager::process_range_series_chunk(
             sample.timestamp_ms >= range_build_to_) {
             continue;
         }
+        int64_t sample_bucket =
+            (sample.timestamp_ms - range_build_from_) / range_bucket_ms_;
+        if (sample_bucket < 0) sample_bucket = 0;
+        if (sample_bucket >=
+            static_cast<int64_t>(AC_REPORT_RANGE_PLOT_BUCKETS)) {
+            sample_bucket =
+                static_cast<int64_t>(AC_REPORT_RANGE_PLOT_BUCKETS) - 1;
+        }
+        if (range_current_bucket_ != sample_bucket) {
+            range_series_points_ += flush_plot_bucket_to(range_tmp_,
+                                                         range_bucket_,
+                                                         range_build_from_,
+                                                         range_build_ok_);
+            if (!range_build_ok_) {
+                fail_range_plot_build("range_overflow");
+                return false;
+            }
+            range_current_bucket_ = sample_bucket;
+            if (range_series_points_ >= AC_REPORT_RANGE_MAX_POINTS) {
+                range_chunk_index_ = result_status_.chunk_count;
+                return true;
+            }
+        }
         int64_t value = static_cast<int64_t>(sample.value_milli) * scale;
         if (value > INT32_MAX) value = INT32_MAX;
         else if (value < INT32_MIN) value = INT32_MIN;
-        range_build_ok_ &=
-            bin_put_i32(range_tmp_,
-                        static_cast<int32_t>(sample.timestamp_ms -
-                                             range_build_from_));
-        range_build_ok_ &=
-            bin_put_i32(range_tmp_, static_cast<int32_t>(value));
-        if (!range_build_ok_) {
-            fail_range_plot_build("range_overflow");
-            return false;
+        const int32_t value_i32 = static_cast<int32_t>(value);
+        if (!range_bucket_.have) {
+            range_bucket_.have = true;
+            range_bucket_.start_t = sample.timestamp_ms;
+            range_bucket_.end_t = sample.timestamp_ms;
+            range_bucket_.min_t = sample.timestamp_ms;
+            range_bucket_.max_t = sample.timestamp_ms;
+            range_bucket_.start_value = value_i32;
+            range_bucket_.end_value = value_i32;
+            range_bucket_.min_value = value_i32;
+            range_bucket_.max_value = value_i32;
+        } else {
+            range_bucket_.end_t = sample.timestamp_ms;
+            range_bucket_.end_value = value_i32;
+            if (value_i32 < range_bucket_.min_value) {
+                range_bucket_.min_value = value_i32;
+                range_bucket_.min_t = sample.timestamp_ms;
+            }
+            if (value_i32 > range_bucket_.max_value) {
+                range_bucket_.max_value = value_i32;
+                range_bucket_.max_t = sample.timestamp_ms;
+            }
         }
-        ++range_series_points_;
-    }
-    if (range_series_points_ >= AC_REPORT_RANGE_MAX_POINTS) {
-        range_chunk_index_ = result_status_.chunk_count;
     }
     return true;
 }
 
 bool ReportManager::finish_range_series() {
     if (!range_build_bytes_ || !range_series_open_) return false;
+    range_series_points_ += flush_plot_bucket_to(range_tmp_,
+                                                 range_bucket_,
+                                                 range_build_from_,
+                                                 range_build_ok_);
     range_build_ok_ &= bin_put_u32(*range_build_bytes_, range_series_points_);
     if (range_tmp_.size()) {
         range_build_ok_ &=
@@ -4137,6 +4191,7 @@ bool ReportManager::finish_range_series() {
     range_tmp_.clear();
     range_series_open_ = false;
     range_series_points_ = 0;
+    range_current_bucket_ = -1;
     if (!range_build_ok_) {
         fail_range_plot_build("range_overflow");
         return false;

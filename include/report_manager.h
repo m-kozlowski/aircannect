@@ -528,6 +528,10 @@ private:
     bool process_plot_event_chunk(const ReportResultChunk &chunk);
     bool open_plot_series(const ReportResultStream &stream);
     bool process_plot_series_chunk(const ReportResultChunk &chunk);
+    uint8_t flush_plot_bucket_to(ReportSpoolBuffer &out,
+                                 PlotBuildBucket &bucket,
+                                 int64_t base_ms,
+                                 bool &ok);
     void flush_plot_bucket();
     bool finish_result_plot_build();
     void reset_range_plot_build(bool clear_ready);
@@ -702,6 +706,9 @@ private:
     size_t range_stream_index_ = 0;
     bool range_series_open_ = false;
     uint32_t range_series_points_ = 0;
+    int64_t range_bucket_ms_ = 1;
+    int64_t range_current_bucket_ = -1;
+    PlotBuildBucket range_bucket_;
     bool range_build_ok_ = true;
     void service_range_plot(bool realtime_active);
     uint32_t result_slot_tick_ = 0;

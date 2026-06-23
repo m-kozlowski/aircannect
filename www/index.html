@@ -3491,12 +3491,13 @@
       return token === reportLoadToken;
     }
 
-    // Zoom detail: raw samples for [lo,hi] rounded out to hour bounds.
+    // Zoom detail: higher-resolution samples for [lo,hi], rounded to a small
+    // tile for cache reuse without dragging a whole hour over HTTP.
     async function fetchReportRange(lo, hi) {
       if (reportCurrentEtag == null) return;
-      const HOUR = 3600000;
-      const from = Math.floor(lo / HOUR) * HOUR;
-      const to = Math.ceil(hi / HOUR) * HOUR;
+      const RANGE_TILE = 15 * 60 * 1000;
+      const from = Math.floor(lo / RANGE_TILE) * RANGE_TILE;
+      const to = Math.ceil(hi / RANGE_TILE) * RANGE_TILE;
       if (!(to > from)) return;
       const key = reportCurrentIndex + ":" + from + ":" + to;
       const token = ++reportRangeToken;
