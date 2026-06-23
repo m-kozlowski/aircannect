@@ -388,7 +388,7 @@ private:
     bool start_next_cache_source();
     bool store_cache_round(ReportSpoolResult &result);
     bool write_cache_source_coverage(ReportSourceId source, int64_t from_ms);
-    void reset_cache_source_coverage_marks();
+    bool reset_cache_source_coverage_marks();
     void note_cache_chunk_coverage(const ReportParsedChunk &chunk);
     bool drain_source_events(RpcArbiter &arbiter);
     void poll_cache_fetch(RpcArbiter &arbiter);
@@ -598,7 +598,8 @@ private:
     // Positional sidecar for records_: summary refresh is refused while a cache
     // fetch is active, so record indices cannot change between chunk parsing
     // and coverage writing.
-    int64_t cache_source_night_extent_ms_[AC_REPORT_SUMMARY_RECORD_MAX] = {};
+    int64_t *cache_source_night_extent_ms_ = nullptr;  // PSRAM sidecar
+    bool ensure_cache_source_night_extents();
 
     // Write-side coalescing: buffer parsed chunks per (kind,name) and flush
     // larger files, so a night reads back as a few files instead of hundreds.

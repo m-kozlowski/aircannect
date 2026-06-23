@@ -427,6 +427,8 @@ ReportManager::~ReportManager() {
     Memory::free(night_epochs_);
     night_epochs_ = nullptr;
     night_epoch_count_ = 0;
+    Memory::free(cache_source_night_extent_ms_);
+    cache_source_night_extent_ms_ = nullptr;
     if (result_slots_) {
         for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
             result_slots_[i].~MaterializedResult();
@@ -481,11 +483,27 @@ void ReportManager::begin() {
                 AC_REPORT_SUMMARY_RECORD_MAX * sizeof(NightEpoch));
         }
     }
+    ensure_cache_source_night_extents();
     clear_summary_records();
     summary_status_ = {};
     if (!load_summary_from_store()) {
         publish_summary_json_snapshot();
     }
+}
+
+bool ReportManager::ensure_cache_source_night_extents() {
+    if (cache_source_night_extent_ms_) return true;
+    cache_source_night_extent_ms_ = static_cast<int64_t *>(
+        Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
+                             sizeof(int64_t),
+                             false));
+    if (!cache_source_night_extent_ms_) {
+        log_report_alloc_failed(
+            "cache_source_night_extents",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(int64_t));
+        return false;
+    }
+    return true;
 }
 
 void ReportManager::set_edf_report_catalog(EdfReportCatalogJob *catalog) {
@@ -5188,7 +5206,10 @@ bool ReportManager::start_next_cache_source() {
         return false;
     }
 
-    reset_cache_source_coverage_marks();
+    if (!reset_cache_source_coverage_marks()) {
+        fail_cache_fetch("coverage_extent_alloc_failed");
+        return false;
+    }
     cache_status_.active_source = source;
     cache_status_.source_index = static_cast<uint32_t>(cache_source_index_);
     cache_status_.spool = spool_.status();
@@ -5251,10 +5272,12 @@ bool ReportManager::store_cache_round(ReportSpoolResult &result) {
     return true;
 }
 
-void ReportManager::reset_cache_source_coverage_marks() {
+bool ReportManager::reset_cache_source_coverage_marks() {
+    if (!ensure_cache_source_night_extents()) return false;
     memset(cache_source_night_extent_ms_,
            0,
-           sizeof(cache_source_night_extent_ms_));
+           AC_REPORT_SUMMARY_RECORD_MAX * sizeof(int64_t));
+    return true;
 }
 
 void ReportManager::note_cache_chunk_coverage(const ReportParsedChunk &chunk) {
@@ -5265,6 +5288,7 @@ void ReportManager::note_cache_chunk_coverage(const ReportParsedChunk &chunk) {
         return;
     }
 
+    if (!cache_source_night_extent_ms_) return;
     if (!take_summary_lock(portMAX_DELAY)) return;
     for (size_t record_index = 0;
          records_ &&
