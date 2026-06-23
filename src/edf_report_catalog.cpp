@@ -7,6 +7,67 @@
 namespace aircannect {
 namespace {
 
+struct SignalMapRow {
+    EdfInventoryFileKind kind;
+    const char *label;
+    ReportSignalId signal;
+    uint32_t sample_interval_ms;
+    bool primary;
+};
+
+const SignalMapRow REPORT_SIGNAL_MAP[] = {
+    {EdfInventoryFileKind::Brp,
+     "Flow.40ms",
+     ReportSignalId::Flow,
+     40,
+     true},
+    {EdfInventoryFileKind::Brp,
+     "Press.40ms",
+     ReportSignalId::MaskPressure,
+     40,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "MaskPress.2s",
+     ReportSignalId::MaskPressure,
+     2000,
+     false},
+    {EdfInventoryFileKind::Pld,
+     "Press.2s",
+     ReportSignalId::InspiratoryPressure,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "EprPress.2s",
+     ReportSignalId::ExpiratoryPressure,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "Leak.2s",
+     ReportSignalId::Leak,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "RespRate.2s",
+     ReportSignalId::RespiratoryRate,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "MinVent.2s",
+     ReportSignalId::MinuteVentilation,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "IERatio.2s",
+     ReportSignalId::IeRatio,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "Ti.2s",
+     ReportSignalId::InspiratoryDuration,
+     2000,
+     true},
+};
+
 bool report_kind(EdfInventoryFileKind kind) {
     return kind == EdfInventoryFileKind::Brp ||
            kind == EdfInventoryFileKind::Pld ||
@@ -101,6 +162,21 @@ const EdfReportSignalDescriptor *edf_report_find_signal(
         }
     }
     return nullptr;
+}
+
+bool edf_report_signal_mapping(EdfInventoryFileKind kind,
+                               const char *label,
+                               EdfReportSignalMapping &out) {
+    out = {};
+    if (!label || !label[0]) return false;
+    for (const SignalMapRow &row : REPORT_SIGNAL_MAP) {
+        if (row.kind != kind || strcmp(row.label, label) != 0) continue;
+        out.signal = row.signal;
+        out.sample_interval_ms = row.sample_interval_ms;
+        out.primary = row.primary;
+        return true;
+    }
+    return false;
 }
 
 }  // namespace aircannect

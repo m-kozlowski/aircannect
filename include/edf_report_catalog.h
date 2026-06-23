@@ -6,6 +6,7 @@
 
 #include "edf_file_inventory.h"
 #include "edf_file_reader.h"
+#include "report_sources.h"
 
 namespace aircannect {
 
@@ -36,6 +37,12 @@ struct EdfReportFileDescriptor {
     EdfReportSignalDescriptor signals[AC_EDF_REPORT_FILE_SIGNAL_MAX] = {};
 };
 
+struct EdfReportSignalMapping {
+    ReportSignalId signal = ReportSignalId::Flow;
+    uint32_t sample_interval_ms = 0;
+    bool primary = false;
+};
+
 const char *edf_report_file_status_name(EdfReportFileStatus status);
 bool edf_report_file_kind_supported(EdfInventoryFileKind kind);
 
@@ -50,5 +57,9 @@ EdfReportFileStatus edf_report_describe_file(
 const EdfReportSignalDescriptor *edf_report_find_signal(
     const EdfReportFileDescriptor &file,
     const char *label);
+
+bool edf_report_signal_mapping(EdfInventoryFileKind kind,
+                               const char *label,
+                               EdfReportSignalMapping &out);
 
 }  // namespace aircannect
