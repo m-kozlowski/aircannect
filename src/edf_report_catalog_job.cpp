@@ -42,14 +42,10 @@ EdfReportCatalogJob::~EdfReportCatalogJob() {
     if (sessions_) Memory::free(sessions_);
     sessions_ = nullptr;
     session_count_ = 0;
-    if (lock_) {
-        vSemaphoreDelete(lock_);
-        lock_ = nullptr;
-    }
 }
 
 void EdfReportCatalogJob::begin() {
-    if (!lock_) lock_ = xSemaphoreCreateMutex();
+    if (!lock_) lock_ = xSemaphoreCreateMutexStatic(&lock_storage_);
 }
 
 bool EdfReportCatalogJob::lock(uint32_t timeout_ms) const {

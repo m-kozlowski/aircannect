@@ -13,7 +13,9 @@ BackgroundWorker *g_instance = nullptr;
 BackgroundWorker *background_worker() { return g_instance; }
 
 void BackgroundWorker::begin() {
-    if (!status_lock_) status_lock_ = xSemaphoreCreateMutex();
+    if (!status_lock_) {
+        status_lock_ = xSemaphoreCreateMutexStatic(&status_lock_storage_);
+    }
     g_instance = this;
     if (task_) return;
     xTaskCreatePinnedToCore(task_entry, "ac_bgworker",

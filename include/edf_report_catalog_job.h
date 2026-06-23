@@ -83,6 +83,7 @@ private:
 
     bool add_file_to_build_locked(const EdfReportFileDescriptor &file);
 
+    mutable StaticSemaphore_t lock_storage_ = {};
     mutable SemaphoreHandle_t lock_ = nullptr;
     EdfReportCatalogStatus status_;
     uint32_t next_refresh_id_ = 1;

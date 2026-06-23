@@ -264,6 +264,11 @@ private:
     uint64_t console_sse_pos_ = 0;
     bool console_sse_reset_pending_ = false;
     FixedQueue<WebCommand, AC_WEB_COMMAND_QUEUE_DEPTH> command_queue_;
+    StaticSemaphore_t command_mutex_storage_ = {};
+    StaticSemaphore_t cache_mutex_storage_ = {};
+    StaticSemaphore_t sse_mutex_storage_ = {};
+    StaticSemaphore_t live_view_mutex_storage_ = {};
+    StaticSemaphore_t storage_job_mutex_storage_ = {};
     SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;

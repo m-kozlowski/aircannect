@@ -669,11 +669,23 @@ bool WebUI::begin(RpcArbiter &arbiter,
     sleephq_sync_job_ = sleephq_sync_job;
     console_ctx_ = &console_ctx;
 
-    command_mutex_ = xSemaphoreCreateMutex();
-    cache_mutex_ = xSemaphoreCreateMutex();
-    sse_mutex_ = xSemaphoreCreateMutex();
-    live_view_mutex_ = xSemaphoreCreateMutex();
-    storage_job_mutex_ = xSemaphoreCreateMutex();
+    if (!command_mutex_) {
+        command_mutex_ = xSemaphoreCreateMutexStatic(&command_mutex_storage_);
+    }
+    if (!cache_mutex_) {
+        cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
+    }
+    if (!sse_mutex_) {
+        sse_mutex_ = xSemaphoreCreateMutexStatic(&sse_mutex_storage_);
+    }
+    if (!live_view_mutex_) {
+        live_view_mutex_ =
+            xSemaphoreCreateMutexStatic(&live_view_mutex_storage_);
+    }
+    if (!storage_job_mutex_) {
+        storage_job_mutex_ =
+            xSemaphoreCreateMutexStatic(&storage_job_mutex_storage_);
+    }
     if (!command_mutex_ || !cache_mutex_ || !sse_mutex_ ||
         !live_view_mutex_ || !storage_job_mutex_) {
         stop();
@@ -797,8 +809,6 @@ void WebUI::stop() {
         } else {
             command_queue_.clear();
         }
-        vSemaphoreDelete(command_mutex_);
-        command_mutex_ = nullptr;
     }
 
     if (sse_mutex_) {
@@ -806,8 +816,6 @@ void WebUI::stop() {
             for (SseClientRef &ref : sse_clients_) ref = {};
             xSemaphoreGive(sse_mutex_);
         }
-        vSemaphoreDelete(sse_mutex_);
-        sse_mutex_ = nullptr;
     } else {
         for (SseClientRef &ref : sse_clients_) ref = {};
     }
@@ -817,20 +825,8 @@ void WebUI::stop() {
             for (LiveViewLease &lease : live_view_leases_) lease = {};
             xSemaphoreGive(live_view_mutex_);
         }
-        vSemaphoreDelete(live_view_mutex_);
-        live_view_mutex_ = nullptr;
     } else {
         for (LiveViewLease &lease : live_view_leases_) lease = {};
-    }
-
-    if (cache_mutex_) {
-        vSemaphoreDelete(cache_mutex_);
-        cache_mutex_ = nullptr;
-    }
-
-    if (storage_job_mutex_) {
-        vSemaphoreDelete(storage_job_mutex_);
-        storage_job_mutex_ = nullptr;
     }
 
     sse_enforce_needed_ = false;

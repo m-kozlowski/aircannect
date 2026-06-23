@@ -94,6 +94,7 @@ private:
     std::atomic<uint32_t> gate_inputs_{GATE_UNPUBLISHED};
     TaskHandle_t task_ = nullptr;
 
+    mutable StaticSemaphore_t status_lock_storage_ = {};
     mutable SemaphoreHandle_t status_lock_ = nullptr;
     BackgroundWorkerStatus status_ = {};
 };
