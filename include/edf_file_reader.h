@@ -79,6 +79,10 @@ bool edf_parse_signal_header(const uint8_t *header,
                              uint32_t signal_index,
                              EdfSignalHeader &out);
 
+bool edf_parse_header_start_ms(const EdfHeaderSummary &summary,
+                               int64_t &out);
+bool edf_parse_header_record_duration_ms(const EdfHeaderSummary &summary,
+                                         uint32_t &out);
 bool edf_parse_signal_scale(const EdfSignalHeader &signal,
                             EdfSignalScale &out);
 float edf_scale_digital_sample(const EdfSignalScale &scale,

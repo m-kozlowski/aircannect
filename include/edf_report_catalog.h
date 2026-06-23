@@ -21,6 +21,7 @@ enum class EdfReportFileStatus : uint8_t {
     FileTooLarge,
     TooManySignals,
     SignalHeaderError,
+    TimingError,
 };
 
 struct EdfReportSignalDescriptor {
@@ -37,6 +38,9 @@ struct EdfReportFileDescriptor {
     char path[AC_EDF_REPORT_PATH_MAX] = {};
     uint64_t file_size = 0;
     time_t last_write = 0;
+    int64_t header_start_ms = 0;
+    int64_t header_end_ms = 0;
+    uint32_t record_duration_ms = 0;
     uint32_t signal_count = 0;
     EdfReportSignalDescriptor signals[AC_EDF_REPORT_FILE_SIGNAL_MAX] = {};
 };
@@ -52,6 +56,9 @@ struct EdfReportSessionFileDescriptor {
     char path[AC_EDF_REPORT_PATH_MAX] = {};
     uint64_t file_size = 0;
     time_t last_write = 0;
+    int64_t header_start_ms = 0;
+    int64_t header_end_ms = 0;
+    uint32_t record_duration_ms = 0;
     uint32_t complete_records = 0;
     uint32_t signal_count = 0;
 };
@@ -66,6 +73,8 @@ struct EdfReportSessionDescriptor {
     size_t file_count = 0;
     uint64_t total_size = 0;
     time_t latest_write = 0;
+    int64_t earliest_header_start_ms = 0;
+    int64_t latest_header_end_ms = 0;
     EdfReportSessionFileDescriptor files[AC_EDF_REPORT_SESSION_FILE_MAX] = {};
 };
 

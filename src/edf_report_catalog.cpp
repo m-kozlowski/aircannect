@@ -1,5 +1,6 @@
 #include "edf_report_catalog.h"
 
+#include <limits.h>
 #include <string.h>
 
 #include "string_util.h"
@@ -116,6 +117,7 @@ const char *edf_report_file_status_name(EdfReportFileStatus status) {
         case EdfReportFileStatus::TooManySignals: return "too_many_signals";
         case EdfReportFileStatus::SignalHeaderError:
             return "signal_header_error";
+        case EdfReportFileStatus::TimingError: return "timing_error";
         default:
             return "unknown";
     }
@@ -167,6 +169,21 @@ EdfReportFileStatus edf_report_describe_file(
         out.status = EdfReportFileStatus::TooManySignals;
         return out.status;
     }
+    if (!edf_parse_header_start_ms(inventory.header, out.header_start_ms) ||
+        !edf_parse_header_record_duration_ms(inventory.header,
+                                             out.record_duration_ms)) {
+        out.status = EdfReportFileStatus::TimingError;
+        return out.status;
+    }
+    const uint64_t duration_ms =
+        static_cast<uint64_t>(inventory.complete_records_from_size) *
+        static_cast<uint64_t>(out.record_duration_ms);
+    if (out.header_start_ms < 0 ||
+        duration_ms > static_cast<uint64_t>(INT64_MAX - out.header_start_ms)) {
+        out.status = EdfReportFileStatus::TimingError;
+        return out.status;
+    }
+    out.header_end_ms = out.header_start_ms + static_cast<int64_t>(duration_ms);
 
     out.signal_count = inventory.header.signal_count;
     for (uint32_t i = 0; i < inventory.header.signal_count; ++i) {
@@ -247,6 +264,9 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
     copy_cstr(dst.path, sizeof(dst.path), file.path);
     dst.file_size = file.file_size;
     dst.last_write = file.last_write;
+    dst.header_start_ms = file.header_start_ms;
+    dst.header_end_ms = file.header_end_ms;
+    dst.record_duration_ms = file.record_duration_ms;
     dst.complete_records = file.inventory.complete_records_from_size;
     dst.signal_count = file.signal_count;
 
@@ -255,6 +275,13 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
     session.total_size += file.file_size;
     if (file.last_write > session.latest_write) {
         session.latest_write = file.last_write;
+    }
+    if (session.earliest_header_start_ms == 0 ||
+        file.header_start_ms < session.earliest_header_start_ms) {
+        session.earliest_header_start_ms = file.header_start_ms;
+    }
+    if (file.header_end_ms > session.latest_header_end_ms) {
+        session.latest_header_end_ms = file.header_end_ms;
     }
     session.warnings |= file.inventory.warnings;
 

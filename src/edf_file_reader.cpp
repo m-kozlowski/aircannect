@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "calendar_utils.h"
 #include "edf_bytes.h"
 #include "edf_layout.h"
 
@@ -68,6 +69,15 @@ bool parse_float_text(const char *text, float &out) {
     const float value = strtof(text, &end);
     if (!end || *end != '\0') return false;
     out = value;
+    return true;
+}
+
+bool parse_two_digits(const char *text, int &out) {
+    if (!text || text[0] < '0' || text[0] > '9' ||
+        text[1] < '0' || text[1] > '9') {
+        return false;
+    }
+    out = (text[0] - '0') * 10 + (text[1] - '0');
     return true;
 }
 
@@ -314,6 +324,87 @@ bool edf_parse_signal_header(const uint8_t *header,
                                      EDF_SIGNAL_RESERVED_BLOCK_OFFSET,
                                      AC_EDF_SIGNAL_RESERVED_WIDTH),
         AC_EDF_SIGNAL_RESERVED_WIDTH);
+    return true;
+}
+
+bool edf_parse_header_start_ms(const EdfHeaderSummary &summary,
+                               int64_t &out) {
+    out = 0;
+    const char *date = summary.start_date;
+    const char *time = summary.start_time;
+    if (strlen(date) != 8 || strlen(time) != 8 ||
+        date[2] != '.' || date[5] != '.' ||
+        time[2] != '.' || time[5] != '.') {
+        return false;
+    }
+
+    int day = 0;
+    int month = 0;
+    int year2 = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (!parse_two_digits(date, day) ||
+        !parse_two_digits(date + 3, month) ||
+        !parse_two_digits(date + 6, year2) ||
+        !parse_two_digits(time, hour) ||
+        !parse_two_digits(time + 3, minute) ||
+        !parse_two_digits(time + 6, second)) {
+        return false;
+    }
+
+    const int year = year2 >= 85 ? 1900 + year2 : 2000 + year2;
+    if (month < 1 || month > 12 || day < 1 ||
+        day > calendar_days_in_month(year, month) ||
+        hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        second < 0 || second > 59) {
+        return false;
+    }
+    const int64_t days =
+        calendar_days_from_civil(year,
+                                 static_cast<unsigned>(month),
+                                 static_cast<unsigned>(day));
+    out = (days * 86400 + static_cast<int64_t>(hour) * 3600 +
+           static_cast<int64_t>(minute) * 60 + second) * 1000;
+    return true;
+}
+
+bool edf_parse_header_record_duration_ms(const EdfHeaderSummary &summary,
+                                         uint32_t &out) {
+    out = 0;
+    const char *text = summary.record_duration;
+    if (!text || !text[0]) return false;
+
+    uint64_t seconds = 0;
+    size_t i = 0;
+    bool any = false;
+    while (text[i] >= '0' && text[i] <= '9') {
+        any = true;
+        const uint64_t digit = static_cast<uint64_t>(text[i] - '0');
+        if (seconds > (UINT32_MAX / 1000u - digit) / 10u) return false;
+        seconds = seconds * 10u + digit;
+        ++i;
+    }
+    if (!any) return false;
+
+    uint32_t fractional_ms = 0;
+    if (text[i] == '.') {
+        ++i;
+        uint32_t scale = 100;
+        if (text[i] < '0' || text[i] > '9') return false;
+        while (text[i] >= '0' && text[i] <= '9') {
+            if (scale > 0) {
+                fractional_ms +=
+                    static_cast<uint32_t>(text[i] - '0') * scale;
+                scale /= 10;
+            }
+            ++i;
+        }
+    }
+    if (text[i] != '\0') return false;
+    const uint64_t total = seconds * 1000u + fractional_ms;
+    if (total == 0 || total > UINT32_MAX) return false;
+    out = static_cast<uint32_t>(total);
     return true;
 }
 
