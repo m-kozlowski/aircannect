@@ -135,34 +135,38 @@ bool emit_numeric_entries(const EdfReportSessionFileDescriptor &file,
 
 struct PlanCountContext {
     uint32_t entries = 0;
+    uint32_t scored_entries = 0;
 };
 
 bool count_plan_entry(void *context, const EdfReportDataPlanEntry &entry) {
     PlanCountContext *ctx = static_cast<PlanCountContext *>(context);
     if (!ctx || !entry.name || !entry.name[0]) return false;
     ctx->entries++;
+    if (entry.kind == EdfReportDataKind::Events &&
+        entry.file_kind == EdfInventoryFileKind::Eve) {
+        ctx->scored_entries++;
+    }
     return true;
 }
 
-}  // namespace
-
-bool edf_report_plan_events(const EdfReportSessionDescriptor &session,
-                            int64_t range_start_ms,
-                            int64_t range_end_ms,
-                            EdfReportDataPlanCallback callback,
-                            void *context) {
-    if (!callback || range_end_ms <= range_start_ms) return false;
+bool emit_event_file_entry(const EdfReportSessionDescriptor &session,
+                           EdfInventoryFileKind kind,
+                           const char *name,
+                           int64_t range_start_ms,
+                           int64_t range_end_ms,
+                           EdfReportDataPlanCallback callback,
+                           void *context) {
     uint8_t slot = 0;
     const EdfReportSessionFileDescriptor *file =
-        session_file(session, EdfInventoryFileKind::Eve, slot);
+        session_file(session, kind, slot);
     if (!file || file->complete_records == 0) return true;
 
     EdfReportDataPlanEntry entry;
     entry.kind = EdfReportDataKind::Events;
     entry.signal = ReportSignalId::Flow;
     entry.source = ReportSourceId::RespiratoryEvents;
-    entry.name = report_source_spool_type(ReportSourceId::RespiratoryEvents);
-    entry.file_kind = EdfInventoryFileKind::Eve;
+    entry.name = name;
+    entry.file_kind = kind;
     entry.file_slot = slot;
     entry.first_record = 0;
     entry.record_count = file->complete_records;
@@ -173,6 +177,33 @@ bool edf_report_plan_events(const EdfReportSessionDescriptor &session,
         clamp_u64_to_u32(static_cast<uint64_t>(file->record_size) *
                          file->complete_records);
     return callback(context, entry);
+}
+
+}  // namespace
+
+bool edf_report_plan_events(const EdfReportSessionDescriptor &session,
+                            int64_t range_start_ms,
+                            int64_t range_end_ms,
+                            EdfReportDataPlanCallback callback,
+                            void *context) {
+    if (!callback || range_end_ms <= range_start_ms) return false;
+    if (!emit_event_file_entry(
+            session,
+            EdfInventoryFileKind::Eve,
+            report_source_spool_type(ReportSourceId::RespiratoryEvents),
+            range_start_ms,
+            range_end_ms,
+            callback,
+            context)) {
+        return false;
+    }
+    return emit_event_file_entry(session,
+                                 EdfInventoryFileKind::Csl,
+                                 "TherapyEvents-CSR",
+                                 range_start_ms,
+                                 range_end_ms,
+                                 callback,
+                                 context);
 }
 
 bool edf_report_plan_signal(const EdfReportSessionDescriptor &session,
@@ -221,8 +252,9 @@ bool edf_report_plan_covers_report(
             return false;
         }
         coverage.event_entries += ctx.entries;
+        coverage.scored_event_entries += ctx.scored_entries;
     }
-    if (coverage.event_entries == 0) {
+    if (coverage.scored_event_entries == 0) {
         if (coverage_out) *coverage_out = coverage;
         return false;
     }

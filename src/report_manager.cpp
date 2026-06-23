@@ -11,6 +11,7 @@
 #include "edf_report_catalog_job.h"
 #include "edf_report_data_plan.h"
 #include "edf_report_provider.h"
+#include "edf_report_provider_token.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
@@ -40,6 +41,7 @@ struct ResultChunkContext {
     bool required = false;
     size_t stream_index = 0;
     uint32_t entries = 0;
+    uint32_t scored_event_entries = 0;
 };
 
 struct SummaryRecordBufferContext {
@@ -3062,6 +3064,14 @@ bool ReportManager::collect_result_chunk(void *context,
         return false;
     }
     ctx->entries++;
+    if (info.kind == ReportStoreChunkKind::Events &&
+        info.ref.provider == ReportProviderId::Edf) {
+        EdfReportProviderToken token;
+        if (edf_report_provider_unpack_token(info.ref, token) &&
+            token.file_kind == EdfInventoryFileKind::Eve) {
+            ctx->scored_event_entries++;
+        }
+    }
     return true;
 }
 
@@ -3323,8 +3333,8 @@ bool ReportManager::find_edf_sessions_for_night(
 bool ReportManager::add_edf_events_for_range(int64_t range_start_ms,
                                              int64_t range_end_ms,
                                              bool required,
-                                             uint32_t &entries) {
-    entries = 0;
+                                             uint32_t &scored_entries) {
+    scored_entries = 0;
     if (!ensure_result_chunks() || !result_edf_sessions_ ||
         result_edf_session_count_ == 0) {
         return true;
@@ -3345,7 +3355,7 @@ bool ReportManager::add_edf_events_for_range(int64_t range_start_ms,
                                                     &ctx)) {
         return false;
     }
-    entries = ctx.entries;
+    scored_entries = ctx.scored_event_entries;
     return true;
 }
 
@@ -3744,7 +3754,16 @@ bool ReportManager::process_plot_event_chunk(const ReportResultChunk &chunk) {
                                       event)) {
             continue;
         }
-        if (!plot_time_in_ranges(event.start_ms)) continue;
+        const int64_t duration_ms = event.duration_ms > 0
+                                        ? static_cast<int64_t>(
+                                              event.duration_ms)
+                                        : 0;
+        const int64_t event_end_ms = event.start_ms + duration_ms;
+        const bool in_range = duration_ms > 0
+                                  ? plot_time_in_ranges(event.start_ms) ||
+                                        plot_time_in_ranges(event_end_ms - 1)
+                                  : plot_time_in_ranges(event.start_ms);
+        if (!in_range) continue;
         if (report_event_seen(plot_seen_events_, event)) continue;
         if (!remember_report_event(plot_seen_events_, event)) {
             fail_result_prepare("plot_event_dedupe_failed");
@@ -3993,8 +4012,17 @@ bool ReportManager::process_range_event_chunk(
                                       event)) {
             continue;
         }
-        if (event.start_ms < range_build_from_ ||
-            event.start_ms >= range_build_to_) {
+        const int64_t duration_ms = event.duration_ms > 0
+                                        ? static_cast<int64_t>(
+                                              event.duration_ms)
+                                        : 0;
+        const int64_t event_end_ms = event.start_ms + duration_ms;
+        const bool in_range = duration_ms > 0
+                                  ? event.start_ms < range_build_to_ &&
+                                        event_end_ms > range_build_from_
+                                  : event.start_ms >= range_build_from_ &&
+                                        event.start_ms < range_build_to_;
+        if (!in_range) {
             continue;
         }
         if (report_event_seen(range_seen_events_, event)) continue;

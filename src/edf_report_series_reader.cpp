@@ -149,7 +149,7 @@ EdfReportSeriesStatus edf_report_decode_series_record(
                                               digital)) {
             return EdfReportSeriesStatus::RecordSizeMismatch;
         }
-        if (edf_digital_sample_is_missing(decoder.signal_header, digital)) {
+        if (edf_digital_sample_is_missing(decoder.signal_scale, digital)) {
             stats.samples_missing++;
             continue;
         }

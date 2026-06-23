@@ -85,12 +85,7 @@ bool parse_unsigned_milliseconds(const uint8_t *data,
     return true;
 }
 
-bool event_code_for_label(EdfInventoryFileKind kind,
-                          const uint8_t *label,
-                          size_t len,
-                          uint16_t &code) {
-    EdfAnnotationLabelId id = EdfAnnotationLabelId::Hypopnea;
-    if (!edf_annotation_label_id_for_text(kind, label, len, id)) return false;
+bool event_code_for_id(EdfAnnotationLabelId id, uint16_t &code) {
     switch (id) {
         case EdfAnnotationLabelId::Hypopnea:
             code = report_event_code_value(ReportEventCode::Hypopnea);
@@ -112,6 +107,24 @@ bool event_code_for_label(EdfInventoryFileKind kind,
             return false;
     }
     return false;
+}
+
+bool emit_event(EdfReportEventCallback callback,
+                void *context,
+                int64_t start_ms,
+                int64_t duration_ms,
+                uint16_t code,
+                EdfReportEventDecodeStats &stats) {
+    ReportEventRecord event;
+    event.start_ms = start_ms;
+    event.duration_ms = duration_ms > INT32_MAX
+                            ? INT32_MAX
+                            : static_cast<int32_t>(duration_ms);
+    event.code = code;
+    event.flags = 0;
+    if (!callback(context, event)) return false;
+    stats.events_emitted++;
+    return true;
 }
 
 bool verify_record_crc(const uint8_t *record, size_t record_size) {
@@ -146,7 +159,8 @@ EdfReportEventStatus edf_report_decode_annotation_record(
     bool verify_crc,
     EdfReportEventCallback callback,
     void *context,
-    EdfReportEventDecodeStats &stats) {
+    EdfReportEventDecodeStats &stats,
+    EdfReportEventDecodeContext *decode_context) {
     if (file.status != EdfReportFileStatus::Ok || !record || !callback ||
         file.header_start_ms <= 0 ||
         (file.inventory.kind != EdfInventoryFileKind::Eve &&
@@ -197,22 +211,55 @@ EdfReportEventStatus edf_report_decode_annotation_record(
             const size_t label_len = index - label_start;
             if (label_len > 0) {
                 stats.annotations_seen++;
-                uint16_t code = 0;
-                if (event_code_for_label(file.inventory.kind,
-                                         record + label_start,
-                                         label_len,
-                                         code)) {
-                    ReportEventRecord event;
-                    event.start_ms = file.header_start_ms + onset_ms;
-                    event.duration_ms = duration_ms > INT32_MAX
-                                            ? INT32_MAX
-                                            : static_cast<int32_t>(duration_ms);
-                    event.code = code;
-                    event.flags = 0;
-                    if (!callback(context, event)) {
-                        return EdfReportEventStatus::CallbackRejected;
+                EdfAnnotationLabelId id = EdfAnnotationLabelId::Hypopnea;
+                if (edf_annotation_label_id_for_text(file.inventory.kind,
+                                                     record + label_start,
+                                                     label_len,
+                                                     id)) {
+                    const int64_t event_start_ms =
+                        file.header_start_ms + onset_ms;
+                    if (id == EdfAnnotationLabelId::CsrStart) {
+                        if (decode_context) {
+                            decode_context->csr_open = true;
+                            decode_context->csr_start_ms = event_start_ms;
+                        } else {
+                            stats.unsupported_labels++;
+                        }
+                    } else if (id == EdfAnnotationLabelId::CsrEnd) {
+                        if (decode_context && decode_context->csr_open &&
+                            event_start_ms > decode_context->csr_start_ms) {
+                            const int64_t csr_duration_ms =
+                                event_start_ms -
+                                decode_context->csr_start_ms;
+                            if (!emit_event(
+                                    callback,
+                                    context,
+                                    decode_context->csr_start_ms,
+                                    csr_duration_ms,
+                                    report_event_code_value(
+                                        ReportEventCode::Csr),
+                                    stats)) {
+                                return EdfReportEventStatus::CallbackRejected;
+                            }
+                        } else {
+                            stats.unsupported_labels++;
+                        }
+                        if (decode_context) {
+                            decode_context->csr_open = false;
+                            decode_context->csr_start_ms = 0;
+                        }
+                    } else {
+                        uint16_t code = 0;
+                        if (!event_code_for_id(id, code) ||
+                            !emit_event(callback,
+                                        context,
+                                        event_start_ms,
+                                        duration_ms,
+                                        code,
+                                        stats)) {
+                            return EdfReportEventStatus::CallbackRejected;
+                        }
                     }
-                    stats.events_emitted++;
                 } else {
                     stats.unsupported_labels++;
                 }

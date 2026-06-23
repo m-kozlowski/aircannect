@@ -22,6 +22,11 @@ struct EdfReportEventDecodeStats {
     uint32_t unsupported_labels = 0;
 };
 
+struct EdfReportEventDecodeContext {
+    bool csr_open = false;
+    int64_t csr_start_ms = 0;
+};
+
 using EdfReportEventCallback =
     bool (*)(void *context, const ReportEventRecord &event);
 
@@ -34,6 +39,7 @@ EdfReportEventStatus edf_report_decode_annotation_record(
     bool verify_crc,
     EdfReportEventCallback callback,
     void *context,
-    EdfReportEventDecodeStats &stats);
+    EdfReportEventDecodeStats &stats,
+    EdfReportEventDecodeContext *decode_context = nullptr);
 
 }  // namespace aircannect

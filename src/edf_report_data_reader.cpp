@@ -37,8 +37,16 @@ bool append_series_sample(void *context, const ReportSeriesSample &sample) {
 bool append_event_record(void *context, const ReportEventRecord &event) {
     AppendEventContext *ctx = static_cast<AppendEventContext *>(context);
     if (!ctx || !ctx->payload) return false;
-    if (event.start_ms < ctx->range_start_ms ||
-        event.start_ms >= ctx->range_end_ms) {
+    const int64_t duration_ms = event.duration_ms > 0
+                                    ? static_cast<int64_t>(event.duration_ms)
+                                    : 0;
+    const int64_t event_end_ms = event.start_ms + duration_ms;
+    const bool in_range = duration_ms > 0
+                              ? event.start_ms < ctx->range_end_ms &&
+                                    event_end_ms > ctx->range_start_ms
+                              : event.start_ms >= ctx->range_start_ms &&
+                                    event.start_ms < ctx->range_end_ms;
+    if (!in_range) {
         return true;
     }
     if (!report_append_event_record(*ctx->payload, event)) {
@@ -260,6 +268,7 @@ EdfReportDataReadStatus read_event_entry(
     ctx.payload = &payload;
     ctx.range_start_ms = entry.start_ms;
     ctx.range_end_ms = entry.end_ms;
+    EdfReportEventDecodeContext decode_context;
     for (uint32_t i = 0; i < entry.record_count; ++i) {
         status = read_exact(file, record, session_file.record_size);
         if (status != EdfReportDataReadStatus::Ok) break;
@@ -272,7 +281,8 @@ EdfReportDataReadStatus read_event_entry(
                                                 true,
                                                 append_event_record,
                                                 &ctx,
-                                                record_stats);
+                                                record_stats,
+                                                &decode_context);
         stats.annotations_seen += record_stats.annotations_seen;
         stats.events_emitted += record_stats.events_emitted;
         stats.unsupported_event_labels += record_stats.unsupported_labels;

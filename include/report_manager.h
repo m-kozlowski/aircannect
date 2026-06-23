@@ -480,7 +480,7 @@ private:
     bool add_edf_events_for_range(int64_t range_start_ms,
                                   int64_t range_end_ms,
                                   bool required,
-                                  uint32_t &entries);
+                                  uint32_t &scored_entries);
     bool add_edf_signal_for_range(ReportSignalId signal,
                                   int64_t range_start_ms,
                                   int64_t range_end_ms,

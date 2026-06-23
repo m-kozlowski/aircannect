@@ -37,6 +37,7 @@ struct EdfReportDataPlanEntry {
 
 struct EdfReportDataCoverage {
     uint32_t event_entries = 0;
+    uint32_t scored_event_entries = 0;
     uint32_t signals_required = 0;
     uint32_t signals_covered = 0;
 };

@@ -430,9 +430,10 @@ float edf_scale_digital_sample(const EdfSignalScale &scale,
     return static_cast<float>(digital) * scale.scale + scale.offset;
 }
 
-bool edf_digital_sample_is_missing(const EdfSignalHeader &,
+bool edf_digital_sample_is_missing(const EdfSignalScale &scale,
                                    int16_t digital) {
-    return digital == -1;
+    return digital == -1 &&
+           (digital < scale.digital_min || digital > scale.digital_max);
 }
 
 bool edf_decode_signal_digital_sample(const EdfSignalHeader &signal,

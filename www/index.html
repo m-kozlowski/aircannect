@@ -2160,6 +2160,7 @@
       {key: "ie_ratio", title: "I:E", color: "#f43f5e", unit: ""},
     ];
     const reportEventDefs = [
+      {code: 7, key: "CSR", label: "CSR", color: "#2563eb"},
       {code: 3, key: "CA", label: "Central Apnea", color: "#d946ef"},
       {code: 4, key: "OA", label: "Obstructive Apnea", color: "#22d3ee"},
       {code: 5, key: "UA", label: "Apnea", color: "#a78bfa"},
@@ -2924,13 +2925,21 @@
 
       events.forEach((event) => {
         const def = reportEventDefs.find((item) => item.code === event.code);
-        if (!def || event.t < start || event.t > end) return;
-        if (reportPointRangeIndex(event.t, ranges) < 0) return;
-        const row = reportEventDefs.indexOf(def);
-        const x = pad.left + graphW * ((event.t - start) / (end - start));
-        const y = pad.top + rowH * row + 2;
+        if (!def) return;
         const duration = Math.max(0, Number(event.duration || 0));
-        const w = Math.max(2, graphW * (duration / (end - start)));
+        const eventEnd = event.t + duration;
+        const overlaps = duration > 0
+          ? event.t < end && eventEnd > start
+          : event.t >= start && event.t <= end;
+        if (!overlaps) return;
+        const visibleT = Math.max(event.t, start);
+        if (reportPointRangeIndex(visibleT, ranges) < 0) return;
+        const row = reportEventDefs.indexOf(def);
+        const x = pad.left + graphW * ((visibleT - start) / (end - start));
+        const y = pad.top + rowH * row + 2;
+        const visibleEnd = duration > 0 ? Math.min(eventEnd, end) : visibleT;
+        const visibleDuration = Math.max(0, visibleEnd - visibleT);
+        const w = Math.max(2, graphW * (visibleDuration / (end - start)));
         svg.appendChild(svgNode("rect", {
           x: x.toFixed(1),
           y: y.toFixed(1),

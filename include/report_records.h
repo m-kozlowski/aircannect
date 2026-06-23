@@ -16,6 +16,7 @@ enum class ReportEventCode : uint16_t {
     ObstructiveApnea = 4,
     UnclassifiedApnea = 5,
     Arousal = 6,
+    Csr = 7,
 };
 
 constexpr uint16_t report_event_code_value(ReportEventCode code) {
