@@ -441,6 +441,19 @@ private:
 
     void service_prefetch(bool realtime_active);
     void prefetch_yield_to_foreground();
+    bool edf_report_catalog_pending() const;
+    bool collect_edf_sessions_for_night(
+        const ReportSummaryRecord &night,
+        int64_t range_start_ms,
+        int64_t range_end_ms,
+        EdfReportSessionDescriptor *sessions,
+        size_t session_capacity,
+        size_t &session_count,
+        bool *pending_out = nullptr) const;
+    bool edf_report_complete_for_night(const ReportSummaryRecord &night,
+                                       int64_t range_start_ms,
+                                       int64_t range_end_ms,
+                                       bool *pending_out = nullptr) const;
     void set_prefetch_phase(PrefetchPhase phase, uint64_t night_ms,
                             bool inc_completed, bool inc_failed);
     void prefetch_note_failure(uint64_t night_ms);

@@ -47,6 +47,10 @@ struct EdfResultEntryContext {
     uint32_t entries = 0;
 };
 
+struct EdfPlanCountContext {
+    uint32_t entries = 0;
+};
+
 struct SummaryRecordBufferContext {
     ReportSummaryRecord *records = nullptr;
     size_t capacity = 0;
@@ -275,6 +279,14 @@ bool store_summary_record_to_buffer(void *context,
     }
     ctx->records[ctx->count++] = record;
     if (record.duration_min > 0) ctx->nights_with_therapy++;
+    return true;
+}
+
+bool count_edf_plan_entry(void *context,
+                          const EdfReportDataPlanEntry &entry) {
+    EdfPlanCountContext *ctx = static_cast<EdfPlanCountContext *>(context);
+    if (!ctx || !entry.name || !entry.name[0]) return false;
+    ctx->entries++;
     return true;
 }
 
@@ -1900,6 +1912,14 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
     out.end_ms = night.end_ms;
     out.duration_min = night.duration_min;
 
+    int64_t span_start_ms = 0;
+    int64_t span_end_ms = 0;
+    const bool edf_complete =
+        night_data_span(night, span_start_ms, span_end_ms) &&
+        edf_report_complete_for_night(night,
+                                      span_start_ms,
+                                      span_end_ms);
+
     size_t source_count = 0;
     const ReportSourceDef *sources = report_source_defs(source_count);
     for (size_t i = 0; i < source_count &&
@@ -1910,7 +1930,8 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
         ReportNightSourceCoverage &entry = out.sources[out.source_count++];
         entry.source = source.id;
         entry.required = source_required_for_report_result(source.id);
-        entry.complete = source_complete_for_night(night, source);
+        entry.complete = edf_complete ||
+                         source_complete_for_night(night, source);
         if (entry.required && !entry.complete) out.missing_required++;
     }
     return true;
@@ -1934,6 +1955,17 @@ bool ReportManager::next_night_needing_cache(
         give_summary_lock();
         if (!record.valid || !record.duration_min) continue;
         if (prefetch_in_cooldown(record.start_ms, now)) continue;
+        int64_t span_start_ms = 0;
+        int64_t span_end_ms = 0;
+        bool edf_pending = false;
+        if (night_data_span(record, span_start_ms, span_end_ms) &&
+            edf_report_complete_for_night(record,
+                                          span_start_ms,
+                                          span_end_ms,
+                                          &edf_pending)) {
+            continue;
+        }
+        if (edf_pending) continue;
         ReportNightCoverageStatus coverage;
         if (!night_coverage(record.start_ms, coverage)) continue;
         if (coverage.missing_required > 0) {
@@ -2523,6 +2555,7 @@ void ReportManager::service_prefetch(bool realtime_active) {
 
     if (phase == PrefetchPhase::Selecting) {
         if (realtime_active || busy()) return;
+        if (edf_report_catalog_pending()) return;
         uint64_t night = 0;
         if (next_night_needing_cache(night) && night != 0) {
             set_prefetch_phase(PrefetchPhase::Pending, night, false, false);
@@ -3110,25 +3143,47 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
     return true;
 }
 
-bool ReportManager::find_edf_sessions_for_night(
+bool ReportManager::edf_report_catalog_pending() const {
+    if (!edf_catalog_) return false;
+
+    EdfReportCatalogStatus status;
+    if (!edf_catalog_->status(status, 0)) return true;
+    if (status.state == EdfReportCatalogState::Ready ||
+        status.state == EdfReportCatalogState::Error) {
+        return false;
+    }
+    (void)edf_catalog_->request_refresh();
+    return true;
+}
+
+bool ReportManager::collect_edf_sessions_for_night(
     const ReportSummaryRecord &night,
     int64_t range_start_ms,
-    int64_t range_end_ms) {
-    result_edf_session_count_ = 0;
-    memset(result_edf_sessions_, 0, sizeof(result_edf_sessions_));
-    if (!edf_catalog_ || range_end_ms <= range_start_ms) return false;
+    int64_t range_end_ms,
+    EdfReportSessionDescriptor *sessions,
+    size_t session_capacity,
+    size_t &session_count,
+    bool *pending_out) const {
+    session_count = 0;
+    if (pending_out) *pending_out = false;
+    if (!edf_catalog_ || !sessions || session_capacity == 0 ||
+        range_end_ms <= range_start_ms) {
+        return false;
+    }
 
     EdfReportCatalogStatus status;
     if (!edf_catalog_->status(status, 0) ||
         status.state != EdfReportCatalogState::Ready) {
-        (void)edf_catalog_->request_refresh();
+        if (status.state != EdfReportCatalogState::Error) {
+            (void)edf_catalog_->request_refresh();
+            if (pending_out) *pending_out = true;
+        }
         return false;
     }
 
     const size_t count = edf_catalog_->session_count();
     for (size_t i = 0; i < count &&
-                       result_edf_session_count_ <
-                           AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+                       session_count < session_capacity; ++i) {
         EdfReportSessionDescriptor session;
         if (!edf_catalog_->copy_session(i, session)) continue;
         if (session.earliest_header_start_ms <= 0 ||
@@ -3139,18 +3194,105 @@ bool ReportManager::find_edf_sessions_for_night(
                             range_end_ms)) {
             continue;
         }
-        result_edf_sessions_[result_edf_session_count_++] = session;
+        sessions[session_count++] = session;
     }
 
-    std::sort(result_edf_sessions_,
-              result_edf_sessions_ + result_edf_session_count_,
+    std::sort(sessions,
+              sessions + session_count,
               [](const EdfReportSessionDescriptor &a,
                  const EdfReportSessionDescriptor &b) {
                   return a.earliest_header_start_ms <
                          b.earliest_header_start_ms;
               });
     (void)night;
-    return result_edf_session_count_ > 0;
+    return session_count > 0;
+}
+
+bool ReportManager::edf_report_complete_for_night(
+    const ReportSummaryRecord &night,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
+    bool *pending_out) const {
+    EdfReportSessionDescriptor *sessions =
+        static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
+            AC_REPORT_SUMMARY_SESSION_MAX *
+            sizeof(EdfReportSessionDescriptor)));
+    if (!sessions) {
+        log_report_alloc_failed(
+            "edf_report_session_snapshot",
+            AC_REPORT_SUMMARY_SESSION_MAX *
+                sizeof(EdfReportSessionDescriptor));
+        if (pending_out) *pending_out = false;
+        return false;
+    }
+
+    size_t session_count = 0;
+    if (!collect_edf_sessions_for_night(night,
+                                        range_start_ms,
+                                        range_end_ms,
+                                        sessions,
+                                        AC_REPORT_SUMMARY_SESSION_MAX,
+                                        session_count,
+                                        pending_out)) {
+        Memory::free(sessions);
+        return false;
+    }
+
+    uint32_t event_entries = 0;
+    bool complete = true;
+    for (size_t i = 0; i < session_count; ++i) {
+        EdfPlanCountContext ctx;
+        if (!edf_report_plan_events(sessions[i],
+                                    range_start_ms,
+                                    range_end_ms,
+                                    count_edf_plan_entry,
+                                    &ctx)) {
+            complete = false;
+            break;
+        }
+        event_entries += ctx.entries;
+    }
+    if (complete && event_entries == 0) complete = false;
+
+    size_t signal_count = 0;
+    const ReportSignalDef *signals = report_signal_defs(signal_count);
+    for (size_t signal_index = 0; complete && signal_index < signal_count;
+         ++signal_index) {
+        const ReportSignalDef &signal = signals[signal_index];
+        uint32_t entries = 0;
+        for (size_t i = 0; i < session_count; ++i) {
+            EdfPlanCountContext ctx;
+            if (!edf_report_plan_signal(sessions[i],
+                                        signal.id,
+                                        range_start_ms,
+                                        range_end_ms,
+                                        count_edf_plan_entry,
+                                        &ctx)) {
+                complete = false;
+                break;
+            }
+            entries += ctx.entries;
+        }
+        if (entries == 0) complete = false;
+    }
+    Memory::free(sessions);
+    return complete;
+}
+
+bool ReportManager::find_edf_sessions_for_night(
+    const ReportSummaryRecord &night,
+    int64_t range_start_ms,
+    int64_t range_end_ms) {
+    result_edf_session_count_ = 0;
+    memset(result_edf_sessions_, 0, sizeof(result_edf_sessions_));
+    bool pending = false;
+    return collect_edf_sessions_for_night(night,
+                                          range_start_ms,
+                                          range_end_ms,
+                                          result_edf_sessions_,
+                                          AC_REPORT_SUMMARY_SESSION_MAX,
+                                          result_edf_session_count_,
+                                          &pending);
 }
 
 bool ReportManager::collect_edf_result_entry(
