@@ -1,7 +1,9 @@
 #include "edf_file_reader.h"
 
+#include <stdlib.h>
 #include <string.h>
 
+#include "edf_bytes.h"
 #include "edf_layout.h"
 
 namespace aircannect {
@@ -45,6 +47,26 @@ bool parse_u32_field(const uint8_t *field, size_t width, uint32_t &out) {
         value = value * 10u + digit;
     }
     if (!any) return false;
+    out = value;
+    return true;
+}
+
+bool parse_i16_text(const char *text, int16_t &out) {
+    if (!text || !text[0]) return false;
+    char *end = nullptr;
+    const long value = strtol(text, &end, 10);
+    if (!end || *end != '\0' || value < INT16_MIN || value > INT16_MAX) {
+        return false;
+    }
+    out = static_cast<int16_t>(value);
+    return true;
+}
+
+bool parse_float_text(const char *text, float &out) {
+    if (!text || !text[0]) return false;
+    char *end = nullptr;
+    const float value = strtof(text, &end);
+    if (!end || *end != '\0') return false;
     out = value;
     return true;
 }
@@ -292,6 +314,61 @@ bool edf_parse_signal_header(const uint8_t *header,
                                      EDF_SIGNAL_RESERVED_BLOCK_OFFSET,
                                      AC_EDF_SIGNAL_RESERVED_WIDTH),
         AC_EDF_SIGNAL_RESERVED_WIDTH);
+    return true;
+}
+
+bool edf_parse_signal_scale(const EdfSignalHeader &signal,
+                            EdfSignalScale &out) {
+    out = EdfSignalScale();
+    if (!parse_i16_text(signal.digital_min, out.digital_min) ||
+        !parse_i16_text(signal.digital_max, out.digital_max) ||
+        !parse_float_text(signal.physical_min, out.physical_min) ||
+        !parse_float_text(signal.physical_max, out.physical_max) ||
+        out.digital_max == out.digital_min) {
+        return false;
+    }
+    out.scale = (out.physical_max - out.physical_min) /
+                static_cast<float>(out.digital_max - out.digital_min);
+    out.offset = out.physical_min -
+                 static_cast<float>(out.digital_min) * out.scale;
+    return true;
+}
+
+float edf_scale_digital_sample(const EdfSignalScale &scale,
+                               int16_t digital) {
+    return static_cast<float>(digital) * scale.scale + scale.offset;
+}
+
+bool edf_decode_signal_digital_sample(const EdfSignalHeader &signal,
+                                      const uint8_t *record,
+                                      size_t record_size,
+                                      uint32_t sample_index,
+                                      int16_t &out) {
+    out = 0;
+    if (!record || sample_index >= signal.samples_per_record) return false;
+    const size_t offset = static_cast<size_t>(signal.byte_offset_in_record) +
+                          static_cast<size_t>(sample_index) * 2u;
+    if (offset > record_size || record_size - offset < 2u) return false;
+    out = edf_read_i16_le(record + offset);
+    return true;
+}
+
+bool edf_decode_signal_physical_sample(const EdfSignalHeader &signal,
+                                       const EdfSignalScale &scale,
+                                       const uint8_t *record,
+                                       size_t record_size,
+                                       uint32_t sample_index,
+                                       float &out) {
+    out = 0.0f;
+    int16_t digital = 0;
+    if (!edf_decode_signal_digital_sample(signal,
+                                          record,
+                                          record_size,
+                                          sample_index,
+                                          digital)) {
+        return false;
+    }
+    out = edf_scale_digital_sample(scale, digital);
     return true;
 }
 

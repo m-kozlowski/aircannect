@@ -57,6 +57,15 @@ struct EdfSignalHeader {
     char reserved[AC_EDF_SIGNAL_RESERVED_TEXT_SIZE] = {};
 };
 
+struct EdfSignalScale {
+    int16_t digital_min = 0;
+    int16_t digital_max = 0;
+    float physical_min = 0.0f;
+    float physical_max = 0.0f;
+    float scale = 0.0f;
+    float offset = 0.0f;
+};
+
 bool edf_parse_header_declared_size(const uint8_t *header,
                                     size_t available_size,
                                     uint32_t &out);
@@ -69,5 +78,21 @@ bool edf_parse_signal_header(const uint8_t *header,
                              size_t available_size,
                              uint32_t signal_index,
                              EdfSignalHeader &out);
+
+bool edf_parse_signal_scale(const EdfSignalHeader &signal,
+                            EdfSignalScale &out);
+float edf_scale_digital_sample(const EdfSignalScale &scale,
+                               int16_t digital);
+bool edf_decode_signal_digital_sample(const EdfSignalHeader &signal,
+                                      const uint8_t *record,
+                                      size_t record_size,
+                                      uint32_t sample_index,
+                                      int16_t &out);
+bool edf_decode_signal_physical_sample(const EdfSignalHeader &signal,
+                                       const EdfSignalScale &scale,
+                                       const uint8_t *record,
+                                       size_t record_size,
+                                       uint32_t sample_index,
+                                       float &out);
 
 }  // namespace aircannect
