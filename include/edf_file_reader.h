@@ -87,6 +87,8 @@ bool edf_parse_signal_scale(const EdfSignalHeader &signal,
                             EdfSignalScale &out);
 float edf_scale_digital_sample(const EdfSignalScale &scale,
                                int16_t digital);
+bool edf_digital_sample_is_missing(const EdfSignalHeader &signal,
+                                   int16_t digital);
 bool edf_decode_signal_digital_sample(const EdfSignalHeader &signal,
                                       const uint8_t *record,
                                       size_t record_size,

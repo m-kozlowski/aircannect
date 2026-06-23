@@ -403,7 +403,7 @@ bool edf_parse_header_record_duration_ms(const EdfHeaderSummary &summary,
     }
     if (text[i] != '\0') return false;
     const uint64_t total = seconds * 1000u + fractional_ms;
-    if (total == 0 || total > UINT32_MAX) return false;
+    if (total > UINT32_MAX) return false;
     out = static_cast<uint32_t>(total);
     return true;
 }
@@ -428,6 +428,11 @@ bool edf_parse_signal_scale(const EdfSignalHeader &signal,
 float edf_scale_digital_sample(const EdfSignalScale &scale,
                                int16_t digital) {
     return static_cast<float>(digital) * scale.scale + scale.offset;
+}
+
+bool edf_digital_sample_is_missing(const EdfSignalHeader &,
+                                   int16_t digital) {
+    return digital == -1;
 }
 
 bool edf_decode_signal_digital_sample(const EdfSignalHeader &signal,
