@@ -17,6 +17,16 @@ struct ChunkExtentContext {
     int64_t max_end_ms = 0;
 };
 
+struct ProviderChunkContext {
+    const SpoolReportProvider *provider = nullptr;
+    ReportStoreChunkKind kind = ReportStoreChunkKind::Series;
+    ReportSourceId source = ReportSourceId::Summary;
+    ReportSignalId signal = ReportSignalId::Flow;
+    const char *name = nullptr;
+    ReportProviderChunkCallback callback = nullptr;
+    void *context = nullptr;
+};
+
 bool remember_chunk_extent(void *context, const ReportStoreChunkInfo &chunk) {
     ChunkExtentContext *ctx = static_cast<ChunkExtentContext *>(context);
     if (!ctx) return false;
@@ -28,6 +38,24 @@ bool remember_chunk_extent(void *context, const ReportStoreChunkInfo &chunk) {
     }
     ctx->found = true;
     return true;
+}
+
+bool emit_provider_chunk(void *context, const ReportStoreChunkInfo &chunk) {
+    ProviderChunkContext *ctx = static_cast<ProviderChunkContext *>(context);
+    if (!ctx || !ctx->provider || !ctx->callback) return false;
+
+    ReportProviderChunk out;
+    out.ref.provider = ctx->provider->provider_id();
+    out.kind = ctx->kind;
+    out.source = ctx->source;
+    out.signal = ctx->signal;
+    out.name = ctx->name;
+    out.start_ms = chunk.key.start_ms;
+    out.end_ms = chunk.key.end_ms;
+    out.payload_schema = chunk.meta.payload_schema;
+    out.record_count = chunk.meta.record_count;
+    out.payload_len = chunk.payload_len;
+    return ctx->callback(ctx->context, out);
 }
 
 struct LatestChunkEndContext {
@@ -56,14 +84,14 @@ bool latest_chunk_end_for_name(const SpoolReportProvider &provider,
                                int64_t end_ms,
                                int64_t &out_end_ms) {
     LatestChunkEndContext ctx;
-    if (!provider.for_each_chunk(kind,
-                                 source,
-                                 name,
-                                 night_start_ms,
-                                 start_ms,
-                                 end_ms,
-                                 remember_latest_chunk_end,
-                                 &ctx)) {
+    if (!ReportStore::for_each_chunk(kind,
+                                     source.spool_type,
+                                     name,
+                                     night_start_ms,
+                                     start_ms,
+                                     end_ms,
+                                     remember_latest_chunk_end,
+                                     &ctx)) {
         return false;
     }
     if (!ctx.found) return false;
@@ -105,21 +133,50 @@ bool SpoolReportProvider::coverage_first_missing(
 bool SpoolReportProvider::for_each_chunk(
     ReportStoreChunkKind kind,
     const ReportSourceDef &source,
+    ReportSignalId signal,
     const char *name,
     int64_t night_start_ms,
     int64_t start_ms,
     int64_t end_ms,
-    ReportStoreChunkCallback callback,
+    ReportProviderChunkCallback callback,
     void *context) const {
-    if (!valid_source(source) || !name || !name[0]) return false;
+    if (!valid_source(source) || !name || !name[0] || !callback) return false;
+    ProviderChunkContext ctx;
+    ctx.provider = this;
+    ctx.kind = kind;
+    ctx.source = source.id;
+    ctx.signal = signal;
+    ctx.name = name;
+    ctx.callback = callback;
+    ctx.context = context;
     return ReportStore::for_each_chunk(kind,
                                        source.spool_type,
                                        name,
                                        night_start_ms,
                                        start_ms,
                                        end_ms,
-                                       callback,
-                                       context);
+                                       emit_provider_chunk,
+                                       &ctx);
+}
+
+bool SpoolReportProvider::read_chunk(const ReportProviderChunk &chunk,
+                                     int64_t night_start_ms,
+                                     ReportStoreChunkMeta &meta,
+                                     ReportSpoolBuffer &payload) const {
+    meta = {};
+    payload.clear();
+    const ReportSourceDef *source = report_source_def(chunk.source);
+    if (!source || !valid_source(*source) || !chunk.name || !chunk.name[0]) {
+        return false;
+    }
+    ReportStoreChunkKey key;
+    key.kind = chunk.kind;
+    key.source = source->spool_type;
+    key.name = chunk.name;
+    key.start_ms = chunk.start_ms;
+    key.end_ms = chunk.end_ms;
+    key.night_start_ms = night_start_ms;
+    return ReportStore::read_chunk(key, meta, payload);
 }
 
 bool SpoolReportProvider::chunk_extent(
@@ -132,14 +189,15 @@ bool SpoolReportProvider::chunk_extent(
     ReportProviderChunkExtent &out) const {
     out = {};
     ChunkExtentContext ctx;
-    if (!for_each_chunk(kind,
-                        source,
-                        name,
-                        night_start_ms,
-                        start_ms,
-                        end_ms,
-                        remember_chunk_extent,
-                        &ctx)) {
+    if (!valid_source(source) || !name || !name[0]) return false;
+    if (!ReportStore::for_each_chunk(kind,
+                                     source.spool_type,
+                                     name,
+                                     night_start_ms,
+                                     start_ms,
+                                     end_ms,
+                                     remember_chunk_extent,
+                                     &ctx)) {
         return false;
     }
     if (!ctx.found) return false;

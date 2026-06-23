@@ -9,7 +9,8 @@
 #include "background_worker.h"
 #include "debug_log.h"
 #include "edf_report_catalog_job.h"
-#include "edf_report_data_reader.h"
+#include "edf_report_data_plan.h"
+#include "edf_report_provider.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
@@ -38,12 +39,6 @@ struct ResultChunkContext {
     const char *name = nullptr;
     bool required = false;
     size_t stream_index = 0;
-};
-
-struct EdfResultEntryContext {
-    ReportManager *manager = nullptr;
-    uint8_t session_index = 0;
-    bool required = true;
     uint32_t entries = 0;
 };
 
@@ -61,6 +56,11 @@ struct ReportSessionRange {
 
 const SpoolReportProvider &spool_report_provider() {
     static SpoolReportProvider provider;
+    return provider;
+}
+
+const EdfReportProvider &edf_report_provider() {
+    static EdfReportProvider provider;
     return provider;
 }
 
@@ -437,6 +437,9 @@ ReportManager::~ReportManager() {
     Memory::free(result_chunks_);
     result_chunks_ = nullptr;
     result_chunk_capacity_ = 0;
+    Memory::free(result_edf_sessions_);
+    result_edf_sessions_ = nullptr;
+    result_edf_session_count_ = 0;
     if (summary_lock_) {
         vSemaphoreDelete(summary_lock_);
         summary_lock_ = nullptr;
@@ -490,6 +493,17 @@ void ReportManager::begin() {
             log_report_alloc_failed(
                 "result_slots",
                 AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult));
+        }
+    }
+    if (!result_edf_sessions_) {
+        result_edf_sessions_ = static_cast<EdfReportSessionDescriptor *>(
+            Memory::calloc_large(AC_REPORT_SUMMARY_SESSION_MAX,
+                                 sizeof(EdfReportSessionDescriptor)));
+        if (!result_edf_sessions_) {
+            log_report_alloc_failed(
+                "result_edf_sessions",
+                AC_REPORT_SUMMARY_SESSION_MAX *
+                    sizeof(EdfReportSessionDescriptor));
         }
     }
     clear_summary_records();
@@ -2947,7 +2961,12 @@ void ReportManager::clear_result_prepare() {
     }
     memset(result_streams_, 0, sizeof(result_streams_));
     result_stream_count_ = 0;
-    memset(result_edf_sessions_, 0, sizeof(result_edf_sessions_));
+    if (result_edf_sessions_) {
+        memset(result_edf_sessions_,
+               0,
+               AC_REPORT_SUMMARY_SESSION_MAX *
+                   sizeof(EdfReportSessionDescriptor));
+    }
     result_edf_session_count_ = 0;
     result_night_ = {};
     result_plot_bin_.clear();
@@ -3007,50 +3026,77 @@ bool ReportManager::add_result_stream(ReportStoreChunkKind kind,
 }
 
 bool ReportManager::collect_result_chunk(void *context,
-                                         const ReportStoreChunkInfo &info) {
+                                         const ReportProviderChunk &info) {
     ResultChunkContext *ctx = static_cast<ResultChunkContext *>(context);
-    if (!ctx || !ctx->manager || !ctx->name || !ctx->name[0]) return false;
+    if (!ctx || !ctx->manager || !info.name || !info.name[0]) return false;
     ReportManager *manager = ctx->manager;
-    if (!manager->result_chunks_ ||
-        manager->result_status_.chunk_count >=
-            manager->result_chunk_capacity_) {
-        manager->fail_result_prepare("result_chunks_full");
-        return false;
+    if (ctx->name && ctx->name[0] && strcmp(ctx->name, info.name) != 0) {
+        return true;
     }
-
     for (uint32_t i = 0; i < manager->result_status_.chunk_count; ++i) {
         const ReportResultChunk &existing = manager->result_chunks_[i];
-        if (existing.kind == info.key.kind &&
-            existing.source == ctx->source &&
-            existing.name && info.key.name &&
-            strcmp(existing.name, info.key.name) == 0 &&
-            existing.start_ms == info.key.start_ms &&
-            existing.end_ms == info.key.end_ms) {
+        if (existing.kind == info.kind &&
+            existing.source == info.source &&
+            existing.name && info.name &&
+            strcmp(existing.name, info.name) == 0 &&
+            existing.start_ms == info.start_ms &&
+            existing.end_ms == info.end_ms) {
             return true;
         }
     }
 
-    ReportResultChunk &chunk =
-        manager->result_chunks_[manager->result_status_.chunk_count++];
-    chunk.kind = ctx->kind;
-    chunk.source = ctx->source;
-    chunk.signal = ctx->signal;
-    chunk.name = ctx->name;
-    chunk.start_ms = info.key.start_ms;
-    chunk.end_ms = info.key.end_ms;
-    chunk.payload_schema = info.meta.payload_schema;
-    chunk.record_count = info.meta.record_count;
-    chunk.payload_len = info.payload_len;
-
-    if (ctx->stream_index < manager->result_stream_count_) {
-        ReportResultStream &stream =
-            manager->result_streams_[ctx->stream_index];
-        stream.chunk_count++;
-        stream.record_count += info.meta.record_count;
-        stream.payload_bytes += info.payload_len;
+    if (ctx->stream_index == SIZE_MAX) {
+        if (!manager->add_result_stream(info.kind,
+                                        info.source,
+                                        info.signal,
+                                        info.name,
+                                        ctx->required,
+                                        true,
+                                        ctx->stream_index)) {
+            return false;
+        }
     }
-    manager->result_status_.record_count += info.meta.record_count;
-    manager->result_status_.payload_bytes += info.payload_len;
+    if (!manager->add_provider_result_chunk(info,
+                                            ctx->required,
+                                            ctx->stream_index)) {
+        return false;
+    }
+    ctx->entries++;
+    return true;
+}
+
+bool ReportManager::add_provider_result_chunk(
+    const ReportProviderChunk &provider_chunk,
+    bool required,
+    size_t stream_index) {
+    (void)required;
+    if (!result_chunks_ ||
+        result_status_.chunk_count >= result_chunk_capacity_) {
+        fail_result_prepare("result_chunks_full");
+        return false;
+    }
+
+    ReportResultChunk &chunk =
+        result_chunks_[result_status_.chunk_count++];
+    chunk.provider_ref = provider_chunk.ref;
+    chunk.kind = provider_chunk.kind;
+    chunk.source = provider_chunk.source;
+    chunk.signal = provider_chunk.signal;
+    chunk.name = provider_chunk.name;
+    chunk.start_ms = provider_chunk.start_ms;
+    chunk.end_ms = provider_chunk.end_ms;
+    chunk.payload_schema = provider_chunk.payload_schema;
+    chunk.record_count = provider_chunk.record_count;
+    chunk.payload_len = provider_chunk.payload_len;
+
+    if (stream_index < result_stream_count_) {
+        ReportResultStream &stream = result_streams_[stream_index];
+        stream.chunk_count++;
+        stream.record_count += provider_chunk.record_count;
+        stream.payload_bytes += provider_chunk.payload_len;
+    }
+    result_status_.record_count += provider_chunk.record_count;
+    result_status_.payload_bytes += provider_chunk.payload_len;
     return true;
 }
 
@@ -3129,6 +3175,7 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
     context.stream_index = stream_index;
     if (!spool_report_provider().for_each_chunk(kind,
                                                 *source_def,
+                                                signal,
                                                 name,
                                                 night_start_ms,
                                                 start_ms,
@@ -3258,7 +3305,11 @@ bool ReportManager::find_edf_sessions_for_night(
     int64_t range_start_ms,
     int64_t range_end_ms) {
     result_edf_session_count_ = 0;
-    memset(result_edf_sessions_, 0, sizeof(result_edf_sessions_));
+    if (!result_edf_sessions_) return false;
+    memset(result_edf_sessions_,
+           0,
+           AC_REPORT_SUMMARY_SESSION_MAX *
+               sizeof(EdfReportSessionDescriptor));
     bool pending = false;
     return collect_edf_sessions_for_night(night,
                                           range_start_ms,
@@ -3269,198 +3320,106 @@ bool ReportManager::find_edf_sessions_for_night(
                                           &pending);
 }
 
-bool ReportManager::collect_edf_result_entry(
-    void *context,
-    const EdfReportDataPlanEntry &entry) {
-    EdfResultEntryContext *ctx =
-        static_cast<EdfResultEntryContext *>(context);
-    if (!ctx || !ctx->manager) return false;
-    if (!ctx->manager->add_edf_result_plan_entry(ctx->session_index,
-                                                 entry,
-                                                 ctx->required)) {
+bool ReportManager::add_edf_events_for_range(int64_t range_start_ms,
+                                             int64_t range_end_ms,
+                                             bool required,
+                                             uint32_t &entries) {
+    entries = 0;
+    if (!ensure_result_chunks() || !result_edf_sessions_ ||
+        result_edf_session_count_ == 0) {
+        return true;
+    }
+
+    ResultChunkContext ctx;
+    ctx.manager = this;
+    ctx.kind = ReportStoreChunkKind::Events;
+    ctx.source = ReportSourceId::RespiratoryEvents;
+    ctx.signal = ReportSignalId::Flow;
+    ctx.required = required;
+    ctx.stream_index = SIZE_MAX;
+    if (!edf_report_provider().for_each_event_chunk(result_edf_sessions_,
+                                                    result_edf_session_count_,
+                                                    range_start_ms,
+                                                    range_end_ms,
+                                                    collect_result_chunk,
+                                                    &ctx)) {
         return false;
     }
-    ctx->entries++;
+    entries = ctx.entries;
     return true;
 }
 
-bool ReportManager::add_edf_result_plan_entry(
-    uint8_t session_index,
-    const EdfReportDataPlanEntry &entry,
-    bool required) {
-    if (!ensure_result_chunks()) return false;
-    if (!entry.name || !entry.name[0] ||
-        session_index >= result_edf_session_count_) {
-        return false;
-    }
-
-    const ReportStoreChunkKind kind =
-        entry.kind == EdfReportDataKind::Events
-            ? ReportStoreChunkKind::Events
-            : ReportStoreChunkKind::Series;
-    size_t stream_index = 0;
-    if (!add_result_stream(kind,
-                           entry.source,
-                           entry.signal,
-                           entry.name,
-                           required,
-                           true,
-                           stream_index)) {
-        return false;
-    }
-    if (result_status_.chunk_count >= result_chunk_capacity_) {
-        fail_result_prepare("result_chunks_full");
-        return false;
-    }
-
-    ReportResultChunk &chunk =
-        result_chunks_[result_status_.chunk_count++];
-    chunk.data_source = ReportResultChunk::DataSource::Edf;
-    chunk.kind = kind;
-    chunk.source = entry.source;
-    chunk.signal = entry.signal;
-    chunk.name = entry.name;
-    chunk.start_ms = entry.start_ms;
-    chunk.end_ms = entry.end_ms;
-    chunk.payload_schema =
-        kind == ReportStoreChunkKind::Events
-            ? REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1
-            : REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V1;
-    chunk.record_count =
-        entry.record_count_estimate ? entry.record_count_estimate
-                                    : entry.record_count;
-    chunk.payload_len = entry.payload_len_estimate;
-    chunk.edf_session_index = session_index;
-    chunk.edf_file_slot = entry.file_slot;
-    chunk.edf_file_kind = entry.file_kind;
-    copy_cstr(chunk.edf_signal_label,
-              sizeof(chunk.edf_signal_label),
-              entry.signal_label);
-    chunk.edf_first_record = entry.first_record;
-    chunk.edf_record_count = entry.record_count;
-    chunk.edf_primary = entry.primary;
-
-    if (stream_index < result_stream_count_) {
-        ReportResultStream &stream = result_streams_[stream_index];
-        stream.chunk_count++;
-        stream.record_count += chunk.record_count;
-        stream.payload_bytes += chunk.payload_len;
-    }
-    result_status_.record_count += chunk.record_count;
-    result_status_.payload_bytes += chunk.payload_len;
-    return true;
-}
-
-bool ReportManager::try_add_edf_result_chunks_for_night(
-    const ReportSummaryRecord &night,
+bool ReportManager::add_edf_signal_for_range(
+    ReportSignalId signal,
     int64_t range_start_ms,
-    int64_t range_end_ms) {
-    if (!find_edf_sessions_for_night(night, range_start_ms, range_end_ms)) {
+    int64_t range_end_ms,
+    bool required,
+    uint32_t &entries) {
+    entries = 0;
+    if (!ensure_result_chunks() || !result_edf_sessions_ ||
+        result_edf_session_count_ == 0) {
+        return true;
+    }
+
+    const char *name = report_signal_store_name(signal);
+    if (!name || !name[0]) {
+        fail_result_prepare("bad_result_signal");
         return false;
     }
 
-    uint32_t event_entries = 0;
-    for (size_t i = 0; i < result_edf_session_count_; ++i) {
-        EdfResultEntryContext ctx;
-        ctx.manager = this;
-        ctx.session_index = static_cast<uint8_t>(i);
-        if (!edf_report_plan_events(result_edf_sessions_[i],
-                                    range_start_ms,
-                                    range_end_ms,
-                                    collect_edf_result_entry,
-                                    &ctx)) {
-            return false;
-        }
-        event_entries += ctx.entries;
+    ResultChunkContext ctx;
+    ctx.manager = this;
+    ctx.kind = ReportStoreChunkKind::Series;
+    ctx.source = ReportSourceId::Summary;
+    ctx.signal = signal;
+    ctx.name = name;
+    ctx.required = required;
+    ctx.stream_index = SIZE_MAX;
+    if (!edf_report_provider().for_each_signal_chunk(result_edf_sessions_,
+                                                     result_edf_session_count_,
+                                                     signal,
+                                                     range_start_ms,
+                                                     range_end_ms,
+                                                     collect_result_chunk,
+                                                     &ctx)) {
+        return false;
     }
-    if (event_entries == 0) return false;
-
-    size_t signal_count = 0;
-    const ReportSignalDef *signals = report_signal_defs(signal_count);
-    for (size_t signal_index = 0; signal_index < signal_count; ++signal_index) {
-        const ReportSignalDef &signal = signals[signal_index];
-        uint32_t entries = 0;
-        for (size_t i = 0; i < result_edf_session_count_; ++i) {
-            EdfResultEntryContext ctx;
-            ctx.manager = this;
-            ctx.session_index = static_cast<uint8_t>(i);
-            if (!edf_report_plan_signal(result_edf_sessions_[i],
-                                        signal.id,
-                                        range_start_ms,
-                                        range_end_ms,
-                                        collect_edf_result_entry,
-                                        &ctx)) {
-                return false;
-            }
-            entries += ctx.entries;
-        }
-        if (entries == 0) return false;
-    }
-
-    result_status_.missing_required = 0;
-    result_status_.events_available = true;
-    return result_status_.chunk_count > 0;
+    entries = ctx.entries;
+    return true;
 }
 
 bool ReportManager::read_result_chunk_payload(
     const ReportResultChunk &chunk,
     ReportStoreChunkMeta &meta,
     ReportSpoolBuffer &payload) {
-    meta = {};
-    payload.clear();
-    if (chunk.data_source == ReportResultChunk::DataSource::Store) {
-        const char *source = report_source_spool_type(chunk.source);
-        if (!source || !source[0] || !chunk.name || !chunk.name[0]) {
+    ReportProviderChunk provider_chunk;
+    provider_chunk.ref = chunk.provider_ref;
+    provider_chunk.kind = chunk.kind;
+    provider_chunk.source = chunk.source;
+    provider_chunk.signal = chunk.signal;
+    provider_chunk.name = chunk.name;
+    provider_chunk.start_ms = chunk.start_ms;
+    provider_chunk.end_ms = chunk.end_ms;
+    provider_chunk.payload_schema = chunk.payload_schema;
+    provider_chunk.record_count = chunk.record_count;
+    provider_chunk.payload_len = chunk.payload_len;
+
+    switch (chunk.provider_ref.provider) {
+        case ReportProviderId::Spool:
+            return spool_report_provider().read_chunk(
+                provider_chunk,
+                static_cast<int64_t>(result_night_.start_ms),
+                meta,
+                payload);
+        case ReportProviderId::Edf:
+            return edf_report_provider().read_chunk(provider_chunk,
+                                                   result_edf_sessions_,
+                                                   result_edf_session_count_,
+                                                   meta,
+                                                   payload);
+        default:
             return false;
-        }
-        ReportStoreChunkKey key;
-        key.kind = chunk.kind;
-        key.source = source;
-        key.name = chunk.name;
-        key.start_ms = chunk.start_ms;
-        key.end_ms = chunk.end_ms;
-        key.night_start_ms = static_cast<int64_t>(result_night_.start_ms);
-        return ReportStore::read_chunk(key, meta, payload);
     }
-
-    if (chunk.edf_session_index >= result_edf_session_count_) return false;
-    EdfReportDataPlanEntry entry;
-    entry.kind = chunk.kind == ReportStoreChunkKind::Events
-                     ? EdfReportDataKind::Events
-                     : EdfReportDataKind::Series;
-    entry.signal = chunk.signal;
-    entry.source = chunk.source;
-    entry.name = chunk.name;
-    entry.file_kind = chunk.edf_file_kind;
-    entry.file_slot = chunk.edf_file_slot;
-    copy_cstr(entry.signal_label,
-              sizeof(entry.signal_label),
-              chunk.edf_signal_label);
-    entry.first_record = chunk.edf_first_record;
-    entry.record_count = chunk.edf_record_count;
-    entry.start_ms = chunk.start_ms;
-    entry.end_ms = chunk.end_ms;
-    entry.record_count_estimate = chunk.record_count;
-    entry.payload_len_estimate = chunk.payload_len;
-    entry.primary = chunk.edf_primary;
-
-    EdfReportDataReadStats stats;
-    const EdfReportDataReadStatus status = edf_report_read_entry_payload(
-        result_edf_sessions_[chunk.edf_session_index],
-        entry,
-        meta,
-        payload,
-        stats);
-    if (status != EdfReportDataReadStatus::Ok) {
-        Log::logf(CAT_REPORT,
-                  LOG_WARN,
-                  "EDF report chunk read failed kind=%s name=%s status=%s\n",
-                  ReportStore::kind_name(chunk.kind),
-                  chunk.name ? chunk.name : "",
-                  edf_report_data_read_status_name(status));
-        return false;
-    }
-    return true;
 }
 
 bool ReportManager::result_plot_cache_path_for_night(
@@ -4577,17 +4536,17 @@ void ReportManager::begin_result_prepare_for_night(
 
 bool ReportManager::refresh_result_cache_if_needed(
     const ReportSummaryRecord &night,
-    const ReportNightCoverageStatus &coverage,
     size_t therapy_index,
     bool refresh_cache,
     bool &deferred) {
     deferred = false;
-    if (!refresh_cache) return true;
+    if (!refresh_cache || result_status_.missing_required == 0) return true;
 
     const bool latest_tail_refresh = therapy_index == 0;
     prefetch_yield_to_foreground();
     if (!cache_fetch_active_) {
-        if (!build_cache_plan(night, true, latest_tail_refresh)) {
+        if (!build_cache_plan_for_result_gaps(night,
+                                              latest_tail_refresh)) {
             return false;
         }
         if (cache_source_count_ > 0) {
@@ -4604,7 +4563,7 @@ bool ReportManager::refresh_result_cache_if_needed(
 
     const bool cache_refresh_in_flight =
         cache_fetch_active_ && cache_night_.start_ms == night.start_ms;
-    if (cache_refresh_in_flight || coverage.missing_required) {
+    if (cache_refresh_in_flight) {
         pending_result_prepare_ = true;
         pending_result_refresh_cache_ = false;
         pending_result_therapy_index_ = therapy_index;
@@ -4615,44 +4574,77 @@ bool ReportManager::refresh_result_cache_if_needed(
     return true;
 }
 
-bool ReportManager::add_result_chunks_for_night(
+ReportSourceId ReportManager::choose_spool_source_for_signal(
+    const ReportSummaryRecord &night,
+    const ReportSignalDef &signal) const {
+    ReportSourceId source = signal.preferred_source;
+    if (source == signal.fallback_source) return source;
+
+    constexpr int64_t kCoverTolMs = 5 * 60 * 1000;  // absorb rate offsets
+    int64_t p_min = 0, p_max = 0, f_min = 0, f_max = 0;
+    const bool p_has = source_chunk_extent(
+        night, source, signal.store_name, p_min, p_max);
+    const bool f_has = source_chunk_extent(
+        night, signal.fallback_source, signal.store_name, f_min, f_max);
+    if (!p_has || (f_has && (p_min > f_min + kCoverTolMs ||
+                             p_max < f_max - kCoverTolMs))) {
+        source = signal.fallback_source;
+    }
+    return source;
+}
+
+bool ReportManager::add_best_result_chunks_for_night(
     const ReportSummaryRecord &night,
     int64_t range_start_ms,
     int64_t range_end_ms) {
-    if (!add_result_chunks_for_range(
-            ReportStoreChunkKind::Events,
-            ReportSourceId::RespiratoryEvents,
-            ReportSignalId::Flow,
-            report_source_spool_type(ReportSourceId::RespiratoryEvents),
-            static_cast<int64_t>(night.start_ms),
-            range_start_ms,
-            range_end_ms,
-            true)) {
+    const bool have_edf =
+        find_edf_sessions_for_night(night, range_start_ms, range_end_ms);
+
+    uint32_t edf_event_entries = 0;
+    if (have_edf &&
+        !add_edf_events_for_range(range_start_ms,
+                                  range_end_ms,
+                                  true,
+                                  edf_event_entries)) {
         return false;
+    }
+    if (edf_event_entries > 0) {
+        result_status_.events_available = true;
+    } else {
+        if (!add_result_chunks_for_range(
+                ReportStoreChunkKind::Events,
+                ReportSourceId::RespiratoryEvents,
+                ReportSignalId::Flow,
+                report_source_spool_type(ReportSourceId::RespiratoryEvents),
+                static_cast<int64_t>(night.start_ms),
+                range_start_ms,
+                range_end_ms,
+                true)) {
+            return false;
+        }
+        const ReportSourceDef *events_def =
+            report_source_def(ReportSourceId::RespiratoryEvents);
+        result_status_.events_available =
+            events_def && source_complete_for_night(night, *events_def);
     }
 
     size_t signal_count = 0;
     const ReportSignalDef *signals = report_signal_defs(signal_count);
     for (size_t signal_index = 0; signal_index < signal_count; ++signal_index) {
         const ReportSignalDef &signal = signals[signal_index];
-        // Prefer the high-res source only when its cached data covers the night
-        // about as fully as the 1-minute fallback. On a retention-boundary night
-        // the device kept only a recent TAIL of high-res; preferring it would
-        // drop the early hours the 1-minute trend still has. Older nights age out
-        // high-res entirely (no chunks), and that also falls back here.
-        ReportSourceId source = signal.preferred_source;
-        if (source != signal.fallback_source) {
-            constexpr int64_t kCoverTolMs = 5 * 60 * 1000;  // absorb rate offsets
-            int64_t p_min = 0, p_max = 0, f_min = 0, f_max = 0;
-            const bool p_has = source_chunk_extent(
-                night, source, signal.store_name, p_min, p_max);
-            const bool f_has = source_chunk_extent(
-                night, signal.fallback_source, signal.store_name, f_min, f_max);
-            if (!p_has || (f_has && (p_min > f_min + kCoverTolMs ||
-                                     p_max < f_max - kCoverTolMs))) {
-                source = signal.fallback_source;
-            }
+        uint32_t edf_entries = 0;
+        if (have_edf &&
+            !add_edf_signal_for_range(signal.id,
+                                      range_start_ms,
+                                      range_end_ms,
+                                      true,
+                                      edf_entries)) {
+            return false;
         }
+        if (edf_entries > 0) continue;
+
+        const ReportSourceId source =
+            choose_spool_source_for_signal(night, signal);
         if (!add_result_chunks_for_range(ReportStoreChunkKind::Series,
                                          source,
                                          signal.id,
@@ -4664,6 +4656,90 @@ bool ReportManager::add_result_chunks_for_night(
             return false;
         }
     }
+
+    result_status_.missing_required = result_status_.missing_streams;
+    return true;
+}
+
+bool ReportManager::build_cache_plan_for_result_gaps(
+    const ReportSummaryRecord &night,
+    bool latest_tail_refresh) {
+    cache_night_ = night;
+    cache_source_count_ = 0;
+    cache_source_index_ = 0;
+    cache_status_ = {};
+    cache_status_.night_start_ms = night.start_ms;
+    cache_status_.night_end_ms = night.end_ms;
+    cache_status_.active = true;
+
+    int64_t latest_tail_start_ms = static_cast<int64_t>(night.start_ms);
+    if (latest_tail_refresh) {
+        ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
+        const size_t range_count =
+            collect_session_ranges(night,
+                                   ranges,
+                                   AC_REPORT_SUMMARY_SESSION_MAX);
+        latest_tail_start_ms = range_count
+            ? ranges[range_count - 1].start_ms
+            : static_cast<int64_t>(night.start_ms);
+    }
+
+    for (size_t i = 0; i < result_stream_count_; ++i) {
+        const ReportResultStream &stream = result_streams_[i];
+        if (!stream.required || stream.complete) continue;
+        const ReportSourceDef *source = report_source_def(stream.source);
+        if (!source || !cache_source_supported(source->id)) continue;
+
+        bool duplicate = false;
+        for (size_t existing = 0; existing < cache_source_count_; ++existing) {
+            if (cache_plan_[existing].source == source->id) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        int64_t from_ms = 0;
+        if (latest_tail_refresh) {
+            from_ms = latest_tail_start_ms;
+            int64_t cached_end_ms = 0;
+            if (source_latest_cached_end_for_night(*source,
+                                                   night,
+                                                   cached_end_ms) &&
+                cached_end_ms > latest_tail_start_ms) {
+                from_ms = cached_end_ms - AC_REPORT_LATEST_TAIL_OVERLAP_MS;
+                if (from_ms < latest_tail_start_ms) {
+                    from_ms = latest_tail_start_ms;
+                }
+            }
+        } else {
+            const bool refresh_empty_event =
+                sparse_event_refresh_due(night, *source);
+            if (!source_missing_start_for_night(night,
+                                                *source,
+                                                from_ms,
+                                                refresh_empty_event)) {
+                from_ms = static_cast<int64_t>(night.start_ms);
+            }
+        }
+
+        if (cache_source_count_ >= AC_REPORT_CACHE_SOURCE_MAX) {
+            fail_cache_fetch("cache_plan_full");
+            return false;
+        }
+        ReportCacheSourcePlan &plan = cache_plan_[cache_source_count_++];
+        plan.source = source->id;
+        plan.from_ms = from_ms;
+    }
+
+    cache_status_.source_count = static_cast<uint32_t>(cache_source_count_);
+    if (cache_source_count_ > 0) {
+        invalidate_materialized(night.start_ms, false);
+    }
+    discard_cache_coalesce_buffers();
+    begin_cache_write_fetch();
+    cache_fetch_active_ = true;
+    cache_status_.active = true;
     return true;
 }
 
@@ -4852,30 +4928,14 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
         return true;
     }
 
-    if (try_add_edf_result_chunks_for_night(night,
-                                            night_range.start_ms,
-                                            night_range.end_ms)) {
-        return finalize_result_prepare(therapy_index);
-    }
-    begin_result_prepare_for_night(therapy_index, night);
-
-    ReportNightCoverageStatus coverage;
-    if (!night_coverage(night.start_ms, coverage)) {
-        fail_result_prepare("coverage_unavailable");
+    if (!add_best_result_chunks_for_night(night,
+                                          night_range.start_ms,
+                                          night_range.end_ms)) {
         return false;
     }
-    result_status_.missing_required = coverage.missing_required;
-    // Event counts come from cached event chunks; if the event source is not
-    // covered for this night, zero counts are unknown (not real) -> flag
-    // unavailable so the UI shows that rather than reporting zero events.
-    const ReportSourceDef *events_def =
-        report_source_def(ReportSourceId::RespiratoryEvents);
-    result_status_.events_available =
-        events_def && source_complete_for_night(night, *events_def);
 
     bool deferred = false;
     if (!refresh_result_cache_if_needed(night,
-                                        coverage,
                                         therapy_index,
                                         refresh_cache,
                                         deferred)) {
@@ -4883,11 +4943,6 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
     }
     if (deferred) return true;
 
-    if (!add_result_chunks_for_night(night,
-                                     night_range.start_ms,
-                                     night_range.end_ms)) {
-        return false;
-    }
     return finalize_result_prepare(therapy_index);
 }
 
