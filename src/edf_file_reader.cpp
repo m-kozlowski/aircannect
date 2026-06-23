@@ -7,15 +7,25 @@
 namespace aircannect {
 namespace {
 
-static constexpr size_t EDF_SIGNAL_LABEL_WIDTH = 16;
-static constexpr size_t EDF_SIGNAL_TRANSDUCER_WIDTH = 80;
-static constexpr size_t EDF_SIGNAL_PHYSICAL_DIMENSION_WIDTH = 8;
-static constexpr size_t EDF_SIGNAL_PHYSICAL_MIN_WIDTH = 8;
-static constexpr size_t EDF_SIGNAL_PHYSICAL_MAX_WIDTH = 8;
-static constexpr size_t EDF_SIGNAL_DIGITAL_MIN_WIDTH = 8;
-static constexpr size_t EDF_SIGNAL_DIGITAL_MAX_WIDTH = 8;
-static constexpr size_t EDF_SIGNAL_PREFILTER_WIDTH = 80;
-static constexpr size_t EDF_SIGNAL_SAMPLES_WIDTH = 8;
+static constexpr size_t EDF_SIGNAL_TRANSDUCER_BLOCK_OFFSET =
+    AC_EDF_SIGNAL_LABEL_WIDTH;
+static constexpr size_t EDF_SIGNAL_PHYSICAL_DIMENSION_BLOCK_OFFSET =
+    EDF_SIGNAL_TRANSDUCER_BLOCK_OFFSET + AC_EDF_SIGNAL_TRANSDUCER_WIDTH;
+static constexpr size_t EDF_SIGNAL_PHYSICAL_MIN_BLOCK_OFFSET =
+    EDF_SIGNAL_PHYSICAL_DIMENSION_BLOCK_OFFSET +
+    AC_EDF_SIGNAL_PHYSICAL_DIMENSION_WIDTH;
+static constexpr size_t EDF_SIGNAL_PHYSICAL_MAX_BLOCK_OFFSET =
+    EDF_SIGNAL_PHYSICAL_MIN_BLOCK_OFFSET + AC_EDF_SIGNAL_PHYSICAL_MIN_WIDTH;
+static constexpr size_t EDF_SIGNAL_DIGITAL_MIN_BLOCK_OFFSET =
+    EDF_SIGNAL_PHYSICAL_MAX_BLOCK_OFFSET + AC_EDF_SIGNAL_PHYSICAL_MAX_WIDTH;
+static constexpr size_t EDF_SIGNAL_DIGITAL_MAX_BLOCK_OFFSET =
+    EDF_SIGNAL_DIGITAL_MIN_BLOCK_OFFSET + AC_EDF_SIGNAL_DIGITAL_MIN_WIDTH;
+static constexpr size_t EDF_SIGNAL_PREFILTER_BLOCK_OFFSET =
+    EDF_SIGNAL_DIGITAL_MAX_BLOCK_OFFSET + AC_EDF_SIGNAL_DIGITAL_MAX_WIDTH;
+static constexpr size_t EDF_SIGNAL_SAMPLES_BLOCK_OFFSET =
+    EDF_SIGNAL_PREFILTER_BLOCK_OFFSET + AC_EDF_SIGNAL_PREFILTER_WIDTH;
+static constexpr size_t EDF_SIGNAL_RESERVED_BLOCK_OFFSET =
+    EDF_SIGNAL_SAMPLES_BLOCK_OFFSET + AC_EDF_SIGNAL_SAMPLES_WIDTH;
 
 bool parse_u32_field(const uint8_t *field, size_t width, uint32_t &out) {
     if (!field || width == 0) return false;
@@ -54,16 +64,18 @@ void copy_trimmed_field(char *dst,
 }
 
 size_t signal_samples_offset(uint32_t signal_count) {
-    return AC_EDF_HEADER_FIXED_SIZE +
+    return AC_EDF_HEADER_SIGNAL_HEADER_OFFSET +
            static_cast<size_t>(signal_count) *
-               (EDF_SIGNAL_LABEL_WIDTH +
-                EDF_SIGNAL_TRANSDUCER_WIDTH +
-                EDF_SIGNAL_PHYSICAL_DIMENSION_WIDTH +
-                EDF_SIGNAL_PHYSICAL_MIN_WIDTH +
-                EDF_SIGNAL_PHYSICAL_MAX_WIDTH +
-                EDF_SIGNAL_DIGITAL_MIN_WIDTH +
-                EDF_SIGNAL_DIGITAL_MAX_WIDTH +
-                EDF_SIGNAL_PREFILTER_WIDTH);
+               EDF_SIGNAL_SAMPLES_BLOCK_OFFSET;
+}
+
+size_t signal_field_offset(uint32_t signal_count,
+                           uint32_t signal_index,
+                           size_t field_block_offset,
+                           size_t field_width) {
+    return AC_EDF_HEADER_SIGNAL_HEADER_OFFSET +
+           static_cast<size_t>(signal_count) * field_block_offset +
+           static_cast<size_t>(signal_index) * field_width;
 }
 
 bool parse_total_samples_per_record(const uint8_t *header,
@@ -76,8 +88,8 @@ bool parse_total_samples_per_record(const uint8_t *header,
         uint32_t samples = 0;
         if (!parse_u32_field(header + offset +
                                  static_cast<size_t>(i) *
-                                     EDF_SIGNAL_SAMPLES_WIDTH,
-                             EDF_SIGNAL_SAMPLES_WIDTH,
+                                     AC_EDF_SIGNAL_SAMPLES_WIDTH,
+                             AC_EDF_SIGNAL_SAMPLES_WIDTH,
                              samples)) {
             return false;
         }
@@ -162,6 +174,124 @@ bool edf_parse_header_summary(const uint8_t *header,
                        sizeof(out.record_duration),
                        header + AC_EDF_HEADER_RECORD_DURATION_OFFSET,
                        AC_EDF_HEADER_RECORD_DURATION_WIDTH);
+    return true;
+}
+
+bool edf_parse_signal_header(const uint8_t *header,
+                             size_t available_size,
+                             uint32_t signal_index,
+                             EdfSignalHeader &out) {
+    out = {};
+    EdfHeaderSummary summary;
+    if (!edf_parse_header_summary(header, available_size, summary) ||
+        signal_index >= summary.signal_count) {
+        return false;
+    }
+
+    uint32_t sample_offset = 0;
+    uint32_t samples = 0;
+    const size_t samples_offset = signal_samples_offset(summary.signal_count);
+    for (uint32_t i = 0; i <= signal_index; ++i) {
+        if (!parse_u32_field(header + samples_offset +
+                                 static_cast<size_t>(i) *
+                                     AC_EDF_SIGNAL_SAMPLES_WIDTH,
+                             AC_EDF_SIGNAL_SAMPLES_WIDTH,
+                             samples)) {
+            return false;
+        }
+        if (i < signal_index) {
+            if (samples > UINT32_MAX - sample_offset) return false;
+            sample_offset += samples;
+        }
+    }
+    if (sample_offset > UINT32_MAX / 2u) return false;
+
+    out.signal_index = signal_index;
+    out.samples_per_record = samples;
+    out.sample_offset_in_record = sample_offset;
+    out.byte_offset_in_record = sample_offset * 2u;
+
+    copy_trimmed_field(
+        out.label,
+        sizeof(out.label),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     0,
+                                     AC_EDF_SIGNAL_LABEL_WIDTH),
+        AC_EDF_SIGNAL_LABEL_WIDTH);
+    copy_trimmed_field(
+        out.transducer,
+        sizeof(out.transducer),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_TRANSDUCER_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_TRANSDUCER_WIDTH),
+        AC_EDF_SIGNAL_TRANSDUCER_WIDTH);
+    copy_trimmed_field(
+        out.physical_dimension,
+        sizeof(out.physical_dimension),
+        header + signal_field_offset(
+                     summary.signal_count,
+                     signal_index,
+                     EDF_SIGNAL_PHYSICAL_DIMENSION_BLOCK_OFFSET,
+                     AC_EDF_SIGNAL_PHYSICAL_DIMENSION_WIDTH),
+        AC_EDF_SIGNAL_PHYSICAL_DIMENSION_WIDTH);
+    copy_trimmed_field(
+        out.physical_min,
+        sizeof(out.physical_min),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_PHYSICAL_MIN_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_PHYSICAL_MIN_WIDTH),
+        AC_EDF_SIGNAL_PHYSICAL_MIN_WIDTH);
+    copy_trimmed_field(
+        out.physical_max,
+        sizeof(out.physical_max),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_PHYSICAL_MAX_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_PHYSICAL_MAX_WIDTH),
+        AC_EDF_SIGNAL_PHYSICAL_MAX_WIDTH);
+    copy_trimmed_field(
+        out.digital_min,
+        sizeof(out.digital_min),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_DIGITAL_MIN_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_DIGITAL_MIN_WIDTH),
+        AC_EDF_SIGNAL_DIGITAL_MIN_WIDTH);
+    copy_trimmed_field(
+        out.digital_max,
+        sizeof(out.digital_max),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_DIGITAL_MAX_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_DIGITAL_MAX_WIDTH),
+        AC_EDF_SIGNAL_DIGITAL_MAX_WIDTH);
+    copy_trimmed_field(
+        out.prefilter,
+        sizeof(out.prefilter),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_PREFILTER_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_PREFILTER_WIDTH),
+        AC_EDF_SIGNAL_PREFILTER_WIDTH);
+    copy_trimmed_field(
+        out.samples_per_record_text,
+        sizeof(out.samples_per_record_text),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_SAMPLES_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_SAMPLES_WIDTH),
+        AC_EDF_SIGNAL_SAMPLES_WIDTH);
+    copy_trimmed_field(
+        out.reserved,
+        sizeof(out.reserved),
+        header + signal_field_offset(summary.signal_count,
+                                     signal_index,
+                                     EDF_SIGNAL_RESERVED_BLOCK_OFFSET,
+                                     AC_EDF_SIGNAL_RESERVED_WIDTH),
+        AC_EDF_SIGNAL_RESERVED_WIDTH);
     return true;
 }
 

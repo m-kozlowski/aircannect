@@ -29,4 +29,15 @@ static constexpr size_t AC_EDF_HEADER_SIGNAL_HEADER_OFFSET =
     AC_EDF_HEADER_FIXED_SIZE;
 static constexpr size_t AC_EDF_SIGNAL_HEADER_SIZE = 256;
 
+static constexpr size_t AC_EDF_SIGNAL_LABEL_WIDTH = 16;
+static constexpr size_t AC_EDF_SIGNAL_TRANSDUCER_WIDTH = 80;
+static constexpr size_t AC_EDF_SIGNAL_PHYSICAL_DIMENSION_WIDTH = 8;
+static constexpr size_t AC_EDF_SIGNAL_PHYSICAL_MIN_WIDTH = 8;
+static constexpr size_t AC_EDF_SIGNAL_PHYSICAL_MAX_WIDTH = 8;
+static constexpr size_t AC_EDF_SIGNAL_DIGITAL_MIN_WIDTH = 8;
+static constexpr size_t AC_EDF_SIGNAL_DIGITAL_MAX_WIDTH = 8;
+static constexpr size_t AC_EDF_SIGNAL_PREFILTER_WIDTH = 80;
+static constexpr size_t AC_EDF_SIGNAL_SAMPLES_WIDTH = 8;
+static constexpr size_t AC_EDF_SIGNAL_RESERVED_WIDTH = 32;
+
 }  // namespace aircannect

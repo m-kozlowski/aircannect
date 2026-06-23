@@ -3,7 +3,30 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "edf_layout.h"
+
 namespace aircannect {
+
+static constexpr size_t AC_EDF_SIGNAL_LABEL_TEXT_SIZE =
+    AC_EDF_SIGNAL_LABEL_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_TRANSDUCER_TEXT_SIZE =
+    AC_EDF_SIGNAL_TRANSDUCER_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_PHYSICAL_DIMENSION_TEXT_SIZE =
+    AC_EDF_SIGNAL_PHYSICAL_DIMENSION_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_PHYSICAL_MIN_TEXT_SIZE =
+    AC_EDF_SIGNAL_PHYSICAL_MIN_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_PHYSICAL_MAX_TEXT_SIZE =
+    AC_EDF_SIGNAL_PHYSICAL_MAX_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_DIGITAL_MIN_TEXT_SIZE =
+    AC_EDF_SIGNAL_DIGITAL_MIN_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_DIGITAL_MAX_TEXT_SIZE =
+    AC_EDF_SIGNAL_DIGITAL_MAX_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_PREFILTER_TEXT_SIZE =
+    AC_EDF_SIGNAL_PREFILTER_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_SAMPLES_TEXT_SIZE =
+    AC_EDF_SIGNAL_SAMPLES_WIDTH + 1;
+static constexpr size_t AC_EDF_SIGNAL_RESERVED_TEXT_SIZE =
+    AC_EDF_SIGNAL_RESERVED_WIDTH + 1;
 
 struct EdfHeaderSummary {
     uint32_t header_size = 0;
@@ -17,6 +40,23 @@ struct EdfHeaderSummary {
     char record_duration[9] = {};
 };
 
+struct EdfSignalHeader {
+    uint32_t signal_index = 0;
+    uint32_t samples_per_record = 0;
+    uint32_t sample_offset_in_record = 0;
+    uint32_t byte_offset_in_record = 0;
+    char label[AC_EDF_SIGNAL_LABEL_TEXT_SIZE] = {};
+    char transducer[AC_EDF_SIGNAL_TRANSDUCER_TEXT_SIZE] = {};
+    char physical_dimension[AC_EDF_SIGNAL_PHYSICAL_DIMENSION_TEXT_SIZE] = {};
+    char physical_min[AC_EDF_SIGNAL_PHYSICAL_MIN_TEXT_SIZE] = {};
+    char physical_max[AC_EDF_SIGNAL_PHYSICAL_MAX_TEXT_SIZE] = {};
+    char digital_min[AC_EDF_SIGNAL_DIGITAL_MIN_TEXT_SIZE] = {};
+    char digital_max[AC_EDF_SIGNAL_DIGITAL_MAX_TEXT_SIZE] = {};
+    char prefilter[AC_EDF_SIGNAL_PREFILTER_TEXT_SIZE] = {};
+    char samples_per_record_text[AC_EDF_SIGNAL_SAMPLES_TEXT_SIZE] = {};
+    char reserved[AC_EDF_SIGNAL_RESERVED_TEXT_SIZE] = {};
+};
+
 bool edf_parse_header_declared_size(const uint8_t *header,
                                     size_t available_size,
                                     uint32_t &out);
@@ -24,5 +64,10 @@ bool edf_parse_header_declared_size(const uint8_t *header,
 bool edf_parse_header_summary(const uint8_t *header,
                               size_t available_size,
                               EdfHeaderSummary &out);
+
+bool edf_parse_signal_header(const uint8_t *header,
+                             size_t available_size,
+                             uint32_t signal_index,
+                             EdfSignalHeader &out);
 
 }  // namespace aircannect
