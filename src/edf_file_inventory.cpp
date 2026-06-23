@@ -130,13 +130,17 @@ EdfInventoryStatus edf_inventory_describe_file(const char *path,
         out.status = EdfInventoryStatus::InvalidHeader;
         return out.status;
     }
-    out.complete_records_from_size = out.data_size / out.header.record_size;
+    const size_t records_from_size = out.data_size / out.header.record_size;
+    out.complete_records_from_size = records_from_size;
     out.partial_tail_bytes = out.data_size % out.header.record_size;
     if (out.partial_tail_bytes != 0) {
         out.warnings |= AC_EDF_INVENTORY_WARN_PARTIAL_TAIL;
     }
-    if (out.header.record_count != out.complete_records_from_size) {
+    if (out.header.record_count != records_from_size) {
         out.warnings |= AC_EDF_INVENTORY_WARN_RECORD_COUNT_MISMATCH;
+        if (out.header.record_count < out.complete_records_from_size) {
+            out.complete_records_from_size = out.header.record_count;
+        }
     }
 
     out.status = EdfInventoryStatus::Ok;

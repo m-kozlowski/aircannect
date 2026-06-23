@@ -1712,10 +1712,6 @@ bool for_each_chunk(ReportStoreChunkKind kind,
                 current.read_errors++;
                 continue;
             }
-            if (!chunk_index_record_matches_payload(info)) {
-                dirty = true;
-                continue;
-            }
             if (!ranges_overlap(info.key.start_ms,
                                 info.key.end_ms,
                                 start_ms,
