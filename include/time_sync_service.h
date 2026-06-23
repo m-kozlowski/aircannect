@@ -47,6 +47,7 @@ private:
     void poll_ntp(uint32_t now_ms);
 
     bool resmed_fallback_ready(uint32_t now_ms) const;
+    bool resmed_pull_due(uint32_t now_ms) const;
     void poll_resmed_pull(uint32_t now_ms);
     void poll_resmed_push(uint32_t now_ms);
     bool therapy_running() const;

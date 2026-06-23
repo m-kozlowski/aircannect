@@ -240,6 +240,12 @@ bool TimeSyncService::resmed_fallback_ready(uint32_t now_ms) const {
            static_cast<int32_t>(TIME_SYNC_NTP_FALLBACK_MS);
 }
 
+bool TimeSyncService::resmed_pull_due(uint32_t now_ms) const {
+    return !last_resmed_pull_success_ms_ ||
+           static_cast<int32_t>(now_ms - last_resmed_pull_success_ms_) >=
+               static_cast<int32_t>(TIME_SYNC_RESMED_PULL_INTERVAL_MS);
+}
+
 void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
     const As11DeviceState &state = arbiter_->as11_state();
     if (state.clock_valid() &&
@@ -252,7 +258,8 @@ void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
                       "[TIME] AS11 time push readback ok UTC=%s\n",
                       state.device_datetime().c_str());
         } else if (manual_resmed_pull_pending_ ||
-                   resmed_fallback_ready(now_ms)) {
+                   (resmed_fallback_ready(now_ms) &&
+                    resmed_pull_due(now_ms))) {
             if (set_esp_time_from_resmed(state.device_datetime())) {
                 last_resmed_pull_success_ms_ = now_ms;
                 manual_resmed_pull_pending_ = false;
@@ -264,10 +271,7 @@ void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
         resmed_push_readback_pending_ &&
         static_cast<int32_t>(now_ms - next_resmed_push_readback_ms_) >= 0;
     const bool fallback_due =
-        resmed_fallback_ready(now_ms) &&
-        (!last_resmed_pull_success_ms_ ||
-         static_cast<int32_t>(now_ms - last_resmed_pull_success_ms_) >=
-             static_cast<int32_t>(TIME_SYNC_RESMED_PULL_INTERVAL_MS));
+        resmed_fallback_ready(now_ms) && resmed_pull_due(now_ms);
     if (!manual_resmed_pull_pending_ && !fallback_due && !push_readback_due) {
         return;
     }
