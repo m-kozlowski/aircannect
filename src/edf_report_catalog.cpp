@@ -8,63 +8,65 @@
 namespace aircannect {
 namespace {
 
-struct SignalMapRow {
-    EdfInventoryFileKind kind;
-    const char *label;
-    ReportSignalId signal;
-    uint32_t sample_interval_ms;
-    bool primary;
-};
-
-const SignalMapRow REPORT_SIGNAL_MAP[] = {
+const EdfReportSignalMappingDef REPORT_SIGNAL_MAP[] = {
     {EdfInventoryFileKind::Brp,
      "Flow.40ms",
      ReportSignalId::Flow,
+     ReportSourceId::RespiratoryFlow6p25Hz,
      40,
      true},
     {EdfInventoryFileKind::Brp,
      "Press.40ms",
      ReportSignalId::MaskPressure,
+     ReportSourceId::MaskPressure6p25Hz,
      40,
      true},
     {EdfInventoryFileKind::Pld,
      "MaskPress.2s",
      ReportSignalId::MaskPressure,
+     ReportSourceId::TherapyOneMinute,
      2000,
      false},
     {EdfInventoryFileKind::Pld,
      "Press.2s",
      ReportSignalId::InspiratoryPressure,
+     ReportSourceId::InspiratoryPressure0p5Hz,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
      "EprPress.2s",
      ReportSignalId::ExpiratoryPressure,
+     ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
      "Leak.2s",
      ReportSignalId::Leak,
+     ReportSourceId::Leak0p5Hz,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
      "RespRate.2s",
      ReportSignalId::RespiratoryRate,
+     ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
      "MinVent.2s",
      ReportSignalId::MinuteVentilation,
+     ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
      "IERatio.2s",
      ReportSignalId::IeRatio,
+     ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
      "Ti.2s",
      ReportSignalId::InspiratoryDuration,
+     ReportSourceId::TherapyOneMinute,
      2000,
      true},
 };
@@ -175,6 +177,8 @@ EdfReportFileStatus edf_report_describe_file(
         out.status = EdfReportFileStatus::TimingError;
         return out.status;
     }
+    out.header_size = inventory.header.header_size;
+    out.record_size = inventory.header.record_size;
     const uint64_t duration_ms =
         static_cast<uint64_t>(inventory.complete_records_from_size) *
         static_cast<uint64_t>(out.record_duration_ms);
@@ -211,14 +215,21 @@ const EdfReportSignalDescriptor *edf_report_find_signal(
     return nullptr;
 }
 
+const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
+    size_t &count) {
+    count = sizeof(REPORT_SIGNAL_MAP) / sizeof(REPORT_SIGNAL_MAP[0]);
+    return REPORT_SIGNAL_MAP;
+}
+
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out) {
     out = EdfReportSignalMapping();
     if (!label || !label[0]) return false;
-    for (const SignalMapRow &row : REPORT_SIGNAL_MAP) {
+    for (const EdfReportSignalMappingDef &row : REPORT_SIGNAL_MAP) {
         if (row.kind != kind || strcmp(row.label, label) != 0) continue;
         out.signal = row.signal;
+        out.source = row.source;
         out.sample_interval_ms = row.sample_interval_ms;
         out.primary = row.primary;
         return true;
@@ -266,6 +277,8 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
     dst.last_write = file.last_write;
     dst.header_start_ms = file.header_start_ms;
     dst.header_end_ms = file.header_end_ms;
+    dst.header_size = file.header_size;
+    dst.record_size = file.record_size;
     dst.record_duration_ms = file.record_duration_ms;
     dst.complete_records = file.inventory.complete_records_from_size;
     dst.signal_count = file.signal_count;

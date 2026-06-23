@@ -40,13 +40,25 @@ struct EdfReportFileDescriptor {
     time_t last_write = 0;
     int64_t header_start_ms = 0;
     int64_t header_end_ms = 0;
+    uint32_t header_size = 0;
+    uint32_t record_size = 0;
     uint32_t record_duration_ms = 0;
     uint32_t signal_count = 0;
     EdfReportSignalDescriptor signals[AC_EDF_REPORT_FILE_SIGNAL_MAX] = {};
 };
 
+struct EdfReportSignalMappingDef {
+    EdfInventoryFileKind kind = EdfInventoryFileKind::Unknown;
+    const char *label = nullptr;
+    ReportSignalId signal = ReportSignalId::Flow;
+    ReportSourceId source = ReportSourceId::Summary;
+    uint32_t sample_interval_ms = 0;
+    bool primary = false;
+};
+
 struct EdfReportSignalMapping {
     ReportSignalId signal = ReportSignalId::Flow;
+    ReportSourceId source = ReportSourceId::Summary;
     uint32_t sample_interval_ms = 0;
     bool primary = false;
 };
@@ -58,6 +70,8 @@ struct EdfReportSessionFileDescriptor {
     time_t last_write = 0;
     int64_t header_start_ms = 0;
     int64_t header_end_ms = 0;
+    uint32_t header_size = 0;
+    uint32_t record_size = 0;
     uint32_t record_duration_ms = 0;
     uint32_t complete_records = 0;
     uint32_t signal_count = 0;
@@ -94,6 +108,8 @@ const EdfReportSignalDescriptor *edf_report_find_signal(
     const EdfReportFileDescriptor &file,
     const char *label);
 
+const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
+    size_t &count);
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out);

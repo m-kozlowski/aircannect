@@ -8,12 +8,15 @@
 #include "board.h"
 #include "background_worker.h"
 #include "debug_log.h"
+#include "edf_report_catalog_job.h"
+#include "edf_report_data_reader.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
 #include "report_records.h"
 #include "report_store.h"
 #include "storage_manager.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
@@ -35,6 +38,13 @@ struct ResultChunkContext {
     const char *name = nullptr;
     bool required = false;
     size_t stream_index = 0;
+};
+
+struct EdfResultEntryContext {
+    ReportManager *manager = nullptr;
+    uint8_t session_index = 0;
+    bool required = true;
+    uint32_t entries = 0;
 };
 
 struct SummaryRecordBufferContext {
@@ -177,6 +187,13 @@ bool night_data_span(const ReportSummaryRecord &night,
         if (ranges[i].end_ms > span_end) span_end = ranges[i].end_ms;
     }
     return span_end > span_start;
+}
+
+bool ranges_overlap(int64_t start_a,
+                    int64_t end_a,
+                    int64_t start_b,
+                    int64_t end_b) {
+    return start_a < end_b && start_b < end_a;
 }
 
 bool source_complete_for_night(const ReportSummaryRecord &night,
@@ -478,6 +495,10 @@ void ReportManager::begin() {
     if (!load_summary_from_store()) {
         publish_summary_json_snapshot();
     }
+}
+
+void ReportManager::set_edf_report_catalog(EdfReportCatalogJob *catalog) {
+    edf_catalog_ = catalog;
 }
 
 bool ReportManager::take_summary_lock(TickType_t timeout) const {
@@ -2886,6 +2907,8 @@ void ReportManager::clear_result_prepare() {
     }
     memset(result_streams_, 0, sizeof(result_streams_));
     result_stream_count_ = 0;
+    memset(result_edf_sessions_, 0, sizeof(result_edf_sessions_));
+    result_edf_session_count_ = 0;
     result_night_ = {};
     result_plot_bin_.clear();
     result_status_ = {};
@@ -3083,6 +3106,243 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
         result_streams_[stream_index].complete) {
         result_streams_[stream_index].complete = false;
         result_status_.missing_streams++;
+    }
+    return true;
+}
+
+bool ReportManager::find_edf_sessions_for_night(
+    const ReportSummaryRecord &night,
+    int64_t range_start_ms,
+    int64_t range_end_ms) {
+    result_edf_session_count_ = 0;
+    memset(result_edf_sessions_, 0, sizeof(result_edf_sessions_));
+    if (!edf_catalog_ || range_end_ms <= range_start_ms) return false;
+
+    EdfReportCatalogStatus status;
+    if (!edf_catalog_->status(status, 0) ||
+        status.state != EdfReportCatalogState::Ready) {
+        (void)edf_catalog_->request_refresh();
+        return false;
+    }
+
+    const size_t count = edf_catalog_->session_count();
+    for (size_t i = 0; i < count &&
+                       result_edf_session_count_ <
+                           AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+        EdfReportSessionDescriptor session;
+        if (!edf_catalog_->copy_session(i, session)) continue;
+        if (session.earliest_header_start_ms <= 0 ||
+            session.latest_header_end_ms <= session.earliest_header_start_ms ||
+            !ranges_overlap(session.earliest_header_start_ms,
+                            session.latest_header_end_ms,
+                            range_start_ms,
+                            range_end_ms)) {
+            continue;
+        }
+        result_edf_sessions_[result_edf_session_count_++] = session;
+    }
+
+    std::sort(result_edf_sessions_,
+              result_edf_sessions_ + result_edf_session_count_,
+              [](const EdfReportSessionDescriptor &a,
+                 const EdfReportSessionDescriptor &b) {
+                  return a.earliest_header_start_ms <
+                         b.earliest_header_start_ms;
+              });
+    (void)night;
+    return result_edf_session_count_ > 0;
+}
+
+bool ReportManager::collect_edf_result_entry(
+    void *context,
+    const EdfReportDataPlanEntry &entry) {
+    EdfResultEntryContext *ctx =
+        static_cast<EdfResultEntryContext *>(context);
+    if (!ctx || !ctx->manager) return false;
+    if (!ctx->manager->add_edf_result_plan_entry(ctx->session_index,
+                                                 entry,
+                                                 ctx->required)) {
+        return false;
+    }
+    ctx->entries++;
+    return true;
+}
+
+bool ReportManager::add_edf_result_plan_entry(
+    uint8_t session_index,
+    const EdfReportDataPlanEntry &entry,
+    bool required) {
+    if (!ensure_result_chunks()) return false;
+    if (!entry.name || !entry.name[0] ||
+        session_index >= result_edf_session_count_) {
+        return false;
+    }
+
+    const ReportStoreChunkKind kind =
+        entry.kind == EdfReportDataKind::Events
+            ? ReportStoreChunkKind::Events
+            : ReportStoreChunkKind::Series;
+    size_t stream_index = 0;
+    if (!add_result_stream(kind,
+                           entry.source,
+                           entry.signal,
+                           entry.name,
+                           required,
+                           true,
+                           stream_index)) {
+        return false;
+    }
+    if (result_status_.chunk_count >= result_chunk_capacity_) {
+        fail_result_prepare("result_chunks_full");
+        return false;
+    }
+
+    ReportResultChunk &chunk =
+        result_chunks_[result_status_.chunk_count++];
+    chunk.data_source = ReportResultChunk::DataSource::Edf;
+    chunk.kind = kind;
+    chunk.source = entry.source;
+    chunk.signal = entry.signal;
+    chunk.name = entry.name;
+    chunk.start_ms = entry.start_ms;
+    chunk.end_ms = entry.end_ms;
+    chunk.payload_schema =
+        kind == ReportStoreChunkKind::Events
+            ? REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1
+            : REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V1;
+    chunk.record_count =
+        entry.record_count_estimate ? entry.record_count_estimate
+                                    : entry.record_count;
+    chunk.payload_len = entry.payload_len_estimate;
+    chunk.edf_session_index = session_index;
+    chunk.edf_file_slot = entry.file_slot;
+    chunk.edf_file_kind = entry.file_kind;
+    copy_cstr(chunk.edf_signal_label,
+              sizeof(chunk.edf_signal_label),
+              entry.signal_label);
+    chunk.edf_first_record = entry.first_record;
+    chunk.edf_record_count = entry.record_count;
+    chunk.edf_primary = entry.primary;
+
+    if (stream_index < result_stream_count_) {
+        ReportResultStream &stream = result_streams_[stream_index];
+        stream.chunk_count++;
+        stream.record_count += chunk.record_count;
+        stream.payload_bytes += chunk.payload_len;
+    }
+    result_status_.record_count += chunk.record_count;
+    result_status_.payload_bytes += chunk.payload_len;
+    return true;
+}
+
+bool ReportManager::try_add_edf_result_chunks_for_night(
+    const ReportSummaryRecord &night,
+    int64_t range_start_ms,
+    int64_t range_end_ms) {
+    if (!find_edf_sessions_for_night(night, range_start_ms, range_end_ms)) {
+        return false;
+    }
+
+    uint32_t event_entries = 0;
+    for (size_t i = 0; i < result_edf_session_count_; ++i) {
+        EdfResultEntryContext ctx;
+        ctx.manager = this;
+        ctx.session_index = static_cast<uint8_t>(i);
+        if (!edf_report_plan_events(result_edf_sessions_[i],
+                                    range_start_ms,
+                                    range_end_ms,
+                                    collect_edf_result_entry,
+                                    &ctx)) {
+            return false;
+        }
+        event_entries += ctx.entries;
+    }
+    if (event_entries == 0) return false;
+
+    size_t signal_count = 0;
+    const ReportSignalDef *signals = report_signal_defs(signal_count);
+    for (size_t signal_index = 0; signal_index < signal_count; ++signal_index) {
+        const ReportSignalDef &signal = signals[signal_index];
+        uint32_t entries = 0;
+        for (size_t i = 0; i < result_edf_session_count_; ++i) {
+            EdfResultEntryContext ctx;
+            ctx.manager = this;
+            ctx.session_index = static_cast<uint8_t>(i);
+            if (!edf_report_plan_signal(result_edf_sessions_[i],
+                                        signal.id,
+                                        range_start_ms,
+                                        range_end_ms,
+                                        collect_edf_result_entry,
+                                        &ctx)) {
+                return false;
+            }
+            entries += ctx.entries;
+        }
+        if (entries == 0) return false;
+    }
+
+    result_status_.missing_required = 0;
+    result_status_.events_available = true;
+    return result_status_.chunk_count > 0;
+}
+
+bool ReportManager::read_result_chunk_payload(
+    const ReportResultChunk &chunk,
+    ReportStoreChunkMeta &meta,
+    ReportSpoolBuffer &payload) {
+    meta = {};
+    payload.clear();
+    if (chunk.data_source == ReportResultChunk::DataSource::Store) {
+        const char *source = report_source_spool_type(chunk.source);
+        if (!source || !source[0] || !chunk.name || !chunk.name[0]) {
+            return false;
+        }
+        ReportStoreChunkKey key;
+        key.kind = chunk.kind;
+        key.source = source;
+        key.name = chunk.name;
+        key.start_ms = chunk.start_ms;
+        key.end_ms = chunk.end_ms;
+        key.night_start_ms = static_cast<int64_t>(result_night_.start_ms);
+        return ReportStore::read_chunk(key, meta, payload);
+    }
+
+    if (chunk.edf_session_index >= result_edf_session_count_) return false;
+    EdfReportDataPlanEntry entry;
+    entry.kind = chunk.kind == ReportStoreChunkKind::Events
+                     ? EdfReportDataKind::Events
+                     : EdfReportDataKind::Series;
+    entry.signal = chunk.signal;
+    entry.source = chunk.source;
+    entry.name = chunk.name;
+    entry.file_kind = chunk.edf_file_kind;
+    entry.file_slot = chunk.edf_file_slot;
+    copy_cstr(entry.signal_label,
+              sizeof(entry.signal_label),
+              chunk.edf_signal_label);
+    entry.first_record = chunk.edf_first_record;
+    entry.record_count = chunk.edf_record_count;
+    entry.start_ms = chunk.start_ms;
+    entry.end_ms = chunk.end_ms;
+    entry.record_count_estimate = chunk.record_count;
+    entry.payload_len_estimate = chunk.payload_len;
+    entry.primary = chunk.edf_primary;
+
+    EdfReportDataReadStats stats;
+    const EdfReportDataReadStatus status = edf_report_read_entry_payload(
+        result_edf_sessions_[chunk.edf_session_index],
+        entry,
+        meta,
+        payload,
+        stats);
+    if (status != EdfReportDataReadStatus::Ok) {
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "EDF report chunk read failed kind=%s name=%s status=%s\n",
+                  ReportStore::kind_name(chunk.kind),
+                  chunk.name ? chunk.name : "",
+                  edf_report_data_read_status_name(status));
+        return false;
     }
     return true;
 }
@@ -3394,21 +3654,9 @@ bool ReportManager::start_result_plot_build() {
 }
 
 bool ReportManager::process_plot_event_chunk(const ReportResultChunk &chunk) {
-    const char *source = report_source_spool_type(chunk.source);
-    if (!source || !source[0] || !chunk.name || !chunk.name[0]) {
-        fail_result_prepare("plot_event_key_failed");
-        return false;
-    }
-    ReportStoreChunkKey key;
-    key.kind = chunk.kind;
-    key.source = source;
-    key.name = chunk.name;
-    key.start_ms = chunk.start_ms;
-    key.end_ms = chunk.end_ms;
-    key.night_start_ms = static_cast<int64_t>(result_night_.start_ms);
     ReportStoreChunkMeta meta;
     ReportSpoolBuffer payload;
-    if (!ReportStore::read_chunk(key, meta, payload)) {
+    if (!read_result_chunk_payload(chunk, meta, payload)) {
         fail_result_prepare("plot_event_read_failed");
         return false;
     }
@@ -3486,21 +3734,9 @@ void ReportManager::flush_plot_bucket() {
 }
 
 bool ReportManager::process_plot_series_chunk(const ReportResultChunk &chunk) {
-    const char *source = report_source_spool_type(chunk.source);
-    if (!source || !source[0] || !chunk.name || !chunk.name[0]) {
-        fail_result_prepare("plot_series_key_failed");
-        return false;
-    }
-    ReportStoreChunkKey key;
-    key.kind = chunk.kind;
-    key.source = source;
-    key.name = chunk.name;
-    key.start_ms = chunk.start_ms;
-    key.end_ms = chunk.end_ms;
-    key.night_start_ms = static_cast<int64_t>(result_night_.start_ms);
     ReportStoreChunkMeta meta;
     ReportSpoolBuffer payload;
-    if (!ReportStore::read_chunk(key, meta, payload)) {
+    if (!read_result_chunk_payload(chunk, meta, payload)) {
         fail_result_prepare("plot_series_read_failed");
         return false;
     }
@@ -3604,8 +3840,6 @@ bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
     ok = ok && bin_put_u16(out, 0);  // flags
     ok = ok && bin_put_i64(out, from_ms);  // base_ms
     if (!ok) return false;
-    const int64_t night = static_cast<int64_t>(result_night_.start_ms);
-
     // Walk result_chunks_ (the prepared manifest); keep samples in [from,to].
     // scratch is local (freed on return) so the range leaves no persistent buffer.
     ReportSpoolBuffer scratch;
@@ -3618,18 +3852,9 @@ bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
         const ReportResultChunk &chunk = result_chunks_[ci];
         if (chunk.kind != ReportStoreChunkKind::Events) continue;
         if (chunk.end_ms <= from_ms || chunk.start_ms >= to_ms) continue;
-        const char *src = report_source_spool_type(chunk.source);
-        if (!src || !chunk.name) continue;
-        ReportStoreChunkKey key;
-        key.kind = chunk.kind;
-        key.source = src;
-        key.name = chunk.name;
-        key.start_ms = chunk.start_ms;
-        key.end_ms = chunk.end_ms;
-        key.night_start_ms = night;
         ReportStoreChunkMeta meta;
         ReportSpoolBuffer payload;
-        if (!ReportStore::read_chunk(key, meta, payload)) continue;
+        if (!read_result_chunk_payload(chunk, meta, payload)) continue;
         const size_t wire = report_event_record_wire_size();
         const size_t n = wire ? payload.size() / wire : 0;
         for (size_t j = 0; j < n; ++j) {
@@ -3683,18 +3908,9 @@ bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
                 continue;
             }
             if (chunk.end_ms <= from_ms || chunk.start_ms >= to_ms) continue;
-            const char *src = report_source_spool_type(chunk.source);
-            if (!src) continue;
-            ReportStoreChunkKey key;
-            key.kind = chunk.kind;
-            key.source = src;
-            key.name = chunk.name;
-            key.start_ms = chunk.start_ms;
-            key.end_ms = chunk.end_ms;
-            key.night_start_ms = night;
             ReportStoreChunkMeta meta;
             ReportSpoolBuffer payload;
-            if (!ReportStore::read_chunk(key, meta, payload)) continue;
+            if (!read_result_chunk_payload(chunk, meta, payload)) continue;
             const size_t wire = report_series_sample_wire_size();
             const size_t n = wire ? payload.size() / wire : 0;
             for (size_t j = 0; j < n && points < AC_REPORT_RANGE_MAX_POINTS;
@@ -4116,21 +4332,9 @@ bool ReportManager::count_result_events_from_chunks() {
     for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
         const ReportResultChunk &chunk = result_chunks_[i];
         if (chunk.kind != ReportStoreChunkKind::Events) continue;
-        const char *source = report_source_spool_type(chunk.source);
-        if (!source || !source[0] || !chunk.name || !chunk.name[0]) {
-            fail_result_prepare("event_chunk_key_failed");
-            return false;
-        }
-        ReportStoreChunkKey key;
-        key.kind = chunk.kind;
-        key.source = source;
-        key.name = chunk.name;
-        key.start_ms = chunk.start_ms;
-        key.end_ms = chunk.end_ms;
-        key.night_start_ms = static_cast<int64_t>(result_night_.start_ms);
         ReportStoreChunkMeta meta;
         ReportSpoolBuffer payload;
-        if (!ReportStore::read_chunk(key, meta, payload)) {
+        if (!read_result_chunk_payload(chunk, meta, payload)) {
             fail_result_prepare("event_chunk_read_failed");
             return false;
         }
@@ -4286,6 +4490,24 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
 
     begin_result_prepare_for_night(therapy_index, night);
 
+    // Use the session data span, not night.end_ms (a 24h day bucket far past the
+    // therapy data) coverage is only written/checked over the session span,
+    // so the result chunk range and its coverage check must match.
+    ReportSessionRange night_range;
+    if (!night_data_span(night, night_range.start_ms, night_range.end_ms)) {
+        result_status_.state = ReportResultState::Incomplete;
+        result_status_.error = "no_sessions";
+        publish_result_to_slot();
+        return true;
+    }
+
+    if (try_add_edf_result_chunks_for_night(night,
+                                            night_range.start_ms,
+                                            night_range.end_ms)) {
+        return finalize_result_prepare(therapy_index);
+    }
+    begin_result_prepare_for_night(therapy_index, night);
+
     ReportNightCoverageStatus coverage;
     if (!night_coverage(night.start_ms, coverage)) {
         fail_result_prepare("coverage_unavailable");
@@ -4299,17 +4521,6 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
         report_source_def(ReportSourceId::RespiratoryEvents);
     result_status_.events_available =
         events_def && source_complete_for_night(night, *events_def);
-
-    // Use the session data span, not night.end_ms (a 24h day bucket far past the
-    // therapy data) coverage is only written/checked over the session span,
-    // so the result chunk range and its coverage check must match.
-    ReportSessionRange night_range;
-    if (!night_data_span(night, night_range.start_ms, night_range.end_ms)) {
-        result_status_.state = ReportResultState::Incomplete;
-        result_status_.error = "no_sessions";
-        publish_result_to_slot();
-        return true;
-    }
 
     bool deferred = false;
     if (!refresh_result_cache_if_needed(night,

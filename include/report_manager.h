@@ -11,6 +11,8 @@
 #include <freertos/semphr.h>
 
 #include "large_text_buffer.h"
+#include "edf_report_catalog.h"
+#include "edf_report_data_plan.h"
 #include "report_parser.h"
 #include "report_proto.h"
 #include "report_spool_types.h"
@@ -18,6 +20,8 @@
 #include "spool_client.h"
 
 namespace aircannect {
+
+class EdfReportCatalogJob;
 
 static constexpr size_t AC_REPORT_SUMMARY_RECORD_MAX = 256;
 static constexpr size_t AC_REPORT_NIGHT_SOURCE_MAX = 8;
@@ -147,6 +151,7 @@ public:
     ~ReportManager();
 
     void begin();
+    void set_edf_report_catalog(EdfReportCatalogJob *catalog);
     void poll(RpcArbiter &arbiter);
     bool handle_event(const RpcEvent &event);
 
@@ -279,6 +284,12 @@ private:
     };
 
     struct ReportResultChunk {
+        enum class DataSource : uint8_t {
+            Store,
+            Edf,
+        };
+
+        DataSource data_source = DataSource::Store;
         ReportStoreChunkKind kind = ReportStoreChunkKind::Series;
         ReportSourceId source = ReportSourceId::Summary;
         ReportSignalId signal = ReportSignalId::Flow;
@@ -288,6 +299,13 @@ private:
         uint32_t payload_schema = 0;
         uint32_t record_count = 0;
         uint32_t payload_len = 0;
+        uint8_t edf_session_index = 0;
+        uint8_t edf_file_slot = 0;
+        EdfInventoryFileKind edf_file_kind = EdfInventoryFileKind::Unknown;
+        char edf_signal_label[AC_EDF_REPORT_DATA_SIGNAL_LABEL_MAX] = {};
+        uint32_t edf_first_record = 0;
+        uint32_t edf_record_count = 0;
+        bool edf_primary = false;
     };
 
     struct ReportResultStream {
@@ -367,6 +385,9 @@ private:
                                    const ReportParsedChunk &chunk);
     static bool collect_result_chunk(void *context,
                                      const ReportStoreChunkInfo &chunk);
+    static bool collect_edf_result_entry(
+        void *context,
+        const EdfReportDataPlanEntry &entry);
 
     bool ensure_summary_records();
     bool parse_summary_result(ReportSpoolResult &result);
@@ -452,6 +473,18 @@ private:
                                      int64_t start_ms,
                                      int64_t end_ms,
                                      bool required);
+    bool find_edf_sessions_for_night(const ReportSummaryRecord &night,
+                                     int64_t range_start_ms,
+                                     int64_t range_end_ms);
+    bool add_edf_result_plan_entry(uint8_t session_index,
+                                   const EdfReportDataPlanEntry &entry,
+                                   bool required);
+    bool try_add_edf_result_chunks_for_night(const ReportSummaryRecord &night,
+                                             int64_t range_start_ms,
+                                             int64_t range_end_ms);
+    bool read_result_chunk_payload(const ReportResultChunk &chunk,
+                                   ReportStoreChunkMeta &meta,
+                                   ReportSpoolBuffer &payload);
     bool prepare_result_by_therapy_index_internal(size_t therapy_index,
                                                   bool refresh_cache);
     bool defer_result_prepare_for_summary(size_t therapy_index,
@@ -608,6 +641,10 @@ private:
     size_t result_chunk_capacity_ = 0;
     ReportResultStream result_streams_[AC_REPORT_RESULT_STREAM_MAX] = {};
     size_t result_stream_count_ = 0;
+    EdfReportCatalogJob *edf_catalog_ = nullptr;
+    EdfReportSessionDescriptor
+        result_edf_sessions_[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    size_t result_edf_session_count_ = 0;
 
     // Served-result LRU. The result_* slot above is build SCRATCH only; GET-by-
     // index serves these immutable per-night entries, so two clients on different

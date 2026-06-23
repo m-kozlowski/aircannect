@@ -8,6 +8,7 @@
 #include "board.h"
 #include "can_driver.h"
 #include "debug_log.h"
+#include "edf_report_catalog_job.h"
 #include "edf_recorder_manager.h"
 #include "edf_storage_worker.h"
 #include "export_coordinator.h"
@@ -54,6 +55,7 @@ static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager;
+static EdfReportCatalogJob edf_report_catalog_job;
 static OximetryManager oximetry_manager;
 static ReportManager report_manager;
 static BackgroundWorker bg_worker;
@@ -64,6 +66,9 @@ static SleepHqSyncJob *sleephq_sync_job = nullptr;
 static ExportCoordinator export_coordinator;
 static ReportCacheWriterJob report_cache_writer_job(report_manager);
 static ReportPrefetchJob report_prefetch_job(report_manager);
+static uint32_t edf_report_catalog_seen_sessions_ended = 0;
+static bool edf_report_catalog_post_session_pending = false;
+static uint32_t edf_report_catalog_refresh_due_ms = 0;
 
 class FileLogBackgroundJob : public BackgroundJob {
 public:
@@ -144,6 +149,39 @@ static void sync_network_services() {
         }
     } else if (telnet_console.started()) {
         telnet_console.stop(&rpc_arbiter);
+    }
+}
+
+static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
+    const EdfRecorderStatus recorder = edf_recorder_manager.status();
+    if (recorder.sessions_ended != edf_report_catalog_seen_sessions_ended) {
+        edf_report_catalog_seen_sessions_ended = recorder.sessions_ended;
+        edf_report_catalog_post_session_pending = true;
+        edf_report_catalog_refresh_due_ms = now_ms + 5000;
+    }
+
+    if (!edf_report_catalog_post_session_pending) return;
+    if (static_cast<int32_t>(now_ms - edf_report_catalog_refresh_due_ms) < 0) {
+        return;
+    }
+
+    const EdfStorageWorkerStatus storage =
+        edf_recorder_manager.storage_status();
+    if (storage.busy || storage.queued > 0 || storage.open_file_count > 0) {
+        edf_report_catalog_refresh_due_ms = now_ms + 1000;
+        return;
+    }
+
+    EdfReportCatalogStatus catalog;
+    if (edf_report_catalog_job.status(catalog, 0) &&
+        catalog.state == EdfReportCatalogState::Refreshing) {
+        edf_report_catalog_post_session_pending = false;
+        return;
+    }
+    if (edf_report_catalog_job.request_refresh()) {
+        edf_report_catalog_post_session_pending = false;
+    } else {
+        edf_report_catalog_refresh_due_ms = now_ms + 2000;
     }
 }
 
@@ -297,6 +335,8 @@ void setup() {
     sink_manager.begin(rpc_arbiter, session_manager);
     edf_recorder_manager.begin(rpc_arbiter, session_manager);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
+    edf_report_catalog_job.begin();
+    report_manager.set_edf_report_catalog(&edf_report_catalog_job);
     oximetry_manager.begin(app_config);
     report_manager.begin();
     resmed_ota_manager.begin(rpc_arbiter);
@@ -342,6 +382,7 @@ void setup() {
     bg_worker.add_job(&file_log_job);
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
+    bg_worker.add_job(&edf_report_catalog_job);
     bg_worker.add_job(&report_cache_writer_job);
     bg_worker.add_job(&report_prefetch_job);
     if (storage_sync_job) {
@@ -351,6 +392,7 @@ void setup() {
         bg_worker.add_job(sleephq_sync_job);
     }
     bg_worker.begin();
+    (void)edf_report_catalog_job.request_refresh();
 }
 
 void loop() {
@@ -384,6 +426,7 @@ void loop() {
     const uint32_t now_ms = millis();
     session_manager.poll(rpc_arbiter.as11_state(), now_ms);
     edf_recorder_manager.poll(now_ms);
+    poll_edf_report_catalog_refresh(now_ms);
     drain_can_rx_after("session_edf");
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
