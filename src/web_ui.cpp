@@ -44,6 +44,7 @@ static constexpr size_t WEB_JSON_RESERVE_MEDIUM = 1024;
 static constexpr size_t WEB_CONFIG_FULL_JSON_RESERVE = 2304;
 static constexpr size_t WEB_CONFIG_SYNC_JSON_RESERVE = 640;
 static constexpr size_t WEB_CONFIG_SMALL_JSON_RESERVE = 384;
+static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
 
 const char *web_command_name(uint8_t kind) {
     switch (kind) {
@@ -80,6 +81,15 @@ bool web_config_section_known(const char *section) {
            strcmp(section, "oximetry") == 0 ||
            strcmp(section, "smb") == 0 ||
            strcmp(section, "sleephq") == 0;
+}
+
+uint32_t fnv1a32_string(const String &text) {
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < text.length(); ++i) {
+        hash ^= static_cast<uint8_t>(text[i]);
+        hash *= 16777619u;
+    }
+    return hash ? hash : 1u;
 }
 
 size_t web_config_json_reserve(const char *section) {
@@ -662,9 +672,10 @@ bool WebUI::begin(RpcArbiter &arbiter,
     command_mutex_ = xSemaphoreCreateMutex();
     cache_mutex_ = xSemaphoreCreateMutex();
     sse_mutex_ = xSemaphoreCreateMutex();
+    live_view_mutex_ = xSemaphoreCreateMutex();
     storage_job_mutex_ = xSemaphoreCreateMutex();
     if (!command_mutex_ || !cache_mutex_ || !sse_mutex_ ||
-        !storage_job_mutex_) {
+        !live_view_mutex_ || !storage_job_mutex_) {
         stop();
         return false;
     }
@@ -799,6 +810,17 @@ void WebUI::stop() {
         sse_mutex_ = nullptr;
     } else {
         for (SseClientRef &ref : sse_clients_) ref = {};
+    }
+
+    if (live_view_mutex_) {
+        if (xSemaphoreTake(live_view_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+            for (LiveViewLease &lease : live_view_leases_) lease = {};
+            xSemaphoreGive(live_view_mutex_);
+        }
+        vSemaphoreDelete(live_view_mutex_);
+        live_view_mutex_ = nullptr;
+    } else {
+        for (LiveViewLease &lease : live_view_leases_) lease = {};
     }
 
     if (cache_mutex_) {
@@ -1103,8 +1125,32 @@ WebUI::SseSendResult WebUI::send_sse_to_clients(const char *payload,
 
 void WebUI::poll_live_stream() {
     const size_t clients = healthy_sse_client_count();
-    if (sink_manager_) sink_manager_->set_live_chart_enabled(clients > 0);
+    const bool live_needed = live_view_requested(millis()) && clients > 0;
+    if (sink_manager_) sink_manager_->set_live_chart_enabled(live_needed);
+    if (!live_needed) {
+        if (sink_manager_) sink_manager_->clear_live_chart_batch();
+        live_last_send_ms_ = 0;
+        return;
+    }
     send_live_batch(millis());
+}
+
+bool WebUI::live_view_requested(uint32_t now_ms) {
+    if (!live_view_mutex_) return false;
+    bool active = false;
+    if (xSemaphoreTake(live_view_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return false;
+    }
+    for (LiveViewLease &lease : live_view_leases_) {
+        if (!lease.client_hash) continue;
+        if (static_cast<int32_t>(now_ms - lease.expires_ms) >= 0) {
+            lease = {};
+            continue;
+        }
+        active = true;
+    }
+    xSemaphoreGive(live_view_mutex_);
+    return active;
 }
 
 void WebUI::send_live_batch(uint32_t now_ms) {
@@ -1588,6 +1634,62 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
                           "{\"ok\":false,\"error\":\"no such night\"}");
             return;
     }
+}
+
+void WebUI::send_live_view_state(AsyncWebServerRequest *request) {
+    bool active = false;
+    if (request->hasArg("active")) {
+        parse_bool_yesno(request->arg("active"), active);
+    } else if (request->hasArg("enabled")) {
+        parse_bool_yesno(request->arg("enabled"), active);
+    }
+    const uint32_t client_hash =
+        request->hasArg("id") ? fnv1a32_string(request->arg("id")) : 1u;
+    const uint32_t now_ms = millis();
+    if (live_view_mutex_ &&
+        xSemaphoreTake(live_view_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        LiveViewLease *empty = nullptr;
+        LiveViewLease *oldest = nullptr;
+        for (LiveViewLease &lease : live_view_leases_) {
+            if (lease.client_hash == client_hash) {
+                if (active) {
+                    lease.expires_ms = now_ms + WEB_LIVE_VIEW_LEASE_MS;
+                } else {
+                    lease = {};
+                }
+                xSemaphoreGive(live_view_mutex_);
+                request->send(200, "application/json",
+                              active ? "{\"ok\":true,\"active\":true}"
+                                     : "{\"ok\":true,\"active\":false}");
+                return;
+            }
+            if (!lease.client_hash) {
+                if (!empty) empty = &lease;
+                continue;
+            }
+            if (static_cast<int32_t>(now_ms - lease.expires_ms) >= 0) {
+                lease = {};
+                if (!empty) empty = &lease;
+                continue;
+            }
+            if (!oldest ||
+                static_cast<int32_t>(lease.expires_ms -
+                                     oldest->expires_ms) < 0) {
+                oldest = &lease;
+            }
+        }
+        if (active) {
+            LiveViewLease *slot = empty ? empty : oldest;
+            if (slot) {
+                slot->client_hash = client_hash;
+                slot->expires_ms = now_ms + WEB_LIVE_VIEW_LEASE_MS;
+            }
+        }
+        xSemaphoreGive(live_view_mutex_);
+    }
+    request->send(200, "application/json",
+                  active ? "{\"ok\":true,\"active\":true}"
+                         : "{\"ok\":true,\"active\":false}");
 }
 
 void WebUI::send_queue_result(AsyncWebServerRequest *request,
@@ -3416,6 +3518,11 @@ void WebUI::register_routes() {
 
     server_->on("/api/stream", HTTP_GET, [this](AsyncWebServerRequest *request) {
         send_cached(request, cached_stream_json_);
+    });
+
+    server_->on("/api/live/view", HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        send_live_view_state(request);
     });
 
     server_->on("/api/storage/list", HTTP_GET,

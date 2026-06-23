@@ -470,13 +470,15 @@ uint32_t RpcArbiter::stream_consumer_queue_drops(
 }
 
 bool RpcArbiter::stream_activity_active() const {
-    if (stream_.desired_active() || stream_.actual_active() ||
-        stream_.pending()) {
-        return true;
-    }
+    if (stream_realtime_active()) return true;
     return stream_.last_owned_activity_ms() &&
            millis() - stream_.last_owned_activity_ms() <
                AC_WIFI_ROAM_STREAM_QUIET_MS;
+}
+
+bool RpcArbiter::stream_realtime_active() const {
+    return stream_.desired_active() || stream_.actual_active() ||
+           stream_.pending();
 }
 
 bool RpcArbiter::stream_actual_active() const {

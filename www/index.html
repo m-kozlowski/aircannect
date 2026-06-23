@@ -2193,6 +2193,42 @@
       nav.onclick = () => showTab(nav.dataset.tab);
     });
 
+    const liveViewClientId = (() => {
+      if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+      return Date.now().toString(36) + Math.random().toString(36).slice(2);
+    })();
+    let liveViewActiveSent = null;
+    let liveViewLastPostMs = 0;
+    const liveViewHeartbeatMs = 5000;
+
+    function liveViewWanted(tabId) {
+      return tabId === "dash" && document.visibilityState !== "hidden";
+    }
+
+    function postLiveViewState(active, force) {
+      const now = Date.now();
+      if (!force && liveViewActiveSent === active) {
+        if (!active || now - liveViewLastPostMs < liveViewHeartbeatMs) return;
+      }
+      liveViewActiveSent = active;
+      liveViewLastPostMs = now;
+      fetch("/api/live/view?id=" + encodeURIComponent(liveViewClientId) +
+        "&active=" + (active ? "1" : "0"), {
+        method: "POST",
+        cache: "no-store",
+        keepalive: true,
+      }).catch(() => {
+        liveViewActiveSent = null;
+      });
+    }
+
+    function updateLiveViewState(tabId, force) {
+      const activeTab = tabId ||
+        (document.querySelector(".pane.active") || {}).id || "p-dash";
+      const id = activeTab.replace(/^p-/, "");
+      postLiveViewState(liveViewWanted(id), force);
+    }
+
     function showTab(id) {
       Object.keys(tabs).forEach((tab) => {
         document.getElementById("p-" + tab).classList.toggle("active", tab === id);
@@ -2203,6 +2239,7 @@
 
       document.getElementById("title").textContent = tabs[id];
       location.hash = id;
+      updateLiveViewState(id);
 
       if (id === "dash") loadStatus();
       if (id === "report") {
@@ -2245,6 +2282,7 @@
 
     function refreshActive() {
       const pane = document.querySelector(".pane.active").id.replace("p-", "");
+      updateLiveViewState(pane);
       if (pane === "dash") loadStatus();
       if (pane === "report") refreshReportSummary(true);
       if (pane === "edf") {
@@ -2266,6 +2304,14 @@
       if (pane === "console") loadConsole();
       if (pane === "config") loadConfig();
     }
+
+    document.addEventListener("visibilitychange", () => updateLiveViewState());
+    window.addEventListener("beforeunload", () => {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon("/api/live/view?id=" +
+          encodeURIComponent(liveViewClientId) + "&active=0", new Blob([]));
+      }
+    });
 
     async function api(url, opt) {
       const response = await fetch(url, opt);
@@ -7308,11 +7354,13 @@
     if (location.hash && tabs[location.hash.slice(1)]) {
       showTab(location.hash.slice(1));
     } else {
+      updateLiveViewState("dash");
       loadStatus();
     }
 
     setInterval(() => {
       if (document.getElementById("p-dash").classList.contains("active")) {
+        updateLiveViewState("dash");
         loadStatus();
       }
       if (document.getElementById("p-oxi").classList.contains("active")) {

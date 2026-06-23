@@ -589,7 +589,7 @@ bool ReportManager::request_summary_refresh(bool force) {
 
 void ReportManager::poll(RpcArbiter &arbiter) {
     const bool realtime_active =
-        arbiter.stream_activity_active() ||
+        arbiter.stream_realtime_active() ||
         arbiter.as11_state().therapy_state() == As11TherapyState::Running;
 
     if (drain_source_events(arbiter)) return;

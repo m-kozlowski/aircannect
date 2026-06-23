@@ -135,6 +135,7 @@ private:
     void send_sleephq_sync_start(AsyncWebServerRequest *request) const;
     void send_sleephq_sync_check(AsyncWebServerRequest *request) const;
     void send_sleephq_sync_status(AsyncWebServerRequest *request) const;
+    void send_live_view_state(AsyncWebServerRequest *request);
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json,
                            const char *section = nullptr) const;
@@ -195,6 +196,7 @@ private:
     // Dashboard live stream sink
     void poll_live_stream();
     void send_live_batch(uint32_t now_ms);
+    bool live_view_requested(uint32_t now_ms);
 
     // Response helpers
     String queued_json(const char *result = "queued") const;
@@ -209,6 +211,11 @@ private:
         AsyncEventSourceClient *client = nullptr;
         uint32_t connected_ms = 0;
         uint32_t last_status_ms = 0;
+    };
+
+    struct LiveViewLease {
+        uint32_t client_hash = 0;
+        uint32_t expires_ms = 0;
     };
 
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
@@ -260,6 +267,7 @@ private:
     SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;
+    SemaphoreHandle_t live_view_mutex_ = nullptr;
     SemaphoreHandle_t storage_job_mutex_ = nullptr;
 
     AsyncWebServer *server_ = nullptr;
@@ -269,6 +277,7 @@ private:
 
     uint32_t live_last_send_ms_ = 0;
     uint32_t live_seq_ = 0;
+    LiveViewLease live_view_leases_[AC_WEB_SSE_CLIENTS_MAX + 1];
 
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer cached_stream_json_;
