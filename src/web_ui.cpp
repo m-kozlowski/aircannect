@@ -15,6 +15,7 @@
 #include "app_config_update.h"
 #include "as11_rpc.h"
 #include "background_worker.h"
+#include "board.h"
 #include "debug_log.h"
 #include "edf_storage_worker.h"
 #include "export_coordinator.h"
@@ -1941,6 +1942,11 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
     json_add_string(json, "sensor_state",
                     oximetry_sensor_state_name(sensor.sensor_state));
     json_add_bool(json, "sensor_task_started", sensor.sensor_task_started);
+#if AC_STACK_PROFILE_ENABLED
+    json_add_int(json, "sensor_task_stack_free",
+                 static_cast<long>(
+                     sensor.sensor_task_stack_high_water_bytes));
+#endif
     json_add_bool(json, "sensor_scanning", sensor.sensor_scanning);
     json_add_bool(json, "sensor_connected", sensor.sensor_connected);
     json_add_int(json, "sensor_known_count", sensor.sensor_known_count);
@@ -3642,8 +3648,10 @@ void WebUI::register_routes() {
         json_add_bool(json, "idle", s.idle);
         json_add_string(json, "gate", s.gate_reason);
         json_add_int(json, "ticks", static_cast<long>(s.ticks));
+#if AC_STACK_PROFILE_ENABLED
         json_add_int(json, "stack_free",
                      static_cast<long>(s.stack_high_water_words));
+#endif
         json_add_int(json, "phase", static_cast<long>(p.phase));
         json_add_uint64(json, "night_ms", p.night_ms);
         json_add_uint64(json, "last_night_ms", p.last_night_ms);

@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "board.h"
+
 namespace aircannect {
 
 // What a single step() accomplished, so the worker can pace the next tick.
@@ -40,7 +42,9 @@ struct BackgroundWorkerStatus {
     bool idle = false;
     char gate_reason[16] = {};
     uint32_t ticks = 0;
+#if AC_STACK_PROFILE_ENABLED
     uint32_t stack_high_water_words = 0;
+#endif
 };
 
 // Low-priority FreeRTOS task that runs registered jobs only while the device is
@@ -59,6 +63,9 @@ public:
 
     void set_enabled(bool enabled) { enabled_.store(enabled); }
     bool enabled() const { return enabled_.load(); }
+#if AC_STACK_PROFILE_ENABLED
+    uint32_t stack_high_water_bytes() const;
+#endif
 
     // Push back the idle grace window so prefetch defers briefly after
     // foreground activity (e.g. a web request). Safe from any task.

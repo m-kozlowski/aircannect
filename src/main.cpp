@@ -1,5 +1,7 @@
 #include <Arduino.h>
 
+#include <freertos/task.h>
+
 #include <new>
 #include <string.h>
 
@@ -30,6 +32,9 @@
 #include "storage_manager.h"
 #include "storage_sync_job.h"
 #include "storage_writer.h"
+#if AC_STACK_PROFILE_ENABLED
+#include "stack_profiler.h"
+#endif
 #include "system_status_snapshot.h"
 #include "tcp_bridge.h"
 #include "telnet_console.h"
@@ -66,6 +71,9 @@ static SleepHqSyncJob *sleephq_sync_job = nullptr;
 static ExportCoordinator export_coordinator;
 static ReportCacheWriterJob report_cache_writer_job(report_manager);
 static ReportPrefetchJob report_prefetch_job(report_manager);
+#if AC_STACK_PROFILE_ENABLED
+static StackProfiler stack_profiler;
+#endif
 static uint32_t edf_report_catalog_seen_sessions_ended = 0;
 static bool edf_report_catalog_post_session_pending = false;
 static uint32_t edf_report_catalog_refresh_due_ms = 0;
@@ -120,6 +128,36 @@ static void note_session_stream_frame(void *context,
                                       uint32_t now_ms) {
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
 }
+
+#if AC_STACK_PROFILE_ENABLED
+static void poll_stack_profiler(uint32_t now_ms) {
+    static TaskHandle_t async_tcp_task = nullptr;
+    if (!async_tcp_task) {
+        async_tcp_task = xTaskGetHandle("async_tcp");
+    }
+    const uint32_t oxi_stack =
+        oximetry_manager.sensor_task_stack_high_water_bytes();
+
+    StackProfileSample samples[] = {
+        {StackProfileTask::Loop, true, uxTaskGetStackHighWaterMark(nullptr)},
+        {StackProfileTask::AsyncTcp,
+         async_tcp_task != nullptr,
+         async_tcp_task ? uxTaskGetStackHighWaterMark(async_tcp_task) : 0},
+        {StackProfileTask::BackgroundWorker,
+         true,
+         bg_worker.stack_high_water_bytes()},
+        {StackProfileTask::EdfStorage,
+         true,
+         EdfStorageWorker::stack_high_water_bytes()},
+        {StackProfileTask::OximetrySensor, oxi_stack != 0, oxi_stack},
+    };
+    stack_profiler.poll(now_ms, samples, sizeof(samples) / sizeof(samples[0]));
+}
+#else
+static void poll_stack_profiler(uint32_t now_ms) {
+    (void)now_ms;
+}
+#endif
 
 static void sync_network_services() {
     const bool should_run_tcp =
@@ -484,6 +522,7 @@ void loop() {
         StorageWriter::poll();
     }
     drain_can_rx_after("storage_writer");
+    poll_stack_profiler(now_ms);
 
     delay(0);
 }

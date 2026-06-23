@@ -46,6 +46,12 @@ bool BackgroundWorker::add_job(BackgroundJob *job) {
     return true;
 }
 
+#if AC_STACK_PROFILE_ENABLED
+uint32_t BackgroundWorker::stack_high_water_bytes() const {
+    return task_ ? uxTaskGetStackHighWaterMark(task_) : 0;
+}
+#endif
+
 void BackgroundWorker::note_activity() {
     uint32_t now = millis();
     if (now == 0) now = 1;  // 0 is the "never" sentinel
@@ -107,7 +113,9 @@ void BackgroundWorker::publish(bool idle, const char *reason) {
     snprintf(status_.gate_reason, sizeof(status_.gate_reason), "%s",
              reason ? reason : "");
     status_.ticks++;
+#if AC_STACK_PROFILE_ENABLED
     status_.stack_high_water_words = uxTaskGetStackHighWaterMark(nullptr);
+#endif
     xSemaphoreGive(status_lock_);
 }
 

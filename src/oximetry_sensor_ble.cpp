@@ -463,13 +463,37 @@ void OximetryManager::ensure_sensor_task() {
     sensor_task_started_ = true;
     status_.sensor_task_started = true;
     portEXIT_CRITICAL(&sensor_mux_);
-    xTaskCreatePinnedToCore(sensor_task_entry,
-                            "oxi_sensor",
-                            AC_OXIMETRY_SENSOR_TASK_STACK,
-                            this,
-                            AC_OXIMETRY_SENSOR_TASK_PRIO,
-                            nullptr,
-                            0);
+#if AC_STACK_PROFILE_ENABLED
+    TaskHandle_t task = nullptr;
+#endif
+    const BaseType_t created =
+        xTaskCreatePinnedToCore(sensor_task_entry,
+                                "oxi_sensor",
+                                AC_OXIMETRY_SENSOR_TASK_STACK,
+                                this,
+                                AC_OXIMETRY_SENSOR_TASK_PRIO,
+#if AC_STACK_PROFILE_ENABLED
+                                &task,
+#else
+                                nullptr,
+#endif
+                                0);
+    portENTER_CRITICAL(&sensor_mux_);
+    if (created == pdPASS) {
+#if AC_STACK_PROFILE_ENABLED
+        sensor_task_ = task;
+#endif
+    } else {
+        sensor_task_started_ = false;
+        status_.sensor_task_started = false;
+#if AC_STACK_PROFILE_ENABLED
+        sensor_task_ = nullptr;
+#endif
+    }
+    portEXIT_CRITICAL(&sensor_mux_);
+    if (created != pdPASS) {
+        Log::logf(CAT_OXI, LOG_ERROR, "Sensor task create failed\n");
+    }
 #endif
 }
 

@@ -11,6 +11,13 @@
 #define AIRCANNECT_BUILD_DATE __DATE__ " " __TIME__
 #endif
 
+#ifndef AC_STACK_PROFILE_ENABLED
+#define AC_STACK_PROFILE_ENABLED 1
+#endif
+
+static constexpr uint32_t AC_STACK_PROFILE_SAMPLE_MS = 10000;
+static constexpr uint32_t AC_STACK_PROFILE_SUMMARY_MS = 600000;
+
 // Board configuration is split by subsystem; this keeps every
 // #include "board.h" working unchanged.
 #include "board_can.h"

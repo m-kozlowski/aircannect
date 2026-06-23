@@ -80,6 +80,9 @@ struct OximetryRuntimeStatus {
 struct OximetrySensorStatus {
     OximetrySensorState sensor_state = OximetrySensorState::Off;
     bool sensor_task_started = false;
+#if AC_STACK_PROFILE_ENABLED
+    uint32_t sensor_task_stack_high_water_bytes = 0;
+#endif
     bool sensor_scanning = false;
     bool sensor_connected = false;
     uint8_t sensor_known_count = 0;
@@ -114,6 +117,9 @@ public:
     bool request_sensor_disconnect();
     bool forget_sensor(const char *addr_or_all);
     bool set_sensor_autoconnect(const char *addr, bool enabled);
+#if AC_STACK_PROFILE_ENABLED
+    uint32_t sensor_task_stack_high_water_bytes() const;
+#endif
 
     OximetryRuntimeStatus runtime_status() const;
     OximetrySensorStatus sensor_status() const;
@@ -228,6 +234,9 @@ private:
     uint8_t sensor_scan_count_ = 0;
     uint32_t sensor_scan_generation_ = 0;
     bool sensor_known_loaded_ = false;
+#if AC_STACK_PROFILE_ENABLED
+    TaskHandle_t sensor_task_ = nullptr;
+#endif
     bool sensor_task_started_ = false;
     bool sensor_scan_requested_ = false;
     bool sensor_manual_connect_requested_ = false;

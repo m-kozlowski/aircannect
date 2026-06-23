@@ -537,6 +537,13 @@ void print_oximetry_sensor_status(Print &out,
     out.print(sensor_state_text(s.sensor_state));
     out.print(" task=");
     print_yes_no(out, s.sensor_task_started);
+#if AC_STACK_PROFILE_ENABLED
+    if (s.sensor_task_started) {
+        out.print(" stack_free=");
+        out.print(static_cast<unsigned long>(
+            s.sensor_task_stack_high_water_bytes));
+    }
+#endif
     out.print(" scanning=");
     print_yes_no(out, s.sensor_scanning);
     out.print(" connected=");

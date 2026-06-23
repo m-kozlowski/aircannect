@@ -154,6 +154,9 @@ OximetrySensorStatus OximetryManager::sensor_status() const {
     portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
 #endif
     out.sensor_task_started = sensor_task_started_;
+#if AC_STACK_PROFILE_ENABLED
+    TaskHandle_t sensor_task = sensor_task_;
+#endif
     out.sensor_known_count = 0;
     for (size_t i = 0; i < AC_OXIMETRY_SENSOR_MAX_KNOWN; ++i) {
         if (sensor_known_[i].addr[0]) out.sensor_known_count++;
@@ -169,8 +172,27 @@ OximetrySensorStatus OximetryManager::sensor_status() const {
 #if AC_OXIMETRY_BLE_ENABLED
     portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
 #endif
+#if AC_STACK_PROFILE_ENABLED
+    if (sensor_task) {
+        out.sensor_task_stack_high_water_bytes =
+            uxTaskGetStackHighWaterMark(sensor_task);
+    }
+#endif
     return out;
 }
+
+#if AC_STACK_PROFILE_ENABLED
+uint32_t OximetryManager::sensor_task_stack_high_water_bytes() const {
+#if AC_OXIMETRY_BLE_ENABLED
+    portENTER_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    TaskHandle_t sensor_task = sensor_task_;
+#if AC_OXIMETRY_BLE_ENABLED
+    portEXIT_CRITICAL(const_cast<portMUX_TYPE *>(&sensor_mux_));
+#endif
+    return sensor_task ? uxTaskGetStackHighWaterMark(sensor_task) : 0;
+}
+#endif
 
 void OximetryManager::apply_config() {
     if (!app_config_) return;

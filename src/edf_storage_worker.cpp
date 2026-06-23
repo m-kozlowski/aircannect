@@ -1802,11 +1802,17 @@ EdfStorageWorkerStatus status() {
     } else {
         out.busy = processing_job;
     }
-    if (task) {
-        out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
-    }
+#if AC_STACK_PROFILE_ENABLED
+    if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
+#endif
     return out;
 }
+
+#if AC_STACK_PROFILE_ENABLED
+uint32_t stack_high_water_bytes() {
+    return task ? uxTaskGetStackHighWaterMark(task) : 0;
+}
+#endif
 
 bool open_result(const EdfStorageOpenHandle &handle,
                  EdfStorageOpenResult &result) {

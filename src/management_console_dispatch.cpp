@@ -9,6 +9,7 @@
 #include "as11_rpc.h"
 #include "as11_settings.h"
 #include "background_worker.h"
+#include "board.h"
 #include "board_report.h"
 #include "debug_log.h"
 #include "export_coordinator.h"
@@ -202,6 +203,18 @@ void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
     out.print(" data_bytes=");
     out.print(static_cast<unsigned long>(
         storage.capacity * storage.chunk_bytes));
+    out.println();
+
+    const OximetrySensorStatus oxi = ctx.oximetry_manager.sensor_status();
+    out.print("[MEM owner] oximetry_sensor task=");
+    out.print(oxi.sensor_task_started ? "started" : "stopped");
+#if AC_STACK_PROFILE_ENABLED
+    if (oxi.sensor_task_started) {
+        out.print(" stack_free=");
+        out.print(static_cast<unsigned long>(
+            oxi.sensor_task_stack_high_water_bytes));
+    }
+#endif
     out.println();
 
     const TlsMemoryStatus tls = TlsMemory::status();
@@ -457,8 +470,10 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(storage.queue_drops));
     out.print(" storage_patch_errors=");
     out.print(static_cast<unsigned long>(storage.patch_errors));
+#if AC_STACK_PROFILE_ENABLED
     out.print(" storage_stack_free=");
     out.print(static_cast<unsigned long>(storage.stack_high_water_words));
+#endif
     out.print(" assembly=");
     out.print(assembly.buffers_ready ? "ready" : "unavailable");
     out.print(" records=");
@@ -581,11 +596,18 @@ void print_report_prefetch_status(Print &out, const ReportManager &manager) {
     BackgroundWorker *w = background_worker();
     if (w) {
         const BackgroundWorkerStatus s = w->status();
+#if AC_STACK_PROFILE_ENABLED
         snprintf(line, sizeof(line),
                  "[REPORT] prefetch worker=%s gate=%s ticks=%lu stack_free=%lu",
                  s.enabled ? "enabled" : "disabled", s.gate_reason,
                  static_cast<unsigned long>(s.ticks),
                  static_cast<unsigned long>(s.stack_high_water_words));
+#else
+        snprintf(line, sizeof(line),
+                 "[REPORT] prefetch worker=%s gate=%s ticks=%lu",
+                 s.enabled ? "enabled" : "disabled", s.gate_reason,
+                 static_cast<unsigned long>(s.ticks));
+#endif
         out.println(line);
     } else {
         out.println("[REPORT] prefetch worker=unavailable");

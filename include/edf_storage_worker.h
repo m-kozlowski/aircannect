@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string>
 
+#include "board.h"
 #include "edf_file_inventory.h"
 #include "edf_file_writer.h"
 
@@ -95,7 +96,9 @@ struct EdfStorageWorkerStatus {
     uint32_t patch_errors = 0;
     uint32_t unavailable_drops = 0;
 
+#if AC_STACK_PROFILE_ENABLED
     uint32_t stack_high_water_words = 0;
+#endif
     uint64_t bytes_enqueued = 0;
     uint64_t bytes_written = 0;
     uint32_t last_activity_ms = 0;
@@ -160,6 +163,9 @@ bool enqueue_close_numeric(EdfFileKind kind);
 bool enqueue_close_annotation(EdfAnnotationKind kind);
 
 EdfStorageWorkerStatus status();
+#if AC_STACK_PROFILE_ENABLED
+uint32_t stack_high_water_bytes();
+#endif
 bool open_result(const EdfStorageOpenHandle &handle,
                  EdfStorageOpenResult &result);
 
