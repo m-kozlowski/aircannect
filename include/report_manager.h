@@ -454,6 +454,8 @@ private:
         const ReportSummaryRecord &night) const;
 
     bool ensure_result_chunks();
+    bool ensure_result_slots();
+    bool ensure_result_edf_sessions();
     void clear_result_prepare();
     void fail_result_prepare(const char *message);
     bool add_result_stream(ReportStoreChunkKind kind,

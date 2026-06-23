@@ -110,8 +110,35 @@ bool EdfReportCatalogJob::allocate_build_locked() {
 
 void EdfReportCatalogJob::publish_build_locked() {
     if (sessions_) Memory::free(sessions_);
-    sessions_ = build_sessions_;
-    session_count_ = build_session_count_;
+    sessions_ = nullptr;
+    session_count_ = 0;
+
+    if (build_session_count_ > 0) {
+        EdfReportSessionDescriptor *packed =
+            static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
+                build_session_count_ * sizeof(EdfReportSessionDescriptor),
+                false));
+        if (packed) {
+            memcpy(packed,
+                   build_sessions_,
+                   build_session_count_ *
+                       sizeof(EdfReportSessionDescriptor));
+            Memory::free(build_sessions_);
+            sessions_ = packed;
+        } else {
+            Log::logf(CAT_EDF, LOG_WARN,
+                      "report catalog compact allocation failed "
+                      "sessions=%u bytes=%u; keeping full buffer\n",
+                      static_cast<unsigned>(build_session_count_),
+                      static_cast<unsigned>(
+                          build_session_count_ *
+                          sizeof(EdfReportSessionDescriptor)));
+            sessions_ = build_sessions_;
+        }
+        session_count_ = build_session_count_;
+    } else {
+        Memory::free(build_sessions_);
+    }
     build_sessions_ = nullptr;
     build_session_count_ = 0;
 
