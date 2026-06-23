@@ -3508,11 +3508,25 @@
       let buf = null;
       for (let attempt = 0; attempt < 60; attempt++) {
         if (token !== reportLoadToken) return false;
-        const response = await fetch("/api/report/plot?index=" + index +
-          "&v=" + encodeURIComponent(version));
-        if (response.ok) {
-          buf = await response.arrayBuffer();
-          break;
+        let response;
+        try {
+          response = await fetch("/api/report/plot?index=" + index +
+            "&v=" + encodeURIComponent(version));
+        } catch (e) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          continue;
+        }
+        if (response.status === 200) {
+          try {
+            buf = await response.arrayBuffer();
+            break;
+          } catch (e) {
+            // Retry transient HTTP/AsyncTCP truncation. The root cause is
+            // backend-side; this only prevents a one-off partial transfer from
+            // becoming a sticky UI error.
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            continue;
+          }
         }
         if (response.status === 202) {
           await new Promise((resolve) => setTimeout(resolve, 300));
