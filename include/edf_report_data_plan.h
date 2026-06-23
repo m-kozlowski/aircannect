@@ -35,6 +35,12 @@ struct EdfReportDataPlanEntry {
     bool primary = false;
 };
 
+struct EdfReportDataCoverage {
+    uint32_t event_entries = 0;
+    uint32_t signals_required = 0;
+    uint32_t signals_covered = 0;
+};
+
 using EdfReportDataPlanCallback =
     bool (*)(void *context, const EdfReportDataPlanEntry &entry);
 
@@ -50,5 +56,12 @@ bool edf_report_plan_signal(const EdfReportSessionDescriptor &session,
                             int64_t range_end_ms,
                             EdfReportDataPlanCallback callback,
                             void *context);
+
+bool edf_report_plan_covers_report(
+    const EdfReportSessionDescriptor *sessions,
+    size_t session_count,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
+    EdfReportDataCoverage *coverage_out = nullptr);
 
 }  // namespace aircannect

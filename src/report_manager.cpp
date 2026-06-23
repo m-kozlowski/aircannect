@@ -47,10 +47,6 @@ struct EdfResultEntryContext {
     uint32_t entries = 0;
 };
 
-struct EdfPlanCountContext {
-    uint32_t entries = 0;
-};
-
 struct SummaryRecordBufferContext {
     ReportSummaryRecord *records = nullptr;
     size_t capacity = 0;
@@ -279,14 +275,6 @@ bool store_summary_record_to_buffer(void *context,
     }
     ctx->records[ctx->count++] = record;
     if (record.duration_min > 0) ctx->nights_with_therapy++;
-    return true;
-}
-
-bool count_edf_plan_entry(void *context,
-                          const EdfReportDataPlanEntry &entry) {
-    EdfPlanCountContext *ctx = static_cast<EdfPlanCountContext *>(context);
-    if (!ctx || !entry.name || !entry.name[0]) return false;
-    ctx->entries++;
     return true;
 }
 
@@ -3238,43 +3226,10 @@ bool ReportManager::edf_report_complete_for_night(
         return false;
     }
 
-    uint32_t event_entries = 0;
-    bool complete = true;
-    for (size_t i = 0; i < session_count; ++i) {
-        EdfPlanCountContext ctx;
-        if (!edf_report_plan_events(sessions[i],
-                                    range_start_ms,
-                                    range_end_ms,
-                                    count_edf_plan_entry,
-                                    &ctx)) {
-            complete = false;
-            break;
-        }
-        event_entries += ctx.entries;
-    }
-    if (complete && event_entries == 0) complete = false;
-
-    size_t signal_count = 0;
-    const ReportSignalDef *signals = report_signal_defs(signal_count);
-    for (size_t signal_index = 0; complete && signal_index < signal_count;
-         ++signal_index) {
-        const ReportSignalDef &signal = signals[signal_index];
-        uint32_t entries = 0;
-        for (size_t i = 0; i < session_count; ++i) {
-            EdfPlanCountContext ctx;
-            if (!edf_report_plan_signal(sessions[i],
-                                        signal.id,
-                                        range_start_ms,
-                                        range_end_ms,
-                                        count_edf_plan_entry,
-                                        &ctx)) {
-                complete = false;
-                break;
-            }
-            entries += ctx.entries;
-        }
-        if (entries == 0) complete = false;
-    }
+    const bool complete = edf_report_plan_covers_report(sessions,
+                                                        session_count,
+                                                        range_start_ms,
+                                                        range_end_ms);
     Memory::free(sessions);
     return complete;
 }

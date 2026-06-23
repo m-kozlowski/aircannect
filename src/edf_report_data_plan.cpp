@@ -182,6 +182,17 @@ bool emit_numeric_entries(const EdfReportSessionFileDescriptor &file,
     return true;
 }
 
+struct PlanCountContext {
+    uint32_t entries = 0;
+};
+
+bool count_plan_entry(void *context, const EdfReportDataPlanEntry &entry) {
+    PlanCountContext *ctx = static_cast<PlanCountContext *>(context);
+    if (!ctx || !entry.name || !entry.name[0]) return false;
+    ctx->entries++;
+    return true;
+}
+
 }  // namespace
 
 bool edf_report_plan_events(const EdfReportSessionDescriptor &session,
@@ -235,6 +246,63 @@ bool edf_report_plan_signal(const EdfReportSessionDescriptor &session,
                                 range_end_ms,
                                 callback,
                                 context);
+}
+
+bool edf_report_plan_covers_report(
+    const EdfReportSessionDescriptor *sessions,
+    size_t session_count,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
+    EdfReportDataCoverage *coverage_out) {
+    if (coverage_out) *coverage_out = EdfReportDataCoverage();
+    if (!sessions || session_count == 0 || range_end_ms <= range_start_ms) {
+        return false;
+    }
+
+    EdfReportDataCoverage coverage;
+    for (size_t i = 0; i < session_count; ++i) {
+        PlanCountContext ctx;
+        if (!edf_report_plan_events(sessions[i],
+                                    range_start_ms,
+                                    range_end_ms,
+                                    count_plan_entry,
+                                    &ctx)) {
+            return false;
+        }
+        coverage.event_entries += ctx.entries;
+    }
+    if (coverage.event_entries == 0) {
+        if (coverage_out) *coverage_out = coverage;
+        return false;
+    }
+
+    size_t signal_count = 0;
+    const ReportSignalDef *signals = report_signal_defs(signal_count);
+    coverage.signals_required = static_cast<uint32_t>(signal_count);
+    for (size_t signal_index = 0; signal_index < signal_count; ++signal_index) {
+        const ReportSignalDef &signal = signals[signal_index];
+        uint32_t entries = 0;
+        for (size_t i = 0; i < session_count; ++i) {
+            PlanCountContext ctx;
+            if (!edf_report_plan_signal(sessions[i],
+                                        signal.id,
+                                        range_start_ms,
+                                        range_end_ms,
+                                        count_plan_entry,
+                                        &ctx)) {
+                return false;
+            }
+            entries += ctx.entries;
+        }
+        if (entries == 0) {
+            if (coverage_out) *coverage_out = coverage;
+            return false;
+        }
+        coverage.signals_covered++;
+    }
+
+    if (coverage_out) *coverage_out = coverage;
+    return true;
 }
 
 }  // namespace aircannect
