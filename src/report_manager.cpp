@@ -10,6 +10,7 @@
 #include "debug_log.h"
 #include "json_util.h"
 #include "memory_manager.h"
+#include "report_data_provider.h"
 #include "report_records.h"
 #include "report_store.h"
 #include "storage_manager.h"
@@ -36,11 +37,6 @@ struct ResultChunkContext {
     size_t stream_index = 0;
 };
 
-struct LatestChunkEndContext {
-    bool found = false;
-    int64_t latest_end_ms = 0;
-};
-
 struct SummaryRecordBufferContext {
     ReportSummaryRecord *records = nullptr;
     size_t capacity = 0;
@@ -52,6 +48,11 @@ struct ReportSessionRange {
     int64_t start_ms = 0;
     int64_t end_ms = 0;
 };
+
+const SpoolReportProvider &spool_report_provider() {
+    static SpoolReportProvider provider;
+    return provider;
+}
 
 void append_u64(LargeTextBuffer &out, uint64_t value) {
     char buf[24];
@@ -183,10 +184,9 @@ bool source_complete_for_night(const ReportSummaryRecord &night,
     int64_t span_start = 0;
     int64_t span_end = 0;
     if (!night_data_span(night, span_start, span_end)) return false;
-    return ReportStore::coverage_complete(source.spool_type,
-                                          span_start,
-                                          span_end,
-                                          source.parser_schema);
+    return spool_report_provider().coverage_complete(source,
+                                                     span_start,
+                                                     span_end);
 }
 
 // Series sources stream continuous samples; event sources are sparse (a covered
@@ -283,12 +283,10 @@ bool source_missing_start_for_night(const ReportSummaryRecord &night,
     if (!night_data_span(night, span_start, span_end)) return false;
 
     int64_t missing_ms = span_start;
-    if (!ReportStore::coverage_first_missing(
-            source.spool_type,
-            span_start,
-            span_end,
-            source.parser_schema,
-            missing_ms)) {
+    if (!spool_report_provider().coverage_first_missing(source,
+                                                        span_start,
+                                                        span_end,
+                                                        missing_ms)) {
         out_start_ms = span_start;
         return true;
     }
@@ -305,88 +303,15 @@ bool source_missing_start_for_night(const ReportSummaryRecord &night,
     return true;
 }
 
-bool remember_latest_chunk_end(void *context,
-                               const ReportStoreChunkInfo &chunk) {
-    LatestChunkEndContext *ctx =
-        static_cast<LatestChunkEndContext *>(context);
-    if (!ctx) return false;
-    if (!ctx->found || chunk.key.end_ms > ctx->latest_end_ms) {
-        ctx->found = true;
-        ctx->latest_end_ms = chunk.key.end_ms;
-    }
-    return true;
-}
-
-bool latest_chunk_end_for_name(ReportStoreChunkKind kind,
-                               const char *source,
-                               const char *name,
-                               int64_t night_start_ms,
-                               int64_t start_ms,
-                               int64_t end_ms,
-                               int64_t &out_end_ms) {
-    LatestChunkEndContext ctx;
-    if (!ReportStore::for_each_chunk(kind,
-                                     source,
-                                     name,
-                                     night_start_ms,
-                                     start_ms,
-                                     end_ms,
-                                     remember_latest_chunk_end,
-                                     &ctx)) {
-        return false;
-    }
-    if (!ctx.found) return false;
-    out_end_ms = ctx.latest_end_ms;
-    return true;
-}
-
 bool source_latest_cached_end_for_night(const ReportSourceDef &source,
                                         const ReportSummaryRecord &night,
                                         int64_t &out_end_ms) {
-    const int64_t start_ms = static_cast<int64_t>(night.start_ms);
-    const int64_t end_ms = static_cast<int64_t>(night.end_ms);
-    const char *spool_type = source.spool_type;
-    if (!spool_type || !spool_type[0]) return false;
-
-    if (source.id == ReportSourceId::UsageEvents ||
-        source.id == ReportSourceId::RespiratoryEvents) {
-        return latest_chunk_end_for_name(ReportStoreChunkKind::Events,
-                                         spool_type,
-                                         spool_type,
-                                         start_ms,
-                                         start_ms,
-                                         end_ms,
-                                         out_end_ms);
-    }
-
-    bool matched = false;
-    int64_t earliest_latest_end = 0;
-    size_t signal_count = 0;
-    const ReportSignalDef *signals = report_signal_defs(signal_count);
-    for (size_t i = 0; i < signal_count; ++i) {
-        const ReportSignalDef &signal = signals[i];
-        if (signal.preferred_source != source.id &&
-            signal.fallback_source != source.id) {
-            continue;
-        }
-        int64_t signal_end = 0;
-        if (!latest_chunk_end_for_name(ReportStoreChunkKind::Series,
-                                       spool_type,
-                                       signal.store_name,
-                                       start_ms,
-                                       start_ms,
-                                       end_ms,
-                                       signal_end)) {
-            return false;
-        }
-        if (!matched || signal_end < earliest_latest_end) {
-            earliest_latest_end = signal_end;
-        }
-        matched = true;
-    }
-    if (!matched) return false;
-    out_end_ms = earliest_latest_end;
-    return true;
+    return spool_report_provider().latest_cached_end(
+        source,
+        static_cast<int64_t>(night.start_ms),
+        static_cast<int64_t>(night.start_ms),
+        static_cast<int64_t>(night.end_ms),
+        out_end_ms);
 }
 
 bool source_required_for_report_result(ReportSourceId source) {
@@ -3066,25 +2991,6 @@ bool ReportManager::collect_result_chunk(void *context,
     return true;
 }
 
-namespace {
-struct ReportChunkExtentCtx {
-    int64_t min_start = 0;
-    int64_t max_end = 0;
-    bool found = false;
-};
-bool report_chunk_extent_cb(void *context, const ReportStoreChunkInfo &info) {
-    auto *ctx = static_cast<ReportChunkExtentCtx *>(context);
-    if (!ctx->found || info.key.start_ms < ctx->min_start) {
-        ctx->min_start = info.key.start_ms;
-    }
-    if (!ctx->found || info.key.end_ms > ctx->max_end) {
-        ctx->max_end = info.key.end_ms;
-    }
-    ctx->found = true;
-    return true;  // keep iterating: every chunk is needed to bound the extent
-}
-}  // namespace
-
 // Earliest start / latest end of a source's cached chunks for a night, within
 // the night's session span. Returns false when the source has none cached.
 bool ReportManager::source_chunk_extent(const ReportSummaryRecord &night,
@@ -3099,18 +3005,19 @@ bool ReportManager::source_chunk_extent(const ReportSummaryRecord &night,
     int64_t span_start = 0;
     int64_t span_end = 0;
     if (!night_data_span(night, span_start, span_end)) return false;
-    ReportChunkExtentCtx ctx;
-    ReportStore::for_each_chunk(ReportStoreChunkKind::Series,
-                                def->spool_type,
-                                name,
-                                static_cast<int64_t>(night.start_ms),
-                                span_start,
-                                span_end,
-                                report_chunk_extent_cb,
-                                &ctx);
-    if (!ctx.found) return false;
-    min_start = ctx.min_start;
-    max_end = ctx.max_end;
+    ReportProviderChunkExtent extent;
+    if (!spool_report_provider().chunk_extent(
+            ReportStoreChunkKind::Series,
+            *def,
+            name,
+            static_cast<int64_t>(night.start_ms),
+            span_start,
+            span_end,
+            extent)) {
+        return false;
+    }
+    min_start = extent.min_start_ms;
+    max_end = extent.max_end_ms;
     return true;
 }
 
@@ -3134,10 +3041,9 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
     // not (events unavailable, not zero). sparse_events still guards the aged-out
     // series check below, where a covered event stream may hold zero chunks.
     const bool complete =
-        ReportStore::coverage_complete(source_def->spool_type,
-                                       start_ms,
-                                       end_ms,
-                                       source_def->parser_schema);
+        spool_report_provider().coverage_complete(*source_def,
+                                                  start_ms,
+                                                  end_ms);
     size_t stream_index = 0;
     if (!add_result_stream(kind,
                            source,
@@ -3158,14 +3064,14 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
     context.name = name;
     context.required = required;
     context.stream_index = stream_index;
-    if (!ReportStore::for_each_chunk(kind,
-                                     source_def->spool_type,
-                                     name,
-                                     night_start_ms,
-                                     start_ms,
-                                     end_ms,
-                                     collect_result_chunk,
-                                     &context)) {
+    if (!spool_report_provider().for_each_chunk(kind,
+                                                *source_def,
+                                                name,
+                                                night_start_ms,
+                                                start_ms,
+                                                end_ms,
+                                                collect_result_chunk,
+                                                &context)) {
         if (result_status_.state != ReportResultState::Error) {
             fail_result_prepare("result_chunk_list_failed");
         }
