@@ -475,7 +475,7 @@ void ReportManager::begin() {
     if (!cache_write_lock_) cache_write_lock_ = xSemaphoreCreateMutex();
     if (!night_epochs_) {
         night_epochs_ = static_cast<NightEpoch *>(Memory::calloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX, sizeof(NightEpoch)));
+            AC_REPORT_SUMMARY_RECORD_MAX, sizeof(NightEpoch), false));
         if (!night_epochs_) {
             log_report_alloc_failed(
                 "night_epochs",
@@ -484,7 +484,7 @@ void ReportManager::begin() {
     }
     if (!result_slots_) {
         result_slots_ = static_cast<MaterializedResult *>(Memory::alloc_large(
-            AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult)));
+            AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult), false));
         if (result_slots_) {
             for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
                 new (&result_slots_[i]) MaterializedResult();
@@ -498,7 +498,8 @@ void ReportManager::begin() {
     if (!result_edf_sessions_) {
         result_edf_sessions_ = static_cast<EdfReportSessionDescriptor *>(
             Memory::calloc_large(AC_REPORT_SUMMARY_SESSION_MAX,
-                                 sizeof(EdfReportSessionDescriptor)));
+                                 sizeof(EdfReportSessionDescriptor),
+                                 false));
         if (!result_edf_sessions_) {
             log_report_alloc_failed(
                 "result_edf_sessions",
@@ -535,7 +536,8 @@ bool ReportManager::take_summary_scratch(TickType_t timeout,
     if (!summary_scratch_) {
         summary_scratch_ = static_cast<ReportSummaryRecord *>(
             Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
-                                 sizeof(ReportSummaryRecord)));
+                                 sizeof(ReportSummaryRecord),
+                                 false));
     }
     if (!summary_scratch_) {
         xSemaphoreGive(summary_scratch_lock_);
@@ -1048,7 +1050,8 @@ bool ReportManager::ensure_summary_records() {
     if (records_) return true;
     records_ = static_cast<ReportSummaryRecord *>(
         Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
-                             sizeof(ReportSummaryRecord)));
+                             sizeof(ReportSummaryRecord),
+                             false));
     if (!records_) {
         log_report_alloc_failed(
             "summary_records",
@@ -1997,7 +2000,8 @@ bool ReportManager::for_each_summary_night(
 
     ReportSummaryRecord *snapshot =
         static_cast<ReportSummaryRecord *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord)));
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord),
+            false));
     if (!snapshot) {
         log_report_alloc_failed(
             "summary_night_snapshot",
@@ -2849,7 +2853,8 @@ bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
 
     ReportSummaryRecord *snapshot =
         static_cast<ReportSummaryRecord *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord)));
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord),
+            false));
     if (!snapshot) {
         log_report_alloc_failed(
             "cache_prune_snapshot",
@@ -2940,7 +2945,8 @@ bool ReportManager::ensure_result_chunks() {
     if (result_chunks_) return true;
     result_chunks_ = static_cast<ReportResultChunk *>(
         Memory::calloc_large(AC_REPORT_RESULT_CHUNK_MAX,
-                             sizeof(ReportResultChunk)));
+                             sizeof(ReportResultChunk),
+                             false));
     if (!result_chunks_) {
         log_report_alloc_failed(
             "result_chunks",
@@ -3274,7 +3280,8 @@ bool ReportManager::edf_report_complete_for_night(
     EdfReportSessionDescriptor *sessions =
         static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
             AC_REPORT_SUMMARY_SESSION_MAX *
-            sizeof(EdfReportSessionDescriptor)));
+            sizeof(EdfReportSessionDescriptor),
+            false));
     if (!sessions) {
         log_report_alloc_failed(
             "edf_report_session_snapshot",
@@ -5287,7 +5294,9 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
     static ReportStoreCoverageRecord *cov_batch = nullptr;
     if (!cov_batch) {
         cov_batch = static_cast<ReportStoreCoverageRecord *>(Memory::calloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX, sizeof(ReportStoreCoverageRecord)));
+            AC_REPORT_SUMMARY_RECORD_MAX,
+            sizeof(ReportStoreCoverageRecord),
+            false));
     }
     if (!cov_batch) {
         log_report_alloc_failed(

@@ -12,9 +12,11 @@
 namespace aircannect {
 namespace {
 
+static constexpr size_t REPORT_INTERNAL_FALLBACK_MAX = 4096;
+
 void *alloc_report_buffer(size_t size) {
 #ifdef ARDUINO
-    return Memory::alloc_large(size);
+    return Memory::alloc_large(size, size <= REPORT_INTERNAL_FALLBACK_MAX);
 #else
     return malloc(size);
 #endif
