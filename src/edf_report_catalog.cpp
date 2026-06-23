@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "edf_file_writer.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -10,61 +11,61 @@ namespace {
 
 const EdfReportSignalMappingDef REPORT_SIGNAL_MAP[] = {
     {EdfInventoryFileKind::Brp,
-     "Flow.40ms",
+     0,
      ReportSignalId::Flow,
      ReportSourceId::RespiratoryFlow6p25Hz,
      40,
      true},
     {EdfInventoryFileKind::Brp,
-     "Press.40ms",
+     1,
      ReportSignalId::MaskPressure,
      ReportSourceId::MaskPressure6p25Hz,
      40,
      true},
     {EdfInventoryFileKind::Pld,
-     "MaskPress.2s",
+     0,
      ReportSignalId::MaskPressure,
      ReportSourceId::TherapyOneMinute,
      2000,
      false},
     {EdfInventoryFileKind::Pld,
-     "Press.2s",
+     1,
      ReportSignalId::InspiratoryPressure,
      ReportSourceId::InspiratoryPressure0p5Hz,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     "EprPress.2s",
+     2,
      ReportSignalId::ExpiratoryPressure,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     "Leak.2s",
+     3,
      ReportSignalId::Leak,
      ReportSourceId::Leak0p5Hz,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     "RespRate.2s",
+     4,
      ReportSignalId::RespiratoryRate,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     "MinVent.2s",
+     6,
      ReportSignalId::MinuteVentilation,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     "IERatio.2s",
+     8,
      ReportSignalId::IeRatio,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     "Ti.2s",
+     11,
      ReportSignalId::InspiratoryDuration,
      ReportSourceId::TherapyOneMinute,
      2000,
@@ -79,7 +80,32 @@ bool report_kind(EdfInventoryFileKind kind) {
            kind == EdfInventoryFileKind::Csl;
 }
 
-size_t session_file_slot(EdfInventoryFileKind kind) {
+EdfFileKind numeric_file_kind(EdfInventoryFileKind kind) {
+    switch (kind) {
+        case EdfInventoryFileKind::Brp: return EdfFileKind::Brp;
+        case EdfInventoryFileKind::Pld: return EdfFileKind::Pld;
+        case EdfInventoryFileKind::Sa2: return EdfFileKind::Sa2;
+        default:
+            return EdfFileKind::Brp;
+    }
+}
+
+const EdfSignalSpec *mapping_signal_spec(
+    const EdfReportSignalMappingDef &mapping) {
+    if (mapping.kind != EdfInventoryFileKind::Brp &&
+        mapping.kind != EdfInventoryFileKind::Pld &&
+        mapping.kind != EdfInventoryFileKind::Sa2) {
+        return nullptr;
+    }
+    const EdfFileSchema &schema = edf_numeric_schema(
+        numeric_file_kind(mapping.kind));
+    if (mapping.schema_signal_index >= schema.signal_count) return nullptr;
+    return &schema.signals[mapping.schema_signal_index];
+}
+
+}  // namespace
+
+size_t edf_report_session_file_slot(EdfInventoryFileKind kind) {
     switch (kind) {
         case EdfInventoryFileKind::Brp: return 0;
         case EdfInventoryFileKind::Pld: return 1;
@@ -91,11 +117,13 @@ size_t session_file_slot(EdfInventoryFileKind kind) {
     }
 }
 
-uint32_t signal_bit(ReportSignalId signal) {
+uint32_t edf_report_signal_bit(ReportSignalId signal) {
     const uint8_t index = static_cast<uint8_t>(signal);
     if (index >= 32) return 0;
     return 1u << index;
 }
+
+namespace {
 
 void copy_signal_descriptor(const EdfSignalHeader &src,
                             EdfReportSignalDescriptor &dst) {
@@ -106,6 +134,21 @@ void copy_signal_descriptor(const EdfSignalHeader &src,
     dst.samples_per_record = src.samples_per_record;
     dst.sample_offset_in_record = src.sample_offset_in_record;
     dst.byte_offset_in_record = src.byte_offset_in_record;
+}
+
+bool session_mapping_available(const EdfReportSessionDescriptor &session,
+                               const EdfReportSignalMappingDef &mapping,
+                               uint32_t bit) {
+    if (bit == 0) return false;
+    const size_t slot = edf_report_session_file_slot(mapping.kind);
+    if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return false;
+    const uint32_t file_mask = edf_report_file_kind_mask(mapping.kind);
+    if ((session.file_mask & file_mask) == 0) return false;
+    const EdfReportSessionFileDescriptor &file = session.files[slot];
+    if (file.kind != mapping.kind || !file.path[0]) return false;
+    const uint32_t signal_mask = mapping.primary ? session.primary_signal_mask
+                                                 : session.fallback_signal_mask;
+    return (signal_mask & bit) != 0;
 }
 
 }  // namespace
@@ -130,7 +173,7 @@ bool edf_report_file_kind_supported(EdfInventoryFileKind kind) {
 }
 
 uint32_t edf_report_file_kind_mask(EdfInventoryFileKind kind) {
-    const size_t slot = session_file_slot(kind);
+    const size_t slot = edf_report_session_file_slot(kind);
     if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return 0;
     return 1u << slot;
 }
@@ -221,18 +264,78 @@ const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
     return REPORT_SIGNAL_MAP;
 }
 
+const char *edf_report_signal_mapping_label(
+    const EdfReportSignalMappingDef &mapping) {
+    const EdfSignalSpec *spec = mapping_signal_spec(mapping);
+    return spec ? spec->label : "";
+}
+
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out) {
     out = EdfReportSignalMapping();
     if (!label || !label[0]) return false;
     for (const EdfReportSignalMappingDef &row : REPORT_SIGNAL_MAP) {
-        if (row.kind != kind || strcmp(row.label, label) != 0) continue;
+        if (row.kind != kind) continue;
+        const char *row_label = edf_report_signal_mapping_label(row);
+        if (!row_label[0] || strcmp(row_label, label) != 0) continue;
         out.signal = row.signal;
         out.source = row.source;
         out.sample_interval_ms = row.sample_interval_ms;
         out.primary = row.primary;
         return true;
+    }
+    return false;
+}
+
+const EdfReportSignalMappingDef *edf_report_session_select_signal_mapping(
+    const EdfReportSessionDescriptor &session,
+    ReportSignalId signal) {
+    size_t count = 0;
+    const EdfReportSignalMappingDef *mappings =
+        edf_report_signal_mapping_defs(count);
+    const uint32_t bit = edf_report_signal_bit(signal);
+    for (size_t pass = 0; pass < 2; ++pass) {
+        const bool want_primary = pass == 0;
+        for (size_t i = 0; i < count; ++i) {
+            const EdfReportSignalMappingDef &mapping = mappings[i];
+            if (mapping.signal != signal || mapping.primary != want_primary) {
+                continue;
+            }
+            if (session_mapping_available(session, mapping, bit)) {
+                return &mapping;
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
+                                         ReportSignalId signal,
+                                         bool require_primary,
+                                         uint32_t &signal_index,
+                                         EdfReportSignalMapping &mapping) {
+    signal_index = 0;
+    mapping = EdfReportSignalMapping();
+    if (file.status != EdfReportFileStatus::Ok) return false;
+    const size_t pass_count = require_primary ? 1 : 2;
+    for (size_t pass = 0; pass < pass_count; ++pass) {
+        const bool want_primary = pass == 0;
+        for (uint32_t i = 0; i < file.signal_count; ++i) {
+            EdfReportSignalMapping candidate;
+            if (!edf_report_signal_mapping(file.inventory.kind,
+                                           file.signals[i].label,
+                                           candidate)) {
+                continue;
+            }
+            if (candidate.signal != signal ||
+                candidate.primary != want_primary) {
+                continue;
+            }
+            signal_index = i;
+            mapping = candidate;
+            return true;
+        }
     }
     return false;
 }
@@ -267,7 +370,7 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
         return false;
     }
 
-    const size_t slot = session_file_slot(file.inventory.kind);
+    const size_t slot = edf_report_session_file_slot(file.inventory.kind);
     if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return false;
     EdfReportSessionFileDescriptor &dst = session.files[slot];
     dst = EdfReportSessionFileDescriptor();
@@ -305,7 +408,7 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
                                        mapping)) {
             continue;
         }
-        const uint32_t bit = signal_bit(mapping.signal);
+        const uint32_t bit = edf_report_signal_bit(mapping.signal);
         if (bit == 0) continue;
         if (mapping.primary) {
             session.primary_signal_mask |= bit;
@@ -319,13 +422,13 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
 bool edf_report_session_has_primary_signal(
     const EdfReportSessionDescriptor &session,
     ReportSignalId signal) {
-    const uint32_t bit = signal_bit(signal);
+    const uint32_t bit = edf_report_signal_bit(signal);
     return bit != 0 && (session.primary_signal_mask & bit) != 0;
 }
 
 bool edf_report_session_has_signal(const EdfReportSessionDescriptor &session,
                                    ReportSignalId signal) {
-    const uint32_t bit = signal_bit(signal);
+    const uint32_t bit = edf_report_signal_bit(signal);
     if (bit == 0) return false;
     return ((session.primary_signal_mask | session.fallback_signal_mask) &
             bit) != 0;

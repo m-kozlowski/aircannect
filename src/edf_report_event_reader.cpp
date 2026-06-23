@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "edf_annotation_labels.h"
 #include "edf_bytes.h"
 #include "edf_file_writer.h"
 
@@ -84,35 +85,31 @@ bool parse_unsigned_milliseconds(const uint8_t *data,
     return true;
 }
 
-bool label_equals(const uint8_t *label, size_t len, const char *expected) {
-    return expected && strlen(expected) == len &&
-           memcmp(label, expected, len) == 0;
-}
-
 bool event_code_for_label(EdfInventoryFileKind kind,
                           const uint8_t *label,
                           size_t len,
                           uint16_t &code) {
-    if (kind != EdfInventoryFileKind::Eve) return false;
-    if (label_equals(label, len, "Hypopnea")) {
-        code = report_event_code_value(ReportEventCode::Hypopnea);
-        return true;
-    }
-    if (label_equals(label, len, "Central Apnea")) {
-        code = report_event_code_value(ReportEventCode::CentralApnea);
-        return true;
-    }
-    if (label_equals(label, len, "Obstructive Apnea")) {
-        code = report_event_code_value(ReportEventCode::ObstructiveApnea);
-        return true;
-    }
-    if (label_equals(label, len, "Apnea")) {
-        code = report_event_code_value(ReportEventCode::UnclassifiedApnea);
-        return true;
-    }
-    if (label_equals(label, len, "Arousal")) {
-        code = report_event_code_value(ReportEventCode::Arousal);
-        return true;
+    EdfAnnotationLabelId id = EdfAnnotationLabelId::Hypopnea;
+    if (!edf_annotation_label_id_for_text(kind, label, len, id)) return false;
+    switch (id) {
+        case EdfAnnotationLabelId::Hypopnea:
+            code = report_event_code_value(ReportEventCode::Hypopnea);
+            return true;
+        case EdfAnnotationLabelId::CentralApnea:
+            code = report_event_code_value(ReportEventCode::CentralApnea);
+            return true;
+        case EdfAnnotationLabelId::ObstructiveApnea:
+            code = report_event_code_value(ReportEventCode::ObstructiveApnea);
+            return true;
+        case EdfAnnotationLabelId::UnclassifiedApnea:
+            code = report_event_code_value(ReportEventCode::UnclassifiedApnea);
+            return true;
+        case EdfAnnotationLabelId::Arousal:
+            code = report_event_code_value(ReportEventCode::Arousal);
+            return true;
+        case EdfAnnotationLabelId::CsrStart:
+        case EdfAnnotationLabelId::CsrEnd:
+            return false;
     }
     return false;
 }

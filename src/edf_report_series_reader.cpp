@@ -13,59 +13,6 @@ bool ranges_overlap(int64_t start_a,
     return start_a < end_b && start_b < end_a;
 }
 
-bool mapped_signal_matches(const EdfReportFileDescriptor &file,
-                           uint32_t signal_index,
-                           ReportSignalId signal,
-                           bool require_primary,
-                           EdfReportSignalMapping &mapping) {
-    if (signal_index >= file.signal_count) return false;
-    if (!edf_report_signal_mapping(file.inventory.kind,
-                                   file.signals[signal_index].label,
-                                   mapping)) {
-        return false;
-    }
-    if (mapping.signal != signal) return false;
-    return !require_primary || mapping.primary;
-}
-
-bool find_mapped_signal(const EdfReportFileDescriptor &file,
-                        ReportSignalId signal,
-                        bool require_primary,
-                        uint32_t &signal_index,
-                        EdfReportSignalMapping &mapping) {
-    bool found_fallback = false;
-    uint32_t fallback_index = 0;
-    EdfReportSignalMapping fallback_mapping;
-
-    for (uint32_t i = 0; i < file.signal_count; ++i) {
-        EdfReportSignalMapping candidate;
-        if (!mapped_signal_matches(file,
-                                   i,
-                                   signal,
-                                   false,
-                                   candidate)) {
-            continue;
-        }
-        if (candidate.primary) {
-            signal_index = i;
-            mapping = candidate;
-            return true;
-        }
-        if (!found_fallback) {
-            found_fallback = true;
-            fallback_index = i;
-            fallback_mapping = candidate;
-        }
-    }
-
-    if (!require_primary && found_fallback) {
-        signal_index = fallback_index;
-        mapping = fallback_mapping;
-        return true;
-    }
-    return false;
-}
-
 int32_t physical_to_milli(float value) {
     const long scaled = lroundf(value * 1000.0f);
     if (scaled < INT32_MIN) return INT32_MIN;
@@ -112,11 +59,11 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
 
     uint32_t signal_index = 0;
     EdfReportSignalMapping mapping;
-    if (!find_mapped_signal(file,
-                            signal,
-                            require_primary,
-                            signal_index,
-                            mapping)) {
+    if (!edf_report_file_find_signal_mapping(file,
+                                             signal,
+                                             require_primary,
+                                             signal_index,
+                                             mapping)) {
         return EdfReportSeriesStatus::SignalNotFound;
     }
 

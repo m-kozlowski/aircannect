@@ -49,7 +49,7 @@ struct EdfReportFileDescriptor {
 
 struct EdfReportSignalMappingDef {
     EdfInventoryFileKind kind = EdfInventoryFileKind::Unknown;
-    const char *label = nullptr;
+    uint8_t schema_signal_index = 0;
     ReportSignalId signal = ReportSignalId::Flow;
     ReportSourceId source = ReportSourceId::Summary;
     uint32_t sample_interval_ms = 0;
@@ -95,6 +95,8 @@ struct EdfReportSessionDescriptor {
 const char *edf_report_file_status_name(EdfReportFileStatus status);
 bool edf_report_file_kind_supported(EdfInventoryFileKind kind);
 uint32_t edf_report_file_kind_mask(EdfInventoryFileKind kind);
+size_t edf_report_session_file_slot(EdfInventoryFileKind kind);
+uint32_t edf_report_signal_bit(ReportSignalId signal);
 
 EdfReportFileStatus edf_report_describe_file(
     const char *path,
@@ -110,9 +112,19 @@ const EdfReportSignalDescriptor *edf_report_find_signal(
 
 const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
     size_t &count);
+const char *edf_report_signal_mapping_label(
+    const EdfReportSignalMappingDef &mapping);
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out);
+const EdfReportSignalMappingDef *edf_report_session_select_signal_mapping(
+    const EdfReportSessionDescriptor &session,
+    ReportSignalId signal);
+bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
+                                         ReportSignalId signal,
+                                         bool require_primary,
+                                         uint32_t &signal_index,
+                                         EdfReportSignalMapping &mapping);
 
 void edf_report_session_init(EdfReportSessionDescriptor &session);
 bool edf_report_session_add_file(EdfReportSessionDescriptor &session,

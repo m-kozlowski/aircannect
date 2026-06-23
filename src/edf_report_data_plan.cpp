@@ -7,29 +7,11 @@ namespace {
 
 static constexpr uint32_t EDF_REPORT_PLAN_TARGET_BYTES = 64 * 1024;
 
-size_t session_file_slot(EdfInventoryFileKind kind) {
-    switch (kind) {
-        case EdfInventoryFileKind::Brp: return 0;
-        case EdfInventoryFileKind::Pld: return 1;
-        case EdfInventoryFileKind::Sa2: return 2;
-        case EdfInventoryFileKind::Eve: return 3;
-        case EdfInventoryFileKind::Csl: return 4;
-        default:
-            return AC_EDF_REPORT_SESSION_FILE_MAX;
-    }
-}
-
-uint32_t signal_bit(ReportSignalId signal) {
-    const uint8_t index = static_cast<uint8_t>(signal);
-    if (index >= 32) return 0;
-    return 1u << index;
-}
-
 const EdfReportSessionFileDescriptor *session_file(
     const EdfReportSessionDescriptor &session,
     EdfInventoryFileKind kind,
     uint8_t &slot_out) {
-    const size_t slot = session_file_slot(kind);
+    const size_t slot = edf_report_session_file_slot(kind);
     if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return nullptr;
     const uint32_t mask = edf_report_file_kind_mask(kind);
     if ((session.file_mask & mask) == 0) return nullptr;
@@ -37,37 +19,6 @@ const EdfReportSessionFileDescriptor *session_file(
     if (file.kind != kind || !file.path[0]) return nullptr;
     slot_out = static_cast<uint8_t>(slot);
     return &file;
-}
-
-bool mapping_available(const EdfReportSessionDescriptor &session,
-                       const EdfReportSignalMappingDef &mapping,
-                       uint32_t bit) {
-    if (bit == 0) return false;
-    uint8_t slot = 0;
-    if (!session_file(session, mapping.kind, slot)) return false;
-    const uint32_t mask = mapping.primary ? session.primary_signal_mask
-                                          : session.fallback_signal_mask;
-    return (mask & bit) != 0;
-}
-
-const EdfReportSignalMappingDef *select_signal_mapping(
-    const EdfReportSessionDescriptor &session,
-    ReportSignalId signal) {
-    size_t count = 0;
-    const EdfReportSignalMappingDef *mappings =
-        edf_report_signal_mapping_defs(count);
-    const uint32_t bit = signal_bit(signal);
-    for (size_t pass = 0; pass < 2; ++pass) {
-        const bool want_primary = pass == 0;
-        for (size_t i = 0; i < count; ++i) {
-            const EdfReportSignalMappingDef &mapping = mappings[i];
-            if (mapping.signal != signal || mapping.primary != want_primary) {
-                continue;
-            }
-            if (mapping_available(session, mapping, bit)) return &mapping;
-        }
-    }
-    return nullptr;
 }
 
 bool numeric_record_window(const EdfReportSessionFileDescriptor &file,
@@ -160,7 +111,7 @@ bool emit_numeric_entries(const EdfReportSessionFileDescriptor &file,
         entry.file_slot = file_slot;
         copy_cstr(entry.signal_label,
                   sizeof(entry.signal_label),
-                  mapping.label);
+                  edf_report_signal_mapping_label(mapping));
         entry.first_record = record;
         entry.record_count = count;
         entry.start_ms = file.header_start_ms +
@@ -232,7 +183,7 @@ bool edf_report_plan_signal(const EdfReportSessionDescriptor &session,
                             void *context) {
     if (!callback || range_end_ms <= range_start_ms) return false;
     const EdfReportSignalMappingDef *mapping =
-        select_signal_mapping(session, signal);
+        edf_report_session_select_signal_mapping(session, signal);
     if (!mapping) return true;
 
     uint8_t slot = 0;

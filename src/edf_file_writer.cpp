@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "edf_bytes.h"
+#include "edf_annotation_labels.h"
 #include "edf_layout.h"
 #include "edf_str_signal_table.h"
 
@@ -608,26 +609,9 @@ bool edf_annotation_label_for_event(EdfAnnotationKind kind,
                                     const char *event_name,
                                     const char *&label) {
     label = nullptr;
-    if (!event_name) return false;
-    if (kind == EdfAnnotationKind::Eve) {
-        if (strcmp(event_name, "HypopneaEnd") == 0) {
-            label = "Hypopnea";
-        } else if (strcmp(event_name, "CentralApneaEnd") == 0) {
-            label = "Central Apnea";
-        } else if (strcmp(event_name, "ObstructiveApneaEnd") == 0) {
-            label = "Obstructive Apnea";
-        } else if (strcmp(event_name, "ApneaEnd") == 0) {
-            label = "Apnea";
-        } else if (strcmp(event_name, "ReraEnd") == 0) {
-            label = "Arousal";
-        }
-    } else if (kind == EdfAnnotationKind::Csl) {
-        if (strcmp(event_name, "CsrStart") == 0) {
-            label = "CSR Start";
-        } else if (strcmp(event_name, "CsrEnd") == 0) {
-            label = "CSR End";
-        }
-    }
+    EdfAnnotationLabelId id = EdfAnnotationLabelId::Hypopnea;
+    if (!edf_annotation_label_id_for_event(kind, event_name, id)) return false;
+    label = edf_annotation_label_text(id);
     return label != nullptr;
 }
 
