@@ -49,7 +49,7 @@ struct BackgroundWorkerStatus {
 class BackgroundWorker {
 public:
     void begin();
-    void add_job(BackgroundJob *job);
+    bool add_job(BackgroundJob *job);
 
     // The main loop owns the gated subsystems; it publishes their state here
     // every iteration so the worker never reads them cross-task. Main loop only.
@@ -83,7 +83,7 @@ private:
     static constexpr uint32_t GATE_AS11 = 1u << 5;
     static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
-    static constexpr size_t MAX_JOBS = 7;
+    static constexpr size_t MAX_JOBS = 8;
     BackgroundJob *jobs_[MAX_JOBS] = {};
     size_t job_count_ = 0;
 

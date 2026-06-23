@@ -27,9 +27,21 @@ void BackgroundWorker::begin() {
               static_cast<unsigned>(AC_BG_WORKER_TASK_STACK));
 }
 
-void BackgroundWorker::add_job(BackgroundJob *job) {
-    if (!job || job_count_ >= MAX_JOBS) return;
+bool BackgroundWorker::add_job(BackgroundJob *job) {
+    if (!job) {
+        Log::logf(CAT_BGWORKER, LOG_ERROR,
+                  "job registration failed: null job\n");
+        return false;
+    }
+    if (job_count_ >= MAX_JOBS) {
+        Log::logf(CAT_BGWORKER, LOG_ERROR,
+                  "job registration failed: capacity=%u dropped=%s\n",
+                  static_cast<unsigned>(MAX_JOBS),
+                  job->name() ? job->name() : "?");
+        return false;
+    }
     jobs_[job_count_++] = job;
+    return true;
 }
 
 void BackgroundWorker::note_activity() {
