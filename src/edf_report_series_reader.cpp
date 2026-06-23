@@ -80,10 +80,13 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
         return EdfReportSeriesStatus::ScaleError;
     }
 
-    out.file = file;
     out.signal_header = signal_header;
     out.signal_scale = signal_scale;
     out.mapping = mapping;
+    out.header_start_ms = file.header_start_ms;
+    out.record_duration_ms = file.record_duration_ms;
+    out.record_size = file.inventory.header.record_size;
+    out.complete_records = file.inventory.complete_records_from_size;
     out.signal_index = signal_index;
     return EdfReportSeriesStatus::Ok;
 }
@@ -100,24 +103,23 @@ EdfReportSeriesStatus edf_report_decode_series_record(
     EdfReportSeriesDecodeStats &stats) {
     stats = {};
     if (!record || !callback || range_end_ms <= range_start_ms ||
-        decoder.file.status != EdfReportFileStatus::Ok ||
-        decoder.file.record_duration_ms == 0 ||
+        decoder.record_duration_ms == 0 || decoder.record_size == 0 ||
         decoder.signal_header.samples_per_record == 0) {
         return EdfReportSeriesStatus::InvalidArgument;
     }
-    if (record_index >= decoder.file.inventory.complete_records_from_size) {
+    if (record_index >= decoder.complete_records) {
         return EdfReportSeriesStatus::RecordOutOfRange;
     }
-    if (record_size < decoder.file.inventory.header.record_size) {
+    if (record_size < decoder.record_size) {
         return EdfReportSeriesStatus::RecordSizeMismatch;
     }
 
     const int64_t record_start_ms =
-        decoder.file.header_start_ms +
+        decoder.header_start_ms +
         static_cast<int64_t>(record_index) *
-            static_cast<int64_t>(decoder.file.record_duration_ms);
+            static_cast<int64_t>(decoder.record_duration_ms);
     const int64_t record_end_ms =
-        record_start_ms + static_cast<int64_t>(decoder.file.record_duration_ms);
+        record_start_ms + static_cast<int64_t>(decoder.record_duration_ms);
     if (!ranges_overlap(record_start_ms,
                         record_end_ms,
                         range_start_ms,
@@ -131,7 +133,7 @@ EdfReportSeriesStatus edf_report_decode_series_record(
         const int64_t sample_ms =
             record_start_ms +
             (static_cast<int64_t>(i) *
-             static_cast<int64_t>(decoder.file.record_duration_ms)) /
+             static_cast<int64_t>(decoder.record_duration_ms)) /
                 static_cast<int64_t>(
                     decoder.signal_header.samples_per_record);
         if (sample_ms < range_start_ms || sample_ms >= range_end_ms) {

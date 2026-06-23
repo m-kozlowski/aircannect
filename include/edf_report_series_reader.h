@@ -20,10 +20,13 @@ enum class EdfReportSeriesStatus : uint8_t {
 };
 
 struct EdfReportSeriesDecoder {
-    EdfReportFileDescriptor file;
     EdfSignalHeader signal_header;
     EdfSignalScale signal_scale;
     EdfReportSignalMapping mapping;
+    int64_t header_start_ms = 0;
+    uint32_t record_duration_ms = 0;
+    uint32_t record_size = 0;
+    uint32_t complete_records = 0;
     uint32_t signal_index = 0;
 };
 
