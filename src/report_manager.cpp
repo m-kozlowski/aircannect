@@ -1819,6 +1819,7 @@ ReportManager::PlotRead ReportManager::read_plot(
     size_t therapy_index, const char *version,
     std::shared_ptr<ReportSpoolBuffer> &out) {
     ReportSummaryRecord rec;
+    char current_etag[48] = {};
     if (!take_summary_lock(pdMS_TO_TICKS(20))) {
         return PlotRead::Busy;
     }
@@ -1826,15 +1827,30 @@ ReportManager::PlotRead ReportManager::read_plot(
         give_summary_lock();
         return PlotRead::NotFound;
     }
+    format_night_etag_unlocked(rec, current_etag, sizeof(current_etag));
     give_summary_lock();
     if (result_slots_ && result_slots_lock_) {
         xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
         for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
-            if (result_slots_[i].valid && result_slots_[i].plot &&
-                result_slots_[i].night_start_ms == rec.start_ms &&
-                (!version || !version[0] ||
-                 strcmp(result_slots_[i].etag, version) == 0)) {
-                result_slots_[i].last_used = ++result_slot_tick_;
+            if (!result_slots_[i].valid ||
+                result_slots_[i].night_start_ms != rec.start_ms) {
+                continue;
+            }
+            if (strcmp(result_slots_[i].etag, current_etag) != 0) {
+                result_slots_[i] = MaterializedResult{};
+                update_materialized_status_locked();
+                continue;
+            }
+            if (version && version[0] &&
+                strcmp(result_slots_[i].etag, version) != 0) {
+                continue;
+            }
+            result_slots_[i].last_used = ++result_slot_tick_;
+            if (result_slots_[i].status.state == ReportResultState::Error) {
+                xSemaphoreGive(result_slots_lock_);
+                return PlotRead::Error;
+            }
+            if (result_slots_[i].plot) {
                 out = result_slots_[i].plot;
                 xSemaphoreGive(result_slots_lock_);
                 return PlotRead::Ready;
@@ -2986,6 +3002,22 @@ bool ReportManager::ensure_result_edf_sessions() {
     return true;
 }
 
+bool ReportManager::result_uses_edf_provider() const {
+    if (!result_chunks_) return false;
+    for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
+        if (result_chunks_[i].provider_ref.provider == ReportProviderId::Edf) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ReportManager::release_result_edf_sessions() {
+    Memory::free(result_edf_sessions_);
+    result_edf_sessions_ = nullptr;
+    result_edf_session_count_ = 0;
+}
+
 void ReportManager::clear_result_prepare() {
     reset_plot_build();
     reset_range_plot_build(true);
@@ -2995,13 +3027,7 @@ void ReportManager::clear_result_prepare() {
     }
     memset(result_streams_, 0, sizeof(result_streams_));
     result_stream_count_ = 0;
-    if (result_edf_sessions_) {
-        memset(result_edf_sessions_,
-               0,
-               AC_REPORT_SUMMARY_SESSION_MAX *
-                   sizeof(EdfReportSessionDescriptor));
-    }
-    result_edf_session_count_ = 0;
+    release_result_edf_sessions();
     result_night_ = {};
     result_plot_bin_.clear();
     result_status_ = {};
@@ -3011,6 +3037,10 @@ void ReportManager::fail_result_prepare(const char *message) {
     reset_plot_build();
     result_status_.state = ReportResultState::Error;
     result_status_.error = message ? message : "result_prepare_failed";
+    if (result_night_.start_ms != 0 && result_status_.night_start_ms != 0) {
+        publish_result_to_slot();
+    }
+    release_result_edf_sessions();
     Log::logf(CAT_REPORT, LOG_WARN, "Result prepare failed: %s\n",
               result_status_.error.c_str());
 }
@@ -3973,6 +4003,7 @@ bool ReportManager::finish_result_plot_build() {
     result_status_.state = settled_result_state(result_status_.missing_required);
     result_status_.error.clear();
     publish_result_to_slot();
+    release_result_edf_sessions();
     Log::logf(CAT_REPORT,
               LOG_INFO,
               "Result plot ready index=%lu chunks=%lu bytes=%lu\n",
@@ -5062,25 +5093,32 @@ bool ReportManager::prepare_result_by_therapy_index_internal(
     if (!add_best_result_chunks_for_night(night,
                                           night_range.start_ms,
                                           night_range.end_ms)) {
-        Memory::free(result_edf_sessions_);
-        result_edf_sessions_ = nullptr;
-        result_edf_session_count_ = 0;
+        release_result_edf_sessions();
         return false;
     }
-    Memory::free(result_edf_sessions_);
-    result_edf_sessions_ = nullptr;
-    result_edf_session_count_ = 0;
+    const bool uses_edf = result_uses_edf_provider();
+    if (!uses_edf) {
+        release_result_edf_sessions();
+    }
 
     bool deferred = false;
     if (!refresh_result_cache_if_needed(night,
                                         therapy_index,
                                         refresh_cache,
                                         deferred)) {
+        release_result_edf_sessions();
         return false;
     }
-    if (deferred) return true;
+    if (deferred) {
+        release_result_edf_sessions();
+        return true;
+    }
 
-    return finalize_result_prepare(therapy_index);
+    const bool ok = finalize_result_prepare(therapy_index);
+    if (!plot_build_active_) {
+        release_result_edf_sessions();
+    }
+    return ok;
 }
 
 bool ReportManager::cache_source_supported(ReportSourceId source) const {

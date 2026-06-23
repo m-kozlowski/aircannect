@@ -341,7 +341,7 @@ EdfReportDataReadStatus edf_report_read_entry_payload(
         entry_file(session, entry);
     if (!session_file) return EdfReportDataReadStatus::InvalidArgument;
 
-    payload.set_max_size(entry.payload_len_estimate + 4096u);
+    payload.set_max_size(AC_REPORT_MAX_PAYLOAD_BYTES);
     if (entry.payload_len_estimate &&
         !payload.reserve_capacity(entry.payload_len_estimate)) {
         return EdfReportDataReadStatus::PayloadFull;

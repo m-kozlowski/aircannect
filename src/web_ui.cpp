@@ -2073,6 +2073,11 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"no such night\"}");
         return;
     }
+    if (st == ReportManager::PlotRead::Error) {
+        request->send(500, "application/json",
+                      "{\"ok\":false,\"error\":\"report_plot_failed\"}");
+        return;
+    }
     if (st == ReportManager::PlotRead::QueueFull) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"report_queue_full\"}");
