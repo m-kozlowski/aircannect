@@ -190,7 +190,7 @@ public:
 
     bool busy() const {
         return summary_fetch_active_ || cache_fetch_active_ ||
-               plot_build_active_;
+               plot_build_active_ || range_build_active_;
     }
     bool background_work_active() const;
 
@@ -535,7 +535,17 @@ private:
     bool process_plot_series_chunk(const ReportResultChunk &chunk);
     void flush_plot_bucket();
     bool finish_result_plot_build();
-    bool build_range_plot(int64_t from_ms, int64_t to_ms, ReportSpoolBuffer &out);
+    void reset_range_plot_build(bool clear_ready);
+    bool start_range_plot_build(size_t therapy_index,
+                                int64_t from_ms,
+                                int64_t to_ms);
+    void poll_range_plot_build();
+    bool process_range_event_chunk(const ReportResultChunk &chunk);
+    bool open_range_series(const ReportResultStream &stream);
+    bool process_range_series_chunk(const ReportResultChunk &chunk);
+    bool finish_range_series();
+    void finish_range_plot_build();
+    void fail_range_plot_build(const char *message);
 
     bool result_plot_cache_path_for_night(const ReportSummaryRecord &night,
                                           char *path,
@@ -685,6 +695,20 @@ private:
     size_t range_plot_index_ = 0;
     int64_t range_plot_from_ = 0;
     int64_t range_plot_to_ = 0;
+    bool range_build_active_ = false;
+    ReportPlotBuildPhase range_build_phase_ = ReportPlotBuildPhase::Idle;
+    size_t range_build_index_ = 0;
+    int64_t range_build_from_ = 0;
+    int64_t range_build_to_ = 0;
+    std::shared_ptr<ReportSpoolBuffer> range_build_bytes_;
+    ReportSpoolBuffer range_tmp_;
+    ReportSpoolBuffer range_seen_events_;
+    uint32_t range_event_count_ = 0;
+    uint32_t range_chunk_index_ = 0;
+    size_t range_stream_index_ = 0;
+    bool range_series_open_ = false;
+    uint32_t range_series_points_ = 0;
+    bool range_build_ok_ = true;
     void service_range_plot(bool realtime_active);
     uint32_t result_slot_tick_ = 0;
     void publish_result_to_slot();

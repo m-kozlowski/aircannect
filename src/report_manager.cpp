@@ -417,6 +417,8 @@ const char *prefetch_phase_name(ReportManager::PrefetchPhase phase) {
 
 }  // namespace
 
+uint32_t range_blob_series_points(const ReportSpoolBuffer &b);
+
 ReportManager::~ReportManager() {
     Memory::free(records_);
     records_ = nullptr;
@@ -589,7 +591,7 @@ void ReportManager::poll(RpcArbiter &arbiter) {
     }
     if (!realtime_active &&
         !summary_fetch_active_ && !cache_fetch_active_ &&
-        !plot_build_active_ &&
+        !plot_build_active_ && !range_build_active_ &&
         static_cast<int32_t>(millis() - next_trash_cleanup_ms_) >= 0) {
         next_trash_cleanup_ms_ = millis() + 250;
         uint32_t removed = 0;
@@ -601,6 +603,11 @@ void ReportManager::poll(RpcArbiter &arbiter) {
     }
     if (plot_build_active_) {
         poll_result_plot_build();
+        return;
+    }
+    if (range_build_active_) {
+        if (realtime_active) return;
+        poll_range_plot_build();
         return;
     }
     if (!summary_fetch_active_) return;
@@ -2074,7 +2081,9 @@ bool ReportManager::latest_night_coverage(
 }
 
 bool ReportManager::request_night_cache(uint64_t night_start_ms, bool force) {
-    if (summary_fetch_active_ || cache_fetch_active_) return false;
+    if (summary_fetch_active_ || cache_fetch_active_ || range_build_active_) {
+        return false;
+    }
     if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
     ReportSummaryRecord night;
     const bool found = summary_night_by_start_unlocked(night_start_ms, night);
@@ -2364,7 +2373,9 @@ ReportManager::PrefetchSnapshot ReportManager::prefetch_snapshot() const {
 }
 
 bool ReportManager::foreground_busy() const {
-    if (summary_fetch_active_ || plot_build_active_) return true;
+    if (summary_fetch_active_ || plot_build_active_ || range_build_active_) {
+        return true;
+    }
     if (build_queue_lock_) {
         xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
         const bool queued = build_queue_count_ > 0;
@@ -2381,7 +2392,8 @@ bool ReportManager::foreground_busy() const {
 }
 
 bool ReportManager::background_work_active() const {
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
+        range_build_active_) {
         return true;
     }
     if (build_queue_lock_) {
@@ -2495,7 +2507,9 @@ void ReportManager::clear_build_queue(uint64_t night_start_ms, bool all) {
 
 void ReportManager::service_build_queue(bool realtime_active) {
     if (!build_queue_lock_) return;
-    if (summary_fetch_active_ || plot_build_active_) return;
+    if (summary_fetch_active_ || plot_build_active_ || range_build_active_) {
+        return;
+    }
     if (realtime_active) return;
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
     const bool have = build_queue_count_ > 0;
@@ -2727,7 +2741,8 @@ bool ReportManager::clear_cache_range(int64_t start_ms,
 
 bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
     out = {};
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
+        range_build_active_) {
         return false;
     }
 
@@ -2771,7 +2786,8 @@ static void merge_cache_clear_result(ReportCacheClearResult &dst,
 bool ReportManager::clear_cache_night(uint64_t night_start_ms,
                                       ReportCacheClearResult &out) {
     out = {};
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
+        range_build_active_) {
         return false;
     }
 
@@ -2812,7 +2828,8 @@ bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
                                               ReportCacheClearResult &out) {
     out = {};
     if (max_nights == 0) return true;
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
+        range_build_active_) {
         return false;
     }
 
@@ -2866,7 +2883,8 @@ bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
 bool ReportManager::prune_cache_to_latest_nights(size_t keep_latest,
                                                  ReportCacheClearResult &out) {
     out = {};
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_) {
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
+        range_build_active_) {
         return false;
     }
     size_t report_nights = 0;
@@ -2922,6 +2940,7 @@ bool ReportManager::ensure_result_chunks() {
 
 void ReportManager::clear_result_prepare() {
     reset_plot_build();
+    reset_range_plot_build(true);
     if (result_chunks_ && result_chunk_capacity_) {
         memset(result_chunks_, 0,
                result_chunk_capacity_ * sizeof(ReportResultChunk));
@@ -3926,122 +3945,261 @@ bool ReportManager::finish_result_plot_build() {
     return true;
 }
 
-bool ReportManager::build_range_plot(int64_t from_ms, int64_t to_ms,
-                                     ReportSpoolBuffer &out) {
-    if (to_ms <= from_ms) return false;
-    out.clear();
-    out.set_max_size(AC_REPORT_RANGE_PLOT_MAX_BYTES);
-    bool ok = out.reserve_capacity(64 * 1024);
-    ok = ok && bin_put_u32(out, PLOT_BIN_MAGIC);
-    ok = ok && bin_put_u16(out, PLOT_BIN_VERSION);
-    ok = ok && bin_put_u16(out, 0);  // flags
-    ok = ok && bin_put_i64(out, from_ms);  // base_ms
-    if (!ok) return false;
-    // Walk result_chunks_ (the prepared manifest); keep samples in [from,to].
-    // scratch is local (freed on return) so the range leaves no persistent buffer.
-    ReportSpoolBuffer scratch;
-    scratch.set_max_size(768 * 1024);
-    ReportSpoolBuffer seen;
-    seen.set_max_size(16 * 1024);
-    seen.reserve_capacity(2 * 1024);
-    uint32_t ev_count = 0;
-    for (size_t ci = 0; ci < result_status_.chunk_count && ok; ++ci) {
-        const ReportResultChunk &chunk = result_chunks_[ci];
-        if (chunk.kind != ReportStoreChunkKind::Events) continue;
-        if (chunk.end_ms <= from_ms || chunk.start_ms >= to_ms) continue;
-        ReportStoreChunkMeta meta;
-        ReportSpoolBuffer payload;
-        if (!read_result_chunk_payload(chunk, meta, payload)) continue;
-        const size_t wire = report_event_record_wire_size();
-        const size_t n = wire ? payload.size() / wire : 0;
-        for (size_t j = 0; j < n; ++j) {
-            ReportEventRecord e;
-            if (!report_read_event_record(payload.data(), payload.size(), j,
-                                          e)) {
-                continue;
-            }
-            if (e.start_ms < from_ms || e.start_ms >= to_ms) continue;
-            if (report_event_seen(seen, e)) continue;
-            if (!remember_report_event(seen, e)) { ok = false; break; }
-            ok = ok && bin_put_i32(scratch,
-                                   static_cast<int32_t>(e.start_ms - from_ms));
-            ok = ok && bin_put_i32(scratch,
-                                   static_cast<int32_t>(e.duration_ms));
-            ok = ok && bin_put_i32(scratch, static_cast<int32_t>(e.code));
-            ok = ok && bin_put_i32(scratch, static_cast<int32_t>(e.flags));
-            if (!ok) break;
-            ++ev_count;
-        }
-    }
-    ok = ok && bin_put_u32(out, ev_count);
-    if (ok && scratch.size()) {
-        ok = out.append(scratch.data(), scratch.size());
-    }
-    if (!ok) return false;
+void ReportManager::reset_range_plot_build(bool clear_ready) {
+    range_build_active_ = false;
+    range_build_phase_ = ReportPlotBuildPhase::Idle;
+    range_build_index_ = 0;
+    range_build_from_ = 0;
+    range_build_to_ = 0;
+    range_build_bytes_.reset();
+    range_tmp_.clear();
+    range_seen_events_.clear();
+    range_event_count_ = 0;
+    range_chunk_index_ = 0;
+    range_stream_index_ = 0;
+    range_series_open_ = false;
+    range_series_points_ = 0;
+    range_build_ok_ = true;
 
-    // Series: one stream at a time - name, point count, raw in-range points.
-    for (size_t i = 0; i < result_stream_count_; ++i) {
-        const ReportResultStream &st = result_streams_[i];
-        if (st.kind != ReportStoreChunkKind::Series || !st.name || !st.name[0]) {
+    if (!clear_ready) return;
+    if (result_slots_lock_) {
+        xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+        range_req_active_ = false;
+        range_plot_bytes_.reset();
+        range_plot_index_ = 0;
+        range_plot_from_ = 0;
+        range_plot_to_ = 0;
+        xSemaphoreGive(result_slots_lock_);
+    } else {
+        range_req_active_ = false;
+        range_plot_bytes_.reset();
+        range_plot_index_ = 0;
+        range_plot_from_ = 0;
+        range_plot_to_ = 0;
+    }
+}
+
+bool ReportManager::start_range_plot_build(size_t therapy_index,
+                                           int64_t from_ms,
+                                           int64_t to_ms) {
+    reset_range_plot_build(false);
+    if (to_ms <= from_ms) return false;
+
+    range_build_index_ = therapy_index;
+    range_build_from_ = from_ms;
+    range_build_to_ = to_ms;
+    range_build_bytes_ = std::make_shared<ReportSpoolBuffer>();
+    if (!range_build_bytes_) {
+        fail_range_plot_build("range_alloc_failed");
+        return false;
+    }
+
+    ReportSpoolBuffer &out = *range_build_bytes_;
+    out.set_max_size(AC_REPORT_RANGE_PLOT_MAX_BYTES);
+    range_tmp_.set_max_size(768 * 1024);
+    range_seen_events_.set_max_size(16 * 1024);
+
+    range_build_ok_ =
+        out.reserve_capacity(64 * 1024) &&
+        range_seen_events_.reserve_capacity(2 * 1024) &&
+        bin_put_u32(out, PLOT_BIN_MAGIC) &&
+        bin_put_u16(out, PLOT_BIN_VERSION) &&
+        bin_put_u16(out, 0) &&
+        bin_put_i64(out, from_ms);
+    if (!range_build_ok_) {
+        fail_range_plot_build("range_alloc_failed");
+        return false;
+    }
+
+    range_build_active_ = true;
+    range_build_phase_ = ReportPlotBuildPhase::Events;
+    return true;
+}
+
+bool ReportManager::process_range_event_chunk(
+    const ReportResultChunk &chunk) {
+    ReportStoreChunkMeta meta;
+    ReportSpoolBuffer payload;
+    if (!read_result_chunk_payload(chunk, meta, payload)) {
+        fail_range_plot_build("range_event_read_failed");
+        return false;
+    }
+    const size_t wire = report_event_record_wire_size();
+    const size_t count = wire ? payload.size() / wire : 0;
+    for (size_t index = 0; index < count; ++index) {
+        ReportEventRecord event;
+        if (!report_read_event_record(payload.data(),
+                                      payload.size(),
+                                      index,
+                                      event)) {
             continue;
         }
-        const size_t name_len = strlen(st.name);
-        ok = ok && bin_put_u16(out, static_cast<uint16_t>(name_len));
-        ok = ok && out.append(reinterpret_cast<const uint8_t *>(st.name),
-                              name_len);
-        if (!ok) return false;
-        const int32_t scale =
-            (st.source == ReportSourceId::RespiratoryFlow6p25Hz ||
-             st.source == ReportSourceId::Leak0p5Hz) ? 60 : 1;
-        scratch.clear();
-        uint32_t points = 0;
-        for (size_t ci = 0;
-             ci < result_status_.chunk_count &&
-             points < AC_REPORT_RANGE_MAX_POINTS && ok; ++ci) {
-            const ReportResultChunk &chunk = result_chunks_[ci];
-            if (chunk.kind != ReportStoreChunkKind::Series ||
-                chunk.source != st.source ||
-                strcmp(chunk.name ? chunk.name : "", st.name) != 0) {
-                continue;
-            }
-            if (chunk.end_ms <= from_ms || chunk.start_ms >= to_ms) continue;
-            ReportStoreChunkMeta meta;
-            ReportSpoolBuffer payload;
-            if (!read_result_chunk_payload(chunk, meta, payload)) continue;
-            const size_t wire = report_series_sample_wire_size();
-            const size_t n = wire ? payload.size() / wire : 0;
-            for (size_t j = 0; j < n && points < AC_REPORT_RANGE_MAX_POINTS;
-                 ++j) {
-                ReportSeriesSample s;
-                if (!report_read_series_sample(payload.data(), payload.size(),
-                                               j, s)) {
-                    continue;
-                }
-                if (s.timestamp_ms < from_ms || s.timestamp_ms >= to_ms) {
-                    continue;
-                }
-                int64_t v = static_cast<int64_t>(s.value_milli) * scale;
-                if (v > INT32_MAX) v = INT32_MAX;
-                else if (v < INT32_MIN) v = INT32_MIN;
-                ok = ok && bin_put_i32(
-                    scratch, static_cast<int32_t>(s.timestamp_ms - from_ms));
-                ok = ok && bin_put_i32(scratch, static_cast<int32_t>(v));
-                if (!ok) break;
-                ++points;
-            }
+        if (event.start_ms < range_build_from_ ||
+            event.start_ms >= range_build_to_) {
+            continue;
         }
-        ok = ok && bin_put_u32(out, points);
-        if (ok && scratch.size()) {
-            ok = out.append(scratch.data(), scratch.size());
+        if (report_event_seen(range_seen_events_, event)) continue;
+        if (!remember_report_event(range_seen_events_, event)) {
+            fail_range_plot_build("range_event_dedupe_failed");
+            return false;
         }
-        if (!ok) return false;
+        range_build_ok_ &=
+            bin_put_i32(range_tmp_,
+                        static_cast<int32_t>(event.start_ms -
+                                             range_build_from_));
+        range_build_ok_ &=
+            bin_put_i32(range_tmp_, static_cast<int32_t>(event.duration_ms));
+        range_build_ok_ &=
+            bin_put_i32(range_tmp_, static_cast<int32_t>(event.code));
+        range_build_ok_ &=
+            bin_put_i32(range_tmp_, static_cast<int32_t>(event.flags));
+        if (!range_build_ok_) {
+            fail_range_plot_build("range_overflow");
+            return false;
+        }
+        ++range_event_count_;
     }
-    return ok;
+    return true;
+}
+
+bool ReportManager::open_range_series(const ReportResultStream &stream) {
+    if (!range_build_bytes_) return false;
+    const size_t name_len = stream.name ? strlen(stream.name) : 0;
+    range_build_ok_ &=
+        bin_put_u16(*range_build_bytes_, static_cast<uint16_t>(name_len));
+    if (name_len) {
+        range_build_ok_ &= range_build_bytes_->append(
+            reinterpret_cast<const uint8_t *>(stream.name), name_len);
+    }
+    range_tmp_.clear();
+    range_series_points_ = 0;
+    range_series_open_ = true;
+    return range_build_ok_;
+}
+
+bool ReportManager::process_range_series_chunk(
+    const ReportResultChunk &chunk) {
+    ReportStoreChunkMeta meta;
+    ReportSpoolBuffer payload;
+    if (!read_result_chunk_payload(chunk, meta, payload)) {
+        fail_range_plot_build("range_series_read_failed");
+        return false;
+    }
+    const size_t wire = report_series_sample_wire_size();
+    const size_t count = wire ? payload.size() / wire : 0;
+    const int32_t scale =
+        (chunk.source == ReportSourceId::RespiratoryFlow6p25Hz ||
+         chunk.source == ReportSourceId::Leak0p5Hz)
+            ? 60
+            : 1;
+    for (size_t index = 0;
+         index < count && range_series_points_ < AC_REPORT_RANGE_MAX_POINTS;
+         ++index) {
+        ReportSeriesSample sample;
+        if (!report_read_series_sample(payload.data(),
+                                       payload.size(),
+                                       index,
+                                       sample)) {
+            continue;
+        }
+        if (sample.timestamp_ms < range_build_from_ ||
+            sample.timestamp_ms >= range_build_to_) {
+            continue;
+        }
+        int64_t value = static_cast<int64_t>(sample.value_milli) * scale;
+        if (value > INT32_MAX) value = INT32_MAX;
+        else if (value < INT32_MIN) value = INT32_MIN;
+        range_build_ok_ &=
+            bin_put_i32(range_tmp_,
+                        static_cast<int32_t>(sample.timestamp_ms -
+                                             range_build_from_));
+        range_build_ok_ &=
+            bin_put_i32(range_tmp_, static_cast<int32_t>(value));
+        if (!range_build_ok_) {
+            fail_range_plot_build("range_overflow");
+            return false;
+        }
+        ++range_series_points_;
+    }
+    if (range_series_points_ >= AC_REPORT_RANGE_MAX_POINTS) {
+        range_chunk_index_ = result_status_.chunk_count;
+    }
+    return true;
+}
+
+bool ReportManager::finish_range_series() {
+    if (!range_build_bytes_ || !range_series_open_) return false;
+    range_build_ok_ &= bin_put_u32(*range_build_bytes_, range_series_points_);
+    if (range_tmp_.size()) {
+        range_build_ok_ &=
+            range_build_bytes_->append(range_tmp_.data(), range_tmp_.size());
+    }
+    range_tmp_.clear();
+    range_series_open_ = false;
+    range_series_points_ = 0;
+    if (!range_build_ok_) {
+        fail_range_plot_build("range_overflow");
+        return false;
+    }
+    return true;
+}
+
+void ReportManager::finish_range_plot_build() {
+    if (!range_build_bytes_) {
+        fail_range_plot_build("range_bad_state");
+        return;
+    }
+    if (range_blob_series_points(*range_build_bytes_) == 0) {
+        if (result_slots_lock_) {
+            xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+            if (range_req_active_ && range_req_index_ == range_build_index_ &&
+                range_req_from_ == range_build_from_ &&
+                range_req_to_ == range_build_to_) {
+                range_req_active_ = false;
+            }
+            xSemaphoreGive(result_slots_lock_);
+        }
+        reset_range_plot_build(false);
+        return;
+    }
+
+    if (result_slots_lock_) {
+        xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+        if (range_req_active_ && range_req_index_ == range_build_index_ &&
+            range_req_from_ == range_build_from_ &&
+            range_req_to_ == range_build_to_) {
+            range_plot_bytes_ = range_build_bytes_;
+            range_plot_index_ = range_build_index_;
+            range_plot_from_ = range_build_from_;
+            range_plot_to_ = range_build_to_;
+            range_req_active_ = false;
+        }
+        xSemaphoreGive(result_slots_lock_);
+    }
+    reset_range_plot_build(false);
+}
+
+void ReportManager::fail_range_plot_build(const char *message) {
+    Log::logf(CAT_REPORT,
+              LOG_WARN,
+              "Range plot failed index=%lu error=%s\n",
+              static_cast<unsigned long>(range_build_index_),
+              message ? message : "range_failed");
+    if (result_slots_lock_) {
+        xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+        if (range_req_active_ && range_req_index_ == range_build_index_ &&
+            range_req_from_ == range_build_from_ &&
+            range_req_to_ == range_build_to_) {
+            range_req_active_ = false;
+        }
+        xSemaphoreGive(result_slots_lock_);
+    }
+    reset_range_plot_build(false);
 }
 
 // Series-point count from the actual blob bytes (0 if malformed). Gates caching
 // and serving so a zero-series/truncated blob is never stored or sent.
-static uint32_t range_blob_series_points(const ReportSpoolBuffer &b) {
+uint32_t range_blob_series_points(const ReportSpoolBuffer &b) {
     const uint8_t *d = reinterpret_cast<const uint8_t *>(b.data());
     const size_t n = b.size();
     if (!d || n < 20) return 0;
@@ -4125,27 +4283,123 @@ void ReportManager::service_range_plot(bool realtime_active) {
         }
         return;
     }
-    std::shared_ptr<ReportSpoolBuffer> bytes =
-        std::make_shared<ReportSpoolBuffer>();
-    const bool ok = bytes && build_range_plot(from_ms, to_ms, *bytes);
-    const bool has_points = ok && range_blob_series_points(*bytes) > 0;
-    xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
-    if (has_points) {
-        range_plot_bytes_ = bytes;
-        range_plot_index_ = index;
-        range_plot_from_ = from_ms;
-        range_plot_to_ = to_ms;
-    } else if (range_plot_index_ == index && range_plot_from_ == from_ms &&
-               range_plot_to_ == to_ms) {
-        // Zero-series build (wrong manifest): never cache, and drop any stale
-        // empty for this window so a later poll rebuilds.
-        range_plot_bytes_.reset();
+
+    if (range_build_active_) {
+        if (range_build_index_ == index &&
+            range_build_from_ == from_ms &&
+            range_build_to_ == to_ms) {
+            return;
+        }
+        reset_range_plot_build(false);
     }
-    if (range_req_active_ && range_req_index_ == index &&
-        range_req_from_ == from_ms && range_req_to_ == to_ms) {
-        range_req_active_ = false;
+    if (!start_range_plot_build(index, from_ms, to_ms)) {
+        xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+        if (range_req_active_ && range_req_index_ == index &&
+            range_req_from_ == from_ms && range_req_to_ == to_ms) {
+            range_req_active_ = false;
+        }
+        xSemaphoreGive(result_slots_lock_);
     }
-    xSemaphoreGive(result_slots_lock_);
+}
+
+void ReportManager::poll_range_plot_build() {
+    if (!range_build_active_) return;
+    constexpr size_t RANGE_BYTE_BUDGET = 64 * 1024;
+    constexpr size_t RANGE_CHUNK_CAP = 8;
+    size_t bytes = 0;
+    size_t reads = 0;
+
+    while (range_build_active_ && bytes < RANGE_BYTE_BUDGET &&
+           reads < RANGE_CHUNK_CAP) {
+        if (range_build_phase_ == ReportPlotBuildPhase::Events) {
+            bool processed = false;
+            while (range_chunk_index_ < result_status_.chunk_count) {
+                const ReportResultChunk &chunk =
+                    result_chunks_[range_chunk_index_++];
+                if (chunk.kind != ReportStoreChunkKind::Events) continue;
+                if (chunk.end_ms <= range_build_from_ ||
+                    chunk.start_ms >= range_build_to_) {
+                    continue;
+                }
+                if (!process_range_event_chunk(chunk)) return;
+                bytes += chunk.payload_len;
+                reads++;
+                processed = true;
+                break;
+            }
+            if (processed) continue;
+            if (!range_build_bytes_) {
+                fail_range_plot_build("range_bad_state");
+                return;
+            }
+            range_build_ok_ &=
+                bin_put_u32(*range_build_bytes_, range_event_count_);
+            if (range_tmp_.size()) {
+                range_build_ok_ &=
+                    range_build_bytes_->append(range_tmp_.data(),
+                                               range_tmp_.size());
+            }
+            range_tmp_.clear();
+            if (!range_build_ok_) {
+                fail_range_plot_build("range_overflow");
+                return;
+            }
+            range_build_phase_ = ReportPlotBuildPhase::Series;
+            range_chunk_index_ = 0;
+            range_stream_index_ = 0;
+            continue;
+        }
+
+        if (range_build_phase_ == ReportPlotBuildPhase::Series) {
+            if (range_stream_index_ >= result_stream_count_) {
+                finish_range_plot_build();
+                return;
+            }
+
+            const ReportResultStream &stream =
+                result_streams_[range_stream_index_];
+            if (stream.kind != ReportStoreChunkKind::Series ||
+                !stream.name || !stream.name[0] ||
+                stream.chunk_count == 0) {
+                range_stream_index_++;
+                range_chunk_index_ = 0;
+                continue;
+            }
+            if (!range_series_open_ && !open_range_series(stream)) {
+                fail_range_plot_build("range_series_open_failed");
+                return;
+            }
+
+            bool processed = false;
+            while (range_chunk_index_ < result_status_.chunk_count) {
+                const ReportResultChunk &chunk =
+                    result_chunks_[range_chunk_index_++];
+                if (chunk.kind != ReportStoreChunkKind::Series ||
+                    chunk.source != stream.source ||
+                    strcmp(chunk.name ? chunk.name : "", stream.name) != 0) {
+                    continue;
+                }
+                if (chunk.end_ms <= range_build_from_ ||
+                    chunk.start_ms >= range_build_to_) {
+                    continue;
+                }
+                if (!process_range_series_chunk(chunk)) return;
+                bytes += chunk.payload_len;
+                reads++;
+                processed = true;
+                break;
+            }
+            if (processed) continue;
+
+            if (!finish_range_series()) return;
+            range_stream_index_++;
+            range_chunk_index_ = 0;
+            continue;
+        }
+
+        fail_range_plot_build("range_bad_state");
+        return;
+    }
 }
 
 void ReportManager::poll_result_plot_build() {
