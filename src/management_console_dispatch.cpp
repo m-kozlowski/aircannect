@@ -102,6 +102,21 @@ void print_web_memory_detail(Print &out, WebUI *web_ui) {
     out.println();
 }
 
+bool report_store_integrity_allowed(const ConsoleContext &ctx,
+                                    const char *&reason) {
+    const SessionStatus &session = ctx.session_manager.status();
+    if (session.state == SessionState::Active) {
+        reason = "therapy_active";
+        return false;
+    }
+    if (ctx.arbiter.stream_activity_active()) {
+        reason = "stream_active";
+        return false;
+    }
+    reason = "";
+    return true;
+}
+
 void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
     const StreamBroker &stream = ctx.arbiter.stream_broker();
     const size_t frame_pool_slots = stream.frame_pool_capacity();
@@ -1019,6 +1034,13 @@ void ManagementConsole::handle_report_command(Print &out,
         return;
     }
     if (rest == "store check" || rest == "store repair") {
+        const char *reason = nullptr;
+        if (!report_store_integrity_allowed(ctx, reason)) {
+            out.print("[REPORT] store integrity scan refused: ");
+            out.println(reason ? reason : "realtime_active");
+            out.println("[REPORT] retry when therapy and live streams are idle");
+            return;
+        }
         const bool repair = rest == "store repair";
         ReportStoreIntegrityResult result;
         ReportStore::check_integrity(repair, result);
