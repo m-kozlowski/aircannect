@@ -11,7 +11,6 @@
 #include "edf_report_catalog_job.h"
 #include "edf_report_data_plan.h"
 #include "edf_report_provider.h"
-#include "edf_report_provider_token.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
@@ -39,9 +38,8 @@ struct ResultChunkContext {
     ReportSignalId signal = ReportSignalId::Flow;
     const char *name = nullptr;
     bool required = false;
-    size_t stream_index = 0;
+    size_t stream_index = SIZE_MAX;
     uint32_t entries = 0;
-    uint32_t scored_event_entries = 0;
 };
 
 struct SummaryRecordBufferContext {
@@ -3047,31 +3045,27 @@ bool ReportManager::collect_result_chunk(void *context,
         }
     }
 
-    if (ctx->stream_index == SIZE_MAX) {
+    const bool fixed_stream =
+        ctx->name && ctx->name[0] && strcmp(ctx->name, info.name) == 0;
+    size_t stream_index = ctx->stream_index;
+    if (stream_index == SIZE_MAX || !fixed_stream) {
         if (!manager->add_result_stream(info.kind,
                                         info.source,
                                         info.signal,
                                         info.name,
                                         ctx->required,
                                         true,
-                                        ctx->stream_index)) {
+                                        stream_index)) {
             return false;
         }
     }
     if (!manager->add_provider_result_chunk(info,
                                             ctx->required,
-                                            ctx->stream_index)) {
+                                            stream_index)) {
         return false;
     }
+    if (fixed_stream) ctx->stream_index = stream_index;
     ctx->entries++;
-    if (info.kind == ReportStoreChunkKind::Events &&
-        info.ref.provider == ReportProviderId::Edf) {
-        EdfReportProviderToken token;
-        if (edf_report_provider_unpack_token(info.ref, token) &&
-            token.file_kind == EdfInventoryFileKind::Eve) {
-            ctx->scored_event_entries++;
-        }
-    }
     return true;
 }
 
@@ -3333,11 +3327,31 @@ bool ReportManager::find_edf_sessions_for_night(
 bool ReportManager::add_edf_events_for_range(int64_t range_start_ms,
                                              int64_t range_end_ms,
                                              bool required,
-                                             uint32_t &scored_entries) {
-    scored_entries = 0;
+                                             uint32_t &scored_sources) {
+    scored_sources = 0;
     if (!ensure_result_chunks() || !result_edf_sessions_ ||
         result_edf_session_count_ == 0) {
         return true;
+    }
+
+    for (size_t i = 0; i < result_edf_session_count_; ++i) {
+        if (edf_report_session_has_file(result_edf_sessions_[i],
+                                        EdfInventoryFileKind::Eve)) {
+            scored_sources++;
+        }
+    }
+    if (scored_sources > 0) {
+        size_t stream_index = SIZE_MAX;
+        if (!add_result_stream(
+                ReportStoreChunkKind::Events,
+                ReportSourceId::RespiratoryEvents,
+                ReportSignalId::Flow,
+                report_source_spool_type(ReportSourceId::RespiratoryEvents),
+                required,
+                true,
+                stream_index)) {
+            return false;
+        }
     }
 
     ResultChunkContext ctx;
@@ -3355,7 +3369,6 @@ bool ReportManager::add_edf_events_for_range(int64_t range_start_ms,
                                                     &ctx)) {
         return false;
     }
-    scored_entries = ctx.scored_event_entries;
     return true;
 }
 

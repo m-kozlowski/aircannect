@@ -135,17 +135,12 @@ bool emit_numeric_entries(const EdfReportSessionFileDescriptor &file,
 
 struct PlanCountContext {
     uint32_t entries = 0;
-    uint32_t scored_entries = 0;
 };
 
 bool count_plan_entry(void *context, const EdfReportDataPlanEntry &entry) {
     PlanCountContext *ctx = static_cast<PlanCountContext *>(context);
     if (!ctx || !entry.name || !entry.name[0]) return false;
     ctx->entries++;
-    if (entry.kind == EdfReportDataKind::Events &&
-        entry.file_kind == EdfInventoryFileKind::Eve) {
-        ctx->scored_entries++;
-    }
     return true;
 }
 
@@ -180,6 +175,12 @@ bool emit_event_file_entry(const EdfReportSessionDescriptor &session,
 }
 
 }  // namespace
+
+bool edf_report_session_has_file(const EdfReportSessionDescriptor &session,
+                                 EdfInventoryFileKind kind) {
+    uint8_t slot = 0;
+    return session_file(session, kind, slot) != nullptr;
+}
 
 bool edf_report_plan_events(const EdfReportSessionDescriptor &session,
                             int64_t range_start_ms,
@@ -243,6 +244,10 @@ bool edf_report_plan_covers_report(
 
     EdfReportDataCoverage coverage;
     for (size_t i = 0; i < session_count; ++i) {
+        if (edf_report_session_has_file(sessions[i],
+                                        EdfInventoryFileKind::Eve)) {
+            coverage.scored_event_sources++;
+        }
         PlanCountContext ctx;
         if (!edf_report_plan_events(sessions[i],
                                     range_start_ms,
@@ -252,9 +257,8 @@ bool edf_report_plan_covers_report(
             return false;
         }
         coverage.event_entries += ctx.entries;
-        coverage.scored_event_entries += ctx.scored_entries;
     }
-    if (coverage.scored_event_entries == 0) {
+    if (coverage.scored_event_sources == 0) {
         if (coverage_out) *coverage_out = coverage;
         return false;
     }

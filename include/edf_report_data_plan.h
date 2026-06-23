@@ -37,13 +37,16 @@ struct EdfReportDataPlanEntry {
 
 struct EdfReportDataCoverage {
     uint32_t event_entries = 0;
-    uint32_t scored_event_entries = 0;
+    uint32_t scored_event_sources = 0;
     uint32_t signals_required = 0;
     uint32_t signals_covered = 0;
 };
 
 using EdfReportDataPlanCallback =
     bool (*)(void *context, const EdfReportDataPlanEntry &entry);
+
+bool edf_report_session_has_file(const EdfReportSessionDescriptor &session,
+                                 EdfInventoryFileKind kind);
 
 bool edf_report_plan_events(const EdfReportSessionDescriptor &session,
                             int64_t range_start_ms,
