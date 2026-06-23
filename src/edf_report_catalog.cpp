@@ -76,6 +76,24 @@ bool report_kind(EdfInventoryFileKind kind) {
            kind == EdfInventoryFileKind::Csl;
 }
 
+size_t session_file_slot(EdfInventoryFileKind kind) {
+    switch (kind) {
+        case EdfInventoryFileKind::Brp: return 0;
+        case EdfInventoryFileKind::Pld: return 1;
+        case EdfInventoryFileKind::Sa2: return 2;
+        case EdfInventoryFileKind::Eve: return 3;
+        case EdfInventoryFileKind::Csl: return 4;
+        default:
+            return AC_EDF_REPORT_SESSION_FILE_MAX;
+    }
+}
+
+uint32_t signal_bit(ReportSignalId signal) {
+    const uint8_t index = static_cast<uint8_t>(signal);
+    if (index >= 32) return 0;
+    return 1u << index;
+}
+
 void copy_signal_descriptor(const EdfSignalHeader &src,
                             EdfReportSignalDescriptor &dst) {
     copy_cstr(dst.label, sizeof(dst.label), src.label);
@@ -94,6 +112,7 @@ const char *edf_report_file_status_name(EdfReportFileStatus status) {
         case EdfReportFileStatus::Ok: return "ok";
         case EdfReportFileStatus::UnsupportedKind: return "unsupported_kind";
         case EdfReportFileStatus::InventoryError: return "inventory_error";
+        case EdfReportFileStatus::FileTooLarge: return "file_too_large";
         case EdfReportFileStatus::TooManySignals: return "too_many_signals";
         case EdfReportFileStatus::SignalHeaderError:
             return "signal_header_error";
@@ -106,6 +125,12 @@ bool edf_report_file_kind_supported(EdfInventoryFileKind kind) {
     return report_kind(kind);
 }
 
+uint32_t edf_report_file_kind_mask(EdfInventoryFileKind kind) {
+    const size_t slot = session_file_slot(kind);
+    if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return 0;
+    return 1u << slot;
+}
+
 EdfReportFileStatus edf_report_describe_file(
     const char *path,
     const uint8_t *header,
@@ -113,9 +138,14 @@ EdfReportFileStatus edf_report_describe_file(
     uint64_t file_size,
     time_t last_write,
     EdfReportFileDescriptor &out) {
-    out = {};
+    out = EdfReportFileDescriptor();
     out.file_size = file_size;
     out.last_write = last_write;
+    copy_cstr(out.path, sizeof(out.path), path);
+    if (file_size > static_cast<uint64_t>(SIZE_MAX)) {
+        out.status = EdfReportFileStatus::FileTooLarge;
+        return out.status;
+    }
 
     EdfInventoryEntry inventory;
     const EdfInventoryStatus inventory_status =
@@ -167,7 +197,7 @@ const EdfReportSignalDescriptor *edf_report_find_signal(
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out) {
-    out = {};
+    out = EdfReportSignalMapping();
     if (!label || !label[0]) return false;
     for (const SignalMapRow &row : REPORT_SIGNAL_MAP) {
         if (row.kind != kind || strcmp(row.label, label) != 0) continue;
@@ -177,6 +207,88 @@ bool edf_report_signal_mapping(EdfInventoryFileKind kind,
         return true;
     }
     return false;
+}
+
+void edf_report_session_init(EdfReportSessionDescriptor &session) {
+    session = EdfReportSessionDescriptor();
+}
+
+bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
+                                 const EdfReportFileDescriptor &file) {
+    if (file.status != EdfReportFileStatus::Ok ||
+        !report_kind(file.inventory.kind)) {
+        return false;
+    }
+    const uint32_t file_mask = edf_report_file_kind_mask(file.inventory.kind);
+    if (file_mask == 0 || (session.file_mask & file_mask) != 0) {
+        return false;
+    }
+    if (file.file_size > UINT64_MAX - session.total_size) {
+        return false;
+    }
+    if (session.file_count == 0) {
+        copy_cstr(session.sleep_day,
+                  sizeof(session.sleep_day),
+                  file.inventory.sleep_day);
+        copy_cstr(session.session_stamp,
+                  sizeof(session.session_stamp),
+                  file.inventory.session_stamp);
+    } else if (strcmp(session.sleep_day, file.inventory.sleep_day) != 0 ||
+               strcmp(session.session_stamp,
+                      file.inventory.session_stamp) != 0) {
+        return false;
+    }
+
+    const size_t slot = session_file_slot(file.inventory.kind);
+    if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return false;
+    EdfReportSessionFileDescriptor &dst = session.files[slot];
+    dst = EdfReportSessionFileDescriptor();
+    dst.kind = file.inventory.kind;
+    copy_cstr(dst.path, sizeof(dst.path), file.path);
+    dst.file_size = file.file_size;
+    dst.last_write = file.last_write;
+    dst.complete_records = file.inventory.complete_records_from_size;
+    dst.signal_count = file.signal_count;
+
+    session.file_mask |= file_mask;
+    session.file_count++;
+    session.total_size += file.file_size;
+    if (file.last_write > session.latest_write) {
+        session.latest_write = file.last_write;
+    }
+    session.warnings |= file.inventory.warnings;
+
+    for (uint32_t i = 0; i < file.signal_count; ++i) {
+        EdfReportSignalMapping mapping;
+        if (!edf_report_signal_mapping(file.inventory.kind,
+                                       file.signals[i].label,
+                                       mapping)) {
+            continue;
+        }
+        const uint32_t bit = signal_bit(mapping.signal);
+        if (bit == 0) continue;
+        if (mapping.primary) {
+            session.primary_signal_mask |= bit;
+        } else {
+            session.fallback_signal_mask |= bit;
+        }
+    }
+    return true;
+}
+
+bool edf_report_session_has_primary_signal(
+    const EdfReportSessionDescriptor &session,
+    ReportSignalId signal) {
+    const uint32_t bit = signal_bit(signal);
+    return bit != 0 && (session.primary_signal_mask & bit) != 0;
+}
+
+bool edf_report_session_has_signal(const EdfReportSessionDescriptor &session,
+                                   ReportSignalId signal) {
+    const uint32_t bit = signal_bit(signal);
+    if (bit == 0) return false;
+    return ((session.primary_signal_mask | session.fallback_signal_mask) &
+            bit) != 0;
 }
 
 }  // namespace aircannect
