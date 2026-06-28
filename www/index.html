@@ -1452,13 +1452,12 @@
                   <div class="np-grid" id="reportCalGrid"></div>
                 </div>
               </div>
-              <button class="btn" onclick="refreshReportSummary(true)">
-                Refresh Summary
-              </button>
-              <button class="btn" onclick="loadSelectedReportNight(true, true)">
-                Reload Night
-              </button>
-              <button class="btn" onclick="resetReportZoom()">
+              <button class="btn np-arrow" id="reportZoomOut"
+                      title="Zoom out" onclick="zoomReportWindow(2)">-</button>
+              <button class="btn np-arrow" id="reportZoomIn"
+                      title="Zoom in" onclick="zoomReportWindow(0.5)">+</button>
+              <button class="btn" id="reportZoomReset"
+                      onclick="resetReportZoom()">
                 Reset Zoom
               </button>
             </div>
@@ -3350,6 +3349,66 @@
     }
     document.addEventListener("mouseup", reportFinishDrag);
 
+    function validReportRange(range) {
+      return range && Number.isFinite(range.start) && Number.isFinite(range.end) &&
+        range.end - range.start > 60000;
+    }
+
+    function updateReportZoomControls() {
+      const haveRange = validReportRange(reportRange());
+      const zoomOut = document.getElementById("reportZoomOut");
+      const zoomIn = document.getElementById("reportZoomIn");
+      const zoomReset = document.getElementById("reportZoomReset");
+      if (zoomOut) zoomOut.disabled = !reportZoom;
+      if (zoomReset) zoomReset.disabled = !reportZoom;
+      if (zoomIn) zoomIn.disabled = !haveRange;
+    }
+
+    function setReportZoomRange(start, end) {
+      const bounds = reportRange();
+      if (!validReportRange(bounds)) return false;
+      let width = Math.max(60000, end - start);
+      const boundsWidth = bounds.end - bounds.start;
+      if (width >= boundsWidth - 1000) {
+        resetReportZoom();
+        return true;
+      }
+      width = Math.min(width, boundsWidth);
+      let center = start + (end - start) / 2;
+      let lo = center - width / 2;
+      let hi = center + width / 2;
+      if (lo < bounds.start) {
+        hi += bounds.start - lo;
+        lo = bounds.start;
+      }
+      if (hi > bounds.end) {
+        lo -= hi - bounds.end;
+        hi = bounds.end;
+      }
+      lo = Math.max(bounds.start, lo);
+      hi = Math.min(bounds.end, hi);
+      if (hi - lo < 60000) return false;
+      reportZoom = {start: lo, end: hi};
+      renderReportCharts();
+      return true;
+    }
+
+    function zoomReportWindow(scale) {
+      const base = reportZoom || reportRange();
+      if (!validReportRange(base)) return;
+      if (!reportZoom && scale > 1) return;
+      const center = base.start + (base.end - base.start) / 2;
+      const width = (base.end - base.start) * scale;
+      setReportZoomRange(center - width / 2, center + width / 2);
+    }
+
+    function panReportZoom(direction) {
+      if (!reportZoom || !direction) return;
+      const width = reportZoom.end - reportZoom.start;
+      const shift = width * 0.25 * direction;
+      setReportZoomRange(reportZoom.start + shift, reportZoom.end + shift);
+    }
+
     function resetReportZoom() {
       if (!reportZoom) return;
       reportZoom = null;
@@ -3359,6 +3418,23 @@
       reportEvents = reportBaseEvents;
       renderReportCharts();
     }
+
+    document.addEventListener("keydown", (ev) => {
+      if (!reportTabActive() || !reportZoom) return;
+      const tag = ev.target && ev.target.tagName ?
+        ev.target.tagName.toLowerCase() : "";
+      if (tag === "input" || tag === "textarea" || tag === "select" ||
+          (ev.target && ev.target.isContentEditable)) {
+        return;
+      }
+      if (ev.key === "ArrowLeft") {
+        ev.preventDefault();
+        panReportZoom(-1);
+      } else if (ev.key === "ArrowRight") {
+        ev.preventDefault();
+        panReportZoom(1);
+      }
+    });
 
     function attachReportChartPointer(canvas) {
       canvas.addEventListener("mousemove", (ev) => {
@@ -3521,6 +3597,7 @@
             "Backfilling this night - charts will appear once cached.";
           container.appendChild(note);
         }
+        updateReportZoomControls();
         return;
       }
       if (reportResult.state === "partial") {
@@ -3531,7 +3608,10 @@
         container.appendChild(pnote);
       }
       const range = reportZoom || reportRange();
-      if (!(range.end > range.start)) return;
+      if (!(range.end > range.start)) {
+        updateReportZoomControls();
+        return;
+      }
       if (reportZoom) ensureReportRangeLoaded(reportZoom.start, reportZoom.end);
       const zoomAwaitingRange = !!reportZoom && !currentReportRangeReady();
       const sessionRanges = reportVisibleSessionRanges();
@@ -3641,6 +3721,7 @@
         observeReportCanvas(canvas);
       });
       drawReportItems();
+      updateReportZoomControls();
     }
 
     function renderReportSummary() {
@@ -3679,6 +3760,7 @@
       renderReportEventCounts(displayable ? reportResult : null);
       renderReportSessions(reportResult && reportResult.sessions ?
         reportResult.sessions : selected ? selected.sessions : []);
+      updateReportZoomControls();
 
       if (state === "fetching") {
         const spool = reportSummary && reportSummary.spool ? reportSummary.spool : {};
