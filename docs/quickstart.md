@@ -45,13 +45,11 @@ ssid_0=your-network
 pass_0=your-password
 ```
 
-Multiple profiles use `ssid_0` / `pass_0` through `ssid_3` / `pass_3`. Any
-other config field (hostname, country, timezone, HTTP auth, etc.) can be
-seeded the same way or left for the web UI to set later. The timezone
-specifically takes a POSIX TZ string like `CET-1CEST,M3.5.0,M10.5.0/3` -
-the web UI Config tab has user-friendly picker and auto-detect so
-you do not need to write one by hand. Full key reference:
-[configuration.md](configuration.md).
+Multiple profiles use `ssid_0` / `pass_0` through `ssid_3` / `pass_3`.
+Common boot settings such as `host`, `wifi_ctry`, `tz`, `http_user`,
+`http_pass`, `syslog_en`, `oxi_en`, `smb_ep`, and `shq_id` can also be seeded
+this way. `config.txt` uses exact NVS keys; no aliases are accepted.
+Full key reference: [configuration.md](configuration.md).
 
 After the first STA profile is stored, SoftAP stays as a recovery fallback.
 Set `softap_mode=forced` to keep it up alongside STA.
