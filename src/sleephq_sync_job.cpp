@@ -12,6 +12,7 @@
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "storage_export_plan.h"
+#include "storage_export_state.h"
 #include "storage_manager.h"
 #include "string_util.h"
 
@@ -1040,47 +1041,8 @@ bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     return true;
 }
 
-bool SleepHqSyncJob::local_ensure_dir_locked(const char *path) {
-    if (!path || path[0] != '/') return false;
-    char current[AC_STORAGE_PATH_MAX] = {};
-    size_t len = 0;
-    current[len++] = '/';
-    current[len] = '\0';
-    const char *segment = path + 1;
-    for (const char *p = segment;; ++p) {
-        if (*p != '/' && *p != '\0') continue;
-        const size_t seg_len = static_cast<size_t>(p - segment);
-        if (seg_len > 0) {
-            if (len > 1) current[len++] = '/';
-            if (len + seg_len >= sizeof(current)) return false;
-            memcpy(current + len, segment, seg_len);
-            len += seg_len;
-            current[len] = '\0';
-            if (!Storage::ensure_dir(current)) return false;
-        }
-        if (*p == '\0') break;
-        segment = p + 1;
-    }
-    return true;
-}
-
 bool SleepHqSyncJob::ensure_state_dir_locked() {
-    return state_dir_[0] && local_ensure_dir_locked(state_dir_);
-}
-
-void SleepHqSyncJob::note_state_written_locked(const char *state_path,
-                                               const char *path,
-                                               uint64_t size,
-                                               uint64_t mtime,
-                                               StateWriteMode mode) {
-    state_cache_.note_written(
-        state_path,
-        path,
-        size,
-        mtime,
-        mode == StateWriteMode::Append
-            ? StorageExportStateWriteMode::Append
-            : StorageExportStateWriteMode::Replace);
+    return storage_export_ensure_state_dir(state_dir_);
 }
 
 bool SleepHqSyncJob::build_inflight_path_locked(char *out,
@@ -1106,42 +1068,6 @@ bool SleepHqSyncJob::staged_contains_locked(const char *path,
     return false;
 }
 
-bool SleepHqSyncJob::datalog_day_done_path_locked(const char *day,
-                                                  char *out,
-                                                  size_t out_size) const {
-    return storage_export_build_done_path(state_dir_, day, out, out_size);
-}
-
-bool SleepHqSyncJob::datalog_day_done_locked(const char *day) const {
-    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
-    if (!datalog_day_done_path_locked(day, path, sizeof(path))) return false;
-    const StorageLocalNodeInfo info = storage_stat_local_node(path);
-    return info.exists && !info.is_dir;
-}
-
-bool SleepHqSyncJob::mark_datalog_day_done_locked(const char *day) {
-    char path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
-    if (!datalog_day_done_path_locked(day, path, sizeof(path))) return false;
-    if (!ensure_state_dir_locked()) return false;
-    {
-        Storage::Guard guard;
-        File file = Storage::open(path, "w");
-        if (!file) return false;
-        const size_t written = file.printf("done\n");
-        file.close();
-        return written != 0;
-    }
-}
-
-bool SleepHqSyncJob::datalog_day_is_finalized_locked(const char *day) const {
-    if (!day || strlen(day) != 8 ||
-        !storage_export_all_digits(day, 8) ||
-        !latest_datalog_day_[0]) {
-        return false;
-    }
-    return strcmp(day, latest_datalog_day_) < 0;
-}
-
 void SleepHqSyncJob::refresh_latest_datalog_day_name_locked() {
     latest_datalog_day_[0] = '\0';
     char path[AC_STORAGE_PATH_MAX] = {};
@@ -1160,14 +1086,15 @@ void SleepHqSyncJob::refresh_latest_datalog_day_name_locked() {
 
 void SleepHqSyncJob::note_completed_datalog_day_locked(const char *day) {
     pending_done_day_[0] = '\0';
-    if (!datalog_day_is_finalized_locked(day)) return;
-    if (datalog_day_done_locked(day)) return;
+    if (!storage_export_datalog_day_finalized(day, latest_datalog_day_)) return;
+    if (storage_export_datalog_day_done(state_dir_, day)) return;
     copy_cstr(pending_done_day_, sizeof(pending_done_day_), day);
 }
 
 void SleepHqSyncJob::maybe_mark_completed_datalog_day_locked() {
     if (!pending_done_day_[0]) return;
-    if (!mark_datalog_day_done_locked(pending_done_day_)) {
+    if (!storage_export_mark_datalog_day_done(state_dir_,
+                                              pending_done_day_)) {
         Log::logf(CAT_SLEEPHQ, LOG_WARN,
                   "DATALOG done marker write failed day=%s\n",
                   pending_done_day_);
@@ -1384,62 +1311,33 @@ bool SleepHqSyncJob::load_inflight_locked(InflightPhase &phase_out) {
     return true;
 }
 
-bool SleepHqSyncJob::append_state_locked(const StagedFile &file_info) {
-    if (!ensure_state_dir_locked()) return false;
-    File file;
-    {
-        Storage::Guard guard;
-        file = Storage::open(file_info.state_path, "a");
-        if (!file) return false;
-        file.printf("%llu\t%llu\t%s\t%lu\t%s\n",
-                    static_cast<unsigned long long>(file_info.size),
-                    static_cast<unsigned long long>(file_info.mtime),
-                    file_info.content_hash,
-                    static_cast<unsigned long>(file_info.import_id),
-                    file_info.path);
-        file.close();
-    }
-    return true;
-}
-
-bool SleepHqSyncJob::replace_state_locked(const StagedFile &file_info) {
-    if (!ensure_state_dir_locked()) return false;
-    File file;
-    {
-        Storage::Guard guard;
-        file = Storage::open(file_info.state_path, "w");
-        if (!file) return false;
-        const size_t written =
-            file.printf("%llu\t%llu\t%s\t%lu\t%s\n",
-                        static_cast<unsigned long long>(file_info.size),
-                        static_cast<unsigned long long>(file_info.mtime),
-                        file_info.content_hash,
-                        static_cast<unsigned long>(file_info.import_id),
-                        file_info.path);
-        file.close();
-        if (written == 0) return false;
-    }
-    return true;
-}
-
 bool SleepHqSyncJob::write_state_locked(const StagedFile &file_info) {
-    if (state_cache_.contains(file_info.state_path,
-                              file_info.path,
-                              file_info.size,
-                              file_info.mtime)) {
-        return true;
+    char line[AC_STORAGE_PATH_MAX + AC_SLEEPHQ_CONTENT_HASH_MAX + 96] = {};
+    const int written =
+        snprintf(line,
+                 sizeof(line),
+                 "%llu\t%llu\t%s\t%lu\t%s",
+                 static_cast<unsigned long long>(file_info.size),
+                 static_cast<unsigned long long>(file_info.mtime),
+                 file_info.content_hash,
+                 static_cast<unsigned long>(file_info.import_id),
+                 file_info.path);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(line)) {
+        return false;
     }
-    const bool ok = file_info.state_write_mode == StateWriteMode::Replace
-        ? replace_state_locked(file_info)
-        : append_state_locked(file_info);
-    if (ok) {
-        note_state_written_locked(file_info.state_path,
-                                  file_info.path,
-                                  file_info.size,
-                                  file_info.mtime,
-                                  file_info.state_write_mode);
-    }
-    return ok;
+    const StorageExportStateWriteMode mode =
+        file_info.state_write_mode == StateWriteMode::Append
+            ? StorageExportStateWriteMode::Append
+            : StorageExportStateWriteMode::Replace;
+    return storage_export_write_state_line(&state_cache_,
+                                           state_dir_,
+                                           file_info.state_path,
+                                           file_info.path,
+                                           file_info.size,
+                                           file_info.mtime,
+                                           mode,
+                                           line,
+                                           true);
 }
 
 bool SleepHqSyncJob::reserve_staged_locked(size_t needed) {

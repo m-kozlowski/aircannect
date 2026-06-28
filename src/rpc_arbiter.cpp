@@ -422,11 +422,6 @@ void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
     raw_rpc_events_enabled_ = enabled;
 }
 
-void RpcArbiter::set_event_frame_observer(EventFrameObserver observer,
-                                          void *context) {
-    event_.set_frame_observer(observer, context);
-}
-
 bool RpcArbiter::add_event_frame_observer(EventFrameObserver observer,
                                           void *context) {
     return event_.add_frame_observer(observer, context);

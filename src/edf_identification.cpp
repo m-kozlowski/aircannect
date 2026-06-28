@@ -2,8 +2,6 @@
 
 #include <ArduinoJson.h>
 
-#include "crc32.h"
-
 namespace aircannect {
 namespace {
 
@@ -47,11 +45,6 @@ bool edf_build_identification_json(const std::string &get_response,
     json_out += '}';
     strip_identification_whitespace(json_out);
     return true;
-}
-
-uint32_t edf_identification_crc32(const std::string &json) {
-    return crc32_ieee(reinterpret_cast<const uint8_t *>(json.data()),
-                      json.size());
 }
 
 void edf_identification_crc32_le(uint32_t crc, uint8_t out[4]) {

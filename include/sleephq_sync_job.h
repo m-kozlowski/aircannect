@@ -211,11 +211,6 @@ private:
                                          char *out,
                                          size_t out_size) const;
     bool ensure_state_dir_locked();
-    void note_state_written_locked(const char *state_path,
-                                   const char *path,
-                                   uint64_t size,
-                                   uint64_t mtime,
-                                   StateWriteMode mode);
     bool build_inflight_path_locked(char *out, size_t out_size) const;
     bool load_inflight_locked(InflightPhase &phase_out);
     bool write_inflight_locked(InflightPhase phase);
@@ -223,18 +218,10 @@ private:
     bool staged_contains_locked(const char *path,
                                 uint64_t size,
                                 uint64_t mtime) const;
-    bool datalog_day_done_path_locked(const char *day,
-                                      char *out,
-                                      size_t out_size) const;
-    bool datalog_day_done_locked(const char *day) const;
-    bool mark_datalog_day_done_locked(const char *day);
-    bool datalog_day_is_finalized_locked(const char *day) const;
     void refresh_latest_datalog_day_name_locked();
     void note_completed_datalog_day_locked(const char *day);
     void maybe_mark_completed_datalog_day_locked();
     bool write_state_locked(const StagedFile &file);
-    bool append_state_locked(const StagedFile &file);
-    bool replace_state_locked(const StagedFile &file);
     bool reserve_staged_locked(size_t needed);
     bool add_staged_locked(const SleepHqUploadResult &upload);
     void clear_staged_locked();
@@ -277,7 +264,6 @@ private:
                                      bool &force_export,
                                      char *error,
                                      size_t error_size);
-    bool local_ensure_dir_locked(const char *path);
     bool build_sleep_path_locked(const char *local_path,
                                  char *path_out,
                                  size_t path_out_size,

@@ -24,12 +24,6 @@ void edf_reset_numeric_file_layout(EdfNumericFileLayout &layout) {
     layout = empty;
 }
 
-void edf_reset_numeric_file_layout_set(EdfNumericFileLayoutSet &layouts) {
-    edf_reset_numeric_file_layout(layouts.brp);
-    edf_reset_numeric_file_layout(layouts.pld);
-    edf_reset_numeric_file_layout(layouts.sa2);
-}
-
 bool edf_accepted_data_ids_contain(const char *accepted_data_ids_csv,
                                    const char *data_id) {
     if (!accepted_data_ids_csv || !data_id || !data_id[0]) return false;
@@ -98,25 +92,6 @@ bool edf_build_numeric_file_layout(EdfFileKind kind,
     layout.schema.source_signal_count = count;
     layout.enabled = true;
     return true;
-}
-
-bool edf_build_numeric_file_layout_set(const char *accepted_data_ids_csv,
-                                       EdfNumericFileLayoutSet &layouts) {
-    edf_reset_numeric_file_layout_set(layouts);
-    return edf_build_numeric_file_layout(EdfFileKind::Brp,
-                                         accepted_data_ids_csv,
-                                         layouts.brp) &&
-           edf_build_numeric_file_layout(EdfFileKind::Pld,
-                                         accepted_data_ids_csv,
-                                         layouts.pld) &&
-           edf_build_numeric_file_layout(EdfFileKind::Sa2,
-                                         accepted_data_ids_csv,
-                                         layouts.sa2);
-}
-
-bool edf_numeric_file_layout_set_enabled(
-    const EdfNumericFileLayoutSet &layouts) {
-    return layouts.brp.enabled || layouts.pld.enabled || layouts.sa2.enabled;
 }
 
 }  // namespace aircannect

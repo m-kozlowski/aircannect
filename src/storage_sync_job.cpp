@@ -12,6 +12,7 @@
 #include "memory_manager.h"
 #include "storage_directory.h"
 #include "storage_export_plan.h"
+#include "storage_export_state.h"
 #include "storage_manager.h"
 #include "string_util.h"
 
@@ -805,32 +806,8 @@ bool StorageSyncJob::build_state_path_locked(const char *path,
     return ok;
 }
 
-bool StorageSyncJob::local_ensure_dir_locked(const char *path) {
-    if (!path || path[0] != '/') return false;
-    char current[AC_STORAGE_PATH_MAX] = {};
-    size_t len = 0;
-    current[len++] = '/';
-    current[len] = '\0';
-    const char *segment = path + 1;
-    for (const char *p = segment;; ++p) {
-        if (*p != '/' && *p != '\0') continue;
-        const size_t seg_len = static_cast<size_t>(p - segment);
-        if (seg_len > 0) {
-            if (len > 1) current[len++] = '/';
-            if (len + seg_len >= sizeof(current)) return false;
-            memcpy(current + len, segment, seg_len);
-            len += seg_len;
-            current[len] = '\0';
-            if (!Storage::ensure_dir(current)) return false;
-        }
-        if (*p == '\0') break;
-        segment = p + 1;
-    }
-    return true;
-}
-
 bool StorageSyncJob::ensure_state_dir_locked() {
-    return state_dir_[0] && local_ensure_dir_locked(state_dir_);
+    return storage_export_ensure_state_dir(state_dir_);
 }
 
 bool StorageSyncJob::state_contains_locked(const char *state_path,
@@ -840,77 +817,34 @@ bool StorageSyncJob::state_contains_locked(const char *state_path,
     return state_cache_.contains(state_path, path, size, mtime);
 }
 
-bool StorageSyncJob::append_state_locked(const char *state_path,
-                                         const char *path,
-                                         uint64_t size,
-                                         uint64_t mtime) {
-    if (!ensure_state_dir_locked()) {
-        fail_locked("state_dir_failed");
-        return false;
-    }
-    File file;
-    {
-        Storage::Guard guard;
-        file = Storage::open(state_path, "a");
-        if (!file) return false;
-        file.printf("%llu\t%llu\t%s\n",
-                    static_cast<unsigned long long>(size),
-                    static_cast<unsigned long long>(mtime),
-                    path ? path : "");
-        file.close();
-    }
-    return true;
-}
-
-bool StorageSyncJob::replace_state_locked(const char *state_path,
-                                          const char *path,
-                                          uint64_t size,
-                                          uint64_t mtime) {
-    if (!ensure_state_dir_locked()) {
-        fail_locked("state_dir_failed");
-        return false;
-    }
-    File file;
-    {
-        Storage::Guard guard;
-        file = Storage::open(state_path, "w");
-        if (!file) return false;
-        const size_t written =
-            file.printf("%llu\t%llu\t%s\n",
-                        static_cast<unsigned long long>(size),
-                        static_cast<unsigned long long>(mtime),
-                        path ? path : "");
-        file.close();
-        if (written == 0) return false;
-    }
-    return true;
-}
-
-void StorageSyncJob::note_state_written_locked(const char *state_path,
-                                               const char *path,
-                                               uint64_t size,
-                                               uint64_t mtime,
-                                               StateWriteMode mode) {
-    state_cache_.note_written(
-        state_path,
-        path,
-        size,
-        mtime,
-        mode == StateWriteMode::Append
-            ? StorageExportStateWriteMode::Append
-            : StorageExportStateWriteMode::Replace);
-}
-
 bool StorageSyncJob::write_state_locked(const char *state_path,
                                         const char *path,
                                         uint64_t size,
                                         uint64_t mtime,
                                         StateWriteMode mode) {
-    const bool ok = mode == StateWriteMode::Replace
-        ? replace_state_locked(state_path, path, size, mtime)
-        : append_state_locked(state_path, path, size, mtime);
-    if (ok) note_state_written_locked(state_path, path, size, mtime, mode);
-    return ok;
+    char line[AC_STORAGE_PATH_MAX + 64] = {};
+    const int written = snprintf(line,
+                                 sizeof(line),
+                                 "%llu\t%llu\t%s",
+                                 static_cast<unsigned long long>(size),
+                                 static_cast<unsigned long long>(mtime),
+                                 path ? path : "");
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(line)) {
+        return false;
+    }
+    const StorageExportStateWriteMode export_mode =
+        mode == StateWriteMode::Append
+            ? StorageExportStateWriteMode::Append
+            : StorageExportStateWriteMode::Replace;
+    return storage_export_write_state_line(&state_cache_,
+                                           state_dir_,
+                                           state_path,
+                                           path,
+                                           size,
+                                           mtime,
+                                           export_mode,
+                                           line,
+                                           false);
 }
 
 bool StorageSyncJob::remote_parent_dir_locked(const char *remote_path,
@@ -935,42 +869,6 @@ bool StorageSyncJob::datalog_day_name_from_path(const char *path,
     return storage_export_datalog_day_from_path(path, out, out_size);
 }
 
-bool StorageSyncJob::datalog_day_done_path_locked(const char *day,
-                                                  char *out,
-                                                  size_t out_size) const {
-    return storage_export_build_done_path(state_dir_, day, out, out_size);
-}
-
-bool StorageSyncJob::datalog_day_done_locked(const char *day) const {
-    char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
-    if (!datalog_day_done_path_locked(day, path, sizeof(path))) return false;
-    const StorageLocalNodeInfo info = storage_stat_local_node(path);
-    return info.exists && !info.is_dir;
-}
-
-bool StorageSyncJob::mark_datalog_day_done_locked(const char *day) {
-    char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
-    if (!datalog_day_done_path_locked(day, path, sizeof(path))) return false;
-    if (!ensure_state_dir_locked()) return false;
-    {
-        Storage::Guard guard;
-        File file = Storage::open(path, "w");
-        if (!file) return false;
-        file.printf("done\n");
-        file.close();
-    }
-    return true;
-}
-
-bool StorageSyncJob::datalog_day_is_finalized_locked(const char *day) const {
-    if (!day || strlen(day) != 8 ||
-        !storage_export_all_digits(day, 8) ||
-        !latest_datalog_day_[0]) {
-        return false;
-    }
-    return strcmp(day, latest_datalog_day_) < 0;
-}
-
 void StorageSyncJob::refresh_latest_datalog_day_name_locked() {
     latest_datalog_day_[0] = '\0';
     char path[AC_STORAGE_PATH_MAX] = {};
@@ -992,9 +890,9 @@ void StorageSyncJob::maybe_mark_completed_datalog_day_locked(
     const char *day) {
     if (run_kind_is_reconcile(current_run_kind_)) return;
     if (!day || !day[0]) return;
-    if (!datalog_day_is_finalized_locked(day)) return;
-    if (datalog_day_done_locked(day)) return;
-    if (!mark_datalog_day_done_locked(day)) {
+    if (!storage_export_datalog_day_finalized(day, latest_datalog_day_)) return;
+    if (storage_export_datalog_day_done(state_dir_, day)) return;
+    if (!storage_export_mark_datalog_day_done(state_dir_, day)) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
                   "[SYNC] DATALOG done marker write failed day=%s\n",

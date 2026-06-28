@@ -247,38 +247,18 @@ private:
                                const char *path,
                                uint64_t size,
                                uint64_t mtime);
-    void note_state_written_locked(const char *state_path,
-                                   const char *path,
-                                   uint64_t size,
-                                   uint64_t mtime,
-                                   StateWriteMode mode);
     bool write_state_locked(const char *state_path,
                             const char *path,
                             uint64_t size,
                             uint64_t mtime,
                             StateWriteMode mode);
-    bool append_state_locked(const char *state_path,
-                             const char *path,
-                             uint64_t size,
-                             uint64_t mtime);
-    bool replace_state_locked(const char *state_path,
-                              const char *path,
-                              uint64_t size,
-                              uint64_t mtime);
 
-    bool local_ensure_dir_locked(const char *path);
     bool remote_parent_dir_locked(const char *remote_path,
                                   char *out,
                                   size_t out_size) const;
     bool datalog_day_name_from_path(const char *path,
                                     char *out,
                                     size_t out_size) const;
-    bool datalog_day_done_path_locked(const char *day,
-                                      char *out,
-                                      size_t out_size) const;
-    bool datalog_day_done_locked(const char *day) const;
-    bool mark_datalog_day_done_locked(const char *day);
-    bool datalog_day_is_finalized_locked(const char *day) const;
     void refresh_latest_datalog_day_name_locked();
     void maybe_mark_completed_datalog_day_locked(const char *day);
     bool prepare_upload_buffer_locked();

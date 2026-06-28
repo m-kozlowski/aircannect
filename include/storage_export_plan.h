@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "storage_export_day.h"
 #include "storage_path.h"
 
 namespace aircannect {
