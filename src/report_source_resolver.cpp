@@ -346,7 +346,7 @@ bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
                         source->id,
                         source->id,
                         provider,
-                        true,
+                        false,
                         complete,
                         event_stream_index)) {
             return false;
@@ -361,7 +361,7 @@ bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
                            provider,
                            start_ms,
                            end_ms,
-                           true,
+                           false,
                            complete);
     };
 

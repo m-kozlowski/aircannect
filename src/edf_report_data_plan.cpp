@@ -300,6 +300,20 @@ bool emit_event_file_entry(const EdfReportSessionDescriptor &session,
         session_file(session, kind, slot);
     if (!file || file->complete_records == 0) return true;
 
+    int64_t file_start_ms = file->header_start_ms;
+    int64_t file_end_ms = file->header_end_ms;
+    if (file_end_ms <= file_start_ms) {
+        file_start_ms = session.earliest_header_start_ms;
+        file_end_ms = session.latest_header_end_ms;
+    }
+    if (file_end_ms <= file_start_ms) return true;
+    if (file_start_ms >=
+            range_end_ms + AC_EDF_REPORT_COVERAGE_TOLERANCE_MS ||
+        file_end_ms <=
+            range_start_ms - AC_EDF_REPORT_COVERAGE_TOLERANCE_MS) {
+        return true;
+    }
+
     EdfReportDataPlanEntry entry;
     entry.kind = EdfReportDataKind::Events;
     entry.signal = ReportSignalId::Flow;
@@ -309,8 +323,8 @@ bool emit_event_file_entry(const EdfReportSessionDescriptor &session,
     entry.file_slot = slot;
     entry.first_record = 0;
     entry.record_count = file->complete_records;
-    entry.start_ms = range_start_ms;
-    entry.end_ms = range_end_ms;
+    entry.start_ms = file_start_ms;
+    entry.end_ms = file_end_ms;
     entry.record_count_estimate = file->complete_records;
     entry.payload_len_estimate =
         clamp_u64_to_u32(static_cast<uint64_t>(file->record_size) *

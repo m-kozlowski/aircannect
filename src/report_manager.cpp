@@ -5574,13 +5574,15 @@ bool ReportManager::result_chunk_has_stream(const ReportResultChunk &chunk,
 bool ReportManager::result_chunk_same_physical_edf(
     const ReportResultChunk &existing,
     const ReportProviderChunk &candidate) const {
-    if (existing.kind != ReportStoreChunkKind::Series ||
-        candidate.kind != ReportStoreChunkKind::Series ||
+    if (existing.kind != candidate.kind ||
         existing.provider_ref.provider != ReportProviderId::Edf ||
         candidate.ref.provider != ReportProviderId::Edf ||
         existing.payload_schema != candidate.payload_schema ||
         existing.start_ms != candidate.start_ms ||
-        existing.end_ms != candidate.end_ms ||
+        existing.end_ms != candidate.end_ms) {
+        return false;
+    }
+    if (existing.kind == ReportStoreChunkKind::Series &&
         edf_report_signal_uses_edge_zero_padding(existing.signal) !=
             edf_report_signal_uses_edge_zero_padding(candidate.signal)) {
         return false;
