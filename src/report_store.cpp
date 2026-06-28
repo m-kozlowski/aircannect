@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ctype.h>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,6 +10,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "storage_directory.h"
 #include "storage_manager.h"
 #include "string_util.h"
 
@@ -42,8 +44,23 @@ constexpr uint16_t CHUNK_INDEX_SCHEMA = 2;  // bumped for chunk origin byte
 constexpr size_t CHUNK_INDEX_RECORD_SIZE = 64;
 constexpr size_t REPORT_PATH_MAX = 192;
 constexpr const char *REPORT_TRASH_PREFIX = "v3-trash-";
+constexpr size_t REPORT_TRASH_CLEANUP_MAX_DEPTH = 16;
 
 ReportStoreStatus current;
+
+struct TrashCleanupFrame {
+    char path[REPORT_PATH_MAX] = {};
+    bool opened = false;
+    File dir;
+};
+
+struct TrashCleanupState {
+    TrashCleanupFrame *frames = nullptr;
+    size_t capacity = 0;
+    size_t depth = 0;
+};
+
+TrashCleanupState trash_cleanup;
 
 void set_error(char *dst, size_t size, const char *error) {
     copy_cstr(dst, size, error);
@@ -2143,74 +2160,49 @@ bool reset_cache_store(uint32_t &renamed) {
     return true;
 }
 
-bool remove_tree_step(const char *path,
-                      uint32_t &budget,
-                      uint32_t &removed) {
-    if (!path || !path[0] || budget == 0) return true;
-
-    File node = Storage::open(path, "r");
-    if (!node) {
-        if (!Storage::remove(path)) return false;
-        if (budget > 0) budget--;
-        removed++;
-        return true;
+bool ensure_trash_cleanup_state() {
+    if (trash_cleanup.frames) return true;
+    trash_cleanup.frames = static_cast<TrashCleanupFrame *>(
+        Memory::alloc_large(sizeof(TrashCleanupFrame) *
+                            REPORT_TRASH_CLEANUP_MAX_DEPTH,
+                            false));
+    if (!trash_cleanup.frames) {
+        note_error("trash_state_alloc_failed", &current.write_errors);
+        return false;
     }
-
-    if (!node.isDirectory()) {
-        node.close();
-        if (!Storage::remove(path)) return false;
-        if (budget > 0) budget--;
-        removed++;
-        return true;
+    trash_cleanup.capacity = REPORT_TRASH_CLEANUP_MAX_DEPTH;
+    trash_cleanup.depth = 0;
+    for (size_t i = 0; i < trash_cleanup.capacity; ++i) {
+        new (&trash_cleanup.frames[i]) TrashCleanupFrame();
     }
-
-    while (budget > 0) {
-        File child = node.openNextFile();
-        if (!child) break;
-
-        char child_path[REPORT_PATH_MAX];
-        const bool path_ok =
-            build_child_path(path,
-                             child.name(),
-                             child_path,
-                             sizeof(child_path));
-        const bool child_is_dir = child.isDirectory();
-        child.close();
-        if (!path_ok) {
-            node.close();
-            note_error("trash_child_path_failed", &current.write_errors);
-            return false;
-        }
-
-        if (child_is_dir) {
-            if (!remove_tree_step(child_path, budget, removed)) {
-                node.close();
-                return false;
-            }
-        } else {
-            if (!Storage::remove(child_path)) {
-                node.close();
-                return false;
-            }
-            budget--;
-            removed++;
-        }
-    }
-    node.close();
-
-    if (budget == 0) return true;
-    if (!Storage::rmdir(path)) return false;
-    budget--;
-    removed++;
     return true;
 }
 
-bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed) {
-    Storage::Guard g;
-    removed = 0;
-    if (!max_entries) return true;
-    if (!ready()) return false;
+void close_trash_cleanup_walk() {
+    if (!trash_cleanup.frames) return;
+    for (size_t i = 0; i < trash_cleanup.depth; ++i) {
+        if (trash_cleanup.frames[i].opened) {
+            trash_cleanup.frames[i].dir.close();
+            trash_cleanup.frames[i].opened = false;
+        }
+    }
+    trash_cleanup.depth = 0;
+}
 
+bool push_trash_cleanup_dir(const char *path) {
+    if (!path || !path[0] ||
+        !ensure_trash_cleanup_state() ||
+        trash_cleanup.depth >= trash_cleanup.capacity) {
+        note_error("trash_cleanup_depth", &current.write_errors);
+        return false;
+    }
+    TrashCleanupFrame &frame = trash_cleanup.frames[trash_cleanup.depth++];
+    frame = TrashCleanupFrame();
+    copy_cstr(frame.path, sizeof(frame.path), path);
+    return true;
+}
+
+bool start_next_trash_cleanup_tree() {
     File root = Storage::open("/aircannect/report", "r");
     if (!root) return true;
     if (!root.isDirectory()) {
@@ -2218,34 +2210,113 @@ bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed) {
         return true;
     }
 
-    uint32_t budget = max_entries;
     bool ok = true;
-    while (budget > 0) {
-        File child = root.openNextFile();
-        if (!child) break;
-        const bool child_is_dir = child.isDirectory();
-        const bool child_is_trash = is_report_trash_dir_name(child.name());
-        char child_path[REPORT_PATH_MAX];
-        const bool path_ok =
-            build_child_path("/aircannect/report",
-                             child.name(),
-                             child_path,
-                             sizeof(child_path));
-        child.close();
+    while (true) {
+        StorageDirChild child;
+        if (!storage_read_next_dir_child(root, child)) break;
+        if (!child.is_dir || !is_report_trash_dir_name(child.name)) continue;
 
-        if (!child_is_dir || !child_is_trash) continue;
+        char child_path[REPORT_PATH_MAX];
+        const bool path_ok = build_child_path("/aircannect/report",
+                                              child.name,
+                                              child_path,
+                                              sizeof(child_path));
         if (!path_ok) {
             ok = false;
             note_error("trash_path_failed", &current.write_errors);
             break;
         }
-        if (!remove_tree_step(child_path, budget, removed)) {
+        ok = push_trash_cleanup_dir(child_path);
+        break;
+    }
+    root.close();
+    return ok;
+}
+
+bool cleanup_trash_tree_step(uint32_t &budget, uint32_t &removed) {
+    while (budget > 0 && trash_cleanup.depth > 0) {
+        TrashCleanupFrame &frame =
+            trash_cleanup.frames[trash_cleanup.depth - 1];
+        if (!frame.opened) {
+            frame.dir = Storage::open(frame.path, "r");
+            if (!frame.dir) {
+                if (!Storage::remove(frame.path)) return false;
+                trash_cleanup.depth--;
+                budget--;
+                removed++;
+                continue;
+            }
+            if (!frame.dir.isDirectory()) {
+                frame.dir.close();
+                if (!Storage::remove(frame.path)) return false;
+                trash_cleanup.depth--;
+                budget--;
+                removed++;
+                continue;
+            }
+            frame.opened = true;
+        }
+
+        StorageDirChild child;
+        if (storage_read_next_dir_child(frame.dir, child)) {
+            char child_path[REPORT_PATH_MAX];
+            const bool path_ok = build_child_path(frame.path,
+                                                  child.name,
+                                                  child_path,
+                                                  sizeof(child_path));
+            if (!path_ok) {
+                note_error("trash_child_path_failed", &current.write_errors);
+                return false;
+            }
+            if (child.is_dir) {
+                return push_trash_cleanup_dir(child_path);
+            }
+            if (!Storage::remove(child_path)) return false;
+            budget--;
+            removed++;
+            continue;
+        }
+
+        frame.dir.close();
+        frame.opened = false;
+        char dir_path[REPORT_PATH_MAX];
+        copy_cstr(dir_path, sizeof(dir_path), frame.path);
+        trash_cleanup.depth--;
+        if (!Storage::rmdir(dir_path)) return false;
+        budget--;
+        removed++;
+    }
+    return true;
+}
+
+bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed) {
+    Storage::Guard g;
+    removed = 0;
+    if (!max_entries) return true;
+    if (!ready()) {
+        close_trash_cleanup_walk();
+        return false;
+    }
+    if (!ensure_trash_cleanup_state()) return false;
+
+    uint32_t budget = max_entries;
+    bool ok = true;
+    while (budget > 0) {
+        if (trash_cleanup.depth == 0 &&
+            !start_next_trash_cleanup_tree()) {
+            ok = false;
+            break;
+        }
+        if (trash_cleanup.depth == 0) break;
+        if (!cleanup_trash_tree_step(budget, removed)) {
             ok = false;
             note_error("trash_cleanup_failed", &current.write_errors);
             break;
         }
     }
-    root.close();
+    if (!ok) {
+        close_trash_cleanup_walk();
+    }
     if (ok) set_error(current.last_error, sizeof(current.last_error), "");
     return ok;
 }

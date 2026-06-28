@@ -342,7 +342,9 @@ bool remove(const char *path) {
     Guard g;
     if (!initialized) begin();
     fs::FS *fs = active_fs();
-    return fs && (!fs->exists(path) || fs->remove(path));
+    if (!fs) return false;
+    if (fs->remove(path)) return true;
+    return !fs->exists(path);
 }
 
 bool rmdir(const char *path) {
@@ -350,7 +352,9 @@ bool rmdir(const char *path) {
     Guard g;
     if (!initialized) begin();
     fs::FS *fs = active_fs();
-    return fs && (!fs->exists(path) || fs->rmdir(path));
+    if (!fs) return false;
+    if (fs->rmdir(path)) return true;
+    return !fs->exists(path);
 }
 
 bool rename(const char *from, const char *to) {
