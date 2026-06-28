@@ -2039,7 +2039,6 @@
     let reportDrawPending = false;
     let reportDrawRetryCount = 0;
     let reportResizeObserver = null;
-    const reportClientCache = new Map();
     const reportPlotClientCache = new Map();
     let reportZoom = null;        // {start,end} when drag-zoomed, else null
     // Zoom: raw samples for the hour-rounded window, cached per (index, window).
@@ -2076,7 +2075,6 @@
     let edfOverviewLoading = false;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
-    const REPORT_CLIENT_CACHE_MAX = 4;
     const REPORT_PLOT_CLIENT_CACHE_MAX = 6;
     const REPORT_RANGE_CACHE_MAX = 3;
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
@@ -2523,6 +2521,12 @@
       return Number.isInteger(value) && value >= 0 ? value : null;
     }
 
+    function reportNightLoadKey(night) {
+      if (!night) return "";
+      const start = Number(night.start || 0);
+      return String(start || night.id || "");
+    }
+
     function fmtReportTime(ms) {
       const date = new Date(Number(ms));
       if (Number.isNaN(date.getTime())) return "--";
@@ -2608,10 +2612,6 @@
       if (charts) charts.textContent = "";
     }
 
-    function cloneReportResult(result) {
-      return result ? JSON.parse(JSON.stringify(result)) : null;
-    }
-
     function lruGet(cache, key) {
       if (!cache.has(key)) return null;
       const value = cache.get(key);
@@ -2627,21 +2627,6 @@
         const oldest = cache.keys().next().value;
         cache.delete(oldest);
       }
-    }
-
-    function rememberReportClientCache(nightId, etag) {
-      if (!nightId || !reportResult ||
-          (reportResult.state !== "ready" && reportResult.state !== "partial")) {
-        return;
-      }
-      // Decoded plot objects are immutable after decode; render paths slice
-      // before drawing, so cache hits can reuse references without deep copies.
-      lruSet(reportClientCache, nightId, {
-        etag: etag,
-        result: cloneReportResult(reportResult),
-        series: reportSeries,
-        events: reportEvents,
-      }, REPORT_CLIENT_CACHE_MAX);
     }
 
     function rememberReportPlotClientCache(etag) {
@@ -3777,19 +3762,18 @@
       return options.timeoutValue === undefined ? null : options.timeoutValue;
     }
 
-    async function pollReportResult(token, index, nightStart, inm) {
+    async function pollReportResult(token, index, nightStart) {
       const url = "/api/report/result?index=" + index +
-        (nightStart ? "&night=" + encodeURIComponent(nightStart) : "") +
-        (inm ? "&inm=" + encodeURIComponent(inm) : "");
+        (nightStart ? "&night=" + encodeURIComponent(nightStart) : "");
       return pollReportFetch({
         active: () => token === reportLoadToken,
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         timeoutValue: {status: 0, etag: "", json: null},
-        request: () => fetch(url),
+        request: () => fetch(url, {cache: "no-store"}),
         handle: async (resp) => {
           if (resp.status === 304) {
-            return {done: true, value: {status: 304, etag: inm, json: null}};
+            return {done: false, delayMs: 50};
           }
           if (resp.status === 200) {
             const etag = (resp.headers.get("ETag") || "").replace(/"/g, "");
@@ -4154,7 +4138,8 @@
         renderReportSummary();
         return;
       }
-      if (!force && reportLoadedId === String(night.id) &&
+      const nightId = reportNightLoadKey(night);
+      if (!force && reportLoadedId === nightId &&
           reportResult && reportResult.state === "ready") {
         renderReportSummary();
         renderReportCharts();
@@ -4165,11 +4150,7 @@
         msg("reportMsg", "Selected night has no report index", false, true);
         return;
       }
-      const nightId = String(night.id);
       const token = ++reportLoadToken;
-      if (refreshCache) reportClientCache.delete(nightId);
-      const cached = refreshCache ? null : lruGet(reportClientCache, nightId);
-      const inm = cached ? cached.etag : "";
       resetReportData();
       reportLoadedId = "";
       renderReportSummary();
@@ -4185,21 +4166,8 @@
         }
         const res = await pollReportResult(token,
           therapyIndex,
-          Number(night.start || 0),
-          inm);
+          Number(night.start || 0));
         if (!res || token !== reportLoadToken) return;
-        if (res.status === 304 && cached) {
-          reportHiddenSessions.clear();
-          reportResult = cloneReportResult(cached.result);
-          activateReportBasePlot(therapyIndex, cached.etag,
-            cached.series,
-            cached.events);
-          reportLoadedId = nightId;
-          renderReportSummary();
-          renderReportCharts();
-          msg("reportMsg", "Report loaded", true);
-          return;
-        }
         if (res.status === 404) {
           msg("reportMsg", "Night not found", false, true);
           return;
@@ -4218,7 +4186,6 @@
         const plotEtag = await fetchReportPlot(token, therapyIndex, res.etag);
         if (!plotEtag) return;
         reportLoadedId = nightId;
-        rememberReportClientCache(nightId, plotEtag);
         renderReportSummary();
         renderReportCharts();
         msg("reportMsg",
