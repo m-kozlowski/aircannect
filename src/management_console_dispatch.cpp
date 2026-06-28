@@ -654,8 +654,14 @@ void print_report_result_status(Print &out,
         out.print("unavailable");
     } else {
         out.print(edf_report_catalog_state_name(catalog.state));
+        out.print(" phase=");
+        out.print(edf_report_catalog_phase_name(catalog.phase));
         out.print(" refresh=");
         out.print(static_cast<unsigned long>(catalog.refresh_id));
+        out.print(" steps=");
+        out.print(static_cast<unsigned long>(catalog.step_calls));
+        out.print("/");
+        out.print(static_cast<unsigned long>(catalog.idle_phase_hits));
         out.print(" sessions=");
         out.print(static_cast<unsigned long>(catalog.sessions));
         out.print(" build_sessions=");

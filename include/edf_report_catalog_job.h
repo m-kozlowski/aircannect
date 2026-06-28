@@ -24,10 +24,14 @@ enum class EdfReportCatalogState : uint8_t {
 };
 
 const char *edf_report_catalog_state_name(EdfReportCatalogState state);
+const char *edf_report_catalog_phase_name(uint8_t phase);
 
 struct EdfReportCatalogStatus {
     EdfReportCatalogState state = EdfReportCatalogState::Idle;
+    uint8_t phase = 0;
     uint32_t refresh_id = 0;
+    uint32_t step_calls = 0;
+    uint32_t idle_phase_hits = 0;
     uint32_t sessions = 0;
     uint32_t build_sessions = 0;
     uint32_t days_scanned = 0;
@@ -52,6 +56,7 @@ public:
 
     bool set_timezone_offset_minutes(int32_t offset_minutes);
     bool request_refresh(uint32_t *refresh_id_out = nullptr);
+    bool request_refresh_after_current(uint32_t *refresh_id_out = nullptr);
     bool status(EdfReportCatalogStatus &out,
                 uint32_t timeout_ms = 0) const;
     EdfReportCatalogStatus status() const;

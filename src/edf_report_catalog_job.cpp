@@ -37,6 +37,19 @@ const char *edf_report_catalog_state_name(EdfReportCatalogState state) {
     }
 }
 
+const char *edf_report_catalog_phase_name(uint8_t phase) {
+    switch (phase) {
+        case 0: return "idle";
+        case 1: return "open_root";
+        case 2: return "read_day";
+        case 3: return "open_day";
+        case 4: return "read_file";
+        case 5: return "read_header";
+        default:
+            return "unknown";
+    }
+}
+
 EdfReportCatalogJob::~EdfReportCatalogJob() {
     close_dirs_locked();
     release_build_locked();
@@ -64,6 +77,7 @@ void EdfReportCatalogJob::set_error_locked(const char *error) {
     refresh_again_pending_ = false;
     status_.state = EdfReportCatalogState::Error;
     phase_ = Phase::Idle;
+    status_.phase = static_cast<uint8_t>(phase_);
     copy_cstr(status_.error, sizeof(status_.error), error ? error : "error");
     update_current_path_locked("");
 }
@@ -172,6 +186,8 @@ void EdfReportCatalogJob::publish_snapshot_locked(bool final) {
         build_session_count_ = 0;
         release_build_days_locked();
         status_.state = EdfReportCatalogState::Ready;
+        phase_ = Phase::Idle;
+        status_.phase = static_cast<uint8_t>(phase_);
         status_.build_sessions = 0;
         status_.error[0] = '\0';
         update_current_path_locked("");
@@ -216,6 +232,7 @@ bool EdfReportCatalogJob::start_refresh_locked(uint32_t *refresh_id_out) {
     if (next_refresh_id_ == 0) next_refresh_id_ = 1;
     status_.sessions = session_count_;
     phase_ = Phase::OpenRoot;
+    status_.phase = static_cast<uint8_t>(phase_);
     day_path_[0] = '\0';
     current_file_path_[0] = '\0';
     current_file_size_ = 0;
@@ -225,6 +242,26 @@ bool EdfReportCatalogJob::start_refresh_locked(uint32_t *refresh_id_out) {
 }
 
 bool EdfReportCatalogJob::request_refresh(uint32_t *refresh_id_out) {
+    begin();
+    if (!lock(0)) return false;
+    bool accepted = false;
+    bool started = false;
+    if (status_.state == EdfReportCatalogState::Refreshing) {
+        if (refresh_id_out) *refresh_id_out = status_.refresh_id;
+        accepted = true;
+    } else {
+        started = start_refresh_locked(refresh_id_out);
+        accepted = started;
+    }
+    unlock();
+    if (accepted) {
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+    }
+    return accepted;
+}
+
+bool EdfReportCatalogJob::request_refresh_after_current(
+    uint32_t *refresh_id_out) {
     begin();
     if (!lock(0)) return false;
     bool accepted = false;
@@ -260,6 +297,7 @@ bool EdfReportCatalogJob::set_timezone_offset_minutes(int32_t offset_minutes) {
                                                : EdfReportCatalogState::Idle;
             status_.sessions = session_count_;
             phase_ = Phase::Idle;
+            status_.phase = static_cast<uint8_t>(phase_);
             update_current_path_locked("");
         }
     }
@@ -279,6 +317,8 @@ bool EdfReportCatalogJob::set_timezone_offset_minutes(int32_t offset_minutes) {
 JobStep EdfReportCatalogJob::step() {
     begin();
     if (!lock(20)) return JobStep::Waiting;
+    status_.step_calls++;
+    status_.phase = static_cast<uint8_t>(phase_);
     if (status_.state != EdfReportCatalogState::Refreshing) {
         if (refresh_again_pending_) {
             refresh_again_pending_ = false;
@@ -292,6 +332,7 @@ JobStep EdfReportCatalogJob::step() {
 
     JobStep out = JobStep::Idle;
     if (phase_ == Phase::ReadHeader) {
+        status_.phase = static_cast<uint8_t>(phase_);
         unlock();
         return read_header_unlocked();
     }
@@ -303,9 +344,11 @@ JobStep EdfReportCatalogJob::step() {
         case Phase::ReadHeader: break;
         case Phase::Idle:
         default:
+            status_.idle_phase_hits++;
             out = JobStep::Idle;
             break;
     }
+    status_.phase = static_cast<uint8_t>(phase_);
     unlock();
     return out;
 }
@@ -315,7 +358,9 @@ bool EdfReportCatalogJob::run_when_gate_closed(const char *reason) const {
     // bounded metadata scan and is a dependency of foreground report builds, so
     // letting it progress here avoids a self-deadlock where polling a report
     // prevents the catalog needed by that report from becoming ready.
-    return reason && strcmp(reason, "web_grace") == 0;
+    if (!reason) return false;
+    return strcmp(reason, "web_grace") == 0 ||
+           strcmp(reason, "report_busy") == 0;
 }
 
 void EdfReportCatalogJob::on_preempt() {
@@ -323,10 +368,12 @@ void EdfReportCatalogJob::on_preempt() {
     if (status_.state == EdfReportCatalogState::Refreshing) {
         close_dirs_locked();
         release_build_locked();
+        refresh_again_pending_ = true;
         status_.state = session_count_ > 0 ? EdfReportCatalogState::Ready
                                            : EdfReportCatalogState::Idle;
         status_.sessions = session_count_;
         phase_ = Phase::Idle;
+        status_.phase = static_cast<uint8_t>(phase_);
         update_current_path_locked("");
     }
     unlock();
@@ -385,7 +432,6 @@ JobStep EdfReportCatalogJob::open_root_locked() {
     root_dir_ = Storage::open("/DATALOG", "r");
     if (!root_dir_) {
         publish_build_locked();
-        phase_ = Phase::Idle;
         return JobStep::Idle;
     }
     if (!root_dir_.isDirectory()) {
@@ -407,7 +453,6 @@ JobStep EdfReportCatalogJob::read_day_locked() {
         root_dir_ = File();
         if (build_day_count_ == 0) {
             publish_build_locked();
-            phase_ = Phase::Idle;
             return JobStep::Idle;
         }
         std::sort(build_days_,
@@ -439,7 +484,6 @@ JobStep EdfReportCatalogJob::open_day_locked() {
     if (build_day_index_ >= build_day_count_) {
         close_dirs_locked();
         publish_build_locked();
-        phase_ = Phase::Idle;
         return JobStep::Idle;
     }
     if (!storage_append_child_path("/DATALOG",
@@ -581,6 +625,7 @@ JobStep EdfReportCatalogJob::read_header_unlocked() {
         status_.refresh_id != snapshot_refresh_id ||
         phase_ != Phase::ReadHeader ||
         strcmp(current_file_path_, path) != 0) {
+        status_.phase = static_cast<uint8_t>(phase_);
         unlock();
         return JobStep::Idle;
     }
@@ -594,6 +639,7 @@ JobStep EdfReportCatalogJob::read_header_unlocked() {
     if (!read_ok || file_status != EdfReportFileStatus::Ok) {
         status_.files_skipped++;
         phase_ = Phase::ReadFile;
+        status_.phase = static_cast<uint8_t>(phase_);
         unlock();
         return JobStep::Working;
     }
@@ -605,6 +651,7 @@ JobStep EdfReportCatalogJob::read_header_unlocked() {
     }
 
     phase_ = Phase::ReadFile;
+    status_.phase = static_cast<uint8_t>(phase_);
     unlock();
     return JobStep::Working;
 }

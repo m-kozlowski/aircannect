@@ -4090,8 +4090,17 @@ ReportManager::BuildQueueResult ReportManager::enqueue_build(
     for (size_t k = 0; k < build_queue_count_; ++k) {
         size_t idx = (build_queue_head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
         if (build_queue_[idx].night_start_ms == night_start_ms) {
-            if (refresh) build_queue_[idx].refresh = true;
-            if (!idle_prebuild) build_queue_[idx].idle_prebuild = false;
+            build_queue_[idx].therapy_index = therapy_index;
+            if (refresh) {
+                build_queue_[idx].refresh = true;
+                build_queue_[idx].next_attempt_ms = 0;
+            }
+            if (!idle_prebuild) {
+                if (build_queue_[idx].idle_prebuild) {
+                    build_queue_[idx].next_attempt_ms = 0;
+                }
+                build_queue_[idx].idle_prebuild = false;
+            }
             build_queue_already_total_++;
             copy_cstr(build_queue_last_enqueue_result_,
                       sizeof(build_queue_last_enqueue_result_),
@@ -4118,6 +4127,7 @@ ReportManager::BuildQueueResult ReportManager::enqueue_build(
         build_queue_[tail].refresh = refresh;
         build_queue_[tail].idle_prebuild = idle_prebuild;
         build_queue_[tail].queued_ms = millis();
+        build_queue_[tail].next_attempt_ms = 0;
         build_queue_count_++;
         build_queue_queued_total_++;
         copy_cstr(build_queue_last_enqueue_result_,
@@ -4201,6 +4211,18 @@ void ReportManager::service_build_queue(bool realtime_active) {
     ResultBuildJob job = have ? build_queue_[build_queue_head_] : ResultBuildJob{};
     xSemaphoreGive(build_queue_lock_);
     if (!have) return;
+    const uint32_t now_ms = millis();
+    if (job.next_attempt_ms != 0 &&
+        static_cast<int32_t>(now_ms - job.next_attempt_ms) < 0) {
+        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+        if (build_queue_count_ > 0) {
+            copy_cstr(build_queue_last_service_block_,
+                      sizeof(build_queue_last_service_block_),
+                      "retry_wait");
+        }
+        xSemaphoreGive(build_queue_lock_);
+        return;
+    }
     if (job.idle_prebuild) {
         const char *reason = "idle";
         if (!idle_prebuild_gate_open(&reason)) {
@@ -4270,6 +4292,14 @@ void ReportManager::service_build_queue(bool realtime_active) {
               static_cast<unsigned long>(result_status_.payload_bytes));
     if (outcome == ResultPrepareOutcome::Deferred ||
         outcome == ResultPrepareOutcome::Retry) {
+        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+        if (build_queue_count_ > 0 &&
+            build_queue_[build_queue_head_].night_start_ms ==
+                job.night_start_ms) {
+            build_queue_[build_queue_head_].next_attempt_ms =
+                millis() + AC_BG_WORKER_BUSY_RECHECK_MS;
+        }
+        xSemaphoreGive(build_queue_lock_);
         return;
     }
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);

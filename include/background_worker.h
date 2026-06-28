@@ -106,6 +106,10 @@ private:
     // gated until the first publish_gate().
     std::atomic<uint32_t> gate_inputs_{GATE_UNPUBLISHED};
     TaskHandle_t task_ = nullptr;
+    size_t foreground_cursor_ = 0;
+    size_t gate_closed_cursor_ = 0;
+    size_t drain_cursor_ = 0;
+    size_t regular_cursor_ = 0;
 
     mutable StaticSemaphore_t status_lock_storage_ = {};
     mutable SemaphoreHandle_t status_lock_ = nullptr;

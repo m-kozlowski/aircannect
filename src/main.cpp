@@ -212,7 +212,7 @@ static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
         return;
     }
 
-    if (edf_report_catalog_job.request_refresh()) {
+    if (edf_report_catalog_job.request_refresh_after_current()) {
         edf_report_catalog_post_session_pending = false;
     } else {
         edf_report_catalog_refresh_due_ms = now_ms + 2000;

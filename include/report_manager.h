@@ -1009,6 +1009,7 @@ private:
         bool refresh = false;
         bool idle_prebuild = false;
         uint32_t queued_ms = 0;
+        uint32_t next_attempt_ms = 0;
     };
     enum class BuildQueueResult : uint8_t {
         Queued,

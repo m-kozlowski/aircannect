@@ -165,8 +165,12 @@ void BackgroundWorker::run() {
                 }
             }
             if (foreground_busy) {
-                for (size_t i = 0; i < job_count_; ++i) {
+                if (foreground_cursor_ >= job_count_) foreground_cursor_ = 0;
+                const size_t start = foreground_cursor_;
+                for (size_t n = 0; n < job_count_; ++n) {
+                    const size_t i = (start + n) % job_count_;
                     if (!jobs_[i]->run_when_foreground_busy()) continue;
+                    foreground_cursor_ = (i + 1) % job_count_;
                     const JobStep s = jobs_[i]->step();
                     if (s != JobStep::Idle) {
                         foreground_result = s;
@@ -174,9 +178,13 @@ void BackgroundWorker::run() {
                     }
                 }
             }
-            for (size_t i = 0; i < job_count_; ++i) {
+            if (gate_closed_cursor_ >= job_count_) gate_closed_cursor_ = 0;
+            const size_t gate_start = gate_closed_cursor_;
+            for (size_t n = 0; n < job_count_; ++n) {
                 if (foreground_result != JobStep::Idle) break;
+                const size_t i = (gate_start + n) % job_count_;
                 if (!jobs_[i]->run_when_gate_closed(reason)) continue;
+                gate_closed_cursor_ = (i + 1) % job_count_;
                 const JobStep s = jobs_[i]->step_when_gate_closed(reason);
                 if (s != JobStep::Idle) {
                     foreground_result = s;
@@ -197,25 +205,42 @@ void BackgroundWorker::run() {
         }
 
         JobStep result = JobStep::Idle;
-        for (size_t i = 0; i < job_count_; ++i) {
+        if (drain_cursor_ >= job_count_) drain_cursor_ = 0;
+        const size_t drain_start = drain_cursor_;
+        for (size_t n = 0; n < job_count_; ++n) {
             const char *r = "idle";
             if (!gate_open(&r)) break;  // foreground appeared mid-pass
+            const size_t i = (drain_start + n) % job_count_;
             if (!jobs_[i]->drain_before_regular_jobs()) continue;
+            drain_cursor_ = (i + 1) % job_count_;
             const JobStep s = jobs_[i]->step();
             if (s != JobStep::Idle) {
                 result = s;
                 break;
             }
         }
-        for (size_t i = 0; result == JobStep::Idle && i < job_count_; ++i) {
+        // "Drain before" is priority, not exclusivity. Long/cache-backed
+        // drains can otherwise starve regular dependency jobs such as the EDF
+        // report catalog and leave foreground report requests stuck waiting for
+        // state that only the worker can build.
+        if (regular_cursor_ >= job_count_) regular_cursor_ = 0;
+        const size_t regular_start = regular_cursor_;
+        JobStep regular_result = JobStep::Idle;
+        for (size_t n = 0; n < job_count_; ++n) {
             const char *r = "idle";
             if (!gate_open(&r)) break;  // foreground appeared mid-pass
+            const size_t i = (regular_start + n) % job_count_;
             if (jobs_[i]->drain_before_regular_jobs()) continue;
+            regular_cursor_ = (i + 1) % job_count_;
             const JobStep s = jobs_[i]->step();
             if (s != JobStep::Idle) {
-                result = s;
+                regular_result = s;
                 break;  // one active job per pass, then re-gate
             }
+        }
+        if (regular_result == JobStep::Working ||
+            (regular_result == JobStep::Waiting && result == JobStep::Idle)) {
+            result = regular_result;
         }
 
         if (result == JobStep::Idle && (++idle_ticks % 30) == 0) {
