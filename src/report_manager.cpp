@@ -31,9 +31,14 @@ namespace aircannect {
 namespace {
 
 const char *const REPORT_SUMMARY_FROM = "2000-01-01T00:00:00.000Z";
-constexpr const char *REPORT_PLOT_CACHE_DIR = "/aircannect/report/v4/plots/v2";
-constexpr size_t REPORT_PLOT_PATH_MAX = 128;
-constexpr size_t REPORT_PLOT_CACHE_WRITE_CHUNK = 4096;
+constexpr const char *REPORT_CACHE_BASE_DIR = "/aircannect/report/v4";
+constexpr const char *REPORT_PLOT_CACHE_DIR =
+    "/aircannect/report/v4/plots/v2";
+constexpr const char *REPORT_RESULT_JSON_CACHE_DIR =
+    "/aircannect/report/v4/results/v1";
+constexpr size_t REPORT_CACHE_PATH_MAX = 192;
+constexpr size_t REPORT_CACHE_WRITE_CHUNK = 4096;
+constexpr size_t REPORT_RESULT_JSON_CACHE_MAX = 32 * 1024;
 constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 23;
 
 const char *report_provider_id_name(ReportProviderId provider) {
@@ -642,9 +647,10 @@ const char *plot_cache_basename(const char *path) {
     return last ? last + 1 : path;
 }
 
-bool plot_cache_child_path(const char *child_name,
-                           char *out,
-                           size_t out_size) {
+bool cache_child_path(const char *dir,
+                      const char *child_name,
+                      char *out,
+                      size_t out_size) {
     if (!child_name || !child_name[0] || !out || !out_size) {
         return false;
     }
@@ -652,8 +658,7 @@ bool plot_cache_child_path(const char *child_name,
         const int written = snprintf(out, out_size, "%s", child_name);
         return written > 0 && static_cast<size_t>(written) < out_size;
     }
-    const int written =
-        snprintf(out, out_size, "%s/%s", REPORT_PLOT_CACHE_DIR, child_name);
+    const int written = snprintf(out, out_size, "%s/%s", dir, child_name);
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
@@ -1027,7 +1032,7 @@ ReportManager::~ReportManager() {
     }
     if (plot_cache_write_lock_) {
         if (xSemaphoreTake(plot_cache_write_lock_, portMAX_DELAY) == pdTRUE) {
-            reset_plot_cache_write_locked();
+            reset_result_cache_write_locked();
             xSemaphoreGive(plot_cache_write_lock_);
         }
         vSemaphoreDelete(plot_cache_write_lock_);
@@ -2086,14 +2091,14 @@ void ReportManager::note_cache_chunk_committed(uint64_t night_start_ms) {
 
 bool ReportManager::service_cache_writer() {
     if (!cache_write_lock_ || !cache_write_queue_) {
-        return service_plot_cache_writer();
+        return service_result_cache_writer();
     }
 
     CacheWriteQueueSlot job;
     if (!xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(20))) return false;
     if (cache_write_count_ == 0) {
         xSemaphoreGive(cache_write_lock_);
-        return service_plot_cache_writer();
+        return service_result_cache_writer();
     }
 
     CacheWriteQueueSlot &slot = cache_write_queue_[cache_write_head_];
@@ -2971,9 +2976,46 @@ bool ReportManager::publish_result_to_slot(bool cache_plot) {
     update_materialized_status_locked();
     xSemaphoreGive(result_slots_lock_);
     if (cache_plot && plot) {
-        enqueue_result_plot_cache_write(result_indexed_night_,
-                                        result_etag_,
-                                        plot);
+        LargeTextBuffer result_json_text;
+        result_json_text.reserve(8192);
+        const ReportCacheFetchStatus inactive_cache{};
+        build_result_json_from(result_status_,
+                               result_indexed_night_,
+                               result_ranges_,
+                               result_range_count_,
+                               result_streams_,
+                               result_stream_count_,
+                               inactive_cache,
+                               result_json_text);
+        std::shared_ptr<ReportSpoolBuffer> result_json;
+        if (!result_json_text.overflowed() && result_json_text.length() > 0) {
+            result_json = std::make_shared<ReportSpoolBuffer>();
+            if (result_json) {
+                result_json->set_max_size(result_json_text.length());
+                if (!result_json->reserve_capacity(result_json_text.length()) ||
+                    !result_json->append(
+                        reinterpret_cast<const uint8_t *>(
+                            result_json_text.c_str()),
+                        result_json_text.length())) {
+                    result_json.reset();
+                }
+            }
+        }
+        if (result_json) {
+            enqueue_result_cache_write(result_indexed_night_,
+                                       result_etag_,
+                                       result_json,
+                                       plot);
+        } else {
+            Log::logf(CAT_REPORT,
+                      LOG_WARN,
+                      "Result cache write skipped: result JSON snapshot "
+                      "failed index=%lu night=%llu\n",
+                      static_cast<unsigned long>(
+                          result_status_.therapy_index),
+                      static_cast<unsigned long long>(
+                          result_indexed_night_.summary.start_ms));
+        }
     }
     return true;
 }
@@ -3228,6 +3270,29 @@ ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
         }
         return slot_read;
     }
+
+    if (load_result_json_cache_for_night(indexed_night,
+                                         current_etag,
+                                         json_out)) {
+        if (etag_out && etag_out_size) {
+            snprintf(etag_out, etag_out_size, "%s", current_etag);
+        }
+        if (build_queue_lock_ &&
+            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            copy_cstr(build_queue_last_read_,
+                      sizeof(build_queue_last_read_),
+                      "ready_sd");
+            xSemaphoreGive(build_queue_lock_);
+        }
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Result cache direct hit index=%lu night=%llu bytes=%lu\n",
+                  static_cast<unsigned long>(therapy_index),
+                  static_cast<unsigned long long>(
+                      indexed_night.summary.start_ms),
+                  static_cast<unsigned long>(json_out.length()));
+        return ResultRead::Ready;
+    }
     if (etag_out && etag_out_size) etag_out[0] = '\0';
 
     const BuildQueueResult queued =
@@ -3330,6 +3395,41 @@ ReportManager::PlotRead ReportManager::read_plot(
             break;
         }
         xSemaphoreGive(result_slots_lock_);
+    }
+    auto cached_plot = std::make_shared<ReportSpoolBuffer>();
+    if (cached_plot &&
+        load_result_plot_cache_for_night(indexed_night.get(),
+                                         current_etag,
+                                         *cached_plot)) {
+        if (result_slots_ && result_slots_lock_) {
+            xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
+            for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
+                if (!result_slots_[i].valid ||
+                    result_slots_[i].night_start_ms !=
+                        indexed_night->summary.start_ms) {
+                    continue;
+                }
+                if (strcmp(result_slots_[i].etag, current_etag) != 0) {
+                    clear_materialized_slot_locked(result_slots_[i]);
+                    update_materialized_status_locked();
+                    continue;
+                }
+                result_slots_[i].plot = cached_plot;
+                result_slots_[i].last_used = ++result_slot_tick_;
+                update_materialized_status_locked();
+                break;
+            }
+            xSemaphoreGive(result_slots_lock_);
+        }
+        out = cached_plot;
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Plot cache direct hit index=%lu night=%llu bytes=%lu\n",
+                  static_cast<unsigned long>(resolved_therapy_index),
+                  static_cast<unsigned long long>(
+                      indexed_night->summary.start_ms),
+                  static_cast<unsigned long>(cached_plot->size()));
+        return PlotRead::Ready;
     }
     if (matching_result_without_plot &&
         plot_build_night_start_ms_.load() == indexed_night->summary.start_ms) {
@@ -4553,9 +4653,11 @@ bool ReportManager::clear_plot_cache_for_night(const ReportSummaryRecord &night,
         const bool is_dir = file.isDirectory();
         const bool match =
             !is_dir && plot_cache_name_for_night(file.name(), night.start_ms);
-        char path[REPORT_PLOT_PATH_MAX];
-        const bool path_ok =
-            match && plot_cache_child_path(file.name(), path, sizeof(path));
+        char path[REPORT_CACHE_PATH_MAX];
+        const bool path_ok = match && cache_child_path(REPORT_PLOT_CACHE_DIR,
+                                                       file.name(),
+                                                       path,
+                                                       sizeof(path));
         file.close();
         if (!match) continue;
         if (!path_ok || !Storage::remove(path)) {
@@ -4710,6 +4812,7 @@ static void merge_cache_clear_result(ReportCacheClearResult &dst,
     dst.chunks_deleted += src.chunks_deleted;
     dst.coverage_deleted += src.coverage_deleted;
     dst.plots_deleted += src.plots_deleted;
+    dst.result_json_deleted += src.result_json_deleted;
 }
 
 bool ReportManager::clear_cache_night(uint64_t night_start_ms,
@@ -4737,6 +4840,10 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
     uint32_t plot_deleted = 0;
     if (clear_plot_cache_for_night(night, plot_deleted)) {
         out.plots_deleted += plot_deleted;
+    }
+    uint32_t result_json_deleted = 0;
+    if (clear_result_json_cache_for_night(night, result_json_deleted)) {
+        out.result_json_deleted += result_json_deleted;
     }
     if (result_status_.night_start_ms == night.start_ms) {
         clear_result_prepare();
@@ -4803,11 +4910,12 @@ bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
         Log::logf(CAT_REPORT,
                   LOG_INFO,
                   "Cache pruned oldest nights=%lu chunks=%lu coverage=%lu "
-                  "plots=%lu\n",
+                  "plots=%lu result_json=%lu\n",
                   static_cast<unsigned long>(out.nights_cleared),
                   static_cast<unsigned long>(out.chunks_deleted),
                   static_cast<unsigned long>(out.coverage_deleted),
-                  static_cast<unsigned long>(out.plots_deleted));
+                  static_cast<unsigned long>(out.plots_deleted),
+                  static_cast<unsigned long>(out.result_json_deleted));
     }
     return ok;
 }
@@ -5902,6 +6010,25 @@ bool ReportManager::result_plot_cache_path_for_night(
     return written > 0 && static_cast<size_t>(written) < path_size;
 }
 
+bool ReportManager::result_json_cache_path_for_night(
+    const ReportIndexedNight &night,
+    const char *etag,
+    char *path,
+    size_t path_size) const {
+    if (!path || !path_size || night.summary.start_ms == 0 ||
+        !etag || !etag[0]) {
+        return false;
+    }
+    const int written = snprintf(
+        path,
+        path_size,
+        "%s/%llu-%s.json",
+        REPORT_RESULT_JSON_CACHE_DIR,
+        static_cast<unsigned long long>(night.summary.start_ms),
+        etag);
+    return written > 0 && static_cast<size_t>(written) < path_size;
+}
+
 bool ReportManager::result_plot_cache_path(char *path,
                                            size_t path_size) const {
     return result_plot_cache_path_for_night(result_indexed_night_,
@@ -5915,44 +6042,127 @@ bool ReportManager::result_plot_cache_exists_for_night(
     const char *etag) const {
     Storage::Guard g;
     if (!Storage::mounted()) return false;
-    char path[REPORT_PLOT_PATH_MAX];
+    char path[REPORT_CACHE_PATH_MAX];
     if (!result_plot_cache_path_for_night(night, etag, path, sizeof(path))) {
         return false;
     }
     return Storage::exists(path);
 }
 
-bool ReportManager::load_result_plot_cache() {
+bool ReportManager::clear_result_json_cache_for_night(
+    const ReportSummaryRecord &night,
+    uint32_t &deleted) const {
+    deleted = 0;
+    if (!night.start_ms) return false;
     Storage::Guard g;
-    result_plot_bin_.clear();
     if (!Storage::mounted()) return false;
-    char path[REPORT_PLOT_PATH_MAX];
-    if (!result_plot_cache_path(path, sizeof(path)) ||
+    File dir = Storage::open(REPORT_RESULT_JSON_CACHE_DIR, "r");
+    if (!dir) return true;
+    if (!dir.isDirectory()) {
+        dir.close();
+        return false;
+    }
+
+    bool ok = true;
+    while (true) {
+        File file = dir.openNextFile();
+        if (!file) break;
+        const bool is_dir = file.isDirectory();
+        const bool match =
+            !is_dir && plot_cache_name_for_night(file.name(), night.start_ms);
+        char path[REPORT_CACHE_PATH_MAX];
+        const bool path_ok = match &&
+                             cache_child_path(REPORT_RESULT_JSON_CACHE_DIR,
+                                              file.name(),
+                                              path,
+                                              sizeof(path));
+        file.close();
+        if (!match) continue;
+        if (!path_ok || !Storage::remove(path)) {
+            ok = false;
+            continue;
+        }
+        deleted++;
+    }
+    dir.close();
+    return ok;
+}
+
+bool ReportManager::load_result_json_cache_for_night(
+    const ReportIndexedNight &night,
+    const char *etag,
+    LargeTextBuffer &out) const {
+    Storage::Guard g;
+    out.clear();
+    if (!Storage::mounted()) return false;
+    char path[REPORT_CACHE_PATH_MAX];
+    if (!result_json_cache_path_for_night(night, etag, path, sizeof(path)) ||
         !Storage::exists(path)) {
         return false;
     }
     File file = Storage::open(path, "r");
     if (!file) return false;
     const size_t size = static_cast<size_t>(file.size());
-    result_plot_bin_.set_max_size(size);
-    if (size < 8 || !result_plot_bin_.reserve_capacity(size)) {
+    if (size < 16 || size > REPORT_RESULT_JSON_CACHE_MAX ||
+        !out.reserve(size + 1)) {
         file.close();
-        result_plot_bin_.clear();
+        out.clear();
+        return false;
+    }
+    char buffer[512];
+    while (file.available()) {
+        const int n = file.read(reinterpret_cast<uint8_t *>(buffer),
+                                sizeof(buffer));
+        if (n < 0 || !out.append(buffer, static_cast<size_t>(n))) {
+            file.close();
+            out.clear();
+            return false;
+        }
+        if (n == 0) break;
+    }
+    file.close();
+    const char *json = out.c_str();
+    if (out.length() != size || json[0] != '{') {
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
+bool ReportManager::load_result_plot_cache_for_night(
+    const ReportIndexedNight &night,
+    const char *etag,
+    ReportSpoolBuffer &out) const {
+    Storage::Guard g;
+    out.clear();
+    if (!Storage::mounted()) return false;
+    char path[REPORT_CACHE_PATH_MAX];
+    if (!result_plot_cache_path_for_night(night, etag, path, sizeof(path)) ||
+        !Storage::exists(path)) {
+        return false;
+    }
+    File file = Storage::open(path, "r");
+    if (!file) return false;
+    const size_t size = static_cast<size_t>(file.size());
+    out.set_max_size(size);
+    if (size < 8 || !out.reserve_capacity(size)) {
+        file.close();
+        out.clear();
         return false;
     }
     uint8_t buffer[512];
     while (file.available()) {
         const int n = file.read(buffer, sizeof(buffer));
         if (n < 0 ||
-            !result_plot_bin_.append(buffer, static_cast<size_t>(n))) {
+            !out.append(buffer, static_cast<size_t>(n))) {
             file.close();
-            result_plot_bin_.clear();
+            out.clear();
             return false;
         }
         if (n == 0) break;
     }
     file.close();
-    const uint8_t *d = result_plot_bin_.data();
+    const uint8_t *d = out.data();
     const uint32_t magic = d ? (static_cast<uint32_t>(d[0]) |
                                 (static_cast<uint32_t>(d[1]) << 8) |
                                 (static_cast<uint32_t>(d[2]) << 16) |
@@ -5963,42 +6173,69 @@ bool ReportManager::load_result_plot_cache() {
     const uint16_t version = d ? (static_cast<uint16_t>(d[4]) |
                                   (static_cast<uint16_t>(d[5]) << 8))
                                : 0u;
-    if (result_plot_bin_.size() != size || magic != PLOT_BIN_MAGIC ||
+    if (out.size() != size || magic != PLOT_BIN_MAGIC ||
         version != PLOT_BIN_VERSION) {
-        result_plot_bin_.clear();
+        out.clear();
         return false;
     }
     return true;
 }
 
-void ReportManager::reset_plot_cache_write_locked() {
+bool ReportManager::load_result_plot_cache() {
+    return load_result_plot_cache_for_night(result_indexed_night_,
+                                            result_etag_,
+                                            result_plot_bin_);
+}
+
+void ReportManager::reset_result_cache_write_locked() {
     if (plot_cache_write_.file) {
         Storage::Guard g;
         plot_cache_write_.file.close();
     }
     plot_cache_write_.file = File();
     plot_cache_write_.active = false;
-    plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+    plot_cache_write_.phase = ResultCacheWritePhase::Idle;
     plot_cache_write_.night = ReportSummaryRecord{};
-    plot_cache_write_.path[0] = 0;
-    plot_cache_write_.tmp_path[0] = 0;
-    plot_cache_write_.payload.reset();
+    plot_cache_write_.plot_path[0] = 0;
+    plot_cache_write_.plot_tmp_path[0] = 0;
+    plot_cache_write_.result_path[0] = 0;
+    plot_cache_write_.result_tmp_path[0] = 0;
+    plot_cache_write_.result_json.reset();
+    plot_cache_write_.plot.reset();
     plot_cache_write_.offset = 0;
 }
 
-bool ReportManager::enqueue_result_plot_cache_write(
+bool ReportManager::enqueue_result_cache_write(
     const ReportIndexedNight &night,
     const char *etag,
+    const std::shared_ptr<ReportSpoolBuffer> &result_json,
     const std::shared_ptr<ReportSpoolBuffer> &plot) {
-    if (!plot || plot->size() == 0 || !plot_cache_write_lock_) return false;
+    if (!result_json || result_json->size() == 0 ||
+        !plot || plot->size() == 0 || !plot_cache_write_lock_) {
+        return false;
+    }
 
-    char path[sizeof(plot_cache_write_.path)];
+    char path[sizeof(plot_cache_write_.plot_path)];
     if (!result_plot_cache_path_for_night(night, etag, path, sizeof(path))) {
         return false;
     }
-    char tmp[sizeof(plot_cache_write_.tmp_path)];
+    char tmp[sizeof(plot_cache_write_.plot_tmp_path)];
     const int written = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     if (written <= 0 || static_cast<size_t>(written) >= sizeof(tmp)) {
+        return false;
+    }
+    char result_path[sizeof(plot_cache_write_.result_path)];
+    if (!result_json_cache_path_for_night(night,
+                                          etag,
+                                          result_path,
+                                          sizeof(result_path))) {
+        return false;
+    }
+    char result_tmp[sizeof(plot_cache_write_.result_tmp_path)];
+    const int result_written =
+        snprintf(result_tmp, sizeof(result_tmp), "%s.tmp", result_path);
+    if (result_written <= 0 ||
+        static_cast<size_t>(result_written) >= sizeof(result_tmp)) {
         return false;
     }
 
@@ -6014,19 +6251,28 @@ bool ReportManager::enqueue_result_plot_cache_write(
         return false;
     }
 
-    reset_plot_cache_write_locked();
+    reset_result_cache_write_locked();
     plot_cache_write_.active = true;
-    plot_cache_write_.phase = PlotCacheWritePhase::ClearOld;
+    plot_cache_write_.phase = ResultCacheWritePhase::ClearOld;
     plot_cache_write_.night = night.summary;
-    snprintf(plot_cache_write_.path,
-             sizeof(plot_cache_write_.path),
+    snprintf(plot_cache_write_.plot_path,
+             sizeof(plot_cache_write_.plot_path),
              "%s",
              path);
-    snprintf(plot_cache_write_.tmp_path,
-             sizeof(plot_cache_write_.tmp_path),
+    snprintf(plot_cache_write_.plot_tmp_path,
+             sizeof(plot_cache_write_.plot_tmp_path),
              "%s",
              tmp);
-    plot_cache_write_.payload = plot;
+    snprintf(plot_cache_write_.result_path,
+             sizeof(plot_cache_write_.result_path),
+             "%s",
+             result_path);
+    snprintf(plot_cache_write_.result_tmp_path,
+             sizeof(plot_cache_write_.result_tmp_path),
+             "%s",
+             result_tmp);
+    plot_cache_write_.result_json = result_json;
+    plot_cache_write_.plot = plot;
     plot_cache_write_.offset = 0;
     xSemaphoreGive(plot_cache_write_lock_);
     if (BackgroundWorker *worker = background_worker()) {
@@ -6045,7 +6291,7 @@ bool ReportManager::plot_cache_writer_active() const {
     return active;
 }
 
-bool ReportManager::service_plot_cache_writer() {
+bool ReportManager::service_result_cache_writer() {
     if (!plot_cache_write_lock_) return false;
     if (xSemaphoreTake(plot_cache_write_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
         return false;
@@ -6057,51 +6303,58 @@ bool ReportManager::service_plot_cache_writer() {
 
     bool ok = true;
     switch (plot_cache_write_.phase) {
-        case PlotCacheWritePhase::ClearOld: {
+        case ResultCacheWritePhase::ClearOld: {
             {
                 Storage::Guard g;
                 ok = Storage::mounted() &&
                      Storage::ensure_dir("/aircannect") &&
                      Storage::ensure_dir("/aircannect/report") &&
-                     Storage::ensure_dir("/aircannect/report/v4") &&
+                     Storage::ensure_dir(REPORT_CACHE_BASE_DIR) &&
                      Storage::ensure_dir("/aircannect/report/v4/plots") &&
-                     Storage::ensure_dir(REPORT_PLOT_CACHE_DIR);
+                     Storage::ensure_dir(REPORT_PLOT_CACHE_DIR) &&
+                     Storage::ensure_dir("/aircannect/report/v4/results") &&
+                     Storage::ensure_dir(REPORT_RESULT_JSON_CACHE_DIR);
             }
-            uint32_t deleted = 0;
+            uint32_t deleted_plot = 0;
+            uint32_t deleted_result = 0;
             ok = ok && clear_plot_cache_for_night(plot_cache_write_.night,
-                                                  deleted);
+                                                  deleted_plot);
+            ok = ok && clear_result_json_cache_for_night(
+                           plot_cache_write_.night,
+                           deleted_result);
             plot_cache_write_.phase =
-                ok ? PlotCacheWritePhase::OpenTmp
-                   : PlotCacheWritePhase::Idle;
+                ok ? ResultCacheWritePhase::OpenPlotTmp
+                   : ResultCacheWritePhase::Idle;
             break;
         }
-        case PlotCacheWritePhase::OpenTmp: {
+        case ResultCacheWritePhase::OpenPlotTmp: {
             Storage::Guard g;
-            Storage::remove(plot_cache_write_.tmp_path);
+            Storage::remove(plot_cache_write_.plot_tmp_path);
             plot_cache_write_.file =
-                Storage::open(plot_cache_write_.tmp_path, "w");
+                Storage::open(plot_cache_write_.plot_tmp_path, "w");
             ok = static_cast<bool>(plot_cache_write_.file);
             plot_cache_write_.phase =
-                ok ? PlotCacheWritePhase::Write
-                   : PlotCacheWritePhase::Idle;
+                ok ? ResultCacheWritePhase::WritePlot
+                   : ResultCacheWritePhase::Idle;
             break;
         }
-        case PlotCacheWritePhase::Write: {
-            if (!plot_cache_write_.payload || !plot_cache_write_.file) {
+        case ResultCacheWritePhase::WritePlot: {
+            if (!plot_cache_write_.plot || !plot_cache_write_.file) {
                 ok = false;
-                plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+                plot_cache_write_.phase = ResultCacheWritePhase::Idle;
                 break;
             }
-            const size_t total = plot_cache_write_.payload->size();
+            const size_t total = plot_cache_write_.plot->size();
             if (plot_cache_write_.offset >= total) {
-                plot_cache_write_.phase = PlotCacheWritePhase::CloseRename;
+                plot_cache_write_.phase =
+                    ResultCacheWritePhase::ClosePlotRename;
                 break;
             }
             const size_t len =
-                std::min(REPORT_PLOT_CACHE_WRITE_CHUNK,
+                std::min(REPORT_CACHE_WRITE_CHUNK,
                          total - plot_cache_write_.offset);
             const uint8_t *data =
-                plot_cache_write_.payload->data() + plot_cache_write_.offset;
+                plot_cache_write_.plot->data() + plot_cache_write_.offset;
             size_t wrote = 0;
             {
                 Storage::Guard g;
@@ -6112,53 +6365,125 @@ bool ReportManager::service_plot_cache_writer() {
                 plot_cache_write_.offset += len;
                 if (plot_cache_write_.offset >= total) {
                     plot_cache_write_.phase =
-                        PlotCacheWritePhase::CloseRename;
+                        ResultCacheWritePhase::ClosePlotRename;
                 }
             } else {
-                plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+                plot_cache_write_.phase = ResultCacheWritePhase::Idle;
             }
             break;
         }
-        case PlotCacheWritePhase::CloseRename: {
+        case ResultCacheWritePhase::ClosePlotRename: {
             Storage::Guard g;
             if (plot_cache_write_.file) plot_cache_write_.file.close();
-            Storage::remove(plot_cache_write_.path);
-            ok = Storage::rename(plot_cache_write_.tmp_path,
-                                 plot_cache_write_.path);
-            if (!ok) Storage::remove(plot_cache_write_.tmp_path);
-            plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+            Storage::remove(plot_cache_write_.plot_path);
+            ok = Storage::rename(plot_cache_write_.plot_tmp_path,
+                                 plot_cache_write_.plot_path);
+            if (!ok) {
+                Storage::remove(plot_cache_write_.plot_tmp_path);
+                plot_cache_write_.phase = ResultCacheWritePhase::Idle;
+            } else {
+                plot_cache_write_.offset = 0;
+                plot_cache_write_.phase =
+                    ResultCacheWritePhase::OpenResultTmp;
+            }
             break;
         }
-        case PlotCacheWritePhase::Idle:
+        case ResultCacheWritePhase::OpenResultTmp: {
+            Storage::Guard g;
+            Storage::remove(plot_cache_write_.result_tmp_path);
+            plot_cache_write_.file =
+                Storage::open(plot_cache_write_.result_tmp_path, "w");
+            ok = static_cast<bool>(plot_cache_write_.file);
+            plot_cache_write_.phase =
+                ok ? ResultCacheWritePhase::WriteResult
+                   : ResultCacheWritePhase::Idle;
+            break;
+        }
+        case ResultCacheWritePhase::WriteResult: {
+            if (!plot_cache_write_.result_json || !plot_cache_write_.file) {
+                ok = false;
+                plot_cache_write_.phase = ResultCacheWritePhase::Idle;
+                break;
+            }
+            const size_t total = plot_cache_write_.result_json->size();
+            if (plot_cache_write_.offset >= total) {
+                plot_cache_write_.phase =
+                    ResultCacheWritePhase::CloseResultRename;
+                break;
+            }
+            const size_t len =
+                std::min(REPORT_CACHE_WRITE_CHUNK,
+                         total - plot_cache_write_.offset);
+            const uint8_t *data =
+                plot_cache_write_.result_json->data() +
+                plot_cache_write_.offset;
+            size_t wrote = 0;
+            {
+                Storage::Guard g;
+                wrote = plot_cache_write_.file.write(data, len);
+            }
+            ok = wrote == len;
+            if (ok) {
+                plot_cache_write_.offset += len;
+                if (plot_cache_write_.offset >= total) {
+                    plot_cache_write_.phase =
+                        ResultCacheWritePhase::CloseResultRename;
+                }
+            } else {
+                plot_cache_write_.phase = ResultCacheWritePhase::Idle;
+            }
+            break;
+        }
+        case ResultCacheWritePhase::CloseResultRename: {
+            Storage::Guard g;
+            if (plot_cache_write_.file) plot_cache_write_.file.close();
+            Storage::remove(plot_cache_write_.result_path);
+            ok = Storage::rename(plot_cache_write_.result_tmp_path,
+                                 plot_cache_write_.result_path);
+            if (!ok) Storage::remove(plot_cache_write_.result_tmp_path);
+            plot_cache_write_.phase = ResultCacheWritePhase::Idle;
+            break;
+        }
+        case ResultCacheWritePhase::Idle:
         default:
             ok = false;
             break;
     }
 
-    const bool done = plot_cache_write_.phase == PlotCacheWritePhase::Idle;
+    const bool done = plot_cache_write_.phase == ResultCacheWritePhase::Idle;
     const uint64_t night_start_ms = plot_cache_write_.night.start_ms;
-    const size_t bytes =
-        plot_cache_write_.payload ? plot_cache_write_.payload->size() : 0;
+    const size_t plot_bytes =
+        plot_cache_write_.plot ? plot_cache_write_.plot->size() : 0;
+    const size_t result_bytes =
+        plot_cache_write_.result_json ? plot_cache_write_.result_json->size()
+                                      : 0;
     if (done) {
         if (ok) {
             Log::logf(CAT_REPORT,
                       LOG_DEBUG,
-                      "Plot cache write complete night=%llu bytes=%u\n",
+                      "Result cache write complete night=%llu result=%u "
+                      "plot=%u\n",
                       static_cast<unsigned long long>(night_start_ms),
-                      static_cast<unsigned>(bytes));
+                      static_cast<unsigned>(result_bytes),
+                      static_cast<unsigned>(plot_bytes));
         } else {
             Log::logf(CAT_REPORT,
                       LOG_WARN,
-                      "Plot cache write failed night=%llu bytes=%u\n",
+                      "Result cache write failed night=%llu result=%u "
+                      "plot=%u\n",
                       static_cast<unsigned long long>(night_start_ms),
-                      static_cast<unsigned>(bytes));
+                      static_cast<unsigned>(result_bytes),
+                      static_cast<unsigned>(plot_bytes));
             Storage::Guard g;
             if (plot_cache_write_.file) plot_cache_write_.file.close();
-            if (plot_cache_write_.tmp_path[0]) {
-                Storage::remove(plot_cache_write_.tmp_path);
+            if (plot_cache_write_.plot_tmp_path[0]) {
+                Storage::remove(plot_cache_write_.plot_tmp_path);
+            }
+            if (plot_cache_write_.result_tmp_path[0]) {
+                Storage::remove(plot_cache_write_.result_tmp_path);
             }
         }
-        reset_plot_cache_write_locked();
+        reset_result_cache_write_locked();
     }
     xSemaphoreGive(plot_cache_write_lock_);
     return true;

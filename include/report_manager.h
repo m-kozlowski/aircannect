@@ -108,6 +108,7 @@ struct ReportCacheClearResult {
     uint32_t chunks_deleted = 0;
     uint32_t coverage_deleted = 0;
     uint32_t plots_deleted = 0;
+    uint32_t result_json_deleted = 0;
 };
 
 enum class ReportResultState : uint8_t {
@@ -760,18 +761,31 @@ private:
                                           const char *etag,
                                           char *path,
                                           size_t path_size) const;
+    bool result_json_cache_path_for_night(const ReportIndexedNight &night,
+                                          const char *etag,
+                                          char *path,
+                                          size_t path_size) const;
     bool result_plot_cache_path(char *path, size_t path_size) const;
     bool result_plot_cache_exists_for_night(const ReportIndexedNight &night,
                                             const char *etag) const;
     bool clear_plot_cache_for_night(const ReportSummaryRecord &night,
                                     uint32_t &deleted) const;
+    bool clear_result_json_cache_for_night(const ReportSummaryRecord &night,
+                                           uint32_t &deleted) const;
+    bool load_result_json_cache_for_night(const ReportIndexedNight &night,
+                                          const char *etag,
+                                          LargeTextBuffer &out) const;
+    bool load_result_plot_cache_for_night(const ReportIndexedNight &night,
+                                          const char *etag,
+                                          ReportSpoolBuffer &out) const;
     bool load_result_plot_cache();
-    bool enqueue_result_plot_cache_write(
+    bool enqueue_result_cache_write(
         const ReportIndexedNight &night,
         const char *etag,
+        const std::shared_ptr<ReportSpoolBuffer> &result_json,
         const std::shared_ptr<ReportSpoolBuffer> &plot);
-    bool service_plot_cache_writer();
-    void reset_plot_cache_write_locked();
+    bool service_result_cache_writer();
+    void reset_result_cache_write_locked();
 
     ReportSummaryRecord *records_ = nullptr;
     size_t record_count_ = 0;
@@ -997,25 +1011,31 @@ private:
     uint32_t range_build_input_bytes_ = 0;
     void service_range_plot(bool realtime_active);
 
-    enum class PlotCacheWritePhase : uint8_t {
+    enum class ResultCacheWritePhase : uint8_t {
         Idle,
         ClearOld,
-        OpenTmp,
-        Write,
-        CloseRename,
+        OpenPlotTmp,
+        WritePlot,
+        ClosePlotRename,
+        OpenResultTmp,
+        WriteResult,
+        CloseResultRename,
     };
-    struct PlotCacheWriteJob {
+    struct ResultCacheWriteJob {
         bool active = false;
-        PlotCacheWritePhase phase = PlotCacheWritePhase::Idle;
+        ResultCacheWritePhase phase = ResultCacheWritePhase::Idle;
         ReportSummaryRecord night;
-        char path[128] = {};
-        char tmp_path[136] = {};
-        std::shared_ptr<ReportSpoolBuffer> payload;
+        char plot_path[192] = {};
+        char plot_tmp_path[200] = {};
+        char result_path[192] = {};
+        char result_tmp_path[200] = {};
+        std::shared_ptr<ReportSpoolBuffer> result_json;
+        std::shared_ptr<ReportSpoolBuffer> plot;
         size_t offset = 0;
         File file;
     };
     SemaphoreHandle_t plot_cache_write_lock_ = nullptr;
-    PlotCacheWriteJob plot_cache_write_;
+    ResultCacheWriteJob plot_cache_write_;
 
     uint32_t result_slot_tick_ = 0;
     bool publish_result_to_slot(bool cache_plot = false);

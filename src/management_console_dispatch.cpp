@@ -324,6 +324,8 @@ void print_report_cache_clear_result(Print &out,
     out.print(static_cast<unsigned long>(result.coverage_deleted));
     out.print(" plots=");
     out.print(static_cast<unsigned long>(result.plots_deleted));
+    out.print(" result_json=");
+    out.print(static_cast<unsigned long>(result.result_json_deleted));
     out.println();
 }
 
