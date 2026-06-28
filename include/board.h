@@ -12,7 +12,7 @@
 #endif
 
 #ifndef AC_STACK_PROFILE_ENABLED
-#define AC_STACK_PROFILE_ENABLED 1
+#define AC_STACK_PROFILE_ENABLED 0
 #endif
 
 static constexpr uint32_t AC_STACK_PROFILE_SAMPLE_MS = 10000;
