@@ -61,6 +61,7 @@ void EdfReportCatalogJob::unlock() const {
 void EdfReportCatalogJob::set_error_locked(const char *error) {
     close_dirs_locked();
     release_build_locked();
+    refresh_again_pending_ = false;
     status_.state = EdfReportCatalogState::Error;
     phase_ = Phase::Idle;
     copy_cstr(status_.error, sizeof(status_.error), error ? error : "error");
@@ -188,6 +189,9 @@ void EdfReportCatalogJob::publish_partial_build_locked() {
 
 void EdfReportCatalogJob::publish_build_locked() {
     publish_snapshot_locked(true);
+    if (!refresh_again_pending_) return;
+    refresh_again_pending_ = false;
+    (void)start_refresh_locked(nullptr);
 }
 
 void EdfReportCatalogJob::update_current_path_locked(const char *path) {
@@ -199,6 +203,7 @@ bool EdfReportCatalogJob::start_refresh_locked(uint32_t *refresh_id_out) {
         return false;
     }
 
+    refresh_again_pending_ = false;
     close_dirs_locked();
     release_build_locked();
     if (!allocate_build_locked()) {
@@ -222,12 +227,21 @@ bool EdfReportCatalogJob::start_refresh_locked(uint32_t *refresh_id_out) {
 bool EdfReportCatalogJob::request_refresh(uint32_t *refresh_id_out) {
     begin();
     if (!lock(0)) return false;
-    const bool started = start_refresh_locked(refresh_id_out);
+    bool accepted = false;
+    bool started = false;
+    if (status_.state == EdfReportCatalogState::Refreshing) {
+        refresh_again_pending_ = true;
+        if (refresh_id_out) *refresh_id_out = status_.refresh_id;
+        accepted = true;
+    } else {
+        started = start_refresh_locked(refresh_id_out);
+        accepted = started;
+    }
     unlock();
-    if (started) {
+    if (accepted) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
-    return started;
+    return accepted;
 }
 
 bool EdfReportCatalogJob::set_timezone_offset_minutes(int32_t offset_minutes) {
@@ -266,6 +280,12 @@ JobStep EdfReportCatalogJob::step() {
     begin();
     if (!lock(20)) return JobStep::Waiting;
     if (status_.state != EdfReportCatalogState::Refreshing) {
+        if (refresh_again_pending_) {
+            refresh_again_pending_ = false;
+            const bool started = start_refresh_locked(nullptr);
+            unlock();
+            return started ? JobStep::Working : JobStep::Idle;
+        }
         unlock();
         return JobStep::Idle;
     }

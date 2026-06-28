@@ -212,12 +212,6 @@ static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
         return;
     }
 
-    EdfReportCatalogStatus catalog;
-    if (edf_report_catalog_job.status(catalog, 0) &&
-        catalog.state == EdfReportCatalogState::Refreshing) {
-        edf_report_catalog_post_session_pending = false;
-        return;
-    }
     if (edf_report_catalog_job.request_refresh()) {
         edf_report_catalog_post_session_pending = false;
     } else {

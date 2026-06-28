@@ -96,6 +96,7 @@ private:
     EdfReportCatalogStatus status_;
     uint32_t next_refresh_id_ = 1;
     Phase phase_ = Phase::Idle;
+    bool refresh_again_pending_ = false;
 
     EdfReportSessionDescriptor *sessions_ = nullptr;
     size_t session_count_ = 0;
