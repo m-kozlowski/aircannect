@@ -784,6 +784,30 @@ bool remember_report_event(ReportSpoolBuffer &seen,
     return report_append_event_record(seen, event);
 }
 
+bool indexed_night_by_newest_cursor(const ReportIndexedNight *nights,
+                                    size_t count,
+                                    size_t cursor,
+                                    ReportIndexedNight &out,
+                                    size_t &therapy_index) {
+    if (!nights) return false;
+    size_t seen = 0;
+    for (size_t i = count; i > 0; --i) {
+        const ReportIndexedNight &night = nights[i - 1];
+        if (!night.summary.valid ||
+            night.summary.start_ms == 0 ||
+            night.summary.duration_min == 0) {
+            continue;
+        }
+        if (seen == cursor) {
+            out = night;
+            therapy_index = seen;
+            return true;
+        }
+        seen++;
+    }
+    return false;
+}
+
 void log_report_alloc_failed(const char *context, size_t bytes) {
     Log::logf(CAT_REPORT,
               LOG_ERROR,
@@ -818,6 +842,38 @@ public:
 private:
     const char *context_ = nullptr;
     ReportIndexedNight *night_ = nullptr;
+};
+
+class ScopedIndexedNightList {
+public:
+    ScopedIndexedNightList(const char *context, size_t capacity)
+        : context_(context),
+          capacity_(capacity),
+          nights_(static_cast<ReportIndexedNight *>(Memory::alloc_large(
+              capacity * sizeof(ReportIndexedNight),
+              false))) {
+        if (!nights_) {
+            log_report_alloc_failed(context_,
+                                    capacity * sizeof(ReportIndexedNight));
+        }
+    }
+
+    ~ScopedIndexedNightList() {
+        Memory::free(nights_);
+    }
+
+    ScopedIndexedNightList(const ScopedIndexedNightList &) = delete;
+    ScopedIndexedNightList &operator=(const ScopedIndexedNightList &) = delete;
+
+    explicit operator bool() const { return nights_ != nullptr; }
+    ReportIndexedNight *data() { return nights_; }
+    const ReportIndexedNight *data() const { return nights_; }
+    size_t capacity() const { return capacity_; }
+
+private:
+    const char *context_ = nullptr;
+    size_t capacity_ = 0;
+    ReportIndexedNight *nights_ = nullptr;
 };
 
 class ScopedReportResolveContext {
@@ -1080,7 +1136,6 @@ bool ReportManager::build_indexed_nights(ReportIndexedNight *out,
                                          size_t &count) const {
     count = 0;
     if (!out || capacity == 0) return false;
-    if (!index_cache_lock_) return false;
 
     uint32_t summary_revision = 0;
     bool catalog_present = false;
@@ -1093,21 +1148,58 @@ bool ReportManager::build_indexed_nights(ReportIndexedNight *out,
         return false;
     }
 
-    if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+    if (index_cache_lock_ &&
+        xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        const bool copied = copy_index_cache_locked(out,
+                                                    capacity,
+                                                    count,
+                                                    summary_revision,
+                                                    catalog_present,
+                                                    catalog_state,
+                                                    catalog_refresh_id);
+        xSemaphoreGive(index_cache_lock_);
+        if (copied) return true;
+    }
+
+    ReportIndexedNight *fresh =
+        static_cast<ReportIndexedNight *>(Memory::calloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX,
+            sizeof(ReportIndexedNight),
+            false));
+    if (!fresh) {
+        log_report_alloc_failed(
+            "report_night_index_build",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
         return false;
     }
-    const bool ready = ensure_index_cache_locked(summary_revision,
-                                                catalog_present,
-                                                catalog_state,
-                                                catalog_refresh_id);
-    if (ready) {
-        count = index_cache_count_ < capacity ? index_cache_count_ : capacity;
-        if (count > 0) {
-            memcpy(out, index_cache_, count * sizeof(ReportIndexedNight));
-        }
+
+    size_t fresh_count = 0;
+    const bool ready =
+        build_indexed_nights_uncached(fresh,
+                                      AC_REPORT_SUMMARY_RECORD_MAX,
+                                      fresh_count);
+    if (!ready) {
+        Memory::free(fresh);
+        return false;
     }
-    xSemaphoreGive(index_cache_lock_);
-    return ready;
+
+    if (index_cache_lock_ &&
+        xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        (void)publish_index_cache_locked(fresh,
+                                         fresh_count,
+                                         summary_revision,
+                                         catalog_present,
+                                         catalog_state,
+                                         catalog_refresh_id);
+        xSemaphoreGive(index_cache_lock_);
+    }
+
+    count = fresh_count < capacity ? fresh_count : capacity;
+    if (count > 0) {
+        memcpy(out, fresh, count * sizeof(ReportIndexedNight));
+    }
+    Memory::free(fresh);
+    return true;
 }
 
 bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
@@ -1254,19 +1346,50 @@ bool ReportManager::index_cache_key(
     return true;
 }
 
-bool ReportManager::ensure_index_cache_locked(
+bool ReportManager::index_cache_matches(
     uint32_t summary_revision,
     bool catalog_present,
     uint8_t catalog_state,
     uint32_t catalog_refresh_id) const {
-    const bool key_matches =
-        index_cache_valid_ &&
-        index_cache_summary_revision_ == summary_revision &&
-        index_cache_catalog_present_ == catalog_present &&
-        index_cache_catalog_state_ == catalog_state &&
-        index_cache_catalog_refresh_id_ == catalog_refresh_id;
-    if (key_matches) return true;
+    return index_cache_valid_ &&
+           index_cache_summary_revision_ == summary_revision &&
+           index_cache_catalog_present_ == catalog_present &&
+           index_cache_catalog_state_ == catalog_state &&
+           index_cache_catalog_refresh_id_ == catalog_refresh_id &&
+           index_cache_ != nullptr;
+}
 
+bool ReportManager::copy_index_cache_locked(
+    ReportIndexedNight *out,
+    size_t capacity,
+    size_t &count,
+    uint32_t summary_revision,
+    bool catalog_present,
+    uint8_t catalog_state,
+    uint32_t catalog_refresh_id) const {
+    count = 0;
+    if (!out || capacity == 0 ||
+        !index_cache_matches(summary_revision,
+                             catalog_present,
+                             catalog_state,
+                             catalog_refresh_id)) {
+        return false;
+    }
+    count = index_cache_count_ < capacity ? index_cache_count_ : capacity;
+    if (count > 0) {
+        memcpy(out, index_cache_, count * sizeof(ReportIndexedNight));
+    }
+    return true;
+}
+
+bool ReportManager::publish_index_cache_locked(
+    const ReportIndexedNight *src,
+    size_t count,
+    uint32_t summary_revision,
+    bool catalog_present,
+    uint8_t catalog_state,
+    uint32_t catalog_refresh_id) const {
+    if (!src) return false;
     if (!index_cache_) {
         index_cache_ = static_cast<ReportIndexedNight *>(Memory::calloc_large(
             AC_REPORT_SUMMARY_RECORD_MAX,
@@ -1282,16 +1405,19 @@ bool ReportManager::ensure_index_cache_locked(
         }
     }
 
-    size_t count = 0;
-    if (!build_indexed_nights_uncached(index_cache_,
-                                       AC_REPORT_SUMMARY_RECORD_MAX,
-                                       count)) {
-        index_cache_valid_ = false;
-        index_cache_count_ = 0;
-        return false;
+    const size_t stored = count < AC_REPORT_SUMMARY_RECORD_MAX
+                              ? count
+                              : AC_REPORT_SUMMARY_RECORD_MAX;
+    if (stored > 0) {
+        memcpy(index_cache_, src, stored * sizeof(ReportIndexedNight));
+    }
+    if (stored < index_cache_count_) {
+        memset(index_cache_ + stored,
+               0,
+               (index_cache_count_ - stored) * sizeof(ReportIndexedNight));
     }
 
-    index_cache_count_ = count;
+    index_cache_count_ = stored;
     index_cache_summary_revision_ = summary_revision;
     index_cache_catalog_present_ = catalog_present;
     index_cache_catalog_state_ = catalog_state;
@@ -1303,86 +1429,56 @@ bool ReportManager::ensure_index_cache_locked(
 bool ReportManager::indexed_night_by_therapy_index(
     size_t therapy_index,
     ReportIndexedNight &out) const {
-    if (!index_cache_lock_) return false;
-    uint32_t summary_revision = 0;
-    bool catalog_present = false;
-    uint8_t catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
-    uint32_t catalog_refresh_id = 0;
-    if (!index_cache_key(summary_revision,
-                         catalog_present,
-                         catalog_state,
-                         catalog_refresh_id)) {
+    ReportIndexedNight *snapshot =
+        static_cast<ReportIndexedNight *>(Memory::alloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
+            false));
+    if (!snapshot) {
+        log_report_alloc_failed(
+            "report_night_index_lookup",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
         return false;
     }
-    if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
-        return false;
-    }
+    size_t count = 0;
     bool found = false;
-    if (ensure_index_cache_locked(summary_revision,
-                                  catalog_present,
-                                  catalog_state,
-                                  catalog_refresh_id)) {
-        found = ReportNightIndex::by_therapy_index(index_cache_,
-                                                   index_cache_count_,
+    if (build_indexed_nights(snapshot,
+                             AC_REPORT_SUMMARY_RECORD_MAX,
+                             count)) {
+        found = ReportNightIndex::by_therapy_index(snapshot,
+                                                   count,
                                                    therapy_index,
                                                    out);
     }
-    xSemaphoreGive(index_cache_lock_);
+    Memory::free(snapshot);
     return found;
 }
 
 bool ReportManager::indexed_night_by_start(uint64_t night_start_ms,
                                            ReportIndexedNight &out,
                                            size_t *therapy_index_out) const {
-    if (!index_cache_lock_) return false;
-    uint32_t summary_revision = 0;
-    bool catalog_present = false;
-    uint8_t catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
-    uint32_t catalog_refresh_id = 0;
-    if (!index_cache_key(summary_revision,
-                         catalog_present,
-                         catalog_state,
-                         catalog_refresh_id)) {
+    ReportIndexedNight *snapshot =
+        static_cast<ReportIndexedNight *>(Memory::alloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
+            false));
+    if (!snapshot) {
+        log_report_alloc_failed(
+            "report_night_index_lookup",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
         return false;
     }
-    if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
-        return false;
-    }
+    size_t count = 0;
     bool found = false;
-    if (ensure_index_cache_locked(summary_revision,
-                                  catalog_present,
-                                  catalog_state,
-                                  catalog_refresh_id)) {
-        found = ReportNightIndex::by_start(index_cache_,
-                                           index_cache_count_,
+    if (build_indexed_nights(snapshot,
+                             AC_REPORT_SUMMARY_RECORD_MAX,
+                             count)) {
+        found = ReportNightIndex::by_start(snapshot,
+                                           count,
                                            night_start_ms,
                                            out,
                                            therapy_index_out);
     }
-    xSemaphoreGive(index_cache_lock_);
+    Memory::free(snapshot);
     return found;
-}
-
-bool ReportManager::indexed_night_by_newest_cursor_locked(
-    size_t cursor,
-    ReportIndexedNight &out,
-    size_t &therapy_index) const {
-    size_t seen = 0;
-    for (size_t i = index_cache_count_; i > 0; --i) {
-        const ReportIndexedNight &night = index_cache_[i - 1];
-        if (!night.summary.valid ||
-            night.summary.start_ms == 0 ||
-            night.summary.duration_min == 0) {
-            continue;
-        }
-        if (seen == cursor) {
-            out = night;
-            therapy_index = seen;
-            return true;
-        }
-        seen++;
-    }
-    return false;
 }
 
 bool ReportManager::request_summary_refresh(bool force) {
@@ -4020,25 +4116,26 @@ ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
         return PlotPrebuildResult::Waiting;
     }
 
+    ScopedIndexedNightList snapshot("report_night_index_prebuild",
+                                    AC_REPORT_SUMMARY_RECORD_MAX);
+    if (!snapshot) return PlotPrebuildResult::Unavailable;
+    size_t snapshot_count = 0;
+    if (!build_indexed_nights(snapshot.data(),
+                              snapshot.capacity(),
+                              snapshot_count)) {
+        return PlotPrebuildResult::Waiting;
+    }
+
     constexpr size_t SCAN_STEPS_PER_CALL = 4;
     for (size_t step = 0; step < SCAN_STEPS_PER_CALL; ++step) {
         ReportIndexedNight night;
         size_t therapy_index = 0;
-        if (!index_cache_lock_) return PlotPrebuildResult::Unavailable;
-        if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
-            return PlotPrebuildResult::Waiting;
-        }
-        const bool index_ready = ensure_index_cache_locked(summary_revision,
-                                                           catalog_present,
-                                                           catalog_state,
-                                                           catalog_refresh_id);
         const bool found =
-            index_ready &&
-            indexed_night_by_newest_cursor_locked(plot_prebuild_cursor_,
-                                                  night,
-                                                  therapy_index);
-        xSemaphoreGive(index_cache_lock_);
-        if (!index_ready) return PlotPrebuildResult::Waiting;
+            indexed_night_by_newest_cursor(snapshot.data(),
+                                           snapshot_count,
+                                           plot_prebuild_cursor_,
+                                           night,
+                                           therapy_index);
         if (!found) {
             plot_prebuild_next_scan_ms_ =
                 millis() + AC_REPORT_PLOT_PREBUILD_RESCAN_MS;

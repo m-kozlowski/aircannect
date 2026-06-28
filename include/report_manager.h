@@ -800,13 +800,23 @@ private:
     bool indexed_night_by_start(uint64_t night_start_ms,
                                 ReportIndexedNight &out,
                                 size_t *therapy_index_out = nullptr) const;
-    bool indexed_night_by_newest_cursor_locked(size_t cursor,
-                                               ReportIndexedNight &out,
-                                               size_t &therapy_index) const;
-    bool ensure_index_cache_locked(uint32_t summary_revision,
-                                   bool catalog_present,
-                                   uint8_t catalog_state,
-                                   uint32_t catalog_refresh_id) const;
+    bool index_cache_matches(uint32_t summary_revision,
+                             bool catalog_present,
+                             uint8_t catalog_state,
+                             uint32_t catalog_refresh_id) const;
+    bool copy_index_cache_locked(ReportIndexedNight *out,
+                                 size_t capacity,
+                                 size_t &count,
+                                 uint32_t summary_revision,
+                                 bool catalog_present,
+                                 uint8_t catalog_state,
+                                 uint32_t catalog_refresh_id) const;
+    bool publish_index_cache_locked(const ReportIndexedNight *src,
+                                    size_t count,
+                                    uint32_t summary_revision,
+                                    bool catalog_present,
+                                    uint8_t catalog_state,
+                                    uint32_t catalog_refresh_id) const;
     bool index_cache_key(uint32_t &summary_revision,
                          bool &catalog_present,
                          uint8_t &catalog_state,
