@@ -1987,7 +1987,7 @@
         fields: [
           ["oxi_en", "Oximetry", "bool"],
           ["oxi_udp", "Oximetry UDP port", "number"],
-          ["oxi_adv", "BLE advertising", "enum", ["off", "auto", "always"]],
+          ["oxi_adv", "BLE advertising", "enum", ["auto", "manual"]],
         ],
       },
       {
@@ -6558,9 +6558,7 @@
         const response = await api("/api/config", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            oximetry_advertise_mode: advertiseMode,
-          }),
+          body: JSON.stringify({oxi_adv: advertiseMode}),
         });
         const data = await response.json();
         msg("oxiTabMsg", data.queued ? "Config update queued" : "Saved", true);
