@@ -536,7 +536,7 @@ private:
         size_t session_capacity,
         size_t &session_count,
         bool *pending_out = nullptr) const;
-    bool append_edf_event_sessions_for_selected_days(
+    bool append_edf_sessions_for_selected_days(
         EdfReportSessionDescriptor *sessions,
         size_t session_capacity,
         size_t &session_count) const;
@@ -906,7 +906,7 @@ private:
         ReportResultChunk chunks[AC_REPORT_RESULT_CHUNK_MAX] = {};
         size_t chunk_count = 0;
         EdfReportSessionDescriptor
-            edf_sessions[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+            edf_sessions[AC_REPORT_EDF_SESSION_MAX] = {};
         size_t edf_session_count = 0;
         std::shared_ptr<ReportSpoolBuffer> plot;
     };

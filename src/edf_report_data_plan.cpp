@@ -6,7 +6,6 @@ namespace aircannect {
 namespace {
 
 static constexpr uint32_t EDF_REPORT_PLAN_TARGET_BYTES = 512 * 1024;
-static constexpr int64_t EDF_REPORT_COVERAGE_TOLERANCE_MS = 90000;
 
 const EdfReportSessionFileDescriptor *session_file(
     const EdfReportSessionDescriptor &session,
@@ -252,7 +251,7 @@ bool extend_plan_coverage(void *context, const EdfReportDataPlanEntry &entry) {
     }
     if (entry.end_ms <= ctx->covered_until_ms) return true;
     if (entry.start_ms >
-        ctx->covered_until_ms + EDF_REPORT_COVERAGE_TOLERANCE_MS) {
+        ctx->covered_until_ms + AC_EDF_REPORT_COVERAGE_TOLERANCE_MS) {
         return true;
     }
     ctx->covered_until_ms = entry.end_ms;
@@ -269,7 +268,8 @@ bool signal_covers_range(const EdfReportSessionDescriptor *sessions,
     }
 
     int64_t covered_until = range.start_ms;
-    while (covered_until + EDF_REPORT_COVERAGE_TOLERANCE_MS < range.end_ms) {
+    while (covered_until + AC_EDF_REPORT_COVERAGE_TOLERANCE_MS <
+           range.end_ms) {
         PlanCoverageContext ctx;
         ctx.covered_until_ms = covered_until;
         for (size_t i = 0; i < session_count; ++i) {

@@ -98,6 +98,11 @@ bool merge_intervals(ReportCoverageInterval *intervals,
     return true;
 }
 
+bool gap_exceeds_edf_tolerance(int64_t start_ms, int64_t end_ms) {
+    return end_ms > start_ms &&
+           end_ms - start_ms > AC_EDF_REPORT_COVERAGE_TOLERANCE_MS;
+}
+
 const ReportResolvedStream *find_stream(const ReportResolvedPlan &plan,
                                         ReportStoreChunkKind kind,
                                         const char *name) {
@@ -621,6 +626,12 @@ bool ReportSourceResolver::add_signal(
         return true;
     };
 
+    auto add_required_spool_gap = [&](int64_t start_ms,
+                                      int64_t end_ms) -> bool {
+        if (!gap_exceeds_edf_tolerance(start_ms, end_ms)) return true;
+        return add_spool_gap(start_ms, end_ms);
+    };
+
     for (size_t range_index = 0; range_index < range_count; ++range_index) {
         const ReportSessionRange &range = ranges[range_index];
         if (range.end_ms <= range.start_ms) continue;
@@ -647,7 +658,9 @@ bool ReportSourceResolver::add_signal(
                 scratch_.coverage[interval_index];
             if (interval.end_ms <= cursor) continue;
             if (interval.start_ms > cursor) {
-                if (!add_spool_gap(cursor, interval.start_ms)) return false;
+                if (!add_required_spool_gap(cursor, interval.start_ms)) {
+                    return false;
+                }
             }
             if (!add_series_segment(ReportResolvedProvider::Edf,
                                     interval.source,
@@ -661,7 +674,7 @@ bool ReportSourceResolver::add_signal(
         }
 
         if (range.end_ms > cursor) {
-            if (!add_spool_gap(cursor, range.end_ms)) return false;
+            if (!add_required_spool_gap(cursor, range.end_ms)) return false;
         }
     }
     return true;

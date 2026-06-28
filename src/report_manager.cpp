@@ -32,7 +32,7 @@ const char *const REPORT_SUMMARY_FROM = "2000-01-01T00:00:00.000Z";
 constexpr const char *REPORT_PLOT_CACHE_DIR = "/aircannect/report/v4/plots/v2";
 constexpr size_t REPORT_PLOT_PATH_MAX = 128;
 constexpr size_t REPORT_PLOT_CACHE_WRITE_CHUNK = 4096;
-constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 21;
+constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 22;
 
 const char *report_provider_id_name(ReportProviderId provider) {
     switch (provider) {
@@ -125,12 +125,6 @@ bool edf_session_same_identity(const EdfReportSessionDescriptor &a,
                                const EdfReportSessionDescriptor &b) {
     return strcmp(a.sleep_day, b.sleep_day) == 0 &&
            strcmp(a.session_stamp, b.session_stamp) == 0;
-}
-
-bool edf_session_has_event_file(const EdfReportSessionDescriptor &session) {
-    return (session.file_mask &
-            (edf_report_file_kind_mask(EdfInventoryFileKind::Eve) |
-             edf_report_file_kind_mask(EdfInventoryFileKind::Csl))) != 0;
 }
 
 void append_u64(LargeTextBuffer &out, uint64_t value) {
@@ -826,7 +820,7 @@ public:
           include_sessions_(include_sessions),
           sessions_(static_cast<EdfReportSessionDescriptor *>(
               include_sessions
-                  ? Memory::calloc_large(AC_REPORT_SUMMARY_SESSION_MAX,
+                  ? Memory::calloc_large(AC_REPORT_EDF_SESSION_MAX,
                                          sizeof(EdfReportSessionDescriptor),
                                          false)
                   : nullptr)),
@@ -838,7 +832,7 @@ public:
             size_t bytes = sizeof(ReportResolvedPlan) +
                            sizeof(ReportResolveScratch);
             if (include_sessions_) {
-                bytes += AC_REPORT_SUMMARY_SESSION_MAX *
+                bytes += AC_REPORT_EDF_SESSION_MAX *
                          sizeof(EdfReportSessionDescriptor);
             }
             log_report_alloc_failed(
@@ -2831,8 +2825,8 @@ bool ReportManager::publish_result_to_slot(bool cache_plot) {
     }
     slot.edf_session_count =
         std::min(result_edf_session_count_,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+                 static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX));
+    for (size_t i = 0; i < AC_REPORT_EDF_SESSION_MAX; ++i) {
         slot.edf_sessions[i] =
             (result_edf_sessions_ && i < slot.edf_session_count)
                 ? result_edf_sessions_[i]
@@ -3305,7 +3299,7 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
                                         span_start_ms,
                                         span_end_ms,
                                         resolve.sessions(),
-                                        AC_REPORT_SUMMARY_SESSION_MAX,
+                                        AC_REPORT_EDF_SESSION_MAX,
                                         session_count,
                                         &pending) ||
         pending) {
@@ -3391,13 +3385,13 @@ bool ReportManager::next_night_needing_cache(
         size_t session_count = 0;
         memset(resolve.sessions(),
                0,
-               AC_REPORT_SUMMARY_SESSION_MAX *
+               AC_REPORT_EDF_SESSION_MAX *
                    sizeof(EdfReportSessionDescriptor));
         if (!collect_edf_sessions_for_night(record,
                                             span_start_ms,
                                             span_end_ms,
                                             resolve.sessions(),
-                                            AC_REPORT_SUMMARY_SESSION_MAX,
+                                            AC_REPORT_EDF_SESSION_MAX,
                                             session_count,
                                             &edf_pending)) {
             Memory::free(nights);
@@ -4724,13 +4718,13 @@ bool ReportManager::ensure_result_slots() {
 bool ReportManager::ensure_result_edf_sessions() {
     if (result_edf_sessions_) return true;
     result_edf_sessions_ = static_cast<EdfReportSessionDescriptor *>(
-        Memory::calloc_large(AC_REPORT_SUMMARY_SESSION_MAX,
+        Memory::calloc_large(AC_REPORT_EDF_SESSION_MAX,
                              sizeof(EdfReportSessionDescriptor),
                              false));
     if (!result_edf_sessions_) {
         log_report_alloc_failed(
             "result_edf_sessions",
-            AC_REPORT_SUMMARY_SESSION_MAX *
+            AC_REPORT_EDF_SESSION_MAX *
                 sizeof(EdfReportSessionDescriptor));
         return false;
     }
@@ -5204,16 +5198,26 @@ bool ReportManager::collect_edf_sessions_for_night(
     }
 
     const size_t count = edf_catalog_->session_count();
+    char target_sleep_day[9] = {};
+    const bool have_target_sleep_day =
+        report_summary_sleep_day_yyyymmdd(night,
+                                          target_sleep_day,
+                                          sizeof(target_sleep_day));
     for (size_t i = 0; i < count &&
                        session_count < session_capacity; ++i) {
         EdfReportSessionDescriptor &session = sessions[session_count];
         if (!edf_catalog_->copy_session(i, session)) continue;
-        if (session.earliest_header_start_ms <= 0 ||
-            session.latest_header_end_ms <= session.earliest_header_start_ms ||
-            !ranges_overlap(session.earliest_header_start_ms,
-                            session.latest_header_end_ms,
-                            range_start_ms,
-                            range_end_ms)) {
+        const bool matches_sleep_day =
+            have_target_sleep_day &&
+            strcmp(session.sleep_day, target_sleep_day) == 0;
+        const bool matches_range =
+            session.earliest_header_start_ms > 0 &&
+            session.latest_header_end_ms > session.earliest_header_start_ms &&
+            ranges_overlap(session.earliest_header_start_ms,
+                           session.latest_header_end_ms,
+                           range_start_ms,
+                           range_end_ms);
+        if (!matches_sleep_day && !matches_range) {
             continue;
         }
         session_count++;
@@ -5226,10 +5230,9 @@ bool ReportManager::collect_edf_sessions_for_night(
                   return a.earliest_header_start_ms <
                          b.earliest_header_start_ms;
               });
-    (void)night;
-    if (!append_edf_event_sessions_for_selected_days(sessions,
-                                                     session_capacity,
-                                                     session_count)) {
+    if (!append_edf_sessions_for_selected_days(sessions,
+                                               session_capacity,
+                                               session_count)) {
         return false;
     }
     if (session_count == 0 &&
@@ -5240,7 +5243,7 @@ bool ReportManager::collect_edf_sessions_for_night(
     return session_count > 0;
 }
 
-bool ReportManager::append_edf_event_sessions_for_selected_days(
+bool ReportManager::append_edf_sessions_for_selected_days(
     EdfReportSessionDescriptor *sessions,
     size_t session_capacity,
     size_t &session_count) const {
@@ -5261,7 +5264,6 @@ bool ReportManager::append_edf_event_sessions_for_selected_days(
     }
     for (size_t i = 0; i < catalog_count; ++i) {
         if (!edf_catalog_->copy_session(i, *candidate)) continue;
-        if (!edf_session_has_event_file(*candidate)) continue;
 
         bool selected_day = false;
         for (size_t base = 0; base < base_count; ++base) {
@@ -5284,7 +5286,7 @@ bool ReportManager::append_edf_event_sessions_for_selected_days(
         if (session_count >= session_capacity) {
             Log::logf(CAT_REPORT,
                       LOG_WARN,
-                      "EDF report event session list full capacity=%u\n",
+                      "EDF report session list full capacity=%u\n",
                       static_cast<unsigned>(session_capacity));
             break;
         }
@@ -5310,13 +5312,13 @@ bool ReportManager::edf_report_complete_for_night(
     bool *pending_out) const {
     EdfReportSessionDescriptor *sessions =
         static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_SESSION_MAX *
+            AC_REPORT_EDF_SESSION_MAX *
             sizeof(EdfReportSessionDescriptor),
             false));
     if (!sessions) {
         log_report_alloc_failed(
             "edf_report_session_snapshot",
-            AC_REPORT_SUMMARY_SESSION_MAX *
+            AC_REPORT_EDF_SESSION_MAX *
                 sizeof(EdfReportSessionDescriptor));
         if (pending_out) *pending_out = false;
         return false;
@@ -5327,7 +5329,7 @@ bool ReportManager::edf_report_complete_for_night(
                                         range_start_ms,
                                         range_end_ms,
                                         sessions,
-                                        AC_REPORT_SUMMARY_SESSION_MAX,
+                                        AC_REPORT_EDF_SESSION_MAX,
                                         session_count,
                                         pending_out)) {
         Memory::free(sessions);
@@ -5357,13 +5359,13 @@ bool ReportManager::edf_report_complete_for_indexed_night(
     bool *pending_out) const {
     EdfReportSessionDescriptor *sessions =
         static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_SESSION_MAX *
+            AC_REPORT_EDF_SESSION_MAX *
             sizeof(EdfReportSessionDescriptor),
             false));
     if (!sessions) {
         log_report_alloc_failed(
             "edf_report_session_snapshot",
-            AC_REPORT_SUMMARY_SESSION_MAX *
+            AC_REPORT_EDF_SESSION_MAX *
                 sizeof(EdfReportSessionDescriptor));
         if (pending_out) *pending_out = false;
         return false;
@@ -5374,7 +5376,7 @@ bool ReportManager::edf_report_complete_for_indexed_night(
                                         range_start_ms,
                                         range_end_ms,
                                         sessions,
-                                        AC_REPORT_SUMMARY_SESSION_MAX,
+                                        AC_REPORT_EDF_SESSION_MAX,
                                         session_count,
                                         pending_out)) {
         Memory::free(sessions);
@@ -5424,13 +5426,13 @@ bool ReportManager::find_edf_sessions_for_night(
     if (!ensure_result_edf_sessions()) return false;
     memset(result_edf_sessions_,
            0,
-           AC_REPORT_SUMMARY_SESSION_MAX *
+           AC_REPORT_EDF_SESSION_MAX *
                sizeof(EdfReportSessionDescriptor));
     return collect_edf_sessions_for_night(night,
                                           range_start_ms,
                                           range_end_ms,
                                           result_edf_sessions_,
-                                          AC_REPORT_SUMMARY_SESSION_MAX,
+                                          AC_REPORT_EDF_SESSION_MAX,
                                           result_edf_session_count_,
                                           pending_out);
 }
@@ -6630,13 +6632,13 @@ bool ReportManager::ensure_range_build_buffers() {
     }
     if (!range_edf_sessions_) {
         range_edf_sessions_ = static_cast<EdfReportSessionDescriptor *>(
-            Memory::calloc_large(AC_REPORT_SUMMARY_SESSION_MAX,
+            Memory::calloc_large(AC_REPORT_EDF_SESSION_MAX,
                                  sizeof(EdfReportSessionDescriptor),
                                  false));
         if (!range_edf_sessions_) {
             log_report_alloc_failed(
                 "range_edf_sessions",
-                AC_REPORT_SUMMARY_SESSION_MAX *
+                AC_REPORT_EDF_SESSION_MAX *
                     sizeof(EdfReportSessionDescriptor));
             return false;
         }
@@ -6743,14 +6745,14 @@ bool ReportManager::start_range_plot_build(uint64_t night_start_ms,
     bool edf_pending = false;
     memset(range_edf_sessions_,
            0,
-           AC_REPORT_SUMMARY_SESSION_MAX *
+           AC_REPORT_EDF_SESSION_MAX *
                sizeof(EdfReportSessionDescriptor));
     bool have_edf =
         collect_edf_sessions_for_night(indexed_night.summary,
                                        from_ms,
                                        to_ms,
                                        range_edf_sessions_,
-                                       AC_REPORT_SUMMARY_SESSION_MAX,
+                                       AC_REPORT_EDF_SESSION_MAX,
                                        range_edf_session_count_,
                                        &edf_pending);
     if (edf_pending) {
@@ -8521,7 +8523,7 @@ bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
                                            span_start_ms,
                                            span_end_ms,
                                            resolve.sessions(),
-                                           AC_REPORT_SUMMARY_SESSION_MAX,
+                                           AC_REPORT_EDF_SESSION_MAX,
                                            session_count,
                                            &edf_pending);
         if (edf_pending) {

@@ -11,6 +11,7 @@ namespace aircannect {
 
 static constexpr size_t AC_EDF_REPORT_DATA_SIGNAL_LABEL_MAX =
     AC_EDF_SIGNAL_LABEL_TEXT_SIZE;
+static constexpr int64_t AC_EDF_REPORT_COVERAGE_TOLERANCE_MS = 90000;
 
 enum class EdfReportDataKind : uint8_t {
     Series,

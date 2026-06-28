@@ -1,6 +1,7 @@
 #include "report_night_index.h"
 
 #include <algorithm>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -150,7 +151,7 @@ void normalize_indexed_data_ranges(ReportIndexedNight &night) {
 void normalize_edf_source_signatures(ReportIndexedNight &night) {
     size_t count = std::min(
         night.edf_source_signature_count,
-        static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+        static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX));
     std::sort(night.edf_source_signatures,
               night.edf_source_signatures + count);
     size_t write = 0;
@@ -163,7 +164,7 @@ void normalize_edf_source_signatures(ReportIndexedNight &night) {
         }
         night.edf_source_signatures[write++] = signature;
     }
-    for (size_t i = write; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+    for (size_t i = write; i < AC_REPORT_EDF_SESSION_MAX; ++i) {
         night.edf_source_signatures[i] = 0;
     }
     night.edf_source_signature_count = write;
@@ -185,8 +186,8 @@ bool append_edf_source_signature(ReportIndexedNight &night,
                                  uint64_t signature) {
     size_t count = std::min(
         night.edf_source_signature_count,
-        static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    if (count >= AC_REPORT_SUMMARY_SESSION_MAX) return false;
+        static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX));
+    if (count >= AC_REPORT_EDF_SESSION_MAX) return false;
     night.edf_source_signatures[count] = signature;
     night.edf_source_signature_count = count + 1;
     return true;
@@ -536,6 +537,33 @@ uint32_t report_ceil_duration_min(int64_t start_ms, int64_t end_ms) {
     if (end_ms <= start_ms) return 0;
     const int64_t duration_ms = end_ms - start_ms;
     return static_cast<uint32_t>((duration_ms + 59999LL) / 60000LL);
+}
+
+bool report_summary_sleep_day_yyyymmdd(const ReportSummaryRecord &record,
+                                       char *out,
+                                       size_t out_size) {
+    if (!out || out_size < 9 || !record.valid || !record.start_ms ||
+        !record.has_tz_offset_min) {
+        return false;
+    }
+
+    const int64_t local_ms =
+        static_cast<int64_t>(record.start_ms) +
+        static_cast<int64_t>(record.tz_offset_min) * 60LL * 1000LL;
+    if (local_ms < 0) return false;
+
+    int year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    if (!calendar_civil_from_days(local_ms / REPORT_DAY_MS,
+                                  year,
+                                  month,
+                                  day)) {
+        return false;
+    }
+    snprintf(out, out_size, "%04d%02u%02u", year, month, day);
+    out[out_size - 1] = '\0';
+    return true;
 }
 
 bool edf_session_has_report_numeric(
