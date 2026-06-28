@@ -537,6 +537,15 @@ private:
         size_t session_capacity,
         size_t &session_count,
         bool *pending_out = nullptr) const;
+    bool edf_catalog_session_reportable(
+        const EdfReportSessionDescriptor &session,
+        EdfReportSessionDescriptor &scratch) const;
+    bool edf_catalog_session_has_annotation_marker(
+        const EdfReportSessionDescriptor &session,
+        EdfReportSessionDescriptor &scratch) const;
+    bool edf_catalog_annotation_has_numeric_session(
+        const EdfReportSessionDescriptor &session,
+        EdfReportSessionDescriptor &scratch) const;
     bool append_edf_sessions_for_selected_days(
         EdfReportSessionDescriptor *sessions,
         size_t session_capacity,

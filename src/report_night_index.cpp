@@ -107,7 +107,22 @@ uint64_t report_edf_session_signature(
     return hash;
 }
 
-bool edf_session_has_report_event(
+bool session_windows_match_with_tolerance(int64_t first_start_ms,
+                                          int64_t first_end_ms,
+                                          int64_t second_start_ms,
+                                          int64_t second_end_ms,
+                                          int64_t tolerance_ms) {
+    if (first_start_ms <= 0 || second_start_ms <= 0) return false;
+    if (first_end_ms <= first_start_ms) first_end_ms = first_start_ms;
+    if (second_end_ms <= second_start_ms) second_end_ms = second_start_ms;
+    if (first_start_ms <= second_end_ms + tolerance_ms &&
+        second_start_ms <= first_end_ms + tolerance_ms) {
+        return true;
+    }
+    return llabs(first_start_ms - second_start_ms) <= tolerance_ms;
+}
+
+bool edf_session_has_report_event_mask(
     const EdfReportSessionDescriptor &session) {
     const uint32_t event_mask =
         edf_report_file_kind_mask(EdfInventoryFileKind::Eve) |
@@ -577,6 +592,34 @@ bool edf_session_has_report_numeric(
            session.latest_header_end_ms > session.earliest_header_start_ms;
 }
 
+bool edf_session_has_report_annotation(
+    const EdfReportSessionDescriptor &session) {
+    return edf_session_has_report_event_mask(session);
+}
+
+bool edf_session_annotation_matches_numeric(
+    const EdfReportSessionDescriptor &numeric_session,
+    const EdfReportSessionDescriptor &annotation_session) {
+    if (!edf_session_has_report_numeric(numeric_session) ||
+        !edf_session_has_report_annotation(annotation_session)) {
+        return false;
+    }
+    if (strcmp(numeric_session.sleep_day, annotation_session.sleep_day) != 0) {
+        return false;
+    }
+    if (numeric_session.session_stamp[0] &&
+        strcmp(numeric_session.session_stamp,
+               annotation_session.session_stamp) == 0) {
+        return true;
+    }
+    return session_windows_match_with_tolerance(
+        numeric_session.earliest_header_start_ms,
+        numeric_session.latest_header_end_ms,
+        annotation_session.earliest_header_start_ms,
+        annotation_session.latest_header_end_ms,
+        REPORT_SESSION_MERGE_TOLERANCE_MS);
+}
+
 ReportNightIndex::ReportNightIndex(ReportIndexedNight *nights,
                                    size_t capacity)
     : nights_(nights), capacity_(capacity) {
@@ -610,7 +653,7 @@ bool ReportNightIndex::add_edf_session(
     int32_t timezone_offset_minutes) {
     if (!nights_) return false;
     const bool has_numeric = edf_session_has_report_numeric(session);
-    const bool has_event = edf_session_has_report_event(session);
+    const bool has_event = edf_session_has_report_annotation(session);
     if (!has_numeric && !has_event) return true;
 
     int64_t day_start_ms = 0;

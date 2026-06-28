@@ -1182,14 +1182,44 @@ bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
                                 sizeof(EdfReportSessionDescriptor));
         return false;
     }
-    for (size_t i = 0; i < catalog_count; ++i) {
-        if (!edf_catalog_->copy_session(i, *session_scratch)) continue;
-        if (!index.add_edf_session(*session_scratch,
-                                   have_timezone,
-                                   timezone_offset_min)) {
-            break;
+    EdfReportSessionDescriptor *marker_scratch =
+        static_cast<EdfReportSessionDescriptor *>(
+            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
+    if (!marker_scratch) {
+        Memory::free(session_scratch);
+        Memory::free(sort_scratch);
+        log_report_alloc_failed("report_night_edf_marker_scratch",
+                                sizeof(EdfReportSessionDescriptor));
+        return false;
+    }
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i < catalog_count; ++i) {
+            if (!edf_catalog_->copy_session(i, *session_scratch)) continue;
+            const bool has_numeric =
+                edf_session_has_report_numeric(*session_scratch);
+            const bool has_annotation =
+                edf_session_has_report_annotation(*session_scratch);
+            if (pass == 0) {
+                if (!has_numeric ||
+                    !edf_catalog_session_reportable(*session_scratch,
+                                                    *marker_scratch)) {
+                    continue;
+                }
+            } else {
+                if (has_numeric || !has_annotation ||
+                    !edf_catalog_session_reportable(*session_scratch,
+                                                    *marker_scratch)) {
+                    continue;
+                }
+            }
+            if (!index.add_edf_session(*session_scratch,
+                                       have_timezone,
+                                       timezone_offset_min)) {
+                break;
+            }
         }
     }
+    Memory::free(marker_scratch);
     Memory::free(session_scratch);
 
     return finish_index(false);
@@ -5255,6 +5285,49 @@ bool ReportManager::edf_report_catalog_pending() const {
     return true;
 }
 
+bool ReportManager::edf_catalog_session_has_annotation_marker(
+    const EdfReportSessionDescriptor &session,
+    EdfReportSessionDescriptor &scratch) const {
+    if (!edf_catalog_ || !edf_session_has_report_numeric(session)) {
+        return false;
+    }
+    if (edf_session_has_report_annotation(session)) return true;
+    const size_t count = edf_catalog_->session_count();
+    for (size_t i = 0; i < count; ++i) {
+        if (!edf_catalog_->copy_session(i, scratch)) continue;
+        if (edf_session_annotation_matches_numeric(session, scratch)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ReportManager::edf_catalog_annotation_has_numeric_session(
+    const EdfReportSessionDescriptor &session,
+    EdfReportSessionDescriptor &scratch) const {
+    if (!edf_catalog_ || !edf_session_has_report_annotation(session)) {
+        return false;
+    }
+    if (edf_session_has_report_numeric(session)) return true;
+    const size_t count = edf_catalog_->session_count();
+    for (size_t i = 0; i < count; ++i) {
+        if (!edf_catalog_->copy_session(i, scratch)) continue;
+        if (edf_session_annotation_matches_numeric(scratch, session)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ReportManager::edf_catalog_session_reportable(
+    const EdfReportSessionDescriptor &session,
+    EdfReportSessionDescriptor &scratch) const {
+    if (edf_session_has_report_numeric(session)) {
+        return edf_catalog_session_has_annotation_marker(session, scratch);
+    }
+    return edf_catalog_annotation_has_numeric_session(session, scratch);
+}
+
 bool ReportManager::collect_edf_sessions_for_night(
     const ReportSummaryRecord &night,
     int64_t range_start_ms,
@@ -5287,6 +5360,14 @@ bool ReportManager::collect_edf_sessions_for_night(
         report_summary_sleep_day_yyyymmdd(night,
                                           target_sleep_day,
                                           sizeof(target_sleep_day));
+    EdfReportSessionDescriptor *marker_scratch =
+        static_cast<EdfReportSessionDescriptor *>(
+            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
+    if (!marker_scratch) {
+        log_report_alloc_failed("edf_session_marker_scratch",
+                                sizeof(EdfReportSessionDescriptor));
+        return false;
+    }
     for (size_t i = 0; i < count &&
                        session_count < session_capacity; ++i) {
         EdfReportSessionDescriptor &session = sessions[session_count];
@@ -5304,8 +5385,12 @@ bool ReportManager::collect_edf_sessions_for_night(
         if (!matches_sleep_day && !matches_range) {
             continue;
         }
+        if (!edf_catalog_session_reportable(session, *marker_scratch)) {
+            continue;
+        }
         session_count++;
     }
+    Memory::free(marker_scratch);
 
     std::sort(sessions,
               sessions + session_count,
@@ -5346,6 +5431,15 @@ bool ReportManager::append_edf_sessions_for_selected_days(
                                 sizeof(EdfReportSessionDescriptor));
         return false;
     }
+    EdfReportSessionDescriptor *marker_scratch =
+        static_cast<EdfReportSessionDescriptor *>(
+            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
+    if (!marker_scratch) {
+        Memory::free(candidate);
+        log_report_alloc_failed("edf_event_marker_scratch",
+                                sizeof(EdfReportSessionDescriptor));
+        return false;
+    }
     for (size_t i = 0; i < catalog_count; ++i) {
         if (!edf_catalog_->copy_session(i, *candidate)) continue;
 
@@ -5357,6 +5451,9 @@ bool ReportManager::append_edf_sessions_for_selected_days(
             }
         }
         if (!selected_day) continue;
+        if (!edf_catalog_session_reportable(*candidate, *marker_scratch)) {
+            continue;
+        }
 
         bool duplicate = false;
         for (size_t existing = 0; existing < session_count; ++existing) {
@@ -5376,6 +5473,7 @@ bool ReportManager::append_edf_sessions_for_selected_days(
         }
         sessions[session_count++] = *candidate;
     }
+    Memory::free(marker_scratch);
     Memory::free(candidate);
     std::sort(sessions,
               sessions + session_count,

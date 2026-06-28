@@ -56,6 +56,11 @@ bool report_summary_sleep_day_yyyymmdd(const ReportSummaryRecord &record,
                                        size_t out_size);
 bool edf_session_has_report_numeric(
     const EdfReportSessionDescriptor &session);
+bool edf_session_has_report_annotation(
+    const EdfReportSessionDescriptor &session);
+bool edf_session_annotation_matches_numeric(
+    const EdfReportSessionDescriptor &numeric_session,
+    const EdfReportSessionDescriptor &annotation_session);
 
 class ReportNightIndex {
 public:
