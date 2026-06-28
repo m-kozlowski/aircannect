@@ -84,6 +84,11 @@ bool web_config_section_known(const char *section) {
            strcmp(section, "sleephq") == 0;
 }
 
+size_t json_escaped_capacity(size_t raw_len, size_t overhead = 128) {
+    // JSON string escaping can expand a control byte to "\\u00XX".
+    return overhead + raw_len * 6;
+}
+
 uint32_t fnv1a32_string(const String &text) {
     uint32_t hash = 2166136261u;
     for (size_t i = 0; i < text.length(); ++i) {
@@ -918,7 +923,7 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         const size_t payload_len =
             static_cast<size_t>(end > from ? end - from : 0);
         LargeTextBuffer console_json;
-        console_json.reserve(payload_len + 128);
+        console_json.reserve(json_escaped_capacity(payload_len));
         build_console_sse_json(console_json);
         const SseSendResult console_result =
             console_json.overflowed()
@@ -1382,7 +1387,7 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
         return;
     }
     LargeTextBuffer json;
-    json.reserve(console_log_length_ + 128);
+    json.reserve(json_escaped_capacity(console_log_length_));
     build_console_json(json);
     if (json.overflowed()) {
         xSemaphoreGive(cache_mutex_);
@@ -3046,60 +3051,55 @@ void WebUI::build_config_json(LargeTextBuffer &json,
     };
 
     if (include("device")) {
-        add_string("hostname", cfg.hostname.c_str());
-        add_bool("edf_capture_enabled", cfg.edf_capture_enabled);
+        add_string("host", cfg.hostname.c_str());
+        add_bool("edf_cap", cfg.edf_capture_enabled);
     }
     if (include("access")) {
-        add_bool("tcp_enabled", cfg.tcp_bridge_enabled);
+        add_bool("tcp_en", cfg.tcp_bridge_enabled);
         add_int("tcp_port", cfg.tcp_bridge_port);
-        add_bool("telnet_enabled", cfg.telnet_console_enabled);
+        add_bool("telnet_en", cfg.telnet_console_enabled);
         add_int("telnet_port", cfg.telnet_console_port);
-        add_bool("http_auth_required", network_auth_required(cfg));
         add_string("http_user", cfg.http_user.c_str());
-        add_bool("http_password_set", cfg.http_password.length() > 0);
-        add_string("http_password", "");
-        add_string("auth_whitelist", cfg.auth_whitelist.c_str());
-        add_bool("ota_password_set", cfg.ota_password.length() > 0);
-        add_string("ota_password", "");
+        add_bool("http_pass_set", cfg.http_password.length() > 0);
+        add_string("http_pass", "");
+        add_string("auth_wl", cfg.auth_whitelist.c_str());
+        add_bool("ota_pass_set", cfg.ota_password.length() > 0);
+        add_string("ota_pass", "");
     }
     if (include("logging")) {
-        add_bool("syslog_enabled", cfg.syslog_enabled);
+        add_bool("syslog_en", cfg.syslog_enabled);
         add_string("syslog_host", cfg.syslog_host.c_str());
         add_int("syslog_port", cfg.syslog_port);
         add_bool("file_log_en", cfg.file_log_enabled);
     }
     if (include("network")) {
         add_string("softap_mode", softap_mode_name(cfg.softap_mode));
-        add_string("wifi_country", cfg.wifi_country.c_str());
+        add_string("wifi_ctry", cfg.wifi_country.c_str());
     }
     if (include("time")) {
-        add_string("timezone", cfg.timezone.c_str());
-        add_bool("resmed_time_sync_enabled",
-                 cfg.resmed_time_sync_enabled);
+        add_string("tz", cfg.timezone.c_str());
+        add_bool("resmed_time", cfg.resmed_time_sync_enabled);
     }
     if (include("oximetry")) {
-        add_bool("oximetry_enabled", cfg.oximetry_enabled);
-        add_int("oximetry_udp_port", cfg.oximetry_udp_port);
-        add_string("oximetry_advertise_mode",
+        add_bool("oxi_en", cfg.oximetry_enabled);
+        add_int("oxi_udp", cfg.oximetry_udp_port);
+        add_string("oxi_adv",
                    oximetry_advertise_mode_name(
                        cfg.oximetry_advertise_mode));
     }
     if (include("smb")) {
-        add_string("smb_endpoint", cfg.smb_endpoint.c_str());
+        add_string("smb_ep", cfg.smb_endpoint.c_str());
         add_string("smb_user", cfg.smb_user.c_str());
-        add_bool("smb_password_set", cfg.smb_password.length() > 0);
-        add_string("smb_password", "");
+        add_bool("smb_pass_set", cfg.smb_password.length() > 0);
+        add_string("smb_pass", "");
     }
     if (include("sleephq")) {
-        add_string("sleephq_client_id",
-                   cfg.sleephq_client_id.c_str());
-        add_bool("sleephq_client_secret_set",
+        add_string("shq_id", cfg.sleephq_client_id.c_str());
+        add_bool("shq_secret_set",
                  cfg.sleephq_client_secret.length() > 0);
-        add_string("sleephq_client_secret", "");
-        add_string("sleephq_team_id",
-                   cfg.sleephq_team_id.c_str());
-        add_string("sleephq_device_id",
-                   cfg.sleephq_device_id.c_str());
+        add_string("shq_secret", "");
+        add_string("shq_team", cfg.sleephq_team_id.c_str());
+        add_string("shq_device", cfg.sleephq_device_id.c_str());
     }
     json += '}';
 }
@@ -3880,7 +3880,7 @@ void WebUI::register_routes() {
         nullptr, handle_body);
 
     server_->on(
-        AsyncURIMatcher::exact("/api/console"),
+        AsyncURIMatcher::exact("/api/console"), HTTP_GET,
         [this](AsyncWebServerRequest *request) {
             send_console_snapshot(request);
         });

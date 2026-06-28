@@ -1937,76 +1937,76 @@
         id: "device",
         title: "Device",
         fields: [
-          ["hostname", "Hostname", "text"],
-          ["edf_capture_enabled", "EDF Capture", "bool"],
+          ["host", "Hostname", "text"],
+          ["edf_cap", "EDF capture", "bool"],
         ],
       },
       {
         id: "network",
         title: "Network",
         fields: [
-          ["softap_mode", "SoftAP Mode", "enum", ["auto", "forced"]],
-          ["wifi_country", "WiFi Country", "text"],
+          ["softap_mode", "SoftAP mode", "enum", ["auto", "forced"]],
+          ["wifi_ctry", "WiFi country", "text"],
         ],
       },
       {
         id: "access",
         title: "Access",
         fields: [
-          ["tcp_enabled", "Raw TCP", "bool"],
-          ["tcp_port", "Raw TCP Port", "number"],
-          ["telnet_enabled", "Telnet", "bool"],
-          ["telnet_port", "Telnet Port", "number"],
-          ["http_auth_required", "HTTP Auth", "bool"],
-          ["http_user", "HTTP User", "text"],
-          ["http_password", "HTTP Password", "password"],
-          ["auth_whitelist", "Auth Whitelist", "text"],
-          ["ota_password", "ArduinoOTA Password", "password"],
+          ["tcp_en", "TCP bridge", "bool"],
+          ["tcp_port", "TCP bridge port", "number"],
+          ["telnet_en", "Telnet console", "bool"],
+          ["telnet_port", "Telnet port", "number"],
+          ["http_user", "HTTP username", "text"],
+          ["http_pass", "HTTP password", "password"],
+          ["auth_wl", "Auth whitelist", "text"],
+          ["ota_pass", "OTA password", "password"],
         ],
       },
       {
         id: "logging",
         title: "Logging",
         fields: [
-          ["syslog_enabled", "Syslog", "bool"],
-          ["syslog_host", "Syslog Host", "text"],
-          ["syslog_port", "Syslog Port", "number"],
-          ["file_log_en", "File Logging", "bool"],
+          ["syslog_en", "Syslog", "bool"],
+          ["syslog_host", "Syslog host", "text"],
+          ["syslog_port", "Syslog port", "number"],
+          ["file_log_en", "File logging", "bool"],
         ],
       },
       {
         id: "time",
         title: "Time",
         fields: [
-          ["timezone", "Timezone", "text"],
-          ["resmed_time_sync_enabled", "Sync AS11 Time", "bool"],
+          ["tz", "Timezone", "text"],
+          ["resmed_time", "ResMed time sync", "bool"],
         ],
       },
       {
         id: "oximetry",
         title: "Oximetry",
         fields: [
-          ["oximetry_enabled", "Oximetry Bridge", "bool"],
-          ["oximetry_udp_port", "Oximetry UDP Port", "number"],
+          ["oxi_en", "Oximetry", "bool"],
+          ["oxi_udp", "Oximetry UDP port", "number"],
+          ["oxi_adv", "BLE advertising", "enum", ["off", "auto", "always"]],
         ],
       },
       {
         id: "smb",
         title: "SMB",
         fields: [
-          ["smb_endpoint", "SMB Endpoint", "text"],
-          ["smb_user", "SMB User", "text"],
-          ["smb_password", "SMB Password", "password"],
+          ["smb_ep", "SMB endpoint", "text"],
+          ["smb_user", "SMB username", "text"],
+          ["smb_pass", "SMB password", "password"],
         ],
       },
       {
         id: "sleephq",
         title: "SleepHQ",
         fields: [
-          ["sleephq_client_id", "SleepHQ Client ID", "text"],
-          ["sleephq_client_secret", "SleepHQ Client Secret", "password"],
-          ["sleephq_team_id", "SleepHQ Team ID", "text"],
-          ["sleephq_device_id", "SleepHQ Device ID", "text"],
+          ["shq_id", "SleepHQ client ID", "text"],
+          ["shq_secret", "SleepHQ client secret", "password"],
+          ["shq_team", "SleepHQ team ID", "text"],
+          ["shq_device", "SleepHQ device ID", "text"],
         ],
       },
     ];
@@ -4877,7 +4877,7 @@
     function renderSmbSyncStatus(data) {
       const state = data && data.state ? data.state : "unknown";
       up("edfSyncEndpoint", data && data.endpoint ? data.endpoint :
-        (configData && configData.smb_endpoint ? configData.smb_endpoint : "--"));
+        (configData && configData.smb_ep ? configData.smb_ep : "--"));
       up("edfSyncResult", smbSyncResultText(data));
       up("edfSyncLast", smbSyncLastText(data));
       up("edfSyncCheck", smbSyncCheckText(data));
@@ -7449,11 +7449,20 @@
       }
     }
 
-    async function loadConsole() {
+    async function loadConsole(showError) {
       try {
         const response = await api("/api/console");
+        const before = consoleSeq;
         renderConsole(await response.json());
-      } catch (error) {}
+        return consoleSeq !== before;
+      } catch (error) {
+        if (showError) {
+          const output = document.getElementById("consoleLog");
+          output.textContent += "\nERR: " + error.message + "\n";
+          output.scrollTop = output.scrollHeight;
+        }
+      }
+      return false;
     }
 
     function renderConsole(data) {
@@ -7485,7 +7494,7 @@
         });
         const data = await response.json();
         if (data.log !== undefined) renderConsole(data);
-        setTimeout(loadConsole, 300);
+        setTimeout(() => loadConsole(true), 300);
       } catch (error) {
         const output = document.getElementById("consoleLog");
         output.textContent += "\nERR: " + error.message + "\n";
@@ -7543,35 +7552,36 @@
         control = document.createElement("input");
         control.type = field[2];
         control.value = data[field[0]] || "";
-        if (field[0] === "http_password") {
-          control.placeholder = data.http_password_set ? "set" : "empty";
-        }
-        if (field[0] === "smb_password") {
-          control.placeholder = data.smb_password_set ? "set" : "empty";
-          if (data.smb_password_set) {
+        if (field[0] === "http_pass") {
+          control.placeholder = data.http_pass_set ? "set" : "empty";
+          if (data.http_pass_set) {
             control.value = "********";
           }
         }
-        if (field[0] === "smb_endpoint") {
+        if (field[0] === "smb_pass") {
+          control.placeholder = data.smb_pass_set ? "set" : "empty";
+          if (data.smb_pass_set) {
+            control.value = "********";
+          }
+        }
+        if (field[0] === "smb_ep") {
           control.placeholder = "smb://host/share/path";
         }
-        if (field[0] === "sleephq_client_secret") {
-          control.placeholder = data.sleephq_client_secret_set ?
-            "set" : "empty";
-          if (data.sleephq_client_secret_set) {
+        if (field[0] === "shq_secret") {
+          control.placeholder = data.shq_secret_set ? "set" : "empty";
+          if (data.shq_secret_set) {
             control.value = "********";
           }
         }
-        if (field[0] === "sleephq_team_id" ||
-            field[0] === "sleephq_device_id") {
+        if (field[0] === "shq_team" || field[0] === "shq_device") {
           control.placeholder = "optional numeric id";
         }
         if (field[0] === "syslog_host") {
           control.placeholder = "IPv4 address";
         }
-        if (field[0] === "ota_password") {
-          control.placeholder = data.ota_password_set ? "set" : "empty";
-          if (data.ota_password_set) {
+        if (field[0] === "ota_pass") {
+          control.placeholder = data.ota_pass_set ? "set" : "empty";
+          if (data.ota_pass_set) {
             control.value = "********";
           }
         }
@@ -7582,8 +7592,8 @@
       control.dataset.type = field[2];
       control.dataset.orig = String(control.value || "");
       let rendered = control;
-      if (field[0] === "timezone") rendered = timezoneHelper(control);
-      if (field[0] === "wifi_country") rendered = wifiCountryHelper(control);
+      if (field[0] === "tz") rendered = timezoneHelper(control);
+      if (field[0] === "wifi_ctry") rendered = wifiCountryHelper(control);
       root.appendChild(row(field[1], rendered, field[0]));
     }
 
@@ -7608,10 +7618,10 @@
 
     function configFieldApplied(data, key, value) {
       if (!data) return false;
-      if (key === "smb_password" ||
-          key === "sleephq_client_secret" ||
-          key === "http_password" ||
-          key === "ota_password") {
+      if (key === "smb_pass" ||
+          key === "shq_secret" ||
+          key === "http_pass" ||
+          key === "ota_pass") {
         if (value === "********") return true;
         const setKey = key + "_set";
         const expectedSet = String(value || "").length > 0;
@@ -7694,7 +7704,7 @@
       root.querySelectorAll("[data-key]").forEach((input) => {
         let rawValue = input.value;
         let originalValue = input.dataset.orig;
-        if (input.dataset.key === "smb_endpoint") {
+        if (input.dataset.key === "smb_ep") {
           rawValue = normalizeSmbEndpoint(rawValue);
           originalValue = normalizeSmbEndpoint(originalValue);
         }
@@ -7715,37 +7725,32 @@
     }
 
     function validateConfigChanges(changes, messageId) {
-      if (changes.http_auth_required === false) {
-        changes.http_user = "";
-        changes.http_password = "";
-      }
-
-      if (Object.prototype.hasOwnProperty.call(changes, "smb_endpoint") &&
-          !validSmbEndpoint(changes.smb_endpoint)) {
-        msg(messageId, "SMB endpoint must be smb://host/share[/path]", false);
+      if (Object.prototype.hasOwnProperty.call(changes, "smb_ep") &&
+          !validSmbEndpoint(changes.smb_ep)) {
+        msg(messageId, "smb_ep must be smb://host/share[/path]", false);
         return false;
       }
-      if (Object.prototype.hasOwnProperty.call(changes, "sleephq_team_id") &&
-          !validOptionalNumericId(changes.sleephq_team_id)) {
-        msg(messageId, "SleepHQ team id must be numeric", false);
+      if (Object.prototype.hasOwnProperty.call(changes, "shq_team") &&
+          !validOptionalNumericId(changes.shq_team)) {
+        msg(messageId, "shq_team must be numeric", false);
         return false;
       }
-      if (Object.prototype.hasOwnProperty.call(changes, "sleephq_device_id") &&
-          !validOptionalNumericId(changes.sleephq_device_id)) {
-        msg(messageId, "SleepHQ device id must be numeric", false);
+      if (Object.prototype.hasOwnProperty.call(changes, "shq_device") &&
+          !validOptionalNumericId(changes.shq_device)) {
+        msg(messageId, "shq_device must be numeric", false);
         return false;
       }
 
       const syslogHost = Object.prototype.hasOwnProperty.call(changes, "syslog_host") ?
         changes.syslog_host : (configData ? configData.syslog_host : "");
-      const syslogEnabled = Object.prototype.hasOwnProperty.call(changes, "syslog_enabled") ?
-        changes.syslog_enabled : !!(configData && configData.syslog_enabled);
+      const syslogEnabled = Object.prototype.hasOwnProperty.call(changes, "syslog_en") ?
+        changes.syslog_en : !!(configData && configData.syslog_en);
       if (!validIpv4(syslogHost)) {
-        msg(messageId, "Syslog host must be an IPv4 address", false);
+        msg(messageId, "syslog_host must be an IPv4 address", false);
         return false;
       }
       if (syslogEnabled && !String(syslogHost || "").trim().length) {
-        msg(messageId, "Syslog host is required when syslog is enabled", false);
+        msg(messageId, "syslog_host is required when syslog_en is true", false);
         return false;
       }
       return true;

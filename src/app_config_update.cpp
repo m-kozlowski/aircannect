@@ -83,7 +83,7 @@ bool apply_web_config_update(AppConfig &config,
     String s;
     config.begin_update();
 
-    if (json_get_string(doc, "hostname", s)) {
+    if (json_get_string(doc, "host", s)) {
         const String before = config.data().hostname;
         const bool accepted = config.set_hostname(s);
         if (note_string_change(before, config.data().hostname,
@@ -93,7 +93,7 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    if (json_get_string(doc, "wifi_country", s)) {
+    if (json_get_string(doc, "wifi_ctry", s)) {
         const String before = config.data().wifi_country;
         const bool accepted = config.set_wifi_country(s);
         if (note_string_change(before, config.data().wifi_country,
@@ -103,52 +103,52 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    if (json_get_string(doc, "timezone", s)) {
+    if (json_get_string(doc, "tz", s)) {
         const String before = config.data().timezone;
         const bool accepted = config.set_timezone(s);
         note_string_change(before, config.data().timezone, accepted, result);
     }
 
-    if (doc["resmed_time_sync_enabled"].is<bool>()) {
+    if (doc["resmed_time"].is<bool>()) {
         const bool before = config.data().resmed_time_sync_enabled;
         const bool accepted = config.set_resmed_time_sync(
-            doc["resmed_time_sync_enabled"].as<bool>());
+            doc["resmed_time"].as<bool>());
         note_bool_change(before, config.data().resmed_time_sync_enabled,
                          accepted, result);
     }
 
-    if (doc["oximetry_enabled"].is<bool>()) {
+    if (doc["oxi_en"].is<bool>()) {
         const bool before = config.data().oximetry_enabled;
         const bool accepted = config.set_oximetry_enabled(
-            doc["oximetry_enabled"].as<bool>());
+            doc["oxi_en"].as<bool>());
         note_bool_change(before, config.data().oximetry_enabled,
                          accepted, result);
     }
 
-    if (doc["edf_capture_enabled"].is<bool>()) {
+    if (doc["edf_cap"].is<bool>()) {
         const bool before = config.data().edf_capture_enabled;
         const bool accepted = config.set_edf_capture_enabled(
-            doc["edf_capture_enabled"].as<bool>());
+            doc["edf_cap"].as<bool>());
         if (note_bool_change(before, config.data().edf_capture_enabled,
                              accepted, result)) {
             result.edf_capture_changed = true;
         }
     }
 
-    if (doc["smb_endpoint"].is<const char *>() ||
+    if (doc["smb_ep"].is<const char *>() ||
         doc["smb_user"].is<const char *>() ||
-        doc["smb_password"].is<const char *>()) {
+        doc["smb_pass"].is<const char *>()) {
         String endpoint = config.data().smb_endpoint;
         String user = config.data().smb_user;
         String password = config.data().smb_password;
-        if (doc["smb_endpoint"].is<const char *>()) {
-            endpoint = doc["smb_endpoint"].as<const char *>();
+        if (doc["smb_ep"].is<const char *>()) {
+            endpoint = doc["smb_ep"].as<const char *>();
         }
         if (doc["smb_user"].is<const char *>()) {
             user = doc["smb_user"].as<const char *>();
         }
-        if (doc["smb_password"].is<const char *>()) {
-            password = doc["smb_password"].as<const char *>();
+        if (doc["smb_pass"].is<const char *>()) {
+            password = doc["smb_pass"].as<const char *>();
             if (password == "********" &&
                 config.data().smb_password.length() > 0) {
                 password = config.data().smb_password;
@@ -169,29 +169,29 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    if (doc["sleephq_client_id"].is<const char *>() ||
-        doc["sleephq_client_secret"].is<const char *>() ||
-        doc["sleephq_team_id"].is<const char *>() ||
-        doc["sleephq_device_id"].is<const char *>()) {
+    if (doc["shq_id"].is<const char *>() ||
+        doc["shq_secret"].is<const char *>() ||
+        doc["shq_team"].is<const char *>() ||
+        doc["shq_device"].is<const char *>()) {
         String client_id = config.data().sleephq_client_id;
         String client_secret = config.data().sleephq_client_secret;
         String team_id = config.data().sleephq_team_id;
         String device_id = config.data().sleephq_device_id;
-        if (doc["sleephq_client_id"].is<const char *>()) {
-            client_id = doc["sleephq_client_id"].as<const char *>();
+        if (doc["shq_id"].is<const char *>()) {
+            client_id = doc["shq_id"].as<const char *>();
         }
-        if (doc["sleephq_client_secret"].is<const char *>()) {
-            client_secret = doc["sleephq_client_secret"].as<const char *>();
+        if (doc["shq_secret"].is<const char *>()) {
+            client_secret = doc["shq_secret"].as<const char *>();
             if (client_secret == "********" &&
                 config.data().sleephq_client_secret.length() > 0) {
                 client_secret = config.data().sleephq_client_secret;
             }
         }
-        if (doc["sleephq_team_id"].is<const char *>()) {
-            team_id = doc["sleephq_team_id"].as<const char *>();
+        if (doc["shq_team"].is<const char *>()) {
+            team_id = doc["shq_team"].as<const char *>();
         }
-        if (doc["sleephq_device_id"].is<const char *>()) {
-            device_id = doc["sleephq_device_id"].as<const char *>();
+        if (doc["shq_device"].is<const char *>()) {
+            device_id = doc["shq_device"].as<const char *>();
         }
         const String before_client_id = config.data().sleephq_client_id;
         const String before_client_secret =
@@ -213,14 +213,14 @@ bool apply_web_config_update(AppConfig &config,
     }
 
     uint16_t parsed_port = 0;
-    if (valid_port_from_json(doc, "oximetry_udp_port", parsed_port)) {
+    if (valid_port_from_json(doc, "oxi_udp", parsed_port)) {
         const uint16_t before = config.data().oximetry_udp_port;
         const bool accepted = config.set_oximetry_udp_port(parsed_port);
         note_uint16_change(before, config.data().oximetry_udp_port,
                            accepted, result);
     }
 
-    if (json_get_string(doc, "oximetry_advertise_mode", s)) {
+    if (json_get_string(doc, "oxi_adv", s)) {
         OximetryAdvertiseMode mode;
         if (parse_oximetry_advertise_mode(s, mode)) {
             const OximetryAdvertiseMode before =
@@ -232,8 +232,7 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    const bool syslog_enabled_present = doc["syslog_enabled"].is<bool>() ||
-                                        doc["syslog"].is<bool>();
+    const bool syslog_enabled_present = doc["syslog_en"].is<bool>();
     const bool syslog_host_present = doc["syslog_host"].is<const char *>();
     const bool syslog_port_present =
         valid_port_from_json(doc, "syslog_port", parsed_port);
@@ -242,9 +241,7 @@ bool apply_web_config_update(AppConfig &config,
         String host = config.data().syslog_host;
         uint16_t port = config.data().syslog_port;
         if (syslog_enabled_present) {
-            enabled = doc["syslog_enabled"].is<bool>()
-                ? doc["syslog_enabled"].as<bool>()
-                : doc["syslog"].as<bool>();
+            enabled = doc["syslog_en"].as<bool>();
         }
         if (syslog_host_present) {
             host = doc["syslog_host"].as<const char *>();
@@ -294,23 +291,21 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    const bool http_auth_present = doc["http_auth_required"].is<bool>();
-    const bool disable_http_auth =
-        http_auth_present && !doc["http_auth_required"].as<bool>();
     const bool http_user_present = doc["http_user"].is<const char *>();
     const bool http_password_present =
-        doc["http_password"].is<const char *>();
-    if (disable_http_auth || http_user_present || http_password_present) {
+        doc["http_pass"].is<const char *>();
+    if (http_user_present || http_password_present) {
         String user = config.data().http_user;
         String password = config.data().http_password;
-        if (disable_http_auth) {
-            user = "";
-            password = "";
-        } else if (http_user_present) {
+        if (http_user_present) {
             user = doc["http_user"].as<const char *>();
         }
-        if (!disable_http_auth && http_password_present) {
-            password = doc["http_password"].as<const char *>();
+        if (http_password_present) {
+            password = doc["http_pass"].as<const char *>();
+            if (password == "********" &&
+                config.data().http_password.length() > 0) {
+                password = config.data().http_password;
+            }
         }
         const String before_user = config.data().http_user;
         const String before_password = config.data().http_password;
@@ -324,15 +319,16 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    if (json_get_string(doc, "auth_whitelist", s)) {
+    if (json_get_string(doc, "auth_wl", s)) {
         const String before = config.data().auth_whitelist;
         const bool accepted = config.set_auth_whitelist(s);
         note_string_change(before, config.data().auth_whitelist,
                            accepted, result);
     }
 
-    if (json_get_string(doc, "ota_password", s)) {
+    if (json_get_string(doc, "ota_pass", s)) {
         const String before = config.data().ota_password;
+        if (s == "********" && before.length() > 0) s = before;
         const bool accepted = config.set_ota_password(s);
         if (note_string_change(before, config.data().ota_password,
                                accepted, result)) {
@@ -340,12 +336,12 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    if (doc["tcp_enabled"].is<bool>() ||
+    if (doc["tcp_en"].is<bool>() ||
         valid_port_from_json(doc, "tcp_port", parsed_port)) {
         bool enabled = config.data().tcp_bridge_enabled;
         uint16_t port = config.data().tcp_bridge_port;
-        if (doc["tcp_enabled"].is<bool>()) {
-            enabled = doc["tcp_enabled"].as<bool>();
+        if (doc["tcp_en"].is<bool>()) {
+            enabled = doc["tcp_en"].as<bool>();
         }
         if (valid_port_from_json(doc, "tcp_port", parsed_port)) {
             port = parsed_port;
@@ -362,12 +358,12 @@ bool apply_web_config_update(AppConfig &config,
         }
     }
 
-    if (doc["telnet_enabled"].is<bool>() ||
+    if (doc["telnet_en"].is<bool>() ||
         valid_port_from_json(doc, "telnet_port", parsed_port)) {
         bool enabled = config.data().telnet_console_enabled;
         uint16_t port = config.data().telnet_console_port;
-        if (doc["telnet_enabled"].is<bool>()) {
-            enabled = doc["telnet_enabled"].as<bool>();
+        if (doc["telnet_en"].is<bool>()) {
+            enabled = doc["telnet_en"].as<bool>();
         }
         if (valid_port_from_json(doc, "telnet_port", parsed_port)) {
             port = parsed_port;
