@@ -10,9 +10,10 @@ namespace aircannect {
 
 // EDF catalog groups numeric and annotation files separately. Keep provider and
 // source-signature capacity independent from display/session ranges so a
-// multi-session sleep-day can carry both descriptor classes.
+// multi-session sleep-day can carry split descriptor classes without dropping
+// the tail of short-session-heavy nights.
 static constexpr size_t AC_REPORT_EDF_SESSION_MAX =
-    AC_REPORT_SUMMARY_SESSION_MAX * 2;
+    AC_REPORT_SUMMARY_SESSION_MAX * 4;
 
 struct ReportSessionRange {
     int64_t start_ms = 0;

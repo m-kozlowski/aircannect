@@ -26,6 +26,7 @@ enum class ReportSignalId : uint8_t {
     InspiratoryDuration,
     RespiratoryRate,
     IeRatio,
+    FlowLimitation,
 };
 
 enum ReportSourcePurpose : uint16_t {

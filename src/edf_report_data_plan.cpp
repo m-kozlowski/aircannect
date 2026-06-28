@@ -375,6 +375,68 @@ bool edf_report_plan_signal(const EdfReportSessionDescriptor &session,
                                 context);
 }
 
+namespace {
+
+struct FindSignalEntryContext {
+    EdfInventoryFileKind file_kind = EdfInventoryFileKind::Unknown;
+    uint8_t file_slot = 0;
+    uint32_t first_record = 0;
+    uint32_t record_count = 0;
+    int64_t start_ms = 0;
+    int64_t end_ms = 0;
+    EdfReportDataPlanEntry *out = nullptr;
+    bool found = false;
+};
+
+bool find_signal_entry_callback(void *context,
+                                const EdfReportDataPlanEntry &entry) {
+    FindSignalEntryContext *ctx =
+        static_cast<FindSignalEntryContext *>(context);
+    if (!ctx || !ctx->out) return false;
+    if (entry.kind == EdfReportDataKind::Series &&
+        entry.file_kind == ctx->file_kind &&
+        entry.file_slot == ctx->file_slot &&
+        entry.first_record == ctx->first_record &&
+        entry.record_count == ctx->record_count &&
+        entry.start_ms == ctx->start_ms &&
+        entry.end_ms == ctx->end_ms) {
+        *ctx->out = entry;
+        ctx->found = true;
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+bool edf_report_find_signal_entry_for_chunk(
+    const EdfReportSessionDescriptor &session,
+    ReportSignalId signal,
+    EdfInventoryFileKind file_kind,
+    uint8_t file_slot,
+    uint32_t first_record,
+    uint32_t record_count,
+    int64_t start_ms,
+    int64_t end_ms,
+    EdfReportDataPlanEntry &out) {
+    out = EdfReportDataPlanEntry();
+    FindSignalEntryContext ctx;
+    ctx.file_kind = file_kind;
+    ctx.file_slot = file_slot;
+    ctx.first_record = first_record;
+    ctx.record_count = record_count;
+    ctx.start_ms = start_ms;
+    ctx.end_ms = end_ms;
+    ctx.out = &out;
+    (void)edf_report_plan_signal(session,
+                                 signal,
+                                 start_ms,
+                                 end_ms,
+                                 find_signal_entry_callback,
+                                 &ctx);
+    return ctx.found;
+}
+
 bool edf_report_plan_signal_covers_ranges(
     const EdfReportSessionDescriptor *sessions,
     size_t session_count,

@@ -353,6 +353,7 @@ private:
         ReportSignalId signal = ReportSignalId::Flow;
         const char *name = nullptr;
         uint8_t stream_index = 0;
+        uint32_t stream_mask = 0;
         int64_t start_ms = 0;
         int64_t end_ms = 0;
         uint32_t payload_schema = 0;
@@ -618,8 +619,22 @@ private:
                                    ReportSpoolBuffer &payload);
     void provider_chunk_from_result(const ReportResultChunk &chunk,
                                     ReportProviderChunk &out) const;
+    bool provider_chunk_from_result_stream(
+        const ReportResultChunk &chunk,
+        size_t stream_index,
+        const ReportResultStream *streams,
+        size_t stream_count,
+        const EdfReportSessionDescriptor *sessions,
+        size_t session_count,
+        ReportProviderChunk &out) const;
+    bool result_chunk_has_stream(const ReportResultChunk &chunk,
+                                 size_t stream_index) const;
+    bool result_chunk_same_physical_edf(
+        const ReportResultChunk &existing,
+        const ReportProviderChunk &candidate) const;
     bool for_each_result_series_sample(
         const ReportResultChunk &chunk,
+        size_t stream_index,
         ReportProviderSeriesReadStats &stats,
         ReportSeriesSampleCallback callback,
         void *context);
@@ -704,6 +719,7 @@ private:
                                   ReportSpoolBuffer &payload);
     bool for_each_range_series_sample(
         const ReportResultChunk &chunk,
+        size_t stream_index,
         ReportProviderSeriesReadStats &stats,
         ReportSeriesSampleCallback callback,
         void *context);
@@ -711,6 +727,7 @@ private:
     bool open_range_series(const ReportResultStream &stream);
     int range_plot_range_index(int64_t timestamp_ms) const;
     bool result_chunk_matches_stream(const ReportResultChunk &chunk,
+                                     size_t stream_index,
                                      const ReportResultStream &stream) const;
     bool add_range_provider_chunk(const ReportProviderChunk &provider_chunk,
                                   size_t stream_index);
@@ -724,6 +741,8 @@ private:
                                            bool &capped,
                                            bool &overflow);
     bool process_range_series_chunk(const ReportResultChunk &chunk);
+    bool process_range_series_chunk(const ReportResultChunk &chunk,
+                                    size_t stream_index);
     bool finish_range_series();
     void finish_range_plot_build();
     void fail_range_plot_build(const char *message);
@@ -1039,6 +1058,7 @@ private:
                                    size_t therapy_index,
                                    bool refresh,
                                    bool idle_prebuild = false);
+    bool build_queue_has_capacity() const;
     void clear_build_queue(uint64_t night_start_ms, bool all);
     void service_build_queue(bool realtime_active);
     bool plot_cache_writer_active() const;

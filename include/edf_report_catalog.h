@@ -50,7 +50,7 @@ struct EdfReportFileDescriptor {
 
 struct EdfReportSignalMappingDef {
     EdfInventoryFileKind kind = EdfInventoryFileKind::Unknown;
-    uint8_t schema_signal_index = 0;
+    const char *label = nullptr;
     ReportSignalId signal = ReportSignalId::Flow;
     ReportSourceId source = ReportSourceId::Summary;
     uint32_t sample_interval_ms = 0;

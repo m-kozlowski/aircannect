@@ -13,7 +13,9 @@
 #include "debug_log.h"
 #include "edf_report_catalog_job.h"
 #include "edf_report_data_plan.h"
+#include "edf_report_data_reader.h"
 #include "edf_report_provider.h"
+#include "edf_report_provider_token.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
@@ -32,7 +34,7 @@ const char *const REPORT_SUMMARY_FROM = "2000-01-01T00:00:00.000Z";
 constexpr const char *REPORT_PLOT_CACHE_DIR = "/aircannect/report/v4/plots/v2";
 constexpr size_t REPORT_PLOT_PATH_MAX = 128;
 constexpr size_t REPORT_PLOT_CACHE_WRITE_CHUNK = 4096;
-constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 22;
+constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 23;
 
 const char *report_provider_id_name(ReportProviderId provider) {
     switch (provider) {
@@ -125,6 +127,12 @@ bool edf_session_same_identity(const EdfReportSessionDescriptor &a,
                                const EdfReportSessionDescriptor &b) {
     return strcmp(a.sleep_day, b.sleep_day) == 0 &&
            strcmp(a.session_stamp, b.session_stamp) == 0;
+}
+
+bool report_stream_bit(size_t stream_index, uint32_t &bit) {
+    if (stream_index >= 32) return false;
+    bit = 1u << static_cast<uint32_t>(stream_index);
+    return true;
 }
 
 void append_u64(LargeTextBuffer &out, uint64_t value) {
@@ -3978,6 +3986,9 @@ ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
                                     plot_prebuild_next_scan_ms_) < 0) {
         return PlotPrebuildResult::Drained;
     }
+    if (!build_queue_has_capacity()) {
+        return PlotPrebuildResult::Waiting;
+    }
 
     constexpr size_t SCAN_STEPS_PER_CALL = 4;
     for (size_t step = 0; step < SCAN_STEPS_PER_CALL; ++step) {
@@ -4041,6 +4052,7 @@ ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
             return PlotPrebuildResult::AlreadyQueued;
         }
         if (queued == BuildQueueResult::Full) {
+            if (plot_prebuild_cursor_ > 0) plot_prebuild_cursor_--;
             return PlotPrebuildResult::Waiting;
         }
         return PlotPrebuildResult::Unavailable;
@@ -4151,7 +4163,7 @@ ReportManager::BuildQueueResult ReportManager::enqueue_build(
               "full");
     xSemaphoreGive(build_queue_lock_);
     Log::logf(CAT_REPORT,
-              LOG_WARN,
+              idle_prebuild ? LOG_DEBUG : LOG_WARN,
               "Result build enqueue rejected night=%llu index=%lu "
               "refresh=%u idle_prebuild=%u reason=full count=%lu\n",
               static_cast<unsigned long long>(night_start_ms),
@@ -4160,6 +4172,16 @@ ReportManager::BuildQueueResult ReportManager::enqueue_build(
               idle_prebuild ? 1u : 0u,
               static_cast<unsigned long>(AC_REPORT_BUILD_QUEUE_MAX));
     return BuildQueueResult::Full;
+}
+
+bool ReportManager::build_queue_has_capacity() const {
+    if (!build_queue_lock_) return false;
+    if (xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return false;
+    }
+    const bool available = build_queue_count_ < AC_REPORT_BUILD_QUEUE_MAX;
+    xSemaphoreGive(build_queue_lock_);
+    return available;
 }
 
 void ReportManager::clear_build_queue(uint64_t night_start_ms, bool all) {
@@ -5045,13 +5067,57 @@ bool ReportManager::add_provider_result_chunk(
     bool required,
     size_t stream_index) {
     (void)required;
-    if (!result_chunks_ ||
-        result_status_.chunk_count >= result_chunk_capacity_) {
-        fail_result_prepare("result_chunks_full");
-        return false;
-    }
     if (stream_index >= result_stream_count_ || stream_index > UINT8_MAX) {
         fail_result_prepare("bad_result_stream");
+        return false;
+    }
+    uint32_t stream_bit = 0;
+    if (!report_stream_bit(stream_index, stream_bit)) {
+        fail_result_prepare("bad_result_stream");
+        return false;
+    }
+    if (!result_chunks_) {
+        fail_result_prepare("result_chunks_missing");
+        return false;
+    }
+
+    auto account_stream = [&]() {
+        ReportResultStream &stream = result_streams_[stream_index];
+        stream.has_edf_segment =
+            stream.has_edf_segment ||
+            provider_chunk.ref.provider == ReportProviderId::Edf;
+        stream.has_spool_segment =
+            stream.has_spool_segment ||
+            provider_chunk.ref.provider == ReportProviderId::Spool;
+        stream.chunk_count++;
+        stream.record_count += provider_chunk.record_count;
+        stream.payload_bytes += provider_chunk.payload_len;
+        result_status_.record_count += provider_chunk.record_count;
+        result_status_.payload_bytes += provider_chunk.payload_len;
+    };
+
+    for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
+        ReportResultChunk &existing = result_chunks_[i];
+        const bool same_physical =
+            result_chunk_same_physical_edf(existing, provider_chunk);
+        const bool same_logical =
+            existing.kind == provider_chunk.kind &&
+            existing.source == provider_chunk.source &&
+            existing.name && provider_chunk.name &&
+            strcmp(existing.name, provider_chunk.name) == 0 &&
+            existing.start_ms == provider_chunk.start_ms &&
+            existing.end_ms == provider_chunk.end_ms &&
+            report_provider_chunk_ref_equal(existing.provider_ref,
+                                            provider_chunk.ref);
+        if (!same_physical && !same_logical) continue;
+        if ((existing.stream_mask & stream_bit) != 0) return true;
+        existing.stream_mask |= stream_bit;
+        account_stream();
+        return true;
+    }
+
+    if (result_status_.chunk_count >= result_chunk_capacity_) {
+        fail_result_prepare("result_chunks_full");
         return false;
     }
 
@@ -5063,26 +5129,14 @@ bool ReportManager::add_provider_result_chunk(
     chunk.signal = provider_chunk.signal;
     chunk.name = provider_chunk.name;
     chunk.stream_index = static_cast<uint8_t>(stream_index);
+    chunk.stream_mask = stream_bit;
     chunk.start_ms = provider_chunk.start_ms;
     chunk.end_ms = provider_chunk.end_ms;
     chunk.payload_schema = provider_chunk.payload_schema;
     chunk.record_count = provider_chunk.record_count;
     chunk.payload_len = provider_chunk.payload_len;
 
-    if (stream_index < result_stream_count_) {
-        ReportResultStream &stream = result_streams_[stream_index];
-        stream.has_edf_segment =
-            stream.has_edf_segment ||
-            provider_chunk.ref.provider == ReportProviderId::Edf;
-        stream.has_spool_segment =
-            stream.has_spool_segment ||
-            provider_chunk.ref.provider == ReportProviderId::Spool;
-        stream.chunk_count++;
-        stream.record_count += provider_chunk.record_count;
-        stream.payload_bytes += provider_chunk.payload_len;
-    }
-    result_status_.record_count += provider_chunk.record_count;
-    result_status_.payload_bytes += provider_chunk.payload_len;
+    account_stream();
     return true;
 }
 
@@ -5508,8 +5562,107 @@ void ReportManager::provider_chunk_from_result(
     out.payload_len = chunk.payload_len;
 }
 
+bool ReportManager::result_chunk_has_stream(const ReportResultChunk &chunk,
+                                            size_t stream_index) const {
+    uint32_t bit = 0;
+    if (chunk.stream_mask != 0 && report_stream_bit(stream_index, bit)) {
+        return (chunk.stream_mask & bit) != 0;
+    }
+    return stream_index == chunk.stream_index;
+}
+
+bool ReportManager::result_chunk_same_physical_edf(
+    const ReportResultChunk &existing,
+    const ReportProviderChunk &candidate) const {
+    if (existing.kind != ReportStoreChunkKind::Series ||
+        candidate.kind != ReportStoreChunkKind::Series ||
+        existing.provider_ref.provider != ReportProviderId::Edf ||
+        candidate.ref.provider != ReportProviderId::Edf ||
+        existing.payload_schema != candidate.payload_schema ||
+        existing.start_ms != candidate.start_ms ||
+        existing.end_ms != candidate.end_ms ||
+        edf_report_signal_uses_edge_zero_padding(existing.signal) !=
+            edf_report_signal_uses_edge_zero_padding(candidate.signal)) {
+        return false;
+    }
+
+    EdfReportProviderToken a;
+    EdfReportProviderToken b;
+    if (!edf_report_provider_unpack_token(existing.provider_ref, a) ||
+        !edf_report_provider_unpack_token(candidate.ref, b)) {
+        return false;
+    }
+    return a.session_index == b.session_index &&
+           a.file_slot == b.file_slot &&
+           a.file_kind == b.file_kind &&
+           a.data_kind == b.data_kind &&
+           a.first_record == b.first_record &&
+           a.record_count == b.record_count;
+}
+
+bool ReportManager::provider_chunk_from_result_stream(
+    const ReportResultChunk &chunk,
+    size_t stream_index,
+    const ReportResultStream *streams,
+    size_t stream_count,
+    const EdfReportSessionDescriptor *sessions,
+    size_t session_count,
+    ReportProviderChunk &out) const {
+    if (!streams || stream_index >= stream_count ||
+        !result_chunk_has_stream(chunk, stream_index)) {
+        return false;
+    }
+    const ReportResultStream &stream = streams[stream_index];
+    provider_chunk_from_result(chunk, out);
+    out.source = stream.source;
+    out.signal = stream.signal;
+    out.name = stream.name;
+
+    if (chunk.provider_ref.provider != ReportProviderId::Edf ||
+        chunk.kind != ReportStoreChunkKind::Series) {
+        return true;
+    }
+
+    EdfReportProviderToken token;
+    if (!edf_report_provider_unpack_token(chunk.provider_ref, token) ||
+        token.session_index >= session_count || !sessions) {
+        return false;
+    }
+
+    EdfReportDataPlanEntry entry;
+    if (!edf_report_find_signal_entry_for_chunk(
+            sessions[token.session_index],
+            stream.signal,
+            token.file_kind,
+            token.file_slot,
+            token.first_record,
+            token.record_count,
+            chunk.start_ms,
+            chunk.end_ms,
+            entry)) {
+        return false;
+    }
+
+    token.primary = entry.primary;
+    token.trim_leading_padding = entry.trim_leading_padding;
+    token.trim_trailing_padding = entry.trim_trailing_padding;
+    copy_cstr(token.signal_label,
+              sizeof(token.signal_label),
+              entry.signal_label);
+    edf_report_provider_pack_token(out.ref, token);
+    out.source = entry.source;
+    out.signal = entry.signal;
+    out.name = entry.name;
+    out.start_ms = entry.start_ms;
+    out.end_ms = entry.end_ms;
+    out.record_count = entry.record_count_estimate;
+    out.payload_len = entry.payload_len_estimate;
+    return true;
+}
+
 bool ReportManager::for_each_result_series_sample(
     const ReportResultChunk &chunk,
+    size_t stream_index,
     ReportProviderSeriesReadStats &stats,
     ReportSeriesSampleCallback callback,
     void *context) {
@@ -5518,7 +5671,15 @@ bool ReportManager::for_each_result_series_sample(
         return false;
     }
     ReportProviderChunk provider_chunk;
-    provider_chunk_from_result(chunk, provider_chunk);
+    if (!provider_chunk_from_result_stream(chunk,
+                                           stream_index,
+                                           result_streams_,
+                                           result_stream_count_,
+                                           result_edf_sessions_,
+                                           result_edf_session_count_,
+                                           provider_chunk)) {
+        return false;
+    }
 
     switch (chunk.provider_ref.provider) {
         case ReportProviderId::Spool:
@@ -6244,6 +6405,7 @@ bool ReportManager::process_plot_series_chunk(size_t chunk_index) {
     ctx.read_stats = &read_stats;
     const bool ok = for_each_result_series_sample(
         chunk,
+        chunk.stream_index,
         read_stats,
         [](void *context, const ReportSeriesSample &sample) -> bool {
             PlotSeriesContext *ctx =
@@ -6289,24 +6451,40 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
         static_cast<size_t>(result_status_.chunk_count),
         static_cast<size_t>(AC_REPORT_RESULT_CHUNK_MAX));
     if (max_chunks == 0) return true;
+    const size_t candidate_capacity =
+        max_chunks *
+        std::min(result_stream_count_,
+                 static_cast<size_t>(AC_REPORT_RESULT_STREAM_MAX));
+    if (candidate_capacity == 0) return true;
     ReportProviderChunk *candidates =
         static_cast<ReportProviderChunk *>(Memory::calloc_large(
-            max_chunks, sizeof(ReportProviderChunk), false));
+            candidate_capacity, sizeof(ReportProviderChunk), false));
+    ReportResultChunk *logical_chunks =
+        static_cast<ReportResultChunk *>(Memory::calloc_large(
+            candidate_capacity, sizeof(ReportResultChunk), false));
     size_t *chunk_indices = static_cast<size_t *>(Memory::calloc_large(
-        max_chunks, sizeof(size_t), false));
+        candidate_capacity, sizeof(size_t), false));
+    uint8_t *stream_indices = static_cast<uint8_t *>(Memory::calloc_large(
+        candidate_capacity, sizeof(uint8_t), false));
     bool *selected = static_cast<bool *>(Memory::calloc_large(
+        candidate_capacity, sizeof(bool), false));
+    bool *physical_counted = static_cast<bool *>(Memory::calloc_large(
         max_chunks, sizeof(bool), false));
     ReportProviderSeriesReadStats *stats =
         static_cast<ReportProviderSeriesReadStats *>(Memory::calloc_large(
-            max_chunks, sizeof(ReportProviderSeriesReadStats), false));
+            candidate_capacity, sizeof(ReportProviderSeriesReadStats), false));
     EdfReportSeriesPlotConfig *plot_configs =
         static_cast<EdfReportSeriesPlotConfig *>(Memory::calloc_large(
-            max_chunks, sizeof(EdfReportSeriesPlotConfig), false));
-    if (!candidates || !chunk_indices || !selected || !stats ||
+            candidate_capacity, sizeof(EdfReportSeriesPlotConfig), false));
+    if (!candidates || !logical_chunks || !chunk_indices ||
+        !stream_indices || !selected || !physical_counted || !stats ||
         !plot_configs) {
         if (candidates) Memory::free(candidates);
+        if (logical_chunks) Memory::free(logical_chunks);
         if (chunk_indices) Memory::free(chunk_indices);
+        if (stream_indices) Memory::free(stream_indices);
         if (selected) Memory::free(selected);
+        if (physical_counted) Memory::free(physical_counted);
         if (stats) Memory::free(stats);
         if (plot_configs) Memory::free(plot_configs);
         fail_result_prepare("plot_alloc_failed");
@@ -6323,26 +6501,49 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
     }
 
     size_t candidate_count = 0;
-    auto add_candidate = [&](size_t index) {
+    auto add_candidate = [&](size_t index, size_t stream_index) {
         const ReportResultChunk &chunk = result_chunks_[index];
         if (plot_chunk_done_[index] ||
             chunk.kind != ReportStoreChunkKind::Series ||
             chunk.provider_ref.provider != ReportProviderId::Edf ||
-            chunk.stream_index >= result_stream_count_ ||
-            chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX) {
+            stream_index >= result_stream_count_ ||
+            stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
+            !result_chunk_has_stream(chunk, stream_index) ||
+            candidate_count >= candidate_capacity) {
             return;
         }
-        provider_chunk_from_result(chunk, candidates[candidate_count]);
+        if (!provider_chunk_from_result_stream(chunk,
+                                               stream_index,
+                                               result_streams_,
+                                               result_stream_count_,
+                                               result_edf_sessions_,
+                                               result_edf_session_count_,
+                                               candidates[candidate_count])) {
+            return;
+        }
+        ReportResultChunk &logical = logical_chunks[candidate_count];
+        logical = chunk;
+        logical.provider_ref = candidates[candidate_count].ref;
+        logical.source = candidates[candidate_count].source;
+        logical.signal = candidates[candidate_count].signal;
+        logical.name = candidates[candidate_count].name;
+        logical.stream_index = static_cast<uint8_t>(stream_index);
+        logical.stream_mask = 0;
+        logical.start_ms = candidates[candidate_count].start_ms;
+        logical.end_ms = candidates[candidate_count].end_ms;
+        logical.record_count = candidates[candidate_count].record_count;
+        logical.payload_len = candidates[candidate_count].payload_len;
+        logical.payload_schema = candidates[candidate_count].payload_schema;
         const uint32_t interval_ms = infer_chunk_interval_ms(
-            chunk.record_count, chunk.start_ms, chunk.end_ms);
+            logical.record_count, logical.start_ms, logical.end_ms);
         plot_configs[candidate_count].ranges = fast_ranges;
         plot_configs[candidate_count].range_count = fast_range_count;
         plot_configs[candidate_count].plot_start_ms = plot_start_ms_;
         plot_configs[candidate_count].bucket_ms =
             static_cast<uint32_t>(std::min<int64_t>(
                 UINT32_MAX,
-                plot_bucket_ms_for_signal(chunk.signal,
-                                          chunk.source,
+                plot_bucket_ms_for_signal(logical.signal,
+                                          logical.source,
                                           plot_bucket_ms_,
                                           interval_ms,
                                           false)));
@@ -6350,20 +6551,33 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
             static_cast<uint32_t>(std::min<int64_t>(
                 UINT32_MAX, plot_gap_threshold_ms(interval_ms)));
         plot_configs[candidate_count].value_multiplier =
-            plot_value_multiplier(chunk.signal, chunk.source);
+            plot_value_multiplier(logical.signal, logical.source);
         chunk_indices[candidate_count] = index;
+        stream_indices[candidate_count] = static_cast<uint8_t>(stream_index);
         ++candidate_count;
     };
-    add_candidate(seed_chunk_index);
+    for (size_t stream_index = 0; stream_index < result_stream_count_ &&
+                                  stream_index < AC_REPORT_RESULT_STREAM_MAX;
+         ++stream_index) {
+        add_candidate(seed_chunk_index, stream_index);
+    }
     for (size_t i = 0; i < max_chunks; ++i) {
         if (i == seed_chunk_index) continue;
-        add_candidate(i);
+        for (size_t stream_index = 0;
+             stream_index < result_stream_count_ &&
+             stream_index < AC_REPORT_RESULT_STREAM_MAX;
+             ++stream_index) {
+            add_candidate(i, stream_index);
+        }
     }
     if (candidate_count == 0) {
         Memory::free(plot_configs);
         Memory::free(stats);
+        Memory::free(physical_counted);
         Memory::free(selected);
+        Memory::free(stream_indices);
         Memory::free(chunk_indices);
+        Memory::free(logical_chunks);
         Memory::free(candidates);
         return true;
     }
@@ -6371,6 +6585,8 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
     struct EdfBatchContext {
         ReportManager *manager = nullptr;
         const size_t *chunk_indices = nullptr;
+        const uint8_t *stream_indices = nullptr;
+        const ReportResultChunk *logical_chunks = nullptr;
         const EdfReportSeriesPlotConfig *plot_configs = nullptr;
         size_t chunk_count = 0;
         uint32_t points = 0;
@@ -6378,6 +6594,8 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
     EdfBatchContext ctx;
     ctx.manager = this;
     ctx.chunk_indices = chunk_indices;
+    ctx.stream_indices = stream_indices;
+    ctx.logical_chunks = logical_chunks;
     ctx.plot_configs = plot_configs;
     ctx.chunk_count = candidate_count;
     bool ok = false;
@@ -6396,7 +6614,9 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
                 EdfBatchContext *ctx =
                     static_cast<EdfBatchContext *>(context);
                 ReportManager *manager = ctx ? ctx->manager : nullptr;
-                if (!manager || !ctx->chunk_indices || !ctx->plot_configs ||
+                if (!manager || !ctx->chunk_indices ||
+                    !ctx->stream_indices || !ctx->logical_chunks ||
+                    !ctx->plot_configs ||
                     candidate_index >= ctx->chunk_count) {
                     return false;
                 }
@@ -6406,15 +6626,15 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
                     chunk_index >= AC_REPORT_RESULT_CHUNK_MAX) {
                     return false;
                 }
-                const ReportResultChunk &chunk =
-                    manager->result_chunks_[chunk_index];
-                if (chunk.stream_index >= manager->result_stream_count_ ||
-                    chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
-                    !manager->open_plot_series_state(chunk.stream_index)) {
+                const size_t stream_index =
+                    ctx->stream_indices[candidate_index];
+                if (stream_index >= manager->result_stream_count_ ||
+                    stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
+                    !manager->open_plot_series_state(stream_index)) {
                     return false;
                 }
                 PlotSeriesBuildState &state =
-                    manager->plot_series_states_[chunk.stream_index];
+                    manager->plot_series_states_[stream_index];
                 if (point.gap) {
                     ctx->points++;
                     return manager->append_plot_series_gap(state);
@@ -6444,8 +6664,12 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
             if (!selected[i]) continue;
             const size_t chunk_index = chunk_indices[i];
             plot_chunk_done_[chunk_index] = true;
-            plot_build_input_chunks_++;
-            plot_build_input_bytes_ += result_chunks_[chunk_index].payload_len;
+            if (chunk_index < max_chunks && !physical_counted[chunk_index]) {
+                physical_counted[chunk_index] = true;
+                plot_build_input_chunks_++;
+                plot_build_input_bytes_ +=
+                    result_chunks_[chunk_index].payload_len;
+            }
             processed = true;
         }
     } else if (ctx.points == 0 && plot_bin_ok_) {
@@ -6470,18 +6694,20 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
                     chunk_index >= AC_REPORT_RESULT_CHUNK_MAX) {
                     return false;
                 }
-                const ReportResultChunk &chunk =
-                    manager->result_chunks_[chunk_index];
-                if (chunk.stream_index >= manager->result_stream_count_ ||
-                    chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
-                    !manager->open_plot_series_state(chunk.stream_index)) {
+                const size_t stream_index =
+                    ctx->stream_indices[candidate_index];
+                const ReportResultChunk &logical =
+                    ctx->logical_chunks[candidate_index];
+                if (stream_index >= manager->result_stream_count_ ||
+                    stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
+                    !manager->open_plot_series_state(stream_index)) {
                     return false;
                 }
                 const uint32_t interval_ms = infer_chunk_interval_ms(
-                    chunk.record_count, chunk.start_ms, chunk.end_ms);
+                    logical.record_count, logical.start_ms, logical.end_ms);
                 return manager->process_plot_series_sample_value(
-                    manager->plot_series_states_[chunk.stream_index],
-                    chunk,
+                    manager->plot_series_states_[stream_index],
+                    logical,
                     sample,
                     interval_ms);
             },
@@ -6492,9 +6718,13 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
                 if (!selected[i]) continue;
                 const size_t chunk_index = chunk_indices[i];
                 plot_chunk_done_[chunk_index] = true;
-                plot_build_input_chunks_++;
-                plot_build_input_bytes_ +=
-                    result_chunks_[chunk_index].payload_len;
+                if (chunk_index < max_chunks &&
+                    !physical_counted[chunk_index]) {
+                    physical_counted[chunk_index] = true;
+                    plot_build_input_chunks_++;
+                    plot_build_input_bytes_ +=
+                        result_chunks_[chunk_index].payload_len;
+                }
                 processed = true;
             }
         }
@@ -6502,8 +6732,11 @@ bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
 
     Memory::free(plot_configs);
     Memory::free(stats);
+    Memory::free(physical_counted);
     Memory::free(selected);
+    Memory::free(stream_indices);
     Memory::free(chunk_indices);
+    Memory::free(logical_chunks);
     Memory::free(candidates);
     if (!ok || !processed || !plot_bin_ok_) {
         fail_result_prepare(ok && processed ? "plot_overflow"
@@ -6712,6 +6945,7 @@ bool ReportManager::read_range_chunk_payload(
 
 bool ReportManager::for_each_range_series_sample(
     const ReportResultChunk &chunk,
+    size_t stream_index,
     ReportProviderSeriesReadStats &stats,
     ReportSeriesSampleCallback callback,
     void *context) {
@@ -6720,16 +6954,15 @@ bool ReportManager::for_each_range_series_sample(
         return false;
     }
     ReportProviderChunk provider_chunk;
-    provider_chunk.ref = chunk.provider_ref;
-    provider_chunk.kind = chunk.kind;
-    provider_chunk.source = chunk.source;
-    provider_chunk.signal = chunk.signal;
-    provider_chunk.name = chunk.name;
-    provider_chunk.start_ms = chunk.start_ms;
-    provider_chunk.end_ms = chunk.end_ms;
-    provider_chunk.payload_schema = chunk.payload_schema;
-    provider_chunk.record_count = chunk.record_count;
-    provider_chunk.payload_len = chunk.payload_len;
+    if (!provider_chunk_from_result_stream(chunk,
+                                           stream_index,
+                                           range_streams_,
+                                           range_stream_count_,
+                                           range_edf_sessions_,
+                                           range_edf_session_count_,
+                                           provider_chunk)) {
+        return false;
+    }
 
     switch (chunk.provider_ref.provider) {
         case ReportProviderId::Spool:
@@ -6949,11 +7182,14 @@ int ReportManager::range_plot_range_index(int64_t timestamp_ms) const {
 
 bool ReportManager::result_chunk_matches_stream(
     const ReportResultChunk &chunk,
+    size_t stream_index,
     const ReportResultStream &stream) const {
-    return chunk.kind == stream.kind &&
-           chunk.signal == stream.signal &&
-           chunk.name && stream.name &&
-           strcmp(chunk.name, stream.name) == 0;
+    if (!result_chunk_has_stream(chunk, stream_index)) return false;
+    if (chunk.stream_mask != 0) {
+        return chunk.kind == stream.kind;
+    }
+    return chunk.kind == stream.kind && chunk.signal == stream.signal &&
+           chunk.name && stream.name && strcmp(chunk.name, stream.name) == 0;
 }
 
 bool ReportManager::collect_range_chunk(void *context,
@@ -6969,13 +7205,17 @@ bool ReportManager::collect_range_chunk(void *context,
 bool ReportManager::add_range_provider_chunk(
     const ReportProviderChunk &provider_chunk,
     size_t stream_index) {
-    if (!range_chunks_ ||
-        range_chunk_count_ >= AC_REPORT_RESULT_CHUNK_MAX) {
-        fail_range_plot_build("range_chunks_full");
-        return false;
-    }
     if (stream_index >= range_stream_count_ || stream_index > UINT8_MAX) {
         fail_range_plot_build("range_bad_stream");
+        return false;
+    }
+    uint32_t stream_bit = 0;
+    if (!report_stream_bit(stream_index, stream_bit)) {
+        fail_range_plot_build("range_bad_stream");
+        return false;
+    }
+    if (!range_chunks_) {
+        fail_range_plot_build("range_chunks_missing");
         return false;
     }
 
@@ -6987,18 +7227,41 @@ bool ReportManager::add_range_provider_chunk(
         fail_range_plot_build("range_stream_mismatch");
         return false;
     }
+    auto account_stream = [&]() {
+        stream.chunk_count++;
+        stream.record_count += provider_chunk.record_count;
+        stream.payload_bytes += provider_chunk.payload_len;
+        stream.has_edf_segment =
+            stream.has_edf_segment ||
+            provider_chunk.ref.provider == ReportProviderId::Edf;
+        stream.has_spool_segment =
+            stream.has_spool_segment ||
+            provider_chunk.ref.provider == ReportProviderId::Spool;
+    };
+
     for (size_t i = 0; i < range_chunk_count_; ++i) {
-        const ReportResultChunk &existing = range_chunks_[i];
-        if (existing.kind == provider_chunk.kind &&
+        ReportResultChunk &existing = range_chunks_[i];
+        const bool same_physical =
+            result_chunk_same_physical_edf(existing, provider_chunk);
+        const bool same_logical =
+            existing.kind == provider_chunk.kind &&
             existing.source == provider_chunk.source &&
             existing.name && provider_chunk.name &&
             strcmp(existing.name, provider_chunk.name) == 0 &&
             existing.start_ms == provider_chunk.start_ms &&
             existing.end_ms == provider_chunk.end_ms &&
             report_provider_chunk_ref_equal(existing.provider_ref,
-                                            provider_chunk.ref)) {
-            return true;
-        }
+                                            provider_chunk.ref);
+        if (!same_physical && !same_logical) continue;
+        if ((existing.stream_mask & stream_bit) != 0) return true;
+        existing.stream_mask |= stream_bit;
+        account_stream();
+        return true;
+    }
+
+    if (range_chunk_count_ >= AC_REPORT_RESULT_CHUNK_MAX) {
+        fail_range_plot_build("range_chunks_full");
+        return false;
     }
 
     ReportResultChunk &chunk = range_chunks_[range_chunk_count_++];
@@ -7008,21 +7271,14 @@ bool ReportManager::add_range_provider_chunk(
     chunk.signal = provider_chunk.signal;
     chunk.name = provider_chunk.name;
     chunk.stream_index = static_cast<uint8_t>(stream_index);
+    chunk.stream_mask = stream_bit;
     chunk.start_ms = provider_chunk.start_ms;
     chunk.end_ms = provider_chunk.end_ms;
     chunk.payload_schema = provider_chunk.payload_schema;
     chunk.record_count = provider_chunk.record_count;
     chunk.payload_len = provider_chunk.payload_len;
 
-    stream.chunk_count++;
-    stream.record_count += provider_chunk.record_count;
-    stream.payload_bytes += provider_chunk.payload_len;
-    stream.has_edf_segment =
-        stream.has_edf_segment ||
-        provider_chunk.ref.provider == ReportProviderId::Edf;
-    stream.has_spool_segment =
-        stream.has_spool_segment ||
-        provider_chunk.ref.provider == ReportProviderId::Spool;
+    account_stream();
     return true;
 }
 
@@ -7204,9 +7460,30 @@ bool ReportManager::process_range_series_sample_value(
 
 bool ReportManager::process_range_series_chunk(
     const ReportResultChunk &chunk) {
+    return process_range_series_chunk(chunk, chunk.stream_index);
+}
+
+bool ReportManager::process_range_series_chunk(
+    const ReportResultChunk &chunk,
+    size_t stream_index) {
+    if (stream_index >= range_stream_count_) {
+        fail_range_plot_build("range_bad_stream");
+        return false;
+    }
+    ReportProviderChunk provider_chunk;
+    if (!provider_chunk_from_result_stream(chunk,
+                                           stream_index,
+                                           range_streams_,
+                                           range_stream_count_,
+                                           range_edf_sessions_,
+                                           range_edf_session_count_,
+                                           provider_chunk)) {
+        fail_range_plot_build("range_chunk_map_failed");
+        return false;
+    }
     const int32_t scale =
-        (chunk.source == ReportSourceId::RespiratoryFlow6p25Hz ||
-         chunk.source == ReportSourceId::Leak0p5Hz)
+        (provider_chunk.source == ReportSourceId::RespiratoryFlow6p25Hz ||
+         provider_chunk.source == ReportSourceId::Leak0p5Hz)
             ? 60
             : 1;
 
@@ -7222,15 +7499,18 @@ bool ReportManager::process_range_series_chunk(
     };
     RangeSeriesContext ctx;
     ctx.manager = this;
-    ctx.signal = chunk.signal;
-    ctx.source = chunk.source;
+    ctx.signal = provider_chunk.signal;
+    ctx.source = provider_chunk.source;
     ctx.scale = scale;
     ctx.interval_ms =
-        infer_chunk_interval_ms(chunk.record_count, chunk.start_ms, chunk.end_ms);
+        infer_chunk_interval_ms(provider_chunk.record_count,
+                                provider_chunk.start_ms,
+                                provider_chunk.end_ms);
     ReportProviderSeriesReadStats read_stats;
     ctx.read_stats = &read_stats;
     const bool ok = for_each_range_series_sample(
         chunk,
+        stream_index,
         read_stats,
         [](void *context, const ReportSeriesSample &sample) -> bool {
             RangeSeriesContext *ctx =
@@ -7640,14 +7920,19 @@ void ReportManager::poll_range_plot_build() {
             while (range_chunk_index_ < range_chunk_count_) {
                 const ReportResultChunk &chunk =
                     range_chunks_[range_chunk_index_++];
-                if (!result_chunk_matches_stream(chunk, stream)) {
+                if (!result_chunk_matches_stream(chunk,
+                                                 range_stream_index_,
+                                                 stream)) {
                     continue;
                 }
                 if (chunk.end_ms <= range_build_from_ ||
                     chunk.start_ms >= range_build_to_) {
                     continue;
                 }
-                if (!process_range_series_chunk(chunk)) return;
+                if (!process_range_series_chunk(chunk,
+                                                range_stream_index_)) {
+                    return;
+                }
                 reads++;
                 range_build_input_chunks_++;
                 range_build_input_bytes_ += chunk.payload_len;

@@ -69,6 +69,17 @@ bool edf_report_plan_signal(const EdfReportSessionDescriptor &session,
                             EdfReportDataPlanCallback callback,
                             void *context);
 
+bool edf_report_find_signal_entry_for_chunk(
+    const EdfReportSessionDescriptor &session,
+    ReportSignalId signal,
+    EdfInventoryFileKind file_kind,
+    uint8_t file_slot,
+    uint32_t first_record,
+    uint32_t record_count,
+    int64_t start_ms,
+    int64_t end_ms,
+    EdfReportDataPlanEntry &out);
+
 bool edf_report_plan_signal_covers_ranges(
     const EdfReportSessionDescriptor *sessions,
     size_t session_count,

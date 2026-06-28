@@ -3,7 +3,6 @@
 #include <limits.h>
 #include <string.h>
 
-#include "edf_file_writer.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -11,61 +10,67 @@ namespace {
 
 const EdfReportSignalMappingDef REPORT_SIGNAL_MAP[] = {
     {EdfInventoryFileKind::Brp,
-     0,
+     "Flow.40ms",
      ReportSignalId::Flow,
      ReportSourceId::RespiratoryFlow6p25Hz,
      40,
      true},
     {EdfInventoryFileKind::Brp,
-     1,
+     "Press.40ms",
      ReportSignalId::MaskPressure,
      ReportSourceId::MaskPressure6p25Hz,
      40,
      true},
     {EdfInventoryFileKind::Pld,
-     0,
+     "MaskPress.2s",
      ReportSignalId::MaskPressure,
      ReportSourceId::TherapyOneMinute,
      2000,
      false},
     {EdfInventoryFileKind::Pld,
-     1,
+     "Press.2s",
      ReportSignalId::InspiratoryPressure,
      ReportSourceId::InspiratoryPressure0p5Hz,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     2,
+     "EprPress.2s",
      ReportSignalId::ExpiratoryPressure,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     3,
+     "Leak.2s",
      ReportSignalId::Leak,
      ReportSourceId::Leak0p5Hz,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     4,
+     "RespRate.2s",
      ReportSignalId::RespiratoryRate,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     6,
+     "MinVent.2s",
      ReportSignalId::MinuteVentilation,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     8,
+     "IERatio.2s",
      ReportSignalId::IeRatio,
      ReportSourceId::TherapyOneMinute,
      2000,
      true},
     {EdfInventoryFileKind::Pld,
-     11,
+     "FlowLim.2s",
+     ReportSignalId::FlowLimitation,
+     ReportSourceId::TherapyOneMinute,
+     2000,
+     true},
+    {EdfInventoryFileKind::Pld,
+     "Ti.2s",
      ReportSignalId::InspiratoryDuration,
      ReportSourceId::TherapyOneMinute,
      2000,
@@ -78,29 +83,6 @@ bool report_kind(EdfInventoryFileKind kind) {
            kind == EdfInventoryFileKind::Sa2 ||
            kind == EdfInventoryFileKind::Eve ||
            kind == EdfInventoryFileKind::Csl;
-}
-
-EdfFileKind numeric_file_kind(EdfInventoryFileKind kind) {
-    switch (kind) {
-        case EdfInventoryFileKind::Brp: return EdfFileKind::Brp;
-        case EdfInventoryFileKind::Pld: return EdfFileKind::Pld;
-        case EdfInventoryFileKind::Sa2: return EdfFileKind::Sa2;
-        default:
-            return EdfFileKind::Brp;
-    }
-}
-
-const EdfSignalSpec *mapping_signal_spec(
-    const EdfReportSignalMappingDef &mapping) {
-    if (mapping.kind != EdfInventoryFileKind::Brp &&
-        mapping.kind != EdfInventoryFileKind::Pld &&
-        mapping.kind != EdfInventoryFileKind::Sa2) {
-        return nullptr;
-    }
-    const EdfFileSchema &schema = edf_numeric_schema(
-        numeric_file_kind(mapping.kind));
-    if (mapping.schema_signal_index >= schema.signal_count) return nullptr;
-    return &schema.signals[mapping.schema_signal_index];
 }
 
 }  // namespace
@@ -273,8 +255,7 @@ const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
 
 const char *edf_report_signal_mapping_label(
     const EdfReportSignalMappingDef &mapping) {
-    const EdfSignalSpec *spec = mapping_signal_spec(mapping);
-    return spec ? spec->label : "";
+    return mapping.label ? mapping.label : "";
 }
 
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
