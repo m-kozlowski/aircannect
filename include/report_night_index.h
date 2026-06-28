@@ -61,6 +61,8 @@ bool edf_session_has_report_annotation(
 bool edf_session_annotation_matches_numeric(
     const EdfReportSessionDescriptor &numeric_session,
     const EdfReportSessionDescriptor &annotation_session);
+void merge_edf_annotation_sessions(EdfReportSessionDescriptor *sessions,
+                                   size_t &session_count);
 
 class ReportNightIndex {
 public:

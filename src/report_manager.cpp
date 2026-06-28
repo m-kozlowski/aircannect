@@ -4975,23 +4975,6 @@ bool ReportManager::set_result_ranges_from_indexed_night(
             append_range(night.data_ranges[i].start_ms,
                          night.data_ranges[i].end_ms);
         }
-        const size_t display_count =
-            std::min(night.range_count,
-                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-        for (size_t i = 0; i < display_count; ++i) {
-            const ReportSessionRange &display = night.ranges[i];
-            bool overlaps_edf = false;
-            for (size_t k = 0; k < edf_count; ++k) {
-                if (ranges_overlap(display.start_ms,
-                                   display.end_ms,
-                                   night.data_ranges[k].start_ms,
-                                   night.data_ranges[k].end_ms)) {
-                    overlaps_edf = true;
-                    break;
-                }
-            }
-            if (!overlaps_edf) append_range(display.start_ms, display.end_ms);
-        }
     } else {
         const size_t display_count =
             std::min(night.range_count,
@@ -5572,6 +5555,7 @@ bool ReportManager::append_edf_sessions_for_selected_days(
     }
     Memory::free(marker_scratch);
     Memory::free(candidate);
+    merge_edf_annotation_sessions(sessions, session_count);
     std::sort(sessions,
               sessions + session_count,
               [](const EdfReportSessionDescriptor &a,

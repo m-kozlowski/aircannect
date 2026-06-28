@@ -334,6 +334,8 @@ bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
     const char *event_name = report_source_spool_type(source->id);
     bool have_event_stream = false;
     size_t event_stream_index = 0;
+    bool saw_event_range = false;
+    bool all_event_ranges_covered = true;
 
     auto add_event_segment = [&](ReportResolvedProvider provider,
                                  int64_t start_ms,
@@ -396,52 +398,66 @@ bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
                                end_ms);
     };
 
-    for (size_t range_index = 0; range_index < range_count; ++range_index) {
-        const ReportSessionRange &range = ranges[range_index];
-        if (range.end_ms <= range.start_ms) continue;
-
-        size_t edf_count = 0;
-        if (!collect(edf_,
-                     ReportResolvedProvider::Edf,
-                     event_name,
-                     range.start_ms,
-                     range.end_ms,
-                     edf_count)) {
+    auto add_collected_event_payloads = [&](ReportResolvedProvider provider_id,
+                                            const char *name,
+                                            int64_t start_ms,
+                                            int64_t end_ms) -> bool {
+        size_t interval_count = 0;
+        const ReportDataProvider &provider =
+            provider_id == ReportResolvedProvider::Edf ? edf_ : spool_;
+        if (!collect(provider,
+                     provider_id,
+                     name,
+                     start_ms,
+                     end_ms,
+                     interval_count)) {
             return false;
         }
-
-        int64_t cursor = range.start_ms;
-        for (size_t i = 0; i < edf_count; ++i) {
+        for (size_t i = 0; i < interval_count; ++i) {
             const ReportCoverageInterval &interval = scratch_.coverage[i];
-            if (interval.end_ms <= cursor) continue;
-            if (interval.start_ms > cursor) {
-                const bool complete = spool_.coverage_complete(*source,
-                                                               cursor,
-                                                               interval.start_ms);
-                if (!add_event_segment(ReportResolvedProvider::Spool,
-                                       cursor,
-                                       interval.start_ms,
-                                       complete)) {
-                    return false;
-                }
-            }
-            if (!add_event_segment(ReportResolvedProvider::Edf,
-                                   std::max(interval.start_ms, range.start_ms),
-                                   std::min(interval.end_ms, range.end_ms),
+            if (!add_event_segment(provider_id,
+                                   interval.start_ms,
+                                   interval.end_ms,
                                    true)) {
                 return false;
             }
-            cursor = std::max(cursor, interval.end_ms);
         }
+        return true;
+    };
 
-        if (cursor < range.end_ms) {
-            const bool complete = spool_.coverage_complete(*source,
-                                                           cursor,
-                                                           range.end_ms);
-            if (!add_event_segment(ReportResolvedProvider::Spool,
-                                   cursor,
+    for (size_t range_index = 0; range_index < range_count; ++range_index) {
+        const ReportSessionRange &range = ranges[range_index];
+        if (range.end_ms <= range.start_ms) continue;
+        saw_event_range = true;
+
+        if (edf_.coverage_complete(*source, range.start_ms, range.end_ms)) {
+            if (!add_event_segment(ReportResolvedProvider::Edf,
+                                   range.start_ms,
                                    range.end_ms,
-                                   complete)) {
+                                   true)) {
+                return false;
+            }
+        } else if (spool_.coverage_complete(*source,
+                                            range.start_ms,
+                                            range.end_ms)) {
+            if (!add_event_segment(ReportResolvedProvider::Spool,
+                                   range.start_ms,
+                                   range.end_ms,
+                                   true)) {
+                return false;
+            }
+        } else {
+            all_event_ranges_covered = false;
+            if (!add_collected_event_payloads(ReportResolvedProvider::Edf,
+                                              event_name,
+                                              range.start_ms,
+                                              range.end_ms)) {
+                return false;
+            }
+            if (!add_collected_event_payloads(ReportResolvedProvider::Spool,
+                                              event_name,
+                                              range.start_ms,
+                                              range.end_ms)) {
                 return false;
             }
         }
@@ -489,8 +505,9 @@ bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
         have_event_stream
             ? find_stream(plan, ReportStoreChunkKind::Events, event_name)
             : nullptr;
-    plan.events_available =
-        stream && stream->complete && stream->has_covered_segment;
+    plan.events_available = saw_event_range && all_event_ranges_covered &&
+                            stream && stream->complete &&
+                            stream->has_covered_segment;
     return true;
 }
 
