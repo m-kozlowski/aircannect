@@ -10,6 +10,7 @@ Boolean values accept `on`/`off`, `yes`/`no`, `true`/`false`, `1`/`0`, and
 | Key | Values | Default | Description |
 | --- | --- | --- | --- |
 | `host` | Hostname, 1-63 alnum/hyphen chars, not starting or ending with hyphen | `aircannect` | Device hostname and SoftAP SSID prefix. |
+| `edf_cap` | boolean | on when the build has SD storage | Enable AS11-style EDF capture on SD card. |
 
 ## Wi-Fi Profiles
 
@@ -23,7 +24,7 @@ Boolean values accept `on`/`off`, `yes`/`no`, `true`/`false`, `1`/`0`, and
 | Key | Values | Default | Description |
 | --- | --- | --- | --- |
 | `wifi_ctry` | `01`, or two-letter ISO country code | `01` | Wi-Fi regulatory country. `01` is the worldwide-safe setting. |
-| `softap_mode` | `auto`, `forced` | `auto` | `auto` keeps SoftAP as fallback/recovery. `forced` keeps SoftAP running alongside STA. |
+| `softap_mode` | `auto`, `forced` | `auto` | `auto` uses SoftAP as fallback/recovery. `forced` keeps SoftAP running alongside STA. |
 
 Roaming is implicit when more than one Wi-Fi profile exists.
 
@@ -36,7 +37,7 @@ Roaming is implicit when more than one Wi-Fi profile exists.
 | `telnet_en` | boolean | `on` | Enable the telnet management console. |
 | `telnet_port` | TCP port `1` to `65535` | `23` | Telnet management console port. |
 
-## Network Access
+## Access
 
 Empty `http_user` and `http_pass` mean open access for HTTP and telnet.
 
@@ -45,6 +46,7 @@ Empty `http_user` and `http_pass` mean open access for HTTP and telnet.
 | `http_user` | ASCII string, max 64 chars, or empty | `admin` | Web UI/API username. |
 | `http_pass` | ASCII string, max 64 chars, or empty | `aircannect` | Web UI/API password. |
 | `auth_wl` | Empty, `*`, IPv4 addresses, CIDR ranges, or IPv4 start-end ranges separated by commas | empty | IP/range whitelist that bypasses HTTP and telnet auth. |
+| `ota_pass` | ASCII string up to 64 chars, or empty | `aircannect` | ArduinoOTA password. Empty value allows ArduinoOTA without authorization. |
 
 ## Time
 
@@ -64,11 +66,22 @@ Empty `http_user` and `http_pass` mean open access for HTTP and telnet.
 Known BLE oximeters are stored separately and managed from the Web UI or
 `oxi sensor` console commands, not from `config.txt`.
 
-## ESP32 OTA
+## SMB Sync
 
 | Key | Values | Default | Description |
 | --- | --- | --- | --- |
-| `ota_pass` | ASCII string up to 64 chars, or empty | `aircannect` | ArduinoOTA password. Empty value allows ArduinoOTA without authorization. |
+| `smb_ep` | `//host/share/path` | empty | Destination SMB share/path. |
+| `smb_user` | SMB username | empty | SMB username. |
+| `smb_pass` | SMB password | empty | SMB password. |
+
+## SleepHQ Sync
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `shq_id` | SleepHQ OAuth client ID | empty | OAuth client ID. |
+| `shq_secret` | SleepHQ OAuth client secret | empty | OAuth client secret. |
+| `shq_team` | Numeric SleepHQ team ID | empty | Optional team ID. |
+| `shq_device` | Numeric SleepHQ device ID, or empty | empty | Optional SleepHQ device type override. |
 
 ## Logging
 
@@ -77,16 +90,16 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `syslog_en` | boolean | `off` | Enable UDP syslog forwarding. |
 | `syslog_host` | Empty, or IPv4 address | empty | Syslog destination host. |
 | `syslog_port` | UDP port `1` to `65535` | `514` | Syslog destination port. |
-| `file_log_en` | boolean | storage build default | Enable persistent SD-card log files when storage is available. |
-| `log0` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `GENERAL` category log level. |
-| `log1` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `CAN` category log level. |
-| `log2` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `RPC` category log level. |
-| `log3` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `TCP` category log level. |
-| `log4` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `CLI` category log level. |
-| `log5` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `WIFI` category log level. |
-| `log6` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `STREAM` category log level. |
-| `log7` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `OTA` category log level. |
-| `log8` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | `OXI` category log level. |
+| `file_log_en` | boolean | on when the build has SD storage | Enable persistent SD-card log files when storage is available. |
+| `log0` ... `log14` | `ERROR`, `WARN`, `INFO`, `DEBUG` | mostly `INFO` | Per-category log levels. Numeric keys map to `debug_log.h` category order. |
 
-Per-category log levels are currently changed from the management console with
-`log level`, not from `config.txt`.
+The management console also has a separate convenience command for interactive
+logging changes:
+
+```text
+log level LEVEL
+log level CATEGORY LEVEL
+```
+
+Category order for the numeric keys is defined by `log_cat_t` in
+`include/debug_log.h`.

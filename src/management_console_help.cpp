@@ -45,27 +45,19 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "config") {
         out.println("[HELP config]");
-        out.println("  config                    show persistent config");
-        out.println("  config KEY [VALUE]        show/set one config value");
+        out.println("  config                    show persistent config with exact NVS keys");
+        out.println("  config KEY                show one exact NVS key");
+        out.println("  config KEY VALUE          set one exact NVS key");
         out.println("  config reset              reset app config, keep Wi-Fi profiles");
         out.println("  config factory-reset      reset app config and Wi-Fi profiles");
-        out.println("  config hostname NAME      set network hostname");
-        out.println("  config tcp on|off [PORT]  enable raw RPC bridge");
-        out.println("  config softap auto|forced set SoftAP fallback behavior");
-        out.println("  config wifi-country CC    set Wi-Fi regulatory country");
-        out.println("  config timezone VALUE     set ESP local timezone");
-        out.println("  config resmed-time-sync on|off  push NTP time to AS11");
-        out.println("  config oximetry on|off    enable oximetry bridge");
-        out.println("  config oximetry udp-port P        set UDP source port");
-        out.println("  config oximetry advertise auto|manual  set BLE advertising policy");
-        out.println("  config smb ENDPOINT USER PASSWORD set SMB target");
-        out.println("  config smb clear          clear SMB target");
-        out.println("  config sleephq CLIENT_ID CLIENT_SECRET [TEAM_ID] [DEVICE_ID]");
-        out.println("  config sleephq clear      clear SleepHQ credentials");
-        out.println("  config http-auth U P      set Web UI auth; empty U/P disables auth");
-        out.println("  config http-whitelist L   bypass auth for IP/range list, or clear");
-        out.println("  config telnet on|off [P]  enable management telnet console");
-        out.println("  config ota-password VALUE set ArduinoOTA password; empty opens access");
+        out.println("  keys are not aliased or normalized: use the NVS key exactly");
+        out.println("  common keys:");
+        out.println("    host tcp_en tcp_port softap_mode wifi_ctry tz resmed_time");
+        out.println("    oxi_en oxi_udp oxi_adv edf_cap");
+        out.println("    smb_ep smb_user smb_pass");
+        out.println("    shq_id shq_secret shq_team shq_device");
+        out.println("    http_user http_pass auth_wl telnet_en telnet_port ota_pass");
+        out.println("    syslog_en syslog_host syslog_port file_log_en log0..log14");
         return;
     }
 

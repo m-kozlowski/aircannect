@@ -9,7 +9,7 @@ to other ESP32-S3 / ESP32 boards with `build_flags` overrides if needed.
 - **XIAO ESP32-S3 Plus** (or any ESP32-S3 board with PSRAM and a few free GPIOs). PSRAM is useful for live therapy-data charts and large web responses.
 - **3.3 V CAN transceiver** - SN65HVD230D-class.
 - **24 V to 3.3 V buck regulator** - the AirSense 11 power line is 24 V; the ESP32 and transceiver both run on 3.3 V.
-- **microSD card** *(optional)* - enables on-device storage, first-boot provisioning, and `.abc` firmware staging.
+- **microSD card** *(optional)* - enables on-device storage, first-boot provisioning, `.abc` firmware staging, EDF capture, reports, file logging.
 
 ## Bare minimum hardware diagram
 
@@ -113,7 +113,7 @@ Other build profiles:
 
 ## Wiring tips
 
-CAN at 1 Mbit/s and 4-bit SDMMC at 20 MHz both suffer from sloppy wiring.
+CAN at 1 Mbit/s and 4-bit SDMMC at 40 MHz both suffer from sloppy wiring.
 Practical targets:
 
 **CAN bus.**
@@ -131,28 +131,17 @@ Practical targets:
 
 - 24 V and GND from AS11 to buck: under 1 m of 22-24 AWG wire.
 
-**microSD.** 20 MHz SDMMC is unforgiving:
+**microSD.** 40 MHz SDMMC is unforgiving:
 
 - Short wires only - under 5 cm from each SD pin to the GPIO. Socket
   choice matters less than how short you wire it.
 - Avoid the long (20 cm) Dupont jumpers - they cause intermittent
   card-not-detected and CRC errors.
 - The SD spec requires pull-ups on `CMD` and `D0`-`D3`. ESP32-S3
-  internal pull-ups (~45 kOhm) are marginal at 20 MHz - add external
+  internal pull-ups (~45 kOhm) are marginal at SDMMC speed - add external
   **10 kOhm pull-ups to 3.3 V** on `CMD` and each `D0`-`D3` line. `CLK`
   does not need one.
 
-## Optional microSD
-
-Wiring an SD card unlocks:
-
-- **First-boot provisioning** from `config.txt` on the card root (see README).
-- **`.abc` firmware staging** so large ResMed OTA images don't have to fit in RAM.
-- **On-device therapy data capture** *(planned)*.
-
-The card mounts at `/sdcard`. State and free space are visible in the web
-UI dashboard and in `storage status` on the management console. After
-swapping cards, use `storage remount` to re-detect without rebooting.
 
 For first-boot, flash, and CAN-link test steps, see
 [quickstart.md](quickstart.md).

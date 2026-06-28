@@ -32,6 +32,17 @@ struct ProvisionState {
     OximetryAdvertiseMode oximetry_advertise_mode =
         OximetryAdvertiseMode::Auto;
 
+    bool smb_dirty = false;
+    String smb_endpoint;
+    String smb_user;
+    String smb_password;
+
+    bool sleephq_dirty = false;
+    String sleephq_client_id;
+    String sleephq_client_secret;
+    String sleephq_team_id;
+    String sleephq_device_id;
+
     bool wifi_profile_touched = false;
     WifiProfile wifi[AC_WIFI_PROFILE_MAX];
     bool wifi_touched[AC_WIFI_PROFILE_MAX] = {};
@@ -54,6 +65,19 @@ bool parse_bool_value(const String &text, bool &value) {
 
 bool parse_port_value(const String &text, uint16_t &port) {
     return parse_port(text, port);
+}
+
+bool parse_log_key(const String &key, log_cat_t &cat) {
+    cat = CAT_GENERAL;
+    if (!key.startsWith("log") || key.length() <= 3) return false;
+    String index_text = key.substring(3);
+    for (size_t i = 0; i < index_text.length(); ++i) {
+        if (!isDigit(index_text[i])) return false;
+    }
+    const int parsed = index_text.toInt();
+    if (parsed < 0 || parsed >= CAT_COUNT) return false;
+    cat = static_cast<log_cat_t>(parsed);
+    return true;
 }
 
 bool parse_wifi_key(const String &key, size_t &index, String &field) {
@@ -157,6 +181,45 @@ bool apply_app_key(AppConfig &app_config,
         state.oximetry_dirty = true;
         return true;
     }
+    if (key == "edf_cap") {
+        if (!parse_bool_value(value, bool_value)) return false;
+        return app_config.set_edf_capture_enabled(bool_value);
+    }
+    if (key == "smb_ep") {
+        state.smb_endpoint = value;
+        state.smb_dirty = true;
+        return true;
+    }
+    if (key == "smb_user") {
+        state.smb_user = value;
+        state.smb_dirty = true;
+        return true;
+    }
+    if (key == "smb_pass") {
+        state.smb_password = value;
+        state.smb_dirty = true;
+        return true;
+    }
+    if (key == "shq_id") {
+        state.sleephq_client_id = value;
+        state.sleephq_dirty = true;
+        return true;
+    }
+    if (key == "shq_secret") {
+        state.sleephq_client_secret = value;
+        state.sleephq_dirty = true;
+        return true;
+    }
+    if (key == "shq_team") {
+        state.sleephq_team_id = value;
+        state.sleephq_dirty = true;
+        return true;
+    }
+    if (key == "shq_device") {
+        state.sleephq_device_id = value;
+        state.sleephq_dirty = true;
+        return true;
+    }
     if (key == "http_user") {
         return app_config.set_http_auth(value,
                                         app_config.data().http_password);
@@ -203,6 +266,12 @@ bool apply_app_key(AppConfig &app_config,
         if (!parse_bool_value(value, bool_value)) return false;
         return app_config.set_file_log(bool_value);
     }
+    log_cat_t log_cat = CAT_GENERAL;
+    if (parse_log_key(key, log_cat)) {
+        log_level_t level = LOG_INFO;
+        if (!Log::parse_level(value, level)) return false;
+        return app_config.set_log_level(log_cat, level);
+    }
 
     known = false;
     return true;
@@ -235,6 +304,20 @@ bool commit_grouped_config(AppConfig &app_config, ProvisionState &state) {
              ok;
         ok = app_config.set_oximetry_advertise_mode(
                  state.oximetry_advertise_mode) &&
+             ok;
+    }
+    if (state.smb_dirty) {
+        ok = app_config.set_smb_credentials(state.smb_endpoint,
+                                            state.smb_user,
+                                            state.smb_password) &&
+             ok;
+    }
+    if (state.sleephq_dirty) {
+        ok = app_config.set_sleephq_credentials(
+                 state.sleephq_client_id,
+                 state.sleephq_client_secret,
+                 state.sleephq_team_id,
+                 state.sleephq_device_id) &&
              ok;
     }
     return ok;
@@ -273,6 +356,13 @@ void consume_config_file(AppConfig &app_config, WifiManager &wifi_manager) {
     state.oximetry_enabled = cfg.oximetry_enabled;
     state.oximetry_udp_port = cfg.oximetry_udp_port;
     state.oximetry_advertise_mode = cfg.oximetry_advertise_mode;
+    state.smb_endpoint = cfg.smb_endpoint;
+    state.smb_user = cfg.smb_user;
+    state.smb_password = cfg.smb_password;
+    state.sleephq_client_id = cfg.sleephq_client_id;
+    state.sleephq_client_secret = cfg.sleephq_client_secret;
+    state.sleephq_team_id = cfg.sleephq_team_id;
+    state.sleephq_device_id = cfg.sleephq_device_id;
 
     size_t lines = 0;
     size_t applied = 0;

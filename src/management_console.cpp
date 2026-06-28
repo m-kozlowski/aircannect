@@ -46,90 +46,73 @@ const char *secret_state_text(const String &value) {
 
 void print_app_config_redacted(Print &out, const AppConfigData &cfg) {
     out.println("[CONFIG]");
-    out.print("  schema: ");
-    out.println(cfg.schema_version);
-    out.print("  hostname: ");
+    out.print("  host: ");
     out.println(cfg.hostname);
-    out.print("  tcp: ");
-    out.print(on_off_text(cfg.tcp_bridge_enabled));
-    out.print(" port=");
+    out.print("  tcp_en: ");
+    out.println(on_off_text(cfg.tcp_bridge_enabled));
+    out.print("  tcp_port: ");
     out.println(cfg.tcp_bridge_port);
-    out.print("  softap: ");
+    out.print("  softap_mode: ");
     out.println(softap_mode_name(cfg.softap_mode));
-    out.print("  wifi_country: ");
+    out.print("  wifi_ctry: ");
     out.println(cfg.wifi_country);
-    out.print("  timezone: ");
+    out.print("  tz: ");
     out.println(cfg.timezone);
-    out.print("  resmed_time_sync: ");
+    out.print("  resmed_time: ");
     out.println(on_off_text(cfg.resmed_time_sync_enabled));
-    out.print("  oximetry: ");
-    out.print(on_off_text(cfg.oximetry_enabled));
-    out.print(" udp_port=");
-    out.print(cfg.oximetry_udp_port);
-    out.print(" advertise=");
+    out.print("  oxi_en: ");
+    out.println(on_off_text(cfg.oximetry_enabled));
+    out.print("  oxi_udp: ");
+    out.println(cfg.oximetry_udp_port);
+    out.print("  oxi_adv: ");
     out.println(oximetry_advertise_mode_name(
         cfg.oximetry_advertise_mode));
-    out.print("  edf_capture: ");
+    out.print("  edf_cap: ");
     out.println(on_off_text(cfg.edf_capture_enabled));
-    out.print("  smb: ");
-    out.println(cfg.smb_endpoint.length() ? "configured" : "not_configured");
-    out.print("  smb_endpoint: ");
+    out.print("  smb_ep: ");
     out.println(cfg.smb_endpoint.length() ? cfg.smb_endpoint : "<empty>");
     out.print("  smb_user: ");
     out.println(cfg.smb_user.length() ? cfg.smb_user : "<empty>");
-    out.print("  smb_password: ");
+    out.print("  smb_pass: ");
     out.println(secret_state_text(cfg.smb_password));
-    out.print("  sleephq: ");
-    out.println(cfg.sleephq_client_id.length() &&
-                        cfg.sleephq_client_secret.length()
-                    ? "configured"
-                    : "not_configured");
-    out.print("  sleephq_client_id: ");
+    out.print("  shq_id: ");
     out.println(cfg.sleephq_client_id.length()
                     ? cfg.sleephq_client_id
                     : "<empty>");
-    out.print("  sleephq_client_secret: ");
+    out.print("  shq_secret: ");
     out.println(secret_state_text(cfg.sleephq_client_secret));
-    out.print("  sleephq_team_id: ");
+    out.print("  shq_team: ");
     out.println(cfg.sleephq_team_id.length()
                     ? cfg.sleephq_team_id
                     : "<empty>");
-    out.print("  sleephq_device_id: ");
+    out.print("  shq_device: ");
     out.println(cfg.sleephq_device_id.length()
                     ? cfg.sleephq_device_id
                     : "<empty>");
-    out.print("  http_auth: ");
-    out.println(cfg.http_user.length() || cfg.http_password.length()
-                    ? "protected"
-                    : "open");
     out.print("  http_user: ");
     out.println(cfg.http_user.length() ? cfg.http_user : "<empty>");
-    out.print("  http_password: ");
+    out.print("  http_pass: ");
     out.println(secret_state_text(cfg.http_password));
-    out.print("  http_whitelist: ");
+    out.print("  auth_wl: ");
     out.println(cfg.auth_whitelist.length() ? cfg.auth_whitelist : "<empty>");
-    out.print("  telnet: ");
-    out.print(on_off_text(cfg.telnet_console_enabled));
-    out.print(" port=");
+    out.print("  telnet_en: ");
+    out.println(on_off_text(cfg.telnet_console_enabled));
+    out.print("  telnet_port: ");
     out.println(cfg.telnet_console_port);
-    out.print("  ota: ");
-    out.println(cfg.ota_password.length() ? "protected" : "open");
-    out.print("  ota_password: ");
+    out.print("  ota_pass: ");
     out.println(secret_state_text(cfg.ota_password));
-    out.print("  syslog: ");
-    out.print(on_off_text(cfg.syslog_enabled));
-    out.print(" host=");
-    out.print(cfg.syslog_host.length() ? cfg.syslog_host : "<empty>");
-    out.print(" port=");
+    out.print("  syslog_en: ");
+    out.println(on_off_text(cfg.syslog_enabled));
+    out.print("  syslog_host: ");
+    out.println(cfg.syslog_host.length() ? cfg.syslog_host : "<empty>");
+    out.print("  syslog_port: ");
     out.println(cfg.syslog_port);
     out.print("  file_log_en: ");
     out.println(on_off_text(cfg.file_log_enabled));
 }
 
-String normalized_config_key(String key) {
+String trim_config_key(String key) {
     key.trim();
-    key.toLowerCase();
-    key.replace('-', '_');
     return key;
 }
 
@@ -139,7 +122,6 @@ struct BoolConfigRuntime {
 
 struct BoolConfigKey {
     const char *key;
-    const char *canonical;
     bool (*get)(const AppConfigData &cfg);
     bool (*set)(AppConfig &config, bool enabled);
     void (*apply)(AppConfig &config, BoolConfigRuntime &runtime);
@@ -199,21 +181,15 @@ void apply_log_config(AppConfig &config, BoolConfigRuntime &) {
 
 const BoolConfigKey *find_bool_config_key(const String &key) {
     static const BoolConfigKey keys[] = {
-        {"resmed_time_sync", "resmed_time_sync", get_resmed_time_sync,
+        {"resmed_time", get_resmed_time_sync,
          set_resmed_time_sync, apply_noop},
-        {"resmed_time_sync_enabled", "resmed_time_sync",
-         get_resmed_time_sync, set_resmed_time_sync, apply_noop},
-        {"oximetry_enabled", "oximetry_enabled", get_oximetry_enabled,
+        {"oxi_en", get_oximetry_enabled,
          set_oximetry_enabled, apply_noop},
-        {"edf_capture", "edf_capture", get_edf_capture_enabled,
+        {"edf_cap", get_edf_capture_enabled,
          set_edf_capture_enabled, apply_edf_capture},
-        {"edf_capture_enabled", "edf_capture", get_edf_capture_enabled,
-         set_edf_capture_enabled, apply_edf_capture},
-        {"syslog", "syslog", get_syslog_enabled, set_syslog_enabled,
+        {"syslog_en", get_syslog_enabled, set_syslog_enabled,
          apply_log_config},
-        {"syslog_enabled", "syslog_enabled", get_syslog_enabled,
-         set_syslog_enabled, apply_log_config},
-        {"file_log_en", "file_log_en", get_file_log_enabled,
+        {"file_log_en", get_file_log_enabled,
          set_file_log_enabled, apply_log_config},
     };
 
@@ -221,6 +197,19 @@ const BoolConfigKey *find_bool_config_key(const String &key) {
         if (key == entry.key) return &entry;
     }
     return nullptr;
+}
+
+bool parse_config_log_key(const String &key, log_cat_t &cat) {
+    cat = CAT_GENERAL;
+    if (!key.startsWith("log") || key.length() <= 3) return false;
+    String index_text = key.substring(3);
+    for (size_t i = 0; i < index_text.length(); ++i) {
+        if (!isDigit(index_text[i])) return false;
+    }
+    const int parsed = index_text.toInt();
+    if (parsed < 0 || parsed >= CAT_COUNT) return false;
+    cat = static_cast<log_cat_t>(parsed);
+    return true;
 }
 
 void print_config_value_header(Print &out, const char *key) {
@@ -242,161 +231,111 @@ void print_config_secret(Print &out, const char *key, const String &value) {
 bool print_app_config_value(Print &out,
                             const AppConfigData &cfg,
                             String key) {
-    key = normalized_config_key(key);
+    key = trim_config_key(key);
     if (!key.length() || key.indexOf(' ') >= 0) return false;
 
-    if (key == "schema" || key == "schema_version") {
-        print_config_value_header(out, "schema");
-        out.println(cfg.schema_version);
-        return true;
-    }
     if (const BoolConfigKey *bool_key = find_bool_config_key(key)) {
-        print_config_value_header(out, bool_key->canonical);
+        print_config_value_header(out, bool_key->key);
         out.println(on_off_text(bool_key->get(cfg)));
         return true;
     }
-    if (key == "hostname" || key == "host") {
-        print_config_value(out, "hostname", cfg.hostname);
+    log_cat_t log_cat = CAT_GENERAL;
+    if (parse_config_log_key(key, log_cat)) {
+        print_config_value_header(out, key.c_str());
+        out.println(Log::level_name(cfg.log_levels[log_cat]));
         return true;
     }
-    if (key == "tcp") {
-        print_config_value_header(out, "tcp");
-        out.print(on_off_text(cfg.tcp_bridge_enabled));
-        out.print(" port=");
-        out.println(cfg.tcp_bridge_port);
+    if (key == "host") {
+        print_config_value(out, "host", cfg.hostname);
         return true;
     }
-    if (key == "tcp_enabled" || key == "tcp_bridge_enabled") {
-        print_config_value_header(out, "tcp_enabled");
+    if (key == "tcp_en") {
+        print_config_value_header(out, "tcp_en");
         out.println(on_off_text(cfg.tcp_bridge_enabled));
         return true;
     }
-    if (key == "tcp_port" || key == "tcp_bridge_port") {
+    if (key == "tcp_port") {
         print_config_value_header(out, "tcp_port");
         out.println(cfg.tcp_bridge_port);
         return true;
     }
-    if (key == "softap" || key == "softap_mode") {
-        print_config_value_header(out, "softap");
+    if (key == "softap_mode") {
+        print_config_value_header(out, "softap_mode");
         out.println(softap_mode_name(cfg.softap_mode));
         return true;
     }
-    if (key == "wifi_country") {
-        print_config_value(out, "wifi_country", cfg.wifi_country);
+    if (key == "wifi_ctry") {
+        print_config_value(out, "wifi_ctry", cfg.wifi_country);
         return true;
     }
-    if (key == "timezone" || key == "tz") {
-        print_config_value(out, "timezone", cfg.timezone);
+    if (key == "tz") {
+        print_config_value(out, "tz", cfg.timezone);
         return true;
     }
-    if (key == "oximetry") {
-        print_config_value_header(out, "oximetry");
-        out.print(on_off_text(cfg.oximetry_enabled));
-        out.print(" udp_port=");
-        out.print(cfg.oximetry_udp_port);
-        out.print(" advertise=");
-        out.println(oximetry_advertise_mode_name(
-            cfg.oximetry_advertise_mode));
-        return true;
-    }
-    if (key == "oximetry_udp_port") {
-        print_config_value_header(out, "oximetry_udp_port");
+    if (key == "oxi_udp") {
+        print_config_value_header(out, "oxi_udp");
         out.println(cfg.oximetry_udp_port);
         return true;
     }
-    if (key == "oximetry_advertise" ||
-        key == "oximetry_advertise_mode") {
-        print_config_value_header(out, "oximetry_advertise");
+    if (key == "oxi_adv") {
+        print_config_value_header(out, "oxi_adv");
         out.println(oximetry_advertise_mode_name(
             cfg.oximetry_advertise_mode));
         return true;
     }
-    if (key == "smb") {
-        print_config_value_header(out, "smb");
-        out.println(cfg.smb_endpoint.length() ? "configured"
-                                              : "not_configured");
-        return true;
-    }
-    if (key == "smb_endpoint") {
-        print_config_value(out, "smb_endpoint", cfg.smb_endpoint);
+    if (key == "smb_ep") {
+        print_config_value(out, "smb_ep", cfg.smb_endpoint);
         return true;
     }
     if (key == "smb_user") {
         print_config_value(out, "smb_user", cfg.smb_user);
         return true;
     }
-    if (key == "smb_password") {
-        print_config_secret(out, "smb_password", cfg.smb_password);
+    if (key == "smb_pass") {
+        print_config_secret(out, "smb_pass", cfg.smb_password);
         return true;
     }
-    if (key == "sleephq") {
-        print_config_value_header(out, "sleephq");
-        out.println(cfg.sleephq_client_id.length() &&
-                            cfg.sleephq_client_secret.length()
-                        ? "configured"
-                        : "not_configured");
+    if (key == "shq_id") {
+        print_config_value(out, "shq_id", cfg.sleephq_client_id);
         return true;
     }
-    if (key == "sleephq_client_id") {
-        print_config_value(out, "sleephq_client_id", cfg.sleephq_client_id);
-        return true;
-    }
-    if (key == "sleephq_client_secret") {
-        print_config_secret(out, "sleephq_client_secret",
+    if (key == "shq_secret") {
+        print_config_secret(out, "shq_secret",
                             cfg.sleephq_client_secret);
         return true;
     }
-    if (key == "sleephq_team_id") {
-        print_config_value(out, "sleephq_team_id", cfg.sleephq_team_id);
+    if (key == "shq_team") {
+        print_config_value(out, "shq_team", cfg.sleephq_team_id);
         return true;
     }
-    if (key == "sleephq_device_id") {
-        print_config_value(out, "sleephq_device_id", cfg.sleephq_device_id);
-        return true;
-    }
-    if (key == "http_auth" || key == "http_auth_required") {
-        print_config_value_header(out, "http_auth");
-        out.println(cfg.http_user.length() || cfg.http_password.length()
-                        ? "protected"
-                        : "open");
+    if (key == "shq_device") {
+        print_config_value(out, "shq_device", cfg.sleephq_device_id);
         return true;
     }
     if (key == "http_user") {
         print_config_value(out, "http_user", cfg.http_user);
         return true;
     }
-    if (key == "http_password") {
-        print_config_secret(out, "http_password", cfg.http_password);
+    if (key == "http_pass") {
+        print_config_secret(out, "http_pass", cfg.http_password);
         return true;
     }
-    if (key == "http_whitelist" || key == "auth_whitelist") {
-        print_config_value(out, "http_whitelist", cfg.auth_whitelist);
+    if (key == "auth_wl") {
+        print_config_value(out, "auth_wl", cfg.auth_whitelist);
         return true;
     }
-    if (key == "telnet") {
-        print_config_value_header(out, "telnet");
-        out.print(on_off_text(cfg.telnet_console_enabled));
-        out.print(" port=");
-        out.println(cfg.telnet_console_port);
-        return true;
-    }
-    if (key == "telnet_enabled" || key == "telnet_console_enabled") {
-        print_config_value_header(out, "telnet_enabled");
+    if (key == "telnet_en") {
+        print_config_value_header(out, "telnet_en");
         out.println(on_off_text(cfg.telnet_console_enabled));
         return true;
     }
-    if (key == "telnet_port" || key == "telnet_console_port") {
+    if (key == "telnet_port") {
         print_config_value_header(out, "telnet_port");
         out.println(cfg.telnet_console_port);
         return true;
     }
-    if (key == "ota") {
-        print_config_value_header(out, "ota");
-        out.println(cfg.ota_password.length() ? "protected" : "open");
-        return true;
-    }
-    if (key == "ota_password") {
-        print_config_secret(out, "ota_password", cfg.ota_password);
+    if (key == "ota_pass") {
+        print_config_secret(out, "ota_pass", cfg.ota_password);
         return true;
     }
     if (key == "syslog_host") {
@@ -421,7 +360,7 @@ bool split_config_key_value(String rest,
 
     int pos = 0;
     if (!parse_console_arg(rest, pos, key)) return false;
-    key = normalized_config_key(key);
+    key = trim_config_key(key);
     if (!key.length()) return false;
 
     while (pos < static_cast<int>(rest.length()) &&
@@ -1622,20 +1561,15 @@ bool ManagementConsole::handle_config_key(
     if (!has_value) return print_app_config_value(out, app_config.data(), key);
 
     bool ok = false;
-    if (key == "schema" || key == "schema_version") {
-        print_config_read_only(out, "schema");
-        return true;
-    }
-
     if (const BoolConfigKey *bool_key = find_bool_config_key(key)) {
         bool enabled = false;
         if (!parse_config_bool_value(value, enabled)) {
-            print_config_invalid(out, bool_key->canonical);
+            print_config_invalid(out, bool_key->key);
             return true;
         }
         ok = bool_key->set(app_config, enabled);
         if (!ok) {
-            print_config_invalid(out, bool_key->canonical);
+            print_config_invalid(out, bool_key->key);
             return true;
         }
         BoolConfigRuntime runtime{edf_recorder_manager};
@@ -1644,10 +1578,27 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "hostname" || key == "host") {
+    log_cat_t log_cat = CAT_GENERAL;
+    if (parse_config_log_key(key, log_cat)) {
+        log_level_t level = LOG_INFO;
+        if (!Log::parse_level(value, level)) {
+            print_config_invalid(out, key.c_str());
+            return true;
+        }
+        ok = app_config.set_log_level(log_cat, level);
+        if (!ok) {
+            print_config_invalid(out, key.c_str());
+            return true;
+        }
+        app_config.apply_log_config();
+        print_app_config_value(out, app_config.data(), key);
+        return true;
+    }
+
+    if (key == "host") {
         ok = app_config.set_hostname(value);
         if (!ok) {
-            print_config_invalid(out, "hostname");
+            print_config_invalid(out, "host");
             return true;
         }
         wifi_manager.set_hostname(app_config.data().hostname);
@@ -1657,16 +1608,16 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "tcp_enabled" || key == "tcp_bridge_enabled") {
+    if (key == "tcp_en") {
         bool enabled = false;
         if (!parse_config_bool_value(value, enabled)) {
-            print_config_invalid(out, "tcp_enabled");
+            print_config_invalid(out, "tcp_en");
             return true;
         }
         ok = app_config.set_tcp_bridge(enabled,
                                        app_config.data().tcp_bridge_port);
         if (!ok) {
-            print_config_invalid(out, "tcp_enabled");
+            print_config_invalid(out, "tcp_en");
             return true;
         }
         apply_runtime_config(app_config, wifi_manager, tcp_bridge);
@@ -1674,7 +1625,7 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "tcp_port" || key == "tcp_bridge_port") {
+    if (key == "tcp_port") {
         uint16_t port = 0;
         if (!parse_uint16_arg(value, port)) {
             print_config_invalid(out, "tcp_port");
@@ -1691,10 +1642,10 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "softap" || key == "softap_mode") {
+    if (key == "softap_mode") {
         SoftApMode mode;
         if (!parse_softap_mode(value, mode)) {
-            print_config_invalid(out, "softap");
+            print_config_invalid(out, "softap_mode");
             return true;
         }
         const bool should_reconnect =
@@ -1703,7 +1654,7 @@ bool ManagementConsole::handle_config_key(
             wifi_manager.has_sta_config();
         ok = app_config.set_softap_mode(mode);
         if (!ok) {
-            print_config_invalid(out, "softap");
+            print_config_invalid(out, "softap_mode");
             return true;
         }
         wifi_manager.set_softap_mode(app_config.data().softap_mode);
@@ -1714,10 +1665,10 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "wifi_country") {
+    if (key == "wifi_ctry") {
         ok = app_config.set_wifi_country(value);
         if (!ok) {
-            print_config_invalid(out, "wifi_country");
+            print_config_invalid(out, "wifi_ctry");
             return true;
         }
         wifi_manager.set_country_code(app_config.data().wifi_country);
@@ -1727,57 +1678,52 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "timezone" || key == "tz") {
+    if (key == "tz") {
         ok = app_config.set_timezone(value);
         if (!ok) {
-            print_config_invalid(out, "timezone");
+            print_config_invalid(out, "tz");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
 
-    if (key == "oximetry_udp_port") {
+    if (key == "oxi_udp") {
         uint16_t port = 0;
         if (!parse_uint16_arg(value, port)) {
-            print_config_invalid(out, "oximetry_udp_port");
+            print_config_invalid(out, "oxi_udp");
             return true;
         }
         ok = app_config.set_oximetry_udp_port(port);
         if (!ok) {
-            print_config_invalid(out, "oximetry_udp_port");
+            print_config_invalid(out, "oxi_udp");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
 
-    if (key == "oximetry_advertise" ||
-        key == "oximetry_advertise_mode") {
+    if (key == "oxi_adv") {
         OximetryAdvertiseMode mode;
         if (!parse_oximetry_advertise_mode(value, mode)) {
-            print_config_invalid(out, "oximetry_advertise");
+            print_config_invalid(out, "oxi_adv");
             return true;
         }
         ok = app_config.set_oximetry_advertise_mode(mode);
         if (!ok) {
-            print_config_invalid(out, "oximetry_advertise");
+            print_config_invalid(out, "oxi_adv");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
 
-    if (key == "smb") {
-        print_config_read_only(out, "smb");
-        return true;
-    }
-    if (key == "smb_endpoint") {
+    if (key == "smb_ep") {
         ok = app_config.set_smb_credentials(
             value, app_config.data().smb_user,
             app_config.data().smb_password);
         if (!ok) {
-            print_config_invalid(out, "smb_endpoint");
+            print_config_invalid(out, "smb_ep");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
@@ -1794,100 +1740,66 @@ bool ManagementConsole::handle_config_key(
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "smb_password") {
+    if (key == "smb_pass") {
         ok = app_config.set_smb_credentials(
             app_config.data().smb_endpoint, app_config.data().smb_user,
             value);
         if (!ok) {
-            print_config_invalid(out, "smb_password");
+            print_config_invalid(out, "smb_pass");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "sleephq") {
-        print_config_read_only(out, "sleephq");
-        return true;
-    }
-    if (key == "sleephq_client_id") {
+    if (key == "shq_id") {
         ok = app_config.set_sleephq_credentials(
             value, app_config.data().sleephq_client_secret,
             app_config.data().sleephq_team_id,
             app_config.data().sleephq_device_id);
         if (!ok) {
-            print_config_invalid(out, "sleephq_client_id");
+            print_config_invalid(out, "shq_id");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "sleephq_client_secret") {
+    if (key == "shq_secret") {
         ok = app_config.set_sleephq_credentials(
             app_config.data().sleephq_client_id, value,
             app_config.data().sleephq_team_id,
             app_config.data().sleephq_device_id);
         if (!ok) {
-            print_config_invalid(out, "sleephq_client_secret");
+            print_config_invalid(out, "shq_secret");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "sleephq_team_id") {
+    if (key == "shq_team") {
         ok = app_config.set_sleephq_credentials(
             app_config.data().sleephq_client_id,
             app_config.data().sleephq_client_secret, value,
             app_config.data().sleephq_device_id);
         if (!ok) {
-            print_config_invalid(out, "sleephq_team_id");
+            print_config_invalid(out, "shq_team");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "sleephq_device_id") {
+    if (key == "shq_device") {
         ok = app_config.set_sleephq_credentials(
             app_config.data().sleephq_client_id,
             app_config.data().sleephq_client_secret,
             app_config.data().sleephq_team_id, value);
         if (!ok) {
-            print_config_invalid(out, "sleephq_device_id");
+            print_config_invalid(out, "shq_device");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
 
-    if (key == "http_auth" || key == "http_auth_required") {
-        String lower = value;
-        lower.trim();
-        lower.toLowerCase();
-        bool enabled = false;
-        if (lower == "open") {
-            enabled = false;
-        } else if (lower == "protected") {
-            enabled = true;
-        } else if (!parse_config_bool_value(lower, enabled)) {
-            print_config_invalid(out, "http_auth");
-            return true;
-        }
-        if (enabled) {
-            if (!app_config.data().http_user.length() &&
-                !app_config.data().http_password.length()) {
-                out.println("[CONFIG] set http_user/http_password first");
-                return true;
-            }
-            print_app_config_value(out, app_config.data(), key);
-            return true;
-        }
-        ok = app_config.set_http_auth("", "");
-        if (!ok) {
-            print_config_invalid(out, "http_auth");
-            return true;
-        }
-        print_app_config_value(out, app_config.data(), key);
-        return true;
-    }
     if (key == "http_user") {
         ok = app_config.set_http_auth(value,
                                       app_config.data().http_password);
@@ -1898,42 +1810,42 @@ bool ManagementConsole::handle_config_key(
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "http_password") {
+    if (key == "http_pass") {
         ok = app_config.set_http_auth(app_config.data().http_user,
                                       value);
         if (!ok) {
-            print_config_invalid(out, "http_password");
+            print_config_invalid(out, "http_pass");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "http_whitelist" || key == "auth_whitelist") {
+    if (key == "auth_wl") {
         ok = app_config.set_auth_whitelist(value);
         if (!ok) {
-            print_config_invalid(out, "http_whitelist");
+            print_config_invalid(out, "auth_wl");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
 
-    if (key == "telnet_enabled" || key == "telnet_console_enabled") {
+    if (key == "telnet_en") {
         bool enabled = false;
         if (!parse_config_bool_value(value, enabled)) {
-            print_config_invalid(out, "telnet_enabled");
+            print_config_invalid(out, "telnet_en");
             return true;
         }
         ok = app_config.set_telnet_console(
             enabled, app_config.data().telnet_console_port);
         if (!ok) {
-            print_config_invalid(out, "telnet_enabled");
+            print_config_invalid(out, "telnet_en");
             return true;
         }
         print_app_config_value(out, app_config.data(), key);
         return true;
     }
-    if (key == "telnet_port" || key == "telnet_console_port") {
+    if (key == "telnet_port") {
         uint16_t port = 0;
         if (!parse_uint16_arg(value, port)) {
             print_config_invalid(out, "telnet_port");
@@ -1949,32 +1861,10 @@ bool ManagementConsole::handle_config_key(
         return true;
     }
 
-    if (key == "ota") {
-        String lower = value;
-        lower.trim();
-        lower.toLowerCase();
-        bool open = false;
-        if (lower == "open" || lower == "off" || lower == "disable" ||
-            lower == "disabled") {
-            open = true;
-        }
-        if (!open) {
-            out.println("[CONFIG] set ota_password instead");
-            return true;
-        }
-        ok = app_config.set_ota_password("");
-        if (!ok) {
-            print_config_invalid(out, "ota");
-            return true;
-        }
-        ota_manager.mark_config_dirty();
-        print_app_config_value(out, app_config.data(), key);
-        return true;
-    }
-    if (key == "ota_password") {
+    if (key == "ota_pass") {
         ok = app_config.set_ota_password(value);
         if (!ok) {
-            print_config_invalid(out, "ota_password");
+            print_config_invalid(out, "ota_pass");
             return true;
         }
         ota_manager.mark_config_dirty();
@@ -2053,519 +1943,13 @@ void ManagementConsole::handle_config(Print &out, String rest,
         return;
     }
 
-    if (rest == "hostname") {
-        out.print("[CONFIG] hostname=");
-        out.println(app_config.data().hostname);
-        return;
-    }
-
-    if (rest.startsWith("hostname ")) {
-        String hostname = rest.substring(9);
-        hostname.trim();
-        if (!app_config.set_hostname(hostname)) {
-            out.println("[CONFIG] invalid hostname; use 1-63 alnum/hyphen chars, not starting or ending with hyphen");
-            return;
-        }
-        wifi_manager.set_hostname(app_config.data().hostname);
-        ota_manager.mark_config_dirty();
-        app_config.apply_log_config();
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        out.print("[CONFIG] hostname=");
-        out.println(app_config.data().hostname);
-        return;
-    }
-
-    if (rest == "tcp") {
-        out.print("[CONFIG] tcp=");
-        out.print(on_off_text(app_config.data().tcp_bridge_enabled));
-        out.print(" port=");
-        out.println(app_config.data().tcp_bridge_port);
-        return;
-    }
-
-    if (rest.startsWith("tcp ")) {
-        String args = rest.substring(4);
-        int pos = 0;
-        String state;
-        if (!parse_console_arg(args, pos, state)) {
-            out.println("[CONFIG] usage: config tcp on|off [PORT]");
-            return;
-        }
-
-        bool enabled = false;
-        uint16_t port = app_config.data().tcp_bridge_port;
-        if (state == "port") {
-            String port_arg;
-            if (!parse_console_arg(args, pos, port_arg)) {
-                out.println("[CONFIG] usage: config tcp port PORT");
-                return;
-            }
-            if (!parse_uint16_arg(port_arg, port)) {
-                out.println("[CONFIG] invalid TCP port");
-                return;
-            }
-            enabled = app_config.data().tcp_bridge_enabled;
-        } else {
-            if (!parse_on_off(state, enabled)) {
-                out.println("[CONFIG] usage: config tcp on|off [PORT]");
-                return;
-            }
-            String port_arg;
-            if (parse_console_arg(args, pos, port_arg)) {
-                if (!parse_uint16_arg(port_arg, port)) {
-                    out.println("[CONFIG] invalid TCP port");
-                    return;
-                }
-            }
-        }
-
-        if (!app_config.set_tcp_bridge(enabled, port)) {
-            out.println("[CONFIG] failed to store TCP bridge config");
-            return;
-        }
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        out.print("[CONFIG] tcp=");
-        out.print(on_off_text(app_config.data().tcp_bridge_enabled));
-        out.print(" port=");
-        out.println(app_config.data().tcp_bridge_port);
-        return;
-    }
-
-    if (rest == "softap") {
-        out.print("[CONFIG] softap=");
-        out.println(softap_mode_name(app_config.data().softap_mode));
-        return;
-    }
-
-    if (rest.startsWith("softap ")) {
-        String state = rest.substring(7);
-        SoftApMode mode;
-        if (!parse_softap_mode(state, mode)) {
-            out.println("[CONFIG] usage: config softap auto|forced");
-            return;
-        }
-        const bool should_reconnect =
-            wifi_manager.mode_state() == WifiModeState::SoftAp &&
-            mode == SoftApMode::Auto &&
-            wifi_manager.has_sta_config();
-        app_config.set_softap_mode(mode);
-        wifi_manager.set_softap_mode(app_config.data().softap_mode);
-        wifi_manager.apply_softap_mode();
-        if (should_reconnect) wifi_manager.reconnect();
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        out.print("[CONFIG] softap=");
-        out.println(softap_mode_name(app_config.data().softap_mode));
-        ConsoleFormat::print_wifi_status(out, wifi_manager);
-        return;
-    }
-
-    if (rest == "wifi-country") {
-        out.print("[CONFIG] wifi_country=");
-        out.println(app_config.data().wifi_country);
-        return;
-    }
-
-    if (rest.startsWith("wifi-country ")) {
-        String country = rest.substring(13);
-        country.trim();
-        if (!app_config.set_wifi_country(country)) {
-            out.println("[CONFIG] invalid Wi-Fi country; use ISO CC, 01, or default");
-            return;
-        }
-        wifi_manager.set_country_code(app_config.data().wifi_country);
-        wifi_manager.reconnect();
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        out.print("[CONFIG] wifi_country=");
-        out.println(app_config.data().wifi_country);
-        ConsoleFormat::print_wifi_status(out, wifi_manager);
-        return;
-    }
-
-    if (rest == "timezone") {
-        out.print("[CONFIG] timezone=");
-        out.println(app_config.data().timezone);
-        return;
-    }
-
-    if (rest.startsWith("timezone ")) {
-        String timezone = rest.substring(9);
-        if (!app_config.set_timezone(timezone)) {
-            out.println("[CONFIG] invalid timezone");
-            return;
-        }
-        out.print("[CONFIG] timezone=");
-        out.println(app_config.data().timezone);
-        return;
-    }
-
-    if (rest == "resmed-time-sync") {
-        out.print("[CONFIG] resmed_time_sync=");
-        out.println(on_off_text(app_config.data().resmed_time_sync_enabled));
-        return;
-    }
-
-    if (rest.startsWith("resmed-time-sync ")) {
-        String state = rest.substring(17);
-        bool enabled = false;
-        if (!parse_on_off(state, enabled)) {
-            out.println("[CONFIG] usage: config resmed-time-sync on|off");
-            return;
-        }
-        if (!app_config.set_resmed_time_sync(enabled)) {
-            out.println("[CONFIG] failed to store ResMed time sync setting");
-            return;
-        }
-        out.print("[CONFIG] resmed_time_sync=");
-        out.println(on_off_text(app_config.data().resmed_time_sync_enabled));
-        return;
-    }
-
-    if (rest == "oximetry") {
-        out.print("[CONFIG] oximetry=");
-        out.print(on_off_text(app_config.data().oximetry_enabled));
-        out.print(" udp_port=");
-        out.print(app_config.data().oximetry_udp_port);
-        out.print(" advertise=");
-        out.println(oximetry_advertise_mode_name(
-            app_config.data().oximetry_advertise_mode));
-        return;
-    }
-
-    if (rest.startsWith("oximetry ")) {
-        String args = rest.substring(9);
-        int pos = 0;
-        String key;
-        if (!parse_console_arg(args, pos, key)) {
-            out.println("[CONFIG] usage: config oximetry on|off|udp-port PORT|advertise auto|manual");
-            return;
-        }
-        key.toLowerCase();
-        bool ok = false;
-        if (key == "on" || key == "off" || key == "enable" ||
-            key == "disable" || key == "enabled" || key == "disabled") {
-            bool enabled = false;
-            if (key == "enable") enabled = true;
-            else if (key == "disable") enabled = false;
-            else if (!parse_on_off(key, enabled)) {
-                out.println("[CONFIG] usage: config oximetry on|off");
-                return;
-            }
-            ok = app_config.set_oximetry_enabled(enabled);
-        } else if (key == "udp-port" || key == "port") {
-            String port_arg;
-            uint16_t port = 0;
-            if (!parse_console_arg(args, pos, port_arg) ||
-                !parse_uint16_arg(port_arg, port)) {
-                out.println("[CONFIG] usage: config oximetry udp-port PORT");
-                return;
-            }
-            ok = app_config.set_oximetry_udp_port(port);
-        } else if (key == "advertise" || key == "adv") {
-            String mode_arg;
-            OximetryAdvertiseMode mode;
-            if (!parse_console_arg(args, pos, mode_arg) ||
-                !parse_oximetry_advertise_mode(mode_arg, mode)) {
-                out.println("[CONFIG] usage: config oximetry advertise auto|manual");
-                return;
-            }
-            ok = app_config.set_oximetry_advertise_mode(mode);
-        } else {
-            out.println("[CONFIG] usage: config oximetry on|off|udp-port PORT|advertise auto|manual");
-            return;
-        }
-        if (!ok) {
-            out.println("[CONFIG] failed to store oximetry config");
-            return;
-        }
-        out.print("[CONFIG] oximetry=");
-        out.print(on_off_text(app_config.data().oximetry_enabled));
-        out.print(" udp_port=");
-        out.print(app_config.data().oximetry_udp_port);
-        out.print(" advertise=");
-        out.println(oximetry_advertise_mode_name(
-            app_config.data().oximetry_advertise_mode));
-        return;
-    }
-
-    if (rest == "http-auth") {
-        out.print("[CONFIG] http_auth=");
-        out.print(app_config.data().http_user.length() ||
-                          app_config.data().http_password.length()
-                      ? "protected"
-                      : "open");
-        out.print(" user=");
-        out.print(app_config.data().http_user.length()
-                      ? app_config.data().http_user.c_str()
-                      : "<empty>");
-        out.print(" password=");
-        out.println(secret_state_text(app_config.data().http_password));
-        return;
-    }
-
-    if (rest == "smb") {
-        out.print("[CONFIG] smb=");
-        out.print(app_config.data().smb_endpoint.length()
-                      ? "configured"
-                      : "not_configured");
-        out.print(" endpoint=");
-        out.print(app_config.data().smb_endpoint.length()
-                      ? app_config.data().smb_endpoint.c_str()
-                      : "<empty>");
-        out.print(" user=");
-        out.print(app_config.data().smb_user.length()
-                      ? app_config.data().smb_user.c_str()
-                      : "<empty>");
-        out.print(" password=");
-        out.println(secret_state_text(app_config.data().smb_password));
-        return;
-    }
-
-    if (rest == "sleephq") {
-        out.print("[CONFIG] sleephq=");
-        out.print(app_config.data().sleephq_client_id.length() &&
-                          app_config.data().sleephq_client_secret.length()
-                      ? "configured"
-                      : "not_configured");
-        out.print(" client_id=");
-        out.print(app_config.data().sleephq_client_id.length()
-                      ? app_config.data().sleephq_client_id.c_str()
-                      : "<empty>");
-        out.print(" secret=");
-        out.print(secret_state_text(app_config.data().sleephq_client_secret));
-        out.print(" team_id=");
-        out.print(app_config.data().sleephq_team_id.length()
-                      ? app_config.data().sleephq_team_id.c_str()
-                      : "<empty>");
-        out.print(" device_id=");
-        out.println(app_config.data().sleephq_device_id.length()
-                        ? app_config.data().sleephq_device_id.c_str()
-                        : "<empty>");
-        return;
-    }
-
-    if (rest.startsWith("smb ")) {
-        String args = rest.substring(4);
-        args.trim();
-        if (args == "clear" || args == "off" || args == "disable") {
-            if (!app_config.set_smb_credentials("", "", "")) {
-                out.println("[CONFIG] failed to clear SMB config");
-                return;
-            }
-            out.println("[CONFIG] smb=not_configured");
-            return;
-        }
-
-        int pos = 0;
-        String endpoint;
-        String user;
-        String password;
-        if (!parse_console_arg(args, pos, endpoint) ||
-            !parse_console_arg(args, pos, user) ||
-            !parse_console_arg(args, pos, password)) {
-            out.println("[CONFIG] usage: config smb ENDPOINT USER PASSWORD");
-            out.println("[CONFIG] use: config smb clear to clear SMB target");
-            return;
-        }
-        if (!app_config.set_smb_credentials(endpoint, user, password)) {
-            out.println("[CONFIG] invalid SMB config");
-            return;
-        }
-        out.print("[CONFIG] smb=configured endpoint=");
-        out.print(app_config.data().smb_endpoint);
-        out.print(" user=");
-        out.print(app_config.data().smb_user.length()
-                      ? app_config.data().smb_user.c_str()
-                      : "<empty>");
-        out.print(" password=");
-        out.println(secret_state_text(app_config.data().smb_password));
-        return;
-    }
-
-    if (rest.startsWith("sleephq ")) {
-        String args = rest.substring(8);
-        args.trim();
-        if (args == "clear" || args == "off" || args == "disable") {
-            if (!app_config.set_sleephq_credentials("", "", "", "")) {
-                out.println("[CONFIG] failed to clear SleepHQ config");
-                return;
-            }
-            out.println("[CONFIG] sleephq=not_configured");
-            return;
-        }
-
-        int pos = 0;
-        String client_id;
-        String client_secret;
-        String team_id;
-        String device_id;
-        if (!parse_console_arg(args, pos, client_id) ||
-            !parse_console_arg(args, pos, client_secret)) {
-            out.println("[CONFIG] usage: config sleephq CLIENT_ID "
-                        "CLIENT_SECRET [TEAM_ID] [DEVICE_ID]");
-            out.println("[CONFIG] use: config sleephq clear to clear SleepHQ");
-            return;
-        }
-        (void)parse_console_arg(args, pos, team_id);
-        (void)parse_console_arg(args, pos, device_id);
-        if (!app_config.set_sleephq_credentials(
-                client_id, client_secret, team_id, device_id)) {
-            out.println("[CONFIG] invalid SleepHQ config");
-            return;
-        }
-        out.print("[CONFIG] sleephq=");
-        out.print(app_config.data().sleephq_client_id.length() &&
-                          app_config.data().sleephq_client_secret.length()
-                      ? "configured"
-                      : "not_configured");
-        out.print(" client_id=");
-        out.print(app_config.data().sleephq_client_id.length()
-                      ? app_config.data().sleephq_client_id.c_str()
-                      : "<empty>");
-        out.print(" secret=");
-        out.print(secret_state_text(app_config.data().sleephq_client_secret));
-        out.print(" team_id=");
-        out.print(app_config.data().sleephq_team_id.length()
-                      ? app_config.data().sleephq_team_id.c_str()
-                      : "<empty>");
-        out.print(" device_id=");
-        out.println(app_config.data().sleephq_device_id.length()
-                        ? app_config.data().sleephq_device_id.c_str()
-                        : "<empty>");
-        return;
-    }
-
-    if (rest.startsWith("http-auth ")) {
-        String args = rest.substring(10);
-        int pos = 0;
-        String user;
-        String password;
-        if (!parse_console_arg(args, pos, user) ||
-            !parse_console_arg(args, pos, password)) {
-            out.println("[CONFIG] usage: config http-auth USER PASSWORD");
-            out.println("[CONFIG] use: config http-auth \"\" \"\" to allow open HTTP access");
-            return;
-        }
-        if (!app_config.set_http_auth(user, password)) {
-            out.println("[CONFIG] invalid HTTP credentials");
-            return;
-        }
-        out.print("[CONFIG] http_auth=");
-        out.println(app_config.data().http_user.length() ||
-                            app_config.data().http_password.length()
-                        ? "protected"
-                        : "open");
-        return;
-    }
-
-    if (rest == "http-whitelist") {
-        out.print("[CONFIG] http_whitelist=");
-        out.println(app_config.data().auth_whitelist.length()
-                        ? app_config.data().auth_whitelist.c_str()
-                        : "<empty>");
-        return;
-    }
-
-    if (rest.startsWith("http-whitelist ")) {
-        String whitelist = rest.substring(15);
-        whitelist.trim();
-        if (!app_config.set_auth_whitelist(whitelist)) {
-            out.println("[CONFIG] invalid HTTP whitelist");
-            return;
-        }
-        out.print("[CONFIG] http_whitelist=");
-        out.println(app_config.data().auth_whitelist.length()
-                        ? app_config.data().auth_whitelist.c_str()
-                        : "<empty>");
-        return;
-    }
-
-    if (rest == "telnet") {
-        out.print("[CONFIG] telnet=");
-        out.print(on_off_text(app_config.data().telnet_console_enabled));
-        out.print(" port=");
-        out.println(app_config.data().telnet_console_port);
-        return;
-    }
-
-    if (rest.startsWith("telnet ")) {
-        String args = rest.substring(7);
-        int pos = 0;
-        String state;
-        if (!parse_console_arg(args, pos, state)) {
-            out.println("[CONFIG] usage: config telnet on|off [PORT]");
-            return;
-        }
-
-        bool enabled = false;
-        uint16_t port = app_config.data().telnet_console_port;
-        if (state == "port") {
-            String port_arg;
-            if (!parse_console_arg(args, pos, port_arg)) {
-                out.println("[CONFIG] usage: config telnet port PORT");
-                return;
-            }
-            if (!parse_uint16_arg(port_arg, port)) {
-                out.println("[CONFIG] invalid telnet port");
-                return;
-            }
-            enabled = app_config.data().telnet_console_enabled;
-        } else {
-            if (!parse_on_off(state, enabled)) {
-                out.println("[CONFIG] usage: config telnet on|off [PORT]");
-                return;
-            }
-            String port_arg;
-            if (parse_console_arg(args, pos, port_arg)) {
-                if (!parse_uint16_arg(port_arg, port)) {
-                    out.println("[CONFIG] invalid telnet port");
-                    return;
-                }
-            }
-        }
-
-        if (!app_config.set_telnet_console(enabled, port)) {
-            out.println("[CONFIG] failed to store telnet config");
-            return;
-        }
-        out.print("[CONFIG] telnet=");
-        out.print(on_off_text(app_config.data().telnet_console_enabled));
-        out.print(" port=");
-        out.println(app_config.data().telnet_console_port);
-        return;
-    }
-
-    if (rest == "ota-password") {
-        out.print("[CONFIG] ota_password=");
-        out.println(secret_state_text(app_config.data().ota_password));
-        return;
-    }
-
-    if (rest.startsWith("ota-password ")) {
-        String args = rest.substring(13);
-        int pos = 0;
-        String password;
-        if (!parse_console_arg(args, pos, password)) {
-            out.println("[CONFIG] usage: config ota-password PASSWORD");
-            out.println("[CONFIG] use: config ota-password \"\" to allow open ArduinoOTA access");
-            return;
-        }
-        if (!app_config.set_ota_password(password)) {
-            out.println("[CONFIG] invalid OTA password");
-            return;
-        }
-        ota_manager.mark_config_dirty();
-        out.print("[CONFIG] ota_password=");
-        out.println(secret_state_text(app_config.data().ota_password));
-        return;
-    }
-
     if (handle_config_key(out, rest, app_config, wifi_manager, tcp_bridge,
                           ota_manager, edf_recorder_manager)) {
         return;
     }
 
     print_unknown_command(out, "CONFIG",
-                          "config, KEY, hostname, tcp, softap, wifi-country, timezone, resmed-time-sync, oximetry, smb, sleephq, http-auth, http-whitelist, telnet, ota-password, reset, factory-reset");
+                          "config, config KEY [VALUE], reset, factory-reset");
 }
 
 void ManagementConsole::apply_runtime_config(const AppConfig &app_config,
