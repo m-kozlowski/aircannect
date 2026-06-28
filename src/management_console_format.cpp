@@ -239,17 +239,6 @@ void print_as11_status(Print &out, const As11DeviceState &state) {
     }
     out.println();
 
-    out.print("[AS11] mhr=\"");
-    out.print(state.mhr().c_str());
-    out.print("\"");
-    if (state.timezone_offset_valid()) {
-        out.print(" timezone_offset_min=");
-        out.print(state.timezone_offset_minutes());
-    } else {
-        out.print(" timezone_offset_min=unknown");
-    }
-    out.println();
-
     out.print("[AS11] datetime=\"");
     out.print(state.device_datetime().c_str());
     out.print("\" clock=");
@@ -263,6 +252,12 @@ void print_as11_status(Print &out, const As11DeviceState &state) {
         out.print(state.clock_offset_ms());
     } else {
         out.print("unknown");
+    }
+    if (state.timezone_offset_valid()) {
+        out.print(" timezone_offset_min=");
+        out.print(state.timezone_offset_minutes());
+    } else {
+        out.print(" timezone_offset_min=unknown");
     }
     out.println();
 }

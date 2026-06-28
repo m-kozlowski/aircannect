@@ -26,7 +26,8 @@ static constexpr uint32_t AC_EDF_IDENTIFICATION_TIMEOUT_MS = 12000;
 static constexpr size_t AC_EDF_GAP_RECORD_BUDGET = 3;
 
 const char *const EDF_RECORDING_GATE_DATA_ID = "_ZLE";
-const char *const EDF_MASK_START_EVENT_THERAPY_STARTED = "TherapyStarted";
+const char *const EDF_MASK_ON_EVENT = "MaskOn";
+const char *const EDF_MASK_OFF_EVENT = "MaskOff";
 const char *const EDF_CAPTURE_EVENT_IDS =
     "_ZLE,TherapyEvents-RespiratoryEvents";
 
@@ -44,8 +45,8 @@ struct StatusCarryover {
     uint32_t recording_gate_falls = 0;
     uint32_t recording_gate_recoveries = 0;
     uint32_t recording_gate_bad_events = 0;
-    uint32_t mask_start_events = 0;
-    uint32_t mask_start_bad_events = 0;
+    uint32_t mask_events = 0;
+    uint32_t mask_bad_events = 0;
 };
 
 StatusCarryover preserve_status_carryover(
@@ -64,8 +65,8 @@ StatusCarryover preserve_status_carryover(
     out.recording_gate_falls = status.recording_gate_falls;
     out.recording_gate_recoveries = status.recording_gate_recoveries;
     out.recording_gate_bad_events = status.recording_gate_bad_events;
-    out.mask_start_events = status.mask_start_events;
-    out.mask_start_bad_events = status.mask_start_bad_events;
+    out.mask_events = status.mask_events;
+    out.mask_bad_events = status.mask_bad_events;
     return out;
 }
 
@@ -84,8 +85,8 @@ void restore_status_carryover(EdfRecorderStatus &status,
     status.recording_gate_falls = carryover.recording_gate_falls;
     status.recording_gate_recoveries = carryover.recording_gate_recoveries;
     status.recording_gate_bad_events = carryover.recording_gate_bad_events;
-    status.mask_start_events = carryover.mask_start_events;
-    status.mask_start_bad_events = carryover.mask_start_bad_events;
+    status.mask_events = carryover.mask_events;
+    status.mask_bad_events = carryover.mask_bad_events;
 }
 
 const char *open_result_error(const EdfStorageOpenResult &result,
@@ -125,13 +126,14 @@ const char *annotation_kind_name(EdfAnnotationKind kind) {
     }
 }
 
-bool edf_event_record_is_mask_start(const As11EventFrame &frame,
+bool edf_event_record_is_mask_event(const As11EventFrame &frame,
                                     const As11EventRecord &record) {
     if (!as11_event_data_id_is_activity(frame.data_id) ||
         record.report_time.empty()) {
         return false;
     }
-    return record.name == EDF_MASK_START_EVENT_THERAPY_STARTED;
+    return record.name == EDF_MASK_ON_EVENT ||
+           record.name == EDF_MASK_OFF_EVENT;
 }
 
 }  // namespace
@@ -175,8 +177,12 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
         return;
     }
 
-    if (mask_start_pending_) {
-        (void)ensure_mask_session_open(now_ms);
+    if (str_start_pending_) {
+        (void)ensure_str_session_started(now_ms);
+    }
+
+    if (annotation_open_pending_) {
+        (void)ensure_annotation_files_open(now_ms);
     }
 
     if (!numeric_files_open_ &&
@@ -225,7 +231,7 @@ EdfRecorderStatus EdfRecorderManager::status() const {
     snapshot.recording_gate_is_closed = recording_gate_closed_;
     snapshot.recording_gate_recovery_is_pending =
         recording_gate_recovery_pending_;
-    snapshot.mask_start_is_pending = mask_start_pending_;
+    snapshot.annotation_open_is_pending = annotation_open_pending_;
     snapshot.event_coverage_session_gap_count =
         event_coverage_session_gaps();
     return snapshot;
@@ -266,49 +272,111 @@ bool EdfRecorderManager::handle_recording_gate_frame(
     return true;
 }
 
-bool EdfRecorderManager::handle_mask_start_frame(const As11EventFrame &frame,
+bool EdfRecorderManager::handle_mask_event_frame(const As11EventFrame &frame,
                                                  uint32_t now_ms) {
     if (!as11_event_data_id_is_activity(frame.data_id)) return false;
 
     bool handled = false;
     for (size_t i = 0; i < frame.event_count; ++i) {
         const As11EventRecord &record = frame.events[i];
-        if (!edf_event_record_is_mask_start(frame, record)) continue;
+        if (!edf_event_record_is_mask_event(frame, record)) continue;
         handled = true;
-        status_.mask_start_events++;
-        begin_mask_start(record.report_time.c_str(), now_ms);
-        break;
+        status_.mask_events++;
+        if (record.name == EDF_MASK_ON_EVENT) {
+            begin_mask_event(record.report_time.c_str(), now_ms);
+        } else {
+            finish_mask_event(record.report_time.c_str(), now_ms);
+        }
     }
     return handled;
 }
 
-void EdfRecorderManager::begin_mask_start(const char *start_time,
+void EdfRecorderManager::begin_mask_event(const char *start_time,
                                           uint32_t now_ms) {
     if (!start_time || !start_time[0]) {
-        status_.mask_start_bad_events++;
+        status_.mask_bad_events++;
         return;
     }
 
     if (!status_.active) {
-        copy_cstr(pending_mask_start_time_,
-                  sizeof(pending_mask_start_time_),
+        copy_cstr(pending_mask_event_start_time_,
+                  sizeof(pending_mask_event_start_time_),
                   start_time);
         return;
     }
 
-    if (!status_.mask_start_time[0]) {
-        copy_cstr(status_.mask_start_time,
-                  sizeof(status_.mask_start_time),
-                  start_time);
+    EdfLocalDateTime start;
+    if (!parse_session_local_time(start_time, start)) {
+        status_.mask_bad_events++;
+        set_error("bad_mask_on_time");
+        return;
     }
-    mask_start_pending_ = true;
-    next_annotation_open_ms_ = now_ms;
-    (void)ensure_mask_session_open(now_ms);
+
+    EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
+    if (!str_.begin_mask_event(start, str_status)) {
+        status_.mask_bad_events++;
+        switch (str_status) {
+            case EdfStrSessionStatus::MaskEventsFull:
+                set_error("str_mask_events_full");
+                break;
+            case EdfStrSessionStatus::OffsetError:
+                set_error("str_offset_failed");
+                break;
+            case EdfStrSessionStatus::BadSleepDay:
+            default:
+                set_error("bad_mask_on_sleep_day");
+                break;
+        }
+        return;
+    }
+
+    copy_cstr(status_.last_mask_event_time,
+              sizeof(status_.last_mask_event_time),
+              start_time);
 }
 
-bool EdfRecorderManager::ensure_mask_session_open(uint32_t now_ms) {
-    if (!status_.active || !status_.mask_start_time[0]) return false;
-    if (!mask_start_pending_ && files_open_ && str_.mask_open()) return true;
+void EdfRecorderManager::finish_mask_event(const char *end_time,
+                                           uint32_t now_ms) {
+    (void)now_ms;
+    if (!end_time || !end_time[0]) {
+        status_.mask_bad_events++;
+        return;
+    }
+    if (!status_.active) return;
+
+    EdfLocalDateTime end;
+    if (!parse_session_local_time(end_time, end)) {
+        status_.mask_bad_events++;
+        set_error("bad_mask_off_time");
+        return;
+    }
+
+    EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
+    if (!str_.finish_mask_event(end, str_status)) {
+        status_.mask_bad_events++;
+        switch (str_status) {
+            case EdfStrSessionStatus::MaskEventsFull:
+                set_error("str_mask_events_full");
+                break;
+            case EdfStrSessionStatus::OffsetError:
+                set_error("str_offset_failed");
+                break;
+            case EdfStrSessionStatus::BadSleepDay:
+            default:
+                set_error("bad_mask_off_sleep_day");
+                break;
+        }
+        return;
+    }
+
+    copy_cstr(status_.last_mask_event_time,
+              sizeof(status_.last_mask_event_time),
+              end_time);
+}
+
+bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {
+    if (!status_.active || !status_.recording_start_time[0]) return false;
+    if (!annotation_open_pending_ && files_open_) return true;
     if (static_cast<int32_t>(now_ms - next_annotation_open_ms_) < 0) {
         return false;
     }
@@ -319,14 +387,7 @@ bool EdfRecorderManager::ensure_mask_session_open(uint32_t now_ms) {
     }
 
     bool ok = true;
-    if (!open_session_annotation_files(status_.mask_start_time)) {
-        ok = false;
-    }
-    if (!str_.mask_open() && !begin_str_session(status_.mask_start_time)) {
-        Log::logf(CAT_EDF, LOG_WARN,
-                  "STR mask start skipped id=%lu error=%s\n",
-                  static_cast<unsigned long>(status_.session_id),
-                  status_.last_error[0] ? status_.last_error : "--");
+    if (!open_session_annotation_files(status_.recording_start_time)) {
         ok = false;
     }
     if (!ok) {
@@ -334,7 +395,7 @@ bool EdfRecorderManager::ensure_mask_session_open(uint32_t now_ms) {
         return false;
     }
 
-    mask_start_pending_ = false;
+    annotation_open_pending_ = false;
     status_.last_error[0] = 0;
     return true;
 }
@@ -355,10 +416,9 @@ void EdfRecorderManager::begin_recording_gate(const char *start_time,
     pending_stream_frame_.reset();
     numeric_open_frame_buffer_.clear();
     next_numeric_open_ms_ = now_ms;
-
-    if (!status_.mask_start_time[0]) {
-        begin_mask_start(start_time, now_ms);
-    }
+    annotation_open_pending_ = true;
+    next_annotation_open_ms_ = now_ms;
+    (void)ensure_annotation_files_open(now_ms);
 }
 
 void EdfRecorderManager::close_recording_gate(const char *end_time,
@@ -383,7 +443,7 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
                                             uint32_t now_ms) {
     if (!status_.enabled) return;
 
-    const bool mask_start_frame = handle_mask_start_frame(frame, now_ms);
+    (void)handle_mask_event_frame(frame, now_ms);
     const bool recording_gate_frame =
         handle_recording_gate_frame(frame, now_ms);
     if (!status_.active) return;
@@ -397,7 +457,8 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
 
     for (size_t i = 0; i < frame.event_count; ++i) {
         const As11EventRecord &record = frame.events[i];
-        if (!recording_gate_frame && !mask_start_frame &&
+        if (!recording_gate_frame &&
+            !edf_event_record_is_mask_event(frame, record) &&
             edf_event_frame_is_respiratory(frame)) {
             status_.respiratory_events++;
             (void)enqueue_event_annotation(EdfAnnotationKind::Eve, record);
@@ -497,11 +558,14 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     str_settings_rpc_.clear();
     str_summary_rpc_.clear();
     identification_rpc_.clear();
+    str_start_pending_ = false;
+    pending_str_start_time_[0] = 0;
     snapshot_event_coverage();
 
-    if (pending_mask_start_time_[0]) {
-        begin_mask_start(pending_mask_start_time_, now_ms);
-        pending_mask_start_time_[0] = 0;
+    begin_str_session(session.start_device_time, now_ms);
+    if (pending_mask_event_start_time_[0]) {
+        begin_mask_event(pending_mask_event_start_time_, now_ms);
+        pending_mask_event_start_time_[0] = 0;
     }
 
     Log::logf(CAT_EDF, LOG_DEBUG,
@@ -514,7 +578,6 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
                                      uint32_t now_ms,
                                      const char *reason,
                                      const char *recording_end_time) {
-    (void)now_ms;
     if (!status_.active) return;
     update_event_coverage();
 
@@ -533,8 +596,10 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     next_annotation_open_ms_ = 0;
     recording_gate_open_ = false;
     recording_gate_recovery_pending_ = false;
-    mask_start_pending_ = false;
-    pending_mask_start_time_[0] = 0;
+    annotation_open_pending_ = false;
+    str_start_pending_ = false;
+    pending_str_start_time_[0] = 0;
+    pending_mask_event_start_time_[0] = 0;
     numeric_open_frame_buffer_.clear();
     status_.sessions_ended++;
     const uint32_t enqueue_failures =
@@ -782,7 +847,7 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
                       : "--");
     }
 
-    if (!ensure_mask_session_open(now_ms)) {
+    if (!ensure_annotation_files_open(now_ms)) {
         next_numeric_open_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
         return false;
     }
@@ -1142,20 +1207,38 @@ bool EdfRecorderManager::parse_session_local_time(
     return edf_epoch_ms_to_configured_local_datetime(epoch_ms, out);
 }
 
-bool EdfRecorderManager::begin_str_session(const char *session_start_time) {
+void EdfRecorderManager::begin_str_session(const char *session_start_time,
+                                           uint32_t now_ms) {
+    if (!session_start_time || !session_start_time[0]) {
+        set_error("missing_str_start_time");
+        return;
+    }
+    copy_cstr(pending_str_start_time_,
+              sizeof(pending_str_start_time_),
+              session_start_time);
+    str_start_pending_ = true;
+    (void)ensure_str_session_started(now_ms);
+}
+
+bool EdfRecorderManager::ensure_str_session_started(uint32_t now_ms) {
+    if (!str_start_pending_) return true;
+
     EdfLocalDateTime start;
-    if (!parse_session_local_time(session_start_time, start)) {
+    if (!parse_session_local_time(pending_str_start_time_, start)) {
         set_error("bad_str_start_time");
         return false;
     }
 
-    return begin_str_session_at(start, millis());
+    if (!begin_str_session_at(start, now_ms)) return false;
+    str_start_pending_ = false;
+    pending_str_start_time_[0] = 0;
+    return true;
 }
 
 bool EdfRecorderManager::begin_str_session_at(const EdfLocalDateTime &start,
                                               uint32_t now_ms) {
     EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
-    if (!str_.begin_session(start, str_status)) {
+    if (!str_.begin_therapy(start, str_status)) {
         switch (str_status) {
             case EdfStrSessionStatus::MaskEventsFull:
                 set_error("str_mask_events_full");
@@ -1323,7 +1406,7 @@ void EdfRecorderManager::handle_str_settings_response(
               static_cast<unsigned long>(result.missing),
               static_cast<unsigned long>(result.unmapped));
 
-    if (str_.active() && !str_.mask_open() && !str_record_pending_write_ &&
+    if (str_.active() && !str_.therapy_open() && !str_record_pending_write_ &&
         !str_summary_rpc_.active) {
         (void)write_str_day_record();
     }
@@ -1375,11 +1458,14 @@ void EdfRecorderManager::handle_identification_response(
 bool EdfRecorderManager::finish_str_session(const SessionStatus &session,
                                             uint32_t now_ms,
                                             const char *recording_end_time) {
-    if (!str_.active() || !str_.mask_open()) return true;
+    (void)recording_end_time;
+    if (str_start_pending_) {
+        if (!ensure_str_session_started(now_ms)) return false;
+    }
+    if (!str_.active() || !str_.therapy_open()) return true;
 
     EdfLocalDateTime end;
-    if (!parse_session_local_time(recording_end_time, end) &&
-        !parse_session_local_time(session.end_device_time, end) &&
+    if (!parse_session_local_time(session.end_device_time, end) &&
         !parse_session_local_time(session.last_stream_start_time, end) &&
         !parse_session_local_time(session.start_device_time, end)) {
         set_error("bad_str_end_time");
@@ -1412,11 +1498,11 @@ bool EdfRecorderManager::finish_str_session(const SessionStatus &session,
 bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
                                                uint32_t now_ms,
                                                bool request_summary) {
-    if (!str_.active() || !str_.mask_open()) return true;
+    if (!str_.active() || !str_.therapy_open()) return true;
 
     bool record_ready = false;
     EdfStrSessionStatus str_status = EdfStrSessionStatus::Ok;
-    if (!str_.finish_session(end, record_ready, str_status)) {
+    if (!str_.finish_therapy(end, record_ready, str_status)) {
         switch (str_status) {
             case EdfStrSessionStatus::MaskEventsFull:
                 set_error("str_mask_events_full");

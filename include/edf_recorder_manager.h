@@ -36,7 +36,7 @@ struct EdfRecorderStatus {
     bool recording_gate_is_open = false;
     bool recording_gate_is_closed = false;
     bool recording_gate_recovery_is_pending = false;
-    bool mask_start_is_pending = false;
+    bool annotation_open_is_pending = false;
 
     StreamConsumerHandle stream_handle = STREAM_CONSUMER_INVALID;
     EventConsumerHandle event_handle = EVENT_CONSUMER_INVALID;
@@ -99,8 +99,8 @@ struct EdfRecorderStatus {
     uint32_t recording_gate_falls = 0;
     uint32_t recording_gate_recoveries = 0;
     uint32_t recording_gate_bad_events = 0;
-    uint32_t mask_start_events = 0;
-    uint32_t mask_start_bad_events = 0;
+    uint32_t mask_events = 0;
+    uint32_t mask_bad_events = 0;
 
     uint32_t last_frame_ms = 0;
     uint32_t last_event_ms = 0;
@@ -111,7 +111,7 @@ struct EdfRecorderStatus {
     char eve_path[80] = {};
     char csl_path[80] = {};
     char str_path[80] = {};
-    char mask_start_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
+    char last_mask_event_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char recording_start_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char recording_end_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char last_event_data_id[64] = {};
@@ -126,7 +126,7 @@ struct EdfRecorderStatus {
     bool recording_gate_recovery_pending() const {
         return recording_gate_recovery_is_pending;
     }
-    bool mask_start_pending() const { return mask_start_is_pending; }
+    bool annotation_open_pending() const { return annotation_open_is_pending; }
     uint32_t event_coverage_session_gaps() const {
         return event_coverage_session_gap_count;
     }
@@ -199,10 +199,11 @@ private:
                      const char *recording_end_time = nullptr);
     bool handle_recording_gate_frame(const As11EventFrame &frame,
                                      uint32_t now_ms);
-    bool handle_mask_start_frame(const As11EventFrame &frame,
+    bool handle_mask_event_frame(const As11EventFrame &frame,
                                  uint32_t now_ms);
-    void begin_mask_start(const char *start_time, uint32_t now_ms);
-    bool ensure_mask_session_open(uint32_t now_ms);
+    void begin_mask_event(const char *start_time, uint32_t now_ms);
+    void finish_mask_event(const char *end_time, uint32_t now_ms);
+    bool ensure_annotation_files_open(uint32_t now_ms);
     void begin_recording_gate(const char *start_time, uint32_t now_ms);
     void close_recording_gate(const char *end_time, uint32_t now_ms);
 
@@ -237,7 +238,8 @@ private:
     void buffer_numeric_open_stream(uint32_t now_ms);
     uint32_t event_coverage_session_gaps() const;
 
-    bool begin_str_session(const char *session_start_time);
+    void begin_str_session(const char *session_start_time, uint32_t now_ms);
+    bool ensure_str_session_started(uint32_t now_ms);
     bool begin_str_session_at(const EdfLocalDateTime &start,
                               uint32_t now_ms);
     bool finish_str_session(const SessionStatus &session,
@@ -306,8 +308,10 @@ private:
     bool recording_gate_open_ = false;
     bool recording_gate_closed_ = false;
     bool recording_gate_recovery_pending_ = false;
-    bool mask_start_pending_ = false;
-    char pending_mask_start_time_[AC_STREAM_FRAME_START_TIME_MAX] = {};
+    bool annotation_open_pending_ = false;
+    bool str_start_pending_ = false;
+    char pending_str_start_time_[AC_STREAM_FRAME_START_TIME_MAX] = {};
+    char pending_mask_event_start_time_[AC_STREAM_FRAME_START_TIME_MAX] = {};
     bool annotation_open_synced_ = false;
     bool numeric_open_synced_ = false;
     EdfStorageOpenHandle eve_open_handle_;

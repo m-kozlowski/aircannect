@@ -86,15 +86,13 @@ EdfStrRecordMergeStatus collect_mask_events(const uint8_t *record,
     return EdfStrRecordMergeStatus::Ok;
 }
 
-bool mask_session_sample(size_t sample_offset) {
+bool mask_event_sample(size_t sample_offset) {
     const size_t on_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_ON_SIGNAL);
     const size_t off_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL);
     const size_t events_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_EVENTS_SIGNAL);
-    const size_t duration_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
 
     return sample_offset == edf_str_signal_sample_offset(
                                 AC_EDF_STR_DATE_SIGNAL) ||
@@ -102,8 +100,7 @@ bool mask_session_sample(size_t sample_offset) {
             sample_offset < on_offset + AC_EDF_STR_MASK_EVENT_CAPACITY) ||
            (sample_offset >= off_offset &&
             sample_offset < off_offset + AC_EDF_STR_MASK_EVENT_CAPACITY) ||
-           sample_offset == events_offset ||
-           sample_offset == duration_offset;
+           sample_offset == events_offset;
 }
 
 bool summary_sample(size_t sample_offset) {
@@ -120,7 +117,7 @@ bool summary_sample(size_t sample_offset) {
 
 void merge_non_session_samples(const uint8_t *existing, uint8_t *incoming) {
     for (size_t i = 0; i < AC_EDF_STR_DATA_SAMPLES_PER_RECORD; ++i) {
-        if (mask_session_sample(i)) continue;
+        if (mask_event_sample(i)) continue;
         if (summary_sample(i)) continue;
         if (edf_read_i16_le_sample(incoming, i) == EDF_STR_MISSING) {
             const int16_t existing_value =
@@ -132,6 +129,31 @@ void merge_non_session_samples(const uint8_t *existing, uint8_t *incoming) {
     }
 }
 
+void merge_duration_sample(const uint8_t *existing, uint8_t *incoming) {
+    const size_t duration_offset =
+        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
+    if (duration_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) return;
+
+    const int16_t existing_value =
+        edf_read_i16_le_sample(existing, duration_offset);
+    const int16_t incoming_value =
+        edf_read_i16_le_sample(incoming, duration_offset);
+
+    if (incoming_value == EDF_STR_MISSING) {
+        if (existing_value != EDF_STR_MISSING) {
+            edf_write_i16_le_sample(incoming, duration_offset, existing_value);
+        }
+        return;
+    }
+    if (existing_value == EDF_STR_MISSING) return;
+
+    edf_write_i16_le_sample(incoming,
+                            duration_offset,
+                            existing_value > incoming_value
+                                ? existing_value
+                                : incoming_value);
+}
+
 void write_mask_events(uint8_t *record,
                        const MaskEvent *events,
                        size_t count) {
@@ -141,29 +163,18 @@ void write_mask_events(uint8_t *record,
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_OFF_SIGNAL);
     const size_t events_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_EVENTS_SIGNAL);
-    const size_t duration_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
 
     for (size_t i = 0; i < AC_EDF_STR_MASK_EVENT_CAPACITY; ++i) {
         edf_write_i16_le_sample(record, on_offset + i, EDF_STR_MISSING);
         edf_write_i16_le_sample(record, off_offset + i, EDF_STR_MISSING);
     }
 
-    int duration = 0;
     for (size_t i = 0; i < count; ++i) {
         edf_write_i16_le_sample(record, on_offset + i, events[i].on);
         edf_write_i16_le_sample(record, off_offset + i, events[i].off);
-        duration += events[i].off > events[i].on
-                        ? events[i].off - events[i].on
-                        : 0;
     }
-    if (duration > 1440) duration = 1440;
     edf_write_i16_le_sample(record, events_offset,
                             static_cast<int16_t>(count));
-    edf_write_i16_le_sample(record,
-                            duration_offset,
-                            count > 0 ? static_cast<int16_t>(duration)
-                                      : EDF_STR_MISSING);
 }
 
 void patch_crc(uint8_t *record) {
@@ -211,6 +222,7 @@ EdfStrRecordMergeStatus edf_str_merge_existing_record(
     if (status != EdfStrRecordMergeStatus::Ok) return status;
 
     merge_non_session_samples(existing_record, incoming_record);
+    merge_duration_sample(existing_record, incoming_record);
     write_mask_events(incoming_record, events, event_count);
     patch_crc(incoming_record);
     return EdfStrRecordMergeStatus::Ok;

@@ -406,15 +406,15 @@ void print_edf_recorder_status(Print &out,
     }
     out.print(" zle_bad=");
     out.print(static_cast<unsigned long>(status.recording_gate_bad_events));
-    out.print(" mask_start=");
-    out.print(status.mask_start_time[0] ? status.mask_start_time : "--");
-    if (status.mask_start_pending()) {
-        out.print(" mask_pending=yes");
+    out.print(" mask_event=");
+    out.print(status.last_mask_event_time[0] ? status.last_mask_event_time : "--");
+    if (status.annotation_open_pending()) {
+        out.print(" annotation_pending=yes");
     }
     out.print(" mask_events=");
-    out.print(static_cast<unsigned long>(status.mask_start_events));
+    out.print(static_cast<unsigned long>(status.mask_events));
     out.print('/');
-    out.print(static_cast<unsigned long>(status.mask_start_bad_events));
+    out.print(static_cast<unsigned long>(status.mask_bad_events));
     out.print(" numeric_open_buffered=");
     out.print(static_cast<unsigned long>(
         status.numeric_open_buffered_frames));

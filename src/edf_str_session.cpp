@@ -41,14 +41,86 @@ void EdfStrSessionAccumulator::reset_day(
     }
 
     day_active_ = true;
-    mask_open_ = false;
+    therapy_open_ = false;
+    mask_event_open_ = false;
     day_epoch_days_ = epoch_days;
     day_start_ = sleep_day_start;
-    current_on_minute_ = 0;
+    current_therapy_start_minute_ = 0;
+    current_mask_on_minute_ = 0;
     mask_events_ = 0;
 }
 
-bool EdfStrSessionAccumulator::begin_session(
+bool EdfStrSessionAccumulator::begin_therapy(
+    const EdfLocalDateTime &start,
+    EdfStrSessionStatus &status) {
+    status = EdfStrSessionStatus::Ok;
+
+    uint16_t day = 0;
+    uint16_t minute = 0;
+    EdfLocalDateTime sleep_day_start;
+    if (!edf_sleep_day_epoch_days(start, day) ||
+        !edf_sleep_day_minute(start, minute) ||
+        !edf_sleep_day_start(start, sleep_day_start)) {
+        status = EdfStrSessionStatus::BadSleepDay;
+        return false;
+    }
+
+    if (!day_active_ || day_epoch_days_ != day) {
+        reset_day(day, sleep_day_start);
+    }
+
+    if (!reset_offsets_valid()) {
+        status = EdfStrSessionStatus::OffsetError;
+        return false;
+    }
+    current_therapy_start_minute_ = minute;
+    therapy_open_ = true;
+    return true;
+}
+
+bool EdfStrSessionAccumulator::finish_therapy(
+    const EdfLocalDateTime &end,
+    bool &record_ready,
+    EdfStrSessionStatus &status) {
+    record_ready = false;
+    status = EdfStrSessionStatus::Ok;
+    if (!day_active_ || !therapy_open_) return true;
+
+    uint16_t end_day = 0;
+    uint16_t end_minute = 0;
+    if (!edf_sleep_day_epoch_days(end, end_day) ||
+        !edf_sleep_day_minute(end, end_minute)) {
+        status = EdfStrSessionStatus::BadSleepDay;
+        return false;
+    }
+
+    uint16_t off_minute = end_minute;
+    if (end_day != day_epoch_days_) {
+        off_minute = 1440;
+    } else if (off_minute < current_therapy_start_minute_) {
+        off_minute = current_therapy_start_minute_;
+    }
+
+    const size_t duration_offset =
+        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
+    if (duration_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
+        status = EdfStrSessionStatus::OffsetError;
+        return false;
+    }
+
+    int duration = samples_[duration_offset];
+    if (duration < 0) duration = 0;
+    duration += off_minute > current_therapy_start_minute_
+                    ? off_minute - current_therapy_start_minute_
+                    : 0;
+    if (duration > 1440) duration = 1440;
+    samples_[duration_offset] = static_cast<int16_t>(duration);
+    therapy_open_ = false;
+    record_ready = true;
+    return true;
+}
+
+bool EdfStrSessionAccumulator::begin_mask_event(
     const EdfLocalDateTime &start,
     EdfStrSessionStatus &status) {
     status = EdfStrSessionStatus::Ok;
@@ -76,18 +148,16 @@ bool EdfStrSessionAccumulator::begin_session(
         return false;
     }
 
-    current_on_minute_ = minute;
-    mask_open_ = true;
+    current_mask_on_minute_ = minute;
+    mask_event_open_ = true;
     return true;
 }
 
-bool EdfStrSessionAccumulator::finish_session(
+bool EdfStrSessionAccumulator::finish_mask_event(
     const EdfLocalDateTime &end,
-    bool &record_ready,
     EdfStrSessionStatus &status) {
-    record_ready = false;
     status = EdfStrSessionStatus::Ok;
-    if (!day_active_ || !mask_open_) return true;
+    if (!day_active_ || !mask_event_open_) return true;
 
     uint16_t end_day = 0;
     uint16_t end_minute = 0;
@@ -100,8 +170,8 @@ bool EdfStrSessionAccumulator::finish_session(
     uint16_t off_minute = end_minute;
     if (end_day != day_epoch_days_) {
         off_minute = 1440;
-    } else if (off_minute < current_on_minute_) {
-        off_minute = current_on_minute_;
+    } else if (off_minute < current_mask_on_minute_) {
+        off_minute = current_mask_on_minute_;
     }
 
     if (mask_events_ >= AC_EDF_STR_MASK_EVENT_CAPACITY) {
@@ -118,30 +188,18 @@ bool EdfStrSessionAccumulator::finish_session(
         event_index;
     const size_t events_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_EVENTS_SIGNAL);
-    const size_t duration_offset =
-        edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
     if (on_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
         off_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
-        events_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD ||
-        duration_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
+        events_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) {
         status = EdfStrSessionStatus::OffsetError;
         return false;
     }
 
-    samples_[on_offset] = static_cast<int16_t>(current_on_minute_);
+    samples_[on_offset] = static_cast<int16_t>(current_mask_on_minute_);
     samples_[off_offset] = static_cast<int16_t>(off_minute);
     mask_events_++;
     samples_[events_offset] = static_cast<int16_t>(mask_events_);
-
-    int duration = samples_[duration_offset];
-    if (duration < 0) duration = 0;
-    duration += off_minute > current_on_minute_
-                    ? off_minute - current_on_minute_
-                    : 0;
-    if (duration > 1440) duration = 1440;
-    samples_[duration_offset] = static_cast<int16_t>(duration);
-    mask_open_ = false;
-    record_ready = true;
+    mask_event_open_ = false;
     return true;
 }
 
