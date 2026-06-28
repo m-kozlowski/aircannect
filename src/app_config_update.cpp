@@ -2,71 +2,86 @@
 
 #include <ArduinoJson.h>
 
+#include "app_config_registry.h"
+#include "debug_log.h"
 #include "edf_recorder_manager.h"
 
 namespace aircannect {
 namespace {
 
-bool json_get_string(JsonDocument &doc, const char *key, String &out) {
-    if (!doc[key].is<const char *>()) return false;
-    out = doc[key].as<const char *>();
-    return true;
+bool json_value_to_config_text(JsonVariantConst value,
+                               const AppConfigFieldDescriptor &field,
+                               String &out) {
+    out = "";
+    switch (field.type) {
+        case AppConfigFieldType::Bool:
+            if (value.is<bool>()) {
+                out = value.as<bool>() ? "1" : "0";
+                return true;
+            }
+            if (value.is<const char *>()) {
+                out = value.as<const char *>();
+                return true;
+            }
+            return false;
+
+        case AppConfigFieldType::UInt16:
+            if (value.is<int>()) {
+                const int parsed = value.as<int>();
+                if (parsed < 0 || parsed > 65535) return false;
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%d", parsed);
+                out = buf;
+                return true;
+            }
+            if (value.is<const char *>()) {
+                out = value.as<const char *>();
+                return true;
+            }
+            return false;
+
+        case AppConfigFieldType::String:
+        case AppConfigFieldType::Secret:
+        case AppConfigFieldType::Enum:
+        case AppConfigFieldType::LogLevel:
+            if (!value.is<const char *>()) return false;
+            out = value.as<const char *>();
+            return true;
+    }
+    return false;
 }
 
-bool note_bool_change(bool before, bool after, bool accepted,
-                      AppConfigUpdateResult &result) {
-    if (!accepted) return false;
-    result.accepted_fields++;
-    if (before == after) return false;
-    result.changed_fields++;
-    return true;
-}
-
-bool note_uint16_change(uint16_t before, uint16_t after, bool accepted,
-                        AppConfigUpdateResult &result) {
-    if (!accepted) return false;
-    result.accepted_fields++;
-    if (before == after) return false;
-    result.changed_fields++;
-    return true;
-}
-
-bool note_string_change(const String &before, const String &after,
-                        bool accepted, AppConfigUpdateResult &result) {
-    if (!accepted) return false;
-    result.accepted_fields++;
-    if (before == after) return false;
-    result.changed_fields++;
-    return true;
-}
-
-bool note_softap_change(SoftApMode before, SoftApMode after, bool accepted,
-                        AppConfigUpdateResult &result) {
-    if (!accepted) return false;
-    result.accepted_fields++;
-    if (before == after) return false;
-    result.changed_fields++;
-    return true;
-}
-
-bool note_oximetry_advertise_change(OximetryAdvertiseMode before,
-                                    OximetryAdvertiseMode after,
-                                    bool accepted,
-                                    AppConfigUpdateResult &result) {
-    if (!accepted) return false;
-    result.accepted_fields++;
-    if (before == after) return false;
-    result.changed_fields++;
-    return true;
-}
-
-bool valid_port_from_json(JsonDocument &doc, const char *key,
-                          uint16_t &out) {
-    if (!doc[key].is<int>()) return false;
-    const int parsed = doc[key].as<int>();
-    if (parsed <= 0 || parsed > 65535) return false;
-    out = static_cast<uint16_t>(parsed);
-    return true;
+void note_dirty(uint32_t dirty,
+                const AppConfig &config,
+                const AppConfigUpdateRuntime &runtime,
+                AppConfigUpdateResult &result) {
+    if (dirty & AC_CONFIG_DIRTY_HOSTNAME) {
+        result.hostname_changed = true;
+        result.ota_config_dirty = true;
+    }
+    if (dirty & AC_CONFIG_DIRTY_WIFI_COUNTRY) {
+        result.wifi_country_changed = true;
+        result.wifi_reconnect_required = true;
+    }
+    if (dirty & AC_CONFIG_DIRTY_SOFTAP) {
+        result.softap_changed = true;
+        result.wifi_reconnect_required =
+            result.wifi_reconnect_required ||
+            (runtime.wifi_mode == WifiModeState::SoftAp &&
+             config.data().softap_mode == SoftApMode::Auto &&
+             runtime.has_sta_config);
+    }
+    if (dirty & AC_CONFIG_DIRTY_EDF_CAPTURE) {
+        result.edf_capture_changed = true;
+    }
+    if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
+        result.ota_config_dirty = true;
+    }
+    if (dirty & (AC_CONFIG_DIRTY_LOG_LEVELS |
+                 AC_CONFIG_DIRTY_SYSLOG |
+                 AC_CONFIG_DIRTY_FILE_LOG)) {
+        result.log_config_changed = true;
+    }
 }
 
 }  // namespace
@@ -80,304 +95,42 @@ bool apply_web_config_update(AppConfig &config,
     JsonDocument doc;
     if (deserializeJson(doc, body.c_str())) return false;
 
-    String s;
+    JsonObjectConst root = doc.as<JsonObjectConst>();
+    if (root.isNull()) return false;
+
     config.begin_update();
+    for (JsonPairConst pair : root) {
+        const char *key = pair.key().c_str();
+        const AppConfigFieldDescriptor *field = app_config_find_field(key);
+        if (!field) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "rejected web config key=%s reason=unknown\n",
+                      key ? key : "<null>");
+            continue;
+        }
 
-    if (json_get_string(doc, "host", s)) {
-        const String before = config.data().hostname;
-        const bool accepted = config.set_hostname(s);
-        if (note_string_change(before, config.data().hostname,
-                               accepted, result)) {
-            result.hostname_changed = true;
-            result.ota_config_dirty = true;
+        String value;
+        if (!json_value_to_config_text(pair.value(), *field, value)) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "rejected web config key=%s reason=bad_type\n",
+                      field->key);
+            continue;
         }
-    }
 
-    if (json_get_string(doc, "wifi_ctry", s)) {
-        const String before = config.data().wifi_country;
-        const bool accepted = config.set_wifi_country(s);
-        if (note_string_change(before, config.data().wifi_country,
-                               accepted, result)) {
-            result.wifi_country_changed = true;
-            result.wifi_reconnect_required = true;
+        AppConfigFieldSetResult field_result;
+        if (!app_config_field_set_in_update(config, *field, value, true,
+                                            field_result)) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "rejected web config key=%s reason=invalid_value\n",
+                      field->key);
+            continue;
         }
-    }
 
-    if (json_get_string(doc, "tz", s)) {
-        const String before = config.data().timezone;
-        const bool accepted = config.set_timezone(s);
-        note_string_change(before, config.data().timezone, accepted, result);
-    }
-
-    if (doc["resmed_time"].is<bool>()) {
-        const bool before = config.data().resmed_time_sync_enabled;
-        const bool accepted = config.set_resmed_time_sync(
-            doc["resmed_time"].as<bool>());
-        note_bool_change(before, config.data().resmed_time_sync_enabled,
-                         accepted, result);
-    }
-
-    if (doc["oxi_en"].is<bool>()) {
-        const bool before = config.data().oximetry_enabled;
-        const bool accepted = config.set_oximetry_enabled(
-            doc["oxi_en"].as<bool>());
-        note_bool_change(before, config.data().oximetry_enabled,
-                         accepted, result);
-    }
-
-    if (doc["edf_cap"].is<bool>()) {
-        const bool before = config.data().edf_capture_enabled;
-        const bool accepted = config.set_edf_capture_enabled(
-            doc["edf_cap"].as<bool>());
-        if (note_bool_change(before, config.data().edf_capture_enabled,
-                             accepted, result)) {
-            result.edf_capture_changed = true;
-        }
-    }
-
-    if (doc["smb_ep"].is<const char *>() ||
-        doc["smb_user"].is<const char *>() ||
-        doc["smb_pass"].is<const char *>()) {
-        String endpoint = config.data().smb_endpoint;
-        String user = config.data().smb_user;
-        String password = config.data().smb_password;
-        if (doc["smb_ep"].is<const char *>()) {
-            endpoint = doc["smb_ep"].as<const char *>();
-        }
-        if (doc["smb_user"].is<const char *>()) {
-            user = doc["smb_user"].as<const char *>();
-        }
-        if (doc["smb_pass"].is<const char *>()) {
-            password = doc["smb_pass"].as<const char *>();
-            if (password == "********" &&
-                config.data().smb_password.length() > 0) {
-                password = config.data().smb_password;
-            }
-        }
-        const String before_endpoint = config.data().smb_endpoint;
-        const String before_user = config.data().smb_user;
-        const String before_password = config.data().smb_password;
-        const bool accepted =
-            config.set_smb_credentials(endpoint, user, password);
-        if (accepted) {
-            result.accepted_fields++;
-            if (before_endpoint != config.data().smb_endpoint ||
-                before_user != config.data().smb_user ||
-                before_password != config.data().smb_password) {
-                result.changed_fields++;
-            }
-        }
-    }
-
-    if (doc["shq_id"].is<const char *>() ||
-        doc["shq_secret"].is<const char *>() ||
-        doc["shq_team"].is<const char *>() ||
-        doc["shq_device"].is<const char *>()) {
-        String client_id = config.data().sleephq_client_id;
-        String client_secret = config.data().sleephq_client_secret;
-        String team_id = config.data().sleephq_team_id;
-        String device_id = config.data().sleephq_device_id;
-        if (doc["shq_id"].is<const char *>()) {
-            client_id = doc["shq_id"].as<const char *>();
-        }
-        if (doc["shq_secret"].is<const char *>()) {
-            client_secret = doc["shq_secret"].as<const char *>();
-            if (client_secret == "********" &&
-                config.data().sleephq_client_secret.length() > 0) {
-                client_secret = config.data().sleephq_client_secret;
-            }
-        }
-        if (doc["shq_team"].is<const char *>()) {
-            team_id = doc["shq_team"].as<const char *>();
-        }
-        if (doc["shq_device"].is<const char *>()) {
-            device_id = doc["shq_device"].as<const char *>();
-        }
-        const String before_client_id = config.data().sleephq_client_id;
-        const String before_client_secret =
-            config.data().sleephq_client_secret;
-        const String before_team_id = config.data().sleephq_team_id;
-        const String before_device_id = config.data().sleephq_device_id;
-        const bool accepted = config.set_sleephq_credentials(
-            client_id, client_secret, team_id, device_id);
-        if (accepted) {
-            result.accepted_fields++;
-            if (before_client_id != config.data().sleephq_client_id ||
-                before_client_secret !=
-                    config.data().sleephq_client_secret ||
-                before_team_id != config.data().sleephq_team_id ||
-                before_device_id != config.data().sleephq_device_id) {
-                result.changed_fields++;
-            }
-        }
-    }
-
-    uint16_t parsed_port = 0;
-    if (valid_port_from_json(doc, "oxi_udp", parsed_port)) {
-        const uint16_t before = config.data().oximetry_udp_port;
-        const bool accepted = config.set_oximetry_udp_port(parsed_port);
-        note_uint16_change(before, config.data().oximetry_udp_port,
-                           accepted, result);
-    }
-
-    if (json_get_string(doc, "oxi_adv", s)) {
-        OximetryAdvertiseMode mode;
-        if (parse_oximetry_advertise_mode(s, mode)) {
-            const OximetryAdvertiseMode before =
-                config.data().oximetry_advertise_mode;
-            const bool accepted = config.set_oximetry_advertise_mode(mode);
-            note_oximetry_advertise_change(
-                before, config.data().oximetry_advertise_mode,
-                accepted, result);
-        }
-    }
-
-    const bool syslog_enabled_present = doc["syslog_en"].is<bool>();
-    const bool syslog_host_present = doc["syslog_host"].is<const char *>();
-    const bool syslog_port_present =
-        valid_port_from_json(doc, "syslog_port", parsed_port);
-    if (syslog_enabled_present || syslog_host_present || syslog_port_present) {
-        bool enabled = config.data().syslog_enabled;
-        String host = config.data().syslog_host;
-        uint16_t port = config.data().syslog_port;
-        if (syslog_enabled_present) {
-            enabled = doc["syslog_en"].as<bool>();
-        }
-        if (syslog_host_present) {
-            host = doc["syslog_host"].as<const char *>();
-            if (!syslog_enabled_present) enabled = host.length() > 0;
-        }
-        if (syslog_port_present) port = parsed_port;
-
-        const bool before_enabled = config.data().syslog_enabled;
-        const String before_host = config.data().syslog_host;
-        const uint16_t before_port = config.data().syslog_port;
-        const bool accepted = config.set_syslog(enabled, host, port);
-        if (accepted) {
-            result.accepted_fields++;
-            if (before_enabled != config.data().syslog_enabled ||
-                before_host != config.data().syslog_host ||
-                before_port != config.data().syslog_port) {
-                result.changed_fields++;
-                result.log_config_changed = true;
-            }
-        }
-    }
-
-    if (doc["file_log_en"].is<bool>()) {
-        const bool before = config.data().file_log_enabled;
-        const bool accepted =
-            config.set_file_log(doc["file_log_en"].as<bool>());
-        if (note_bool_change(before, config.data().file_log_enabled,
-                             accepted, result)) {
-            result.log_config_changed = true;
-        }
-    }
-
-    if (json_get_string(doc, "softap_mode", s)) {
-        SoftApMode softap_mode;
-        if (parse_softap_mode(s, softap_mode)) {
-            const SoftApMode before = config.data().softap_mode;
-            const bool accepted = config.set_softap_mode(softap_mode);
-            if (note_softap_change(before, config.data().softap_mode,
-                                   accepted, result)) {
-                result.softap_changed = true;
-                result.wifi_reconnect_required =
-                    result.wifi_reconnect_required ||
-                    (runtime.wifi_mode == WifiModeState::SoftAp &&
-                     config.data().softap_mode == SoftApMode::Auto &&
-                     runtime.has_sta_config);
-            }
-        }
-    }
-
-    const bool http_user_present = doc["http_user"].is<const char *>();
-    const bool http_password_present =
-        doc["http_pass"].is<const char *>();
-    if (http_user_present || http_password_present) {
-        String user = config.data().http_user;
-        String password = config.data().http_password;
-        if (http_user_present) {
-            user = doc["http_user"].as<const char *>();
-        }
-        if (http_password_present) {
-            password = doc["http_pass"].as<const char *>();
-            if (password == "********" &&
-                config.data().http_password.length() > 0) {
-                password = config.data().http_password;
-            }
-        }
-        const String before_user = config.data().http_user;
-        const String before_password = config.data().http_password;
-        const bool accepted = config.set_http_auth(user, password);
-        if (accepted) {
-            result.accepted_fields++;
-            if (before_user != config.data().http_user ||
-                before_password != config.data().http_password) {
-                result.changed_fields++;
-            }
-        }
-    }
-
-    if (json_get_string(doc, "auth_wl", s)) {
-        const String before = config.data().auth_whitelist;
-        const bool accepted = config.set_auth_whitelist(s);
-        note_string_change(before, config.data().auth_whitelist,
-                           accepted, result);
-    }
-
-    if (json_get_string(doc, "ota_pass", s)) {
-        const String before = config.data().ota_password;
-        if (s == "********" && before.length() > 0) s = before;
-        const bool accepted = config.set_ota_password(s);
-        if (note_string_change(before, config.data().ota_password,
-                               accepted, result)) {
-            result.ota_config_dirty = true;
-        }
-    }
-
-    if (doc["tcp_en"].is<bool>() ||
-        valid_port_from_json(doc, "tcp_port", parsed_port)) {
-        bool enabled = config.data().tcp_bridge_enabled;
-        uint16_t port = config.data().tcp_bridge_port;
-        if (doc["tcp_en"].is<bool>()) {
-            enabled = doc["tcp_en"].as<bool>();
-        }
-        if (valid_port_from_json(doc, "tcp_port", parsed_port)) {
-            port = parsed_port;
-        }
-        const bool before_enabled = config.data().tcp_bridge_enabled;
-        const uint16_t before_port = config.data().tcp_bridge_port;
-        const bool accepted = config.set_tcp_bridge(enabled, port);
-        if (accepted) {
-            result.accepted_fields++;
-            if (before_enabled != config.data().tcp_bridge_enabled ||
-                before_port != config.data().tcp_bridge_port) {
-                result.changed_fields++;
-            }
-        }
-    }
-
-    if (doc["telnet_en"].is<bool>() ||
-        valid_port_from_json(doc, "telnet_port", parsed_port)) {
-        bool enabled = config.data().telnet_console_enabled;
-        uint16_t port = config.data().telnet_console_port;
-        if (doc["telnet_en"].is<bool>()) {
-            enabled = doc["telnet_en"].as<bool>();
-        }
-        if (valid_port_from_json(doc, "telnet_port", parsed_port)) {
-            port = parsed_port;
-        }
-        const bool before_enabled = config.data().telnet_console_enabled;
-        const uint16_t before_port = config.data().telnet_console_port;
-        const bool accepted = config.set_telnet_console(enabled, port);
-        if (accepted) {
-            result.accepted_fields++;
-            if (before_enabled != config.data().telnet_console_enabled ||
-                before_port != config.data().telnet_console_port) {
-                result.changed_fields++;
-            }
-        }
+        if (!field_result.accepted) continue;
+        result.accepted_fields++;
+        if (!field_result.changed) continue;
+        result.changed_fields++;
+        note_dirty(field_result.dirty, config, runtime, result);
     }
 
     result.persisted = config.commit_update();

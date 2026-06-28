@@ -137,8 +137,10 @@ private:
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json,
                            const char *section = nullptr) const;
+    void build_config_schema_json(LargeTextBuffer &json) const;
     void send_config_json(AsyncWebServerRequest *request,
                           const char *section = nullptr) const;
+    void send_config_schema_json(AsyncWebServerRequest *request) const;
     void send_config_update(AsyncWebServerRequest *request);
     void build_wifi_json(LargeTextBuffer &json) const;
     void build_settings_json(LargeTextBuffer &json,

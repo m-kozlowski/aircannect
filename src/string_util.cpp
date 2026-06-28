@@ -39,13 +39,13 @@ bool parse_bool_yesno(const String &text, bool &value) {
     to_lower_inplace(normalized);
     if (normalized == "on" || normalized == "yes" ||
         normalized == "true" || normalized == "1" ||
-        normalized == "enabled") {
+        normalized == "enabled" || normalized == "enable") {
         value = true;
         return true;
     }
     if (normalized == "off" || normalized == "no" ||
         normalized == "false" || normalized == "0" ||
-        normalized == "disabled") {
+        normalized == "disabled" || normalized == "disable") {
         value = false;
         return true;
     }
@@ -73,13 +73,13 @@ bool parse_bool_yesno(const std::string &text, bool &value) {
 
     if (normalized == "on" || normalized == "yes" ||
         normalized == "true" || normalized == "1" ||
-        normalized == "enabled") {
+        normalized == "enabled" || normalized == "enable") {
         value = true;
         return true;
     }
     if (normalized == "off" || normalized == "no" ||
         normalized == "false" || normalized == "0" ||
-        normalized == "disabled") {
+        normalized == "disabled" || normalized == "disable") {
         value = false;
         return true;
     }

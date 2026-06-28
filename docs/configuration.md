@@ -91,7 +91,21 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `syslog_host` | Empty, or IPv4 address | empty | Syslog destination host. |
 | `syslog_port` | UDP port `1` to `65535` | `514` | Syslog destination port. |
 | `file_log_en` | boolean | on when the build has SD storage | Enable persistent SD-card log files when storage is available. |
-| `log0` ... `log14` | `ERROR`, `WARN`, `INFO`, `DEBUG` | mostly `INFO` | Per-category log levels. Numeric keys map to `debug_log.h` category order. |
+| `log_general` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | General log category level. |
+| `log_can` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | CAN log category level. |
+| `log_rpc` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | RPC log category level. |
+| `log_tcp` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | TCP bridge log category level. |
+| `log_cli` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | CLI log category level. |
+| `log_wifi` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Wi-Fi log category level. |
+| `log_stream` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Live stream log category level. |
+| `log_ota` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | OTA log category level. |
+| `log_oxi` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Oximetry log category level. |
+| `log_storage` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Storage log category level. |
+| `log_bgworker` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Background worker log category level. |
+| `log_report` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Report log category level. |
+| `log_edf` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | EDF capture/report log category level. |
+| `log_config` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Configuration log category level. |
+| `log_sleephq` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | SleepHQ sync log category level. |
 
 The management console also has a separate convenience command for interactive
 logging changes:
@@ -101,5 +115,3 @@ log level LEVEL
 log level CATEGORY LEVEL
 ```
 
-Category order for the numeric keys is defined by `log_cat_t` in
-`include/debug_log.h`.

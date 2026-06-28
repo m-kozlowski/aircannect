@@ -57,7 +57,10 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("    smb_ep smb_user smb_pass");
         out.println("    shq_id shq_secret shq_team shq_device");
         out.println("    http_user http_pass auth_wl telnet_en telnet_port ota_pass");
-        out.println("    syslog_en syslog_host syslog_port file_log_en log0..log14");
+        out.println("    syslog_en syslog_host syslog_port file_log_en");
+        out.println("    log_general log_can log_rpc log_tcp log_cli log_wifi");
+        out.println("    log_stream log_ota log_oxi log_storage log_bgworker");
+        out.println("    log_report log_edf log_config log_sleephq");
         return;
     }
 

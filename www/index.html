@@ -504,6 +504,27 @@
       margin: 18px 0 8px;
     }
 
+    details.config-section > summary.section-title {
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    details.config-section > summary.section-title::-webkit-details-marker {
+      display: none;
+    }
+
+    details.config-section > summary.section-title::before {
+      content: ">";
+      display: inline-block;
+      width: 14px;
+      color: var(--muted);
+    }
+
+    details.config-section[open] > summary.section-title::before {
+      content: "v";
+    }
+
     .storage-toolbar {
       display: flex;
       align-items: center;
@@ -1932,92 +1953,26 @@
     let settingsCatalog = [];
     let settingsCatalogPromise = null;
     let configData = null;
-    const configSections = [
-      {
-        id: "device",
-        title: "Device",
-        fields: [
-          ["host", "Hostname", "text"],
-          ["edf_cap", "EDF capture", "bool"],
-        ],
-      },
-      {
-        id: "network",
-        title: "Network",
-        fields: [
-          ["softap_mode", "SoftAP mode", "enum", ["auto", "forced"]],
-          ["wifi_ctry", "WiFi country", "text"],
-        ],
-      },
-      {
-        id: "access",
-        title: "Access",
-        fields: [
-          ["tcp_en", "TCP bridge", "bool"],
-          ["tcp_port", "TCP bridge port", "number"],
-          ["telnet_en", "Telnet console", "bool"],
-          ["telnet_port", "Telnet port", "number"],
-          ["http_user", "HTTP username", "text"],
-          ["http_pass", "HTTP password", "password"],
-          ["auth_wl", "Auth whitelist", "text"],
-          ["ota_pass", "OTA password", "password"],
-        ],
-      },
-      {
-        id: "logging",
-        title: "Logging",
-        fields: [
-          ["syslog_en", "Syslog", "bool"],
-          ["syslog_host", "Syslog host", "text"],
-          ["syslog_port", "Syslog port", "number"],
-          ["file_log_en", "File logging", "bool"],
-        ],
-      },
-      {
-        id: "time",
-        title: "Time",
-        fields: [
-          ["tz", "Timezone", "text"],
-          ["resmed_time", "ResMed time sync", "bool"],
-        ],
-      },
-      {
-        id: "oximetry",
-        title: "Oximetry",
-        fields: [
-          ["oxi_en", "Oximetry", "bool"],
-          ["oxi_udp", "Oximetry UDP port", "number"],
-          ["oxi_adv", "BLE advertising", "enum", ["auto", "manual"]],
-        ],
-      },
-      {
-        id: "smb",
-        title: "SMB",
-        fields: [
-          ["smb_ep", "SMB endpoint", "text"],
-          ["smb_user", "SMB username", "text"],
-          ["smb_pass", "SMB password", "password"],
-        ],
-      },
-      {
-        id: "sleephq",
-        title: "SleepHQ",
-        fields: [
-          ["shq_id", "SleepHQ client ID", "text"],
-          ["shq_secret", "SleepHQ client secret", "password"],
-          ["shq_team", "SleepHQ team ID", "text"],
-          ["shq_device", "SleepHQ device ID", "text"],
-        ],
-      },
-    ];
+    let configSections = [];
+    let configSchemaPromise = null;
     const configSectionById = {};
     const configSectionByKey = {};
-    configSections.forEach((section) => {
-      configSectionById[section.id] = section;
-      section.fields.forEach((field) => {
-        configSectionByKey[field[0]] = section.id;
+    const configFieldByKey = {};
+    function rebuildConfigSectionMaps() {
+      Object.keys(configSectionById).forEach((key) =>
+        delete configSectionById[key]);
+      Object.keys(configSectionByKey).forEach((key) =>
+        delete configSectionByKey[key]);
+      Object.keys(configFieldByKey).forEach((key) =>
+        delete configFieldByKey[key]);
+      configSections.forEach((section) => {
+        configSectionById[section.id] = section;
+        section.fields.forEach((field) => {
+          configSectionByKey[field.key] = section.id;
+          configFieldByKey[field.key] = field;
+        });
       });
-    });
+    }
     const endpointConfigPanels = {
       smb: {
         section: "smb",
@@ -7519,12 +7474,39 @@
       }
     }
 
+    function normalizeConfigSchema(data) {
+      const groups = Array.isArray(data && data.groups) ? data.groups : [];
+      configSections = groups.map((group) => ({
+        id: group.id,
+        title: group.label || group.id,
+        fields: Array.isArray(group.fields) ? group.fields : [],
+      })).filter((group) => group.id);
+      rebuildConfigSectionMaps();
+    }
+
+    async function loadConfigSchema() {
+      const response = await api("/api/config/schema");
+      normalizeConfigSchema(await response.json());
+      return configSections;
+    }
+
+    async function ensureConfigSchema() {
+      if (configSections.length) return configSections;
+      if (!configSchemaPromise) {
+        configSchemaPromise = loadConfigSchema().finally(() => {
+          configSchemaPromise = null;
+        });
+      }
+      return await configSchemaPromise;
+    }
+
     async function fetchConfigSection(sectionId) {
       const response = await api("/api/config/" + encodeURIComponent(sectionId));
       return await response.json();
     }
 
     async function fetchConfigData() {
+      await ensureConfigSchema();
       const parts = await Promise.all(configSections.map(async (section) => {
         return await fetchConfigSection(section.id);
       }));
@@ -7534,86 +7516,80 @@
     function renderConfigField(root, section, field, data) {
       data = data || configData || {};
       let control;
-      if (field[2] === "bool") {
+      if (field.type === "bool") {
         control = document.createElement("select");
         ["false", "true"].forEach((value) => {
           const option = document.createElement("option");
           option.value = value;
           option.textContent = value === "true" ? "On" : "Off";
-          if (String(data[field[0]]) === value) option.selected = true;
+          if (String(data[field.key]) === value) option.selected = true;
           control.appendChild(option);
         });
-      } else if (field[2] === "enum") {
+      } else if (field.type === "enum") {
         control = document.createElement("select");
-        field[3].forEach((value) => {
+        (field.enum || []).forEach((entry) => {
+          const value = typeof entry === "string" ? entry : entry.value;
+          const label = typeof entry === "string" ? entry : entry.label;
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = value;
-          if (String(data[field[0]]) === value) option.selected = true;
+          option.textContent = label || value;
+          if (String(data[field.key]) === value) option.selected = true;
           control.appendChild(option);
         });
       } else {
         control = document.createElement("input");
-        control.type = field[2];
-        control.value = data[field[0]] || "";
-        if (field[0] === "http_pass") {
-          control.placeholder = data.http_pass_set ? "set" : "empty";
-          if (data.http_pass_set) {
-            control.value = "********";
-          }
+        control.type = field.type === "password" ? "password" : field.type;
+        control.value = data[field.key] || "";
+        if (field.secret) {
+          const setKey = field.key + "_set";
+          control.placeholder = data[setKey] ? "set" : "empty";
+          if (data[setKey]) control.value = "********";
         }
-        if (field[0] === "smb_pass") {
-          control.placeholder = data.smb_pass_set ? "set" : "empty";
-          if (data.smb_pass_set) {
-            control.value = "********";
-          }
-        }
-        if (field[0] === "smb_ep") {
+        if (field.key === "smb_ep") {
           control.placeholder = "smb://host/share/path";
         }
-        if (field[0] === "shq_secret") {
-          control.placeholder = data.shq_secret_set ? "set" : "empty";
-          if (data.shq_secret_set) {
-            control.value = "********";
-          }
-        }
-        if (field[0] === "shq_team" || field[0] === "shq_device") {
+        if (field.key === "shq_team" || field.key === "shq_device") {
           control.placeholder = "optional numeric id";
         }
-        if (field[0] === "syslog_host") {
+        if (field.key === "syslog_host") {
           control.placeholder = "IPv4 address";
-        }
-        if (field[0] === "ota_pass") {
-          control.placeholder = data.ota_pass_set ? "set" : "empty";
-          if (data.ota_pass_set) {
-            control.value = "********";
-          }
         }
       }
 
-      control.dataset.key = field[0];
+      control.dataset.key = field.key;
       control.dataset.section = section.id;
-      control.dataset.type = field[2];
+      control.dataset.type = field.type;
       control.dataset.orig = String(control.value || "");
       let rendered = control;
-      if (field[0] === "tz") rendered = timezoneHelper(control);
-      if (field[0] === "wifi_ctry") rendered = wifiCountryHelper(control);
-      root.appendChild(row(field[1], rendered, field[0]));
+      if (field.key === "tz") rendered = timezoneHelper(control);
+      if (field.key === "wifi_ctry") rendered = wifiCountryHelper(control);
+      root.appendChild(row(field.label || field.key, rendered, field.key));
     }
 
     async function loadConfig() {
       try {
+        await ensureConfigSchema();
         configData = await fetchConfigData();
 
         const root = document.getElementById("configFields");
         root.innerHTML = "";
         configSections.forEach((section) => {
-          const heading = document.createElement("div");
+          const wrapper = document.createElement("details");
+          wrapper.className = "config-section";
+          if (section.id !== "logging") wrapper.open = true;
+
+          const heading = document.createElement("summary");
           heading.className = "section-title";
           heading.textContent = section.title;
-          root.appendChild(heading);
+          wrapper.appendChild(heading);
+
+          const fields = document.createElement("div");
+          fields.className = "config-section-fields";
+          wrapper.appendChild(fields);
+          root.appendChild(wrapper);
+
           section.fields.forEach((field) =>
-            renderConfigField(root, section, field));
+            renderConfigField(fields, section, field));
         });
       } catch (error) {
         msg("configMsg", error.message, false);
@@ -7622,10 +7598,8 @@
 
     function configFieldApplied(data, key, value) {
       if (!data) return false;
-      if (key === "smb_pass" ||
-          key === "shq_secret" ||
-          key === "http_pass" ||
-          key === "ota_pass") {
+      const field = configFieldByKey[key];
+      if (field && field.secret) {
         if (value === "********") return true;
         const setKey = key + "_set";
         const expectedSet = String(value || "").length > 0;
@@ -7642,6 +7616,7 @@
     }
 
     async function fetchConfigSections(sectionIds) {
+      await ensureConfigSchema();
       const parts = await Promise.all(sectionIds.map((sectionId) =>
         fetchConfigSection(sectionId)));
       return Object.assign({}, ...parts);
@@ -7761,6 +7736,7 @@
     }
 
     async function postConfigChanges(changes) {
+      await ensureConfigSchema();
       const sections = {};
       Object.keys(changes).forEach((key) => {
         const section = configSectionByKey[key] || "device";
@@ -7788,6 +7764,7 @@
     }
 
     async function saveConfigFields(root, messageId, reload) {
+      await ensureConfigSchema();
       const changes = collectConfigChanges(root);
       if (!validateConfigChanges(changes, messageId)) return false;
 
@@ -7839,6 +7816,7 @@
     }
 
     async function loadEndpointConfig(id, clearMessage) {
+      await ensureConfigSchema();
       const panel = endpointConfigPanels[id];
       if (!panel) return false;
       const section = configSectionById[panel.section];

@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "auth_utils.h"
+#include "app_config_registry.h"
 #include "app_config_update.h"
 #include "as11_rpc.h"
 #include "background_worker.h"
@@ -43,6 +44,7 @@ namespace {
 static constexpr size_t WEB_JSON_RESERVE_SMALL = 512;
 static constexpr size_t WEB_JSON_RESERVE_MEDIUM = 1024;
 static constexpr size_t WEB_CONFIG_FULL_JSON_RESERVE = 2304;
+static constexpr size_t WEB_CONFIG_SCHEMA_JSON_RESERVE = 12 * 1024;
 static constexpr size_t WEB_CONFIG_SYNC_JSON_RESERVE = 640;
 static constexpr size_t WEB_CONFIG_SMALL_JSON_RESERVE = 384;
 static constexpr size_t WEB_REPORT_RESULT_JSON_RESERVE = 4096;
@@ -74,14 +76,19 @@ const char *web_command_name(uint8_t kind) {
 
 bool web_config_section_known(const char *section) {
     if (!section || !section[0] || strcmp(section, "all") == 0) return true;
-    return strcmp(section, "device") == 0 ||
-           strcmp(section, "network") == 0 ||
-           strcmp(section, "access") == 0 ||
-           strcmp(section, "logging") == 0 ||
-           strcmp(section, "time") == 0 ||
-           strcmp(section, "oximetry") == 0 ||
-           strcmp(section, "smb") == 0 ||
-           strcmp(section, "sleephq") == 0;
+    size_t count = 0;
+    const AppConfigFieldDescriptor *fields = app_config_fields(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(section, app_config_group_id(fields[i].group)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool web_config_section_includes(const char *section, AppConfigGroup group) {
+    return !section || !section[0] || strcmp(section, "all") == 0 ||
+           strcmp(section, app_config_group_id(group)) == 0;
 }
 
 size_t json_escaped_capacity(size_t raw_len, size_t overhead = 128) {
@@ -100,17 +107,58 @@ uint32_t fnv1a32_string(const String &text) {
 
 size_t web_config_json_reserve(const char *section) {
     if (!section || !section[0] || strcmp(section, "all") == 0) {
-        return WEB_CONFIG_FULL_JSON_RESERVE;
+        return 4096;
     }
     if (strcmp(section, "access") == 0 ||
         strcmp(section, "logging") == 0) {
-        return WEB_JSON_RESERVE_MEDIUM;
+        return 2048;
     }
     if (strcmp(section, "smb") == 0 ||
         strcmp(section, "sleephq") == 0) {
         return WEB_CONFIG_SYNC_JSON_RESERVE;
     }
     return WEB_CONFIG_SMALL_JSON_RESERVE;
+}
+
+const char *web_config_field_type_name(AppConfigFieldType type) {
+    switch (type) {
+        case AppConfigFieldType::Bool: return "bool";
+        case AppConfigFieldType::UInt16: return "number";
+        case AppConfigFieldType::String: return "text";
+        case AppConfigFieldType::Secret: return "password";
+        case AppConfigFieldType::Enum:
+        case AppConfigFieldType::LogLevel:
+            return "enum";
+    }
+    return "text";
+}
+
+static constexpr AppConfigEnumValue WEB_LOG_LEVEL_VALUES[] = {
+    {"ERROR", "Error"},
+    {"WARN", "Warn"},
+    {"INFO", "Info"},
+    {"DEBUG", "Debug"},
+};
+
+void append_config_schema_enum(LargeTextBuffer &json,
+                               const AppConfigFieldDescriptor &field) {
+    const AppConfigEnumValue *values = field.enum_values;
+    size_t count = field.enum_value_count;
+    if (field.type == AppConfigFieldType::LogLevel) {
+        values = WEB_LOG_LEVEL_VALUES;
+        count = sizeof(WEB_LOG_LEVEL_VALUES) / sizeof(WEB_LOG_LEVEL_VALUES[0]);
+    }
+    if (!values || !count) return;
+
+    json += ",\"enum\":[";
+    for (size_t i = 0; i < count; ++i) {
+        if (i) json += ',';
+        json += "{";
+        json_add_string(json, "value", values[i].value, false);
+        json_add_string(json, "label", values[i].label);
+        json += "}";
+    }
+    json += "]";
 }
 
 void release_request_body(AsyncWebServerRequest *request) {
@@ -1524,6 +1572,32 @@ void WebUI::send_config_json(AsyncWebServerRequest *request,
     if (json.overflowed()) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"config_overflow\"}");
+        return;
+    }
+
+    AsyncResponseStream *response =
+        request->beginResponseStream("application/json");
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
+                    json.length());
+    request->send(response);
+}
+
+void WebUI::send_config_schema_json(AsyncWebServerRequest *request) const {
+    LargeTextBuffer json;
+    if (!json.reserve(WEB_CONFIG_SCHEMA_JSON_RESERVE)) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"schema_alloc\"}");
+        return;
+    }
+    build_config_schema_json(json);
+    if (json.overflowed()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"schema_overflow\"}");
         return;
     }
 
@@ -3030,78 +3104,97 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
 void WebUI::build_config_json(LargeTextBuffer &json,
                               const char *section) const {
     const AppConfigData &cfg = app_config_->data();
-    const bool all = !section || !section[0] || strcmp(section, "all") == 0;
-    const auto include = [all, section](const char *name) {
-        return all || strcmp(section, name) == 0;
-    };
     json = "{";
     bool comma = false;
-    const auto add_string = [&json, &comma](const char *key,
-                                            const char *value) {
-        json_add_string(json, key, value, comma);
-        comma = true;
-    };
-    const auto add_bool = [&json, &comma](const char *key, bool value) {
-        json_add_bool(json, key, value, comma);
-        comma = true;
-    };
-    const auto add_int = [&json, &comma](const char *key, long value) {
-        json_add_int(json, key, value, comma);
-        comma = true;
-    };
 
-    if (include("device")) {
-        add_string("host", cfg.hostname.c_str());
-        add_bool("edf_cap", cfg.edf_capture_enabled);
-    }
-    if (include("access")) {
-        add_bool("tcp_en", cfg.tcp_bridge_enabled);
-        add_int("tcp_port", cfg.tcp_bridge_port);
-        add_bool("telnet_en", cfg.telnet_console_enabled);
-        add_int("telnet_port", cfg.telnet_console_port);
-        add_string("http_user", cfg.http_user.c_str());
-        add_bool("http_pass_set", cfg.http_password.length() > 0);
-        add_string("http_pass", "");
-        add_string("auth_wl", cfg.auth_whitelist.c_str());
-        add_bool("ota_pass_set", cfg.ota_password.length() > 0);
-        add_string("ota_pass", "");
-    }
-    if (include("logging")) {
-        add_bool("syslog_en", cfg.syslog_enabled);
-        add_string("syslog_host", cfg.syslog_host.c_str());
-        add_int("syslog_port", cfg.syslog_port);
-        add_bool("file_log_en", cfg.file_log_enabled);
-    }
-    if (include("network")) {
-        add_string("softap_mode", softap_mode_name(cfg.softap_mode));
-        add_string("wifi_ctry", cfg.wifi_country.c_str());
-    }
-    if (include("time")) {
-        add_string("tz", cfg.timezone.c_str());
-        add_bool("resmed_time", cfg.resmed_time_sync_enabled);
-    }
-    if (include("oximetry")) {
-        add_bool("oxi_en", cfg.oximetry_enabled);
-        add_int("oxi_udp", cfg.oximetry_udp_port);
-        add_string("oxi_adv",
-                   oximetry_advertise_mode_name(
-                       cfg.oximetry_advertise_mode));
-    }
-    if (include("smb")) {
-        add_string("smb_ep", cfg.smb_endpoint.c_str());
-        add_string("smb_user", cfg.smb_user.c_str());
-        add_bool("smb_pass_set", cfg.smb_password.length() > 0);
-        add_string("smb_pass", "");
-    }
-    if (include("sleephq")) {
-        add_string("shq_id", cfg.sleephq_client_id.c_str());
-        add_bool("shq_secret_set",
-                 cfg.sleephq_client_secret.length() > 0);
-        add_string("shq_secret", "");
-        add_string("shq_team", cfg.sleephq_team_id.c_str());
-        add_string("shq_device", cfg.sleephq_device_id.c_str());
+    size_t count = 0;
+    const AppConfigFieldDescriptor *fields = app_config_fields(count);
+    for (size_t i = 0; i < count; ++i) {
+        const AppConfigFieldDescriptor &field = fields[i];
+        if (!web_config_section_includes(section, field.group)) continue;
+
+        String value;
+        if (!app_config_field_get_raw_value(cfg, field, value)) continue;
+
+        if (app_config_field_is_secret(field)) {
+            char set_key[40];
+            snprintf(set_key, sizeof(set_key), "%s_set", field.key);
+            json_add_bool(json, set_key, value.length() > 0, comma);
+            comma = true;
+            json_add_string(json, field.key, "");
+            comma = true;
+            continue;
+        }
+
+        switch (field.type) {
+            case AppConfigFieldType::Bool:
+                json_add_bool(json, field.key, value == "1", comma);
+                comma = true;
+                break;
+            case AppConfigFieldType::UInt16:
+                json_add_int(json, field.key, strtol(value.c_str(), nullptr,
+                                                     10), comma);
+                comma = true;
+                break;
+            case AppConfigFieldType::String:
+            case AppConfigFieldType::Enum:
+            case AppConfigFieldType::LogLevel:
+                json_add_string(json, field.key, value.c_str(), comma);
+                comma = true;
+                break;
+            case AppConfigFieldType::Secret:
+                break;
+        }
     }
     json += '}';
+}
+
+void WebUI::build_config_schema_json(LargeTextBuffer &json) const {
+    json = "{\"groups\":[";
+
+    size_t count = 0;
+    const AppConfigFieldDescriptor *fields = app_config_fields(count);
+    AppConfigGroup current_group = AppConfigGroup::Device;
+    bool group_open = false;
+    bool first_group = true;
+    bool first_field = true;
+
+    for (size_t i = 0; i < count; ++i) {
+        const AppConfigFieldDescriptor &field = fields[i];
+        if (!group_open || field.group != current_group) {
+            if (group_open) json += "]}";
+            if (!first_group) json += ',';
+            first_group = false;
+            current_group = field.group;
+            json += "{";
+            json_add_string(json, "id", app_config_group_id(current_group),
+                            false);
+            json_add_string(json, "label",
+                            app_config_group_label(current_group));
+            json += ",\"fields\":[";
+            group_open = true;
+            first_field = true;
+        }
+
+        if (!first_field) json += ',';
+        first_field = false;
+        json += "{";
+        json_add_string(json, "key", field.key, false);
+        json_add_string(json, "label", field.label);
+        json_add_string(json, "type",
+                        web_config_field_type_name(field.type));
+        json_add_bool(json, "secret", app_config_field_is_secret(field));
+        json_add_bool(json, "provisionable",
+                      (field.flags & AC_CONFIG_FIELD_PROVISIONABLE) != 0);
+        if (field.help && field.help[0]) {
+            json_add_string(json, "help", field.help);
+        }
+        append_config_schema_enum(json, field);
+        json += "}";
+    }
+
+    if (group_open) json += "]}";
+    json += "]}";
 }
 
 void WebUI::build_wifi_json(LargeTextBuffer &json) const {
@@ -3925,6 +4018,11 @@ void WebUI::register_routes() {
     server_->on(AsyncURIMatcher::exact("/api/config"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_config_json(request);
+    });
+
+    server_->on(AsyncURIMatcher::exact("/api/config/schema"), HTTP_GET,
+                [this](AsyncWebServerRequest *request) {
+        send_config_schema_json(request);
     });
 
     server_->on(
