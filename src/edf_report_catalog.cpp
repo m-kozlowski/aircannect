@@ -125,7 +125,7 @@ uint32_t edf_report_signal_bit(ReportSignalId signal) {
 
 namespace {
 
-void copy_signal_descriptor(const EdfSignalHeader &src,
+bool copy_signal_descriptor(const EdfSignalHeader &src,
                             EdfReportSignalDescriptor &dst) {
     copy_cstr(dst.label, sizeof(dst.label), src.label);
     copy_cstr(dst.physical_dimension,
@@ -134,6 +134,7 @@ void copy_signal_descriptor(const EdfSignalHeader &src,
     dst.samples_per_record = src.samples_per_record;
     dst.sample_offset_in_record = src.sample_offset_in_record;
     dst.byte_offset_in_record = src.byte_offset_in_record;
+    return edf_parse_signal_scale(src, dst.scale);
 }
 
 bool session_mapping_available(const EdfReportSessionDescriptor &session,
@@ -184,6 +185,7 @@ EdfReportFileStatus edf_report_describe_file(
     size_t header_size,
     uint64_t file_size,
     time_t last_write,
+    int32_t timezone_offset_minutes,
     EdfReportFileDescriptor &out) {
     out = EdfReportFileDescriptor();
     out.file_size = file_size;
@@ -220,6 +222,8 @@ EdfReportFileStatus edf_report_describe_file(
         out.status = EdfReportFileStatus::TimingError;
         return out.status;
     }
+    out.header_start_ms -=
+        static_cast<int64_t>(timezone_offset_minutes) * 60LL * 1000LL;
     out.header_size = inventory.header.header_size;
     out.record_size = inventory.header.record_size;
     const uint64_t duration_ms =
@@ -239,7 +243,10 @@ EdfReportFileStatus edf_report_describe_file(
             out.status = EdfReportFileStatus::SignalHeaderError;
             return out.status;
         }
-        copy_signal_descriptor(signal, out.signals[i]);
+        if (!copy_signal_descriptor(signal, out.signals[i])) {
+            out.status = EdfReportFileStatus::SignalHeaderError;
+            return out.status;
+        }
     }
 
     out.status = EdfReportFileStatus::Ok;
@@ -384,7 +391,6 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
     dst.record_size = file.record_size;
     dst.record_duration_ms = file.record_duration_ms;
     dst.complete_records = file.inventory.complete_records_from_size;
-    dst.signal_count = file.signal_count;
 
     session.file_mask |= file_mask;
     session.file_count++;

@@ -63,6 +63,13 @@ void BackgroundWorker::wake() {
     if (task_) xTaskNotifyGive(task_);
 }
 
+bool BackgroundWorker::idle_gate_open(const char **reason) const {
+    const char *local_reason = "idle";
+    const bool open = gate_open(&local_reason);
+    if (reason) *reason = local_reason;
+    return open;
+}
+
 void BackgroundWorker::publish_gate(bool foreground_busy, bool as11_ready,
                                    bool stream_active,
                                    bool resmed_ota_active, bool esp_ota_active,
@@ -193,6 +200,17 @@ void BackgroundWorker::run() {
         for (size_t i = 0; i < job_count_; ++i) {
             const char *r = "idle";
             if (!gate_open(&r)) break;  // foreground appeared mid-pass
+            if (!jobs_[i]->drain_before_regular_jobs()) continue;
+            const JobStep s = jobs_[i]->step();
+            if (s != JobStep::Idle) {
+                result = s;
+                break;
+            }
+        }
+        for (size_t i = 0; result == JobStep::Idle && i < job_count_; ++i) {
+            const char *r = "idle";
+            if (!gate_open(&r)) break;  // foreground appeared mid-pass
+            if (jobs_[i]->drain_before_regular_jobs()) continue;
             const JobStep s = jobs_[i]->step();
             if (s != JobStep::Idle) {
                 result = s;

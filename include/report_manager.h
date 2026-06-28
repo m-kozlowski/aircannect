@@ -7,11 +7,15 @@
 #include <new>
 #include <string>
 
+#include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
 #include "large_text_buffer.h"
+#include "edf_report_catalog.h"
 #include "report_data_provider.h"
+#include "report_materializer.h"
+#include "report_night_index.h"
 #include "report_parser.h"
 #include "report_proto.h"
 #include "report_spool_types.h"
@@ -21,7 +25,11 @@
 namespace aircannect {
 
 class EdfReportCatalogJob;
+struct EdfReportCatalogStatus;
+struct ReportSeriesSample;
 struct EdfReportSessionDescriptor;
+struct EdfReportRequiredRange;
+struct ReportResolveScratch;
 
 static constexpr size_t AC_REPORT_SUMMARY_RECORD_MAX = 256;
 static constexpr size_t AC_REPORT_NIGHT_SOURCE_MAX = 8;
@@ -30,6 +38,7 @@ static constexpr size_t AC_REPORT_RESULT_CHUNK_MAX = 512;
 static constexpr size_t AC_REPORT_RESULT_STREAM_MAX = 16;
 static constexpr size_t AC_REPORT_RESULT_SLOT_MAX = 4;
 static constexpr size_t AC_REPORT_BUILD_QUEUE_MAX = 4;
+static constexpr size_t AC_REPORT_RESULT_ETAG_MAX = 80;
 
 enum class ReportSummaryState : uint8_t {
     Idle,
@@ -146,7 +155,7 @@ struct ReportResultStatus {
     std::string error;
 };
 
-class ReportManager {
+class ReportManager : private ReportMaterializerSink {
 public:
     ~ReportManager();
 
@@ -224,10 +233,54 @@ public:
     void prefetch_mark_drained();
     void prefetch_preempt();
     PrefetchSnapshot prefetch_snapshot() const;
+
+    enum class PlotPrebuildResult : uint8_t {
+        Queued,
+        AlreadyQueued,
+        Scanned,
+        Drained,
+        Waiting,
+        Unavailable,
+    };
+    PlotPrebuildResult request_idle_plot_prebuild();
+    void preempt_idle_plot_prebuild();
+
+    struct BuildQueueSnapshot {
+        bool available = false;
+        bool lock_ok = false;
+        size_t count = 0;
+        uint64_t head_night_ms = 0;
+        size_t head_therapy_index = 0;
+        bool head_refresh = false;
+        bool head_idle_prebuild = false;
+        uint32_t head_age_ms = 0;
+        uint64_t last_night_ms = 0;
+        size_t last_therapy_index = 0;
+        char last_outcome[16] = {};
+        char last_state[16] = {};
+        char last_error[48] = {};
+        uint32_t enqueue_total = 0;
+        uint32_t queued_total = 0;
+        uint32_t already_total = 0;
+        uint32_t service_total = 0;
+        uint64_t last_enqueue_night_ms = 0;
+        size_t last_enqueue_therapy_index = 0;
+        char last_read[24] = {};
+        char last_enqueue_result[24] = {};
+        char last_service_block[24] = {};
+    };
+    BuildQueueSnapshot build_queue_snapshot() const;
+    bool edf_catalog_status(EdfReportCatalogStatus &out,
+                            uint32_t timeout_ms = 0) const;
+
     bool foreground_busy() const;
     bool service_cache_writer();
 
     bool prepare_result_by_therapy_index(size_t therapy_index,
+                                         bool refresh_cache = false);
+    bool request_result_prepare_by_therapy_index(size_t therapy_index,
+                                                 bool refresh_cache = false);
+    bool request_result_prepare_by_start(uint64_t night_start_ms,
                                          bool refresh_cache = false);
     void build_result_chunks_json(LargeTextBuffer &json,
                                   size_t offset,
@@ -248,6 +301,11 @@ public:
     ResultRead read_result(size_t therapy_index, const char *if_none_match,
                            char *etag_out, size_t etag_out_size,
                            LargeTextBuffer &json_out);
+    ResultRead read_result_by_start(uint64_t night_start_ms,
+                                    const char *if_none_match,
+                                    char *etag_out,
+                                    size_t etag_out_size,
+                                    LargeTextBuffer &json_out);
 
     // Stateless per-night plot read: serves the PSRAM blob for (night, version);
     // a miss queues a build and returns Building.
@@ -256,15 +314,19 @@ public:
         Ready,
         Error,
         Building,
+        Stale,
+        Empty,
         QueueFull,
         Unavailable,
         Busy,
     };
 
     PlotRead read_plot(size_t therapy_index, const char *version,
+                       char *etag_out, size_t etag_out_size,
                        std::shared_ptr<ReportSpoolBuffer> &out);
-    PlotRead read_plot_range(size_t therapy_index, int64_t from_ms,
-                             int64_t to_ms,
+    PlotRead read_plot_range(size_t therapy_index, const char *version,
+                             char *etag_out, size_t etag_out_size,
+                             int64_t from_ms, int64_t to_ms,
                              std::shared_ptr<ReportSpoolBuffer> &out);
 
     const ReportSpoolBuffer &result_plot_bin() const {
@@ -290,6 +352,7 @@ private:
         ReportSourceId source = ReportSourceId::Summary;
         ReportSignalId signal = ReportSignalId::Flow;
         const char *name = nullptr;
+        uint8_t stream_index = 0;
         int64_t start_ms = 0;
         int64_t end_ms = 0;
         uint32_t payload_schema = 0;
@@ -304,6 +367,8 @@ private:
         const char *name = nullptr;
         bool required = false;
         bool complete = false;
+        bool has_edf_segment = false;
+        bool has_spool_segment = false;
         uint32_t chunk_count = 0;
         uint32_t record_count = 0;
         uint32_t payload_bytes = 0;
@@ -324,6 +389,8 @@ private:
         int64_t last_ms = 0;
         uint32_t record_count = 0;
         uint32_t payload_schema = 0;
+        uint32_t series_interval_ms = 0;
+        bool series_values_pending = false;
         ReportSpoolBuffer payload;
     };
     struct PlotBuildBucket {
@@ -351,9 +418,36 @@ private:
             max_value = 0;
         }
     };
+    struct PlotSeriesBuildState {
+        ReportSpoolBuffer points;
+        PlotBuildBucket bucket;
+        int64_t current_bucket = -1;
+        int64_t current_bucket_start_ms = 0;
+        int64_t current_bucket_end_ms = 0;
+        int64_t current_bucket_ms = 0;
+        int64_t series_bucket_ms = 0;
+        bool open = false;
+        bool have_last_sample = false;
+        int64_t last_sample_ms = 0;
+        int last_range_index = -1;
+
+        void reset() {
+            points.clear();
+            bucket.clear();
+            current_bucket = -1;
+            current_bucket_start_ms = 0;
+            current_bucket_end_ms = 0;
+            current_bucket_ms = 0;
+            series_bucket_ms = 0;
+            open = false;
+            have_last_sample = false;
+            last_sample_ms = 0;
+            last_range_index = -1;
+        }
+    };
 
     static constexpr size_t PREFETCH_SKIP_MAX = 8;
-    static constexpr size_t AC_REPORT_COALESCE_SLOTS = 8;
+    static constexpr size_t AC_REPORT_COALESCE_SLOTS = 64;
     static constexpr size_t AC_REPORT_COALESCE_TARGET_BYTES = 64 * 1024;
     static constexpr size_t AC_REPORT_CACHE_WRITE_QUEUE_MAX = 8;
     static constexpr size_t AC_REPORT_CACHE_WRITE_BACKPRESSURE_WATERMARK =
@@ -374,6 +468,8 @@ private:
                                    const ReportParsedChunk &chunk);
     static bool collect_result_chunk(void *context,
                                      const ReportProviderChunk &chunk);
+    static bool collect_range_chunk(void *context,
+                                    const ReportProviderChunk &chunk);
 
     bool ensure_summary_records();
     bool parse_summary_result(ReportSpoolResult &result);
@@ -385,7 +481,9 @@ private:
     const char *summary_state_name() const;
 
     bool cache_source_supported(ReportSourceId source) const;
-    bool build_cache_plan(const ReportSummaryRecord &night, bool force, bool latest_tail_refresh);
+    bool build_cache_plan(const ReportIndexedNight &night,
+                          bool force,
+                          bool latest_tail_refresh);
     bool start_next_cache_source();
     bool store_cache_round(ReportSpoolResult &result);
     bool write_cache_source_coverage(ReportSourceId source, int64_t from_ms);
@@ -404,6 +502,8 @@ private:
                              const char *name,
                              int64_t &min_start,
                              int64_t &max_end) const;
+    bool ensure_cache_coalesce_slots();
+    bool ensure_cache_write_queue_slots();
     bool buffer_parsed_chunk(const ReportParsedChunk &chunk);
     CacheFlushResult flush_cache_coalesce_buffer(size_t slot);
     CacheFlushResult flush_all_cache_coalesce_buffers();
@@ -436,10 +536,21 @@ private:
         size_t session_capacity,
         size_t &session_count,
         bool *pending_out = nullptr) const;
+    bool append_edf_event_sessions_for_selected_days(
+        EdfReportSessionDescriptor *sessions,
+        size_t session_capacity,
+        size_t &session_count) const;
     bool edf_report_complete_for_night(const ReportSummaryRecord &night,
                                        int64_t range_start_ms,
                                        int64_t range_end_ms,
                                        bool *pending_out = nullptr) const;
+    bool edf_report_complete_for_indexed_night(
+        const ReportIndexedNight &night,
+        int64_t range_start_ms,
+        int64_t range_end_ms,
+        bool *pending_out = nullptr) const;
+    bool edf_report_complete_for_night_sessions(
+        const ReportSummaryRecord &night) const;
     void set_prefetch_phase(PrefetchPhase phase, uint64_t night_ms,
                             bool inc_completed, bool inc_failed);
     void prefetch_note_failure(uint64_t night_ms);
@@ -449,14 +560,11 @@ private:
                                            const ReportSourceDef &source);
     bool sparse_event_confirmed_empty(const ReportSummaryRecord &night,
                                       const ReportSourceDef &source) const;
-    bool sparse_event_refresh_due(const ReportSummaryRecord &night,
-                                  const ReportSourceDef &source) const;
-    bool sparse_event_refresh_due_for_night(
-        const ReportSummaryRecord &night) const;
 
     bool ensure_result_chunks();
     bool ensure_result_slots();
     bool ensure_result_edf_sessions();
+    bool ensure_result_resolve_buffers();
     bool result_uses_edf_provider() const;
     void release_result_edf_sessions();
     void clear_result_prepare();
@@ -468,61 +576,85 @@ private:
                            bool required,
                            bool complete,
                            size_t &stream_index);
-    bool add_result_chunks_for_range(ReportStoreChunkKind kind,
-                                     ReportSourceId source,
-                                     ReportSignalId signal,
-                                     const char *name,
-                                     int64_t night_start_ms,
-                                     int64_t start_ms,
-                                     int64_t end_ms,
-                                     bool required);
+    bool add_provider_chunks_to_result_stream(
+        const ReportDataProvider &provider,
+        ReportStoreChunkKind kind,
+        ReportSourceId source,
+        ReportSignalId signal,
+        const char *name,
+        int64_t night_start_ms,
+        int64_t start_ms,
+        int64_t end_ms,
+        bool required,
+        bool complete,
+        size_t stream_index);
     bool add_provider_result_chunk(const ReportProviderChunk &provider_chunk,
                                    bool required,
                                    size_t stream_index);
     bool find_edf_sessions_for_night(const ReportSummaryRecord &night,
                                      int64_t range_start_ms,
-                                     int64_t range_end_ms);
-    bool add_edf_events_for_range(int64_t range_start_ms,
-                                  int64_t range_end_ms,
-                                  bool required,
-                                  uint32_t &scored_sources);
-    bool add_edf_signal_for_range(ReportSignalId signal,
-                                  int64_t range_start_ms,
-                                  int64_t range_end_ms,
-                                  bool required,
-                                  uint32_t &entries);
-    ReportSourceId choose_spool_source_for_signal(
-        const ReportSummaryRecord &night,
-        const ReportSignalDef &signal) const;
-    bool add_best_result_chunks_for_night(const ReportSummaryRecord &night,
-                                          int64_t range_start_ms,
-                                          int64_t range_end_ms);
+                                     int64_t range_end_ms,
+                                     bool *pending_out = nullptr);
+    bool resolve_and_materialize_result_for_night(
+        const ReportIndexedNight &night,
+        int64_t range_start_ms,
+        int64_t range_end_ms,
+        bool *edf_pending_out = nullptr);
+    enum class ResultPrepareOutcome : uint8_t {
+        Prepared,
+        Deferred,
+        Retry,
+        Failed,
+    };
+    bool begin_materialization(const ReportIndexedNight &night,
+                               const ReportResolvedPlan &plan) override;
+    bool add_materialized_stream(const ReportResolvedStream &stream,
+                                 size_t &result_stream_index) override;
+    bool add_materialized_segment(const ReportResolvedSegment &segment,
+                                  size_t result_stream_index) override;
+    void finish_materialization(const ReportResolvedPlan &plan) override;
     bool read_result_chunk_payload(const ReportResultChunk &chunk,
                                    ReportStoreChunkMeta &meta,
                                    ReportSpoolBuffer &payload);
-    bool prepare_result_by_therapy_index_internal(size_t therapy_index,
-                                                  bool refresh_cache);
+    void provider_chunk_from_result(const ReportResultChunk &chunk,
+                                    ReportProviderChunk &out) const;
+    bool for_each_result_series_sample(
+        const ReportResultChunk &chunk,
+        ReportProviderSeriesReadStats &stats,
+        ReportSeriesSampleCallback callback,
+        void *context);
+    ResultPrepareOutcome prepare_result_by_therapy_index_internal(
+        size_t therapy_index,
+        bool refresh_cache);
+    ResultPrepareOutcome prepare_result_by_night_start_internal(
+        uint64_t night_start_ms,
+        size_t therapy_index,
+        bool refresh_cache);
     bool defer_result_prepare_for_summary(size_t therapy_index,
                                           bool refresh_cache);
     bool load_result_night(size_t therapy_index,
                            ReportSummaryRecord &night);
     bool publish_existing_result_if_current(size_t therapy_index,
-                                            const ReportSummaryRecord &night,
+                                            const ReportIndexedNight &night,
+                                            const char *current_etag,
                                             bool refresh_cache);
     void begin_result_prepare_for_night(size_t therapy_index,
-                                        const ReportSummaryRecord &night);
-    bool refresh_result_cache_if_needed(const ReportSummaryRecord &night,
+                                        const ReportIndexedNight &night,
+                                        const char *current_etag);
+    bool refresh_result_cache_if_needed(const ReportIndexedNight &night,
                                         size_t therapy_index,
                                         bool refresh_cache,
                                         bool &deferred);
-    bool build_cache_plan_for_result_gaps(const ReportSummaryRecord &night,
-                                          bool latest_tail_refresh);
+    bool activate_cache_plan_for_night(const ReportSummaryRecord &night);
     bool count_result_events_from_chunks();
     void apply_result_event_indices_from_counts();
     bool finalize_result_prepare(size_t therapy_index);
-    size_t derive_result_session_ranges(PlotRange *ranges, size_t max_ranges) const;
-    void apply_result_session_ranges(const PlotRange *ranges, size_t range_count);
     const char *result_state_name() const;
+    void clear_result_ranges();
+    bool set_result_ranges_from_indexed_night(const ReportIndexedNight &night);
+    bool set_result_ranges_from_edf_sessions();
+    bool result_data_span(int64_t &span_start_ms,
+                          int64_t &span_end_ms) const;
 
     void reset_plot_build();
     void build_empty_plot_bin(ReportSpoolBuffer &out) const;
@@ -531,34 +663,87 @@ private:
     bool plot_time_in_ranges(int64_t timestamp_ms) const;
     int plot_range_index(int64_t timestamp_ms) const;
     bool process_plot_event_chunk(const ReportResultChunk &chunk);
-    bool open_plot_series(const ReportResultStream &stream);
-    bool process_plot_series_chunk(const ReportResultChunk &chunk);
+    bool open_plot_series_state(size_t stream_index);
+    bool process_plot_series_sample_value(PlotSeriesBuildState &state,
+                                          const ReportResultChunk &chunk,
+                                          const ReportSeriesSample &sample,
+                                          uint32_t interval_ms);
+    bool append_plot_series_value(PlotSeriesBuildState &state,
+                                  int64_t timestamp_ms,
+                                  int32_t value_milli,
+                                  int64_t bucket_ms);
+    bool append_plot_series_point(PlotSeriesBuildState &state,
+                                  int64_t timestamp_ms,
+                                  int32_t value_milli,
+                                  int64_t bucket_ms);
+    bool append_plot_series_gap(PlotSeriesBuildState &state);
+    bool process_plot_series_chunk(size_t chunk_index);
+    bool process_plot_edf_series_batch(size_t seed_chunk_index,
+                                       bool &processed);
     uint8_t flush_plot_bucket_to(ReportSpoolBuffer &out,
                                  PlotBuildBucket &bucket,
                                  int64_t base_ms,
                                  bool &ok);
-    void flush_plot_bucket();
+    uint8_t emit_plot_gap_to(ReportSpoolBuffer &out,
+                             PlotBuildBucket &bucket,
+                             int64_t base_ms,
+                             bool &ok);
+    void flush_plot_bucket(PlotSeriesBuildState &state);
+    bool finish_plot_series(size_t stream_index);
     bool finish_result_plot_build();
     void reset_range_plot_build(bool clear_ready);
-    bool start_range_plot_build(size_t therapy_index,
+    bool start_range_plot_build(uint64_t night_start_ms,
+                                size_t therapy_index_hint,
                                 int64_t from_ms,
-                                int64_t to_ms);
+                                int64_t to_ms,
+                                bool &waiting_for_result);
     void poll_range_plot_build();
+    bool ensure_range_build_buffers();
+    bool read_range_chunk_payload(const ReportResultChunk &chunk,
+                                  ReportStoreChunkMeta &meta,
+                                  ReportSpoolBuffer &payload);
+    bool for_each_range_series_sample(
+        const ReportResultChunk &chunk,
+        ReportProviderSeriesReadStats &stats,
+        ReportSeriesSampleCallback callback,
+        void *context);
     bool process_range_event_chunk(const ReportResultChunk &chunk);
     bool open_range_series(const ReportResultStream &stream);
+    int range_plot_range_index(int64_t timestamp_ms) const;
+    bool result_chunk_matches_stream(const ReportResultChunk &chunk,
+                                     const ReportResultStream &stream) const;
+    bool add_range_provider_chunk(const ReportProviderChunk &provider_chunk,
+                                  size_t stream_index);
+    bool materialize_range_plan(const ReportIndexedNight &night,
+                                const ReportResolvedPlan &plan);
+    bool process_range_series_sample_value(const ReportSeriesSample &sample,
+                                           ReportSignalId signal,
+                                           ReportSourceId source,
+                                           uint32_t interval_ms,
+                                           int32_t scale,
+                                           bool &capped,
+                                           bool &overflow);
     bool process_range_series_chunk(const ReportResultChunk &chunk);
     bool finish_range_series();
     void finish_range_plot_build();
     void fail_range_plot_build(const char *message);
 
-    bool result_plot_cache_path_for_night(const ReportSummaryRecord &night,
+    bool result_plot_cache_path_for_night(const ReportIndexedNight &night,
+                                          const char *etag,
                                           char *path,
                                           size_t path_size) const;
     bool result_plot_cache_path(char *path, size_t path_size) const;
+    bool result_plot_cache_exists_for_night(const ReportIndexedNight &night,
+                                            const char *etag) const;
     bool clear_plot_cache_for_night(const ReportSummaryRecord &night,
                                     uint32_t &deleted) const;
     bool load_result_plot_cache();
-    bool save_result_plot_cache() const;
+    bool enqueue_result_plot_cache_write(
+        const ReportIndexedNight &night,
+        const char *etag,
+        const std::shared_ptr<ReportSpoolBuffer> &plot);
+    bool service_plot_cache_writer();
+    void reset_plot_cache_write_locked();
 
     ReportSummaryRecord *records_ = nullptr;
     size_t record_count_ = 0;
@@ -576,10 +761,28 @@ private:
                               ReportSummaryRecord *&out);
     void give_summary_scratch();
     void publish_summary_json_snapshot();
-    bool summary_night_by_therapy_index_unlocked(size_t therapy_index,
-                                                 ReportSummaryRecord &out) const;
-    bool summary_night_by_start_unlocked(uint64_t night_start_ms,
-                                         ReportSummaryRecord &out) const;
+    bool build_indexed_nights(ReportIndexedNight *out,
+                              size_t capacity,
+                              size_t &count) const;
+    bool build_indexed_nights_uncached(ReportIndexedNight *out,
+                                       size_t capacity,
+                                       size_t &count) const;
+    bool indexed_night_by_therapy_index(size_t therapy_index,
+                                        ReportIndexedNight &out) const;
+    bool indexed_night_by_start(uint64_t night_start_ms,
+                                ReportIndexedNight &out,
+                                size_t *therapy_index_out = nullptr) const;
+    bool indexed_night_by_newest_cursor_locked(size_t cursor,
+                                               ReportIndexedNight &out,
+                                               size_t &therapy_index) const;
+    bool ensure_index_cache_locked(uint32_t summary_revision,
+                                   bool catalog_present,
+                                   uint8_t catalog_state,
+                                   uint32_t catalog_refresh_id) const;
+    bool index_cache_key(uint32_t &summary_revision,
+                         bool &catalog_present,
+                         uint8_t &catalog_state,
+                         uint32_t &catalog_refresh_id) const;
     std::atomic<uint32_t> summary_revision_pub_{0};  // see summary_revision()
     SpoolClient spool_;
     uint32_t observed_spool_rx_queue_full_alerts_ = 0;
@@ -606,7 +809,7 @@ private:
 
     // Write-side coalescing: buffer parsed chunks per (kind,name) and flush
     // larger files, so a night reads back as a few files instead of hundreds.
-    CacheCoalesceBuffer cache_coalesce_[AC_REPORT_COALESCE_SLOTS];
+    CacheCoalesceBuffer *cache_coalesce_ = nullptr;  // PSRAM slots
     struct CacheWriteQueueSlot {
         bool active = false;
         uint32_t fetch_id = 0;
@@ -614,7 +817,7 @@ private:
         ReportStoreChunkMeta meta;
         ReportSpoolBuffer payload;
     };
-    CacheWriteQueueSlot cache_write_queue_[AC_REPORT_CACHE_WRITE_QUEUE_MAX];
+    CacheWriteQueueSlot *cache_write_queue_ = nullptr;  // PSRAM slots
     mutable SemaphoreHandle_t cache_write_lock_ = nullptr;
     size_t cache_write_head_ = 0;
     size_t cache_write_tail_ = 0;
@@ -640,9 +843,8 @@ private:
     NightEpoch *night_epochs_ = nullptr;  // PSRAM, AC_REPORT_SUMMARY_RECORD_MAX
     size_t night_epoch_count_ = 0;
     uint32_t night_epoch_for_unlocked(uint64_t night_start_ms) const;
-    void format_night_etag(const ReportSummaryRecord &rec, char *out,
-                           size_t out_size) const;
     void format_night_etag_unlocked(const ReportSummaryRecord &rec,
+                                    uint64_t source_signature,
                                     char *out,
                                     size_t out_size) const;
     uint32_t next_trash_cleanup_ms_ = 0;
@@ -670,8 +872,22 @@ private:
     ReportResultStream result_streams_[AC_REPORT_RESULT_STREAM_MAX] = {};
     size_t result_stream_count_ = 0;
     EdfReportCatalogJob *edf_catalog_ = nullptr;
+    uint32_t edf_catalog_summary_refresh_id_ = 0;
     EdfReportSessionDescriptor *result_edf_sessions_ = nullptr;
     size_t result_edf_session_count_ = 0;
+    ReportResolvedPlan *result_resolved_plan_ = nullptr;
+    ReportResolveScratch *result_resolve_scratch_ = nullptr;
+    ReportIndexedNight *prepare_indexed_night_ = nullptr;
+    ReportIndexedNight *range_indexed_night_ = nullptr;
+
+    mutable SemaphoreHandle_t index_cache_lock_ = nullptr;
+    mutable ReportIndexedNight *index_cache_ = nullptr;
+    mutable size_t index_cache_count_ = 0;
+    mutable bool index_cache_valid_ = false;
+    mutable uint32_t index_cache_summary_revision_ = 0;
+    mutable bool index_cache_catalog_present_ = false;
+    mutable uint8_t index_cache_catalog_state_ = 0;
+    mutable uint32_t index_cache_catalog_refresh_id_ = 0;
 
     // Served-result LRU. The result_* slot above is build SCRATCH only; GET-by-
     // index serves these immutable per-night entries, so two clients on different
@@ -679,24 +895,34 @@ private:
     struct MaterializedResult {
         bool valid = false;
         uint64_t night_start_ms = 0;
-        char etag[48] = {};
+        char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
         uint32_t last_used = 0;
         ReportResultStatus status;
-        ReportSummaryRecord night;
+        ReportIndexedNight night;
+        PlotRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+        size_t range_count = 0;
         ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
         size_t stream_count = 0;
+        ReportResultChunk chunks[AC_REPORT_RESULT_CHUNK_MAX] = {};
+        size_t chunk_count = 0;
+        EdfReportSessionDescriptor
+            edf_sessions[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+        size_t edf_session_count = 0;
         std::shared_ptr<ReportSpoolBuffer> plot;
     };
     MaterializedResult *result_slots_ = nullptr;  // PSRAM, AC_REPORT_RESULT_SLOT_MAX
     SemaphoreHandle_t result_slots_lock_ = nullptr;
+    void clear_materialized_slot_locked(MaterializedResult &slot);
     // Zoom range plot: request set by the web thread, built on the main loop,
     // result held for serving. All guarded by result_slots_lock_
     bool range_req_active_ = false;
     size_t range_req_index_ = 0;
+    uint64_t range_req_night_start_ms_ = 0;
     int64_t range_req_from_ = 0;
     int64_t range_req_to_ = 0;
     std::shared_ptr<ReportSpoolBuffer> range_plot_bytes_;
     size_t range_plot_index_ = 0;
+    uint64_t range_plot_night_start_ms_ = 0;
     int64_t range_plot_from_ = 0;
     int64_t range_plot_to_ = 0;
     bool range_build_active_ = false;
@@ -704,6 +930,15 @@ private:
     size_t range_build_index_ = 0;
     int64_t range_build_from_ = 0;
     int64_t range_build_to_ = 0;
+    uint64_t range_night_start_ms_ = 0;
+    ReportResultChunk *range_chunks_ = nullptr;
+    size_t range_chunk_count_ = 0;
+    ReportResultStream range_streams_[AC_REPORT_RESULT_STREAM_MAX] = {};
+    size_t range_stream_count_ = 0;
+    EdfReportSessionDescriptor *range_edf_sessions_ = nullptr;
+    size_t range_edf_session_count_ = 0;
+    PlotRange range_ranges_[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    size_t range_range_count_ = 0;
     std::shared_ptr<ReportSpoolBuffer> range_build_bytes_;
     ReportSpoolBuffer range_tmp_;
     ReportSpoolBuffer range_seen_events_;
@@ -712,22 +947,59 @@ private:
     size_t range_stream_index_ = 0;
     bool range_series_open_ = false;
     uint32_t range_series_points_ = 0;
+    bool range_have_last_sample_ = false;
+    int64_t range_last_sample_ms_ = 0;
+    int range_last_range_index_ = -1;
     int64_t range_bucket_ms_ = 1;
     int64_t range_current_bucket_ = -1;
     PlotBuildBucket range_bucket_;
     bool range_build_ok_ = true;
+    uint32_t range_build_started_ms_ = 0;
+    uint32_t range_build_input_chunks_ = 0;
+    uint32_t range_build_input_bytes_ = 0;
     void service_range_plot(bool realtime_active);
+
+    enum class PlotCacheWritePhase : uint8_t {
+        Idle,
+        ClearOld,
+        OpenTmp,
+        Write,
+        CloseRename,
+    };
+    struct PlotCacheWriteJob {
+        bool active = false;
+        PlotCacheWritePhase phase = PlotCacheWritePhase::Idle;
+        ReportSummaryRecord night;
+        char path[128] = {};
+        char tmp_path[136] = {};
+        std::shared_ptr<ReportSpoolBuffer> payload;
+        size_t offset = 0;
+        File file;
+    };
+    SemaphoreHandle_t plot_cache_write_lock_ = nullptr;
+    PlotCacheWriteJob plot_cache_write_;
+
     uint32_t result_slot_tick_ = 0;
-    void publish_result_to_slot();
+    bool publish_result_to_slot(bool cache_plot = false);
     void update_materialized_status_locked();
+    void clear_range_plot_locked(uint64_t night_start_ms, bool all);
     void invalidate_materialized_locked(uint64_t night_start_ms, bool all);
     void invalidate_materialized(uint64_t night_start_ms, bool all);
     void build_result_json_from(const ReportResultStatus &status,
-                                const ReportSummaryRecord &night,
+                                const ReportIndexedNight &night,
+                                const PlotRange *ranges,
+                                size_t range_count,
                                 const ReportResultStream *streams,
                                 size_t stream_count,
                                 const ReportCacheFetchStatus &cache,
                                 LargeTextBuffer &json) const;
+    ResultRead read_result_for_indexed_night(
+        size_t therapy_index,
+        const ReportIndexedNight &indexed_night,
+        const char *if_none_match,
+        char *etag_out,
+        size_t etag_out_size,
+        LargeTextBuffer &json_out);
 
     // Bounded dedup build queue: a GET-miss (or POST refresh) enqueues a night to
     // build; the main loop services one at a time, replacing the single pending slot.
@@ -735,6 +1007,8 @@ private:
         uint64_t night_start_ms = 0;
         size_t therapy_index = 0;
         bool refresh = false;
+        bool idle_prebuild = false;
+        uint32_t queued_ms = 0;
     };
     enum class BuildQueueResult : uint8_t {
         Queued,
@@ -745,22 +1019,55 @@ private:
     ResultBuildJob build_queue_[AC_REPORT_BUILD_QUEUE_MAX];
     size_t build_queue_head_ = 0;
     size_t build_queue_count_ = 0;
+    uint32_t build_queue_enqueue_total_ = 0;
+    uint32_t build_queue_queued_total_ = 0;
+    uint32_t build_queue_already_total_ = 0;
+    uint32_t build_queue_service_total_ = 0;
+    uint64_t build_queue_last_enqueue_night_ms_ = 0;
+    size_t build_queue_last_enqueue_therapy_index_ = 0;
+    char build_queue_last_read_[24] = {};
+    char build_queue_last_enqueue_result_[24] = {};
+    char build_queue_last_service_block_[24] = {};
+    uint64_t build_queue_last_night_ms_ = 0;
+    size_t build_queue_last_therapy_index_ = 0;
+    char build_queue_last_outcome_[16] = {};
+    char build_queue_last_state_[16] = {};
+    char build_queue_last_error_[48] = {};
     SemaphoreHandle_t build_queue_lock_ = nullptr;
     BuildQueueResult enqueue_build(uint64_t night_start_ms,
                                    size_t therapy_index,
-                                   bool refresh);
+                                   bool refresh,
+                                   bool idle_prebuild = false);
     void clear_build_queue(uint64_t night_start_ms, bool all);
     void service_build_queue(bool realtime_active);
+    bool plot_cache_writer_active() const;
+    bool idle_prebuild_gate_open(const char **reason = nullptr) const;
+    bool plot_prebuild_key_matches(uint32_t summary_revision,
+                                   bool catalog_present,
+                                   uint8_t catalog_state,
+                                   uint32_t catalog_refresh_id) const;
+    void set_plot_prebuild_key(uint32_t summary_revision,
+                               bool catalog_present,
+                               uint8_t catalog_state,
+                               uint32_t catalog_refresh_id);
 
+    ReportIndexedNight result_indexed_night_;
     ReportSummaryRecord result_night_;
+    char result_etag_[AC_REPORT_RESULT_ETAG_MAX] = {};
+    PlotRange result_ranges_[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    size_t result_range_count_ = 0;
     ReportResultStatus result_status_;
     ReportSpoolBuffer result_plot_bin_;
     ReportSpoolBuffer plot_build_bin_;
     ReportSpoolBuffer plot_tmp_;
     ReportSpoolBuffer plot_seen_events_;
+    bool result_skip_plot_cache_ = false;
+    bool active_build_idle_prebuild_ = false;
 
     bool plot_bin_ok_ = true;
     bool plot_build_active_ = false;
+    bool plot_build_idle_prebuild_ = false;
+    std::atomic<uint64_t> plot_build_night_start_ms_{0};
     ReportPlotBuildPhase plot_build_phase_ = ReportPlotBuildPhase::Idle;
     PlotRange plot_ranges_[AC_REPORT_SUMMARY_SESSION_MAX] = {};
     size_t plot_range_count_ = 0;
@@ -768,10 +1075,19 @@ private:
     int64_t plot_end_ms_ = 0;
     int64_t plot_bucket_ms_ = 1;
     uint32_t plot_chunk_index_ = 0;
-    size_t plot_stream_index_ = 0;
-    int64_t plot_current_bucket_ = -1;
-    bool plot_series_open_ = false;
-    PlotBuildBucket plot_bucket_;
+    bool plot_chunk_done_[AC_REPORT_RESULT_CHUNK_MAX] = {};
+    PlotSeriesBuildState plot_series_states_[AC_REPORT_RESULT_STREAM_MAX];
+    uint32_t plot_build_started_ms_ = 0;
+    uint32_t plot_build_input_chunks_ = 0;
+    uint32_t plot_build_input_bytes_ = 0;
+
+    bool plot_prebuild_key_valid_ = false;
+    uint32_t plot_prebuild_summary_revision_ = 0;
+    bool plot_prebuild_catalog_present_ = false;
+    uint8_t plot_prebuild_catalog_state_ = 0;
+    uint32_t plot_prebuild_catalog_refresh_id_ = 0;
+    size_t plot_prebuild_cursor_ = 0;
+    uint32_t plot_prebuild_next_scan_ms_ = 0;
 };
 
 }  // namespace aircannect

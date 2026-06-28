@@ -5,7 +5,8 @@
 namespace aircannect {
 namespace {
 
-static constexpr uint32_t EDF_REPORT_PLAN_TARGET_BYTES = 64 * 1024;
+static constexpr uint32_t EDF_REPORT_PLAN_TARGET_BYTES = 512 * 1024;
+static constexpr int64_t EDF_REPORT_COVERAGE_TOLERANCE_MS = 90000;
 
 const EdfReportSessionFileDescriptor *session_file(
     const EdfReportSessionDescriptor &session,
@@ -77,6 +78,73 @@ uint32_t clamp_u64_to_u32(uint64_t value) {
     return value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(value);
 }
 
+int64_t ceil_sample_index(int64_t base_ms,
+                          uint32_t interval_ms,
+                          int64_t timestamp_ms) {
+    if (interval_ms == 0 || timestamp_ms <= base_ms) return 0;
+    const int64_t delta = timestamp_ms - base_ms;
+    return (delta + static_cast<int64_t>(interval_ms) - 1) /
+           static_cast<int64_t>(interval_ms);
+}
+
+bool numeric_sample_window(const EdfReportSessionFileDescriptor &file,
+                           uint32_t sample_interval_ms,
+                           uint32_t first_record,
+                           uint32_t record_count,
+                           int64_t range_start_ms,
+                           int64_t range_end_ms,
+                           int64_t &sample_start_ms,
+                           int64_t &sample_end_ms,
+                           uint32_t &sample_count) {
+    sample_start_ms = 0;
+    sample_end_ms = 0;
+    sample_count = 0;
+    if (range_end_ms <= range_start_ms || file.header_start_ms <= 0 ||
+        sample_interval_ms == 0 || record_count == 0) {
+        return false;
+    }
+
+    const uint32_t samples = samples_per_record(file, sample_interval_ms);
+    if (samples == 0) return false;
+    const int64_t samples_i = static_cast<int64_t>(samples);
+    if (static_cast<uint64_t>(first_record) >
+        static_cast<uint64_t>(INT64_MAX / samples_i)) {
+        return false;
+    }
+
+    const int64_t record_first =
+        static_cast<int64_t>(first_record) * samples_i;
+    if (static_cast<uint64_t>(record_count) >
+        static_cast<uint64_t>((INT64_MAX - record_first) / samples_i)) {
+        return false;
+    }
+    const int64_t record_end =
+        record_first + static_cast<int64_t>(record_count) * samples_i;
+    int64_t first =
+        ceil_sample_index(file.header_start_ms,
+                          sample_interval_ms,
+                          range_start_ms);
+    int64_t end =
+        ceil_sample_index(file.header_start_ms,
+                          sample_interval_ms,
+                          range_end_ms);
+    if (first < record_first) first = record_first;
+    if (end > record_end) end = record_end;
+    if (end <= first) return false;
+
+    const int64_t interval = static_cast<int64_t>(sample_interval_ms);
+    if (first > (INT64_MAX - file.header_start_ms) / interval ||
+        end > (INT64_MAX - file.header_start_ms) / interval) {
+        return false;
+    }
+    const int64_t count = end - first;
+    if (count <= 0 || count > UINT32_MAX) return false;
+    sample_start_ms = file.header_start_ms + first * interval;
+    sample_end_ms = file.header_start_ms + end * interval;
+    sample_count = static_cast<uint32_t>(count);
+    return sample_end_ms > sample_start_ms;
+}
+
 bool emit_numeric_entries(const EdfReportSessionFileDescriptor &file,
                           uint8_t file_slot,
                           const EdfReportSignalMappingDef &mapping,
@@ -95,12 +163,40 @@ bool emit_numeric_entries(const EdfReportSessionFileDescriptor &file,
     }
 
     const uint32_t per_entry = records_per_plan_entry(file);
-    const uint32_t samples = samples_per_record(file,
-                                                mapping.sample_interval_ms);
+    int64_t range_sample_start_ms = 0;
+    int64_t range_sample_end_ms = 0;
+    uint32_t range_sample_count = 0;
+    if (!numeric_sample_window(file,
+                               mapping.sample_interval_ms,
+                               first_record,
+                               end_record - first_record,
+                               range_start_ms,
+                               range_end_ms,
+                               range_sample_start_ms,
+                               range_sample_end_ms,
+                               range_sample_count)) {
+        return true;
+    }
     const char *name = report_signal_store_name(mapping.signal);
     for (uint32_t record = first_record; record < end_record;) {
         uint32_t count = end_record - record;
         if (count > per_entry) count = per_entry;
+
+        int64_t sample_start_ms = 0;
+        int64_t sample_end_ms = 0;
+        uint32_t sample_count = 0;
+        if (!numeric_sample_window(file,
+                                   mapping.sample_interval_ms,
+                                   record,
+                                   count,
+                                   range_start_ms,
+                                   range_end_ms,
+                                   sample_start_ms,
+                                   sample_end_ms,
+                                   sample_count)) {
+            record += count;
+            continue;
+        }
 
         EdfReportDataPlanEntry entry;
         entry.kind = EdfReportDataKind::Series;
@@ -114,19 +210,18 @@ bool emit_numeric_entries(const EdfReportSessionFileDescriptor &file,
                   edf_report_signal_mapping_label(mapping));
         entry.first_record = record;
         entry.record_count = count;
-        entry.start_ms = file.header_start_ms +
-                         static_cast<int64_t>(record) *
-                             static_cast<int64_t>(file.record_duration_ms);
-        entry.end_ms = entry.start_ms +
-                       static_cast<int64_t>(count) *
-                           static_cast<int64_t>(file.record_duration_ms);
+        entry.start_ms = sample_start_ms;
+        entry.end_ms = sample_end_ms;
         entry.sample_interval_ms = mapping.sample_interval_ms;
-        entry.record_count_estimate =
-            clamp_u64_to_u32(static_cast<uint64_t>(count) * samples);
+        entry.record_count_estimate = sample_count;
+        const size_t max_missing_bitmap_bytes =
+            (static_cast<size_t>(sample_count) + 7u) / 8u;
         entry.payload_len_estimate = clamp_u64_to_u32(
-            static_cast<uint64_t>(entry.record_count_estimate) *
-            report_series_sample_wire_size());
+            report_series_v2_uniform_wire_size(sample_count,
+                                               max_missing_bitmap_bytes));
         entry.primary = mapping.primary;
+        entry.trim_leading_padding = sample_start_ms == range_sample_start_ms;
+        entry.trim_trailing_padding = sample_end_ms == range_sample_end_ms;
         if (!callback(context, entry)) return false;
         record += count;
     }
@@ -137,10 +232,59 @@ struct PlanCountContext {
     uint32_t entries = 0;
 };
 
+struct PlanCoverageContext {
+    int64_t covered_until_ms = 0;
+    bool advanced = false;
+};
+
 bool count_plan_entry(void *context, const EdfReportDataPlanEntry &entry) {
     PlanCountContext *ctx = static_cast<PlanCountContext *>(context);
     if (!ctx || !entry.name || !entry.name[0]) return false;
     ctx->entries++;
+    return true;
+}
+
+bool extend_plan_coverage(void *context, const EdfReportDataPlanEntry &entry) {
+    PlanCoverageContext *ctx = static_cast<PlanCoverageContext *>(context);
+    if (!ctx || !entry.name || !entry.name[0] ||
+        entry.end_ms <= entry.start_ms) {
+        return false;
+    }
+    if (entry.end_ms <= ctx->covered_until_ms) return true;
+    if (entry.start_ms >
+        ctx->covered_until_ms + EDF_REPORT_COVERAGE_TOLERANCE_MS) {
+        return true;
+    }
+    ctx->covered_until_ms = entry.end_ms;
+    ctx->advanced = true;
+    return true;
+}
+
+bool signal_covers_range(const EdfReportSessionDescriptor *sessions,
+                         size_t session_count,
+                         ReportSignalId signal,
+                         const EdfReportRequiredRange &range) {
+    if (!sessions || session_count == 0 || range.end_ms <= range.start_ms) {
+        return false;
+    }
+
+    int64_t covered_until = range.start_ms;
+    while (covered_until + EDF_REPORT_COVERAGE_TOLERANCE_MS < range.end_ms) {
+        PlanCoverageContext ctx;
+        ctx.covered_until_ms = covered_until;
+        for (size_t i = 0; i < session_count; ++i) {
+            if (!edf_report_plan_signal(sessions[i],
+                                        signal,
+                                        range.start_ms,
+                                        range.end_ms,
+                                        extend_plan_coverage,
+                                        &ctx)) {
+                return false;
+            }
+        }
+        if (!ctx.advanced) return false;
+        covered_until = ctx.covered_until_ms;
+    }
     return true;
 }
 
@@ -231,57 +375,66 @@ bool edf_report_plan_signal(const EdfReportSessionDescriptor &session,
                                 context);
 }
 
+bool edf_report_plan_signal_covers_ranges(
+    const EdfReportSessionDescriptor *sessions,
+    size_t session_count,
+    ReportSignalId signal,
+    const EdfReportRequiredRange *ranges,
+    size_t range_count) {
+    if (!sessions || session_count == 0 || !ranges || range_count == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < range_count; ++i) {
+        if (!signal_covers_range(sessions, session_count, signal, ranges[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool edf_report_plan_covers_report(
     const EdfReportSessionDescriptor *sessions,
     size_t session_count,
-    int64_t range_start_ms,
-    int64_t range_end_ms,
+    const EdfReportRequiredRange *ranges,
+    size_t range_count,
     EdfReportDataCoverage *coverage_out) {
     if (coverage_out) *coverage_out = EdfReportDataCoverage();
-    if (!sessions || session_count == 0 || range_end_ms <= range_start_ms) {
+    if (!sessions || session_count == 0 || !ranges || range_count == 0) {
         return false;
     }
 
     EdfReportDataCoverage coverage;
-    for (size_t i = 0; i < session_count; ++i) {
-        if (edf_report_session_has_file(sessions[i],
+    for (size_t session_index = 0; session_index < session_count;
+         ++session_index) {
+        if (edf_report_session_has_file(sessions[session_index],
                                         EdfInventoryFileKind::Eve)) {
             coverage.scored_event_sources++;
         }
-        PlanCountContext ctx;
-        if (!edf_report_plan_events(sessions[i],
-                                    range_start_ms,
-                                    range_end_ms,
-                                    count_plan_entry,
-                                    &ctx)) {
-            return false;
-        }
-        coverage.event_entries += ctx.entries;
-    }
-    if (coverage.scored_event_sources == 0) {
-        if (coverage_out) *coverage_out = coverage;
-        return false;
-    }
-
-    size_t signal_count = 0;
-    const ReportSignalDef *signals = report_signal_defs(signal_count);
-    coverage.signals_required = static_cast<uint32_t>(signal_count);
-    for (size_t signal_index = 0; signal_index < signal_count; ++signal_index) {
-        const ReportSignalDef &signal = signals[signal_index];
-        uint32_t entries = 0;
-        for (size_t i = 0; i < session_count; ++i) {
+        for (size_t range_index = 0; range_index < range_count; ++range_index) {
+            const EdfReportRequiredRange &range = ranges[range_index];
+            if (range.end_ms <= range.start_ms) continue;
             PlanCountContext ctx;
-            if (!edf_report_plan_signal(sessions[i],
-                                        signal.id,
-                                        range_start_ms,
-                                        range_end_ms,
+            if (!edf_report_plan_events(sessions[session_index],
+                                        range.start_ms,
+                                        range.end_ms,
                                         count_plan_entry,
                                         &ctx)) {
                 return false;
             }
-            entries += ctx.entries;
+            coverage.event_entries += ctx.entries;
         }
-        if (entries == 0) {
+    }
+    size_t signal_count = 0;
+    const ReportSignalDef *signals = report_signal_defs(signal_count);
+    for (size_t signal_index = 0; signal_index < signal_count; ++signal_index) {
+        const ReportSignalDef &signal = signals[signal_index];
+        if (!report_signal_required_for_result(signal)) continue;
+        coverage.signals_required++;
+        if (!edf_report_plan_signal_covers_ranges(sessions,
+                                                  session_count,
+                                                  signal.id,
+                                                  ranges,
+                                                  range_count)) {
             if (coverage_out) *coverage_out = coverage;
             return false;
         }

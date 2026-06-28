@@ -49,47 +49,56 @@ const ReportSignalDef SIGNALS[] = {
      "flow",
      "Flow",
      ReportSourceId::RespiratoryFlow6p25Hz,
-     ReportSourceId::RespiratoryFlow6p25Hz},
+     ReportSourceId::RespiratoryFlow6p25Hz,
+     REPORT_SIGNAL_REQUIRED},
     {ReportSignalId::InspiratoryPressure,
      "inspiratory_pressure",
      "Inspiratory Pressure",
      ReportSourceId::InspiratoryPressure0p5Hz,
-     ReportSourceId::TherapyOneMinute},
+     ReportSourceId::TherapyOneMinute,
+     0},
     {ReportSignalId::ExpiratoryPressure,
      "expiratory_pressure",
      "Expiratory Pressure",
      ReportSourceId::TherapyOneMinute,
-     ReportSourceId::TherapyOneMinute},
+     ReportSourceId::TherapyOneMinute,
+     0},
     {ReportSignalId::Leak,
      "leak",
      "Leak",
      ReportSourceId::Leak0p5Hz,
-     ReportSourceId::TherapyOneMinute},
+     ReportSourceId::TherapyOneMinute,
+     0},
     {ReportSignalId::MinuteVentilation,
      "minute_ventilation",
      "Minute Vent",
      ReportSourceId::TherapyOneMinute,
-     ReportSourceId::TherapyOneMinute},
+     ReportSourceId::TherapyOneMinute,
+     0},
     {ReportSignalId::MaskPressure,
      "mask_pressure",
      "Mask Pressure",
      ReportSourceId::MaskPressure6p25Hz,
-     ReportSourceId::MaskPressure6p25Hz},
+     ReportSourceId::MaskPressure6p25Hz,
+     REPORT_SIGNAL_REQUIRED},
     {ReportSignalId::InspiratoryDuration,
      "inspiratory_duration",
      "Insp. Duration",
      ReportSourceId::TherapyOneMinute,
-     ReportSourceId::TherapyOneMinute},
+     ReportSourceId::TherapyOneMinute,
+     0},
     {ReportSignalId::RespiratoryRate,
      "respiratory_rate",
      "Resp. Rate",
      ReportSourceId::TherapyOneMinute,
-     ReportSourceId::TherapyOneMinute},
+     ReportSourceId::TherapyOneMinute,
+     0},
     {ReportSignalId::IeRatio,
      "ie_ratio",
      "I:E",
      ReportSourceId::TherapyOneMinute,
-     ReportSourceId::TherapyOneMinute},
+     ReportSourceId::TherapyOneMinute,
+     0},
 };
 
 }  // namespace
@@ -130,6 +139,34 @@ const char *report_signal_store_name(ReportSignalId id) {
         if (signals[i].id == id) return signals[i].store_name;
     }
     return "";
+}
+
+bool report_source_required_for_result(ReportSourceId source) {
+    switch (source) {
+        case ReportSourceId::RespiratoryEvents:
+        case ReportSourceId::TherapyOneMinute:
+        case ReportSourceId::RespiratoryFlow6p25Hz:
+        case ReportSourceId::MaskPressure6p25Hz:
+        case ReportSourceId::InspiratoryPressure0p5Hz:
+        case ReportSourceId::Leak0p5Hz:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool report_signal_required_for_result(const ReportSignalDef &signal) {
+    return (signal.flags & REPORT_SIGNAL_REQUIRED) != 0;
+}
+
+bool report_source_is_sampled(const ReportSourceDef &source) {
+    return (source.purposes &
+            (REPORT_SOURCE_TREND_SERIES | REPORT_SOURCE_HIGH_RES_SERIES)) != 0;
+}
+
+bool report_source_is_sparse_event(const ReportSourceDef &source) {
+    return source.id == ReportSourceId::RespiratoryEvents ||
+           source.id == ReportSourceId::UsageEvents;
 }
 
 }  // namespace aircannect

@@ -1,5 +1,6 @@
 #include "edf_report_catalog_job.h"
 
+#include <algorithm>
 #include <string.h>
 
 #include "debug_log.h"
@@ -84,6 +85,14 @@ void EdfReportCatalogJob::release_build_locked() {
     build_sessions_ = nullptr;
     build_session_count_ = 0;
     status_.build_sessions = 0;
+    release_build_days_locked();
+}
+
+void EdfReportCatalogJob::release_build_days_locked() {
+    if (build_days_) Memory::free(build_days_);
+    build_days_ = nullptr;
+    build_day_count_ = 0;
+    build_day_index_ = 0;
 }
 
 bool EdfReportCatalogJob::allocate_build_locked() {
@@ -101,26 +110,38 @@ bool EdfReportCatalogJob::allocate_build_locked() {
                                         sizeof(EdfReportSessionDescriptor)));
         return false;
     }
+    build_days_ = static_cast<DayName *>(Memory::calloc_large(
+        AC_EDF_REPORT_CATALOG_DAY_MAX,
+        sizeof(DayName),
+        false));
+    if (!build_days_) {
+        Memory::free(build_sessions_);
+        build_sessions_ = nullptr;
+        set_error_locked("alloc_failed");
+        Log::logf(CAT_EDF, LOG_ERROR,
+                  "report catalog allocation failed days=%u bytes=%u\n",
+                  static_cast<unsigned>(AC_EDF_REPORT_CATALOG_DAY_MAX),
+                  static_cast<unsigned>(AC_EDF_REPORT_CATALOG_DAY_MAX *
+                                        sizeof(DayName)));
+        return false;
+    }
     return true;
 }
 
-void EdfReportCatalogJob::publish_build_locked() {
-    if (sessions_) Memory::free(sessions_);
-    sessions_ = nullptr;
-    session_count_ = 0;
+void EdfReportCatalogJob::publish_snapshot_locked(bool final) {
+    EdfReportSessionDescriptor *packed = nullptr;
+    size_t packed_count = 0;
 
     if (build_session_count_ > 0) {
-        EdfReportSessionDescriptor *packed =
-            static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
-                build_session_count_ * sizeof(EdfReportSessionDescriptor),
-                false));
+        packed = static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
+            build_session_count_ * sizeof(EdfReportSessionDescriptor),
+            false));
         if (packed) {
             memcpy(packed,
                    build_sessions_,
                    build_session_count_ *
                        sizeof(EdfReportSessionDescriptor));
-            Memory::free(build_sessions_);
-            sessions_ = packed;
+            packed_count = build_session_count_;
         } else {
             Log::logf(CAT_EDF, LOG_WARN,
                       "report catalog compact allocation failed "
@@ -129,38 +150,58 @@ void EdfReportCatalogJob::publish_build_locked() {
                       static_cast<unsigned>(
                           build_session_count_ *
                           sizeof(EdfReportSessionDescriptor)));
-            sessions_ = build_sessions_;
+            if (final) {
+                packed = build_sessions_;
+                packed_count = build_session_count_;
+            }
         }
-        session_count_ = build_session_count_;
-    } else {
-        Memory::free(build_sessions_);
     }
-    build_sessions_ = nullptr;
-    build_session_count_ = 0;
 
-    status_.state = EdfReportCatalogState::Ready;
+    if (packed || final) {
+        if (sessions_ && sessions_ != packed) Memory::free(sessions_);
+        sessions_ = packed;
+        session_count_ = packed_count;
+    }
+
+    if (final) {
+        if (build_sessions_ && build_sessions_ != sessions_) {
+            Memory::free(build_sessions_);
+        }
+        build_sessions_ = nullptr;
+        build_session_count_ = 0;
+        release_build_days_locked();
+        status_.state = EdfReportCatalogState::Ready;
+        status_.build_sessions = 0;
+        status_.error[0] = '\0';
+        update_current_path_locked("");
+    }
     status_.sessions = session_count_;
-    status_.build_sessions = 0;
-    status_.error[0] = '\0';
-    update_current_path_locked("");
+}
+
+void EdfReportCatalogJob::publish_partial_build_locked() {
+    // Keep the public session snapshot stable until a refresh completes.
+    // Report ETags and source planning depend on this snapshot; publishing a
+    // partial DATALOG walk makes the same night oscillate between identities.
+    status_.sessions = session_count_;
+    status_.build_sessions = build_session_count_;
+}
+
+void EdfReportCatalogJob::publish_build_locked() {
+    publish_snapshot_locked(true);
 }
 
 void EdfReportCatalogJob::update_current_path_locked(const char *path) {
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
 }
 
-bool EdfReportCatalogJob::request_refresh(uint32_t *refresh_id_out) {
-    begin();
-    if (!lock(0)) return false;
+bool EdfReportCatalogJob::start_refresh_locked(uint32_t *refresh_id_out) {
     if (status_.state == EdfReportCatalogState::Refreshing) {
-        unlock();
         return false;
     }
 
     close_dirs_locked();
     release_build_locked();
     if (!allocate_build_locked()) {
-        unlock();
         return false;
     }
 
@@ -175,9 +216,50 @@ bool EdfReportCatalogJob::request_refresh(uint32_t *refresh_id_out) {
     current_file_size_ = 0;
     current_file_mtime_ = 0;
     if (refresh_id_out) *refresh_id_out = status_.refresh_id;
-    unlock();
-    if (BackgroundWorker *worker = background_worker()) worker->wake();
     return true;
+}
+
+bool EdfReportCatalogJob::request_refresh(uint32_t *refresh_id_out) {
+    begin();
+    if (!lock(0)) return false;
+    const bool started = start_refresh_locked(refresh_id_out);
+    unlock();
+    if (started) {
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+    }
+    return started;
+}
+
+bool EdfReportCatalogJob::set_timezone_offset_minutes(int32_t offset_minutes) {
+    begin();
+    if (!lock(0)) return false;
+    const bool changed = !timezone_offset_valid_ ||
+                         timezone_offset_minutes_ != offset_minutes;
+    if (changed) {
+        timezone_offset_valid_ = true;
+        timezone_offset_minutes_ = offset_minutes;
+        timezone_refresh_pending_ = true;
+        if (status_.state == EdfReportCatalogState::Refreshing) {
+            close_dirs_locked();
+            release_build_locked();
+            status_.state = session_count_ > 0 ? EdfReportCatalogState::Ready
+                                               : EdfReportCatalogState::Idle;
+            status_.sessions = session_count_;
+            phase_ = Phase::Idle;
+            update_current_path_locked("");
+        }
+    }
+    bool started = false;
+    if (timezone_refresh_pending_ &&
+        status_.state != EdfReportCatalogState::Refreshing) {
+        started = start_refresh_locked(nullptr);
+        if (started) timezone_refresh_pending_ = false;
+    }
+    unlock();
+    if (started) {
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+    }
+    return changed;
 }
 
 JobStep EdfReportCatalogJob::step() {
@@ -189,12 +271,16 @@ JobStep EdfReportCatalogJob::step() {
     }
 
     JobStep out = JobStep::Idle;
+    if (phase_ == Phase::ReadHeader) {
+        unlock();
+        return read_header_unlocked();
+    }
     switch (phase_) {
         case Phase::OpenRoot: out = open_root_locked(); break;
         case Phase::ReadDay: out = read_day_locked(); break;
         case Phase::OpenDay: out = open_day_locked(); break;
         case Phase::ReadFile: out = read_file_locked(); break;
-        case Phase::ReadHeader: out = read_header_locked(); break;
+        case Phase::ReadHeader: break;
         case Phase::Idle:
         default:
             out = JobStep::Idle;
@@ -202,6 +288,14 @@ JobStep EdfReportCatalogJob::step() {
     }
     unlock();
     return out;
+}
+
+bool EdfReportCatalogJob::run_when_gate_closed(const char *reason) const {
+    // Report result polling creates short web-grace windows. The catalog is a
+    // bounded metadata scan and is a dependency of foreground report builds, so
+    // letting it progress here avoids a self-deadlock where polling a report
+    // prevents the catalog needed by that report from becoming ready.
+    return reason && strcmp(reason, "web_grace") == 0;
 }
 
 void EdfReportCatalogJob::on_preempt() {
@@ -232,6 +326,14 @@ EdfReportCatalogStatus EdfReportCatalogJob::status() const {
     EdfReportCatalogStatus out;
     (void)status(out);
     return out;
+}
+
+bool EdfReportCatalogJob::timezone_offset_minutes(int32_t &out) const {
+    if (!lock(20)) return false;
+    const bool valid = timezone_offset_valid_;
+    if (valid) out = timezone_offset_minutes_;
+    unlock();
+    return valid;
 }
 
 size_t EdfReportCatalogJob::session_count() const {
@@ -278,39 +380,69 @@ JobStep EdfReportCatalogJob::open_root_locked() {
 JobStep EdfReportCatalogJob::read_day_locked() {
     StorageDirChild child;
     if (!storage_read_next_dir_child(root_dir_, child)) {
-        close_dirs_locked();
-        publish_build_locked();
-        phase_ = Phase::Idle;
-        return JobStep::Idle;
+        {
+            Storage::Guard guard;
+            root_dir_.close();
+        }
+        root_dir_ = File();
+        if (build_day_count_ == 0) {
+            publish_build_locked();
+            phase_ = Phase::Idle;
+            return JobStep::Idle;
+        }
+        std::sort(build_days_,
+                  build_days_ + build_day_count_,
+                  [](const DayName &a, const DayName &b) {
+                      return strcmp(a.name, b.name) > 0;
+                  });
+        build_day_index_ = 0;
+        phase_ = Phase::OpenDay;
+        update_current_path_locked("/DATALOG");
+        return JobStep::Working;
     }
     if (!child.is_dir ||
         !storage_export_is_datalog_day_name(child.name)) {
         return JobStep::Working;
     }
+    if (build_day_count_ >= AC_EDF_REPORT_CATALOG_DAY_MAX) {
+        status_.truncated = true;
+        return JobStep::Working;
+    }
+    copy_cstr(build_days_[build_day_count_].name,
+              sizeof(build_days_[build_day_count_].name),
+              child.name);
+    build_day_count_++;
+    return JobStep::Working;
+}
+
+JobStep EdfReportCatalogJob::open_day_locked() {
+    if (build_day_index_ >= build_day_count_) {
+        close_dirs_locked();
+        publish_build_locked();
+        phase_ = Phase::Idle;
+        return JobStep::Idle;
+    }
     if (!storage_append_child_path("/DATALOG",
-                                   child.name,
+                                   build_days_[build_day_index_].name,
                                    day_path_,
                                    sizeof(day_path_))) {
         set_error_locked("day_path_too_long");
         return JobStep::Idle;
     }
-    phase_ = Phase::OpenDay;
     update_current_path_locked(day_path_);
-    return JobStep::Working;
-}
 
-JobStep EdfReportCatalogJob::open_day_locked() {
     Storage::Guard guard;
     day_dir_ = Storage::open(day_path_, "r");
     if (!day_dir_) {
         status_.files_skipped++;
-        phase_ = Phase::ReadDay;
+        build_day_index_++;
         return JobStep::Working;
     }
     if (!day_dir_.isDirectory()) {
         day_dir_.close();
         status_.files_skipped++;
-        phase_ = Phase::ReadDay;
+        day_dir_ = File();
+        build_day_index_++;
         return JobStep::Working;
     }
     status_.days_scanned++;
@@ -323,7 +455,10 @@ JobStep EdfReportCatalogJob::read_file_locked() {
     if (!storage_read_next_dir_child(day_dir_, child)) {
         Storage::Guard guard;
         day_dir_.close();
-        phase_ = Phase::ReadDay;
+        day_dir_ = File();
+        publish_partial_build_locked();
+        build_day_index_++;
+        phase_ = Phase::OpenDay;
         return JobStep::Working;
     }
     if (child.is_dir) return JobStep::Working;
@@ -349,18 +484,35 @@ JobStep EdfReportCatalogJob::read_file_locked() {
     return JobStep::Working;
 }
 
-JobStep EdfReportCatalogJob::read_header_locked() {
+JobStep EdfReportCatalogJob::read_header_unlocked() {
+    char path[AC_STORAGE_PATH_MAX] = {};
+    time_t snapshot_mtime = 0;
+    int32_t snapshot_tz_offset_min = 0;
+    uint32_t snapshot_refresh_id = 0;
+
+    if (!lock(20)) return JobStep::Waiting;
+    if (status_.state != EdfReportCatalogState::Refreshing ||
+        phase_ != Phase::ReadHeader) {
+        unlock();
+        return JobStep::Idle;
+    }
+    snapshot_refresh_id = status_.refresh_id;
+    snapshot_mtime = current_file_mtime_;
+    snapshot_tz_offset_min = timezone_offset_minutes_;
+    copy_cstr(path, sizeof(path), current_file_path_);
+    unlock();
+
     uint8_t fixed_header[AC_EDF_HEADER_FIXED_SIZE] = {};
     uint8_t *header = nullptr;
     size_t header_size = 0;
     size_t file_size = 0;
-    time_t last_write = current_file_mtime_;
+    time_t last_write = snapshot_mtime;
     bool read_ok = false;
     bool alloc_failed = false;
 
     {
         Storage::Guard guard;
-        File file = Storage::open(current_file_path_, "r");
+        File file = Storage::open(path, "r");
         if (file && !file.isDirectory()) {
             file_size = static_cast<size_t>(file.size());
             last_write = file.getLastWrite();
@@ -391,40 +543,49 @@ JobStep EdfReportCatalogJob::read_header_locked() {
         }
     }
 
-    if (alloc_failed) {
-        set_error_locked("alloc_failed");
+    EdfReportFileDescriptor file;
+    EdfReportFileStatus file_status = EdfReportFileStatus::InventoryError;
+    if (read_ok && header) {
+        file_status = edf_report_describe_file(path,
+                                               header,
+                                               header_size,
+                                               file_size,
+                                               last_write,
+                                               snapshot_tz_offset_min,
+                                               file);
     }
+    if (header) Memory::free(header);
 
-    if (status_.state != EdfReportCatalogState::Refreshing) {
-        if (header) Memory::free(header);
+    if (!lock(20)) return JobStep::Waiting;
+    if (status_.state != EdfReportCatalogState::Refreshing ||
+        status_.refresh_id != snapshot_refresh_id ||
+        phase_ != Phase::ReadHeader ||
+        strcmp(current_file_path_, path) != 0) {
+        unlock();
         return JobStep::Idle;
     }
 
-    if (!read_ok || !header) {
-        if (header) Memory::free(header);
+    if (alloc_failed) {
+        set_error_locked("alloc_failed");
+        unlock();
+        return JobStep::Idle;
+    }
+
+    if (!read_ok || file_status != EdfReportFileStatus::Ok) {
         status_.files_skipped++;
         phase_ = Phase::ReadFile;
+        unlock();
         return JobStep::Working;
     }
 
-    EdfReportFileDescriptor file;
-    const EdfReportFileStatus status = edf_report_describe_file(
-        current_file_path_,
-        header,
-        header_size,
-        file_size,
-        last_write,
-        file);
-    Memory::free(header);
-
-    if (status == EdfReportFileStatus::Ok &&
-        add_file_to_build_locked(file)) {
+    if (add_file_to_build_locked(file)) {
         status_.files_indexed++;
     } else {
         status_.files_skipped++;
     }
 
     phase_ = Phase::ReadFile;
+    unlock();
     return JobStep::Working;
 }
 

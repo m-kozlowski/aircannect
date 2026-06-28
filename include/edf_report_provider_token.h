@@ -14,6 +14,8 @@ struct EdfReportProviderToken {
     EdfInventoryFileKind file_kind = EdfInventoryFileKind::Unknown;
     EdfReportDataKind data_kind = EdfReportDataKind::Series;
     bool primary = false;
+    bool trim_leading_padding = false;
+    bool trim_trailing_padding = false;
     uint32_t first_record = 0;
     uint32_t record_count = 0;
     char signal_label[AC_EDF_REPORT_DATA_SIGNAL_LABEL_MAX] = {};

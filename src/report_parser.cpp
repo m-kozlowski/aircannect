@@ -167,6 +167,13 @@ int16_t read_le_i16(const uint8_t *data) {
     return static_cast<int16_t>(value);
 }
 
+void put_le32(uint8_t *out, uint32_t value) {
+    out[0] = static_cast<uint8_t>(value & 0xFFu);
+    out[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    out[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+    out[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+}
+
 int32_t milli_from_scaled(int64_t raw, double scale) {
     const double value = static_cast<double>(raw) * scale * 1000.0;
     if (value >= 0.0) {
@@ -175,16 +182,26 @@ int32_t milli_from_scaled(int64_t raw, double scale) {
     return static_cast<int32_t>(value - 0.5);
 }
 
+bool append_scaled_value_le(ReportSpoolBuffer &values,
+                            int64_t raw,
+                            double scale) {
+    size_t offset = 0;
+    uint8_t *dst = values.append_uninitialized(4, offset);
+    if (!dst) return false;
+    put_le32(dst, static_cast<uint32_t>(milli_from_scaled(raw, scale)));
+    return true;
+}
+
 bool parse_rc03_block(const uint8_t *block,
                       size_t block_len,
-                      int64_t start_ms,
                       uint64_t interval_ms,
                       uint64_t sample_count,
                       ReportSpoolBuffer &payload,
                       char *error,
                       size_t error_len) {
     if (!block || block_len < 6 || sample_count == 0 ||
-        sample_count > SIZE_MAX / report_series_sample_wire_size()) {
+        sample_count > UINT32_MAX || sample_count > SIZE_MAX / 4u ||
+        interval_ms == 0 || interval_ms > UINT32_MAX) {
         set_error(error, error_len, "bad_rc03_block");
         return false;
     }
@@ -227,10 +244,8 @@ bool parse_rc03_block(const uint8_t *block,
         return false;
     }
 
-    payload.clear();
-    if (!payload.reserve_capacity(
-            static_cast<size_t>(sample_count) *
-            report_series_sample_wire_size())) {
+    ReportSpoolBuffer values;
+    if (!values.reserve_capacity(static_cast<size_t>(sample_count) * 4u)) {
         set_error(error, error_len, "series_alloc_failed");
         return false;
     }
@@ -250,11 +265,7 @@ bool parse_rc03_block(const uint8_t *block,
             break;
         }
 
-        ReportSeriesSample sample;
-        sample.timestamp_ms =
-            start_ms + static_cast<int64_t>(i * interval_ms);
-        sample.value_milli = milli_from_scaled(raw, scale);
-        if (!report_append_series_sample(payload, sample)) {
+        if (!append_scaled_value_le(values, raw, scale)) {
             set_error(error, error_len, "series_append_failed");
             return false;
         }
@@ -262,28 +273,34 @@ bool parse_rc03_block(const uint8_t *block,
         else prev1 = raw;
     }
 
-    if (sample_count <= 2) return true;
+    if (sample_count > 2) {
+        Rc03BitReader bits(body + body_offset, body_len - body_offset);
+        for (uint64_t i = 2; i < sample_count; ++i) {
+            uint64_t encoded = 0;
+            if (!rc03_read_rice(bits, rice_m, encoded)) {
+                set_error(error, error_len, "rc03_bitstream_short");
+                return false;
+            }
+            const int64_t delta2 = zigzag_decode(encoded);
+            const int64_t raw = 2 * prev1 - prev2 + delta2;
+            prev2 = prev1;
+            prev1 = raw;
 
-    Rc03BitReader bits(body + body_offset, body_len - body_offset);
-    for (uint64_t i = 2; i < sample_count; ++i) {
-        uint64_t encoded = 0;
-        if (!rc03_read_rice(bits, rice_m, encoded)) {
-            set_error(error, error_len, "rc03_bitstream_short");
-            return false;
+            if (!append_scaled_value_le(values, raw, scale)) {
+                set_error(error, error_len, "series_append_failed");
+                return false;
+            }
         }
-        const int64_t delta2 = zigzag_decode(encoded);
-        const int64_t raw = 2 * prev1 - prev2 + delta2;
-        prev2 = prev1;
-        prev1 = raw;
+    }
 
-        ReportSeriesSample sample;
-        sample.timestamp_ms =
-            start_ms + static_cast<int64_t>(i * interval_ms);
-        sample.value_milli = milli_from_scaled(raw, scale);
-        if (!report_append_series_sample(payload, sample)) {
-            set_error(error, error_len, "series_append_failed");
-            return false;
-        }
+    if (values.size() != static_cast<size_t>(sample_count) * 4u ||
+        !report_build_series_payload_v2_uniform_values_le(
+            payload,
+            static_cast<uint32_t>(interval_ms),
+            values.data(),
+            static_cast<uint32_t>(sample_count))) {
+        set_error(error, error_len, "series_v2_build_failed");
+        return false;
     }
     return true;
 }
@@ -379,18 +396,11 @@ bool parse_therapy_signal_fields(const uint8_t *data,
 }
 
 bool append_therapy_value(ReportSpoolBuffer &payload,
-                          int64_t start_ms,
-                          uint64_t interval_ms,
-                          uint64_t sample_index,
                           int64_t raw,
                           double scale,
                           char *error,
                           size_t error_len) {
-    ReportSeriesSample sample;
-    sample.timestamp_ms =
-        start_ms + static_cast<int64_t>(sample_index * interval_ms);
-    sample.value_milli = milli_from_scaled(raw, scale);
-    if (!report_append_series_sample(payload, sample)) {
+    if (!append_scaled_value_le(payload, raw, scale)) {
         set_error(error, error_len, "therapy_series_append_failed");
         return false;
     }
@@ -399,7 +409,6 @@ bool append_therapy_value(ReportSpoolBuffer &payload,
 
 bool parse_therapy_1minute_blob(const uint8_t *blob,
                                 size_t blob_len,
-                                int64_t start_ms,
                                 uint64_t interval_ms,
                                 const TherapyOneMinuteSignalSpec &spec,
                                 ReportSpoolBuffer &payload,
@@ -412,8 +421,17 @@ bool parse_therapy_1minute_blob(const uint8_t *blob,
         set_error(error, error_len, "bad_therapy_series_blob");
         return false;
     }
-    if (!payload.reserve_capacity(
-            (blob_len / 2 + blob_len) * report_series_sample_wire_size())) {
+    if (interval_ms > UINT32_MAX) {
+        set_error(error, error_len, "therapy_interval_invalid");
+        return false;
+    }
+    const size_t max_samples =
+        (blob_len <= 4 || spec.rice_m <= 0)
+            ? blob_len / 2
+            : (blob_len - 4) * 4u + 2u;
+    if (max_samples == 0 || max_samples > UINT32_MAX ||
+        max_samples > SIZE_MAX / 4u ||
+        !payload.reserve_capacity(max_samples * 4u)) {
         set_error(error, error_len, "therapy_series_alloc_failed");
         return false;
     }
@@ -422,9 +440,6 @@ bool parse_therapy_1minute_blob(const uint8_t *blob,
         for (size_t offset = 0; offset + 1 < blob_len; offset += 2) {
             const int64_t raw = read_le_i16(blob + offset);
             if (!append_therapy_value(payload,
-                                      start_ms,
-                                      interval_ms,
-                                      sample_count,
                                       raw,
                                       spec.scale,
                                       error,
@@ -439,17 +454,11 @@ bool parse_therapy_1minute_blob(const uint8_t *blob,
     int64_t prev2 = read_le_i16(blob);
     int64_t prev1 = read_le_i16(blob + 2);
     if (!append_therapy_value(payload,
-                              start_ms,
-                              interval_ms,
-                              0,
                               prev2,
                               spec.scale,
                               error,
                               error_len) ||
         !append_therapy_value(payload,
-                              start_ms,
-                              interval_ms,
-                              1,
                               prev1,
                               spec.scale,
                               error,
@@ -467,9 +476,6 @@ bool parse_therapy_1minute_blob(const uint8_t *blob,
         prev2 = prev1;
         prev1 = raw;
         if (!append_therapy_value(payload,
-                                  start_ms,
-                                  interval_ms,
-                                  sample_count,
                                   raw,
                                   spec.scale,
                                   error,
@@ -503,14 +509,13 @@ bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
         return false;
     }
 
-    ReportSpoolBuffer parsed;
+    ReportSpoolBuffer values;
     uint32_t sample_count = 0;
     if (!parse_therapy_1minute_blob(blob,
                                     blob_len,
-                                    static_cast<int64_t>(start),
                                     interval_ms,
                                     spec,
-                                    parsed,
+                                    values,
                                     sample_count,
                                     error,
                                     error_len)) {
@@ -521,6 +526,15 @@ bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
         set_error(error, error_len, "therapy_signal_count_invalid");
         return false;
     }
+    ReportSpoolBuffer parsed;
+    if (!report_build_series_payload_v2_uniform_values_le(
+            parsed,
+            static_cast<uint32_t>(interval_ms),
+            values.data(),
+            sample_count)) {
+        set_error(error, error_len, "therapy_series_v2_build_failed");
+        return false;
+    }
 
     ReportParsedChunk chunk;
     chunk.source = ReportSourceId::TherapyOneMinute;
@@ -529,12 +543,14 @@ bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
     chunk.start_ms = static_cast<int64_t>(start);
     chunk.end_ms =
         chunk.start_ms + static_cast<int64_t>(sample_count * interval_ms);
-    chunk.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V1;
+    chunk.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
     chunk.record_count = sample_count;
     chunk.payload = parsed.data();
     chunk.payload_len = parsed.size();
     if (!callback(context, chunk)) {
-        set_error(error, error_len, "therapy_series_chunk_rejected");
+        if (!error || !error[0]) {
+            set_error(error, error_len, "therapy_series_chunk_rejected");
+        }
         return false;
     }
     return true;
@@ -786,7 +802,9 @@ bool report_parse_event_spool(const ReportSpoolResult &result,
     chunk.payload = parsed.payload.data();
     chunk.payload_len = parsed.payload.size();
     if (!callback(context, chunk)) {
-        set_error(error, error_len, "event_chunk_rejected");
+        if (!error || !error[0]) {
+            set_error(error, error_len, "event_chunk_rejected");
+        }
         return false;
     }
     set_error(error, error_len, "");
@@ -912,7 +930,6 @@ bool report_parse_series_spool(const ReportSpoolResult &result,
         ReportSpoolBuffer parsed;
         if (!parse_rc03_block(block,
                               block_len,
-                              chunk_start,
                               interval_ms,
                               sample_count,
                               parsed,
@@ -927,12 +944,14 @@ bool report_parse_series_spool(const ReportSpoolResult &result,
         chunk.name = signal_name;
         chunk.start_ms = chunk_start;
         chunk.end_ms = chunk_end;
-        chunk.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V1;
+        chunk.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
         chunk.record_count = static_cast<uint32_t>(sample_count);
         chunk.payload = parsed.data();
         chunk.payload_len = parsed.size();
         if (!callback(context, chunk)) {
-            set_error(error, error_len, "series_chunk_rejected");
+            if (!error || !error[0]) {
+                set_error(error, error_len, "series_chunk_rejected");
+            }
             return false;
         }
         emitted++;

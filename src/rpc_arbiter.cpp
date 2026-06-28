@@ -189,8 +189,19 @@ void RpcArbiter::poll() {
         !esp_ota_quiesce_timeout_logged_ &&
         static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0) {
         esp_ota_quiesce_timeout_logged_ = true;
+        const EventBrokerStatus event_status = event_.status();
         Log::logf(CAT_OTA, LOG_WARN,
-                  "AS11 quiesce timed out\n");
+                  "AS11 quiesce timed out stream=%u event=%u pending=%u "
+                  "retry=%u queue=%u tx_q=%u event_active=%u "
+                  "event_pending=%u\n",
+                  stream_.quiesced() ? 1u : 0u,
+                  event_.quiesced() ? 1u : 0u,
+                  pending_.active ? 1u : 0u,
+                  dispatch_retry_active_ ? 1u : 0u,
+                  static_cast<unsigned>(requests_.count()),
+                  static_cast<unsigned>(can_.tx_queue_depth()),
+                  event_status.subscription_active ? 1u : 0u,
+                  event_status.subscribe_pending ? 1u : 0u);
     }
 
     DatagramFeedResult rpc_timeout = rpc_rx_.poll(now);
@@ -344,7 +355,11 @@ bool RpcArbiter::send_set_datetime_now(RpcSource source,
 
 bool RpcArbiter::enqueue_request(QueuedRequest &request) {
     const uint32_t now = millis();
-    if (scheduler_source(request.source) && background_backoff_active(now)) {
+    const bool ota_quiesce_control =
+        esp_ota_quiesce_requested_ &&
+        request_allowed_during_esp_ota_quiesce(request);
+    if (scheduler_source(request.source) && background_backoff_active(now) &&
+        !ota_quiesce_control) {
         return false;
     }
 
@@ -1167,7 +1182,15 @@ void RpcArbiter::check_pending_timeout() {
         push_event(RpcEventKind::Info, buf);
     }
     stats_.request_timeouts++;
-    note_request_timeout(pending_.source, now);
+    const bool ota_quiesce_control =
+        esp_ota_quiesce_requested_ &&
+        ((pending_.method == "StartStream" &&
+          pending_.stream_command == StreamCommandType::Stop) ||
+         (pending_.method == "SubscribeEvent" &&
+          pending_.event_command == EventCommandType::Quiesce));
+    if (!ota_quiesce_control) {
+        note_request_timeout(pending_.source, now);
+    }
     if (pending_.stream_command != StreamCommandType::None) {
         stream_.mark_command_timeout(now);
     }
@@ -1184,7 +1207,7 @@ void RpcArbiter::check_pending_timeout() {
 void RpcArbiter::poll_event_subscription() {
     const uint32_t now = millis();
     if (background_polls_suspended_ && !esp_ota_quiesce_requested_) return;
-    if (background_backoff_active(now)) return;
+    if (background_backoff_active(now) && !esp_ota_quiesce_requested_) return;
     EventCommand command = event_.next_command(now);
     if (command.type == EventCommandType::None) return;
     if (pending_.active || dispatch_retry_active_ || !requests_.empty()) {

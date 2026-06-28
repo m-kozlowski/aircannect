@@ -284,7 +284,8 @@ bool OtaManager::begin_http_upload(const String &filename, size_t image_size) {
     return true;
 }
 
-bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
+bool OtaManager::write_http_upload(size_t index, const uint8_t *data,
+                                   size_t len) {
     if (!lock_status()) return false;
     if (!status_.http_active || !http_partition_ || !http_handle_) {
         if (!status_.last_error.length()) set_error("upload_not_active");
@@ -297,13 +298,30 @@ bool OtaManager::write_http_upload(const uint8_t *data, size_t len) {
         return true;
     }
 
-    if (status_.bytes == 0 && data[0] != 0xE9) {
-        abort_http_upload("bad_esp32_image");
+    if (index != status_.bytes) {
+        Log::logf(CAT_OTA, LOG_ERROR,
+                  "HTTP upload offset mismatch index=%u expected=%u len=%u "
+                  "total=%u\n",
+                  static_cast<unsigned>(index),
+                  static_cast<unsigned>(status_.bytes),
+                  static_cast<unsigned>(len),
+                  static_cast<unsigned>(status_.total_size));
+        abort_http_upload("upload_offset_mismatch");
         unlock_status();
         return false;
     }
-    if (status_.total_size == 0 || status_.bytes + len > status_.total_size) {
-        abort_http_upload("image_too_large");
+    if (status_.total_size == 0 || index > status_.total_size ||
+        len > status_.total_size - index) {
+        Log::logf(CAT_OTA, LOG_ERROR,
+                  "HTTP upload overrun index=%u len=%u total=%u\n",
+                  static_cast<unsigned>(index), static_cast<unsigned>(len),
+                  static_cast<unsigned>(status_.total_size));
+        abort_http_upload("upload_overrun");
+        unlock_status();
+        return false;
+    }
+    if (index == 0 && data[0] != 0xE9) {
+        abort_http_upload("bad_esp32_image");
         unlock_status();
         return false;
     }

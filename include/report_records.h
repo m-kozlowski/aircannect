@@ -7,7 +7,7 @@
 
 namespace aircannect {
 
-static constexpr uint32_t REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V1 = 1;
+static constexpr uint32_t REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 = 2;
 static constexpr uint32_t REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 = 1;
 
 enum class ReportEventCode : uint16_t {
@@ -35,17 +35,58 @@ struct ReportEventRecord {
     uint16_t flags = 0;
 };
 
-size_t report_series_sample_wire_size();
+struct ReportSeriesV2UniformView {
+    uint32_t interval_ms = 0;
+    uint32_t sample_count = 0;
+    const uint8_t *missing_bitmap = nullptr;
+    size_t missing_bitmap_bytes = 0;
+    const uint8_t *values_milli_le = nullptr;
+    size_t values_milli_bytes = 0;
+};
+
+using ReportSeriesSampleCallback =
+    bool (*)(void *context, const ReportSeriesSample &sample);
+
+size_t report_series_v2_header_size();
+size_t report_series_v2_uniform_wire_size(uint32_t sample_count,
+                                          size_t missing_bitmap_bytes);
+size_t report_series_v2_explicit_wire_size(uint32_t sample_count);
 size_t report_event_record_wire_size();
 
-bool report_append_series_sample(ReportSpoolBuffer &out,
-                                 const ReportSeriesSample &sample);
 bool report_append_event_record(ReportSpoolBuffer &out,
                                 const ReportEventRecord &event);
-bool report_read_series_sample(const uint8_t *data,
-                               size_t len,
-                               size_t index,
-                               ReportSeriesSample &sample);
+
+bool report_build_series_payload_v2_uniform(
+    ReportSpoolBuffer &out,
+    uint32_t interval_ms,
+    const int32_t *values_milli,
+    uint32_t sample_count,
+    const uint8_t *missing_bitmap = nullptr,
+    size_t missing_bitmap_bytes = 0);
+bool report_build_series_payload_v2_uniform_values_le(
+    ReportSpoolBuffer &out,
+    uint32_t interval_ms,
+    const uint8_t *values_milli_le,
+    uint32_t sample_count,
+    const uint8_t *missing_bitmap = nullptr,
+    size_t missing_bitmap_bytes = 0);
+bool report_build_series_payload_v2_explicit(
+    ReportSpoolBuffer &out,
+    int64_t chunk_start_ms,
+    const ReportSeriesSample *samples,
+    uint32_t sample_count);
+bool report_series_payload_v2_uniform_view(
+    const uint8_t *data,
+    size_t len,
+    uint32_t record_count,
+    ReportSeriesV2UniformView &view);
+bool report_for_each_series_sample(uint32_t payload_schema,
+                                   int64_t chunk_start_ms,
+                                   const uint8_t *data,
+                                   size_t len,
+                                   uint32_t record_count,
+                                   ReportSeriesSampleCallback callback,
+                                   void *context);
 bool report_read_event_record(const uint8_t *data,
                               size_t len,
                               size_t index,

@@ -127,6 +127,14 @@ bool emit_event(EdfReportEventCallback callback,
     return true;
 }
 
+int64_t normalized_eve_event_start_ms(int64_t annotation_time_ms,
+                                      int64_t duration_ms,
+                                      int64_t file_start_ms) {
+    if (duration_ms <= 0) return annotation_time_ms;
+    const int64_t start_ms = annotation_time_ms - duration_ms;
+    return start_ms < file_start_ms ? file_start_ms : start_ms;
+}
+
 bool verify_record_crc(const uint8_t *record, size_t record_size) {
     if (!record || record_size < 2) return false;
     const size_t payload_size = record_size - 2;
@@ -216,20 +224,21 @@ EdfReportEventStatus edf_report_decode_annotation_record(
                                                      record + label_start,
                                                      label_len,
                                                      id)) {
-                    const int64_t event_start_ms =
+                    const int64_t annotation_time_ms =
                         file.header_start_ms + onset_ms;
                     if (id == EdfAnnotationLabelId::CsrStart) {
                         if (decode_context) {
                             decode_context->csr_open = true;
-                            decode_context->csr_start_ms = event_start_ms;
+                            decode_context->csr_start_ms = annotation_time_ms;
                         } else {
                             stats.unsupported_labels++;
                         }
                     } else if (id == EdfAnnotationLabelId::CsrEnd) {
                         if (decode_context && decode_context->csr_open &&
-                            event_start_ms > decode_context->csr_start_ms) {
+                            annotation_time_ms >
+                                decode_context->csr_start_ms) {
                             const int64_t csr_duration_ms =
-                                event_start_ms -
+                                annotation_time_ms -
                                 decode_context->csr_start_ms;
                             if (!emit_event(
                                     callback,
@@ -249,6 +258,11 @@ EdfReportEventStatus edf_report_decode_annotation_record(
                             decode_context->csr_start_ms = 0;
                         }
                     } else {
+                        const int64_t event_start_ms =
+                            normalized_eve_event_start_ms(
+                                annotation_time_ms,
+                                duration_ms,
+                                file.header_start_ms);
                         uint16_t code = 0;
                         if (!event_code_for_id(id, code) ||
                             !emit_event(callback,

@@ -30,6 +30,7 @@ struct EdfReportSignalDescriptor {
     uint32_t samples_per_record = 0;
     uint32_t sample_offset_in_record = 0;
     uint32_t byte_offset_in_record = 0;
+    EdfSignalScale scale;
 };
 
 struct EdfReportFileDescriptor {
@@ -74,7 +75,6 @@ struct EdfReportSessionFileDescriptor {
     uint32_t record_size = 0;
     uint32_t record_duration_ms = 0;
     uint32_t complete_records = 0;
-    uint32_t signal_count = 0;
 };
 
 struct EdfReportSessionDescriptor {
@@ -104,6 +104,7 @@ EdfReportFileStatus edf_report_describe_file(
     size_t header_size,
     uint64_t file_size,
     time_t last_write,
+    int32_t timezone_offset_minutes,
     EdfReportFileDescriptor &out);
 
 const EdfReportSignalDescriptor *edf_report_find_signal(

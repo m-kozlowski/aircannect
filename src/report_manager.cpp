@@ -1,7 +1,10 @@
 #include "report_manager.h"
 
 #include <algorithm>
+#include <limits.h>
+#include <new>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -14,7 +17,10 @@
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
+#include "report_materializer.h"
+#include "report_night_index.h"
 #include "report_records.h"
+#include "report_source_resolver.h"
 #include "report_store.h"
 #include "storage_manager.h"
 #include "string_util.h"
@@ -23,12 +29,24 @@ namespace aircannect {
 namespace {
 
 const char *const REPORT_SUMMARY_FROM = "2000-01-01T00:00:00.000Z";
-constexpr const char *REPORT_PLOT_CACHE_DIR = "/aircannect/report/v2/plots/v10";
+constexpr const char *REPORT_PLOT_CACHE_DIR = "/aircannect/report/v4/plots/v2";
 constexpr size_t REPORT_PLOT_PATH_MAX = 128;
+constexpr size_t REPORT_PLOT_CACHE_WRITE_CHUNK = 4096;
+constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 21;
+
+const char *report_provider_id_name(ReportProviderId provider) {
+    switch (provider) {
+        case ReportProviderId::Edf: return "edf";
+        case ReportProviderId::Spool: return "spool";
+        default: return "unknown";
+    }
+}
 
 struct ChunkWriteContext {
     ReportManager *manager = nullptr;
     ReportSourceId source = ReportSourceId::Summary;
+    char *error = nullptr;
+    size_t error_len = 0;
 };
 
 struct ResultChunkContext {
@@ -42,16 +60,17 @@ struct ResultChunkContext {
     uint32_t entries = 0;
 };
 
+struct RangeChunkContext {
+    ReportManager *manager = nullptr;
+    size_t stream_index = SIZE_MAX;
+    const char *name = nullptr;
+};
+
 struct SummaryRecordBufferContext {
     ReportSummaryRecord *records = nullptr;
     size_t capacity = 0;
     size_t count = 0;
     uint32_t nights_with_therapy = 0;
-};
-
-struct ReportSessionRange {
-    int64_t start_ms = 0;
-    int64_t end_ms = 0;
 };
 
 const SpoolReportProvider &spool_report_provider() {
@@ -62,6 +81,56 @@ const SpoolReportProvider &spool_report_provider() {
 const EdfReportProvider &edf_report_provider() {
     static EdfReportProvider provider;
     return provider;
+}
+
+bool parse_report_night_start_from_etag(const char *etag,
+                                        uint64_t &night_start_ms) {
+    if (!etag || !etag[0]) return false;
+    char *end = nullptr;
+    const unsigned long long parsed = strtoull(etag, &end, 10);
+    if (end == etag || !end || *end != '-') return false;
+    night_start_ms = static_cast<uint64_t>(parsed);
+    return night_start_ms != 0;
+}
+
+const char *result_prepare_outcome_name(uint8_t outcome) {
+    switch (outcome) {
+        case 0:
+            return "prepared";
+        case 1:
+            return "deferred";
+        case 2:
+            return "retry";
+        case 3:
+            return "failed";
+    }
+    return "unknown";
+}
+
+const char *build_queue_result_name(uint8_t result) {
+    switch (result) {
+        case 0:
+            return "queued";
+        case 1:
+            return "already";
+        case 2:
+            return "full";
+        case 3:
+            return "unavailable";
+    }
+    return "unknown";
+}
+
+bool edf_session_same_identity(const EdfReportSessionDescriptor &a,
+                               const EdfReportSessionDescriptor &b) {
+    return strcmp(a.sleep_day, b.sleep_day) == 0 &&
+           strcmp(a.session_stamp, b.session_stamp) == 0;
+}
+
+bool edf_session_has_event_file(const EdfReportSessionDescriptor &session) {
+    return (session.file_mask &
+            (edf_report_file_kind_mask(EdfInventoryFileKind::Eve) |
+             edf_report_file_kind_mask(EdfInventoryFileKind::Csl))) != 0;
 }
 
 void append_u64(LargeTextBuffer &out, uint64_t value) {
@@ -90,16 +159,36 @@ void format_stable_night_key(const ReportSummaryRecord &rec,
 // Plot binary wire format (little-endian), served at /api/report/plot:
 //   header: magic u32 'ACPB', version u16, flags u16, base_ms i64
 //   events: count u32, then count * { t_delta i32, duration i32, code i32, flags i32 }
-//   series: to EOF, repeated { name_len u16, name bytes, point_count u32,
-//           point_count * { t_delta i32, value_milli i32 } }
-// Timestamps are i32 deltas from base_ms; values stay in milli-units and the
-// client divides by 1000.
+//   series: to EOF, repeated { name_len u16, name bytes,
+//           mode u8, flags u8, reserved u16, mode-specific payload }
+// Compact-point payload:
+//           series_base_delta_ms i32, time_unit_ms u32, value_scale_milli u32,
+//           point_count u32, point_count * { time_index u16, value_i16 }
+// Envelope-run payload:
+//           axis_base_delta_ms i32, bucket_ms u32, value_scale_milli u32,
+//           run_count u32, run_count * {
+//             start_bucket u32, bucket_count u16,
+//             bucket_count * { min_value_i16, max_value_i16 }
+//           }
+// Compact time_index 0xFFFF is an explicit segment break. Envelope gaps are
+// represented by separate runs. Values are value_i16 * scale / 1000.
 constexpr uint32_t PLOT_BIN_MAGIC = 0x42504341u;  // "ACPB"
-constexpr uint16_t PLOT_BIN_VERSION = 1;
+constexpr uint16_t PLOT_BIN_VERSION = 5;
+constexpr uint8_t PLOT_SERIES_MODE_COMPACT = 0;
+constexpr uint8_t PLOT_SERIES_MODE_ENVELOPE_RUNS = 1;
+constexpr int32_t PLOT_POINT_GAP_DELTA = INT32_MIN;
+constexpr uint16_t PLOT_POINT_GAP_INDEX = UINT16_MAX;
+constexpr uint32_t PLOT_POINT_MAX_TIME_INDEX =
+    static_cast<uint32_t>(PLOT_POINT_GAP_INDEX - 1);
+constexpr uint32_t PLOT_ENVELOPE_GAP_BUCKET = UINT32_MAX;
+constexpr int64_t PLOT_UNKNOWN_INTERVAL_GAP_MS = 5 * 60 * 1000;
 
 bool bin_put_u16(ReportSpoolBuffer &b, uint16_t v) {
     const uint8_t x[2] = {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8)};
     return b.append(x, sizeof(x));
+}
+bool bin_put_u8(ReportSpoolBuffer &b, uint8_t v) {
+    return b.append(&v, sizeof(v));
 }
 bool bin_put_u32(ReportSpoolBuffer &b, uint32_t v) {
     const uint8_t x[4] = {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8),
@@ -110,10 +199,335 @@ bool bin_put_u32(ReportSpoolBuffer &b, uint32_t v) {
 bool bin_put_i32(ReportSpoolBuffer &b, int32_t v) {
     return bin_put_u32(b, static_cast<uint32_t>(v));
 }
+bool bin_put_i16(ReportSpoolBuffer &b, int16_t v) {
+    return bin_put_u16(b, static_cast<uint16_t>(v));
+}
 bool bin_put_i64(ReportSpoolBuffer &b, int64_t v) {
     const uint64_t u = static_cast<uint64_t>(v);
     return bin_put_u32(b, static_cast<uint32_t>(u)) &&
            bin_put_u32(b, static_cast<uint32_t>(u >> 32));
+}
+
+uint16_t read_u16_le(const uint8_t *p) {
+    return static_cast<uint16_t>(p[0]) |
+           (static_cast<uint16_t>(p[1]) << 8);
+}
+
+uint32_t read_u32_le(const uint8_t *p) {
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+int32_t read_i32_le(const uint8_t *p) {
+    return static_cast<int32_t>(read_u32_le(p));
+}
+
+uint32_t ceil_div_u64(uint64_t n, uint64_t d) {
+    return d ? static_cast<uint32_t>((n + d - 1) / d) : 0;
+}
+
+int16_t quantize_plot_value(int32_t value_milli,
+                            uint32_t scale_milli) {
+    if (scale_milli == 0) scale_milli = 1;
+    int64_t value = value_milli;
+    int64_t encoded = 0;
+    if (value >= 0) {
+        encoded = (value + static_cast<int64_t>(scale_milli / 2)) /
+                  static_cast<int64_t>(scale_milli);
+    } else {
+        encoded = -((-value + static_cast<int64_t>(scale_milli / 2)) /
+                    static_cast<int64_t>(scale_milli));
+    }
+    if (encoded > INT16_MAX) encoded = INT16_MAX;
+    if (encoded < INT16_MIN) encoded = INT16_MIN;
+    return static_cast<int16_t>(encoded);
+}
+
+bool append_plot_series_compact(ReportSpoolBuffer &out,
+                                const char *name,
+                                const ReportSpoolBuffer &raw_points,
+                                bool &ok) {
+    if (!ok) return false;
+    if (raw_points.size() == 0) return true;
+    if ((raw_points.size() % 8) != 0) {
+        ok = false;
+        return false;
+    }
+    const size_t point_count = raw_points.size() / 8;
+    if (point_count > UINT32_MAX) {
+        ok = false;
+        return false;
+    }
+    const size_t name_len = name ? strlen(name) : 0;
+    if (name_len > UINT16_MAX) {
+        ok = false;
+        return false;
+    }
+
+    const uint8_t *raw = raw_points.data();
+    bool have_real_point = false;
+    int32_t min_delta = INT32_MAX;
+    int32_t max_delta = INT32_MIN;
+    int64_t max_abs_value = 0;
+    for (size_t i = 0; i < point_count; ++i) {
+        const uint8_t *p = raw + i * 8;
+        const int32_t delta = read_i32_le(p);
+        if (delta == PLOT_POINT_GAP_DELTA) continue;
+        const int32_t value = read_i32_le(p + 4);
+        min_delta = std::min(min_delta, delta);
+        max_delta = std::max(max_delta, delta);
+        const int64_t abs_value =
+            value == INT32_MIN
+                ? static_cast<int64_t>(INT32_MAX) + 1
+                : llabs(static_cast<int64_t>(value));
+        max_abs_value = std::max(max_abs_value, abs_value);
+        have_real_point = true;
+    }
+    if (!have_real_point) return true;
+
+    const uint64_t span = max_delta > min_delta
+                              ? static_cast<uint64_t>(
+                                    static_cast<int64_t>(max_delta) -
+                                    static_cast<int64_t>(min_delta))
+                              : 0;
+    uint32_t time_unit_ms = std::max<uint32_t>(
+        1, ceil_div_u64(span, PLOT_POINT_MAX_TIME_INDEX));
+    if (time_unit_ms == 0) time_unit_ms = 1;
+    const uint32_t value_scale_milli =
+        std::max<uint32_t>(1, ceil_div_u64(static_cast<uint64_t>(max_abs_value),
+                                          static_cast<uint64_t>(INT16_MAX)));
+
+    ok &= bin_put_u16(out, static_cast<uint16_t>(name_len));
+    if (name_len) {
+        ok &= out.append(reinterpret_cast<const uint8_t *>(name), name_len);
+    }
+    ok &= bin_put_u8(out, PLOT_SERIES_MODE_COMPACT);
+    ok &= bin_put_u8(out, 0);
+    ok &= bin_put_u16(out, 0);
+    ok &= bin_put_i32(out, min_delta);
+    ok &= bin_put_u32(out, time_unit_ms);
+    ok &= bin_put_u32(out, value_scale_milli);
+    ok &= bin_put_u32(out, static_cast<uint32_t>(point_count));
+    for (size_t i = 0; i < point_count; ++i) {
+        const uint8_t *p = raw + i * 8;
+        const int32_t delta = read_i32_le(p);
+        const int32_t value = read_i32_le(p + 4);
+        if (delta == PLOT_POINT_GAP_DELTA) {
+            ok &= bin_put_u16(out, PLOT_POINT_GAP_INDEX);
+            ok &= bin_put_i16(out, 0);
+            continue;
+        }
+        const uint64_t offset =
+            static_cast<uint64_t>(static_cast<int64_t>(delta) -
+                                  static_cast<int64_t>(min_delta));
+        uint64_t index =
+            (offset + static_cast<uint64_t>(time_unit_ms / 2)) /
+            static_cast<uint64_t>(time_unit_ms);
+        if (index > PLOT_POINT_MAX_TIME_INDEX) index = PLOT_POINT_MAX_TIME_INDEX;
+        ok &= bin_put_u16(out, static_cast<uint16_t>(index));
+        ok &= bin_put_i16(out, quantize_plot_value(value, value_scale_milli));
+    }
+    return ok;
+}
+
+bool append_plot_series_envelope_runs(ReportSpoolBuffer &out,
+                                      const char *name,
+                                      const ReportSpoolBuffer &raw_buckets,
+                                      int64_t bucket_ms,
+                                      bool &ok) {
+    if (!ok) return false;
+    if (raw_buckets.size() == 0) return true;
+    if (bucket_ms <= 0 || bucket_ms > UINT32_MAX ||
+        (raw_buckets.size() % 12) != 0) {
+        ok = false;
+        return false;
+    }
+    const size_t record_count = raw_buckets.size() / 12;
+    const size_t name_len = name ? strlen(name) : 0;
+    if (name_len > UINT16_MAX) {
+        ok = false;
+        return false;
+    }
+
+    const uint8_t *raw = raw_buckets.data();
+    bool have_real_bucket = false;
+    int64_t max_abs_value = 0;
+    for (size_t i = 0; i < record_count; ++i) {
+        const uint8_t *p = raw + i * 12;
+        const uint32_t bucket = read_u32_le(p);
+        if (bucket == PLOT_ENVELOPE_GAP_BUCKET) continue;
+        const int32_t min_value = read_i32_le(p + 4);
+        const int32_t max_value = read_i32_le(p + 8);
+        const int64_t min_abs =
+            min_value == INT32_MIN
+                ? static_cast<int64_t>(INT32_MAX) + 1
+                : llabs(static_cast<int64_t>(min_value));
+        const int64_t max_abs =
+            max_value == INT32_MIN
+                ? static_cast<int64_t>(INT32_MAX) + 1
+                : llabs(static_cast<int64_t>(max_value));
+        max_abs_value = std::max(max_abs_value, std::max(min_abs, max_abs));
+        have_real_bucket = true;
+    }
+    if (!have_real_bucket) return true;
+
+    uint32_t run_count = 0;
+    bool in_run = false;
+    uint32_t previous_bucket = 0;
+    uint32_t buckets_in_run = 0;
+    for (size_t i = 0; i < record_count; ++i) {
+        const uint32_t bucket = read_u32_le(raw + i * 12);
+        if (bucket == PLOT_ENVELOPE_GAP_BUCKET) {
+            in_run = false;
+            buckets_in_run = 0;
+            continue;
+        }
+        const bool starts_run =
+            !in_run || bucket != previous_bucket + 1 ||
+            buckets_in_run >= UINT16_MAX;
+        if (starts_run) {
+            ++run_count;
+            buckets_in_run = 0;
+            in_run = true;
+        }
+        previous_bucket = bucket;
+        ++buckets_in_run;
+    }
+    if (run_count == 0) return true;
+
+    const uint32_t value_scale_milli =
+        std::max<uint32_t>(1, ceil_div_u64(static_cast<uint64_t>(max_abs_value),
+                                          static_cast<uint64_t>(INT16_MAX)));
+
+    ok &= bin_put_u16(out, static_cast<uint16_t>(name_len));
+    if (name_len) {
+        ok &= out.append(reinterpret_cast<const uint8_t *>(name), name_len);
+    }
+    ok &= bin_put_u8(out, PLOT_SERIES_MODE_ENVELOPE_RUNS);
+    ok &= bin_put_u8(out, 0);
+    ok &= bin_put_u16(out, 0);
+    ok &= bin_put_i32(out, 0);
+    ok &= bin_put_u32(out, static_cast<uint32_t>(bucket_ms));
+    ok &= bin_put_u32(out, value_scale_milli);
+    ok &= bin_put_u32(out, run_count);
+
+    size_t i = 0;
+    while (i < record_count) {
+        uint32_t bucket = read_u32_le(raw + i * 12);
+        if (bucket == PLOT_ENVELOPE_GAP_BUCKET) {
+            ++i;
+            continue;
+        }
+        const size_t run_start = i;
+        const uint32_t start_bucket = bucket;
+        uint16_t bucket_count = 1;
+        ++i;
+        while (i < record_count && bucket_count < UINT16_MAX) {
+            const uint32_t next_bucket = read_u32_le(raw + i * 12);
+            if (next_bucket == PLOT_ENVELOPE_GAP_BUCKET ||
+                next_bucket != bucket + 1) {
+                break;
+            }
+            bucket = next_bucket;
+            ++bucket_count;
+            ++i;
+        }
+
+        ok &= bin_put_u32(out, start_bucket);
+        ok &= bin_put_u16(out, bucket_count);
+        for (uint16_t n = 0; n < bucket_count; ++n) {
+            const uint8_t *p = raw + (run_start + n) * 12;
+            int32_t min_value = read_i32_le(p + 4);
+            int32_t max_value = read_i32_le(p + 8);
+            if (min_value > max_value) std::swap(min_value, max_value);
+            ok &= bin_put_i16(out,
+                              quantize_plot_value(min_value,
+                                                  value_scale_milli));
+            ok &= bin_put_i16(out,
+                              quantize_plot_value(max_value,
+                                                  value_scale_milli));
+        }
+    }
+    return ok;
+}
+
+int64_t plot_gap_threshold_ms(uint32_t interval_ms) {
+    if (interval_ms == 0) return PLOT_UNKNOWN_INTERVAL_GAP_MS;
+    const int64_t by_interval =
+        static_cast<int64_t>(interval_ms) * 3LL;
+    return std::max<int64_t>(5000, by_interval);
+}
+
+uint32_t infer_chunk_interval_ms(uint32_t record_count,
+                                 int64_t start_ms,
+                                 int64_t end_ms) {
+    if (record_count == 0 || end_ms <= start_ms) return 0;
+    const int64_t duration_ms = end_ms - start_ms;
+    const int64_t interval_ms =
+        duration_ms / static_cast<int64_t>(record_count);
+    return interval_ms > 0 && interval_ms <= UINT32_MAX
+               ? static_cast<uint32_t>(interval_ms)
+               : 0;
+}
+
+int64_t plot_bucket_ms_for_interval(int64_t target_bucket_ms,
+                                    uint32_t interval_ms,
+                                    bool preserve_slow_native_cadence) {
+    if (target_bucket_ms < 1) target_bucket_ms = 1;
+    if (preserve_slow_native_cadence &&
+        interval_ms >= AC_REPORT_RANGE_PLOT_PRESERVE_INTERVAL_MIN_MS) {
+        return std::min<int64_t>(target_bucket_ms,
+                                 static_cast<int64_t>(interval_ms));
+    }
+    return target_bucket_ms;
+}
+
+int64_t plot_bucket_ms_for_signal(ReportSignalId signal,
+                                  ReportSourceId source,
+                                  int64_t target_bucket_ms,
+                                  uint32_t interval_ms,
+                                  bool preserve_slow_native_cadence) {
+    int64_t bucket_ms = plot_bucket_ms_for_interval(
+        target_bucket_ms, interval_ms, preserve_slow_native_cadence);
+    if (!preserve_slow_native_cadence) {
+        if (interval_ms > 0) {
+            bucket_ms =
+                std::max<int64_t>(bucket_ms, static_cast<int64_t>(interval_ms));
+        }
+        return std::max<int64_t>(1, bucket_ms);
+    }
+    if (interval_ms > 0) {
+        int64_t cap_ms = 0;
+        if ((signal == ReportSignalId::Flow &&
+             source == ReportSourceId::RespiratoryFlow6p25Hz) ||
+            (signal == ReportSignalId::MaskPressure &&
+             source == ReportSourceId::MaskPressure6p25Hz) ||
+            interval_ms <
+                AC_REPORT_LOW_RATE_NATIVE_PLOT_MIN_INTERVAL_MS) {
+            cap_ms = AC_REPORT_HIGH_RATE_PLOT_BUCKET_MAX_MS;
+        } else if (interval_ms <=
+                   AC_REPORT_LOW_RATE_NATIVE_PLOT_MAX_INTERVAL_MS) {
+            cap_ms = preserve_slow_native_cadence
+                         ? static_cast<int64_t>(interval_ms)
+                         : AC_REPORT_LOW_RATE_OVERVIEW_BUCKET_MAX_MS;
+        }
+        if (cap_ms > 0) bucket_ms = std::min<int64_t>(bucket_ms, cap_ms);
+        bucket_ms =
+            std::max<int64_t>(bucket_ms, static_cast<int64_t>(interval_ms));
+    }
+    return std::max<int64_t>(1, bucket_ms);
+}
+
+int32_t plot_value_multiplier(ReportSignalId signal, ReportSourceId source) {
+    if ((signal == ReportSignalId::Flow &&
+         source == ReportSourceId::RespiratoryFlow6p25Hz) ||
+        (signal == ReportSignalId::Leak &&
+         source == ReportSourceId::Leak0p5Hz)) {
+        return 60;
+    }
+    return 1;
 }
 
 void append_optional_float(LargeTextBuffer &json,
@@ -136,73 +550,67 @@ bool format_utc_ms_iso(uint64_t ms, std::string &out) {
     return true;
 }
 
-size_t collect_session_ranges(const ReportSummaryRecord &night,
-                              ReportSessionRange *ranges,
-                              size_t max_ranges) {
-    if (!ranges || !max_ranges || !night.valid || !night.duration_min) {
+size_t collect_required_ranges_from_session_ranges(
+    const ReportSessionRange *session_ranges,
+    size_t session_range_count,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
+    EdfReportRequiredRange *required_ranges,
+    size_t max_ranges) {
+    if (!session_ranges || !required_ranges || max_ranges == 0 ||
+        range_end_ms <= range_start_ms) {
+        return 0;
+    }
+    size_t required_range_count = 0;
+    for (size_t i = 0; i < session_range_count &&
+                       required_range_count < max_ranges; ++i) {
+        if (!ranges_overlap(session_ranges[i].start_ms,
+                            session_ranges[i].end_ms,
+                            range_start_ms,
+                            range_end_ms)) {
+            continue;
+        }
+        EdfReportRequiredRange &range = required_ranges[required_range_count];
+        range.start_ms = std::max(session_ranges[i].start_ms, range_start_ms);
+        range.end_ms = std::min(session_ranges[i].end_ms, range_end_ms);
+        if (range.end_ms > range.start_ms) required_range_count++;
+    }
+    return required_range_count;
+}
+
+size_t collect_required_edf_ranges(const ReportSummaryRecord &night,
+                                   int64_t range_start_ms,
+                                   int64_t range_end_ms,
+                                   EdfReportRequiredRange *required_ranges,
+                                   size_t max_ranges) {
+    if (!required_ranges || max_ranges == 0 ||
+        range_end_ms <= range_start_ms) {
         return 0;
     }
 
-    size_t count = 0;
-    for (uint32_t i = 0; i < night.session_interval_count &&
-                         count < max_ranges; ++i) {
-        const ReportSummarySession &session = night.sessions[i];
-        if (!session.start_ms || !session.duration_min) continue;
-        ReportSessionRange &range = ranges[count];
-        range.start_ms = static_cast<int64_t>(session.start_ms);
-        range.end_ms = range.start_ms +
-                       static_cast<int64_t>(session.duration_min) * 60000LL;
-        if (range.end_ms > range.start_ms) count++;
-    }
-
-    if (count == 0 && night.end_ms > night.start_ms) {
-        ranges[0].start_ms = static_cast<int64_t>(night.start_ms);
-        ranges[0].end_ms = static_cast<int64_t>(night.end_ms);
-        count = 1;
-    }
-
-    std::sort(ranges, ranges + count,
-              [](const ReportSessionRange &a,
-                 const ReportSessionRange &b) {
-                  return a.start_ms < b.start_ms;
-              });
-    return count;
+    ReportSessionRange session_ranges[AC_REPORT_SUMMARY_SESSION_MAX];
+    const size_t session_range_count =
+        collect_session_ranges(night,
+                               session_ranges,
+                               AC_REPORT_SUMMARY_SESSION_MAX);
+    return collect_required_ranges_from_session_ranges(session_ranges,
+                                                       session_range_count,
+                                                       range_start_ms,
+                                                       range_end_ms,
+                                                       required_ranges,
+                                                       max_ranges);
 }
 
-// A night's end_ms is a 24h day bucket, far past the actual therapy data. The
-// meaningful coverage span is the session data range [first session start, last
-// session end]; use it for all coverage claims and completeness checks so a
-// night is "complete" when its sessions are covered, not the empty hours after.
-bool night_data_span(const ReportSummaryRecord &night,
-                     int64_t &span_start,
-                     int64_t &span_end) {
-    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
-    const size_t count =
-        collect_session_ranges(night, ranges, AC_REPORT_SUMMARY_SESSION_MAX);
-    if (count == 0) return false;
-    span_start = ranges[0].start_ms;
-    span_end = ranges[0].end_ms;
-    for (size_t i = 1; i < count; ++i) {
-        if (ranges[i].start_ms < span_start) span_start = ranges[i].start_ms;
-        if (ranges[i].end_ms > span_end) span_end = ranges[i].end_ms;
-    }
-    return span_end > span_start;
-}
-
-bool ranges_overlap(int64_t start_a,
-                    int64_t end_a,
-                    int64_t start_b,
-                    int64_t end_b) {
-    return start_a < end_b && start_b < end_a;
-}
-
-bool source_complete_for_night(const ReportSummaryRecord &night,
-                               const ReportSourceDef &source) {
+bool source_complete_for_range(const ReportSummaryRecord &night,
+                               const ReportSourceDef &source,
+                               int64_t from_ms) {
     int64_t span_start = 0;
     int64_t span_end = 0;
     if (!night_data_span(night, span_start, span_end)) return false;
+    const int64_t coverage_start = std::max(span_start, from_ms);
+    if (span_end <= coverage_start) return true;
     return spool_report_provider().coverage_complete(source,
-                                                     span_start,
+                                                     coverage_start,
                                                      span_end);
 }
 
@@ -210,13 +618,11 @@ bool source_complete_for_night(const ReportSummaryRecord &night,
 // range may legitimately contain zero events). Used to decide whether a night
 // must show delivered samples before its coverage is claimed.
 bool source_is_sampled(const ReportSourceDef &source) {
-    return (source.purposes &
-            (REPORT_SOURCE_TREND_SERIES | REPORT_SOURCE_HIGH_RES_SERIES)) != 0;
+    return report_source_is_sampled(source);
 }
 
 bool source_is_sparse_event(const ReportSourceDef &source) {
-    return source.id == ReportSourceId::RespiratoryEvents ||
-           source.id == ReportSourceId::UsageEvents;
+    return report_source_is_sparse_event(source);
 }
 
 bool source_latest_cached_end_for_night(const ReportSourceDef &source,
@@ -291,33 +697,8 @@ bool result_state_http_cacheable(ReportResultState state) {
            state == ReportResultState::Partial;
 }
 
-bool source_missing_start_for_night(const ReportSummaryRecord &night,
-                                    const ReportSourceDef &source,
-                                    int64_t &out_start_ms,
-                                    bool refresh_empty_sparse_event = false) {
-    int64_t span_start = 0;
-    int64_t span_end = 0;
-    if (!night_data_span(night, span_start, span_end)) return false;
-
-    int64_t missing_ms = span_start;
-    if (!spool_report_provider().coverage_first_missing(source,
-                                                        span_start,
-                                                        span_end,
-                                                        missing_ms)) {
-        out_start_ms = span_start;
-        return true;
-    }
-    if (missing_ms >= span_end) {
-        int64_t cached_end_ms = 0;
-        if (refresh_empty_sparse_event && source_is_sparse_event(source) &&
-            !source_latest_cached_end_for_night(source, night, cached_end_ms)) {
-            out_start_ms = span_start;
-            return true;
-        }
-        return false;
-    }
-    out_start_ms = missing_ms;
-    return true;
+bool result_state_materialized_slot_allowed(ReportResultState state) {
+    return state != ReportResultState::Preparing;
 }
 
 bool source_latest_cached_end_for_night(const ReportSourceDef &source,
@@ -329,20 +710,6 @@ bool source_latest_cached_end_for_night(const ReportSourceDef &source,
         static_cast<int64_t>(night.start_ms),
         static_cast<int64_t>(night.end_ms),
         out_end_ms);
-}
-
-bool source_required_for_report_result(ReportSourceId source) {
-    switch (source) {
-        case ReportSourceId::RespiratoryEvents:
-        case ReportSourceId::TherapyOneMinute:
-        case ReportSourceId::RespiratoryFlow6p25Hz:
-        case ReportSourceId::MaskPressure6p25Hz:
-        case ReportSourceId::InspiratoryPressure0p5Hz:
-        case ReportSourceId::Leak0p5Hz:
-            return true;
-        default:
-            return false;
-    }
 }
 
 bool report_ranges_overlap(int64_t a_start,
@@ -358,6 +725,27 @@ bool report_time_in_ranges(int64_t value,
     if (!ranges || value <= 0) return false;
     for (size_t i = 0; i < range_count; ++i) {
         if (value >= ranges[i].start_ms && value <= ranges[i].end_ms) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool report_event_overlaps_ranges(const ReportEventRecord &event,
+                                  const ReportSessionRange *ranges,
+                                  size_t range_count) {
+    if (!ranges || event.start_ms <= 0 || event.duration_ms < 0) return false;
+    if (event.duration_ms == 0) {
+        return report_time_in_ranges(event.start_ms, ranges, range_count);
+    }
+    const int64_t event_end_ms =
+        event.start_ms + static_cast<int64_t>(event.duration_ms);
+    if (event_end_ms <= event.start_ms) return false;
+    for (size_t i = 0; i < range_count; ++i) {
+        if (report_ranges_overlap(event.start_ms,
+                                  event_end_ms,
+                                  ranges[i].start_ms,
+                                  ranges[i].end_ms)) {
             return true;
         }
     }
@@ -402,6 +790,89 @@ void log_report_alloc_failed(const char *context, size_t bytes) {
               static_cast<unsigned>(bytes));
 }
 
+class ScopedIndexedNight {
+public:
+    explicit ScopedIndexedNight(const char *context)
+        : context_(context),
+          night_(static_cast<ReportIndexedNight *>(Memory::alloc_large(
+              sizeof(ReportIndexedNight),
+              false))) {
+        if (!night_) log_report_alloc_failed(context_, sizeof(ReportIndexedNight));
+    }
+
+    ~ScopedIndexedNight() {
+        Memory::free(night_);
+    }
+
+    ScopedIndexedNight(const ScopedIndexedNight &) = delete;
+    ScopedIndexedNight &operator=(const ScopedIndexedNight &) = delete;
+
+    explicit operator bool() const { return night_ != nullptr; }
+    ReportIndexedNight &get() { return *night_; }
+    const ReportIndexedNight &get() const { return *night_; }
+    ReportIndexedNight *operator->() { return night_; }
+    const ReportIndexedNight *operator->() const { return night_; }
+
+private:
+    const char *context_ = nullptr;
+    ReportIndexedNight *night_ = nullptr;
+};
+
+class ScopedReportResolveContext {
+public:
+    explicit ScopedReportResolveContext(const char *context,
+                                        bool include_sessions = true)
+        : context_(context),
+          include_sessions_(include_sessions),
+          sessions_(static_cast<EdfReportSessionDescriptor *>(
+              include_sessions
+                  ? Memory::calloc_large(AC_REPORT_SUMMARY_SESSION_MAX,
+                                         sizeof(EdfReportSessionDescriptor),
+                                         false)
+                  : nullptr)),
+          plan_(static_cast<ReportResolvedPlan *>(
+              Memory::calloc_large(1, sizeof(ReportResolvedPlan), false))),
+          scratch_(static_cast<ReportResolveScratch *>(
+              Memory::calloc_large(1, sizeof(ReportResolveScratch), false))) {
+        if ((include_sessions_ && !sessions_) || !plan_ || !scratch_) {
+            size_t bytes = sizeof(ReportResolvedPlan) +
+                           sizeof(ReportResolveScratch);
+            if (include_sessions_) {
+                bytes += AC_REPORT_SUMMARY_SESSION_MAX *
+                         sizeof(EdfReportSessionDescriptor);
+            }
+            log_report_alloc_failed(
+                context_,
+                bytes);
+        }
+    }
+
+    ~ScopedReportResolveContext() {
+        Memory::free(scratch_);
+        Memory::free(plan_);
+        Memory::free(sessions_);
+    }
+
+    ScopedReportResolveContext(const ScopedReportResolveContext &) = delete;
+    ScopedReportResolveContext &operator=(const ScopedReportResolveContext &) =
+        delete;
+
+    explicit operator bool() const {
+        return (!include_sessions_ || sessions_) && plan_ && scratch_;
+    }
+
+    EdfReportSessionDescriptor *sessions() { return sessions_; }
+    ReportResolvedPlan &plan() { return *plan_; }
+    ReportResolveScratch &scratch() { return *scratch_; }
+
+private:
+    const char *context_ = nullptr;
+    bool include_sessions_ = true;
+    EdfReportSessionDescriptor *sessions_ = nullptr;
+    ReportResolvedPlan *plan_ = nullptr;
+    ReportResolveScratch *scratch_ = nullptr;
+};
+
 const char *prefetch_phase_name(ReportManager::PrefetchPhase phase) {
     switch (phase) {
         case ReportManager::PrefetchPhase::Idle: return "idle";
@@ -417,7 +888,12 @@ const char *prefetch_phase_name(ReportManager::PrefetchPhase phase) {
 
 }  // namespace
 
-uint32_t range_blob_series_points(const ReportSpoolBuffer &b);
+struct PlotBlobScan {
+    bool valid = false;
+    uint32_t events = 0;
+    uint32_t points = 0;
+};
+PlotBlobScan scan_plot_blob(const ReportSpoolBuffer &b);
 
 ReportManager::~ReportManager() {
     Memory::free(records_);
@@ -429,6 +905,21 @@ ReportManager::~ReportManager() {
     night_epoch_count_ = 0;
     Memory::free(cache_source_night_extent_ms_);
     cache_source_night_extent_ms_ = nullptr;
+    if (cache_coalesce_) {
+        discard_cache_coalesce_buffers();
+        for (size_t i = 0; i < AC_REPORT_COALESCE_SLOTS; ++i) {
+            cache_coalesce_[i].~CacheCoalesceBuffer();
+        }
+        Memory::free(cache_coalesce_);
+        cache_coalesce_ = nullptr;
+    }
+    if (cache_write_queue_) {
+        for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
+            cache_write_queue_[i].~CacheWriteQueueSlot();
+        }
+        Memory::free(cache_write_queue_);
+        cache_write_queue_ = nullptr;
+    }
     if (result_slots_) {
         for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
             result_slots_[i].~MaterializedResult();
@@ -442,6 +933,24 @@ ReportManager::~ReportManager() {
     Memory::free(result_edf_sessions_);
     result_edf_sessions_ = nullptr;
     result_edf_session_count_ = 0;
+    Memory::free(result_resolved_plan_);
+    result_resolved_plan_ = nullptr;
+    Memory::free(result_resolve_scratch_);
+    result_resolve_scratch_ = nullptr;
+    Memory::free(prepare_indexed_night_);
+    prepare_indexed_night_ = nullptr;
+    Memory::free(range_indexed_night_);
+    range_indexed_night_ = nullptr;
+    Memory::free(index_cache_);
+    index_cache_ = nullptr;
+    index_cache_count_ = 0;
+    index_cache_valid_ = false;
+    Memory::free(range_chunks_);
+    range_chunks_ = nullptr;
+    range_chunk_count_ = 0;
+    Memory::free(range_edf_sessions_);
+    range_edf_sessions_ = nullptr;
+    range_edf_session_count_ = 0;
     if (summary_lock_) {
         vSemaphoreDelete(summary_lock_);
         summary_lock_ = nullptr;
@@ -453,6 +962,18 @@ ReportManager::~ReportManager() {
     if (result_slots_lock_) {
         vSemaphoreDelete(result_slots_lock_);
         result_slots_lock_ = nullptr;
+    }
+    if (index_cache_lock_) {
+        vSemaphoreDelete(index_cache_lock_);
+        index_cache_lock_ = nullptr;
+    }
+    if (plot_cache_write_lock_) {
+        if (xSemaphoreTake(plot_cache_write_lock_, portMAX_DELAY) == pdTRUE) {
+            reset_plot_cache_write_locked();
+            xSemaphoreGive(plot_cache_write_lock_);
+        }
+        vSemaphoreDelete(plot_cache_write_lock_);
+        plot_cache_write_lock_ = nullptr;
     }
     if (build_queue_lock_) {
         vSemaphoreDelete(build_queue_lock_);
@@ -471,6 +992,10 @@ ReportManager::~ReportManager() {
 void ReportManager::begin() {
     if (!summary_lock_) summary_lock_ = xSemaphoreCreateMutex();
     if (!summary_scratch_lock_) summary_scratch_lock_ = xSemaphoreCreateMutex();
+    if (!index_cache_lock_) index_cache_lock_ = xSemaphoreCreateMutex();
+    if (!plot_cache_write_lock_) {
+        plot_cache_write_lock_ = xSemaphoreCreateMutex();
+    }
     if (!prefetch_lock_) prefetch_lock_ = xSemaphoreCreateMutex();
     if (!build_queue_lock_) build_queue_lock_ = xSemaphoreCreateMutex();
     if (!cache_write_lock_) cache_write_lock_ = xSemaphoreCreateMutex();
@@ -484,6 +1009,8 @@ void ReportManager::begin() {
         }
     }
     ensure_cache_source_night_extents();
+    ensure_cache_coalesce_slots();
+    ensure_cache_write_queue_slots();
     clear_summary_records();
     summary_status_ = {};
     if (!load_summary_from_store()) {
@@ -546,6 +1073,286 @@ void ReportManager::give_summary_scratch() {
     if (summary_scratch_lock_) xSemaphoreGive(summary_scratch_lock_);
 }
 
+bool ReportManager::build_indexed_nights(ReportIndexedNight *out,
+                                         size_t capacity,
+                                         size_t &count) const {
+    count = 0;
+    if (!out || capacity == 0) return false;
+    if (!index_cache_lock_) return false;
+
+    uint32_t summary_revision = 0;
+    bool catalog_present = false;
+    uint8_t catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
+    uint32_t catalog_refresh_id = 0;
+    if (!index_cache_key(summary_revision,
+                         catalog_present,
+                         catalog_state,
+                         catalog_refresh_id)) {
+        return false;
+    }
+
+    if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    const bool ready = ensure_index_cache_locked(summary_revision,
+                                                catalog_present,
+                                                catalog_state,
+                                                catalog_refresh_id);
+    if (ready) {
+        count = index_cache_count_ < capacity ? index_cache_count_ : capacity;
+        if (count > 0) {
+            memcpy(out, index_cache_, count * sizeof(ReportIndexedNight));
+        }
+    }
+    xSemaphoreGive(index_cache_lock_);
+    return ready;
+}
+
+bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
+                                                  size_t capacity,
+                                                  size_t &count) const {
+    count = 0;
+    if (!out || capacity == 0) return false;
+
+    ReportNightIndex index(out, capacity);
+
+    if (take_summary_lock(pdMS_TO_TICKS(20))) {
+        const size_t raw_count = records_ ? record_count_ : 0;
+        for (size_t i = 0; i < raw_count; ++i) {
+            if (!index.add_summary_record(records_[i])) break;
+        }
+        give_summary_lock();
+    }
+
+    ReportIndexedNight *sort_scratch =
+        static_cast<ReportIndexedNight *>(Memory::alloc_large(
+            sizeof(ReportIndexedNight),
+            false));
+    if (!sort_scratch) {
+        log_report_alloc_failed("report_night_index_sort",
+                                sizeof(ReportIndexedNight));
+        return false;
+    }
+
+    auto finish_index = [&](bool edf_catalog_pending) -> bool {
+        if (!index.finish(sort_scratch)) {
+            Memory::free(sort_scratch);
+            return false;
+        }
+        count = index.count();
+        if (edf_catalog_pending) {
+            for (size_t i = 0; i < count; ++i) {
+                out[i].edf_catalog_pending = true;
+            }
+        }
+        Memory::free(sort_scratch);
+        sort_scratch = nullptr;
+        return true;
+    };
+
+    if (!edf_catalog_) {
+        return finish_index(false);
+    }
+
+    EdfReportCatalogStatus catalog_status;
+    const bool have_catalog_status = edf_catalog_->status(catalog_status, 0);
+    if (!have_catalog_status ||
+        catalog_status.state != EdfReportCatalogState::Ready) {
+        if (!have_catalog_status ||
+            catalog_status.state != EdfReportCatalogState::Error) {
+            (void)edf_catalog_->request_refresh();
+        }
+        return finish_index(!have_catalog_status ||
+                            catalog_status.state !=
+                                EdfReportCatalogState::Error);
+    }
+
+    int32_t timezone_offset_min = 0;
+    const bool have_timezone =
+        edf_catalog_->timezone_offset_minutes(timezone_offset_min);
+    const size_t catalog_count = edf_catalog_->session_count();
+    EdfReportSessionDescriptor *session_scratch =
+        static_cast<EdfReportSessionDescriptor *>(
+            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
+    if (!session_scratch) {
+        Memory::free(sort_scratch);
+        log_report_alloc_failed("report_night_edf_session_scratch",
+                                sizeof(EdfReportSessionDescriptor));
+        return false;
+    }
+    for (size_t i = 0; i < catalog_count; ++i) {
+        if (!edf_catalog_->copy_session(i, *session_scratch)) continue;
+        if (!index.add_edf_session(*session_scratch,
+                                   have_timezone,
+                                   timezone_offset_min)) {
+            break;
+        }
+    }
+    Memory::free(session_scratch);
+
+    return finish_index(false);
+}
+
+bool ReportManager::index_cache_key(
+    uint32_t &summary_revision,
+    bool &catalog_present,
+    uint8_t &catalog_state,
+    uint32_t &catalog_refresh_id) const {
+    summary_revision = 0;
+    catalog_present = edf_catalog_ != nullptr;
+    catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
+    catalog_refresh_id = 0;
+
+    if (take_summary_lock(pdMS_TO_TICKS(20))) {
+        summary_revision = summary_status_.revision;
+        give_summary_lock();
+    } else {
+        return false;
+    }
+
+    if (!edf_catalog_) return true;
+
+    EdfReportCatalogStatus catalog_status;
+    if (!edf_catalog_->status(catalog_status, 0)) {
+        catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Refreshing);
+        return true;
+    }
+    catalog_state = static_cast<uint8_t>(catalog_status.state);
+    catalog_refresh_id = catalog_status.refresh_id;
+    return true;
+}
+
+bool ReportManager::ensure_index_cache_locked(
+    uint32_t summary_revision,
+    bool catalog_present,
+    uint8_t catalog_state,
+    uint32_t catalog_refresh_id) const {
+    const bool key_matches =
+        index_cache_valid_ &&
+        index_cache_summary_revision_ == summary_revision &&
+        index_cache_catalog_present_ == catalog_present &&
+        index_cache_catalog_state_ == catalog_state &&
+        index_cache_catalog_refresh_id_ == catalog_refresh_id;
+    if (key_matches) return true;
+
+    if (!index_cache_) {
+        index_cache_ = static_cast<ReportIndexedNight *>(Memory::calloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX,
+            sizeof(ReportIndexedNight),
+            false));
+        if (!index_cache_) {
+            log_report_alloc_failed(
+                "report_night_index_cache",
+                AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+            index_cache_valid_ = false;
+            index_cache_count_ = 0;
+            return false;
+        }
+    }
+
+    size_t count = 0;
+    if (!build_indexed_nights_uncached(index_cache_,
+                                       AC_REPORT_SUMMARY_RECORD_MAX,
+                                       count)) {
+        index_cache_valid_ = false;
+        index_cache_count_ = 0;
+        return false;
+    }
+
+    index_cache_count_ = count;
+    index_cache_summary_revision_ = summary_revision;
+    index_cache_catalog_present_ = catalog_present;
+    index_cache_catalog_state_ = catalog_state;
+    index_cache_catalog_refresh_id_ = catalog_refresh_id;
+    index_cache_valid_ = true;
+    return true;
+}
+
+bool ReportManager::indexed_night_by_therapy_index(
+    size_t therapy_index,
+    ReportIndexedNight &out) const {
+    if (!index_cache_lock_) return false;
+    uint32_t summary_revision = 0;
+    bool catalog_present = false;
+    uint8_t catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
+    uint32_t catalog_refresh_id = 0;
+    if (!index_cache_key(summary_revision,
+                         catalog_present,
+                         catalog_state,
+                         catalog_refresh_id)) {
+        return false;
+    }
+    if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    bool found = false;
+    if (ensure_index_cache_locked(summary_revision,
+                                  catalog_present,
+                                  catalog_state,
+                                  catalog_refresh_id)) {
+        found = ReportNightIndex::by_therapy_index(index_cache_,
+                                                   index_cache_count_,
+                                                   therapy_index,
+                                                   out);
+    }
+    xSemaphoreGive(index_cache_lock_);
+    return found;
+}
+
+bool ReportManager::indexed_night_by_start(uint64_t night_start_ms,
+                                           ReportIndexedNight &out,
+                                           size_t *therapy_index_out) const {
+    if (!index_cache_lock_) return false;
+    uint32_t summary_revision = 0;
+    bool catalog_present = false;
+    uint8_t catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
+    uint32_t catalog_refresh_id = 0;
+    if (!index_cache_key(summary_revision,
+                         catalog_present,
+                         catalog_state,
+                         catalog_refresh_id)) {
+        return false;
+    }
+    if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    bool found = false;
+    if (ensure_index_cache_locked(summary_revision,
+                                  catalog_present,
+                                  catalog_state,
+                                  catalog_refresh_id)) {
+        found = ReportNightIndex::by_start(index_cache_,
+                                           index_cache_count_,
+                                           night_start_ms,
+                                           out,
+                                           therapy_index_out);
+    }
+    xSemaphoreGive(index_cache_lock_);
+    return found;
+}
+
+bool ReportManager::indexed_night_by_newest_cursor_locked(
+    size_t cursor,
+    ReportIndexedNight &out,
+    size_t &therapy_index) const {
+    size_t seen = 0;
+    for (size_t i = index_cache_count_; i > 0; --i) {
+        const ReportIndexedNight &night = index_cache_[i - 1];
+        if (!night.summary.valid ||
+            night.summary.start_ms == 0 ||
+            night.summary.duration_min == 0) {
+            continue;
+        }
+        if (seen == cursor) {
+            out = night;
+            therapy_index = seen;
+            return true;
+        }
+        seen++;
+    }
+    return false;
+}
+
 bool ReportManager::request_summary_refresh(bool force) {
     if (summary_fetch_active_ && !force) return true;
     if (cache_fetch_active_) return false;
@@ -588,6 +1395,17 @@ void ReportManager::poll(RpcArbiter &arbiter) {
     service_build_queue(realtime_active);
     service_range_plot(realtime_active);
     service_prefetch(realtime_active);
+    if (edf_catalog_) {
+        EdfReportCatalogStatus catalog_status;
+        if (edf_catalog_->status(catalog_status, 0) &&
+            catalog_status.state == EdfReportCatalogState::Ready &&
+            catalog_status.refresh_id != 0 &&
+            catalog_status.refresh_id != edf_catalog_summary_refresh_id_) {
+            edf_catalog_summary_refresh_id_ = catalog_status.refresh_id;
+            invalidate_materialized(0, true);
+            publish_summary_json_snapshot();
+        }
+    }
     // Publish the summary revision for the background prefetch job (cross-task).
     if (take_summary_lock(0)) {
         summary_revision_pub_.store(summary_status_.revision);
@@ -610,6 +1428,28 @@ void ReportManager::poll(RpcArbiter &arbiter) {
         poll_cache_fetch(arbiter);
     }
     if (plot_build_active_) {
+        if (plot_build_idle_prebuild_) {
+            const char *reason = "idle";
+            if (realtime_active || !idle_prebuild_gate_open(&reason)) {
+                const uint32_t elapsed_ms =
+                    plot_build_started_ms_
+                        ? static_cast<uint32_t>(millis() -
+                                                plot_build_started_ms_)
+                        : 0;
+                Log::logf(CAT_REPORT,
+                          LOG_DEBUG,
+                          "Idle plot prebuild aborted reason=%s "
+                          "night=%llu elapsed_ms=%lu\n",
+                          realtime_active ? "realtime" :
+                                            (reason ? reason : "gate"),
+                          static_cast<unsigned long long>(
+                              plot_build_night_start_ms_.load()),
+                          static_cast<unsigned long>(elapsed_ms));
+                reset_plot_build();
+                release_result_edf_sessions();
+                return;
+            }
+        }
         poll_result_plot_build();
         return;
     }
@@ -669,10 +1509,45 @@ bool ReportManager::write_parsed_chunk(void *context,
         !chunk.payload || chunk.payload_schema == 0 ||
         chunk.record_count == 0 ||
         chunk.start_ms < 0 || chunk.end_ms <= chunk.start_ms) {
+        if (ctx && ctx->error && ctx->error_len && !ctx->error[0]) {
+            snprintf(ctx->error, ctx->error_len, "%s", "bad_cache_chunk");
+        }
         return false;
     }
-    if (!report_source_spool_type(chunk.source)) return false;
-    return ctx->manager->buffer_parsed_chunk(chunk);
+    if (!report_source_spool_type(chunk.source)) {
+        if (ctx->error && ctx->error_len && !ctx->error[0]) {
+            snprintf(ctx->error, ctx->error_len, "%s", "bad_cache_source");
+        }
+        return false;
+    }
+    if (chunk.kind == ReportStoreChunkKind::Series &&
+        chunk.payload_schema != REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2) {
+        if (ctx->error && ctx->error_len && !ctx->error[0]) {
+            snprintf(ctx->error, ctx->error_len, "%s",
+                     "bad_series_payload_schema");
+        }
+        return false;
+    }
+    if (chunk.kind == ReportStoreChunkKind::Events &&
+        chunk.payload_schema != REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1) {
+        if (ctx->error && ctx->error_len && !ctx->error[0]) {
+            snprintf(ctx->error, ctx->error_len, "%s",
+                     "bad_event_payload_schema");
+        }
+        return false;
+    }
+    if (!ctx->manager->buffer_parsed_chunk(chunk)) {
+        if (ctx->error && ctx->error_len && !ctx->error[0]) {
+            const std::string &detail = ctx->manager->cache_status_.error;
+            snprintf(ctx->error,
+                     ctx->error_len,
+                     "%s",
+                     detail.empty() ? "cache_chunk_store_failed"
+                                    : detail.c_str());
+        }
+        return false;
+    }
+    return true;
 }
 
 // Map a timestamp to its summary-night bucket start (the partition key). Bucket
@@ -706,37 +1581,92 @@ int64_t ReportManager::night_start_for_timestamp(int64_t timestamp_ms) const {
     return result;
 }
 
-// Coalesce parsed chunks per (kind,name); flush on night change, session gap,
-// or size cap. The source's final buffer is flushed at source completion.
+// Coalesce parsed chunks per compatible (kind,name) segment. A night/timebase
+// break or size cap opens another active segment instead of forcing an immediate
+// writer-queue flush from the parser callback; source finalization drains the
+// pending segments with normal backpressure handling.
+bool ReportManager::ensure_cache_coalesce_slots() {
+    if (cache_coalesce_) return true;
+    cache_coalesce_ = static_cast<CacheCoalesceBuffer *>(Memory::alloc_large(
+        AC_REPORT_COALESCE_SLOTS * sizeof(CacheCoalesceBuffer), false));
+    if (!cache_coalesce_) {
+        log_report_alloc_failed(
+            "cache_coalesce",
+            AC_REPORT_COALESCE_SLOTS * sizeof(CacheCoalesceBuffer));
+        return false;
+    }
+    for (size_t i = 0; i < AC_REPORT_COALESCE_SLOTS; ++i) {
+        new (&cache_coalesce_[i]) CacheCoalesceBuffer();
+    }
+    return true;
+}
+
+bool ReportManager::ensure_cache_write_queue_slots() {
+    if (cache_write_queue_) return true;
+    cache_write_queue_ = static_cast<CacheWriteQueueSlot *>(Memory::alloc_large(
+        AC_REPORT_CACHE_WRITE_QUEUE_MAX * sizeof(CacheWriteQueueSlot), false));
+    if (!cache_write_queue_) {
+        log_report_alloc_failed(
+            "cache_write_queue",
+            AC_REPORT_CACHE_WRITE_QUEUE_MAX * sizeof(CacheWriteQueueSlot));
+        return false;
+    }
+    for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
+        new (&cache_write_queue_[i]) CacheWriteQueueSlot();
+    }
+    return true;
+}
+
 bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
+    if (!ensure_cache_coalesce_slots()) {
+        fail_cache_fetch("cache_coalesce_alloc_failed");
+        return false;
+    }
+
     const int64_t night = night_start_for_timestamp(chunk.start_ms);
+    const bool is_series = chunk.kind == ReportStoreChunkKind::Series;
+    ReportSeriesV2UniformView series_view;
+    if (is_series) {
+        if (!report_series_payload_v2_uniform_view(chunk.payload,
+                                                   chunk.payload_len,
+                                                   chunk.record_count,
+                                                   series_view) ||
+            series_view.missing_bitmap_bytes != 0) {
+            fail_cache_fetch("cache_series_v2_invalid");
+            return false;
+        }
+    }
+
+    const size_t incoming_bytes =
+        is_series ? series_view.values_milli_bytes : chunk.payload_len;
+    const size_t fixed_bytes =
+        is_series ? report_series_v2_header_size() : 0;
 
     size_t slot = AC_REPORT_COALESCE_SLOTS;
     for (size_t i = 0; i < AC_REPORT_COALESCE_SLOTS; ++i) {
         if (cache_coalesce_[i].active &&
             cache_coalesce_[i].kind == chunk.kind &&
             cache_coalesce_[i].name == chunk.name) {
+            CacheCoalesceBuffer &buf = cache_coalesce_[i];
+            bool size_overflow = incoming_bytes > SIZE_MAX - buf.payload.size();
+            size_t projected_size =
+                size_overflow ? SIZE_MAX : buf.payload.size() + incoming_bytes;
+            if (!size_overflow) {
+                size_overflow = fixed_bytes > SIZE_MAX - projected_size;
+                if (!size_overflow) projected_size += fixed_bytes;
+            }
+            if (size_overflow ||
+                projected_size > AC_REPORT_COALESCE_TARGET_BYTES) {
+                continue;
+            }
+            if (buf.night_start_ms != night) continue;
+            if (is_series &&
+                (buf.series_interval_ms != series_view.interval_ms ||
+                 chunk.start_ms != buf.last_ms)) {
+                continue;
+            }
             slot = i;
             break;
-        }
-    }
-
-    if (slot != AC_REPORT_COALESCE_SLOTS) {
-        CacheCoalesceBuffer &buf = cache_coalesce_[slot];
-        // Break the chunk at a session gap, else its [start,end] spans the gap,
-        // derive_result_session_ranges() merges the sessions, and the chart
-        // bridges it. Series only - events are sparse and have no sessions.
-        const bool session_gap =
-            chunk.kind == ReportStoreChunkKind::Series &&
-            chunk.start_ms - buf.last_ms > AC_REPORT_SESSION_GAP_MS;
-        if (buf.night_start_ms != night || session_gap ||
-            buf.payload.size() + chunk.payload_len >
-                AC_REPORT_COALESCE_TARGET_BYTES) {
-            if (flush_cache_coalesce_buffer(slot) !=
-                CacheFlushResult::Flushed) {
-                return false;
-            }
-            slot = AC_REPORT_COALESCE_SLOTS;
         }
     }
 
@@ -748,8 +1678,13 @@ bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
             }
         }
         if (slot == AC_REPORT_COALESCE_SLOTS) {
-            if (flush_cache_coalesce_buffer(0) !=
-                CacheFlushResult::Flushed) {
+            const CacheFlushResult flush = flush_cache_coalesce_buffer(0);
+            if (flush == CacheFlushResult::Blocked) {
+                cache_status_.error = "cache_coalesce_backpressure";
+                return false;
+            }
+            if (flush == CacheFlushResult::Failed) {
+                cache_status_.error = "cache_coalesce_flush_failed";
                 return false;
             }
             slot = 0;
@@ -764,12 +1699,18 @@ bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
         buf.last_ms = chunk.end_ms;
         buf.record_count = 0;
         buf.payload_schema = chunk.payload_schema;
+        buf.series_interval_ms = is_series ? series_view.interval_ms : 0;
+        buf.series_values_pending = is_series;
         buf.payload.clear();
         buf.payload.set_max_size(AC_REPORT_COALESCE_TARGET_BYTES + 65536);
     }
 
     CacheCoalesceBuffer &buf = cache_coalesce_[slot];
-    if (!buf.payload.append(chunk.payload, chunk.payload_len)) {
+    const uint8_t *append_data =
+        is_series ? series_view.values_milli_le : chunk.payload;
+    const size_t append_len =
+        is_series ? series_view.values_milli_bytes : chunk.payload_len;
+    if (!buf.payload.append(append_data, append_len)) {
         fail_cache_fetch("cache_coalesce_alloc");
         return false;
     }
@@ -782,7 +1723,9 @@ bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
 
 ReportManager::CacheFlushResult ReportManager::flush_cache_coalesce_buffer(
     size_t slot) {
-    if (slot >= AC_REPORT_COALESCE_SLOTS) return CacheFlushResult::Flushed;
+    if (!cache_coalesce_ || slot >= AC_REPORT_COALESCE_SLOTS) {
+        return CacheFlushResult::Flushed;
+    }
     CacheCoalesceBuffer &buf = cache_coalesce_[slot];
     if (!buf.active) return CacheFlushResult::Flushed;
 
@@ -800,15 +1743,40 @@ ReportManager::CacheFlushResult ReportManager::flush_cache_coalesce_buffer(
             result = CacheFlushResult::Failed;
         } else {
             ReportStoreChunkMeta meta;
-            meta.payload_schema = buf.payload_schema;
             meta.record_count = buf.record_count;
-            const CacheWriteEnqueueResult queued =
-                enqueue_cache_write(buf, key, meta);
-            if (queued == CacheWriteEnqueueResult::Blocked) {
-                return CacheFlushResult::Blocked;
+            meta.payload_schema = buf.payload_schema;
+            if (buf.kind == ReportStoreChunkKind::Series &&
+                buf.series_values_pending) {
+                ReportSpoolBuffer built;
+                if (!report_build_series_payload_v2_uniform_values_le(
+                        built,
+                        buf.series_interval_ms,
+                        buf.payload.data(),
+                        buf.record_count)) {
+                    Log::logf(CAT_REPORT,
+                              LOG_WARN,
+                              "Cache series v2 build failed source=%s "
+                              "name=%s records=%lu\n",
+                              key.source ? key.source : "",
+                              key.name ? key.name : "",
+                              static_cast<unsigned long>(buf.record_count));
+                    result = CacheFlushResult::Failed;
+                } else {
+                    buf.payload.move_from(built);
+                    buf.payload_schema = REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
+                    buf.series_values_pending = false;
+                    meta.payload_schema = buf.payload_schema;
+                }
             }
-            if (queued == CacheWriteEnqueueResult::Failed) {
-                result = CacheFlushResult::Failed;
+            if (result == CacheFlushResult::Flushed) {
+                const CacheWriteEnqueueResult queued =
+                    enqueue_cache_write(buf, key, meta);
+                if (queued == CacheWriteEnqueueResult::Blocked) {
+                    return CacheFlushResult::Blocked;
+                }
+                if (queued == CacheWriteEnqueueResult::Failed) {
+                    result = CacheFlushResult::Failed;
+                }
             }
         }
     }
@@ -820,6 +1788,9 @@ ReportManager::CacheFlushResult ReportManager::flush_cache_coalesce_buffer(
     buf.last_ms = 0;
     buf.night_start_ms = 0;
     buf.name = nullptr;
+    buf.payload_schema = 0;
+    buf.series_interval_ms = 0;
+    buf.series_values_pending = false;
     return result;
 }
 
@@ -827,7 +1798,7 @@ ReportManager::CacheWriteEnqueueResult ReportManager::enqueue_cache_write(
     CacheCoalesceBuffer &buf,
     const ReportStoreChunkKey &key,
     const ReportStoreChunkMeta &meta) {
-    if (!cache_write_lock_) {
+    if (!cache_write_lock_ || !ensure_cache_write_queue_slots()) {
         return CacheWriteEnqueueResult::Failed;
     }
     if (!xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(5))) {
@@ -863,6 +1834,7 @@ ReportManager::CacheWriteEnqueueResult ReportManager::enqueue_cache_write(
 
 ReportManager::CacheFlushResult
 ReportManager::flush_all_cache_coalesce_buffers() {
+    if (!cache_coalesce_) return CacheFlushResult::Flushed;
     CacheFlushResult result = CacheFlushResult::Flushed;
     for (size_t i = 0; i < AC_REPORT_COALESCE_SLOTS; ++i) {
         const CacheFlushResult flush = flush_cache_coalesce_buffer(i);
@@ -875,6 +1847,7 @@ ReportManager::flush_all_cache_coalesce_buffers() {
 }
 
 void ReportManager::discard_cache_coalesce_buffers() {
+    if (!cache_coalesce_) return;
     for (size_t i = 0; i < AC_REPORT_COALESCE_SLOTS; ++i) {
         CacheCoalesceBuffer &buf = cache_coalesce_[i];
         buf.active = false;
@@ -884,14 +1857,19 @@ void ReportManager::discard_cache_coalesce_buffers() {
         buf.last_ms = 0;
         buf.night_start_ms = 0;
         buf.name = nullptr;
+        buf.payload_schema = 0;
+        buf.series_interval_ms = 0;
+        buf.series_values_pending = false;
     }
 }
 
 void ReportManager::reset_cache_write_fetch_state_locked() {
-    for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
-        CacheWriteQueueSlot &job = cache_write_queue_[i];
-        job.active = false;
-        job.payload.clear();
+    if (cache_write_queue_) {
+        for (size_t i = 0; i < AC_REPORT_CACHE_WRITE_QUEUE_MAX; ++i) {
+            CacheWriteQueueSlot &job = cache_write_queue_[i];
+            job.active = false;
+            job.payload.clear();
+        }
     }
     cache_write_head_ = 0;
     cache_write_tail_ = 0;
@@ -979,13 +1957,15 @@ void ReportManager::note_cache_chunk_committed(uint64_t night_start_ms) {
 }
 
 bool ReportManager::service_cache_writer() {
-    if (!cache_write_lock_) return false;
+    if (!cache_write_lock_ || !cache_write_queue_) {
+        return service_plot_cache_writer();
+    }
 
     CacheWriteQueueSlot job;
     if (!xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(20))) return false;
     if (cache_write_count_ == 0) {
         xSemaphoreGive(cache_write_lock_);
-        return false;
+        return service_plot_cache_writer();
     }
 
     CacheWriteQueueSlot &slot = cache_write_queue_[cache_write_head_];
@@ -1255,10 +2235,70 @@ ReportSummaryStatus ReportManager::summary_status() const {
     return snapshot;
 }
 
-void append_summary_json_from_records(LargeTextBuffer &json,
+uint32_t indexed_night_display_duration_min(const ReportIndexedNight &night) {
+    uint32_t duration_min = 0;
+    const size_t range_count =
+        std::min(night.range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    for (size_t i = 0; i < range_count; ++i) {
+        duration_min += report_ceil_duration_min(night.ranges[i].start_ms,
+                                                 night.ranges[i].end_ms);
+    }
+    if (duration_min > 0) return duration_min;
+    return night.summary.duration_min;
+}
+
+bool indexed_night_visible_in_summary(const ReportIndexedNight &night) {
+    return night.summary.valid && night.range_count > 0 &&
+           indexed_night_display_duration_min(night) > 0;
+}
+
+void append_summary_sessions_json(LargeTextBuffer &json,
+                                  const ReportIndexedNight &night) {
+    const size_t range_count =
+        std::min(night.range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    bool first = true;
+    if (range_count > 0) {
+        for (size_t i = 0; i < range_count; ++i) {
+            const ReportSessionRange &range = night.ranges[i];
+            if (range.end_ms <= range.start_ms) continue;
+            if (!first) json += ',';
+            first = false;
+            json += "{";
+            json_add_uint64(json,
+                            "start",
+                            static_cast<uint64_t>(range.start_ms),
+                            false);
+            json_add_int(json,
+                         "duration_min",
+                         static_cast<long>(report_ceil_duration_min(
+                             range.start_ms,
+                             range.end_ms)));
+            json += "}";
+        }
+        return;
+    }
+
+    const ReportSummaryRecord &record = night.summary;
+    for (uint32_t session_index = 0;
+         session_index < record.session_interval_count;
+         ++session_index) {
+        const ReportSummarySession &session = record.sessions[session_index];
+        if (!first) json += ',';
+        first = false;
+        json += "{";
+        json_add_uint64(json, "start", session.start_ms, false);
+        json_add_int(json, "duration_min",
+                     static_cast<long>(session.duration_min));
+        json += "}";
+    }
+}
+
+void append_summary_json_from_indexed(LargeTextBuffer &json,
                                       const ReportSummaryStatus &status_snapshot,
                                       uint32_t data_epoch_snapshot,
-                                      const ReportSummaryRecord *snapshot,
+                                      const ReportIndexedNight *snapshot,
                                       size_t record_count_snapshot) {
     json.clear();
     if (record_count_snapshot > AC_REPORT_SUMMARY_RECORD_MAX) {
@@ -1296,8 +2336,11 @@ void append_summary_json_from_records(LargeTextBuffer &json,
     bool first = true;
     size_t therapy_seen = 0;
     for (size_t i = 0; i < record_count_snapshot; ++i) {
-        const ReportSummaryRecord &record = snapshot[i];
-        if (!record.valid || record.duration_min == 0) continue;
+        const ReportIndexedNight &night = snapshot[i];
+        const ReportSummaryRecord &record = night.summary;
+        const uint32_t duration_min =
+            indexed_night_display_duration_min(night);
+        if (!indexed_night_visible_in_summary(night)) continue;
         if (!first) json += ',';
         first = false;
         const size_t therapy_index =
@@ -1312,7 +2355,7 @@ void append_summary_json_from_records(LargeTextBuffer &json,
         json_add_uint64(json, "start", record.start_ms);
         json_add_uint64(json, "end", record.end_ms);
         json_add_int(json, "duration_min",
-                     static_cast<long>(record.duration_min));
+                     static_cast<long>(duration_min));
         if (record.has_tz_offset_min) {
             json_add_int(json, "tz_offset_min",
                          static_cast<long>(record.tz_offset_min));
@@ -1336,24 +2379,15 @@ void append_summary_json_from_records(LargeTextBuffer &json,
         append_optional_float(json, "rera_index",
                               record.has_rera_index,
                               record.rera_index);
-        if (record.has_session_count) {
-            json_add_int(json, "session_count",
-                         static_cast<long>(record.session_count));
-        }
+        json_add_int(json, "session_count",
+                     static_cast<long>(night.range_count > 0
+                                           ? night.range_count
+                                           : record.session_count));
         json += ",\"sessions\":[";
-        for (uint32_t session_index = 0;
-             session_index < record.session_interval_count;
-             ++session_index) {
-            const ReportSummarySession &session =
-                record.sessions[session_index];
-            if (session_index) json += ',';
-            json += "{";
-            json_add_uint64(json, "start", session.start_ms, false);
-            json_add_int(json, "duration_min",
-                         static_cast<long>(session.duration_min));
-            json += "}";
-        }
+        append_summary_sessions_json(json, night);
         json += "]";
+        json_add_int(json, "has_summary", night.has_summary ? 1 : 0);
+        json_add_int(json, "has_edf", night.has_edf ? 1 : 0);
         json += ",\"id\":\"";
         append_u64(json, record.start_ms);
         json += "\"}";
@@ -1362,9 +2396,7 @@ void append_summary_json_from_records(LargeTextBuffer &json,
 }
 
 void ReportManager::publish_summary_json_snapshot() {
-    ReportSummaryRecord *records_snapshot = nullptr;
-    const bool have_scratch =
-        take_summary_scratch(portMAX_DELAY, records_snapshot);
+    ReportIndexedNight *indexed_snapshot = nullptr;
     ReportSummaryStatus status_snapshot;
     uint32_t data_epoch_snapshot = 0;
     size_t record_count_snapshot = 0;
@@ -1372,34 +2404,47 @@ void ReportManager::publish_summary_json_snapshot() {
     if (take_summary_lock(portMAX_DELAY)) {
         status_snapshot = summary_status_;
         data_epoch_snapshot = cache_data_epoch_;
-        record_count_snapshot = record_count_;
-        if (record_count_snapshot > AC_REPORT_SUMMARY_RECORD_MAX) {
-            record_count_snapshot = AC_REPORT_SUMMARY_RECORD_MAX;
-        }
-        if (records_snapshot && records_ && record_count_snapshot) {
-            memcpy(records_snapshot,
-                   records_,
-                   record_count_snapshot * sizeof(ReportSummaryRecord));
-        }
         give_summary_lock();
     } else {
         status_snapshot.state = ReportSummaryState::Error;
         status_snapshot.error = "summary_busy";
     }
 
-    if (!have_scratch && record_count_snapshot) {
+    indexed_snapshot = static_cast<ReportIndexedNight *>(
+        Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
+                             sizeof(ReportIndexedNight),
+                             false));
+    if (!indexed_snapshot) {
         status_snapshot.state = ReportSummaryState::Error;
         status_snapshot.error = "summary_snapshot_alloc";
         record_count_snapshot = 0;
+    } else if (!build_indexed_nights(indexed_snapshot,
+                                     AC_REPORT_SUMMARY_RECORD_MAX,
+                                     record_count_snapshot)) {
+        status_snapshot.state = ReportSummaryState::Error;
+        status_snapshot.error = "summary_snapshot_build";
+        record_count_snapshot = 0;
+        Memory::free(indexed_snapshot);
+        indexed_snapshot = nullptr;
+    } else {
+        status_snapshot.records_total =
+            static_cast<uint32_t>(record_count_snapshot);
     }
+    uint32_t nights_with_therapy = 0;
+    for (size_t i = 0; indexed_snapshot && i < record_count_snapshot; ++i) {
+        if (indexed_night_visible_in_summary(indexed_snapshot[i])) {
+            nights_with_therapy++;
+        }
+    }
+    status_snapshot.nights_with_therapy = nights_with_therapy;
 
     summary_json_build_.clear();
-    append_summary_json_from_records(summary_json_build_,
+    append_summary_json_from_indexed(summary_json_build_,
                                      status_snapshot,
                                      data_epoch_snapshot,
-                                     records_snapshot,
+                                     indexed_snapshot,
                                      record_count_snapshot);
-    if (have_scratch) give_summary_scratch();
+    Memory::free(indexed_snapshot);
 
     if (summary_json_build_.overflowed()) {
         Log::logf(CAT_REPORT, LOG_WARN,
@@ -1431,36 +2476,34 @@ uint32_t ReportManager::night_epoch_for_unlocked(uint64_t night_start_ms) const 
     return 0;
 }
 
-void ReportManager::format_night_etag(const ReportSummaryRecord &rec, char *out,
-                                      size_t out_size) const {
-    if (!take_summary_lock(portMAX_DELAY)) {
-        if (out && out_size) out[0] = '\0';
-        return;
-    }
-    format_night_etag_unlocked(rec, out, out_size);
-    give_summary_lock();
-}
-
-void ReportManager::format_night_etag_unlocked(const ReportSummaryRecord &rec,
-                                               char *out,
-                                               size_t out_size) const {
+void ReportManager::format_night_etag_unlocked(
+    const ReportSummaryRecord &rec,
+    uint64_t source_signature,
+    char *out,
+    size_t out_size) const {
     if (!out || !out_size) return;
-    snprintf(out, out_size, "%llu-%lu-%lu-%lu",
+    snprintf(out, out_size, "%llu-%lu-%lu-%08lx%08lx-%lu-r%lu",
              static_cast<unsigned long long>(rec.start_ms),
              static_cast<unsigned long>(rec.duration_min),
              static_cast<unsigned long>(rec.session_interval_count),
-             static_cast<unsigned long>(night_epoch_for_unlocked(rec.start_ms)));
+             static_cast<unsigned long>(source_signature >> 32),
+             static_cast<unsigned long>(source_signature & 0xffffffffULL),
+             static_cast<unsigned long>(night_epoch_for_unlocked(rec.start_ms)),
+             static_cast<unsigned long>(REPORT_RESULT_ETAG_VERSION));
 }
 
 bool ReportManager::night_etag(size_t therapy_index, char *out,
                                size_t out_size) const {
-    ReportSummaryRecord rec;
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-    if (!summary_night_by_therapy_index_unlocked(therapy_index, rec)) {
-        give_summary_lock();
+    ScopedIndexedNight night("night_etag_index");
+    if (!night ||
+        !indexed_night_by_therapy_index(therapy_index, night.get())) {
         return false;
     }
-    format_night_etag_unlocked(rec, out, out_size);
+    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
+    format_night_etag_unlocked(night->summary,
+                               night->source_signature,
+                               out,
+                               out_size);
     give_summary_lock();
     return true;
 }
@@ -1479,11 +2522,14 @@ static const char *result_state_name_for(ReportResultState state) {
 
 void ReportManager::build_result_json_from(
     const ReportResultStatus &result_status_,
-    const ReportSummaryRecord &result_night_,
+    const ReportIndexedNight &indexed_night,
+    const PlotRange *ranges,
+    size_t range_count,
     const ReportResultStream *result_streams_,
     size_t result_stream_count_,
     const ReportCacheFetchStatus &cache_status_,
     LargeTextBuffer &json) const {
+    const ReportSummaryRecord &result_night_ = indexed_night.summary;
     json.clear();
     json += "{";
     json_add_string(json, "state", result_state_name_for(result_status_.state),
@@ -1576,13 +2622,48 @@ void ReportManager::build_result_json_from(
                  static_cast<long>(result_status_.arousal_count));
     json_add_bool(json, "events_available", result_status_.events_available);
     json += ",\"sessions\":[";
-    for (uint32_t i = 0; i < result_night_.session_interval_count; ++i) {
-        const ReportSummarySession &session = result_night_.sessions[i];
+    const bool have_index_ranges = indexed_night.range_count > 0;
+    const bool have_resolved_ranges = !have_index_ranges &&
+                                      ranges &&
+                                      range_count > 0;
+    const size_t session_json_count =
+        have_index_ranges
+            ? std::min(indexed_night.range_count,
+                       static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX))
+            : (have_resolved_ranges
+                   ? range_count
+                   : result_night_.session_interval_count);
+    for (size_t i = 0; i < session_json_count; ++i) {
+        uint64_t session_start = 0;
+        uint64_t session_end = 0;
+        uint32_t duration_min = 0;
+        if (have_index_ranges) {
+            const ReportSessionRange &range = indexed_night.ranges[i];
+            session_start = static_cast<uint64_t>(range.start_ms);
+            session_end = static_cast<uint64_t>(range.end_ms);
+            duration_min =
+                report_ceil_duration_min(range.start_ms, range.end_ms);
+        } else if (have_resolved_ranges) {
+            const PlotRange &range = ranges[i];
+            session_start = static_cast<uint64_t>(range.start_ms);
+            session_end = static_cast<uint64_t>(range.end_ms);
+            duration_min =
+                report_ceil_duration_min(range.start_ms, range.end_ms);
+        } else {
+            const ReportSummarySession &session =
+                result_night_.sessions[i];
+            session_start = session.start_ms;
+            session_end = session.start_ms +
+                          static_cast<uint64_t>(session.duration_min) *
+                              60000ULL;
+            duration_min = session.duration_min;
+        }
         if (i) json += ',';
         json += "{";
-        json_add_uint64(json, "start", session.start_ms, false);
+        json_add_uint64(json, "start", session_start, false);
+        json_add_uint64(json, "end", session_end);
         json_add_int(json, "duration_min",
-                     static_cast<long>(session.duration_min));
+                     static_cast<long>(duration_min));
         json += "}";
     }
     json += "],\"stream_details\":[";
@@ -1600,6 +2681,17 @@ void ReportManager::build_result_json_from(
         json_add_string(json, "name", stream.name ? stream.name : "");
         json_add_bool(json, "required", stream.required);
         json_add_bool(json, "complete", stream.complete);
+        const char *provider_name = "none";
+        if (stream.has_edf_segment && stream.has_spool_segment) {
+            provider_name = "mixed";
+        } else if (stream.has_edf_segment) {
+            provider_name = "edf";
+        } else if (stream.has_spool_segment) {
+            provider_name = "spool";
+        }
+        json_add_string(json, "provider", provider_name);
+        json_add_bool(json, "has_edf", stream.has_edf_segment);
+        json_add_bool(json, "has_spool", stream.has_spool_segment);
         json_add_int(json, "chunks",
                      static_cast<long>(stream.chunk_count));
         json_add_int(json, "records",
@@ -1626,22 +2718,47 @@ void ReportManager::build_result_json_from(
     json += "]}";
 }
 
-void ReportManager::publish_result_to_slot() {
-    if (!ensure_result_slots()) return;
-    // A slot is fresh iff this summary-derived ETag matches the live summary
-    // ETag at read time. Use the live summary row, not result_night_, because
-    // result_night_ is adjusted for display from cached chunk coverage.
-    char etag[48];
-    etag[0] = '\0';
-    if (take_summary_lock(portMAX_DELAY)) {
-        ReportSummaryRecord summary_night;
-        if (summary_night_by_start_unlocked(result_night_.start_ms,
-                                            summary_night)) {
-            format_night_etag_unlocked(summary_night, etag, sizeof(etag));
-        }
-        give_summary_lock();
+bool ReportManager::publish_result_to_slot(bool cache_plot) {
+    if (!ensure_result_slots()) {
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "Result publish skipped reason=slot_alloc_failed "
+                  "index=%lu night=%llu state=%s error=%s\n",
+                  static_cast<unsigned long>(result_status_.therapy_index),
+                  static_cast<unsigned long long>(
+                      result_indexed_night_.summary.start_ms),
+                  result_state_name(),
+                  result_status_.error.length() ? result_status_.error.c_str()
+                                                : "--");
+        return false;
     }
-    if (!etag[0]) return;
+    if (!result_state_materialized_slot_allowed(result_status_.state)) {
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Result publish skipped reason=state index=%lu night=%llu "
+                  "state=%s error=%s\n",
+                  static_cast<unsigned long>(result_status_.therapy_index),
+                  static_cast<unsigned long long>(
+                      result_indexed_night_.summary.start_ms),
+                  result_state_name(),
+                  result_status_.error.length() ? result_status_.error.c_str()
+                                                : "--");
+        return false;
+    }
+    if (!result_etag_[0] || result_indexed_night_.summary.start_ms == 0) {
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "Result publish skipped reason=%s index=%lu night=%llu "
+                  "state=%s error=%s\n",
+                  !result_etag_[0] ? "missing_etag" : "missing_night",
+                  static_cast<unsigned long>(result_status_.therapy_index),
+                  static_cast<unsigned long long>(
+                      result_indexed_night_.summary.start_ms),
+                  result_state_name(),
+                  result_status_.error.length() ? result_status_.error.c_str()
+                                                : "--");
+        return false;
+    }
 
     // Snapshot the plot bytes outside the slot lock (the copy is the heavy
     // part); a shared_ptr lets a GET stream it even after the blob is evicted.
@@ -1661,14 +2778,15 @@ void ReportManager::publish_result_to_slot() {
                   "index=%lu bytes=%lu\n",
                   static_cast<unsigned long>(result_status_.therapy_index),
                   static_cast<unsigned long>(result_plot_bin_.size()));
-        return;
+        return false;
     }
     xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
     size_t pick = 0;
     bool found = false;
     for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
         if (result_slots_[i].valid &&
-            result_slots_[i].night_start_ms == result_night_.start_ms) {
+            result_slots_[i].night_start_ms ==
+                result_indexed_night_.summary.start_ms) {
             pick = i;
             found = true;
             break;
@@ -1687,19 +2805,49 @@ void ReportManager::publish_result_to_slot() {
     }
     MaterializedResult &slot = result_slots_[pick];
     slot.valid = true;
-    slot.night_start_ms = result_night_.start_ms;
-    snprintf(slot.etag, sizeof(slot.etag), "%s", etag);
+    slot.night_start_ms = result_indexed_night_.summary.start_ms;
+    snprintf(slot.etag, sizeof(slot.etag), "%s", result_etag_);
     slot.status = result_status_;
-    slot.night = result_night_;
+    slot.night = result_indexed_night_;
+    slot.range_count =
+        std::min(result_range_count_,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+        slot.ranges[i] = (i < slot.range_count) ? result_ranges_[i]
+                                                : PlotRange{};
+    }
     slot.stream_count = result_stream_count_;
     for (size_t i = 0; i < AC_REPORT_RESULT_STREAM_MAX; ++i) {
         slot.streams[i] = (i < result_stream_count_) ? result_streams_[i]
                                                      : ReportResultStream{};
     }
+    slot.chunk_count =
+        std::min(static_cast<size_t>(result_status_.chunk_count),
+                 static_cast<size_t>(AC_REPORT_RESULT_CHUNK_MAX));
+    for (size_t i = 0; i < AC_REPORT_RESULT_CHUNK_MAX; ++i) {
+        slot.chunks[i] = (result_chunks_ && i < slot.chunk_count)
+                             ? result_chunks_[i]
+                             : ReportResultChunk{};
+    }
+    slot.edf_session_count =
+        std::min(result_edf_session_count_,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+        slot.edf_sessions[i] =
+            (result_edf_sessions_ && i < slot.edf_session_count)
+                ? result_edf_sessions_[i]
+                : EdfReportSessionDescriptor{};
+    }
     slot.plot = plot;
     slot.last_used = ++result_slot_tick_;
     update_materialized_status_locked();
     xSemaphoreGive(result_slots_lock_);
+    if (cache_plot && plot) {
+        enqueue_result_plot_cache_write(result_indexed_night_,
+                                        result_etag_,
+                                        plot);
+    }
+    return true;
 }
 
 void ReportManager::update_materialized_status_locked() {
@@ -1718,14 +2866,61 @@ void ReportManager::update_materialized_status_locked() {
     result_status_.materialized_plot_slots = plot_slots;
 }
 
+void ReportManager::clear_materialized_slot_locked(MaterializedResult &slot) {
+    slot.valid = false;
+    slot.night_start_ms = 0;
+    slot.etag[0] = '\0';
+    slot.status = ReportResultStatus{};
+    memset(&slot.night, 0, sizeof(slot.night));
+    memset(slot.ranges, 0, sizeof(slot.ranges));
+    slot.range_count = 0;
+    memset(slot.streams, 0, sizeof(slot.streams));
+    slot.stream_count = 0;
+    memset(slot.chunks, 0, sizeof(slot.chunks));
+    slot.chunk_count = 0;
+    memset(slot.edf_sessions, 0, sizeof(slot.edf_sessions));
+    slot.edf_session_count = 0;
+    slot.plot.reset();
+}
+
+void ReportManager::clear_range_plot_locked(uint64_t night_start_ms, bool all) {
+    const bool matches_request =
+        range_req_active_ &&
+        (all || range_req_night_start_ms_ == night_start_ms);
+    const bool matches_plot =
+        range_plot_bytes_ &&
+        (all || range_plot_night_start_ms_ == night_start_ms);
+    if (!matches_request && !matches_plot) return;
+
+    if (matches_request) {
+        range_req_active_ = false;
+        range_req_index_ = 0;
+        range_req_night_start_ms_ = 0;
+        range_req_from_ = 0;
+        range_req_to_ = 0;
+    }
+    if (matches_plot) {
+        range_plot_bytes_.reset();
+        range_plot_index_ = 0;
+        range_plot_night_start_ms_ = 0;
+        range_plot_from_ = 0;
+        range_plot_to_ = 0;
+    }
+}
+
 void ReportManager::invalidate_materialized_locked(uint64_t night_start_ms,
                                                    bool all) {
     if (!result_slots_) return;
+    bool invalidated = false;
     for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
         if (result_slots_[i].valid &&
             (all || result_slots_[i].night_start_ms == night_start_ms)) {
-            result_slots_[i] = MaterializedResult{};
+            clear_materialized_slot_locked(result_slots_[i]);
+            invalidated = true;
         }
+    }
+    if (invalidated) {
+        clear_range_plot_locked(night_start_ms, all);
     }
     update_materialized_status_locked();
 }
@@ -1740,70 +2935,185 @@ void ReportManager::invalidate_materialized(uint64_t night_start_ms, bool all) {
 ReportManager::ResultRead ReportManager::read_result(
     size_t therapy_index, const char *if_none_match, char *etag_out,
     size_t etag_out_size, LargeTextBuffer &json_out) {
-    ReportSummaryRecord rec;
-    char current_etag[48] = {};
-    char etag[48] = {};
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) {
-        if (etag_out && etag_out_size) etag_out[0] = '\0';
-        return ResultRead::Busy;
-    }
-    if (!summary_night_by_therapy_index_unlocked(therapy_index, rec)) {
-        give_summary_lock();
+    ScopedIndexedNight indexed_night("read_result_index");
+    if (!indexed_night ||
+        !indexed_night_by_therapy_index(therapy_index, indexed_night.get())) {
+        if (build_queue_lock_ &&
+            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            copy_cstr(build_queue_last_read_,
+                      sizeof(build_queue_last_read_),
+                      "not_found");
+            xSemaphoreGive(build_queue_lock_);
+        }
         if (etag_out && etag_out_size) etag_out[0] = '\0';
         return ResultRead::NotFound;
     }
-    format_night_etag_unlocked(rec, current_etag, sizeof(current_etag));
+    return read_result_for_indexed_night(therapy_index,
+                                         indexed_night.get(),
+                                         if_none_match,
+                                         etag_out,
+                                         etag_out_size,
+                                         json_out);
+}
+
+ReportManager::ResultRead ReportManager::read_result_by_start(
+    uint64_t night_start_ms, const char *if_none_match, char *etag_out,
+    size_t etag_out_size, LargeTextBuffer &json_out) {
+    ScopedIndexedNight indexed_night("read_result_start_index");
+    size_t therapy_index = 0;
+    if (!indexed_night ||
+        !indexed_night_by_start(night_start_ms,
+                                indexed_night.get(),
+                                &therapy_index)) {
+        if (build_queue_lock_ &&
+            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            copy_cstr(build_queue_last_read_,
+                      sizeof(build_queue_last_read_),
+                      "not_found");
+            xSemaphoreGive(build_queue_lock_);
+        }
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        return ResultRead::NotFound;
+    }
+    return read_result_for_indexed_night(therapy_index,
+                                         indexed_night.get(),
+                                         if_none_match,
+                                         etag_out,
+                                         etag_out_size,
+                                         json_out);
+}
+
+ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
+    size_t therapy_index, const ReportIndexedNight &indexed_night,
+    const char *if_none_match, char *etag_out, size_t etag_out_size,
+    LargeTextBuffer &json_out) {
+    if (indexed_night.edf_catalog_pending) {
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        const BuildQueueResult queued =
+            enqueue_build(indexed_night.summary.start_ms,
+                          therapy_index,
+                          false);
+        if (build_queue_lock_ &&
+            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            copy_cstr(build_queue_last_read_,
+                      sizeof(build_queue_last_read_),
+                      "edf_catalog");
+            xSemaphoreGive(build_queue_lock_);
+        }
+        switch (queued) {
+            case BuildQueueResult::Queued:
+            case BuildQueueResult::AlreadyQueued:
+                return ResultRead::Building;
+            case BuildQueueResult::Full:
+                return ResultRead::QueueFull;
+            case BuildQueueResult::Unavailable:
+            default:
+                return ResultRead::Unavailable;
+        }
+    }
+
+    char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+    char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+    if (!take_summary_lock(pdMS_TO_TICKS(20))) {
+        if (build_queue_lock_ &&
+            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            copy_cstr(build_queue_last_read_,
+                      sizeof(build_queue_last_read_),
+                      "summary_busy");
+            xSemaphoreGive(build_queue_lock_);
+        }
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        return ResultRead::Busy;
+    }
+    format_night_etag_unlocked(indexed_night.summary,
+                               indexed_night.source_signature,
+                               current_etag,
+                               sizeof(current_etag));
     give_summary_lock();
 
-    ReportResultStatus status;
-    ReportSummaryRecord night;
-    ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
-    size_t stream_count = 0;
-    bool found = false;
+    ResultRead slot_read = ResultRead::NotFound;
+    bool have_slot_read = false;
     if (result_slots_ && result_slots_lock_) {
         xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
         for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
             if (result_slots_[i].valid &&
-                result_slots_[i].night_start_ms == rec.start_ms) {
+                result_slots_[i].night_start_ms ==
+                    indexed_night.summary.start_ms) {
                 if (strcmp(result_slots_[i].etag, current_etag) != 0) {
-                    result_slots_[i] = MaterializedResult{};
+                    clear_materialized_slot_locked(result_slots_[i]);
+                    clear_range_plot_locked(indexed_night.summary.start_ms,
+                                            false);
+                    update_materialized_status_locked();
+                    continue;
+                }
+                if (!result_state_materialized_slot_allowed(
+                        result_slots_[i].status.state)) {
+                    clear_materialized_slot_locked(result_slots_[i]);
+                    clear_range_plot_locked(indexed_night.summary.start_ms,
+                                            false);
                     update_materialized_status_locked();
                     continue;
                 }
                 result_slots_[i].last_used = ++result_slot_tick_;
                 snprintf(etag, sizeof(etag), "%s", result_slots_[i].etag);
-                status = result_slots_[i].status;
-                night = result_slots_[i].night;
-                stream_count = result_slots_[i].stream_count;
-                if (stream_count > AC_REPORT_RESULT_STREAM_MAX) {
-                    stream_count = AC_REPORT_RESULT_STREAM_MAX;
+                const ReportResultStatus &status = result_slots_[i].status;
+                const bool cacheable =
+                    result_state_http_cacheable(status.state);
+                if (etag_out && etag_out_size) {
+                    snprintf(etag_out, etag_out_size, "%s",
+                             cacheable ? etag : "");
                 }
-                for (size_t k = 0; k < stream_count; ++k) {
-                    streams[k] = result_slots_[i].streams[k];
+                if (cacheable && if_none_match && if_none_match[0] &&
+                    strcmp(if_none_match, etag) == 0) {
+                    slot_read = ResultRead::NotModified;
+                } else {
+                    const ReportCacheFetchStatus inactive{};
+                    build_result_json_from(
+                        status,
+                        result_slots_[i].night,
+                        result_slots_[i].ranges,
+                        std::min(result_slots_[i].range_count,
+                                 static_cast<size_t>(
+                                     AC_REPORT_SUMMARY_SESSION_MAX)),
+                        result_slots_[i].streams,
+                        std::min(result_slots_[i].stream_count,
+                                 static_cast<size_t>(
+                                     AC_REPORT_RESULT_STREAM_MAX)),
+                        inactive,
+                        json_out);
+                    slot_read = ResultRead::Ready;
                 }
-                found = true;
+                have_slot_read = true;
                 break;
             }
         }
         xSemaphoreGive(result_slots_lock_);
     }
-    if (found) {
-        const bool cacheable = result_state_http_cacheable(status.state);
-        if (etag_out && etag_out_size) {
-            snprintf(etag_out, etag_out_size, "%s", cacheable ? etag : "");
+    if (have_slot_read) {
+        if (build_queue_lock_ &&
+            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            copy_cstr(build_queue_last_read_,
+                      sizeof(build_queue_last_read_),
+                      slot_read == ResultRead::NotModified ? "not_modified"
+                                                           : "ready");
+            xSemaphoreGive(build_queue_lock_);
         }
-        if (cacheable && if_none_match && if_none_match[0] &&
-            strcmp(if_none_match, etag) == 0) {
-            return ResultRead::NotModified;
-        }
-        const ReportCacheFetchStatus inactive{};
-        build_result_json_from(status, night, streams, stream_count, inactive,
-                               json_out);
-        return ResultRead::Ready;
+        return slot_read;
     }
     if (etag_out && etag_out_size) etag_out[0] = '\0';
 
-    switch (enqueue_build(rec.start_ms, therapy_index, false)) {
+    const BuildQueueResult queued =
+        enqueue_build(indexed_night.summary.start_ms,
+                      therapy_index,
+                      false);
+    if (build_queue_lock_ &&
+        xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+        copy_cstr(build_queue_last_read_,
+                  sizeof(build_queue_last_read_),
+                  build_queue_result_name(static_cast<uint8_t>(queued)));
+        xSemaphoreGive(build_queue_lock_);
+    }
+    switch (queued) {
         case BuildQueueResult::Queued:
         case BuildQueueResult::AlreadyQueued:
             return ResultRead::Building;
@@ -1817,32 +3127,65 @@ ReportManager::ResultRead ReportManager::read_result(
 
 ReportManager::PlotRead ReportManager::read_plot(
     size_t therapy_index, const char *version,
+    char *etag_out, size_t etag_out_size,
     std::shared_ptr<ReportSpoolBuffer> &out) {
-    ReportSummaryRecord rec;
-    char current_etag[48] = {};
+    ScopedIndexedNight indexed_night("read_plot_index");
+    if (!indexed_night) return PlotRead::Unavailable;
+    size_t resolved_therapy_index = therapy_index;
+    char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+    if (etag_out && etag_out_size) etag_out[0] = '\0';
+    uint64_t version_night_start_ms = 0;
+    const bool have_version_start =
+        parse_report_night_start_from_etag(version, version_night_start_ms);
+    const bool found_night = have_version_start
+        ? indexed_night_by_start(version_night_start_ms,
+                                 indexed_night.get(),
+                                 &resolved_therapy_index)
+        : indexed_night_by_therapy_index(therapy_index, indexed_night.get());
+    if (!found_night) {
+        return PlotRead::NotFound;
+    }
+    if (indexed_night->edf_catalog_pending) {
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        switch (enqueue_build(indexed_night->summary.start_ms,
+                              resolved_therapy_index,
+                              false)) {
+            case BuildQueueResult::Queued:
+            case BuildQueueResult::AlreadyQueued:
+                return PlotRead::Building;
+            case BuildQueueResult::Full:
+                return PlotRead::QueueFull;
+            case BuildQueueResult::Unavailable:
+            default:
+                return PlotRead::Unavailable;
+        }
+    }
     if (!take_summary_lock(pdMS_TO_TICKS(20))) {
         return PlotRead::Busy;
     }
-    if (!summary_night_by_therapy_index_unlocked(therapy_index, rec)) {
-        give_summary_lock();
-        return PlotRead::NotFound;
-    }
-    format_night_etag_unlocked(rec, current_etag, sizeof(current_etag));
+    format_night_etag_unlocked(indexed_night->summary,
+                               indexed_night->source_signature,
+                               current_etag,
+                               sizeof(current_etag));
     give_summary_lock();
+    if (etag_out && etag_out_size) {
+        snprintf(etag_out, etag_out_size, "%s", current_etag);
+    }
+    if (version && version[0] && strcmp(version, current_etag) != 0) {
+        return PlotRead::Stale;
+    }
+    bool matching_result_without_plot = false;
     if (result_slots_ && result_slots_lock_) {
         xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
         for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
             if (!result_slots_[i].valid ||
-                result_slots_[i].night_start_ms != rec.start_ms) {
+                result_slots_[i].night_start_ms !=
+                    indexed_night->summary.start_ms) {
                 continue;
             }
             if (strcmp(result_slots_[i].etag, current_etag) != 0) {
-                result_slots_[i] = MaterializedResult{};
+                clear_materialized_slot_locked(result_slots_[i]);
                 update_materialized_status_locked();
-                continue;
-            }
-            if (version && version[0] &&
-                strcmp(result_slots_[i].etag, version) != 0) {
                 continue;
             }
             result_slots_[i].last_used = ++result_slot_tick_;
@@ -1855,10 +3198,18 @@ ReportManager::PlotRead ReportManager::read_plot(
                 xSemaphoreGive(result_slots_lock_);
                 return PlotRead::Ready;
             }
+            matching_result_without_plot = true;
+            break;
         }
         xSemaphoreGive(result_slots_lock_);
     }
-    switch (enqueue_build(rec.start_ms, therapy_index, false)) {
+    if (matching_result_without_plot &&
+        plot_build_night_start_ms_.load() == indexed_night->summary.start_ms) {
+        return PlotRead::Building;
+    }
+    switch (enqueue_build(indexed_night->summary.start_ms,
+                          resolved_therapy_index,
+                          false)) {
         case BuildQueueResult::Queued:
         case BuildQueueResult::AlreadyQueued:
             return PlotRead::Building;
@@ -1897,7 +3248,13 @@ void ReportManager::build_result_chunks_json(LargeTextBuffer &json,
         json_add_string(json,
                         "source",
                         report_source_spool_type(chunk.source));
+        json_add_string(json,
+                        "provider",
+                        report_provider_id_name(chunk.provider_ref.provider));
         json_add_string(json, "name", chunk.name ? chunk.name : "");
+        json_add_int(json,
+                     "stream",
+                     static_cast<long>(chunk.stream_index));
         json_add_uint64(json,
                         "start",
                         static_cast<uint64_t>(chunk.start_ms));
@@ -1918,38 +3275,74 @@ void ReportManager::build_result_chunks_json(LargeTextBuffer &json,
 bool ReportManager::night_coverage(uint64_t night_start_ms,
                                    ReportNightCoverageStatus &out) const {
     out = {};
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-    ReportSummaryRecord night;
-    const bool found = summary_night_by_start_unlocked(night_start_ms, night);
-    give_summary_lock();
-    if (!found) return false;
+    ScopedIndexedNight indexed_night("night_coverage_index");
+    if (!indexed_night ||
+        !indexed_night_by_start(night_start_ms, indexed_night.get())) {
+        return false;
+    }
+    const ReportIndexedNight &indexed = indexed_night.get();
+    const ReportSummaryRecord &night = indexed.summary;
 
     out.found = true;
     out.start_ms = night.start_ms;
     out.end_ms = night.end_ms;
-    out.duration_min = night.duration_min;
+    out.duration_min = indexed_night_display_duration_min(indexed);
 
     int64_t span_start_ms = 0;
     int64_t span_end_ms = 0;
-    const bool edf_complete =
-        night_data_span(night, span_start_ms, span_end_ms) &&
-        edf_report_complete_for_night(night,
-                                      span_start_ms,
-                                      span_end_ms);
+    if (!indexed_night_data_span(indexed, span_start_ms, span_end_ms)) {
+        return true;
+    }
 
-    size_t source_count = 0;
-    const ReportSourceDef *sources = report_source_defs(source_count);
-    for (size_t i = 0; i < source_count &&
-                       out.source_count < AC_REPORT_NIGHT_SOURCE_MAX; ++i) {
-        const ReportSourceDef &source = sources[i];
-        if (source.id == ReportSourceId::Summary) continue;
-        if (!cache_source_supported(source.id)) continue;
-        ReportNightSourceCoverage &entry = out.sources[out.source_count++];
-        entry.source = source.id;
-        entry.required = source_required_for_report_result(source.id);
-        entry.complete = edf_complete ||
-                         source_complete_for_night(night, source);
-        if (entry.required && !entry.complete) out.missing_required++;
+    ScopedReportResolveContext resolve("night_coverage_resolver");
+    if (!resolve) {
+        return false;
+    }
+
+    bool pending = false;
+    size_t session_count = 0;
+    if (!collect_edf_sessions_for_night(night,
+                                        span_start_ms,
+                                        span_end_ms,
+                                        resolve.sessions(),
+                                        AC_REPORT_SUMMARY_SESSION_MAX,
+                                        session_count,
+                                        &pending) ||
+        pending) {
+        return false;
+    }
+
+    EdfReportDataProvider edf_provider(resolve.sessions(), session_count);
+    ReportSourceResolver resolver(edf_provider,
+                                  spool_report_provider(),
+                                  resolve.scratch());
+    if (!resolver.build_plan(indexed,
+                             span_start_ms,
+                             span_end_ms,
+                             resolve.plan())) {
+        return false;
+    }
+
+    const ReportResolvedPlan &plan = resolve.plan();
+    out.missing_required = plan.missing_required;
+    for (size_t i = 0; i < plan.stream_count; ++i) {
+        const ReportResolvedStream &stream = plan.streams[i];
+        if (!cache_source_supported(stream.selected_source)) continue;
+        ReportNightSourceCoverage *entry = nullptr;
+        for (size_t existing = 0; existing < out.source_count; ++existing) {
+            if (out.sources[existing].source == stream.selected_source) {
+                entry = &out.sources[existing];
+                break;
+            }
+        }
+        if (!entry) {
+            if (out.source_count >= AC_REPORT_NIGHT_SOURCE_MAX) break;
+            entry = &out.sources[out.source_count++];
+            entry->source = stream.selected_source;
+            entry->complete = true;
+        }
+        entry->required = entry->required || stream.required;
+        if (stream.required && !stream.complete) entry->complete = false;
     }
     return true;
 }
@@ -1957,44 +3350,88 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
 bool ReportManager::next_night_needing_cache(
     uint64_t &night_start_ms_out) const {
     const uint32_t now = millis();
-    ReportSummaryRecord latest;
-    const bool have_latest = latest_summary_night(latest);
+    ReportIndexedNight *nights =
+        static_cast<ReportIndexedNight *>(Memory::alloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
+            false));
+    if (!nights) {
+        log_report_alloc_failed(
+            "prefetch_night_index",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+        return false;
+    }
+    size_t count = 0;
+    if (!build_indexed_nights(nights,
+                              AC_REPORT_SUMMARY_RECORD_MAX,
+                              count)) {
+        Memory::free(nights);
+        return false;
+    }
+    ScopedReportResolveContext resolve("prefetch_resolver");
+    if (!resolve) {
+        Memory::free(nights);
+        return false;
+    }
+
     // Oldest-first: the spool is open-ended (fromDateTime -> now), so fetching
     // the OLDEST night with a gap streams every source from there forward and
     // backfills all newer nights in a single sweep (deduped on write)
-    for (size_t i = 0; i < AC_REPORT_SUMMARY_RECORD_MAX; ++i) {
-        if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-        if (!records_ || i >= record_count_) {
-            give_summary_lock();
-            return false;
-        }
-        const ReportSummaryRecord record = records_[i];
-        give_summary_lock();
+    for (size_t i = 0; i < count; ++i) {
+        const ReportIndexedNight &indexed = nights[i];
+        const ReportSummaryRecord &record = indexed.summary;
         if (!record.valid || !record.duration_min) continue;
         if (prefetch_in_cooldown(record.start_ms, now)) continue;
         int64_t span_start_ms = 0;
         int64_t span_end_ms = 0;
-        bool edf_pending = false;
-        if (night_data_span(record, span_start_ms, span_end_ms) &&
-            edf_report_complete_for_night(record,
-                                          span_start_ms,
-                                          span_end_ms,
-                                          &edf_pending)) {
+        if (!indexed_night_data_span(indexed, span_start_ms, span_end_ms)) {
             continue;
         }
-        if (edf_pending) continue;
-        ReportNightCoverageStatus coverage;
-        if (!night_coverage(record.start_ms, coverage)) continue;
-        if (coverage.missing_required > 0) {
-            night_start_ms_out = record.start_ms;
-            return true;
+
+        bool edf_pending = false;
+        size_t session_count = 0;
+        memset(resolve.sessions(),
+               0,
+               AC_REPORT_SUMMARY_SESSION_MAX *
+                   sizeof(EdfReportSessionDescriptor));
+        if (!collect_edf_sessions_for_night(record,
+                                            span_start_ms,
+                                            span_end_ms,
+                                            resolve.sessions(),
+                                            AC_REPORT_SUMMARY_SESSION_MAX,
+                                            session_count,
+                                            &edf_pending)) {
+            Memory::free(nights);
+            return false;
         }
-        if (have_latest && record.start_ms == latest.start_ms &&
-            sparse_event_refresh_due_for_night(record)) {
-            night_start_ms_out = record.start_ms;
-            return true;
+        if (edf_pending) continue;
+
+        EdfReportDataProvider edf_provider(resolve.sessions(), session_count);
+        ReportSourceResolver resolver(edf_provider,
+                                      spool_report_provider(),
+                                      resolve.scratch());
+        if (!resolver.build_plan(indexed,
+                                 span_start_ms,
+                                 span_end_ms,
+                                 resolve.plan())) {
+            Memory::free(nights);
+            return false;
+        }
+        const ReportResolvedPlan &plan = resolve.plan();
+        for (size_t segment_index = 0; segment_index < plan.segment_count;
+             ++segment_index) {
+            const ReportResolvedSegment &segment =
+                plan.segments[segment_index];
+            if (segment.provider == ReportResolvedProvider::Spool &&
+                !segment.complete &&
+                segment.required &&
+                cache_source_supported(segment.source)) {
+                night_start_ms_out = record.start_ms;
+                Memory::free(nights);
+                return true;
+            }
         }
     }
+    Memory::free(nights);
     return false;
 }
 
@@ -2003,36 +3440,33 @@ bool ReportManager::for_each_summary_night(
     void *context) const {
     if (!callback) return false;
 
-    ReportSummaryRecord *snapshot =
-        static_cast<ReportSummaryRecord *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord),
+    ReportIndexedNight *snapshot =
+        static_cast<ReportIndexedNight *>(Memory::alloc_large(
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
             false));
     if (!snapshot) {
         log_report_alloc_failed(
             "summary_night_snapshot",
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+        return false;
+    }
+
+    size_t count = 0;
+    if (!build_indexed_nights(snapshot,
+                              AC_REPORT_SUMMARY_RECORD_MAX,
+                              count)) {
+        Memory::free(snapshot);
         return false;
     }
 
     bool any = false;
     size_t therapy_index = 0;
-    size_t count = 0;
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) {
-        Memory::free(snapshot);
-        return false;
-    }
-    count = records_ ? record_count_ : 0;
-    if (count > AC_REPORT_SUMMARY_RECORD_MAX) {
-        count = AC_REPORT_SUMMARY_RECORD_MAX;
-    }
-    if (records_ && count) {
-        memcpy(snapshot, records_, count * sizeof(ReportSummaryRecord));
-    }
-    give_summary_lock();
     for (size_t i = count; i > 0; --i) {
         const size_t summary_index = i - 1;
-        const ReportSummaryRecord record = snapshot[summary_index];
-        if (!record.valid || record.duration_min == 0) continue;
+        const ReportIndexedNight &indexed = snapshot[summary_index];
+        if (!indexed_night_visible_in_summary(indexed)) continue;
+        ReportSummaryRecord record = indexed.summary;
+        record.duration_min = indexed_night_display_duration_min(indexed);
 
         ReportSummaryNight night;
         night.summary_index = summary_index;
@@ -2048,42 +3482,14 @@ bool ReportManager::for_each_summary_night(
 bool ReportManager::summary_night_by_therapy_index(
     size_t therapy_index,
     ReportSummaryRecord &out) const {
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-    const bool ok = summary_night_by_therapy_index_unlocked(therapy_index, out);
-    give_summary_lock();
-    return ok;
-}
-
-bool ReportManager::summary_night_by_therapy_index_unlocked(
-    size_t therapy_index,
-    ReportSummaryRecord &out) const {
-    if (!records_) return false;
-
-    size_t current = 0;
-    for (size_t i = record_count_; i > 0; --i) {
-        const ReportSummaryRecord &record = records_[i - 1];
-        if (!record.valid || record.duration_min == 0) continue;
-        if (current == therapy_index) {
-            out = record;
-            return true;
-        }
-        current++;
+    ScopedIndexedNight night("summary_night_index");
+    if (!night ||
+        !indexed_night_by_therapy_index(therapy_index, night.get())) {
+        return false;
     }
-    return false;
-}
-
-bool ReportManager::summary_night_by_start_unlocked(
-    uint64_t night_start_ms,
-    ReportSummaryRecord &out) const {
-    if (!records_) return false;
-    for (size_t i = 0; i < record_count_; ++i) {
-        const ReportSummaryRecord &record = records_[i];
-        if (record.valid && record.start_ms == night_start_ms) {
-            out = record;
-            return true;
-        }
-    }
-    return false;
+    out = night->summary;
+    out.duration_min = indexed_night_display_duration_min(night.get());
+    return true;
 }
 
 bool ReportManager::latest_summary_night(ReportSummaryRecord &out) const {
@@ -2107,12 +3513,13 @@ bool ReportManager::request_night_cache(uint64_t night_start_ms, bool force) {
     if (summary_fetch_active_ || cache_fetch_active_ || range_build_active_) {
         return false;
     }
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-    ReportSummaryRecord night;
-    const bool found = summary_night_by_start_unlocked(night_start_ms, night);
-    give_summary_lock();
-    if (!found || night.duration_min == 0) return false;
-    if (!build_cache_plan(night, force, false)) return false;
+    ScopedIndexedNight indexed_night("request_night_cache_index");
+    if (!indexed_night ||
+        !indexed_night_by_start(night_start_ms, indexed_night.get()) ||
+        !indexed_night_visible_in_summary(indexed_night.get())) {
+        return false;
+    }
+    if (!build_cache_plan(indexed_night.get(), force, false)) return false;
     if (cache_source_count_ == 0) {
         finish_cache_fetch();
         return true;
@@ -2225,31 +3632,6 @@ bool ReportManager::sparse_event_confirmed_empty(
     }
     if (locked) xSemaphoreGive(prefetch_lock_);
     return confirmed;
-}
-
-bool ReportManager::sparse_event_refresh_due(
-    const ReportSummaryRecord &night,
-    const ReportSourceDef &source) const {
-    if (!source_required_for_report_result(source.id)) return false;
-    if (!source_is_sparse_event(source)) return false;
-    if (!source_complete_for_night(night, source)) return false;
-    int64_t cached_end_ms = 0;
-    if (source_latest_cached_end_for_night(source, night, cached_end_ms)) {
-        return false;
-    }
-    return !sparse_event_confirmed_empty(night, source);
-}
-
-bool ReportManager::sparse_event_refresh_due_for_night(
-    const ReportSummaryRecord &night) const {
-    size_t source_count = 0;
-    const ReportSourceDef *sources = report_source_defs(source_count);
-    for (size_t i = 0; i < source_count; ++i) {
-        if (sparse_event_refresh_due(night, sources[i])) {
-            return true;
-        }
-    }
-    return false;
 }
 
 void ReportManager::prefetch_note_failure(uint64_t night_ms) {
@@ -2395,16 +3777,62 @@ ReportManager::PrefetchSnapshot ReportManager::prefetch_snapshot() const {
     return snap;
 }
 
+ReportManager::BuildQueueSnapshot ReportManager::build_queue_snapshot() const {
+    BuildQueueSnapshot snap;
+    snap.available = build_queue_lock_ != nullptr;
+    if (!build_queue_lock_) return snap;
+    if (xSemaphoreTake(build_queue_lock_, 0) != pdTRUE) return snap;
+    const uint32_t now_ms = millis();
+    snap.lock_ok = true;
+    snap.count = build_queue_count_;
+    if (build_queue_count_ > 0) {
+        const ResultBuildJob &job = build_queue_[build_queue_head_];
+        snap.head_night_ms = job.night_start_ms;
+        snap.head_therapy_index = job.therapy_index;
+        snap.head_refresh = job.refresh;
+        snap.head_idle_prebuild = job.idle_prebuild;
+        snap.head_age_ms = job.queued_ms ? now_ms - job.queued_ms : 0;
+    }
+    snap.last_night_ms = build_queue_last_night_ms_;
+    snap.last_therapy_index = build_queue_last_therapy_index_;
+    snap.enqueue_total = build_queue_enqueue_total_;
+    snap.queued_total = build_queue_queued_total_;
+    snap.already_total = build_queue_already_total_;
+    snap.service_total = build_queue_service_total_;
+    snap.last_enqueue_night_ms = build_queue_last_enqueue_night_ms_;
+    snap.last_enqueue_therapy_index = build_queue_last_enqueue_therapy_index_;
+    copy_cstr(snap.last_read,
+              sizeof(snap.last_read),
+              build_queue_last_read_);
+    copy_cstr(snap.last_enqueue_result,
+              sizeof(snap.last_enqueue_result),
+              build_queue_last_enqueue_result_);
+    copy_cstr(snap.last_service_block,
+              sizeof(snap.last_service_block),
+              build_queue_last_service_block_);
+    copy_cstr(snap.last_outcome,
+              sizeof(snap.last_outcome),
+              build_queue_last_outcome_);
+    copy_cstr(snap.last_state, sizeof(snap.last_state), build_queue_last_state_);
+    copy_cstr(snap.last_error, sizeof(snap.last_error), build_queue_last_error_);
+    xSemaphoreGive(build_queue_lock_);
+    return snap;
+}
+
+bool ReportManager::edf_catalog_status(EdfReportCatalogStatus &out,
+                                       uint32_t timeout_ms) const {
+    if (!edf_catalog_) return false;
+    return edf_catalog_->status(out, timeout_ms);
+}
+
 bool ReportManager::foreground_busy() const {
-    if (summary_fetch_active_ || plot_build_active_ || range_build_active_) {
+    // A queued build is pending work, not foreground ownership. Keeping it out
+    // of this gate lets dependency jobs (notably the EDF catalog refresh) run;
+    // background_work_active() still reports the queue so export/backfill waits.
+    if (summary_fetch_active_ || range_build_active_) {
         return true;
     }
-    if (build_queue_lock_) {
-        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
-        const bool queued = build_queue_count_ > 0;
-        xSemaphoreGive(build_queue_lock_);
-        if (queued) return true;
-    }
+    if (plot_build_active_) return !plot_build_idle_prebuild_;
     if (!cache_fetch_active_) return false;
     // A cache fetch is in flight: it's foreground unless it's the prefetch's own.
     if (!prefetch_lock_) return true;
@@ -2478,19 +3906,213 @@ void ReportManager::prefetch_yield_to_foreground() {
               "prefetch yielded to foreground prepare\n");
 }
 
+bool ReportManager::idle_prebuild_gate_open(const char **reason) const {
+    BackgroundWorker *worker = background_worker();
+    if (!worker) {
+        if (reason) *reason = "no_worker";
+        return false;
+    }
+    return worker->idle_gate_open(reason);
+}
+
+bool ReportManager::plot_prebuild_key_matches(
+    uint32_t summary_revision,
+    bool catalog_present,
+    uint8_t catalog_state,
+    uint32_t catalog_refresh_id) const {
+    return plot_prebuild_key_valid_ &&
+           plot_prebuild_summary_revision_ == summary_revision &&
+           plot_prebuild_catalog_present_ == catalog_present &&
+           plot_prebuild_catalog_state_ == catalog_state &&
+           plot_prebuild_catalog_refresh_id_ == catalog_refresh_id;
+}
+
+void ReportManager::set_plot_prebuild_key(uint32_t summary_revision,
+                                          bool catalog_present,
+                                          uint8_t catalog_state,
+                                          uint32_t catalog_refresh_id) {
+    plot_prebuild_key_valid_ = true;
+    plot_prebuild_summary_revision_ = summary_revision;
+    plot_prebuild_catalog_present_ = catalog_present;
+    plot_prebuild_catalog_state_ = catalog_state;
+    plot_prebuild_catalog_refresh_id_ = catalog_refresh_id;
+    plot_prebuild_cursor_ = 0;
+    plot_prebuild_next_scan_ms_ = 0;
+}
+
+ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
+    const char *gate_reason = "idle";
+    if (!idle_prebuild_gate_open(&gate_reason)) {
+        return PlotPrebuildResult::Waiting;
+    }
+    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
+        range_build_active_ || plot_cache_writer_active()) {
+        return PlotPrebuildResult::Waiting;
+    }
+    {
+        Storage::Guard g;
+        if (!Storage::mounted()) return PlotPrebuildResult::Unavailable;
+    }
+
+    uint32_t summary_revision = 0;
+    bool catalog_present = false;
+    uint8_t catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
+    uint32_t catalog_refresh_id = 0;
+    if (!index_cache_key(summary_revision,
+                         catalog_present,
+                         catalog_state,
+                         catalog_refresh_id)) {
+        return PlotPrebuildResult::Waiting;
+    }
+
+    if (catalog_present &&
+        catalog_state != static_cast<uint8_t>(EdfReportCatalogState::Ready) &&
+        catalog_state != static_cast<uint8_t>(EdfReportCatalogState::Error)) {
+        return PlotPrebuildResult::Waiting;
+    }
+
+    if (!plot_prebuild_key_matches(summary_revision,
+                                   catalog_present,
+                                   catalog_state,
+                                   catalog_refresh_id)) {
+        set_plot_prebuild_key(summary_revision,
+                              catalog_present,
+                              catalog_state,
+                              catalog_refresh_id);
+    } else if (plot_prebuild_next_scan_ms_ != 0 &&
+               static_cast<int32_t>(millis() -
+                                    plot_prebuild_next_scan_ms_) < 0) {
+        return PlotPrebuildResult::Drained;
+    }
+
+    constexpr size_t SCAN_STEPS_PER_CALL = 4;
+    for (size_t step = 0; step < SCAN_STEPS_PER_CALL; ++step) {
+        ReportIndexedNight night;
+        size_t therapy_index = 0;
+        if (!index_cache_lock_) return PlotPrebuildResult::Unavailable;
+        if (xSemaphoreTake(index_cache_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+            return PlotPrebuildResult::Waiting;
+        }
+        const bool index_ready = ensure_index_cache_locked(summary_revision,
+                                                           catalog_present,
+                                                           catalog_state,
+                                                           catalog_refresh_id);
+        const bool found =
+            index_ready &&
+            indexed_night_by_newest_cursor_locked(plot_prebuild_cursor_,
+                                                  night,
+                                                  therapy_index);
+        xSemaphoreGive(index_cache_lock_);
+        if (!index_ready) return PlotPrebuildResult::Waiting;
+        if (!found) {
+            plot_prebuild_next_scan_ms_ =
+                millis() + AC_REPORT_PLOT_PREBUILD_RESCAN_MS;
+            if (plot_prebuild_next_scan_ms_ == 0) {
+                plot_prebuild_next_scan_ms_ = 1;
+            }
+            return PlotPrebuildResult::Drained;
+        }
+        plot_prebuild_cursor_++;
+
+        if (night.edf_catalog_pending) return PlotPrebuildResult::Waiting;
+
+        char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+        if (!take_summary_lock(pdMS_TO_TICKS(20))) {
+            return PlotPrebuildResult::Waiting;
+        }
+        format_night_etag_unlocked(night.summary,
+                                   night.source_signature,
+                                   etag,
+                                   sizeof(etag));
+        give_summary_lock();
+        if (result_plot_cache_exists_for_night(night, etag)) {
+            continue;
+        }
+
+        const BuildQueueResult queued =
+            enqueue_build(night.summary.start_ms,
+                          therapy_index,
+                          false,
+                          true);
+        if (queued == BuildQueueResult::Queued) {
+            Log::logf(CAT_REPORT,
+                      LOG_DEBUG,
+                      "Idle plot prebuild queued night=%llu index=%lu\n",
+                      static_cast<unsigned long long>(
+                          night.summary.start_ms),
+                      static_cast<unsigned long>(therapy_index));
+            return PlotPrebuildResult::Queued;
+        }
+        if (queued == BuildQueueResult::AlreadyQueued) {
+            return PlotPrebuildResult::AlreadyQueued;
+        }
+        if (queued == BuildQueueResult::Full) {
+            return PlotPrebuildResult::Waiting;
+        }
+        return PlotPrebuildResult::Unavailable;
+    }
+    return PlotPrebuildResult::Scanned;
+}
+
+void ReportManager::preempt_idle_plot_prebuild() {
+    if (!plot_build_active_ || !plot_build_idle_prebuild_) return;
+    const uint32_t elapsed_ms =
+        plot_build_started_ms_
+            ? static_cast<uint32_t>(millis() - plot_build_started_ms_)
+            : 0;
+    Log::logf(CAT_REPORT,
+              LOG_DEBUG,
+              "Idle plot prebuild preempted night=%llu elapsed_ms=%lu\n",
+              static_cast<unsigned long long>(
+                  plot_build_night_start_ms_.load()),
+              static_cast<unsigned long>(elapsed_ms));
+    reset_plot_build();
+    release_result_edf_sessions();
+}
+
 ReportManager::BuildQueueResult ReportManager::enqueue_build(
     uint64_t night_start_ms,
     size_t therapy_index,
-    bool refresh) {
+    bool refresh,
+    bool idle_prebuild) {
     if (!build_queue_lock_ || !night_start_ms) {
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "Result build enqueue rejected night=%llu index=%lu "
+                  "refresh=%u idle_prebuild=%u reason=unavailable\n",
+                  static_cast<unsigned long long>(night_start_ms),
+                  static_cast<unsigned long>(therapy_index),
+                  refresh ? 1u : 0u,
+                  idle_prebuild ? 1u : 0u);
         return BuildQueueResult::Unavailable;
     }
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    build_queue_enqueue_total_++;
+    build_queue_last_enqueue_night_ms_ = night_start_ms;
+    build_queue_last_enqueue_therapy_index_ = therapy_index;
+    copy_cstr(build_queue_last_service_block_,
+              sizeof(build_queue_last_service_block_),
+              "");
     for (size_t k = 0; k < build_queue_count_; ++k) {
         size_t idx = (build_queue_head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
         if (build_queue_[idx].night_start_ms == night_start_ms) {
             if (refresh) build_queue_[idx].refresh = true;
+            if (!idle_prebuild) build_queue_[idx].idle_prebuild = false;
+            build_queue_already_total_++;
+            copy_cstr(build_queue_last_enqueue_result_,
+                      sizeof(build_queue_last_enqueue_result_),
+                      "already");
+            const size_t count = build_queue_count_;
             xSemaphoreGive(build_queue_lock_);
+            Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Result build already queued night=%llu index=%lu "
+                  "refresh=%u idle_prebuild=%u count=%lu\n",
+                  static_cast<unsigned long long>(night_start_ms),
+                  static_cast<unsigned long>(therapy_index),
+                  refresh ? 1u : 0u,
+                  idle_prebuild ? 1u : 0u,
+                  static_cast<unsigned long>(count));
             return BuildQueueResult::AlreadyQueued;
         }
     }
@@ -2500,11 +4122,39 @@ ReportManager::BuildQueueResult ReportManager::enqueue_build(
         build_queue_[tail].night_start_ms = night_start_ms;
         build_queue_[tail].therapy_index = therapy_index;
         build_queue_[tail].refresh = refresh;
+        build_queue_[tail].idle_prebuild = idle_prebuild;
+        build_queue_[tail].queued_ms = millis();
         build_queue_count_++;
+        build_queue_queued_total_++;
+        copy_cstr(build_queue_last_enqueue_result_,
+                  sizeof(build_queue_last_enqueue_result_),
+                  "queued");
+        const size_t count = build_queue_count_;
         xSemaphoreGive(build_queue_lock_);
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Result build queued night=%llu index=%lu refresh=%u "
+                  "idle_prebuild=%u count=%lu\n",
+                  static_cast<unsigned long long>(night_start_ms),
+                  static_cast<unsigned long>(therapy_index),
+                  refresh ? 1u : 0u,
+                  idle_prebuild ? 1u : 0u,
+                  static_cast<unsigned long>(count));
         return BuildQueueResult::Queued;
     }
+    copy_cstr(build_queue_last_enqueue_result_,
+              sizeof(build_queue_last_enqueue_result_),
+              "full");
     xSemaphoreGive(build_queue_lock_);
+    Log::logf(CAT_REPORT,
+              LOG_WARN,
+              "Result build enqueue rejected night=%llu index=%lu "
+              "refresh=%u idle_prebuild=%u reason=full count=%lu\n",
+              static_cast<unsigned long long>(night_start_ms),
+              static_cast<unsigned long>(therapy_index),
+              refresh ? 1u : 0u,
+              idle_prebuild ? 1u : 0u,
+              static_cast<unsigned long>(AC_REPORT_BUILD_QUEUE_MAX));
     return BuildQueueResult::Full;
 }
 
@@ -2531,18 +4181,102 @@ void ReportManager::clear_build_queue(uint64_t night_start_ms, bool all) {
 void ReportManager::service_build_queue(bool realtime_active) {
     if (!build_queue_lock_) return;
     if (summary_fetch_active_ || plot_build_active_ || range_build_active_) {
+        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+        if (build_queue_count_ > 0) {
+            copy_cstr(build_queue_last_service_block_,
+                      sizeof(build_queue_last_service_block_),
+                      summary_fetch_active_
+                          ? "summary"
+                          : (plot_build_active_ ? "plot" : "range"));
+        }
+        xSemaphoreGive(build_queue_lock_);
         return;
     }
-    if (realtime_active) return;
+    if (realtime_active) {
+        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+        if (build_queue_count_ > 0) {
+            copy_cstr(build_queue_last_service_block_,
+                      sizeof(build_queue_last_service_block_),
+                      "realtime");
+        }
+        xSemaphoreGive(build_queue_lock_);
+        return;
+    }
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
     const bool have = build_queue_count_ > 0;
     ResultBuildJob job = have ? build_queue_[build_queue_head_] : ResultBuildJob{};
     xSemaphoreGive(build_queue_lock_);
     if (!have) return;
-    // A foreground build preempts an idle prefetch fetch.
+    if (job.idle_prebuild) {
+        const char *reason = "idle";
+        if (!idle_prebuild_gate_open(&reason)) {
+            xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+            copy_cstr(build_queue_last_service_block_,
+                      sizeof(build_queue_last_service_block_),
+                      reason ? reason : "gate");
+            xSemaphoreGive(build_queue_lock_);
+            return;
+        }
+    }
+    // A foreground build preempts an idle prefetch fetch. Idle plot prebuilds
+    // wait behind prefetch, because both are background work.
     if (cache_fetch_active_) {
-        prefetch_yield_to_foreground();
-        if (cache_fetch_active_) return;  // a non-prefetch fetch is in flight; wait
+        if (!job.idle_prebuild) prefetch_yield_to_foreground();
+        if (cache_fetch_active_) {
+            xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+            copy_cstr(build_queue_last_service_block_,
+                      sizeof(build_queue_last_service_block_),
+                      "cache_fetch");
+            xSemaphoreGive(build_queue_lock_);
+            return;  // a non-prefetch fetch is in flight; wait
+        }
+    }
+    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    build_queue_service_total_++;
+    copy_cstr(build_queue_last_service_block_,
+              sizeof(build_queue_last_service_block_),
+              "");
+    xSemaphoreGive(build_queue_lock_);
+    active_build_idle_prebuild_ = job.idle_prebuild;
+    const ResultPrepareOutcome outcome =
+        prepare_result_by_night_start_internal(job.night_start_ms,
+                                               job.therapy_index,
+                                               job.refresh);
+    active_build_idle_prebuild_ = false;
+    const char *outcome_name =
+        result_prepare_outcome_name(static_cast<uint8_t>(outcome));
+    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    build_queue_last_night_ms_ = job.night_start_ms;
+    build_queue_last_therapy_index_ = job.therapy_index;
+    copy_cstr(build_queue_last_outcome_,
+              sizeof(build_queue_last_outcome_),
+              outcome_name);
+    copy_cstr(build_queue_last_state_,
+              sizeof(build_queue_last_state_),
+              result_state_name());
+    copy_cstr(build_queue_last_error_,
+              sizeof(build_queue_last_error_),
+              result_status_.error.c_str());
+    xSemaphoreGive(build_queue_lock_);
+    Log::logf(CAT_REPORT,
+              outcome == ResultPrepareOutcome::Failed ? LOG_WARN : LOG_DEBUG,
+              "Result build step night=%llu index=%lu refresh=%u "
+              "idle_prebuild=%u outcome=%s state=%s error=%s chunks=%lu "
+              "records=%lu bytes=%lu\n",
+              static_cast<unsigned long long>(job.night_start_ms),
+              static_cast<unsigned long>(job.therapy_index),
+              job.refresh ? 1u : 0u,
+              job.idle_prebuild ? 1u : 0u,
+              outcome_name,
+              result_state_name(),
+              result_status_.error.length() ? result_status_.error.c_str()
+                                            : "--",
+              static_cast<unsigned long>(result_status_.chunk_count),
+              static_cast<unsigned long>(result_status_.record_count),
+              static_cast<unsigned long>(result_status_.payload_bytes));
+    if (outcome == ResultPrepareOutcome::Deferred ||
+        outcome == ResultPrepareOutcome::Retry) {
+        return;
     }
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
     if (build_queue_count_ > 0 &&
@@ -2551,7 +4285,6 @@ void ReportManager::service_build_queue(bool realtime_active) {
         build_queue_count_--;
     }
     xSemaphoreGive(build_queue_lock_);
-    prepare_result_by_therapy_index_internal(job.therapy_index, job.refresh);
 }
 
 void ReportManager::service_prefetch(bool realtime_active) {
@@ -2814,11 +4547,13 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
         return false;
     }
 
-    ReportSummaryRecord night;
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-    const bool found = summary_night_by_start_unlocked(night_start_ms, night);
-    give_summary_lock();
-    if (!found || night.end_ms <= night.start_ms) return false;
+    ScopedIndexedNight indexed_night("clear_cache_night_index");
+    if (!indexed_night ||
+        !indexed_night_by_start(night_start_ms, indexed_night.get()) ||
+        indexed_night->summary.end_ms <= indexed_night->summary.start_ms) {
+        return false;
+    }
+    const ReportSummaryRecord &night = indexed_night->summary;
     clear_build_queue(night.start_ms, false);
     invalidate_materialized(night.start_ms, false);
 
@@ -3002,6 +4737,30 @@ bool ReportManager::ensure_result_edf_sessions() {
     return true;
 }
 
+bool ReportManager::ensure_result_resolve_buffers() {
+    if (!result_resolved_plan_) {
+        result_resolved_plan_ = static_cast<ReportResolvedPlan *>(
+            Memory::calloc_large(1, sizeof(ReportResolvedPlan), false));
+        if (!result_resolved_plan_) {
+            log_report_alloc_failed("result_resolved_plan",
+                                    sizeof(ReportResolvedPlan));
+            fail_result_prepare("result_plan_alloc_failed");
+            return false;
+        }
+    }
+    if (!result_resolve_scratch_) {
+        result_resolve_scratch_ = static_cast<ReportResolveScratch *>(
+            Memory::calloc_large(1, sizeof(ReportResolveScratch), false));
+        if (!result_resolve_scratch_) {
+            log_report_alloc_failed("result_resolve_scratch",
+                                    sizeof(ReportResolveScratch));
+            fail_result_prepare("result_scratch_alloc_failed");
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ReportManager::result_uses_edf_provider() const {
     if (!result_chunks_) return false;
     for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
@@ -3018,6 +4777,106 @@ void ReportManager::release_result_edf_sessions() {
     result_edf_session_count_ = 0;
 }
 
+void ReportManager::clear_result_ranges() {
+    memset(result_ranges_, 0, sizeof(result_ranges_));
+    result_range_count_ = 0;
+}
+
+bool ReportManager::set_result_ranges_from_indexed_night(
+    const ReportIndexedNight &night) {
+    clear_result_ranges();
+    auto append_range = [&](int64_t start_ms, int64_t end_ms) {
+        if (end_ms <= start_ms ||
+            result_range_count_ >= AC_REPORT_SUMMARY_SESSION_MAX) {
+            return;
+        }
+        PlotRange &range = result_ranges_[result_range_count_++];
+        range.start_ms = start_ms;
+        range.end_ms = end_ms;
+    };
+    const size_t edf_count =
+        std::min(night.data_range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    if (night.has_edf && edf_count > 0) {
+        for (size_t i = 0; i < edf_count; ++i) {
+            append_range(night.data_ranges[i].start_ms,
+                         night.data_ranges[i].end_ms);
+        }
+        const size_t display_count =
+            std::min(night.range_count,
+                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+        for (size_t i = 0; i < display_count; ++i) {
+            const ReportSessionRange &display = night.ranges[i];
+            bool overlaps_edf = false;
+            for (size_t k = 0; k < edf_count; ++k) {
+                if (ranges_overlap(display.start_ms,
+                                   display.end_ms,
+                                   night.data_ranges[k].start_ms,
+                                   night.data_ranges[k].end_ms)) {
+                    overlaps_edf = true;
+                    break;
+                }
+            }
+            if (!overlaps_edf) append_range(display.start_ms, display.end_ms);
+        }
+    } else {
+        const size_t display_count =
+            std::min(night.range_count,
+                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+        for (size_t i = 0; i < display_count; ++i) {
+            append_range(night.ranges[i].start_ms, night.ranges[i].end_ms);
+        }
+    }
+    std::sort(result_ranges_,
+              result_ranges_ + result_range_count_,
+              [](const PlotRange &a, const PlotRange &b) {
+                  return a.start_ms < b.start_ms;
+              });
+    return result_range_count_ > 0;
+}
+
+bool ReportManager::set_result_ranges_from_edf_sessions() {
+    if (!result_edf_sessions_ || result_edf_session_count_ == 0) return false;
+    clear_result_ranges();
+    for (size_t i = 0; i < result_edf_session_count_ &&
+                       result_range_count_ < AC_REPORT_SUMMARY_SESSION_MAX;
+         ++i) {
+        const EdfReportSessionDescriptor &session = result_edf_sessions_[i];
+        if (!edf_session_has_report_numeric(session)) continue;
+        if (session.earliest_header_start_ms <= 0 ||
+            session.latest_header_end_ms <= session.earliest_header_start_ms) {
+            continue;
+        }
+        PlotRange &range = result_ranges_[result_range_count_++];
+        range.start_ms = session.earliest_header_start_ms;
+        range.end_ms = session.latest_header_end_ms;
+    }
+    std::sort(result_ranges_,
+              result_ranges_ + result_range_count_,
+              [](const PlotRange &a,
+                 const PlotRange &b) {
+                  return a.start_ms < b.start_ms;
+              });
+    return result_range_count_ > 0;
+}
+
+bool ReportManager::result_data_span(int64_t &span_start_ms,
+                                     int64_t &span_end_ms) const {
+    if (result_range_count_ == 0) {
+        return indexed_night_data_span(result_indexed_night_,
+                                       span_start_ms,
+                                       span_end_ms) ||
+               night_data_span(result_night_, span_start_ms, span_end_ms);
+    }
+    span_start_ms = result_ranges_[0].start_ms;
+    span_end_ms = result_ranges_[0].end_ms;
+    for (size_t i = 1; i < result_range_count_; ++i) {
+        span_start_ms = std::min(span_start_ms, result_ranges_[i].start_ms);
+        span_end_ms = std::max(span_end_ms, result_ranges_[i].end_ms);
+    }
+    return span_end_ms > span_start_ms;
+}
+
 void ReportManager::clear_result_prepare() {
     reset_plot_build();
     reset_range_plot_build(true);
@@ -3028,8 +4887,12 @@ void ReportManager::clear_result_prepare() {
     memset(result_streams_, 0, sizeof(result_streams_));
     result_stream_count_ = 0;
     release_result_edf_sessions();
+    result_indexed_night_ = {};
     result_night_ = {};
+    result_etag_[0] = '\0';
+    clear_result_ranges();
     result_plot_bin_.clear();
+    result_skip_plot_cache_ = false;
     result_status_ = {};
 }
 
@@ -3059,13 +4922,16 @@ bool ReportManager::add_result_stream(ReportStoreChunkKind kind,
     if (!name || !name[0]) return false;
     for (size_t i = 0; i < result_stream_count_; ++i) {
         ReportResultStream &stream = result_streams_[i];
-        if (stream.kind == kind && stream.source == source &&
+        if (stream.kind == kind && stream.signal == signal &&
             stream.name && strcmp(stream.name, name) == 0) {
             stream_index = i;
             if (required) stream.required = true;
             if (!complete && stream.complete) {
                 stream.complete = false;
                 if (stream.required) result_status_.missing_streams++;
+            }
+            if (stream.chunk_count == 0) {
+                stream.source = source;
             }
             return true;
         }
@@ -3104,7 +4970,9 @@ bool ReportManager::collect_result_chunk(void *context,
             existing.name && info.name &&
             strcmp(existing.name, info.name) == 0 &&
             existing.start_ms == info.start_ms &&
-            existing.end_ms == info.end_ms) {
+            existing.end_ms == info.end_ms &&
+            report_provider_chunk_ref_equal(existing.provider_ref,
+                                            info.ref)) {
             return true;
         }
     }
@@ -3112,6 +4980,21 @@ bool ReportManager::collect_result_chunk(void *context,
     const bool fixed_stream =
         ctx->name && ctx->name[0] && strcmp(ctx->name, info.name) == 0;
     size_t stream_index = ctx->stream_index;
+    if (fixed_stream && stream_index != SIZE_MAX) {
+        if (stream_index >= manager->result_stream_count_) {
+            manager->fail_result_prepare("bad_result_stream");
+            return false;
+        }
+        const ReportResultStream &stream =
+            manager->result_streams_[stream_index];
+        if (stream.kind != info.kind ||
+            stream.signal != info.signal ||
+            !stream.name ||
+            strcmp(stream.name, info.name) != 0) {
+            manager->fail_result_prepare("result_stream_mismatch");
+            return false;
+        }
+    }
     if (stream_index == SIZE_MAX || !fixed_stream) {
         if (!manager->add_result_stream(info.kind,
                                         info.source,
@@ -3143,6 +5026,10 @@ bool ReportManager::add_provider_result_chunk(
         fail_result_prepare("result_chunks_full");
         return false;
     }
+    if (stream_index >= result_stream_count_ || stream_index > UINT8_MAX) {
+        fail_result_prepare("bad_result_stream");
+        return false;
+    }
 
     ReportResultChunk &chunk =
         result_chunks_[result_status_.chunk_count++];
@@ -3151,6 +5038,7 @@ bool ReportManager::add_provider_result_chunk(
     chunk.source = provider_chunk.source;
     chunk.signal = provider_chunk.signal;
     chunk.name = provider_chunk.name;
+    chunk.stream_index = static_cast<uint8_t>(stream_index);
     chunk.start_ms = provider_chunk.start_ms;
     chunk.end_ms = provider_chunk.end_ms;
     chunk.payload_schema = provider_chunk.payload_schema;
@@ -3159,6 +5047,12 @@ bool ReportManager::add_provider_result_chunk(
 
     if (stream_index < result_stream_count_) {
         ReportResultStream &stream = result_streams_[stream_index];
+        stream.has_edf_segment =
+            stream.has_edf_segment ||
+            provider_chunk.ref.provider == ReportProviderId::Edf;
+        stream.has_spool_segment =
+            stream.has_spool_segment ||
+            provider_chunk.ref.provider == ReportProviderId::Spool;
         stream.chunk_count++;
         stream.record_count += provider_chunk.record_count;
         stream.payload_bytes += provider_chunk.payload_len;
@@ -3198,14 +5092,18 @@ bool ReportManager::source_chunk_extent(const ReportSummaryRecord &night,
     return true;
 }
 
-bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
-                                                ReportSourceId source,
-                                                ReportSignalId signal,
-                                                const char *name,
-                                                int64_t night_start_ms,
-                                                int64_t start_ms,
-                                                int64_t end_ms,
-                                                bool required) {
+bool ReportManager::add_provider_chunks_to_result_stream(
+    const ReportDataProvider &provider,
+    ReportStoreChunkKind kind,
+    ReportSourceId source,
+    ReportSignalId signal,
+    const char *name,
+    int64_t night_start_ms,
+    int64_t start_ms,
+    int64_t end_ms,
+    bool required,
+    bool complete,
+    size_t stream_index) {
     if (!ensure_result_chunks()) return false;
     const ReportSourceDef *source_def = report_source_def(source);
     if (!source_def || !source_def->spool_type || !source_def->spool_type[0]) {
@@ -3213,26 +5111,24 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
         return false;
     }
     const bool sparse_events = kind == ReportStoreChunkKind::Events;
-    // Completeness is coverage-driven for every source, events included: a swept
-    // span is covered full-width (so zero events is real) and an unswept span is
-    // not (events unavailable, not zero). sparse_events still guards the aged-out
-    // series check below, where a covered event stream may hold zero chunks.
-    const bool complete =
-        spool_report_provider().coverage_complete(*source_def,
-                                                  start_ms,
-                                                  end_ms);
-    size_t stream_index = 0;
-    if (!add_result_stream(kind,
-                           source,
-                           signal,
-                           name,
-                           required,
-                           complete,
-                           stream_index)) {
+    if (stream_index >= result_stream_count_ || !name || !name[0]) {
+        fail_result_prepare("bad_result_stream");
         return false;
+    }
+    ReportResultStream &stream = result_streams_[stream_index];
+    if (stream.kind != kind || stream.signal != signal || !stream.name ||
+        strcmp(stream.name, name) != 0) {
+        fail_result_prepare("result_stream_mismatch");
+        return false;
+    }
+    if (required) stream.required = true;
+    if (!complete && stream.complete) {
+        stream.complete = false;
+        if (stream.required) result_status_.missing_streams++;
     }
     if (!complete) return true;
 
+    const uint32_t chunks_before = stream.chunk_count;
     ResultChunkContext context;
     context.manager = this;
     context.kind = kind;
@@ -3241,15 +5137,15 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
     context.name = name;
     context.required = required;
     context.stream_index = stream_index;
-    if (!spool_report_provider().for_each_chunk(kind,
-                                                *source_def,
-                                                signal,
-                                                name,
-                                                night_start_ms,
-                                                start_ms,
-                                                end_ms,
-                                                collect_result_chunk,
-                                                &context)) {
+    if (!provider.for_each_chunk(kind,
+                                 *source_def,
+                                 signal,
+                                 name,
+                                 night_start_ms,
+                                 start_ms,
+                                 end_ms,
+                                 collect_result_chunk,
+                                 &context)) {
         if (result_status_.state != ReportResultState::Error) {
             fail_result_prepare("result_chunk_list_failed");
         }
@@ -3257,7 +5153,7 @@ bool ReportManager::add_result_chunks_for_range(ReportStoreChunkKind kind,
     }
     if (!sparse_events &&
         required &&
-        result_streams_[stream_index].chunk_count == 0 &&
+        result_streams_[stream_index].chunk_count == chunks_before &&
         result_streams_[stream_index].complete) {
         result_streams_[stream_index].complete = false;
         result_status_.missing_streams++;
@@ -3272,6 +5168,9 @@ bool ReportManager::edf_report_catalog_pending() const {
     if (!edf_catalog_->status(status, 0)) return true;
     if (status.state == EdfReportCatalogState::Ready ||
         status.state == EdfReportCatalogState::Error) {
+        return false;
+    }
+    if (status.sessions > 0) {
         return false;
     }
     (void)edf_catalog_->request_refresh();
@@ -3295,7 +5194,8 @@ bool ReportManager::collect_edf_sessions_for_night(
 
     EdfReportCatalogStatus status;
     if (!edf_catalog_->status(status, 0) ||
-        status.state != EdfReportCatalogState::Ready) {
+        (status.state != EdfReportCatalogState::Ready &&
+         status.sessions == 0)) {
         if (status.state != EdfReportCatalogState::Error) {
             (void)edf_catalog_->request_refresh();
             if (pending_out) *pending_out = true;
@@ -3306,7 +5206,7 @@ bool ReportManager::collect_edf_sessions_for_night(
     const size_t count = edf_catalog_->session_count();
     for (size_t i = 0; i < count &&
                        session_count < session_capacity; ++i) {
-        EdfReportSessionDescriptor session;
+        EdfReportSessionDescriptor &session = sessions[session_count];
         if (!edf_catalog_->copy_session(i, session)) continue;
         if (session.earliest_header_start_ms <= 0 ||
             session.latest_header_end_ms <= session.earliest_header_start_ms ||
@@ -3316,7 +5216,7 @@ bool ReportManager::collect_edf_sessions_for_night(
                             range_end_ms)) {
             continue;
         }
-        sessions[session_count++] = session;
+        session_count++;
     }
 
     std::sort(sessions,
@@ -3327,7 +5227,80 @@ bool ReportManager::collect_edf_sessions_for_night(
                          b.earliest_header_start_ms;
               });
     (void)night;
+    if (!append_edf_event_sessions_for_selected_days(sessions,
+                                                     session_capacity,
+                                                     session_count)) {
+        return false;
+    }
+    if (session_count == 0 &&
+        status.state == EdfReportCatalogState::Refreshing) {
+        if (pending_out) *pending_out = true;
+        return false;
+    }
     return session_count > 0;
+}
+
+bool ReportManager::append_edf_event_sessions_for_selected_days(
+    EdfReportSessionDescriptor *sessions,
+    size_t session_capacity,
+    size_t &session_count) const {
+    if (!edf_catalog_ || !sessions || session_count == 0 ||
+        session_capacity == 0) {
+        return true;
+    }
+
+    const size_t base_count = session_count;
+    const size_t catalog_count = edf_catalog_->session_count();
+    EdfReportSessionDescriptor *candidate =
+        static_cast<EdfReportSessionDescriptor *>(
+            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
+    if (!candidate) {
+        log_report_alloc_failed("edf_event_session_scratch",
+                                sizeof(EdfReportSessionDescriptor));
+        return false;
+    }
+    for (size_t i = 0; i < catalog_count; ++i) {
+        if (!edf_catalog_->copy_session(i, *candidate)) continue;
+        if (!edf_session_has_event_file(*candidate)) continue;
+
+        bool selected_day = false;
+        for (size_t base = 0; base < base_count; ++base) {
+            if (strcmp(sessions[base].sleep_day, candidate->sleep_day) == 0) {
+                selected_day = true;
+                break;
+            }
+        }
+        if (!selected_day) continue;
+
+        bool duplicate = false;
+        for (size_t existing = 0; existing < session_count; ++existing) {
+            if (edf_session_same_identity(sessions[existing], *candidate)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        if (session_count >= session_capacity) {
+            Log::logf(CAT_REPORT,
+                      LOG_WARN,
+                      "EDF report event session list full capacity=%u\n",
+                      static_cast<unsigned>(session_capacity));
+            break;
+        }
+        sessions[session_count++] = *candidate;
+    }
+    Memory::free(candidate);
+    std::sort(sessions,
+              sessions + session_count,
+              [](const EdfReportSessionDescriptor &a,
+                 const EdfReportSessionDescriptor &b) {
+                  if (strcmp(a.sleep_day, b.sleep_day) != 0) {
+                      return strcmp(a.sleep_day, b.sleep_day) < 0;
+                  }
+                  return strcmp(a.session_stamp, b.session_stamp) < 0;
+              });
+    return true;
 }
 
 bool ReportManager::edf_report_complete_for_night(
@@ -3361,119 +5334,105 @@ bool ReportManager::edf_report_complete_for_night(
         return false;
     }
 
+    EdfReportRequiredRange required_ranges[AC_REPORT_SUMMARY_SESSION_MAX];
+    const size_t required_range_count =
+        collect_required_edf_ranges(night,
+                                    range_start_ms,
+                                    range_end_ms,
+                                    required_ranges,
+                                    AC_REPORT_SUMMARY_SESSION_MAX);
+
     const bool complete = edf_report_plan_covers_report(sessions,
                                                         session_count,
-                                                        range_start_ms,
-                                                        range_end_ms);
+                                                        required_ranges,
+                                                        required_range_count);
     Memory::free(sessions);
     return complete;
+}
+
+bool ReportManager::edf_report_complete_for_indexed_night(
+    const ReportIndexedNight &night,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
+    bool *pending_out) const {
+    EdfReportSessionDescriptor *sessions =
+        static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(
+            AC_REPORT_SUMMARY_SESSION_MAX *
+            sizeof(EdfReportSessionDescriptor),
+            false));
+    if (!sessions) {
+        log_report_alloc_failed(
+            "edf_report_session_snapshot",
+            AC_REPORT_SUMMARY_SESSION_MAX *
+                sizeof(EdfReportSessionDescriptor));
+        if (pending_out) *pending_out = false;
+        return false;
+    }
+
+    size_t session_count = 0;
+    if (!collect_edf_sessions_for_night(night.summary,
+                                        range_start_ms,
+                                        range_end_ms,
+                                        sessions,
+                                        AC_REPORT_SUMMARY_SESSION_MAX,
+                                        session_count,
+                                        pending_out)) {
+        Memory::free(sessions);
+        return false;
+    }
+
+    EdfReportRequiredRange required_ranges[AC_REPORT_SUMMARY_SESSION_MAX];
+    ReportSessionRange source_ranges[AC_REPORT_SUMMARY_SESSION_MAX];
+    const size_t source_range_count =
+        collect_indexed_night_data_ranges(night,
+                                          source_ranges,
+                                          AC_REPORT_SUMMARY_SESSION_MAX);
+    const size_t required_range_count =
+        collect_required_ranges_from_session_ranges(
+            source_ranges,
+            source_range_count,
+            range_start_ms,
+            range_end_ms,
+            required_ranges,
+            AC_REPORT_SUMMARY_SESSION_MAX);
+
+    const bool complete = edf_report_plan_covers_report(sessions,
+                                                        session_count,
+                                                        required_ranges,
+                                                        required_range_count);
+    Memory::free(sessions);
+    return complete;
+}
+
+bool ReportManager::edf_report_complete_for_night_sessions(
+    const ReportSummaryRecord &night) const {
+    int64_t span_start_ms = 0;
+    int64_t span_end_ms = 0;
+    return night_data_span(night, span_start_ms, span_end_ms) &&
+           edf_report_complete_for_night(night,
+                                         span_start_ms,
+                                         span_end_ms);
 }
 
 bool ReportManager::find_edf_sessions_for_night(
     const ReportSummaryRecord &night,
     int64_t range_start_ms,
-    int64_t range_end_ms) {
+    int64_t range_end_ms,
+    bool *pending_out) {
     result_edf_session_count_ = 0;
+    if (pending_out) *pending_out = false;
     if (!ensure_result_edf_sessions()) return false;
     memset(result_edf_sessions_,
            0,
            AC_REPORT_SUMMARY_SESSION_MAX *
                sizeof(EdfReportSessionDescriptor));
-    bool pending = false;
     return collect_edf_sessions_for_night(night,
                                           range_start_ms,
                                           range_end_ms,
                                           result_edf_sessions_,
                                           AC_REPORT_SUMMARY_SESSION_MAX,
                                           result_edf_session_count_,
-                                          &pending);
-}
-
-bool ReportManager::add_edf_events_for_range(int64_t range_start_ms,
-                                             int64_t range_end_ms,
-                                             bool required,
-                                             uint32_t &scored_sources) {
-    scored_sources = 0;
-    if (!ensure_result_chunks() || !result_edf_sessions_ ||
-        result_edf_session_count_ == 0) {
-        return true;
-    }
-
-    for (size_t i = 0; i < result_edf_session_count_; ++i) {
-        if (edf_report_session_has_file(result_edf_sessions_[i],
-                                        EdfInventoryFileKind::Eve)) {
-            scored_sources++;
-        }
-    }
-    if (scored_sources > 0) {
-        size_t stream_index = SIZE_MAX;
-        if (!add_result_stream(
-                ReportStoreChunkKind::Events,
-                ReportSourceId::RespiratoryEvents,
-                ReportSignalId::Flow,
-                report_source_spool_type(ReportSourceId::RespiratoryEvents),
-                required,
-                true,
-                stream_index)) {
-            return false;
-        }
-    }
-
-    ResultChunkContext ctx;
-    ctx.manager = this;
-    ctx.kind = ReportStoreChunkKind::Events;
-    ctx.source = ReportSourceId::RespiratoryEvents;
-    ctx.signal = ReportSignalId::Flow;
-    ctx.required = required;
-    ctx.stream_index = SIZE_MAX;
-    if (!edf_report_provider().for_each_event_chunk(result_edf_sessions_,
-                                                    result_edf_session_count_,
-                                                    range_start_ms,
-                                                    range_end_ms,
-                                                    collect_result_chunk,
-                                                    &ctx)) {
-        return false;
-    }
-    return true;
-}
-
-bool ReportManager::add_edf_signal_for_range(
-    ReportSignalId signal,
-    int64_t range_start_ms,
-    int64_t range_end_ms,
-    bool required,
-    uint32_t &entries) {
-    entries = 0;
-    if (!ensure_result_chunks() || !result_edf_sessions_ ||
-        result_edf_session_count_ == 0) {
-        return true;
-    }
-
-    const char *name = report_signal_store_name(signal);
-    if (!name || !name[0]) {
-        fail_result_prepare("bad_result_signal");
-        return false;
-    }
-
-    ResultChunkContext ctx;
-    ctx.manager = this;
-    ctx.kind = ReportStoreChunkKind::Series;
-    ctx.source = ReportSourceId::Summary;
-    ctx.signal = signal;
-    ctx.name = name;
-    ctx.required = required;
-    ctx.stream_index = SIZE_MAX;
-    if (!edf_report_provider().for_each_signal_chunk(result_edf_sessions_,
-                                                     result_edf_session_count_,
-                                                     signal,
-                                                     range_start_ms,
-                                                     range_end_ms,
-                                                     collect_result_chunk,
-                                                     &ctx)) {
-        return false;
-    }
-    entries = ctx.entries;
-    return true;
+                                          pending_out);
 }
 
 bool ReportManager::read_result_chunk_payload(
@@ -3481,16 +5440,7 @@ bool ReportManager::read_result_chunk_payload(
     ReportStoreChunkMeta &meta,
     ReportSpoolBuffer &payload) {
     ReportProviderChunk provider_chunk;
-    provider_chunk.ref = chunk.provider_ref;
-    provider_chunk.kind = chunk.kind;
-    provider_chunk.source = chunk.source;
-    provider_chunk.signal = chunk.signal;
-    provider_chunk.name = chunk.name;
-    provider_chunk.start_ms = chunk.start_ms;
-    provider_chunk.end_ms = chunk.end_ms;
-    provider_chunk.payload_schema = chunk.payload_schema;
-    provider_chunk.record_count = chunk.record_count;
-    provider_chunk.payload_len = chunk.payload_len;
+    provider_chunk_from_result(chunk, provider_chunk);
 
     switch (chunk.provider_ref.provider) {
         case ReportProviderId::Spool:
@@ -3510,28 +5460,92 @@ bool ReportManager::read_result_chunk_payload(
     }
 }
 
+void ReportManager::provider_chunk_from_result(
+    const ReportResultChunk &chunk,
+    ReportProviderChunk &out) const {
+    out = {};
+    out.ref = chunk.provider_ref;
+    out.kind = chunk.kind;
+    out.source = chunk.source;
+    out.signal = chunk.signal;
+    out.name = chunk.name;
+    out.start_ms = chunk.start_ms;
+    out.end_ms = chunk.end_ms;
+    out.payload_schema = chunk.payload_schema;
+    out.record_count = chunk.record_count;
+    out.payload_len = chunk.payload_len;
+}
+
+bool ReportManager::for_each_result_series_sample(
+    const ReportResultChunk &chunk,
+    ReportProviderSeriesReadStats &stats,
+    ReportSeriesSampleCallback callback,
+    void *context) {
+    stats = {};
+    if (!callback || chunk.kind != ReportStoreChunkKind::Series) {
+        return false;
+    }
+    ReportProviderChunk provider_chunk;
+    provider_chunk_from_result(chunk, provider_chunk);
+
+    switch (chunk.provider_ref.provider) {
+        case ReportProviderId::Spool:
+            return spool_report_provider().for_each_series_sample(
+                provider_chunk,
+                static_cast<int64_t>(result_night_.start_ms),
+                stats,
+                callback,
+                context);
+        case ReportProviderId::Edf:
+            return edf_report_provider().for_each_series_sample(
+                provider_chunk,
+                result_edf_sessions_,
+                result_edf_session_count_,
+                stats,
+                callback,
+                context);
+        default:
+            return false;
+    }
+}
+
 bool ReportManager::result_plot_cache_path_for_night(
-    const ReportSummaryRecord &night,
+    const ReportIndexedNight &night,
+    const char *etag,
     char *path,
     size_t path_size) const {
-    if (!path || !path_size || night.start_ms == 0) return false;
-    // record_count is a data-version tag: when a night's chunks change the count moves,
-    // so the key changes and the stale plot binary is never loaded
+    if (!path || !path_size || night.summary.start_ms == 0 ||
+        !etag || !etag[0]) {
+        return false;
+    }
     const int written = snprintf(
         path,
         path_size,
-        "%s/%llu-%lu-%lu-%lu.bin",
+        "%s/%llu-%s.bin",
         REPORT_PLOT_CACHE_DIR,
-        static_cast<unsigned long long>(night.start_ms),
-        static_cast<unsigned long>(night.duration_min),
-        static_cast<unsigned long>(night.session_interval_count),
-        static_cast<unsigned long>(result_status_.record_count));
+        static_cast<unsigned long long>(night.summary.start_ms),
+        etag);
     return written > 0 && static_cast<size_t>(written) < path_size;
 }
 
 bool ReportManager::result_plot_cache_path(char *path,
                                            size_t path_size) const {
-    return result_plot_cache_path_for_night(result_night_, path, path_size);
+    return result_plot_cache_path_for_night(result_indexed_night_,
+                                            result_etag_,
+                                            path,
+                                            path_size);
+}
+
+bool ReportManager::result_plot_cache_exists_for_night(
+    const ReportIndexedNight &night,
+    const char *etag) const {
+    Storage::Guard g;
+    if (!Storage::mounted()) return false;
+    char path[REPORT_PLOT_PATH_MAX];
+    if (!result_plot_cache_path_for_night(night, etag, path, sizeof(path))) {
+        return false;
+    }
+    return Storage::exists(path);
 }
 
 bool ReportManager::load_result_plot_cache() {
@@ -3583,46 +5597,203 @@ bool ReportManager::load_result_plot_cache() {
     return true;
 }
 
-bool ReportManager::save_result_plot_cache() const {
-    Storage::Guard g;
-    if (!Storage::mounted() || result_plot_bin_.size() == 0) return false;
-    if (!Storage::ensure_dir("/aircannect") ||
-        !Storage::ensure_dir("/aircannect/report") ||
-        !Storage::ensure_dir("/aircannect/report/v2") ||
-        !Storage::ensure_dir("/aircannect/report/v2/plots") ||
-        !Storage::ensure_dir(REPORT_PLOT_CACHE_DIR)) {
+void ReportManager::reset_plot_cache_write_locked() {
+    if (plot_cache_write_.file) {
+        Storage::Guard g;
+        plot_cache_write_.file.close();
+    }
+    plot_cache_write_.file = File();
+    plot_cache_write_.active = false;
+    plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+    plot_cache_write_.night = ReportSummaryRecord{};
+    plot_cache_write_.path[0] = 0;
+    plot_cache_write_.tmp_path[0] = 0;
+    plot_cache_write_.payload.reset();
+    plot_cache_write_.offset = 0;
+}
+
+bool ReportManager::enqueue_result_plot_cache_write(
+    const ReportIndexedNight &night,
+    const char *etag,
+    const std::shared_ptr<ReportSpoolBuffer> &plot) {
+    if (!plot || plot->size() == 0 || !plot_cache_write_lock_) return false;
+
+    char path[sizeof(plot_cache_write_.path)];
+    if (!result_plot_cache_path_for_night(night, etag, path, sizeof(path))) {
         return false;
     }
-    char path[REPORT_PLOT_PATH_MAX];
-    if (!result_plot_cache_path(path, sizeof(path))) return false;
-    uint32_t deleted = 0;
-    if (!clear_plot_cache_for_night(result_night_, deleted)) return false;
-    char tmp[REPORT_PLOT_PATH_MAX + 8];
+    char tmp[sizeof(plot_cache_write_.tmp_path)];
     const int written = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     if (written <= 0 || static_cast<size_t>(written) >= sizeof(tmp)) {
         return false;
     }
-    Storage::remove(tmp);
-    File file = Storage::open(tmp, "w");
-    if (!file) return false;
-    const uint8_t *data = result_plot_bin_.data();
-    const size_t len = result_plot_bin_.size();
-    const bool ok = file.write(data, len) == len;
-    file.close();
-    if (!ok) {
-        Storage::remove(tmp);
+
+    if (xSemaphoreTake(plot_cache_write_lock_, pdMS_TO_TICKS(5)) != pdTRUE) {
         return false;
     }
-    Storage::remove(path);
-    if (!Storage::rename(tmp, path)) {
-        Storage::remove(tmp);
+    if (plot_cache_write_.active) {
+        xSemaphoreGive(plot_cache_write_lock_);
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Plot cache write skipped: writer busy night=%llu\n",
+                  static_cast<unsigned long long>(night.summary.start_ms));
         return false;
     }
+
+    reset_plot_cache_write_locked();
+    plot_cache_write_.active = true;
+    plot_cache_write_.phase = PlotCacheWritePhase::ClearOld;
+    plot_cache_write_.night = night.summary;
+    snprintf(plot_cache_write_.path,
+             sizeof(plot_cache_write_.path),
+             "%s",
+             path);
+    snprintf(plot_cache_write_.tmp_path,
+             sizeof(plot_cache_write_.tmp_path),
+             "%s",
+             tmp);
+    plot_cache_write_.payload = plot;
+    plot_cache_write_.offset = 0;
+    xSemaphoreGive(plot_cache_write_lock_);
+    if (BackgroundWorker *worker = background_worker()) {
+        worker->wake();
+    }
+    return true;
+}
+
+bool ReportManager::plot_cache_writer_active() const {
+    if (!plot_cache_write_lock_) return false;
+    if (xSemaphoreTake(plot_cache_write_lock_, pdMS_TO_TICKS(1)) != pdTRUE) {
+        return true;
+    }
+    const bool active = plot_cache_write_.active;
+    xSemaphoreGive(plot_cache_write_lock_);
+    return active;
+}
+
+bool ReportManager::service_plot_cache_writer() {
+    if (!plot_cache_write_lock_) return false;
+    if (xSemaphoreTake(plot_cache_write_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    if (!plot_cache_write_.active) {
+        xSemaphoreGive(plot_cache_write_lock_);
+        return false;
+    }
+
+    bool ok = true;
+    switch (plot_cache_write_.phase) {
+        case PlotCacheWritePhase::ClearOld: {
+            {
+                Storage::Guard g;
+                ok = Storage::mounted() &&
+                     Storage::ensure_dir("/aircannect") &&
+                     Storage::ensure_dir("/aircannect/report") &&
+                     Storage::ensure_dir("/aircannect/report/v4") &&
+                     Storage::ensure_dir("/aircannect/report/v4/plots") &&
+                     Storage::ensure_dir(REPORT_PLOT_CACHE_DIR);
+            }
+            uint32_t deleted = 0;
+            ok = ok && clear_plot_cache_for_night(plot_cache_write_.night,
+                                                  deleted);
+            plot_cache_write_.phase =
+                ok ? PlotCacheWritePhase::OpenTmp
+                   : PlotCacheWritePhase::Idle;
+            break;
+        }
+        case PlotCacheWritePhase::OpenTmp: {
+            Storage::Guard g;
+            Storage::remove(plot_cache_write_.tmp_path);
+            plot_cache_write_.file =
+                Storage::open(plot_cache_write_.tmp_path, "w");
+            ok = static_cast<bool>(plot_cache_write_.file);
+            plot_cache_write_.phase =
+                ok ? PlotCacheWritePhase::Write
+                   : PlotCacheWritePhase::Idle;
+            break;
+        }
+        case PlotCacheWritePhase::Write: {
+            if (!plot_cache_write_.payload || !plot_cache_write_.file) {
+                ok = false;
+                plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+                break;
+            }
+            const size_t total = plot_cache_write_.payload->size();
+            if (plot_cache_write_.offset >= total) {
+                plot_cache_write_.phase = PlotCacheWritePhase::CloseRename;
+                break;
+            }
+            const size_t len =
+                std::min(REPORT_PLOT_CACHE_WRITE_CHUNK,
+                         total - plot_cache_write_.offset);
+            const uint8_t *data =
+                plot_cache_write_.payload->data() + plot_cache_write_.offset;
+            size_t wrote = 0;
+            {
+                Storage::Guard g;
+                wrote = plot_cache_write_.file.write(data, len);
+            }
+            ok = wrote == len;
+            if (ok) {
+                plot_cache_write_.offset += len;
+                if (plot_cache_write_.offset >= total) {
+                    plot_cache_write_.phase =
+                        PlotCacheWritePhase::CloseRename;
+                }
+            } else {
+                plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+            }
+            break;
+        }
+        case PlotCacheWritePhase::CloseRename: {
+            Storage::Guard g;
+            if (plot_cache_write_.file) plot_cache_write_.file.close();
+            Storage::remove(plot_cache_write_.path);
+            ok = Storage::rename(plot_cache_write_.tmp_path,
+                                 plot_cache_write_.path);
+            if (!ok) Storage::remove(plot_cache_write_.tmp_path);
+            plot_cache_write_.phase = PlotCacheWritePhase::Idle;
+            break;
+        }
+        case PlotCacheWritePhase::Idle:
+        default:
+            ok = false;
+            break;
+    }
+
+    const bool done = plot_cache_write_.phase == PlotCacheWritePhase::Idle;
+    const uint64_t night_start_ms = plot_cache_write_.night.start_ms;
+    const size_t bytes =
+        plot_cache_write_.payload ? plot_cache_write_.payload->size() : 0;
+    if (done) {
+        if (ok) {
+            Log::logf(CAT_REPORT,
+                      LOG_DEBUG,
+                      "Plot cache write complete night=%llu bytes=%u\n",
+                      static_cast<unsigned long long>(night_start_ms),
+                      static_cast<unsigned>(bytes));
+        } else {
+            Log::logf(CAT_REPORT,
+                      LOG_WARN,
+                      "Plot cache write failed night=%llu bytes=%u\n",
+                      static_cast<unsigned long long>(night_start_ms),
+                      static_cast<unsigned>(bytes));
+            Storage::Guard g;
+            if (plot_cache_write_.file) plot_cache_write_.file.close();
+            if (plot_cache_write_.tmp_path[0]) {
+                Storage::remove(plot_cache_write_.tmp_path);
+            }
+        }
+        reset_plot_cache_write_locked();
+    }
+    xSemaphoreGive(plot_cache_write_lock_);
     return true;
 }
 
 void ReportManager::reset_plot_build() {
     plot_build_active_ = false;
+    plot_build_idle_prebuild_ = false;
+    plot_build_night_start_ms_.store(0);
     plot_build_phase_ = ReportPlotBuildPhase::Idle;
     plot_build_bin_.clear();
     plot_tmp_.clear();
@@ -3633,11 +5804,14 @@ void ReportManager::reset_plot_build() {
     plot_end_ms_ = 0;
     plot_bucket_ms_ = 1;
     plot_chunk_index_ = 0;
-    plot_stream_index_ = 0;
-    plot_current_bucket_ = -1;
-    plot_series_open_ = false;
+    memset(plot_chunk_done_, 0, sizeof(plot_chunk_done_));
     plot_seen_events_.clear();
-    plot_bucket_.clear();
+    for (size_t i = 0; i < AC_REPORT_RESULT_STREAM_MAX; ++i) {
+        plot_series_states_[i].reset();
+    }
+    plot_build_started_ms_ = 0;
+    plot_build_input_chunks_ = 0;
+    plot_build_input_bytes_ = 0;
 }
 
 void ReportManager::build_empty_plot_bin(ReportSpoolBuffer &out) const {
@@ -3664,136 +5838,55 @@ int ReportManager::plot_range_index(int64_t timestamp_ms) const {
     return -1;
 }
 
-size_t ReportManager::derive_result_session_ranges(PlotRange *ranges,
-                                                   size_t max_ranges) const {
-    if (!ranges || !max_ranges || !result_chunks_ ||
-        result_status_.chunk_count == 0 ||
-        result_night_.end_ms <= result_night_.start_ms) {
-        return 0;
-    }
-
-    const int64_t SESSION_GAP_MS = AC_REPORT_SESSION_GAP_MS;
-    const int64_t night_start = static_cast<int64_t>(result_night_.start_ms);
-    const int64_t night_end = static_cast<int64_t>(result_night_.end_ms);
-    size_t count = 0;
-
-    for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
-        const ReportResultChunk &chunk = result_chunks_[i];
-        if (chunk.kind != ReportStoreChunkKind::Series ||
-            chunk.signal != ReportSignalId::Flow ||
-            chunk.end_ms <= chunk.start_ms) {
-            continue;
-        }
-
-        const int64_t start_ms = std::max(chunk.start_ms, night_start);
-        const int64_t end_ms = std::min(chunk.end_ms, night_end);
-        if (end_ms <= start_ms) continue;
-
-        if (count > 0 && start_ms <= ranges[count - 1].end_ms + SESSION_GAP_MS) {
-            ranges[count - 1].end_ms =
-                std::max(ranges[count - 1].end_ms, end_ms);
-            continue;
-        }
-        if (count >= max_ranges) {
-            ranges[count - 1].end_ms =
-                std::max(ranges[count - 1].end_ms, end_ms);
-            continue;
-        }
-        ranges[count].start_ms = start_ms;
-        ranges[count].end_ms = end_ms;
-        count++;
-    }
-    return count;
-}
-
-void ReportManager::apply_result_session_ranges(const PlotRange *ranges,
-                                                size_t range_count) {
-    if (!ranges || !range_count) return;
-
-    result_night_.session_interval_count = 0;
-    result_night_.has_session_count = true;
-    result_night_.session_count = static_cast<uint32_t>(range_count);
-
-    uint32_t total_min = 0;
-    for (size_t i = 0; i < range_count &&
-                       i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
-        if (ranges[i].end_ms <= ranges[i].start_ms) continue;
-        const int64_t duration_ms = ranges[i].end_ms - ranges[i].start_ms;
-        uint32_t duration_min =
-            static_cast<uint32_t>((duration_ms + 30000LL) / 60000LL);
-        if (duration_min == 0) duration_min = 1;
-
-        ReportSummarySession &session =
-            result_night_.sessions[result_night_.session_interval_count++];
-        session.start_ms = static_cast<uint64_t>(ranges[i].start_ms);
-        session.duration_min = duration_min;
-        total_min += duration_min;
-    }
-
-    if (result_night_.session_interval_count > 0) {
-        result_night_.duration_min = total_min;
-        result_status_.duration_min = total_min;
-    }
-}
-
 bool ReportManager::start_result_plot_build() {
     reset_plot_build();
     build_empty_plot_bin(result_plot_bin_);
     if (result_status_.state == ReportResultState::Error ||
         !result_chunks_ || result_status_.chunk_count == 0) {
         build_empty_plot_bin(result_plot_bin_);
-        result_status_.state = settled_result_state(result_status_.missing_required);
-        result_status_.error.clear();
-        publish_result_to_slot();
-        return true;
+        return publish_result_to_slot();
     }
 
-    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
     const size_t range_count =
-        collect_session_ranges(result_night_,
-                               ranges,
-                               AC_REPORT_SUMMARY_SESSION_MAX);
+        std::min(result_range_count_,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
     if (range_count == 0) {
         build_empty_plot_bin(result_plot_bin_);
-        result_status_.state = settled_result_state(result_status_.missing_required);
-        result_status_.error.clear();
-        publish_result_to_slot();
-        return true;
+        return publish_result_to_slot();
     }
 
     plot_range_count_ = range_count;
-    plot_start_ms_ = ranges[0].start_ms;
-    plot_end_ms_ = ranges[0].end_ms;
+    plot_start_ms_ = result_ranges_[0].start_ms;
+    plot_end_ms_ = result_ranges_[0].end_ms;
     for (size_t i = 0; i < range_count; ++i) {
-        plot_ranges_[i].start_ms = ranges[i].start_ms;
-        plot_ranges_[i].end_ms = ranges[i].end_ms;
-        plot_start_ms_ = std::min(plot_start_ms_, ranges[i].start_ms);
-        plot_end_ms_ = std::max(plot_end_ms_, ranges[i].end_ms);
+        plot_ranges_[i] = result_ranges_[i];
+        plot_start_ms_ = std::min(plot_start_ms_, result_ranges_[i].start_ms);
+        plot_end_ms_ = std::max(plot_end_ms_, result_ranges_[i].end_ms);
     }
     if (plot_start_ms_ <= 0 || plot_end_ms_ <= plot_start_ms_) {
         build_empty_plot_bin(result_plot_bin_);
-        result_status_.state = settled_result_state(result_status_.missing_required);
-        result_status_.error.clear();
-        publish_result_to_slot();
-        return true;
+        return publish_result_to_slot();
     }
-    if (load_result_plot_cache()) {
-        result_status_.state = settled_result_state(result_status_.missing_required);
-        result_status_.error.clear();
+    if (!result_skip_plot_cache_ && load_result_plot_cache()) {
         Log::logf(CAT_REPORT,
                   LOG_INFO,
                   "Result plot cache hit index=%lu bytes=%lu\n",
                   static_cast<unsigned long>(result_status_.therapy_index),
                   static_cast<unsigned long>(result_plot_bin_.size()));
-        publish_result_to_slot();
-        return true;
+        return publish_result_to_slot();
+    }
+    if (result_skip_plot_cache_) {
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Result plot cache skipped index=%lu reason=refresh\n",
+                  static_cast<unsigned long>(result_status_.therapy_index));
     }
 
     const int64_t span_ms = plot_end_ms_ - plot_start_ms_;
     plot_bucket_ms_ = std::max<int64_t>(
         1, span_ms / static_cast<int64_t>(AC_REPORT_PLOT_BUCKETS));
     plot_build_bin_.clear();
-    plot_build_bin_.set_max_size(768 * 1024);
+    plot_build_bin_.set_max_size(AC_REPORT_PLOT_MAX_BYTES);
     plot_tmp_.clear();
     plot_tmp_.set_max_size(128 * 1024);
     plot_bin_ok_ = true;
@@ -3810,9 +5903,12 @@ bool ReportManager::start_result_plot_build() {
         return false;
     }
     plot_build_active_ = true;
+    plot_build_idle_prebuild_ = active_build_idle_prebuild_;
+    plot_build_started_ms_ = millis();
+    plot_build_input_chunks_ = 0;
+    plot_build_input_bytes_ = 0;
+    plot_build_night_start_ms_.store(result_night_.start_ms);
     plot_build_phase_ = ReportPlotBuildPhase::Events;
-    result_status_.state = ReportResultState::Preparing;
-    result_status_.error = "plot_preparing";
     return true;
 }
 
@@ -3858,18 +5954,16 @@ bool ReportManager::process_plot_event_chunk(const ReportResultChunk &chunk) {
     return true;
 }
 
-bool ReportManager::open_plot_series(const ReportResultStream &stream) {
-    const size_t name_len = stream.name ? strlen(stream.name) : 0;
-    plot_bin_ok_ &= bin_put_u16(plot_build_bin_,
-                                static_cast<uint16_t>(name_len));
-    if (name_len) {
-        plot_bin_ok_ &= plot_build_bin_.append(
-            reinterpret_cast<const uint8_t *>(stream.name), name_len);
+bool ReportManager::open_plot_series_state(size_t stream_index) {
+    if (stream_index >= result_stream_count_ ||
+        stream_index >= AC_REPORT_RESULT_STREAM_MAX) {
+        return false;
     }
-    plot_tmp_.clear();
-    plot_series_open_ = true;
-    plot_current_bucket_ = -1;
-    plot_bucket_.clear();
+    PlotSeriesBuildState &state = plot_series_states_[stream_index];
+    if (state.open) return true;
+    state.reset();
+    state.points.set_max_size(AC_REPORT_PLOT_MAX_BYTES);
+    state.open = true;
     return plot_bin_ok_;
 }
 
@@ -3909,79 +6003,510 @@ uint8_t ReportManager::flush_plot_bucket_to(ReportSpoolBuffer &out,
     return count;
 }
 
-void ReportManager::flush_plot_bucket() {
-    (void)flush_plot_bucket_to(plot_tmp_,
-                               plot_bucket_,
-                               plot_start_ms_,
-                               plot_bin_ok_);
+uint8_t ReportManager::emit_plot_gap_to(ReportSpoolBuffer &out,
+                                        PlotBuildBucket &bucket,
+                                        int64_t base_ms,
+                                        bool &ok) {
+    uint8_t count = flush_plot_bucket_to(out, bucket, base_ms, ok);
+    ok &= bin_put_i32(out, PLOT_POINT_GAP_DELTA);
+    ok &= bin_put_i32(out, 0);
+    return static_cast<uint8_t>(count + 1);
 }
 
-bool ReportManager::process_plot_series_chunk(const ReportResultChunk &chunk) {
-    ReportStoreChunkMeta meta;
-    ReportSpoolBuffer payload;
-    if (!read_result_chunk_payload(chunk, meta, payload)) {
-        fail_result_prepare("plot_series_read_failed");
+void ReportManager::flush_plot_bucket(PlotSeriesBuildState &state) {
+    if (!state.bucket.have) return;
+    if (state.current_bucket < 0 ||
+        state.current_bucket > PLOT_ENVELOPE_GAP_BUCKET - 1) {
+        plot_bin_ok_ = false;
+        state.bucket.clear();
+        return;
+    }
+    plot_bin_ok_ &=
+        bin_put_u32(state.points, static_cast<uint32_t>(state.current_bucket));
+    int32_t min_value = state.bucket.min_value;
+    int32_t max_value = state.bucket.max_value;
+    if (min_value > max_value) std::swap(min_value, max_value);
+    plot_bin_ok_ &= bin_put_i32(state.points, min_value);
+    plot_bin_ok_ &= bin_put_i32(state.points, max_value);
+    state.bucket.clear();
+}
+
+bool ReportManager::append_plot_series_value(PlotSeriesBuildState &state,
+                                             int64_t timestamp_ms,
+                                             int32_t value_milli,
+                                             int64_t bucket_ms) {
+    if (timestamp_ms < plot_start_ms_) return true;
+    if (bucket_ms <= 0) bucket_ms = 1;
+    if (state.series_bucket_ms <= 0) {
+        state.series_bucket_ms = bucket_ms;
+    } else {
+        bucket_ms = state.series_bucket_ms;
+    }
+
+    int64_t sample_bucket = state.current_bucket;
+    if (state.current_bucket < 0 ||
+        state.current_bucket_ms != bucket_ms ||
+        timestamp_ms < state.current_bucket_start_ms ||
+        timestamp_ms >= state.current_bucket_end_ms) {
+        sample_bucket = (timestamp_ms - plot_start_ms_) / bucket_ms;
+        if (sample_bucket < 0) sample_bucket = 0;
+    }
+    if (state.current_bucket != sample_bucket ||
+        state.current_bucket_ms != bucket_ms) {
+        flush_plot_bucket(state);
+        state.current_bucket = sample_bucket;
+        state.current_bucket_ms = bucket_ms;
+        state.current_bucket_start_ms =
+            plot_start_ms_ + sample_bucket * bucket_ms;
+        state.current_bucket_end_ms =
+            state.current_bucket_start_ms + bucket_ms;
+    } else if (state.current_bucket_start_ms == 0 ||
+               state.current_bucket_end_ms == 0) {
+        state.current_bucket_start_ms =
+            plot_start_ms_ + sample_bucket * bucket_ms;
+        state.current_bucket_end_ms =
+            state.current_bucket_start_ms + bucket_ms;
+    }
+
+    if (!state.bucket.have) {
+        state.bucket.have = true;
+        state.bucket.start_t = timestamp_ms;
+        state.bucket.end_t = timestamp_ms;
+        state.bucket.min_t = timestamp_ms;
+        state.bucket.max_t = timestamp_ms;
+        state.bucket.start_value = value_milli;
+        state.bucket.end_value = value_milli;
+        state.bucket.min_value = value_milli;
+        state.bucket.max_value = value_milli;
+    } else {
+        state.bucket.end_t = timestamp_ms;
+        state.bucket.end_value = value_milli;
+        if (value_milli < state.bucket.min_value) {
+            state.bucket.min_value = value_milli;
+            state.bucket.min_t = timestamp_ms;
+        }
+        if (value_milli > state.bucket.max_value) {
+            state.bucket.max_value = value_milli;
+            state.bucket.max_t = timestamp_ms;
+        }
+    }
+    return plot_bin_ok_;
+}
+
+bool ReportManager::process_plot_series_sample_value(
+    PlotSeriesBuildState &state,
+    const ReportResultChunk &chunk,
+    const ReportSeriesSample &sample,
+    uint32_t interval_ms) {
+    int range_index = -1;
+    if (state.last_range_index >= 0 &&
+        static_cast<size_t>(state.last_range_index) < plot_range_count_) {
+        const PlotRange &last_range =
+            plot_ranges_[state.last_range_index];
+        if (sample.timestamp_ms >= last_range.start_ms &&
+            sample.timestamp_ms < last_range.end_ms) {
+            range_index = state.last_range_index;
+        }
+    }
+    if (range_index < 0) {
+        range_index = plot_range_index(sample.timestamp_ms);
+    }
+    if (range_index < 0) {
+        return true;
+    }
+    if (state.have_last_sample &&
+        (range_index != state.last_range_index ||
+         sample.timestamp_ms >
+             state.last_sample_ms + plot_gap_threshold_ms(interval_ms))) {
+        if (!append_plot_series_gap(state)) return false;
+    }
+    const int64_t bucket_ms =
+        plot_bucket_ms_for_signal(chunk.signal,
+                                  chunk.source,
+                                  plot_bucket_ms_,
+                                  interval_ms,
+                                  false);
+    int32_t value_milli = sample.value_milli;
+    if ((chunk.signal == ReportSignalId::Flow &&
+         chunk.source == ReportSourceId::RespiratoryFlow6p25Hz) ||
+        (chunk.signal == ReportSignalId::Leak &&
+         chunk.source == ReportSourceId::Leak0p5Hz)) {
+        const int64_t scaled = static_cast<int64_t>(value_milli) * 60LL;
+        value_milli = scaled > INT32_MAX
+                          ? INT32_MAX
+                          : (scaled < INT32_MIN
+                                 ? INT32_MIN
+                                 : static_cast<int32_t>(scaled));
+    }
+    if (!append_plot_series_value(state,
+                                  sample.timestamp_ms,
+                                  value_milli,
+                                  bucket_ms)) {
         return false;
     }
-    const size_t sample_count =
-        payload.size() / report_series_sample_wire_size();
-    for (size_t sample_index = 0; sample_index < sample_count; ++sample_index) {
-        ReportSeriesSample sample;
-        if (!report_read_series_sample(payload.data(),
-                                       payload.size(),
-                                       sample_index,
-                                       sample)) {
-            continue;
+    state.bucket.range_index = range_index;
+    state.have_last_sample = true;
+    state.last_sample_ms = sample.timestamp_ms;
+    state.last_range_index = range_index;
+    return true;
+}
+
+bool ReportManager::append_plot_series_point(PlotSeriesBuildState &state,
+                                             int64_t timestamp_ms,
+                                             int32_t value_milli,
+                                             int64_t bucket_ms) {
+    if (!append_plot_series_value(state,
+                                  timestamp_ms,
+                                  value_milli,
+                                  bucket_ms)) {
+        return false;
+    }
+    state.have_last_sample = true;
+    state.last_sample_ms = timestamp_ms;
+    return plot_bin_ok_;
+}
+
+bool ReportManager::append_plot_series_gap(PlotSeriesBuildState &state) {
+    flush_plot_bucket(state);
+    plot_bin_ok_ &= bin_put_u32(state.points, PLOT_ENVELOPE_GAP_BUCKET);
+    plot_bin_ok_ &= bin_put_i32(state.points, 0);
+    plot_bin_ok_ &= bin_put_i32(state.points, 0);
+    state.have_last_sample = false;
+    state.last_sample_ms = 0;
+    state.last_range_index = -1;
+    state.current_bucket = -1;
+    state.current_bucket_start_ms = 0;
+    state.current_bucket_end_ms = 0;
+    state.current_bucket_ms = 0;
+    state.bucket.clear();
+    return plot_bin_ok_;
+}
+
+bool ReportManager::process_plot_series_chunk(size_t chunk_index) {
+    if (chunk_index >= result_status_.chunk_count ||
+        chunk_index >= AC_REPORT_RESULT_CHUNK_MAX) {
+        fail_result_prepare("plot_bad_chunk");
+        return false;
+    }
+    const ReportResultChunk &chunk = result_chunks_[chunk_index];
+    if (chunk.stream_index >= result_stream_count_ ||
+        chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
+        !open_plot_series_state(chunk.stream_index)) {
+        fail_result_prepare("plot_series_open_failed");
+        return false;
+    }
+    struct PlotSeriesContext {
+        ReportManager *manager = nullptr;
+        const ReportResultChunk *chunk = nullptr;
+        PlotSeriesBuildState *state = nullptr;
+        const ReportProviderSeriesReadStats *read_stats = nullptr;
+        uint32_t interval_ms = 0;
+    };
+    PlotSeriesContext ctx;
+    ctx.manager = this;
+    ctx.chunk = &chunk;
+    ctx.state = &plot_series_states_[chunk.stream_index];
+    ctx.interval_ms =
+        infer_chunk_interval_ms(chunk.record_count, chunk.start_ms, chunk.end_ms);
+    ReportProviderSeriesReadStats read_stats;
+    ctx.read_stats = &read_stats;
+    const bool ok = for_each_result_series_sample(
+        chunk,
+        read_stats,
+        [](void *context, const ReportSeriesSample &sample) -> bool {
+            PlotSeriesContext *ctx =
+                static_cast<PlotSeriesContext *>(context);
+            ReportManager *manager = ctx ? ctx->manager : nullptr;
+            const ReportResultChunk *chunk = ctx ? ctx->chunk : nullptr;
+            PlotSeriesBuildState *state = ctx ? ctx->state : nullptr;
+            if (!manager || !chunk || !state) return false;
+            const uint32_t interval_ms =
+                (ctx->read_stats && ctx->read_stats->interval_ms)
+                    ? ctx->read_stats->interval_ms
+                    : ctx->interval_ms;
+            return manager->process_plot_series_sample_value(*state,
+                                                             *chunk,
+                                                             sample,
+                                                             interval_ms);
+        },
+        &ctx);
+    if (!ok) {
+        fail_result_prepare("plot_series_decode_failed");
+        return false;
+    }
+    (void)read_stats;
+    return true;
+}
+
+bool ReportManager::process_plot_edf_series_batch(size_t seed_chunk_index,
+                                                  bool &processed) {
+    processed = false;
+    if (!result_chunks_ || seed_chunk_index >= result_status_.chunk_count ||
+        seed_chunk_index >= AC_REPORT_RESULT_CHUNK_MAX) {
+        fail_result_prepare("plot_bad_chunk");
+        return false;
+    }
+    const ReportResultChunk &seed = result_chunks_[seed_chunk_index];
+    if (seed.kind != ReportStoreChunkKind::Series ||
+        seed.provider_ref.provider != ReportProviderId::Edf ||
+        plot_chunk_done_[seed_chunk_index]) {
+        return true;
+    }
+
+    const size_t max_chunks = std::min(
+        static_cast<size_t>(result_status_.chunk_count),
+        static_cast<size_t>(AC_REPORT_RESULT_CHUNK_MAX));
+    if (max_chunks == 0) return true;
+    ReportProviderChunk *candidates =
+        static_cast<ReportProviderChunk *>(Memory::calloc_large(
+            max_chunks, sizeof(ReportProviderChunk), false));
+    size_t *chunk_indices = static_cast<size_t *>(Memory::calloc_large(
+        max_chunks, sizeof(size_t), false));
+    bool *selected = static_cast<bool *>(Memory::calloc_large(
+        max_chunks, sizeof(bool), false));
+    ReportProviderSeriesReadStats *stats =
+        static_cast<ReportProviderSeriesReadStats *>(Memory::calloc_large(
+            max_chunks, sizeof(ReportProviderSeriesReadStats), false));
+    EdfReportSeriesPlotConfig *plot_configs =
+        static_cast<EdfReportSeriesPlotConfig *>(Memory::calloc_large(
+            max_chunks, sizeof(EdfReportSeriesPlotConfig), false));
+    if (!candidates || !chunk_indices || !selected || !stats ||
+        !plot_configs) {
+        if (candidates) Memory::free(candidates);
+        if (chunk_indices) Memory::free(chunk_indices);
+        if (selected) Memory::free(selected);
+        if (stats) Memory::free(stats);
+        if (plot_configs) Memory::free(plot_configs);
+        fail_result_prepare("plot_alloc_failed");
+        return false;
+    }
+
+    EdfReportPlotRange fast_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    const size_t fast_range_count =
+        std::min(plot_range_count_,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    for (size_t i = 0; i < fast_range_count; ++i) {
+        fast_ranges[i].start_ms = plot_ranges_[i].start_ms;
+        fast_ranges[i].end_ms = plot_ranges_[i].end_ms;
+    }
+
+    size_t candidate_count = 0;
+    auto add_candidate = [&](size_t index) {
+        const ReportResultChunk &chunk = result_chunks_[index];
+        if (plot_chunk_done_[index] ||
+            chunk.kind != ReportStoreChunkKind::Series ||
+            chunk.provider_ref.provider != ReportProviderId::Edf ||
+            chunk.stream_index >= result_stream_count_ ||
+            chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX) {
+            return;
         }
-        if (!plot_time_in_ranges(sample.timestamp_ms)) continue;
-        int64_t sample_bucket =
-            (sample.timestamp_ms - plot_start_ms_) / plot_bucket_ms_;
-        if (sample_bucket < 0) sample_bucket = 0;
-        if (sample_bucket >= static_cast<int64_t>(AC_REPORT_PLOT_BUCKETS)) {
-            sample_bucket = static_cast<int64_t>(AC_REPORT_PLOT_BUCKETS) - 1;
+        provider_chunk_from_result(chunk, candidates[candidate_count]);
+        const uint32_t interval_ms = infer_chunk_interval_ms(
+            chunk.record_count, chunk.start_ms, chunk.end_ms);
+        plot_configs[candidate_count].ranges = fast_ranges;
+        plot_configs[candidate_count].range_count = fast_range_count;
+        plot_configs[candidate_count].plot_start_ms = plot_start_ms_;
+        plot_configs[candidate_count].bucket_ms =
+            static_cast<uint32_t>(std::min<int64_t>(
+                UINT32_MAX,
+                plot_bucket_ms_for_signal(chunk.signal,
+                                          chunk.source,
+                                          plot_bucket_ms_,
+                                          interval_ms,
+                                          false)));
+        plot_configs[candidate_count].gap_threshold_ms =
+            static_cast<uint32_t>(std::min<int64_t>(
+                UINT32_MAX, plot_gap_threshold_ms(interval_ms)));
+        plot_configs[candidate_count].value_multiplier =
+            plot_value_multiplier(chunk.signal, chunk.source);
+        chunk_indices[candidate_count] = index;
+        ++candidate_count;
+    };
+    add_candidate(seed_chunk_index);
+    for (size_t i = 0; i < max_chunks; ++i) {
+        if (i == seed_chunk_index) continue;
+        add_candidate(i);
+    }
+    if (candidate_count == 0) {
+        Memory::free(plot_configs);
+        Memory::free(stats);
+        Memory::free(selected);
+        Memory::free(chunk_indices);
+        Memory::free(candidates);
+        return true;
+    }
+
+    struct EdfBatchContext {
+        ReportManager *manager = nullptr;
+        const size_t *chunk_indices = nullptr;
+        const EdfReportSeriesPlotConfig *plot_configs = nullptr;
+        size_t chunk_count = 0;
+        uint32_t points = 0;
+    };
+    EdfBatchContext ctx;
+    ctx.manager = this;
+    ctx.chunk_indices = chunk_indices;
+    ctx.plot_configs = plot_configs;
+    ctx.chunk_count = candidate_count;
+    bool ok = false;
+    if (!edf_report_signal_uses_edge_zero_padding(seed.signal)) {
+        ok = edf_report_provider().for_each_compatible_series_plot_batch(
+            candidates,
+            candidate_count,
+            plot_configs,
+            selected,
+            result_edf_sessions_,
+            result_edf_session_count_,
+            stats,
+            [](void *context,
+               size_t candidate_index,
+               const EdfReportSeriesPlotPoint &point) -> bool {
+                EdfBatchContext *ctx =
+                    static_cast<EdfBatchContext *>(context);
+                ReportManager *manager = ctx ? ctx->manager : nullptr;
+                if (!manager || !ctx->chunk_indices || !ctx->plot_configs ||
+                    candidate_index >= ctx->chunk_count) {
+                    return false;
+                }
+                const size_t chunk_index =
+                    ctx->chunk_indices[candidate_index];
+                if (chunk_index >= manager->result_status_.chunk_count ||
+                    chunk_index >= AC_REPORT_RESULT_CHUNK_MAX) {
+                    return false;
+                }
+                const ReportResultChunk &chunk =
+                    manager->result_chunks_[chunk_index];
+                if (chunk.stream_index >= manager->result_stream_count_ ||
+                    chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
+                    !manager->open_plot_series_state(chunk.stream_index)) {
+                    return false;
+                }
+                PlotSeriesBuildState &state =
+                    manager->plot_series_states_[chunk.stream_index];
+                if (point.gap) {
+                    ctx->points++;
+                    return manager->append_plot_series_gap(state);
+                }
+                const EdfReportSeriesPlotConfig &config =
+                    ctx->plot_configs[candidate_index];
+                const int64_t decimated_gap_threshold_ms =
+                    std::max<int64_t>(
+                        static_cast<int64_t>(config.gap_threshold_ms),
+                        static_cast<int64_t>(config.bucket_ms) * 2LL);
+                if (state.have_last_sample &&
+                    point.timestamp_ms >
+                        state.last_sample_ms + decimated_gap_threshold_ms) {
+                    if (!manager->append_plot_series_gap(state)) return false;
+                }
+                ctx->points++;
+                return manager->append_plot_series_point(state,
+                                                         point.timestamp_ms,
+                                                         point.value_milli,
+                                                         config.bucket_ms);
+            },
+            &ctx);
+    }
+
+    if (ok) {
+        for (size_t i = 0; i < candidate_count; ++i) {
+            if (!selected[i]) continue;
+            const size_t chunk_index = chunk_indices[i];
+            plot_chunk_done_[chunk_index] = true;
+            plot_build_input_chunks_++;
+            plot_build_input_bytes_ += result_chunks_[chunk_index].payload_len;
+            processed = true;
         }
-        if (plot_current_bucket_ != sample_bucket) {
-            flush_plot_bucket();
-            plot_current_bucket_ = sample_bucket;
-        }
-        int32_t value_milli = sample.value_milli;
-        if ((chunk.signal == ReportSignalId::Flow &&
-             chunk.source == ReportSourceId::RespiratoryFlow6p25Hz) ||
-            (chunk.signal == ReportSignalId::Leak &&
-             chunk.source == ReportSourceId::Leak0p5Hz)) {
-            const int64_t scaled =
-                static_cast<int64_t>(value_milli) * 60LL;
-            value_milli = scaled > INT32_MAX
-                              ? INT32_MAX
-                              : (scaled < INT32_MIN
-                                     ? INT32_MIN
-                                     : static_cast<int32_t>(scaled));
-        }
-        if (!plot_bucket_.have) {
-            plot_bucket_.have = true;
-            plot_bucket_.range_index =
-                plot_range_index(sample.timestamp_ms);
-            plot_bucket_.start_t = sample.timestamp_ms;
-            plot_bucket_.end_t = sample.timestamp_ms;
-            plot_bucket_.min_t = sample.timestamp_ms;
-            plot_bucket_.max_t = sample.timestamp_ms;
-            plot_bucket_.start_value = value_milli;
-            plot_bucket_.end_value = value_milli;
-            plot_bucket_.min_value = value_milli;
-            plot_bucket_.max_value = value_milli;
-        } else {
-            plot_bucket_.end_t = sample.timestamp_ms;
-            plot_bucket_.end_value = value_milli;
-            if (value_milli < plot_bucket_.min_value) {
-                plot_bucket_.min_value = value_milli;
-                plot_bucket_.min_t = sample.timestamp_ms;
-            }
-            if (value_milli > plot_bucket_.max_value) {
-                plot_bucket_.max_value = value_milli;
-                plot_bucket_.max_t = sample.timestamp_ms;
+    } else if (ctx.points == 0 && plot_bin_ok_) {
+        ok = edf_report_provider().for_each_compatible_series_sample_batch(
+            candidates,
+            candidate_count,
+            selected,
+            result_edf_sessions_,
+            result_edf_session_count_,
+            stats,
+            [](void *context,
+               size_t candidate_index,
+               const ReportSeriesSample &sample) -> bool {
+                EdfBatchContext *ctx = static_cast<EdfBatchContext *>(context);
+                ReportManager *manager = ctx ? ctx->manager : nullptr;
+                if (!manager || !ctx->chunk_indices ||
+                    candidate_index >= ctx->chunk_count) {
+                    return false;
+                }
+                const size_t chunk_index = ctx->chunk_indices[candidate_index];
+                if (chunk_index >= manager->result_status_.chunk_count ||
+                    chunk_index >= AC_REPORT_RESULT_CHUNK_MAX) {
+                    return false;
+                }
+                const ReportResultChunk &chunk =
+                    manager->result_chunks_[chunk_index];
+                if (chunk.stream_index >= manager->result_stream_count_ ||
+                    chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX ||
+                    !manager->open_plot_series_state(chunk.stream_index)) {
+                    return false;
+                }
+                const uint32_t interval_ms = infer_chunk_interval_ms(
+                    chunk.record_count, chunk.start_ms, chunk.end_ms);
+                return manager->process_plot_series_sample_value(
+                    manager->plot_series_states_[chunk.stream_index],
+                    chunk,
+                    sample,
+                    interval_ms);
+            },
+            &ctx);
+
+        if (ok) {
+            for (size_t i = 0; i < candidate_count; ++i) {
+                if (!selected[i]) continue;
+                const size_t chunk_index = chunk_indices[i];
+                plot_chunk_done_[chunk_index] = true;
+                plot_build_input_chunks_++;
+                plot_build_input_bytes_ +=
+                    result_chunks_[chunk_index].payload_len;
+                processed = true;
             }
         }
     }
+
+    Memory::free(plot_configs);
+    Memory::free(stats);
+    Memory::free(selected);
+    Memory::free(chunk_indices);
+    Memory::free(candidates);
+    if (!ok || !processed || !plot_bin_ok_) {
+        fail_result_prepare(ok && processed ? "plot_overflow"
+                                            : "plot_series_decode_failed");
+        return false;
+    }
+    return true;
+}
+
+bool ReportManager::finish_plot_series(size_t stream_index) {
+    if (stream_index >= result_stream_count_ ||
+        stream_index >= AC_REPORT_RESULT_STREAM_MAX) {
+        return true;
+    }
+    const ReportResultStream &stream = result_streams_[stream_index];
+    PlotSeriesBuildState &state = plot_series_states_[stream_index];
+    if (stream.kind != ReportStoreChunkKind::Series || !state.open) {
+        state.reset();
+        return true;
+    }
+    flush_plot_bucket(state);
+    if (state.points.size()) {
+        const int64_t bucket_ms =
+            state.series_bucket_ms > 0 ? state.series_bucket_ms
+                                       : plot_bucket_ms_;
+        if (!append_plot_series_envelope_runs(plot_build_bin_,
+                                              stream.name,
+                                              state.points,
+                                              bucket_ms,
+                                              plot_bin_ok_)) {
+            fail_result_prepare("plot_overflow");
+            return false;
+        }
+    }
+    state.reset();
     return true;
 }
 
@@ -3998,18 +6523,31 @@ bool ReportManager::finish_result_plot_build() {
         fail_result_prepare("plot_publish_failed");
         return false;
     }
-    save_result_plot_cache();
-    reset_plot_build();
     result_status_.state = settled_result_state(result_status_.missing_required);
     result_status_.error.clear();
-    publish_result_to_slot();
+    if (!publish_result_to_slot(true)) {
+        reset_plot_build();
+        release_result_edf_sessions();
+        return false;
+    }
+    const uint32_t elapsed_ms =
+        plot_build_started_ms_ ? static_cast<uint32_t>(millis() -
+                                                       plot_build_started_ms_)
+                               : 0;
+    const uint32_t input_chunks = plot_build_input_chunks_;
+    const uint32_t input_bytes = plot_build_input_bytes_;
+    reset_plot_build();
     release_result_edf_sessions();
     Log::logf(CAT_REPORT,
               LOG_INFO,
-              "Result plot ready index=%lu chunks=%lu bytes=%lu\n",
+              "Result plot ready index=%lu chunks=%lu input_chunks=%lu "
+              "input_bytes=%lu bytes=%lu elapsed_ms=%lu\n",
               static_cast<unsigned long>(result_status_.therapy_index),
               static_cast<unsigned long>(result_status_.chunk_count),
-              static_cast<unsigned long>(result_plot_bin_.size()));
+              static_cast<unsigned long>(input_chunks),
+              static_cast<unsigned long>(input_bytes),
+              static_cast<unsigned long>(result_plot_bin_.size()),
+              static_cast<unsigned long>(elapsed_ms));
     return true;
 }
 
@@ -4019,6 +6557,14 @@ void ReportManager::reset_range_plot_build(bool clear_ready) {
     range_build_index_ = 0;
     range_build_from_ = 0;
     range_build_to_ = 0;
+    range_night_start_ms_ = 0;
+    range_chunk_count_ = 0;
+    range_stream_count_ = 0;
+    range_edf_session_count_ = 0;
+    range_range_count_ = 0;
+    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+        range_ranges_[i] = PlotRange{};
+    }
     range_build_bytes_.reset();
     range_tmp_.clear();
     range_seen_events_.clear();
@@ -4027,34 +6573,215 @@ void ReportManager::reset_range_plot_build(bool clear_ready) {
     range_stream_index_ = 0;
     range_series_open_ = false;
     range_series_points_ = 0;
+    range_have_last_sample_ = false;
+    range_last_sample_ms_ = 0;
+    range_last_range_index_ = -1;
     range_bucket_ms_ = 1;
     range_current_bucket_ = -1;
     range_bucket_.clear();
     range_build_ok_ = true;
+    range_build_started_ms_ = 0;
+    range_build_input_chunks_ = 0;
+    range_build_input_bytes_ = 0;
 
     if (!clear_ready) return;
     if (result_slots_lock_) {
         xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
         range_req_active_ = false;
+        range_req_night_start_ms_ = 0;
         range_plot_bytes_.reset();
         range_plot_index_ = 0;
+        range_plot_night_start_ms_ = 0;
         range_plot_from_ = 0;
         range_plot_to_ = 0;
         xSemaphoreGive(result_slots_lock_);
     } else {
         range_req_active_ = false;
+        range_req_night_start_ms_ = 0;
         range_plot_bytes_.reset();
         range_plot_index_ = 0;
+        range_plot_night_start_ms_ = 0;
         range_plot_from_ = 0;
         range_plot_to_ = 0;
     }
 }
 
-bool ReportManager::start_range_plot_build(size_t therapy_index,
+bool ReportManager::ensure_range_build_buffers() {
+    if (!range_indexed_night_) {
+        range_indexed_night_ = static_cast<ReportIndexedNight *>(
+            Memory::calloc_large(1, sizeof(ReportIndexedNight), false));
+        if (!range_indexed_night_) {
+            log_report_alloc_failed("range_indexed_night",
+                                    sizeof(ReportIndexedNight));
+            return false;
+        }
+    }
+    if (!range_chunks_) {
+        range_chunks_ = static_cast<ReportResultChunk *>(
+            Memory::calloc_large(AC_REPORT_RESULT_CHUNK_MAX,
+                                 sizeof(ReportResultChunk),
+                                 false));
+        if (!range_chunks_) {
+            log_report_alloc_failed(
+                "range_chunks",
+                AC_REPORT_RESULT_CHUNK_MAX * sizeof(ReportResultChunk));
+            return false;
+        }
+    }
+    if (!range_edf_sessions_) {
+        range_edf_sessions_ = static_cast<EdfReportSessionDescriptor *>(
+            Memory::calloc_large(AC_REPORT_SUMMARY_SESSION_MAX,
+                                 sizeof(EdfReportSessionDescriptor),
+                                 false));
+        if (!range_edf_sessions_) {
+            log_report_alloc_failed(
+                "range_edf_sessions",
+                AC_REPORT_SUMMARY_SESSION_MAX *
+                    sizeof(EdfReportSessionDescriptor));
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ReportManager::read_range_chunk_payload(
+    const ReportResultChunk &chunk,
+    ReportStoreChunkMeta &meta,
+    ReportSpoolBuffer &payload) {
+    ReportProviderChunk provider_chunk;
+    provider_chunk.ref = chunk.provider_ref;
+    provider_chunk.kind = chunk.kind;
+    provider_chunk.source = chunk.source;
+    provider_chunk.signal = chunk.signal;
+    provider_chunk.name = chunk.name;
+    provider_chunk.start_ms = chunk.start_ms;
+    provider_chunk.end_ms = chunk.end_ms;
+    provider_chunk.payload_schema = chunk.payload_schema;
+    provider_chunk.record_count = chunk.record_count;
+    provider_chunk.payload_len = chunk.payload_len;
+
+    switch (chunk.provider_ref.provider) {
+        case ReportProviderId::Spool:
+            return spool_report_provider().read_chunk(
+                provider_chunk,
+                static_cast<int64_t>(range_night_start_ms_),
+                meta,
+                payload);
+        case ReportProviderId::Edf:
+            return edf_report_provider().read_chunk(provider_chunk,
+                                                   range_edf_sessions_,
+                                                   range_edf_session_count_,
+                                                   meta,
+                                                   payload);
+        default:
+            return false;
+    }
+}
+
+bool ReportManager::for_each_range_series_sample(
+    const ReportResultChunk &chunk,
+    ReportProviderSeriesReadStats &stats,
+    ReportSeriesSampleCallback callback,
+    void *context) {
+    stats = {};
+    if (!callback || chunk.kind != ReportStoreChunkKind::Series) {
+        return false;
+    }
+    ReportProviderChunk provider_chunk;
+    provider_chunk.ref = chunk.provider_ref;
+    provider_chunk.kind = chunk.kind;
+    provider_chunk.source = chunk.source;
+    provider_chunk.signal = chunk.signal;
+    provider_chunk.name = chunk.name;
+    provider_chunk.start_ms = chunk.start_ms;
+    provider_chunk.end_ms = chunk.end_ms;
+    provider_chunk.payload_schema = chunk.payload_schema;
+    provider_chunk.record_count = chunk.record_count;
+    provider_chunk.payload_len = chunk.payload_len;
+
+    switch (chunk.provider_ref.provider) {
+        case ReportProviderId::Spool:
+            return spool_report_provider().for_each_series_sample(
+                provider_chunk,
+                static_cast<int64_t>(range_night_start_ms_),
+                stats,
+                callback,
+                context);
+        case ReportProviderId::Edf:
+            return edf_report_provider().for_each_series_sample(
+                provider_chunk,
+                range_edf_sessions_,
+                range_edf_session_count_,
+                stats,
+                callback,
+                context);
+        default:
+            return false;
+    }
+}
+
+bool ReportManager::start_range_plot_build(uint64_t night_start_ms,
+                                           size_t therapy_index_hint,
                                            int64_t from_ms,
-                                           int64_t to_ms) {
+                                           int64_t to_ms,
+                                           bool &waiting_for_result) {
+    waiting_for_result = false;
     reset_range_plot_build(false);
     if (to_ms <= from_ms) return false;
+    if (!ensure_range_build_buffers()) return false;
+
+    size_t therapy_index = therapy_index_hint;
+    memset(range_indexed_night_, 0, sizeof(*range_indexed_night_));
+    if (!indexed_night_by_start(night_start_ms,
+                                *range_indexed_night_,
+                                &therapy_index)) {
+        return false;
+    }
+    ReportIndexedNight &indexed_night = *range_indexed_night_;
+
+    range_edf_session_count_ = 0;
+    bool edf_pending = false;
+    memset(range_edf_sessions_,
+           0,
+           AC_REPORT_SUMMARY_SESSION_MAX *
+               sizeof(EdfReportSessionDescriptor));
+    bool have_edf =
+        collect_edf_sessions_for_night(indexed_night.summary,
+                                       from_ms,
+                                       to_ms,
+                                       range_edf_sessions_,
+                                       AC_REPORT_SUMMARY_SESSION_MAX,
+                                       range_edf_session_count_,
+                                       &edf_pending);
+    if (edf_pending) {
+        range_edf_session_count_ = 0;
+        waiting_for_result = true;
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Range plot waiting for EDF catalog "
+                  "night=%llu from=%lld to=%lld\n",
+                  static_cast<unsigned long long>(night_start_ms),
+                  static_cast<long long>(from_ms),
+                  static_cast<long long>(to_ms));
+        return false;
+    }
+    ScopedReportResolveContext resolve("range_resolver", false);
+    if (!resolve) return false;
+
+    EdfReportDataProvider edf_provider(have_edf ? range_edf_sessions_
+                                                : nullptr,
+                                       have_edf ? range_edf_session_count_
+                                                : 0);
+    ReportSourceResolver resolver(edf_provider,
+                                  spool_report_provider(),
+                                  resolve.scratch());
+    ReportResolvedPlan &plan = resolve.plan();
+    if (!resolver.build_plan(indexed_night, from_ms, to_ms, plan)) {
+        return false;
+    }
+    if (!materialize_range_plan(indexed_night, plan)) {
+        return false;
+    }
 
     range_build_index_ = therapy_index;
     range_build_from_ = from_ms;
@@ -4087,6 +6814,9 @@ bool ReportManager::start_range_plot_build(size_t therapy_index,
     }
 
     range_build_active_ = true;
+    range_build_started_ms_ = millis();
+    range_build_input_chunks_ = 0;
+    range_build_input_bytes_ = 0;
     range_build_phase_ = ReportPlotBuildPhase::Events;
     return true;
 }
@@ -4095,7 +6825,7 @@ bool ReportManager::process_range_event_chunk(
     const ReportResultChunk &chunk) {
     ReportStoreChunkMeta meta;
     ReportSpoolBuffer payload;
-    if (!read_result_chunk_payload(chunk, meta, payload)) {
+    if (!read_range_chunk_payload(chunk, meta, payload)) {
         fail_range_plot_build("range_event_read_failed");
         return false;
     }
@@ -4122,6 +6852,21 @@ bool ReportManager::process_range_event_chunk(
         if (!in_range) {
             continue;
         }
+        bool in_session_range = false;
+        for (size_t i = 0; i < range_range_count_; ++i) {
+            if (duration_ms > 0) {
+                if (event.start_ms < range_ranges_[i].end_ms &&
+                    event_end_ms > range_ranges_[i].start_ms) {
+                    in_session_range = true;
+                    break;
+                }
+            } else if (event.start_ms >= range_ranges_[i].start_ms &&
+                       event.start_ms < range_ranges_[i].end_ms) {
+                in_session_range = true;
+                break;
+            }
+        }
+        if (!in_session_range) continue;
         if (report_event_seen(range_seen_events_, event)) continue;
         if (!remember_report_event(range_seen_events_, event)) {
             fail_range_plot_build("range_event_dedupe_failed");
@@ -4147,99 +6892,338 @@ bool ReportManager::process_range_event_chunk(
 }
 
 bool ReportManager::open_range_series(const ReportResultStream &stream) {
-    if (!range_build_bytes_) return false;
     const size_t name_len = stream.name ? strlen(stream.name) : 0;
-    range_build_ok_ &=
-        bin_put_u16(*range_build_bytes_, static_cast<uint16_t>(name_len));
-    if (name_len) {
-        range_build_ok_ &= range_build_bytes_->append(
-            reinterpret_cast<const uint8_t *>(stream.name), name_len);
-    }
+    if (!range_build_bytes_ || name_len > UINT16_MAX) return false;
     range_tmp_.clear();
     range_series_points_ = 0;
     range_current_bucket_ = -1;
+    range_have_last_sample_ = false;
+    range_last_sample_ms_ = 0;
+    range_last_range_index_ = -1;
     range_bucket_.clear();
     range_series_open_ = true;
     return range_build_ok_;
 }
 
-bool ReportManager::process_range_series_chunk(
-    const ReportResultChunk &chunk) {
-    ReportStoreChunkMeta meta;
-    ReportSpoolBuffer payload;
-    if (!read_result_chunk_payload(chunk, meta, payload)) {
-        fail_range_plot_build("range_series_read_failed");
+int ReportManager::range_plot_range_index(int64_t timestamp_ms) const {
+    for (size_t i = 0; i < range_range_count_; ++i) {
+        if (timestamp_ms >= range_ranges_[i].start_ms &&
+            timestamp_ms < range_ranges_[i].end_ms) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool ReportManager::result_chunk_matches_stream(
+    const ReportResultChunk &chunk,
+    const ReportResultStream &stream) const {
+    return chunk.kind == stream.kind &&
+           chunk.signal == stream.signal &&
+           chunk.name && stream.name &&
+           strcmp(chunk.name, stream.name) == 0;
+}
+
+bool ReportManager::collect_range_chunk(void *context,
+                                        const ReportProviderChunk &info) {
+    RangeChunkContext *ctx = static_cast<RangeChunkContext *>(context);
+    if (!ctx || !ctx->manager || !info.name || !info.name[0]) return false;
+    if (ctx->name && ctx->name[0] && strcmp(ctx->name, info.name) != 0) {
+        return true;
+    }
+    return ctx->manager->add_range_provider_chunk(info, ctx->stream_index);
+}
+
+bool ReportManager::add_range_provider_chunk(
+    const ReportProviderChunk &provider_chunk,
+    size_t stream_index) {
+    if (!range_chunks_ ||
+        range_chunk_count_ >= AC_REPORT_RESULT_CHUNK_MAX) {
+        fail_range_plot_build("range_chunks_full");
         return false;
     }
-    const size_t wire = report_series_sample_wire_size();
-    const size_t count = wire ? payload.size() / wire : 0;
+    if (stream_index >= range_stream_count_ || stream_index > UINT8_MAX) {
+        fail_range_plot_build("range_bad_stream");
+        return false;
+    }
+
+    ReportResultStream &stream = range_streams_[stream_index];
+    if (stream.kind != provider_chunk.kind ||
+        stream.signal != provider_chunk.signal ||
+        !stream.name ||
+        strcmp(stream.name, provider_chunk.name) != 0) {
+        fail_range_plot_build("range_stream_mismatch");
+        return false;
+    }
+    for (size_t i = 0; i < range_chunk_count_; ++i) {
+        const ReportResultChunk &existing = range_chunks_[i];
+        if (existing.kind == provider_chunk.kind &&
+            existing.source == provider_chunk.source &&
+            existing.name && provider_chunk.name &&
+            strcmp(existing.name, provider_chunk.name) == 0 &&
+            existing.start_ms == provider_chunk.start_ms &&
+            existing.end_ms == provider_chunk.end_ms &&
+            report_provider_chunk_ref_equal(existing.provider_ref,
+                                            provider_chunk.ref)) {
+            return true;
+        }
+    }
+
+    ReportResultChunk &chunk = range_chunks_[range_chunk_count_++];
+    chunk.provider_ref = provider_chunk.ref;
+    chunk.kind = provider_chunk.kind;
+    chunk.source = provider_chunk.source;
+    chunk.signal = provider_chunk.signal;
+    chunk.name = provider_chunk.name;
+    chunk.stream_index = static_cast<uint8_t>(stream_index);
+    chunk.start_ms = provider_chunk.start_ms;
+    chunk.end_ms = provider_chunk.end_ms;
+    chunk.payload_schema = provider_chunk.payload_schema;
+    chunk.record_count = provider_chunk.record_count;
+    chunk.payload_len = provider_chunk.payload_len;
+
+    stream.chunk_count++;
+    stream.record_count += provider_chunk.record_count;
+    stream.payload_bytes += provider_chunk.payload_len;
+    stream.has_edf_segment =
+        stream.has_edf_segment ||
+        provider_chunk.ref.provider == ReportProviderId::Edf;
+    stream.has_spool_segment =
+        stream.has_spool_segment ||
+        provider_chunk.ref.provider == ReportProviderId::Spool;
+    return true;
+}
+
+bool ReportManager::materialize_range_plan(const ReportIndexedNight &night,
+                                           const ReportResolvedPlan &plan) {
+    range_night_start_ms_ = night.summary.start_ms;
+    range_chunk_count_ = 0;
+    for (size_t i = 0; i < AC_REPORT_RESULT_CHUNK_MAX; ++i) {
+        range_chunks_[i] = ReportResultChunk{};
+    }
+    range_stream_count_ =
+        std::min(plan.stream_count,
+                 static_cast<size_t>(AC_REPORT_RESULT_STREAM_MAX));
+    for (size_t i = 0; i < AC_REPORT_RESULT_STREAM_MAX; ++i) {
+        range_streams_[i] = ReportResultStream{};
+    }
+    for (size_t i = 0; i < range_stream_count_; ++i) {
+        const ReportResolvedStream &resolved = plan.streams[i];
+        ReportResultStream &stream = range_streams_[i];
+        stream.kind = resolved.kind;
+        stream.source = resolved.selected_source;
+        stream.signal = resolved.signal;
+        stream.name = resolved.name;
+        stream.required = resolved.required;
+        stream.complete = resolved.complete;
+        stream.has_edf_segment = resolved.has_edf_segment;
+        stream.has_spool_segment = resolved.has_spool_segment;
+    }
+    range_range_count_ =
+        std::min(plan.range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+        if (i < range_range_count_) {
+            range_ranges_[i].start_ms = plan.ranges[i].start_ms;
+            range_ranges_[i].end_ms = plan.ranges[i].end_ms;
+        } else {
+            range_ranges_[i] = PlotRange{};
+        }
+    }
+
+    EdfReportDataProvider edf_provider(range_edf_sessions_,
+                                       range_edf_session_count_);
+    for (size_t i = 0; i < plan.segment_count; ++i) {
+        const ReportResolvedSegment &segment = plan.segments[i];
+        if (segment.stream_index >= range_stream_count_) {
+            fail_range_plot_build("range_bad_segment");
+            return false;
+        }
+        if (!segment.complete ||
+            segment.provider == ReportResolvedProvider::None) {
+            continue;
+        }
+        const ReportSourceDef *source_def = report_source_def(segment.source);
+        if (!source_def || !source_def->spool_type ||
+            !source_def->spool_type[0]) {
+            fail_range_plot_build("range_bad_source");
+            return false;
+        }
+        const ReportDataProvider *provider = nullptr;
+        if (segment.provider == ReportResolvedProvider::Edf) {
+            provider = &edf_provider;
+        } else if (segment.provider == ReportResolvedProvider::Spool) {
+            provider = &spool_report_provider();
+        }
+        if (!provider) {
+            fail_range_plot_build("range_bad_provider");
+            return false;
+        }
+        RangeChunkContext context;
+        context.manager = this;
+        context.stream_index = segment.stream_index;
+        context.name = segment.name;
+        if (!provider->for_each_chunk(segment.kind,
+                                      *source_def,
+                                      segment.signal,
+                                      segment.name,
+                                      static_cast<int64_t>(
+                                          night.summary.start_ms),
+                                      segment.start_ms,
+                                      segment.end_ms,
+                                      collect_range_chunk,
+                                      &context)) {
+            fail_range_plot_build("range_chunk_list_failed");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ReportManager::process_range_series_sample_value(
+    const ReportSeriesSample &sample,
+    ReportSignalId signal,
+    ReportSourceId source,
+    uint32_t interval_ms,
+    int32_t scale,
+    bool &capped,
+    bool &overflow) {
+    if (sample.timestamp_ms < range_build_from_ ||
+        sample.timestamp_ms >= range_build_to_) {
+        return true;
+    }
+    const int sample_range_index = range_plot_range_index(sample.timestamp_ms);
+    if (sample_range_index < 0) return true;
+    if (range_have_last_sample_ &&
+        (sample_range_index != range_last_range_index_ ||
+         sample.timestamp_ms >
+             range_last_sample_ms_ + plot_gap_threshold_ms(interval_ms))) {
+        range_series_points_ += emit_plot_gap_to(range_tmp_,
+                                                 range_bucket_,
+                                                 range_build_from_,
+                                                 range_build_ok_);
+        range_current_bucket_ = -1;
+        if (!range_build_ok_) {
+            overflow = true;
+            return false;
+        }
+        if (range_series_points_ >= AC_REPORT_RANGE_MAX_POINTS) {
+            range_chunk_index_ = static_cast<uint32_t>(range_chunk_count_);
+            capped = true;
+            return false;
+        }
+    }
+    const int64_t bucket_ms =
+        plot_bucket_ms_for_signal(signal,
+                                  source,
+                                  range_bucket_ms_,
+                                  interval_ms,
+                                  true);
+    int64_t sample_bucket =
+        (sample.timestamp_ms - range_build_from_) / bucket_ms;
+    if (sample_bucket < 0) sample_bucket = 0;
+    if (range_current_bucket_ != sample_bucket) {
+        range_series_points_ += flush_plot_bucket_to(range_tmp_,
+                                                     range_bucket_,
+                                                     range_build_from_,
+                                                     range_build_ok_);
+        if (!range_build_ok_) {
+            overflow = true;
+            return false;
+        }
+        range_current_bucket_ = sample_bucket;
+        if (range_series_points_ >= AC_REPORT_RANGE_MAX_POINTS) {
+            range_chunk_index_ = static_cast<uint32_t>(range_chunk_count_);
+            capped = true;
+            return false;
+        }
+    }
+    int64_t value = static_cast<int64_t>(sample.value_milli) * scale;
+    if (value > INT32_MAX) value = INT32_MAX;
+    else if (value < INT32_MIN) value = INT32_MIN;
+    const int32_t value_i32 = static_cast<int32_t>(value);
+    if (!range_bucket_.have) {
+        range_bucket_.have = true;
+        range_bucket_.start_t = sample.timestamp_ms;
+        range_bucket_.end_t = sample.timestamp_ms;
+        range_bucket_.min_t = sample.timestamp_ms;
+        range_bucket_.max_t = sample.timestamp_ms;
+        range_bucket_.start_value = value_i32;
+        range_bucket_.end_value = value_i32;
+        range_bucket_.min_value = value_i32;
+        range_bucket_.max_value = value_i32;
+    } else {
+        range_bucket_.end_t = sample.timestamp_ms;
+        range_bucket_.end_value = value_i32;
+        if (value_i32 < range_bucket_.min_value) {
+            range_bucket_.min_value = value_i32;
+            range_bucket_.min_t = sample.timestamp_ms;
+        }
+        if (value_i32 > range_bucket_.max_value) {
+            range_bucket_.max_value = value_i32;
+            range_bucket_.max_t = sample.timestamp_ms;
+        }
+    }
+    range_have_last_sample_ = true;
+    range_last_sample_ms_ = sample.timestamp_ms;
+    range_last_range_index_ = sample_range_index;
+    return true;
+}
+
+bool ReportManager::process_range_series_chunk(
+    const ReportResultChunk &chunk) {
     const int32_t scale =
         (chunk.source == ReportSourceId::RespiratoryFlow6p25Hz ||
          chunk.source == ReportSourceId::Leak0p5Hz)
             ? 60
             : 1;
-    for (size_t index = 0; index < count; ++index) {
-        ReportSeriesSample sample;
-        if (!report_read_series_sample(payload.data(),
-                                       payload.size(),
-                                       index,
-                                       sample)) {
-            continue;
-        }
-        if (sample.timestamp_ms < range_build_from_ ||
-            sample.timestamp_ms >= range_build_to_) {
-            continue;
-        }
-        int64_t sample_bucket =
-            (sample.timestamp_ms - range_build_from_) / range_bucket_ms_;
-        if (sample_bucket < 0) sample_bucket = 0;
-        if (sample_bucket >=
-            static_cast<int64_t>(AC_REPORT_RANGE_PLOT_BUCKETS)) {
-            sample_bucket =
-                static_cast<int64_t>(AC_REPORT_RANGE_PLOT_BUCKETS) - 1;
-        }
-        if (range_current_bucket_ != sample_bucket) {
-            range_series_points_ += flush_plot_bucket_to(range_tmp_,
-                                                         range_bucket_,
-                                                         range_build_from_,
-                                                         range_build_ok_);
-            if (!range_build_ok_) {
-                fail_range_plot_build("range_overflow");
-                return false;
-            }
-            range_current_bucket_ = sample_bucket;
-            if (range_series_points_ >= AC_REPORT_RANGE_MAX_POINTS) {
-                range_chunk_index_ = result_status_.chunk_count;
-                return true;
-            }
-        }
-        int64_t value = static_cast<int64_t>(sample.value_milli) * scale;
-        if (value > INT32_MAX) value = INT32_MAX;
-        else if (value < INT32_MIN) value = INT32_MIN;
-        const int32_t value_i32 = static_cast<int32_t>(value);
-        if (!range_bucket_.have) {
-            range_bucket_.have = true;
-            range_bucket_.start_t = sample.timestamp_ms;
-            range_bucket_.end_t = sample.timestamp_ms;
-            range_bucket_.min_t = sample.timestamp_ms;
-            range_bucket_.max_t = sample.timestamp_ms;
-            range_bucket_.start_value = value_i32;
-            range_bucket_.end_value = value_i32;
-            range_bucket_.min_value = value_i32;
-            range_bucket_.max_value = value_i32;
-        } else {
-            range_bucket_.end_t = sample.timestamp_ms;
-            range_bucket_.end_value = value_i32;
-            if (value_i32 < range_bucket_.min_value) {
-                range_bucket_.min_value = value_i32;
-                range_bucket_.min_t = sample.timestamp_ms;
-            }
-            if (value_i32 > range_bucket_.max_value) {
-                range_bucket_.max_value = value_i32;
-                range_bucket_.max_t = sample.timestamp_ms;
-            }
-        }
+
+    struct RangeSeriesContext {
+        ReportManager *manager = nullptr;
+        const ReportProviderSeriesReadStats *read_stats = nullptr;
+        ReportSignalId signal = ReportSignalId::Flow;
+        ReportSourceId source = ReportSourceId::Summary;
+        uint32_t interval_ms = 0;
+        int32_t scale = 1;
+        bool capped = false;
+        bool overflow = false;
+    };
+    RangeSeriesContext ctx;
+    ctx.manager = this;
+    ctx.signal = chunk.signal;
+    ctx.source = chunk.source;
+    ctx.scale = scale;
+    ctx.interval_ms =
+        infer_chunk_interval_ms(chunk.record_count, chunk.start_ms, chunk.end_ms);
+    ReportProviderSeriesReadStats read_stats;
+    ctx.read_stats = &read_stats;
+    const bool ok = for_each_range_series_sample(
+        chunk,
+        read_stats,
+        [](void *context, const ReportSeriesSample &sample) -> bool {
+            RangeSeriesContext *ctx =
+                static_cast<RangeSeriesContext *>(context);
+            ReportManager *manager = ctx ? ctx->manager : nullptr;
+            if (!manager) return false;
+            const uint32_t interval_ms =
+                (ctx->read_stats && ctx->read_stats->interval_ms)
+                    ? ctx->read_stats->interval_ms
+                    : ctx->interval_ms;
+            return manager->process_range_series_sample_value(sample,
+                                                              ctx->signal,
+                                                              ctx->source,
+                                                              interval_ms,
+                                                              ctx->scale,
+                                                              ctx->capped,
+                                                              ctx->overflow);
+        },
+        &ctx);
+    if (!ok && !ctx.capped) {
+        fail_range_plot_build(ctx.overflow ? "range_overflow"
+                                           : "range_series_decode_failed");
+        return false;
     }
+    (void)read_stats;
     return true;
 }
 
@@ -4249,15 +7233,23 @@ bool ReportManager::finish_range_series() {
                                                  range_bucket_,
                                                  range_build_from_,
                                                  range_build_ok_);
-    range_build_ok_ &= bin_put_u32(*range_build_bytes_, range_series_points_);
-    if (range_tmp_.size()) {
-        range_build_ok_ &=
-            range_build_bytes_->append(range_tmp_.data(), range_tmp_.size());
+    if (range_series_points_ > 0) {
+        const ReportResultStream &stream =
+            range_streams_[range_stream_index_];
+        if (!append_plot_series_compact(*range_build_bytes_,
+                                        stream.name,
+                                        range_tmp_,
+                                        range_build_ok_)) {
+            fail_range_plot_build("range_overflow");
+            return false;
+        }
     }
     range_tmp_.clear();
     range_series_open_ = false;
     range_series_points_ = 0;
     range_current_bucket_ = -1;
+    range_have_last_sample_ = false;
+    range_last_sample_ms_ = 0;
     if (!range_build_ok_) {
         fail_range_plot_build("range_overflow");
         return false;
@@ -4270,33 +7262,41 @@ void ReportManager::finish_range_plot_build() {
         fail_range_plot_build("range_bad_state");
         return;
     }
-    if (range_blob_series_points(*range_build_bytes_) == 0) {
-        if (result_slots_lock_) {
-            xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
-            if (range_req_active_ && range_req_index_ == range_build_index_ &&
-                range_req_from_ == range_build_from_ &&
-                range_req_to_ == range_build_to_) {
-                range_req_active_ = false;
-            }
-            xSemaphoreGive(result_slots_lock_);
-        }
-        reset_range_plot_build(false);
+    const PlotBlobScan scan = scan_plot_blob(*range_build_bytes_);
+    if (!scan.valid) {
+        fail_range_plot_build("range_invalid_blob");
         return;
     }
 
     if (result_slots_lock_) {
         xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
         if (range_req_active_ && range_req_index_ == range_build_index_ &&
+            range_req_night_start_ms_ == range_night_start_ms_ &&
             range_req_from_ == range_build_from_ &&
             range_req_to_ == range_build_to_) {
             range_plot_bytes_ = range_build_bytes_;
             range_plot_index_ = range_build_index_;
+            range_plot_night_start_ms_ = range_night_start_ms_;
             range_plot_from_ = range_build_from_;
             range_plot_to_ = range_build_to_;
             range_req_active_ = false;
         }
         xSemaphoreGive(result_slots_lock_);
     }
+    Log::logf(CAT_REPORT,
+              LOG_DEBUG,
+              "Range plot ready index=%lu points=%lu input_chunks=%lu "
+              "input_bytes=%lu bytes=%lu elapsed_ms=%lu\n",
+              static_cast<unsigned long>(range_build_index_),
+              static_cast<unsigned long>(scan.points),
+              static_cast<unsigned long>(range_build_input_chunks_),
+              static_cast<unsigned long>(range_build_input_bytes_),
+              static_cast<unsigned long>(range_build_bytes_->size()),
+              static_cast<unsigned long>(
+                  range_build_started_ms_
+                      ? static_cast<uint32_t>(millis() -
+                                              range_build_started_ms_)
+                      : 0));
     reset_range_plot_build(false);
 }
 
@@ -4309,6 +7309,7 @@ void ReportManager::fail_range_plot_build(const char *message) {
     if (result_slots_lock_) {
         xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
         if (range_req_active_ && range_req_index_ == range_build_index_ &&
+            range_req_night_start_ms_ == range_night_start_ms_ &&
             range_req_from_ == range_build_from_ &&
             range_req_to_ == range_build_to_) {
             range_req_active_ = false;
@@ -4318,51 +7319,153 @@ void ReportManager::fail_range_plot_build(const char *message) {
     reset_range_plot_build(false);
 }
 
-// Series-point count from the actual blob bytes (0 if malformed). Gates caching
-// and serving so a zero-series/truncated blob is never stored or sent.
-uint32_t range_blob_series_points(const ReportSpoolBuffer &b) {
+PlotBlobScan scan_plot_blob(const ReportSpoolBuffer &b) {
+    PlotBlobScan out;
     const uint8_t *d = reinterpret_cast<const uint8_t *>(b.data());
     const size_t n = b.size();
-    if (!d || n < 20) return 0;
-    uint32_t ev = 0;
-    memcpy(&ev, d + 16, sizeof(ev));
-    size_t off = 20 + static_cast<size_t>(ev) * 16;
-    if (off > n) return 0;  // events truncated -> treat as no data
-    uint32_t total = 0;
-    // Bail to 0 on any malformation (e.g. a stream whose points are truncated).
-    while (off < n) {
-        if (off + 2 > n) return 0;
-        uint16_t name_len = 0;
-        memcpy(&name_len, d + off, sizeof(name_len));
-        off += 2;
-        if (off + name_len + 4 > n) return 0;
-        off += name_len;
-        uint32_t pc = 0;
-        memcpy(&pc, d + off, sizeof(pc));
-        off += 4;
-        if (off + static_cast<size_t>(pc) * 8 > n) return 0;
-        off += static_cast<size_t>(pc) * 8;
-        total += pc;
+    if (!d || n < 20) return out;
+    if (read_u32_le(d) != PLOT_BIN_MAGIC ||
+        read_u16_le(d + 4) != PLOT_BIN_VERSION) {
+        return out;
     }
-    return total;
+    const uint32_t ev = read_u32_le(d + 16);
+    out.events = ev;
+    size_t off = 20 + static_cast<size_t>(ev) * 16;
+    if (off > n) return out;
+    while (off < n) {
+        if (off + 2 > n) return out;
+        const uint16_t name_len = read_u16_le(d + off);
+        off += 2;
+        if (off + name_len + 4 > n) return out;
+        off += name_len;
+        const uint8_t mode = d[off++];
+        off += 1;  // flags
+        off += 2;  // reserved
+        if (mode == PLOT_SERIES_MODE_COMPACT) {
+            if (off + 16 > n) return out;
+            off += 4;  // series_base_delta_ms
+            const uint32_t time_unit_ms = read_u32_le(d + off);
+            off += 4;
+            const uint32_t value_scale_milli = read_u32_le(d + off);
+            off += 4;
+            const uint32_t pc = read_u32_le(d + off);
+            off += 4;
+            if (time_unit_ms == 0 || value_scale_milli == 0) return out;
+            if (off + static_cast<size_t>(pc) * 4 > n) return out;
+            off += static_cast<size_t>(pc) * 4;
+            out.points += pc;
+        } else if (mode == PLOT_SERIES_MODE_ENVELOPE_RUNS) {
+            if (off + 16 > n) return out;
+            off += 4;  // axis_base_delta_ms
+            const uint32_t bucket_ms = read_u32_le(d + off);
+            off += 4;
+            const uint32_t value_scale_milli = read_u32_le(d + off);
+            off += 4;
+            const uint32_t run_count = read_u32_le(d + off);
+            off += 4;
+            if (bucket_ms == 0 || value_scale_milli == 0) return out;
+            for (uint32_t i = 0; i < run_count; ++i) {
+                if (off + 6 > n) return out;
+                off += 4;  // start_bucket
+                const uint16_t bucket_count = read_u16_le(d + off);
+                off += 2;
+                if (off + static_cast<size_t>(bucket_count) * 4 > n) {
+                    return out;
+                }
+                off += static_cast<size_t>(bucket_count) * 4;
+                out.points += static_cast<uint32_t>(bucket_count) * 2u;
+            }
+        } else {
+            return out;
+        }
+    }
+    out.valid = off == n;
+    return out;
 }
 
 ReportManager::PlotRead ReportManager::read_plot_range(
-    size_t therapy_index, int64_t from_ms, int64_t to_ms,
+    size_t therapy_index, const char *version,
+    char *etag_out, size_t etag_out_size,
+    int64_t from_ms, int64_t to_ms,
     std::shared_ptr<ReportSpoolBuffer> &out) {
+    if (etag_out && etag_out_size) etag_out[0] = '\0';
     if (to_ms <= from_ms) return PlotRead::NotFound;
     if (!ensure_result_slots()) return PlotRead::Unavailable;
+
+    ScopedIndexedNight indexed_night("read_plot_range_index");
+    if (!indexed_night) return PlotRead::Unavailable;
+    size_t resolved_therapy_index = therapy_index;
+    uint64_t version_night_start_ms = 0;
+    const bool have_version_start =
+        parse_report_night_start_from_etag(version, version_night_start_ms);
+    const bool found_night = have_version_start
+        ? indexed_night_by_start(version_night_start_ms,
+                                 indexed_night.get(),
+                                 &resolved_therapy_index)
+        : indexed_night_by_therapy_index(therapy_index, indexed_night.get());
+    if (!found_night) return PlotRead::NotFound;
+    if (indexed_night->edf_catalog_pending) {
+        switch (enqueue_build(indexed_night->summary.start_ms,
+                              resolved_therapy_index,
+                              false)) {
+            case BuildQueueResult::Queued:
+            case BuildQueueResult::AlreadyQueued:
+                return PlotRead::Building;
+            case BuildQueueResult::Full:
+                return PlotRead::QueueFull;
+            case BuildQueueResult::Unavailable:
+            default:
+                return PlotRead::Unavailable;
+        }
+    }
+
+    char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+    if (!take_summary_lock(pdMS_TO_TICKS(20))) return PlotRead::Busy;
+    format_night_etag_unlocked(indexed_night->summary,
+                               indexed_night->source_signature,
+                               current_etag,
+                               sizeof(current_etag));
+    give_summary_lock();
+    if (etag_out && etag_out_size) {
+        snprintf(etag_out, etag_out_size, "%s", current_etag);
+    }
+    if (version && version[0] && strcmp(version, current_etag) != 0) {
+        return PlotRead::Stale;
+    }
+
+    const uint64_t night_start_ms = indexed_night->summary.start_ms;
     xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
-    if (range_plot_bytes_ && range_plot_index_ == therapy_index &&
-        range_plot_from_ == from_ms && range_plot_to_ == to_ms &&
-        range_blob_series_points(*range_plot_bytes_) > 0) {
+    if (range_plot_bytes_ && range_plot_index_ == resolved_therapy_index &&
+        range_plot_night_start_ms_ == night_start_ms &&
+        range_plot_from_ == from_ms && range_plot_to_ == to_ms) {
+        const PlotBlobScan scan = scan_plot_blob(*range_plot_bytes_);
+        if (!scan.valid) {
+            range_plot_bytes_.reset();
+            range_plot_index_ = 0;
+            range_plot_night_start_ms_ = 0;
+            range_plot_from_ = 0;
+            range_plot_to_ = 0;
+            xSemaphoreGive(result_slots_lock_);
+            return PlotRead::Error;
+        }
+        if (scan.events == 0 && scan.points == 0) {
+            xSemaphoreGive(result_slots_lock_);
+            return PlotRead::Empty;
+        }
         out = range_plot_bytes_;
-        range_plot_bytes_.reset();  // serve once; the response holds it while streaming
         xSemaphoreGive(result_slots_lock_);
         return PlotRead::Ready;
     }
+    if (range_plot_bytes_) {
+        range_plot_bytes_.reset();
+        range_plot_index_ = 0;
+        range_plot_night_start_ms_ = 0;
+        range_plot_from_ = 0;
+        range_plot_to_ = 0;
+    }
     range_req_active_ = true;
-    range_req_index_ = therapy_index;
+    range_req_index_ = resolved_therapy_index;
+    range_req_night_start_ms_ = night_start_ms;
     range_req_from_ = from_ms;
     range_req_to_ = to_ms;
     xSemaphoreGive(result_slots_lock_);
@@ -4374,48 +7477,54 @@ void ReportManager::service_range_plot(bool realtime_active) {
     xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
     const bool active = range_req_active_;
     const size_t index = range_req_index_;
+    const uint64_t night_start_ms = range_req_night_start_ms_;
     const int64_t from_ms = range_req_from_;
     const int64_t to_ms = range_req_to_;
     xSemaphoreGive(result_slots_lock_);
     if (!active) return;
     if (realtime_active) return;
-    // Defer while a night build or summary fetch owns the shared state + SD bus.
-    if (plot_build_active_ || summary_fetch_active_) return;
+    if (summary_fetch_active_) return;
+    if (plot_build_active_) {
+        const uint32_t elapsed_ms =
+            plot_build_started_ms_
+                ? static_cast<uint32_t>(millis() - plot_build_started_ms_)
+                : 0;
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Range plot preempted overview index=%lu "
+                  "night=%llu elapsed_ms=%lu\n",
+                  static_cast<unsigned long>(index),
+                  static_cast<unsigned long long>(night_start_ms),
+                  static_cast<unsigned long>(elapsed_ms));
+        reset_plot_build();
+        release_result_edf_sessions();
+    }
     // Yield an idle prefetch so the range builds now; a real foreground fetch is
     // not yielded, so wait for that.
     if (cache_fetch_active_) {
         prefetch_yield_to_foreground();
         if (cache_fetch_active_) return;
     }
-    const bool ready = result_status_.state == ReportResultState::Ready ||
-                       result_status_.state == ReportResultState::Partial;
-    if (!ready || result_status_.therapy_index != index) {
-        // Prepare the requested night first, then retry on a later poll.
-        ReportSummaryRecord rec;
-        if (summary_night_by_therapy_index(index, rec)) {
-            enqueue_build(rec.start_ms, index, false);
-        } else {
-            xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
-            if (range_req_active_ && range_req_index_ == index &&
-                range_req_from_ == from_ms && range_req_to_ == to_ms) {
-                range_req_active_ = false;
-            }
-            xSemaphoreGive(result_slots_lock_);
-        }
-        return;
-    }
 
     if (range_build_active_) {
         if (range_build_index_ == index &&
+            range_night_start_ms_ == night_start_ms &&
             range_build_from_ == from_ms &&
             range_build_to_ == to_ms) {
             return;
         }
         reset_range_plot_build(false);
     }
-    if (!start_range_plot_build(index, from_ms, to_ms)) {
+    bool waiting_for_result = false;
+    if (!start_range_plot_build(night_start_ms,
+                                index,
+                                from_ms,
+                                to_ms,
+                                waiting_for_result)) {
+        if (waiting_for_result) return;
         xSemaphoreTake(result_slots_lock_, portMAX_DELAY);
         if (range_req_active_ && range_req_index_ == index &&
+            range_req_night_start_ms_ == night_start_ms &&
             range_req_from_ == from_ms && range_req_to_ == to_ms) {
             range_req_active_ = false;
         }
@@ -4425,26 +7534,30 @@ void ReportManager::service_range_plot(bool realtime_active) {
 
 void ReportManager::poll_range_plot_build() {
     if (!range_build_active_) return;
-    constexpr size_t RANGE_BYTE_BUDGET = 64 * 1024;
-    constexpr size_t RANGE_CHUNK_CAP = 8;
-    size_t bytes = 0;
     size_t reads = 0;
+    const uint32_t started_ms = millis();
+    auto budget_spent = [&]() -> bool {
+        if (reads == 0) return false;
+        if (reads >= AC_REPORT_RANGE_PLOT_POLL_CHUNK_CAP) return true;
+        return static_cast<uint32_t>(millis() - started_ms) >=
+               AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS;
+    };
 
-    while (range_build_active_ && bytes < RANGE_BYTE_BUDGET &&
-           reads < RANGE_CHUNK_CAP) {
+    while (range_build_active_ && !budget_spent()) {
         if (range_build_phase_ == ReportPlotBuildPhase::Events) {
             bool processed = false;
-            while (range_chunk_index_ < result_status_.chunk_count) {
+            while (range_chunk_index_ < range_chunk_count_) {
                 const ReportResultChunk &chunk =
-                    result_chunks_[range_chunk_index_++];
+                    range_chunks_[range_chunk_index_++];
                 if (chunk.kind != ReportStoreChunkKind::Events) continue;
                 if (chunk.end_ms <= range_build_from_ ||
                     chunk.start_ms >= range_build_to_) {
                     continue;
                 }
                 if (!process_range_event_chunk(chunk)) return;
-                bytes += chunk.payload_len;
                 reads++;
+                range_build_input_chunks_++;
+                range_build_input_bytes_ += chunk.payload_len;
                 processed = true;
                 break;
             }
@@ -4472,13 +7585,13 @@ void ReportManager::poll_range_plot_build() {
         }
 
         if (range_build_phase_ == ReportPlotBuildPhase::Series) {
-            if (range_stream_index_ >= result_stream_count_) {
+            if (range_stream_index_ >= range_stream_count_) {
                 finish_range_plot_build();
                 return;
             }
 
             const ReportResultStream &stream =
-                result_streams_[range_stream_index_];
+                range_streams_[range_stream_index_];
             if (stream.kind != ReportStoreChunkKind::Series ||
                 !stream.name || !stream.name[0] ||
                 stream.chunk_count == 0) {
@@ -4492,12 +7605,10 @@ void ReportManager::poll_range_plot_build() {
             }
 
             bool processed = false;
-            while (range_chunk_index_ < result_status_.chunk_count) {
+            while (range_chunk_index_ < range_chunk_count_) {
                 const ReportResultChunk &chunk =
-                    result_chunks_[range_chunk_index_++];
-                if (chunk.kind != ReportStoreChunkKind::Series ||
-                    chunk.source != stream.source ||
-                    strcmp(chunk.name ? chunk.name : "", stream.name) != 0) {
+                    range_chunks_[range_chunk_index_++];
+                if (!result_chunk_matches_stream(chunk, stream)) {
                     continue;
                 }
                 if (chunk.end_ms <= range_build_from_ ||
@@ -4505,8 +7616,9 @@ void ReportManager::poll_range_plot_build() {
                     continue;
                 }
                 if (!process_range_series_chunk(chunk)) return;
-                bytes += chunk.payload_len;
                 reads++;
+                range_build_input_chunks_++;
+                range_build_input_bytes_ += chunk.payload_len;
                 processed = true;
                 break;
             }
@@ -4525,17 +7637,16 @@ void ReportManager::poll_range_plot_build() {
 
 void ReportManager::poll_result_plot_build() {
     if (!plot_build_active_) return;
-    // Bound SD work per poll by BYTES read: after coalescing a chunk is ~512 KB,
-    // so a chunk-count budget would pull a whole night in one poll and block the
-    // main loop for seconds. The chunk cap is a secondary guard against per-open
-    // cost on many tiny (legacy) chunks. The byte check sits at the loop top, so
-    // the chunk that crosses the budget still completes 
-    constexpr size_t PLOT_BYTE_BUDGET = 256 * 1024;
-    constexpr size_t PLOT_CHUNK_CAP = 24;
-    size_t bytes = 0;
     size_t reads = 0;
-    while (plot_build_active_ && bytes < PLOT_BYTE_BUDGET &&
-           reads < PLOT_CHUNK_CAP) {
+    const uint32_t started_ms = millis();
+    auto budget_spent = [&]() -> bool {
+        if (reads == 0) return false;
+        if (reads >= AC_REPORT_PLOT_POLL_CHUNK_CAP) return true;
+        return static_cast<uint32_t>(millis() - started_ms) >=
+               AC_REPORT_PLOT_POLL_BUDGET_MS;
+    };
+
+    while (plot_build_active_ && !budget_spent()) {
         if (plot_build_phase_ == ReportPlotBuildPhase::Events) {
             bool processed = false;
             while (plot_chunk_index_ < result_status_.chunk_count) {
@@ -4544,8 +7655,9 @@ void ReportManager::poll_result_plot_build() {
                 if (chunk.kind != ReportStoreChunkKind::Events) continue;
                 if (!process_plot_event_chunk(chunk)) return;
                 processed = true;
-                bytes += chunk.payload_len;
                 reads++;
+                plot_build_input_chunks_++;
+                plot_build_input_bytes_ += chunk.payload_len;
                 break;
             }
             if (processed) continue;
@@ -4560,60 +7672,62 @@ void ReportManager::poll_result_plot_build() {
             plot_tmp_.clear();
             plot_build_phase_ = ReportPlotBuildPhase::Series;
             plot_chunk_index_ = 0;
-            plot_stream_index_ = 0;
+            memset(plot_chunk_done_, 0, sizeof(plot_chunk_done_));
             continue;
         }
 
         if (plot_build_phase_ == ReportPlotBuildPhase::Series) {
-            if (plot_stream_index_ >= result_stream_count_) {
-                finish_result_plot_build();
-                return;
-            }
-
-            const ReportResultStream &stream =
-                result_streams_[plot_stream_index_];
-            if (stream.kind != ReportStoreChunkKind::Series ||
-                !stream.name || !stream.name[0] ||
-                stream.chunk_count == 0) {
-                plot_stream_index_++;
-                plot_chunk_index_ = 0;
-                continue;
-            }
-            if (!plot_series_open_ && !open_plot_series(stream)) {
-                fail_result_prepare("plot_series_open_failed");
-                return;
-            }
-
             bool processed = false;
-            while (plot_chunk_index_ < result_status_.chunk_count) {
-                const ReportResultChunk &chunk =
-                    result_chunks_[plot_chunk_index_++];
-                if (chunk.kind != ReportStoreChunkKind::Series ||
-                    chunk.source != stream.source ||
-                    strcmp(chunk.name ? chunk.name : "", stream.name) != 0) {
+            const size_t max_chunks = std::min(
+                static_cast<size_t>(result_status_.chunk_count),
+                static_cast<size_t>(AC_REPORT_RESULT_CHUNK_MAX));
+            while (plot_chunk_index_ < max_chunks) {
+                const size_t chunk_index = plot_chunk_index_++;
+                if (plot_chunk_done_[chunk_index]) continue;
+                const ReportResultChunk &chunk = result_chunks_[chunk_index];
+                if (chunk.kind != ReportStoreChunkKind::Series) {
+                    plot_chunk_done_[chunk_index] = true;
                     continue;
                 }
-                if (!process_plot_series_chunk(chunk)) return;
+                if (chunk.stream_index >= result_stream_count_ ||
+                    chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX) {
+                    plot_chunk_done_[chunk_index] = true;
+                    continue;
+                }
+                if (chunk.provider_ref.provider == ReportProviderId::Edf) {
+                    if (!process_plot_edf_series_batch(chunk_index,
+                                                       processed)) {
+                        return;
+                    }
+                    if (processed) {
+                        reads++;
+                        break;
+                    }
+                    continue;
+                }
+                if (!process_plot_series_chunk(chunk_index)) return;
+                plot_chunk_done_[chunk_index] = true;
+                plot_build_input_chunks_++;
+                plot_build_input_bytes_ += chunk.payload_len;
                 processed = true;
-                bytes += chunk.payload_len;
                 reads++;
                 break;
             }
             if (processed) continue;
 
-            flush_plot_bucket();
-            // Series done: write its point count + accumulated points.
-            const uint32_t point_count =
-                static_cast<uint32_t>(plot_tmp_.size() / 8);
-            plot_bin_ok_ &= bin_put_u32(plot_build_bin_, point_count);
-            if (plot_tmp_.size()) {
-                plot_bin_ok_ &=
-                    plot_build_bin_.append(plot_tmp_.data(), plot_tmp_.size());
+            for (size_t i = 0; i < result_stream_count_ &&
+                               i < AC_REPORT_RESULT_STREAM_MAX;
+                 ++i) {
+                if (!finish_plot_series(i)) return;
             }
-            plot_tmp_.clear();
-            plot_series_open_ = false;
-            plot_stream_index_++;
-            plot_chunk_index_ = 0;
+            if (!plot_bin_ok_) {
+                fail_result_prepare("plot_overflow");
+                return;
+            }
+            if (plot_chunk_index_ >= max_chunks) {
+                finish_result_plot_build();
+                return;
+            }
             continue;
         }
 
@@ -4624,8 +7738,53 @@ void ReportManager::poll_result_plot_build() {
 
 bool ReportManager::prepare_result_by_therapy_index(size_t therapy_index,
                                                     bool refresh_cache) {
-    return prepare_result_by_therapy_index_internal(therapy_index,
-                                                   refresh_cache);
+    const ResultPrepareOutcome outcome =
+        prepare_result_by_therapy_index_internal(therapy_index,
+                                                 refresh_cache);
+    return outcome == ResultPrepareOutcome::Prepared ||
+           outcome == ResultPrepareOutcome::Deferred;
+}
+
+bool ReportManager::request_result_prepare_by_therapy_index(
+    size_t therapy_index,
+    bool refresh_cache) {
+    ScopedIndexedNight indexed_night("request_result_prepare_index");
+    if (!indexed_night ||
+        !indexed_night_by_therapy_index(therapy_index, indexed_night.get())) {
+        return false;
+    }
+
+    if (refresh_cache) {
+        invalidate_materialized(indexed_night->summary.start_ms, false);
+    }
+    const BuildQueueResult queued =
+        enqueue_build(indexed_night->summary.start_ms,
+                      therapy_index,
+                      refresh_cache);
+    return queued == BuildQueueResult::Queued ||
+           queued == BuildQueueResult::AlreadyQueued;
+}
+
+bool ReportManager::request_result_prepare_by_start(uint64_t night_start_ms,
+                                                    bool refresh_cache) {
+    ScopedIndexedNight indexed_night("request_result_prepare_start_index");
+    size_t therapy_index = 0;
+    if (!indexed_night ||
+        !indexed_night_by_start(night_start_ms,
+                                indexed_night.get(),
+                                &therapy_index)) {
+        return false;
+    }
+
+    if (refresh_cache) {
+        invalidate_materialized(indexed_night->summary.start_ms, false);
+    }
+    const BuildQueueResult queued =
+        enqueue_build(indexed_night->summary.start_ms,
+                      therapy_index,
+                      refresh_cache);
+    return queued == BuildQueueResult::Queued ||
+           queued == BuildQueueResult::AlreadyQueued;
 }
 
 bool ReportManager::defer_result_prepare_for_summary(size_t therapy_index,
@@ -4643,7 +7802,12 @@ bool ReportManager::defer_result_prepare_for_summary(size_t therapy_index,
 
 bool ReportManager::load_result_night(size_t therapy_index,
                                       ReportSummaryRecord &night) {
-    if (summary_night_by_therapy_index(therapy_index, night)) return true;
+    ScopedIndexedNight indexed_night("load_result_night_index");
+    if (indexed_night &&
+        indexed_night_by_therapy_index(therapy_index, indexed_night.get())) {
+        night = indexed_night->summary;
+        return true;
+    }
     clear_result_prepare();
     fail_result_prepare("night_not_found");
     return false;
@@ -4651,53 +7815,63 @@ bool ReportManager::load_result_night(size_t therapy_index,
 
 bool ReportManager::publish_existing_result_if_current(
     size_t therapy_index,
-    const ReportSummaryRecord &night,
+    const ReportIndexedNight &night,
+    const char *current_etag,
     bool refresh_cache) {
-    // Idempotent re-prepare: same night already prepared with a plot -> keep it,
-    // bump revision. Identity is (therapy_index, start_ms, end_ms); duration_min
-    // is deliberately excluded - the plot build overwrites it with the session
-    // sum, so comparing it would defeat the fast path and briefly empty
-    // result_plot_bin_ (a /api/report/plot 404 window).
+    // Idempotent re-prepare: same indexed night and same Summary+EDF content
+    // version already prepared with a plot -> keep it and republish. The ETag
+    // check is required because another EDF session can be appended to the same
+    // noon-noon night without changing the Summary start/end identity.
     if (!refresh_cache &&
+        current_etag && current_etag[0] &&
+        strcmp(result_etag_, current_etag) == 0 &&
         (result_status_.state == ReportResultState::Ready ||
          result_status_.state == ReportResultState::Partial) &&
         result_status_.therapy_index == therapy_index &&
         result_status_.chunk_count > 0 &&
-        result_status_.night_start_ms == night.start_ms &&
-        result_status_.night_end_ms == night.end_ms &&
+        result_status_.night_start_ms == night.summary.start_ms &&
         result_plot_bin_.size() > 0) {
-        publish_result_to_slot();
-        return true;
+        return publish_result_to_slot();
     }
     return false;
 }
 
 void ReportManager::begin_result_prepare_for_night(
     size_t therapy_index,
-    const ReportSummaryRecord &night) {
+    const ReportIndexedNight &night,
+    const char *current_etag) {
     clear_result_prepare();
     result_status_.state = ReportResultState::Preparing;
     result_status_.therapy_index = therapy_index;
 
-    result_night_ = night;
-    result_status_.night_start_ms = night.start_ms;
-    result_status_.night_end_ms = night.end_ms;
-    result_status_.duration_min = night.duration_min;
-    if (night.has_ahi) {
-        result_status_.ahi = night.ahi;
-        result_status_.oa_index = night.has_oa_index ? night.oa_index : 0.0f;
-        result_status_.ca_index = night.has_ca_index ? night.ca_index : 0.0f;
-        result_status_.ua_index = night.has_ua_index ? night.ua_index : 0.0f;
+    result_indexed_night_ = night;
+    result_night_ = night.summary;
+    snprintf(result_etag_, sizeof(result_etag_), "%s",
+             current_etag ? current_etag : "");
+    set_result_ranges_from_indexed_night(night);
+    result_status_.night_start_ms = night.summary.start_ms;
+    result_status_.night_end_ms = night.summary.end_ms;
+    result_status_.duration_min = night.summary.duration_min;
+    if (night.summary.has_ahi) {
+        result_status_.ahi = night.summary.ahi;
+        result_status_.oa_index =
+            night.summary.has_oa_index ? night.summary.oa_index : 0.0f;
+        result_status_.ca_index =
+            night.summary.has_ca_index ? night.summary.ca_index : 0.0f;
+        result_status_.ua_index =
+            night.summary.has_ua_index ? night.summary.ua_index : 0.0f;
         result_status_.hypopnea_index =
-            night.has_hypopnea_index ? night.hypopnea_index : 0.0f;
+            night.summary.has_hypopnea_index
+                ? night.summary.hypopnea_index
+                : 0.0f;
         result_status_.arousal_index =
-            night.has_rera_index ? night.rera_index : 0.0f;
+            night.summary.has_rera_index ? night.summary.rera_index : 0.0f;
         result_status_.event_metrics_valid = true;
     }
 }
 
 bool ReportManager::refresh_result_cache_if_needed(
-    const ReportSummaryRecord &night,
+    const ReportIndexedNight &night,
     size_t therapy_index,
     bool refresh_cache,
     bool &deferred) {
@@ -4707,8 +7881,7 @@ bool ReportManager::refresh_result_cache_if_needed(
     const bool latest_tail_refresh = therapy_index == 0;
     prefetch_yield_to_foreground();
     if (!cache_fetch_active_) {
-        if (!build_cache_plan_for_result_gaps(night,
-                                              latest_tail_refresh)) {
+        if (!build_cache_plan(night, false, latest_tail_refresh)) {
             return false;
         }
         if (cache_source_count_ > 0) {
@@ -4724,7 +7897,8 @@ bool ReportManager::refresh_result_cache_if_needed(
     }
 
     const bool cache_refresh_in_flight =
-        cache_fetch_active_ && cache_night_.start_ms == night.start_ms;
+        cache_fetch_active_ &&
+        cache_night_.start_ms == night.summary.start_ms;
     if (cache_refresh_in_flight) {
         pending_result_prepare_ = true;
         pending_result_refresh_cache_ = false;
@@ -4736,164 +7910,144 @@ bool ReportManager::refresh_result_cache_if_needed(
     return true;
 }
 
-ReportSourceId ReportManager::choose_spool_source_for_signal(
-    const ReportSummaryRecord &night,
-    const ReportSignalDef &signal) const {
-    ReportSourceId source = signal.preferred_source;
-    if (source == signal.fallback_source) return source;
-
-    constexpr int64_t kCoverTolMs = 5 * 60 * 1000;  // absorb rate offsets
-    int64_t p_min = 0, p_max = 0, f_min = 0, f_max = 0;
-    const bool p_has = source_chunk_extent(
-        night, source, signal.store_name, p_min, p_max);
-    const bool f_has = source_chunk_extent(
-        night, signal.fallback_source, signal.store_name, f_min, f_max);
-    if (!p_has || (f_has && (p_min > f_min + kCoverTolMs ||
-                             p_max < f_max - kCoverTolMs))) {
-        source = signal.fallback_source;
-    }
-    return source;
-}
-
-bool ReportManager::add_best_result_chunks_for_night(
-    const ReportSummaryRecord &night,
-    int64_t range_start_ms,
-    int64_t range_end_ms) {
-    const bool have_edf =
-        find_edf_sessions_for_night(night, range_start_ms, range_end_ms);
-
-    uint32_t edf_event_entries = 0;
-    if (have_edf &&
-        !add_edf_events_for_range(range_start_ms,
-                                  range_end_ms,
-                                  true,
-                                  edf_event_entries)) {
-        return false;
-    }
-    if (edf_event_entries > 0) {
-        result_status_.events_available = true;
-    } else {
-        if (!add_result_chunks_for_range(
-                ReportStoreChunkKind::Events,
-                ReportSourceId::RespiratoryEvents,
-                ReportSignalId::Flow,
-                report_source_spool_type(ReportSourceId::RespiratoryEvents),
-                static_cast<int64_t>(night.start_ms),
-                range_start_ms,
-                range_end_ms,
-                true)) {
-            return false;
-        }
-        const ReportSourceDef *events_def =
-            report_source_def(ReportSourceId::RespiratoryEvents);
-        result_status_.events_available =
-            events_def && source_complete_for_night(night, *events_def);
+bool ReportManager::begin_materialization(const ReportIndexedNight &night,
+                                          const ReportResolvedPlan &plan) {
+    clear_result_ranges();
+    result_range_count_ =
+        std::min(plan.range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    for (size_t i = 0; i < result_range_count_; ++i) {
+        result_ranges_[i].start_ms = plan.ranges[i].start_ms;
+        result_ranges_[i].end_ms = plan.ranges[i].end_ms;
     }
 
-    size_t signal_count = 0;
-    const ReportSignalDef *signals = report_signal_defs(signal_count);
-    for (size_t signal_index = 0; signal_index < signal_count; ++signal_index) {
-        const ReportSignalDef &signal = signals[signal_index];
-        uint32_t edf_entries = 0;
-        if (have_edf &&
-            !add_edf_signal_for_range(signal.id,
-                                      range_start_ms,
-                                      range_end_ms,
-                                      true,
-                                      edf_entries)) {
-            return false;
-        }
-        if (edf_entries > 0) continue;
-
-        const ReportSourceId source =
-            choose_spool_source_for_signal(night, signal);
-        if (!add_result_chunks_for_range(ReportStoreChunkKind::Series,
-                                         source,
-                                         signal.id,
-                                         signal.store_name,
-                                         static_cast<int64_t>(night.start_ms),
-                                         range_start_ms,
-                                         range_end_ms,
-                                         true)) {
-            return false;
-        }
+    uint32_t duration_min = 0;
+    for (size_t i = 0; i < result_range_count_; ++i) {
+        duration_min += report_ceil_duration_min(result_ranges_[i].start_ms,
+                                                 result_ranges_[i].end_ms);
     }
-
-    result_status_.missing_required = result_status_.missing_streams;
+    if (duration_min > 0) {
+        result_status_.duration_min = duration_min;
+    } else if (night.has_summary && night.summary.duration_min > 0) {
+        result_status_.duration_min = night.summary.duration_min;
+    }
     return true;
 }
 
-bool ReportManager::build_cache_plan_for_result_gaps(
-    const ReportSummaryRecord &night,
-    bool latest_tail_refresh) {
-    cache_night_ = night;
-    cache_source_count_ = 0;
-    cache_source_index_ = 0;
-    cache_status_ = {};
-    cache_status_.night_start_ms = night.start_ms;
-    cache_status_.night_end_ms = night.end_ms;
-    cache_status_.active = true;
+bool ReportManager::add_materialized_stream(
+    const ReportResolvedStream &stream,
+    size_t &result_stream_index) {
+    if (!add_result_stream(stream.kind,
+                           stream.selected_source,
+                           stream.signal,
+                           stream.name,
+                           stream.required,
+                           stream.complete,
+                           result_stream_index)) {
+        return false;
+    }
+    if (result_stream_index < result_stream_count_) {
+        ReportResultStream &result_stream =
+            result_streams_[result_stream_index];
+        result_stream.has_edf_segment =
+            result_stream.has_edf_segment || stream.has_edf_segment;
+        result_stream.has_spool_segment =
+            result_stream.has_spool_segment || stream.has_spool_segment;
+    }
+    return true;
+}
 
-    int64_t latest_tail_start_ms = static_cast<int64_t>(night.start_ms);
-    if (latest_tail_refresh) {
-        ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
-        const size_t range_count =
-            collect_session_ranges(night,
-                                   ranges,
-                                   AC_REPORT_SUMMARY_SESSION_MAX);
-        latest_tail_start_ms = range_count
-            ? ranges[range_count - 1].start_ms
-            : static_cast<int64_t>(night.start_ms);
+bool ReportManager::add_materialized_segment(
+    const ReportResolvedSegment &segment,
+    size_t result_stream_index) {
+    if (segment.provider == ReportResolvedProvider::None) return true;
+
+    if (segment.provider == ReportResolvedProvider::Edf) {
+        EdfReportDataProvider provider(result_edf_sessions_,
+                                       result_edf_session_count_);
+        return add_provider_chunks_to_result_stream(
+            provider,
+            segment.kind,
+            segment.source,
+            segment.signal,
+            segment.name,
+            static_cast<int64_t>(result_night_.start_ms),
+            segment.start_ms,
+            segment.end_ms,
+            segment.required,
+            segment.complete,
+            result_stream_index);
     }
 
-    for (size_t i = 0; i < result_stream_count_; ++i) {
-        const ReportResultStream &stream = result_streams_[i];
-        if (!stream.required || stream.complete) continue;
-        const ReportSourceDef *source = report_source_def(stream.source);
-        if (!source || !cache_source_supported(source->id)) continue;
+    return add_provider_chunks_to_result_stream(
+        spool_report_provider(),
+        segment.kind,
+        segment.source,
+        segment.signal,
+        segment.name,
+        static_cast<int64_t>(result_night_.start_ms),
+        segment.start_ms,
+        segment.end_ms,
+        segment.required,
+        segment.complete,
+        result_stream_index);
+}
 
-        bool duplicate = false;
-        for (size_t existing = 0; existing < cache_source_count_; ++existing) {
-            if (cache_plan_[existing].source == source->id) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
+void ReportManager::finish_materialization(const ReportResolvedPlan &plan) {
+    result_status_.events_available = plan.events_available;
+    result_status_.missing_required = result_status_.missing_streams;
+}
 
-        int64_t from_ms = 0;
-        if (latest_tail_refresh) {
-            from_ms = latest_tail_start_ms;
-            int64_t cached_end_ms = 0;
-            if (source_latest_cached_end_for_night(*source,
-                                                   night,
-                                                   cached_end_ms) &&
-                cached_end_ms > latest_tail_start_ms) {
-                from_ms = cached_end_ms - AC_REPORT_LATEST_TAIL_OVERLAP_MS;
-                if (from_ms < latest_tail_start_ms) {
-                    from_ms = latest_tail_start_ms;
-                }
-            }
-        } else {
-            const bool refresh_empty_event =
-                sparse_event_refresh_due(night, *source);
-            if (!source_missing_start_for_night(night,
-                                                *source,
-                                                from_ms,
-                                                refresh_empty_event)) {
-                from_ms = static_cast<int64_t>(night.start_ms);
-            }
-        }
+bool ReportManager::resolve_and_materialize_result_for_night(
+    const ReportIndexedNight &night,
+    int64_t range_start_ms,
+    int64_t range_end_ms,
+    bool *edf_pending_out) {
+    if (edf_pending_out) *edf_pending_out = false;
+    bool edf_pending = false;
+    bool have_edf =
+        find_edf_sessions_for_night(night.summary,
+                                    range_start_ms,
+                                    range_end_ms,
+                                    &edf_pending);
+    if (edf_pending) {
+        if (edf_pending_out) *edf_pending_out = true;
+        result_status_.state = ReportResultState::Preparing;
+        result_status_.error = "edf_catalog_refreshing";
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Result waiting for EDF catalog "
+                  "night=%llu from=%lld to=%lld\n",
+                  static_cast<unsigned long long>(night.summary.start_ms),
+                  static_cast<long long>(range_start_ms),
+                  static_cast<long long>(range_end_ms));
+        return true;
+    }
+    if (!ensure_result_resolve_buffers()) return false;
 
-        if (cache_source_count_ >= AC_REPORT_CACHE_SOURCE_MAX) {
-            fail_cache_fetch("cache_plan_full");
-            return false;
-        }
-        ReportCacheSourcePlan &plan = cache_plan_[cache_source_count_++];
-        plan.source = source->id;
-        plan.from_ms = from_ms;
+    EdfReportDataProvider edf_provider(have_edf ? result_edf_sessions_
+                                                : nullptr,
+                                       have_edf ? result_edf_session_count_
+                                                : 0);
+    ReportSourceResolver resolver(edf_provider,
+                                  spool_report_provider(),
+                                  *result_resolve_scratch_);
+    ReportResolvedPlan &plan = *result_resolved_plan_;
+    if (!resolver.build_plan(night, range_start_ms, range_end_ms, plan)) {
+        fail_result_prepare("source_resolve_failed");
+        return false;
     }
 
+    ReportMaterializer materializer;
+    if (!materializer.materialize(night, plan, *this)) {
+        fail_result_prepare("source_materialize_failed");
+        return false;
+    }
+    return true;
+}
+
+bool ReportManager::activate_cache_plan_for_night(
+    const ReportSummaryRecord &night) {
     cache_status_.source_count = static_cast<uint32_t>(cache_source_count_);
     if (cache_source_count_ > 0) {
         invalidate_materialized(night.start_ms, false);
@@ -4906,11 +8060,9 @@ bool ReportManager::build_cache_plan_for_result_gaps(
 }
 
 bool ReportManager::count_result_events_from_chunks() {
-    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
     const size_t range_count =
-        collect_session_ranges(result_night_,
-                               ranges,
-                               AC_REPORT_SUMMARY_SESSION_MAX);
+        std::min(result_range_count_,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
     result_status_.oa_count = 0;
     result_status_.ca_count = 0;
     result_status_.ua_count = 0;
@@ -4937,12 +8089,32 @@ bool ReportManager::count_result_events_from_chunks() {
                                           event)) {
                 continue;
             }
-            if (!report_time_in_ranges(event.start_ms,
-                                       ranges,
-                                       range_count)) {
+            bool overlaps_result_range = false;
+            const int64_t duration_ms = event.duration_ms > 0
+                                            ? static_cast<int64_t>(
+                                                  event.duration_ms)
+                                            : 0;
+            const int64_t event_end_ms = event.start_ms + duration_ms;
+            for (size_t range_index = 0; range_index < range_count;
+                 ++range_index) {
+                const PlotRange &range = result_ranges_[range_index];
+                if (duration_ms > 0) {
+                    if (report_ranges_overlap(event.start_ms,
+                                              event_end_ms,
+                                              range.start_ms,
+                                              range.end_ms)) {
+                        overlaps_result_range = true;
+                        break;
+                    }
+                } else if (event.start_ms >= range.start_ms &&
+                           event.start_ms <= range.end_ms) {
+                    overlaps_result_range = true;
+                    break;
+                }
+            }
+            if (!overlaps_result_range) {
                 continue;
             }
-            if (event.duration_ms < 0) continue;
             if (report_event_seen(counted_events, event)) continue;
             if (!remember_report_event(counted_events, event)) {
                 fail_result_prepare("event_dedupe_failed");
@@ -5013,29 +8185,32 @@ bool ReportManager::finalize_result_prepare(size_t therapy_index) {
     if (result_status_.chunk_count == 0) {
         result_status_.state = ReportResultState::Incomplete;
         result_status_.error = "not_cached";
-        publish_result_to_slot();
+        if (!publish_result_to_slot()) return false;
     } else {
         std::sort(result_chunks_,
                   result_chunks_ + result_status_.chunk_count,
                   [](const ReportResultChunk &a,
                      const ReportResultChunk &b) {
+                      if (a.stream_index != b.stream_index) {
+                          return a.stream_index < b.stream_index;
+                      }
                       if (a.kind != b.kind) return a.kind < b.kind;
+                      if (a.start_ms != b.start_ms) {
+                          return a.start_ms < b.start_ms;
+                      }
+                      if (a.end_ms != b.end_ms) return a.end_ms < b.end_ms;
                       if (a.source != b.source) return a.source < b.source;
                       const int name_cmp = strcmp(a.name ? a.name : "",
                                                   b.name ? b.name : "");
                       if (name_cmp != 0) return name_cmp < 0;
-                      return a.start_ms < b.start_ms;
+                      return a.payload_len < b.payload_len;
                   });
-        PlotRange derived_ranges[AC_REPORT_SUMMARY_SESSION_MAX];
-        const size_t derived_range_count =
-            derive_result_session_ranges(derived_ranges,
-                                         AC_REPORT_SUMMARY_SESSION_MAX);
-        if (derived_range_count > 0) {
-            apply_result_session_ranges(derived_ranges, derived_range_count);
-        }
-
         if (!count_result_events_from_chunks()) return false;
         apply_result_event_indices_from_counts();
+        result_status_.state =
+            settled_result_state(result_status_.missing_required);
+        result_status_.error.clear();
+        if (!publish_result_to_slot()) return false;
         if (!start_result_plot_build()) return false;
         if (plot_build_active_) {
             Log::logf(CAT_REPORT,
@@ -5061,64 +8236,157 @@ bool ReportManager::finalize_result_prepare(size_t therapy_index) {
     return true;
 }
 
-bool ReportManager::prepare_result_by_therapy_index_internal(
+ReportManager::ResultPrepareOutcome
+ReportManager::prepare_result_by_therapy_index_internal(
     size_t therapy_index,
     bool refresh_cache) {
     if (defer_result_prepare_for_summary(therapy_index, refresh_cache)) {
-        return true;
+        return ResultPrepareOutcome::Deferred;
     }
-    if (!ensure_result_chunks()) return false;
+    if (!ensure_result_chunks()) return ResultPrepareOutcome::Failed;
 
     ReportSummaryRecord night;
-    if (!load_result_night(therapy_index, night)) return false;
-    if (publish_existing_result_if_current(therapy_index,
-                                           night,
-                                           refresh_cache)) {
-        return true;
+    if (!load_result_night(therapy_index, night)) {
+        return ResultPrepareOutcome::Failed;
+    }
+    return prepare_result_by_night_start_internal(night.start_ms,
+                                                 therapy_index,
+                                                 refresh_cache);
+}
+
+ReportManager::ResultPrepareOutcome
+ReportManager::prepare_result_by_night_start_internal(
+    uint64_t night_start_ms,
+    size_t therapy_index,
+    bool refresh_cache) {
+    Log::logf(CAT_REPORT,
+              LOG_DEBUG,
+              "Result prepare start night=%llu index=%lu refresh=%u\n",
+              static_cast<unsigned long long>(night_start_ms),
+              static_cast<unsigned long>(therapy_index),
+              refresh_cache ? 1u : 0u);
+    if (!ensure_result_chunks()) {
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "Result prepare failed before night load reason=chunk_alloc "
+                  "night=%llu index=%lu\n",
+                  static_cast<unsigned long long>(night_start_ms),
+                  static_cast<unsigned long>(therapy_index));
+        return ResultPrepareOutcome::Failed;
     }
 
-    begin_result_prepare_for_night(therapy_index, night);
+    if (!prepare_indexed_night_) {
+        prepare_indexed_night_ = static_cast<ReportIndexedNight *>(
+            Memory::calloc_large(1, sizeof(ReportIndexedNight), false));
+        if (!prepare_indexed_night_) {
+            log_report_alloc_failed("prepare_indexed_night",
+                                    sizeof(ReportIndexedNight));
+            return ResultPrepareOutcome::Retry;
+        }
+    }
+    size_t current_therapy_index = therapy_index;
+    memset(prepare_indexed_night_, 0, sizeof(*prepare_indexed_night_));
+    if (!indexed_night_by_start(night_start_ms,
+                                *prepare_indexed_night_,
+                                &current_therapy_index)) {
+        clear_result_prepare();
+        fail_result_prepare("night_not_found");
+        return ResultPrepareOutcome::Failed;
+    }
+    const ReportIndexedNight &indexed_night = *prepare_indexed_night_;
+    therapy_index = current_therapy_index;
+    const ReportSummaryRecord &night = indexed_night.summary;
+    if (indexed_night.edf_catalog_pending) {
+        result_status_.state = ReportResultState::Preparing;
+        result_status_.therapy_index = therapy_index;
+        result_status_.night_start_ms = night.start_ms;
+        result_status_.night_end_ms = night.end_ms;
+        result_status_.duration_min = night.duration_min;
+        result_status_.error = "edf_catalog_refreshing";
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Result prepare deferred for EDF catalog "
+                  "night=%llu index=%lu\n",
+                  static_cast<unsigned long long>(night_start_ms),
+                  static_cast<unsigned long>(therapy_index));
+        return ResultPrepareOutcome::Deferred;
+    }
+
+    char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+    if (!take_summary_lock(pdMS_TO_TICKS(20))) {
+        result_status_.error = "summary_lock_busy";
+        return ResultPrepareOutcome::Retry;
+    }
+    format_night_etag_unlocked(night,
+                               indexed_night.source_signature,
+                               current_etag,
+                               sizeof(current_etag));
+    give_summary_lock();
+    if (!current_etag[0]) {
+        result_status_.error = "empty_etag";
+        return ResultPrepareOutcome::Retry;
+    }
+
+    if (publish_existing_result_if_current(therapy_index,
+                                           indexed_night,
+                                           current_etag,
+                                           refresh_cache)) {
+        return ResultPrepareOutcome::Prepared;
+    }
+
+    begin_result_prepare_for_night(therapy_index, indexed_night, current_etag);
+    result_skip_plot_cache_ = refresh_cache;
 
     // Use the session data span, not night.end_ms (a 24h day bucket far past the
     // therapy data) coverage is only written/checked over the session span,
     // so the result chunk range and its coverage check must match.
     ReportSessionRange night_range;
-    if (!night_data_span(night, night_range.start_ms, night_range.end_ms)) {
+    if (!result_data_span(night_range.start_ms, night_range.end_ms)) {
         result_status_.state = ReportResultState::Incomplete;
         result_status_.error = "no_sessions";
-        publish_result_to_slot();
-        return true;
+        return publish_result_to_slot() ? ResultPrepareOutcome::Prepared
+                                        : ResultPrepareOutcome::Retry;
     }
 
-    if (!add_best_result_chunks_for_night(night,
-                                          night_range.start_ms,
-                                          night_range.end_ms)) {
+    bool deferred = false;
+    if (!resolve_and_materialize_result_for_night(indexed_night,
+                                                  night_range.start_ms,
+                                                  night_range.end_ms,
+                                                  &deferred)) {
         release_result_edf_sessions();
-        return false;
+        return result_status_.state == ReportResultState::Error
+                   ? ResultPrepareOutcome::Failed
+                   : ResultPrepareOutcome::Retry;
     }
+    if (deferred) return ResultPrepareOutcome::Deferred;
     const bool uses_edf = result_uses_edf_provider();
     if (!uses_edf) {
         release_result_edf_sessions();
     }
 
-    bool deferred = false;
-    if (!refresh_result_cache_if_needed(night,
+    deferred = false;
+    if (!refresh_result_cache_if_needed(indexed_night,
                                         therapy_index,
                                         refresh_cache,
                                         deferred)) {
         release_result_edf_sessions();
-        return false;
+        return result_status_.state == ReportResultState::Error
+                   ? ResultPrepareOutcome::Failed
+                   : ResultPrepareOutcome::Retry;
     }
     if (deferred) {
         release_result_edf_sessions();
-        return true;
+        return ResultPrepareOutcome::Deferred;
     }
 
     const bool ok = finalize_result_prepare(therapy_index);
     if (!plot_build_active_) {
         release_result_edf_sessions();
     }
-    return ok;
+    if (ok) return ResultPrepareOutcome::Prepared;
+    return result_status_.state == ReportResultState::Error
+               ? ResultPrepareOutcome::Failed
+               : ResultPrepareOutcome::Retry;
 }
 
 bool ReportManager::cache_source_supported(ReportSourceId source) const {
@@ -5135,9 +8403,10 @@ bool ReportManager::cache_source_supported(ReportSourceId source) const {
     }
 }
 
-bool ReportManager::build_cache_plan(const ReportSummaryRecord &night,
+bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
                                      bool force,
                                      bool latest_tail_refresh) {
+    const ReportSummaryRecord &night = indexed_night.summary;
     cache_night_ = night;
     cache_source_count_ = 0;
     cache_source_index_ = 0;
@@ -5146,67 +8415,175 @@ bool ReportManager::build_cache_plan(const ReportSummaryRecord &night,
     cache_status_.night_end_ms = night.end_ms;
     cache_status_.active = true;
 
-    int64_t latest_tail_start_ms = static_cast<int64_t>(night.start_ms);
-    if (latest_tail_refresh) {
-        ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX];
-        const size_t range_count =
-            collect_session_ranges(night,
-                                   ranges,
-                                   AC_REPORT_SUMMARY_SESSION_MAX);
-        latest_tail_start_ms = range_count
-            ? ranges[range_count - 1].start_ms
-            : static_cast<int64_t>(night.start_ms);
-    }
-
-    size_t source_count = 0;
-    const ReportSourceDef *sources = report_source_defs(source_count);
-    for (size_t i = 0; i < source_count; ++i) {
-        const ReportSourceDef &source = sources[i];
-        if (source.id == ReportSourceId::Summary) continue;
-        if (!cache_source_supported(source.id)) continue;
-        if (!force && !source_required_for_report_result(source.id)) continue;
-        int64_t from_ms = 0;
-        if (latest_tail_refresh) {
-            from_ms = latest_tail_start_ms;
-            int64_t cached_end_ms = 0;
-            if (source_latest_cached_end_for_night(source,
-                                                   night,
-                                                   cached_end_ms) &&
-                cached_end_ms > latest_tail_start_ms) {
-                from_ms = cached_end_ms - AC_REPORT_LATEST_TAIL_OVERLAP_MS;
-                if (from_ms < latest_tail_start_ms) {
-                    from_ms = latest_tail_start_ms;
-                }
-            }
-        } else if (force) {
-            from_ms = static_cast<int64_t>(night.start_ms);
-        } else {
-            const bool refresh_empty_event =
-                sparse_event_refresh_due(night, source);
-            if (!source_missing_start_for_night(night,
-                                                source,
-                                                from_ms,
-                                                refresh_empty_event)) {
-                continue;
-            }
+    auto add_plan_source = [&](ReportSourceId source,
+                               int64_t from_ms) -> bool {
+        if (!cache_source_supported(source)) return true;
+        for (size_t i = 0; i < cache_source_count_; ++i) {
+            ReportCacheSourcePlan &existing = cache_plan_[i];
+            if (existing.source != source) continue;
+            if (from_ms < existing.from_ms) existing.from_ms = from_ms;
+            return true;
         }
         if (cache_source_count_ >= AC_REPORT_CACHE_SOURCE_MAX) {
             fail_cache_fetch("cache_plan_full");
             return false;
         }
         ReportCacheSourcePlan &plan = cache_plan_[cache_source_count_++];
-        plan.source = source.id;
+        plan.source = source;
         plan.from_ms = from_ms;
+        return true;
+    };
+
+    int64_t latest_tail_start_ms = static_cast<int64_t>(night.start_ms);
+    int64_t latest_tail_end_ms = static_cast<int64_t>(night.end_ms);
+    if (latest_tail_refresh) {
+        bool found_latest_range = false;
+        auto maybe_use_latest_range = [&](const ReportSessionRange &range) {
+            if (range.end_ms <= range.start_ms) return;
+            if (!found_latest_range ||
+                range.start_ms > latest_tail_start_ms) {
+                latest_tail_start_ms = range.start_ms;
+                latest_tail_end_ms = range.end_ms;
+                found_latest_range = true;
+            }
+        };
+        const size_t edf_count =
+            std::min(indexed_night.data_range_count,
+                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+        if (indexed_night.has_edf && edf_count > 0) {
+            for (size_t i = 0; i < edf_count; ++i) {
+                maybe_use_latest_range(indexed_night.data_ranges[i]);
+            }
+            const size_t display_count =
+                std::min(indexed_night.range_count,
+                         static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+            for (size_t i = 0; i < display_count; ++i) {
+                const ReportSessionRange &display = indexed_night.ranges[i];
+                bool overlaps_edf = false;
+                for (size_t k = 0; k < edf_count; ++k) {
+                    if (ranges_overlap(display.start_ms,
+                                       display.end_ms,
+                                       indexed_night.data_ranges[k].start_ms,
+                                       indexed_night.data_ranges[k].end_ms)) {
+                        overlaps_edf = true;
+                        break;
+                    }
+                }
+                if (!overlaps_edf) maybe_use_latest_range(display);
+            }
+        } else {
+            const size_t display_count =
+                std::min(indexed_night.range_count,
+                         static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+            for (size_t i = 0; i < display_count; ++i) {
+                maybe_use_latest_range(indexed_night.ranges[i]);
+            }
+        }
     }
-    cache_status_.source_count = static_cast<uint32_t>(cache_source_count_);
-    if (cache_source_count_ > 0) {
-        invalidate_materialized(night.start_ms, false);
+
+    size_t source_count = 0;
+    const ReportSourceDef *sources = report_source_defs(source_count);
+
+    if (force) {
+        for (size_t i = 0; i < source_count; ++i) {
+            const ReportSourceDef &source = sources[i];
+            if (source.id == ReportSourceId::Summary) continue;
+            if (!add_plan_source(source.id,
+                                 static_cast<int64_t>(night.start_ms))) {
+                return false;
+            }
+        }
+    } else {
+        int64_t span_start_ms = 0;
+        int64_t span_end_ms = 0;
+        if (latest_tail_refresh) {
+            span_start_ms = latest_tail_start_ms;
+            span_end_ms = latest_tail_end_ms;
+        } else if (!indexed_night_data_span(indexed_night,
+                                            span_start_ms,
+                                            span_end_ms)) {
+            cache_status_.active = false;
+            cache_status_.revision++;
+            cache_status_.error.clear();
+            return true;
+        }
+
+        ScopedReportResolveContext resolve("cache_plan_resolver");
+        if (!resolve) {
+            fail_cache_fetch("cache_plan_alloc_failed");
+            return false;
+        }
+
+        bool edf_pending = false;
+        size_t session_count = 0;
+        const bool have_edf =
+            collect_edf_sessions_for_night(night,
+                                           span_start_ms,
+                                           span_end_ms,
+                                           resolve.sessions(),
+                                           AC_REPORT_SUMMARY_SESSION_MAX,
+                                           session_count,
+                                           &edf_pending);
+        if (edf_pending) {
+            cache_status_.active = false;
+            cache_status_.revision++;
+            cache_status_.error.clear();
+            return true;
+        }
+
+        EdfReportDataProvider edf_provider(have_edf ? resolve.sessions()
+                                                    : nullptr,
+                                           have_edf ? session_count : 0);
+        ReportSourceResolver resolver(edf_provider,
+                                      spool_report_provider(),
+                                      resolve.scratch());
+        ReportResolvedPlan &resolved = resolve.plan();
+        if (!resolver.build_plan(indexed_night,
+                                 span_start_ms,
+                                 span_end_ms,
+                                 resolved)) {
+            fail_cache_fetch("cache_source_resolve_failed");
+            return false;
+        }
+
+        for (size_t i = 0; i < resolved.segment_count; ++i) {
+            const ReportResolvedSegment &segment = resolved.segments[i];
+            if (segment.provider != ReportResolvedProvider::Spool ||
+                segment.complete ||
+                !segment.required ||
+                segment.end_ms <= segment.start_ms) {
+                continue;
+            }
+            const ReportSourceDef *source = report_source_def(segment.source);
+            if (!source || !cache_source_supported(source->id)) continue;
+            int64_t from_ms = segment.start_ms;
+            if (latest_tail_refresh) {
+                int64_t cached_end_ms = 0;
+                if (source_latest_cached_end_for_night(*source,
+                                                       night,
+                                                       cached_end_ms) &&
+                    cached_end_ms > latest_tail_start_ms) {
+                    from_ms =
+                        cached_end_ms - AC_REPORT_LATEST_TAIL_OVERLAP_MS;
+                    if (from_ms < latest_tail_start_ms) {
+                        from_ms = latest_tail_start_ms;
+                    }
+                    if (from_ms > segment.start_ms) {
+                        from_ms = segment.start_ms;
+                    }
+                }
+            }
+            if (!add_plan_source(source->id, from_ms)) return false;
+        }
     }
-    discard_cache_coalesce_buffers();
-    begin_cache_write_fetch();
-    cache_fetch_active_ = true;
-    cache_status_.active = true;
-    return true;
+
+    if (cache_source_count_ == 0) {
+        cache_status_.active = false;
+        cache_status_.revision++;
+        cache_status_.error.clear();
+        return true;
+    }
+    return activate_cache_plan_for_night(night);
 }
 
 bool ReportManager::start_next_cache_source() {
@@ -5271,6 +8648,8 @@ bool ReportManager::store_cache_round(ReportSpoolResult &result) {
     context.manager = this;
     context.source = source;
     char error[64] = {};
+    context.error = error;
+    context.error_len = sizeof(error);
     bool parsed = false;
     switch (source) {
         case ReportSourceId::UsageEvents:
@@ -5435,7 +8814,7 @@ bool ReportManager::write_cache_source_coverage(ReportSourceId source,
         fail_cache_fetch("coverage_write_failed");
         return false;
     }
-    if (!source_complete_for_night(cache_night_, *def)) {
+    if (!source_complete_for_range(cache_night_, *def, from_ms)) {
         fail_cache_fetch("coverage_incomplete");
         return false;
     }

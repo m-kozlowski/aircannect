@@ -45,7 +45,6 @@ enum WebCommandKind : uint8_t {
     WebCommandTherapyAction,
     WebCommandOximetryAction,
     WebCommandReportSummaryRefresh,
-    WebCommandReportResultPrepare,
     WebCommandResmedOtaInit,
     WebCommandResmedOtaBlock,
     WebCommandResmedOtaCheck,
@@ -77,7 +76,6 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus resmed_ota;
     WebUiBufferMemoryStatus settings;
     WebUiBufferMemoryStatus live;
-    WebUiBufferMemoryStatus report_result;
     size_t console_log_length = 0;
     size_t sse_clients = 0;
     size_t sse_pending_total = 0;
@@ -180,7 +178,6 @@ private:
     void execute_oximetry_action(const std::string &action,
                                  const std::string &body);
     void execute_report_summary_refresh();
-    void execute_report_result_prepare(const std::string &body);
     void execute_resmed_ota_command(const WebCommand &command);
 
     // SSE client tracking
@@ -291,9 +288,6 @@ private:
     LargeTextBuffer cached_ota_json_;
     LargeTextBuffer cached_resmed_ota_json_;
     LargeTextBuffer cached_settings_json_;
-    // Render scratch for report GET handlers, held under cache_mutex_; mutable
-    // so const handlers can render into it.
-    mutable LargeTextBuffer report_request_json_;
     LargeTextBuffer live_json_;
 
     bool cached_http_auth_required_ = true;

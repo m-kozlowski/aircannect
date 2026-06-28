@@ -59,6 +59,8 @@ private:
 
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
 
+    bool export_network_ready(bool network_connected, uint32_t now_ms);
+
     void poll_post_therapy(RpcArbiter &arbiter,
                            ReportManager &report,
                            bool storage_sync_active,
@@ -94,6 +96,7 @@ private:
     PostTherapyState post_therapy_;
     StartupCheckState startup_check_;
     IdleBackfillState idle_backfill_;
+    uint32_t network_connected_since_ms_ = 0;
 };
 
 }  // namespace aircannect

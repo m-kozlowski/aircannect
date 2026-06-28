@@ -1,5 +1,6 @@
 #include "export_coordinator.h"
 
+#include "board_net.h"
 #include "board_report.h"
 #include "debug_log.h"
 
@@ -49,6 +50,20 @@ bool ExportCoordinator::request_sleephq_check() {
     return sleephq_sync_->request_check("manual");
 }
 
+bool ExportCoordinator::export_network_ready(bool network_connected,
+                                             uint32_t now_ms) {
+    if (!network_connected) {
+        network_connected_since_ms_ = 0;
+        return false;
+    }
+    if (network_connected_since_ms_ == 0) {
+        network_connected_since_ms_ = now_ms ? now_ms : 1;
+        return false;
+    }
+    return static_cast<int32_t>(now_ms - network_connected_since_ms_) >=
+           static_cast<int32_t>(AC_EXPORT_NETWORK_SETTLE_MS);
+}
+
 void ExportCoordinator::poll(RpcArbiter &arbiter,
                              ReportManager &report,
                              const AppConfigData &config,
@@ -56,13 +71,16 @@ void ExportCoordinator::poll(RpcArbiter &arbiter,
                              bool resmed_ota_active,
                              bool esp_ota_active,
                              uint32_t now_ms) {
+    const bool network_ready =
+        export_network_ready(network_connected, now_ms);
+
     if (storage_sync_) {
-        storage_sync_->set_network_available(network_connected);
+        storage_sync_->set_network_available(network_ready);
         storage_sync_->refresh_config(config, now_ms);
     }
 
     if (sleephq_sync_) {
-        sleephq_sync_->set_network_available(network_connected);
+        sleephq_sync_->set_network_available(network_ready);
         sleephq_sync_->refresh_config(config, now_ms);
     }
 
@@ -94,12 +112,12 @@ void ExportCoordinator::poll(RpcArbiter &arbiter,
                 As11TherapyState::Running);
     }
 
-    maybe_queue_sleephq_startup_check(network_connected,
+    maybe_queue_sleephq_startup_check(network_ready,
                                       storage_sync_active,
                                       sleephq_runtime);
     poll_sleephq_idle_backfill(arbiter,
                                report,
-                               network_connected,
+                               network_ready,
                                storage_sync_active,
                                sleephq_runtime,
                                now_ms);

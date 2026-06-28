@@ -29,6 +29,7 @@ public:
         (void)reason;
         return false;
     }
+    virtual bool drain_before_regular_jobs() const { return false; }
     virtual JobStep step_when_gate_closed(const char *reason) {
         (void)reason;
         return step();
@@ -72,6 +73,11 @@ public:
     void note_activity();
     void wake();
 
+    // Same gate decision the worker task uses before running regular idle
+    // jobs. This lets main-loop-owned jobs yield/abort without reading worker
+    // internals or duplicating gate policy.
+    bool idle_gate_open(const char **reason = nullptr) const;
+
     BackgroundWorkerStatus status() const;
 
 private:
@@ -90,7 +96,7 @@ private:
     static constexpr uint32_t GATE_AS11 = 1u << 5;
     static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
-    static constexpr size_t MAX_JOBS = 8;
+    static constexpr size_t MAX_JOBS = 10;
     BackgroundJob *jobs_[MAX_JOBS] = {};
     size_t job_count_ = 0;
 

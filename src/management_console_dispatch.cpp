@@ -12,6 +12,7 @@
 #include "board.h"
 #include "board_report.h"
 #include "debug_log.h"
+#include "edf_report_catalog_job.h"
 #include "export_coordinator.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
@@ -588,6 +589,92 @@ void print_report_result_status(Print &out,
     out.print(static_cast<unsigned long>(status.materialized_plot_slots));
     out.print(" error=");
     out.print(status.error.length() ? status.error.c_str() : "--");
+    out.println();
+
+    const ReportManager::BuildQueueSnapshot queue =
+        manager.build_queue_snapshot();
+    out.print("[REPORT] build_queue=");
+    if (!queue.available) {
+        out.print("unavailable");
+    } else if (!queue.lock_ok) {
+        out.print("busy");
+    } else {
+        out.print(static_cast<unsigned long>(queue.count));
+        if (queue.count > 0) {
+            out.print(" head_index=");
+            out.print(static_cast<unsigned long>(queue.head_therapy_index));
+            out.print(" head_night=");
+            print_uint64(out, queue.head_night_ms);
+            out.print(" refresh=");
+            out.print(queue.head_refresh ? "yes" : "no");
+        }
+        out.print(" enq=");
+        out.print(static_cast<unsigned long>(queue.enqueue_total));
+        out.print("/");
+        out.print(static_cast<unsigned long>(queue.queued_total));
+        out.print("/");
+        out.print(static_cast<unsigned long>(queue.already_total));
+        out.print(" svc=");
+        out.print(static_cast<unsigned long>(queue.service_total));
+        if (queue.last_read[0]) {
+            out.print(" last_read=");
+            out.print(queue.last_read);
+        }
+        if (queue.last_enqueue_result[0]) {
+            out.print(" last_enqueue=");
+            out.print(queue.last_enqueue_result);
+            out.print("@");
+            out.print(static_cast<unsigned long>(
+                queue.last_enqueue_therapy_index));
+            out.print("/");
+            print_uint64(out, queue.last_enqueue_night_ms);
+        }
+        if (queue.last_service_block[0]) {
+            out.print(" blocked=");
+            out.print(queue.last_service_block);
+        }
+        if (queue.last_night_ms != 0 || queue.last_outcome[0]) {
+            out.print(" last_index=");
+            out.print(static_cast<unsigned long>(queue.last_therapy_index));
+            out.print(" last_night=");
+            print_uint64(out, queue.last_night_ms);
+            out.print(" last_outcome=");
+            out.print(queue.last_outcome[0] ? queue.last_outcome : "--");
+            out.print(" last_state=");
+            out.print(queue.last_state[0] ? queue.last_state : "--");
+            out.print(" last_error=");
+            out.print(queue.last_error[0] ? queue.last_error : "--");
+        }
+    }
+    out.println();
+
+    EdfReportCatalogStatus catalog;
+    out.print("[REPORT] edf_catalog=");
+    if (!manager.edf_catalog_status(catalog, 0)) {
+        out.print("unavailable");
+    } else {
+        out.print(edf_report_catalog_state_name(catalog.state));
+        out.print(" refresh=");
+        out.print(static_cast<unsigned long>(catalog.refresh_id));
+        out.print(" sessions=");
+        out.print(static_cast<unsigned long>(catalog.sessions));
+        out.print(" build_sessions=");
+        out.print(static_cast<unsigned long>(catalog.build_sessions));
+        out.print(" days=");
+        out.print(static_cast<unsigned long>(catalog.days_scanned));
+        out.print(" files=");
+        out.print(static_cast<unsigned long>(catalog.files_scanned));
+        out.print("/");
+        out.print(static_cast<unsigned long>(catalog.files_indexed));
+        out.print(" skipped=");
+        out.print(static_cast<unsigned long>(catalog.files_skipped));
+        out.print(" truncated=");
+        out.print(catalog.truncated ? "yes" : "no");
+        out.print(" current=");
+        out.print(catalog.current_path[0] ? catalog.current_path : "--");
+        out.print(" error=");
+        out.print(catalog.error[0] ? catalog.error : "--");
+    }
     out.println();
 }
 

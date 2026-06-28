@@ -2086,6 +2086,7 @@
     let reportDrawRetryCount = 0;
     let reportResizeObserver = null;
     const reportClientCache = new Map();
+    const reportPlotClientCache = new Map();
     let reportZoom = null;        // {start,end} when drag-zoomed, else null
     // Zoom: raw samples for the hour-rounded window, cached per (index, window).
     let reportBaseSeries = {};
@@ -2093,6 +2094,7 @@
     let reportCurrentIndex = -1;
     let reportCurrentEtag = null;
     const reportRangeCache = new Map();
+    let reportRangeInFlightKey = "";
     let reportRangeToken = 0;
     let reportHoverTime = null;   // cursor time shared across all charts
     let reportDrag = null;        // active drag-to-zoom selection state
@@ -2121,6 +2123,13 @@
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_CLIENT_CACHE_MAX = 4;
+    const REPORT_PLOT_CLIENT_CACHE_MAX = 6;
+    const REPORT_RANGE_CACHE_MAX = 3;
+    const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
+    const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
+    const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
+    const REPORT_POLL_DELAY_MS = 300;
+    const REPORT_RANGE_POLL_DELAY_MS = 250;
     const reportChartDefs = [
       {key: "flow", title: "Flow", color: "#8b5cf6", unit: "L/min"},
       {
@@ -2571,7 +2580,8 @@
         item.className = "report-session";
         const start = Number(session.start || 0);
         const minutes = Number(session.duration_min || 0);
-        const end = start + minutes * 60000;
+        const explicitEnd = Number(session.end || 0);
+        const end = explicitEnd > start ? explicitEnd : start + minutes * 60000;
         item.textContent = fmtReportTime(start) + "-" + fmtReportTime(end) +
           " " + fmtMinutes(minutes);
         if (toggleable) {
@@ -2629,6 +2639,7 @@
       reportCurrentIndex = -1;
       reportCurrentEtag = null;
       reportRangeCache.clear();
+      reportRangeInFlightKey = "";
       reportRangeToken++;
       reportDrawItems = [];
       reportDrawPending = false;
@@ -2637,28 +2648,25 @@
       if (charts) charts.textContent = "";
     }
 
-    function cloneReportSeries(series) {
-      const copy = {};
-      Object.keys(series || {}).forEach((key) => {
-        copy[key] = (series[key] || []).map((point) => ({
-          t: point.t,
-          value: point.value,
-        }));
-      });
-      return copy;
-    }
-
-    function cloneReportEvents(events) {
-      return (events || []).map((event) => ({
-        t: event.t,
-        duration: event.duration,
-        code: event.code,
-        flags: event.flags,
-      }));
-    }
-
     function cloneReportResult(result) {
       return result ? JSON.parse(JSON.stringify(result)) : null;
+    }
+
+    function lruGet(cache, key) {
+      if (!cache.has(key)) return null;
+      const value = cache.get(key);
+      cache.delete(key);
+      cache.set(key, value);
+      return value;
+    }
+
+    function lruSet(cache, key, value, maxEntries) {
+      if (cache.has(key)) cache.delete(key);
+      cache.set(key, value);
+      while (cache.size > maxEntries) {
+        const oldest = cache.keys().next().value;
+        cache.delete(oldest);
+      }
     }
 
     function rememberReportClientCache(nightId, etag) {
@@ -2666,16 +2674,41 @@
           (reportResult.state !== "ready" && reportResult.state !== "partial")) {
         return;
       }
-      reportClientCache.set(nightId, {
+      // Decoded plot objects are immutable after decode; render paths slice
+      // before drawing, so cache hits can reuse references without deep copies.
+      lruSet(reportClientCache, nightId, {
         etag: etag,
         result: cloneReportResult(reportResult),
-        series: cloneReportSeries(reportSeries),
-        events: cloneReportEvents(reportEvents),
-      });
-      while (reportClientCache.size > REPORT_CLIENT_CACHE_MAX) {
-        const oldest = reportClientCache.keys().next().value;
-        reportClientCache.delete(oldest);
-      }
+        series: reportSeries,
+        events: reportEvents,
+      }, REPORT_CLIENT_CACHE_MAX);
+    }
+
+    function rememberReportPlotClientCache(etag) {
+      if (!etag) return;
+      lruSet(reportPlotClientCache, etag, {
+        series: reportSeries,
+        events: reportEvents,
+      }, REPORT_PLOT_CLIENT_CACHE_MAX);
+    }
+
+    function activateReportBasePlot(index, etag, series, events) {
+      reportSeries = series || {};
+      reportEvents = events || [];
+      reportBaseSeries = reportSeries;
+      reportBaseEvents = reportEvents;
+      reportCurrentIndex = Number.isFinite(Number(index)) ? Number(index) : -1;
+      reportCurrentEtag = etag || null;
+      reportRangeCache.clear();
+      reportRangeInFlightKey = "";
+      reportRangeToken++;
+    }
+
+    function restoreReportPlotClientCache(etag, index) {
+      const cached = etag ? lruGet(reportPlotClientCache, etag) : null;
+      if (!cached) return false;
+      activateReportBasePlot(index, etag, cached.series, cached.events);
+      return true;
     }
 
     function reportRange() {
@@ -2699,9 +2732,10 @@
       return sessions.map((session) => {
         const start = Number(session.start || 0);
         const minutes = Number(session.duration_min || 0);
+        const explicitEnd = Number(session.end || 0);
         return {
           start,
-          end: start + minutes * 60000,
+          end: explicitEnd > start ? explicitEnd : start + minutes * 60000,
         };
       }).filter((range) => range.start > 0 && range.end > range.start)
         .sort((a, b) => a.start - b.start);
@@ -2725,14 +2759,46 @@
       return -1;
     }
 
+    function reportPointMin(point) {
+      if (!point || point.gap) return NaN;
+      if (Number.isFinite(point.min)) return point.min;
+      return Number.isFinite(point.value) ? point.value : NaN;
+    }
+
+    function reportPointMax(point) {
+      if (!point || point.gap) return NaN;
+      if (Number.isFinite(point.max)) return point.max;
+      return Number.isFinite(point.value) ? point.value : NaN;
+    }
+
+    function reportPointValue(point) {
+      if (!point || point.gap) return NaN;
+      if (Number.isFinite(point.value)) return point.value;
+      const min = reportPointMin(point);
+      const max = reportPointMax(point);
+      return Number.isFinite(min) && Number.isFinite(max)
+        ? (min + max) / 2
+        : NaN;
+    }
+
+    function reportPointOverlapsRange(point, range) {
+      if (!point || point.gap || !range || !Number.isFinite(point.t)) {
+        return false;
+      }
+      const pointEnd = Number.isFinite(point.end) ? point.end : point.t;
+      return pointEnd >= range.start && point.t <= range.end;
+    }
+
     function reportSeriesExtent(seriesList) {
       let min = Infinity;
       let max = -Infinity;
       seriesList.forEach((series) => {
         series.forEach((point) => {
-          if (!Number.isFinite(point.value)) return;
-          min = Math.min(min, point.value);
-          max = Math.max(max, point.value);
+          const pointMin = reportPointMin(point);
+          const pointMax = reportPointMax(point);
+          if (!Number.isFinite(pointMin) || !Number.isFinite(pointMax)) return;
+          min = Math.min(min, pointMin);
+          max = Math.max(max, pointMax);
         });
       });
       if (!Number.isFinite(min) || !Number.isFinite(max)) {
@@ -2856,7 +2922,14 @@
       }
     }
 
-    function drawReportChart(svg, seriesList, minY, maxY, start, end, ranges) {
+    function drawReportChart(svg,
+                             seriesList,
+                             minY,
+                             maxY,
+                             start,
+                             end,
+                             ranges,
+                             rangePending) {
       const box = reportSvgBox(svg, 150);
       if (!box) return false;
       const {width, height} = box;
@@ -2891,12 +2964,108 @@
 
       seriesList.forEach((series) => {
         const points = Array.isArray(series.points) ? series.points : [];
-        if (points.length < 2) return;
+        const isEnvelope = points.some((point) => point && point.envelope);
+        if ((!isEnvelope && points.length < 2) ||
+            (isEnvelope && points.length < 1)) {
+          return;
+        }
+        if (isEnvelope) {
+          const flushSegment = (segment) => {
+            if (!segment.length) return;
+            const midParts = [];
+            const barParts = [];
+            let midStarted = false;
+            segment.forEach((point) => {
+              const pointEnd = Number.isFinite(point.end) ? point.end : point.t;
+              const tMid = point.t + Math.max(0, pointEnd - point.t) / 2;
+              const x = pad.left + graphW * ((tMid - start) / (end - start));
+              const yMax = pad.top + graphH *
+                (1 - (reportPointMax(point) - minY) / (maxY - minY));
+              const yMin = pad.top + graphH *
+                (1 - (reportPointMin(point) - minY) / (maxY - minY));
+              const yMid = (yMax + yMin) / 2;
+              barParts.push("M" + x.toFixed(1) + " " + yMax.toFixed(1) +
+                "L" + x.toFixed(1) + " " + yMin.toFixed(1));
+              midParts.push((midStarted ? "L" : "M") + x.toFixed(1) + " " +
+                yMid.toFixed(1));
+              midStarted = true;
+            });
+            if (barParts.length) {
+              svg.appendChild(svgNode("path", {
+                d: barParts.join(" "),
+                fill: "none",
+                stroke: series.color,
+                "stroke-opacity": "0.55",
+                "stroke-width": "1.15",
+                "vector-effect": "non-scaling-stroke",
+              }));
+            }
+            if (midParts.length > 1) {
+              svg.appendChild(svgNode("path", {
+                d: midParts.join(" "),
+                fill: "none",
+                stroke: series.color,
+                "stroke-opacity": "0.95",
+                "stroke-width": "1.25",
+                "vector-effect": "non-scaling-stroke",
+              }));
+            }
+          };
+          let segment = [];
+          let currentRange = -1;
+          points.forEach((point) => {
+            if (point && point.gap) {
+              flushSegment(segment);
+              segment = [];
+              currentRange = -1;
+              return;
+            }
+            const minValue = reportPointMin(point);
+            const maxValue = reportPointMax(point);
+            if (!Number.isFinite(point.t) ||
+                !Number.isFinite(minValue) ||
+                !Number.isFinite(maxValue)) {
+              flushSegment(segment);
+              segment = [];
+              currentRange = -1;
+              return;
+            }
+            const pointEnd = Number.isFinite(point.end) ? point.end : point.t;
+            if (pointEnd < start || point.t > end) {
+              flushSegment(segment);
+              segment = [];
+              currentRange = -1;
+              return;
+            }
+            const visibleT = Math.max(point.t, start);
+            const rangeIndex = reportPointRangeIndex(visibleT, ranges);
+            if (rangeIndex < 0 || rangeIndex !== currentRange) {
+              flushSegment(segment);
+              segment = [];
+              currentRange = rangeIndex;
+            }
+            if (rangeIndex < 0) return;
+            segment.push({
+              t: Math.max(point.t, start),
+              end: Math.min(pointEnd, end),
+              min: minValue,
+              max: maxValue,
+            });
+          });
+          flushSegment(segment);
+          return;
+        }
         const parts = [];
         let started = false;
         let currentRange = -1;
         points.forEach((point) => {
-          if (!Number.isFinite(point.t) || !Number.isFinite(point.value) ||
+          if (point && point.gap) {
+            started = false;
+            currentRange = -1;
+            return;
+          }
+          const pointValue = reportPointValue(point);
+          if (!Number.isFinite(point.t) || !Number.isFinite(pointValue) ||
               point.t < start || point.t > end) {
             started = false;
             currentRange = -1;
@@ -2914,7 +3083,7 @@
           }
           const x = pad.left + graphW * ((point.t - start) / (end - start));
           const y = pad.top + graphH *
-            (1 - (point.value - minY) / (maxY - minY));
+            (1 - (pointValue - minY) / (maxY - minY));
           parts.push((started ? "L" : "M") + x.toFixed(1) + " " +
             y.toFixed(1));
           started = true;
@@ -2937,6 +3106,7 @@
       });
       svg.appendChild(cursor);
       svg._cursor = cursor;
+      svg._timeTooltip = createReportTimeTooltip(svg);
       return true;
     }
 
@@ -3003,6 +3173,7 @@
       });
       svg.appendChild(cursor);
       svg._cursor = cursor;
+      svg._timeTooltip = createReportTimeTooltip(svg);
       return true;
     }
 
@@ -3028,12 +3199,25 @@
         const mid = (lo + hi) >> 1;
         if (points[mid].t < t) lo = mid + 1; else hi = mid;
       }
-      let best = points[lo];
-      if (lo > 0 && Math.abs(points[lo - 1].t - t) < Math.abs(best.t - t)) {
-        best = points[lo - 1];
+      const dataPoint = (idx, step) => {
+        for (let i = idx; i >= 0 && i < points.length; i += step) {
+          const point = points[i];
+          const value = reportPointValue(point);
+          if (point && !point.gap && Number.isFinite(point.t) &&
+              Number.isFinite(value)) {
+            return point;
+          }
+        }
+        return null;
+      };
+      let best = dataPoint(lo, 1) || dataPoint(lo - 1, -1);
+      const left = dataPoint(lo - 1, -1);
+      if (!best) return null;
+      if (left && Math.abs(left.t - t) < Math.abs(best.t - t)) {
+        best = left;
       }
       if (Math.abs(best.t - t) > 120000) return null;
-      return best.value;
+      return reportPointValue(best);
     }
 
     // Mouse clientX over a chart svg -> time within its range (viewBox is
@@ -3066,6 +3250,60 @@
       return g.pad.left + g.graphW * ((t - it.start) / (it.end - it.start));
     }
 
+    function createReportTimeTooltip(svg) {
+      const group = svgNode("g", {
+        "pointer-events": "none",
+        visibility: "hidden",
+      });
+      const rect = svgNode("rect", {
+        x: "0",
+        y: "0",
+        width: "58",
+        height: "16",
+        rx: "2",
+        ry: "2",
+        fill: "#0b1020",
+        "fill-opacity": "0.96",
+        stroke: "#aeb8c8",
+        "stroke-width": "1",
+      });
+      const text = svgText("00:00:00", 0, 0, {
+        fill: "#f2f6fb",
+        "font-size": "10",
+        "font-family": "SF Mono, Consolas, monospace",
+        "text-anchor": "middle",
+      });
+      group.appendChild(rect);
+      group.appendChild(text);
+      svg.appendChild(group);
+      return {group, rect, text};
+    }
+
+    function hideReportTimeTooltip(canvas) {
+      if (canvas._timeTooltip) {
+        canvas._timeTooltip.group.setAttribute("visibility", "hidden");
+      }
+    }
+
+    function updateReportTimeTooltip(canvas, x, t) {
+      const tip = canvas._timeTooltip;
+      const g = canvas._geom;
+      if (!tip || !g) return;
+      const label = fmtReportClock(t);
+      const boxW = 58;
+      const boxH = 16;
+      const minCx = g.pad.left + boxW / 2;
+      const maxCx = g.width - g.pad.right - boxW / 2;
+      const cx = Math.max(minCx, Math.min(maxCx, x));
+      const y = Math.max(g.pad.top + 2, g.height - boxH - 2);
+      tip.text.textContent = label;
+      tip.rect.setAttribute("x", (cx - boxW / 2).toFixed(1));
+      tip.rect.setAttribute("y", y.toFixed(1));
+      tip.text.setAttribute("x", cx.toFixed(1));
+      tip.text.setAttribute("y", (y + 11).toFixed(1));
+      tip.group.setAttribute("visibility", "visible");
+    }
+
     // Item 6: one cursor time, drawn on every chart, with each header showing
     // that chart's value at the cursor.
     function updateReportHover() {
@@ -3076,6 +3314,7 @@
         const inRange = t != null && t >= item.start && t <= item.end;
         if (!inRange) {
           canvas._cursor.setAttribute("visibility", "hidden");
+          hideReportTimeTooltip(canvas);
           if (canvas._readout) canvas._readout.textContent = "";
           return;
         }
@@ -3083,6 +3322,7 @@
         canvas._cursor.setAttribute("x1", x.toFixed(1));
         canvas._cursor.setAttribute("x2", x.toFixed(1));
         canvas._cursor.setAttribute("visibility", "visible");
+        updateReportTimeTooltip(canvas, x, t);
         if (canvas._readout) {
           canvas._readout.textContent = reportReadoutText(item, t);
         }
@@ -3106,7 +3346,6 @@
       if (hi - lo > 60000) {
         reportZoom = {start: lo, end: hi};
         renderReportCharts();
-        fetchReportRange(lo, hi);
       }
     }
     document.addEventListener("mouseup", reportFinishDrag);
@@ -3114,6 +3353,8 @@
     function resetReportZoom() {
       if (!reportZoom) return;
       reportZoom = null;
+      reportRangeInFlightKey = "";
+      reportRangeToken++;
       reportSeries = reportBaseSeries;
       reportEvents = reportBaseEvents;
       renderReportCharts();
@@ -3183,7 +3424,8 @@
                                    item.maxY,
                                    item.start,
                                    item.end,
-                                   item.ranges) || retry;
+                                   item.ranges,
+                                   item.rangePending) || retry;
         }
       });
       updateReportHover();
@@ -3290,6 +3532,8 @@
       }
       const range = reportZoom || reportRange();
       if (!(range.end > range.start)) return;
+      if (reportZoom) ensureReportRangeLoaded(reportZoom.start, reportZoom.end);
+      const zoomAwaitingRange = !!reportZoom && !currentReportRangeReady();
       const sessionRanges = reportVisibleSessionRanges();
 
       // Map each signal name -> whether it fell back to the low-res 1-min trend
@@ -3333,8 +3577,9 @@
         }
         const extent = reportSeriesExtent(seriesList.map((series) =>
           series.points.filter((p) =>
+            p && !p.gap &&
             reportPointRangeIndex(p.t, sessionRanges) >= 0 &&
-            p.t >= range.start && p.t <= range.end)));
+            reportPointOverlapsRange(p, range))));
 
         const card = document.createElement("div");
         card.className = "report-chart";
@@ -3387,6 +3632,7 @@
           start: range.start,
           end: range.end,
           ranges: sessionRanges,
+          rangePending: zoomAwaitingRange,
         };
         reportDrawItems.push(item);
         canvas._item = item;
@@ -3450,8 +3696,7 @@
     }
 
     // Conditional GET by night index: returns {status, etag, json}. Polls while
-    // the backend is still building (202). forceFresh (a refresh) keeps polling
-    // through 304 until the version changes, so it waits for the rebuild.
+    // the backend is still building (202).
     function isTransientReportError(text) {
       try {
         const parsed = JSON.parse(text);
@@ -3463,183 +3708,303 @@
       }
     }
 
-    async function pollReportResult(token, index, inm, forceFresh) {
-      for (let attempt = 0; attempt < 80; attempt++) {
-        if (token !== reportLoadToken) return null;
-        const url = "/api/report/result?index=" + index +
-          (inm ? "&inm=" + encodeURIComponent(inm) : "");
-        const resp = await fetch(url);
-        if (token !== reportLoadToken) return null;
-        if (resp.status === 304) {
-          if (forceFresh) {
-            await new Promise((r) => setTimeout(r, 300));
-            continue;
-          }
-          return {status: 304, etag: inm, json: null};
-        }
-        if (resp.status === 200) {
-          const etag = (resp.headers.get("ETag") || "").replace(/"/g, "");
-          const json = await resp.json();
-          if (forceFresh && inm && etag === inm) {
-            await new Promise((r) => setTimeout(r, 300));
-            continue;
-          }
-          return {status: 200, etag: etag, json: json};
-        }
-        if (resp.status === 202) {
-          msg("reportMsg", "Preparing report...", true, true);
-          await new Promise((r) => setTimeout(r, 300));
+    function delayMs(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function pollReportFetch(options) {
+      const active = options.active || (() => true);
+      const delay = options.delayMs || REPORT_POLL_DELAY_MS;
+      const maxAttempts = options.maxAttempts || 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (!active()) return null;
+        let response;
+        try {
+          response = await options.request();
+        } catch (error) {
+          await delayMs(delay);
           continue;
         }
-        if (resp.status === 404) return {status: 404, etag: "", json: null};
-        const text = await resp.text();
-        if (resp.status === 503 && isTransientReportError(text)) {
-          await new Promise((r) => setTimeout(r, 300));
-          continue;
-        }
-        throw new Error(text);
+        if (!active()) return null;
+        const action = await options.handle(response);
+        if (!action) return null;
+        if (action.done) return action.value;
+        await delayMs(action.delayMs == null ? delay : action.delayMs);
       }
-      return {status: 0, etag: "", json: null};
+      return options.timeoutValue === undefined ? null : options.timeoutValue;
+    }
+
+    async function pollReportResult(token, index, nightStart, inm) {
+      const url = "/api/report/result?index=" + index +
+        (nightStart ? "&night=" + encodeURIComponent(nightStart) : "") +
+        (inm ? "&inm=" + encodeURIComponent(inm) : "");
+      return pollReportFetch({
+        active: () => token === reportLoadToken,
+        maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
+        delayMs: REPORT_POLL_DELAY_MS,
+        timeoutValue: {status: 0, etag: "", json: null},
+        request: () => fetch(url),
+        handle: async (resp) => {
+          if (resp.status === 304) {
+            return {done: true, value: {status: 304, etag: inm, json: null}};
+          }
+          if (resp.status === 200) {
+            const etag = (resp.headers.get("ETag") || "").replace(/"/g, "");
+            const json = await resp.json();
+            return {done: true, value: {status: 200, etag: etag, json: json}};
+          }
+          if (resp.status === 202) {
+            msg("reportMsg", "Preparing report...", true, true);
+            return {done: false};
+          }
+          if (resp.status === 404) {
+            return {done: true, value: {status: 404, etag: "", json: null}};
+          }
+          const text = await resp.text();
+          if (resp.status === 503 && isTransientReportError(text)) {
+            return {done: false};
+          }
+          throw new Error(text);
+        },
+      });
+    }
+
+    function reportPlotUrl(index, version) {
+      return "/api/report/plot?index=" + index +
+        "&v=" + encodeURIComponent(version);
+    }
+
+    function emptyReportPlot() {
+      return {valid: true, series: {}, events: []};
+    }
+
+    async function fetchReportPlotBuffer(index, version) {
+      const response = await fetch(reportPlotUrl(index, version));
+      if (response.status === 200) {
+        return {kind: "buffer", buffer: await response.arrayBuffer()};
+      }
+      if (response.status === 304) {
+        return {kind: "not_modified"};
+      }
+      if (response.status === 202) {
+        return {kind: "retry"};
+      }
+      if (response.status === 409) {
+        let stale = null;
+        try { stale = await response.json(); } catch (error) {}
+        if (stale && stale.error === "stale_plot" && stale.etag) {
+          return {kind: "stale", etag: stale.etag};
+        }
+      }
+      if (response.status === 404) throw new Error("plot not found");
+      const text = await response.text();
+      if (response.status === 503 && isTransientReportError(text)) {
+        return {kind: "retry"};
+      }
+      throw new Error(text);
+    }
+
+    async function fetchReportRangePayload(url) {
+      const response = await fetch(url, {cache: "no-store"});
+      if (response.status === 204) {
+        return {kind: "plot", decoded: emptyReportPlot()};
+      }
+      if (response.status === 200) {
+        const decoded = decodeReportPlotBinary(await response.arrayBuffer());
+        if (!decoded.valid) return {kind: "retry"};
+        return {kind: "plot", decoded};
+      }
+      if (response.status === 202) {
+        return {kind: "retry"};
+      }
+      if (response.status === 409) {
+        return {kind: "stale"};
+      }
+      const text = await response.text();
+      if (response.status === 503 && isTransientReportError(text)) {
+        return {kind: "retry"};
+      }
+      return {kind: "stop"};
+    }
+
+    async function fetchReportPlotReload(index, version) {
+      try {
+        const response = await fetch(reportPlotUrl(index, version) +
+          "&reload=" + Date.now(), {cache: "no-store"});
+        if (response.status !== 200) return null;
+        return response.arrayBuffer();
+      } catch (error) {
+        return null;
+      }
     }
 
     async function fetchReportPlot(token, index, version) {
       // The plot is keyed by (index, version=etag); 202 means it's still building
-      // (poll), 404 means no such night.
-      let buf = null;
-      for (let attempt = 0; attempt < 60; attempt++) {
-        if (token !== reportLoadToken) return false;
-        let response;
-        try {
-          response = await fetch("/api/report/plot?index=" + index +
-            "&v=" + encodeURIComponent(version));
-        } catch (e) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          continue;
-        }
-        if (response.status === 200) {
-          try {
-            buf = await response.arrayBuffer();
-            break;
-          } catch (e) {
-            // Retry transient HTTP/AsyncTCP truncation. The root cause is
-            // backend-side; this only prevents a one-off partial transfer from
-            // becoming a sticky UI error.
-            await new Promise((resolve) => setTimeout(resolve, 300));
-            continue;
-          }
-        }
-        if (response.status === 202) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          continue;
-        }
-        if (response.status === 404) throw new Error("plot not found");
-        const text = await response.text();
-        if (response.status === 503 && isTransientReportError(text)) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          continue;
-        }
-        throw new Error(text);
+      // (poll), 409 means this version is stale and the backend provides the
+      // current etag to retry under a cache-correct URL.
+      if (restoreReportPlotClientCache(version, index)) {
+        return token === reportLoadToken ? version : "";
       }
+      const fetched = await pollReportFetch({
+        active: () => token === reportLoadToken,
+        maxAttempts: REPORT_PLOT_POLL_MAX_ATTEMPTS,
+        delayMs: REPORT_POLL_DELAY_MS,
+        request: () => fetchReportPlotBuffer(index, version),
+        handle: async (result) => {
+          if (result.kind === "buffer") {
+            return {done: true, value: {version, buffer: result.buffer}};
+          }
+          if (result.kind === "not_modified") {
+            if (restoreReportPlotClientCache(version, index)) {
+              return {done: true, value: {version, cached: true}};
+            }
+            const reloaded = await fetchReportPlotReload(index, version);
+            if (reloaded) {
+              return {done: true, value: {version, buffer: reloaded}};
+            }
+            return {done: false, delayMs: 50};
+          }
+          if (result.kind === "stale") {
+            version = result.etag;
+            return {done: false, delayMs: 50};
+          }
+          return {done: false};
+        },
+      });
       if (token !== reportLoadToken) return false;
-      if (!buf) throw new Error("plot not ready");
-      parseReportPlotBinary(buf);
-      reportBaseSeries = reportSeries;
-      reportBaseEvents = reportEvents;
-      reportCurrentIndex = index;
-      reportCurrentEtag = version;
-      reportRangeCache.clear();
-      return token === reportLoadToken;
+      if (!fetched) throw new Error("plot not ready");
+      if (fetched.cached) return token === reportLoadToken ? fetched.version : "";
+      const decoded = decodeReportPlotBinary(fetched.buffer);
+      if (!decoded.valid) throw new Error("invalid plot response");
+      activateReportBasePlot(index, fetched.version, decoded.series, decoded.events);
+      rememberReportPlotClientCache(fetched.version);
+      return token === reportLoadToken ? fetched.version : "";
     }
 
-    // Zoom detail: higher-resolution samples for [lo,hi], rounded to a small
-    // tile for cache reuse without dragging a whole hour over HTTP.
-    async function fetchReportRange(lo, hi) {
-      if (reportCurrentEtag == null) return;
+    function reportRangeWindow(lo, hi) {
       const RANGE_TILE = 15 * 60 * 1000;
       const from = Math.floor(lo / RANGE_TILE) * RANGE_TILE;
       const to = Math.ceil(hi / RANGE_TILE) * RANGE_TILE;
-      if (!(to > from)) return;
-      const key = reportCurrentIndex + ":" + from + ":" + to;
+      return to > from ? {from, to} : null;
+    }
+
+    function reportRangeCacheKey(index, etag, from, to) {
+      return String(index) + ":" + String(etag || "") + ":" + from + ":" + to;
+    }
+
+    function currentReportRangeCacheKey() {
+      if (!reportZoom || reportCurrentEtag == null || reportCurrentIndex < 0) {
+        return "";
+      }
+      const w = reportRangeWindow(reportZoom.start, reportZoom.end);
+      if (!w) return "";
+      return reportRangeCacheKey(reportCurrentIndex,
+        reportCurrentEtag, w.from, w.to);
+    }
+
+    function currentReportRangeReady() {
+      const key = currentReportRangeCacheKey();
+      return !!key && reportRangeCache.has(key);
+    }
+
+    function activateReportRangeCache(key) {
+      const cached = lruGet(reportRangeCache, key);
+      if (!cached) return false;
+      reportSeries = cached.series;
+      reportEvents = cached.events;
+      return true;
+    }
+
+    function ensureReportRangeLoaded(lo, hi) {
+      if (reportCurrentEtag == null || reportCurrentIndex < 0) return;
+      const w = reportRangeWindow(lo, hi);
+      if (!w) return;
+      const key = reportRangeCacheKey(reportCurrentIndex,
+        reportCurrentEtag, w.from, w.to);
+      if (activateReportRangeCache(key) || reportRangeInFlightKey === key) return;
+      fetchReportRange(lo, hi);
+    }
+
+    async function fetchReportRange(lo, hi) {
+      if (reportCurrentEtag == null || reportCurrentIndex < 0) return;
+      const w = reportRangeWindow(lo, hi);
+      if (!w) return;
+      const etag = reportCurrentEtag;
+      const index = reportCurrentIndex;
+      const from = w.from;
+      const to = w.to;
+      const key = reportRangeCacheKey(index, etag, from, to);
+      if (activateReportRangeCache(key)) {
+        renderReportCharts();
+        return;
+      }
+      if (reportRangeInFlightKey === key) return;
+      reportRangeInFlightKey = key;
       const token = ++reportRangeToken;
-      const cached = reportRangeCache.get(key);
-      if (cached) {
-        reportSeries = cached.series;
-        reportEvents = cached.events;
+      const url = "/api/report/plot?index=" + index +
+        "&v=" + encodeURIComponent(etag) +
+        "&from=" + encodeURIComponent(from) +
+        "&to=" + encodeURIComponent(to);
+      try {
+        const decoded = await pollReportFetch({
+          active: () => token === reportRangeToken &&
+            etag === reportCurrentEtag &&
+            index === reportCurrentIndex,
+          maxAttempts: REPORT_RANGE_POLL_MAX_ATTEMPTS,
+          delayMs: REPORT_RANGE_POLL_DELAY_MS,
+          request: () => fetchReportRangePayload(url),
+          handle: async (result) => {
+            if (result.kind === "plot") {
+              return {done: true, value: result.decoded};
+            }
+            if (result.kind === "stale" || result.kind === "stop") {
+              return null;
+            }
+            return {done: false};
+          },
+        });
+        if (!decoded || token !== reportRangeToken || etag !== reportCurrentEtag ||
+            index !== reportCurrentIndex) {
+          return;
+        }
+        if (!decoded.valid) {
+          return;
+        }
+        lruSet(reportRangeCache, key,
+          {series: decoded.series, events: decoded.events},
+          REPORT_RANGE_CACHE_MAX);
+        reportSeries = decoded.series;
+        reportEvents = decoded.events;
         renderReportCharts();
-        return;
-      }
-      // Coarse base shows while the raw tile loads, then sharpens.
-      if (reportSeries !== reportBaseSeries) {
-        reportSeries = reportBaseSeries;
-        reportEvents = reportBaseEvents;
-        renderReportCharts();
-      }
-      const url = "/api/report/plot?index=" + reportCurrentIndex +
-        "&v=" + encodeURIComponent(reportCurrentEtag) +
-        "&from=" + from + "&to=" + to;
-      // Poll ~60s; re-poll an empty/short 200 too so a transient does not stick.
-      for (let attempt = 0; attempt < 120; attempt++) {
-        if (token !== reportRangeToken) return;
-        let resp;
-        try { resp = await fetch(url, {cache: "no-store"}); }
-        catch (e) { return; }
-        // resp.ok is true for 202 too; key off 200 so a "preparing" reply is not
-        // parsed as a zero-series plot.
-        if (resp.status === 200) {
-          const ab = await resp.arrayBuffer();
-          parseReportPlotBinary(ab);
-          const hasData = Object.keys(reportSeries).some(
-            (k) => reportSeries[k] && reportSeries[k].length);
-          if (hasData) {
-            reportRangeCache.set(key,
-              {series: reportSeries, events: reportEvents});
-            renderReportCharts();
-            return;
-          }
-          // Empty/short 200: keep coarse, keep polling; the backend rebuilds.
-          reportSeries = reportBaseSeries;
-          reportEvents = reportBaseEvents;
-          renderReportCharts();
-          await new Promise((r) => setTimeout(r, 250));
-          continue;
-        }
-        if (resp.status === 202) {
-          await new Promise((r) => setTimeout(r, 250));
-          continue;
-        }
-        if (resp.status === 404) return;
-        const text = await resp.text();
-        if (resp.status === 503 && isTransientReportError(text)) {
-          await new Promise((r) => setTimeout(r, 250));
-          continue;
-        }
-        return;
+      } finally {
+        if (reportRangeInFlightKey === key) reportRangeInFlightKey = "";
       }
     }
 
-    // Decode the binary plot blob (mirrors report_manager.cpp, little-endian):
-    //   header: magic u32 'ACPB', version u16, flags u16, base_ms i64
-    //   events: count u32, then count*{ t_delta i32, duration i32, code i32, flags i32 }
-    //   series: to EOF, repeated { name_len u16, name, point_count u32,
-    //           point_count*{ t_delta i32, value_milli i32 } }
-    function parseReportPlotBinary(buf) {
-      reportEvents = [];
-      reportSeries = {};
+    // Decode the binary plot blob (mirrors report_manager.cpp, little-endian).
+    function decodeReportPlotBinary(buf) {
+      const decoded = {valid: false, events: [], series: {}};
       const dv = new DataView(buf);
       // Header: magic u32, version u16, flags u16, base_ms i64 (16 bytes).
-      if (dv.byteLength < 16 || dv.getUint32(0, true) !== 0x42504341) return;
-      if (dv.getUint16(4, true) !== 1) return;  // PLOT_BIN_VERSION
+      if (dv.byteLength < 16 || dv.getUint32(0, true) !== 0x42504341) {
+        return decoded;
+      }
+      if (dv.getUint16(4, true) !== 5) return decoded;  // PLOT_BIN_VERSION
+      decoded.valid = true;
       const base = Number(dv.getBigInt64(8, true));
+      const PLOT_GAP_INDEX = 0xFFFF;
+      const SERIES_COMPACT = 0;
+      const SERIES_ENVELOPE_RUNS = 1;
       let off = 16;
       // Every read below is bounds-checked: a truncated/corrupt blob bails
       // cleanly (no out-of-range throw, no half-record) so a later redraw never
       // sees partial state. Events are all-or-nothing; series stop at the last
       // whole one decoded.
-      if (off + 4 > dv.byteLength) return;
+      if (off + 4 > dv.byteLength) return decoded;
       const eventCount = dv.getUint32(off, true); off += 4;
-      if (off + eventCount * 16 > dv.byteLength) { reportEvents = []; return; }
+      if (off + eventCount * 16 > dv.byteLength) return decoded;
       for (let i = 0; i < eventCount; i++) {
-        reportEvents.push({
+        decoded.events.push({
           t: base + dv.getInt32(off, true),
           duration: dv.getInt32(off + 4, true),
           code: dv.getInt32(off + 8, true),
@@ -3653,17 +4018,90 @@
         if (off + nameLen + 4 > dv.byteLength) break;
         const name = decoder.decode(new Uint8Array(buf, off, nameLen));
         off += nameLen;
-        const pointCount = dv.getUint32(off, true); off += 4;
-        if (off + pointCount * 8 > dv.byteLength) break;
+        const mode = dv.getUint8(off); off += 1;
+        off += 1; // flags
+        off += 2; // reserved
         const points = [];
-        for (let p = 0; p < pointCount; p++) {
-          const t = base + dv.getInt32(off, true);
-          const value = dv.getInt32(off + 4, true) / 1000;
-          off += 8;
-          if (t > 0 && Number.isFinite(value)) points.push({t, value});
+        if (mode === SERIES_COMPACT) {
+          if (off + 16 > dv.byteLength) break;
+          const seriesBaseDelta = dv.getInt32(off, true); off += 4;
+          const timeUnitMs = dv.getUint32(off, true); off += 4;
+          const valueScaleMilli = dv.getUint32(off, true); off += 4;
+          const pointCount = dv.getUint32(off, true); off += 4;
+          if (!timeUnitMs || !valueScaleMilli) break;
+          if (off + pointCount * 4 > dv.byteLength) break;
+          let lastPointT = base;
+          for (let p = 0; p < pointCount; p++) {
+            const timeIndex = dv.getUint16(off, true);
+            const rawValue = dv.getInt16(off + 2, true);
+            off += 4;
+            if (timeIndex === PLOT_GAP_INDEX) {
+              points.push({gap: true, t: lastPointT});
+              continue;
+            }
+            const t = base + seriesBaseDelta + timeIndex * timeUnitMs;
+            const value = rawValue * valueScaleMilli / 1000;
+            if (t > 0 && Number.isFinite(value)) {
+              lastPointT = t;
+              points.push({t, value});
+            }
+          }
+        } else if (mode === SERIES_ENVELOPE_RUNS) {
+          if (off + 16 > dv.byteLength) break;
+          const axisBaseDelta = dv.getInt32(off, true); off += 4;
+          const bucketMs = dv.getUint32(off, true); off += 4;
+          const valueScaleMilli = dv.getUint32(off, true); off += 4;
+          const runCount = dv.getUint32(off, true); off += 4;
+          if (!bucketMs || !valueScaleMilli) break;
+          let firstRun = true;
+          for (let r = 0; r < runCount; r++) {
+            if (off + 6 > dv.byteLength) break;
+            const startBucket = dv.getUint32(off, true); off += 4;
+            const bucketCount = dv.getUint16(off, true); off += 2;
+            if (off + bucketCount * 4 > dv.byteLength) {
+              off = dv.byteLength + 1;
+              break;
+            }
+            const runStartT =
+              base + axisBaseDelta + startBucket * bucketMs;
+            if (!firstRun) points.push({gap: true, t: runStartT});
+            firstRun = false;
+            for (let b = 0; b < bucketCount; b++) {
+              const minValue = dv.getInt16(off, true) *
+                valueScaleMilli / 1000;
+              const maxValue = dv.getInt16(off + 2, true) *
+                valueScaleMilli / 1000;
+              off += 4;
+              const t = runStartT + b * bucketMs;
+              if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+                continue;
+              }
+              points.push({
+                t,
+                end: t + bucketMs,
+                min: Math.min(minValue, maxValue),
+                max: Math.max(minValue, maxValue),
+                value: (minValue + maxValue) / 2,
+                envelope: true,
+              });
+            }
+          }
+          if (off > dv.byteLength) break;
+        } else {
+          break;
         }
-        reportSeries[name] = points;
+        if (points.length) {
+          decoded.series[name] = points;
+        }
       }
+      return decoded;
+    }
+
+    function parseReportPlotBinary(buf) {
+      const decoded = decodeReportPlotBinary(buf);
+      if (!decoded.valid) throw new Error("invalid plot response");
+      reportEvents = decoded.events;
+      reportSeries = decoded.series;
     }
 
     async function loadSelectedReportNight(force, refreshCache) {
@@ -3686,25 +4124,33 @@
       }
       const nightId = String(night.id);
       const token = ++reportLoadToken;
-      const cached = reportClientCache.get(nightId);
-      const inm = (cached && !refreshCache) ? cached.etag : "";
+      if (refreshCache) reportClientCache.delete(nightId);
+      const cached = refreshCache ? null : lruGet(reportClientCache, nightId);
+      const inm = cached ? cached.etag : "";
       resetReportData();
       reportLoadedId = "";
       renderReportSummary();
       msg("reportMsg", "Loading report...", true, true);
       try {
         if (refreshCache) {
-          await fetch("/api/report/result?index=" + therapyIndex +
+          const queued = await fetch("/api/report/result?index=" + therapyIndex +
+                      "&night=" + encodeURIComponent(Number(night.start || 0)) +
                       "&refresh_cache=1", {method: "POST"});
+          if (!queued.ok && queued.status !== 202) {
+            throw new Error(await queued.text());
+          }
         }
-        const res = await pollReportResult(token, therapyIndex, inm,
-                                           !!refreshCache);
+        const res = await pollReportResult(token,
+          therapyIndex,
+          Number(night.start || 0),
+          inm);
         if (!res || token !== reportLoadToken) return;
         if (res.status === 304 && cached) {
           reportHiddenSessions.clear();
           reportResult = cloneReportResult(cached.result);
-          reportSeries = cloneReportSeries(cached.series);
-          reportEvents = cloneReportEvents(cached.events);
+          activateReportBasePlot(therapyIndex, cached.etag,
+            cached.series,
+            cached.events);
           reportLoadedId = nightId;
           renderReportSummary();
           renderReportCharts();
@@ -3726,10 +4172,10 @@
           renderReportSummary();
           return;
         }
-        const ok = await fetchReportPlot(token, therapyIndex, res.etag);
-        if (!ok) return;
+        const plotEtag = await fetchReportPlot(token, therapyIndex, res.etag);
+        if (!plotEtag) return;
         reportLoadedId = nightId;
-        rememberReportClientCache(nightId, res.etag);
+        rememberReportClientCache(nightId, plotEtag);
         renderReportSummary();
         renderReportCharts();
         msg("reportMsg",

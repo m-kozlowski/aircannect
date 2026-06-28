@@ -45,7 +45,7 @@ public:
                                   bool as11_quiesce_timed_out);
     bool as11_quiesce_required() const;
     bool begin_http_upload(const String &filename, size_t image_size);
-    bool write_http_upload(const uint8_t *data, size_t len);
+    bool write_http_upload(size_t index, const uint8_t *data, size_t len);
     bool finish_http_upload();
     void abort_http_upload(const char *reason);
 

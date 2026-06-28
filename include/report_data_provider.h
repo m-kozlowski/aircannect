@@ -2,9 +2,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "report_sources.h"
 #include "report_store.h"
+#include "report_records.h"
 
 namespace aircannect {
 
@@ -19,6 +21,13 @@ struct ReportProviderChunkRef {
     ReportProviderId provider = ReportProviderId::Spool;
     uint8_t data[AC_REPORT_PROVIDER_TOKEN_BYTES] = {};
 };
+
+inline bool report_provider_chunk_ref_equal(
+    const ReportProviderChunkRef &a,
+    const ReportProviderChunkRef &b) {
+    return a.provider == b.provider &&
+           memcmp(a.data, b.data, AC_REPORT_PROVIDER_TOKEN_BYTES) == 0;
+}
 
 struct ReportProviderChunk {
     ReportProviderChunkRef ref;
@@ -40,6 +49,12 @@ struct ReportProviderChunkExtent {
     bool found = false;
     int64_t min_start_ms = 0;
     int64_t max_end_ms = 0;
+};
+
+struct ReportProviderSeriesReadStats {
+    uint32_t record_count = 0;
+    uint32_t payload_bytes = 0;
+    uint32_t interval_ms = 0;
 };
 
 // Report data providers expose report-ready chunks to ReportManager without
@@ -74,6 +89,13 @@ public:
                             int64_t night_start_ms,
                             ReportStoreChunkMeta &meta,
                             ReportSpoolBuffer &payload) const = 0;
+
+    virtual bool for_each_series_sample(
+        const ReportProviderChunk &chunk,
+        int64_t night_start_ms,
+        ReportProviderSeriesReadStats &stats,
+        ReportSeriesSampleCallback callback,
+        void *context) const;
 
     virtual bool chunk_extent(ReportStoreChunkKind kind,
                               const ReportSourceDef &source,

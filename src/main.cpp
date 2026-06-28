@@ -21,6 +21,7 @@
 #include "report_cache_writer_job.h"
 #include "provisioning.h"
 #include "report_manager.h"
+#include "report_plot_prebuild_job.h"
 #include "report_prefetch_job.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
@@ -71,6 +72,7 @@ static SleepHqSyncJob *sleephq_sync_job = nullptr;
 static ExportCoordinator export_coordinator;
 static ReportCacheWriterJob report_cache_writer_job(report_manager);
 static ReportPrefetchJob report_prefetch_job(report_manager);
+static ReportPlotPrebuildJob report_plot_prebuild_job(report_manager);
 #if AC_STACK_PROFILE_ENABLED
 static StackProfiler stack_profiler;
 #endif
@@ -429,6 +431,7 @@ void setup() {
     if (sleephq_sync_job) {
         bg_worker.add_job(sleephq_sync_job);
     }
+    bg_worker.add_job(&report_plot_prebuild_job);
     bg_worker.begin();
     (void)edf_report_catalog_job.request_refresh();
 }
@@ -464,6 +467,10 @@ void loop() {
     const uint32_t now_ms = millis();
     session_manager.poll(rpc_arbiter.as11_state(), now_ms);
     edf_recorder_manager.poll(now_ms);
+    if (rpc_arbiter.as11_state().timezone_offset_valid()) {
+        (void)edf_report_catalog_job.set_timezone_offset_minutes(
+            rpc_arbiter.as11_state().timezone_offset_minutes());
+    }
     poll_edf_report_catalog_refresh(now_ms);
     drain_can_rx_after("session_edf");
     sink_manager.poll();

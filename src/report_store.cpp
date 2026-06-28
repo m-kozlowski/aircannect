@@ -16,7 +16,7 @@ namespace aircannect {
 namespace ReportStore {
 namespace {
 
-constexpr const char *BASE_DIR = "/aircannect/report/v2";
+constexpr const char *BASE_DIR = "/aircannect/report/v3";
 constexpr uint32_t CHUNK_MAGIC = 0x50524341u;  // "ACRP", little-endian.
 constexpr uint16_t CHUNK_SCHEMA = 3;  // bumped for chunk origin byte
 constexpr size_t CHUNK_HEADER_SIZE = 56;
@@ -41,7 +41,7 @@ constexpr uint32_t CHUNK_INDEX_MAGIC = 0x49524341u;  // "ACRI", little-endian.
 constexpr uint16_t CHUNK_INDEX_SCHEMA = 2;  // bumped for chunk origin byte
 constexpr size_t CHUNK_INDEX_RECORD_SIZE = 64;
 constexpr size_t REPORT_PATH_MAX = 192;
-constexpr const char *REPORT_TRASH_PREFIX = "v2-trash-";
+constexpr const char *REPORT_TRASH_PREFIX = "v3-trash-";
 
 ReportStoreStatus current;
 
@@ -1499,10 +1499,10 @@ bool ensure_layout() {
         "/aircannect",
         "/aircannect/report",
         BASE_DIR,
-        "/aircannect/report/v2/summary",
-        "/aircannect/report/v2/coverage",
-        "/aircannect/report/v2/series",
-        "/aircannect/report/v2/events",
+        "/aircannect/report/v3/summary",
+        "/aircannect/report/v3/coverage",
+        "/aircannect/report/v3/series",
+        "/aircannect/report/v3/events",
     };
     for (const char *dir : dirs) {
         if (!Storage::ensure_dir(dir)) {
@@ -2124,7 +2124,7 @@ bool reset_cache_store(uint32_t &renamed) {
         const int written =
             snprintf(trash_path,
                      sizeof(trash_path),
-                     "/aircannect/report/v2-trash-%lu",
+                     "/aircannect/report/v3-trash-%lu",
                      static_cast<unsigned long>(millis()));
         if (written <= 0 ||
             static_cast<size_t>(written) >= sizeof(trash_path)) {

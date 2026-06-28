@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <IPAddress.h>
+#include <stdint.h>
 
 #include "board.h"
 #include "softap_mode.h"
@@ -12,6 +13,7 @@ enum class WifiModeState {
     Off,
     StaConnected,
     StaConnecting,
+    StaApSelecting,
     StaPmfRetry,
     SoftAp,
     StaRoamScanning,
@@ -119,12 +121,18 @@ private:
     void stop_wifi();
     void apply_country_code();
     void handle_connected();
+    void handle_ap_select_scan();
     void handle_connect_timeout();
     void enter_softap_fallback();
     void maybe_retry_softap_sta();
     void maybe_start_roam_scan();
     void handle_roam_scan();
     void cleanup_manual_scan();
+    void apply_sta_phy_config();
+    bool begin_unpinned_profile(size_t index, bool keep_softap,
+                                const char *reason);
+    bool begin_scan_candidate(size_t candidate_index, bool keep_softap,
+                              bool roaming);
 
     int8_t find_profile_by_ssid(const String &ssid) const;
     void collect_scan_candidates(int16_t scan_count,
@@ -147,10 +155,12 @@ private:
     bool softap_auto_close_deferred_ = false;
     bool roaming_suspended_ = false;
     bool roam_connect_pending_ = false;
+    bool ap_select_keep_softap_ = false;
     bool manual_scan_active_ = false;
     bool pmf_retry_attempted_ = false;
     uint8_t last_disconnect_reason_ = 0;
     uint32_t connect_deadline_ms_ = 0;
+    uint32_t ap_select_deadline_ms_ = 0;
     uint32_t softap_retry_deadline_ms_ = 0;
     uint32_t last_roam_check_ms_ = 0;
     uint32_t manual_scan_completed_ms_ = 0;

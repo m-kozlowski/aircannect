@@ -69,6 +69,18 @@
 #define AC_DEFAULT_SYSLOG_ENABLED 0
 #endif
 
+#ifndef AC_WIFI_FORCE_STA_HT20
+#define AC_WIFI_FORCE_STA_HT20 1
+#endif
+
+#ifndef AC_WIFI_MAX_TX_POWER_QDBM
+#define AC_WIFI_MAX_TX_POWER_QDBM 84
+#endif
+
+#ifndef AC_WIFI_DISABLE_POWER_SAVE
+#define AC_WIFI_DISABLE_POWER_SAVE 1
+#endif
+
 static constexpr size_t AC_MAX_TCP_CLIENTS = 4;
 static constexpr size_t AC_MAX_TELNET_CLIENTS = 2;
 static constexpr size_t AC_WIFI_PROFILE_MAX = 4;
@@ -117,3 +129,4 @@ static constexpr int32_t AC_WIFI_ROAM_HYSTERESIS_DB = 8;
 static constexpr uint32_t AC_WIFI_ROAM_STREAM_QUIET_MS = 30000;
 static constexpr size_t AC_WIFI_BSSID_TEXT_MAX = 18;
 static constexpr uint32_t AC_WIFI_MANUAL_SCAN_RESULT_TTL_MS = 30000;
+static constexpr uint32_t AC_EXPORT_NETWORK_SETTLE_MS = 15000;

@@ -19,6 +19,12 @@ const char *const BASE_EVENT_DATA_IDS[] = {
     SETTINGS_HISTORY_CHANGE_DATA_ID,
 };
 
+uint32_t retry_delay_for_command(EventCommandType type) {
+    return type == EventCommandType::Quiesce
+        ? AC_AS11_EVENT_QUIESCE_RETRY_MS
+        : AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
+}
+
 bool csv_contains_data_id(const std::string &csv, const char *data_id) {
     if (!data_id || !*data_id) return true;
     const size_t id_len = strlen(data_id);
@@ -331,7 +337,7 @@ void EventBroker::mark_command_queued(EventCommandType type,
     subscribe_pending_ = true;
     pending_quiesce_ = type == EventCommandType::Quiesce;
     pending_params_json_ = params_json;
-    next_subscribe_ms_ = now_ms + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
+    next_subscribe_ms_ = now_ms + retry_delay_for_command(type);
     if (pending_quiesce_) {
         stats_.quiesce_requests++;
     } else {
@@ -345,21 +351,23 @@ void EventBroker::mark_command_deferred(uint32_t now_ms) {
 
 void EventBroker::mark_command_timeout(uint32_t now_ms) {
     const bool was_active = subscription_active_;
-    note_subscription_gap(was_active);
     subscribe_pending_ = false;
     const bool was_quiesce = pending_quiesce_;
     pending_quiesce_ = false;
+    pending_params_json_.clear();
+    if (was_quiesce) {
+        quiesced_ = false;
+        next_subscribe_ms_ = now_ms + AC_AS11_EVENT_QUIESCE_RETRY_MS;
+        stats_.quiesce_errors++;
+        return;
+    }
+
+    note_subscription_gap(was_active);
     subscription_active_ = false;
     subscription_id_ = 0;
     active_params_json_.clear();
-    pending_params_json_.clear();
-    if (was_quiesce) quiesced_ = false;
     next_subscribe_ms_ = now_ms + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-    if (was_quiesce) {
-        stats_.quiesce_errors++;
-    } else {
-        stats_.subscribe_errors++;
-    }
+    stats_.subscribe_errors++;
 }
 
 void EventBroker::mark_command_cancelled(uint32_t now_ms) {
@@ -374,15 +382,19 @@ bool EventBroker::accept_subscribe_response(
     JsonDocument response_doc;
     DeserializationError response_error =
         deserializeJson(response_doc, payload);
-    if (response_error || !extract_subscription_id(response_doc,
-                                                   subscription_id)) {
+    if (response_error) {
         return false;
     }
 
     JsonArrayConst response_ids;
     const bool response_has_ids = json_data_ids(response_doc, response_ids);
     if (pending_quiesce_) {
+        (void)extract_subscription_id(response_doc, subscription_id);
         return !response_has_ids || response_ids.size() == 0;
+    }
+
+    if (!extract_subscription_id(response_doc, subscription_id)) {
+        return false;
     }
     if (!response_has_ids) return false;
 
@@ -416,9 +428,9 @@ void EventBroker::mark_subscribe_response(bool is_error,
     subscribe_pending_ = false;
     pending_quiesce_ = false;
     if (was_quiesce) {
-        if (is_error || subscription_id == 0) {
+        if (is_error) {
             quiesced_ = false;
-            next_subscribe_ms_ = now_ms + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
+            next_subscribe_ms_ = now_ms + AC_AS11_EVENT_QUIESCE_RETRY_MS;
             stats_.quiesce_errors++;
             return;
         }
@@ -479,8 +491,8 @@ void EventBroker::mark_reattach(uint32_t now_ms) {
 
 void EventBroker::request_quiesce(uint32_t now_ms) {
     quiesce_requested_ = true;
-    quiesced_ = false;
-    next_subscribe_ms_ = now_ms;
+    quiesced_ = !subscription_active_ && !subscribe_pending_;
+    next_subscribe_ms_ = quiesced_ ? 0 : now_ms;
 }
 
 void EventBroker::clear_quiesce(uint32_t now_ms) {

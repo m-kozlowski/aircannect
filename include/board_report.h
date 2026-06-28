@@ -46,6 +46,9 @@ static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_COOLDOWN_MS = 600000;
 // instead of churning the bus; a single success resets it.
 static constexpr uint32_t AC_REPORT_PREFETCH_FAIL_BURST = 3;
 static constexpr uint32_t AC_REPORT_PREFETCH_OFFLINE_BACKOFF_MS = 600000;
+// Idle full-overview plot prebuild rescans after draining the current night
+// list. Summary/catalog revision changes reset this immediately.
+static constexpr uint32_t AC_REPORT_PLOT_PREBUILD_RESCAN_MS = 300000;
 // Default manual quota policy: keep roughly the last 90 therapy nights of
 // cached report payloads. Summary records remain intact.
 static constexpr size_t AC_REPORT_CACHE_QUOTA_NIGHTS = 90;
@@ -68,19 +71,38 @@ static constexpr size_t AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES = 8192;
 static constexpr size_t AC_REPORT_CACHE_SPOOL_ROUND_BYTES = 8192;
 
 // Report result assembly and plot build.
-// Plot decimation: target buckets across a night's session span.
-static constexpr size_t AC_REPORT_PLOT_BUCKETS = 1200;
+// Full-night overview plot: target min/max envelope buckets across a night's
+// session span. Range/zoom plots use their own high-detail budget below.
+static constexpr size_t AC_REPORT_PLOT_BUCKETS = 2560;
+// Range plot caps. Overview deliberately does not use these per-rate caps:
+// using one common envelope bucket size keeps the full-night payload bounded
+// without losing short peaks.
+static constexpr int64_t AC_REPORT_HIGH_RATE_PLOT_BUCKET_MAX_MS = 2000;
+static constexpr int64_t AC_REPORT_LOW_RATE_OVERVIEW_BUCKET_MAX_MS = 20000;
+static constexpr uint32_t AC_REPORT_LOW_RATE_NATIVE_PLOT_MIN_INTERVAL_MS = 500;
+static constexpr uint32_t AC_REPORT_LOW_RATE_NATIVE_PLOT_MAX_INTERVAL_MS =
+    60000;
+// Range plots may preserve slow native-cadence signals when the requested
+// viewport is already detailed enough.
+static constexpr uint32_t AC_REPORT_RANGE_PLOT_PRESERVE_INTERVAL_MIN_MS = 500;
+static constexpr size_t AC_REPORT_PLOT_MAX_BYTES = 2 * 1024 * 1024;
 // Initial reserve for the incrementally-built plot binary.
 static constexpr size_t AC_REPORT_PLOT_INITIAL_RESERVE = 256 * 1024;
+// Plot builders run only while realtime CAN/therapy work is idle. Bound by time
+// instead of bytes so large EDF-derived chunks cannot monopolize a poll pass.
+static constexpr uint32_t AC_REPORT_PLOT_POLL_BUDGET_MS = 10;
+static constexpr size_t AC_REPORT_PLOT_POLL_CHUNK_CAP = 32;
 // Range (zoom) plot: keep detail bounded to roughly display resolution.
 static constexpr size_t AC_REPORT_RANGE_PLOT_BUCKETS = 1800;
-static constexpr size_t AC_REPORT_RANGE_PLOT_MAX_BYTES = 512 * 1024;
-static constexpr size_t AC_REPORT_RANGE_MAX_POINTS =
-    AC_REPORT_RANGE_PLOT_BUCKETS * 4;
-// Gap between consecutive series chunks that marks a session boundary. The
-// coalescing writer flushes here and derive_result_session_ranges() splits
-// here; they must agree, or a coalesced chunk would span (and hide) a gap.
-static constexpr int64_t AC_REPORT_SESSION_GAP_MS = 3LL * 60LL * 1000LL;
+static constexpr size_t AC_REPORT_RANGE_PLOT_MAX_BYTES = 2 * 1024 * 1024;
+static constexpr size_t AC_REPORT_RANGE_MAX_POINTS = 32768;
+static constexpr uint32_t AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS = 10;
+static constexpr size_t AC_REPORT_RANGE_PLOT_POLL_CHUNK_CAP = 32;
+// Range plots are the high-detail zoom path. Requests wider than this should
+// use the full-night plot instead of forcing a near-full rebuild through the
+// foreground range endpoint.
+static constexpr int64_t AC_REPORT_RANGE_PLOT_MAX_WINDOW_MS =
+    3LL * 60LL * 60LL * 1000LL;
 // Latest-night tail refresh re-fetches this far back to overlap cached data so
 // the seam has no gap.
 static constexpr int64_t AC_REPORT_LATEST_TAIL_OVERLAP_MS = 60000;
