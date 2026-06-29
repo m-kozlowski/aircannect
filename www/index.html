@@ -1995,6 +1995,7 @@
     let oxiSensorsLoading = false;
     let evtSrc = null;
     let consoleSeq = -1;
+    let consoleEnd = 0;
     let settingsPollTimer = null;
     let settingsRefreshUntil = 0;
     let settingsProfileMode = null;
@@ -7392,16 +7393,26 @@
     }
 
     function renderConsole(data) {
-      if (!data || data.seq === consoleSeq) return;
-      consoleSeq = data.seq;
+      const seq = Number(data && data.seq);
+      if (!data || !Number.isFinite(seq) || seq <= consoleSeq) return;
       const output = document.getElementById("consoleLog");
       if (data.reset || data.log !== undefined) {
         output.textContent = data.log || "";
+        consoleEnd = Number(data.end ?? output.textContent.length);
+        consoleSeq = seq;
       } else if (data.append !== undefined) {
+        const from = Number(data.from ?? consoleEnd);
+        const to = Number(data.to ?? (from + (data.append || "").length));
+        if (from !== consoleEnd) {
+          if (to > consoleEnd) setTimeout(() => loadConsole(false), 0);
+          return;
+        }
         output.textContent += data.append || "";
         if (output.textContent.length > 4096) {
           output.textContent = output.textContent.slice(-4096);
         }
+        consoleEnd = to;
+        consoleSeq = seq;
       }
       output.scrollTop = output.scrollHeight;
     }
@@ -7433,6 +7444,8 @@
         await api("/api/console/clear", {method: "POST"});
         const output = document.getElementById("consoleLog");
         output.textContent = "";
+        consoleSeq = -1;
+        consoleEnd = 0;
         output.scrollTop = 0;
       } catch (error) {
         const output = document.getElementById("consoleLog");

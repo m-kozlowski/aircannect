@@ -1393,11 +1393,14 @@ void WebUI::append_console_log_json_range(LargeTextBuffer &json,
 }
 
 void WebUI::build_console_json(LargeTextBuffer &json) const {
+    const uint64_t begin = console_log_begin_pos();
+    const uint64_t end = console_log_write_pos_;
     json = "{";
-    json_add_int(json, "seq", console_seq_, false);
+    json_add_uint64(json, "seq", console_seq_, false);
+    json_add_uint64(json, "begin", begin);
+    json_add_uint64(json, "end", end);
     json += ",\"log\":\"";
-    append_console_log_json_range(json, console_log_begin_pos(),
-                                  console_log_write_pos_);
+    append_console_log_json_range(json, begin, end);
     json += "\"}";
 }
 
@@ -1409,12 +1412,16 @@ void WebUI::build_console_sse_json(LargeTextBuffer &json) const {
                        console_sse_pos_ > end;
 
     json = "{";
-    json_add_int(json, "seq", console_seq_, false);
+    json_add_uint64(json, "seq", console_seq_, false);
     if (reset) {
         json_add_bool(json, "reset", true);
+        json_add_uint64(json, "begin", begin);
+        json_add_uint64(json, "end", end);
         json += ",\"log\":\"";
         append_console_log_json_range(json, begin, end);
     } else {
+        json_add_uint64(json, "from", console_sse_pos_);
+        json_add_uint64(json, "to", end);
         json += ",\"append\":\"";
         append_console_log_json_range(json, console_sse_pos_, end);
     }
