@@ -679,6 +679,69 @@ bool plot_cache_name_for_night(const char *name, uint64_t night_start_ms) {
     return dot && (strcmp(dot, ".bin") == 0 || strcmp(dot, ".tmp") == 0);
 }
 
+bool result_cache_name_for_summary(const char *name,
+                                   const ReportSummaryRecord &night,
+                                   uint32_t epoch,
+                                   char *etag_out,
+                                   size_t etag_out_size) {
+    if (!name || !night.start_ms) return false;
+    const char *base = plot_cache_basename(name);
+    char prefix[96];
+    const int prefix_written =
+        snprintf(prefix,
+                 sizeof(prefix),
+                 "%llu-%llu-%lu-%lu-",
+                 static_cast<unsigned long long>(night.start_ms),
+                 static_cast<unsigned long long>(night.start_ms),
+                 static_cast<unsigned long>(night.duration_min),
+                 static_cast<unsigned long>(night.session_interval_count));
+    if (prefix_written <= 0 ||
+        static_cast<size_t>(prefix_written) >= sizeof(prefix)) {
+        return false;
+    }
+    const size_t prefix_len = static_cast<size_t>(prefix_written);
+    if (strncmp(base, prefix, prefix_len) != 0) return false;
+
+    char suffix[32];
+    const int suffix_written =
+        snprintf(suffix,
+                 sizeof(suffix),
+                 "-%lu-r%lu.json",
+                 static_cast<unsigned long>(epoch),
+                 static_cast<unsigned long>(REPORT_RESULT_ETAG_VERSION));
+    if (suffix_written <= 0 ||
+        static_cast<size_t>(suffix_written) >= sizeof(suffix)) {
+        return false;
+    }
+    const size_t base_len = strlen(base);
+    const size_t suffix_len = static_cast<size_t>(suffix_written);
+    if (base_len <= suffix_len ||
+        strcmp(base + base_len - suffix_len, suffix) != 0) {
+        return false;
+    }
+
+    char outer_prefix[32];
+    const int outer_written =
+        snprintf(outer_prefix,
+                 sizeof(outer_prefix),
+                 "%llu-",
+                 static_cast<unsigned long long>(night.start_ms));
+    if (outer_written <= 0 ||
+        static_cast<size_t>(outer_written) >= sizeof(outer_prefix)) {
+        return false;
+    }
+    const size_t outer_len = static_cast<size_t>(outer_written);
+    const size_t json_suffix_len = strlen(".json");
+    if (base_len <= outer_len + json_suffix_len) return false;
+    const size_t etag_len = base_len - outer_len - json_suffix_len;
+    if (!etag_out || etag_out_size == 0 || etag_len >= etag_out_size) {
+        return false;
+    }
+    memcpy(etag_out, base + outer_len, etag_len);
+    etag_out[etag_len] = '\0';
+    return true;
+}
+
 bool store_summary_record_to_buffer(void *context,
                                     const ReportSummaryRecord &record) {
     SummaryRecordBufferContext *ctx =
@@ -3158,6 +3221,41 @@ ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
     const char *if_none_match, char *etag_out, size_t etag_out_size,
     LargeTextBuffer &json_out) {
     if (indexed_night.edf_catalog_pending) {
+        char cached_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+        if (load_result_json_cache_for_summary(indexed_night.summary,
+                                               cached_etag,
+                                               sizeof(cached_etag),
+                                               json_out)) {
+            if (etag_out && etag_out_size) {
+                snprintf(etag_out, etag_out_size, "%s", cached_etag);
+            }
+            if (build_queue_lock_ &&
+                xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) ==
+                    pdTRUE) {
+                copy_cstr(build_queue_last_read_,
+                          sizeof(build_queue_last_read_),
+                          if_none_match && if_none_match[0] &&
+                                  strcmp(if_none_match, cached_etag) == 0
+                              ? "not_modified_sd_pending"
+                              : "ready_sd_pending");
+                xSemaphoreGive(build_queue_lock_);
+            }
+            Log::logf(CAT_REPORT,
+                      LOG_DEBUG,
+                      "Result cache pending-catalog hit index=%lu "
+                      "night=%llu etag=%s bytes=%lu\n",
+                      static_cast<unsigned long>(therapy_index),
+                      static_cast<unsigned long long>(
+                          indexed_night.summary.start_ms),
+                      cached_etag,
+                      static_cast<unsigned long>(json_out.length()));
+            if (if_none_match && if_none_match[0] &&
+                strcmp(if_none_match, cached_etag) == 0) {
+                json_out.clear();
+                return ResultRead::NotModified;
+            }
+            return ResultRead::Ready;
+        }
         if (etag_out && etag_out_size) etag_out[0] = '\0';
         const BuildQueueResult queued =
             enqueue_build(indexed_night.summary.start_ms,
@@ -3274,6 +3372,8 @@ ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
     if (load_result_json_cache_for_night(indexed_night,
                                          current_etag,
                                          json_out)) {
+        const bool not_modified = if_none_match && if_none_match[0] &&
+                                  strcmp(if_none_match, current_etag) == 0;
         if (etag_out && etag_out_size) {
             snprintf(etag_out, etag_out_size, "%s", current_etag);
         }
@@ -3281,7 +3381,7 @@ ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
             xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
             copy_cstr(build_queue_last_read_,
                       sizeof(build_queue_last_read_),
-                      "ready_sd");
+                      not_modified ? "not_modified_sd" : "ready_sd");
             xSemaphoreGive(build_queue_lock_);
         }
         Log::logf(CAT_REPORT,
@@ -3291,6 +3391,10 @@ ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
                   static_cast<unsigned long long>(
                       indexed_night.summary.start_ms),
                   static_cast<unsigned long>(json_out.length()));
+        if (not_modified) {
+            json_out.clear();
+            return ResultRead::NotModified;
+        }
         return ResultRead::Ready;
     }
     if (etag_out && etag_out_size) etag_out[0] = '\0';
@@ -3339,6 +3443,27 @@ ReportManager::PlotRead ReportManager::read_plot(
         return PlotRead::NotFound;
     }
     if (indexed_night->edf_catalog_pending) {
+        if (version && version[0]) {
+            auto cached_plot = std::make_shared<ReportSpoolBuffer>();
+            if (cached_plot &&
+                load_result_plot_cache_for_etag(indexed_night->summary.start_ms,
+                                                version,
+                                                *cached_plot)) {
+                if (etag_out && etag_out_size) {
+                    snprintf(etag_out, etag_out_size, "%s", version);
+                }
+                out = cached_plot;
+                Log::logf(CAT_REPORT,
+                          LOG_DEBUG,
+                          "Plot cache pending-catalog hit index=%lu "
+                          "night=%llu bytes=%lu\n",
+                          static_cast<unsigned long>(resolved_therapy_index),
+                          static_cast<unsigned long long>(
+                              indexed_night->summary.start_ms),
+                          static_cast<unsigned long>(cached_plot->size()));
+                return PlotRead::Ready;
+            }
+        }
         if (etag_out && etag_out_size) etag_out[0] = '\0';
         switch (enqueue_build(indexed_night->summary.start_ms,
                               resolved_therapy_index,
@@ -5996,8 +6121,17 @@ bool ReportManager::result_plot_cache_path_for_night(
     const char *etag,
     char *path,
     size_t path_size) const {
-    if (!path || !path_size || night.summary.start_ms == 0 ||
-        !etag || !etag[0]) {
+    return result_plot_cache_path_for_etag(night.summary.start_ms,
+                                           etag,
+                                           path,
+                                           path_size);
+}
+
+bool ReportManager::result_plot_cache_path_for_etag(uint64_t night_start_ms,
+                                                    const char *etag,
+                                                    char *path,
+                                                    size_t path_size) const {
+    if (!path || !path_size || night_start_ms == 0 || !etag || !etag[0]) {
         return false;
     }
     const int written = snprintf(
@@ -6005,7 +6139,7 @@ bool ReportManager::result_plot_cache_path_for_night(
         path_size,
         "%s/%llu-%s.bin",
         REPORT_PLOT_CACHE_DIR,
-        static_cast<unsigned long long>(night.summary.start_ms),
+        static_cast<unsigned long long>(night_start_ms),
         etag);
     return written > 0 && static_cast<size_t>(written) < path_size;
 }
@@ -6015,8 +6149,17 @@ bool ReportManager::result_json_cache_path_for_night(
     const char *etag,
     char *path,
     size_t path_size) const {
-    if (!path || !path_size || night.summary.start_ms == 0 ||
-        !etag || !etag[0]) {
+    return result_json_cache_path_for_etag(night.summary.start_ms,
+                                           etag,
+                                           path,
+                                           path_size);
+}
+
+bool ReportManager::result_json_cache_path_for_etag(uint64_t night_start_ms,
+                                                    const char *etag,
+                                                    char *path,
+                                                    size_t path_size) const {
+    if (!path || !path_size || night_start_ms == 0 || !etag || !etag[0]) {
         return false;
     }
     const int written = snprintf(
@@ -6024,7 +6167,7 @@ bool ReportManager::result_json_cache_path_for_night(
         path_size,
         "%s/%llu-%s.json",
         REPORT_RESULT_JSON_CACHE_DIR,
-        static_cast<unsigned long long>(night.summary.start_ms),
+        static_cast<unsigned long long>(night_start_ms),
         etag);
     return written > 0 && static_cast<size_t>(written) < path_size;
 }
@@ -6092,12 +6235,82 @@ bool ReportManager::load_result_json_cache_for_night(
     const ReportIndexedNight &night,
     const char *etag,
     LargeTextBuffer &out) const {
+    char path[REPORT_CACHE_PATH_MAX];
+    if (!result_json_cache_path_for_night(night, etag, path, sizeof(path))) {
+        return false;
+    }
+    return load_result_json_cache_path(path, out);
+}
+
+bool ReportManager::load_result_json_cache_for_summary(
+    const ReportSummaryRecord &night,
+    char *etag_out,
+    size_t etag_out_size,
+    LargeTextBuffer &out) const {
+    out.clear();
+    if (etag_out && etag_out_size) etag_out[0] = '\0';
+    if (!night.start_ms || !etag_out || etag_out_size == 0) return false;
+
+    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
+    const uint32_t epoch = night_epoch_for_unlocked(night.start_ms);
+    give_summary_lock();
+
+    char best_path[REPORT_CACHE_PATH_MAX] = {};
+    char best_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+    time_t best_write = 0;
+    bool found = false;
+
+    {
+        Storage::Guard g;
+        if (!Storage::mounted()) return false;
+        File dir = Storage::open(REPORT_RESULT_JSON_CACHE_DIR, "r");
+        if (!dir) return false;
+        if (!dir.isDirectory()) {
+            dir.close();
+            return false;
+        }
+
+        while (true) {
+            File file = dir.openNextFile();
+            if (!file) break;
+            const bool is_dir = file.isDirectory();
+            char candidate_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+            const bool match =
+                !is_dir &&
+                result_cache_name_for_summary(file.name(),
+                                              night,
+                                              epoch,
+                                              candidate_etag,
+                                              sizeof(candidate_etag));
+            const time_t last_write = match ? file.getLastWrite() : 0;
+            char candidate_path[REPORT_CACHE_PATH_MAX] = {};
+            const bool path_ok =
+                match && cache_child_path(REPORT_RESULT_JSON_CACHE_DIR,
+                                          file.name(),
+                                          candidate_path,
+                                          sizeof(candidate_path));
+            file.close();
+            if (!match || !path_ok) continue;
+            if (!found || last_write >= best_write) {
+                snprintf(best_path, sizeof(best_path), "%s", candidate_path);
+                snprintf(best_etag, sizeof(best_etag), "%s", candidate_etag);
+                best_write = last_write;
+                found = true;
+            }
+        }
+        dir.close();
+    }
+
+    if (!found || !load_result_json_cache_path(best_path, out)) return false;
+    snprintf(etag_out, etag_out_size, "%s", best_etag);
+    return true;
+}
+
+bool ReportManager::load_result_json_cache_path(const char *path,
+                                                LargeTextBuffer &out) const {
     Storage::Guard g;
     out.clear();
-    if (!Storage::mounted()) return false;
-    char path[REPORT_CACHE_PATH_MAX];
-    if (!result_json_cache_path_for_night(night, etag, path, sizeof(path)) ||
-        !Storage::exists(path)) {
+    if (!path || !path[0] || !Storage::mounted() || !Storage::exists(path)) {
         return false;
     }
     File file = Storage::open(path, "r");
@@ -6133,12 +6346,32 @@ bool ReportManager::load_result_plot_cache_for_night(
     const ReportIndexedNight &night,
     const char *etag,
     ReportSpoolBuffer &out) const {
+    char path[REPORT_CACHE_PATH_MAX];
+    if (!result_plot_cache_path_for_night(night, etag, path, sizeof(path))) {
+        return false;
+    }
+    return load_result_plot_cache_path(path, out);
+}
+
+bool ReportManager::load_result_plot_cache_for_etag(uint64_t night_start_ms,
+                                                    const char *etag,
+                                                    ReportSpoolBuffer &out)
+    const {
+    char path[REPORT_CACHE_PATH_MAX];
+    if (!result_plot_cache_path_for_etag(night_start_ms,
+                                         etag,
+                                         path,
+                                         sizeof(path))) {
+        return false;
+    }
+    return load_result_plot_cache_path(path, out);
+}
+
+bool ReportManager::load_result_plot_cache_path(const char *path,
+                                                ReportSpoolBuffer &out) const {
     Storage::Guard g;
     out.clear();
-    if (!Storage::mounted()) return false;
-    char path[REPORT_CACHE_PATH_MAX];
-    if (!result_plot_cache_path_for_night(night, etag, path, sizeof(path)) ||
-        !Storage::exists(path)) {
+    if (!path || !path[0] || !Storage::mounted() || !Storage::exists(path)) {
         return false;
     }
     File file = Storage::open(path, "r");

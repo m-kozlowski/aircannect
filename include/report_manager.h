@@ -761,10 +761,18 @@ private:
                                           const char *etag,
                                           char *path,
                                           size_t path_size) const;
+    bool result_plot_cache_path_for_etag(uint64_t night_start_ms,
+                                         const char *etag,
+                                         char *path,
+                                         size_t path_size) const;
     bool result_json_cache_path_for_night(const ReportIndexedNight &night,
                                           const char *etag,
                                           char *path,
                                           size_t path_size) const;
+    bool result_json_cache_path_for_etag(uint64_t night_start_ms,
+                                         const char *etag,
+                                         char *path,
+                                         size_t path_size) const;
     bool result_plot_cache_path(char *path, size_t path_size) const;
     bool result_plot_cache_exists_for_night(const ReportIndexedNight &night,
                                             const char *etag) const;
@@ -775,9 +783,20 @@ private:
     bool load_result_json_cache_for_night(const ReportIndexedNight &night,
                                           const char *etag,
                                           LargeTextBuffer &out) const;
+    bool load_result_json_cache_for_summary(const ReportSummaryRecord &night,
+                                            char *etag_out,
+                                            size_t etag_out_size,
+                                            LargeTextBuffer &out) const;
+    bool load_result_json_cache_path(const char *path,
+                                     LargeTextBuffer &out) const;
     bool load_result_plot_cache_for_night(const ReportIndexedNight &night,
                                           const char *etag,
                                           ReportSpoolBuffer &out) const;
+    bool load_result_plot_cache_for_etag(uint64_t night_start_ms,
+                                         const char *etag,
+                                         ReportSpoolBuffer &out) const;
+    bool load_result_plot_cache_path(const char *path,
+                                     ReportSpoolBuffer &out) const;
     bool load_result_plot_cache();
     bool enqueue_result_cache_write(
         const ReportIndexedNight &night,
