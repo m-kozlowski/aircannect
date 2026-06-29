@@ -100,6 +100,8 @@ static constexpr uint64_t AC_RESMED_OTA_STORAGE_MARGIN_BYTES =
     1024ULL * 1024ULL;
 static constexpr const char *AC_RESMED_OTA_CONFIRM = "APPLY_RESMED_OTA";
 static constexpr uint32_t AC_RPC_MIN_TX_INTERVAL_MS = 20;
+static constexpr uint32_t AC_RPC_SET_DATETIME_APPLY_LEAD_MS = 10;
+static constexpr uint32_t AC_RPC_SET_DATETIME_TARGET_MARGIN_MS = 40;
 static constexpr uint8_t AC_RPC_BACKGROUND_TIMEOUTS_BEFORE_BACKOFF = 2;
 static constexpr uint32_t AC_RPC_BACKGROUND_BACKOFF_MS = 120000;
 static constexpr uint32_t AC_RPC_BACKGROUND_RX_PRESSURE_BACKOFF_MS = 500;

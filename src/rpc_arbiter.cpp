@@ -89,19 +89,6 @@ std::string format_utc_ms(int64_t epoch_ms) {
     return std::string(out);
 }
 
-std::string current_utc_iso_ms() {
-    int64_t epoch_ms = 0;
-    if (!current_epoch_ms(epoch_ms)) return "";
-    return format_utc_ms(epoch_ms);
-}
-
-std::string current_utc_iso_nearest_second() {
-    int64_t epoch_ms = 0;
-    if (!current_epoch_ms(epoch_ms)) return "";
-    const int64_t rounded_ms = ((epoch_ms + 500) / 1000) * 1000;
-    return format_utc_ms(rounded_ms);
-}
-
 bool event_suggests_identity_refresh(const std::string &event) {
     return event == "PowerUp" ||
            event == "SettingsReset" ||
@@ -685,6 +672,52 @@ bool RpcArbiter::request_allowed_during_esp_ota_quiesce(
     return false;
 }
 
+RpcArbiter::DateTimePrepareResult RpcArbiter::prepare_set_datetime_request(
+    QueuedRequest &request, uint32_t now) {
+    int64_t now_epoch_ms = 0;
+    if (!current_epoch_ms(now_epoch_ms)) {
+        return DateTimePrepareResult::InvalidClock;
+    }
+
+    const int64_t max_future_ms = 2000;
+    const bool target_missing =
+        request.set_datetime_target_epoch_ms < 1609459200000LL;
+    const bool target_missed =
+        request.set_datetime_target_epoch_ms <= now_epoch_ms;
+    const bool target_from_old_clock =
+        request.set_datetime_target_epoch_ms - now_epoch_ms > max_future_ms;
+    if (target_missing || target_missed || target_from_old_clock) {
+        int64_t target_epoch_ms = ((now_epoch_ms / 1000) + 1) * 1000;
+        const int64_t remaining_ms = target_epoch_ms - now_epoch_ms;
+        if (remaining_ms <=
+            static_cast<int64_t>(AC_RPC_SET_DATETIME_APPLY_LEAD_MS +
+                                 AC_RPC_SET_DATETIME_TARGET_MARGIN_MS)) {
+            target_epoch_ms += 1000;
+        }
+        request.set_datetime_target_epoch_ms = target_epoch_ms;
+    }
+
+    const int64_t fire_epoch_ms =
+        request.set_datetime_target_epoch_ms -
+        static_cast<int64_t>(AC_RPC_SET_DATETIME_APPLY_LEAD_MS);
+    if (now_epoch_ms < fire_epoch_ms) {
+        const uint32_t wait_ms = static_cast<uint32_t>(
+            std::min<int64_t>(fire_epoch_ms - now_epoch_ms, 1000));
+        dispatch_retry_ = request;
+        dispatch_retry_active_ = true;
+        if (!dispatch_retry_deadline_ms_) {
+            dispatch_retry_deadline_ms_ = now + wait_ms + request.timeout_ms;
+        }
+        next_dispatch_retry_ms_ = now + wait_ms;
+        return DateTimePrepareResult::Deferred;
+    }
+
+    const std::string utc = format_utc_ms(request.set_datetime_target_epoch_ms);
+    if (utc.empty()) return DateTimePrepareResult::InvalidClock;
+    request.params_json = build_set_datetime_params(utc);
+    return DateTimePrepareResult::Ready;
+}
+
 void RpcArbiter::note_request_success(RpcSource source, uint32_t now) {
     (void)now;
     (void)source;
@@ -1074,12 +1107,21 @@ void RpcArbiter::dispatch_next_request() {
     }
 
     if (request.set_datetime_now) {
-        const std::string utc = current_utc_iso_nearest_second();
-        if (utc.empty()) {
-            cancel_queued_request(request, "datetime_clock_invalid");
+        const DateTimePrepareResult result =
+            prepare_set_datetime_request(request, now);
+        if (result == DateTimePrepareResult::Deferred) {
             return;
         }
-        request.params_json = build_set_datetime_params(utc);
+        if (result == DateTimePrepareResult::InvalidClock) {
+            cancel_queued_request(request, "datetime_clock_invalid");
+            if (from_retry) {
+                dispatch_retry_ = {};
+                dispatch_retry_active_ = false;
+                dispatch_retry_deadline_ms_ = 0;
+                next_dispatch_retry_ms_ = 0;
+            }
+            return;
+        }
     }
 
     const std::string payload = build_rpc_request(request.method,

@@ -217,9 +217,16 @@ private:
         std::string method;
         std::string params_json;
         bool set_datetime_now = false;
+        int64_t set_datetime_target_epoch_ms = 0;
         StreamCommandType stream_command = StreamCommandType::None;
         EventCommandType event_command = EventCommandType::None;
         bool settings_refresh = false;
+    };
+
+    enum class DateTimePrepareResult : uint8_t {
+        Ready,
+        Deferred,
+        InvalidClock,
     };
 
     struct RawPassthroughRequest {
@@ -308,6 +315,8 @@ private:
     void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_esp_ota_quiesce(
         const QueuedRequest &request) const;
+    DateTimePrepareResult prepare_set_datetime_request(QueuedRequest &request,
+                                                       uint32_t now);
 
     void schedule_as11_identity_refresh(uint32_t now, uint32_t delay_ms);
     void schedule_as11_status_refresh(uint32_t now, uint32_t delay_ms);
