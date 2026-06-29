@@ -1,6 +1,7 @@
+
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1120" viewBox="0 0 1200 1120" role="img" aria-labelledby="title desc">
   <title id="title">AirCANnect reference wiring</title>
-  <desc id="desc">Wiring diagram for an AirCANnect build using a XIAO ESP32-S3 Plus, a 24V to 3.3V buck regulator, an SN65HVD230 CAN transceiver, and Pilot-24 cable ends.</desc>
+  <desc id="desc">Wiring diagram for an AirCANnect build using a XIAO ESP32-S3 Plus, a 24V to 3.3V buck regulator, an SN65HVD230 CAN transceiver, and Pilot-24 cable ends. AirCurve 90W PSU builds pass CAN through from PSU to device.</desc>
   <defs>
     <style>
       .bg { fill: #f8fafc; }
@@ -36,19 +37,24 @@
 
   <rect class="bg" width="1200" height="1120"/>
   <text class="title" x="40" y="42">AirCANnect reference wiring</text>
-  <text class="small" x="40" y="66">Power passes through from PSU to AirSense. AirCANnect taps power locally, steps it down to 3.3V, and adds CAN-H/CAN-L on the AirSense side.</text>
+  <text class="small" x="40" y="66">Power passes through from PSU to device. AirCurve 90W PSU also requires CAN-H/CAN-L pass-through; AirCANnect taps the same CAN pair.</text>
 
-  <rect class="box" x="40" y="105" width="220" height="160"/>
+  <rect class="box" x="40" y="105" width="220" height="235"/>
   <text class="h" x="62" y="139">Pilot-24 socket</text>
   <text class="small" x="62" y="161">ResMed PSU side</text>
+  <text class="small" x="62" y="179">65W: power only; 90W: power + CAN</text>
   <text class="pin" x="62" y="207">+24V from PSU</text>
   <circle class="dot24" cx="260" cy="202" r="6"/>
   <text class="pin" x="62" y="237">GND from PSU</text>
   <circle class="dotgnd" cx="260" cy="232" r="6"/>
+  <text class="pin" x="62" y="290">CAN-H from 90W PSU</text>
+  <circle class="dotcanh" cx="260" cy="285" r="6"/>
+  <text class="pin" x="62" y="320">CAN-L from 90W PSU</text>
+  <circle class="dotcanl" cx="260" cy="315" r="6"/>
 
   <rect class="box" x="940" y="105" width="220" height="235"/>
   <text class="h" x="962" y="139">Pilot-24 plug</text>
-  <text class="small" x="962" y="161">AirSense 11 side</text>
+  <text class="small" x="962" y="161">AirSense/AirCurve 11 side</text>
   <circle class="dot24" cx="940" cy="202" r="6"/>
   <text class="pin" x="962" y="207">pin 1  +24V</text>
   <circle class="dotgnd" cx="940" cy="232" r="6"/>
@@ -58,72 +64,82 @@
   <circle class="dotcanl" cx="940" cy="315" r="6"/>
   <text class="pin" x="962" y="320">pin 3  CAN-L</text>
 
-  <rect class="box" x="365" y="300" width="210" height="165"/>
-  <text class="h" x="390" y="334">Buck regulator</text>
-  <text class="small" x="390" y="356">24V to 3.3V</text>
-  <circle class="dot24" cx="365" cy="390" r="6"/>
-  <text class="pin" x="390" y="395">IN+</text>
-  <circle class="dotgnd" cx="365" cy="430" r="6"/>
-  <text class="pin" x="390" y="435">GND</text>
-  <circle class="dot33" cx="575" cy="390" r="6"/>
-  <text class="pin" x="515" y="395">OUT+</text>
-  <circle class="dotgnd" cx="575" cy="430" r="6"/>
-  <text class="pin" x="520" y="435">GND</text>
+  <rect class="box" x="365" y="365" width="210" height="155"/>
+  <text class="h" x="390" y="399">Buck regulator</text>
+  <text class="small" x="390" y="421">24V to 3.3V</text>
+  <circle class="dot24" cx="365" cy="450" r="6"/>
+  <text class="pin" x="390" y="455">IN+</text>
+  <circle class="dotgnd" cx="365" cy="490" r="6"/>
+  <text class="pin" x="390" y="495">GND</text>
+  <circle class="dot33" cx="575" cy="450" r="6"/>
+  <text class="pin" x="515" y="455">OUT+</text>
+  <circle class="dotgnd" cx="575" cy="490" r="6"/>
+  <text class="pin" x="520" y="495">GND</text>
 
-  <rect class="box" x="690" y="300" width="210" height="205"/>
-  <text class="h" x="715" y="334">XIAO ESP32-S3 Plus</text>
-  <text class="small" x="715" y="356">controller</text>
-  <circle class="dot33" cx="690" cy="390" r="6"/>
-  <text class="pin" x="715" y="395">3V3</text>
-  <circle class="dotgnd" cx="690" cy="430" r="6"/>
-  <text class="pin" x="715" y="435">GND</text>
-  <circle class="dottx" cx="690" cy="470" r="6"/>
-  <text class="pin" x="715" y="475">GPIO1  CAN TX</text>
-  <circle class="dotrx" cx="690" cy="490" r="6"/>
-  <text class="pin" x="715" y="495">GPIO2  CAN RX</text>
+  <rect class="box" x="365" y="555" width="220" height="180"/>
+  <text class="h" x="390" y="589">XIAO ESP32-S3 Plus</text>
+  <text class="small" x="390" y="611">controller</text>
+  <circle class="dot33" cx="585" cy="610" r="6"/>
+  <text class="pin" x="510" y="615">3V3</text>
+  <circle class="dotgnd" cx="585" cy="640" r="6"/>
+  <text class="pin" x="510" y="645">GND</text>
+  <circle class="dottx" cx="585" cy="690" r="6"/>
+  <text class="pin" x="440" y="695">GPIO1  CAN TX</text>
+  <circle class="dotrx" cx="585" cy="710" r="6"/>
+  <text class="pin" x="440" y="715">GPIO2  CAN RX</text>
 
-  <rect class="box" x="690" y="555" width="210" height="160"/>
-  <text class="h" x="715" y="589">SN65HVD230</text>
-  <text class="small" x="715" y="611">3.3V CAN transceiver</text>
-  <circle class="dot33" cx="690" cy="640" r="6"/>
-  <text class="pin" x="715" y="645">VCC</text>
-  <circle class="dotgnd" cx="690" cy="670" r="6"/>
-  <text class="pin" x="715" y="675">GND</text>
-  <circle class="dottx" cx="690" cy="695" r="6"/>
-  <text class="pin" x="715" y="700">D / TXD</text>
+  <rect class="box" x="690" y="535" width="200" height="200"/>
+  <text class="h" x="715" y="569">SN65HVD230</text>
+  <text class="small" x="715" y="591">3.3V CAN transceiver</text>
+  <circle class="dot33" cx="690" cy="610" r="6"/>
+  <text class="pin" x="715" y="615">VCC</text>
+  <circle class="dotgnd" cx="690" cy="640" r="6"/>
+  <text class="pin" x="715" y="645">GND</text>
+  <circle class="dottx" cx="690" cy="690" r="6"/>
+  <text class="pin" x="715" y="695">D / TXD</text>
   <circle class="dotrx" cx="690" cy="710" r="6"/>
   <text class="pin" x="715" y="715">R / RXD</text>
-  <circle class="dotcanh" cx="900" cy="640" r="6"/>
-  <text class="pin" x="835" y="645">CANH</text>
-  <circle class="dotcanl" cx="900" cy="670" r="6"/>
-  <text class="pin" x="835" y="675">CANL</text>
+  <circle class="dotcanh" cx="890" cy="610" r="6"/>
+  <text class="pin" x="825" y="615">CANH</text>
+  <circle class="dotcanl" cx="890" cy="640" r="6"/>
+  <text class="pin" x="825" y="645">CANL</text>
 
-  <!-- Pass-through power to AirSense. -->
+  <!-- Pass-through power to the ResMed device. -->
   <path class="wire p24" d="M260 202 H940"/>
   <path class="wire gnd" d="M260 232 H940"/>
   <text class="small" x="505" y="188">+24V pass-through</text>
   <text class="small" x="510" y="255">GND pass-through</text>
 
   <!-- Local power taps into buck regulator. -->
-  <path class="tap p24" d="M335 202 V390 H365"/>
-  <path class="tap gnd" d="M330 232 V430 H365"/>
-  <text class="small" x="345" y="286">power tap</text>
+  <path class="tap p24" d="M315 202 V450 H365"/>
+  <path class="tap gnd" d="M280 232 V490 H365"/>
+  <circle class="dot24" cx="315" cy="202" r="6"/>
+  <circle class="dotgnd" cx="280" cy="232" r="6"/>
+  <text class="small" x="320" y="350">power tap</text>
 
   <!-- Regulated 3.3V rail. -->
-  <path class="wire v33" d="M575 390 H690"/>
-  <path class="wire gnd" d="M575 430 H690"/>
-  <path class="tap v33" d="M625 390 V640 H690"/>
-  <path class="tap gnd" d="M620 430 V670 H690"/>
-  <text class="small" x="603" y="374">3.3V rail</text>
+  <path class="wire v33" d="M585 610 H690"/>
+  <path class="wire gnd" d="M585 640 H690"/>
+  <path class="tap v33" d="M575 450 H635 V610"/>
+  <path class="tap gnd" d="M575 490 H625 V640"/>
+  <circle class="dot33" cx="635" cy="610" r="6"/>
+  <circle class="dotgnd" cx="625" cy="640" r="6"/>
+  <text class="small" x="610" y="440">3.3V rail</text>
 
   <!-- ESP32 TWAI to transceiver logic pins. -->
-  <path class="wire tx" d="M690 470 H655 V695 H690"/>
-  <path class="wire rx" d="M690 490 H640 V710 H690"/>
+  <path class="wire tx" d="M585 690 H690"/>
+  <path class="wire rx" d="M585 710 H690"/>
 
-  <!-- CAN pair to the AirSense plug. -->
-  <path class="wire canh" d="M900 640 H925 V285 H940"/>
-  <path class="wire canl" d="M900 670 H915 V315 H940"/>
-  <text class="small" x="930" y="475">CAN pair</text>
+  <!-- CAN pair pass-through and AirCANnect tap. AirCurve 90W PSU requires the
+       PSU-side CAN pins; AirSense 65W can leave the PSU-side CAN pins unused. -->
+  <path class="wire canh" d="M260 285 H940"/>
+  <path class="wire canl" d="M260 315 H940"/>
+  <path class="tap canh" d="M925 285 V610 H890"/>
+  <path class="tap canl" d="M910 315 V640 H890"/>
+  <circle class="dotcanh" cx="925" cy="285" r="6"/>
+  <circle class="dotcanl" cx="910" cy="315" r="6"/>
+  <text class="small" x="382" y="272">CAN pass-through for AirCurve 90W PSU; optional on AirSense 65W</text>
+  <text class="small" x="930" y="455">CAN tap</text>
 
   <rect class="soft" x="40" y="755" width="1120" height="335"/>
   <text class="h" x="62" y="790">Optional microSD, 4-bit SDMMC</text>
@@ -189,29 +205,30 @@
   <path class="thin sd" d="M350 1060 H860"/>
 
   <g aria-label="10k pull-ups">
-    <path class="thin v33" d="M485 835 V944"/>
-    <rect class="res" x="473" y="944" width="24" height="14"/>
-    <path class="thin v33" d="M485 958 V960"/>
-    <text class="small" x="466" y="935">10k</text>
+    <path class="thin v33" d="M485 835 V940"/>
+    <rect class="res" x="473" y="940" width="24" height="14"/>
+    <path class="thin v33" d="M485 954 V960"/>
+    <text class="small" x="466" y="931">10k</text>
 
-    <path class="thin v33" d="M555 835 V969"/>
-    <rect class="res" x="543" y="969" width="24" height="14"/>
-    <path class="thin v33" d="M555 983 V985"/>
-    <text class="small" x="536" y="960">10k</text>
+    <path class="thin v33" d="M555 835 V965"/>
+    <rect class="res" x="543" y="965" width="24" height="14"/>
+    <path class="thin v33" d="M555 979 V985"/>
+    <text class="small" x="536" y="956">10k</text>
 
-    <path class="thin v33" d="M625 835 V994"/>
-    <rect class="res" x="613" y="994" width="24" height="14"/>
-    <path class="thin v33" d="M625 1008 V1010"/>
-    <text class="small" x="606" y="985">10k</text>
+    <path class="thin v33" d="M625 835 V990"/>
+    <rect class="res" x="613" y="990" width="24" height="14"/>
+    <path class="thin v33" d="M625 1004 V1010"/>
+    <text class="small" x="606" y="981">10k</text>
 
-    <path class="thin v33" d="M695 835 V1019"/>
-    <rect class="res" x="683" y="1019" width="24" height="14"/>
-    <path class="thin v33" d="M695 1033 V1035"/>
-    <text class="small" x="676" y="1010">10k</text>
+    <path class="thin v33" d="M695 835 V1015"/>
+    <rect class="res" x="683" y="1015" width="24" height="14"/>
+    <path class="thin v33" d="M695 1029 V1035"/>
+    <text class="small" x="676" y="1006">10k</text>
 
-    <path class="thin v33" d="M765 835 V1044"/>
-    <rect class="res" x="753" y="1044" width="24" height="14"/>
-    <path class="thin v33" d="M765 1058 V1060"/>
-    <text class="small" x="746" y="1035">10k</text>
+    <path class="thin v33" d="M765 835 V1040"/>
+    <rect class="res" x="753" y="1040" width="24" height="14"/>
+    <path class="thin v33" d="M765 1054 V1060"/>
+    <text class="small" x="746" y="1031">10k</text>
   </g>
 </svg>
+

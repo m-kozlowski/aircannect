@@ -19,8 +19,13 @@ Default wiring for the `xiao-esp32s3-plus-sdmmc4` profile:
 
 AirCANnect sits in-line between the ResMed PSU and the AirSense. +24 V
 and GND pass through to the AirSense; AirCANnect taps them locally for
-the buck regulator. CAN-H and CAN-L are added only on the AirSense side
-of the in-line wiring.
+the buck regulator.
+
+For AirSense 11 with the 65 W PSU, PSU-side CAN is optional. \
+For AirCurve 11 with the 90 W PSU, the PSU identification uses CAN bus
+and the cable uses all four connector pins. In that build, CAN-H and CAN-L
+must pass through from the PSU connector to the AirCurve connector,
+and the AirCANnect CAN transceiver must tap that same pass-through CAN pair.
 
 Signal summary:
 
@@ -28,6 +33,7 @@ Signal summary:
 |---|---|
 | PSU +24 V | AirSense `+24V` and buck `Vin` |
 | PSU GND | AirSense `GND`, buck `GND`, XIAO `GND`, transceiver `GND` |
+| PSU `CAN-H` / `CAN-L` | AirCurve `CAN-H` / `CAN-L` pass-through *(90 W PSU only)* |
 | Buck 3.3 V output | XIAO `3V3` and transceiver `VCC` |
 | XIAO GPIO1 CAN TX | Transceiver `D` / `TXD` |
 | XIAO GPIO2 CAN RX | Transceiver `R` / `RXD` |
