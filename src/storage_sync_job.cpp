@@ -538,11 +538,42 @@ bool StorageSyncJob::request_verify_recent() {
     return request_sync_with_kind(RunKind::VerifyRecent, "verify_recent");
 }
 
+bool StorageSyncJob::queue_post_therapy_locked(uint32_t now_ms) {
+    if (!status_.enabled || !status_.configured) return false;
+    if (status_.state == StorageSyncState::Working) return false;
+
+    status_.pending = true;
+    status_.state = StorageSyncState::Pending;
+    pending_run_kind_ = RunKind::PostTherapy;
+    copy_cstr(status_.pending_reason,
+              sizeof(status_.pending_reason),
+              run_kind_reason(pending_run_kind_));
+    status_.updated_ms = now_ms == 0 ? millis_nonzero() : now_ms;
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
+    publish_runtime_locked();
+    Log::logf(CAT_STORAGE,
+              LOG_INFO,
+              "[SYNC] queued reason=post_therapy\n");
+    return true;
+}
+
+void StorageSyncJob::queue_deferred_post_therapy_locked(uint32_t now_ms) {
+    if (!post_therapy_requested_.load()) return;
+    if (!status_.enabled || !status_.configured) {
+        post_therapy_requested_.store(false);
+        return;
+    }
+    if (status_.state == StorageSyncState::Working) return;
+    post_therapy_requested_.store(false);
+    (void)queue_post_therapy_locked(now_ms);
+}
+
 bool StorageSyncJob::request_post_therapy_sync() {
     if (!lock(0)) {
-        Log::logf(CAT_STORAGE, LOG_WARN,
-                  "[SYNC] post-therapy request rejected reason=lock_timeout\n");
-        return false;
+        post_therapy_requested_.store(true);
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+        return true;
     }
     if (!status_.enabled || !status_.configured) {
         Log::logf(CAT_STORAGE,
@@ -554,18 +585,11 @@ bool StorageSyncJob::request_post_therapy_sync() {
         unlock();
         return false;
     }
-    if (status_.state != StorageSyncState::Working) {
-        status_.pending = true;
-        status_.state = StorageSyncState::Pending;
-        pending_run_kind_ = RunKind::PostTherapy;
-        copy_cstr(status_.pending_reason, sizeof(status_.pending_reason),
-                  run_kind_reason(pending_run_kind_));
-        status_.updated_ms = millis_nonzero();
-        Log::logf(CAT_STORAGE,
-                  LOG_INFO,
-                  "[SYNC] queued reason=post_therapy\n");
+    if (status_.state == StorageSyncState::Working) {
+        post_therapy_requested_.store(true);
+    } else {
+        (void)queue_post_therapy_locked(millis_nonzero());
     }
-    publish_runtime_locked();
     unlock();
     if (BackgroundWorker *worker = background_worker()) worker->wake();
     return true;
@@ -1091,6 +1115,7 @@ void StorageSyncJob::finish_run_locked() {
     }
     current_run_kind_ = RunKind::Manual;
     sync_after_verify_ = false;
+    queue_deferred_post_therapy_locked(status_.updated_ms);
     publish_runtime_locked();
 }
 
@@ -1240,6 +1265,7 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
     }
     queue_retry_locked(now_ms);
     queue_reconcile_if_due_locked(now_ms);
+    queue_deferred_post_therapy_locked(now_ms);
 
     const bool ready =
         status_.enabled && status_.configured &&

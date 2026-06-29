@@ -29,7 +29,7 @@ static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
 };
 static constexpr const char *SLEEPHQ_INFLIGHT_FILE = "inflight.state";
 static constexpr uint32_t SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT = 1;
-static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PER_PAGE = 25;
+static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PER_PAGE = 10;
 static constexpr uint32_t SLEEPHQ_REMOTE_FILE_LOOKUP_LIMIT = 500;
 static constexpr uint32_t SLEEPHQ_REMOTE_FILE_PAGE_LIMIT =
     (SLEEPHQ_REMOTE_FILE_LOOKUP_LIMIT + SLEEPHQ_REMOTE_FILE_PER_PAGE - 1) /

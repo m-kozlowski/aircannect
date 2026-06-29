@@ -192,6 +192,8 @@ private:
     static bool run_kind_is_reconcile(RunKind kind);
     bool request_sync_with_kind(RunKind kind, const char *label);
 
+    bool queue_post_therapy_locked(uint32_t now_ms);
+    void queue_deferred_post_therapy_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
     bool prepare_step_locked(uint32_t now_ms, JobStep &result);
     void queue_retry_locked(uint32_t now_ms);
@@ -281,6 +283,7 @@ private:
     std::atomic<bool> runtime_enabled_{false};
     std::atomic<bool> runtime_configured_{false};
     std::atomic<uint32_t> idle_defer_until_ms_{0};
+    std::atomic<bool> post_therapy_requested_{false};
     RunKind pending_run_kind_ = RunKind::Manual;
     RunKind current_run_kind_ = RunKind::Manual;
     bool sync_after_verify_ = false;

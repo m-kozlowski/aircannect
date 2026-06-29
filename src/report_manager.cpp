@@ -6801,7 +6801,7 @@ bool ReportManager::start_result_plot_build() {
     }
     if (!result_skip_plot_cache_ && load_result_plot_cache()) {
         Log::logf(CAT_REPORT,
-                  LOG_INFO,
+                  LOG_DEBUG,
                   "Result plot cache hit index=%lu bytes=%lu\n",
                   static_cast<unsigned long>(result_status_.therapy_index),
                   static_cast<unsigned long>(result_plot_bin_.size()));
@@ -7543,7 +7543,7 @@ bool ReportManager::finish_result_plot_build() {
     reset_plot_build();
     release_result_edf_sessions();
     Log::logf(CAT_REPORT,
-              LOG_INFO,
+              LOG_DEBUG,
               "Result plot ready index=%lu chunks=%lu input_chunks=%lu "
               "input_bytes=%lu bytes=%lu elapsed_ms=%lu\n",
               static_cast<unsigned long>(result_status_.therapy_index),
@@ -9270,7 +9270,7 @@ bool ReportManager::finalize_result_prepare(size_t therapy_index) {
         if (!start_result_plot_build()) return false;
         if (plot_build_active_) {
             Log::logf(CAT_REPORT,
-                      LOG_INFO,
+                      LOG_DEBUG,
                       "Result prepared index=%lu state=%s chunks=%lu "
                       "records=%lu bytes=%lu plot=building\n",
                       static_cast<unsigned long>(therapy_index),
@@ -9281,7 +9281,7 @@ bool ReportManager::finalize_result_prepare(size_t therapy_index) {
             return true;
         }
     }
-    Log::logf(CAT_REPORT, LOG_INFO,
+    Log::logf(CAT_REPORT, LOG_DEBUG,
               "Result prepared index=%lu state=%s chunks=%lu "
               "records=%lu bytes=%lu\n",
               static_cast<unsigned long>(therapy_index),
