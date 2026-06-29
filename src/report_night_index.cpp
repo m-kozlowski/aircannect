@@ -75,7 +75,7 @@ bool sleep_day_start_utc_ms(const char *sleep_day,
     return true;
 }
 
-uint64_t report_summary_signature(const ReportSummaryRecord &record) {
+uint64_t summary_identity_signature(const ReportSummaryRecord &record) {
     uint64_t hash = REPORT_FNV_OFFSET;
     hash = report_hash_u64(hash, record.start_ms);
     hash = report_hash_u64(hash, record.end_ms);
@@ -186,7 +186,7 @@ void normalize_edf_source_signatures(ReportIndexedNight &night) {
 }
 
 void recompute_source_signature(ReportIndexedNight &night) {
-    uint64_t hash = report_summary_signature(night.summary);
+    uint64_t hash = summary_identity_signature(night.summary);
     normalize_edf_source_signatures(night);
     hash = report_hash_u32(
         hash,
@@ -369,6 +369,29 @@ bool range_overlaps_any(const ReportSessionRange &range,
     return false;
 }
 
+bool range_covers_with_tolerance(const ReportSessionRange &outer,
+                                 const ReportSessionRange &inner,
+                                 int64_t tolerance_ms) {
+    if (outer.end_ms <= outer.start_ms || inner.end_ms <= inner.start_ms) {
+        return false;
+    }
+    return outer.start_ms <= inner.start_ms + tolerance_ms &&
+           outer.end_ms + tolerance_ms >= inner.end_ms;
+}
+
+int find_indexed_night_by_start(ReportIndexedNight *nights,
+                                size_t count,
+                                uint64_t start_ms) {
+    if (!nights || start_ms == 0) return -1;
+    for (size_t i = 0; i < count; ++i) {
+        if (nights[i].summary.valid &&
+            nights[i].summary.start_ms == start_ms) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
 int find_matching_indexed_range(const ReportIndexedNight &night,
                                 int64_t start_ms,
                                 int64_t end_ms) {
@@ -542,6 +565,38 @@ bool indexed_night_data_span(const ReportIndexedNight &night,
     return span_end > span_start;
 }
 
+bool indexed_night_summary_ranges_covered_by_data(
+    const ReportIndexedNight &night) {
+    if (!night.has_edf || night.data_range_count == 0 ||
+        !night.summary.valid) {
+        return false;
+    }
+
+    ReportSessionRange summary_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    const size_t summary_count =
+        collect_session_ranges(night.summary,
+                               summary_ranges,
+                               AC_REPORT_SUMMARY_SESSION_MAX);
+    if (summary_count == 0) return false;
+
+    const size_t data_count =
+        std::min(night.data_range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    for (size_t i = 0; i < summary_count; ++i) {
+        bool covered = false;
+        for (size_t j = 0; j < data_count; ++j) {
+            if (range_covers_with_tolerance(night.data_ranges[j],
+                                            summary_ranges[i],
+                                            REPORT_SESSION_MERGE_TOLERANCE_MS)) {
+                covered = true;
+                break;
+            }
+        }
+        if (!covered) return false;
+    }
+    return true;
+}
+
 size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
                                          ReportSessionRange *ranges,
                                          size_t max_ranges) {
@@ -606,6 +661,11 @@ bool report_summary_sleep_day_yyyymmdd(const ReportSummaryRecord &record,
     snprintf(out, out_size, "%04d%02u%02u", year, month, day);
     out[out_size - 1] = '\0';
     return true;
+}
+
+uint64_t report_summary_identity_signature(
+    const ReportSummaryRecord &record) {
+    return summary_identity_signature(record);
 }
 
 bool edf_session_has_report_numeric(
@@ -719,15 +779,63 @@ void ReportNightIndex::reset() {
 
 bool ReportNightIndex::add_summary_record(
     const ReportSummaryRecord &record) {
-    if (!nights_ || count_ >= capacity_) return false;
     if (!record.valid) return true;
-    ReportIndexedNight &night = nights_[count_];
+    if (!nights_) return false;
+    int existing = find_indexed_night_by_start(nights_,
+                                               count_,
+                                               record.start_ms);
+    if (existing < 0 && count_ >= capacity_) return false;
+
+    ReportIndexedNight &night = existing >= 0
+        ? nights_[static_cast<size_t>(existing)]
+        : nights_[count_];
+    const bool had_edf = night.has_edf;
+    const size_t old_data_range_count = std::min(
+        night.data_range_count,
+        static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    ReportSessionRange old_data_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    for (size_t i = 0; i < old_data_range_count; ++i) {
+        old_data_ranges[i] = night.data_ranges[i];
+    }
+    const size_t old_signature_count = std::min(
+        night.edf_source_signature_count,
+        static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX));
+    uint64_t old_signatures[AC_REPORT_EDF_SESSION_MAX] = {};
+    for (size_t i = 0; i < old_signature_count; ++i) {
+        old_signatures[i] = night.edf_source_signatures[i];
+    }
+
     night = ReportIndexedNight{};
     night.summary = record;
     night.has_summary = true;
-    night.source_signature = report_summary_signature(record);
+    night.has_edf = had_edf;
+    night.data_range_count = old_data_range_count;
+    for (size_t i = 0; i < old_data_range_count; ++i) {
+        night.data_ranges[i] = old_data_ranges[i];
+    }
+    night.edf_source_signature_count = old_signature_count;
+    for (size_t i = 0; i < old_signature_count; ++i) {
+        night.edf_source_signatures[i] = old_signatures[i];
+    }
+    night.source_signature = summary_identity_signature(record);
     seed_night_ranges_from_summary(night);
-    count_++;
+    night.edf_catalog_pending =
+        had_edf && !indexed_night_summary_ranges_covered_by_data(night);
+    if (existing < 0) count_++;
+    return true;
+}
+
+bool ReportNightIndex::add_indexed_night(const ReportIndexedNight &night) {
+    if (!nights_ || !night.summary.valid) return false;
+    const int existing = find_indexed_night_by_start(nights_,
+                                                     count_,
+                                                     night.summary.start_ms);
+    if (existing >= 0) {
+        nights_[static_cast<size_t>(existing)] = night;
+        return true;
+    }
+    if (count_ >= capacity_) return false;
+    nights_[count_++] = night;
     return true;
 }
 
@@ -800,6 +908,9 @@ bool ReportNightIndex::add_edf_session(
         (void)append_edf_source_signature(
             night,
             report_edf_session_signature(session));
+        night.edf_catalog_pending =
+            night.has_summary &&
+            !indexed_night_summary_ranges_covered_by_data(night);
     }
     return true;
 }

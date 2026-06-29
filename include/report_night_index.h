@@ -47,10 +47,14 @@ bool night_data_span(const ReportSummaryRecord &night,
 bool indexed_night_data_span(const ReportIndexedNight &night,
                              int64_t &span_start,
                              int64_t &span_end);
+bool indexed_night_summary_ranges_covered_by_data(
+    const ReportIndexedNight &night);
 size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
                                          ReportSessionRange *ranges,
                                          size_t max_ranges);
 uint32_t report_ceil_duration_min(int64_t start_ms, int64_t end_ms);
+uint64_t report_summary_identity_signature(
+    const ReportSummaryRecord &record);
 bool report_summary_sleep_day_yyyymmdd(const ReportSummaryRecord &record,
                                        char *out,
                                        size_t out_size);
@@ -69,6 +73,7 @@ public:
     ReportNightIndex(ReportIndexedNight *nights, size_t capacity);
 
     void reset();
+    bool add_indexed_night(const ReportIndexedNight &night);
     bool add_summary_record(const ReportSummaryRecord &record);
     bool add_edf_session(const EdfReportSessionDescriptor &session,
                          bool timezone_offset_valid,

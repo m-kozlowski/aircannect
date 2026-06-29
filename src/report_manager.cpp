@@ -21,6 +21,7 @@
 #include "report_data_provider.h"
 #include "report_materializer.h"
 #include "report_night_index.h"
+#include "report_night_index_store.h"
 #include "report_records.h"
 #include "report_source_resolver.h"
 #include "report_store.h"
@@ -679,69 +680,6 @@ bool plot_cache_name_for_night(const char *name, uint64_t night_start_ms) {
     return dot && (strcmp(dot, ".bin") == 0 || strcmp(dot, ".tmp") == 0);
 }
 
-bool result_cache_name_for_summary(const char *name,
-                                   const ReportSummaryRecord &night,
-                                   uint32_t epoch,
-                                   char *etag_out,
-                                   size_t etag_out_size) {
-    if (!name || !night.start_ms) return false;
-    const char *base = plot_cache_basename(name);
-    char prefix[96];
-    const int prefix_written =
-        snprintf(prefix,
-                 sizeof(prefix),
-                 "%llu-%llu-%lu-%lu-",
-                 static_cast<unsigned long long>(night.start_ms),
-                 static_cast<unsigned long long>(night.start_ms),
-                 static_cast<unsigned long>(night.duration_min),
-                 static_cast<unsigned long>(night.session_interval_count));
-    if (prefix_written <= 0 ||
-        static_cast<size_t>(prefix_written) >= sizeof(prefix)) {
-        return false;
-    }
-    const size_t prefix_len = static_cast<size_t>(prefix_written);
-    if (strncmp(base, prefix, prefix_len) != 0) return false;
-
-    char suffix[32];
-    const int suffix_written =
-        snprintf(suffix,
-                 sizeof(suffix),
-                 "-%lu-r%lu.json",
-                 static_cast<unsigned long>(epoch),
-                 static_cast<unsigned long>(REPORT_RESULT_ETAG_VERSION));
-    if (suffix_written <= 0 ||
-        static_cast<size_t>(suffix_written) >= sizeof(suffix)) {
-        return false;
-    }
-    const size_t base_len = strlen(base);
-    const size_t suffix_len = static_cast<size_t>(suffix_written);
-    if (base_len <= suffix_len ||
-        strcmp(base + base_len - suffix_len, suffix) != 0) {
-        return false;
-    }
-
-    char outer_prefix[32];
-    const int outer_written =
-        snprintf(outer_prefix,
-                 sizeof(outer_prefix),
-                 "%llu-",
-                 static_cast<unsigned long long>(night.start_ms));
-    if (outer_written <= 0 ||
-        static_cast<size_t>(outer_written) >= sizeof(outer_prefix)) {
-        return false;
-    }
-    const size_t outer_len = static_cast<size_t>(outer_written);
-    const size_t json_suffix_len = strlen(".json");
-    if (base_len <= outer_len + json_suffix_len) return false;
-    const size_t etag_len = base_len - outer_len - json_suffix_len;
-    if (!etag_out || etag_out_size == 0 || etag_len >= etag_out_size) {
-        return false;
-    }
-    memcpy(etag_out, base + outer_len, etag_len);
-    etag_out[etag_len] = '\0';
-    return true;
-}
-
 bool store_summary_record_to_buffer(void *context,
                                     const ReportSummaryRecord &record) {
     SummaryRecordBufferContext *ctx =
@@ -1077,6 +1015,14 @@ ReportManager::~ReportManager() {
     Memory::free(range_edf_sessions_);
     range_edf_sessions_ = nullptr;
     range_edf_session_count_ = 0;
+    Memory::free(durable_index_);
+    durable_index_ = nullptr;
+    durable_index_count_ = 0;
+    durable_index_valid_ = false;
+    Memory::free(durable_index_save_);
+    durable_index_save_ = nullptr;
+    durable_index_save_count_ = 0;
+    durable_index_save_pending_ = false;
     if (summary_lock_) {
         vSemaphoreDelete(summary_lock_);
         summary_lock_ = nullptr;
@@ -1092,6 +1038,10 @@ ReportManager::~ReportManager() {
     if (index_cache_lock_) {
         vSemaphoreDelete(index_cache_lock_);
         index_cache_lock_ = nullptr;
+    }
+    if (durable_index_lock_) {
+        vSemaphoreDelete(durable_index_lock_);
+        durable_index_lock_ = nullptr;
     }
     if (plot_cache_write_lock_) {
         if (xSemaphoreTake(plot_cache_write_lock_, portMAX_DELAY) == pdTRUE) {
@@ -1119,6 +1069,7 @@ void ReportManager::begin() {
     if (!summary_lock_) summary_lock_ = xSemaphoreCreateMutex();
     if (!summary_scratch_lock_) summary_scratch_lock_ = xSemaphoreCreateMutex();
     if (!index_cache_lock_) index_cache_lock_ = xSemaphoreCreateMutex();
+    if (!durable_index_lock_) durable_index_lock_ = xSemaphoreCreateMutex();
     if (!plot_cache_write_lock_) {
         plot_cache_write_lock_ = xSemaphoreCreateMutex();
     }
@@ -1137,6 +1088,7 @@ void ReportManager::begin() {
     ensure_cache_source_night_extents();
     ensure_cache_coalesce_slots();
     ensure_cache_write_queue_slots();
+    load_durable_night_index();
     clear_summary_records();
     summary_status_ = {};
     if (!load_summary_from_store()) {
@@ -1197,6 +1149,198 @@ bool ReportManager::take_summary_scratch(TickType_t timeout,
 
 void ReportManager::give_summary_scratch() {
     if (summary_scratch_lock_) xSemaphoreGive(summary_scratch_lock_);
+}
+
+bool ReportManager::load_durable_night_index() {
+    if (!durable_index_lock_) return false;
+    if (!durable_index_) {
+        durable_index_ = static_cast<ReportIndexedNight *>(
+            Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
+                                 sizeof(ReportIndexedNight),
+                                 false));
+        if (!durable_index_) {
+            log_report_alloc_failed(
+                "durable_night_index",
+                AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+            return false;
+        }
+    }
+
+    size_t count = 0;
+    uint32_t crc = 0;
+    const bool loaded = ReportNightIndexStore::load(durable_index_,
+                                                    AC_REPORT_SUMMARY_RECORD_MAX,
+                                                    count,
+                                                    crc);
+    if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    durable_index_count_ = loaded ? count : 0;
+    durable_index_crc_ = loaded ? crc : 0;
+    durable_index_valid_ = loaded;
+    xSemaphoreGive(durable_index_lock_);
+    if (loaded) {
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Durable night index loaded nights=%lu crc=0x%08lx\n",
+                  static_cast<unsigned long>(count),
+                  static_cast<unsigned long>(crc));
+    }
+    return loaded;
+}
+
+bool ReportManager::seed_index_from_durable(ReportNightIndex &index) const {
+    if (!durable_index_lock_ || !durable_index_) return false;
+    if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return false;
+    }
+    const bool valid = durable_index_valid_;
+    const size_t count = std::min(durable_index_count_,
+                                  static_cast<size_t>(
+                                      AC_REPORT_SUMMARY_RECORD_MAX));
+    bool ok = valid;
+    for (size_t i = 0; valid && i < count; ++i) {
+        if (!index.add_indexed_night(durable_index_[i])) {
+            ok = false;
+            break;
+        }
+    }
+    xSemaphoreGive(durable_index_lock_);
+    return ok;
+}
+
+void ReportManager::schedule_durable_night_index_save(
+    const ReportIndexedNight *src,
+    size_t count,
+    uint32_t content_crc) const {
+    if ((!src && count) || count > AC_REPORT_SUMMARY_RECORD_MAX ||
+        !durable_index_lock_) {
+        return;
+    }
+
+    if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+        const bool unchanged = durable_index_valid_ &&
+                               durable_index_crc_ == content_crc &&
+                               !durable_index_save_pending_;
+        xSemaphoreGive(durable_index_lock_);
+        if (unchanged) return;
+    }
+
+    if (!durable_index_save_) {
+        durable_index_save_ = static_cast<ReportIndexedNight *>(
+            Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
+                                 sizeof(ReportIndexedNight),
+                                 false));
+        if (!durable_index_save_) {
+            log_report_alloc_failed(
+                "durable_night_index_save",
+                AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+            return;
+        }
+    }
+
+    if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return;
+    }
+    if (count > 0) {
+        memcpy(durable_index_save_, src, count * sizeof(ReportIndexedNight));
+    }
+    durable_index_save_count_ = count;
+    durable_index_save_crc_ = content_crc;
+    durable_index_save_pending_ = true;
+    durable_index_save_requested_ms_ = millis() + 1000;
+    xSemaphoreGive(durable_index_lock_);
+}
+
+bool ReportManager::service_durable_night_index_writer() {
+    if (!durable_index_lock_) return false;
+    size_t count = 0;
+    uint32_t expected_crc = 0;
+
+    if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return false;
+    }
+    if (!durable_index_save_pending_) {
+        xSemaphoreGive(durable_index_lock_);
+        return false;
+    }
+    const uint32_t now = millis();
+    if (static_cast<int32_t>(now - durable_index_save_requested_ms_) < 0) {
+        xSemaphoreGive(durable_index_lock_);
+        return false;
+    }
+    count = durable_index_save_count_;
+    expected_crc = durable_index_save_crc_;
+    xSemaphoreGive(durable_index_lock_);
+
+    ReportIndexedNight *snapshot = static_cast<ReportIndexedNight *>(
+        Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
+                             sizeof(ReportIndexedNight),
+                             false));
+    if (!snapshot) {
+        log_report_alloc_failed(
+            "durable_night_index_write_snapshot",
+            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+        if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            durable_index_save_requested_ms_ = millis() + 60000;
+            xSemaphoreGive(durable_index_lock_);
+        }
+        return false;
+    }
+
+    if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        Memory::free(snapshot);
+        return false;
+    }
+    count = std::min(durable_index_save_count_,
+                     static_cast<size_t>(AC_REPORT_SUMMARY_RECORD_MAX));
+    expected_crc = durable_index_save_crc_;
+    if (count > 0) {
+        memcpy(snapshot,
+               durable_index_save_,
+               count * sizeof(ReportIndexedNight));
+    }
+    xSemaphoreGive(durable_index_lock_);
+
+    uint32_t written_crc = 0;
+    const bool ok = ReportNightIndexStore::save(snapshot, count, written_crc);
+    if (ok) {
+        if (!durable_index_) {
+            durable_index_ = static_cast<ReportIndexedNight *>(
+                Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
+                                     sizeof(ReportIndexedNight),
+                                     false));
+        }
+        if (durable_index_ &&
+            xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            memcpy(durable_index_,
+                   snapshot,
+                   count * sizeof(ReportIndexedNight));
+            durable_index_count_ = count;
+            durable_index_crc_ = written_crc;
+            durable_index_valid_ = true;
+            if (durable_index_save_pending_ &&
+                durable_index_save_crc_ == expected_crc &&
+                durable_index_save_count_ == count) {
+                durable_index_save_pending_ = false;
+            }
+            xSemaphoreGive(durable_index_lock_);
+        }
+        Log::logf(CAT_REPORT,
+                  LOG_DEBUG,
+                  "Durable night index saved nights=%lu crc=0x%08lx\n",
+                  static_cast<unsigned long>(count),
+                  static_cast<unsigned long>(written_crc));
+    } else {
+        if (xSemaphoreTake(durable_index_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            durable_index_save_requested_ms_ = millis() + 60000;
+            xSemaphoreGive(durable_index_lock_);
+        }
+        Log::logf(CAT_REPORT, LOG_WARN,
+                  "Durable night index save failed\n");
+    }
+    Memory::free(snapshot);
+    return ok;
 }
 
 bool ReportManager::build_indexed_nights(ReportIndexedNight *out,
@@ -1277,6 +1421,7 @@ bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
     if (!out || capacity == 0) return false;
 
     ReportNightIndex index(out, capacity);
+    (void)seed_index_from_durable(index);
 
     if (take_summary_lock(pdMS_TO_TICKS(20))) {
         const size_t raw_count = records_ ? record_count_ : 0;
@@ -1296,15 +1441,24 @@ bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
         return false;
     }
 
-    auto finish_index = [&](bool edf_catalog_pending) -> bool {
+    auto finish_index = [&](bool catalog_pending,
+                            bool authoritative) -> bool {
         if (!index.finish(sort_scratch)) {
             Memory::free(sort_scratch);
             return false;
         }
         count = index.count();
-        if (edf_catalog_pending) {
+        if (catalog_pending) {
             for (size_t i = 0; i < count; ++i) {
-                out[i].edf_catalog_pending = true;
+                out[i].edf_catalog_pending =
+                    !out[i].has_edf ||
+                    !indexed_night_summary_ranges_covered_by_data(out[i]);
+            }
+        }
+        if (authoritative) {
+            uint32_t crc = 0;
+            if (ReportNightIndexStore::content_crc(out, count, crc)) {
+                schedule_durable_night_index_save(out, count, crc);
             }
         }
         Memory::free(sort_scratch);
@@ -1313,7 +1467,7 @@ bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
     };
 
     if (!edf_catalog_) {
-        return finish_index(false);
+        return finish_index(false, false);
     }
 
     EdfReportCatalogStatus catalog_status;
@@ -1326,7 +1480,8 @@ bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
         }
         return finish_index(!have_catalog_status ||
                             catalog_status.state !=
-                                EdfReportCatalogState::Error);
+                                EdfReportCatalogState::Error,
+                            false);
     }
 
     int32_t timezone_offset_min = 0;
@@ -1382,7 +1537,7 @@ bool ReportManager::build_indexed_nights_uncached(ReportIndexedNight *out,
     Memory::free(marker_scratch);
     Memory::free(session_scratch);
 
-    return finish_index(false);
+    return finish_index(false, true);
 }
 
 bool ReportManager::index_cache_key(
@@ -1597,9 +1752,10 @@ void ReportManager::poll(RpcArbiter &arbiter) {
             catalog_status.state == EdfReportCatalogState::Ready &&
             catalog_status.refresh_id != 0 &&
             catalog_status.refresh_id != edf_catalog_summary_refresh_id_) {
-            edf_catalog_summary_refresh_id_ = catalog_status.refresh_id;
             invalidate_materialized(0, true);
-            publish_summary_json_snapshot();
+            if (publish_summary_json_snapshot()) {
+                edf_catalog_summary_refresh_id_ = catalog_status.refresh_id;
+            }
         }
     }
     // Publish the summary revision for the background prefetch job (cross-task).
@@ -2154,14 +2310,16 @@ void ReportManager::note_cache_chunk_committed(uint64_t night_start_ms) {
 
 bool ReportManager::service_cache_writer() {
     if (!cache_write_lock_ || !cache_write_queue_) {
-        return service_result_cache_writer();
+        if (service_result_cache_writer()) return true;
+        return service_durable_night_index_writer();
     }
 
     CacheWriteQueueSlot job;
     if (!xSemaphoreTake(cache_write_lock_, pdMS_TO_TICKS(20))) return false;
     if (cache_write_count_ == 0) {
         xSemaphoreGive(cache_write_lock_);
-        return service_result_cache_writer();
+        if (service_result_cache_writer()) return true;
+        return service_durable_night_index_writer();
     }
 
     CacheWriteQueueSlot &slot = cache_write_queue_[cache_write_head_];
@@ -2591,11 +2749,12 @@ void append_summary_json_from_indexed(LargeTextBuffer &json,
     json += "]}";
 }
 
-void ReportManager::publish_summary_json_snapshot() {
+bool ReportManager::publish_summary_json_snapshot() {
     ReportIndexedNight *indexed_snapshot = nullptr;
     ReportSummaryStatus status_snapshot;
     uint32_t data_epoch_snapshot = 0;
     size_t record_count_snapshot = 0;
+    bool ok = true;
 
     if (take_summary_lock(portMAX_DELAY)) {
         status_snapshot = summary_status_;
@@ -2604,6 +2763,7 @@ void ReportManager::publish_summary_json_snapshot() {
     } else {
         status_snapshot.state = ReportSummaryState::Error;
         status_snapshot.error = "summary_busy";
+        ok = false;
     }
 
     indexed_snapshot = static_cast<ReportIndexedNight *>(
@@ -2614,6 +2774,7 @@ void ReportManager::publish_summary_json_snapshot() {
         status_snapshot.state = ReportSummaryState::Error;
         status_snapshot.error = "summary_snapshot_alloc";
         record_count_snapshot = 0;
+        ok = false;
     } else if (!build_indexed_nights(indexed_snapshot,
                                      AC_REPORT_SUMMARY_RECORD_MAX,
                                      record_count_snapshot)) {
@@ -2622,6 +2783,7 @@ void ReportManager::publish_summary_json_snapshot() {
         record_count_snapshot = 0;
         Memory::free(indexed_snapshot);
         indexed_snapshot = nullptr;
+        ok = false;
     } else {
         status_snapshot.records_total =
             static_cast<uint32_t>(record_count_snapshot);
@@ -2648,8 +2810,10 @@ void ReportManager::publish_summary_json_snapshot() {
         summary_json_build_ =
             "{\"state\":\"error\",\"error\":\"summary_snapshot_alloc\","
             "\"nights\":[]}";
+        ok = false;
     }
     summary_json_snapshot_.swap(summary_json_build_);
+    return ok;
 }
 
 void ReportManager::build_summary_json(LargeTextBuffer &json) const {
@@ -3220,66 +3384,6 @@ ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
     size_t therapy_index, const ReportIndexedNight &indexed_night,
     const char *if_none_match, char *etag_out, size_t etag_out_size,
     LargeTextBuffer &json_out) {
-    if (indexed_night.edf_catalog_pending) {
-        char cached_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-        if (load_result_json_cache_for_summary(indexed_night.summary,
-                                               cached_etag,
-                                               sizeof(cached_etag),
-                                               json_out)) {
-            if (etag_out && etag_out_size) {
-                snprintf(etag_out, etag_out_size, "%s", cached_etag);
-            }
-            if (build_queue_lock_ &&
-                xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) ==
-                    pdTRUE) {
-                copy_cstr(build_queue_last_read_,
-                          sizeof(build_queue_last_read_),
-                          if_none_match && if_none_match[0] &&
-                                  strcmp(if_none_match, cached_etag) == 0
-                              ? "not_modified_sd_pending"
-                              : "ready_sd_pending");
-                xSemaphoreGive(build_queue_lock_);
-            }
-            Log::logf(CAT_REPORT,
-                      LOG_DEBUG,
-                      "Result cache pending-catalog hit index=%lu "
-                      "night=%llu etag=%s bytes=%lu\n",
-                      static_cast<unsigned long>(therapy_index),
-                      static_cast<unsigned long long>(
-                          indexed_night.summary.start_ms),
-                      cached_etag,
-                      static_cast<unsigned long>(json_out.length()));
-            if (if_none_match && if_none_match[0] &&
-                strcmp(if_none_match, cached_etag) == 0) {
-                json_out.clear();
-                return ResultRead::NotModified;
-            }
-            return ResultRead::Ready;
-        }
-        if (etag_out && etag_out_size) etag_out[0] = '\0';
-        const BuildQueueResult queued =
-            enqueue_build(indexed_night.summary.start_ms,
-                          therapy_index,
-                          false);
-        if (build_queue_lock_ &&
-            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
-            copy_cstr(build_queue_last_read_,
-                      sizeof(build_queue_last_read_),
-                      "edf_catalog");
-            xSemaphoreGive(build_queue_lock_);
-        }
-        switch (queued) {
-            case BuildQueueResult::Queued:
-            case BuildQueueResult::AlreadyQueued:
-                return ResultRead::Building;
-            case BuildQueueResult::Full:
-                return ResultRead::QueueFull;
-            case BuildQueueResult::Unavailable:
-            default:
-                return ResultRead::Unavailable;
-        }
-    }
-
     char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
     char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
     if (!take_summary_lock(pdMS_TO_TICKS(20))) {
@@ -3298,6 +3402,51 @@ ReportManager::ResultRead ReportManager::read_result_for_indexed_night(
                                current_etag,
                                sizeof(current_etag));
     give_summary_lock();
+    if (etag_out && etag_out_size) {
+        snprintf(etag_out, etag_out_size, "%s", current_etag);
+    }
+
+    if (indexed_night.edf_catalog_pending) {
+        if (load_result_json_cache_for_night(indexed_night,
+                                             current_etag,
+                                             json_out)) {
+            const bool not_modified = if_none_match && if_none_match[0] &&
+                                      strcmp(if_none_match, current_etag) == 0;
+            if (build_queue_lock_ &&
+                xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) ==
+                    pdTRUE) {
+                copy_cstr(build_queue_last_read_,
+                          sizeof(build_queue_last_read_),
+                          not_modified
+                              ? "not_modified_sd_pending"
+                              : "ready_sd_pending");
+                xSemaphoreGive(build_queue_lock_);
+            }
+            Log::logf(CAT_REPORT,
+                      LOG_DEBUG,
+                      "Result cache pending-catalog hit index=%lu "
+                      "night=%llu etag=%s bytes=%lu\n",
+                      static_cast<unsigned long>(therapy_index),
+                      static_cast<unsigned long long>(
+                          indexed_night.summary.start_ms),
+                      current_etag,
+                      static_cast<unsigned long>(json_out.length()));
+            if (not_modified) {
+                json_out.clear();
+                return ResultRead::NotModified;
+            }
+            return ResultRead::Ready;
+        }
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        if (build_queue_lock_ &&
+            xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            copy_cstr(build_queue_last_read_,
+                      sizeof(build_queue_last_read_),
+                      "edf_catalog");
+            xSemaphoreGive(build_queue_lock_);
+        }
+        return ResultRead::Building;
+    }
 
     ResultRead slot_read = ResultRead::NotFound;
     bool have_slot_read = false;
@@ -3442,42 +3591,6 @@ ReportManager::PlotRead ReportManager::read_plot(
     if (!found_night) {
         return PlotRead::NotFound;
     }
-    if (indexed_night->edf_catalog_pending) {
-        if (version && version[0]) {
-            auto cached_plot = std::make_shared<ReportSpoolBuffer>();
-            if (cached_plot &&
-                load_result_plot_cache_for_etag(indexed_night->summary.start_ms,
-                                                version,
-                                                *cached_plot)) {
-                if (etag_out && etag_out_size) {
-                    snprintf(etag_out, etag_out_size, "%s", version);
-                }
-                out = cached_plot;
-                Log::logf(CAT_REPORT,
-                          LOG_DEBUG,
-                          "Plot cache pending-catalog hit index=%lu "
-                          "night=%llu bytes=%lu\n",
-                          static_cast<unsigned long>(resolved_therapy_index),
-                          static_cast<unsigned long long>(
-                              indexed_night->summary.start_ms),
-                          static_cast<unsigned long>(cached_plot->size()));
-                return PlotRead::Ready;
-            }
-        }
-        if (etag_out && etag_out_size) etag_out[0] = '\0';
-        switch (enqueue_build(indexed_night->summary.start_ms,
-                              resolved_therapy_index,
-                              false)) {
-            case BuildQueueResult::Queued:
-            case BuildQueueResult::AlreadyQueued:
-                return PlotRead::Building;
-            case BuildQueueResult::Full:
-                return PlotRead::QueueFull;
-            case BuildQueueResult::Unavailable:
-            default:
-                return PlotRead::Unavailable;
-        }
-    }
     if (!take_summary_lock(pdMS_TO_TICKS(20))) {
         return PlotRead::Busy;
     }
@@ -3491,6 +3604,26 @@ ReportManager::PlotRead ReportManager::read_plot(
     }
     if (version && version[0] && strcmp(version, current_etag) != 0) {
         return PlotRead::Stale;
+    }
+    if (indexed_night->edf_catalog_pending) {
+        auto cached_plot = std::make_shared<ReportSpoolBuffer>();
+        if (cached_plot &&
+            load_result_plot_cache_for_night(indexed_night.get(),
+                                             current_etag,
+                                             *cached_plot)) {
+            out = cached_plot;
+            Log::logf(CAT_REPORT,
+                      LOG_DEBUG,
+                      "Plot cache pending-catalog hit index=%lu "
+                      "night=%llu bytes=%lu\n",
+                      static_cast<unsigned long>(resolved_therapy_index),
+                      static_cast<unsigned long long>(
+                          indexed_night->summary.start_ms),
+                      static_cast<unsigned long>(cached_plot->size()));
+            return PlotRead::Ready;
+        }
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        return PlotRead::Building;
     }
     bool matching_result_without_plot = false;
     if (result_slots_ && result_slots_lock_) {
@@ -6242,70 +6375,6 @@ bool ReportManager::load_result_json_cache_for_night(
     return load_result_json_cache_path(path, out);
 }
 
-bool ReportManager::load_result_json_cache_for_summary(
-    const ReportSummaryRecord &night,
-    char *etag_out,
-    size_t etag_out_size,
-    LargeTextBuffer &out) const {
-    out.clear();
-    if (etag_out && etag_out_size) etag_out[0] = '\0';
-    if (!night.start_ms || !etag_out || etag_out_size == 0) return false;
-
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-    const uint32_t epoch = night_epoch_for_unlocked(night.start_ms);
-    give_summary_lock();
-
-    char best_path[REPORT_CACHE_PATH_MAX] = {};
-    char best_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-    time_t best_write = 0;
-    bool found = false;
-
-    {
-        Storage::Guard g;
-        if (!Storage::mounted()) return false;
-        File dir = Storage::open(REPORT_RESULT_JSON_CACHE_DIR, "r");
-        if (!dir) return false;
-        if (!dir.isDirectory()) {
-            dir.close();
-            return false;
-        }
-
-        while (true) {
-            File file = dir.openNextFile();
-            if (!file) break;
-            const bool is_dir = file.isDirectory();
-            char candidate_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-            const bool match =
-                !is_dir &&
-                result_cache_name_for_summary(file.name(),
-                                              night,
-                                              epoch,
-                                              candidate_etag,
-                                              sizeof(candidate_etag));
-            const time_t last_write = match ? file.getLastWrite() : 0;
-            char candidate_path[REPORT_CACHE_PATH_MAX] = {};
-            const bool path_ok =
-                match && cache_child_path(REPORT_RESULT_JSON_CACHE_DIR,
-                                          file.name(),
-                                          candidate_path,
-                                          sizeof(candidate_path));
-            file.close();
-            if (!match || !path_ok) continue;
-            if (!found || last_write >= best_write) {
-                snprintf(best_path, sizeof(best_path), "%s", candidate_path);
-                snprintf(best_etag, sizeof(best_etag), "%s", candidate_etag);
-                best_write = last_write;
-                found = true;
-            }
-        }
-        dir.close();
-    }
-
-    if (!found || !load_result_json_cache_path(best_path, out)) return false;
-    snprintf(etag_out, etag_out_size, "%s", best_etag);
-    return true;
-}
-
 bool ReportManager::load_result_json_cache_path(const char *path,
                                                 LargeTextBuffer &out) const {
     Storage::Guard g;
@@ -8455,20 +8524,6 @@ ReportManager::PlotRead ReportManager::read_plot_range(
                                  &resolved_therapy_index)
         : indexed_night_by_therapy_index(therapy_index, indexed_night.get());
     if (!found_night) return PlotRead::NotFound;
-    if (indexed_night->edf_catalog_pending) {
-        switch (enqueue_build(indexed_night->summary.start_ms,
-                              resolved_therapy_index,
-                              false)) {
-            case BuildQueueResult::Queued:
-            case BuildQueueResult::AlreadyQueued:
-                return PlotRead::Building;
-            case BuildQueueResult::Full:
-                return PlotRead::QueueFull;
-            case BuildQueueResult::Unavailable:
-            default:
-                return PlotRead::Unavailable;
-        }
-    }
 
     char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
     if (!take_summary_lock(pdMS_TO_TICKS(20))) return PlotRead::Busy;
@@ -8482,6 +8537,10 @@ ReportManager::PlotRead ReportManager::read_plot_range(
     }
     if (version && version[0] && strcmp(version, current_etag) != 0) {
         return PlotRead::Stale;
+    }
+    if (indexed_night->edf_catalog_pending) {
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        return PlotRead::Building;
     }
 
     const uint64_t night_start_ms = indexed_night->summary.start_ms;

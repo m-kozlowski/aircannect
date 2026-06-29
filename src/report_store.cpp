@@ -10,6 +10,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "report_summary_record_codec.h"
 #include "storage_directory.h"
 #include "storage_manager.h"
 #include "string_util.h"
@@ -25,16 +26,7 @@ constexpr size_t CHUNK_HEADER_SIZE = 56;
 constexpr uint32_t SUMMARY_MAGIC = 0x53524341u;  // "ACRS", little-endian.
 constexpr uint16_t SUMMARY_SCHEMA = 5;
 constexpr size_t SUMMARY_HEADER_SIZE = 32;
-constexpr size_t SUMMARY_RECORD_SIZE = 512;
-constexpr size_t SUMMARY_SESSION_OFFSET = 64;
-constexpr size_t SUMMARY_SESSION_SIZE = 12;
-constexpr size_t SUMMARY_FIELD_OFFSET = 256;
-constexpr size_t SUMMARY_FIELD_MASK_OFFSET = SUMMARY_FIELD_OFFSET;
-constexpr size_t SUMMARY_FIELD_VALUE_OFFSET = SUMMARY_FIELD_OFFSET + 8;
-static_assert(SUMMARY_FIELD_VALUE_OFFSET +
-                      AC_REPORT_SUMMARY_FIELD_COUNT * sizeof(uint32_t) <=
-                  SUMMARY_RECORD_SIZE,
-              "summary field block must fit in summary record");
+constexpr size_t SUMMARY_RECORD_SIZE = AC_REPORT_SUMMARY_RECORD_CODEC_SIZE;
 constexpr uint32_t COVERAGE_MAGIC = 0x56524341u;  // "ACRV", little-endian.
 constexpr uint16_t COVERAGE_SCHEMA = 3;  // bumped: night-partitioned chunk layout
 constexpr size_t COVERAGE_RECORD_SIZE = 48;
@@ -107,17 +99,6 @@ uint64_t get_le64(const uint8_t *in) {
         value |= static_cast<uint64_t>(in[i]) << (i * 8);
     }
     return value;
-}
-
-int32_t float_to_milli(float value) {
-    if (value >= 0.0f) {
-        return static_cast<int32_t>(value * 1000.0f + 0.5f);
-    }
-    return static_cast<int32_t>(value * 1000.0f - 0.5f);
-}
-
-float milli_to_float(int32_t value) {
-    return static_cast<float>(value) / 1000.0f;
 }
 
 bool valid_key(const ReportStoreChunkKey &key) {
@@ -292,134 +273,12 @@ bool decode_summary_header(const uint8_t *header,
     return payload_len == record_count * SUMMARY_RECORD_SIZE;
 }
 
-void encode_summary_record(uint8_t *raw,
-                           const ReportSummaryRecord &record) {
-    memset(raw, 0, SUMMARY_RECORD_SIZE);
-    uint32_t flags = 0;
-    if (record.valid) flags |= 1u << 0;
-    if (record.has_tz_offset_min) flags |= 1u << 1;
-    if (record.has_ahi) flags |= 1u << 2;
-    if (record.has_apnea_index) flags |= 1u << 3;
-    if (record.has_hypopnea_index) flags |= 1u << 4;
-    if (record.has_oa_index) flags |= 1u << 5;
-    if (record.has_ca_index) flags |= 1u << 6;
-    if (record.has_ua_index) flags |= 1u << 7;
-    if (record.has_rera_index) flags |= 1u << 8;
-    if (record.has_session_count) flags |= 1u << 9;
-    if (record.session_interval_count > 0) flags |= 1u << 10;
-    if (record.summary_field_mask != 0) flags |= 1u << 11;
-
-    put_le32(raw + 0, flags);
-    put_le64(raw + 4, record.start_ms);
-    put_le64(raw + 12, record.end_ms);
-    put_le32(raw + 20, record.duration_min);
-    put_le32(raw + 24, static_cast<uint32_t>(record.tz_offset_min));
-    put_le32(raw + 28, record.session_count);
-    put_le32(raw + 32, static_cast<uint32_t>(float_to_milli(record.ahi)));
-    put_le32(raw + 36,
-             static_cast<uint32_t>(float_to_milli(record.apnea_index)));
-    put_le32(raw + 40,
-             static_cast<uint32_t>(float_to_milli(record.hypopnea_index)));
-    put_le32(raw + 44,
-             static_cast<uint32_t>(float_to_milli(record.oa_index)));
-    put_le32(raw + 48,
-             static_cast<uint32_t>(float_to_milli(record.ca_index)));
-    put_le32(raw + 52,
-             static_cast<uint32_t>(float_to_milli(record.ua_index)));
-    put_le32(raw + 56,
-             static_cast<uint32_t>(float_to_milli(record.rera_index)));
-    put_le32(raw + 60, record.session_interval_count);
-
-    const uint32_t session_count =
-        record.session_interval_count < AC_REPORT_SUMMARY_SESSION_MAX
-            ? record.session_interval_count
-            : AC_REPORT_SUMMARY_SESSION_MAX;
-    for (uint32_t i = 0; i < session_count; ++i) {
-        uint8_t *session = raw + SUMMARY_SESSION_OFFSET +
-                           i * SUMMARY_SESSION_SIZE;
-        put_le64(session + 0, record.sessions[i].start_ms);
-        put_le32(session + 8, record.sessions[i].duration_min);
-    }
-
-    put_le64(raw + SUMMARY_FIELD_MASK_OFFSET, record.summary_field_mask);
-    for (size_t i = 0; i < AC_REPORT_SUMMARY_FIELD_COUNT; ++i) {
-        const size_t offset = SUMMARY_FIELD_VALUE_OFFSET + i * 4;
-        put_le32(raw + offset, record.summary_field_values[i]);
-    }
-}
-
-bool decode_summary_record(const uint8_t *raw,
-                           ReportSummaryRecord &record) {
-    const uint32_t flags = get_le32(raw + 0);
-    record = {};
-    record.valid = (flags & (1u << 0)) != 0;
-    record.has_tz_offset_min = (flags & (1u << 1)) != 0;
-    record.has_ahi = (flags & (1u << 2)) != 0;
-    record.has_apnea_index = (flags & (1u << 3)) != 0;
-    record.has_hypopnea_index = (flags & (1u << 4)) != 0;
-    record.has_oa_index = (flags & (1u << 5)) != 0;
-    record.has_ca_index = (flags & (1u << 6)) != 0;
-    record.has_ua_index = (flags & (1u << 7)) != 0;
-    record.has_rera_index = (flags & (1u << 8)) != 0;
-    record.has_session_count = (flags & (1u << 9)) != 0;
-    const bool has_summary_fields = (flags & (1u << 11)) != 0;
-
-    record.start_ms = get_le64(raw + 4);
-    record.end_ms = get_le64(raw + 12);
-    record.duration_min = get_le32(raw + 20);
-    record.tz_offset_min = static_cast<int32_t>(get_le32(raw + 24));
-    record.session_count = get_le32(raw + 28);
-    record.ahi = milli_to_float(static_cast<int32_t>(get_le32(raw + 32)));
-    record.apnea_index =
-        milli_to_float(static_cast<int32_t>(get_le32(raw + 36)));
-    record.hypopnea_index =
-        milli_to_float(static_cast<int32_t>(get_le32(raw + 40)));
-    record.oa_index =
-        milli_to_float(static_cast<int32_t>(get_le32(raw + 44)));
-    record.ca_index =
-        milli_to_float(static_cast<int32_t>(get_le32(raw + 48)));
-    record.ua_index =
-        milli_to_float(static_cast<int32_t>(get_le32(raw + 52)));
-    record.rera_index =
-        milli_to_float(static_cast<int32_t>(get_le32(raw + 56)));
-    uint32_t session_count = get_le32(raw + 60);
-    if (session_count > AC_REPORT_SUMMARY_SESSION_MAX) {
-        session_count = AC_REPORT_SUMMARY_SESSION_MAX;
-    }
-    for (uint32_t i = 0; i < session_count; ++i) {
-        const uint8_t *session = raw + SUMMARY_SESSION_OFFSET +
-                                 i * SUMMARY_SESSION_SIZE;
-        const uint64_t start_ms = get_le64(session + 0);
-        const uint32_t duration_min = get_le32(session + 8);
-        if (!start_ms || !duration_min) continue;
-        ReportSummarySession &out_session =
-            record.sessions[record.session_interval_count++];
-        out_session.start_ms = start_ms;
-        out_session.duration_min = duration_min;
-    }
-    if (!record.has_session_count && record.session_interval_count > 0) {
-        record.has_session_count = true;
-        record.session_count = record.session_interval_count;
-    }
-
-    if (has_summary_fields) {
-        record.summary_field_mask = get_le64(raw + SUMMARY_FIELD_MASK_OFFSET);
-        for (size_t i = 0; i < AC_REPORT_SUMMARY_FIELD_COUNT; ++i) {
-            const size_t offset = SUMMARY_FIELD_VALUE_OFFSET + i * 4;
-            record.summary_field_values[i] = get_le32(raw + offset);
-        }
-    }
-    return record.valid && record.start_ms > 0 &&
-           record.end_ms > record.start_ms;
-}
-
 bool append_summary_record(ReportSpoolBuffer &payload,
                            const ReportSummaryRecord &record) {
     size_t offset = 0;
     uint8_t *raw = payload.append_uninitialized(SUMMARY_RECORD_SIZE, offset);
     if (!raw) return false;
-    encode_summary_record(raw, record);
-    return true;
+    return report_summary_record_encode(raw, SUMMARY_RECORD_SIZE, record);
 }
 
 void encode_header(uint8_t *header,
@@ -918,8 +777,10 @@ bool check_summary_integrity(ReportStoreIntegrityResult &out, bool repair) {
     }
     for (uint32_t i = 0; ok && i < record_count; ++i) {
         ReportSummaryRecord record;
-        ok = decode_summary_record(payload.data() + i * SUMMARY_RECORD_SIZE,
-                                   record);
+        ok = report_summary_record_decode(payload.data() +
+                                              i * SUMMARY_RECORD_SIZE,
+                                          SUMMARY_RECORD_SIZE,
+                                          record);
     }
     if (ok) return true;
 
@@ -2097,7 +1958,7 @@ bool read_summary_records(ReportSummaryRecordCallback callback,
     for (uint32_t i = 0; i < record_count; ++i) {
         ReportSummaryRecord record;
         const uint8_t *raw = payload.data() + i * SUMMARY_RECORD_SIZE;
-        if (!decode_summary_record(raw, record)) {
+        if (!report_summary_record_decode(raw, SUMMARY_RECORD_SIZE, record)) {
             note_error("summary_record_invalid", &current.read_errors);
             return false;
         }

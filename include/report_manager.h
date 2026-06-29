@@ -783,10 +783,6 @@ private:
     bool load_result_json_cache_for_night(const ReportIndexedNight &night,
                                           const char *etag,
                                           LargeTextBuffer &out) const;
-    bool load_result_json_cache_for_summary(const ReportSummaryRecord &night,
-                                            char *etag_out,
-                                            size_t etag_out_size,
-                                            LargeTextBuffer &out) const;
     bool load_result_json_cache_path(const char *path,
                                      LargeTextBuffer &out) const;
     bool load_result_plot_cache_for_night(const ReportIndexedNight &night,
@@ -804,6 +800,7 @@ private:
         const std::shared_ptr<ReportSpoolBuffer> &result_json,
         const std::shared_ptr<ReportSpoolBuffer> &plot);
     bool service_result_cache_writer();
+    bool service_durable_night_index_writer();
     void reset_result_cache_write_locked();
 
     ReportSummaryRecord *records_ = nullptr;
@@ -816,18 +813,33 @@ private:
     LargeTextBuffer summary_json_snapshot_;
     LargeTextBuffer summary_json_build_;
     uint32_t next_summary_progress_snapshot_ms_ = 0;
+    mutable SemaphoreHandle_t durable_index_lock_ = nullptr;
+    mutable ReportIndexedNight *durable_index_ = nullptr;
+    mutable size_t durable_index_count_ = 0;
+    mutable bool durable_index_valid_ = false;
+    mutable uint32_t durable_index_crc_ = 0;
+    mutable ReportIndexedNight *durable_index_save_ = nullptr;
+    mutable size_t durable_index_save_count_ = 0;
+    mutable uint32_t durable_index_save_crc_ = 0;
+    mutable bool durable_index_save_pending_ = false;
+    mutable uint32_t durable_index_save_requested_ms_ = 0;
     bool take_summary_lock(TickType_t timeout) const;
     void give_summary_lock() const;
     bool take_summary_scratch(TickType_t timeout,
                               ReportSummaryRecord *&out);
     void give_summary_scratch();
-    void publish_summary_json_snapshot();
+    bool publish_summary_json_snapshot();
     bool build_indexed_nights(ReportIndexedNight *out,
                               size_t capacity,
                               size_t &count) const;
     bool build_indexed_nights_uncached(ReportIndexedNight *out,
                                        size_t capacity,
                                        size_t &count) const;
+    bool load_durable_night_index();
+    bool seed_index_from_durable(ReportNightIndex &index) const;
+    void schedule_durable_night_index_save(const ReportIndexedNight *src,
+                                           size_t count,
+                                           uint32_t content_crc) const;
     bool indexed_night_by_therapy_index(size_t therapy_index,
                                         ReportIndexedNight &out) const;
     bool indexed_night_by_start(uint64_t night_start_ms,
