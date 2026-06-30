@@ -79,8 +79,11 @@ struct SystemStatusSources {
     const OximetryManager &oximetry_manager;
 };
 
+using SystemStatusCheckpoint = void (*)(const char *section);
+
 SystemStatusSnapshot collect_system_status(
-    const SystemStatusSources &sources);
+    const SystemStatusSources &sources,
+    SystemStatusCheckpoint checkpoint = nullptr);
 
 const char *system_reset_reason_name();
 

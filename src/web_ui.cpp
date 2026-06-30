@@ -1879,7 +1879,8 @@ void WebUI::drain_commands() {
     }
 }
 
-void WebUI::build_status_json(LargeTextBuffer &json) const {
+void WebUI::build_status_json(LargeTextBuffer &json,
+                              PollCheckpoint checkpoint) const {
     const SystemStatusSnapshot snap = collect_system_status({
         *arbiter_,
         *wifi_manager_,
@@ -1887,7 +1888,7 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
         *time_sync_service_,
         *ota_manager_,
         *oximetry_manager_,
-    });
+    }, checkpoint);
     const MemoryStatus &mem = snap.memory;
     const StorageStatus &storage = snap.storage;
     const WifiStatusSnapshot &wifi = snap.wifi;
@@ -1902,75 +1903,10 @@ void WebUI::build_status_json(LargeTextBuffer &json) const {
     json_add_int(json, "heap", static_cast<long>(mem.heap_free));
     json_add_bool(json, "psram_available", mem.psram_available);
     json_add_int(json, "psram_free", static_cast<long>(mem.psram_free));
-    json_add_bool(json, "storage_configured", storage.configured);
-    json_add_bool(json, "storage_mounted", storage.mounted);
     json_add_string(json, "storage_state",
                     Storage::state_name(storage.state));
     json_add_uint64(json, "storage_total", storage.total_bytes);
     json_add_uint64(json, "storage_used", storage.used_bytes);
-    json_add_uint64(json, "storage_free", storage.free_bytes);
-    json_add_bool(json, "edf_capture_enabled",
-                  app_config_->data().edf_capture_enabled);
-    if (storage_sync_job_) {
-        const StorageSyncStatus sync = storage_sync_job_->status();
-        json += ",\"smb_sync\":{";
-        json_add_bool(json, "enabled", sync.enabled, false);
-        json_add_bool(json, "configured", sync.configured);
-        json_add_string(json, "endpoint",
-                        app_config_->data().smb_endpoint.c_str());
-        json_add_string(json, "state",
-                        storage_sync_state_name(sync.state));
-        json_add_bool(json, "network_available",
-                      sync.network_available);
-        json_add_bool(json, "pending", sync.pending);
-        json_add_bool(json, "last_run_verify",
-                      sync.last_run_verify);
-        json_add_bool(json, "last_run_reconcile",
-                      sync.last_run_reconcile);
-        json_add_string(json, "pending_reason", sync.pending_reason);
-        json_add_string(json, "last_error", sync.last_error);
-        json_add_string(json, "current_path", sync.current_path);
-        json_add_int(json, "files_seen",
-                     static_cast<long>(sync.files_seen));
-        json_add_int(json, "files_uploaded",
-                     static_cast<long>(sync.files_uploaded));
-        json_add_int(json, "files_skipped",
-                     static_cast<long>(sync.files_skipped));
-        json_add_int(json, "files_failed",
-                     static_cast<long>(sync.files_failed));
-        json_add_uint64(json, "bytes_uploaded", sync.bytes_uploaded);
-        json_add_uint64(json, "last_sync_epoch",
-                        sync.last_sync_epoch);
-        json_add_int(json, "last_sync_files_seen",
-                     static_cast<long>(sync.last_sync_files_seen));
-        json_add_int(json, "last_sync_files_uploaded",
-                     static_cast<long>(sync.last_sync_files_uploaded));
-        json_add_int(json, "last_sync_files_failed",
-                     static_cast<long>(sync.last_sync_files_failed));
-        json_add_uint64(json, "last_sync_bytes_uploaded",
-                        sync.last_sync_bytes_uploaded);
-        json_add_uint64(json, "last_verify_epoch",
-                        sync.last_verify_epoch);
-        json_add_int(json, "last_verify_files_seen",
-                     static_cast<long>(sync.last_verify_files_seen));
-        json_add_uint64(json, "last_reconcile_epoch",
-                        sync.last_reconcile_epoch);
-        json_add_int(json, "last_reconcile_files_seen",
-                     static_cast<long>(sync.last_reconcile_files_seen));
-        json_add_int(json, "started_ms",
-                     static_cast<long>(sync.started_ms));
-        json_add_int(json, "updated_ms",
-                     static_cast<long>(sync.updated_ms));
-        json_add_int(json, "retry_due_ms",
-                     static_cast<long>(sync.retry_due_ms));
-        json += '}';
-    }
-    if (sleephq_sync_job_) {
-        const SleepHqSyncStatus sync = sleephq_sync_job_->status();
-        json += ",\"sleephq_sync\":{";
-        append_sleephq_sync_json(json, sync, app_config_->data(), false);
-        json += '}';
-    }
     json_add_string_view(json, "wifi_state", wifi.state);
     json_add_string_view(json, "wifi_ssid", wifi.ssid);
     json_add_string(json, "wifi_ip", wifi.ip);
@@ -3359,7 +3295,7 @@ void WebUI::publish_snapshots(bool force,
     }
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
-        build_status_json(cached_status_json_);
+        build_status_json(cached_status_json_, checkpoint);
         if (checkpoint) checkpoint("web_ui.snapshots.status");
     }
     if (rebuild_mask & SNAPSHOT_STREAM) {

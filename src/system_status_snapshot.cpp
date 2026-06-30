@@ -30,16 +30,20 @@ const char *system_reset_reason_name() {
 }
 
 SystemStatusSnapshot collect_system_status(
-    const SystemStatusSources &sources) {
+    const SystemStatusSources &sources,
+    SystemStatusCheckpoint checkpoint) {
     SystemStatusSnapshot out;
     out.now_ms = millis();
     out.uptime_s = out.now_ms / 1000;
     out.version = aircannect_version();
     out.built = aircannect_build_date();
     out.reset_reason = system_reset_reason_name();
+    if (checkpoint) checkpoint("web_ui.snapshots.status.core");
 
     out.memory = Memory::status();
+    if (checkpoint) checkpoint("web_ui.snapshots.status.memory");
     out.storage = Storage::status();
+    if (checkpoint) checkpoint("web_ui.snapshots.status.storage");
 
     out.wifi.state = sources.wifi_manager.state_name();
     out.wifi.ssid = sources.wifi_manager.sta_ssid().c_str();
@@ -58,8 +62,10 @@ SystemStatusSnapshot collect_system_status(
     out.wifi.channel = sources.wifi_manager.channel();
     out.wifi.active_profile =
         sources.wifi_manager.active_profile_index();
+    if (checkpoint) checkpoint("web_ui.snapshots.status.wifi");
 
     out.ota_active = sources.ota_manager.active();
+    if (checkpoint) checkpoint("web_ui.snapshots.status.ota");
 
     const As11DeviceState &as11 = sources.arbiter.as11_state();
     out.as11.product_name = as11.product_name();
@@ -73,8 +79,10 @@ SystemStatusSnapshot collect_system_status(
     out.as11.pending_therapy_target = as11.pending_therapy_target();
     out.as11.clock_valid = as11.clock_valid();
     out.as11.clock_sample_ms = as11.clock_sample_ms();
+    if (checkpoint) checkpoint("web_ui.snapshots.status.as11");
 
     out.oximetry = sources.oximetry_manager.runtime_status();
+    if (checkpoint) checkpoint("web_ui.snapshots.status.oxi");
 
     out.time.resmed_time_sync_enabled =
         sources.app_config.data().resmed_time_sync_enabled;
@@ -85,6 +93,7 @@ SystemStatusSnapshot collect_system_status(
         sources.time_sync_service.esp_clock_source_name();
     sources.time_sync_service.utc_now_iso(out.time.esp_datetime,
                                           sizeof(out.time.esp_datetime));
+    if (checkpoint) checkpoint("web_ui.snapshots.status.time");
 
     return out;
 }

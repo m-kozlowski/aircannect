@@ -1506,7 +1506,6 @@
             <div class="card">
               <div class="card-head">
                 <span class="label">EDF Capture</span>
-                <span class="badge" id="edfCaptureBadge">--</span>
               </div>
               <div class="row">
                 <label>Latest session</label>
@@ -5746,36 +5745,19 @@
       const meter = document.getElementById("storageMeter");
       if (!summary || !meter) return;
 
-      let text = "Not configured";
+      let text = data.storage_state || "Not mounted";
       let percent = 0;
       const total = Number(data.storage_total || 0);
-      const free = Number(data.storage_free || 0);
       const used = Number(data.storage_used || 0);
-      if (data.storage_mounted && total > 0) {
+      const free = Math.max(0, total - used);
+      if (data.storage_state === "mounted" && total > 0) {
         text = fmtBytes(free) + " / " + fmtBytes(total);
         percent = Math.max(0, Math.min(100, used / total * 100));
-      } else if (data.storage_configured) {
-        text = data.storage_state || "Not mounted";
       }
 
       summary.textContent = text;
       meter.style.width = percent.toFixed(1) + "%";
       meter.title = percent.toFixed(1) + "% used";
-    }
-
-    function renderEdfStatus(data) {
-      const captureEnabled = !!(data && data.edf_capture_enabled);
-      const badge = document.getElementById("edfCaptureBadge");
-      if (badge) {
-        badge.textContent = captureEnabled ? "On" : "Off";
-        badge.className = "badge" + (captureEnabled ? " good" : "");
-      }
-      if (data && data.smb_sync) {
-        renderSmbSyncStatus(Object.assign({ok: true}, data.smb_sync));
-      }
-      if (data && data.sleephq_sync) {
-        renderSleepHqSyncStatus(Object.assign({ok: true}, data.sleephq_sync));
-      }
     }
 
     function renderOximetryRuntime(data) {
@@ -6101,7 +6083,6 @@
         data.device_datetime_age_ms));
       up("espTime", data.esp_time_valid ? fmtIsoMinute(data.esp_datetime) : "invalid");
       renderStorageStatus(data);
-      renderEdfStatus(data);
       up("timeSync", fmtSync(data));
       renderOximetryRuntime(data);
 

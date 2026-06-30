@@ -114,7 +114,8 @@ private:
     // Server setup and cached snapshots
     void register_routes();
     void reserve_cached_json();
-    void build_status_json(LargeTextBuffer &json) const;
+    void build_status_json(LargeTextBuffer &json,
+                           PollCheckpoint checkpoint = nullptr) const;
     void build_oximetry_sensors_json(LargeTextBuffer &json) const;
     void send_report_summary(AsyncWebServerRequest *request) const;
     void send_report_chunks(AsyncWebServerRequest *request) const;
