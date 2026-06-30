@@ -38,6 +38,7 @@ struct StorageExportPlannerConfig {
     const char *state_dir = nullptr;
     StorageExportStateCache *state_cache = nullptr;
     const char *latest_datalog_day = nullptr;
+    const char *only_datalog_day = nullptr;
     StorageExportDatalogDayDecisionCallback datalog_day_decision = nullptr;
     void *datalog_day_decision_ctx = nullptr;
     uint32_t max_datalog_days = 0;
@@ -141,6 +142,7 @@ private:
     StorageExportPlannerConfig config_;
     char state_dir_[AC_STORAGE_PATH_MAX] = {};
     char latest_datalog_day_[9] = {};
+    char only_datalog_day_[9] = {};
     bool started_ = false;
 
     WalkFrame *walk_stack_ = nullptr;

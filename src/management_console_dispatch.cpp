@@ -18,6 +18,7 @@
 #include "management_console_utils.h"
 #include "memory_manager.h"
 #include "report_store.h"
+#include "storage_export_plan.h"
 #include "storage_manager.h"
 #include "storage_writer.h"
 #include "string_util.h"
@@ -1557,8 +1558,28 @@ void ManagementConsole::handle_sleephq_command(Print &out,
         out.println(queued ? "queued" : "rejected");
         return;
     }
+    if (rest.startsWith("sync ")) {
+        ExportCoordinator *coordinator = ctx.export_coordinator;
+        if (!coordinator) {
+            out.println("[SLEEPHQ] sync rejected");
+            return;
+        }
+        String day = rest.substring(5);
+        trim_inplace(day);
+        if (!storage_export_is_datalog_day_name(day.c_str())) {
+            out.println("[SLEEPHQ] bad day; use YYYYMMDD");
+            return;
+        }
+        const bool queued = coordinator->request_sleephq_sync_day(day.c_str());
+        out.print("[SLEEPHQ] sync day=");
+        out.print(day);
+        out.print(" ");
+        out.println(queued ? "queued" : "rejected");
+        return;
+    }
     print_unknown_command(out, "SLEEPHQ",
-                          "sleephq status, sleephq check, sleephq sync");
+                          "sleephq status, sleephq check, sleephq sync, "
+                          "sleephq sync YYYYMMDD");
 }
 
 void ManagementConsole::handle_as11_command(Print &out,

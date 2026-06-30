@@ -39,6 +39,7 @@ bool StorageExportPlanner::begin(const StorageExportPlannerConfig &config,
     config_ = config;
     state_dir_[0] = '\0';
     latest_datalog_day_[0] = '\0';
+    only_datalog_day_[0] = '\0';
     if (config.state_dir) {
         copy_cstr(state_dir_, sizeof(state_dir_), config.state_dir);
         config_.state_dir = state_dir_;
@@ -47,6 +48,15 @@ bool StorageExportPlanner::begin(const StorageExportPlannerConfig &config,
         copy_cstr(latest_datalog_day_, sizeof(latest_datalog_day_),
                   config.latest_datalog_day);
         config_.latest_datalog_day = latest_datalog_day_;
+    }
+    if (config.only_datalog_day) {
+        if (!storage_export_is_datalog_day_name(config.only_datalog_day)) {
+            set_error(error_out, error_out_size, "bad_datalog_day");
+            return false;
+        }
+        copy_cstr(only_datalog_day_, sizeof(only_datalog_day_),
+                  config.only_datalog_day);
+        config_.only_datalog_day = only_datalog_day_;
     }
     if (config_.require_pending_datalog_file && !config_.state_cache) {
         set_error(error_out, error_out_size, "planner_state_cache_missing");
@@ -85,6 +95,7 @@ void StorageExportPlanner::reset() {
     day_name_[0] = '\0';
     state_dir_[0] = '\0';
     latest_datalog_day_[0] = '\0';
+    only_datalog_day_[0] = '\0';
     config_ = StorageExportPlannerConfig();
     started_ = false;
 }
@@ -482,6 +493,16 @@ StorageExportPlannerResult StorageExportPlanner::scan_datalog_days(
     size_t error_out_size,
     uint32_t &budget) {
     if (datalog_scan_complete_) return StorageExportPlannerResult::Done;
+    if (only_datalog_day_[0]) {
+        if (budget == 0) return StorageExportPlannerResult::Yield;
+        budget--;
+        if (!add_datalog_day(only_datalog_day_, error_out, error_out_size)) {
+            return StorageExportPlannerResult::Error;
+        }
+        datalog_scan_complete_ = true;
+        datalog_day_index_ = 0;
+        return StorageExportPlannerResult::Done;
+    }
     if (!datalog_scan_opened_) {
         Storage::Guard guard;
         datalog_scan_dir_ = Storage::open("/DATALOG", "r");

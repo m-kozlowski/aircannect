@@ -42,6 +42,14 @@ bool ExportCoordinator::request_sleephq_sync() {
     return sleephq_sync_->request_sync("manual");
 }
 
+bool ExportCoordinator::request_sleephq_sync_day(const char *day) {
+    if (!sleephq_sync_ ||
+        (storage_sync_ && storage_sync_->runtime_status().active())) {
+        return false;
+    }
+    return sleephq_sync_->request_sync_day(day, "manual_day");
+}
+
 bool ExportCoordinator::request_sleephq_check() {
     if (!sleephq_sync_ ||
         (storage_sync_ && storage_sync_->runtime_status().active())) {

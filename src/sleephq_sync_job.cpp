@@ -299,13 +299,23 @@ void SleepHqSyncJob::set_runtime_blocked(bool blocked) {
     if (blocked) abort_requested_.store(true);
 }
 
-bool SleepHqSyncJob::request_locked(RunKind kind, const char *reason) {
+bool SleepHqSyncJob::request_locked(RunKind kind,
+                                    const char *reason,
+                                    const char *datalog_day) {
     if (!status_.configured) {
         status_.state = SleepHqSyncState::Disabled;
         return false;
     }
+    if (datalog_day && !storage_export_is_datalog_day_name(datalog_day)) {
+        return false;
+    }
     if (status_.state == SleepHqSyncState::Working) return false;
     pending_run_kind_ = kind;
+    pending_datalog_day_[0] = '\0';
+    if (datalog_day) {
+        copy_cstr(pending_datalog_day_, sizeof(pending_datalog_day_),
+                  datalog_day);
+    }
     status_.pending = true;
     status_.state = SleepHqSyncState::Pending;
     copy_cstr(status_.pending_reason, sizeof(status_.pending_reason),
@@ -336,6 +346,22 @@ bool SleepHqSyncJob::request_sync(const char *reason) {
     if (queued) {
         Log::logf(CAT_SLEEPHQ, LOG_INFO, "sync queued reason=%s\n",
                   reason && *reason ? reason : "manual");
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+    }
+    return queued;
+}
+
+bool SleepHqSyncJob::request_sync_day(const char *day, const char *reason) {
+    if (!day || !storage_export_is_datalog_day_name(day)) return false;
+    if (!lock(0)) return false;
+    const bool queued = request_locked(RunKind::Sync, reason, day);
+    publish_runtime_locked();
+    unlock();
+    if (queued) {
+        Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                  "sync queued reason=%s day=%s\n",
+                  reason && *reason ? reason : "manual_day",
+                  day);
         if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
     return queued;
@@ -390,11 +416,16 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
 
     const RunKind kind = pending_run_kind_;
     char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
+    char datalog_day[9] = {};
     copy_cstr(reason, sizeof(reason),
               status_.pending_reason[0] ? status_.pending_reason : "manual");
+    copy_cstr(datalog_day, sizeof(datalog_day), pending_datalog_day_);
 
     reset_run_locked(false);
     current_run_kind_ = kind;
+    copy_cstr(current_datalog_day_filter_,
+              sizeof(current_datalog_day_filter_),
+              datalog_day);
     retry_due_ms_ = 0;
     status_.state = SleepHqSyncState::Working;
     status_.pending = false;
@@ -670,6 +701,8 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     inflight_phase_ = InflightPhase::None;
     pending_rebuild_day_[0] = '\0';
     pending_done_day_[0] = '\0';
+    pending_datalog_day_[0] = '\0';
+    current_datalog_day_filter_[0] = '\0';
     latest_datalog_day_[0] = '\0';
     state_dir_[0] = 0;
     current_run_kind_ = RunKind::Check;
@@ -746,12 +779,17 @@ void SleepHqSyncJob::fail_locked(const char *error) {
     if (error && strcmp(error, "preempted") == 0) {
         const RunKind kind = current_run_kind_;
         char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
+        char datalog_day[9] = {};
         copy_cstr(reason, sizeof(reason),
                   status_.pending_reason[0]
                       ? status_.pending_reason
                       : "preempted");
+        copy_cstr(datalog_day, sizeof(datalog_day),
+                  current_datalog_day_filter_);
         reset_run_locked(true);
         pending_run_kind_ = kind;
+        copy_cstr(pending_datalog_day_, sizeof(pending_datalog_day_),
+                  datalog_day);
         status_.state = SleepHqSyncState::Pending;
         status_.pending = true;
         copy_cstr(status_.pending_reason,
@@ -775,6 +813,9 @@ void SleepHqSyncJob::fail_locked(const char *error) {
     status_.pending = false;
     status_.updated_ms = millis_nonzero();
     status_.files_failed++;
+    char retry_datalog_day[9] = {};
+    copy_cstr(retry_datalog_day, sizeof(retry_datalog_day),
+              current_datalog_day_filter_);
     const bool retryable =
         status_.configured && sleep_hq_error_retryable(status_.last_error);
     if (retryable) {
@@ -809,6 +850,10 @@ void SleepHqSyncJob::fail_locked(const char *error) {
               static_cast<unsigned long>(retry_in_ms),
               static_cast<unsigned>(retry_attempt_));
     reset_run_locked(true);
+    if (retryable && retry_datalog_day[0]) {
+        copy_cstr(pending_datalog_day_, sizeof(pending_datalog_day_),
+                  retry_datalog_day);
+    }
     publish_runtime_locked();
 }
 
@@ -848,6 +893,9 @@ bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
     config.datalog_day_decision_ctx = this;
     if (current_run_kind_ == RunKind::PostTherapySync) {
         config.max_datalog_days = SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT;
+    }
+    if (current_datalog_day_filter_[0]) {
+        config.only_datalog_day = current_datalog_day_filter_;
     }
     return export_planner_.begin(config, error_out, error_out_size);
 }

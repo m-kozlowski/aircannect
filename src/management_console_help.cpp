@@ -152,6 +152,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  sleephq status            show SleepHQ sync status");
         out.println("  sleephq check             queue OAuth/API connectivity check");
         out.println("  sleephq sync              queue manual SleepHQ export sync");
+        out.println("  sleephq sync YYYYMMDD     sync one DATALOG day");
         return;
     }
 

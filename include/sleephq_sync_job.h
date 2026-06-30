@@ -93,6 +93,7 @@ public:
     void set_runtime_blocked(bool blocked);
     bool request_check(const char *reason = "manual");
     bool request_sync(const char *reason = "manual");
+    bool request_sync_day(const char *day, const char *reason = "manual_day");
     bool request_post_therapy_sync();
 
     SleepHqSyncStatus status() const;
@@ -191,7 +192,9 @@ private:
 
     void apply_config_locked(const ConfigSnapshot &config);
     bool config_matches_locked(const ConfigSnapshot &config) const;
-    bool request_locked(RunKind kind, const char *reason);
+    bool request_locked(RunKind kind,
+                        const char *reason,
+                        const char *datalog_day = nullptr);
     bool begin_run_locked(uint32_t now_ms);
     void queue_retry_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
@@ -341,6 +344,8 @@ private:
     char remote_serial_[AC_SLEEPHQ_SERIAL_MAX] = {};
     char pending_rebuild_day_[9] = {};
     char pending_done_day_[9] = {};
+    char pending_datalog_day_[9] = {};
+    char current_datalog_day_filter_[9] = {};
     char latest_datalog_day_[9] = {};
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
