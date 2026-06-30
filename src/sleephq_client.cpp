@@ -546,6 +546,7 @@ bool SleepHqClient::read_response(SleepHqHttpResponse &out) {
 
     if (out.status < 200 || out.status >= 300) {
         snprintf(last_error_, sizeof(last_error_), "http_%d", out.status);
+        disconnect();
         return false;
     }
     return true;
@@ -764,8 +765,10 @@ bool SleepHqClient::attach_file(const SleepHqAttachRequest &attach,
         return false;
     }
     SleepHqHttpResponse response;
-    if (!request("POST", api_path, body.c_str(), content_type, true,
-                 response)) {
+    const bool request_ok = request("POST", api_path, body.c_str(),
+                                    content_type, true, response);
+    disconnect();
+    if (!request_ok) {
         return false;
     }
     copy_cstr(out.content_hash, sizeof(out.content_hash),
@@ -856,7 +859,7 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
     len = snprintf(request_tail, sizeof(request_tail),
                    "Content-Type: multipart/form-data; boundary=%s\r\n"
                    "Content-Length: %llu\r\n"
-                   "Connection: keep-alive\r\n\r\n",
+                   "Connection: close\r\n\r\n",
                    boundary,
                    static_cast<unsigned long long>(content_length));
     if (len <= 0 || static_cast<size_t>(len) >= sizeof(request_tail)) {
@@ -968,7 +971,9 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         disconnect();
         return false;
     }
-    return read_response(response);
+    const bool response_ok = read_response(response);
+    disconnect();
+    return response_ok;
 }
 
 bool SleepHqClient::upload_file(const SleepHqUploadRequest &request,

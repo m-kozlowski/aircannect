@@ -104,6 +104,11 @@ bool sleep_hq_error_retryable(const char *error) {
     return true;
 }
 
+bool sleep_hq_error_preserves_retry_attempt(const char *error) {
+    int http_code = 0;
+    return parse_http_error_code(error, http_code) && http_code == 502;
+}
+
 bool datalog_day_to_iso_date(const char *day, char *out, size_t out_size) {
     if (!day || !out || out_size < 11) return false;
     for (size_t i = 0; i < 8; ++i) {
@@ -773,14 +778,17 @@ void SleepHqSyncJob::fail_locked(const char *error) {
     const bool retryable =
         status_.configured && sleep_hq_error_retryable(status_.last_error);
     if (retryable) {
+        const bool preserve_attempt =
+            sleep_hq_error_preserves_retry_attempt(status_.last_error);
         const size_t backoff_count =
             sizeof(SLEEPHQ_RETRY_BACKOFF_MS) /
             sizeof(SLEEPHQ_RETRY_BACKOFF_MS[0]);
-        const size_t index = retry_attempt_ < backoff_count
-            ? retry_attempt_
-            : backoff_count - 1;
+        const size_t index = preserve_attempt
+            ? 0
+            : (retry_attempt_ < backoff_count ? retry_attempt_
+                                              : backoff_count - 1);
         retry_due_ms_ = status_.updated_ms + SLEEPHQ_RETRY_BACKOFF_MS[index];
-        if (retry_attempt_ < 255) retry_attempt_++;
+        if (!preserve_attempt && retry_attempt_ < 255) retry_attempt_++;
     } else {
         retry_due_ms_ = 0;
         retry_attempt_ = 0;
@@ -1670,7 +1678,7 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
                   ? client_error
                   : "machine_date_lookup_failed");
     if (sleep_hq_error_retryable(error)) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
                   "remote machine-date lookup skipped day=%s error=%s\n",
                   day,
                   error[0] ? error : "machine_date_lookup_failed");
