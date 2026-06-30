@@ -402,6 +402,20 @@ bool storage_heavy_request_available(AsyncWebServerRequest *request,
     return true;
 }
 
+bool storage_read_request_available(AsyncWebServerRequest *request,
+                                    const SessionManager *session_manager,
+                                    const RpcArbiter *arbiter) {
+    if (!therapy_request_idle(request, session_manager, arbiter)) {
+        return false;
+    }
+    if (!Storage::mounted()) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_unavailable\"}");
+        return false;
+    }
+    return true;
+}
+
 bool storage_jobs_available(AsyncWebServerRequest *request,
                             const StorageArchiveJob *archive_job,
                             const StorageDeleteJob *delete_job,
@@ -423,6 +437,16 @@ bool storage_jobs_available(AsyncWebServerRequest *request,
         return false;
     }
     if (sleephq_job && sleephq_job->active()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"storage_busy\"}");
+        return false;
+    }
+    return true;
+}
+
+bool storage_delete_available(AsyncWebServerRequest *request,
+                              const StorageDeleteJob *delete_job) {
+    if (delete_job && delete_job->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
@@ -2396,14 +2420,10 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_read_request_available(request, session_manager_, arbiter_)) {
         return;
     }
-    if (!storage_jobs_available(request,
-                                storage_archive_job_,
-                                storage_delete_job_,
-                                storage_sync_job_,
-                                sleephq_sync_job_)) {
+    if (!storage_delete_available(request, storage_delete_job_)) {
         return;
     }
 
@@ -2619,14 +2639,10 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
     }
     StorageJobGate gate(request, storage_job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_read_request_available(request, session_manager_, arbiter_)) {
         return;
     }
-    if (!storage_jobs_available(request,
-                                nullptr,
-                                storage_delete_job_,
-                                storage_sync_job_,
-                                sleephq_sync_job_)) {
+    if (!storage_delete_available(request, storage_delete_job_)) {
         return;
     }
 
