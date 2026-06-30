@@ -4378,41 +4378,45 @@
 
     function storageSelectionUi() {
       const selected = storageSelectedNames.size;
-      const busy = storageArchiveBusy || storageDeleteBusy || smbSyncBusy ||
-        sleepHqSyncBusy;
+      const storageJobBusy = storageArchiveBusy || storageDeleteBusy;
+      const exportBusy = smbSyncBusy || sleepHqSyncBusy;
+      const archiveBusy = storageJobBusy || exportBusy;
+      const destructiveBusy = storageJobBusy || exportBusy;
+      const endpointBusy = storageJobBusy || exportBusy;
       const selectAll = document.getElementById("storageSelectAll");
       if (selectAll) {
         const selectable = storageEntries.length;
-        selectAll.disabled = busy || selectable === 0;
+        selectAll.disabled = storageJobBusy || selectable === 0;
         selectAll.checked = selectable > 0 && selected === selectable;
         selectAll.indeterminate = selected > 0 && selected < selectable;
       }
       document.querySelectorAll("[data-storage-select]").forEach((input) => {
-        input.disabled = busy;
+        input.disabled = storageJobBusy;
         input.checked = storageSelectedNames.has(input.dataset.storageSelect || "");
       });
       const archiveBtn = document.getElementById("storageArchiveBtn");
       if (archiveBtn) {
-        archiveBtn.disabled = busy || selected === 0;
+        archiveBtn.disabled = archiveBusy || selected === 0;
         archiveBtn.textContent = selected > 0 ?
           "Download Selected (" + selected + ")" : "Download Selected";
       }
       const deleteBtn = document.getElementById("storageDeleteBtn");
       if (deleteBtn) {
-        deleteBtn.disabled = busy || selected === 0;
+        deleteBtn.disabled = destructiveBusy || selected === 0;
         deleteBtn.textContent = selected > 0 ?
           "Delete Selected (" + selected + ")" : "Delete Selected";
       }
       const syncBtn = document.getElementById("edfSyncBtn");
-      if (syncBtn) syncBtn.disabled = busy || !smbSyncEnabled || !smbSyncConfigured;
+      if (syncBtn) syncBtn.disabled = endpointBusy || !smbSyncEnabled || !smbSyncConfigured;
       const verifyBtn = document.getElementById("edfVerifyBtn");
-      if (verifyBtn) verifyBtn.disabled = busy || !smbSyncEnabled || !smbSyncConfigured;
+      if (verifyBtn) verifyBtn.disabled = endpointBusy || !smbSyncEnabled || !smbSyncConfigured;
       const sleepSyncBtn = document.getElementById("edfSleepHqSyncBtn");
-      if (sleepSyncBtn) sleepSyncBtn.disabled = busy || !sleepHqSyncConfigured;
+      if (sleepSyncBtn) sleepSyncBtn.disabled = endpointBusy || !sleepHqSyncConfigured;
       const sleepCheckBtn = document.getElementById("edfSleepHqCheckBtn");
-      if (sleepCheckBtn) sleepCheckBtn.disabled = busy || !sleepHqSyncConfigured;
+      if (sleepCheckBtn) sleepCheckBtn.disabled = endpointBusy || !sleepHqSyncConfigured;
       document.querySelectorAll("[data-storage-action]").forEach((button) => {
-        button.disabled = busy;
+        button.disabled = storageJobBusy ||
+          (button.dataset.storageAction === "archive" && exportBusy);
       });
     }
 
