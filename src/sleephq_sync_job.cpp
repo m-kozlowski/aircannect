@@ -869,7 +869,7 @@ void SleepHqSyncJob::reset_import_batch_locked() {
 }
 
 JobStep SleepHqSyncJob::finish_import_or_sync_locked() {
-    if (current_run_kind_ == RunKind::Sync && import_batch_active_) {
+    if (import_batch_active_) {
         reset_import_batch_locked();
         return JobStep::Working;
     }
