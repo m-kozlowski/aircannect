@@ -116,6 +116,7 @@ static ConsoleContext console_ctx{
     report_manager,
     nullptr,
     nullptr,
+    nullptr,
     &web_ui,
 };
 
@@ -360,6 +361,7 @@ void setup() {
     storage_sync_job = create_storage_sync_job();
     sleephq_sync_job = create_sleephq_sync_job();
     export_coordinator.begin(storage_sync_job, sleephq_sync_job);
+    console_ctx.storage_sync_job = storage_sync_job;
     console_ctx.sleephq_sync_job = sleephq_sync_job;
     console_ctx.export_coordinator = &export_coordinator;
     apply_storage_provisioning(app_config, wifi_manager);

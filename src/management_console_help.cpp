@@ -30,6 +30,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  oxi               oximetry source and BLE injector status");
         out.println("  report            therapy report index/cache status");
         out.println("  storage           persistent storage and writer status");
+        out.println("  smb               SMB sync status and share verification");
         out.println("  sleephq           SleepHQ sync status and connectivity check");
         out.println("  session           therapy session tracking state");
         out.println("  tcp               raw JSON-RPC TCP bridge status");
@@ -135,6 +136,14 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  storage remount           retry storage mount");
         out.println("  storage queue             show async writer queue state");
         out.println("  storage write-test P T    append test text through writer");
+        return;
+    }
+
+    if (topic == "smb") {
+        out.println("[HELP smb]");
+        out.println("  smb status                show SMB sync status");
+        out.println("  smb verify                queue SMB share/recent-files verification");
+        out.println("  smb sync                  queue manual SMB export sync");
         return;
     }
 
