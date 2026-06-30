@@ -119,6 +119,8 @@ static constexpr size_t AC_SYSLOG_SEND_BUDGET = 4;
 static constexpr uint16_t AC_SYSLOG_PORT = 514;
 
 static constexpr uint32_t AC_WIFI_CONNECT_TIMEOUT_MS = 15000;
+static constexpr uint32_t AC_WIFI_IPV4_TIMEOUT_MS = 20000;
+static constexpr uint32_t AC_WIFI_IPV4_FAIL_COOLDOWN_MS = 5UL * 60UL * 1000UL;
 static constexpr uint32_t AC_WIFI_PMF_RETRY_TIMEOUT_MS = 15000;
 static constexpr uint32_t AC_WIFI_SOFTAP_RETRY_MS = 60000;
 static constexpr size_t AC_WIFI_SCAN_CANDIDATES_MAX = 16;

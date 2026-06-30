@@ -702,7 +702,8 @@ void print_wifi_status(Print &out, const WifiManager &wifi_manager) {
         out.print(" ap_ip=");
         out.print(wifi_manager.softap_ip());
     }
-    if (wifi_manager.mode_state() == WifiModeState::StaConnected) {
+    if (wifi_manager.mode_state() == WifiModeState::StaConnected ||
+        wifi_manager.mode_state() == WifiModeState::StaAssociated) {
         out.print(" gw=");
         out.print(wifi_manager.gateway());
         out.print(" rssi=");
@@ -713,6 +714,10 @@ void print_wifi_status(Print &out, const WifiManager &wifi_manager) {
         out.print(bssid_text);
         out.print(" channel=");
         out.print(wifi_manager.channel());
+        if (wifi_manager.mode_state() == WifiModeState::StaAssociated) {
+            out.print(" ipv4_timeout_ms=");
+            out.print(wifi_manager.ipv4_timeout_remaining_ms());
+        }
     } else if (wifi_manager.mode_state() == WifiModeState::StaRoamScanning) {
         out.print(" roam_scan=running rssi=");
         out.print(wifi_manager.rssi());
@@ -739,6 +744,12 @@ void print_wifi_status(Print &out, const WifiManager &wifi_manager) {
     out.print(stats.roam_switches);
     out.print(" roam_candidates=");
     out.print(stats.last_roam_candidates);
+    out.print(" ipv4_timeouts=");
+    out.print(stats.ipv4_timeouts);
+    out.print(" ip_failed=");
+    out.print(stats.ipv4_failed_candidates);
+    out.print(" ip_skip=");
+    out.print(stats.last_ip_failed_skips);
     out.print(" last_reason=");
     out.print(stats.last_disconnect_reason);
     out.println();

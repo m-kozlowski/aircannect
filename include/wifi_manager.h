@@ -12,6 +12,7 @@ namespace aircannect {
 enum class WifiModeState {
     Off,
     StaConnected,
+    StaAssociated,
     StaConnecting,
     StaApSelecting,
     StaPmfRetry,
@@ -35,6 +36,9 @@ struct WifiManagerStats {
     uint32_t roam_scan_failures = 0;
     uint32_t roam_switches = 0;
     uint32_t last_roam_candidates = 0;
+    uint32_t ipv4_timeouts = 0;
+    uint32_t ipv4_failed_candidates = 0;
+    uint32_t last_ip_failed_skips = 0;
     uint8_t last_disconnect_reason = 0;
 };
 
@@ -64,7 +68,9 @@ public:
     bool begin();
     void poll();
 
-    bool network_available() const { return network_available_; }
+    bool network_available() const { return management_reachable_; }
+    bool management_reachable() const { return management_reachable_; }
+    bool sta_ipv4_online() const { return sta_ipv4_online_; }
     bool has_sta_config() const { return sta_configured_; }
     bool sta_is_open() const {
         return sta_configured_ && sta_pass_.length() == 0;
@@ -80,6 +86,7 @@ public:
     int32_t rssi() const;
     int32_t channel() const;
     uint32_t connect_timeout_remaining_ms() const;
+    uint32_t ipv4_timeout_remaining_ms() const;
     void bssid(char *out, size_t size) const;
     size_t profile_count() const { return profile_count_; }
     const WifiProfile &profile(size_t index) const { return profiles_[index]; }
@@ -121,6 +128,7 @@ private:
     void stop_wifi();
     void apply_country_code();
     void handle_connected();
+    void handle_associated_without_ip();
     void handle_ap_select_scan();
     void handle_connect_timeout();
     void enter_softap_fallback();
@@ -133,6 +141,11 @@ private:
                                 const char *reason);
     bool begin_scan_candidate(size_t candidate_index, bool keep_softap,
                               bool roaming);
+    bool sta_has_ipv4() const;
+    void mark_ip_failed_for_current();
+    bool candidate_ip_failed(uint8_t profile_index, const uint8_t *bssid,
+                             uint32_t now_ms) const;
+    void remember_good_candidate(uint8_t profile_index, const uint8_t *bssid);
 
     int8_t find_profile_by_ssid(const String &ssid) const;
     void collect_scan_candidates(int16_t scan_count,
@@ -148,7 +161,15 @@ private:
         int8_t rssi = -127;
     };
 
-    bool network_available_ = false;
+    struct IpFailedCandidate {
+        bool valid = false;
+        uint8_t profile_index = 0;
+        uint8_t bssid[6] = {};
+        uint32_t until_ms = 0;
+    };
+
+    bool management_reachable_ = false;
+    bool sta_ipv4_online_ = false;
     bool sta_configured_ = false;
     SoftApMode softap_mode_ = SoftApMode::Auto;
     bool softap_running_ = false;
@@ -160,6 +181,7 @@ private:
     bool pmf_retry_attempted_ = false;
     uint8_t last_disconnect_reason_ = 0;
     uint32_t connect_deadline_ms_ = 0;
+    uint32_t ipv4_deadline_ms_ = 0;
     uint32_t ap_select_deadline_ms_ = 0;
     uint32_t softap_retry_deadline_ms_ = 0;
     uint32_t last_roam_check_ms_ = 0;
@@ -177,6 +199,8 @@ private:
     uint8_t low_rssi_count_ = 0;
     ScanCandidate scan_candidates_[AC_WIFI_SCAN_CANDIDATES_MAX];
     size_t scan_candidate_count_ = 0;
+    size_t scan_ip_failed_skips_ = 0;
+    IpFailedCandidate ip_failed_[AC_WIFI_SCAN_CANDIDATES_MAX];
 
     WifiManagerStats stats_;
     WifiModeState mode_state_ = WifiModeState::Off;

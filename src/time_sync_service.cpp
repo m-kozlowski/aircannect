@@ -32,9 +32,7 @@ void ntp_sync_cb(struct timeval *) {
 }
 
 bool sta_online(const WifiManager &wifi_manager) {
-    const WifiModeState mode = wifi_manager.mode_state();
-    return mode == WifiModeState::StaConnected ||
-           mode == WifiModeState::StaRoamScanning;
+    return wifi_manager.sta_ipv4_online();
 }
 
 time_t utc_fields_to_epoch(int year,

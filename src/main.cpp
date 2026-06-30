@@ -480,7 +480,7 @@ void loop() {
         !rpc_arbiter.stream_activity_active() &&
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
-    Log::poll(wifi_manager.network_available());
+    Log::poll(wifi_manager.sta_ipv4_online());
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }
@@ -496,7 +496,7 @@ void loop() {
         rpc_arbiter,
         report_manager,
         app_config.data(),
-        wifi_manager.mode_state() == WifiModeState::StaConnected,
+        wifi_manager.sta_ipv4_online(),
         resmed_ota_manager.transport_active(),
         ota_manager.active(),
         now_ms);
