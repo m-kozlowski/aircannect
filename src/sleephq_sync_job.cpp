@@ -21,7 +21,11 @@ namespace {
 
 static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_INTERVAL_MS = 2000;
-static constexpr uint32_t SLEEPHQ_IMPORT_POLL_TIMEOUT_MS = 120000;
+// SleepHQ import processing is asynchronous server-side work. Per-day EDF
+// imports can stay in "unpacking" briefly after upload completes, but a long
+// wait hides a stuck server-side import.
+static constexpr uint32_t SLEEPHQ_IMPORT_POLL_TIMEOUT_MS =
+    5UL * 60UL * 1000UL;
 static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
     15UL * 60UL * 1000UL,
     60UL * 60UL * 1000UL,
