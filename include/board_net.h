@@ -102,7 +102,8 @@ static constexpr size_t AC_WEB_SSE_CLIENT_PENDING_HARD_MAX = 16;
 static constexpr uint32_t AC_WEB_SSE_BACKPRESSURE_STATUS_MS = 15000;
 static constexpr size_t AC_WEB_LIVE_FRAME_BUDGET = 4;
 static constexpr size_t AC_WEB_LIVE_BATCH_SAMPLES_MAX = 96;
-static constexpr size_t AC_WEB_CONSOLE_LOG_MAX = 4096;
+static constexpr size_t AC_WEB_CONSOLE_LOG_MAX = 64 * 1024;
+static constexpr size_t AC_WEB_CONSOLE_COMMAND_OUTPUT_MAX = 60 * 1024;
 
 static constexpr size_t AC_WEB_STATUS_JSON_RESERVE = 4096;
 static constexpr size_t AC_WEB_STREAM_JSON_RESERVE = 1536;

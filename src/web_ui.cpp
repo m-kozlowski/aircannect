@@ -1326,7 +1326,7 @@ void WebUI::handle_event(const RpcEvent &event) {
 
     if (!ManagementConsole::event_has_output(event)) return;
 
-    StringPrint capture;
+    StringPrint capture(AC_WEB_CONSOLE_COMMAND_OUTPUT_MAX);
     web_console_.handle_event(capture, event);
     if (!capture.text().length()) return;
     append_console_log(capture.text());
@@ -3423,7 +3423,7 @@ void WebUI::execute_console_line(const std::string &line) {
     if (!command.length()) return;
     if (!console_ctx_) return;
 
-    StringPrint capture;
+    StringPrint capture(AC_WEB_CONSOLE_COMMAND_OUTPUT_MAX);
     web_console_.execute_line(command, capture, *console_ctx_);
     String entry = "> ";
     entry += command;
@@ -3972,6 +3972,42 @@ void WebUI::register_routes() {
         [this](AsyncWebServerRequest *request) {
             send_queue_result(request,
                               enqueue_simple_command(WebCommandConsoleClear));
+        });
+
+    server_->on(
+        AsyncURIMatcher::exact("/api/log/current"), HTTP_GET,
+        [](AsyncWebServerRequest *request) {
+            size_t lines = AC_FILE_LOG_TAIL_DEFAULT_LINES;
+            if (!request_size_arg_limited(request,
+                                          "tail",
+                                          AC_FILE_LOG_TAIL_DEFAULT_LINES,
+                                          AC_FILE_LOG_TAIL_MAX_LINES,
+                                          lines) ||
+                lines == 0) {
+                char error[48];
+                snprintf(error, sizeof(error), "tail must be 1..%lu\n",
+                         static_cast<unsigned long>(
+                             AC_FILE_LOG_TAIL_MAX_LINES));
+                request->send(400, "text/plain", error);
+                return;
+            }
+            const char *path = Log::filelog_path();
+            if (!Log::filelog_enabled() || !path || !path[0] ||
+                !Storage::exists(path)) {
+                request->send(404, "text/plain",
+                              "file log unavailable\n");
+                return;
+            }
+            AsyncResponseStream *response =
+                request->beginResponseStream("text/plain");
+            if (!response) {
+                request->send(503, "text/plain", "response alloc\n");
+                return;
+            }
+            if (!Log::print_filelog_tail(*response, lines)) {
+                response->print("file log unavailable\n");
+            }
+            request->send(response);
         });
 
     server_->on(AsyncURIMatcher::exact("/api/config"), HTTP_GET,

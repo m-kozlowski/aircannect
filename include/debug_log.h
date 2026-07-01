@@ -71,6 +71,7 @@ size_t syslog_queue_depth();
 bool filelog_enabled();
 const char *filelog_path();
 size_t filelog_queue_depth();
+bool print_filelog_tail(Print &out, size_t lines);
 
 Stats stats();
 

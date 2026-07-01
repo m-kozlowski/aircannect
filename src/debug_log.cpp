@@ -855,6 +855,70 @@ size_t filelog_queue_depth() {
     return out;
 }
 
+bool print_filelog_tail(Print &out, size_t lines) {
+#if AC_FILE_LOG_ENABLED
+    if (lines == 0) lines = 1;
+    lock_file_log_sink();
+    if (file_log_file_open) {
+        file_log_file.flush();
+    }
+    File file = Storage::open(AC_FILE_LOG_PATH, FILE_READ);
+    if (!file) {
+        unlock_file_log_sink();
+        return false;
+    }
+
+    uint8_t buffer[AC_FILE_LOG_TAIL_READ_CHUNK];
+    const uint64_t size = file.size();
+    uint64_t offset = size;
+    size_t newlines = 0;
+
+    while (offset > 0 && newlines <= lines) {
+        const size_t want = offset > AC_FILE_LOG_TAIL_READ_CHUNK
+                                ? AC_FILE_LOG_TAIL_READ_CHUNK
+                                : static_cast<size_t>(offset);
+        offset -= want;
+        if (!file.seek(static_cast<uint32_t>(offset))) {
+            file.close();
+            unlock_file_log_sink();
+            return false;
+        }
+        const int got = file.read(buffer, want);
+        if (got <= 0) {
+            file.close();
+            unlock_file_log_sink();
+            return false;
+        }
+        for (int i = got - 1; i >= 0; --i) {
+            if (buffer[i] != '\n') continue;
+            newlines++;
+            if (newlines > lines) {
+                offset += static_cast<uint64_t>(i + 1);
+                break;
+            }
+        }
+    }
+
+    if (!file.seek(static_cast<uint32_t>(offset))) {
+        file.close();
+        unlock_file_log_sink();
+        return false;
+    }
+    while (file.available()) {
+        const int got = file.read(buffer, sizeof(buffer));
+        if (got <= 0) break;
+        out.write(buffer, static_cast<size_t>(got));
+    }
+    file.close();
+    unlock_file_log_sink();
+    return true;
+#else
+    (void)out;
+    (void)lines;
+    return false;
+#endif
+}
+
 Stats stats() {
     lock_log();
     Stats out = log_stats;

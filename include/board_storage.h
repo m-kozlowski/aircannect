@@ -116,5 +116,8 @@ static constexpr size_t AC_FILE_LOG_DRAIN_BUDGET = 4;
 static constexpr uint32_t AC_FILE_LOG_FLUSH_MS = 10000;
 static constexpr size_t AC_FILE_LOG_ROTATE_BYTES = 256 * 1024;
 static constexpr uint8_t AC_FILE_LOG_ARCHIVES = 8;
+static constexpr size_t AC_FILE_LOG_TAIL_DEFAULT_LINES = 200;
+static constexpr size_t AC_FILE_LOG_TAIL_MAX_LINES = 1000;
+static constexpr size_t AC_FILE_LOG_TAIL_READ_CHUNK = 512;
 
 static constexpr uint32_t AC_SINK_ATTACH_RETRY_MS = 2000;

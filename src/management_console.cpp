@@ -1108,6 +1108,34 @@ void ManagementConsole::handle_log(Print &out,
         return;
     }
 
+    if (rest == "tail" || rest.startsWith("tail ")) {
+        size_t lines = AC_FILE_LOG_TAIL_DEFAULT_LINES;
+        if (rest.length() > 4) {
+            String args = rest.substring(4);
+            args.trim();
+            int pos = 0;
+            String lines_text;
+            if (!parse_console_arg(args, pos, lines_text)) {
+                out.println("[LOG] usage: log tail [LINES]");
+                return;
+            }
+            char *end = nullptr;
+            const unsigned long parsed = strtoul(lines_text.c_str(), &end, 10);
+            if (!end || *end != '\0' || parsed == 0 ||
+                parsed > AC_FILE_LOG_TAIL_MAX_LINES) {
+                out.print("[LOG] lines must be 1..");
+                out.println(static_cast<unsigned long>(
+                    AC_FILE_LOG_TAIL_MAX_LINES));
+                return;
+            }
+            lines = static_cast<size_t>(parsed);
+        }
+        if (!Log::print_filelog_tail(out, lines)) {
+            out.println("[LOG] file log unavailable");
+        }
+        return;
+    }
+
     if (rest == "test" || rest.startsWith("test ")) {
         String text = rest.length() > 4 ? rest.substring(5) : "test";
         text.trim();
@@ -1117,7 +1145,7 @@ void ManagementConsole::handle_log(Print &out,
         return;
     }
 
-    print_unknown_command(out, "LOG", "log status, level, syslog, test");
+    print_unknown_command(out, "LOG", "log status, level, syslog, tail, test");
 }
 
 void ManagementConsole::handle_wifi(Print &out, String rest,
