@@ -310,6 +310,18 @@ StorageStatus status() {
     return current;
 }
 
+bool try_status(StorageStatus &out) {
+    SemaphoreHandle_t m = sd_mutex();
+    if (m && xSemaphoreTakeRecursive(m, 0) != pdTRUE) return false;
+    if (!initialized) {
+        if (m) xSemaphoreGiveRecursive(m);
+        return false;
+    }
+    out = current;
+    if (m) xSemaphoreGiveRecursive(m);
+    return true;
+}
+
 bool mounted() {
     return status().mounted;
 }

@@ -44,6 +44,7 @@ void poll(bool allow_capacity_update);
 bool remount();
 
 StorageStatus status();
+bool try_status(StorageStatus &out);
 bool mounted();
 bool ensure_dir(const char *path);
 bool exists(const char *path);

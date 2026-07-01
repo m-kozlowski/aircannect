@@ -7,6 +7,24 @@
 
 namespace aircannect {
 
+namespace {
+
+StorageStatus cached_storage_status;
+bool cached_storage_status_valid = false;
+
+StorageStatus collect_storage_status_snapshot() {
+    StorageStatus storage;
+    if (Storage::try_status(storage)) {
+        cached_storage_status = storage;
+        cached_storage_status_valid = true;
+        return storage;
+    }
+    if (cached_storage_status_valid) return cached_storage_status;
+    return Storage::status();
+}
+
+}  // namespace
+
 const char *system_reset_reason_name() {
     switch (esp_reset_reason()) {
         case ESP_RST_UNKNOWN: return "unknown";
@@ -42,7 +60,7 @@ SystemStatusSnapshot collect_system_status(
 
     out.memory = Memory::status();
     if (checkpoint) checkpoint("web_ui.snapshots.status.memory");
-    out.storage = Storage::status();
+    out.storage = collect_storage_status_snapshot();
     if (checkpoint) checkpoint("web_ui.snapshots.status.storage");
 
     out.wifi.state = sources.wifi_manager.state_name();
