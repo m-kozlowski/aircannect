@@ -44,7 +44,8 @@ void OtaManager::begin(AppConfig &app_config) {
 
 void OtaManager::poll(const WifiManager &wifi_manager,
                       bool reboot_allowed,
-                      bool arduino_ota_allowed) {
+                      bool arduino_ota_allowed,
+                      bool arduino_ota_poll_allowed) {
     if (reboot_at_ms_ &&
         static_cast<int32_t>(millis() - reboot_at_ms_) >= 0) {
         if (!reboot_allowed) {
@@ -104,6 +105,10 @@ void OtaManager::poll(const WifiManager &wifi_manager,
         const bool stop_ota = status_.arduino_started;
         unlock_status();
         if (stop_ota) stop_arduino_ota();
+        return;
+    }
+    if (!arduino_ota_poll_allowed) {
+        unlock_status();
         return;
     }
 

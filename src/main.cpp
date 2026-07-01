@@ -471,27 +471,38 @@ void loop() {
     drain_can_rx_after("session_edf");
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
+    drain_can_rx_after("oximetry");
     wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||
                                        ota_manager.active() ||
                                        resmed_ota_transport_active);
     wifi_manager.poll();
+    drain_can_rx_after("wifi.poll");
     sync_network_services();
+    drain_can_rx_after("network_services.sync");
     const bool storage_writer_idle_allowed =
         !rpc_arbiter.stream_activity_active() &&
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
     Log::poll(wifi_manager.sta_ipv4_online());
+    drain_can_rx_after("log");
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }
-    drain_can_rx_after("network_services");
+    drain_can_rx_after("time_sync");
     const bool esp_reboot_allowed =
         !ota_manager.status().reboot_pending ||
         rpc_arbiter.esp_ota_reboot_allowed();
+    const bool arduino_ota_poll_allowed =
+        rpc_arbiter.as11_state().therapy_state() !=
+            As11TherapyState::Running;
     ota_manager.poll(wifi_manager, esp_reboot_allowed,
-                     !resmed_ota_transport_active);
+                     !resmed_ota_transport_active,
+                     arduino_ota_poll_allowed);
+    drain_can_rx_after("arduino_ota");
     resmed_ota_manager.poll();
+    drain_can_rx_after("resmed_ota_post");
     Storage::poll(storage_writer_idle_allowed);
+    drain_can_rx_after("storage_poll");
     export_coordinator.poll(
         rpc_arbiter,
         report_manager,
@@ -500,7 +511,7 @@ void loop() {
         resmed_ota_manager.transport_active(),
         ota_manager.active(),
         now_ms);
-    drain_can_rx_after("ota_storage_sync");
+    drain_can_rx_after("export_coordinator");
     // Publish the worker's gate inputs from here (the owner thread) so the
     // background task reads a coherent snapshot instead of these managers.
     bg_worker.publish_gate(

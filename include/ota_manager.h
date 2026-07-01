@@ -37,7 +37,8 @@ public:
     void begin(AppConfig &app_config);
     void poll(const WifiManager &wifi_manager,
               bool reboot_allowed = true,
-              bool arduino_ota_allowed = true);
+              bool arduino_ota_allowed = true,
+              bool arduino_ota_poll_allowed = true);
     void mark_config_dirty();
 
     bool request_http_upload_prepare(size_t image_size);
