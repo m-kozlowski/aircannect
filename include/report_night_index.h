@@ -52,6 +52,9 @@ bool indexed_night_summary_ranges_covered_by_data(
 size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
                                          ReportSessionRange *ranges,
                                          size_t max_ranges);
+size_t collect_indexed_night_report_ranges(const ReportIndexedNight &night,
+                                           ReportSessionRange *ranges,
+                                           size_t max_ranges);
 uint32_t report_ceil_duration_min(int64_t start_ms, int64_t end_ms);
 uint64_t report_summary_identity_signature(
     const ReportSummaryRecord &record);

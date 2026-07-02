@@ -32,7 +32,7 @@ namespace aircannect {
 namespace {
 
 const char *const REPORT_SUMMARY_FROM = "2000-01-01T00:00:00.000Z";
-constexpr const char *REPORT_CACHE_BASE_DIR = "/aircannect/report/v4";
+constexpr const char *REPORT_CACHE_BASE_DIR = "/aircannect/report/v5";
 constexpr const char *REPORT_PLOT_CACHE_DIR =
     "/aircannect/report/v4/plots/v2";
 constexpr const char *REPORT_RESULT_JSON_CACHE_DIR =
@@ -5386,30 +5386,16 @@ void ReportManager::clear_result_ranges() {
 bool ReportManager::set_result_ranges_from_indexed_night(
     const ReportIndexedNight &night) {
     clear_result_ranges();
-    auto append_range = [&](int64_t start_ms, int64_t end_ms) {
-        if (end_ms <= start_ms ||
-            result_range_count_ >= AC_REPORT_SUMMARY_SESSION_MAX) {
-            return;
-        }
+    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    const size_t range_count =
+        collect_indexed_night_report_ranges(night,
+                                            ranges,
+                                            AC_REPORT_SUMMARY_SESSION_MAX);
+    for (size_t i = 0; i < range_count; ++i) {
+        if (result_range_count_ >= AC_REPORT_SUMMARY_SESSION_MAX) break;
         PlotRange &range = result_ranges_[result_range_count_++];
-        range.start_ms = start_ms;
-        range.end_ms = end_ms;
-    };
-    const size_t edf_count =
-        std::min(night.data_range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    if (night.has_edf && edf_count > 0) {
-        for (size_t i = 0; i < edf_count; ++i) {
-            append_range(night.data_ranges[i].start_ms,
-                         night.data_ranges[i].end_ms);
-        }
-    } else {
-        const size_t display_count =
-            std::min(night.range_count,
-                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-        for (size_t i = 0; i < display_count; ++i) {
-            append_range(night.ranges[i].start_ms, night.ranges[i].end_ms);
-        }
+        range.start_ms = ranges[i].start_ms;
+        range.end_ms = ranges[i].end_ms;
     }
     std::sort(result_ranges_,
               result_ranges_ + result_range_count_,
@@ -6077,9 +6063,9 @@ bool ReportManager::edf_report_complete_for_indexed_night(
     EdfReportRequiredRange required_ranges[AC_REPORT_SUMMARY_SESSION_MAX];
     ReportSessionRange source_ranges[AC_REPORT_SUMMARY_SESSION_MAX];
     const size_t source_range_count =
-        collect_indexed_night_data_ranges(night,
-                                          source_ranges,
-                                          AC_REPORT_SUMMARY_SESSION_MAX);
+        collect_indexed_night_report_ranges(night,
+                                            source_ranges,
+                                            AC_REPORT_SUMMARY_SESSION_MAX);
     const size_t required_range_count =
         collect_required_ranges_from_session_ranges(
             source_ranges,

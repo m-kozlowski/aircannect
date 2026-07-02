@@ -138,9 +138,9 @@ bool ReportSourceResolver::build_plan(const ReportIndexedNight &night,
 
     ReportSessionRange *source_ranges = scratch_.source_ranges;
     const size_t source_range_count =
-        collect_indexed_night_data_ranges(night,
-                                          source_ranges,
-                                          AC_REPORT_SUMMARY_SESSION_MAX);
+        collect_indexed_night_report_ranges(night,
+                                            source_ranges,
+                                            AC_REPORT_SUMMARY_SESSION_MAX);
 
     ReportSessionRange *required_ranges = scratch_.required_ranges;
     const size_t required_range_count =

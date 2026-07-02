@@ -630,6 +630,43 @@ size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
     return count;
 }
 
+size_t collect_indexed_night_report_ranges(const ReportIndexedNight &night,
+                                           ReportSessionRange *ranges,
+                                           size_t max_ranges) {
+    if (!ranges || max_ranges == 0) return 0;
+
+    const size_t display_count =
+        std::min(night.range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    const size_t edf_count =
+        std::min(night.data_range_count,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    const bool use_display_ranges =
+        display_count > 0 &&
+        (!night.has_edf ||
+         edf_count == 0 ||
+         indexed_night_summary_ranges_covered_by_data(night));
+
+    size_t count = 0;
+    if (use_display_ranges) {
+        for (size_t i = 0; i < display_count && count < max_ranges; ++i) {
+            if (night.ranges[i].end_ms <= night.ranges[i].start_ms) continue;
+            ranges[count++] = night.ranges[i];
+        }
+    } else if (night.has_edf && edf_count > 0) {
+        for (size_t i = 0; i < edf_count && count < max_ranges; ++i) {
+            if (night.data_ranges[i].end_ms <=
+                night.data_ranges[i].start_ms) {
+                continue;
+            }
+            ranges[count++] = night.data_ranges[i];
+        }
+    }
+
+    normalize_range_array(ranges, count);
+    return count;
+}
+
 uint32_t report_ceil_duration_min(int64_t start_ms, int64_t end_ms) {
     if (end_ms <= start_ms) return 0;
     const int64_t duration_ms = end_ms - start_ms;
