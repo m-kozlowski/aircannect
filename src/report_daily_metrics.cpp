@@ -70,15 +70,6 @@ bool read_str_label_value(const uint8_t *record,
     return false;
 }
 
-bool summary_index_value(const ReportSummaryRecord &record,
-                         ReportSummaryField field,
-                         float &out) {
-    uint32_t raw = 0;
-    if (!report_summary_field_value(record, field, raw)) return false;
-    out = static_cast<float>(raw) / 10.0f;
-    return true;
-}
-
 bool summary_scaled_value(const ReportSummaryRecord &record,
                           ReportSummaryField field,
                           float scale,

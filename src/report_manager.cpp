@@ -97,6 +97,54 @@ bool report_sleep_day_date_sample(const ReportSummaryRecord &night,
     return true;
 }
 
+bool read_str_record_date(File &file,
+                          uint32_t record_index,
+                          int16_t &date_sample) {
+    uint8_t raw[2] = {};
+    const size_t offset = edf_str_record_offset(record_index);
+    if (!file.seek(offset)) return false;
+    if (file.read(raw, sizeof(raw)) != static_cast<int>(sizeof(raw))) {
+        return false;
+    }
+    date_sample = edf_str_record_date_sample(raw, sizeof(raw));
+    return true;
+}
+
+bool read_str_record(File &file,
+                     uint32_t record_index,
+                     uint8_t *record,
+                     size_t record_size) {
+    if (!record || record_size != edf_str_record_size()) return false;
+    const size_t offset = edf_str_record_offset(record_index);
+    if (!file.seek(offset)) return false;
+    return file.read(record, record_size) == static_cast<int>(record_size);
+}
+
+bool find_str_record_by_date(File &file,
+                             uint32_t record_count,
+                             int16_t target_date,
+                             uint32_t &record_index) {
+    uint32_t low = 0;
+    uint32_t high = record_count;
+    while (low < high) {
+        const uint32_t mid = low + (high - low) / 2;
+        int16_t mid_date = -1;
+        if (!read_str_record_date(file, mid, mid_date)) return false;
+        if (mid_date < target_date) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    if (low >= record_count) return false;
+    int16_t found_date = -1;
+    if (!read_str_record_date(file, low, found_date)) return false;
+    if (found_date != target_date) return false;
+    record_index = low;
+    return true;
+}
+
 bool load_str_daily_metrics_for_night(const ReportSummaryRecord &night,
                                       ReportDailyMetrics &out) {
     out = ReportDailyMetrics();
@@ -117,34 +165,30 @@ bool load_str_daily_metrics_for_night(const ReportSummaryRecord &night,
 
     uint8_t record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
     const size_t record_size = edf_str_record_size();
-    for (uint32_t i = 0; i < layout.record_count; ++i) {
-        const size_t offset = edf_str_record_offset(i);
-        if (!file.seek(offset)) break;
-        if (file.read(record, record_size) != static_cast<int>(record_size)) {
-            break;
-        }
-        if (edf_str_record_date_sample(record, record_size) != target_date) {
-            continue;
-        }
+    uint32_t record_index = 0;
+    if (!find_str_record_by_date(file,
+                                 layout.record_count,
+                                 target_date,
+                                 record_index) ||
+        !read_str_record(file, record_index, record, record_size)) {
         file.close();
-        if (!report_daily_metrics_from_str_record(record, record_size, out)) {
+        return false;
+    }
+    file.close();
+
+    if (!report_daily_metrics_from_str_record(record, record_size, out)) {
+        return false;
+    }
+    if (night.duration_min > 0 && out.has_duration_min) {
+        const uint32_t expected = static_cast<uint32_t>(night.duration_min);
+        const uint32_t actual = out.duration_min;
+        const uint32_t delta =
+            expected > actual ? expected - actual : actual - expected;
+        if (delta > REPORT_STR_DURATION_TOLERANCE_MIN) {
             return false;
         }
-        if (night.duration_min > 0 && out.has_duration_min) {
-            const uint32_t expected =
-                static_cast<uint32_t>(night.duration_min);
-            const uint32_t actual = out.duration_min;
-            const uint32_t delta =
-                expected > actual ? expected - actual : actual - expected;
-            if (delta > REPORT_STR_DURATION_TOLERANCE_MIN) {
-                return false;
-            }
-        }
-        return true;
     }
-
-    file.close();
-    return false;
+    return true;
 }
 
 void apply_daily_metrics_to_result_status(ReportResultStatus &status,
