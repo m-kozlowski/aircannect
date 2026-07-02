@@ -2833,6 +2833,9 @@
 
     function clearReportSvg(svg, width, height) {
       svg.textContent = "";
+      svg._selectionRect = null;
+      svg._cursor = null;
+      svg._timeTooltip = null;
       svg.appendChild(svgNode("rect", {
         x: "0",
         y: "0",
@@ -3274,18 +3277,69 @@
       });
     }
 
-    function reportClearDragRect() {
-      if (reportDrag && reportDrag.rect && reportDrag.rect.parentNode) {
-        reportDrag.rect.parentNode.removeChild(reportDrag.rect);
+    function reportSelectionRect(canvas) {
+      if (!canvas._selectionRect) {
+        const rect = svgNode("rect", {
+          fill: "#8b5cf633",
+          stroke: "#8b5cf6",
+          "stroke-width": "1",
+          "pointer-events": "none",
+          visibility: "hidden",
+        });
+        if (canvas._cursor && canvas._cursor.parentNode === canvas) {
+          canvas.insertBefore(rect, canvas._cursor);
+        } else {
+          canvas.appendChild(rect);
+        }
+        canvas._selectionRect = rect;
       }
+      return canvas._selectionRect;
+    }
+
+    function hideReportSelectionRects() {
+      reportDrawItems.forEach((item) => {
+        const canvas = item && item.canvas;
+        if (canvas && canvas._selectionRect) {
+          canvas._selectionRect.setAttribute("visibility", "hidden");
+        }
+      });
+    }
+
+    function updateReportSelectionRects() {
+      if (!reportDrag) {
+        hideReportSelectionRects();
+        return;
+      }
+      const lo = Math.min(reportDrag.t0, reportDrag.t1);
+      const hi = Math.max(reportDrag.t0, reportDrag.t1);
+      reportDrawItems.forEach((item) => {
+        const canvas = item && item.canvas;
+        if (!canvas || !canvas._geom || item.end <= item.start) return;
+        const g = canvas._geom;
+        const rect = reportSelectionRect(canvas);
+        const visibleLo = Math.max(lo, item.start);
+        const visibleHi = Math.min(hi, item.end);
+        if (visibleHi <= visibleLo) {
+          rect.setAttribute("visibility", "hidden");
+          return;
+        }
+        const x0 = reportTimeToX(canvas, visibleLo);
+        const x1 = reportTimeToX(canvas, visibleHi);
+        rect.setAttribute("x", Math.min(x0, x1).toFixed(1));
+        rect.setAttribute("y", String(g.pad.top));
+        rect.setAttribute("width", Math.abs(x1 - x0).toFixed(1));
+        rect.setAttribute("height",
+          (g.height - g.pad.top - g.pad.bottom).toFixed(1));
+        rect.setAttribute("visibility", "visible");
+      });
     }
 
     // Item 7: drag a range on any chart to zoom every chart to it.
     function reportFinishDrag() {
       if (!reportDrag) return;
       const drag = reportDrag;
-      reportClearDragRect();
       reportDrag = null;
+      hideReportSelectionRects();
       const lo = Math.min(drag.t0, drag.t1);
       const hi = Math.max(drag.t0, drag.t1);
       if (hi - lo > 60000) {
@@ -3387,26 +3441,9 @@
         const t = reportCanvasTime(canvas, ev.clientX);
         if (t == null) return;
         if (reportDrag) {
-          if (reportDrag.canvas !== canvas || !canvas._geom) return;
-          const g = canvas._geom;
-          const x = reportTimeToX(canvas, t);
-          if (!reportDrag.rect) {
-            reportDrag.rect = svgNode("rect", {
-              y: String(g.pad.top),
-              fill: "#8b5cf633",
-              stroke: "#8b5cf6",
-              "stroke-width": "1",
-              "pointer-events": "none",
-            });
-            canvas.appendChild(reportDrag.rect);
-          }
-          reportDrag.rect.setAttribute("x",
-            Math.min(x, reportDrag.x0).toFixed(1));
-          reportDrag.rect.setAttribute("width",
-            Math.abs(x - reportDrag.x0).toFixed(1));
-          reportDrag.rect.setAttribute("height",
-            (g.height - g.pad.top - g.pad.bottom).toFixed(1));
+          if (reportDrag.canvas !== canvas) return;
           reportDrag.t1 = t;
+          updateReportSelectionRects();
           return;
         }
         reportHoverTime = t;
@@ -3421,10 +3458,10 @@
         const t = reportCanvasTime(canvas, ev.clientX);
         if (t == null || !canvas._geom) return;
         ev.preventDefault();
-        reportDrag = {canvas, t0: t, t1: t, x0: reportTimeToX(canvas, t),
-                      rect: null};
+        reportDrag = {canvas, t0: t, t1: t};
         reportHoverTime = null;
         updateReportHover();
+        updateReportSelectionRects();
       });
     }
 
@@ -3451,6 +3488,7 @@
         }
       });
       updateReportHover();
+      updateReportSelectionRects();
       if (retry && reportTabActive()) {
         reportDrawRetryCount++;
         setTimeout(() => scheduleReportDraw(), 50);
