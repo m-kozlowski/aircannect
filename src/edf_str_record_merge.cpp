@@ -17,6 +17,11 @@ struct MaskEvent {
     int16_t off = EDF_STR_MISSING;
 };
 
+enum class SessionMergeKind {
+    RewriteOrCumulative,
+    DisjointPartialDay,
+};
+
 bool valid_event_count(int16_t count) {
     return count >= 0 &&
            count <= static_cast<int16_t>(AC_EDF_STR_MASK_EVENT_CAPACITY);
@@ -57,7 +62,8 @@ bool append_unique_event(MaskEvent *events,
 
 EdfStrRecordMergeStatus collect_mask_events(const uint8_t *record,
                                             MaskEvent *events,
-                                            size_t &count) {
+                                            size_t &count,
+                                            size_t *source_count = nullptr) {
     const size_t on_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_MASK_ON_SIGNAL);
     const size_t off_offset =
@@ -79,6 +85,7 @@ EdfStrRecordMergeStatus collect_mask_events(const uint8_t *record,
         if (!valid_event(event)) {
             return EdfStrRecordMergeStatus::BadMaskEvents;
         }
+        if (source_count) (*source_count)++;
         if (!append_unique_event(events, count, event)) {
             return EdfStrRecordMergeStatus::MaskEventOverflow;
         }
@@ -129,7 +136,9 @@ void merge_non_session_samples(const uint8_t *existing, uint8_t *incoming) {
     }
 }
 
-void merge_duration_sample(const uint8_t *existing, uint8_t *incoming) {
+void merge_duration_sample(const uint8_t *existing,
+                           uint8_t *incoming,
+                           SessionMergeKind merge_kind) {
     const size_t duration_offset =
         edf_str_signal_sample_offset(AC_EDF_STR_DURATION_SIGNAL);
     if (duration_offset >= AC_EDF_STR_DATA_SAMPLES_PER_RECORD) return;
@@ -147,11 +156,28 @@ void merge_duration_sample(const uint8_t *existing, uint8_t *incoming) {
     }
     if (existing_value == EDF_STR_MISSING) return;
 
-    edf_write_i16_le_sample(incoming,
-                            duration_offset,
-                            existing_value > incoming_value
-                                ? existing_value
-                                : incoming_value);
+    int16_t merged_value = existing_value > incoming_value
+                               ? existing_value
+                               : incoming_value;
+    if (merge_kind == SessionMergeKind::DisjointPartialDay) {
+        const int sum = static_cast<int>(existing_value) +
+                        static_cast<int>(incoming_value);
+        merged_value = static_cast<int16_t>(sum > 1440 ? 1440 : sum);
+    }
+    edf_write_i16_le_sample(incoming, duration_offset, merged_value);
+}
+
+SessionMergeKind classify_session_merge(size_t existing_event_count,
+                                        size_t incoming_event_count,
+                                        size_t merged_event_count) {
+    const size_t largest_source_count =
+        existing_event_count > incoming_event_count
+            ? existing_event_count
+            : incoming_event_count;
+    if (merged_event_count > largest_source_count) {
+        return SessionMergeKind::DisjointPartialDay;
+    }
+    return SessionMergeKind::RewriteOrCumulative;
 }
 
 void write_mask_events(uint8_t *record,
@@ -215,14 +241,26 @@ EdfStrRecordMergeStatus edf_str_merge_existing_record(
 
     MaskEvent events[AC_EDF_STR_MASK_EVENT_CAPACITY] = {};
     size_t event_count = 0;
+    size_t existing_event_count = 0;
+    size_t incoming_event_count = 0;
     EdfStrRecordMergeStatus status =
-        collect_mask_events(existing_record, events, event_count);
+        collect_mask_events(existing_record,
+                            events,
+                            event_count,
+                            &existing_event_count);
     if (status != EdfStrRecordMergeStatus::Ok) return status;
-    status = collect_mask_events(incoming_record, events, event_count);
+    status = collect_mask_events(incoming_record,
+                                 events,
+                                 event_count,
+                                 &incoming_event_count);
     if (status != EdfStrRecordMergeStatus::Ok) return status;
 
+    const SessionMergeKind session_merge =
+        classify_session_merge(existing_event_count,
+                               incoming_event_count,
+                               event_count);
     merge_non_session_samples(existing_record, incoming_record);
-    merge_duration_sample(existing_record, incoming_record);
+    merge_duration_sample(existing_record, incoming_record, session_merge);
     write_mask_events(incoming_record, events, event_count);
     patch_crc(incoming_record);
     return EdfStrRecordMergeStatus::Ok;
