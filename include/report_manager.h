@@ -14,6 +14,7 @@
 #include "large_text_buffer.h"
 #include "edf_report_catalog.h"
 #include "report_data_provider.h"
+#include "report_daily_metrics.h"
 #include "report_materializer.h"
 #include "report_night_index.h"
 #include "report_parser.h"
@@ -140,14 +141,31 @@ struct ReportResultStatus {
     uint32_t payload_bytes = 0;
     uint32_t materialized_slots = 0;
     uint32_t materialized_plot_slots = 0;
-    bool event_metrics_valid = false;
     bool events_available = false;  // event source covered: counts are real, not unknown
+    bool ahi_valid = false;
+    bool oa_index_valid = false;
+    bool ca_index_valid = false;
+    bool ua_index_valid = false;
+    bool hypopnea_index_valid = false;
+    bool arousal_index_valid = false;
+    bool mask_pressure_50_valid = false;
+    bool leak_50_valid = false;
+    ReportMetricSource ahi_source = ReportMetricSource::None;
+    ReportMetricSource oa_index_source = ReportMetricSource::None;
+    ReportMetricSource ca_index_source = ReportMetricSource::None;
+    ReportMetricSource ua_index_source = ReportMetricSource::None;
+    ReportMetricSource hypopnea_index_source = ReportMetricSource::None;
+    ReportMetricSource arousal_index_source = ReportMetricSource::None;
+    ReportMetricSource mask_pressure_50_source = ReportMetricSource::None;
+    ReportMetricSource leak_50_source = ReportMetricSource::None;
     float ahi = 0.0f;
     float oa_index = 0.0f;
     float ca_index = 0.0f;
     float ua_index = 0.0f;
     float hypopnea_index = 0.0f;
     float arousal_index = 0.0f;
+    float mask_pressure_50_cm_h2o = 0.0f;
+    float leak_50_l_min = 0.0f;
     uint32_t oa_count = 0;
     uint32_t ca_count = 0;
     uint32_t ua_count = 0;
@@ -819,6 +837,8 @@ private:
     bool activate_cache_plan_for_night(const ReportSummaryRecord &night);
     bool count_result_events_from_chunks();
     void apply_result_event_indices_from_counts();
+    bool apply_result_series_metrics_from_chunks();
+    bool result_timestamp_in_ranges(int64_t timestamp_ms) const;
     bool finalize_result_prepare(size_t therapy_index);
     const char *result_state_name() const;
     void clear_result_ranges();

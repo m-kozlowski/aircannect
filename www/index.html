@@ -907,6 +907,14 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .report-metric-small {
+      min-width: 104px;
+    }
+
+    .report-metric-small .report-metric-value {
+      font-variant-numeric: tabular-nums;
+    }
+
     .report-events {
       display: flex;
       flex-wrap: wrap;
@@ -1490,6 +1498,14 @@
               <div class="report-metric report-metric-ahi">
                 <div class="report-metric-label">AHI</div>
                 <div class="report-metric-value" id="reportAhi">--</div>
+              </div>
+              <div class="report-metric report-metric-small">
+                <div class="report-metric-label">Average Pressure</div>
+                <div class="report-metric-value" id="reportMaskPress50">--</div>
+              </div>
+              <div class="report-metric report-metric-small">
+                <div class="report-metric-label">Average Leak</div>
+                <div class="report-metric-value" id="reportLeak50">--</div>
               </div>
               <div class="report-metric report-metric-events">
                 <div class="report-metric-label">Events</div>
@@ -3740,7 +3756,17 @@
         reportResult.duration_min : (selected ? selected.duration_min : 0);
       up("reportDuration", durationMin ? fmtMinutes(durationMin) : "--");
       up("reportAhi", displayable && Number.isFinite(Number(reportResult.ahi)) ?
-        Number(reportResult.ahi).toFixed(2) : "--");
+        Number(reportResult.ahi).toFixed(1) : "--");
+      const averagePressure = reportResult ?
+        (reportResult.average_pressure ?? reportResult.mask_pressure_50) : null;
+      const averageLeak = reportResult ?
+        (reportResult.average_leak ?? reportResult.leak_50) : null;
+      up("reportMaskPress50",
+        displayable && Number.isFinite(Number(averagePressure)) ?
+          Number(averagePressure).toFixed(1) : "--");
+      up("reportLeak50",
+        displayable && Number.isFinite(Number(averageLeak)) ?
+          Number(averageLeak).toFixed(1) : "--");
       renderReportEventCounts(displayable ? reportResult : null);
       renderReportSessions(reportResult && reportResult.sessions ?
         reportResult.sessions : selected ? selected.sessions : []);

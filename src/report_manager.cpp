@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits.h>
+#include <math.h>
 #include <new>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,12 +11,15 @@
 
 #include "board.h"
 #include "background_worker.h"
+#include "calendar_utils.h"
 #include "debug_log.h"
+#include "edf_bytes.h"
 #include "edf_report_catalog_job.h"
 #include "edf_report_data_plan.h"
 #include "edf_report_data_reader.h"
 #include "edf_report_provider.h"
 #include "edf_report_provider_token.h"
+#include "edf_str_file_layout.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
@@ -40,7 +44,8 @@ constexpr const char *REPORT_RESULT_JSON_CACHE_DIR =
 constexpr size_t REPORT_CACHE_PATH_MAX = 192;
 constexpr size_t REPORT_CACHE_WRITE_CHUNK = 4096;
 constexpr size_t REPORT_RESULT_JSON_CACHE_MAX = 32 * 1024;
-constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 23;
+constexpr uint32_t REPORT_STR_DURATION_TOLERANCE_MIN = 3;
+constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 27;
 
 const char *report_provider_id_name(ReportProviderId provider) {
     switch (provider) {
@@ -49,6 +54,159 @@ const char *report_provider_id_name(ReportProviderId provider) {
         default: return "unknown";
     }
 }
+
+bool parse_report_sleep_day(const char *sleep_day,
+                            int &year,
+                            unsigned &month,
+                            unsigned &day) {
+    if (!sleep_day || strlen(sleep_day) != 8) return false;
+    for (size_t i = 0; i < 8; ++i) {
+        if (sleep_day[i] < '0' || sleep_day[i] > '9') return false;
+    }
+    char buf[5] = {};
+    memcpy(buf, sleep_day, 4);
+    year = static_cast<int>(strtol(buf, nullptr, 10));
+    buf[0] = sleep_day[4];
+    buf[1] = sleep_day[5];
+    buf[2] = '\0';
+    month = static_cast<unsigned>(strtoul(buf, nullptr, 10));
+    buf[0] = sleep_day[6];
+    buf[1] = sleep_day[7];
+    day = static_cast<unsigned>(strtoul(buf, nullptr, 10));
+    return year > 0 &&
+           month >= 1 && month <= 12 &&
+           day >= 1 &&
+           day <= calendar_days_in_month(year, static_cast<int>(month));
+}
+
+bool report_sleep_day_date_sample(const ReportSummaryRecord &night,
+                                  int16_t &out) {
+    char sleep_day[9] = {};
+    if (!report_summary_sleep_day_yyyymmdd(night,
+                                           sleep_day,
+                                           sizeof(sleep_day))) {
+        return false;
+    }
+    int year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    if (!parse_report_sleep_day(sleep_day, year, month, day)) return false;
+    const int64_t days = calendar_days_from_civil(year, month, day);
+    if (days < INT16_MIN || days > INT16_MAX) return false;
+    out = static_cast<int16_t>(days);
+    return true;
+}
+
+bool load_str_daily_metrics_for_night(const ReportSummaryRecord &night,
+                                      ReportDailyMetrics &out) {
+    out = ReportDailyMetrics();
+    int16_t target_date = 0;
+    if (!report_sleep_day_date_sample(night, target_date)) return false;
+
+    Storage::Guard guard;
+    File file = Storage::open("/STR.edf", "r");
+    if (!file || file.isDirectory()) return false;
+
+    EdfStrFileLayout layout;
+    if (!edf_str_file_layout_from_size(static_cast<size_t>(file.size()),
+                                       layout) ||
+        layout.record_count == 0) {
+        file.close();
+        return false;
+    }
+
+    uint8_t record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
+    const size_t record_size = edf_str_record_size();
+    for (uint32_t i = 0; i < layout.record_count; ++i) {
+        const size_t offset = edf_str_record_offset(i);
+        if (!file.seek(offset)) break;
+        if (file.read(record, record_size) != static_cast<int>(record_size)) {
+            break;
+        }
+        if (edf_str_record_date_sample(record, record_size) != target_date) {
+            continue;
+        }
+        file.close();
+        if (!report_daily_metrics_from_str_record(record, record_size, out)) {
+            return false;
+        }
+        if (night.duration_min > 0 && out.has_duration_min) {
+            const uint32_t expected =
+                static_cast<uint32_t>(night.duration_min);
+            const uint32_t actual = out.duration_min;
+            const uint32_t delta =
+                expected > actual ? expected - actual : actual - expected;
+            if (delta > REPORT_STR_DURATION_TOLERANCE_MIN) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    file.close();
+    return false;
+}
+
+void apply_daily_metrics_to_result_status(ReportResultStatus &status,
+                                          const ReportDailyMetrics &metrics) {
+    if (metrics.has_ahi && !status.ahi_valid) {
+        status.ahi = metrics.ahi;
+        status.ahi_valid = true;
+        status.ahi_source = metrics.source;
+    }
+    if (metrics.has_oa_index && !status.oa_index_valid) {
+        status.oa_index = metrics.oa_index;
+        status.oa_index_valid = true;
+        status.oa_index_source = metrics.source;
+    }
+    if (metrics.has_ca_index && !status.ca_index_valid) {
+        status.ca_index = metrics.ca_index;
+        status.ca_index_valid = true;
+        status.ca_index_source = metrics.source;
+    }
+    if (metrics.has_ua_index && !status.ua_index_valid) {
+        status.ua_index = metrics.ua_index;
+        status.ua_index_valid = true;
+        status.ua_index_source = metrics.source;
+    }
+    if (metrics.has_hypopnea_index && !status.hypopnea_index_valid) {
+        status.hypopnea_index = metrics.hypopnea_index;
+        status.hypopnea_index_valid = true;
+        status.hypopnea_index_source = metrics.source;
+    }
+    if (metrics.has_arousal_index && !status.arousal_index_valid) {
+        status.arousal_index = metrics.arousal_index;
+        status.arousal_index_valid = true;
+        status.arousal_index_source = metrics.source;
+    }
+    if (metrics.has_mask_pressure_50 && !status.mask_pressure_50_valid) {
+        status.mask_pressure_50_cm_h2o = metrics.mask_pressure_50_cm_h2o;
+        status.mask_pressure_50_valid = true;
+        status.mask_pressure_50_source = metrics.source;
+    }
+    if (metrics.has_leak_50 && !status.leak_50_valid) {
+        status.leak_50_l_min = metrics.leak_50_l_min;
+        status.leak_50_valid = true;
+        status.leak_50_source = metrics.source;
+    }
+}
+
+struct ReportMetricAverage {
+    double sum = 0.0;
+    uint32_t count = 0;
+
+    void add(float value) {
+        if (!isfinite(value)) return;
+        sum += static_cast<double>(value);
+        count++;
+    }
+
+    bool mean(float &out) const {
+        if (count == 0) return false;
+        out = static_cast<float>(sum / static_cast<double>(count));
+        return isfinite(out);
+    }
+};
 
 struct ChunkWriteContext {
     ReportManager *manager = nullptr;
@@ -2970,28 +3128,73 @@ void ReportManager::build_result_json_from(
     json += "}";
     append_optional_float(json,
                           "ahi",
-                          result_status_.event_metrics_valid,
+                          result_status_.ahi_valid,
                           result_status_.ahi);
+    if (result_status_.ahi_valid) {
+        json_add_string(json,
+                        "ahi_source",
+                        report_metric_source_name(result_status_.ahi_source));
+    }
     append_optional_float(json,
                           "oa_index",
-                          result_status_.event_metrics_valid,
+                          result_status_.oa_index_valid,
                           result_status_.oa_index);
     append_optional_float(json,
                           "ca_index",
-                          result_status_.event_metrics_valid,
+                          result_status_.ca_index_valid,
                           result_status_.ca_index);
     append_optional_float(json,
                           "ua_index",
-                          result_status_.event_metrics_valid,
+                          result_status_.ua_index_valid,
                           result_status_.ua_index);
     append_optional_float(json,
                           "hypopnea_index",
-                          result_status_.event_metrics_valid,
+                          result_status_.hypopnea_index_valid,
                           result_status_.hypopnea_index);
     append_optional_float(json,
                           "arousal_index",
-                          result_status_.event_metrics_valid,
+                          result_status_.arousal_index_valid,
                           result_status_.arousal_index);
+    append_optional_float(json,
+                          "mask_pressure_50",
+                          result_status_.mask_pressure_50_valid,
+                          result_status_.mask_pressure_50_cm_h2o);
+    if (result_status_.mask_pressure_50_valid) {
+        json_add_string(
+            json,
+            "mask_pressure_50_source",
+            report_metric_source_name(result_status_.mask_pressure_50_source));
+    }
+    append_optional_float(json,
+                          "average_pressure",
+                          result_status_.mask_pressure_50_valid,
+                          result_status_.mask_pressure_50_cm_h2o);
+    if (result_status_.mask_pressure_50_valid) {
+        json_add_string(
+            json,
+            "average_pressure_source",
+            report_metric_source_name(result_status_.mask_pressure_50_source));
+    }
+    append_optional_float(json,
+                          "leak_50",
+                          result_status_.leak_50_valid,
+                          result_status_.leak_50_l_min);
+    if (result_status_.leak_50_valid) {
+        json_add_string(json,
+                        "leak_50_source",
+                        report_metric_source_name(
+                            result_status_.leak_50_source));
+    }
+    append_optional_float(json,
+                          "average_leak",
+                          result_status_.leak_50_valid,
+                          result_status_.leak_50_l_min);
+    if (result_status_.leak_50_valid) {
+        json_add_string(json,
+                        "average_leak_source",
+                        report_metric_source_name(
+                            result_status_.leak_50_source));
+    }
     json_add_int(json, "oa_count",
                  static_cast<long>(result_status_.oa_count));
     json_add_int(json, "ca_count",
@@ -9077,21 +9280,13 @@ void ReportManager::begin_result_prepare_for_night(
     result_status_.night_start_ms = night.summary.start_ms;
     result_status_.night_end_ms = night.summary.end_ms;
     result_status_.duration_min = night.summary.duration_min;
-    if (night.summary.has_ahi) {
-        result_status_.ahi = night.summary.ahi;
-        result_status_.oa_index =
-            night.summary.has_oa_index ? night.summary.oa_index : 0.0f;
-        result_status_.ca_index =
-            night.summary.has_ca_index ? night.summary.ca_index : 0.0f;
-        result_status_.ua_index =
-            night.summary.has_ua_index ? night.summary.ua_index : 0.0f;
-        result_status_.hypopnea_index =
-            night.summary.has_hypopnea_index
-                ? night.summary.hypopnea_index
-                : 0.0f;
-        result_status_.arousal_index =
-            night.summary.has_rera_index ? night.summary.rera_index : 0.0f;
-        result_status_.event_metrics_valid = true;
+
+    ReportDailyMetrics metrics;
+    if (load_str_daily_metrics_for_night(night.summary, metrics)) {
+        apply_daily_metrics_to_result_status(result_status_, metrics);
+    }
+    if (report_daily_metrics_from_summary(night.summary, metrics)) {
+        apply_daily_metrics_to_result_status(result_status_, metrics);
     }
 }
 
@@ -9373,31 +9568,147 @@ bool ReportManager::count_result_events_from_chunks() {
 }
 
 void ReportManager::apply_result_event_indices_from_counts() {
-    result_status_.event_metrics_valid = false;
     if (result_status_.duration_min <= 0) return;
+    if (!result_status_.events_available) return;
 
     const float hours =
         static_cast<float>(result_status_.duration_min) / 60.0f;
     if (hours <= 0.0f) return;
 
-    result_status_.oa_index =
+    const float oa_index =
         static_cast<float>(result_status_.oa_count) / hours;
-    result_status_.ca_index =
+    const float ca_index =
         static_cast<float>(result_status_.ca_count) / hours;
-    result_status_.ua_index =
+    const float ua_index =
         static_cast<float>(result_status_.ua_count) / hours;
-    result_status_.hypopnea_index =
+    const float hypopnea_index =
         static_cast<float>(result_status_.hypopnea_count) / hours;
-    result_status_.arousal_index =
+    const float arousal_index =
         static_cast<float>(result_status_.arousal_count) / hours;
-    result_status_.ahi =
-        result_status_.oa_index +
-        result_status_.ca_index +
-        result_status_.ua_index +
-        result_status_.hypopnea_index;
-    // Trust chunk-derived indices only when events are covered; otherwise the
-    // counts are zero-by-absence, so omit the AHI.
-    result_status_.event_metrics_valid = result_status_.events_available;
+
+    if (!result_status_.oa_index_valid) {
+        result_status_.oa_index = oa_index;
+        result_status_.oa_index_valid = true;
+        result_status_.oa_index_source = ReportMetricSource::Calculated;
+    }
+    if (!result_status_.ca_index_valid) {
+        result_status_.ca_index = ca_index;
+        result_status_.ca_index_valid = true;
+        result_status_.ca_index_source = ReportMetricSource::Calculated;
+    }
+    if (!result_status_.ua_index_valid) {
+        result_status_.ua_index = ua_index;
+        result_status_.ua_index_valid = true;
+        result_status_.ua_index_source = ReportMetricSource::Calculated;
+    }
+    if (!result_status_.hypopnea_index_valid) {
+        result_status_.hypopnea_index = hypopnea_index;
+        result_status_.hypopnea_index_valid = true;
+        result_status_.hypopnea_index_source =
+            ReportMetricSource::Calculated;
+    }
+    if (!result_status_.arousal_index_valid) {
+        result_status_.arousal_index = arousal_index;
+        result_status_.arousal_index_valid = true;
+        result_status_.arousal_index_source = ReportMetricSource::Calculated;
+    }
+    if (!result_status_.ahi_valid) {
+        result_status_.ahi =
+            oa_index + ca_index + ua_index + hypopnea_index;
+        result_status_.ahi_valid = true;
+        result_status_.ahi_source = ReportMetricSource::Calculated;
+    }
+}
+
+bool ReportManager::result_timestamp_in_ranges(int64_t timestamp_ms) const {
+    const size_t range_count =
+        std::min(result_range_count_,
+                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+    if (range_count == 0) return true;
+    for (size_t i = 0; i < range_count; ++i) {
+        const PlotRange &range = result_ranges_[i];
+        if (timestamp_ms >= range.start_ms && timestamp_ms <= range.end_ms) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ReportManager::apply_result_series_metrics_from_chunks() {
+    ReportMetricAverage pressure_average;
+    ReportMetricAverage mask_pressure_average;
+    ReportMetricAverage leak_average;
+
+    struct MetricSeriesContext {
+        ReportManager *manager = nullptr;
+        ReportMetricAverage *average = nullptr;
+        float multiplier = 1.0f;
+    };
+
+    for (uint32_t chunk_index = 0; chunk_index < result_status_.chunk_count;
+         ++chunk_index) {
+        const ReportResultChunk &chunk = result_chunks_[chunk_index];
+        if (chunk.kind != ReportStoreChunkKind::Series) continue;
+        for (size_t stream_index = 0; stream_index < result_stream_count_;
+             ++stream_index) {
+            if (!result_chunk_has_stream(chunk, stream_index)) continue;
+            const ReportResultStream &stream = result_streams_[stream_index];
+            MetricSeriesContext ctx;
+            ctx.manager = this;
+            if (stream.signal == ReportSignalId::InspiratoryPressure) {
+                ctx.average = &pressure_average;
+                ctx.multiplier = 1.0f;
+            } else if (stream.signal == ReportSignalId::MaskPressure) {
+                ctx.average = &mask_pressure_average;
+                ctx.multiplier = 1.0f;
+            } else if (stream.signal == ReportSignalId::Leak) {
+                ctx.average = &leak_average;
+                ctx.multiplier = 60.0f;
+            } else {
+                continue;
+            }
+
+            ReportProviderSeriesReadStats stats;
+            const bool ok = for_each_result_series_sample(
+                chunk,
+                stream_index,
+                stats,
+                [](void *context, const ReportSeriesSample &sample) -> bool {
+                    MetricSeriesContext *ctx =
+                        static_cast<MetricSeriesContext *>(context);
+                    if (!ctx || !ctx->manager || !ctx->average) return false;
+                    if (!ctx->manager->result_timestamp_in_ranges(
+                            sample.timestamp_ms)) {
+                        return true;
+                    }
+                    const float value =
+                        (static_cast<float>(sample.value_milli) / 1000.0f) *
+                        ctx->multiplier;
+                    ctx->average->add(value);
+                    return true;
+                },
+                &ctx);
+            (void)stats;
+            if (!ok) continue;
+        }
+    }
+
+    float value = 0.0f;
+    if (!pressure_average.mean(value)) {
+        (void)mask_pressure_average.mean(value);
+    }
+    if (isfinite(value) &&
+        (pressure_average.count > 0 || mask_pressure_average.count > 0)) {
+        result_status_.mask_pressure_50_cm_h2o = value;
+        result_status_.mask_pressure_50_valid = true;
+        result_status_.mask_pressure_50_source = ReportMetricSource::Calculated;
+    }
+    if (leak_average.mean(value)) {
+        result_status_.leak_50_l_min = value;
+        result_status_.leak_50_valid = true;
+        result_status_.leak_50_source = ReportMetricSource::Calculated;
+    }
+    return true;
 }
 
 bool ReportManager::finalize_result_prepare(size_t therapy_index) {
@@ -9432,6 +9743,7 @@ bool ReportManager::finalize_result_prepare(size_t therapy_index) {
                   });
         if (!count_result_events_from_chunks()) return false;
         apply_result_event_indices_from_counts();
+        if (!apply_result_series_metrics_from_chunks()) return false;
         result_status_.state =
             settled_result_state(result_status_.missing_required);
         result_status_.error.clear();
