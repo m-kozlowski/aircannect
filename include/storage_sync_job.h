@@ -101,21 +101,26 @@ struct StorageSyncRuntimeStatus {
 
 class StorageSyncJob : public BackgroundJob {
 public:
+    // lifecycle
     void begin(const AppConfigData &config);
 
+    // background worker
     const char *name() const override { return "storage_sync"; }
     JobStep step() override;
     void on_preempt() override;
 
+    // configuration/gates
     void configure(const AppConfigData &config);
     void refresh_config(const AppConfigData &config, uint32_t now_ms);
     void set_network_available(bool available);
     void defer_idle_work_until(uint32_t until_ms);
 
+    // sync requests
     bool request_manual_sync();
     bool request_verify_recent();
     bool request_post_therapy_sync();
 
+    // status
     StorageSyncStatus status() const;
     StorageSyncRuntimeStatus runtime_status() const;
     bool active() const;
@@ -179,6 +184,7 @@ private:
         File dir;
     };
 
+    // locking/config
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void apply_config_locked(const ConfigSnapshot &config);
@@ -192,6 +198,7 @@ private:
     static bool run_kind_is_reconcile(RunKind kind);
     bool request_sync_with_kind(RunKind kind, const char *label);
 
+    // run scheduling
     bool queue_post_therapy_locked(uint32_t now_ms);
     void queue_deferred_post_therapy_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
@@ -199,6 +206,8 @@ private:
     void queue_retry_locked(uint32_t now_ms);
     void queue_reconcile_if_due_locked(uint32_t now_ms);
     JobStep step_work_phase_locked();
+
+    // SMB connection and transfer phases
     JobStep step_connect_locked(char *error_out, size_t error_out_size);
     JobStep step_verify_latest_start_locked(char *error_out,
                                             size_t error_out_size);
@@ -213,6 +222,8 @@ private:
     JobStep step_upload_chunk_locked(char *error_out, size_t error_out_size);
     JobStep step_close_remote_locked(char *error_out, size_t error_out_size);
     JobStep step_mark_state_locked();
+
+    // endpoint/state metadata
     bool build_endpoint_state_dir_locked(const ConfigSnapshot &config,
                                          char *out,
                                          size_t out_size,
@@ -235,11 +246,13 @@ private:
     bool invalidate_latest_state_locked(char *error_out,
                                         size_t error_out_size);
 
+    // export planning
     bool begin_export_planner_locked(char *error_out,
                                      size_t error_out_size);
     bool next_file_locked();
     bool plan_file_locked(const StorageExportPlannerItem &item);
 
+    // local state files
     bool ensure_state_dir_locked();
     bool build_state_path_locked(const char *path,
                                  char *out,
@@ -255,6 +268,7 @@ private:
                             uint64_t mtime,
                             StateWriteMode mode);
 
+    // path helpers and upload resources
     bool remote_parent_dir_locked(const char *remote_path,
                                   char *out,
                                   size_t out_size) const;
@@ -269,6 +283,7 @@ private:
     void clear_current_file_locked();
     void publish_runtime_locked();
 
+    // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
     ConfigSnapshot config_;
     StorageSyncStatus status_;
@@ -288,6 +303,7 @@ private:
     RunKind current_run_kind_ = RunKind::Manual;
     bool sync_after_verify_ = false;
 
+    // active run
     StorageExportPlanner export_planner_;
     CurrentFile current_file_;
     LatestVerify latest_verify_;

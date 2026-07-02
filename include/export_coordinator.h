@@ -15,9 +15,11 @@ namespace aircannect {
 // what order.
 class ExportCoordinator {
 public:
+    // lifecycle
     void begin(StorageSyncJob *storage_sync,
                SleepHqSyncJob *sleephq_sync);
 
+    // scheduling policy
     void poll(RpcArbiter &arbiter,
               ReportManager &report,
               const AppConfigData &config,
@@ -26,6 +28,7 @@ public:
               bool esp_ota_active,
               uint32_t now_ms);
 
+    // external requests
     bool request_smb_sync();
     bool request_smb_verify();
     bool request_sleephq_sync();
@@ -60,8 +63,10 @@ private:
 
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
 
+    // shared gates
     bool export_network_ready(bool network_connected, uint32_t now_ms);
 
+    // post-therapy sequence
     void poll_post_therapy(RpcArbiter &arbiter,
                            ReportManager &report,
                            bool storage_sync_active,
@@ -81,6 +86,7 @@ private:
     void queue_post_therapy_storage_sync(uint32_t now_ms);
     void clear_post_therapy_sleephq();
 
+    // startup and idle backfill
     void maybe_queue_sleephq_startup_check(bool network_connected,
                                            bool storage_sync_active,
                                            SleepHqSyncRuntimeStatus status);
@@ -92,8 +98,11 @@ private:
                                     uint32_t now_ms);
     void clear_idle_backfill();
 
+    // endpoint jobs
     StorageSyncJob *storage_sync_ = nullptr;
     SleepHqSyncJob *sleephq_sync_ = nullptr;
+
+    // coordinator state
     PostTherapyState post_therapy_;
     StartupCheckState startup_check_;
     IdleBackfillState idle_backfill_;

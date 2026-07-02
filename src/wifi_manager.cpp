@@ -1140,49 +1140,62 @@ void WifiManager::handle_roam_scan() {
     const int16_t result = WiFi.scanComplete();
     if (result == WIFI_SCAN_RUNNING) return;
 
+    // Scan failure recovery
     if (result == WIFI_SCAN_FAILED) {
         stats_.roam_scan_failures++;
         low_rssi_count_ = 0;
+
         if (WiFi.status() == WL_CONNECTED) {
             mode_state_ = sta_has_ipv4()
                               ? WifiModeState::StaConnected
                               : WifiModeState::StaAssociated;
+
         } else if (active_profile_index_ >= 0) {
             start_profile(static_cast<size_t>(active_profile_index_),
                           softap_running_);
+
         } else {
             start_next_profile(0, softap_running_);
         }
+
         return;
     }
 
+    // Current association snapshot
     uint8_t current_bssid[6] = {};
     bool have_current_bssid = false;
     int32_t live_current_rssi = 0;
     const int8_t active_profile = active_profile_index_;
+
     if (WiFi.status() == WL_CONNECTED) {
         uint8_t *bssid = WiFi.BSSID();
+
         if (bssid) {
             memcpy(current_bssid, bssid, sizeof(current_bssid));
             have_current_bssid = true;
         }
+
         live_current_rssi = WiFi.RSSI();
     }
 
+    // Candidate selection
     collect_scan_candidates(result, active_profile);
     WiFi.scanDelete();
 
     bool should_switch = false;
+
     if (scan_candidate_count_ > 0 && have_current_bssid &&
         WiFi.status() == WL_CONNECTED) {
         const ScanCandidate &best = scan_candidates_[0];
         bool current_seen = false;
         int32_t current_scan_rssi = live_current_rssi;
+
         for (size_t i = 0; i < scan_candidate_count_; ++i) {
             if (memcmp(scan_candidates_[i].bssid, current_bssid,
                        sizeof(current_bssid)) != 0) {
                 continue;
             }
+
             current_scan_rssi = scan_candidates_[i].rssi;
             current_seen = true;
             break;
@@ -1191,6 +1204,7 @@ void WifiManager::handle_roam_scan() {
         if (!current_seen) {
             char current_text[AC_WIFI_BSSID_TEXT_MAX];
             format_bssid(current_text, sizeof(current_text), current_bssid);
+
             Log::logf(CAT_WIFI, LOG_DEBUG,
                       "roam skipped: current BSSID=%s absent from scan "
                       "candidates=%u live_rssi=%ld\n",
@@ -1200,14 +1214,18 @@ void WifiManager::handle_roam_scan() {
         } else if (memcmp(best.bssid, current_bssid,
                           sizeof(current_bssid)) != 0) {
             const int32_t candidate_rssi = best.rssi;
+
             if (candidate_rssi >
                 current_scan_rssi + AC_WIFI_ROAM_HYSTERESIS_DB) {
                 should_switch = true;
+
                 char current_text[AC_WIFI_BSSID_TEXT_MAX];
                 char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
+
                 format_bssid(current_text, sizeof(current_text),
                              current_bssid);
                 format_bssid(bssid_text, sizeof(bssid_text), best.bssid);
+
                 Log::logf(CAT_WIFI, LOG_INFO,
                           "roam candidate BSSID=%s %ld dBm beats "
                           "current BSSID=%s scan=%ld dBm live=%ld dBm "
@@ -1222,15 +1240,20 @@ void WifiManager::handle_roam_scan() {
         }
     }
 
+    // Resume Wi-Fi state machine
     low_rssi_count_ = 0;
+
     if (should_switch && start_scan_candidate(0)) return;
+
     if (WiFi.status() == WL_CONNECTED) {
         mode_state_ = sta_has_ipv4()
                           ? WifiModeState::StaConnected
                           : WifiModeState::StaAssociated;
+
     } else if (active_profile_index_ >= 0) {
         start_profile(static_cast<size_t>(active_profile_index_),
                       softap_running_);
+
     } else {
         start_next_profile(0, softap_running_);
     }

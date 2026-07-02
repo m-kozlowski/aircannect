@@ -103,14 +103,18 @@ struct OximetryInternalState : public OximetryRuntimeStatus,
 
 class OximetryManager {
 public:
+    // Lifecycle
     bool begin(AppConfig &app_config);
     void poll(bool network_available);
 
+    // Runtime controls
     bool set_enabled(bool enabled);
     bool set_advertise_mode(OximetryAdvertiseMode mode);
     bool request_advertising(bool enabled);
     bool request_pairing(bool enabled);
     bool forget_bonds();
+
+    // Sensor controls
     bool request_sensor_scan();
     bool request_sensor_connect(const char *addr_or_index);
     bool request_sensor_connect_device(const OximetrySensorDevice &device);
@@ -121,10 +125,13 @@ public:
     uint32_t sensor_task_stack_high_water_bytes() const;
 #endif
 
+    // Status snapshots
     OximetryRuntimeStatus runtime_status() const;
     OximetrySensorStatus sensor_status() const;
     size_t sensor_scan_results(OximetrySensorDevice *out, size_t max) const;
     size_t known_sensors(OximetrySensorDevice *out, size_t max) const;
+
+    // Sensor callbacks
     void on_sensor_sample(uint16_t spo2_raw,
                           uint16_t pulse_raw,
                           bool from_invalid_packet,
@@ -133,10 +140,12 @@ public:
     void on_sensor_disconnect(int reason);
 
 private:
+    // Configuration and errors
     void apply_config();
     void build_ble_name();
     void set_error(const char *text);
 
+    // UDP source
     bool ensure_udp(bool network_available);
     void stop_udp();
     void poll_udp(uint32_t now_ms);
@@ -153,6 +162,7 @@ private:
                             bool contact_present,
                             uint32_t now_ms);
 
+    // BLE peripheral and source arbitration
     bool ensure_ble();
     void rebuild_advertising_data();
     bool as11_advertising_requested(uint32_t now_ms) const;
@@ -173,10 +183,12 @@ private:
     bool source_alive(uint32_t now_ms) const;
     bool sample_fresh(uint32_t now_ms) const;
 
+    // Encoding helpers
     static int16_t decode_plx_sfloat(uint16_t raw, bool &valid);
     static uint16_t encode_plx_sfloat_int(int16_t value);
     static const char *sensor_state_name(OximetrySensorState state);
 
+    // Sensor persistence and worker
     bool load_sensor_known();
     bool save_sensor_known() const;
     bool has_sensor_autoconnect() const;
@@ -201,6 +213,8 @@ private:
                                bool manual);
     bool sensor_subscribe_client(void *client,
                                  const char *name);
+
+    // BLE callbacks
     friend class PlxBleServerCallbacks;
     friend class PlxBleMeasurementCallbacks;
     friend class SensorBleScanCallbacks;
@@ -212,6 +226,7 @@ private:
     void on_ble_subscribe(uint16_t conn_handle, bool enabled);
     void on_ble_error(const char *text);
 
+    // Runtime state
     AppConfig *app_config_ = nullptr;
     OximetryInternalState status_;
     bool begun_ = false;
@@ -228,6 +243,8 @@ private:
     char ble_name_[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
     char last_hostname_[64] = {};
     WiFiUDP udp_;
+
+    // Sensor state
     OximetrySensorDevice sensor_known_[AC_OXIMETRY_SENSOR_MAX_KNOWN];
     OximetrySensorDevice sensor_scan_results_[
         AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
@@ -254,6 +271,7 @@ private:
     bool sensor_enabled_ = false;
 
 #if AC_OXIMETRY_BLE_ENABLED
+    // Cross-task BLE events
     portMUX_TYPE ble_event_mux_ = portMUX_INITIALIZER_UNLOCKED;
     portMUX_TYPE sensor_mux_ = portMUX_INITIALIZER_UNLOCKED;
 #endif

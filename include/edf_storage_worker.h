@@ -139,8 +139,10 @@ using EdfStorageInventoryVisitor =
 
 namespace EdfStorageWorker {
 
+// lifecycle
 void begin();
 
+// file opens
 bool enqueue_open_numeric(const char *path,
                           const EdfFileSchema &schema,
                           const EdfHeaderInfo &info,
@@ -150,6 +152,7 @@ bool enqueue_open_annotation(const char *path,
                              const EdfHeaderInfo &info,
                              EdfStorageOpenHandle *handle = nullptr);
 
+// record writes
 bool enqueue_numeric_record(const EdfFileSchema &schema,
                             const EdfCompletedRecordView &record);
 bool enqueue_annotation_record(EdfAnnotationKind kind,
@@ -158,10 +161,12 @@ bool enqueue_str_record(const char *path,
                         const EdfHeaderInfo &info,
                         const EdfStrRecordView &record);
 
+// metadata/close jobs
 bool enqueue_identification_files(const std::string &json);
 bool enqueue_close_numeric(EdfFileKind kind);
 bool enqueue_close_annotation(EdfAnnotationKind kind);
 
+// status/results
 EdfStorageWorkerStatus status();
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes();
@@ -169,6 +174,7 @@ uint32_t stack_high_water_bytes();
 bool open_result(const EdfStorageOpenHandle &handle,
                  EdfStorageOpenResult &result);
 
+// inventory
 EdfStorageInventoryResult list_inventory(
     const char *path,
     size_t offset,

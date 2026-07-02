@@ -38,8 +38,7 @@ void append_json_escaped_impl(Out &out, const char *value, size_t len) {
 }
 
 template <typename Out>
-void json_add_string_impl(Out &out, const char *key, const char *value,
-                          bool comma) {
+void json_add_string_impl(Out &out, const char *key, const char *value, bool comma) {
     if (comma) out += ',';
     out += '"';
     out += key;
@@ -107,8 +106,7 @@ void json_add_float_impl(Out &out, const char *key, float value, bool comma) {
 }
 
 template <typename Out>
-void json_add_uint64_impl(Out &out, const char *key, uint64_t value,
-                          bool comma) {
+void json_add_uint64_impl(Out &out, const char *key, uint64_t value, bool comma) {
     char buf[24];
     snprintf(buf, sizeof(buf), "%llu",
              static_cast<unsigned long long>(value));
@@ -133,8 +131,7 @@ void append_json_float(String &out, float value) {
     append_json_float_impl(out, value);
 }
 
-void json_add_string(String &out, const char *key, const char *value,
-                     bool comma) {
+void json_add_string(String &out, const char *key, const char *value, bool comma) {
     json_add_string_impl(out, key, value, comma);
 }
 
@@ -150,8 +147,7 @@ void json_add_float(String &out, const char *key, float value, bool comma) {
     json_add_float_impl(out, key, value, comma);
 }
 
-void json_add_uint64(String &out, const char *key, uint64_t value,
-                     bool comma) {
+void json_add_uint64(String &out, const char *key, uint64_t value, bool comma) {
     json_add_uint64_impl(out, key, value, comma);
 }
 
@@ -159,8 +155,7 @@ void append_json_escaped(LargeTextBuffer &out, const char *value) {
     append_json_escaped_impl(out, value, value ? strlen(value) : 0);
 }
 
-void append_json_escaped(LargeTextBuffer &out, const char *value,
-                         size_t len) {
+void append_json_escaped(LargeTextBuffer &out, const char *value, size_t len) {
     append_json_escaped_impl(out, value, len);
 }
 
@@ -168,15 +163,11 @@ void append_json_float(LargeTextBuffer &out, float value) {
     append_json_float_impl(out, value);
 }
 
-void json_add_string(LargeTextBuffer &out, const char *key, const char *value,
-                     bool comma) {
+void json_add_string(LargeTextBuffer &out, const char *key, const char *value, bool comma) {
     json_add_string_impl(out, key, value, comma);
 }
 
-void json_add_string_view(LargeTextBuffer &out,
-                          const char *key,
-                          std::string_view value,
-                          bool comma) {
+void json_add_string_view(LargeTextBuffer &out, const char *key, std::string_view value, bool comma) {
     if (comma) out += ',';
     out += '"';
     out += key;
@@ -185,23 +176,19 @@ void json_add_string_view(LargeTextBuffer &out,
     out += '"';
 }
 
-void json_add_bool(LargeTextBuffer &out, const char *key, bool value,
-                   bool comma) {
+void json_add_bool(LargeTextBuffer &out, const char *key, bool value, bool comma) {
     json_add_bool_impl(out, key, value, comma);
 }
 
-void json_add_int(LargeTextBuffer &out, const char *key, long value,
-                  bool comma) {
+void json_add_int(LargeTextBuffer &out, const char *key, long value, bool comma) {
     json_add_int_impl(out, key, value, comma);
 }
 
-void json_add_float(LargeTextBuffer &out, const char *key, float value,
-                    bool comma) {
+void json_add_float(LargeTextBuffer &out, const char *key, float value, bool comma) {
     json_add_float_impl(out, key, value, comma);
 }
 
-void json_add_uint64(LargeTextBuffer &out, const char *key, uint64_t value,
-                     bool comma) {
+void json_add_uint64(LargeTextBuffer &out, const char *key, uint64_t value, bool comma) {
     json_add_uint64_impl(out, key, value, comma);
 }
 

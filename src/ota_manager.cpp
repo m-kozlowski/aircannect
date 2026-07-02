@@ -441,8 +441,10 @@ void OtaManager::schedule_reboot(uint32_t delay_ms) {
 
 void OtaManager::start_arduino_ota() {
     if (!app_config_) return;
+
     stop_arduino_ota();
 
+    // Allocate and configure endpoint
     arduino_ota_ = new ArduinoOTAClass();
     if (!arduino_ota_) {
         set_error("arduino_ota_alloc_failed");
@@ -450,17 +452,21 @@ void OtaManager::start_arduino_ota() {
     }
 
     const AppConfigData &cfg = app_config_->data();
+
     arduino_ota_->setHostname(cfg.hostname.c_str());
     arduino_ota_->setPort(AC_ARDUINO_OTA_PORT);
     arduino_ota_->setMdnsEnabled(false);
     arduino_ota_->setRebootOnSuccess(false);
+
     if (cfg.ota_password.length()) {
-    arduino_ota_->setPassword(cfg.ota_password.c_str());
+        arduino_ota_->setPassword(cfg.ota_password.c_str());
     }
 
+    // Upload lifecycle callbacks
     arduino_ota_->onStart([this]() {
         const char *type =
             arduino_ota_->getCommand() == U_FLASH ? "firmware" : "filesystem";
+
         if (lock_status()) {
             arduino_active_ = true;
             status_.arduino_active = true;
@@ -472,8 +478,10 @@ void OtaManager::start_arduino_ota() {
             last_progress_log_percent_ = 255;
             unlock_status();
         }
+
         Log::logf(CAT_OTA, LOG_INFO, "ArduinoOTA start %s\n", type);
     });
+
     arduino_ota_->onEnd([this]() {
         if (lock_status()) {
             arduino_active_ = false;
@@ -481,19 +489,25 @@ void OtaManager::start_arduino_ota() {
             status_.progress_percent = 100;
             unlock_status();
         }
+
         schedule_reboot(2000);
+
         Log::logf(CAT_OTA, LOG_INFO,
                   "ArduinoOTA complete; rebooting\n");
     });
+
     arduino_ota_->onProgress([this](unsigned int progress,
                                     unsigned int total) {
         if (!lock_status()) return;
+
         status_.bytes = progress;
         status_.total_size = total;
+
         if (total > 0) {
             status_.progress_percent =
                 static_cast<uint8_t>((progress * 100ULL) / total);
         }
+
         if (status_.progress_percent != last_progress_log_percent_ &&
             (status_.progress_percent % 10 == 0 ||
              status_.progress_percent == 100)) {
@@ -501,26 +515,37 @@ void OtaManager::start_arduino_ota() {
             Log::logf(CAT_OTA, LOG_DEBUG, "ArduinoOTA %u%%\n",
                       static_cast<unsigned>(status_.progress_percent));
         }
+
         unlock_status();
     });
+
     arduino_ota_->onError([this](ota_error_t error) {
         Update.abort();
+
         const char *name = arduino_ota_error_name(error);
+
         if (lock_status()) {
             arduino_active_ = false;
             status_.arduino_active = false;
             status_.last_error = name;
             unlock_status();
         }
+
         arduino_config_dirty_ = true;
+
         Log::logf(CAT_OTA, LOG_ERROR, "ArduinoOTA error: %s\n", name);
     });
 
+    // Publish service state
     arduino_ota_->begin();
+
     if (!lock_status()) return;
+
     status_.arduino_started = true;
     unlock_status();
+
     arduino_config_dirty_ = false;
+
     Log::logf(CAT_OTA, LOG_INFO,
               "ArduinoOTA ready port=%u auth=%s mdns=off\n",
               static_cast<unsigned>(AC_ARDUINO_OTA_PORT),

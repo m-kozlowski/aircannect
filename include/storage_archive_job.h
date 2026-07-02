@@ -55,12 +55,15 @@ struct StorageArchiveStatus {
 
 class StorageArchiveJob : public BackgroundJob {
 public:
+    // lifecycle
     void begin();
 
+    // background worker
     const char *name() const override { return "storage_archive"; }
     JobStep step() override;
     void on_preempt() override;
 
+    // archive requests
     bool start(const char *path,
                bool recursive,
                uint32_t *id_out = nullptr,
@@ -72,11 +75,14 @@ public:
                         uint32_t *id_out = nullptr,
                         char *error_out = nullptr,
                         size_t error_out_size = 0);
+
+    // status
     bool status(StorageArchiveStatus &out,
                 uint32_t timeout_ms = 1000) const;
     StorageArchiveStatus status() const;
     bool active() const;
 
+    // download serving
     bool begin_download(uint32_t id,
                         std::shared_ptr<StorageArchiveDownload> &download_out,
                         char *filename_out,
@@ -94,10 +100,13 @@ private:
     struct ArchiveEntry;
     struct WalkFrame;
 
+    // locking/status
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void set_error_locked(const char *error);
     void reset_job_locked(bool keep_status);
+
+    // resource cleanup
     void close_walk_files_locked();
     void close_walk_locked();
     bool ensure_walk_stack_locked();
@@ -111,6 +120,7 @@ private:
                           char *error_out,
                           size_t error_out_size);
 
+    // metadata prewalk
     bool prepare_step_locked();
     bool append_entry_locked(const char *path,
                              uint64_t size,
@@ -121,16 +131,20 @@ private:
     bool push_walk_dir_locked(const char *path);
     bool ensure_walk_dir_open_locked(WalkFrame &frame);
     bool finalize_prepare_locked();
+
+    // response streaming
     size_t read_download_locked(StorageArchiveDownload &download,
                                 uint8_t *buffer,
                                 size_t max_len,
                                 size_t offset);
 
+    // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
     std::atomic<bool> preempt_requested_{false};
     StorageArchiveStatus status_;
     uint32_t next_id_ = 1;
 
+    // archive metadata
     ArchiveEntry *entries_ = nullptr;
     size_t entry_count_ = 0;
     size_t entry_capacity_ = 0;
@@ -138,10 +152,12 @@ private:
     size_t path_bytes_len_ = 0;
     size_t path_bytes_capacity_ = 0;
 
+    // directory walk
     WalkFrame *walk_stack_ = nullptr;
     size_t walk_depth_ = 0;
     size_t walk_capacity_ = 0;
 
+    // temp maintenance
     uint32_t stale_cleanup_due_ms_ = 1;
 };
 

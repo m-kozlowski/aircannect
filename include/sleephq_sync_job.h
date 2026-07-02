@@ -82,20 +82,26 @@ struct SleepHqSyncRuntimeStatus {
 
 class SleepHqSyncJob : public BackgroundJob {
 public:
+    // lifecycle
     void begin(const AppConfigData &config);
 
+    // background worker
     const char *name() const override { return "sleephq_sync"; }
     JobStep step() override;
     void on_preempt() override;
 
+    // configuration/gates
     void refresh_config(const AppConfigData &config, uint32_t now_ms);
     void set_network_available(bool available);
     void set_runtime_blocked(bool blocked);
+
+    // sync requests
     bool request_check(const char *reason = "manual");
     bool request_sync(const char *reason = "manual");
     bool request_sync_day(const char *day, const char *reason = "manual_day");
     bool request_post_therapy_sync();
 
+    // status
     SleepHqSyncStatus status() const;
     SleepHqSyncRuntimeStatus runtime_status() const;
     bool active() const;
@@ -180,6 +186,7 @@ private:
         bool exists = false;
     };
 
+    // locking/config
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
@@ -195,6 +202,8 @@ private:
     bool request_locked(RunKind kind,
                         const char *reason,
                         const char *datalog_day = nullptr);
+
+    // run lifecycle
     bool begin_run_locked(uint32_t now_ms);
     void queue_retry_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
@@ -204,6 +213,8 @@ private:
     void close_local_locked();
     void clear_current_file_locked();
     void publish_runtime_locked();
+
+    // export planning and import batches
     bool begin_export_planner_locked(char *error_out,
                                      size_t error_out_size);
     void reset_import_batch_locked();
@@ -213,6 +224,8 @@ private:
     bool build_endpoint_state_dir_locked(uint32_t team_id,
                                          char *out,
                                          size_t out_size) const;
+
+    // durable sync state
     bool ensure_state_dir_locked();
     bool build_inflight_path_locked(char *out, size_t out_size) const;
     bool load_inflight_locked(InflightPhase &phase_out);
@@ -228,12 +241,16 @@ private:
     bool reserve_staged_locked(size_t needed);
     bool add_staged_locked(const SleepHqUploadResult &upload);
     void clear_staged_locked();
+
+    // remote file cache
     bool reserve_remote_files_locked(size_t needed);
     bool add_remote_file_locked(const SleepHqRemoteFile &file);
     bool remote_file_cache_contains_locked(const CurrentFile &file) const;
     bool fetch_next_remote_file_page_locked(char *error,
                                             size_t error_size);
     void clear_remote_files_locked();
+
+    // remote machine/date reconcile
     bool reserve_remote_dates_locked(size_t needed);
     bool cache_remote_date_locked(const char *day, bool exists);
     bool cached_remote_date_exists_locked(const char *day,
@@ -260,6 +277,8 @@ private:
     bool prepare_remote_reconcile_locked(char *error, size_t error_size);
     bool note_remote_machine_locked(const SleepHqMachine &machine);
     void note_remote_machine_missing_locked();
+
+    // work phases
     JobStep begin_export_work_locked();
     JobStep step_find_remote_machine_locked(char *error, size_t error_size);
     bool datalog_day_decision_locked(const char *day,
@@ -288,6 +307,7 @@ private:
     JobStep step_mark_state_locked(char *error, size_t error_size);
     JobStep step_work_phase_locked();
 
+    // client callbacks
     static bool upload_read_cb(void *ctx, uint8_t *out,
                                size_t len, size_t &read);
     static bool upload_reset_cb(void *ctx);
@@ -303,6 +323,7 @@ private:
                                         char *error,
                                         size_t error_size);
 
+    // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
     SleepHqSyncStatus status_;
     ConfigSnapshot config_;
@@ -321,6 +342,8 @@ private:
     std::atomic<uint32_t> runtime_config_generation_{0};
     std::atomic<uint32_t> runtime_team_id_{0};
     std::atomic<uint32_t> runtime_completed_check_generation_{0};
+
+    // active export/import
     StorageExportPlanner export_planner_;
     bool import_batch_active_ = false;
     CurrentFile current_file_;
@@ -333,6 +356,8 @@ private:
     uint32_t remote_file_next_page_ = 1;
     uint32_t remote_file_pages_loaded_ = 0;
     bool remote_file_cache_complete_ = false;
+
+    // remote reconcile
     RemoteMachineDateCache *remote_dates_ = nullptr;
     size_t remote_date_count_ = 0;
     size_t remote_date_capacity_ = 0;
@@ -342,6 +367,8 @@ private:
     bool remote_reconcile_enabled_ = false;
     bool remote_reconcile_all_missing_ = false;
     char remote_serial_[AC_SLEEPHQ_SERIAL_MAX] = {};
+
+    // day/state tracking
     char pending_rebuild_day_[9] = {};
     char pending_done_day_[9] = {};
     char pending_datalog_day_[9] = {};

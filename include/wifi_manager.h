@@ -65,9 +65,11 @@ struct WifiScanNetwork {
 
 class WifiManager {
 public:
+    // lifecycle
     bool begin();
     void poll();
 
+    // connectivity state
     bool network_available() const { return management_reachable_; }
     bool management_reachable() const { return management_reachable_; }
     bool sta_ipv4_online() const { return sta_ipv4_online_; }
@@ -80,6 +82,8 @@ public:
     const String &sta_ssid() const { return sta_ssid_; }
     WifiModeState mode_state() const { return mode_state_; }
     const char *state_name() const;
+
+    // network details
     IPAddress ip() const;
     IPAddress gateway() const;
     IPAddress softap_ip() const;
@@ -93,12 +97,15 @@ public:
     int8_t active_profile_index() const { return active_profile_index_; }
     const WifiManagerStats &stats() const { return stats_; }
 
+    // identity and SoftAP
     void set_hostname(const String &hostname);
     void set_softap_mode(SoftApMode mode);
     SoftApMode softap_mode() const { return softap_mode_; }
     bool softap_running() const { return softap_running_; }
     void apply_softap_mode();
     void set_country_code(const String &country);
+
+    // STA profiles and roaming
     void set_roaming_suspended(bool suspended);
     bool roaming_enabled() const {
         return sta_configured_ && profile_count_ > 0;
@@ -113,15 +120,33 @@ public:
     bool remove_profile(size_t index);
     void clear_sta_config();
     bool reconnect();
+
+    // manual scan
     WifiScanStartResult start_manual_scan();
     WifiScanStatus manual_scan_status();
     size_t copy_manual_scan_results(WifiScanNetwork *out, size_t max);
     void clear_manual_scan_results();
 
 private:
+    struct ScanCandidate {
+        uint8_t profile_index = 0;
+        uint8_t bssid[6] = {};
+        uint8_t channel = 0;
+        int8_t rssi = -127;
+    };
+
+    struct IpFailedCandidate {
+        bool valid = false;
+        uint8_t profile_index = 0;
+        uint8_t bssid[6] = {};
+        uint32_t until_ms = 0;
+    };
+
+    // persistence
     void load_config();
     void save_config(size_t first_dirty_index = 0);
 
+    // STA/SoftAP lifecycle
     bool start_profile(size_t index, bool keep_softap = false);
     bool start_next_profile(size_t start_index, bool keep_softap = false);
     bool start_softap(bool with_sta);
@@ -133,10 +158,14 @@ private:
     void handle_connect_timeout();
     void enter_softap_fallback();
     void maybe_retry_softap_sta();
+
+    // scanning and roaming
     void maybe_start_roam_scan();
     void handle_roam_scan();
     void cleanup_manual_scan();
     void apply_sta_phy_config();
+
+    // candidate selection
     bool begin_unpinned_profile(size_t index, bool keep_softap,
                                 const char *reason);
     bool begin_scan_candidate(size_t candidate_index, bool keep_softap,
@@ -154,20 +183,7 @@ private:
     void retry_with_pmf_disabled();
     const char *mode_name() const;
 
-    struct ScanCandidate {
-        uint8_t profile_index = 0;
-        uint8_t bssid[6] = {};
-        uint8_t channel = 0;
-        int8_t rssi = -127;
-    };
-
-    struct IpFailedCandidate {
-        bool valid = false;
-        uint8_t profile_index = 0;
-        uint8_t bssid[6] = {};
-        uint32_t until_ms = 0;
-    };
-
+    // reachability and mode state
     bool management_reachable_ = false;
     bool sta_ipv4_online_ = false;
     bool sta_configured_ = false;
@@ -187,11 +203,13 @@ private:
     uint32_t last_roam_check_ms_ = 0;
     uint32_t manual_scan_completed_ms_ = 0;
 
+    // configured identity/profile
     String hostname_ = AC_HOSTNAME;
     String country_code_;
     String sta_ssid_;
     String sta_pass_;
 
+    // profile and AP candidates
     WifiProfile profiles_[AC_WIFI_PROFILE_MAX];
     size_t profile_count_ = 0;
     int8_t active_profile_index_ = -1;
@@ -202,6 +220,7 @@ private:
     size_t scan_ip_failed_skips_ = 0;
     IpFailedCandidate ip_failed_[AC_WIFI_SCAN_CANDIDATES_MAX];
 
+    // diagnostics
     WifiManagerStats stats_;
     WifiModeState mode_state_ = WifiModeState::Off;
 };

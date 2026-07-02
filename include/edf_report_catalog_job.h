@@ -45,23 +45,28 @@ struct EdfReportCatalogStatus {
 
 class EdfReportCatalogJob final : public BackgroundJob {
 public:
+    // lifecycle
     ~EdfReportCatalogJob() override;
-
     void begin();
 
+    // background worker
     const char *name() const override { return "edf_report_catalog"; }
     JobStep step() override;
     bool run_when_gate_closed(const char *reason) const override;
     void on_preempt() override;
 
+    // refresh/configuration
     bool set_timezone_offset_minutes(int32_t offset_minutes);
     bool request_refresh(uint32_t *refresh_id_out = nullptr);
     bool request_refresh_after_current(uint32_t *refresh_id_out = nullptr);
+
+    // status
     bool status(EdfReportCatalogStatus &out,
                 uint32_t timeout_ms = 0) const;
     EdfReportCatalogStatus status() const;
     bool timezone_offset_minutes(int32_t &out) const;
 
+    // published catalog
     size_t session_count() const;
     bool copy_session(size_t index, EdfReportSessionDescriptor &out) const;
 
@@ -75,9 +80,12 @@ private:
         ReadHeader,
     };
 
+    // locking/status
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void set_error_locked(const char *error);
+
+    // build lifecycle
     void close_dirs_locked();
     void release_build_locked();
     void release_build_days_locked();
@@ -88,6 +96,7 @@ private:
     void update_current_path_locked(const char *path);
     bool start_refresh_locked(uint32_t *refresh_id_out);
 
+    // scan phases
     JobStep open_root_locked();
     JobStep read_day_locked();
     JobStep open_day_locked();
@@ -96,6 +105,7 @@ private:
 
     bool add_file_to_build_locked(const EdfReportFileDescriptor &file);
 
+    // synchronization/status
     mutable StaticSemaphore_t lock_storage_ = {};
     mutable SemaphoreHandle_t lock_ = nullptr;
     EdfReportCatalogStatus status_;
@@ -103,9 +113,11 @@ private:
     Phase phase_ = Phase::Idle;
     bool refresh_again_pending_ = false;
 
+    // published snapshot
     EdfReportSessionDescriptor *sessions_ = nullptr;
     size_t session_count_ = 0;
 
+    // build snapshot
     EdfReportSessionDescriptor *build_sessions_ = nullptr;
     size_t build_session_count_ = 0;
 
@@ -122,6 +134,8 @@ private:
     char current_file_path_[AC_STORAGE_PATH_MAX] = {};
     uint64_t current_file_size_ = 0;
     time_t current_file_mtime_ = 0;
+
+    // timezone mapping
     bool timezone_offset_valid_ = false;
     int32_t timezone_offset_minutes_ = 0;
     bool timezone_refresh_pending_ = false;

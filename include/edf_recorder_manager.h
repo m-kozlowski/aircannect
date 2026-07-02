@@ -24,6 +24,7 @@ static constexpr uint32_t AC_EDF_SESSION_RETRY_MS = 5000;
 static constexpr size_t AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH = 32;
 
 struct EdfRecorderStatus {
+    // capture state
     bool enabled = false;
     bool active = false;
     bool stream_attached = false;
@@ -38,20 +39,25 @@ struct EdfRecorderStatus {
     bool recording_gate_recovery_is_pending = false;
     bool annotation_open_is_pending = false;
 
+    // subscriptions
     StreamConsumerHandle stream_handle = STREAM_CONSUMER_INVALID;
     EventConsumerHandle event_handle = EVENT_CONSUMER_INVALID;
 
+    // sessions
     uint32_t session_id = 0;
     uint32_t sessions_started = 0;
     uint32_t sessions_ended = 0;
     uint32_t segment_rollovers = 0;
 
+    // attachment diagnostics
     uint32_t attach_attempts = 0;
     uint32_t attach_failures = 0;
 
+    // stream frames
     uint32_t frames = 0;
     uint32_t frame_drops = 0;
 
+    // event frames
     uint32_t event_frames = 0;
     uint32_t event_records = 0;
     uint32_t event_subscription_generation = 0;
@@ -60,6 +66,7 @@ struct EdfRecorderStatus {
     uint32_t respiratory_events = 0;
     uint32_t csr_events = 0;
 
+    // EDF records
     uint32_t brp_records = 0;
     uint32_t pld_records = 0;
     uint32_t sa2_records = 0;
@@ -67,6 +74,7 @@ struct EdfRecorderStatus {
     uint32_t csl_records = 0;
     uint32_t str_records = 0;
 
+    // STR RPCs
     uint32_t str_setting_requests = 0;
     uint32_t str_setting_responses = 0;
     uint32_t str_setting_timeouts = 0;
@@ -81,12 +89,14 @@ struct EdfRecorderStatus {
     uint32_t str_summary_missing = 0;
     uint32_t str_summary_unmapped = 0;
 
+    // identification RPCs
     uint32_t identification_requests = 0;
     uint32_t identification_responses = 0;
     uint32_t identification_timeouts = 0;
     uint32_t identification_write_requests = 0;
     uint32_t identification_failures = 0;
 
+    // queue/storage failures
     uint32_t record_enqueue_failures = 0;
     uint32_t annotation_enqueue_failures = 0;
     uint32_t str_enqueue_failures = 0;
@@ -95,6 +105,7 @@ struct EdfRecorderStatus {
     uint32_t numeric_open_buffered_frames = 0;
     uint32_t numeric_open_buffer_drops = 0;
 
+    // recording gate and mask events
     uint32_t recording_gate_rises = 0;
     uint32_t recording_gate_falls = 0;
     uint32_t recording_gate_recoveries = 0;
@@ -102,9 +113,11 @@ struct EdfRecorderStatus {
     uint32_t mask_events = 0;
     uint32_t mask_bad_events = 0;
 
+    // last activity
     uint32_t last_frame_ms = 0;
     uint32_t last_event_ms = 0;
 
+    // files and messages
     char brp_path[80] = {};
     char pld_path[80] = {};
     char sa2_path[80] = {};
@@ -134,9 +147,11 @@ struct EdfRecorderStatus {
 
 class EdfRecorderManager {
 public:
+    // lifecycle
     void begin(RpcArbiter &arbiter, SessionManager &session);
     void poll(uint32_t now_ms);
 
+    // control/status
     void set_enabled(bool enabled);
     bool enabled() const { return status_.enabled; }
     EdfRecorderStatus status() const;
@@ -145,6 +160,7 @@ public:
         return assembler_.status();
     }
 
+    // device events
     void handle_event_frame(const As11EventFrame &frame, uint32_t now_ms);
 
 private:
@@ -189,6 +205,7 @@ private:
     static void record_observer(void *context,
                                 const EdfCompletedRecordView &record);
 
+    // session and recording gates
     void dispatch_session_edges(uint32_t now_ms);
     void start_session(const SessionStatus &session,
                        uint32_t now_ms,
@@ -207,6 +224,7 @@ private:
     void begin_recording_gate(const char *start_time, uint32_t now_ms);
     void close_recording_gate(const char *end_time, uint32_t now_ms);
 
+    // EDF file opens
     bool open_session_annotation_files(const char *annotation_start_time);
     bool open_session_annotation_files_at(const EdfLocalDateTime &start,
                                           int64_t annotation_start_ms);
@@ -232,12 +250,14 @@ private:
                             char *dst,
                             size_t dst_size) const;
 
+    // file state synchronization
     void close_session_files();
     void sync_annotation_open_status();
     bool sync_numeric_open_status(uint32_t now_ms);
     void buffer_numeric_open_stream(uint32_t now_ms);
     uint32_t event_coverage_session_gaps() const;
 
+    // STR and identification records
     void begin_str_session(const char *session_start_time, uint32_t now_ms);
     bool ensure_str_session_started(uint32_t now_ms);
     bool begin_str_session_at(const EdfLocalDateTime &start,
@@ -259,9 +279,11 @@ private:
     void handle_identification_response(const std::string &payload);
     bool write_str_day_record();
 
+    // device time
     bool as11_timezone_ready() const;
     bool parse_session_local_time(const char *text, EdfLocalDateTime &out) const;
 
+    // subscriptions
     void attach_events();
     void release_events();
     void snapshot_event_coverage();
@@ -272,6 +294,7 @@ private:
     void update_stream_queue_drops();
     void drain_stream(uint32_t now_ms);
 
+    // record assembly/output
     bool roll_segment_if_needed(const StreamFrameData &frame,
                                 uint32_t now_ms);
     bool frame_sleep_day(const StreamFrameData &frame,
@@ -286,9 +309,11 @@ private:
 
     void set_error(const char *error);
 
+    // subsystem owners
     RpcArbiter *arbiter_ = nullptr;
     SessionManager *session_ = nullptr;
 
+    // session cursors
     uint32_t seen_session_starts_ = 0;
     uint32_t seen_session_ends_ = 0;
     uint32_t last_queue_drops_ = 0;
@@ -298,10 +323,12 @@ private:
     uint32_t next_numeric_open_ms_ = 0;
     uint32_t next_annotation_open_ms_ = 0;
 
+    // event coverage
     int64_t annotation_start_epoch_ms_ = 0;
     uint32_t session_event_subscription_generation_ = 0;
     uint32_t session_event_coverage_gap_count_ = 0;
 
+    // open/recording state
     bool initialized_ = false;
     bool files_open_ = false;
     bool numeric_files_open_ = false;
@@ -318,6 +345,7 @@ private:
     EdfStorageOpenHandle csl_open_handle_;
     uint16_t numeric_segment_day_ = 0;
 
+    // STR/identification state
     PendingRpc str_settings_rpc_;
     PendingRpc str_summary_rpc_;
     PendingRpc identification_rpc_;
@@ -327,6 +355,7 @@ private:
     NumericSchemaState pld_schema_;
     NumericSchemaState sa2_schema_;
 
+    // owned subsystems/status
     EdfStrSessionAccumulator str_;
     EdfRecorderStatus status_;
     EdfStreamAssembler assembler_;

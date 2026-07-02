@@ -3640,6 +3640,7 @@ void WebUI::execute_resmed_ota_command(const WebCommand &command) {
 }
 
 void WebUI::register_routes() {
+    // Static UI and snapshots
     server_->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         AsyncWebServerResponse *response = request->beginResponse(
             200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
@@ -3662,6 +3663,7 @@ void WebUI::register_routes() {
         send_live_view_state(request);
     });
 
+    // Storage browser and jobs
     server_->on(AsyncURIMatcher::exact("/api/storage/list"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_storage_list(request);
@@ -3716,6 +3718,7 @@ void WebUI::register_routes() {
         send_storage_sync_status(request);
     });
 
+    // SleepHQ sync
     server_->on(AsyncURIMatcher::exact("/api/sleephq/sync/start"), HTTP_POST,
                 [this](AsyncWebServerRequest *request) {
         send_sleephq_sync_start(request);
@@ -3731,11 +3734,14 @@ void WebUI::register_routes() {
         send_sleephq_sync_status(request);
     });
 
+    // Reports
     server_->on(AsyncURIMatcher::prefix("/api/report/plot"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         String path = request->url();
         const int query = path.indexOf('?');
+
         if (query >= 0) path = path.substring(0, query);
+
         if (path != "/api/report/plot") {
             request->send(404, "application/json",
                           "{\"ok\":false,\"error\":\"not found\"}");
@@ -3779,11 +3785,14 @@ void WebUI::register_routes() {
                           "{\"ok\":false,\"error\":\"worker unavailable\"}");
             return;
         }
+
         const BackgroundWorkerStatus s = w->status();
         const ReportManager::PrefetchSnapshot p =
             report_manager_->prefetch_snapshot();
+
         LargeTextBuffer json;
         json.reserve(WEB_JSON_RESERVE_SMALL);
+
         json = "{";
         json_add_bool(json, "ok", true, false);
         json_add_bool(json, "started", s.task_started);
@@ -3805,18 +3814,22 @@ void WebUI::register_routes() {
         json_add_int(json, "completed", static_cast<long>(p.completed));
         json_add_int(json, "failed", static_cast<long>(p.failed));
         json += "}";
+
         if (json.overflowed()) {
             request->send(503, "application/json",
                           "{\"ok\":false,\"error\":\"prefetch alloc\"}");
             return;
         }
+
         AsyncResponseStream *response =
             request->beginResponseStream("application/json");
+
         if (!response) {
             request->send(503, "application/json",
                           "{\"ok\":false,\"error\":\"response alloc\"}");
             return;
         }
+
         response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
                         json.length());
         request->send(response);
@@ -3835,12 +3848,15 @@ void WebUI::register_routes() {
                           "{\"ok\":false,\"error\":\"missing enable=0|1\"}");
             return;
         }
+
         const bool on = request->arg("enable") != "0";
         w->set_enabled(on);
+
         char buf[64];
         snprintf(buf, sizeof(buf), "{\"ok\":true,\"enabled\":%s,\"applied\":%s}",
                  on ? "true" : "false",
                  w->enabled() ? "true" : "false");
+
         request->send(200, "application/json", buf);
     });
 
@@ -3852,34 +3868,43 @@ void WebUI::register_routes() {
                               "{\"ok\":false,\"error\":\"report unavailable\"}");
                 return;
             }
+
             if (request->hasArg("index")) {
                 const long index = request->arg("index").toInt();
+
                 if (index < 0) {
                     request->send(400, "application/json",
                                   "{\"ok\":false,\"error\":\"bad index\"}");
                     return;
                 }
+
                 uint64_t night_start_ms = 0;
                 bool have_night_start = false;
+
                 if (request->hasArg("night")) {
                     const String night_arg = request->arg("night");
                     char *end = nullptr;
                     const unsigned long long parsed =
                         strtoull(night_arg.c_str(), &end, 10);
+
                     if (end == night_arg.c_str() || !end ||
                         *end != '\0' || parsed == 0) {
                         request->send(400, "application/json",
                                       "{\"ok\":false,\"error\":\"bad night\"}");
                         return;
                     }
+
                     night_start_ms = static_cast<uint64_t>(parsed);
                     have_night_start = true;
                 }
+
                 bool refresh_cache = false;
+
                 if (request->hasArg("refresh_cache")) {
                     parse_bool_yesno(request->arg("refresh_cache"),
                                      refresh_cache);
                 }
+
                 const bool queued = have_night_start
                     ? report_manager_->request_result_prepare_by_start(
                           night_start_ms,
@@ -3887,6 +3912,7 @@ void WebUI::register_routes() {
                     : report_manager_->request_result_prepare_by_therapy_index(
                           static_cast<size_t>(index),
                           refresh_cache);
+
                 if (queued) {
                     request->send(202, "application/json", queued_json());
                 } else {
@@ -3898,20 +3924,25 @@ void WebUI::register_routes() {
 
             JsonDocument doc;
             std::string body;
+
             if (!parse_body_copy(request, doc, body)) {
                 request->send(400, "application/json",
                               "{\"ok\":false,\"error\":\"bad json\"}");
                 return;
             }
+
             if (!doc["index"].is<unsigned long>()) {
                 request->send(400, "application/json",
                               "{\"ok\":false,\"error\":\"missing index\"}");
                 return;
             }
+
             bool refresh_cache = false;
+
             if (doc["refresh_cache"].is<bool>()) {
                 refresh_cache = doc["refresh_cache"].as<bool>();
             }
+
             const bool queued =
                 doc["night"].is<unsigned long long>()
                     ? report_manager_->request_result_prepare_by_start(
@@ -3920,8 +3951,9 @@ void WebUI::register_routes() {
                           refresh_cache)
                     : report_manager_->request_result_prepare_by_therapy_index(
                           static_cast<size_t>(
-                              doc["index"].as<unsigned long>()),
+                          doc["index"].as<unsigned long>()),
                           refresh_cache);
+
             if (queued) {
                 request->send(202, "application/json", queued_json());
             } else {
@@ -3931,6 +3963,7 @@ void WebUI::register_routes() {
         },
         nullptr, handle_body);
 
+    // Web console and file log
     server_->on(
         AsyncURIMatcher::exact("/api/console"), HTTP_GET,
         [this](AsyncWebServerRequest *request) {
@@ -3942,18 +3975,23 @@ void WebUI::register_routes() {
         [this](AsyncWebServerRequest *request) {
             JsonDocument doc;
             std::string body;
+
             if (!parse_body_copy(request, doc, body)) {
                 request->send(400, "application/json",
                               "{\"ok\":false,\"error\":\"bad json\"}");
                 return;
             }
+
             String command;
+
             if (!json_get_string(doc, "cmd", command)) {
                 request->send(400, "application/json",
                               "{\"ok\":false,\"error\":\"missing cmd\"}");
                 return;
             }
+
             command.trim();
+
             if (!command.length()) {
                 request->send(400, "application/json",
                               "{\"ok\":false,\"error\":\"empty cmd\"}");
@@ -3963,6 +4001,7 @@ void WebUI::register_routes() {
             WebCommand queued;
             queued.kind = WebCommandConsoleLine;
             queued.text = command.c_str();
+
             send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
@@ -3978,6 +4017,7 @@ void WebUI::register_routes() {
         AsyncURIMatcher::exact("/api/log/current"), HTTP_GET,
         [](AsyncWebServerRequest *request) {
             size_t lines = AC_FILE_LOG_TAIL_DEFAULT_LINES;
+
             if (!request_size_arg_limited(request,
                                           "tail",
                                           AC_FILE_LOG_TAIL_DEFAULT_LINES,
@@ -3991,25 +4031,32 @@ void WebUI::register_routes() {
                 request->send(400, "text/plain", error);
                 return;
             }
+
             const char *path = Log::filelog_path();
+
             if (!Log::filelog_enabled() || !path || !path[0] ||
                 !Storage::exists(path)) {
                 request->send(404, "text/plain",
                               "file log unavailable\n");
                 return;
             }
+
             AsyncResponseStream *response =
                 request->beginResponseStream("text/plain");
+
             if (!response) {
                 request->send(503, "text/plain", "response alloc\n");
                 return;
             }
+
             if (!Log::print_filelog_tail(*response, lines)) {
                 response->print("file log unavailable\n");
             }
+
             request->send(response);
         });
 
+    // Configuration
     server_->on(AsyncURIMatcher::exact("/api/config"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_config_json(request);
@@ -4033,6 +4080,7 @@ void WebUI::register_routes() {
                         [this, section](AsyncWebServerRequest *request) {
                 send_config_json(request, section);
             });
+
             server_->on(
                 AsyncURIMatcher::exact(path), HTTP_POST,
                 [this](AsyncWebServerRequest *request) {
@@ -4040,6 +4088,7 @@ void WebUI::register_routes() {
                 },
                 nullptr, handle_body);
         };
+
     register_config_section("/api/config/device", "device");
     register_config_section("/api/config/network", "network");
     register_config_section("/api/config/access", "access");
@@ -4049,6 +4098,7 @@ void WebUI::register_routes() {
     register_config_section("/api/config/smb", "smb");
     register_config_section("/api/config/sleephq", "sleephq");
 
+    // ESP OTA
     server_->on(AsyncURIMatcher::exact("/api/ota"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         String json;
@@ -4062,28 +4112,38 @@ void WebUI::register_routes() {
             if (resmed_ota_manager_->transport_active()) {
                 ota_manager_->abort_http_upload("resmed_ota_active");
                 mark_snapshots_dirty(SNAPSHOT_OTA);
+
                 String json;
                 json.reserve(AC_WEB_OTA_JSON_RESERVE);
                 build_ota_json(json, ota_manager_->status());
+
                 request->send(409, "application/json", json);
                 return;
             }
+
             size_t declared_size = 0;
+
             if (!request_size_arg(request, "size", declared_size)) {
                 ota_manager_->abort_http_upload("missing_size");
                 mark_snapshots_dirty(SNAPSHOT_OTA);
+
                 String json;
                 json.reserve(AC_WEB_OTA_JSON_RESERVE);
                 build_ota_json(json, ota_manager_->status());
+
                 request->send(400, "application/json", json);
                 return;
             }
+
             const bool ok =
                 ota_manager_->request_http_upload_prepare(declared_size);
+
             mark_snapshots_dirty(SNAPSHOT_OTA);
+
             String json;
             json.reserve(AC_WEB_OTA_JSON_RESERVE);
             build_ota_json(json, ota_manager_->status());
+
             request->send(ok ? 202 : 400, "application/json", json);
         });
 
@@ -4091,35 +4151,44 @@ void WebUI::register_routes() {
         AsyncURIMatcher::exact("/api/ota/upload"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             const bool ok = ota_manager_->finish_http_upload();
+
             mark_snapshots_dirty(SNAPSHOT_OTA);
+
             String json;
             json.reserve(AC_WEB_OTA_JSON_RESERVE);
             build_ota_json(json, ota_manager_->status());
+
             request->send(ok ? 200 : 400, "application/json", json);
         },
         [this](AsyncWebServerRequest *request, const String &filename,
                size_t index, uint8_t *data, size_t len, bool final) {
             if (index == 0) {
                 size_t declared_size = 0;
+
                 if (!request_size_arg(request, "size", declared_size)) {
                     ota_manager_->abort_http_upload("missing_size");
                     mark_snapshots_dirty(SNAPSHOT_OTA);
                     return;
                 }
+
                 if (!ota_manager_->begin_http_upload(filename, declared_size)) {
                     mark_snapshots_dirty(SNAPSHOT_OTA);
                     return;
                 }
+
                 mark_snapshots_dirty(SNAPSHOT_OTA);
             }
+
             if (!ota_manager_->write_http_upload(index, data, len)) {
                 mark_snapshots_dirty(SNAPSHOT_OTA);
                 if (request && request->client()) request->client()->close();
                 return;
             }
+
             if (final) mark_snapshots_dirty(SNAPSHOT_OTA);
         });
 
+    // ResMed OTA
     server_->on(AsyncURIMatcher::exact("/api/resmed-ota"), HTTP_GET,
         [this](AsyncWebServerRequest *request) {
             send_cached(request, cached_resmed_ota_json_);
@@ -4131,32 +4200,41 @@ void WebUI::register_routes() {
             const ResmedOtaStatus status = resmed_ota_manager_->status();
             bool ok = status.phase == ResmedOtaPhase::Staging &&
                       resmed_ota_manager_->finish_staged_upload();
+
             if (ok && !enqueue_simple_command(WebCommandResmedOtaStartStaged)) {
                 resmed_ota_manager_->abort("web_queue_full");
                 ok = false;
             }
+
             mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
+
             String json;
             json.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
             build_resmed_ota_json(json, *resmed_ota_manager_);
+
             request->send(ok ? 200 : 400, "application/json", json);
         },
         [this](AsyncWebServerRequest *request, const String &filename,
                size_t index, uint8_t *data, size_t len, bool final) {
             (void)final;
+
             if (index == 0) {
                 size_t declared_size = 0;
+
                 if (!request_size_arg(request, "size", declared_size)) {
                     resmed_ota_manager_->abort("missing_size");
                     return;
                 }
+
                 const String magic =
                     request->hasArg("magic") ? request->arg("magic") : "";
+
                 if (!resmed_ota_manager_->begin_staged_upload(
                         declared_size, filename, magic)) {
                     return;
                 }
             }
+
             resmed_ota_manager_->write_staged_upload(index, data, len);
         });
 

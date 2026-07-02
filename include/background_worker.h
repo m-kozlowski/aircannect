@@ -53,21 +53,25 @@ struct BackgroundWorkerStatus {
 // recent web activity). One instance per device; see background_worker().
 class BackgroundWorker {
 public:
+    // lifecycle
     void begin();
     bool add_job(BackgroundJob *job);
 
+    // gate inputs
     // The main loop owns the gated subsystems; it publishes their state here
     // every iteration so the worker never reads them cross-task. Main loop only.
     void publish_gate(bool foreground_busy, bool as11_ready, bool stream_active,
                       bool resmed_ota_active, bool esp_ota_active,
                       bool therapy_running);
 
+    // control/status
     void set_enabled(bool enabled) { enabled_.store(enabled); }
     bool enabled() const { return enabled_.load(); }
 #if AC_STACK_PROFILE_ENABLED
     uint32_t stack_high_water_bytes() const;
 #endif
 
+    // foreground pacing
     // Push back the idle grace window so prefetch defers briefly after
     // foreground activity (e.g. a web request). Safe from any task.
     void note_activity();
@@ -81,11 +85,6 @@ public:
     BackgroundWorkerStatus status() const;
 
 private:
-    static void task_entry(void *param);
-    void run();
-    bool gate_open(const char **reason) const;
-    void publish(bool idle, const char *reason);
-
     // Gate-input bits published by the main loop (see publish_gate), packed into
     // one atomic so the worker reads a coherent snapshot lock-free.
     static constexpr uint32_t GATE_FOREGROUND = 1u << 0;
@@ -97,20 +96,36 @@ private:
     static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
     static constexpr size_t MAX_JOBS = 10;
+
+    // task loop
+    static void task_entry(void *param);
+    void run();
+
+    // gate policy
+    bool gate_open(const char **reason) const;
+
+    // status publication
+    void publish(bool idle, const char *reason);
+
+    // registered jobs
     BackgroundJob *jobs_[MAX_JOBS] = {};
     size_t job_count_ = 0;
 
+    // gate/control state
     std::atomic<bool> enabled_{true};
     std::atomic<uint32_t> last_activity_ms_{0};  // web grace; set from AsyncTCP
     // Gate inputs from the main loop; starts "unpublished" so the worker stays
     // gated until the first publish_gate().
     std::atomic<uint32_t> gate_inputs_{GATE_UNPUBLISHED};
+
+    // task cursors
     TaskHandle_t task_ = nullptr;
     size_t foreground_cursor_ = 0;
     size_t gate_closed_cursor_ = 0;
     size_t drain_cursor_ = 0;
     size_t regular_cursor_ = 0;
 
+    // status snapshot
     mutable StaticSemaphore_t status_lock_storage_ = {};
     mutable SemaphoreHandle_t status_lock_ = nullptr;
     BackgroundWorkerStatus status_ = {};

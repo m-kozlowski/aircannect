@@ -1742,46 +1742,61 @@ void ReportManager::poll(RpcArbiter &arbiter) {
         arbiter.stream_realtime_active() ||
         arbiter.as11_state().therapy_state() == As11TherapyState::Running;
 
+    // Foreground service points
     if (drain_source_events(arbiter)) return;
+
     service_build_queue(realtime_active);
     service_range_plot(realtime_active);
     service_prefetch(realtime_active);
+
+    // EDF catalog changes invalidate summary-derived materialization.
     if (edf_catalog_) {
         EdfReportCatalogStatus catalog_status;
+
         if (edf_catalog_->status(catalog_status, 0) &&
             catalog_status.state == EdfReportCatalogState::Ready &&
             catalog_status.refresh_id != 0 &&
             catalog_status.refresh_id != edf_catalog_summary_refresh_id_) {
             invalidate_materialized(0, true);
+
             if (publish_summary_json_snapshot()) {
                 edf_catalog_summary_refresh_id_ = catalog_status.refresh_id;
             }
         }
     }
-    // Publish the summary revision for the background prefetch job (cross-task).
+
+    // Cross-task summary revision publication
     if (take_summary_lock(0)) {
         summary_revision_pub_.store(summary_status_.revision);
         give_summary_lock();
     }
+
     if (!spool_.active()) {
         observed_spool_rx_queue_full_alerts_ =
             arbiter.can_driver().stats().rx_queue_full_alerts;
     }
+
+    // Idle trash cleanup
     if (!realtime_active &&
         !summary_fetch_active_ && !cache_fetch_active_ &&
         !plot_build_active_ && !range_build_active_ &&
         static_cast<int32_t>(millis() - next_trash_cleanup_ms_) >= 0) {
         next_trash_cleanup_ms_ = millis() + 250;
+
         uint32_t removed = 0;
         ReportStore::cleanup_trash_step(4, removed);
     }
 
+    // Active cache fetch
     if (cache_fetch_active_) {
         poll_cache_fetch(arbiter);
     }
+
+    // Active full-plot build
     if (plot_build_active_) {
         if (plot_build_idle_prebuild_) {
             const char *reason = "idle";
+
             if (realtime_active || !idle_prebuild_gate_open(&reason)) {
                 const uint32_t elapsed_ms =
                     plot_build_started_ms_
@@ -1799,17 +1814,24 @@ void ReportManager::poll(RpcArbiter &arbiter) {
                           static_cast<unsigned long>(elapsed_ms));
                 reset_plot_build();
                 release_result_edf_sessions();
+
                 return;
             }
         }
+
         poll_result_plot_build();
         return;
     }
+
+    // Active range-plot build
     if (range_build_active_) {
         if (realtime_active) return;
+
         poll_range_plot_build();
         return;
     }
+
+    // Summary spool fetch
     if (!summary_fetch_active_) return;
 
     spool_.poll(arbiter);
@@ -4691,8 +4713,11 @@ void ReportManager::clear_build_queue(uint64_t night_start_ms, bool all) {
 
 void ReportManager::service_build_queue(bool realtime_active) {
     if (!build_queue_lock_) return;
+
+    // Existing report work owns the materialization pipeline.
     if (summary_fetch_active_ || plot_build_active_ || range_build_active_) {
         xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+
         if (build_queue_count_ > 0) {
             copy_cstr(build_queue_last_service_block_,
                       sizeof(build_queue_last_service_block_),
@@ -4700,38 +4725,57 @@ void ReportManager::service_build_queue(bool realtime_active) {
                           ? "summary"
                           : (plot_build_active_ ? "plot" : "range"));
         }
+
         xSemaphoreGive(build_queue_lock_);
         return;
     }
+
+    // Realtime stream/therapy work preempts report materialization.
     if (realtime_active) {
         xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+
         if (build_queue_count_ > 0) {
             copy_cstr(build_queue_last_service_block_,
                       sizeof(build_queue_last_service_block_),
                       "realtime");
         }
+
         xSemaphoreGive(build_queue_lock_);
         return;
     }
+
+    // Dequeue candidate
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+
     const bool have = build_queue_count_ > 0;
-    ResultBuildJob job = have ? build_queue_[build_queue_head_] : ResultBuildJob{};
+    ResultBuildJob job =
+        have ? build_queue_[build_queue_head_] : ResultBuildJob{};
+
     xSemaphoreGive(build_queue_lock_);
+
     if (!have) return;
+
+    // Retry backoff
     const uint32_t now_ms = millis();
+
     if (job.next_attempt_ms != 0 &&
         static_cast<int32_t>(now_ms - job.next_attempt_ms) < 0) {
         xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+
         if (build_queue_count_ > 0) {
             copy_cstr(build_queue_last_service_block_,
                       sizeof(build_queue_last_service_block_),
                       "retry_wait");
         }
+
         xSemaphoreGive(build_queue_lock_);
         return;
     }
+
+    // Idle prebuild gate
     if (job.idle_prebuild) {
         const char *reason = "idle";
+
         if (!idle_prebuild_gate_open(&reason)) {
             xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
             copy_cstr(build_queue_last_service_block_,
@@ -4741,10 +4785,11 @@ void ReportManager::service_build_queue(bool realtime_active) {
             return;
         }
     }
-    // A foreground build preempts an idle prefetch fetch. Idle plot prebuilds
-    // wait behind prefetch, because both are background work.
+
+    // Prefetch interaction
     if (cache_fetch_active_) {
         if (!job.idle_prebuild) prefetch_yield_to_foreground();
+
         if (cache_fetch_active_) {
             xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
             copy_cstr(build_queue_last_service_block_,
@@ -4754,20 +4799,28 @@ void ReportManager::service_build_queue(bool realtime_active) {
             return;  // a non-prefetch fetch is in flight; wait
         }
     }
+
+    // Materialize one job
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
     build_queue_service_total_++;
     copy_cstr(build_queue_last_service_block_,
               sizeof(build_queue_last_service_block_),
               "");
     xSemaphoreGive(build_queue_lock_);
+
     active_build_idle_prebuild_ = job.idle_prebuild;
+
     const ResultPrepareOutcome outcome =
         prepare_result_by_night_start_internal(job.night_start_ms,
                                                job.therapy_index,
                                                job.refresh);
+
     active_build_idle_prebuild_ = false;
+
     const char *outcome_name =
         result_prepare_outcome_name(static_cast<uint8_t>(outcome));
+
+    // Publish diagnostics
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
     build_queue_last_night_ms_ = job.night_start_ms;
     build_queue_last_therapy_index_ = job.therapy_index;
@@ -4781,6 +4834,7 @@ void ReportManager::service_build_queue(bool realtime_active) {
               sizeof(build_queue_last_error_),
               result_status_.error.c_str());
     xSemaphoreGive(build_queue_lock_);
+
     Log::logf(CAT_REPORT,
               outcome == ResultPrepareOutcome::Failed ? LOG_WARN : LOG_DEBUG,
               "Result build step night=%llu index=%lu refresh=%u "
@@ -4797,24 +4851,32 @@ void ReportManager::service_build_queue(bool realtime_active) {
               static_cast<unsigned long>(result_status_.chunk_count),
               static_cast<unsigned long>(result_status_.record_count),
               static_cast<unsigned long>(result_status_.payload_bytes));
+
+    // Retry/defer current head
     if (outcome == ResultPrepareOutcome::Deferred ||
         outcome == ResultPrepareOutcome::Retry) {
         xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+
         if (build_queue_count_ > 0 &&
             build_queue_[build_queue_head_].night_start_ms ==
                 job.night_start_ms) {
             build_queue_[build_queue_head_].next_attempt_ms =
                 millis() + AC_BG_WORKER_BUSY_RECHECK_MS;
         }
+
         xSemaphoreGive(build_queue_lock_);
         return;
     }
+
+    // Pop completed/failed head
     xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+
     if (build_queue_count_ > 0 &&
         build_queue_[build_queue_head_].night_start_ms == job.night_start_ms) {
         build_queue_head_ = (build_queue_head_ + 1) % AC_REPORT_BUILD_QUEUE_MAX;
         build_queue_count_--;
     }
+
     xSemaphoreGive(build_queue_lock_);
 }
 
@@ -8644,56 +8706,75 @@ void ReportManager::service_range_plot(bool realtime_active) {
 
 void ReportManager::poll_range_plot_build() {
     if (!range_build_active_) return;
+
     size_t reads = 0;
     const uint32_t started_ms = millis();
+
     auto budget_spent = [&]() -> bool {
         if (reads == 0) return false;
         if (reads >= AC_REPORT_RANGE_PLOT_POLL_CHUNK_CAP) return true;
+
         return static_cast<uint32_t>(millis() - started_ms) >=
                AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS;
     };
 
     while (range_build_active_ && !budget_spent()) {
+        // Event chunks
         if (range_build_phase_ == ReportPlotBuildPhase::Events) {
             bool processed = false;
+
             while (range_chunk_index_ < range_chunk_count_) {
                 const ReportResultChunk &chunk =
                     range_chunks_[range_chunk_index_++];
+
                 if (chunk.kind != ReportStoreChunkKind::Events) continue;
+
                 if (chunk.end_ms <= range_build_from_ ||
                     chunk.start_ms >= range_build_to_) {
                     continue;
                 }
+
                 if (!process_range_event_chunk(chunk)) return;
+
                 reads++;
                 range_build_input_chunks_++;
                 range_build_input_bytes_ += chunk.payload_len;
                 processed = true;
+
                 break;
             }
+
             if (processed) continue;
+
             if (!range_build_bytes_) {
                 fail_range_plot_build("range_bad_state");
                 return;
             }
+
             range_build_ok_ &=
                 bin_put_u32(*range_build_bytes_, range_event_count_);
+
             if (range_tmp_.size()) {
                 range_build_ok_ &=
                     range_build_bytes_->append(range_tmp_.data(),
                                                range_tmp_.size());
             }
+
             range_tmp_.clear();
+
             if (!range_build_ok_) {
                 fail_range_plot_build("range_overflow");
                 return;
             }
+
             range_build_phase_ = ReportPlotBuildPhase::Series;
             range_chunk_index_ = 0;
             range_stream_index_ = 0;
+
             continue;
         }
 
+        // Series chunks
         if (range_build_phase_ == ReportPlotBuildPhase::Series) {
             if (range_stream_index_ >= range_stream_count_) {
                 finish_range_plot_build();
@@ -8702,46 +8783,58 @@ void ReportManager::poll_range_plot_build() {
 
             const ReportResultStream &stream =
                 range_streams_[range_stream_index_];
+
             if (stream.kind != ReportStoreChunkKind::Series ||
                 !stream.name || !stream.name[0] ||
                 stream.chunk_count == 0) {
                 range_stream_index_++;
                 range_chunk_index_ = 0;
+
                 continue;
             }
+
             if (!range_series_open_ && !open_range_series(stream)) {
                 fail_range_plot_build("range_series_open_failed");
                 return;
             }
 
             bool processed = false;
+
             while (range_chunk_index_ < range_chunk_count_) {
                 const ReportResultChunk &chunk =
                     range_chunks_[range_chunk_index_++];
+
                 if (!result_chunk_matches_stream(chunk,
                                                  range_stream_index_,
                                                  stream)) {
                     continue;
                 }
+
                 if (chunk.end_ms <= range_build_from_ ||
                     chunk.start_ms >= range_build_to_) {
                     continue;
                 }
+
                 if (!process_range_series_chunk(chunk,
                                                 range_stream_index_)) {
                     return;
                 }
+
                 reads++;
                 range_build_input_chunks_++;
                 range_build_input_bytes_ += chunk.payload_len;
                 processed = true;
+
                 break;
             }
+
             if (processed) continue;
 
             if (!finish_range_series()) return;
+
             range_stream_index_++;
             range_chunk_index_ = 0;
+
             continue;
         }
 
@@ -8752,82 +8845,110 @@ void ReportManager::poll_range_plot_build() {
 
 void ReportManager::poll_result_plot_build() {
     if (!plot_build_active_) return;
+
     size_t reads = 0;
     const uint32_t started_ms = millis();
+
     auto budget_spent = [&]() -> bool {
         if (reads == 0) return false;
         if (reads >= AC_REPORT_PLOT_POLL_CHUNK_CAP) return true;
+
         return static_cast<uint32_t>(millis() - started_ms) >=
                AC_REPORT_PLOT_POLL_BUDGET_MS;
     };
 
     while (plot_build_active_ && !budget_spent()) {
+        // Event chunks
         if (plot_build_phase_ == ReportPlotBuildPhase::Events) {
             bool processed = false;
+
             while (plot_chunk_index_ < result_status_.chunk_count) {
                 const ReportResultChunk &chunk =
                     result_chunks_[plot_chunk_index_++];
+
                 if (chunk.kind != ReportStoreChunkKind::Events) continue;
+
                 if (!process_plot_event_chunk(chunk)) return;
+
                 processed = true;
                 reads++;
                 plot_build_input_chunks_++;
                 plot_build_input_bytes_ += chunk.payload_len;
+
                 break;
             }
+
             if (processed) continue;
-            // Events phase done: write the event count + accumulated records.
+
+            // Event phase footer
             const uint32_t event_count =
                 static_cast<uint32_t>(plot_tmp_.size() / 16);
+
             plot_bin_ok_ &= bin_put_u32(plot_build_bin_, event_count);
+
             if (plot_tmp_.size()) {
                 plot_bin_ok_ &=
                     plot_build_bin_.append(plot_tmp_.data(), plot_tmp_.size());
             }
+
             plot_tmp_.clear();
             plot_build_phase_ = ReportPlotBuildPhase::Series;
             plot_chunk_index_ = 0;
             memset(plot_chunk_done_, 0, sizeof(plot_chunk_done_));
+
             continue;
         }
 
+        // Series chunks
         if (plot_build_phase_ == ReportPlotBuildPhase::Series) {
             bool processed = false;
+
             const size_t max_chunks = std::min(
                 static_cast<size_t>(result_status_.chunk_count),
                 static_cast<size_t>(AC_REPORT_RESULT_CHUNK_MAX));
+
             while (plot_chunk_index_ < max_chunks) {
                 const size_t chunk_index = plot_chunk_index_++;
                 if (plot_chunk_done_[chunk_index]) continue;
+
                 const ReportResultChunk &chunk = result_chunks_[chunk_index];
+
                 if (chunk.kind != ReportStoreChunkKind::Series) {
                     plot_chunk_done_[chunk_index] = true;
                     continue;
                 }
+
                 if (chunk.stream_index >= result_stream_count_ ||
                     chunk.stream_index >= AC_REPORT_RESULT_STREAM_MAX) {
                     plot_chunk_done_[chunk_index] = true;
                     continue;
                 }
+
                 if (chunk.provider_ref.provider == ReportProviderId::Edf) {
                     if (!process_plot_edf_series_batch(chunk_index,
                                                        processed)) {
                         return;
                     }
+
                     if (processed) {
                         reads++;
                         break;
                     }
+
                     continue;
                 }
+
                 if (!process_plot_series_chunk(chunk_index)) return;
+
                 plot_chunk_done_[chunk_index] = true;
                 plot_build_input_chunks_++;
                 plot_build_input_bytes_ += chunk.payload_len;
                 processed = true;
                 reads++;
+
                 break;
             }
+
             if (processed) continue;
 
             for (size_t i = 0; i < result_stream_count_ &&
@@ -8835,14 +8956,17 @@ void ReportManager::poll_result_plot_build() {
                  ++i) {
                 if (!finish_plot_series(i)) return;
             }
+
             if (!plot_bin_ok_) {
                 fail_result_prepare("plot_overflow");
                 return;
             }
+
             if (plot_chunk_index_ >= max_chunks) {
                 finish_result_plot_build();
                 return;
             }
+
             continue;
         }
 

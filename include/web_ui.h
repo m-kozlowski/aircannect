@@ -86,6 +86,7 @@ class WebUI {
 public:
     using PollCheckpoint = void (*)(const char *section);
 
+    // lifecycle
     bool begin(RpcArbiter &arbiter,
                WifiManager &wifi_manager,
                TcpBridge &tcp_bridge,
@@ -106,7 +107,11 @@ public:
                uint16_t port = 80);
     void stop();
     void poll(PollCheckpoint checkpoint = nullptr);
+
+    // inbound device events
     void handle_event(const RpcEvent &event);
+
+    // status
     bool started() const { return started_; }
     WebUiMemoryStatus memory_status();
 
@@ -207,17 +212,20 @@ private:
                            const char *result = "queued") const;
     bool request_allowed_cached(AsyncWebServerRequest *request) const;
 
+    // client tracking
     struct SseClientRef {
         AsyncEventSourceClient *client = nullptr;
         uint32_t connected_ms = 0;
         uint32_t last_status_ms = 0;
     };
 
+    // live view leases
     struct LiveViewLease {
         uint32_t client_hash = 0;
         uint32_t expires_ms = 0;
     };
 
+    // snapshot masks
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
     static constexpr uint16_t SNAPSHOT_STREAM = 1u << 1;
     static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 3;
@@ -235,6 +243,7 @@ private:
         SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
         SNAPSHOT_RESMED_OTA;
 
+    // subsystem owners
     RpcArbiter *arbiter_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
     TcpBridge *tcp_bridge_ = nullptr;
@@ -253,6 +262,7 @@ private:
     SleepHqSyncJob *sleephq_sync_job_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
+    // console and command queue
     ManagementConsole web_console_;
     char *console_log_ = nullptr;
     size_t console_log_capacity_ = 0;
@@ -264,6 +274,8 @@ private:
     uint64_t console_sse_pos_ = 0;
     bool console_sse_reset_pending_ = false;
     FixedQueue<WebCommand, AC_WEB_COMMAND_QUEUE_DEPTH> command_queue_;
+
+    // synchronization
     StaticSemaphore_t command_mutex_storage_ = {};
     StaticSemaphore_t cache_mutex_storage_ = {};
     StaticSemaphore_t sse_mutex_storage_ = {};
@@ -275,15 +287,18 @@ private:
     SemaphoreHandle_t live_view_mutex_ = nullptr;
     SemaphoreHandle_t storage_job_mutex_ = nullptr;
 
+    // HTTP/SSE server
     AsyncWebServer *server_ = nullptr;
     AsyncEventSource *events_ = nullptr;
     SseClientRef sse_clients_[AC_WEB_SSE_CLIENTS_MAX + 1];
     bool sse_enforce_needed_ = false;
 
+    // dashboard live stream
     uint32_t live_last_send_ms_ = 0;
     uint32_t live_seq_ = 0;
     LiveViewLease live_view_leases_[AC_WEB_SSE_CLIENTS_MAX + 1];
 
+    // cached JSON snapshots
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer cached_stream_json_;
     LargeTextBuffer cached_wifi_json_;
@@ -293,11 +308,13 @@ private:
     LargeTextBuffer cached_settings_json_;
     LargeTextBuffer live_json_;
 
+    // cached auth config
     bool cached_http_auth_required_ = true;
     String cached_http_user_;
     String cached_http_password_;
     String cached_auth_whitelist_;
 
+    // snapshot state
     int cached_settings_mode_ = -1;
     int requested_settings_mode_ = -1;
     bool cached_settings_refresh_queued_ = false;

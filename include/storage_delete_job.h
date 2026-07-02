@@ -37,18 +37,23 @@ struct StorageDeleteStatus {
 
 class StorageDeleteJob : public BackgroundJob {
 public:
+    // lifecycle
     void begin();
 
+    // background worker
     const char *name() const override { return "storage_delete"; }
     JobStep step() override;
     void on_preempt() override;
 
+    // delete requests
     bool start_selected(const char *base_path,
                         const char *const *names,
                         size_t count,
                         uint32_t *id_out = nullptr,
                         char *error_out = nullptr,
                         size_t error_out_size = 0);
+
+    // status
     bool status(StorageDeleteStatus &out,
                 uint32_t timeout_ms = 1000) const;
     StorageDeleteStatus status() const;
@@ -57,10 +62,13 @@ public:
 private:
     struct WalkFrame;
 
+    // locking/status
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void set_error_locked(const char *error);
     void reset_job_locked(bool keep_status);
+
+    // resource cleanup
     void release_path_metadata_locked();
     void close_walk_locked();
     bool ensure_walk_stack_locked();
@@ -74,17 +82,20 @@ private:
     bool delete_dir_step_locked(uint32_t &budget);
     bool finish_done_locked();
 
+    // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
     std::atomic<bool> preempt_requested_{false};
     StorageDeleteStatus status_;
     uint32_t next_id_ = 1;
 
+    // requested roots
     uint32_t root_offsets_[AC_STORAGE_MAX_SELECTIONS] = {};
     char *path_bytes_ = nullptr;
     size_t path_bytes_len_ = 0;
     size_t path_bytes_capacity_ = 0;
     size_t current_root_ = 0;
 
+    // directory walk
     WalkFrame *walk_stack_ = nullptr;
     size_t walk_depth_ = 0;
     size_t walk_capacity_ = 0;

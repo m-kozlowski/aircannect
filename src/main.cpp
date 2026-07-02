@@ -292,14 +292,18 @@ static SleepHqSyncJob *create_sleephq_sync_job() {
 }
 
 void setup() {
+    // Serial bootstrap
     Serial.begin(AC_SERIAL_BAUD);
     delay(500);
     while (Serial.available()) Serial.read();
 
+    // Core services
     Memory::begin();
     Log::init();
+
     const bool tls_allocator_ready = TlsMemory::begin();
     const TlsMemoryStatus tls_mem = TlsMemory::status();
+
     Log::logf(CAT_GENERAL,
               tls_allocator_ready ? LOG_INFO : LOG_WARN,
               "[TLS] mbedTLS allocator installed=%u psram=%u "
@@ -308,19 +312,25 @@ void setup() {
               tls_mem.psram_enabled ? 1u : 0u,
               static_cast<unsigned>(tls_mem.large_threshold),
               tls_mem.install_result);
+
     app_config.begin();
     app_config.apply_log_config();
+
+    // Boot diagnostics
     const MemoryStatus mem = Memory::status();
+
     Log::logf(CAT_GENERAL, LOG_INFO,
               "[BOOT] version=%s build=%s reset_reason=%s\n",
               aircannect_version(),
               aircannect_build_date(),
               system_reset_reason_name());
+
     Log::logf(CAT_GENERAL, LOG_INFO,
               "[INIT] chip=%s heap_free=%u heap_total=%u\n",
               ESP.getChipModel(),
               static_cast<unsigned>(mem.heap_free),
               static_cast<unsigned>(mem.heap_total));
+
     if (mem.psram_available) {
         Log::logf(CAT_GENERAL, LOG_INFO,
                   "[INIT] psram=yes psram_free=%u psram_total=%u\n",
@@ -333,10 +343,14 @@ void setup() {
         Log::logf(CAT_RPC, LOG_WARN,
                   "[INIT] datagram reassembly buffer prealloc failed\n");
     }
+
+    // Persistent storage
     Storage::begin();
     StorageWriter::begin();
     EdfStorageWorker::begin();
+
     const StorageStatus storage = Storage::status();
+
     if (storage.mounted) {
         Log::logf(CAT_STORAGE, LOG_INFO,
                   "[INIT] storage=%s/%s free_bytes=%llu\n",
@@ -355,33 +369,47 @@ void setup() {
                   Storage::state_name(storage.state));
     }
 
+    // Management console
     serial_management_console.begin(Serial);
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] management CLI ready\n");
 
+    // Export jobs
     storage_sync_job = create_storage_sync_job();
     sleephq_sync_job = create_sleephq_sync_job();
     export_coordinator.begin(storage_sync_job, sleephq_sync_job);
+
     console_ctx.storage_sync_job = storage_sync_job;
     console_ctx.sleephq_sync_job = sleephq_sync_job;
     console_ctx.export_coordinator = &export_coordinator;
+
     apply_storage_provisioning(app_config, wifi_manager);
+
+    // Device/session/report managers
     session_manager.begin();
+
     rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
                                           &session_manager);
+
     sink_manager.begin(rpc_arbiter, session_manager);
+
     edf_recorder_manager.begin(rpc_arbiter, session_manager);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
+
     edf_report_catalog_job.begin();
     report_manager.set_edf_report_catalog(&edf_report_catalog_job);
+
     oximetry_manager.begin(app_config);
     report_manager.begin();
     resmed_ota_manager.begin(rpc_arbiter);
     time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
     ota_manager.begin(app_config);
+
+    // Network configuration
     wifi_manager.set_hostname(app_config.data().hostname);
     wifi_manager.set_softap_mode(app_config.data().softap_mode);
     wifi_manager.set_country_code(app_config.data().wifi_country);
 
+    // CAN and network frontends
     if (!can_driver.begin()) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] CAN failed to start; management CLI still active "
@@ -389,11 +417,14 @@ void setup() {
     }
 
     wifi_manager.begin();
+
     if (!app_config.data().tcp_bridge_enabled) {
         Log::logf(CAT_TCP, LOG_INFO,
                   "raw bridge disabled by config\n");
     }
+
     sync_network_services();
+
     web_ui.begin(rpc_arbiter, wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
@@ -405,16 +436,18 @@ void setup() {
                  sleephq_sync_job,
                  console_ctx);
 
-    // Idle-time background storage worker (prefetch + plot build). Started last,
-    // once every subsystem it gates on (report, CAN, OTA) is up.
+    // Background jobs
     storage_archive_job.begin();
     storage_delete_job.begin();
+
     if (storage_sync_job) {
         storage_sync_job->begin(app_config.data());
     }
+
     if (sleephq_sync_job) {
         sleephq_sync_job->begin(app_config.data());
     }
+
     bg_worker.add_job(&file_log_job);
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
@@ -424,85 +457,119 @@ void setup() {
     if (storage_sync_job) {
         bg_worker.add_job(storage_sync_job);
     }
+
     if (sleephq_sync_job) {
         bg_worker.add_job(sleephq_sync_job);
     }
+
     bg_worker.add_job(&report_plot_prebuild_job);
     bg_worker.begin();
+
     (void)edf_report_catalog_job.request_refresh();
 }
 
 void loop() {
-
+    // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =
         ota_manager.as11_quiesce_required();
     rpc_arbiter.set_esp_ota_quiesce(esp_ota_quiesce_requested);
+
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
     rpc_arbiter.set_background_polls_suspended(
         resmed_ota_transport_active);
+
     rpc_arbiter.set_raw_rpc_events_enabled(
         tcp_bridge.raw_client_connected());
+
     rpc_arbiter.poll();
+
     ota_manager.poll_http_upload_prepare(
         esp_ota_quiesce_requested &&
             rpc_arbiter.esp_ota_quiesce_complete(),
         esp_ota_quiesce_requested &&
             rpc_arbiter.esp_ota_quiesce_timed_out());
+
     drain_can_rx_after("arbiter_ota_prepare");
+
+    // Reports and ResMed OTA
     report_manager.poll(rpc_arbiter);
     drain_can_rx_after("report");
+
     resmed_ota_manager.poll();
-    // Long loop sections can otherwise let TWAI RX overflow during bursty
-    // stream/RPC traffic. Keep service points bounded and owned by RpcArbiter.
     drain_can_rx_after("resmed_ota");
-    // First drain handles events produced by CAN/RPC/OTA work before services
-    // that depend on fresh state run below.
+
+    // RPC event fanout before services that depend on fresh state.
     drain_rpc_events();
     drain_can_rx_after("rpc_events_pre_state");
+
+    // Session and EDF capture
     const uint32_t now_ms = millis();
+
     session_manager.poll(rpc_arbiter.as11_state(), now_ms);
     edf_recorder_manager.poll(now_ms);
+
     if (rpc_arbiter.as11_state().timezone_offset_valid()) {
         (void)edf_report_catalog_job.set_timezone_offset_minutes(
             rpc_arbiter.as11_state().timezone_offset_minutes());
     }
+
     poll_edf_report_catalog_refresh(now_ms);
     drain_can_rx_after("session_edf");
+
+    // Live sinks and oximetry
     sink_manager.poll();
     oximetry_manager.poll(wifi_manager.network_available());
     drain_can_rx_after("oximetry");
+
+    // Wi-Fi and network services
     wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||
                                        ota_manager.active() ||
                                        resmed_ota_transport_active);
+
     wifi_manager.poll();
     drain_can_rx_after("wifi.poll");
+
     sync_network_services();
     drain_can_rx_after("network_services.sync");
+
+    // Log and time services
     const bool storage_writer_idle_allowed =
         !rpc_arbiter.stream_activity_active() &&
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
+
     Log::poll(wifi_manager.sta_ipv4_online());
     drain_can_rx_after("log");
+
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
     }
+
     drain_can_rx_after("time_sync");
+
+    // ESP/Arduino OTA
     const bool esp_reboot_allowed =
         !ota_manager.status().reboot_pending ||
         rpc_arbiter.esp_ota_reboot_allowed();
+
     const bool arduino_ota_poll_allowed =
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
+
     ota_manager.poll(wifi_manager, esp_reboot_allowed,
                      !resmed_ota_transport_active,
                      arduino_ota_poll_allowed);
+
     drain_can_rx_after("arduino_ota");
+
     resmed_ota_manager.poll();
     drain_can_rx_after("resmed_ota_post");
+
+    // Storage and exports
     Storage::poll(storage_writer_idle_allowed);
     drain_can_rx_after("storage_poll");
+
     export_coordinator.poll(
         rpc_arbiter,
         report_manager,
@@ -511,9 +578,10 @@ void loop() {
         resmed_ota_manager.transport_active(),
         ota_manager.active(),
         now_ms);
+
     drain_can_rx_after("export_coordinator");
-    // Publish the worker's gate inputs from here (the owner thread) so the
-    // background task reads a coherent snapshot instead of these managers.
+
+    // Background worker gate snapshot
     bg_worker.publish_gate(
         report_manager.foreground_busy(),
         rpc_arbiter.as11_state().status_valid(),
@@ -521,21 +589,30 @@ void loop() {
         resmed_ota_manager.transport_active(),
         ota_manager.active(),
         rpc_arbiter.as11_state().therapy_state() == As11TherapyState::Running);
+
     drain_can_rx_after("bgworker_gate");
+
+    // Web, TCP, and console frontends
     web_ui.poll(drain_can_rx_after);
     drain_can_rx_after("web_ui");
+
     tcp_bridge.poll(rpc_arbiter);
     telnet_console.poll(console_ctx);
     serial_management_console.poll(Serial, Serial, console_ctx);
+
     drain_can_rx_after("frontends");
-    // Second drain handles events produced by network and console frontends
-    // during this loop turn.
+
+    // RPC event fanout after network and console frontends.
     drain_rpc_events();
     drain_can_rx_after("rpc_events_post_frontends");
+
+    // Deferred storage writes and diagnostics
     if (storage_writer_idle_allowed) {
         StorageWriter::poll();
     }
+
     drain_can_rx_after("storage_writer");
+
     poll_stack_profiler(now_ms);
 
     delay(0);

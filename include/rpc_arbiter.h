@@ -120,10 +120,12 @@ class RpcArbiter {
 public:
     explicit RpcArbiter(CanDriver &can);
 
+    // Lifecycle and CAN pump
     bool reserve_reassembly_buffers();
     void poll();
     size_t drain_can_rx();
 
+    // RPC submission
     bool submit_raw_payload(const std::string &payload, RpcSource source);
 
     bool send_request(const std::string &method,
@@ -138,6 +140,7 @@ public:
     bool send_set_datetime_now(RpcSource source,
                                uint32_t timeout_ms = 0);
 
+    // Event routing
     bool next_event(RpcEvent &event);
     bool next_source_event(RpcSource source, RpcEvent &event);
 
@@ -152,10 +155,12 @@ public:
     void remove_event_frame_observer(EventFrameObserver observer,
                                      void *context);
 
+    // Event subscriptions
     EventAcquireResult acquire_events(const char *data_ids_csv);
     void release_events(EventConsumerHandle handle);
     bool event_consumer_active(EventConsumerHandle handle) const;
 
+    // Stream subscriptions
     StreamAcquireResult acquire_stream(const std::string &params_json,
                                        RpcSource source);
     StreamAcquireResult update_stream(StreamConsumerHandle handle,
@@ -175,6 +180,7 @@ public:
     bool next_stream_frame(StreamConsumerHandle handle,
                            StreamFrameRef &frame);
 
+    // Device maintenance
     void reset_stats();
 
     bool request_as11_healthcheck();
@@ -189,6 +195,7 @@ public:
     bool esp_ota_quiesce_timed_out() const;
     bool esp_ota_reboot_allowed() const;
 
+    // Status snapshots
     const RpcArbiterStats &stats() const { return stats_; }
     RpcRuntimeStatus runtime_status() const;
     const CanDriver &can_driver() const { return can_; }
@@ -198,6 +205,7 @@ public:
     const As11SettingsState &as11_settings() const { return as11_settings_; }
 
 private:
+    // Request and payload types
     struct PendingRequest {
         bool active = false;
         uint32_t id = 0;
@@ -263,6 +271,7 @@ private:
 
     static constexpr size_t RAW_PASSTHROUGH_PENDING_MAX = 8;
 
+    // Event queues
     void push_event(RpcEventKind kind,
                     const std::string &payload,
                     RpcSource source = RpcSource::Internal,
@@ -286,6 +295,7 @@ private:
     bool enqueue_payload_frames(const std::string &payload, RpcSource source);
     bool enqueue_encoded_frames(const std::vector<DatagramFrame> &frames);
 
+    // Request lifecycle
     void cancel_pending_request(const char *reason);
     void cancel_queued_request(const QueuedRequest &request,
                                const char *reason);
@@ -318,6 +328,7 @@ private:
     DateTimePrepareResult prepare_set_datetime_request(QueuedRequest &request,
                                                        uint32_t now);
 
+    // AS11 polling
     void schedule_as11_identity_refresh(uint32_t now, uint32_t delay_ms);
     void schedule_as11_status_refresh(uint32_t now, uint32_t delay_ms);
     void schedule_as11_motor_refresh(uint32_t now, uint32_t delay_ms);
@@ -331,6 +342,7 @@ private:
     void poll_as11_healthcheck();
     void process_deferred_payloads(size_t budget);
 
+    // Payload handling
     void handle_matched_response(const std::string &payload);
     bool handle_event_notification(const char *payload, size_t payload_len);
     void handle_stream_notification(const char *payload, size_t payload_len);
@@ -346,6 +358,7 @@ private:
     std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
 
+    // Source-specific event routes
     enum class SourceEventQueue {
         None,
         Report,
@@ -366,6 +379,7 @@ private:
     bool push_source_event_queue(SourceEventQueue queue, RpcEvent &&event);
     bool pop_source_event_queue(SourceEventQueue queue, RpcEvent &event);
 
+    // CAN/RPC queues and routes
     CanDriver &can_;
     DatagramRx rpc_rx_{AC_STREAM_FRAME_RAW_MAX};
     DatagramRx log_rx_;
@@ -386,6 +400,7 @@ private:
     PendingRequest pending_;
     RawPassthroughRequest raw_passthrough_[RAW_PASSTHROUGH_PENDING_MAX];
 
+    // Dispatch state
     QueuedRequest dispatch_retry_;
     bool dispatch_retry_active_ = false;
     uint32_t dispatch_retry_deadline_ms_ = 0;
@@ -395,11 +410,13 @@ private:
     uint32_t next_rpc_id_ = 0;
     uint32_t last_integrated_tx_ms_ = 0;
 
+    // Runtime diagnostics
     uint32_t stats_started_ms_ = 0;
     uint32_t boot_notifications_seen_ = 0;
     uint32_t last_boot_notification_ms_ = 0;
     std::string last_boot_notification_;
 
+    // Owned brokers and AS11 state
     EventBroker event_;
     StreamBroker stream_;
     As11DeviceState as11_state_;
@@ -407,12 +424,14 @@ private:
 
     bool as11_healthcheck_initialized_ = false;
 
+    // Background AS11 polls
     uint32_t next_as11_identity_poll_ms_ = 0;
     uint32_t next_as11_status_poll_ms_ = 0;
     uint32_t next_as11_motor_poll_ms_ = 0;
     uint32_t next_as11_timezone_poll_ms_ = 0;
     uint32_t next_as11_clock_poll_ms_ = 0;
 
+    // Backpressure and OTA quiesce
     bool background_polls_suspended_ = false;
     bool raw_rpc_events_enabled_ = false;
     bool esp_ota_quiesce_requested_ = false;

@@ -160,11 +160,13 @@ class ReportManager : private ReportMaterializerSink {
 public:
     ~ReportManager();
 
+    // Lifecycle and device events
     void begin();
     void set_edf_report_catalog(EdfReportCatalogJob *catalog);
     void poll(RpcArbiter &arbiter);
     bool handle_event(const RpcEvent &event);
 
+    // Summary and night index
     bool request_summary_refresh(bool force = false);
     void build_summary_json(LargeTextBuffer &json) const;
     bool for_each_summary_night(ReportSummaryNightCallback callback,
@@ -178,6 +180,7 @@ public:
     // background prefetch job can watch for new nights without a cross-task read.
     uint32_t summary_revision() const { return summary_revision_pub_.load(); }
 
+    // Coverage and spool cache
     bool night_coverage(uint64_t night_start_ms,
                         ReportNightCoverageStatus &out) const;
     bool night_coverage_by_therapy_index(
@@ -198,6 +201,7 @@ public:
     bool prune_cache_to_latest_nights(size_t keep_latest,
                                       ReportCacheClearResult &out);
 
+    // Work state and background service
     bool busy() const {
         return summary_fetch_active_ || cache_fetch_active_ ||
                plot_build_active_ || range_build_active_;
@@ -209,6 +213,7 @@ public:
         return cache_status_;
     }
 
+    // Report prefetch
     enum class PrefetchPhase : uint8_t {
         Idle,      // nothing requested
         Selecting, // worker asked; main loop chooses the next night
@@ -235,6 +240,7 @@ public:
     void prefetch_preempt();
     PrefetchSnapshot prefetch_snapshot() const;
 
+    // Idle plot prebuild and build queue
     enum class PlotPrebuildResult : uint8_t {
         Queued,
         AlreadyQueued,
@@ -277,6 +283,7 @@ public:
     bool foreground_busy() const;
     bool service_cache_writer();
 
+    // Result materialization
     bool prepare_result_by_therapy_index(size_t therapy_index,
                                          bool refresh_cache = false);
     bool request_result_prepare_by_therapy_index(size_t therapy_index,
@@ -287,6 +294,7 @@ public:
                                   size_t offset,
                                   size_t limit) const;
 
+    // Result serving
     // Stateless per-night result read: serves a materialized LRU entry by night
     // index with an ETag, without touching the single build-scratch slot.
     enum class ResultRead : uint8_t {
@@ -308,6 +316,7 @@ public:
                                     size_t etag_out_size,
                                     LargeTextBuffer &json_out);
 
+    // Plot serving
     // Stateless per-night plot read: serves the PSRAM blob for (night, version);
     // a miss queues a build and returns Building.
     enum class PlotRead : uint8_t {
@@ -342,6 +351,7 @@ public:
     bool night_etag(size_t therapy_index, char *out, size_t out_size) const;
 
 private:
+    // Materialized result and plot types
     struct PlotRange {
         int64_t start_ms = 0;
         int64_t end_ms = 0;
@@ -376,9 +386,22 @@ private:
         uint32_t payload_bytes = 0;
     };
 
+    enum class ResultPrepareOutcome : uint8_t {
+        Prepared,
+        Deferred,
+        Retry,
+        Failed,
+    };
+
     struct PrefetchSkip {
         uint64_t night_ms = 0;
         uint32_t until_ms = 0;
+    };
+
+    struct SparseEventEmptyMarker {
+        ReportSourceId source = ReportSourceId::Summary;
+        uint64_t night_ms = 0;
+        char night_key[48] = {};
     };
 
     struct CacheCoalesceBuffer {
@@ -395,6 +418,20 @@ private:
         bool series_values_pending = false;
         ReportSpoolBuffer payload;
     };
+
+    struct CacheWriteQueueSlot {
+        bool active = false;
+        uint32_t fetch_id = 0;
+        ReportStoreChunkKey key;
+        ReportStoreChunkMeta meta;
+        ReportSpoolBuffer payload;
+    };
+
+    struct NightEpoch {
+        uint64_t night_start_ms = 0;
+        uint32_t epoch = 0;
+    };
+
     struct PlotBuildBucket {
         bool have = false;
         int range_index = -1;
@@ -448,6 +485,67 @@ private:
         }
     };
 
+    struct MaterializedResult {
+        bool valid = false;
+        uint64_t night_start_ms = 0;
+        char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+        uint32_t last_used = 0;
+        ReportResultStatus status;
+        ReportIndexedNight night;
+        PlotRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+        size_t range_count = 0;
+        ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
+        size_t stream_count = 0;
+        ReportResultChunk chunks[AC_REPORT_RESULT_CHUNK_MAX] = {};
+        size_t chunk_count = 0;
+        EdfReportSessionDescriptor
+            edf_sessions[AC_REPORT_EDF_SESSION_MAX] = {};
+        size_t edf_session_count = 0;
+        std::shared_ptr<ReportSpoolBuffer> plot;
+    };
+
+    enum class ResultCacheWritePhase : uint8_t {
+        Idle,
+        ClearOld,
+        OpenPlotTmp,
+        WritePlot,
+        ClosePlotRename,
+        OpenResultTmp,
+        WriteResult,
+        CloseResultRename,
+    };
+
+    struct ResultCacheWriteJob {
+        bool active = false;
+        ResultCacheWritePhase phase = ResultCacheWritePhase::Idle;
+        ReportSummaryRecord night;
+        char plot_path[192] = {};
+        char plot_tmp_path[200] = {};
+        char result_path[192] = {};
+        char result_tmp_path[200] = {};
+        std::shared_ptr<ReportSpoolBuffer> result_json;
+        std::shared_ptr<ReportSpoolBuffer> plot;
+        size_t offset = 0;
+        File file;
+    };
+
+    struct ResultBuildJob {
+        uint64_t night_start_ms = 0;
+        size_t therapy_index = 0;
+        bool refresh = false;
+        bool idle_prebuild = false;
+        uint32_t queued_ms = 0;
+        uint32_t next_attempt_ms = 0;
+    };
+
+    enum class BuildQueueResult : uint8_t {
+        Queued,
+        AlreadyQueued,
+        Full,
+        Unavailable,
+    };
+
+    // Cache and prefetch constants
     static constexpr size_t PREFETCH_SKIP_MAX = 8;
     static constexpr size_t AC_REPORT_COALESCE_SLOTS = 64;
     static constexpr size_t AC_REPORT_COALESCE_TARGET_BYTES = 64 * 1024;
@@ -466,6 +564,7 @@ private:
         Failed,
     };
 
+    // Provider callbacks
     static bool write_parsed_chunk(void *context,
                                    const ReportParsedChunk &chunk);
     static bool collect_result_chunk(void *context,
@@ -473,6 +572,7 @@ private:
     static bool collect_range_chunk(void *context,
                                     const ReportProviderChunk &chunk);
 
+    // Summary store and snapshots
     bool ensure_summary_records();
     bool parse_summary_result(ReportSpoolResult &result);
     bool load_summary_from_store();
@@ -481,7 +581,51 @@ private:
     void fail_summary(const char *message);
     void clear_summary_records();
     const char *summary_state_name() const;
+    bool take_summary_lock(TickType_t timeout) const;
+    void give_summary_lock() const;
+    bool take_summary_scratch(TickType_t timeout,
+                              ReportSummaryRecord *&out);
+    void give_summary_scratch();
+    bool publish_summary_json_snapshot();
+    bool build_indexed_nights(ReportIndexedNight *out,
+                              size_t capacity,
+                              size_t &count) const;
+    bool build_indexed_nights_uncached(ReportIndexedNight *out,
+                                       size_t capacity,
+                                       size_t &count) const;
+    bool load_durable_night_index();
+    bool seed_index_from_durable(ReportNightIndex &index) const;
+    void schedule_durable_night_index_save(const ReportIndexedNight *src,
+                                           size_t count,
+                                           uint32_t content_crc) const;
+    bool indexed_night_by_therapy_index(size_t therapy_index,
+                                        ReportIndexedNight &out) const;
+    bool indexed_night_by_start(uint64_t night_start_ms,
+                                ReportIndexedNight &out,
+                                size_t *therapy_index_out = nullptr) const;
+    bool index_cache_matches(uint32_t summary_revision,
+                             bool catalog_present,
+                             uint8_t catalog_state,
+                             uint32_t catalog_refresh_id) const;
+    bool copy_index_cache_locked(ReportIndexedNight *out,
+                                 size_t capacity,
+                                 size_t &count,
+                                 uint32_t summary_revision,
+                                 bool catalog_present,
+                                 uint8_t catalog_state,
+                                 uint32_t catalog_refresh_id) const;
+    bool publish_index_cache_locked(const ReportIndexedNight *src,
+                                    size_t count,
+                                    uint32_t summary_revision,
+                                    bool catalog_present,
+                                    uint8_t catalog_state,
+                                    uint32_t catalog_refresh_id) const;
+    bool index_cache_key(uint32_t &summary_revision,
+                         bool &catalog_present,
+                         uint8_t &catalog_state,
+                         uint32_t &catalog_refresh_id) const;
 
+    // Spool cache fetch and writes
     bool cache_source_supported(ReportSourceId source) const;
     bool build_cache_plan(const ReportIndexedNight &night,
                           bool force,
@@ -504,6 +648,7 @@ private:
                              const char *name,
                              int64_t &min_start,
                              int64_t &max_end) const;
+    bool ensure_cache_source_night_extents();
     bool ensure_cache_coalesce_slots();
     bool ensure_cache_write_queue_slots();
     bool buffer_parsed_chunk(const ReportParsedChunk &chunk);
@@ -522,11 +667,17 @@ private:
     bool cache_write_failed_for_active_fetch(std::string &error) const;
     bool finalize_cache_source_if_ready();
     void note_cache_chunk_committed(uint64_t night_start_ms);
+    uint32_t night_epoch_for_unlocked(uint64_t night_start_ms) const;
+    void format_night_etag_unlocked(const ReportSummaryRecord &rec,
+                                    uint64_t source_signature,
+                                    char *out,
+                                    size_t out_size) const;
     bool clear_cache_range(int64_t start_ms,
                            int64_t end_ms,
                            ReportCacheClearResult &out);
     int64_t night_start_for_timestamp(int64_t timestamp_ms) const;
 
+    // Prefetch and EDF coverage
     void service_prefetch(bool realtime_active);
     void prefetch_yield_to_foreground();
     bool edf_report_catalog_pending() const;
@@ -572,6 +723,7 @@ private:
     bool sparse_event_confirmed_empty(const ReportSummaryRecord &night,
                                       const ReportSourceDef &source) const;
 
+    // Result materialization
     bool ensure_result_chunks();
     bool ensure_result_slots();
     bool ensure_result_edf_sessions();
@@ -611,12 +763,6 @@ private:
         int64_t range_start_ms,
         int64_t range_end_ms,
         bool *edf_pending_out = nullptr);
-    enum class ResultPrepareOutcome : uint8_t {
-        Prepared,
-        Deferred,
-        Retry,
-        Failed,
-    };
     bool begin_materialization(const ReportIndexedNight &night,
                                const ReportResolvedPlan &plan) override;
     bool add_materialized_stream(const ReportResolvedStream &stream,
@@ -681,6 +827,30 @@ private:
     bool result_data_span(int64_t &span_start_ms,
                           int64_t &span_end_ms) const;
 
+    // Result slot and JSON serving
+    void clear_materialized_slot_locked(MaterializedResult &slot);
+    bool publish_result_to_slot(bool cache_plot = false);
+    void update_materialized_status_locked();
+    void clear_range_plot_locked(uint64_t night_start_ms, bool all);
+    void invalidate_materialized_locked(uint64_t night_start_ms, bool all);
+    void invalidate_materialized(uint64_t night_start_ms, bool all);
+    void build_result_json_from(const ReportResultStatus &status,
+                                const ReportIndexedNight &night,
+                                const PlotRange *ranges,
+                                size_t range_count,
+                                const ReportResultStream *streams,
+                                size_t stream_count,
+                                const ReportCacheFetchStatus &cache,
+                                LargeTextBuffer &json) const;
+    ResultRead read_result_for_indexed_night(
+        size_t therapy_index,
+        const ReportIndexedNight &indexed_night,
+        const char *if_none_match,
+        char *etag_out,
+        size_t etag_out_size,
+        LargeTextBuffer &json_out);
+
+    // Full-night plot build
     void reset_plot_build();
     void build_empty_plot_bin(ReportSpoolBuffer &out) const;
     bool start_result_plot_build();
@@ -716,6 +886,8 @@ private:
     void flush_plot_bucket(PlotSeriesBuildState &state);
     bool finish_plot_series(size_t stream_index);
     bool finish_result_plot_build();
+
+    // Zoom range plot build
     void reset_range_plot_build(bool clear_ready);
     bool start_range_plot_build(uint64_t night_start_ms,
                                 size_t therapy_index_hint,
@@ -756,7 +928,9 @@ private:
     bool finish_range_series();
     void finish_range_plot_build();
     void fail_range_plot_build(const char *message);
+    void service_range_plot(bool realtime_active);
 
+    // Durable result and plot cache
     bool result_plot_cache_path_for_night(const ReportIndexedNight &night,
                                           const char *etag,
                                           char *path,
@@ -803,6 +977,26 @@ private:
     bool service_durable_night_index_writer();
     void reset_result_cache_write_locked();
 
+    // Build queue and idle prebuild
+    BuildQueueResult enqueue_build(uint64_t night_start_ms,
+                                   size_t therapy_index,
+                                   bool refresh,
+                                   bool idle_prebuild = false);
+    bool build_queue_has_capacity() const;
+    void clear_build_queue(uint64_t night_start_ms, bool all);
+    void service_build_queue(bool realtime_active);
+    bool plot_cache_writer_active() const;
+    bool idle_prebuild_gate_open(const char **reason = nullptr) const;
+    bool plot_prebuild_key_matches(uint32_t summary_revision,
+                                   bool catalog_present,
+                                   uint8_t catalog_state,
+                                   uint32_t catalog_refresh_id) const;
+    void set_plot_prebuild_key(uint32_t summary_revision,
+                               bool catalog_present,
+                               uint8_t catalog_state,
+                               uint32_t catalog_refresh_id);
+
+    // Summary and night index state
     ReportSummaryRecord *records_ = nullptr;
     size_t record_count_ = 0;
     uint32_t nights_with_therapy_ = 0;
@@ -823,49 +1017,8 @@ private:
     mutable uint32_t durable_index_save_crc_ = 0;
     mutable bool durable_index_save_pending_ = false;
     mutable uint32_t durable_index_save_requested_ms_ = 0;
-    bool take_summary_lock(TickType_t timeout) const;
-    void give_summary_lock() const;
-    bool take_summary_scratch(TickType_t timeout,
-                              ReportSummaryRecord *&out);
-    void give_summary_scratch();
-    bool publish_summary_json_snapshot();
-    bool build_indexed_nights(ReportIndexedNight *out,
-                              size_t capacity,
-                              size_t &count) const;
-    bool build_indexed_nights_uncached(ReportIndexedNight *out,
-                                       size_t capacity,
-                                       size_t &count) const;
-    bool load_durable_night_index();
-    bool seed_index_from_durable(ReportNightIndex &index) const;
-    void schedule_durable_night_index_save(const ReportIndexedNight *src,
-                                           size_t count,
-                                           uint32_t content_crc) const;
-    bool indexed_night_by_therapy_index(size_t therapy_index,
-                                        ReportIndexedNight &out) const;
-    bool indexed_night_by_start(uint64_t night_start_ms,
-                                ReportIndexedNight &out,
-                                size_t *therapy_index_out = nullptr) const;
-    bool index_cache_matches(uint32_t summary_revision,
-                             bool catalog_present,
-                             uint8_t catalog_state,
-                             uint32_t catalog_refresh_id) const;
-    bool copy_index_cache_locked(ReportIndexedNight *out,
-                                 size_t capacity,
-                                 size_t &count,
-                                 uint32_t summary_revision,
-                                 bool catalog_present,
-                                 uint8_t catalog_state,
-                                 uint32_t catalog_refresh_id) const;
-    bool publish_index_cache_locked(const ReportIndexedNight *src,
-                                    size_t count,
-                                    uint32_t summary_revision,
-                                    bool catalog_present,
-                                    uint8_t catalog_state,
-                                    uint32_t catalog_refresh_id) const;
-    bool index_cache_key(uint32_t &summary_revision,
-                         bool &catalog_present,
-                         uint8_t &catalog_state,
-                         uint32_t &catalog_refresh_id) const;
+
+    // Spool summary and cache fetch state
     std::atomic<uint32_t> summary_revision_pub_{0};  // see summary_revision()
     SpoolClient spool_;
     uint32_t observed_spool_rx_queue_full_alerts_ = 0;
@@ -888,18 +1041,10 @@ private:
     // fetch is active, so record indices cannot change between chunk parsing
     // and coverage writing.
     int64_t *cache_source_night_extent_ms_ = nullptr;  // PSRAM sidecar
-    bool ensure_cache_source_night_extents();
 
     // Write-side coalescing: buffer parsed chunks per (kind,name) and flush
     // larger files, so a night reads back as a few files instead of hundreds.
     CacheCoalesceBuffer *cache_coalesce_ = nullptr;  // PSRAM slots
-    struct CacheWriteQueueSlot {
-        bool active = false;
-        uint32_t fetch_id = 0;
-        ReportStoreChunkKey key;
-        ReportStoreChunkMeta meta;
-        ReportSpoolBuffer payload;
-    };
     CacheWriteQueueSlot *cache_write_queue_ = nullptr;  // PSRAM slots
     mutable SemaphoreHandle_t cache_write_lock_ = nullptr;
     size_t cache_write_head_ = 0;
@@ -919,19 +1064,11 @@ private:
     // Per-night data version, keyed by the stable night_start_ms so it survives
     // summary rebuilds: bumped on every chunk write to that night. Backs the
     // report ETag (night_etag) so a GET derives a night's version without SD I/O.
-    struct NightEpoch {
-        uint64_t night_start_ms = 0;
-        uint32_t epoch = 0;
-    };
     NightEpoch *night_epochs_ = nullptr;  // PSRAM, AC_REPORT_SUMMARY_RECORD_MAX
     size_t night_epoch_count_ = 0;
-    uint32_t night_epoch_for_unlocked(uint64_t night_start_ms) const;
-    void format_night_etag_unlocked(const ReportSummaryRecord &rec,
-                                    uint64_t source_signature,
-                                    char *out,
-                                    size_t out_size) const;
     uint32_t next_trash_cleanup_ms_ = 0;
 
+    // Prefetch state
     mutable SemaphoreHandle_t prefetch_lock_ = nullptr;
     PrefetchPhase prefetch_phase_ = PrefetchPhase::Idle;
     uint64_t prefetch_active_night_ = 0;
@@ -943,13 +1080,9 @@ private:
     char prefetch_last_source_[48] = {};
     char prefetch_last_error_[48] = {};
     PrefetchSkip prefetch_skip_[PREFETCH_SKIP_MAX] = {};
-    struct SparseEventEmptyMarker {
-        ReportSourceId source = ReportSourceId::Summary;
-        uint64_t night_ms = 0;
-        char night_key[48] = {};
-    };
     SparseEventEmptyMarker sparse_event_empty_[4] = {};
 
+    // Result build scratch
     ReportResultChunk *result_chunks_ = nullptr;
     size_t result_chunk_capacity_ = 0;
     ReportResultStream result_streams_[AC_REPORT_RESULT_STREAM_MAX] = {};
@@ -972,30 +1105,13 @@ private:
     mutable uint8_t index_cache_catalog_state_ = 0;
     mutable uint32_t index_cache_catalog_refresh_id_ = 0;
 
+    // Materialized result and range LRU
     // Served-result LRU. The result_* slot above is build SCRATCH only; GET-by-
     // index serves these immutable per-night entries, so two clients on different
     // nights never clobber each other. Published atomically at build finish.
-    struct MaterializedResult {
-        bool valid = false;
-        uint64_t night_start_ms = 0;
-        char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-        uint32_t last_used = 0;
-        ReportResultStatus status;
-        ReportIndexedNight night;
-        PlotRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-        size_t range_count = 0;
-        ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
-        size_t stream_count = 0;
-        ReportResultChunk chunks[AC_REPORT_RESULT_CHUNK_MAX] = {};
-        size_t chunk_count = 0;
-        EdfReportSessionDescriptor
-            edf_sessions[AC_REPORT_EDF_SESSION_MAX] = {};
-        size_t edf_session_count = 0;
-        std::shared_ptr<ReportSpoolBuffer> plot;
-    };
     MaterializedResult *result_slots_ = nullptr;  // PSRAM, AC_REPORT_RESULT_SLOT_MAX
     SemaphoreHandle_t result_slots_lock_ = nullptr;
-    void clear_materialized_slot_locked(MaterializedResult &slot);
+
     // Zoom range plot: request set by the web thread, built on the main loop,
     // result held for serving. All guarded by result_slots_lock_
     bool range_req_active_ = false;
@@ -1040,72 +1156,17 @@ private:
     uint32_t range_build_started_ms_ = 0;
     uint32_t range_build_input_chunks_ = 0;
     uint32_t range_build_input_bytes_ = 0;
-    void service_range_plot(bool realtime_active);
 
-    enum class ResultCacheWritePhase : uint8_t {
-        Idle,
-        ClearOld,
-        OpenPlotTmp,
-        WritePlot,
-        ClosePlotRename,
-        OpenResultTmp,
-        WriteResult,
-        CloseResultRename,
-    };
-    struct ResultCacheWriteJob {
-        bool active = false;
-        ResultCacheWritePhase phase = ResultCacheWritePhase::Idle;
-        ReportSummaryRecord night;
-        char plot_path[192] = {};
-        char plot_tmp_path[200] = {};
-        char result_path[192] = {};
-        char result_tmp_path[200] = {};
-        std::shared_ptr<ReportSpoolBuffer> result_json;
-        std::shared_ptr<ReportSpoolBuffer> plot;
-        size_t offset = 0;
-        File file;
-    };
+    // Durable cache writer
     SemaphoreHandle_t plot_cache_write_lock_ = nullptr;
     ResultCacheWriteJob plot_cache_write_;
 
+    // Result serving helpers
     uint32_t result_slot_tick_ = 0;
-    bool publish_result_to_slot(bool cache_plot = false);
-    void update_materialized_status_locked();
-    void clear_range_plot_locked(uint64_t night_start_ms, bool all);
-    void invalidate_materialized_locked(uint64_t night_start_ms, bool all);
-    void invalidate_materialized(uint64_t night_start_ms, bool all);
-    void build_result_json_from(const ReportResultStatus &status,
-                                const ReportIndexedNight &night,
-                                const PlotRange *ranges,
-                                size_t range_count,
-                                const ReportResultStream *streams,
-                                size_t stream_count,
-                                const ReportCacheFetchStatus &cache,
-                                LargeTextBuffer &json) const;
-    ResultRead read_result_for_indexed_night(
-        size_t therapy_index,
-        const ReportIndexedNight &indexed_night,
-        const char *if_none_match,
-        char *etag_out,
-        size_t etag_out_size,
-        LargeTextBuffer &json_out);
 
+    // Build queue and idle prebuild
     // Bounded dedup build queue: a GET-miss (or POST refresh) enqueues a night to
     // build; the main loop services one at a time, replacing the single pending slot.
-    struct ResultBuildJob {
-        uint64_t night_start_ms = 0;
-        size_t therapy_index = 0;
-        bool refresh = false;
-        bool idle_prebuild = false;
-        uint32_t queued_ms = 0;
-        uint32_t next_attempt_ms = 0;
-    };
-    enum class BuildQueueResult : uint8_t {
-        Queued,
-        AlreadyQueued,
-        Full,
-        Unavailable,
-    };
     ResultBuildJob build_queue_[AC_REPORT_BUILD_QUEUE_MAX];
     size_t build_queue_head_ = 0;
     size_t build_queue_count_ = 0;
@@ -1124,24 +1185,8 @@ private:
     char build_queue_last_state_[16] = {};
     char build_queue_last_error_[48] = {};
     SemaphoreHandle_t build_queue_lock_ = nullptr;
-    BuildQueueResult enqueue_build(uint64_t night_start_ms,
-                                   size_t therapy_index,
-                                   bool refresh,
-                                   bool idle_prebuild = false);
-    bool build_queue_has_capacity() const;
-    void clear_build_queue(uint64_t night_start_ms, bool all);
-    void service_build_queue(bool realtime_active);
-    bool plot_cache_writer_active() const;
-    bool idle_prebuild_gate_open(const char **reason = nullptr) const;
-    bool plot_prebuild_key_matches(uint32_t summary_revision,
-                                   bool catalog_present,
-                                   uint8_t catalog_state,
-                                   uint32_t catalog_refresh_id) const;
-    void set_plot_prebuild_key(uint32_t summary_revision,
-                               bool catalog_present,
-                               uint8_t catalog_state,
-                               uint32_t catalog_refresh_id);
 
+    // Active result and plot build state
     ReportIndexedNight result_indexed_night_;
     ReportSummaryRecord result_night_;
     char result_etag_[AC_REPORT_RESULT_ETAG_MAX] = {};
