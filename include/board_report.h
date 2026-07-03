@@ -111,3 +111,7 @@ static constexpr int64_t AC_REPORT_LATEST_TAIL_OVERLAP_MS = 60000;
 // within this many ms count as covered (served from SD, not re-spooled).
 // Seconds only - a genuine interior gap (minutes) is NOT masked.
 static constexpr int64_t AC_REPORT_COVERAGE_TOLERANCE_MS = 5000;
+// Summary/session ranges are minute-granular, while EVE annotations carry exact
+// end time + duration. Keep scored events just outside a rounded boundary; this
+// does not relax numeric-series coverage.
+static constexpr int64_t AC_REPORT_EVENT_EDGE_TOLERANCE_MS = 60000;

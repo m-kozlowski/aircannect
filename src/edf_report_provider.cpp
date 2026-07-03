@@ -268,6 +268,24 @@ bool EdfReportDataProvider::coverage_first_missing(
     return true;
 }
 
+bool EdfReportDataProvider::signal_coverage_complete(
+    const ReportSourceDef &source,
+    ReportSignalId signal,
+    int64_t start_ms,
+    int64_t end_ms) const {
+    (void)source;
+    if (end_ms <= start_ms) return false;
+
+    EdfReportRequiredRange range;
+    range.start_ms = start_ms;
+    range.end_ms = end_ms;
+    return edf_report_plan_signal_covers_ranges(sessions_,
+                                                session_count_,
+                                                signal,
+                                                &range,
+                                                1);
+}
+
 bool EdfReportDataProvider::for_each_chunk(
     ReportStoreChunkKind kind,
     const ReportSourceDef &source,

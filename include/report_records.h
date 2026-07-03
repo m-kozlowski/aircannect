@@ -55,6 +55,10 @@ size_t report_event_record_wire_size();
 
 bool report_append_event_record(ReportSpoolBuffer &out,
                                 const ReportEventRecord &event);
+bool report_event_overlaps_window(const ReportEventRecord &event,
+                                  int64_t window_start_ms,
+                                  int64_t window_end_ms,
+                                  int64_t edge_tolerance_ms = 0);
 
 bool report_build_series_payload_v2_uniform(
     ReportSpoolBuffer &out,

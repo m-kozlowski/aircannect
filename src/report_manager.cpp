@@ -45,7 +45,7 @@ constexpr size_t REPORT_CACHE_PATH_MAX = 192;
 constexpr size_t REPORT_CACHE_WRITE_CHUNK = 4096;
 constexpr size_t REPORT_RESULT_JSON_CACHE_MAX = 32 * 1024;
 constexpr uint32_t REPORT_STR_DURATION_TOLERANCE_MIN = 3;
-constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 27;
+constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 29;
 
 const char *report_provider_id_name(ReportProviderId provider) {
     switch (provider) {
@@ -927,39 +927,6 @@ bool report_ranges_overlap(int64_t a_start,
                            int64_t b_start,
                            int64_t b_end) {
     return a_start < b_end && b_start < a_end;
-}
-
-bool report_time_in_ranges(int64_t value,
-                           const ReportSessionRange *ranges,
-                           size_t range_count) {
-    if (!ranges || value <= 0) return false;
-    for (size_t i = 0; i < range_count; ++i) {
-        if (value >= ranges[i].start_ms && value <= ranges[i].end_ms) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool report_event_overlaps_ranges(const ReportEventRecord &event,
-                                  const ReportSessionRange *ranges,
-                                  size_t range_count) {
-    if (!ranges || event.start_ms <= 0 || event.duration_ms < 0) return false;
-    if (event.duration_ms == 0) {
-        return report_time_in_ranges(event.start_ms, ranges, range_count);
-    }
-    const int64_t event_end_ms =
-        event.start_ms + static_cast<int64_t>(event.duration_ms);
-    if (event_end_ms <= event.start_ms) return false;
-    for (size_t i = 0; i < range_count; ++i) {
-        if (report_ranges_overlap(event.start_ms,
-                                  event_end_ms,
-                                  ranges[i].start_ms,
-                                  ranges[i].end_ms)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 bool same_report_event(const ReportEventRecord &a,
@@ -7120,10 +7087,6 @@ void ReportManager::build_empty_plot_bin(ReportSpoolBuffer &out) const {
     bin_put_u32(out, 0);   // event count; no series follow
 }
 
-bool ReportManager::plot_time_in_ranges(int64_t timestamp_ms) const {
-    return plot_range_index(timestamp_ms) >= 0;
-}
-
 int ReportManager::plot_range_index(int64_t timestamp_ms) const {
     for (size_t i = 0; i < plot_range_count_; ++i) {
         if (timestamp_ms >= plot_ranges_[i].start_ms &&
@@ -7224,16 +7187,19 @@ bool ReportManager::process_plot_event_chunk(const ReportResultChunk &chunk) {
                                       event)) {
             continue;
         }
-        const int64_t duration_ms = event.duration_ms > 0
-                                        ? static_cast<int64_t>(
-                                              event.duration_ms)
-                                        : 0;
-        const int64_t event_end_ms = event.start_ms + duration_ms;
-        const bool in_range = duration_ms > 0
-                                  ? plot_time_in_ranges(event.start_ms) ||
-                                        plot_time_in_ranges(event_end_ms - 1)
-                                  : plot_time_in_ranges(event.start_ms);
+        bool in_range = false;
+        for (size_t i = 0; i < plot_range_count_; ++i) {
+            if (report_event_overlaps_window(
+                    event,
+                    plot_ranges_[i].start_ms,
+                    plot_ranges_[i].end_ms,
+                    AC_REPORT_EVENT_EDGE_TOLERANCE_MS)) {
+                in_range = true;
+                break;
+            }
+        }
         if (!in_range) continue;
+
         if (report_event_seen(plot_seen_events_, event)) continue;
         if (!remember_report_event(plot_seen_events_, event)) {
             fail_result_prepare("plot_event_dedupe_failed");
@@ -8207,34 +8173,25 @@ bool ReportManager::process_range_event_chunk(
                                       event)) {
             continue;
         }
-        const int64_t duration_ms = event.duration_ms > 0
-                                        ? static_cast<int64_t>(
-                                              event.duration_ms)
-                                        : 0;
-        const int64_t event_end_ms = event.start_ms + duration_ms;
-        const bool in_range = duration_ms > 0
-                                  ? event.start_ms < range_build_to_ &&
-                                        event_end_ms > range_build_from_
-                                  : event.start_ms >= range_build_from_ &&
-                                        event.start_ms < range_build_to_;
-        if (!in_range) {
+        if (!report_event_overlaps_window(event,
+                                          range_build_from_,
+                                          range_build_to_)) {
             continue;
         }
+
         bool in_session_range = false;
         for (size_t i = 0; i < range_range_count_; ++i) {
-            if (duration_ms > 0) {
-                if (event.start_ms < range_ranges_[i].end_ms &&
-                    event_end_ms > range_ranges_[i].start_ms) {
-                    in_session_range = true;
-                    break;
-                }
-            } else if (event.start_ms >= range_ranges_[i].start_ms &&
-                       event.start_ms < range_ranges_[i].end_ms) {
+            if (report_event_overlaps_window(
+                    event,
+                    range_ranges_[i].start_ms,
+                    range_ranges_[i].end_ms,
+                    AC_REPORT_EVENT_EDGE_TOLERANCE_MS)) {
                 in_session_range = true;
                 break;
             }
         }
         if (!in_session_range) continue;
+
         if (report_event_seen(range_seen_events_, event)) continue;
         if (!remember_report_event(range_seen_events_, event)) {
             fail_range_plot_build("range_event_dedupe_failed");
@@ -9385,10 +9342,12 @@ bool ReportManager::begin_materialization(const ReportIndexedNight &night,
         result_ranges_[i].end_ms = plan.ranges[i].end_ms;
     }
 
-    uint32_t duration_min = 0;
-    for (size_t i = 0; i < result_range_count_; ++i) {
-        duration_min += report_ceil_duration_min(result_ranges_[i].start_ms,
-                                                 result_ranges_[i].end_ms);
+    uint32_t duration_min = indexed_night_display_duration_min(night);
+    if (duration_min == 0) {
+        for (size_t i = 0; i < result_range_count_; ++i) {
+            duration_min += report_ceil_duration_min(result_ranges_[i].start_ms,
+                                                     result_ranges_[i].end_ms);
+        }
     }
     if (duration_min > 0) {
         result_status_.duration_min = duration_min;
@@ -9554,24 +9513,14 @@ bool ReportManager::count_result_events_from_chunks() {
                 continue;
             }
             bool overlaps_result_range = false;
-            const int64_t duration_ms = event.duration_ms > 0
-                                            ? static_cast<int64_t>(
-                                                  event.duration_ms)
-                                            : 0;
-            const int64_t event_end_ms = event.start_ms + duration_ms;
             for (size_t range_index = 0; range_index < range_count;
                  ++range_index) {
                 const PlotRange &range = result_ranges_[range_index];
-                if (duration_ms > 0) {
-                    if (report_ranges_overlap(event.start_ms,
-                                              event_end_ms,
-                                              range.start_ms,
-                                              range.end_ms)) {
-                        overlaps_result_range = true;
-                        break;
-                    }
-                } else if (event.start_ms >= range.start_ms &&
-                           event.start_ms <= range.end_ms) {
+                if (report_event_overlaps_window(
+                        event,
+                        range.start_ms,
+                        range.end_ms,
+                        AC_REPORT_EVENT_EDGE_TOLERANCE_MS)) {
                     overlaps_result_range = true;
                     break;
                 }
@@ -10028,24 +9977,27 @@ bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
                 found_latest_range = true;
             }
         };
-        const size_t edf_count =
-            std::min(indexed_night.data_range_count,
-                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-        if (indexed_night.has_edf && edf_count > 0) {
-            for (size_t i = 0; i < edf_count; ++i) {
-                maybe_use_latest_range(indexed_night.data_ranges[i]);
+        ReportSessionRange data_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+        const size_t data_count =
+            collect_indexed_night_data_ranges(indexed_night,
+                                              data_ranges,
+                                              AC_REPORT_SUMMARY_SESSION_MAX);
+        if (indexed_night.has_edf && data_count > 0) {
+            for (size_t i = 0; i < data_count; ++i) {
+                maybe_use_latest_range(data_ranges[i]);
             }
+
             const size_t display_count =
                 std::min(indexed_night.range_count,
                          static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
             for (size_t i = 0; i < display_count; ++i) {
                 const ReportSessionRange &display = indexed_night.ranges[i];
                 bool overlaps_edf = false;
-                for (size_t k = 0; k < edf_count; ++k) {
+                for (size_t k = 0; k < data_count; ++k) {
                     if (ranges_overlap(display.start_ms,
                                        display.end_ms,
-                                       indexed_night.data_ranges[k].start_ms,
-                                       indexed_night.data_ranges[k].end_ms)) {
+                                       data_ranges[k].start_ms,
+                                       data_ranges[k].end_ms)) {
                         overlaps_edf = true;
                         break;
                     }

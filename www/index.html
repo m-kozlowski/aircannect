@@ -2092,7 +2092,7 @@
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_PLOT_CLIENT_CACHE_MAX = 6;
-    const REPORT_RANGE_CACHE_MAX = 3;
+    const REPORT_RANGE_CACHE_MAX = 24;
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
     const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
     const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
@@ -3870,7 +3870,8 @@
     }
 
     async function fetchReportPlotBuffer(index, version) {
-      const response = await fetch(reportPlotUrl(index, version));
+      const response = await fetch(reportPlotUrl(index, version),
+        {cache: "force-cache"});
       if (response.status === 200) {
         return {kind: "buffer", buffer: await response.arrayBuffer()};
       }
@@ -3896,7 +3897,7 @@
     }
 
     async function fetchReportRangePayload(url) {
-      const response = await fetch(url, {cache: "no-store"});
+      const response = await fetch(url, {cache: "force-cache"});
       if (response.status === 204) {
         return {kind: "plot", decoded: emptyReportPlot()};
       }

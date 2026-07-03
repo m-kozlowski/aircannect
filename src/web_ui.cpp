@@ -49,6 +49,7 @@ static constexpr size_t WEB_CONFIG_SYNC_JSON_RESERVE = 640;
 static constexpr size_t WEB_CONFIG_SMALL_JSON_RESERVE = 384;
 static constexpr size_t WEB_REPORT_RESULT_JSON_RESERVE = 4096;
 static constexpr size_t WEB_REPORT_SUMMARY_JSON_RESERVE = 24 * 1024;
+static constexpr size_t WEB_REPORT_PLOT_HTTP_ETAG_MAX = 144;
 static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
 
 const char *web_command_name(uint8_t kind) {
@@ -287,6 +288,50 @@ bool request_int64_arg(AsyncWebServerRequest *request,
     if (!end || *end != 0 || parsed < 0) return false;
     out = static_cast<int64_t>(parsed);
     return true;
+}
+
+void strip_http_etag_quotes(String &etag) {
+    if (etag.length() >= 2 && etag.charAt(0) == '"' &&
+        etag.charAt(etag.length() - 1) == '"') {
+        etag = etag.substring(1, etag.length() - 1);
+    }
+}
+
+bool format_report_plot_http_etag(const char *plot_etag,
+                                  bool range_requested,
+                                  int64_t range_from_ms,
+                                  int64_t range_to_ms,
+                                  char *out,
+                                  size_t out_size) {
+    if (!plot_etag || !plot_etag[0] || !out || out_size == 0) return false;
+
+    int written = 0;
+    if (range_requested) {
+        written = snprintf(out,
+                           out_size,
+                           "%s-%lld-%lld",
+                           plot_etag,
+                           static_cast<long long>(range_from_ms),
+                           static_cast<long long>(range_to_ms));
+    } else {
+        written = snprintf(out, out_size, "%s", plot_etag);
+    }
+
+    return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+void add_report_plot_cache_headers(AsyncWebServerResponse *response,
+                                   const char *http_etag) {
+    if (!response) return;
+
+    if (http_etag && http_etag[0]) {
+        char etag_hdr[WEB_REPORT_PLOT_HTTP_ETAG_MAX + 4] = {};
+        snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", http_etag);
+        response->addHeader("ETag", etag_hdr);
+    }
+
+    response->addHeader("Cache-Control",
+                        "public, max-age=31536000, immutable");
 }
 
 static constexpr size_t kStorageListDefaultLimit = 64;
@@ -2143,21 +2188,23 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
             return;
         }
     }
-    if (!range_requested && version.length() &&
-        request->hasHeader("If-None-Match")) {
+    char request_http_etag[WEB_REPORT_PLOT_HTTP_ETAG_MAX] = {};
+    if (version.length()) {
+        format_report_plot_http_etag(version.c_str(),
+                                     range_requested,
+                                     range_from_ms,
+                                     range_to_ms,
+                                     request_http_etag,
+                                     sizeof(request_http_etag));
+    }
+
+    if (request_http_etag[0] && request->hasHeader("If-None-Match")) {
         String inm = request->getHeader("If-None-Match")->value();
-        if (inm.length() >= 2 && inm.charAt(0) == '"' &&
-            inm.charAt(inm.length() - 1) == '"') {
-            inm = inm.substring(1, inm.length() - 1);
-        }
-        if (inm == version) {
+        strip_http_etag_quotes(inm);
+        if (inm == request_http_etag) {
             AsyncWebServerResponse *response = request->beginResponse(304);
             if (response) {
-                char etag_hdr[AC_REPORT_RESULT_ETAG_MAX + 4] = {};
-                snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", version.c_str());
-                response->addHeader("ETag", etag_hdr);
-                response->addHeader("Cache-Control",
-                                    "public, max-age=31536000, immutable");
+                add_report_plot_cache_headers(response, request_http_etag);
                 request->send(response);
             } else {
                 request->send(304);
@@ -2212,7 +2259,14 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
     if (st == ReportManager::PlotRead::Empty) {
         AsyncWebServerResponse *response = request->beginResponse(204);
         if (response) {
-            response->addHeader("Cache-Control", "no-store");
+            char http_etag[WEB_REPORT_PLOT_HTTP_ETAG_MAX] = {};
+            format_report_plot_http_etag(plot_etag,
+                                         range_requested,
+                                         range_from_ms,
+                                         range_to_ms,
+                                         http_etag,
+                                         sizeof(http_etag));
+            add_report_plot_cache_headers(response, http_etag);
             request->send(response);
         } else {
             request->send(204);
@@ -2236,8 +2290,15 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
     }
     if (st == ReportManager::PlotRead::Building || !payload ||
         payload->size() == 0) {
-        request->send(202, "application/json",
-                      "{\"ok\":true,\"state\":\"preparing\"}");
+        AsyncWebServerResponse *response = request->beginResponse(
+            202, "application/json", "{\"ok\":true,\"state\":\"preparing\"}");
+        if (response) {
+            response->addHeader("Cache-Control", "no-store");
+            request->send(response);
+        } else {
+            request->send(202, "application/json",
+                          "{\"ok\":true,\"state\":\"preparing\"}");
+        }
         return;
     }
     AsyncWebServerResponse *response = request->beginResponse(
@@ -2255,15 +2316,14 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"response alloc\"}");
         return;
     }
-    if (!range_requested && plot_etag[0]) {
-        char etag_hdr[52];
-        snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", plot_etag);
-        response->addHeader("ETag", etag_hdr);
-    }
-    response->addHeader("Cache-Control",
-                        range_requested
-                            ? "no-store"
-                            : "public, max-age=31536000, immutable");
+    char http_etag[WEB_REPORT_PLOT_HTTP_ETAG_MAX] = {};
+    format_report_plot_http_etag(plot_etag,
+                                 range_requested,
+                                 range_from_ms,
+                                 range_to_ms,
+                                 http_etag,
+                                 sizeof(http_etag));
+    add_report_plot_cache_headers(response, http_etag);
     response->addHeader("Accept-Ranges", "none");
     request->send(response);
 }

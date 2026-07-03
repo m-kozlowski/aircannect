@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "board_report.h"
 #include "edf_report_event_reader.h"
 #include "edf_report_series_reader.h"
 #include "memory_manager.h"
@@ -476,18 +477,14 @@ bool record_stream_series_sample(void *context,
 bool append_event_record(void *context, const ReportEventRecord &event) {
     AppendEventContext *ctx = static_cast<AppendEventContext *>(context);
     if (!ctx || !ctx->payload) return false;
-    const int64_t duration_ms = event.duration_ms > 0
-                                    ? static_cast<int64_t>(event.duration_ms)
-                                    : 0;
-    const int64_t event_end_ms = event.start_ms + duration_ms;
-    const bool in_range = duration_ms > 0
-                              ? event.start_ms < ctx->range_end_ms &&
-                                    event_end_ms > ctx->range_start_ms
-                              : event.start_ms >= ctx->range_start_ms &&
-                                    event.start_ms < ctx->range_end_ms;
-    if (!in_range) {
+
+    if (!report_event_overlaps_window(event,
+                                      ctx->range_start_ms,
+                                      ctx->range_end_ms,
+                                      AC_REPORT_EVENT_EDGE_TOLERANCE_MS)) {
         return true;
     }
+
     if (!report_append_event_record(*ctx->payload, event)) {
         ctx->full = true;
         return false;

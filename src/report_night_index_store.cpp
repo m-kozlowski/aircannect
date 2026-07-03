@@ -14,13 +14,13 @@ namespace aircannect {
 namespace ReportNightIndexStore {
 namespace {
 
-constexpr const char *INDEX_DIR = "/aircannect/report/v4/index/v1";
+constexpr const char *INDEX_DIR = "/aircannect/report/v4/index/v2";
 constexpr const char *INDEX_PATH =
-    "/aircannect/report/v4/index/v1/night-index.bin";
+    "/aircannect/report/v4/index/v2/night-index.bin";
 constexpr const char *INDEX_TMP_PATH =
-    "/aircannect/report/v4/index/v1/night-index.bin.tmp";
+    "/aircannect/report/v4/index/v2/night-index.bin.tmp";
 constexpr uint32_t INDEX_MAGIC = 0x494e4341u;  // "ACNI", little-endian.
-constexpr uint16_t INDEX_SCHEMA = 1;
+constexpr uint16_t INDEX_SCHEMA = 2;
 constexpr size_t INDEX_HEADER_SIZE = 32;
 constexpr size_t INDEX_RECORD_SIZE = 2048;
 constexpr size_t RECORD_SUMMARY_OFFSET = 32;
@@ -209,6 +209,8 @@ bool decode_record(const uint8_t *raw, ReportIndexedNight &night) {
             get_le64(raw + RECORD_EDF_SIGNATURES_OFFSET +
                      static_cast<size_t>(i) * sizeof(uint64_t));
     }
+
+    normalize_report_indexed_night(night);
     return night.summary.valid && night.summary.start_ms > 0;
 }
 

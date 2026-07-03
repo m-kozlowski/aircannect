@@ -49,6 +49,7 @@ bool indexed_night_data_span(const ReportIndexedNight &night,
                              int64_t &span_end);
 bool indexed_night_summary_ranges_covered_by_data(
     const ReportIndexedNight &night);
+void normalize_report_indexed_night(ReportIndexedNight &night);
 size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
                                          ReportSessionRange *ranges,
                                          size_t max_ranges);

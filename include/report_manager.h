@@ -875,7 +875,6 @@ private:
     void build_empty_plot_bin(ReportSpoolBuffer &out) const;
     bool start_result_plot_build();
     void poll_result_plot_build();
-    bool plot_time_in_ranges(int64_t timestamp_ms) const;
     int plot_range_index(int64_t timestamp_ms) const;
     bool process_plot_event_chunk(const ReportResultChunk &chunk);
     bool open_plot_series_state(size_t stream_index);

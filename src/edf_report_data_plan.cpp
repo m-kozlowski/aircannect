@@ -268,8 +268,7 @@ bool signal_covers_range(const EdfReportSessionDescriptor *sessions,
     }
 
     int64_t covered_until = range.start_ms;
-    while (covered_until + AC_EDF_REPORT_COVERAGE_TOLERANCE_MS <
-           range.end_ms) {
+    while (true) {
         PlanCoverageContext ctx;
         ctx.covered_until_ms = covered_until;
         for (size_t i = 0; i < session_count; ++i) {
@@ -284,8 +283,11 @@ bool signal_covers_range(const EdfReportSessionDescriptor *sessions,
         }
         if (!ctx.advanced) return false;
         covered_until = ctx.covered_until_ms;
+        if (covered_until + AC_EDF_REPORT_COVERAGE_TOLERANCE_MS >=
+            range.end_ms) {
+            return true;
+        }
     }
-    return true;
 }
 
 bool emit_event_file_entry(const EdfReportSessionDescriptor &session,

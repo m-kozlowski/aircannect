@@ -84,6 +84,11 @@ public:
                                 int64_t end_ms,
                                 int64_t &missing_ms) const override;
 
+    bool signal_coverage_complete(const ReportSourceDef &source,
+                                  ReportSignalId signal,
+                                  int64_t start_ms,
+                                  int64_t end_ms) const override;
+
     bool for_each_chunk(ReportStoreChunkKind kind,
                         const ReportSourceDef &source,
                         ReportSignalId signal,

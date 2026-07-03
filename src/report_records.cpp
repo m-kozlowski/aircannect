@@ -189,6 +189,35 @@ size_t report_event_record_wire_size() {
     return EVENT_RECORD_WIRE_SIZE;
 }
 
+bool report_event_overlaps_window(const ReportEventRecord &event,
+                                  int64_t window_start_ms,
+                                  int64_t window_end_ms,
+                                  int64_t edge_tolerance_ms) {
+    if (!valid_timestamp(event.start_ms) ||
+        window_end_ms <= window_start_ms ||
+        event.duration_ms < 0) {
+        return false;
+    }
+
+    const int64_t tolerance =
+        edge_tolerance_ms > 0 ? edge_tolerance_ms : 0;
+    const int64_t expanded_start = window_start_ms - tolerance;
+    const int64_t expanded_end = window_end_ms + tolerance;
+
+    if (event.duration_ms == 0) {
+        return event.start_ms >= expanded_start &&
+               event.start_ms < expanded_end;
+    }
+
+    const int64_t duration_ms = static_cast<int64_t>(event.duration_ms);
+    if (duration_ms > INT64_MAX - event.start_ms) return false;
+
+    const int64_t event_end_ms = event.start_ms + duration_ms;
+    if (event_end_ms <= event.start_ms) return false;
+
+    return event.start_ms < expanded_end && event_end_ms > expanded_start;
+}
+
 bool report_append_event_record(ReportSpoolBuffer &out,
                                 const ReportEventRecord &event) {
     if (!valid_timestamp(event.start_ms) || event.duration_ms < 0) {
