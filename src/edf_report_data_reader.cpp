@@ -2,15 +2,17 @@
 
 #include <FS.h>
 #include <limits.h>
-#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
 #include "board_report.h"
+#include "edf_report_batch_plot.h"
+#include "edf_report_data_file.h"
 #include "edf_report_event_reader.h"
 #include "edf_report_series_reader.h"
+#include "edf_report_stream_series.h"
+#include "edf_report_uniform_series.h"
 #include "memory_manager.h"
-#include "storage_manager.h"
 
 namespace aircannect {
 namespace {
@@ -22,53 +24,6 @@ struct AppendEventContext {
     bool full = false;
 };
 
-struct BuildUniformSeriesContext {
-    int64_t start_ms = 0;
-    uint32_t interval_ms = 0;
-    uint32_t sample_count = 0;
-    int32_t *values = nullptr;
-    uint8_t *missing_bitmap = nullptr;
-    size_t missing_bitmap_bytes = 0;
-    bool bad_sample = false;
-};
-
-struct UniformSeriesData {
-    uint32_t interval_ms = 0;
-    uint32_t sample_count = 0;
-    int32_t *values = nullptr;
-    uint8_t *missing_bitmap = nullptr;
-    size_t missing_bitmap_bytes = 0;
-
-    void clear() {
-        if (missing_bitmap) {
-            Memory::free(missing_bitmap);
-            missing_bitmap = nullptr;
-        }
-        if (values) {
-            Memory::free(values);
-            values = nullptr;
-        }
-        interval_ms = 0;
-        sample_count = 0;
-        missing_bitmap_bytes = 0;
-    }
-};
-
-struct StreamSeriesContext {
-    ReportSeriesSampleCallback callback = nullptr;
-    void *context = nullptr;
-    uint32_t interval_ms = 0;
-    bool trim_leading = false;
-    bool trim_trailing = false;
-    bool leading_open = false;
-    bool pending_zero = false;
-    int64_t pending_zero_start_ms = 0;
-    int64_t pending_zero_next_ms = 0;
-    uint32_t pending_zero_count = 0;
-    uint32_t samples_emitted = 0;
-    uint32_t samples_trimmed = 0;
-};
-
 struct BatchSeriesEmitter {
     EdfReportSeriesBatchSampleCallback callback = nullptr;
     void *context = nullptr;
@@ -77,7 +32,7 @@ struct BatchSeriesEmitter {
 
 struct BatchSeriesDecoder {
     EdfReportSeriesDecoder decoder;
-    StreamSeriesContext stream;
+    EdfReportStreamSeriesContext stream;
     BatchSeriesEmitter emitter;
     uint32_t first_record = 0;
     uint32_t end_record = 0;
@@ -85,76 +40,14 @@ struct BatchSeriesDecoder {
     bool active = false;
 };
 
-struct BatchPlotBucket {
-    bool have = false;
-    int64_t start_t = 0;
-    int64_t end_t = 0;
-    int64_t min_t = 0;
-    int64_t max_t = 0;
-    int16_t start_digital = 0;
-    int16_t end_digital = 0;
-    int16_t min_digital = 0;
-    int16_t max_digital = 0;
-
-    void clear() {
-        have = false;
-        start_t = 0;
-        end_t = 0;
-        min_t = 0;
-        max_t = 0;
-        start_digital = 0;
-        end_digital = 0;
-        min_digital = 0;
-        max_digital = 0;
-    }
-};
-
-struct BatchPlotState {
-    const EdfReportPlotRange *ranges = nullptr;
-    size_t range_count = 0;
-    int64_t plot_start_ms = 0;
-    uint32_t bucket_ms = 1;
-    uint32_t gap_threshold_ms = 5000;
-    int32_t value_multiplier = 1;
-    BatchPlotBucket bucket;
-    bool have_last_sample = false;
-    int64_t last_sample_ms = 0;
-    int last_range_index = -1;
-    int64_t current_bucket = -1;
-    int64_t current_bucket_start_ms = 0;
-    int64_t current_bucket_end_ms = 0;
-    EdfReportSeriesBatchPlotCallback callback = nullptr;
-    void *context = nullptr;
-    size_t item_index = 0;
-    uint32_t points_emitted = 0;
-};
-
 struct BatchPlotDecoder {
     EdfReportSeriesDecoder decoder;
-    BatchPlotState plot;
+    EdfReportBatchPlotState plot;
     uint32_t first_record = 0;
     uint32_t end_record = 0;
     uint32_t interval_ms = 0;
     bool active = false;
 };
-
-void clear_missing_bit(uint8_t *bits, size_t bytes, uint32_t index) {
-    const size_t byte = static_cast<size_t>(index) / 8u;
-    if (!bits || byte >= bytes) return;
-    bits[byte] &= static_cast<uint8_t>(~(1u << (index % 8u)));
-}
-
-void set_missing_bit(uint8_t *bits, size_t bytes, uint32_t index) {
-    const size_t byte = static_cast<size_t>(index) / 8u;
-    if (!bits || byte >= bytes) return;
-    bits[byte] |= static_cast<uint8_t>(1u << (index % 8u));
-}
-
-bool missing_bit_set(const uint8_t *bits, size_t bytes, uint32_t index) {
-    const size_t byte = static_cast<size_t>(index) / 8u;
-    if (!bits || byte >= bytes) return true;
-    return (bits[byte] & static_cast<uint8_t>(1u << (index % 8u))) != 0;
-}
 
 bool derived_metric_edge_zero_padding(ReportSignalId signal) {
     switch (signal) {
@@ -166,312 +59,6 @@ bool derived_metric_edge_zero_padding(ReportSignalId signal) {
         default:
             return false;
     }
-}
-
-int32_t physical_to_milli(float value) {
-    const long scaled = lroundf(value * 1000.0f);
-    if (scaled < INT32_MIN) return INT32_MIN;
-    if (scaled > INT32_MAX) return INT32_MAX;
-    return static_cast<int32_t>(scaled);
-}
-
-int32_t scaled_digital_to_milli(const EdfSignalScale &scale,
-                                int16_t digital,
-                                int32_t multiplier) {
-    int32_t value = physical_to_milli(edf_scale_digital_sample(scale, digital));
-    if (multiplier != 1) {
-        const int64_t scaled =
-            static_cast<int64_t>(value) * static_cast<int64_t>(multiplier);
-        value = scaled > INT32_MAX
-                    ? INT32_MAX
-                    : (scaled < INT32_MIN ? INT32_MIN
-                                          : static_cast<int32_t>(scaled));
-    }
-    return value;
-}
-
-int find_plot_range(const BatchPlotState &plot, int64_t timestamp_ms) {
-    if (!plot.ranges || plot.range_count == 0) return -1;
-    if (plot.last_range_index >= 0 &&
-        static_cast<size_t>(plot.last_range_index) < plot.range_count) {
-        const EdfReportPlotRange &range =
-            plot.ranges[plot.last_range_index];
-        if (timestamp_ms >= range.start_ms && timestamp_ms < range.end_ms) {
-            return plot.last_range_index;
-        }
-    }
-    for (size_t i = 0; i < plot.range_count; ++i) {
-        const EdfReportPlotRange &range = plot.ranges[i];
-        if (timestamp_ms >= range.start_ms && timestamp_ms < range.end_ms) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
-
-bool emit_plot_point(BatchPlotState &plot,
-                     const EdfSignalScale &scale,
-                     int64_t timestamp_ms,
-                     int16_t digital) {
-    if (!plot.callback) return false;
-    EdfReportSeriesPlotPoint point;
-    point.timestamp_ms = timestamp_ms;
-    point.value_milli =
-        scaled_digital_to_milli(scale, digital, plot.value_multiplier);
-    if (!plot.callback(plot.context, plot.item_index, point)) return false;
-    plot.points_emitted++;
-    return true;
-}
-
-bool emit_plot_gap(BatchPlotState &plot) {
-    if (!plot.callback) return false;
-    EdfReportSeriesPlotPoint point;
-    point.gap = true;
-    if (!plot.callback(plot.context, plot.item_index, point)) return false;
-    plot.have_last_sample = false;
-    plot.last_sample_ms = 0;
-    plot.last_range_index = -1;
-    plot.current_bucket = -1;
-    plot.current_bucket_start_ms = 0;
-    plot.current_bucket_end_ms = 0;
-    return true;
-}
-
-bool flush_plot_bucket(BatchPlotState &plot,
-                       const EdfSignalScale &scale) {
-    BatchPlotBucket &bucket = plot.bucket;
-    if (!bucket.have) return true;
-    struct Point {
-        int64_t t = 0;
-        int16_t digital = 0;
-    };
-    Point points[4] = {
-        {bucket.start_t, bucket.start_digital},
-        {bucket.min_t, bucket.min_digital},
-        {bucket.max_t, bucket.max_digital},
-        {bucket.end_t, bucket.end_digital},
-    };
-    for (size_t i = 1; i < 4; ++i) {
-        Point v = points[i];
-        size_t j = i;
-        while (j > 0 && points[j - 1].t > v.t) {
-            points[j] = points[j - 1];
-            --j;
-        }
-        points[j] = v;
-    }
-    bool emitted[4] = {};
-    for (uint8_t i = 0; i < 4; ++i) {
-        if (emitted[i]) continue;
-        if (!emit_plot_point(plot,
-                             scale,
-                             points[i].t,
-                             points[i].digital)) {
-            return false;
-        }
-        for (uint8_t j = i + 1; j < 4; ++j) {
-            if (points[j].t == points[i].t) emitted[j] = true;
-        }
-    }
-    bucket.clear();
-    return true;
-}
-
-bool record_plot_digital_sample(BatchPlotState &plot,
-                                const EdfSignalScale &scale,
-                                int64_t timestamp_ms,
-                                int16_t digital,
-                                int range_index) {
-    if (range_index < 0) return true;
-    if (plot.have_last_sample &&
-        (range_index != plot.last_range_index ||
-         timestamp_ms >
-             plot.last_sample_ms +
-                 static_cast<int64_t>(plot.gap_threshold_ms))) {
-        if (!flush_plot_bucket(plot, scale)) return false;
-        if (!emit_plot_gap(plot)) return false;
-    }
-
-    const uint32_t bucket_ms = plot.bucket_ms ? plot.bucket_ms : 1u;
-    int64_t sample_bucket = plot.current_bucket;
-    if (plot.current_bucket < 0 ||
-        timestamp_ms < plot.current_bucket_start_ms ||
-        timestamp_ms >= plot.current_bucket_end_ms) {
-        sample_bucket =
-            (timestamp_ms - plot.plot_start_ms) /
-            static_cast<int64_t>(bucket_ms);
-        if (sample_bucket < 0) sample_bucket = 0;
-    }
-    if (plot.current_bucket != sample_bucket) {
-        if (!flush_plot_bucket(plot, scale)) return false;
-        plot.current_bucket = sample_bucket;
-        plot.current_bucket_start_ms =
-            plot.plot_start_ms +
-            sample_bucket * static_cast<int64_t>(bucket_ms);
-        plot.current_bucket_end_ms =
-            plot.current_bucket_start_ms + static_cast<int64_t>(bucket_ms);
-    }
-
-    BatchPlotBucket &bucket = plot.bucket;
-    if (!bucket.have) {
-        bucket.have = true;
-        bucket.start_t = timestamp_ms;
-        bucket.end_t = timestamp_ms;
-        bucket.min_t = timestamp_ms;
-        bucket.max_t = timestamp_ms;
-        bucket.start_digital = digital;
-        bucket.end_digital = digital;
-        bucket.min_digital = digital;
-        bucket.max_digital = digital;
-    } else {
-        bucket.end_t = timestamp_ms;
-        bucket.end_digital = digital;
-        if (digital < bucket.min_digital) {
-            bucket.min_t = timestamp_ms;
-            bucket.min_digital = digital;
-        }
-        if (digital > bucket.max_digital) {
-            bucket.max_t = timestamp_ms;
-            bucket.max_digital = digital;
-        }
-    }
-
-    plot.have_last_sample = true;
-    plot.last_sample_ms = timestamp_ms;
-    plot.last_range_index = range_index;
-    return true;
-}
-
-uint32_t trim_edge_zero_padding(BuildUniformSeriesContext &ctx,
-                                bool trim_leading,
-                                bool trim_trailing) {
-    if (!ctx.values || !ctx.missing_bitmap || ctx.sample_count == 0) {
-        return 0;
-    }
-    uint32_t trimmed = 0;
-    if (trim_leading) {
-        for (uint32_t i = 0; i < ctx.sample_count; ++i) {
-            if (missing_bit_set(ctx.missing_bitmap,
-                                ctx.missing_bitmap_bytes,
-                                i)) {
-                continue;
-            }
-            if (ctx.values[i] != 0) break;
-            set_missing_bit(ctx.missing_bitmap, ctx.missing_bitmap_bytes, i);
-            trimmed++;
-        }
-    }
-    if (trim_trailing) {
-        for (uint32_t i = ctx.sample_count; i > 0; --i) {
-            const uint32_t index = i - 1;
-            if (missing_bit_set(ctx.missing_bitmap,
-                                ctx.missing_bitmap_bytes,
-                                index)) {
-                continue;
-            }
-            if (ctx.values[index] != 0) break;
-            set_missing_bit(ctx.missing_bitmap,
-                            ctx.missing_bitmap_bytes,
-                            index);
-            trimmed++;
-        }
-    }
-    return trimmed;
-}
-
-bool record_uniform_series_sample(void *context,
-                                  const ReportSeriesSample &sample) {
-    BuildUniformSeriesContext *ctx =
-        static_cast<BuildUniformSeriesContext *>(context);
-    if (!ctx || !ctx->values || !ctx->missing_bitmap ||
-        ctx->interval_ms == 0 || sample.timestamp_ms < ctx->start_ms) {
-        return false;
-    }
-    const int64_t delta = sample.timestamp_ms - ctx->start_ms;
-    if (delta < 0 || delta % static_cast<int64_t>(ctx->interval_ms) != 0) {
-        ctx->bad_sample = true;
-        return false;
-    }
-    const int64_t index64 = delta / static_cast<int64_t>(ctx->interval_ms);
-    if (index64 < 0 || index64 > UINT32_MAX ||
-        static_cast<uint32_t>(index64) >= ctx->sample_count) {
-        ctx->bad_sample = true;
-        return false;
-    }
-    const uint32_t index = static_cast<uint32_t>(index64);
-    ctx->values[index] = sample.value_milli;
-    clear_missing_bit(ctx->missing_bitmap,
-                      ctx->missing_bitmap_bytes,
-                      index);
-    return true;
-}
-
-bool emit_stream_series_sample(StreamSeriesContext &ctx,
-                               const ReportSeriesSample &sample) {
-    if (!ctx.callback) return false;
-    if (!ctx.callback(ctx.context, sample)) return false;
-    ctx.samples_emitted++;
-    return true;
-}
-
-bool flush_stream_zero_run(StreamSeriesContext &ctx) {
-    if (!ctx.pending_zero) return true;
-    if (ctx.interval_ms == 0) return false;
-    for (uint32_t i = 0; i < ctx.pending_zero_count; ++i) {
-        ReportSeriesSample zero;
-        zero.timestamp_ms =
-            ctx.pending_zero_start_ms +
-            static_cast<int64_t>(i) * static_cast<int64_t>(ctx.interval_ms);
-        zero.value_milli = 0;
-        if (!emit_stream_series_sample(ctx, zero)) return false;
-    }
-    ctx.pending_zero = false;
-    ctx.pending_zero_start_ms = 0;
-    ctx.pending_zero_next_ms = 0;
-    ctx.pending_zero_count = 0;
-    return true;
-}
-
-void clear_stream_zero_run(StreamSeriesContext &ctx) {
-    if (!ctx.pending_zero) return;
-    ctx.samples_trimmed += ctx.pending_zero_count;
-    ctx.pending_zero = false;
-    ctx.pending_zero_start_ms = 0;
-    ctx.pending_zero_next_ms = 0;
-    ctx.pending_zero_count = 0;
-}
-
-bool record_stream_series_sample(void *context,
-                                 const ReportSeriesSample &sample) {
-    StreamSeriesContext *ctx = static_cast<StreamSeriesContext *>(context);
-    if (!ctx || !ctx->callback) return false;
-    const bool zero = sample.value_milli == 0;
-
-    if (ctx->trim_leading && ctx->leading_open) {
-        if (zero) {
-            ctx->samples_trimmed++;
-            return true;
-        }
-        ctx->leading_open = false;
-    }
-
-    if (ctx->trim_trailing && zero) {
-        if (!ctx->pending_zero ||
-            sample.timestamp_ms != ctx->pending_zero_next_ms) {
-            if (!flush_stream_zero_run(*ctx)) return false;
-            ctx->pending_zero = true;
-            ctx->pending_zero_start_ms = sample.timestamp_ms;
-            ctx->pending_zero_count = 0;
-        }
-        ctx->pending_zero_count++;
-        ctx->pending_zero_next_ms =
-            sample.timestamp_ms +
-            static_cast<int64_t>(ctx->interval_ms);
-        return true;
-    }
-
-    if (!flush_stream_zero_run(*ctx)) return false;
-    return emit_stream_series_sample(*ctx, sample);
 }
 
 bool append_event_record(void *context, const ReportEventRecord &event) {
@@ -500,147 +87,12 @@ bool emit_batch_series_sample(void *context,
     return emitter->callback(emitter->context, emitter->item_index, sample);
 }
 
-const EdfReportSessionFileDescriptor *entry_file(
-    const EdfReportSessionDescriptor &session,
-    const EdfReportDataPlanEntry &entry) {
-    if (entry.file_slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return nullptr;
-    const EdfReportSessionFileDescriptor &file =
-        session.files[entry.file_slot];
-    if (file.kind != entry.file_kind || !file.path[0] ||
-        file.header_size == 0 || file.record_size == 0 ||
-        file.complete_records == 0) {
-        return nullptr;
-    }
-    if (entry.first_record > file.complete_records ||
-        entry.record_count > file.complete_records - entry.first_record) {
-        return nullptr;
-    }
-    return &file;
-}
-
-EdfReportDataReadStatus read_exact(File &file,
-                                   uint8_t *buffer,
-                                   size_t len) {
-    if (!buffer && len > 0) return EdfReportDataReadStatus::InvalidArgument;
-    size_t done = 0;
-    while (done < len) {
-        int read = 0;
-        {
-            Storage::Guard guard;
-            read = file.read(buffer + done, len - done);
-        }
-        if (read <= 0) return EdfReportDataReadStatus::RecordReadFailed;
-        done += static_cast<size_t>(read);
-    }
-    return EdfReportDataReadStatus::Ok;
-}
-
-EdfReportDataReadStatus open_data_file(
-    const EdfReportSessionFileDescriptor &session_file,
-    File &file) {
-    {
-        Storage::Guard guard;
-        file = Storage::open(session_file.path, "r");
-    }
-    if (!file || file.isDirectory()) {
-        if (file) {
-            Storage::Guard guard;
-            file.close();
-        }
-        return EdfReportDataReadStatus::FileOpenFailed;
-    }
-    return EdfReportDataReadStatus::Ok;
-}
-
-EdfReportDataReadStatus read_header(
-    const EdfReportSessionFileDescriptor &session_file,
-    EdfReportFileDescriptor &file_desc,
-    uint8_t *&header,
-    size_t &header_size,
-    File &file) {
-    header = nullptr;
-    header_size = session_file.header_size;
-    if (header_size == 0) return EdfReportDataReadStatus::HeaderReadFailed;
-
-    EdfReportDataReadStatus open_status = open_data_file(session_file, file);
-    if (open_status != EdfReportDataReadStatus::Ok) return open_status;
-
-    header = static_cast<uint8_t *>(Memory::alloc_large(header_size, false));
-    if (!header) {
-        Storage::Guard guard;
-        file.close();
-        return EdfReportDataReadStatus::HeaderReadFailed;
-    }
-
-    {
-        Storage::Guard guard;
-        if (!file.seek(0)) {
-            Memory::free(header);
-            header = nullptr;
-            file.close();
-            return EdfReportDataReadStatus::HeaderReadFailed;
-        }
-    }
-
-    size_t done = 0;
-    while (done < header_size) {
-        int read = 0;
-        {
-            Storage::Guard guard;
-            read = file.read(header + done, header_size - done);
-        }
-        if (read <= 0) {
-            Memory::free(header);
-            header = nullptr;
-            Storage::Guard guard;
-            file.close();
-            return EdfReportDataReadStatus::HeaderReadFailed;
-        }
-        done += static_cast<size_t>(read);
-    }
-
-    const EdfReportFileStatus desc_status = edf_report_describe_file(
-        session_file.path,
-        header,
-        header_size,
-        session_file.file_size,
-        session_file.last_write,
-        0,
-        file_desc);
-    if (desc_status != EdfReportFileStatus::Ok) {
-        Memory::free(header);
-        header = nullptr;
-        Storage::Guard guard;
-        file.close();
-        return EdfReportDataReadStatus::HeaderParseFailed;
-    }
-    file_desc.header_start_ms = session_file.header_start_ms;
-    file_desc.header_end_ms = session_file.header_end_ms;
-    file_desc.inventory.complete_records_from_size =
-        session_file.complete_records;
-    return EdfReportDataReadStatus::Ok;
-}
-
-EdfReportDataReadStatus seek_record(File &file,
-                                    const EdfReportSessionFileDescriptor &sf,
-                                    uint32_t record_index) {
-    const uint64_t offset =
-        static_cast<uint64_t>(sf.header_size) +
-        static_cast<uint64_t>(record_index) *
-            static_cast<uint64_t>(sf.record_size);
-    if (offset > UINT32_MAX) return EdfReportDataReadStatus::RecordReadFailed;
-    Storage::Guard guard;
-    return file.seek(static_cast<uint32_t>(offset))
-               ? EdfReportDataReadStatus::Ok
-               : EdfReportDataReadStatus::RecordReadFailed;
-}
-
 EdfReportDataReadStatus collect_series_entry_decoded(
     const EdfReportSessionFileDescriptor &session_file,
     const EdfReportDataPlanEntry &entry,
     const EdfReportSeriesDecoder &decoder,
     File &file,
-    UniformSeriesData &series,
+    EdfReportUniformSeriesData &series,
     EdfReportDataReadStats &stats) {
     series.clear();
 
@@ -710,7 +162,7 @@ EdfReportDataReadStatus collect_series_entry_decoded(
         return EdfReportDataReadStatus::RecordReadFailed;
     }
 
-    BuildUniformSeriesContext ctx;
+    EdfReportUniformSeriesBuildContext ctx;
     ctx.start_ms = entry.start_ms;
     ctx.interval_ms = interval_ms;
     ctx.sample_count = sample_count;
@@ -718,23 +170,24 @@ EdfReportDataReadStatus collect_series_entry_decoded(
     ctx.missing_bitmap = missing_bitmap;
     ctx.missing_bitmap_bytes = missing_bitmap_bytes;
     EdfReportDataReadStatus status =
-        seek_record(file, session_file, entry.first_record);
+        edf_report_data_seek_record(file, session_file, entry.first_record);
     for (uint32_t i = 0; i < entry.record_count; ++i) {
         if (status != EdfReportDataReadStatus::Ok) break;
-        status = read_exact(file, record, decoder.record_size);
+        status = edf_report_data_read_exact(file, record, decoder.record_size);
         if (status != EdfReportDataReadStatus::Ok) break;
         stats.records_read++;
         EdfReportSeriesDecodeStats record_stats;
         const EdfReportSeriesStatus decode_status =
-            edf_report_decode_series_record(decoder,
-                                            record,
-                                            decoder.record_size,
-                                            entry.first_record + i,
-                                            entry.start_ms,
-                                            entry.end_ms,
-                                            record_uniform_series_sample,
-                                            &ctx,
-                                            record_stats);
+            edf_report_decode_series_record(
+                decoder,
+                record,
+                decoder.record_size,
+                entry.first_record + i,
+                entry.start_ms,
+                entry.end_ms,
+                edf_report_uniform_series_record_sample,
+                &ctx,
+                record_stats);
         stats.samples_seen += record_stats.samples_seen;
         stats.samples_missing += record_stats.samples_missing;
         stats.samples_out_of_range += record_stats.samples_out_of_range;
@@ -747,10 +200,11 @@ EdfReportDataReadStatus collect_series_entry_decoded(
     Memory::free(record);
     if (status == EdfReportDataReadStatus::Ok) {
         if (derived_metric_edge_zero_padding(entry.signal)) {
-            const uint32_t trimmed = trim_edge_zero_padding(
-                ctx,
-                entry.trim_leading_padding,
-                entry.trim_trailing_padding);
+            const uint32_t trimmed =
+                edf_report_uniform_series_trim_edge_zero_padding(
+                    ctx,
+                    entry.trim_leading_padding,
+                    entry.trim_trailing_padding);
             if (trimmed > 0) {
                 stats.samples_missing += trimmed;
                 stats.samples_emitted =
@@ -780,7 +234,7 @@ EdfReportDataReadStatus collect_series_entry_from_header(
     const uint8_t *header,
     size_t header_size,
     File &file,
-    UniformSeriesData &series,
+    EdfReportUniformSeriesData &series,
     EdfReportDataReadStats &stats) {
     EdfReportSeriesDecoder decoder;
     const EdfReportSeriesStatus init_status =
@@ -855,7 +309,7 @@ EdfReportDataReadStatus stream_series_entry_from_header(
         Memory::alloc_large(decoder.record_size, false));
     if (!record) return EdfReportDataReadStatus::RecordReadFailed;
 
-    StreamSeriesContext ctx;
+    EdfReportStreamSeriesContext ctx;
     ctx.callback = callback;
     ctx.context = context;
     ctx.interval_ms = interval_ms;
@@ -866,23 +320,24 @@ EdfReportDataReadStatus stream_series_entry_from_header(
     }
 
     EdfReportDataReadStatus status =
-        seek_record(file, session_file, entry.first_record);
+        edf_report_data_seek_record(file, session_file, entry.first_record);
     for (uint32_t i = 0; i < entry.record_count; ++i) {
         if (status != EdfReportDataReadStatus::Ok) break;
-        status = read_exact(file, record, decoder.record_size);
+        status = edf_report_data_read_exact(file, record, decoder.record_size);
         if (status != EdfReportDataReadStatus::Ok) break;
         stats.records_read++;
         EdfReportSeriesDecodeStats record_stats;
         const EdfReportSeriesStatus decode_status =
-            edf_report_decode_series_record(decoder,
-                                            record,
-                                            decoder.record_size,
-                                            entry.first_record + i,
-                                            entry.start_ms,
-                                            entry.end_ms,
-                                            record_stream_series_sample,
-                                            &ctx,
-                                            record_stats);
+            edf_report_decode_series_record(
+                decoder,
+                record,
+                decoder.record_size,
+                entry.first_record + i,
+                entry.start_ms,
+                entry.end_ms,
+                edf_report_stream_series_record_sample,
+                &ctx,
+                record_stats);
         stats.samples_seen += record_stats.samples_seen;
         stats.samples_missing += record_stats.samples_missing;
         stats.samples_out_of_range += record_stats.samples_out_of_range;
@@ -898,7 +353,7 @@ EdfReportDataReadStatus stream_series_entry_from_header(
     Memory::free(record);
 
     if (status == EdfReportDataReadStatus::Ok) {
-        clear_stream_zero_run(ctx);
+        edf_report_stream_series_clear_zero_run(ctx);
         stats.samples_emitted = ctx.samples_emitted;
         stats.samples_missing += ctx.samples_trimmed;
     }
@@ -1034,12 +489,12 @@ EdfReportDataReadStatus stream_series_batch_from_header(
     }
 
     if (status == EdfReportDataReadStatus::Ok) {
-        status = seek_record(file, session_file, first_record);
+        status = edf_report_data_seek_record(file, session_file, first_record);
     }
     for (uint32_t record_index = first_record;
          status == EdfReportDataReadStatus::Ok && record_index < end_record;
          ++record_index) {
-        status = read_exact(file, record, session_file.record_size);
+        status = edf_report_data_read_exact(file, record, session_file.record_size);
         if (status != EdfReportDataReadStatus::Ok) break;
         stats.records_read++;
         for (size_t item_index = 0; item_index < entry_count; ++item_index) {
@@ -1051,15 +506,16 @@ EdfReportDataReadStatus stream_series_batch_from_header(
             EdfReportSeriesDecodeStats record_stats;
             const EdfReportDataPlanEntry &entry = entries[item_index];
             const EdfReportSeriesStatus decode_status =
-                edf_report_decode_series_record(item.decoder,
-                                                record,
-                                                session_file.record_size,
-                                                record_index,
-                                                entry.start_ms,
-                                                entry.end_ms,
-                                                record_stream_series_sample,
-                                                &item.stream,
-                                                record_stats);
+                edf_report_decode_series_record(
+                    item.decoder,
+                    record,
+                    session_file.record_size,
+                    record_index,
+                    entry.start_ms,
+                    entry.end_ms,
+                    edf_report_stream_series_record_sample,
+                    &item.stream,
+                    record_stats);
             stats.samples_seen += record_stats.samples_seen;
             stats.samples_missing += record_stats.samples_missing;
             stats.samples_out_of_range += record_stats.samples_out_of_range;
@@ -1077,7 +533,7 @@ EdfReportDataReadStatus stream_series_batch_from_header(
     if (record) Memory::free(record);
     if (status == EdfReportDataReadStatus::Ok) {
         for (size_t i = 0; i < entry_count; ++i) {
-            clear_stream_zero_run(items[i].stream);
+            edf_report_stream_series_clear_zero_run(items[i].stream);
             stats.samples_emitted += items[i].stream.samples_emitted;
             stats.samples_missing += items[i].stream.samples_trimmed;
         }
@@ -1213,12 +669,12 @@ EdfReportDataReadStatus stream_series_batch_plot_from_header(
     }
 
     if (status == EdfReportDataReadStatus::Ok) {
-        status = seek_record(file, session_file, first_record);
+        status = edf_report_data_seek_record(file, session_file, first_record);
     }
     for (uint32_t record_index = first_record;
          status == EdfReportDataReadStatus::Ok && record_index < end_record;
          ++record_index) {
-        status = read_exact(file, record, session_file.record_size);
+        status = edf_report_data_read_exact(file, record, session_file.record_size);
         if (status != EdfReportDataReadStatus::Ok) break;
         stats.records_read++;
         for (size_t item_index = 0; item_index < entry_count; ++item_index) {
@@ -1248,7 +704,7 @@ EdfReportDataReadStatus stream_series_batch_plot_from_header(
                     continue;
                 }
                 const int range_index =
-                    find_plot_range(item.plot, sample_ms);
+                    edf_report_batch_plot_find_range(item.plot, sample_ms);
                 if (range_index < 0) {
                     stats.samples_out_of_range++;
                     continue;
@@ -1269,11 +725,12 @@ EdfReportDataReadStatus stream_series_batch_plot_from_header(
                     stats.samples_missing++;
                     continue;
                 }
-                if (!record_plot_digital_sample(item.plot,
-                                                item.decoder.signal_scale,
-                                                sample_ms,
-                                                digital,
-                                                range_index)) {
+                if (!edf_report_batch_plot_record_sample(
+                        item.plot,
+                        item.decoder.signal_scale,
+                        sample_ms,
+                        digital,
+                        range_index)) {
                     status = EdfReportDataReadStatus::CallbackRejected;
                     break;
                 }
@@ -1285,8 +742,8 @@ EdfReportDataReadStatus stream_series_batch_plot_from_header(
 
     if (status == EdfReportDataReadStatus::Ok) {
         for (size_t i = 0; i < entry_count; ++i) {
-            if (!flush_plot_bucket(items[i].plot,
-                                   items[i].decoder.signal_scale)) {
+            if (!edf_report_batch_plot_flush(items[i].plot,
+                                             items[i].decoder.signal_scale)) {
                 status = EdfReportDataReadStatus::CallbackRejected;
                 break;
             }
@@ -1308,7 +765,7 @@ EdfReportDataReadStatus read_series_entry(
     ReportStoreChunkMeta &meta,
     ReportSpoolBuffer &payload,
     EdfReportDataReadStats &stats) {
-    UniformSeriesData series;
+    EdfReportUniformSeriesData series;
     EdfReportDataReadStatus status =
         collect_series_entry_from_header(session_file,
                                          entry,
@@ -1353,7 +810,11 @@ EdfReportDataReadStatus emit_series_entry_samples(
     uint8_t *header = nullptr;
     size_t header_size = 0;
     EdfReportDataReadStatus status =
-        read_header(session_file, file_desc, header, header_size, file);
+        edf_report_data_read_header(session_file,
+                                    file_desc,
+                                    header,
+                                    header_size,
+                                    file);
     if (status != EdfReportDataReadStatus::Ok) {
         if (header) Memory::free(header);
         return status;
@@ -1387,7 +848,7 @@ EdfReportDataReadStatus read_event_entry(
     if (!record) return EdfReportDataReadStatus::RecordReadFailed;
 
     EdfReportDataReadStatus status =
-        seek_record(file, session_file, entry.first_record);
+        edf_report_data_seek_record(file, session_file, entry.first_record);
     if (status != EdfReportDataReadStatus::Ok) {
         Memory::free(record);
         return status;
@@ -1399,7 +860,7 @@ EdfReportDataReadStatus read_event_entry(
     ctx.range_end_ms = entry.end_ms;
     EdfReportEventDecodeContext decode_context;
     for (uint32_t i = 0; i < entry.record_count; ++i) {
-        status = read_exact(file, record, session_file.record_size);
+        status = edf_report_data_read_exact(file, record, session_file.record_size);
         if (status != EdfReportDataReadStatus::Ok) break;
         stats.records_read++;
         EdfReportEventDecodeStats record_stats;
@@ -1473,7 +934,7 @@ EdfReportDataReadStatus edf_report_read_entry_payload(
         return EdfReportDataReadStatus::InvalidArgument;
     }
     const EdfReportSessionFileDescriptor *session_file =
-        entry_file(session, entry);
+        edf_report_data_entry_file(session, entry);
     if (!session_file) return EdfReportDataReadStatus::InvalidArgument;
 
     payload.set_max_size(AC_REPORT_MAX_PAYLOAD_BYTES);
@@ -1487,7 +948,11 @@ EdfReportDataReadStatus edf_report_read_entry_payload(
     size_t header_size = 0;
     File file;
     EdfReportDataReadStatus status =
-        read_header(*session_file, file_desc, header, header_size, file);
+        edf_report_data_read_header(*session_file,
+                                    file_desc,
+                                    header,
+                                    header_size,
+                                    file);
     if (status == EdfReportDataReadStatus::Ok) {
         if (entry.kind == EdfReportDataKind::Series) {
             status = read_series_entry(*session_file,
@@ -1513,10 +978,7 @@ EdfReportDataReadStatus edf_report_read_entry_payload(
     }
 
     if (header) Memory::free(header);
-    if (file) {
-        Storage::Guard guard;
-        file.close();
-    }
+    edf_report_data_close_file(file);
     if (status != EdfReportDataReadStatus::Ok) {
         payload.clear();
         meta = {};
@@ -1541,7 +1003,7 @@ EdfReportDataReadStatus edf_report_for_each_entry_series_sample(
         return EdfReportDataReadStatus::InvalidArgument;
     }
     const EdfReportSessionFileDescriptor *session_file =
-        entry_file(session, entry);
+        edf_report_data_entry_file(session, entry);
     if (!session_file) return EdfReportDataReadStatus::InvalidArgument;
 
     File file;
@@ -1555,10 +1017,7 @@ EdfReportDataReadStatus edf_report_for_each_entry_series_sample(
                                   callback,
                                   context);
 
-    if (file) {
-        Storage::Guard guard;
-        file.close();
-    }
+    edf_report_data_close_file(file);
     if (status != EdfReportDataReadStatus::Ok) {
         meta = {};
     }
@@ -1585,11 +1044,11 @@ EdfReportDataReadStatus edf_report_for_each_series_batch_sample(
         return EdfReportDataReadStatus::InvalidArgument;
     }
     const EdfReportSessionFileDescriptor *session_file =
-        entry_file(session, entries[0]);
+        edf_report_data_entry_file(session, entries[0]);
     if (!session_file) return EdfReportDataReadStatus::InvalidArgument;
     for (size_t i = 1; i < entry_count; ++i) {
         const EdfReportSessionFileDescriptor *other =
-            entry_file(session, entries[i]);
+            edf_report_data_entry_file(session, entries[i]);
         if (other != session_file) {
             return EdfReportDataReadStatus::InvalidArgument;
         }
@@ -1600,7 +1059,11 @@ EdfReportDataReadStatus edf_report_for_each_series_batch_sample(
     size_t header_size = 0;
     File file;
     EdfReportDataReadStatus status =
-        read_header(*session_file, file_desc, header, header_size, file);
+        edf_report_data_read_header(*session_file,
+                                    file_desc,
+                                    header,
+                                    header_size,
+                                    file);
     if (status == EdfReportDataReadStatus::Ok) {
         status = stream_series_batch_from_header(*session_file,
                                                  entries,
@@ -1616,10 +1079,7 @@ EdfReportDataReadStatus edf_report_for_each_series_batch_sample(
                                                  context);
     }
     if (header) Memory::free(header);
-    if (file) {
-        Storage::Guard guard;
-        file.close();
-    }
+    edf_report_data_close_file(file);
     if (status != EdfReportDataReadStatus::Ok && metas) {
         for (size_t i = 0; i < entry_count; ++i) metas[i] = {};
     }
@@ -1647,11 +1107,11 @@ EdfReportDataReadStatus edf_report_for_each_series_batch_plot(
         return EdfReportDataReadStatus::InvalidArgument;
     }
     const EdfReportSessionFileDescriptor *session_file =
-        entry_file(session, entries[0]);
+        edf_report_data_entry_file(session, entries[0]);
     if (!session_file) return EdfReportDataReadStatus::InvalidArgument;
     for (size_t i = 1; i < entry_count; ++i) {
         const EdfReportSessionFileDescriptor *other =
-            entry_file(session, entries[i]);
+            edf_report_data_entry_file(session, entries[i]);
         if (other != session_file) {
             return EdfReportDataReadStatus::InvalidArgument;
         }
@@ -1662,7 +1122,11 @@ EdfReportDataReadStatus edf_report_for_each_series_batch_plot(
     size_t header_size = 0;
     File file;
     EdfReportDataReadStatus status =
-        read_header(*session_file, file_desc, header, header_size, file);
+        edf_report_data_read_header(*session_file,
+                                    file_desc,
+                                    header,
+                                    header_size,
+                                    file);
     if (status == EdfReportDataReadStatus::Ok) {
         status = stream_series_batch_plot_from_header(*session_file,
                                                       entries,
@@ -1679,10 +1143,7 @@ EdfReportDataReadStatus edf_report_for_each_series_batch_plot(
                                                       context);
     }
     if (header) Memory::free(header);
-    if (file) {
-        Storage::Guard guard;
-        file.close();
-    }
+    edf_report_data_close_file(file);
     if (status != EdfReportDataReadStatus::Ok && metas) {
         for (size_t i = 0; i < entry_count; ++i) metas[i] = {};
     }
