@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "report_spool_types.h"
+
 namespace aircannect {
 namespace report_records_detail {
 
@@ -56,6 +58,35 @@ inline uint64_t get_le64(const uint8_t *in) {
 inline bool valid_timestamp(int64_t timestamp_ms) {
     return timestamp_ms > 0;
 }
+
+struct SeriesV2HeaderView {
+    uint32_t mode = 0;
+    uint32_t interval_ms = 0;
+    uint32_t sample_count = 0;
+    size_t missing_bitmap_bytes = 0;
+    const uint8_t *missing_bitmap = nullptr;
+    const uint8_t *body = nullptr;
+    size_t body_len = 0;
+};
+
+size_t bitmap_bytes_for_count(uint32_t sample_count);
+bool bitmap_missing(const uint8_t *bitmap,
+                    size_t bitmap_bytes,
+                    uint32_t index);
+bool valid_missing_bitmap(uint32_t sample_count, size_t bitmap_bytes);
+bool series_v2_size(uint32_t sample_count,
+                    size_t missing_bitmap_bytes,
+                    size_t value_bytes_per_sample,
+                    size_t &out);
+bool parse_series_v2_header(const uint8_t *data,
+                            size_t len,
+                            uint32_t record_count,
+                            SeriesV2HeaderView &view);
+bool put_series_v2_header(ReportSpoolBuffer &out,
+                          uint32_t mode,
+                          uint32_t interval_ms,
+                          uint32_t sample_count,
+                          size_t missing_bitmap_bytes);
 
 }  // namespace report_records_detail
 }  // namespace aircannect
