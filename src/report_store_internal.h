@@ -44,6 +44,14 @@ bool ranges_overlap(int64_t left_start,
                     int64_t left_end,
                     int64_t right_start,
                     int64_t right_end);
+ReportStoreCoverageRecord *ensure_coverage_scratch();
+void coverage_insert(ReportStoreCoverageRecord *recs,
+                     size_t &count,
+                     const ReportStoreCoverageRecord &rec);
+size_t load_coverage(const char *source, ReportStoreCoverageRecord *recs);
+bool rewrite_coverage_file(const char *source,
+                           const ReportStoreCoverageRecord *recs,
+                           size_t count);
 bool write_all(File &file, const uint8_t *data, size_t len);
 bool read_all(File &file, uint8_t *data, size_t len);
 
