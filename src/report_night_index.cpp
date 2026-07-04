@@ -9,30 +9,6 @@
 namespace aircannect {
 namespace {
 
-constexpr uint64_t REPORT_FNV_OFFSET = 1469598103934665603ULL;
-constexpr uint64_t REPORT_FNV_PRIME = 1099511628211ULL;
-
-uint64_t report_hash_bytes(uint64_t hash, const void *data, size_t len) {
-    const uint8_t *bytes = static_cast<const uint8_t *>(data);
-    for (size_t i = 0; i < len; ++i) {
-        hash ^= bytes[i];
-        hash *= REPORT_FNV_PRIME;
-    }
-    return hash;
-}
-
-uint64_t report_hash_u64(uint64_t hash, uint64_t value) {
-    return report_hash_bytes(hash, &value, sizeof(value));
-}
-
-uint64_t report_hash_i64(uint64_t hash, int64_t value) {
-    return report_hash_bytes(hash, &value, sizeof(value));
-}
-
-uint64_t report_hash_u32(uint64_t hash, uint32_t value) {
-    return report_hash_bytes(hash, &value, sizeof(value));
-}
-
 bool parse_sleep_day(const char *sleep_day,
                      int &year,
                      unsigned &month,
@@ -68,81 +44,6 @@ bool sleep_day_start_utc_ms(const char *sleep_day,
     out_ms = days * REPORT_DAY_MS + REPORT_NOON_MS -
              static_cast<int64_t>(timezone_offset_minutes) * 60LL * 1000LL;
     return true;
-}
-
-uint64_t summary_identity_signature(const ReportSummaryRecord &record) {
-    uint64_t hash = REPORT_FNV_OFFSET;
-    hash = report_hash_u64(hash, record.start_ms);
-    hash = report_hash_u64(hash, record.end_ms);
-    hash = report_hash_u32(hash, record.duration_min);
-    hash = report_hash_u32(hash, record.session_interval_count);
-    const uint32_t session_count = std::min<uint32_t>(
-        record.session_interval_count, AC_REPORT_SUMMARY_SESSION_MAX);
-    for (uint32_t i = 0; i < session_count; ++i) {
-        hash = report_hash_u64(hash, record.sessions[i].start_ms);
-        hash = report_hash_u32(hash, record.sessions[i].duration_min);
-    }
-    return hash;
-}
-
-uint64_t report_edf_session_signature(
-    const EdfReportSessionDescriptor &session) {
-    uint64_t hash = REPORT_FNV_OFFSET;
-    hash = report_hash_bytes(hash, session.sleep_day, sizeof(session.sleep_day));
-    hash = report_hash_bytes(hash,
-                             session.session_stamp,
-                             sizeof(session.session_stamp));
-    hash = report_hash_u32(hash, session.file_mask);
-    hash = report_hash_u32(hash, session.primary_signal_mask);
-    hash = report_hash_u32(hash, session.fallback_signal_mask);
-    hash = report_hash_u64(hash, session.total_size);
-    hash = report_hash_u64(hash, static_cast<uint64_t>(session.latest_write));
-    hash = report_hash_i64(hash, session.earliest_header_start_ms);
-    hash = report_hash_i64(hash, session.latest_header_end_ms);
-    return hash;
-}
-
-void normalize_indexed_ranges(ReportIndexedNight &night) {
-    normalize_range_array(night.ranges, night.range_count);
-}
-
-void normalize_indexed_data_ranges(ReportIndexedNight &night) {
-    normalize_range_array(night.data_ranges, night.data_range_count);
-    coalesce_sorted_range_array(night.data_ranges, night.data_range_count);
-}
-
-void normalize_edf_source_signatures(ReportIndexedNight &night) {
-    size_t count = std::min(
-        night.edf_source_signature_count,
-        static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX));
-    std::sort(night.edf_source_signatures,
-              night.edf_source_signatures + count);
-    size_t write = 0;
-    for (size_t i = 0; i < count; ++i) {
-        const uint64_t signature = night.edf_source_signatures[i];
-        if (signature == 0) continue;
-        if (write > 0 &&
-            night.edf_source_signatures[write - 1] == signature) {
-            continue;
-        }
-        night.edf_source_signatures[write++] = signature;
-    }
-    for (size_t i = write; i < AC_REPORT_EDF_SESSION_MAX; ++i) {
-        night.edf_source_signatures[i] = 0;
-    }
-    night.edf_source_signature_count = write;
-}
-
-void recompute_source_signature(ReportIndexedNight &night) {
-    uint64_t hash = summary_identity_signature(night.summary);
-    normalize_edf_source_signatures(night);
-    hash = report_hash_u32(
-        hash,
-        static_cast<uint32_t>(night.edf_source_signature_count));
-    for (size_t i = 0; i < night.edf_source_signature_count; ++i) {
-        hash = report_hash_u64(hash, night.edf_source_signatures[i]);
-    }
-    night.source_signature = hash;
 }
 
 bool append_edf_source_signature(ReportIndexedNight &night,
@@ -183,7 +84,7 @@ void seed_night_ranges_from_summary(ReportIndexedNight &night) {
     night.range_count = collect_session_ranges(night.summary,
                                                night.ranges,
                                                AC_REPORT_SUMMARY_SESSION_MAX);
-    normalize_indexed_ranges(night);
+    normalize_range_array(night.ranges, night.range_count);
 }
 
 bool merge_range_into_indexed_night(ReportIndexedNight &night,
@@ -221,7 +122,7 @@ bool merge_range_into_indexed_night(ReportIndexedNight &night,
             night.ranges[static_cast<size_t>(best)];
         target.start_ms = std::min(target.start_ms, start_ms);
         target.end_ms = std::max(target.end_ms, end_ms);
-        normalize_indexed_ranges(night);
+        normalize_range_array(night.ranges, night.range_count);
         sync_summary_sessions_from_ranges(night);
         return true;
     }
@@ -230,7 +131,7 @@ bool merge_range_into_indexed_night(ReportIndexedNight &night,
     night.ranges[count].start_ms = start_ms;
     night.ranges[count].end_ms = end_ms;
     night.range_count = count + 1;
-    normalize_indexed_ranges(night);
+    normalize_range_array(night.ranges, night.range_count);
     sync_summary_sessions_from_ranges(night);
     return true;
 }
@@ -262,7 +163,9 @@ bool merge_data_range_into_indexed_night(ReportIndexedNight &night,
         if (gap_ms <= REPORT_SESSION_MERGE_TOLERANCE_MS) {
             existing.start_ms = std::min(existing.start_ms, start_ms);
             existing.end_ms = std::max(existing.end_ms, end_ms);
-            normalize_indexed_data_ranges(night);
+            normalize_range_array(night.data_ranges, night.data_range_count);
+            coalesce_sorted_range_array(night.data_ranges,
+                                        night.data_range_count);
             return true;
         }
     }
@@ -271,7 +174,8 @@ bool merge_data_range_into_indexed_night(ReportIndexedNight &night,
     night.data_ranges[count].start_ms = start_ms;
     night.data_ranges[count].end_ms = end_ms;
     night.data_range_count = count + 1;
-    normalize_indexed_data_ranges(night);
+    normalize_range_array(night.data_ranges, night.data_range_count);
+    coalesce_sorted_range_array(night.data_ranges, night.data_range_count);
     return true;
 }
 
@@ -372,17 +276,6 @@ int find_indexed_night_for_edf_session(const ReportIndexedNight *nights,
 
 }  // namespace
 
-void normalize_report_indexed_night(ReportIndexedNight &night) {
-    normalize_indexed_ranges(night);
-    normalize_indexed_data_ranges(night);
-    normalize_edf_source_signatures(night);
-}
-
-uint64_t report_summary_identity_signature(
-    const ReportSummaryRecord &record) {
-    return summary_identity_signature(record);
-}
-
 ReportNightIndex::ReportNightIndex(ReportIndexedNight *nights,
                                    size_t capacity)
     : nights_(nights), capacity_(capacity) {
@@ -436,7 +329,7 @@ bool ReportNightIndex::add_summary_record(
     for (size_t i = 0; i < old_signature_count; ++i) {
         night.edf_source_signatures[i] = old_signatures[i];
     }
-    night.source_signature = summary_identity_signature(record);
+    night.source_signature = report_summary_identity_signature(record);
     seed_night_ranges_from_summary(night);
 
     if (existing < 0) count_++;
@@ -540,7 +433,7 @@ bool ReportNightIndex::finish(ReportIndexedNight *sort_scratch) {
     if (!nights_) return false;
     for (size_t i = 0; i < count_; ++i) {
         normalize_report_indexed_night(nights_[i]);
-        recompute_source_signature(nights_[i]);
+        recompute_indexed_night_source_signature(nights_[i]);
     }
     if (count_ < 2) return true;
     if (!sort_scratch) return false;

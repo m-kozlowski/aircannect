@@ -11,5 +11,8 @@ constexpr int64_t REPORT_NOON_MS = 12LL * 60LL * 60LL * 1000LL;
 
 void normalize_range_array(ReportSessionRange *ranges, size_t &count);
 void coalesce_sorted_range_array(ReportSessionRange *ranges, size_t &count);
+uint64_t report_edf_session_signature(
+    const EdfReportSessionDescriptor &session);
+void recompute_indexed_night_source_signature(ReportIndexedNight &night);
 
 }  // namespace aircannect
