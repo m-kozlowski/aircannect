@@ -279,8 +279,7 @@ bool WifiManager::start_profile(size_t index, bool keep_softap) {
     if (with_softap && !softap_running_) {
         start_softap(true);
     } else if (!with_softap && softap_running_) {
-        WiFi.softAPdisconnect(true);
-        softap_running_ = false;
+        stop_softap("sta_connect_without_ap");
     }
     WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
     apply_country_code();
@@ -331,6 +330,26 @@ bool WifiManager::start_next_profile(size_t start_index, bool keep_softap) {
 }
 
 bool WifiManager::start_softap(bool with_sta) {
+    if (softap_running_) {
+        const wifi_mode_t mode = WiFi.getMode();
+        if (with_sta && mode != WIFI_MODE_APSTA) {
+            WiFi.mode(WIFI_AP_STA);
+            apply_country_code();
+            apply_sta_phy_config();
+        } else if (!with_sta && mode == WIFI_MODE_APSTA) {
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_AP);
+            apply_country_code();
+            sta_ipv4_online_ = false;
+        }
+        management_reachable_ = true;
+        if (!with_sta) {
+            mode_state_ = WifiModeState::SoftAp;
+            active_profile_index_ = -1;
+        }
+        return true;
+    }
+
     WiFi.mode(with_sta ? WIFI_AP_STA : WIFI_AP);
     apply_country_code();
     if (with_sta) apply_sta_phy_config();
@@ -355,6 +374,18 @@ bool WifiManager::start_softap(bool with_sta) {
     return true;
 }
 
+void WifiManager::stop_softap(const char *reason) {
+    if (!softap_running_) return;
+    const uint8_t clients = WiFi.softAPgetStationNum();
+    WiFi.softAPdisconnect(true);
+    softap_running_ = false;
+    softap_auto_close_deferred_ = false;
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "SoftAP stopped reason=%s clients=%u\n",
+              reason ? reason : "unknown",
+              static_cast<unsigned>(clients));
+}
+
 void WifiManager::stop_wifi() {
     if (manual_scan_active_) {
         esp_wifi_scan_stop();
@@ -367,7 +398,7 @@ void WifiManager::stop_wifi() {
         WiFi.disconnect(true);
     }
     if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
-        WiFi.softAPdisconnect(true);
+        stop_softap("wifi_stop");
     }
     WiFi.mode(WIFI_OFF);
     management_reachable_ = false;
@@ -397,7 +428,7 @@ bool WifiManager::configure_sta(const String &ssid, const String &password) {
     Log::logf(CAT_WIFI, LOG_INFO,
               "configured single STA profile SSID=%s auth=%s\n",
               ssid.c_str(), password.length() ? "password" : "open");
-    return reconnect();
+    return connect_profiles(0, softap_running_);
 }
 
 void WifiManager::set_hostname(const String &hostname) {
@@ -444,12 +475,8 @@ void WifiManager::apply_softap_mode() {
         softap_auto_close_deferred_ = true;
         return;
     }
-    WiFi.softAPdisconnect(true);
-    softap_running_ = false;
-    softap_auto_close_deferred_ = false;
+    stop_softap("sta_connected_no_clients");
     management_reachable_ = true;
-    Log::logf(CAT_WIFI, LOG_INFO,
-              "SoftAP stopped after STA connect\n");
 }
 
 void WifiManager::set_country_code(const String &country) {
@@ -484,7 +511,7 @@ bool WifiManager::configure_open_sta(const String &ssid) {
     Log::logf(CAT_WIFI, LOG_INFO,
               "configured single open STA profile SSID=%s\n",
               ssid.c_str());
-    return reconnect();
+    return connect_profiles(0, softap_running_);
 }
 
 bool WifiManager::add_profile(const String &ssid, const String &password,
@@ -502,7 +529,7 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
                   "updated STA profile %u SSID=%s auth=%s\n",
                   static_cast<unsigned>(i), clean_ssid.c_str(),
                   open_network ? "open" : "password");
-        return reconnect();
+        return connect_profiles(i, softap_running_);
     }
 
     if (profile_count_ >= AC_WIFI_PROFILE_MAX) {
@@ -521,7 +548,7 @@ bool WifiManager::add_profile(const String &ssid, const String &password,
               "added STA profile %u SSID=%s auth=%s\n",
               static_cast<unsigned>(index), clean_ssid.c_str(),
               open_network ? "open" : "password");
-    return reconnect();
+    return connect_profiles(index, softap_running_);
 }
 
 bool WifiManager::replace_profiles(const WifiProfile *profiles,
@@ -565,7 +592,7 @@ bool WifiManager::replace_profiles(const WifiProfile *profiles,
               "replaced STA profiles count=%u reconnect=%s\n",
               static_cast<unsigned>(profile_count_),
               reconnect_now ? "yes" : "no");
-    return reconnect_now ? reconnect() : true;
+    return reconnect_now ? connect_profiles(0, softap_running_) : true;
 }
 
 bool WifiManager::remove_profile(size_t index) {
@@ -582,7 +609,8 @@ bool WifiManager::remove_profile(size_t index) {
               "removed STA profile %u SSID=%s remaining=%u\n",
               static_cast<unsigned>(index), removed_ssid.c_str(),
               static_cast<unsigned>(profile_count_));
-    return reconnect();
+    return connect_profiles(index < profile_count_ ? index : 0,
+                            softap_running_);
 }
 
 void WifiManager::clear_sta_config() {
@@ -594,7 +622,7 @@ void WifiManager::clear_sta_config() {
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     save_config();
     Log::logf(CAT_WIFI, LOG_INFO, "cleared STA profiles\n");
-    reconnect();
+    connect_profiles(0, softap_running_);
 }
 
 bool WifiManager::reconnect() {
@@ -605,6 +633,16 @@ bool WifiManager::reconnect() {
     }
     if (sta_configured_) return start_next_profile(0);
 
+    management_reachable_ = start_softap(false);
+    return management_reachable_;
+}
+
+bool WifiManager::connect_profiles(size_t start_index, bool preserve_softap) {
+    consecutive_profile_failures_ = 0;
+    const bool keep_softap = preserve_softap && softap_running_;
+    if (sta_configured_) return start_next_profile(start_index, keep_softap);
+
+    if (!keep_softap) stop_wifi();
     management_reachable_ = start_softap(false);
     return management_reachable_;
 }
@@ -862,8 +900,7 @@ bool WifiManager::begin_unpinned_profile(size_t index, bool keep_softap,
     if (with_softap && !softap_running_) {
         start_softap(true);
     } else if (!with_softap && softap_running_) {
-        WiFi.softAPdisconnect(true);
-        softap_running_ = false;
+        stop_softap("sta_connect_without_ap");
     }
     WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
     apply_country_code();
@@ -906,12 +943,18 @@ bool WifiManager::begin_scan_candidate(size_t candidate_index,
     WifiProfile &profile = profiles_[candidate.profile_index];
     if (!profile.ssid.length()) return false;
 
-    const bool was_softap_running = softap_running_;
-    stop_wifi();
     const bool with_softap =
         softap_mode_ == SoftApMode::Forced || keep_softap ||
-        was_softap_running;
-    if (with_softap) start_softap(true);
+        softap_running_;
+    if (with_softap) {
+        if (WiFi.getMode() == WIFI_MODE_STA ||
+            WiFi.getMode() == WIFI_MODE_APSTA) {
+            WiFi.disconnect(true);
+        }
+        if (!softap_running_) start_softap(true);
+    } else {
+        stop_wifi();
+    }
     WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
     apply_country_code();
     apply_sta_phy_config();
