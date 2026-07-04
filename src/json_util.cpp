@@ -1,7 +1,5 @@
 #include "json_util.h"
 
-#if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
-
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -119,6 +117,7 @@ void json_add_uint64_impl(Out &out, const char *key, uint64_t value, bool comma)
 
 }  // namespace
 
+#if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
 void append_json_escaped(String &out, const char *value) {
     append_json_escaped_impl(out, value, value ? strlen(value) : 0);
 }
@@ -150,6 +149,7 @@ void json_add_float(String &out, const char *key, float value, bool comma) {
 void json_add_uint64(String &out, const char *key, uint64_t value, bool comma) {
     json_add_uint64_impl(out, key, value, comma);
 }
+#endif
 
 void append_json_escaped(LargeTextBuffer &out, const char *value) {
     append_json_escaped_impl(out, value, value ? strlen(value) : 0);
@@ -193,5 +193,3 @@ void json_add_uint64(LargeTextBuffer &out, const char *key, uint64_t value, bool
 }
 
 }  // namespace aircannect
-
-#endif

@@ -1,6 +1,6 @@
 #include "report_manager.h"
+#include "report_summary_service.h"
 
-#include <algorithm>
 #include <string.h>
 #include <string>
 
@@ -13,6 +13,8 @@
 
 namespace aircannect {
 namespace {
+
+const char *const REPORT_SUMMARY_FROM = "2000-01-01T00:00:00.000Z";
 
 struct SummaryRecordBufferContext {
     ReportSummaryRecord *records = nullptr;
@@ -36,34 +38,111 @@ bool store_summary_record_to_buffer(void *context,
 
 }  // namespace
 
-bool ReportManager::ensure_summary_records() {
-    if (records_) return true;
+ReportSummaryService::ReportSummaryService(
+    ReportSummaryRuntime &summary,
+    ReportFetchRuntime &fetch,
+    ReportNightIndexRuntime &night_index,
+    ReportNightIndexService &night_index_service,
+    ReportResultCacheRuntime &result_cache)
+    : summary_(summary),
+      fetch_(fetch),
+      night_index_(night_index),
+      night_index_service_(night_index_service),
+      result_cache_(result_cache) {}
 
-    records_ = static_cast<ReportSummaryRecord *>(
-        Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
-                             sizeof(ReportSummaryRecord),
-                             false));
-    if (!records_) {
+void ReportSummaryService::begin() {
+    summary_.begin();
+}
+
+void ReportSummaryService::load_initial_snapshot() {
+    summary_.clear_records();
+    summary_.reset_status();
+
+    if (!load_from_store()) {
+        publish_json_snapshot();
+    }
+}
+
+bool ReportSummaryService::request_refresh(bool force,
+                                           bool cache_fetch_active) {
+    if (fetch_.summary_active() && !force) return true;
+    if (cache_fetch_active) return false;
+
+    SpoolClientRequest request;
+    request.spool_type = "Summary";
+    request.from_dt = REPORT_SUMMARY_FROM;
+    request.max_size = AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES;
+    request.fragment_max = AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES;
+    request.max_notifications = AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL;
+    request.max_rounds = 64;
+    request.pace_on_backpressure = true;
+    request.stream_rounds = false;
+
+    if (!fetch_.start_summary_fetch(request, millis())) {
+        (void)fail_fetch("summary_start_failed");
+        return false;
+    }
+
+    if (summary_.take(portMAX_DELAY)) {
+        ReportSummaryStatus &status = summary_.status();
+        status.state = ReportSummaryState::Fetching;
+        status.active_spool = "Summary";
+        status.error.clear();
+        status.spool = fetch_.spool_status();
+        summary_.give();
+    }
+
+    publish_json_snapshot();
+    Log::logf(CAT_REPORT, LOG_INFO, "Summary refresh queued\n");
+    return true;
+}
+
+ReportSummaryFetchEvent ReportSummaryService::poll(RpcArbiter &arbiter) {
+    if (!fetch_.summary_active()) return ReportSummaryFetchEvent::None;
+
+    fetch_.poll_spool(arbiter);
+
+    bool publish_progress = false;
+    const uint32_t now_ms = millis();
+    if (summary_.take(0)) {
+        ReportSummaryStatus &status = summary_.status();
+        status.spool = fetch_.spool_status();
+        status.elapsed_ms = fetch_.summary_elapsed_ms(now_ms);
+        summary_.give();
+        publish_progress = summary_.snapshot_progress_due(now_ms, 500);
+    }
+    if (publish_progress) publish_json_snapshot();
+
+    if (fetch_.spool_complete()) return finish_fetch();
+    if (fetch_.spool_failed()) {
+        return fail_fetch(fetch_.spool_status().error.c_str());
+    }
+    return ReportSummaryFetchEvent::None;
+}
+
+bool ReportSummaryService::ensure_records() {
+    if (!summary_.ensure_records()) {
         log_report_alloc_failed(
             "summary_records",
             AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
-        fail_summary("summary_alloc_failed");
+        (void)fail_fetch("summary_alloc_failed");
         return false;
     }
 
     return true;
 }
 
-bool ReportManager::parse_summary_result(ReportSpoolResult &result) {
-    if (!ensure_summary_records()) return false;
+bool ReportSummaryService::parse_result(ReportSpoolResult &result) {
+    if (!ensure_records()) return false;
 
     ReportSummaryRecord *staging = nullptr;
-    if (!take_summary_scratch(portMAX_DELAY, staging)) {
-        fail_summary("summary_staging_alloc_failed");
+    if (!summary_.take_scratch(portMAX_DELAY, staging)) {
+        (void)fail_fetch("summary_staging_alloc_failed");
         return false;
     }
 
-    memset(staging, 0,
+    memset(staging,
+           0,
            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
 
     SummaryRecordBufferContext context;
@@ -76,31 +155,29 @@ bool ReportManager::parse_summary_result(ReportSpoolResult &result) {
                                     &context,
                                     error,
                                     sizeof(error))) {
-        give_summary_scratch();
-        fail_summary(error[0] ? error : "summary_parse_failed");
+        summary_.give_scratch();
+        (void)fail_fetch(error[0] ? error : "summary_parse_failed");
         return false;
     }
 
     size_t write_count = 0;
-    if (!take_summary_lock(portMAX_DELAY)) {
-        give_summary_scratch();
+    if (!summary_.take(portMAX_DELAY)) {
+        summary_.give_scratch();
         return false;
     }
 
-    clear_summary_records();
-    if (context.count) {
-        memcpy(records_, staging,
-               context.count * sizeof(ReportSummaryRecord));
-    }
-    record_count_ = context.count;
-    nights_with_therapy_ = context.nights_with_therapy;
-
-    finalize_summary_records();
-    write_count = record_count_;
+    summary_.clear_records();
+    summary_.replace_records_from(staging,
+                                  context.count,
+                                  context.nights_with_therapy);
+    summary_.finalize_records();
+    write_count = summary_.record_count();
     if (write_count) {
-        memcpy(staging, records_, write_count * sizeof(ReportSummaryRecord));
+        memcpy(staging,
+               summary_.records(),
+               write_count * sizeof(ReportSummaryRecord));
     }
-    give_summary_lock();
+    summary_.give();
 
     if (write_count &&
         !ReportStore::write_summary_records(staging, write_count)) {
@@ -110,18 +187,19 @@ bool ReportManager::parse_summary_result(ReportSpoolResult &result) {
                   static_cast<unsigned long>(write_count));
     }
 
-    give_summary_scratch();
-    invalidate_materialized(0, true);
+    summary_.give_scratch();
+    result_cache_.invalidate(0, true);
     return true;
 }
 
-bool ReportManager::load_summary_from_store() {
-    if (!ensure_summary_records()) return false;
+bool ReportSummaryService::load_from_store() {
+    if (!ensure_records()) return false;
 
     ReportSummaryRecord *staging = nullptr;
-    if (!take_summary_scratch(portMAX_DELAY, staging)) return false;
+    if (!summary_.take_scratch(portMAX_DELAY, staging)) return false;
 
-    memset(staging, 0,
+    memset(staging,
+           0,
            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
 
     SummaryRecordBufferContext context;
@@ -130,32 +208,30 @@ bool ReportManager::load_summary_from_store() {
 
     if (!ReportStore::read_summary_records(store_summary_record_to_buffer,
                                            &context)) {
-        give_summary_scratch();
+        summary_.give_scratch();
         return false;
     }
 
-    if (!take_summary_lock(portMAX_DELAY)) {
-        give_summary_scratch();
+    if (!summary_.take(portMAX_DELAY)) {
+        summary_.give_scratch();
         return false;
     }
 
-    clear_summary_records();
-    if (context.count) {
-        memcpy(records_, staging,
-               context.count * sizeof(ReportSummaryRecord));
-    }
-    record_count_ = context.count;
-    nights_with_therapy_ = context.nights_with_therapy;
+    summary_.clear_records();
+    summary_.replace_records_from(staging,
+                                  context.count,
+                                  context.nights_with_therapy);
+    summary_.finalize_records();
 
-    finalize_summary_records();
-    summary_status_.state = ReportSummaryState::Ready;
-    summary_status_.revision++;
-    summary_status_.error.clear();
-    summary_status_.active_spool.clear();
+    ReportSummaryStatus &status = summary_.status();
+    status.state = ReportSummaryState::Ready;
+    status.revision++;
+    status.error.clear();
+    status.active_spool.clear();
 
-    const uint32_t records_total = summary_status_.records_total;
-    const uint32_t nights_with_therapy = summary_status_.nights_with_therapy;
-    give_summary_lock();
+    const uint32_t records_total = status.records_total;
+    const uint32_t nights_with_therapy = status.nights_with_therapy;
+    summary_.give();
 
     Log::logf(CAT_REPORT,
               LOG_INFO,
@@ -164,129 +240,94 @@ bool ReportManager::load_summary_from_store() {
               static_cast<unsigned long>(records_total),
               static_cast<unsigned long>(nights_with_therapy));
 
-    give_summary_scratch();
-    publish_summary_json_snapshot();
-    invalidate_materialized(0, true);
+    summary_.give_scratch();
+    publish_json_snapshot();
+    result_cache_.invalidate(0, true);
     return true;
 }
 
-void ReportManager::finalize_summary_records() {
-    if (records_ && record_count_ > 1) {
-        std::sort(records_, records_ + record_count_,
-                  [](const ReportSummaryRecord &a,
-                     const ReportSummaryRecord &b) {
-                      return a.start_ms < b.start_ms;
-                  });
-    }
-
-    summary_status_.records_total = static_cast<uint32_t>(record_count_);
-    summary_status_.nights_with_therapy = nights_with_therapy_;
-}
-
-void ReportManager::finish_summary_fetch() {
+ReportSummaryFetchEvent ReportSummaryService::finish_fetch() {
     ReportSpoolResult result;
-    spool_.move_result_to(result);
-    summary_fetch_active_ = false;
+    fetch_.move_spool_result_to(result);
+    fetch_.finish_summary_fetch();
 
-    if (take_summary_lock(portMAX_DELAY)) {
-        summary_status_.active_spool.clear();
-        summary_status_.spool = spool_.status();
-        give_summary_lock();
+    if (summary_.take(portMAX_DELAY)) {
+        ReportSummaryStatus &status = summary_.status();
+        status.active_spool.clear();
+        status.spool = fetch_.spool_status();
+        summary_.give();
     }
 
-    if (!parse_summary_result(result)) return;
+    if (!parse_result(result)) return ReportSummaryFetchEvent::Failed;
 
     uint32_t records_total = 0;
     uint32_t nights_with_therapy = 0;
-    if (take_summary_lock(portMAX_DELAY)) {
-        summary_status_.state = ReportSummaryState::Ready;
-        summary_status_.revision++;
-        summary_status_.error.clear();
-        records_total = summary_status_.records_total;
-        nights_with_therapy = summary_status_.nights_with_therapy;
-        give_summary_lock();
+    if (summary_.take(portMAX_DELAY)) {
+        ReportSummaryStatus &status = summary_.status();
+        status.state = ReportSummaryState::Ready;
+        status.revision++;
+        status.error.clear();
+        records_total = status.records_total;
+        nights_with_therapy = status.nights_with_therapy;
+        summary_.give();
     }
 
-    publish_summary_json_snapshot();
+    publish_json_snapshot();
     Log::logf(CAT_REPORT,
               LOG_INFO,
               "Summary ready records=%lu therapy_nights=%lu\n",
               static_cast<unsigned long>(records_total),
               static_cast<unsigned long>(nights_with_therapy));
-
-    if (pending_result_prepare_) {
-        const size_t therapy_index = pending_result_therapy_index_;
-        const bool refresh_cache = pending_result_refresh_cache_;
-        pending_result_prepare_ = false;
-        pending_result_refresh_cache_ = false;
-        prepare_result_by_therapy_index_internal(therapy_index, refresh_cache);
-    }
+    return ReportSummaryFetchEvent::Completed;
 }
 
-void ReportManager::fail_summary(const char *message) {
-    summary_fetch_active_ = false;
+ReportSummaryFetchEvent ReportSummaryService::fail_fetch(
+    const char *message) {
+    fetch_.finish_summary_fetch();
 
     std::string error;
-    if (take_summary_lock(portMAX_DELAY)) {
-        summary_status_.state = ReportSummaryState::Error;
-        summary_status_.revision++;
-        summary_status_.active_spool.clear();
-        summary_status_.error = message ? message : "summary_error";
-        summary_status_.spool = spool_.status();
-        error = summary_status_.error;
-        give_summary_lock();
+    if (summary_.take(portMAX_DELAY)) {
+        ReportSummaryStatus &status = summary_.status();
+        status.state = ReportSummaryState::Error;
+        status.revision++;
+        status.active_spool.clear();
+        status.error = message ? message : "summary_error";
+        status.spool = fetch_.spool_status();
+        error = status.error;
+        summary_.give();
     } else {
         error = message ? message : "summary_error";
     }
 
     Log::logf(CAT_REPORT, LOG_WARN, "Summary failed: %s\n", error.c_str());
-
-    publish_summary_json_snapshot();
-    if (pending_result_prepare_) {
-        pending_result_prepare_ = false;
-        pending_result_refresh_cache_ = false;
-        fail_result_prepare(error.c_str());
-    }
+    publish_json_snapshot();
+    return ReportSummaryFetchEvent::Failed;
 }
 
-void ReportManager::clear_summary_records() {
-    if (records_) {
-        memset(records_, 0,
-               AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportSummaryRecord));
-    }
-
-    record_count_ = 0;
-    nights_with_therapy_ = 0;
-}
-
-const char *ReportManager::summary_state_name() const {
-    return report_summary_state_name(summary_status().state);
-}
-
-ReportSummaryStatus ReportManager::summary_status() const {
+ReportSummaryStatus ReportSummaryService::status() const {
     ReportSummaryStatus snapshot;
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) {
+    if (!summary_.take(pdMS_TO_TICKS(20))) {
         snapshot.state = ReportSummaryState::Error;
         snapshot.error = "summary_busy";
         return snapshot;
     }
 
-    snapshot = summary_status_;
-    give_summary_lock();
+    snapshot = summary_.status();
+    summary_.give();
     return snapshot;
 }
 
-bool ReportManager::publish_summary_json_snapshot() {
+bool ReportSummaryService::publish_json_snapshot() {
     ReportIndexedNight *indexed_snapshot = nullptr;
     ReportSummaryStatus status_snapshot;
     uint32_t data_epoch_snapshot = 0;
     size_t record_count_snapshot = 0;
     bool ok = true;
 
-    if (take_summary_lock(portMAX_DELAY)) {
-        status_snapshot = summary_status_;
-        data_epoch_snapshot = cache_data_epoch_;
-        give_summary_lock();
+    if (summary_.take(portMAX_DELAY)) {
+        status_snapshot = summary_.status();
+        data_epoch_snapshot = night_index_.data_epoch();
+        summary_.give();
     } else {
         status_snapshot.state = ReportSummaryState::Error;
         status_snapshot.error = "summary_busy";
@@ -302,9 +343,9 @@ bool ReportManager::publish_summary_json_snapshot() {
         status_snapshot.error = "summary_snapshot_alloc";
         record_count_snapshot = 0;
         ok = false;
-    } else if (!build_indexed_nights(indexed_snapshot,
-                                     AC_REPORT_SUMMARY_RECORD_MAX,
-                                     record_count_snapshot)) {
+    } else if (!night_index_service_.build(indexed_snapshot,
+                                           AC_REPORT_SUMMARY_RECORD_MAX,
+                                           record_count_snapshot)) {
         status_snapshot.state = ReportSummaryState::Error;
         status_snapshot.error = "summary_snapshot_build";
         record_count_snapshot = 0;
@@ -324,37 +365,38 @@ bool ReportManager::publish_summary_json_snapshot() {
     }
     status_snapshot.nights_with_therapy = nights_with_therapy;
 
-    summary_json_build_.clear();
-    report_append_summary_json_from_indexed(summary_json_build_,
+    LargeTextBuffer summary_json_build;
+    report_append_summary_json_from_indexed(summary_json_build,
                                             status_snapshot,
                                             data_epoch_snapshot,
                                             indexed_snapshot,
                                             record_count_snapshot);
     Memory::free(indexed_snapshot);
 
-    if (summary_json_build_.overflowed()) {
+    if (summary_json_build.overflowed()) {
         Log::logf(CAT_REPORT,
                   LOG_WARN,
                   "Summary JSON snapshot allocation failed\n");
-        summary_json_build_ =
+        summary_json_build =
             "{\"state\":\"error\",\"error\":\"summary_snapshot_alloc\","
             "\"nights\":[]}";
         ok = false;
     }
 
-    summary_json_snapshot_.swap(summary_json_build_);
+    summary_.publish_snapshot(summary_json_build);
     return ok;
 }
 
-void ReportManager::build_summary_json(LargeTextBuffer &json) const {
-    if (!summary_json_snapshot_.length()) {
-        json = "{\"state\":\"idle\",\"error\":\"summary_snapshot_missing\","
-               "\"nights\":[]}";
-        return;
-    }
+void ReportSummaryService::build_json(LargeTextBuffer &json) const {
+    summary_.build_snapshot_json(json);
+}
 
-    json.clear();
-    json.append(summary_json_snapshot_.c_str(), summary_json_snapshot_.length());
+ReportSummaryStatus ReportManager::summary_status() const {
+    return summary_service_.status();
+}
+
+void ReportManager::build_summary_json(LargeTextBuffer &json) const {
+    summary_service_.build_json(json);
 }
 
 }  // namespace aircannect

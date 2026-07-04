@@ -1,9 +1,11 @@
-#include "report_manager.h"
+#include "report_cache_fetch_service.h"
 
 #include <algorithm>
 
 #include "edf_report_provider.h"
 #include "report_data_provider.h"
+#include "report_cache_plan.h"
+#include "report_manager_helpers.h"
 #include "report_night_index.h"
 #include "report_resolve_context.h"
 #include "report_source_resolver.h"
@@ -17,20 +19,9 @@ const SpoolReportProvider &spool_report_provider() {
     return provider;
 }
 
-bool source_latest_cached_end_for_night(const ReportSourceDef &source,
-                                        const ReportSummaryRecord &night,
-                                        int64_t &out_end_ms) {
-    return spool_report_provider().latest_cached_end(
-        source,
-        static_cast<int64_t>(night.start_ms),
-        static_cast<int64_t>(night.start_ms),
-        static_cast<int64_t>(night.end_ms),
-        out_end_ms);
-}
-
 }  // namespace
 
-bool ReportManager::cache_source_supported(ReportSourceId source) const {
+bool report_cache_source_supported(ReportSourceId source) {
     switch (source) {
         case ReportSourceId::RespiratoryEvents:
         case ReportSourceId::TherapyOneMinute:
@@ -44,37 +35,23 @@ bool ReportManager::cache_source_supported(ReportSourceId source) const {
     }
 }
 
-bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
-                                     bool force,
-                                     bool latest_tail_refresh) {
+bool ReportCacheFetchService::build_plan(
+    const ReportIndexedNight &indexed_night,
+    bool force,
+    bool latest_tail_refresh) {
     const ReportSummaryRecord &night = indexed_night.summary;
-    cache_night_ = night;
-    cache_source_count_ = 0;
-    cache_source_index_ = 0;
-    cache_status_ = {};
-    cache_status_.night_start_ms = night.start_ms;
-    cache_status_.night_end_ms = night.end_ms;
-    cache_status_.active = true;
+    state().reset_for_night(night);
 
     auto add_plan_source = [&](ReportSourceId source,
                                int64_t from_ms) -> bool {
-        if (!cache_source_supported(source)) return true;
-        for (size_t i = 0; i < cache_source_count_; ++i) {
-            ReportCacheSourcePlan &existing = cache_plan_[i];
-            if (existing.source != source) continue;
-            if (from_ms < existing.from_ms) existing.from_ms = from_ms;
+        if (!report_cache_source_supported(source)) return true;
+
+        if (state().add_source(source, from_ms)) {
             return true;
         }
 
-        if (cache_source_count_ >= AC_REPORT_CACHE_SOURCE_MAX) {
-            fail_cache_fetch("cache_plan_full");
-            return false;
-        }
-
-        ReportCacheSourcePlan &plan = cache_plan_[cache_source_count_++];
-        plan.source = source;
-        plan.from_ms = from_ms;
-        return true;
+        (void)fail("cache_plan_full");
+        return false;
     };
 
     int64_t latest_tail_start_ms = static_cast<int64_t>(night.start_ms);
@@ -149,32 +126,28 @@ bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
         } else if (!indexed_night_data_span(indexed_night,
                                             span_start_ms,
                                             span_end_ms)) {
-            cache_status_.active = false;
-            cache_status_.revision++;
-            cache_status_.error.clear();
+            state().mark_no_work();
             return true;
         }
 
         ScopedReportResolveContext resolve("cache_plan_resolver");
         if (!resolve) {
-            fail_cache_fetch("cache_plan_alloc_failed");
+            (void)fail("cache_plan_alloc_failed");
             return false;
         }
 
         bool edf_pending = false;
         size_t session_count = 0;
         const bool have_edf =
-            collect_edf_sessions_for_night(night,
-                                           span_start_ms,
-                                           span_end_ms,
-                                           resolve.sessions(),
-                                           AC_REPORT_EDF_SESSION_MAX,
-                                           session_count,
-                                           &edf_pending);
+            edf_catalog_.collect_sessions_for_night(night,
+                                                    span_start_ms,
+                                                    span_end_ms,
+                                                    resolve.sessions(),
+                                                    AC_REPORT_EDF_SESSION_MAX,
+                                                    session_count,
+                                                    &edf_pending);
         if (edf_pending) {
-            cache_status_.active = false;
-            cache_status_.revision++;
-            cache_status_.error.clear();
+            state().mark_no_work();
             return true;
         }
 
@@ -190,7 +163,7 @@ bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
                                  span_start_ms,
                                  span_end_ms,
                                  resolved)) {
-            fail_cache_fetch("cache_source_resolve_failed");
+            (void)fail("cache_source_resolve_failed");
             return false;
         }
 
@@ -204,14 +177,16 @@ bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
             }
 
             const ReportSourceDef *source = report_source_def(segment.source);
-            if (!source || !cache_source_supported(source->id)) continue;
+            if (!source || !report_cache_source_supported(source->id)) continue;
 
             int64_t from_ms = segment.start_ms;
             if (latest_tail_refresh) {
                 int64_t cached_end_ms = 0;
-                if (source_latest_cached_end_for_night(*source,
-                                                       night,
-                                                       cached_end_ms) &&
+                if (report_manager_internal::source_latest_cached_end_for_night(
+                        spool_report_provider(),
+                        *source,
+                        night,
+                        cached_end_ms) &&
                     cached_end_ms > latest_tail_start_ms) {
                     from_ms =
                         cached_end_ms - AC_REPORT_LATEST_TAIL_OVERLAP_MS;
@@ -228,14 +203,12 @@ bool ReportManager::build_cache_plan(const ReportIndexedNight &indexed_night,
         }
     }
 
-    if (cache_source_count_ == 0) {
-        cache_status_.active = false;
-        cache_status_.revision++;
-        cache_status_.error.clear();
+    if (!has_sources()) {
+        state().mark_no_work();
         return true;
     }
 
-    return activate_cache_plan_for_night(night);
+    return activate_plan();
 }
 
 }  // namespace aircannect

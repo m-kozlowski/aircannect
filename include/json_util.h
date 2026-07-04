@@ -24,6 +24,7 @@ void json_add_bool(String &out, const char *key, bool value, bool comma = true);
 void json_add_int(String &out, const char *key, long value, bool comma = true);
 void json_add_float(String &out, const char *key, float value, bool comma = true);
 void json_add_uint64(String &out, const char *key, uint64_t value, bool comma = true);
+#endif
 
 void append_json_escaped(LargeTextBuffer &out, const char *value);
 void append_json_escaped(LargeTextBuffer &out, const char *value, size_t len);
@@ -34,6 +35,5 @@ void json_add_bool(LargeTextBuffer &out, const char *key, bool value, bool comma
 void json_add_int(LargeTextBuffer &out, const char *key, long value, bool comma = true);
 void json_add_float(LargeTextBuffer &out, const char *key, float value, bool comma = true);
 void json_add_uint64(LargeTextBuffer &out, const char *key, uint64_t value, bool comma = true);
-#endif
 
 }  // namespace aircannect

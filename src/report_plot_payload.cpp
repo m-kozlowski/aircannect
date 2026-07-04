@@ -139,4 +139,215 @@ int32_t plot_value_multiplier(ReportSignalId signal, ReportSourceId source) {
     return 1;
 }
 
+void report_build_empty_plot_bin(ReportSpoolBuffer &out) {
+    out.clear();
+    out.set_max_size(32);
+    bin_put_u32(out, PLOT_BIN_MAGIC);
+    bin_put_u16(out, PLOT_BIN_VERSION);
+    bin_put_u16(out, 0);   // flags
+    bin_put_i64(out, 0);   // base_ms
+    bin_put_u32(out, 0);   // event count; no series follow
+}
+
+int report_plot_range_index(
+    const report_manager_internal::PlotRange *ranges,
+    size_t range_count,
+    int64_t timestamp_ms) {
+    if (!ranges) return -1;
+
+    for (size_t i = 0; i < range_count; ++i) {
+        if (timestamp_ms >= ranges[i].start_ms &&
+            timestamp_ms < ranges[i].end_ms) {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
+}
+
+uint8_t report_flush_plot_bucket_to(
+    ReportSpoolBuffer &out,
+    report_manager_internal::PlotBuildBucket &bucket,
+    int64_t base_ms,
+    bool &ok) {
+    if (!bucket.have) return 0;
+
+    struct PlotPoint {
+        int64_t t = 0;
+        int32_t value = 0;
+    };
+
+    PlotPoint points[4] = {
+        {bucket.start_t, bucket.start_value},
+        {bucket.min_t, bucket.min_value},
+        {bucket.max_t, bucket.max_value},
+        {bucket.end_t, bucket.end_value},
+    };
+
+    std::sort(points,
+              points + 4,
+              [](const PlotPoint &a, const PlotPoint &b) {
+                  return a.t < b.t;
+              });
+
+    bool emitted[4] = {};
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < 4; ++i) {
+        if (emitted[i]) continue;
+
+        ok &= bin_put_i32(out, static_cast<int32_t>(points[i].t - base_ms));
+        ok &= bin_put_i32(out, points[i].value);
+        count++;
+
+        for (uint8_t j = i + 1; j < 4; ++j) {
+            if (points[j].t == points[i].t) emitted[j] = true;
+        }
+    }
+
+    bucket.clear();
+    return count;
+}
+
+uint8_t report_emit_plot_gap_to(
+    ReportSpoolBuffer &out,
+    report_manager_internal::PlotBuildBucket &bucket,
+    int64_t base_ms,
+    bool &ok) {
+    uint8_t count = report_flush_plot_bucket_to(out, bucket, base_ms, ok);
+    ok &= bin_put_i32(out, PLOT_POINT_GAP_DELTA);
+    ok &= bin_put_i32(out, 0);
+    return static_cast<uint8_t>(count + 1);
+}
+
+void report_flush_plot_envelope_bucket(
+    report_manager_internal::PlotSeriesBuildState &state,
+    bool &ok) {
+    if (!state.bucket.have) return;
+
+    if (state.current_bucket < 0 ||
+        state.current_bucket > PLOT_ENVELOPE_GAP_BUCKET - 1) {
+        ok = false;
+        state.bucket.clear();
+        return;
+    }
+
+    ok &= bin_put_u32(state.points,
+                      static_cast<uint32_t>(state.current_bucket));
+
+    int32_t min_value = state.bucket.min_value;
+    int32_t max_value = state.bucket.max_value;
+    if (min_value > max_value) std::swap(min_value, max_value);
+
+    ok &= bin_put_i32(state.points, min_value);
+    ok &= bin_put_i32(state.points, max_value);
+    state.bucket.clear();
+}
+
+bool report_append_plot_series_value(
+    report_manager_internal::PlotSeriesBuildState &state,
+    int64_t base_ms,
+    int64_t timestamp_ms,
+    int32_t value_milli,
+    int64_t bucket_ms,
+    bool &ok) {
+    if (timestamp_ms < base_ms) return true;
+    if (bucket_ms <= 0) bucket_ms = 1;
+
+    if (state.series_bucket_ms <= 0) {
+        state.series_bucket_ms = bucket_ms;
+    } else {
+        bucket_ms = state.series_bucket_ms;
+    }
+
+    int64_t sample_bucket = state.current_bucket;
+    if (state.current_bucket < 0 ||
+        state.current_bucket_ms != bucket_ms ||
+        timestamp_ms < state.current_bucket_start_ms ||
+        timestamp_ms >= state.current_bucket_end_ms) {
+        sample_bucket = (timestamp_ms - base_ms) / bucket_ms;
+        if (sample_bucket < 0) sample_bucket = 0;
+    }
+
+    if (state.current_bucket != sample_bucket ||
+        state.current_bucket_ms != bucket_ms) {
+        report_flush_plot_envelope_bucket(state, ok);
+        state.current_bucket = sample_bucket;
+        state.current_bucket_ms = bucket_ms;
+        state.current_bucket_start_ms = base_ms + sample_bucket * bucket_ms;
+        state.current_bucket_end_ms =
+            state.current_bucket_start_ms + bucket_ms;
+    } else if (state.current_bucket_start_ms == 0 ||
+               state.current_bucket_end_ms == 0) {
+        state.current_bucket_start_ms = base_ms + sample_bucket * bucket_ms;
+        state.current_bucket_end_ms =
+            state.current_bucket_start_ms + bucket_ms;
+    }
+
+    if (!state.bucket.have) {
+        state.bucket.have = true;
+        state.bucket.start_t = timestamp_ms;
+        state.bucket.end_t = timestamp_ms;
+        state.bucket.min_t = timestamp_ms;
+        state.bucket.max_t = timestamp_ms;
+        state.bucket.start_value = value_milli;
+        state.bucket.end_value = value_milli;
+        state.bucket.min_value = value_milli;
+        state.bucket.max_value = value_milli;
+    } else {
+        state.bucket.end_t = timestamp_ms;
+        state.bucket.end_value = value_milli;
+        if (value_milli < state.bucket.min_value) {
+            state.bucket.min_value = value_milli;
+            state.bucket.min_t = timestamp_ms;
+        }
+        if (value_milli > state.bucket.max_value) {
+            state.bucket.max_value = value_milli;
+            state.bucket.max_t = timestamp_ms;
+        }
+    }
+
+    return ok;
+}
+
+bool report_append_plot_series_point(
+    report_manager_internal::PlotSeriesBuildState &state,
+    int64_t base_ms,
+    int64_t timestamp_ms,
+    int32_t value_milli,
+    int64_t bucket_ms,
+    bool &ok) {
+    if (!report_append_plot_series_value(state,
+                                         base_ms,
+                                         timestamp_ms,
+                                         value_milli,
+                                         bucket_ms,
+                                         ok)) {
+        return false;
+    }
+
+    state.have_last_sample = true;
+    state.last_sample_ms = timestamp_ms;
+    return ok;
+}
+
+bool report_append_plot_series_gap(
+    report_manager_internal::PlotSeriesBuildState &state,
+    bool &ok) {
+    report_flush_plot_envelope_bucket(state, ok);
+
+    ok &= bin_put_u32(state.points, PLOT_ENVELOPE_GAP_BUCKET);
+    ok &= bin_put_i32(state.points, 0);
+    ok &= bin_put_i32(state.points, 0);
+
+    state.have_last_sample = false;
+    state.last_sample_ms = 0;
+    state.last_range_index = -1;
+    state.current_bucket = -1;
+    state.current_bucket_start_ms = 0;
+    state.current_bucket_end_ms = 0;
+    state.current_bucket_ms = 0;
+    state.bucket.clear();
+    return ok;
+}
+
 }  // namespace aircannect

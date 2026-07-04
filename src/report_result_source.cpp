@@ -1,16 +1,19 @@
-#include "report_manager.h"
+#include "report_result_materialization_sink.h"
 
 #include <limits.h>
 #include <string.h>
 
-#include "report_data_provider.h"
+#include "edf_report_provider.h"
+#include "report_manager_helpers.h"
+#include "report_result_provider_bridge.h"
 #include "report_sources.h"
+#include "report_summary_json.h"
 
 namespace aircannect {
 namespace {
 
 struct ResultChunkContext {
-    ReportManager *manager = nullptr;
+    ReportResultMaterializationSink *sink = nullptr;
     ReportStoreChunkKind kind = ReportStoreChunkKind::Series;
     ReportSourceId source = ReportSourceId::Summary;
     ReportSignalId signal = ReportSignalId::Flow;
@@ -20,26 +23,136 @@ struct ResultChunkContext {
     uint32_t entries = 0;
 };
 
-bool report_stream_bit(size_t stream_index, uint32_t &bit) {
-    if (stream_index >= 32) return false;
-    bit = 1u << static_cast<uint32_t>(stream_index);
+}  // namespace
+
+ReportResultMaterializationSink::ReportResultMaterializationSink(
+    ReportResultRuntime &runtime,
+    const ReportDataProvider &spool_provider)
+    : runtime_(runtime), spool_provider_(spool_provider) {}
+
+void ReportResultMaterializationSink::set_error(const char *message) {
+    if (!error_) error_ = message;
+}
+
+bool ReportResultMaterializationSink::ensure_chunks() {
+    if (runtime_.ensure_chunks()) return true;
+
+    set_error("result_manifest_alloc_failed");
+    return false;
+}
+
+bool ReportResultMaterializationSink::begin_materialization(
+    const ReportIndexedNight &night,
+    const ReportResolvedPlan &plan) {
+    (void)runtime_.ranges().set_from_resolved_plan(plan);
+
+    uint32_t duration_min = report_indexed_night_display_duration_min(night);
+    if (duration_min == 0) {
+        for (size_t i = 0; i < runtime_.ranges().count(); ++i) {
+            duration_min += report_ceil_duration_min(
+                runtime_.ranges()[i].start_ms,
+                runtime_.ranges()[i].end_ms);
+        }
+    }
+
+    if (duration_min > 0) {
+        runtime_.status().duration_min = duration_min;
+    } else if (night.has_summary && night.summary.duration_min > 0) {
+        runtime_.status().duration_min = night.summary.duration_min;
+    }
+
     return true;
 }
 
-}  // namespace
+bool ReportResultMaterializationSink::add_materialized_stream(
+    const ReportResolvedStream &stream,
+    size_t &result_stream_index) {
+    if (!add_stream(stream.kind,
+                    stream.selected_source,
+                    stream.signal,
+                    stream.name,
+                    stream.required,
+                    stream.complete,
+                    result_stream_index)) {
+        return false;
+    }
 
-bool ReportManager::collect_result_chunk(void *context,
-                                         const ReportProviderChunk &info) {
+    if (result_stream_index < runtime_.streams().count()) {
+        ReportResultStream &result_stream =
+            runtime_.streams()[result_stream_index];
+        result_stream.has_edf_segment =
+            result_stream.has_edf_segment || stream.has_edf_segment;
+        result_stream.has_spool_segment =
+            result_stream.has_spool_segment || stream.has_spool_segment;
+    }
+
+    return true;
+}
+
+bool ReportResultMaterializationSink::add_materialized_segment(
+    const ReportResolvedSegment &segment,
+    size_t result_stream_index) {
+    if (segment.provider == ReportResolvedProvider::None) return true;
+
+    const int64_t night_start_ms =
+        static_cast<int64_t>(runtime_.identity().summary().start_ms);
+
+    if (segment.provider == ReportResolvedProvider::Edf) {
+        EdfReportDataProvider provider(runtime_.scratch().edf_sessions(),
+                                       runtime_.scratch().edf_session_count());
+        return add_provider_chunks_to_stream(provider,
+                                             segment,
+                                             night_start_ms,
+                                             result_stream_index);
+    }
+
+    return add_provider_chunks_to_stream(spool_provider_,
+                                         segment,
+                                         night_start_ms,
+                                         result_stream_index);
+}
+
+void ReportResultMaterializationSink::finish_materialization(
+    const ReportResolvedPlan &plan) {
+    runtime_.status().events_available = plan.events_available;
+    runtime_.status().missing_required = runtime_.status().missing_streams;
+}
+
+bool ReportResultMaterializationSink::add_stream(ReportStoreChunkKind kind,
+                                                 ReportSourceId source,
+                                                 ReportSignalId signal,
+                                                 const char *name,
+                                                 bool required,
+                                                 bool complete,
+                                                 size_t &stream_index) {
+    if (runtime_.add_stream(kind,
+                            source,
+                            signal,
+                            name,
+                            required,
+                            complete,
+                            stream_index)) {
+        return true;
+    }
+
+    set_error("result_streams_full");
+    return false;
+}
+
+bool ReportResultMaterializationSink::collect_chunk(
+    void *context,
+    const ReportProviderChunk &info) {
     ResultChunkContext *ctx = static_cast<ResultChunkContext *>(context);
-    if (!ctx || !ctx->manager || !info.name || !info.name[0]) return false;
+    if (!ctx || !ctx->sink || !info.name || !info.name[0]) return false;
 
-    ReportManager *manager = ctx->manager;
+    ReportResultMaterializationSink &sink = *ctx->sink;
     if (ctx->name && ctx->name[0] && strcmp(ctx->name, info.name) != 0) {
         return true;
     }
 
-    for (uint32_t i = 0; i < manager->result_status_.chunk_count; ++i) {
-        const ReportResultChunk &existing = manager->result_chunks_[i];
+    for (uint32_t i = 0; i < sink.runtime_.status().chunk_count; ++i) {
+        const ReportResultChunk &existing =
+            sink.runtime_.scratch().chunks()[i];
         if (existing.kind == info.kind &&
             existing.source == info.source &&
             existing.name && info.name &&
@@ -56,67 +169,66 @@ bool ReportManager::collect_result_chunk(void *context,
         ctx->name && ctx->name[0] && strcmp(ctx->name, info.name) == 0;
     size_t stream_index = ctx->stream_index;
     if (fixed_stream && stream_index != SIZE_MAX) {
-        if (stream_index >= manager->result_stream_count_) {
-            manager->fail_result_prepare("bad_result_stream");
+        if (stream_index >= sink.runtime_.streams().count()) {
+            sink.set_error("bad_result_stream");
             return false;
         }
 
         const ReportResultStream &stream =
-            manager->result_streams_[stream_index];
+            sink.runtime_.streams()[stream_index];
         if (stream.kind != info.kind ||
             stream.signal != info.signal ||
             !stream.name ||
             strcmp(stream.name, info.name) != 0) {
-            manager->fail_result_prepare("result_stream_mismatch");
+            sink.set_error("result_stream_mismatch");
             return false;
         }
     }
 
     if (stream_index == SIZE_MAX || !fixed_stream) {
-        if (!manager->add_result_stream(info.kind,
-                                        info.source,
-                                        info.signal,
-                                        info.name,
-                                        ctx->required,
-                                        true,
-                                        stream_index)) {
+        if (!sink.add_stream(info.kind,
+                             info.source,
+                             info.signal,
+                             info.name,
+                             ctx->required,
+                             true,
+                             stream_index)) {
             return false;
         }
     }
 
-    if (!manager->add_provider_result_chunk(info,
-                                            ctx->required,
-                                            stream_index)) {
+    if (!sink.add_provider_chunk(info, ctx->required, stream_index)) {
         return false;
     }
+
     if (fixed_stream) ctx->stream_index = stream_index;
     ctx->entries++;
     return true;
 }
 
-bool ReportManager::add_provider_result_chunk(
+bool ReportResultMaterializationSink::add_provider_chunk(
     const ReportProviderChunk &provider_chunk,
     bool required,
     size_t stream_index) {
     (void)required;
-    if (stream_index >= result_stream_count_ || stream_index > UINT8_MAX) {
-        fail_result_prepare("bad_result_stream");
+    if (stream_index >= runtime_.streams().count() || stream_index > UINT8_MAX) {
+        set_error("bad_result_stream");
         return false;
     }
 
     uint32_t stream_bit = 0;
-    if (!report_stream_bit(stream_index, stream_bit)) {
-        fail_result_prepare("bad_result_stream");
+    if (!report_manager_internal::report_stream_bit(stream_index, stream_bit)) {
+        set_error("bad_result_stream");
         return false;
     }
 
-    if (!result_chunks_) {
-        fail_result_prepare("result_chunks_missing");
+    if (!runtime_.scratch().chunks()) {
+        set_error("result_chunks_missing");
         return false;
     }
 
     auto account_stream = [&]() {
-        ReportResultStream &stream = result_streams_[stream_index];
+        ReportResultStream &stream = runtime_.streams()[stream_index];
         stream.has_edf_segment =
             stream.has_edf_segment ||
             provider_chunk.ref.provider == ReportProviderId::Edf;
@@ -126,14 +238,14 @@ bool ReportManager::add_provider_result_chunk(
         stream.chunk_count++;
         stream.record_count += provider_chunk.record_count;
         stream.payload_bytes += provider_chunk.payload_len;
-        result_status_.record_count += provider_chunk.record_count;
-        result_status_.payload_bytes += provider_chunk.payload_len;
+        runtime_.status().record_count += provider_chunk.record_count;
+        runtime_.status().payload_bytes += provider_chunk.payload_len;
     };
 
-    for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
-        ReportResultChunk &existing = result_chunks_[i];
+    for (uint32_t i = 0; i < runtime_.status().chunk_count; ++i) {
+        ReportResultChunk &existing = runtime_.scratch().chunks()[i];
         const bool same_physical =
-            result_chunk_same_physical_edf(existing, provider_chunk);
+            report_result_chunk_same_physical_edf(existing, provider_chunk);
         const bool same_logical =
             existing.kind == provider_chunk.kind &&
             existing.source == provider_chunk.source &&
@@ -145,18 +257,19 @@ bool ReportManager::add_provider_result_chunk(
                                             provider_chunk.ref);
         if (!same_physical && !same_logical) continue;
         if ((existing.stream_mask & stream_bit) != 0) return true;
+
         existing.stream_mask |= stream_bit;
         account_stream();
         return true;
     }
 
-    if (result_status_.chunk_count >= result_chunk_capacity_) {
-        fail_result_prepare("result_chunks_full");
+    if (runtime_.status().chunk_count >= runtime_.scratch().chunk_capacity()) {
+        set_error("result_chunks_full");
         return false;
     }
 
     ReportResultChunk &chunk =
-        result_chunks_[result_status_.chunk_count++];
+        runtime_.scratch().chunks()[runtime_.status().chunk_count++];
     chunk.provider_ref = provider_chunk.ref;
     chunk.kind = provider_chunk.kind;
     chunk.source = provider_chunk.source;
@@ -174,78 +287,74 @@ bool ReportManager::add_provider_result_chunk(
     return true;
 }
 
-bool ReportManager::add_provider_chunks_to_result_stream(
+bool ReportResultMaterializationSink::add_provider_chunks_to_stream(
     const ReportDataProvider &provider,
-    ReportStoreChunkKind kind,
-    ReportSourceId source,
-    ReportSignalId signal,
-    const char *name,
+    const ReportResolvedSegment &segment,
     int64_t night_start_ms,
-    int64_t start_ms,
-    int64_t end_ms,
-    bool required,
-    bool complete,
     size_t stream_index) {
-    if (!ensure_result_chunks()) return false;
+    if (!ensure_chunks()) return false;
 
-    const ReportSourceDef *source_def = report_source_def(source);
+    const ReportSourceDef *source_def = report_source_def(segment.source);
     if (!source_def || !source_def->spool_type || !source_def->spool_type[0]) {
-        fail_result_prepare("bad_result_source");
+        set_error("bad_result_source");
         return false;
     }
 
-    const bool sparse_events = kind == ReportStoreChunkKind::Events;
-    if (stream_index >= result_stream_count_ || !name || !name[0]) {
-        fail_result_prepare("bad_result_stream");
+    const bool sparse_events = segment.kind == ReportStoreChunkKind::Events;
+    if (stream_index >= runtime_.streams().count() ||
+        !segment.name || !segment.name[0]) {
+        set_error("bad_result_stream");
         return false;
     }
 
-    ReportResultStream &stream = result_streams_[stream_index];
-    if (stream.kind != kind || stream.signal != signal || !stream.name ||
-        strcmp(stream.name, name) != 0) {
-        fail_result_prepare("result_stream_mismatch");
+    ReportResultStream &stream = runtime_.streams()[stream_index];
+    if (stream.kind != segment.kind ||
+        stream.signal != segment.signal ||
+        !stream.name ||
+        strcmp(stream.name, segment.name) != 0) {
+        set_error("result_stream_mismatch");
         return false;
     }
 
-    if (required) stream.required = true;
-    if (!complete && stream.complete) {
+    if (segment.required) stream.required = true;
+    if (!segment.complete && stream.complete) {
         stream.complete = false;
-        if (stream.required) result_status_.missing_streams++;
+        if (stream.required) runtime_.status().missing_streams++;
     }
-    if (!complete) return true;
+    if (!segment.complete) return true;
 
     const uint32_t chunks_before = stream.chunk_count;
+
     ResultChunkContext context;
-    context.manager = this;
-    context.kind = kind;
-    context.source = source;
-    context.signal = signal;
-    context.name = name;
-    context.required = required;
+    context.sink = this;
+    context.kind = segment.kind;
+    context.source = segment.source;
+    context.signal = segment.signal;
+    context.name = segment.name;
+    context.required = segment.required;
     context.stream_index = stream_index;
 
-    if (!provider.for_each_chunk(kind,
+    if (!provider.for_each_chunk(segment.kind,
                                  *source_def,
-                                 signal,
-                                 name,
+                                 segment.signal,
+                                 segment.name,
                                  night_start_ms,
-                                 start_ms,
-                                 end_ms,
-                                 collect_result_chunk,
+                                 segment.start_ms,
+                                 segment.end_ms,
+                                 collect_chunk,
                                  &context)) {
-        if (result_status_.state != ReportResultState::Error) {
-            fail_result_prepare("result_chunk_list_failed");
-        }
+        if (!error_) set_error("result_chunk_list_failed");
         return false;
     }
 
     if (!sparse_events &&
-        required &&
-        result_streams_[stream_index].chunk_count == chunks_before &&
-        result_streams_[stream_index].complete) {
-        result_streams_[stream_index].complete = false;
-        result_status_.missing_streams++;
+        segment.required &&
+        runtime_.streams()[stream_index].chunk_count == chunks_before &&
+        runtime_.streams()[stream_index].complete) {
+        runtime_.streams()[stream_index].complete = false;
+        runtime_.status().missing_streams++;
     }
+
     return true;
 }
 

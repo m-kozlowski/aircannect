@@ -1,0 +1,72 @@
+#pragma once
+
+#include <stdint.h>
+
+namespace aircannect {
+
+class ReportBuildQueueService;
+class ReportCacheFetchService;
+class ReportCacheStorageRuntime;
+class ReportEdfCatalogContext;
+class ReportFetchRuntime;
+class ReportPlotPrebuildService;
+class ReportPrefetchService;
+class ReportRangePlotBuilder;
+class ReportResultBuildService;
+class ReportResultCacheRuntime;
+class ReportResultPrepareService;
+class ReportSummaryRuntime;
+class ReportSummaryService;
+class RpcArbiter;
+struct RpcEvent;
+
+enum class ReportCacheFetchEvent : uint8_t;
+enum class ReportSummaryFetchEvent : uint8_t;
+
+class ReportRuntimeService {
+public:
+    ReportRuntimeService(ReportFetchRuntime &fetch,
+                         ReportSummaryRuntime &summary_runtime,
+                         ReportCacheStorageRuntime &cache_storage,
+                         ReportResultCacheRuntime &result_cache,
+                         ReportSummaryService &summary,
+                         ReportCacheFetchService &cache_fetch,
+                         ReportResultBuildService &result_build,
+                         ReportRangePlotBuilder &range_plot,
+                         ReportResultPrepareService &result_prepare,
+                         ReportPlotPrebuildService &plot_prebuild,
+                         ReportBuildQueueService &build_queue,
+                         ReportPrefetchService &prefetch,
+                         ReportEdfCatalogContext &edf_catalog);
+
+    void poll(RpcArbiter &arbiter);
+    bool handle_event(const RpcEvent &event);
+
+    bool busy() const;
+    bool foreground_busy() const;
+    bool background_work_active() const;
+    bool cancel_cache_fetch();
+
+private:
+    bool drain_source_events(RpcArbiter &arbiter);
+    void service_build_queue(bool realtime_active);
+    void service_range_plot(bool realtime_active);
+    void handle_cache_fetch_event(ReportCacheFetchEvent event);
+    void handle_summary_fetch_event(ReportSummaryFetchEvent event);
+
+    ReportFetchRuntime &fetch_;
+    ReportSummaryRuntime &summary_runtime_;
+    ReportCacheStorageRuntime &cache_storage_;
+    ReportResultCacheRuntime &result_cache_;
+    ReportSummaryService &summary_;
+    ReportCacheFetchService &cache_fetch_;
+    ReportResultBuildService &result_build_;
+    ReportRangePlotBuilder &range_plot_;
+    ReportResultPrepareService &result_prepare_;
+    ReportPlotPrebuildService &plot_prebuild_;
+    ReportBuildQueueService &build_queue_;
+    ReportPrefetchService &prefetch_;
+    ReportEdfCatalogContext &edf_catalog_;
+};
+
+}  // namespace aircannect

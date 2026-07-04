@@ -1,141 +1,197 @@
-#include "report_manager.h"
+#include "report_result_plot_builder.h"
 
 #include <algorithm>
 #include <stdint.h>
-#include <string.h>
 
 #include "board.h"
 #include "debug_log.h"
 #include "report_event_dedupe.h"
 #include "report_plot_payload.h"
 #include "report_records.h"
+#include "report_result_cache_runtime.h"
+#include "report_result_cache_files.h"
+#include "report_result_provider_bridge.h"
+#include "report_result_runtime.h"
 #include "report_store.h"
 
 namespace aircannect {
 
-void ReportManager::reset_plot_build() {
-    plot_build_active_ = false;
-    plot_build_idle_prebuild_ = false;
-    plot_build_night_start_ms_.store(0);
-    plot_build_phase_ = ReportPlotBuildPhase::Idle;
-    plot_build_bin_.clear();
-    plot_tmp_.clear();
-    plot_bin_ok_ = true;
-    memset(plot_ranges_, 0, sizeof(plot_ranges_));
-    plot_range_count_ = 0;
-    plot_start_ms_ = 0;
-    plot_end_ms_ = 0;
-    plot_bucket_ms_ = 1;
-    plot_chunk_index_ = 0;
-    memset(plot_chunk_done_, 0, sizeof(plot_chunk_done_));
-    plot_seen_events_.clear();
-    for (size_t i = 0; i < AC_REPORT_RESULT_STREAM_MAX; ++i) {
-        plot_series_states_[i].reset();
-    }
-    plot_build_started_ms_ = 0;
-    plot_build_input_chunks_ = 0;
-    plot_build_input_bytes_ = 0;
+ReportResultPlotBuilder::ReportResultPlotBuilder(ReportResultRuntime &result,
+                                                 ReportResultCacheRuntime &cache)
+    : result_(result),
+      cache_(cache) {}
+
+bool ReportResultPlotBuilder::active() const {
+    return result_.plot().active;
 }
 
-void ReportManager::build_empty_plot_bin(ReportSpoolBuffer &out) const {
-    out.clear();
-    out.set_max_size(32);
-    bin_put_u32(out, PLOT_BIN_MAGIC);
-    bin_put_u16(out, PLOT_BIN_VERSION);
-    bin_put_u16(out, 0);   // flags
-    bin_put_i64(out, 0);   // base_ms
-    bin_put_u32(out, 0);   // event count; no series follow
+bool ReportResultPlotBuilder::idle_prebuild_active() const {
+    return result_.plot().active && result_.plot().idle_prebuild;
 }
 
-int ReportManager::plot_range_index(int64_t timestamp_ms) const {
-    for (size_t i = 0; i < plot_range_count_; ++i) {
-        if (timestamp_ms >= plot_ranges_[i].start_ms &&
-            timestamp_ms < plot_ranges_[i].end_ms) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
+uint32_t ReportResultPlotBuilder::elapsed_ms(uint32_t now_ms) const {
+    return result_.plot().elapsed_ms(now_ms);
 }
 
-bool ReportManager::start_result_plot_build() {
-    reset_plot_build();
-    build_empty_plot_bin(result_plot_bin_);
-    if (result_status_.state == ReportResultState::Error ||
-        !result_chunks_ || result_status_.chunk_count == 0) {
-        build_empty_plot_bin(result_plot_bin_);
-        return publish_result_to_slot();
+uint64_t ReportResultPlotBuilder::night_start_ms() const {
+    return result_.plot().night_start_ms.load();
+}
+
+void ReportResultPlotBuilder::reset() {
+    result_.plot().reset();
+}
+
+void ReportResultPlotBuilder::abort_idle_prebuild(const char *reason) {
+    if (!idle_prebuild_active()) return;
+
+    const uint32_t elapsed = elapsed_ms(millis());
+
+    Log::logf(CAT_REPORT,
+              LOG_DEBUG,
+              "Idle plot prebuild aborted reason=%s "
+              "night=%llu elapsed_ms=%lu\n",
+              reason ? reason : "gate",
+              static_cast<unsigned long long>(night_start_ms()),
+              static_cast<unsigned long>(elapsed));
+
+    reset();
+    result_.release_edf_sessions();
+}
+
+void ReportResultPlotBuilder::preempt_idle_prebuild() {
+    if (!idle_prebuild_active()) return;
+
+    const uint32_t elapsed = elapsed_ms(millis());
+
+    Log::logf(CAT_REPORT,
+              LOG_DEBUG,
+              "Idle plot prebuild preempted night=%llu elapsed_ms=%lu\n",
+              static_cast<unsigned long long>(night_start_ms()),
+              static_cast<unsigned long>(elapsed));
+
+    reset();
+    result_.release_edf_sessions();
+}
+
+void ReportResultPlotBuilder::preempt_for_range(size_t therapy_index,
+                                                uint64_t night_start) {
+    if (!active()) return;
+
+    const uint32_t elapsed = elapsed_ms(millis());
+
+    Log::logf(CAT_REPORT,
+              LOG_DEBUG,
+              "Range plot preempted overview index=%lu "
+              "night=%llu elapsed_ms=%lu\n",
+              static_cast<unsigned long>(therapy_index),
+              static_cast<unsigned long long>(night_start),
+              static_cast<unsigned long>(elapsed));
+
+    reset();
+    result_.release_edf_sessions();
+}
+
+bool ReportResultPlotBuilder::start() {
+    reset();
+    report_build_empty_plot_bin(result_.plot().result_bin);
+    if (result_.status().state == ReportResultState::Error ||
+        !result_.scratch().chunks() || result_.status().chunk_count == 0) {
+        report_build_empty_plot_bin(result_.plot().result_bin);
+        return cache_.publish_result(result_);
     }
 
     const size_t range_count =
-        std::min(result_range_count_,
+        std::min(result_.ranges().count(),
                  static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
     if (range_count == 0) {
-        build_empty_plot_bin(result_plot_bin_);
-        return publish_result_to_slot();
+        report_build_empty_plot_bin(result_.plot().result_bin);
+        return cache_.publish_result(result_);
     }
 
-    plot_range_count_ = range_count;
-    plot_start_ms_ = result_ranges_[0].start_ms;
-    plot_end_ms_ = result_ranges_[0].end_ms;
+    result_.plot().range_count = range_count;
+    result_.plot().start_ms = result_.ranges()[0].start_ms;
+    result_.plot().end_ms = result_.ranges()[0].end_ms;
     for (size_t i = 0; i < range_count; ++i) {
-        plot_ranges_[i] = result_ranges_[i];
-        plot_start_ms_ = std::min(plot_start_ms_, result_ranges_[i].start_ms);
-        plot_end_ms_ = std::max(plot_end_ms_, result_ranges_[i].end_ms);
+        result_.plot().ranges[i] = result_.ranges()[i];
+
+        result_.plot().start_ms =
+            std::min(result_.plot().start_ms, result_.ranges()[i].start_ms);
+        result_.plot().end_ms =
+            std::max(result_.plot().end_ms, result_.ranges()[i].end_ms);
     }
-    if (plot_start_ms_ <= 0 || plot_end_ms_ <= plot_start_ms_) {
-        build_empty_plot_bin(result_plot_bin_);
-        return publish_result_to_slot();
+
+    if (result_.plot().start_ms <= 0 ||
+        result_.plot().end_ms <= result_.plot().start_ms) {
+        report_build_empty_plot_bin(result_.plot().result_bin);
+        return cache_.publish_result(result_);
     }
-    if (!result_skip_plot_cache_ && load_result_plot_cache()) {
+
+    if (!result_.plot().skip_cache &&
+        load_result_plot_cache_for_etag(
+            result_.identity().summary().start_ms,
+            result_.identity().etag(),
+            result_.plot().result_bin)) {
         Log::logf(CAT_REPORT,
                   LOG_DEBUG,
                   "Result plot cache hit index=%lu bytes=%lu\n",
-                  static_cast<unsigned long>(result_status_.therapy_index),
-                  static_cast<unsigned long>(result_plot_bin_.size()));
-        return publish_result_to_slot();
+                  static_cast<unsigned long>(result_.status().therapy_index),
+                  static_cast<unsigned long>(result_.plot().result_bin.size()));
+        return cache_.publish_result(result_);
     }
-    if (result_skip_plot_cache_) {
+
+    if (result_.plot().skip_cache) {
         Log::logf(CAT_REPORT,
                   LOG_DEBUG,
                   "Result plot cache skipped index=%lu reason=refresh\n",
-                  static_cast<unsigned long>(result_status_.therapy_index));
+                  static_cast<unsigned long>(result_.status().therapy_index));
     }
 
-    const int64_t span_ms = plot_end_ms_ - plot_start_ms_;
-    plot_bucket_ms_ = std::max<int64_t>(
+    const int64_t span_ms = result_.plot().end_ms - result_.plot().start_ms;
+    result_.plot().bucket_ms = std::max<int64_t>(
         1, span_ms / static_cast<int64_t>(AC_REPORT_PLOT_BUCKETS));
-    plot_build_bin_.clear();
-    plot_build_bin_.set_max_size(AC_REPORT_PLOT_MAX_BYTES);
-    plot_tmp_.clear();
-    plot_tmp_.set_max_size(128 * 1024);
-    plot_bin_ok_ = true;
-    if (!plot_build_bin_.reserve_capacity(AC_REPORT_PLOT_INITIAL_RESERVE)) {
-        fail_result_prepare("plot_alloc_failed");
+    result_.plot().build_bin.clear();
+    result_.plot().build_bin.set_max_size(AC_REPORT_PLOT_MAX_BYTES);
+    result_.plot().tmp.clear();
+    result_.plot().tmp.set_max_size(128 * 1024);
+    result_.plot().ok = true;
+    if (!result_.plot().build_bin.reserve_capacity(
+            AC_REPORT_PLOT_INITIAL_RESERVE)) {
+        fail("plot_alloc_failed");
         return false;
     }
-    plot_bin_ok_ &= bin_put_u32(plot_build_bin_, PLOT_BIN_MAGIC);
-    plot_bin_ok_ &= bin_put_u16(plot_build_bin_, PLOT_BIN_VERSION);
-    plot_bin_ok_ &= bin_put_u16(plot_build_bin_, 0);          // flags
-    plot_bin_ok_ &= bin_put_i64(plot_build_bin_, plot_start_ms_);  // base_ms
-    if (!plot_bin_ok_) {
-        fail_result_prepare("plot_alloc_failed");
+
+    result_.plot().ok &= bin_put_u32(result_.plot().build_bin, PLOT_BIN_MAGIC);
+    result_.plot().ok &= bin_put_u16(result_.plot().build_bin, PLOT_BIN_VERSION);
+    result_.plot().ok &= bin_put_u16(result_.plot().build_bin, 0);  // flags
+    result_.plot().ok &= bin_put_i64(result_.plot().build_bin,
+                                     result_.plot().start_ms);  // base_ms
+    if (!result_.plot().ok) {
+        fail("plot_alloc_failed");
         return false;
     }
-    plot_build_active_ = true;
-    plot_build_idle_prebuild_ = active_build_idle_prebuild_;
-    plot_build_started_ms_ = millis();
-    plot_build_input_chunks_ = 0;
-    plot_build_input_bytes_ = 0;
-    plot_build_night_start_ms_.store(result_night_.start_ms);
-    plot_build_phase_ = ReportPlotBuildPhase::Events;
+
+    result_.plot().active = true;
+    result_.plot().idle_prebuild = result_.plot().active_idle_prebuild;
+    result_.plot().started_ms = millis();
+    result_.plot().input_chunks = 0;
+    result_.plot().input_bytes = 0;
+    result_.plot().night_start_ms.store(result_.identity().summary().start_ms);
+    result_.plot().phase = ReportPlotBuildPhase::Events;
     return true;
 }
 
-bool ReportManager::process_plot_event_chunk(const ReportResultChunk &chunk) {
+bool ReportResultPlotBuilder::process_event_chunk(const ReportResultChunk &chunk) {
     ReportStoreChunkMeta meta;
     ReportSpoolBuffer payload;
-    if (!read_result_chunk_payload(chunk, meta, payload)) {
-        fail_result_prepare("plot_event_read_failed");
+    if (!report_read_result_chunk_payload(
+            chunk,
+            static_cast<int64_t>(
+                result_.identity().summary().start_ms),
+            result_.scratch().edf_sessions(),
+            result_.scratch().edf_session_count(),
+            meta,
+            payload)) {
+        fail("plot_event_read_failed");
         return false;
     }
     const size_t count = payload.size() / report_event_record_wire_size();
@@ -148,11 +204,11 @@ bool ReportManager::process_plot_event_chunk(const ReportResultChunk &chunk) {
             continue;
         }
         bool in_range = false;
-        for (size_t i = 0; i < plot_range_count_; ++i) {
+        for (size_t i = 0; i < result_.plot().range_count; ++i) {
             if (report_event_overlaps_window(
                     event,
-                    plot_ranges_[i].start_ms,
-                    plot_ranges_[i].end_ms,
+                    result_.plot().ranges[i].start_ms,
+                    result_.plot().ranges[i].end_ms,
                     AC_REPORT_EVENT_EDGE_TOLERANCE_MS)) {
                 in_range = true;
                 break;
@@ -160,62 +216,81 @@ bool ReportManager::process_plot_event_chunk(const ReportResultChunk &chunk) {
         }
         if (!in_range) continue;
 
-        if (report_event_seen(plot_seen_events_, event)) continue;
-        if (!remember_report_event(plot_seen_events_, event)) {
-            fail_result_prepare("plot_event_dedupe_failed");
+        if (report_event_seen(result_.plot().seen_events, event)) continue;
+        if (!remember_report_event(result_.plot().seen_events, event)) {
+            fail("plot_event_dedupe_failed");
             return false;
         }
-        plot_bin_ok_ &= bin_put_i32(
-            plot_tmp_, static_cast<int32_t>(event.start_ms - plot_start_ms_));
-        plot_bin_ok_ &= bin_put_i32(
-            plot_tmp_, static_cast<int32_t>(event.duration_ms));
-        plot_bin_ok_ &= bin_put_i32(plot_tmp_, static_cast<int32_t>(event.code));
-        plot_bin_ok_ &= bin_put_i32(plot_tmp_,
-                                    static_cast<int32_t>(event.flags));
+
+        result_.plot().ok &= bin_put_i32(
+            result_.plot().tmp,
+            static_cast<int32_t>(event.start_ms - result_.plot().start_ms));
+        result_.plot().ok &= bin_put_i32(
+            result_.plot().tmp, static_cast<int32_t>(event.duration_ms));
+        result_.plot().ok &= bin_put_i32(result_.plot().tmp,
+                                         static_cast<int32_t>(event.code));
+        result_.plot().ok &= bin_put_i32(result_.plot().tmp,
+                                         static_cast<int32_t>(event.flags));
     }
     return true;
 }
 
-bool ReportManager::finish_result_plot_build() {
-    if (!plot_bin_ok_ || plot_build_bin_.size() == 0) {
-        fail_result_prepare("plot_overflow");
+bool ReportResultPlotBuilder::finish() {
+    if (!result_.plot().ok || result_.plot().build_bin.size() == 0) {
+        fail("plot_overflow");
         return false;
     }
-    const size_t len = plot_build_bin_.size();
-    result_plot_bin_.clear();
-    result_plot_bin_.set_max_size(len);
-    if (!result_plot_bin_.reserve_capacity(len) ||
-        !result_plot_bin_.append(plot_build_bin_.data(), len)) {
-        fail_result_prepare("plot_publish_failed");
+
+    const size_t len = result_.plot().build_bin.size();
+    result_.plot().result_bin.clear();
+    result_.plot().result_bin.set_max_size(len);
+    if (!result_.plot().result_bin.reserve_capacity(len) ||
+        !result_.plot().result_bin.append(result_.plot().build_bin.data(), len)) {
+        fail("plot_publish_failed");
         return false;
     }
-    result_status_.state = report_result_settled_state(result_status_.missing_required);
-    result_status_.error.clear();
-    if (!publish_result_to_slot(true)) {
-        reset_plot_build();
-        release_result_edf_sessions();
+
+    result_.status().state =
+        report_result_settled_state(result_.status().missing_required);
+    result_.status().error.clear();
+    if (!cache_.publish_result(result_, true)) {
+        reset();
+        result_.release_edf_sessions();
         return false;
     }
-    const uint32_t elapsed_ms =
-        plot_build_started_ms_ ? static_cast<uint32_t>(millis() -
-                                                       plot_build_started_ms_)
-                               : 0;
-    const uint32_t input_chunks = plot_build_input_chunks_;
-    const uint32_t input_bytes = plot_build_input_bytes_;
-    reset_plot_build();
-    release_result_edf_sessions();
+
+    const uint32_t elapsed = result_.plot().elapsed_ms(millis());
+    const uint32_t input_chunks = result_.plot().input_chunks;
+    const uint32_t input_bytes = result_.plot().input_bytes;
+
+    reset();
+    result_.release_edf_sessions();
+
     Log::logf(CAT_REPORT,
               LOG_DEBUG,
               "Result plot ready index=%lu chunks=%lu input_chunks=%lu "
               "input_bytes=%lu bytes=%lu elapsed_ms=%lu\n",
-              static_cast<unsigned long>(result_status_.therapy_index),
-              static_cast<unsigned long>(result_status_.chunk_count),
+              static_cast<unsigned long>(result_.status().therapy_index),
+              static_cast<unsigned long>(result_.status().chunk_count),
               static_cast<unsigned long>(input_chunks),
               static_cast<unsigned long>(input_bytes),
-              static_cast<unsigned long>(result_plot_bin_.size()),
-              static_cast<unsigned long>(elapsed_ms));
+              static_cast<unsigned long>(result_.plot().result_bin.size()),
+              static_cast<unsigned long>(elapsed));
     return true;
 }
 
+void ReportResultPlotBuilder::fail(const char *message) {
+    reset();
+    result_.mark_error(message);
+
+    if (result_.identity().night_start_ms() != 0 &&
+        result_.status().night_start_ms != 0) {
+        cache_.publish_result(result_);
+    }
+
+    result_.release_edf_sessions();
+    Log::logf(CAT_REPORT, LOG_WARN, "Result prepare failed: %s\n",
+              result_.status().error.c_str());
+}
 
 }  // namespace aircannect

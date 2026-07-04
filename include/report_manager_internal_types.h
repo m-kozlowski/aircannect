@@ -10,16 +10,12 @@
 #include "report_data_provider.h"
 #include "report_manager_limits.h"
 #include "report_night_index.h"
+#include "report_plot_range.h"
 #include "report_result_types.h"
 #include "report_spool_types.h"
 
 namespace aircannect {
 namespace report_manager_internal {
-
-struct PlotRange {
-    int64_t start_ms = 0;
-    int64_t end_ms = 0;
-};
 
 struct ReportResultChunk {
     ReportProviderChunkRef provider_ref;
@@ -46,12 +42,6 @@ enum class ResultPrepareOutcome : uint8_t {
 struct PrefetchSkip {
     uint64_t night_ms = 0;
     uint32_t until_ms = 0;
-};
-
-struct SparseEventEmptyMarker {
-    ReportSourceId source = ReportSourceId::Summary;
-    uint64_t night_ms = 0;
-    char night_key[48] = {};
 };
 
 struct CacheCoalesceBuffer {

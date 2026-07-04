@@ -3,7 +3,7 @@
 #include "json_util.h"
 #include "report_daily_metrics.h"
 #include "report_sources.h"
-#include "spool_client.h"
+#include "spool_client_status.h"
 
 namespace aircannect {
 namespace {

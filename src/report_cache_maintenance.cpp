@@ -2,10 +2,21 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "report_build_queue_service.h"
+#include "report_cache_fetch_service.h"
+#include "report_cache_maintenance_service.h"
 #include "report_cache_paths.h"
 #include "report_diagnostics.h"
+#include "report_night_index_runtime.h"
+#include "report_night_index_service.h"
+#include "report_range_plot_builder.h"
+#include "report_result_build_service.h"
+#include "report_result_cache_runtime.h"
+#include "report_result_prepare_service.h"
 #include "report_sources.h"
 #include "report_store.h"
+#include "report_summary_runtime.h"
+#include "report_summary_service.h"
 #include "storage_manager.h"
 
 namespace aircannect {
@@ -24,68 +35,53 @@ void merge_cache_clear_result(ReportCacheClearResult &dst,
 
 }  // namespace
 
-bool ReportManager::clear_plot_cache_for_night(
-    const ReportSummaryRecord &night,
-    uint32_t &deleted) const {
-    deleted = 0;
-    if (!night.start_ms) return false;
+ReportCacheMaintenanceService::ReportCacheMaintenanceService(
+    ReportSummaryRuntime &summary_runtime,
+    ReportNightIndexRuntime &night_index_runtime,
+    ReportNightIndexService &night_index,
+    ReportSummaryService &summary,
+    ReportCacheFetchService &cache_fetch,
+    ReportResultCacheRuntime &result_cache,
+    ReportResultBuildService &result_build,
+    ReportRangePlotBuilder &range_plot,
+    ReportResultPrepareService &result_prepare,
+    ReportBuildQueueService &build_queue)
+    : summary_runtime_(summary_runtime),
+      night_index_runtime_(night_index_runtime),
+      night_index_(night_index),
+      summary_(summary),
+      cache_fetch_(cache_fetch),
+      result_cache_(result_cache),
+      result_build_(result_build),
+      range_plot_(range_plot),
+      result_prepare_(result_prepare),
+      build_queue_(build_queue) {}
 
-    Storage::Guard g;
-    if (!Storage::mounted()) return false;
-
-    File dir = Storage::open(REPORT_PLOT_CACHE_DIR, "r");
-    if (!dir) return true;
-    if (!dir.isDirectory()) {
-        dir.close();
-        return false;
-    }
-
-    bool ok = true;
-    while (true) {
-        File file = dir.openNextFile();
-        if (!file) break;
-
-        const bool is_dir = file.isDirectory();
-        const bool match =
-            !is_dir && plot_cache_name_for_night(file.name(), night.start_ms);
-
-        char path[REPORT_CACHE_PATH_MAX];
-        const bool path_ok = match && cache_child_path(REPORT_PLOT_CACHE_DIR,
-                                                       file.name(),
-                                                       path,
-                                                       sizeof(path));
-        file.close();
-
-        if (!match) continue;
-        if (!path_ok || !Storage::remove(path)) {
-            ok = false;
-            continue;
-        }
-
-        deleted++;
-    }
-    dir.close();
-
-    return ok;
+bool ReportCacheMaintenanceService::active_work() const {
+    return summary_.active() || cache_fetch_.active() ||
+           result_build_.plot_active() || range_plot_.active();
 }
 
-bool ReportManager::clear_cache_range(int64_t start_ms,
-                                      int64_t end_ms,
-                                      ReportCacheClearResult &out) {
+bool ReportCacheMaintenanceService::clear_range(
+    int64_t start_ms,
+    int64_t end_ms,
+    ReportCacheClearResult &out) {
     if (start_ms < 0 || end_ms <= start_ms) return false;
 
     ReportSummaryRecord *night_batch = nullptr;
-    if (!take_summary_scratch(portMAX_DELAY, night_batch)) return false;
+    if (!summary_runtime_.take_scratch(portMAX_DELAY, night_batch)) return false;
 
     size_t night_count = 0;
-    if (!take_summary_lock(portMAX_DELAY)) {
-        give_summary_scratch();
+    if (!summary_runtime_.take(portMAX_DELAY)) {
+        summary_runtime_.give_scratch();
         return false;
     }
 
-    for (size_t n = 0; records_ && n < record_count_ &&
+    const ReportSummaryRecord *records = summary_runtime_.records();
+    const size_t record_count = summary_runtime_.record_count();
+    for (size_t n = 0; records && n < record_count &&
                        n < AC_REPORT_SUMMARY_RECORD_MAX; ++n) {
-        const ReportSummaryRecord &r = records_[n];
+        const ReportSummaryRecord &r = records[n];
         if (!r.valid) continue;
 
         const int64_t ns = static_cast<int64_t>(r.start_ms);
@@ -95,7 +91,7 @@ bool ReportManager::clear_cache_range(int64_t start_ms,
 
         night_batch[night_count++] = r;
     }
-    give_summary_lock();
+    summary_runtime_.give();
 
     bool ok = true;
     uint32_t deleted = 0;
@@ -171,16 +167,13 @@ bool ReportManager::clear_cache_range(int64_t start_ms,
         }
     }
 
-    give_summary_scratch();
+    summary_runtime_.give_scratch();
     return ok;
 }
 
-bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
+bool ReportCacheMaintenanceService::clear_all(ReportCacheClearResult &out) {
     out = {};
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
-        range_build_active_) {
-        return false;
-    }
+    if (active_work()) return false;
 
     uint32_t store_reset = 0;
     if (!ReportStore::reset_cache_store(store_reset)) {
@@ -188,35 +181,34 @@ bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
     }
     out.store_reset = store_reset;
 
-    clear_build_queue(0, true);
-    invalidate_materialized(0, true);
-    clear_sparse_event_empty_markers(0);
+    build_queue_.clear(0, true);
+    result_cache_.invalidate(0, true);
 
-    if (!take_summary_lock(portMAX_DELAY)) return false;
-    clear_summary_records();
-    night_epoch_count_ = 0;
-    summary_status_.state = ReportSummaryState::Idle;
-    summary_status_.revision++;
-    summary_status_.records_total = 0;
-    summary_status_.nights_with_therapy = 0;
-    summary_status_.elapsed_ms = 0;
-    summary_status_.active_spool.clear();
-    summary_status_.error.clear();
-    give_summary_lock();
+    if (!summary_runtime_.take(portMAX_DELAY)) return false;
+    summary_runtime_.clear_records();
+    night_index_runtime_.clear_epochs();
 
-    publish_summary_json_snapshot();
-    clear_result_prepare();
+    ReportSummaryStatus &status = summary_runtime_.status();
+    status.state = ReportSummaryState::Idle;
+    status.revision++;
+    status.records_total = 0;
+    status.nights_with_therapy = 0;
+    status.elapsed_ms = 0;
+    status.active_spool.clear();
+    status.error.clear();
+    summary_runtime_.give();
+
+    summary_.publish_json_snapshot();
+    range_plot_.reset(true);
+    result_prepare_.clear_prepare();
 
     return true;
 }
 
-bool ReportManager::clear_cache_night(uint64_t night_start_ms,
-                                      ReportCacheClearResult &out) {
+bool ReportCacheMaintenanceService::clear_night(uint64_t night_start_ms,
+                                                ReportCacheClearResult &out) {
     out = {};
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
-        range_build_active_) {
-        return false;
-    }
+    if (active_work()) return false;
 
     ReportIndexedNight *indexed_night =
         static_cast<ReportIndexedNight *>(Memory::alloc_large(
@@ -229,7 +221,7 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
     }
 
     const bool found =
-        indexed_night_by_start(night_start_ms, *indexed_night) &&
+        night_index_.by_start(night_start_ms, *indexed_night) &&
         indexed_night->summary.end_ms > indexed_night->summary.start_ms;
     const ReportSummaryRecord night = found ? indexed_night->summary
                                             : ReportSummaryRecord{};
@@ -237,52 +229,44 @@ bool ReportManager::clear_cache_night(uint64_t night_start_ms,
 
     if (!found) return false;
 
-    clear_build_queue(night.start_ms, false);
-    invalidate_materialized(night.start_ms, false);
+    build_queue_.clear(night.start_ms, false);
+    result_cache_.invalidate(night.start_ms, false);
 
-    const bool ok = clear_cache_range(static_cast<int64_t>(night.start_ms),
-                                      static_cast<int64_t>(night.end_ms),
-                                      out);
-
-    clear_sparse_event_empty_markers(night.start_ms);
+    const bool ok = clear_range(static_cast<int64_t>(night.start_ms),
+                                static_cast<int64_t>(night.end_ms),
+                                out);
 
     uint32_t plot_deleted = 0;
-    if (clear_plot_cache_for_night(night, plot_deleted)) {
+    if (clear_result_plot_cache_for_night(night.start_ms, plot_deleted)) {
         out.plots_deleted += plot_deleted;
     }
 
     uint32_t result_json_deleted = 0;
-    if (clear_result_json_cache_for_night(night, result_json_deleted)) {
+    if (clear_result_json_cache_for_night(night.start_ms,
+                                          result_json_deleted)) {
         out.result_json_deleted += result_json_deleted;
     }
 
-    if (result_status_.night_start_ms == night.start_ms) {
-        clear_result_prepare();
+    if (result_build_.status().night_start_ms == night.start_ms) {
+        range_plot_.reset(true);
+        result_prepare_.clear_prepare();
     }
 
-    if (take_summary_lock(portMAX_DELAY)) {
-        for (size_t i = 0; i < night_epoch_count_; ++i) {
-            if (night_epochs_[i].night_start_ms == night.start_ms) {
-                night_epochs_[i] = night_epochs_[night_epoch_count_ - 1];
-                --night_epoch_count_;
-                break;
-            }
-        }
-        give_summary_lock();
+    if (summary_runtime_.take(portMAX_DELAY)) {
+        night_index_runtime_.remove_night(night.start_ms);
+        summary_runtime_.give();
     }
 
     if (ok) out.nights_cleared = 1;
     return ok;
 }
 
-bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
-                                              ReportCacheClearResult &out) {
+bool ReportCacheMaintenanceService::clear_oldest_nights(
+    size_t max_nights,
+    ReportCacheClearResult &out) {
     out = {};
     if (max_nights == 0) return true;
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
-        range_build_active_) {
-        return false;
-    }
+    if (active_work()) return false;
 
     ReportSummaryRecord *snapshot =
         static_cast<ReportSummaryRecord *>(Memory::alloc_large(
@@ -296,25 +280,27 @@ bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
     }
 
     size_t count = 0;
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) {
+    if (!summary_runtime_.take(pdMS_TO_TICKS(20))) {
         Memory::free(snapshot);
         return false;
     }
 
-    for (size_t i = 0; records_ && i < record_count_ &&
+    const ReportSummaryRecord *records = summary_runtime_.records();
+    const size_t record_count = summary_runtime_.record_count();
+    for (size_t i = 0; records && i < record_count &&
                        i < AC_REPORT_SUMMARY_RECORD_MAX; ++i) {
-        const ReportSummaryRecord &record = records_[i];
+        const ReportSummaryRecord &record = records[i];
         if (!record.valid || record.end_ms <= record.start_ms) continue;
 
         snapshot[count++] = record;
     }
-    give_summary_lock();
+    summary_runtime_.give();
 
     bool ok = true;
     const size_t limit = count < max_nights ? count : max_nights;
     for (size_t i = 0; i < limit; ++i) {
         ReportCacheClearResult current_clear;
-        if (!clear_cache_night(snapshot[i].start_ms, current_clear)) {
+        if (!clear_night(snapshot[i].start_ms, current_clear)) {
             ok = false;
             break;
         }
@@ -338,28 +324,47 @@ bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
     return ok;
 }
 
-bool ReportManager::prune_cache_to_latest_nights(size_t keep_latest,
-                                                 ReportCacheClearResult &out) {
+bool ReportCacheMaintenanceService::prune_to_latest_nights(
+    size_t keep_latest,
+    ReportCacheClearResult &out) {
     out = {};
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
-        range_build_active_) {
-        return false;
-    }
+    if (active_work()) return false;
 
     size_t report_nights = 0;
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
+    if (!summary_runtime_.take(pdMS_TO_TICKS(20))) return false;
 
-    for (size_t i = 0; records_ && i < record_count_ &&
+    const ReportSummaryRecord *records = summary_runtime_.records();
+    const size_t record_count = summary_runtime_.record_count();
+    for (size_t i = 0; records && i < record_count &&
                        i < AC_REPORT_SUMMARY_RECORD_MAX; ++i) {
-        const ReportSummaryRecord &record = records_[i];
+        const ReportSummaryRecord &record = records[i];
         if (!record.valid || record.end_ms <= record.start_ms) continue;
 
         report_nights++;
     }
-    give_summary_lock();
+    summary_runtime_.give();
 
     if (report_nights <= keep_latest) return true;
-    return clear_oldest_cache_nights(report_nights - keep_latest, out);
+    return clear_oldest_nights(report_nights - keep_latest, out);
+}
+
+bool ReportManager::clear_cache_all(ReportCacheClearResult &out) {
+    return cache_maintenance_.clear_all(out);
+}
+
+bool ReportManager::clear_cache_night(uint64_t night_start_ms,
+                                      ReportCacheClearResult &out) {
+    return cache_maintenance_.clear_night(night_start_ms, out);
+}
+
+bool ReportManager::clear_oldest_cache_nights(size_t max_nights,
+                                              ReportCacheClearResult &out) {
+    return cache_maintenance_.clear_oldest_nights(max_nights, out);
+}
+
+bool ReportManager::prune_cache_to_latest_nights(size_t keep_latest,
+                                                 ReportCacheClearResult &out) {
+    return cache_maintenance_.prune_to_latest_nights(keep_latest, out);
 }
 
 }  // namespace aircannect

@@ -1,39 +1,45 @@
 #include "report_manager.h"
 
+#include <Arduino.h>
+
 #include "debug_log.h"
+#include "report_build_queue_service.h"
+#include "report_index_scratch.h"
 #include "string_util.h"
 
 namespace aircannect {
 namespace {
 
-const char *result_prepare_outcome_name(uint8_t outcome) {
-    switch (outcome) {
-        case 0:
-            return "prepared";
-        case 1:
-            return "deferred";
-        case 2:
-            return "retry";
-        case 3:
-            return "failed";
-    }
-    return "unknown";
-}
+using ResultBuildJob = ReportBuildRuntime::ResultBuildJob;
 
 }  // namespace
 
-ReportManager::BuildQueueSnapshot ReportManager::build_queue_snapshot() const {
-    BuildQueueSnapshot snap;
-    snap.available = build_queue_lock_ != nullptr;
-    if (!build_queue_lock_) return snap;
-    if (xSemaphoreTake(build_queue_lock_, 0) != pdTRUE) return snap;
+ReportBuildQueue::~ReportBuildQueue() {
+    if (!lock_) return;
+
+    vSemaphoreDelete(lock_);
+    lock_ = nullptr;
+}
+
+bool ReportBuildQueue::begin() {
+    if (lock_) return true;
+
+    lock_ = xSemaphoreCreateMutex();
+    return lock_ != nullptr;
+}
+
+ReportBuildQueueSnapshot ReportBuildQueue::snapshot() const {
+    ReportBuildQueueSnapshot snap;
+    snap.available = lock_ != nullptr;
+    if (!lock_) return snap;
+    if (xSemaphoreTake(lock_, 0) != pdTRUE) return snap;
 
     const uint32_t now_ms = millis();
 
     snap.lock_ok = true;
-    snap.count = build_queue_count_;
-    if (build_queue_count_ > 0) {
-        const ResultBuildJob &job = build_queue_[build_queue_head_];
+    snap.count = count_;
+    if (count_ > 0) {
+        const ResultBuildJob &job = queue_[head_];
         snap.head_night_ms = job.night_start_ms;
         snap.head_therapy_index = job.therapy_index;
         snap.head_refresh = job.refresh;
@@ -41,37 +47,35 @@ ReportManager::BuildQueueSnapshot ReportManager::build_queue_snapshot() const {
         snap.head_age_ms = job.queued_ms ? now_ms - job.queued_ms : 0;
     }
 
-    snap.last_night_ms = build_queue_last_night_ms_;
-    snap.last_therapy_index = build_queue_last_therapy_index_;
-    snap.enqueue_total = build_queue_enqueue_total_;
-    snap.queued_total = build_queue_queued_total_;
-    snap.already_total = build_queue_already_total_;
-    snap.service_total = build_queue_service_total_;
-    snap.last_enqueue_night_ms = build_queue_last_enqueue_night_ms_;
-    snap.last_enqueue_therapy_index = build_queue_last_enqueue_therapy_index_;
-    copy_cstr(snap.last_read, sizeof(snap.last_read), build_queue_last_read_);
+    snap.last_night_ms = last_night_ms_;
+    snap.last_therapy_index = last_therapy_index_;
+    snap.enqueue_total = enqueue_total_;
+    snap.queued_total = queued_total_;
+    snap.already_total = already_total_;
+    snap.service_total = service_total_;
+    snap.last_enqueue_night_ms = last_enqueue_night_ms_;
+    snap.last_enqueue_therapy_index = last_enqueue_therapy_index_;
+    copy_cstr(snap.last_read, sizeof(snap.last_read), last_read_);
     copy_cstr(snap.last_enqueue_result,
               sizeof(snap.last_enqueue_result),
-              build_queue_last_enqueue_result_);
+              last_enqueue_result_);
     copy_cstr(snap.last_service_block,
               sizeof(snap.last_service_block),
-              build_queue_last_service_block_);
-    copy_cstr(snap.last_outcome,
-              sizeof(snap.last_outcome),
-              build_queue_last_outcome_);
-    copy_cstr(snap.last_state, sizeof(snap.last_state), build_queue_last_state_);
-    copy_cstr(snap.last_error, sizeof(snap.last_error), build_queue_last_error_);
+              last_service_block_);
+    copy_cstr(snap.last_outcome, sizeof(snap.last_outcome), last_outcome_);
+    copy_cstr(snap.last_state, sizeof(snap.last_state), last_state_);
+    copy_cstr(snap.last_error, sizeof(snap.last_error), last_error_);
 
-    xSemaphoreGive(build_queue_lock_);
+    xSemaphoreGive(lock_);
     return snap;
 }
 
-report_manager_internal::BuildQueueResult ReportManager::enqueue_build(
+ReportBuildQueue::BuildQueueResult ReportBuildQueue::enqueue(
     uint64_t night_start_ms,
     size_t therapy_index,
     bool refresh,
     bool idle_prebuild) {
-    if (!build_queue_lock_ || !night_start_ms) {
+    if (!lock_ || !night_start_ms) {
         Log::logf(CAT_REPORT,
                   LOG_WARN,
                   "Result build enqueue rejected night=%llu index=%lu "
@@ -83,38 +87,34 @@ report_manager_internal::BuildQueueResult ReportManager::enqueue_build(
         return BuildQueueResult::Unavailable;
     }
 
-    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    xSemaphoreTake(lock_, portMAX_DELAY);
 
-    build_queue_enqueue_total_++;
-    build_queue_last_enqueue_night_ms_ = night_start_ms;
-    build_queue_last_enqueue_therapy_index_ = therapy_index;
-    copy_cstr(build_queue_last_service_block_,
-              sizeof(build_queue_last_service_block_),
-              "");
+    enqueue_total_++;
+    last_enqueue_night_ms_ = night_start_ms;
+    last_enqueue_therapy_index_ = therapy_index;
+    copy_cstr(last_service_block_, sizeof(last_service_block_), "");
 
-    for (size_t k = 0; k < build_queue_count_; ++k) {
-        size_t idx = (build_queue_head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
-        if (build_queue_[idx].night_start_ms != night_start_ms) continue;
+    for (size_t k = 0; k < count_; ++k) {
+        const size_t idx = (head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
+        if (queue_[idx].night_start_ms != night_start_ms) continue;
 
-        build_queue_[idx].therapy_index = therapy_index;
+        queue_[idx].therapy_index = therapy_index;
         if (refresh) {
-            build_queue_[idx].refresh = true;
-            build_queue_[idx].next_attempt_ms = 0;
+            queue_[idx].refresh = true;
+            queue_[idx].next_attempt_ms = 0;
         }
         if (!idle_prebuild) {
-            if (build_queue_[idx].idle_prebuild) {
-                build_queue_[idx].next_attempt_ms = 0;
+            if (queue_[idx].idle_prebuild) {
+                queue_[idx].next_attempt_ms = 0;
             }
-            build_queue_[idx].idle_prebuild = false;
+            queue_[idx].idle_prebuild = false;
         }
 
-        build_queue_already_total_++;
-        copy_cstr(build_queue_last_enqueue_result_,
-                  sizeof(build_queue_last_enqueue_result_),
-                  "already");
-        const size_t count = build_queue_count_;
+        already_total_++;
+        copy_cstr(last_enqueue_result_, sizeof(last_enqueue_result_), "already");
+        const size_t count = count_;
 
-        xSemaphoreGive(build_queue_lock_);
+        xSemaphoreGive(lock_);
 
         Log::logf(CAT_REPORT,
                   LOG_DEBUG,
@@ -128,23 +128,21 @@ report_manager_internal::BuildQueueResult ReportManager::enqueue_build(
         return BuildQueueResult::AlreadyQueued;
     }
 
-    if (build_queue_count_ < AC_REPORT_BUILD_QUEUE_MAX) {
-        size_t tail =
-            (build_queue_head_ + build_queue_count_) % AC_REPORT_BUILD_QUEUE_MAX;
-        build_queue_[tail].night_start_ms = night_start_ms;
-        build_queue_[tail].therapy_index = therapy_index;
-        build_queue_[tail].refresh = refresh;
-        build_queue_[tail].idle_prebuild = idle_prebuild;
-        build_queue_[tail].queued_ms = millis();
-        build_queue_[tail].next_attempt_ms = 0;
-        build_queue_count_++;
-        build_queue_queued_total_++;
-        copy_cstr(build_queue_last_enqueue_result_,
-                  sizeof(build_queue_last_enqueue_result_),
-                  "queued");
-        const size_t count = build_queue_count_;
+    if (count_ < AC_REPORT_BUILD_QUEUE_MAX) {
+        const size_t tail = (head_ + count_) % AC_REPORT_BUILD_QUEUE_MAX;
+        queue_[tail].night_start_ms = night_start_ms;
+        queue_[tail].therapy_index = therapy_index;
+        queue_[tail].refresh = refresh;
+        queue_[tail].idle_prebuild = idle_prebuild;
+        queue_[tail].queued_ms = millis();
+        queue_[tail].next_attempt_ms = 0;
 
-        xSemaphoreGive(build_queue_lock_);
+        count_++;
+        queued_total_++;
+        copy_cstr(last_enqueue_result_, sizeof(last_enqueue_result_), "queued");
+        const size_t count = count_;
+
+        xSemaphoreGive(lock_);
 
         Log::logf(CAT_REPORT,
                   LOG_DEBUG,
@@ -158,10 +156,8 @@ report_manager_internal::BuildQueueResult ReportManager::enqueue_build(
         return BuildQueueResult::Queued;
     }
 
-    copy_cstr(build_queue_last_enqueue_result_,
-              sizeof(build_queue_last_enqueue_result_),
-              "full");
-    xSemaphoreGive(build_queue_lock_);
+    copy_cstr(last_enqueue_result_, sizeof(last_enqueue_result_), "full");
+    xSemaphoreGive(lock_);
 
     Log::logf(CAT_REPORT,
               idle_prebuild ? LOG_DEBUG : LOG_WARN,
@@ -175,199 +171,242 @@ report_manager_internal::BuildQueueResult ReportManager::enqueue_build(
     return BuildQueueResult::Full;
 }
 
-bool ReportManager::build_queue_has_capacity() const {
-    if (!build_queue_lock_) return false;
-    if (xSemaphoreTake(build_queue_lock_, pdMS_TO_TICKS(5)) != pdTRUE) {
-        return false;
-    }
+bool ReportBuildQueue::has_capacity() const {
+    if (!lock_) return false;
+    if (xSemaphoreTake(lock_, pdMS_TO_TICKS(5)) != pdTRUE) return false;
 
-    const bool available = build_queue_count_ < AC_REPORT_BUILD_QUEUE_MAX;
+    const bool available = count_ < AC_REPORT_BUILD_QUEUE_MAX;
 
-    xSemaphoreGive(build_queue_lock_);
+    xSemaphoreGive(lock_);
     return available;
 }
 
-void ReportManager::clear_build_queue(uint64_t night_start_ms, bool all) {
-    if (!build_queue_lock_) return;
+bool ReportBuildQueue::has_pending() const {
+    if (!lock_) return false;
 
-    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    const bool pending = count_ > 0;
+    xSemaphoreGive(lock_);
+
+    return pending;
+}
+
+void ReportBuildQueue::clear(uint64_t night_start_ms, bool all) {
+    if (!lock_) return;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
 
     ResultBuildJob kept[AC_REPORT_BUILD_QUEUE_MAX];
     size_t kept_count = 0;
-    for (size_t k = 0; k < build_queue_count_; ++k) {
-        const size_t idx = (build_queue_head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
-        const ResultBuildJob &job = build_queue_[idx];
+    for (size_t k = 0; k < count_; ++k) {
+        const size_t idx = (head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
+        const ResultBuildJob &job = queue_[idx];
         if (!all && job.night_start_ms != night_start_ms) {
             kept[kept_count++] = job;
         }
     }
 
     for (size_t i = 0; i < AC_REPORT_BUILD_QUEUE_MAX; ++i) {
-        build_queue_[i] = i < kept_count ? kept[i] : ResultBuildJob{};
+        queue_[i] = i < kept_count ? kept[i] : ResultBuildJob{};
     }
-    build_queue_head_ = 0;
-    build_queue_count_ = kept_count;
 
-    xSemaphoreGive(build_queue_lock_);
+    head_ = 0;
+    count_ = kept_count;
+
+    xSemaphoreGive(lock_);
 }
 
-void ReportManager::service_build_queue(bool realtime_active) {
-    if (!build_queue_lock_) return;
+void ReportBuildQueue::note_read(const char *state) {
+    if (!lock_) return;
+    if (xSemaphoreTake(lock_, pdMS_TO_TICKS(5)) != pdTRUE) return;
 
-    // Existing report work owns the materialization pipeline.
-    if (summary_fetch_active_ || plot_build_active_ || range_build_active_) {
-        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    copy_cstr(last_read_, sizeof(last_read_), state ? state : "");
 
-        if (build_queue_count_ > 0) {
-            copy_cstr(build_queue_last_service_block_,
-                      sizeof(build_queue_last_service_block_),
-                      summary_fetch_active_
-                          ? "summary"
-                          : (plot_build_active_ ? "plot" : "range"));
-        }
+    xSemaphoreGive(lock_);
+}
 
-        xSemaphoreGive(build_queue_lock_);
-        return;
+void ReportBuildQueue::note_service_block(const char *reason) {
+    if (!lock_) return;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    if (count_ > 0) {
+        copy_cstr(last_service_block_,
+                  sizeof(last_service_block_),
+                  reason ? reason : "");
+    }
+    xSemaphoreGive(lock_);
+}
+
+bool ReportBuildQueue::peek_head(ResultBuildJob &out) const {
+    if (!lock_) return false;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    const bool have = count_ > 0;
+    out = have ? queue_[head_] : ResultBuildJob{};
+
+    xSemaphoreGive(lock_);
+    return have;
+}
+
+void ReportBuildQueue::note_service_started() {
+    if (!lock_) return;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    service_total_++;
+    copy_cstr(last_service_block_, sizeof(last_service_block_), "");
+
+    xSemaphoreGive(lock_);
+}
+
+void ReportBuildQueue::note_build_result(const ResultBuildJob &job,
+                                         const char *outcome,
+                                         const char *state,
+                                         const char *error) {
+    if (!lock_) return;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    last_night_ms_ = job.night_start_ms;
+    last_therapy_index_ = job.therapy_index;
+    copy_cstr(last_outcome_, sizeof(last_outcome_), outcome ? outcome : "");
+    copy_cstr(last_state_, sizeof(last_state_), state ? state : "");
+    copy_cstr(last_error_, sizeof(last_error_), error ? error : "");
+
+    xSemaphoreGive(lock_);
+}
+
+bool ReportBuildQueue::defer_head(const ResultBuildJob &job,
+                                  uint32_t next_attempt_ms) {
+    if (!lock_) return false;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    const bool matched = count_ > 0 && queue_[head_].night_start_ms ==
+                                           job.night_start_ms;
+    if (matched) {
+        queue_[head_].next_attempt_ms = next_attempt_ms;
     }
 
-    // Realtime stream/therapy work preempts report materialization.
-    if (realtime_active) {
-        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    xSemaphoreGive(lock_);
+    return matched;
+}
 
-        if (build_queue_count_ > 0) {
-            copy_cstr(build_queue_last_service_block_,
-                      sizeof(build_queue_last_service_block_),
-                      "realtime");
-        }
+bool ReportBuildQueue::pop_head(const ResultBuildJob &job) {
+    if (!lock_) return false;
 
-        xSemaphoreGive(build_queue_lock_);
-        return;
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    const bool matched = count_ > 0 && queue_[head_].night_start_ms ==
+                                           job.night_start_ms;
+    if (matched) {
+        queue_[head_] = ResultBuildJob{};
+        head_ = (head_ + 1) % AC_REPORT_BUILD_QUEUE_MAX;
+        count_--;
     }
 
-    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    xSemaphoreGive(lock_);
+    return matched;
+}
 
-    const bool have = build_queue_count_ > 0;
-    ResultBuildJob job =
-        have ? build_queue_[build_queue_head_] : ResultBuildJob{};
+ReportBuildQueueService::ReportBuildQueueService(
+    ReportBuildRuntime &build,
+    ReportNightIndexService &night_index,
+    ReportResultCacheRuntime &result_cache)
+    : build_(build),
+      night_index_(night_index),
+      result_cache_(result_cache) {}
 
-    xSemaphoreGive(build_queue_lock_);
+ReportBuildQueueSnapshot ReportBuildQueueService::snapshot() const {
+    return build_.snapshot();
+}
 
-    if (!have) return;
+bool ReportBuildQueueService::has_pending() const {
+    return build_.has_pending();
+}
 
-    const uint32_t now_ms = millis();
-    if (job.next_attempt_ms != 0 &&
-        static_cast<int32_t>(now_ms - job.next_attempt_ms) < 0) {
-        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+void ReportBuildQueueService::clear(uint64_t night_start_ms, bool all) {
+    build_.clear(night_start_ms, all);
+}
 
-        if (build_queue_count_ > 0) {
-            copy_cstr(build_queue_last_service_block_,
-                      sizeof(build_queue_last_service_block_),
-                      "retry_wait");
-        }
+void ReportBuildQueueService::note_service_block(const char *reason) {
+    build_.note_service_block(reason);
+}
 
-        xSemaphoreGive(build_queue_lock_);
-        return;
+bool ReportBuildQueueService::peek_head(ResultBuildJob &out) const {
+    return build_.peek_head(out);
+}
+
+void ReportBuildQueueService::note_service_started() {
+    build_.note_service_started();
+}
+
+void ReportBuildQueueService::note_build_result(const ResultBuildJob &job,
+                                                const char *outcome,
+                                                const char *state,
+                                                const char *error) {
+    build_.note_build_result(job, outcome, state, error);
+}
+
+bool ReportBuildQueueService::defer_head(const ResultBuildJob &job,
+                                         uint32_t next_attempt_ms) {
+    return build_.defer_head(job, next_attempt_ms);
+}
+
+bool ReportBuildQueueService::pop_head(const ResultBuildJob &job) {
+    return build_.pop_head(job);
+}
+
+bool ReportBuildQueueService::request_prepare_by_therapy_index(
+    size_t therapy_index,
+    bool refresh_cache) {
+    ScopedIndexedNight indexed_night("request_result_prepare_index");
+    if (!indexed_night ||
+        !night_index_.by_therapy_index(therapy_index, indexed_night.get())) {
+        return false;
     }
 
-    if (job.idle_prebuild) {
-        const char *reason = "idle";
-        if (!idle_prebuild_gate_open(&reason)) {
-            xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
-            copy_cstr(build_queue_last_service_block_,
-                      sizeof(build_queue_last_service_block_),
-                      reason ? reason : "gate");
-            xSemaphoreGive(build_queue_lock_);
-            return;
-        }
+    if (refresh_cache) {
+        result_cache_.invalidate(indexed_night->summary.start_ms, false);
     }
 
-    if (cache_fetch_active_) {
-        if (!job.idle_prebuild) prefetch_yield_to_foreground();
+    const ReportBuildRuntime::BuildQueueResult queued =
+        build_.enqueue(indexed_night->summary.start_ms,
+                       therapy_index,
+                       refresh_cache,
+                       false);
+    return queued == ReportBuildRuntime::BuildQueueResult::Queued ||
+           queued == ReportBuildRuntime::BuildQueueResult::AlreadyQueued;
+}
 
-        if (cache_fetch_active_) {
-            xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
-            copy_cstr(build_queue_last_service_block_,
-                      sizeof(build_queue_last_service_block_),
-                      "cache_fetch");
-            xSemaphoreGive(build_queue_lock_);
-            return;
-        }
+bool ReportBuildQueueService::request_prepare_by_start(
+    uint64_t night_start_ms,
+    bool refresh_cache) {
+    ScopedIndexedNight indexed_night("request_result_prepare_start_index");
+    size_t therapy_index = 0;
+    if (!indexed_night ||
+        !night_index_.by_start(night_start_ms,
+                               indexed_night.get(),
+                               &therapy_index)) {
+        return false;
     }
 
-    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
-    build_queue_service_total_++;
-    copy_cstr(build_queue_last_service_block_,
-              sizeof(build_queue_last_service_block_),
-              "");
-    xSemaphoreGive(build_queue_lock_);
-
-    active_build_idle_prebuild_ = job.idle_prebuild;
-
-    const ResultPrepareOutcome outcome =
-        prepare_result_by_night_start_internal(job.night_start_ms,
-                                               job.therapy_index,
-                                               job.refresh);
-
-    active_build_idle_prebuild_ = false;
-
-    const char *outcome_name =
-        result_prepare_outcome_name(static_cast<uint8_t>(outcome));
-
-    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
-    build_queue_last_night_ms_ = job.night_start_ms;
-    build_queue_last_therapy_index_ = job.therapy_index;
-    copy_cstr(build_queue_last_outcome_,
-              sizeof(build_queue_last_outcome_),
-              outcome_name);
-    copy_cstr(build_queue_last_state_,
-              sizeof(build_queue_last_state_),
-              result_state_name());
-    copy_cstr(build_queue_last_error_,
-              sizeof(build_queue_last_error_),
-              result_status_.error.c_str());
-    xSemaphoreGive(build_queue_lock_);
-
-    Log::logf(CAT_REPORT,
-              outcome == ResultPrepareOutcome::Failed ? LOG_WARN : LOG_DEBUG,
-              "Result build step night=%llu index=%lu refresh=%u "
-              "idle_prebuild=%u outcome=%s state=%s error=%s chunks=%lu "
-              "records=%lu bytes=%lu\n",
-              static_cast<unsigned long long>(job.night_start_ms),
-              static_cast<unsigned long>(job.therapy_index),
-              job.refresh ? 1u : 0u,
-              job.idle_prebuild ? 1u : 0u,
-              outcome_name,
-              result_state_name(),
-              result_status_.error.length() ? result_status_.error.c_str()
-                                            : "--",
-              static_cast<unsigned long>(result_status_.chunk_count),
-              static_cast<unsigned long>(result_status_.record_count),
-              static_cast<unsigned long>(result_status_.payload_bytes));
-
-    if (outcome == ResultPrepareOutcome::Deferred ||
-        outcome == ResultPrepareOutcome::Retry) {
-        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
-
-        if (build_queue_count_ > 0 &&
-            build_queue_[build_queue_head_].night_start_ms ==
-                job.night_start_ms) {
-            build_queue_[build_queue_head_].next_attempt_ms =
-                millis() + AC_BG_WORKER_BUSY_RECHECK_MS;
-        }
-
-        xSemaphoreGive(build_queue_lock_);
-        return;
+    if (refresh_cache) {
+        result_cache_.invalidate(indexed_night->summary.start_ms, false);
     }
 
-    xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
+    const ReportBuildRuntime::BuildQueueResult queued =
+        build_.enqueue(indexed_night->summary.start_ms,
+                       therapy_index,
+                       refresh_cache,
+                       false);
+    return queued == ReportBuildRuntime::BuildQueueResult::Queued ||
+           queued == ReportBuildRuntime::BuildQueueResult::AlreadyQueued;
+}
 
-    if (build_queue_count_ > 0 &&
-        build_queue_[build_queue_head_].night_start_ms == job.night_start_ms) {
-        build_queue_head_ = (build_queue_head_ + 1) % AC_REPORT_BUILD_QUEUE_MAX;
-        build_queue_count_--;
-    }
-
-    xSemaphoreGive(build_queue_lock_);
+ReportManager::BuildQueueSnapshot ReportManager::build_queue_snapshot() const {
+    return build_queue_service_.snapshot();
 }
 
 }  // namespace aircannect

@@ -154,13 +154,5 @@ bool read_chunk(const ReportStoreChunkKey &key,
     return true;
 }
 
-const char *kind_name(ReportStoreChunkKind kind) {
-    switch (kind) {
-        case ReportStoreChunkKind::Events: return "events";
-        case ReportStoreChunkKind::Series:
-        default: return "series";
-    }
-}
-
 }  // namespace ReportStore
 }  // namespace aircannect

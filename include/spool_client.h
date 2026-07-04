@@ -6,6 +6,7 @@
 
 #include "report_spool_types.h"
 #include "rpc_arbiter.h"
+#include "spool_client_status.h"
 
 namespace aircannect {
 
@@ -13,15 +14,6 @@ static constexpr uint32_t AC_SPOOL_CLIENT_RPC_TIMEOUT_MS = 8000;
 static constexpr uint32_t AC_SPOOL_CLIENT_PULL_RPC_TIMEOUT_MS = 30000;
 static constexpr uint32_t AC_SPOOL_CLIENT_FRAGMENT_TIMEOUT_MS = 30000;
 static constexpr uint8_t AC_SPOOL_CLIENT_ROUND_RETRIES = 2;
-
-enum class SpoolClientState : uint8_t {
-    Idle,
-    Starting,
-    Pulling,
-    WaitingFragments,
-    Complete,
-    Error,
-};
 
 struct SpoolClientRequest {
     std::string spool_type;
@@ -32,20 +24,6 @@ struct SpoolClientRequest {
     uint16_t max_rounds = 64;
     bool pace_on_backpressure = false;
     bool stream_rounds = false;
-};
-
-struct SpoolClientStatus {
-    SpoolClientState state = SpoolClientState::Idle;
-    std::string spool_type;
-    std::string error;
-    uint16_t current_round = 0;
-    uint32_t active_spool_id = 0;
-    uint32_t fragments = 0;
-    uint32_t bytes = 0;
-    uint32_t round_fragments = 0;
-    uint32_t round_bytes = 0;
-    uint32_t elapsed_ms = 0;
-    uint32_t idle_ms = 0;
 };
 
 class SpoolClient {
@@ -129,7 +107,5 @@ private:
     bool completed_round_ready_ = false;
     ReportSpoolResult completed_round_;
 };
-
-const char *spool_client_state_name(SpoolClientState state);
 
 }  // namespace aircannect

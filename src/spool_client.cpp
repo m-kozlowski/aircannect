@@ -168,18 +168,6 @@ bool json_string_equals(const JsonStringView &view, const char *value) {
 
 }  // namespace
 
-const char *spool_client_state_name(SpoolClientState state) {
-    switch (state) {
-        case SpoolClientState::Idle: return "idle";
-        case SpoolClientState::Starting: return "starting";
-        case SpoolClientState::Pulling: return "pulling";
-        case SpoolClientState::WaitingFragments: return "fragments";
-        case SpoolClientState::Complete: return "complete";
-        case SpoolClientState::Error: return "error";
-    }
-    return "unknown";
-}
-
 SpoolClient::~SpoolClient() {
     clear_round_fragments(true);
 }

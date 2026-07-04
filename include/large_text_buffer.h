@@ -1,7 +1,13 @@
 #pragma once
 
-#include <Arduino.h>
 #include <stddef.h>
+
+#if __has_include(<Arduino.h>)
+#include <Arduino.h>
+#define AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO 1
+#else
+#define AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO 0
+#endif
 
 namespace aircannect {
 
@@ -25,7 +31,9 @@ public:
     LargeTextBuffer &operator=(const char *text);
     LargeTextBuffer &operator+=(const char *text);
     LargeTextBuffer &operator+=(char c);
+#if AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO
     LargeTextBuffer &operator+=(const String &text);
+#endif
 
     bool append(const char *text);
     bool append(const char *text, size_t len);

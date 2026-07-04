@@ -1,13 +1,17 @@
-#include "report_manager.h"
+#include "report_result_provider_bridge.h"
 
 #include "edf_report_data_plan.h"
 #include "edf_report_provider.h"
 #include "edf_report_provider_token.h"
-#include "report_data_provider.h"
+#include "report_manager_helpers.h"
 #include "string_util.h"
+
+#include <string.h>
 
 namespace aircannect {
 namespace {
+
+using ReportResultChunk = report_manager_internal::ReportResultChunk;
 
 const SpoolReportProvider &spool_report_provider() {
     static SpoolReportProvider provider;
@@ -19,32 +23,29 @@ const EdfReportProvider &edf_report_provider() {
     return provider;
 }
 
-bool report_stream_bit(size_t stream_index, uint32_t &bit) {
-    if (stream_index >= 32) return false;
-    bit = 1u << static_cast<uint32_t>(stream_index);
-    return true;
-}
-
 }  // namespace
 
-bool ReportManager::read_result_chunk_payload(
+bool report_read_result_chunk_payload(
     const ReportResultChunk &chunk,
+    int64_t night_start_ms,
+    const EdfReportSessionDescriptor *sessions,
+    size_t session_count,
     ReportStoreChunkMeta &meta,
     ReportSpoolBuffer &payload) {
     ReportProviderChunk provider_chunk;
-    provider_chunk_from_result(chunk, provider_chunk);
+    report_provider_chunk_from_result(chunk, provider_chunk);
 
     switch (chunk.provider_ref.provider) {
         case ReportProviderId::Spool:
             return spool_report_provider().read_chunk(
                 provider_chunk,
-                static_cast<int64_t>(result_night_.start_ms),
+                night_start_ms,
                 meta,
                 payload);
         case ReportProviderId::Edf:
             return edf_report_provider().read_chunk(provider_chunk,
-                                                   result_edf_sessions_,
-                                                   result_edf_session_count_,
+                                                   sessions,
+                                                   session_count,
                                                    meta,
                                                    payload);
         default:
@@ -52,9 +53,9 @@ bool ReportManager::read_result_chunk_payload(
     }
 }
 
-void ReportManager::provider_chunk_from_result(
+void report_provider_chunk_from_result(
     const ReportResultChunk &chunk,
-    ReportProviderChunk &out) const {
+    ReportProviderChunk &out) {
     out = {};
     out.ref = chunk.provider_ref;
     out.kind = chunk.kind;
@@ -68,18 +69,19 @@ void ReportManager::provider_chunk_from_result(
     out.payload_len = chunk.payload_len;
 }
 
-bool ReportManager::result_chunk_has_stream(const ReportResultChunk &chunk,
-                                            size_t stream_index) const {
+bool report_result_chunk_has_stream(const ReportResultChunk &chunk,
+                                    size_t stream_index) {
     uint32_t bit = 0;
-    if (chunk.stream_mask != 0 && report_stream_bit(stream_index, bit)) {
+    if (chunk.stream_mask != 0 &&
+        report_manager_internal::report_stream_bit(stream_index, bit)) {
         return (chunk.stream_mask & bit) != 0;
     }
     return stream_index == chunk.stream_index;
 }
 
-bool ReportManager::result_chunk_same_physical_edf(
+bool report_result_chunk_same_physical_edf(
     const ReportResultChunk &existing,
-    const ReportProviderChunk &candidate) const {
+    const ReportProviderChunk &candidate) {
     if (existing.kind != candidate.kind ||
         existing.provider_ref.provider != ReportProviderId::Edf ||
         candidate.ref.provider != ReportProviderId::Edf ||
@@ -109,21 +111,37 @@ bool ReportManager::result_chunk_same_physical_edf(
            a.record_count == b.record_count;
 }
 
-bool ReportManager::provider_chunk_from_result_stream(
+bool report_result_chunk_matches_stream(
+    const ReportResultChunk &chunk,
+    size_t stream_index,
+    const ReportResultStream &stream) {
+    if (!report_result_chunk_has_stream(chunk, stream_index)) return false;
+
+    if (chunk.stream_mask != 0) {
+        return chunk.kind == stream.kind;
+    }
+
+    return chunk.kind == stream.kind &&
+           chunk.signal == stream.signal &&
+           chunk.name && stream.name &&
+           strcmp(chunk.name, stream.name) == 0;
+}
+
+bool report_provider_chunk_from_result_stream(
     const ReportResultChunk &chunk,
     size_t stream_index,
     const ReportResultStream *streams,
     size_t stream_count,
     const EdfReportSessionDescriptor *sessions,
     size_t session_count,
-    ReportProviderChunk &out) const {
+    ReportProviderChunk &out) {
     if (!streams || stream_index >= stream_count ||
-        !result_chunk_has_stream(chunk, stream_index)) {
+        !report_result_chunk_has_stream(chunk, stream_index)) {
         return false;
     }
 
     const ReportResultStream &stream = streams[stream_index];
-    provider_chunk_from_result(chunk, out);
+    report_provider_chunk_from_result(chunk, out);
     out.source = stream.source;
     out.signal = stream.signal;
     out.name = stream.name;
@@ -170,9 +188,14 @@ bool ReportManager::provider_chunk_from_result_stream(
     return true;
 }
 
-bool ReportManager::for_each_result_series_sample(
+bool report_for_each_result_series_sample(
     const ReportResultChunk &chunk,
     size_t stream_index,
+    const ReportResultStream *streams,
+    size_t stream_count,
+    const EdfReportSessionDescriptor *sessions,
+    size_t session_count,
+    int64_t night_start_ms,
     ReportProviderSeriesReadStats &stats,
     ReportSeriesSampleCallback callback,
     void *context) {
@@ -182,13 +205,13 @@ bool ReportManager::for_each_result_series_sample(
     }
 
     ReportProviderChunk provider_chunk;
-    if (!provider_chunk_from_result_stream(chunk,
-                                           stream_index,
-                                           result_streams_,
-                                           result_stream_count_,
-                                           result_edf_sessions_,
-                                           result_edf_session_count_,
-                                           provider_chunk)) {
+    if (!report_provider_chunk_from_result_stream(chunk,
+                                                  stream_index,
+                                                  streams,
+                                                  stream_count,
+                                                  sessions,
+                                                  session_count,
+                                                  provider_chunk)) {
         return false;
     }
 
@@ -196,15 +219,15 @@ bool ReportManager::for_each_result_series_sample(
         case ReportProviderId::Spool:
             return spool_report_provider().for_each_series_sample(
                 provider_chunk,
-                static_cast<int64_t>(result_night_.start_ms),
+                night_start_ms,
                 stats,
                 callback,
                 context);
         case ReportProviderId::Edf:
             return edf_report_provider().for_each_series_sample(
                 provider_chunk,
-                result_edf_sessions_,
-                result_edf_session_count_,
+                sessions,
+                session_count,
                 stats,
                 callback,
                 context);

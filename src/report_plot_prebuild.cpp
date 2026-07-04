@@ -1,4 +1,5 @@
 #include "report_manager.h"
+#include "report_plot_prebuild_service.h"
 
 #include "background_worker.h"
 #include "debug_log.h"
@@ -6,10 +7,13 @@
 #include "edf_report_catalog_job.h"
 #include "memory_manager.h"
 #include "report_diagnostics.h"
+#include "report_result_cache_files.h"
 #include "storage_manager.h"
 
 namespace aircannect {
 namespace {
+
+using BuildQueueResult = ReportBuildRuntime::BuildQueueResult;
 
 bool indexed_night_by_newest_cursor(const ReportIndexedNight *nights,
                                     size_t count,
@@ -73,7 +77,23 @@ private:
 
 }  // namespace
 
-bool ReportManager::idle_prebuild_gate_open(const char **reason) const {
+ReportPlotPrebuildService::ReportPlotPrebuildService(
+    ReportSummaryService &summary,
+    ReportCacheFetchService &cache_fetch,
+    ReportResultBuildService &result_build,
+    ReportRangePlotBuilder &range_plot,
+    ReportResultCacheRuntime &result_cache,
+    ReportNightIndexService &night_index,
+    ReportBuildRuntime &build)
+    : summary_(summary),
+      cache_fetch_(cache_fetch),
+      result_build_(result_build),
+      range_plot_(range_plot),
+      result_cache_(result_cache),
+      night_index_(night_index),
+      build_(build) {}
+
+bool ReportPlotPrebuildService::gate_open(const char **reason) const {
     BackgroundWorker *worker = background_worker();
     if (!worker) {
         if (reason) *reason = "no_worker";
@@ -83,91 +103,56 @@ bool ReportManager::idle_prebuild_gate_open(const char **reason) const {
     return worker->idle_gate_open(reason);
 }
 
-bool ReportManager::plot_prebuild_key_matches(
-    uint32_t summary_revision,
-    bool catalog_present,
-    uint8_t catalog_state,
-    uint32_t catalog_refresh_id) const {
-    return plot_prebuild_key_valid_ &&
-           plot_prebuild_summary_revision_ == summary_revision &&
-           plot_prebuild_catalog_present_ == catalog_present &&
-           plot_prebuild_catalog_state_ == catalog_state &&
-           plot_prebuild_catalog_refresh_id_ == catalog_refresh_id;
-}
-
-void ReportManager::set_plot_prebuild_key(uint32_t summary_revision,
-                                          bool catalog_present,
-                                          uint8_t catalog_state,
-                                          uint32_t catalog_refresh_id) {
-    plot_prebuild_key_valid_ = true;
-    plot_prebuild_summary_revision_ = summary_revision;
-    plot_prebuild_catalog_present_ = catalog_present;
-    plot_prebuild_catalog_state_ = catalog_state;
-    plot_prebuild_catalog_refresh_id_ = catalog_refresh_id;
-    plot_prebuild_cursor_ = 0;
-    plot_prebuild_next_scan_ms_ = 0;
-}
-
-ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
+ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
     const char *gate_reason = "idle";
-    if (!idle_prebuild_gate_open(&gate_reason)) {
-        return PlotPrebuildResult::Waiting;
+    if (!gate_open(&gate_reason)) {
+        return ReportPlotPrebuildResult::Waiting;
     }
 
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
-        range_build_active_ || plot_cache_writer_active()) {
-        return PlotPrebuildResult::Waiting;
+    if (summary_.active() || cache_fetch_.active() ||
+        result_build_.plot_builder().active() ||
+        range_plot_.active() || result_cache_.writer_active()) {
+        return ReportPlotPrebuildResult::Waiting;
     }
 
     {
         Storage::Guard g;
-        if (!Storage::mounted()) return PlotPrebuildResult::Unavailable;
+        if (!Storage::mounted()) return ReportPlotPrebuildResult::Unavailable;
     }
 
-    uint32_t summary_revision = 0;
-    bool catalog_present = false;
-    uint8_t catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
-    uint32_t catalog_refresh_id = 0;
-    if (!index_cache_key(summary_revision,
-                         catalog_present,
-                         catalog_state,
-                         catalog_refresh_id)) {
-        return PlotPrebuildResult::Waiting;
+    ReportNightIndexCacheKey cache_key;
+    if (!night_index_.cache_key(cache_key)) {
+        return ReportPlotPrebuildResult::Waiting;
     }
 
-    if (catalog_present &&
-        catalog_state != static_cast<uint8_t>(EdfReportCatalogState::Ready) &&
-        catalog_state != static_cast<uint8_t>(EdfReportCatalogState::Error)) {
-        return PlotPrebuildResult::Waiting;
+    if (cache_key.catalog_present &&
+        cache_key.catalog_state !=
+            static_cast<uint8_t>(EdfReportCatalogState::Ready) &&
+        cache_key.catalog_state !=
+            static_cast<uint8_t>(EdfReportCatalogState::Error)) {
+        return ReportPlotPrebuildResult::Waiting;
     }
 
-    if (!plot_prebuild_key_matches(summary_revision,
-                                   catalog_present,
-                                   catalog_state,
-                                   catalog_refresh_id)) {
-        set_plot_prebuild_key(summary_revision,
-                              catalog_present,
-                              catalog_state,
-                              catalog_refresh_id);
-    } else if (plot_prebuild_next_scan_ms_ != 0 &&
-               static_cast<int32_t>(millis() -
-                                    plot_prebuild_next_scan_ms_) < 0) {
-        return PlotPrebuildResult::Drained;
+    const uint32_t now_ms = millis();
+    if (!build_.prebuild_key_matches(cache_key)) {
+        build_.reset_prebuild_for_key(cache_key);
+    } else if (build_.prebuild_rescan_delay_active(now_ms)) {
+        return ReportPlotPrebuildResult::Drained;
     }
 
-    if (!build_queue_has_capacity()) {
-        return PlotPrebuildResult::Waiting;
+    if (!build_.has_capacity()) {
+        return ReportPlotPrebuildResult::Waiting;
     }
 
     ScopedIndexedNightList snapshot("report_night_index_prebuild",
                                     AC_REPORT_SUMMARY_RECORD_MAX);
-    if (!snapshot) return PlotPrebuildResult::Unavailable;
+    if (!snapshot) return ReportPlotPrebuildResult::Unavailable;
 
     size_t snapshot_count = 0;
-    if (!build_indexed_nights(snapshot.data(),
-                              snapshot.capacity(),
-                              snapshot_count)) {
-        return PlotPrebuildResult::Waiting;
+    if (!night_index_.build(snapshot.data(),
+                            snapshot.capacity(),
+                            snapshot_count)) {
+        return ReportPlotPrebuildResult::Waiting;
     }
 
     constexpr size_t SCAN_STEPS_PER_CALL = 4;
@@ -177,40 +162,31 @@ ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
         const bool found =
             indexed_night_by_newest_cursor(snapshot.data(),
                                            snapshot_count,
-                                           plot_prebuild_cursor_,
+                                           build_.prebuild_cursor(),
                                            night,
                                            therapy_index);
         if (!found) {
-            plot_prebuild_next_scan_ms_ =
-                millis() + AC_REPORT_PLOT_PREBUILD_RESCAN_MS;
-            if (plot_prebuild_next_scan_ms_ == 0) {
-                plot_prebuild_next_scan_ms_ = 1;
-            }
-            return PlotPrebuildResult::Drained;
+            build_.mark_prebuild_drained(
+                now_ms,
+                AC_REPORT_PLOT_PREBUILD_RESCAN_MS);
+            return ReportPlotPrebuildResult::Drained;
         }
 
-        plot_prebuild_cursor_++;
-        if (night.edf_catalog_pending) return PlotPrebuildResult::Waiting;
+        build_.advance_prebuild_cursor();
+        if (night.edf_catalog_pending) return ReportPlotPrebuildResult::Waiting;
 
         char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-        if (!take_summary_lock(pdMS_TO_TICKS(20))) {
-            return PlotPrebuildResult::Waiting;
-        }
-        format_night_etag_unlocked(night.summary,
-                                   night.source_signature,
-                                   etag,
-                                   sizeof(etag));
-        give_summary_lock();
+        night_index_.format_result_etag(night, etag, sizeof(etag));
 
-        if (result_plot_cache_exists_for_night(night, etag)) {
+        if (result_plot_cache_exists_for_etag(night.summary.start_ms, etag)) {
             continue;
         }
 
         const BuildQueueResult queued =
-            enqueue_build(night.summary.start_ms,
-                          therapy_index,
-                          false,
-                          true);
+            build_.enqueue(night.summary.start_ms,
+                           therapy_index,
+                           false,
+                           true);
         if (queued == BuildQueueResult::Queued) {
             Log::logf(CAT_REPORT,
                       LOG_DEBUG,
@@ -218,41 +194,34 @@ ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
                       static_cast<unsigned long long>(
                           night.summary.start_ms),
                       static_cast<unsigned long>(therapy_index));
-            return PlotPrebuildResult::Queued;
+            return ReportPlotPrebuildResult::Queued;
         }
 
         if (queued == BuildQueueResult::AlreadyQueued) {
-            return PlotPrebuildResult::AlreadyQueued;
+            return ReportPlotPrebuildResult::AlreadyQueued;
         }
 
         if (queued == BuildQueueResult::Full) {
-            if (plot_prebuild_cursor_ > 0) plot_prebuild_cursor_--;
-            return PlotPrebuildResult::Waiting;
+            build_.rewind_prebuild_cursor();
+            return ReportPlotPrebuildResult::Waiting;
         }
 
-        return PlotPrebuildResult::Unavailable;
+        return ReportPlotPrebuildResult::Unavailable;
     }
 
-    return PlotPrebuildResult::Scanned;
+    return ReportPlotPrebuildResult::Scanned;
+}
+
+void ReportPlotPrebuildService::preempt() {
+    result_build_.plot_builder().preempt_idle_prebuild();
+}
+
+ReportManager::PlotPrebuildResult ReportManager::request_idle_plot_prebuild() {
+    return plot_prebuild_.request();
 }
 
 void ReportManager::preempt_idle_plot_prebuild() {
-    if (!plot_build_active_ || !plot_build_idle_prebuild_) return;
-
-    const uint32_t elapsed_ms =
-        plot_build_started_ms_
-            ? static_cast<uint32_t>(millis() - plot_build_started_ms_)
-            : 0;
-
-    Log::logf(CAT_REPORT,
-              LOG_DEBUG,
-              "Idle plot prebuild preempted night=%llu elapsed_ms=%lu\n",
-              static_cast<unsigned long long>(
-                  plot_build_night_start_ms_.load()),
-              static_cast<unsigned long>(elapsed_ms));
-
-    reset_plot_build();
-    release_result_edf_sessions();
+    plot_prebuild_.preempt();
 }
 
 }  // namespace aircannect

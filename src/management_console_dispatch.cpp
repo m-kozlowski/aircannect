@@ -1221,8 +1221,12 @@ void ManagementConsole::handle_report_command(Print &out,
             }
             index = static_cast<size_t>(parsed);
         }
-        if (!ctx.report_manager.prepare_result_by_therapy_index(index)) {
-            out.println("[REPORT] result prepare failed");
+        if (!ctx.report_manager.request_result_prepare_by_therapy_index(
+                index,
+                false)) {
+            out.println("[REPORT] result prepare queue failed");
+        } else {
+            out.println("[REPORT] result prepare queued");
         }
         print_report_result_status(out, ctx.report_manager);
         return;

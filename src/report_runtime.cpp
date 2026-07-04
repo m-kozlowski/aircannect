@@ -1,14 +1,76 @@
 #include "report_manager.h"
 
+#include <Arduino.h>
+
+#include "board_report.h"
 #include "debug_log.h"
 #include "edf_report_catalog_job.h"
-#include "report_sources.h"
-#include "report_store.h"
-#include "spool_client.h"
+#include "report_build_queue_service.h"
+#include "report_cache_fetch_service.h"
+#include "report_cache_storage_runtime.h"
+#include "report_edf_catalog_context.h"
+#include "report_fetch_runtime.h"
+#include "report_plot_prebuild_service.h"
+#include "report_prefetch_service.h"
+#include "report_range_plot_builder.h"
+#include "report_result_build_service.h"
+#include "report_result_cache_runtime.h"
+#include "report_result_prepare_service.h"
+#include "report_runtime_service.h"
+#include "report_summary_runtime.h"
+#include "report_summary_service.h"
+#include "rpc_arbiter.h"
 
 namespace aircannect {
+namespace {
 
-void ReportManager::poll(RpcArbiter &arbiter) {
+const char *result_prepare_outcome_name(
+    ReportResultPrepareService::ResultPrepareOutcome outcome) {
+    switch (outcome) {
+        case ReportResultPrepareService::ResultPrepareOutcome::Prepared:
+            return "prepared";
+        case ReportResultPrepareService::ResultPrepareOutcome::Deferred:
+            return "deferred";
+        case ReportResultPrepareService::ResultPrepareOutcome::Retry:
+            return "retry";
+        case ReportResultPrepareService::ResultPrepareOutcome::Failed:
+            return "failed";
+    }
+
+    return "unknown";
+}
+
+}  // namespace
+
+ReportRuntimeService::ReportRuntimeService(
+    ReportFetchRuntime &fetch,
+    ReportSummaryRuntime &summary_runtime,
+    ReportCacheStorageRuntime &cache_storage,
+    ReportResultCacheRuntime &result_cache,
+    ReportSummaryService &summary,
+    ReportCacheFetchService &cache_fetch,
+    ReportResultBuildService &result_build,
+    ReportRangePlotBuilder &range_plot,
+    ReportResultPrepareService &result_prepare,
+    ReportPlotPrebuildService &plot_prebuild,
+    ReportBuildQueueService &build_queue,
+    ReportPrefetchService &prefetch,
+    ReportEdfCatalogContext &edf_catalog)
+    : fetch_(fetch),
+      summary_runtime_(summary_runtime),
+      cache_storage_(cache_storage),
+      result_cache_(result_cache),
+      summary_(summary),
+      cache_fetch_(cache_fetch),
+      result_build_(result_build),
+      range_plot_(range_plot),
+      result_prepare_(result_prepare),
+      plot_prebuild_(plot_prebuild),
+      build_queue_(build_queue),
+      prefetch_(prefetch),
+      edf_catalog_(edf_catalog) {}
+
+void ReportRuntimeService::poll(RpcArbiter &arbiter) {
     const bool realtime_active =
         arbiter.stream_realtime_active() ||
         arbiter.as11_state().therapy_state() == As11TherapyState::Running;
@@ -18,125 +80,70 @@ void ReportManager::poll(RpcArbiter &arbiter) {
 
     service_build_queue(realtime_active);
     service_range_plot(realtime_active);
-    service_prefetch(realtime_active);
+    prefetch_.service(realtime_active);
 
     // EDF catalog changes invalidate summary-derived materialization.
     if (edf_catalog_) {
         EdfReportCatalogStatus catalog_status;
 
-        if (edf_catalog_->status(catalog_status, 0) &&
-            catalog_status.state == EdfReportCatalogState::Ready &&
-            catalog_status.refresh_id != 0 &&
-            catalog_status.refresh_id != edf_catalog_summary_refresh_id_) {
-            invalidate_materialized(0, true);
+        if (edf_catalog_.ready_refresh_changed(catalog_status)) {
+            result_cache_.invalidate(0, true);
 
-            if (publish_summary_json_snapshot()) {
-                edf_catalog_summary_refresh_id_ = catalog_status.refresh_id;
+            if (summary_.publish_json_snapshot()) {
+                edf_catalog_.mark_summary_published(
+                    catalog_status.refresh_id);
             }
         }
     }
 
     // Cross-task summary revision publication
-    if (take_summary_lock(0)) {
-        summary_revision_pub_.store(summary_status_.revision);
-        give_summary_lock();
+    if (summary_runtime_.take(0)) {
+        summary_runtime_.publish_revision();
+        summary_runtime_.give();
     }
 
-    if (!spool_.active()) {
-        observed_spool_rx_queue_full_alerts_ =
-            arbiter.can_driver().stats().rx_queue_full_alerts;
-    }
+    fetch_.observe_idle(arbiter);
 
-    // Idle trash cleanup
-    if (!realtime_active &&
-        !summary_fetch_active_ && !cache_fetch_active_ &&
-        !plot_build_active_ && !range_build_active_ &&
-        static_cast<int32_t>(millis() - next_trash_cleanup_ms_) >= 0) {
-        next_trash_cleanup_ms_ = millis() + 250;
-
-        uint32_t removed = 0;
-        ReportStore::cleanup_trash_step(4, removed);
-    }
+    cache_storage_.service_trash_cleanup(realtime_active, busy());
 
     // Active cache fetch
-    if (cache_fetch_active_) {
-        poll_cache_fetch(arbiter);
+    if (cache_fetch_.active()) {
+        handle_cache_fetch_event(cache_fetch_.poll(arbiter));
     }
 
     // Active full-plot build
-    if (plot_build_active_) {
-        if (plot_build_idle_prebuild_) {
+    ReportResultPlotBuilder &plot_builder = result_build_.plot_builder();
+    if (plot_builder.active()) {
+        if (plot_builder.idle_prebuild_active()) {
             const char *reason = "idle";
 
-            if (realtime_active || !idle_prebuild_gate_open(&reason)) {
-                const uint32_t elapsed_ms =
-                    plot_build_started_ms_
-                        ? static_cast<uint32_t>(millis() -
-                                                plot_build_started_ms_)
-                        : 0;
-                Log::logf(CAT_REPORT,
-                          LOG_DEBUG,
-                          "Idle plot prebuild aborted reason=%s "
-                          "night=%llu elapsed_ms=%lu\n",
-                          realtime_active ? "realtime" :
-                                            (reason ? reason : "gate"),
-                          static_cast<unsigned long long>(
-                              plot_build_night_start_ms_.load()),
-                          static_cast<unsigned long>(elapsed_ms));
-                reset_plot_build();
-                release_result_edf_sessions();
-
+            if (realtime_active || !plot_prebuild_.gate_open(&reason)) {
+                plot_builder.abort_idle_prebuild(
+                    realtime_active ? "realtime" : reason);
                 return;
             }
         }
 
-        poll_result_plot_build();
+        plot_builder.poll();
         return;
     }
 
     // Active range-plot build
-    if (range_build_active_) {
+    if (range_plot_.active()) {
         if (realtime_active) return;
 
-        poll_range_plot_build();
+        range_plot_.poll();
         return;
     }
 
-    // Summary spool fetch
-    if (!summary_fetch_active_) return;
-
-    spool_.poll(arbiter);
-    log_spool_can_pressure(arbiter);
-    bool publish_progress = false;
-    const uint32_t now_ms = millis();
-    if (take_summary_lock(0)) {
-        summary_status_.spool = spool_.status();
-        summary_status_.elapsed_ms = summary_started_ms_
-            ? now_ms - summary_started_ms_
-            : 0;
-        give_summary_lock();
-        if (static_cast<int32_t>(now_ms - next_summary_progress_snapshot_ms_) >=
-            0) {
-            next_summary_progress_snapshot_ms_ = now_ms + 500;
-            publish_progress = true;
-        }
-    }
-    if (publish_progress) publish_summary_json_snapshot();
-
-    if (spool_.complete()) {
-        finish_summary_fetch();
-    } else if (spool_.failed()) {
-        fail_summary(spool_.status().error.c_str());
-    }
+    handle_summary_fetch_event(summary_.poll(arbiter));
 }
 
-bool ReportManager::handle_event(const RpcEvent &event) {
-    if (cache_fetch_active_ && spool_.handle_event(event)) return true;
-    if (summary_fetch_active_ && spool_.handle_event(event)) return true;
-    return false;
+bool ReportRuntimeService::handle_event(const RpcEvent &event) {
+    return fetch_.handle_event(event);
 }
 
-bool ReportManager::drain_source_events(RpcArbiter &arbiter) {
+bool ReportRuntimeService::drain_source_events(RpcArbiter &arbiter) {
     bool handled = false;
     for (size_t i = 0; i < AC_REPORT_SOURCE_EVENT_DRAIN_BUDGET; ++i) {
         RpcEvent event;
@@ -147,89 +154,181 @@ bool ReportManager::drain_source_events(RpcArbiter &arbiter) {
     return handled;
 }
 
+void ReportRuntimeService::service_build_queue(bool realtime_active) {
+    // Existing report work owns the materialization pipeline.
+    if (summary_.active() || result_build_.plot_builder().active() ||
+        range_plot_.active()) {
+        const char *reason = "range";
+        if (summary_.active()) {
+            reason = "summary";
+        } else if (result_build_.plot_builder().active()) {
+            reason = "plot";
+        }
+
+        build_queue_.note_service_block(reason);
+        return;
+    }
+
+    // Realtime stream/therapy work preempts report materialization.
+    if (realtime_active) {
+        build_queue_.note_service_block("realtime");
+        return;
+    }
+
+    ReportBuildQueueService::ResultBuildJob job;
+    if (!build_queue_.peek_head(job)) return;
+
+    const uint32_t now_ms = millis();
+    if (job.next_attempt_ms != 0 &&
+        static_cast<int32_t>(now_ms - job.next_attempt_ms) < 0) {
+        build_queue_.note_service_block("retry_wait");
+        return;
+    }
+
+    if (job.idle_prebuild) {
+        const char *reason = "idle";
+        if (!plot_prebuild_.gate_open(&reason)) {
+            build_queue_.note_service_block(reason ? reason : "gate");
+            return;
+        }
+    }
+
+    if (cache_fetch_.active()) {
+        if (!job.idle_prebuild) prefetch_.yield_to_foreground();
+
+        if (cache_fetch_.active()) {
+            build_queue_.note_service_block("cache_fetch");
+            return;
+        }
+    }
+
+    build_queue_.note_service_started();
+
+    ReportResultRuntime &runtime = result_build_.runtime();
+    runtime.plot().active_idle_prebuild = job.idle_prebuild;
+
+    const auto outcome =
+        result_prepare_.prepare_by_night_start(job.night_start_ms,
+                                               job.therapy_index,
+                                               job.refresh);
+
+    runtime.plot().active_idle_prebuild = false;
+
+    const char *outcome_name = result_prepare_outcome_name(outcome);
+    const ReportResultStatus &status = runtime.status();
+    const char *error = status.error.length() ? status.error.c_str() : "--";
+
+    build_queue_.note_build_result(job,
+                                   outcome_name,
+                                   runtime.state_name(),
+                                   status.error.c_str());
+
+    const bool failed =
+        outcome == ReportResultPrepareService::ResultPrepareOutcome::Failed;
+    Log::logf(CAT_REPORT,
+              failed ? LOG_WARN : LOG_DEBUG,
+              "Result build step night=%llu index=%lu refresh=%u "
+              "idle_prebuild=%u outcome=%s state=%s error=%s chunks=%lu "
+              "records=%lu bytes=%lu\n",
+              static_cast<unsigned long long>(job.night_start_ms),
+              static_cast<unsigned long>(job.therapy_index),
+              job.refresh ? 1u : 0u,
+              job.idle_prebuild ? 1u : 0u,
+              outcome_name,
+              runtime.state_name(),
+              error,
+              static_cast<unsigned long>(status.chunk_count),
+              static_cast<unsigned long>(status.record_count),
+              static_cast<unsigned long>(status.payload_bytes));
+
+    if (outcome ==
+            ReportResultPrepareService::ResultPrepareOutcome::Deferred ||
+        outcome == ReportResultPrepareService::ResultPrepareOutcome::Retry) {
+        build_queue_.defer_head(job,
+                                millis() + AC_BG_WORKER_BUSY_RECHECK_MS);
+        return;
+    }
+
+    build_queue_.pop_head(job);
+}
+
+void ReportRuntimeService::handle_cache_fetch_event(
+    ReportCacheFetchEvent event) {
+    if (event == ReportCacheFetchEvent::None) return;
+
+    ReportPendingResultPrepare pending;
+    if (!cache_fetch_.take_pending_prepare(pending)) return;
+
+    if (event == ReportCacheFetchEvent::Completed) {
+        result_prepare_.prepare_by_therapy_index(pending.therapy_index, false);
+        return;
+    }
+
+    result_prepare_.fail_prepare(cache_fetch_.status().error.c_str());
+}
+
+void ReportRuntimeService::handle_summary_fetch_event(
+    ReportSummaryFetchEvent event) {
+    if (event == ReportSummaryFetchEvent::None) return;
+
+    ReportPendingResultPrepare pending;
+    if (!cache_fetch_.take_pending_prepare(pending)) return;
+
+    if (event == ReportSummaryFetchEvent::Completed) {
+        result_prepare_.prepare_by_therapy_index(pending.therapy_index,
+                                                 pending.refresh_cache);
+        return;
+    }
+
+    const ReportSummaryStatus status = summary_.status();
+    result_prepare_.fail_prepare(status.error.c_str());
+}
+
+bool ReportRuntimeService::busy() const {
+    return summary_.active() || cache_fetch_.active() ||
+           result_build_.plot_active() || range_plot_.active();
+}
+
+bool ReportRuntimeService::foreground_busy() const {
+    return prefetch_.foreground_busy();
+}
+
+bool ReportRuntimeService::background_work_active() const {
+    if (busy()) return true;
+    if (build_queue_.has_pending()) return true;
+
+    return prefetch_.work_active();
+}
+
+bool ReportRuntimeService::cancel_cache_fetch() {
+    if (!cache_fetch_.active()) return false;
+    handle_cache_fetch_event(cache_fetch_.cancel("cancelled"));
+    return true;
+}
+
+void ReportManager::poll(RpcArbiter &arbiter) {
+    runtime_service_.poll(arbiter);
+}
+
+bool ReportManager::handle_event(const RpcEvent &event) {
+    return runtime_service_.handle_event(event);
+}
+
 bool ReportManager::edf_catalog_status(EdfReportCatalogStatus &out,
                                        uint32_t timeout_ms) const {
-    return edf_catalog_ && edf_catalog_->status(out, timeout_ms);
+    return edf_catalog_ && edf_catalog_.status(out, timeout_ms);
 }
 
 bool ReportManager::foreground_busy() const {
-    if (!cache_fetch_active_) return false;
-
-    // A cache fetch is in flight: it's foreground unless it's the prefetch's own.
-    if (!prefetch_lock_) return true;
-
-    xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
-    const bool prefetch_owned = (prefetch_phase_ == PrefetchPhase::Fetching);
-    xSemaphoreGive(prefetch_lock_);
-
-    return !prefetch_owned;
+    return runtime_service_.foreground_busy();
 }
 
 bool ReportManager::background_work_active() const {
-    if (summary_fetch_active_ || cache_fetch_active_ || plot_build_active_ ||
-        range_build_active_) {
-        return true;
-    }
-    if (build_queue_lock_) {
-        xSemaphoreTake(build_queue_lock_, portMAX_DELAY);
-        const bool queued = build_queue_count_ > 0;
-        xSemaphoreGive(build_queue_lock_);
-        if (queued) return true;
-    }
-    if (!prefetch_lock_) return false;
-    xSemaphoreTake(prefetch_lock_, portMAX_DELAY);
-    const PrefetchPhase phase = prefetch_phase_;
-    xSemaphoreGive(prefetch_lock_);
-    return phase == PrefetchPhase::Selecting ||
-           phase == PrefetchPhase::Pending ||
-           phase == PrefetchPhase::Fetching ||
-           phase == PrefetchPhase::Done;
-}
-
-void ReportManager::log_spool_can_pressure(const RpcArbiter &arbiter) {
-    const uint32_t alerts =
-        arbiter.can_driver().stats().rx_queue_full_alerts;
-    if (alerts == observed_spool_rx_queue_full_alerts_) return;
-    observed_spool_rx_queue_full_alerts_ = alerts;
-    if (!spool_.active()) return;
-
-    const SpoolClientStatus &spool = spool_.status();
-    Log::logf(CAT_REPORT,
-              LOG_WARN,
-              "spool CAN RX pressure source=%s state=%s round=%u "
-              "spool_id=%lu round_fragments=%lu round_bytes=%lu "
-              "total_fragments=%lu total_bytes=%lu alerts=%lu\n",
-              spool.spool_type.c_str(),
-              spool_client_state_name(spool.state),
-              static_cast<unsigned>(spool.current_round),
-              static_cast<unsigned long>(spool.active_spool_id),
-              static_cast<unsigned long>(spool.round_fragments),
-              static_cast<unsigned long>(spool.round_bytes),
-              static_cast<unsigned long>(spool.fragments),
-              static_cast<unsigned long>(spool.bytes),
-              static_cast<unsigned long>(alerts));
+    return runtime_service_.background_work_active();
 }
 
 bool ReportManager::cancel_cache_fetch() {
-    if (!cache_fetch_active_) return false;
-    spool_.reset();
-    abort_cache_write_fetch();
-    cache_fetch_active_ = false;
-    cache_status_.active = false;
-    cache_status_.revision++;
-    cache_status_.error = "cancelled";
-    cache_status_.spool = spool_.status();
-    Log::logf(CAT_REPORT,
-              LOG_INFO,
-              "Cache fetch cancelled night=%llu source=%s\n",
-              static_cast<unsigned long long>(cache_status_.night_start_ms),
-              report_source_spool_type(cache_status_.active_source));
-    if (pending_result_prepare_) {
-        pending_result_prepare_ = false;
-        pending_result_refresh_cache_ = false;
-        fail_result_prepare("cache_cancelled");
-    }
-    return true;
+    return runtime_service_.cancel_cache_fetch();
 }
 
 }  // namespace aircannect

@@ -1,15 +1,15 @@
 #include "report_manager.h"
 
 #include <algorithm>
-#include <limits.h>
-#include <stdio.h>
 #include <string.h>
 
 #include "edf_report_provider.h"
 #include "memory_manager.h"
+#include "report_cache_plan.h"
 #include "report_data_provider.h"
 #include "report_diagnostics.h"
 #include "report_index_scratch.h"
+#include "report_night_cache_service.h"
 #include "report_resolve_context.h"
 #include "report_source_resolver.h"
 #include "report_store.h"
@@ -18,94 +18,35 @@
 namespace aircannect {
 namespace {
 
-constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 29;
-
 const SpoolReportProvider &spool_report_provider() {
     static SpoolReportProvider provider;
     return provider;
 }
 
+void invalidate_active_fetch_result(ReportCacheFetchService &cache_fetch,
+                                    ReportResultCacheRuntime &result_cache) {
+    if (!cache_fetch.has_sources()) return;
+
+    result_cache.invalidate(cache_fetch.state().night().start_ms, false);
+}
+
 }  // namespace
 
-// Map a timestamp to its summary-night bucket start (the partition key). Bucket
-// boundaries sit around local noon (no therapy), so a chunk straddling one is
-// filed whole by its start timestamp.
-int64_t ReportManager::night_start_for_timestamp(int64_t timestamp_ms) const {
-    if (!take_summary_lock(portMAX_DELAY)) return timestamp_ms;
-    if (!records_ || record_count_ == 0) {
-        give_summary_lock();
-        return timestamp_ms;
-    }
-    int64_t nearest_start = 0;
-    bool have_nearest = false;
-    for (size_t i = 0; i < record_count_ &&
-                       i < AC_REPORT_SUMMARY_RECORD_MAX; ++i) {
-        const ReportSummaryRecord &r = records_[i];
-        if (!r.valid || !r.duration_min) continue;
-        const int64_t s = static_cast<int64_t>(r.start_ms);
-        const int64_t e = static_cast<int64_t>(r.end_ms);
-        if (timestamp_ms >= s && timestamp_ms < e) {
-            give_summary_lock();
-            return s;
-        }
-        if (s <= timestamp_ms && (!have_nearest || s > nearest_start)) {
-            nearest_start = s;
-            have_nearest = true;
-        }
-    }
-    const int64_t result = have_nearest ? nearest_start : timestamp_ms;
-    give_summary_lock();
-    return result;
-}
+ReportNightCacheService::ReportNightCacheService(
+    ReportNightIndexService &night_index,
+    ReportEdfCatalogContext &edf_catalog,
+    ReportCacheFetchService &cache_fetch)
+    : night_index_(night_index),
+      edf_catalog_(edf_catalog),
+      cache_fetch_(cache_fetch) {}
 
-uint32_t ReportManager::night_epoch_for_unlocked(uint64_t night_start_ms) const {
-    if (!night_epochs_) return 0;
-    for (size_t i = 0; i < night_epoch_count_; ++i) {
-        if (night_epochs_[i].night_start_ms == night_start_ms) {
-            return night_epochs_[i].epoch;
-        }
-    }
-    return 0;
-}
-
-void ReportManager::format_night_etag_unlocked(
-    const ReportSummaryRecord &rec,
-    uint64_t source_signature,
-    char *out,
-    size_t out_size) const {
-    if (!out || !out_size) return;
-    snprintf(out, out_size, "%llu-%lu-%lu-%08lx%08lx-%lu-r%lu",
-             static_cast<unsigned long long>(rec.start_ms),
-             static_cast<unsigned long>(rec.duration_min),
-             static_cast<unsigned long>(rec.session_interval_count),
-             static_cast<unsigned long>(source_signature >> 32),
-             static_cast<unsigned long>(source_signature & 0xffffffffULL),
-             static_cast<unsigned long>(night_epoch_for_unlocked(rec.start_ms)),
-             static_cast<unsigned long>(REPORT_RESULT_ETAG_VERSION));
-}
-
-bool ReportManager::night_etag(size_t therapy_index, char *out,
-                               size_t out_size) const {
-    ScopedIndexedNight night("night_etag_index");
-    if (!night ||
-        !indexed_night_by_therapy_index(therapy_index, night.get())) {
-        return false;
-    }
-    if (!take_summary_lock(pdMS_TO_TICKS(20))) return false;
-    format_night_etag_unlocked(night->summary,
-                               night->source_signature,
-                               out,
-                               out_size);
-    give_summary_lock();
-    return true;
-}
-
-bool ReportManager::night_coverage(uint64_t night_start_ms,
-                                   ReportNightCoverageStatus &out) const {
+bool ReportNightCacheService::coverage(
+    uint64_t night_start_ms,
+    ReportNightCoverageStatus &out) const {
     out = {};
     ScopedIndexedNight indexed_night("night_coverage_index");
     if (!indexed_night ||
-        !indexed_night_by_start(night_start_ms, indexed_night.get())) {
+        !night_index_.by_start(night_start_ms, indexed_night.get())) {
         return false;
     }
     const ReportIndexedNight &indexed = indexed_night.get();
@@ -129,13 +70,13 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
 
     bool pending = false;
     size_t session_count = 0;
-    if (!collect_edf_sessions_for_night(night,
-                                        span_start_ms,
-                                        span_end_ms,
-                                        resolve.sessions(),
-                                        AC_REPORT_EDF_SESSION_MAX,
-                                        session_count,
-                                        &pending) ||
+    if (!edf_catalog_.collect_sessions_for_night(night,
+                                                 span_start_ms,
+                                                 span_end_ms,
+                                                 resolve.sessions(),
+                                                 AC_REPORT_EDF_SESSION_MAX,
+                                                 session_count,
+                                                 &pending) ||
         pending) {
         return false;
     }
@@ -155,7 +96,7 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
     out.missing_required = plan.missing_required;
     for (size_t i = 0; i < plan.stream_count; ++i) {
         const ReportResolvedStream &stream = plan.streams[i];
-        if (!cache_source_supported(stream.selected_source)) continue;
+        if (!report_cache_source_supported(stream.selected_source)) continue;
         ReportNightSourceCoverage *entry = nullptr;
         for (size_t existing = 0; existing < out.source_count; ++existing) {
             if (out.sources[existing].source == stream.selected_source) {
@@ -175,8 +116,27 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
     return true;
 }
 
-bool ReportManager::next_night_needing_cache(
-    uint64_t &night_start_ms_out) const {
+bool ReportNightCacheService::coverage_by_therapy_index(
+    size_t therapy_index,
+    ReportNightCoverageStatus &out) const {
+    ScopedIndexedNight night("night_coverage_index");
+    if (!night ||
+        !night_index_.by_therapy_index(therapy_index, night.get())) {
+        return false;
+    }
+
+    return coverage(night->summary.start_ms, out);
+}
+
+bool ReportNightCacheService::latest_coverage(
+    ReportNightCoverageStatus &out) const {
+    return coverage_by_therapy_index(0, out);
+}
+
+bool ReportNightCacheService::next_needing_cache(
+    uint64_t &night_start_ms_out,
+    ReportNightCacheSkipFn skip,
+    const void *skip_context) const {
     const uint32_t now = millis();
     ReportIndexedNight *nights =
         static_cast<ReportIndexedNight *>(Memory::alloc_large(
@@ -189,9 +149,9 @@ bool ReportManager::next_night_needing_cache(
         return false;
     }
     size_t count = 0;
-    if (!build_indexed_nights(nights,
-                              AC_REPORT_SUMMARY_RECORD_MAX,
-                              count)) {
+    if (!night_index_.build(nights,
+                            AC_REPORT_SUMMARY_RECORD_MAX,
+                            count)) {
         Memory::free(nights);
         return false;
     }
@@ -208,7 +168,7 @@ bool ReportManager::next_night_needing_cache(
         const ReportIndexedNight &indexed = nights[i];
         const ReportSummaryRecord &record = indexed.summary;
         if (!record.valid || !record.duration_min) continue;
-        if (prefetch_in_cooldown(record.start_ms, now)) continue;
+        if (skip && skip(record.start_ms, now, skip_context)) continue;
         int64_t span_start_ms = 0;
         int64_t span_end_ms = 0;
         if (!indexed_night_data_span(indexed, span_start_ms, span_end_ms)) {
@@ -221,13 +181,13 @@ bool ReportManager::next_night_needing_cache(
                0,
                AC_REPORT_EDF_SESSION_MAX *
                    sizeof(EdfReportSessionDescriptor));
-        if (!collect_edf_sessions_for_night(record,
-                                            span_start_ms,
-                                            span_end_ms,
-                                            resolve.sessions(),
-                                            AC_REPORT_EDF_SESSION_MAX,
-                                            session_count,
-                                            &edf_pending)) {
+        if (!edf_catalog_.collect_sessions_for_night(record,
+                                                     span_start_ms,
+                                                     span_end_ms,
+                                                     resolve.sessions(),
+                                                     AC_REPORT_EDF_SESSION_MAX,
+                                                     session_count,
+                                                     &edf_pending)) {
             Memory::free(nights);
             return false;
         }
@@ -252,7 +212,7 @@ bool ReportManager::next_night_needing_cache(
             if (segment.provider == ReportResolvedProvider::Spool &&
                 !segment.complete &&
                 segment.required &&
-                cache_source_supported(segment.source)) {
+                report_cache_source_supported(segment.source)) {
                 night_start_ms_out = record.start_ms;
                 Memory::free(nights);
                 return true;
@@ -263,108 +223,119 @@ bool ReportManager::next_night_needing_cache(
     return false;
 }
 
+bool ReportNightCacheService::request_cache(uint64_t night_start_ms,
+                                            bool force) {
+    if (cache_fetch_.active()) return false;
+
+    ScopedIndexedNight indexed_night("request_night_cache_index");
+    if (!indexed_night ||
+        !night_index_.by_start(night_start_ms, indexed_night.get()) ||
+        !report_indexed_night_visible_in_summary(indexed_night.get())) {
+        return false;
+    }
+
+    if (!cache_fetch_.build_plan(indexed_night.get(), force, false)) {
+        return false;
+    }
+
+    if (!cache_fetch_.has_sources()) {
+        return cache_fetch_.finish() != ReportCacheFetchEvent::Failed;
+    }
+
+    const ReportCacheFetchEvent event = cache_fetch_.start_next_source();
+    return event != ReportCacheFetchEvent::Failed;
+}
+
+bool ReportNightCacheService::request_cache_by_therapy_index(
+    size_t therapy_index,
+    bool force) {
+    ScopedIndexedNight night("request_night_cache_index");
+    if (!night ||
+        !night_index_.by_therapy_index(therapy_index, night.get())) {
+        return false;
+    }
+
+    return request_cache(night->summary.start_ms, force);
+}
+
+bool ReportNightCacheService::request_latest_cache(bool force) {
+    return request_cache_by_therapy_index(0, force);
+}
+
+bool ReportManager::night_etag(size_t therapy_index, char *out,
+                               size_t out_size) const {
+    return night_query_.night_etag(therapy_index, out, out_size);
+}
+
 bool ReportManager::for_each_summary_night(
     ReportSummaryNightCallback callback,
     void *context) const {
-    if (!callback) return false;
-
-    ReportIndexedNight *snapshot =
-        static_cast<ReportIndexedNight *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
-            false));
-    if (!snapshot) {
-        log_report_alloc_failed(
-            "summary_night_snapshot",
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
-        return false;
-    }
-
-    size_t count = 0;
-    if (!build_indexed_nights(snapshot,
-                              AC_REPORT_SUMMARY_RECORD_MAX,
-                              count)) {
-        Memory::free(snapshot);
-        return false;
-    }
-
-    bool any = false;
-    size_t therapy_index = 0;
-    for (size_t i = count; i > 0; --i) {
-        const size_t summary_index = i - 1;
-        const ReportIndexedNight &indexed = snapshot[summary_index];
-        if (!report_indexed_night_visible_in_summary(indexed)) continue;
-        ReportSummaryRecord record = indexed.summary;
-        record.duration_min = report_indexed_night_display_duration_min(indexed);
-
-        ReportSummaryNight night;
-        night.summary_index = summary_index;
-        night.therapy_index = therapy_index++;
-        night.record = record;
-        any = true;
-        if (!callback(context, night)) break;
-    }
-    Memory::free(snapshot);
-    return any;
+    return night_query_.for_each_summary_night(callback, context);
 }
 
 bool ReportManager::summary_night_by_therapy_index(
     size_t therapy_index,
     ReportSummaryRecord &out) const {
-    ScopedIndexedNight night("summary_night_index");
-    if (!night ||
-        !indexed_night_by_therapy_index(therapy_index, night.get())) {
-        return false;
-    }
-    out = night->summary;
-    out.duration_min = report_indexed_night_display_duration_min(night.get());
-    return true;
+    return night_query_.summary_night_by_therapy_index(therapy_index, out);
 }
 
 bool ReportManager::latest_summary_night(ReportSummaryRecord &out) const {
-    return summary_night_by_therapy_index(0, out);
+    return night_query_.latest_summary_night(out);
+}
+
+bool ReportManager::night_coverage(uint64_t night_start_ms,
+                                   ReportNightCoverageStatus &out) const {
+    return night_cache_.coverage(night_start_ms, out);
 }
 
 bool ReportManager::night_coverage_by_therapy_index(
     size_t therapy_index,
     ReportNightCoverageStatus &out) const {
-    ReportSummaryRecord night;
-    if (!summary_night_by_therapy_index(therapy_index, night)) return false;
-    return night_coverage(night.start_ms, out);
+    return night_cache_.coverage_by_therapy_index(therapy_index, out);
 }
 
 bool ReportManager::latest_night_coverage(
     ReportNightCoverageStatus &out) const {
-    return night_coverage_by_therapy_index(0, out);
+    return night_cache_.latest_coverage(out);
+}
+
+bool ReportManager::next_night_needing_cache(
+    uint64_t &night_start_ms_out) const {
+    return night_cache_.next_needing_cache(night_start_ms_out);
 }
 
 bool ReportManager::request_night_cache(uint64_t night_start_ms, bool force) {
-    if (summary_fetch_active_ || cache_fetch_active_ || range_build_active_) {
+    if (summary_service_.active() || range_plot_builder_.active()) {
         return false;
     }
-    ScopedIndexedNight indexed_night("request_night_cache_index");
-    if (!indexed_night ||
-        !indexed_night_by_start(night_start_ms, indexed_night.get()) ||
-        !report_indexed_night_visible_in_summary(indexed_night.get())) {
-        return false;
-    }
-    if (!build_cache_plan(indexed_night.get(), force, false)) return false;
-    if (cache_source_count_ == 0) {
-        finish_cache_fetch();
-        return true;
-    }
-    return start_next_cache_source();
+    if (!night_cache_.request_cache(night_start_ms, force)) return false;
+
+    invalidate_active_fetch_result(cache_fetch_, result_cache_);
+    return true;
 }
 
 bool ReportManager::request_night_cache_by_therapy_index(
     size_t therapy_index,
     bool force) {
-    ReportSummaryRecord night;
-    if (!summary_night_by_therapy_index(therapy_index, night)) return false;
-    return request_night_cache(night.start_ms, force);
+    if (summary_service_.active() || range_plot_builder_.active()) {
+        return false;
+    }
+    if (!night_cache_.request_cache_by_therapy_index(therapy_index, force)) {
+        return false;
+    }
+
+    invalidate_active_fetch_result(cache_fetch_, result_cache_);
+    return true;
 }
 
 bool ReportManager::request_latest_night_cache(bool force) {
-    return request_night_cache_by_therapy_index(0, force);
+    if (summary_service_.active() || range_plot_builder_.active()) {
+        return false;
+    }
+    if (!night_cache_.request_latest_cache(force)) return false;
+
+    invalidate_active_fetch_result(cache_fetch_, result_cache_);
+    return true;
 }
 
 }  // namespace aircannect

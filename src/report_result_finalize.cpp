@@ -1,4 +1,4 @@
-#include "report_manager.h"
+#include "report_result_build_service.h"
 
 #include <algorithm>
 #include <math.h>
@@ -8,27 +8,35 @@
 #include "report_event_dedupe.h"
 #include "report_records.h"
 #include "report_result_metrics.h"
+#include "report_result_provider_bridge.h"
 
 namespace aircannect {
 
-bool ReportManager::count_result_events_from_chunks() {
+bool ReportResultBuildService::count_events_from_chunks() {
     const size_t range_count =
-        std::min(result_range_count_,
+        std::min(runtime_.ranges().count(),
                  static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    result_status_.oa_count = 0;
-    result_status_.ca_count = 0;
-    result_status_.ua_count = 0;
-    result_status_.hypopnea_count = 0;
-    result_status_.arousal_count = 0;
+    runtime_.status().oa_count = 0;
+    runtime_.status().ca_count = 0;
+    runtime_.status().ua_count = 0;
+    runtime_.status().hypopnea_count = 0;
+    runtime_.status().arousal_count = 0;
     ReportSpoolBuffer counted_events;
     counted_events.set_max_size(64 * 1024);
-    for (uint32_t i = 0; i < result_status_.chunk_count; ++i) {
-        const ReportResultChunk &chunk = result_chunks_[i];
+    for (uint32_t i = 0; i < runtime_.status().chunk_count; ++i) {
+        const ReportResultChunk &chunk = runtime_.scratch().chunks()[i];
         if (chunk.kind != ReportStoreChunkKind::Events) continue;
         ReportStoreChunkMeta meta;
         ReportSpoolBuffer payload;
-        if (!read_result_chunk_payload(chunk, meta, payload)) {
-            fail_result_prepare("event_chunk_read_failed");
+        if (!report_read_result_chunk_payload(
+                chunk,
+                static_cast<int64_t>(
+                    runtime_.identity().summary().start_ms),
+                runtime_.scratch().edf_sessions(),
+                runtime_.scratch().edf_session_count(),
+                meta,
+                payload)) {
+            fail_prepare("event_chunk_read_failed");
             return false;
         }
         const size_t count =
@@ -44,7 +52,7 @@ bool ReportManager::count_result_events_from_chunks() {
             bool overlaps_result_range = false;
             for (size_t range_index = 0; range_index < range_count;
                  ++range_index) {
-                const PlotRange &range = result_ranges_[range_index];
+                const PlotRange &range = runtime_.ranges()[range_index];
                 if (report_event_overlaps_window(
                         event,
                         range.start_ms,
@@ -59,27 +67,27 @@ bool ReportManager::count_result_events_from_chunks() {
             }
             if (report_event_seen(counted_events, event)) continue;
             if (!remember_report_event(counted_events, event)) {
-                fail_result_prepare("event_dedupe_failed");
+                fail_prepare("event_dedupe_failed");
                 return false;
             }
             switch (event.code) {
                 case report_event_code_value(ReportEventCode::Hypopnea):
-                    result_status_.hypopnea_count++;
+                    runtime_.status().hypopnea_count++;
                     break;
                 case report_event_code_value(
                     ReportEventCode::CentralApnea):
-                    result_status_.ca_count++;
+                    runtime_.status().ca_count++;
                     break;
                 case report_event_code_value(
                     ReportEventCode::ObstructiveApnea):
-                    result_status_.oa_count++;
+                    runtime_.status().oa_count++;
                     break;
                 case report_event_code_value(
                     ReportEventCode::UnclassifiedApnea):
-                    result_status_.ua_count++;
+                    runtime_.status().ua_count++;
                     break;
                 case report_event_code_value(ReportEventCode::Arousal):
-                    result_status_.arousal_count++;
+                    runtime_.status().arousal_count++;
                     break;
                 default:
                     break;
@@ -89,94 +97,80 @@ bool ReportManager::count_result_events_from_chunks() {
     return true;
 }
 
-void ReportManager::apply_result_event_indices_from_counts() {
-    if (result_status_.duration_min <= 0) return;
-    if (!result_status_.events_available) return;
+void ReportResultBuildService::apply_event_indices_from_counts() {
+    if (runtime_.status().duration_min <= 0) return;
+    if (!runtime_.status().events_available) return;
 
     const float hours =
-        static_cast<float>(result_status_.duration_min) / 60.0f;
+        static_cast<float>(runtime_.status().duration_min) / 60.0f;
     if (hours <= 0.0f) return;
 
     const float oa_index =
-        static_cast<float>(result_status_.oa_count) / hours;
+        static_cast<float>(runtime_.status().oa_count) / hours;
     const float ca_index =
-        static_cast<float>(result_status_.ca_count) / hours;
+        static_cast<float>(runtime_.status().ca_count) / hours;
     const float ua_index =
-        static_cast<float>(result_status_.ua_count) / hours;
+        static_cast<float>(runtime_.status().ua_count) / hours;
     const float hypopnea_index =
-        static_cast<float>(result_status_.hypopnea_count) / hours;
+        static_cast<float>(runtime_.status().hypopnea_count) / hours;
     const float arousal_index =
-        static_cast<float>(result_status_.arousal_count) / hours;
+        static_cast<float>(runtime_.status().arousal_count) / hours;
 
-    if (!result_status_.oa_index_valid) {
-        result_status_.oa_index = oa_index;
-        result_status_.oa_index_valid = true;
-        result_status_.oa_index_source = ReportMetricSource::Calculated;
+    if (!runtime_.status().oa_index_valid) {
+        runtime_.status().oa_index = oa_index;
+        runtime_.status().oa_index_valid = true;
+        runtime_.status().oa_index_source = ReportMetricSource::Calculated;
     }
-    if (!result_status_.ca_index_valid) {
-        result_status_.ca_index = ca_index;
-        result_status_.ca_index_valid = true;
-        result_status_.ca_index_source = ReportMetricSource::Calculated;
+    if (!runtime_.status().ca_index_valid) {
+        runtime_.status().ca_index = ca_index;
+        runtime_.status().ca_index_valid = true;
+        runtime_.status().ca_index_source = ReportMetricSource::Calculated;
     }
-    if (!result_status_.ua_index_valid) {
-        result_status_.ua_index = ua_index;
-        result_status_.ua_index_valid = true;
-        result_status_.ua_index_source = ReportMetricSource::Calculated;
+    if (!runtime_.status().ua_index_valid) {
+        runtime_.status().ua_index = ua_index;
+        runtime_.status().ua_index_valid = true;
+        runtime_.status().ua_index_source = ReportMetricSource::Calculated;
     }
-    if (!result_status_.hypopnea_index_valid) {
-        result_status_.hypopnea_index = hypopnea_index;
-        result_status_.hypopnea_index_valid = true;
-        result_status_.hypopnea_index_source =
+    if (!runtime_.status().hypopnea_index_valid) {
+        runtime_.status().hypopnea_index = hypopnea_index;
+        runtime_.status().hypopnea_index_valid = true;
+        runtime_.status().hypopnea_index_source =
             ReportMetricSource::Calculated;
     }
-    if (!result_status_.arousal_index_valid) {
-        result_status_.arousal_index = arousal_index;
-        result_status_.arousal_index_valid = true;
-        result_status_.arousal_index_source = ReportMetricSource::Calculated;
+    if (!runtime_.status().arousal_index_valid) {
+        runtime_.status().arousal_index = arousal_index;
+        runtime_.status().arousal_index_valid = true;
+        runtime_.status().arousal_index_source = ReportMetricSource::Calculated;
     }
-    if (!result_status_.ahi_valid) {
-        result_status_.ahi =
+    if (!runtime_.status().ahi_valid) {
+        runtime_.status().ahi =
             oa_index + ca_index + ua_index + hypopnea_index;
-        result_status_.ahi_valid = true;
-        result_status_.ahi_source = ReportMetricSource::Calculated;
+        runtime_.status().ahi_valid = true;
+        runtime_.status().ahi_source = ReportMetricSource::Calculated;
     }
 }
 
-bool ReportManager::result_timestamp_in_ranges(int64_t timestamp_ms) const {
-    const size_t range_count =
-        std::min(result_range_count_,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    if (range_count == 0) return true;
-    for (size_t i = 0; i < range_count; ++i) {
-        const PlotRange &range = result_ranges_[i];
-        if (timestamp_ms >= range.start_ms && timestamp_ms <= range.end_ms) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool ReportManager::apply_result_series_metrics_from_chunks() {
+bool ReportResultBuildService::apply_series_metrics_from_chunks() {
     ReportMetricAverage pressure_average;
     ReportMetricAverage mask_pressure_average;
     ReportMetricAverage leak_average;
 
     struct MetricSeriesContext {
-        ReportManager *manager = nullptr;
+        ReportResultBuildService *builder = nullptr;
         ReportMetricAverage *average = nullptr;
         float multiplier = 1.0f;
     };
 
-    for (uint32_t chunk_index = 0; chunk_index < result_status_.chunk_count;
+    for (uint32_t chunk_index = 0; chunk_index < runtime_.status().chunk_count;
          ++chunk_index) {
-        const ReportResultChunk &chunk = result_chunks_[chunk_index];
+        const ReportResultChunk &chunk = runtime_.scratch().chunks()[chunk_index];
         if (chunk.kind != ReportStoreChunkKind::Series) continue;
-        for (size_t stream_index = 0; stream_index < result_stream_count_;
+        for (size_t stream_index = 0; stream_index < runtime_.streams().count();
              ++stream_index) {
-            if (!result_chunk_has_stream(chunk, stream_index)) continue;
-            const ReportResultStream &stream = result_streams_[stream_index];
+            if (!report_result_chunk_has_stream(chunk, stream_index)) continue;
+            const ReportResultStream &stream = runtime_.streams()[stream_index];
             MetricSeriesContext ctx;
-            ctx.manager = this;
+            ctx.builder = this;
             if (stream.signal == ReportSignalId::InspiratoryPressure) {
                 ctx.average = &pressure_average;
                 ctx.multiplier = 1.0f;
@@ -191,15 +185,21 @@ bool ReportManager::apply_result_series_metrics_from_chunks() {
             }
 
             ReportProviderSeriesReadStats stats;
-            const bool ok = for_each_result_series_sample(
+            const bool ok = report_for_each_result_series_sample(
                 chunk,
                 stream_index,
+                runtime_.streams().data(),
+                runtime_.streams().count(),
+                runtime_.scratch().edf_sessions(),
+                runtime_.scratch().edf_session_count(),
+                static_cast<int64_t>(
+                    runtime_.identity().summary().start_ms),
                 stats,
                 [](void *context, const ReportSeriesSample &sample) -> bool {
                     MetricSeriesContext *ctx =
                         static_cast<MetricSeriesContext *>(context);
-                    if (!ctx || !ctx->manager || !ctx->average) return false;
-                    if (!ctx->manager->result_timestamp_in_ranges(
+                    if (!ctx || !ctx->builder || !ctx->average) return false;
+                    if (!ctx->builder->runtime_.ranges().contains_timestamp(
                             sample.timestamp_ms)) {
                         return true;
                     }
@@ -221,32 +221,36 @@ bool ReportManager::apply_result_series_metrics_from_chunks() {
     }
     if (isfinite(value) &&
         (pressure_average.count > 0 || mask_pressure_average.count > 0)) {
-        result_status_.mask_pressure_50_cm_h2o = value;
-        result_status_.mask_pressure_50_valid = true;
-        result_status_.mask_pressure_50_source = ReportMetricSource::Calculated;
+        runtime_.status().mask_pressure_50_cm_h2o = value;
+        runtime_.status().mask_pressure_50_valid = true;
+        runtime_.status().mask_pressure_50_source = ReportMetricSource::Calculated;
     }
     if (leak_average.mean(value)) {
-        result_status_.leak_50_l_min = value;
-        result_status_.leak_50_valid = true;
-        result_status_.leak_50_source = ReportMetricSource::Calculated;
+        runtime_.status().leak_50_l_min = value;
+        runtime_.status().leak_50_valid = true;
+        runtime_.status().leak_50_source = ReportMetricSource::Calculated;
     }
     return true;
 }
 
-bool ReportManager::finalize_result_prepare(size_t therapy_index) {
-    if (result_status_.state == ReportResultState::Error) return false;
+bool ReportResultBuildService::finalize_prepare(size_t therapy_index) {
+    ReportResultRuntime &result = runtime_;
+    ReportResultStatus &status = result.status();
+
+    if (status.state == ReportResultState::Error) return false;
+
     // Build a best-effort plot from whatever is cached: aged-out signals leave
     // missing_streams>0 and not-yet-swept sources leave missing_required>0, but
     // both are reported for the UI to mark - they do not block rendering. Only
     // a night with nothing cached at all (background hasn't reached it) has no
     // plot to show.
-    if (result_status_.chunk_count == 0) {
-        result_status_.state = ReportResultState::Incomplete;
-        result_status_.error = "not_cached";
-        if (!publish_result_to_slot()) return false;
+    if (status.chunk_count == 0) {
+        status.state = ReportResultState::Incomplete;
+        status.error = "not_cached";
+        if (!cache_.publish_result(result)) return false;
     } else {
-        std::sort(result_chunks_,
-                  result_chunks_ + result_status_.chunk_count,
+        std::sort(result.scratch().chunks(),
+                  result.scratch().chunks() + status.chunk_count,
                   [](const ReportResultChunk &a,
                      const ReportResultChunk &b) {
                       if (a.stream_index != b.stream_index) {
@@ -263,24 +267,23 @@ bool ReportManager::finalize_result_prepare(size_t therapy_index) {
                       if (name_cmp != 0) return name_cmp < 0;
                       return a.payload_len < b.payload_len;
                   });
-        if (!count_result_events_from_chunks()) return false;
-        apply_result_event_indices_from_counts();
-        if (!apply_result_series_metrics_from_chunks()) return false;
-        result_status_.state =
-            report_result_settled_state(result_status_.missing_required);
-        result_status_.error.clear();
-        if (!publish_result_to_slot()) return false;
-        if (!start_result_plot_build()) return false;
-        if (plot_build_active_) {
+        if (!count_events_from_chunks()) return false;
+        apply_event_indices_from_counts();
+        if (!apply_series_metrics_from_chunks()) return false;
+        status.state = report_result_settled_state(status.missing_required);
+        status.error.clear();
+        if (!cache_.publish_result(result)) return false;
+        if (!plot_builder_.start()) return false;
+        if (plot_builder_.active()) {
             Log::logf(CAT_REPORT,
                       LOG_DEBUG,
                       "Result prepared index=%lu state=%s chunks=%lu "
                       "records=%lu bytes=%lu plot=building\n",
                       static_cast<unsigned long>(therapy_index),
-                      result_state_name(),
-                      static_cast<unsigned long>(result_status_.chunk_count),
-                      static_cast<unsigned long>(result_status_.record_count),
-                      static_cast<unsigned long>(result_status_.payload_bytes));
+                      result.state_name(),
+                      static_cast<unsigned long>(status.chunk_count),
+                      static_cast<unsigned long>(status.record_count),
+                      static_cast<unsigned long>(status.payload_bytes));
             return true;
         }
     }
@@ -288,10 +291,10 @@ bool ReportManager::finalize_result_prepare(size_t therapy_index) {
               "Result prepared index=%lu state=%s chunks=%lu "
               "records=%lu bytes=%lu\n",
               static_cast<unsigned long>(therapy_index),
-              result_state_name(),
-              static_cast<unsigned long>(result_status_.chunk_count),
-              static_cast<unsigned long>(result_status_.record_count),
-              static_cast<unsigned long>(result_status_.payload_bytes));
+              result.state_name(),
+              static_cast<unsigned long>(status.chunk_count),
+              static_cast<unsigned long>(status.record_count),
+              static_cast<unsigned long>(status.payload_bytes));
     return true;
 }
 

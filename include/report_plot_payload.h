@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdint.h>
 
+#include "report_manager_internal_types.h"
 #include "report_sources.h"
 #include "report_spool_types.h"
 
@@ -56,6 +57,44 @@ int64_t plot_bucket_ms_for_signal(ReportSignalId signal,
                                   uint32_t interval_ms,
                                   bool preserve_slow_native_cadence);
 int32_t plot_value_multiplier(ReportSignalId signal, ReportSourceId source);
+
+void report_build_empty_plot_bin(ReportSpoolBuffer &out);
+int report_plot_range_index(
+    const report_manager_internal::PlotRange *ranges,
+    size_t range_count,
+    int64_t timestamp_ms);
+
+uint8_t report_flush_plot_bucket_to(
+    ReportSpoolBuffer &out,
+    report_manager_internal::PlotBuildBucket &bucket,
+    int64_t base_ms,
+    bool &ok);
+uint8_t report_emit_plot_gap_to(
+    ReportSpoolBuffer &out,
+    report_manager_internal::PlotBuildBucket &bucket,
+    int64_t base_ms,
+    bool &ok);
+
+void report_flush_plot_envelope_bucket(
+    report_manager_internal::PlotSeriesBuildState &state,
+    bool &ok);
+bool report_append_plot_series_value(
+    report_manager_internal::PlotSeriesBuildState &state,
+    int64_t base_ms,
+    int64_t timestamp_ms,
+    int32_t value_milli,
+    int64_t bucket_ms,
+    bool &ok);
+bool report_append_plot_series_point(
+    report_manager_internal::PlotSeriesBuildState &state,
+    int64_t base_ms,
+    int64_t timestamp_ms,
+    int32_t value_milli,
+    int64_t bucket_ms,
+    bool &ok);
+bool report_append_plot_series_gap(
+    report_manager_internal::PlotSeriesBuildState &state,
+    bool &ok);
 
 bool append_plot_series_compact(ReportSpoolBuffer &out,
                                 const char *name,
