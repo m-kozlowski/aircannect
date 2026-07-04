@@ -26,7 +26,8 @@ bool ReportManager::ensure_cache_write_queue_slots() {
     return true;
 }
 
-ReportManager::CacheWriteEnqueueResult ReportManager::enqueue_cache_write(
+report_manager_internal::CacheWriteEnqueueResult
+ReportManager::enqueue_cache_write(
     CacheCoalesceBuffer &buf,
     const ReportStoreChunkKey &key,
     const ReportStoreChunkMeta &meta) {

@@ -66,7 +66,7 @@ ReportManager::BuildQueueSnapshot ReportManager::build_queue_snapshot() const {
     return snap;
 }
 
-ReportManager::BuildQueueResult ReportManager::enqueue_build(
+report_manager_internal::BuildQueueResult ReportManager::enqueue_build(
     uint64_t night_start_ms,
     size_t therapy_index,
     bool refresh,

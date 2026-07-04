@@ -120,7 +120,7 @@ bool ReportManager::activate_cache_plan_for_night(
     return true;
 }
 
-ReportManager::ResultPrepareOutcome
+report_manager_internal::ResultPrepareOutcome
 ReportManager::prepare_result_by_therapy_index_internal(
     size_t therapy_index,
     bool refresh_cache) {
@@ -138,7 +138,7 @@ ReportManager::prepare_result_by_therapy_index_internal(
                                                  refresh_cache);
 }
 
-ReportManager::ResultPrepareOutcome
+report_manager_internal::ResultPrepareOutcome
 ReportManager::prepare_result_by_night_start_internal(
     uint64_t night_start_ms,
     size_t therapy_index,

@@ -136,7 +136,8 @@ bool ReportManager::buffer_parsed_chunk(const ReportParsedChunk &chunk) {
     return true;
 }
 
-ReportManager::CacheFlushResult ReportManager::flush_cache_coalesce_buffer(
+report_manager_internal::CacheFlushResult
+ReportManager::flush_cache_coalesce_buffer(
     size_t slot) {
     if (!cache_coalesce_ || slot >= AC_REPORT_COALESCE_SLOTS) {
         return CacheFlushResult::Flushed;
@@ -210,7 +211,7 @@ ReportManager::CacheFlushResult ReportManager::flush_cache_coalesce_buffer(
     return result;
 }
 
-ReportManager::CacheFlushResult
+report_manager_internal::CacheFlushResult
 ReportManager::flush_all_cache_coalesce_buffers() {
     if (!cache_coalesce_) return CacheFlushResult::Flushed;
 
