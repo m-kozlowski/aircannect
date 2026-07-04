@@ -2057,7 +2057,7 @@
     let reportResizeObserver = null;
     const reportPlotClientCache = new Map();
     let reportZoom = null;        // {start,end} when drag-zoomed, else null
-    // Zoom: raw samples for the hour-rounded window, cached per (index, window).
+    // Zoom: raw samples for a tile-paged window, cached per (index, window).
     let reportBaseSeries = {};
     let reportBaseEvents = [];
     let reportCurrentIndex = -1;
@@ -2093,6 +2093,9 @@
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
     const REPORT_PLOT_CLIENT_CACHE_MAX = 6;
     const REPORT_RANGE_CACHE_MAX = 24;
+    const REPORT_RANGE_TILE_MS = 15 * 60 * 1000;
+    const REPORT_RANGE_MAX_WINDOW_MS = 3 * 60 * 60 * 1000;
+    const REPORT_RANGE_PAGE_TILES = 8;
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
     const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
     const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;
@@ -2748,6 +2751,11 @@
       }
       const pointEnd = Number.isFinite(point.end) ? point.end : point.t;
       return pointEnd >= range.start && point.t <= range.end;
+    }
+
+    function reportPointOverlapsAnyRange(point, ranges) {
+      if (!Array.isArray(ranges) || !ranges.length) return false;
+      return ranges.some((range) => reportPointOverlapsRange(point, range));
     }
 
     function reportSeriesExtent(seriesList) {
@@ -3655,11 +3663,13 @@
           container.appendChild(card);
           return;
         }
-        const extent = reportSeriesExtent(seriesList.map((series) =>
-          series.points.filter((p) =>
-            p && !p.gap &&
-            reportPointRangeIndex(p.t, sessionRanges) >= 0 &&
-            reportPointOverlapsRange(p, range))));
+        const extentSeriesList = seriesDefs.map((seriesDef) => {
+          const base = reportBaseSeries[seriesDef.key] || [];
+          const source = base.length ? base : reportSeries[seriesDef.key] || [];
+          return source.filter((p) =>
+            p && !p.gap && reportPointOverlapsAnyRange(p, sessionRanges));
+        }).filter((points) => points.length > 0);
+        const extent = reportSeriesExtent(extentSeriesList);
 
         const card = document.createElement("div");
         card.className = "report-chart";
@@ -3974,9 +3984,51 @@
     }
 
     function reportRangeWindow(lo, hi) {
-      const RANGE_TILE = 15 * 60 * 1000;
-      const from = Math.floor(lo / RANGE_TILE) * RANGE_TILE;
-      const to = Math.ceil(hi / RANGE_TILE) * RANGE_TILE;
+      if (!(hi > lo)) return null;
+
+      const viewTiles = Math.max(1,
+        Math.ceil((hi - lo) / REPORT_RANGE_TILE_MS));
+      const maxTiles =
+        Math.floor(REPORT_RANGE_MAX_WINDOW_MS / REPORT_RANGE_TILE_MS);
+      let fetchTiles = viewTiles;
+      if (viewTiles <= 4) {
+        fetchTiles = Math.min(maxTiles, REPORT_RANGE_PAGE_TILES);
+      } else if (viewTiles <= 6) {
+        fetchTiles = Math.min(maxTiles, REPORT_RANGE_PAGE_TILES + 4);
+      }
+
+      if (fetchTiles <= viewTiles) {
+        const from = Math.floor(lo / REPORT_RANGE_TILE_MS) *
+          REPORT_RANGE_TILE_MS;
+        const to = Math.ceil(hi / REPORT_RANGE_TILE_MS) *
+          REPORT_RANGE_TILE_MS;
+        return to > from ? {from, to} : null;
+      }
+
+      const centerTile = Math.floor(((lo + hi) / 2) /
+        REPORT_RANGE_TILE_MS);
+      const stepTiles = Math.max(1, Math.floor(fetchTiles / 2));
+      const pageCenterTile =
+        Math.floor(centerTile / stepTiles) * stepTiles +
+        Math.floor(stepTiles / 2);
+      let fromTile = pageCenterTile - Math.floor(fetchTiles / 2);
+      let toTile = fromTile + fetchTiles;
+
+      const loTile = Math.floor(lo / REPORT_RANGE_TILE_MS);
+      const hiTile = Math.ceil(hi / REPORT_RANGE_TILE_MS);
+      if (fromTile > loTile) {
+        const shift = fromTile - loTile;
+        fromTile -= shift;
+        toTile -= shift;
+      }
+      if (toTile < hiTile) {
+        const shift = hiTile - toTile;
+        fromTile += shift;
+        toTile += shift;
+      }
+
+      const from = fromTile * REPORT_RANGE_TILE_MS;
+      const to = toTile * REPORT_RANGE_TILE_MS;
       return to > from ? {from, to} : null;
     }
 
