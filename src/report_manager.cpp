@@ -11,7 +11,6 @@
 
 #include "board.h"
 #include "background_worker.h"
-#include "calendar_utils.h"
 #include "debug_log.h"
 #include "edf_bytes.h"
 #include "edf_report_catalog_job.h"
@@ -19,7 +18,6 @@
 #include "edf_report_data_reader.h"
 #include "edf_report_provider.h"
 #include "edf_report_provider_token.h"
-#include "edf_str_file_layout.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_data_provider.h"
@@ -54,142 +52,6 @@ const char *report_provider_id_name(ReportProviderId provider) {
         case ReportProviderId::Spool: return "spool";
         default: return "unknown";
     }
-}
-
-bool parse_report_sleep_day(const char *sleep_day,
-                            int &year,
-                            unsigned &month,
-                            unsigned &day) {
-    if (!sleep_day || strlen(sleep_day) != 8) return false;
-    for (size_t i = 0; i < 8; ++i) {
-        if (sleep_day[i] < '0' || sleep_day[i] > '9') return false;
-    }
-    char buf[5] = {};
-    memcpy(buf, sleep_day, 4);
-    year = static_cast<int>(strtol(buf, nullptr, 10));
-    buf[0] = sleep_day[4];
-    buf[1] = sleep_day[5];
-    buf[2] = '\0';
-    month = static_cast<unsigned>(strtoul(buf, nullptr, 10));
-    buf[0] = sleep_day[6];
-    buf[1] = sleep_day[7];
-    day = static_cast<unsigned>(strtoul(buf, nullptr, 10));
-    return year > 0 &&
-           month >= 1 && month <= 12 &&
-           day >= 1 &&
-           day <= calendar_days_in_month(year, static_cast<int>(month));
-}
-
-bool report_sleep_day_date_sample(const ReportSummaryRecord &night,
-                                  int16_t &out) {
-    char sleep_day[9] = {};
-    if (!report_summary_sleep_day_yyyymmdd(night,
-                                           sleep_day,
-                                           sizeof(sleep_day))) {
-        return false;
-    }
-    int year = 0;
-    unsigned month = 0;
-    unsigned day = 0;
-    if (!parse_report_sleep_day(sleep_day, year, month, day)) return false;
-    const int64_t days = calendar_days_from_civil(year, month, day);
-    if (days < INT16_MIN || days > INT16_MAX) return false;
-    out = static_cast<int16_t>(days);
-    return true;
-}
-
-bool read_str_record_date(File &file,
-                          uint32_t record_index,
-                          int16_t &date_sample) {
-    uint8_t raw[2] = {};
-    const size_t offset = edf_str_record_offset(record_index);
-    if (!file.seek(offset)) return false;
-    if (file.read(raw, sizeof(raw)) != static_cast<int>(sizeof(raw))) {
-        return false;
-    }
-    date_sample = edf_str_record_date_sample(raw, sizeof(raw));
-    return true;
-}
-
-bool read_str_record(File &file,
-                     uint32_t record_index,
-                     uint8_t *record,
-                     size_t record_size) {
-    if (!record || record_size != edf_str_record_size()) return false;
-    const size_t offset = edf_str_record_offset(record_index);
-    if (!file.seek(offset)) return false;
-    return file.read(record, record_size) == static_cast<int>(record_size);
-}
-
-bool find_str_record_by_date(File &file,
-                             uint32_t record_count,
-                             int16_t target_date,
-                             uint32_t &record_index) {
-    uint32_t low = 0;
-    uint32_t high = record_count;
-    while (low < high) {
-        const uint32_t mid = low + (high - low) / 2;
-        int16_t mid_date = -1;
-        if (!read_str_record_date(file, mid, mid_date)) return false;
-        if (mid_date < target_date) {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-
-    if (low >= record_count) return false;
-    int16_t found_date = -1;
-    if (!read_str_record_date(file, low, found_date)) return false;
-    if (found_date != target_date) return false;
-    record_index = low;
-    return true;
-}
-
-bool load_str_daily_metrics_for_night(const ReportSummaryRecord &night,
-                                      ReportDailyMetrics &out) {
-    out = ReportDailyMetrics();
-    int16_t target_date = 0;
-    if (!report_sleep_day_date_sample(night, target_date)) return false;
-
-    Storage::Guard guard;
-    File file = Storage::open("/STR.edf", "r");
-    if (!file || file.isDirectory()) return false;
-
-    EdfStrFileLayout layout;
-    if (!edf_str_file_layout_from_size(static_cast<size_t>(file.size()),
-                                       layout) ||
-        layout.record_count == 0) {
-        file.close();
-        return false;
-    }
-
-    uint8_t record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
-    const size_t record_size = edf_str_record_size();
-    uint32_t record_index = 0;
-    if (!find_str_record_by_date(file,
-                                 layout.record_count,
-                                 target_date,
-                                 record_index) ||
-        !read_str_record(file, record_index, record, record_size)) {
-        file.close();
-        return false;
-    }
-    file.close();
-
-    if (!report_daily_metrics_from_str_record(record, record_size, out)) {
-        return false;
-    }
-    if (night.duration_min > 0 && out.has_duration_min) {
-        const uint32_t expected = static_cast<uint32_t>(night.duration_min);
-        const uint32_t actual = out.duration_min;
-        const uint32_t delta =
-            expected > actual ? expected - actual : actual - expected;
-        if (delta > REPORT_STR_DURATION_TOLERANCE_MIN) {
-            return false;
-        }
-    }
-    return true;
 }
 
 void apply_daily_metrics_to_result_status(ReportResultStatus &status,
@@ -8839,7 +8701,9 @@ void ReportManager::begin_result_prepare_for_night(
     result_status_.duration_min = night.summary.duration_min;
 
     ReportDailyMetrics metrics;
-    if (load_str_daily_metrics_for_night(night.summary, metrics)) {
+    if (report_daily_metrics_from_str_file(night.summary,
+                                           REPORT_STR_DURATION_TOLERANCE_MIN,
+                                           metrics)) {
         apply_daily_metrics_to_result_status(result_status_, metrics);
     }
     if (report_daily_metrics_from_summary(night.summary, metrics)) {

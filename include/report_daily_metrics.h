@@ -42,6 +42,9 @@ const char *report_metric_source_name(ReportMetricSource source);
 bool report_daily_metrics_any(const ReportDailyMetrics &metrics);
 bool report_daily_metrics_from_summary(const ReportSummaryRecord &record,
                                        ReportDailyMetrics &out);
+bool report_daily_metrics_from_str_file(const ReportSummaryRecord &record,
+                                        uint32_t duration_tolerance_min,
+                                        ReportDailyMetrics &out);
 bool report_daily_metrics_from_str_record(const uint8_t *record,
                                           size_t len,
                                           ReportDailyMetrics &out);
