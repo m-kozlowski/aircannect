@@ -176,6 +176,7 @@ private:
     void mark_ip_failed_for_current();
     bool candidate_ip_failed(uint8_t profile_index, const uint8_t *bssid,
                              uint32_t now_ms) const;
+    void remember_successful_profile(size_t profile_index);
     void remember_good_candidate(uint8_t profile_index, const uint8_t *bssid);
 
     int8_t find_profile_by_ssid(const String &ssid) const;
@@ -214,6 +215,7 @@ private:
     // profile and AP candidates
     WifiProfile profiles_[AC_WIFI_PROFILE_MAX];
     size_t profile_count_ = 0;
+    size_t preferred_profile_index_ = 0;
     int8_t active_profile_index_ = -1;
     uint8_t consecutive_profile_failures_ = 0;
     uint8_t low_rssi_count_ = 0;

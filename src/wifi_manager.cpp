@@ -20,6 +20,7 @@ static constexpr const char *WIFI_PREF_SSID = "ssid";
 static constexpr const char *WIFI_PREF_PASS = "pass";
 static constexpr const char *WIFI_PREF_OPEN = "open";
 static constexpr const char *WIFI_PREF_COUNT = "count";
+static constexpr const char *WIFI_PREF_LAST_GOOD = "last_good";
 
 static volatile uint8_t last_disconnect_reason = 0;
 
@@ -92,14 +93,14 @@ bool WifiManager::begin() {
         start_softap(sta_configured_);
     }
 
-    if (sta_configured_) return start_next_profile(0);
+    if (sta_configured_) return start_next_profile(preferred_profile_index_);
 
 #if defined(AC_WIFI_STA_SSID) && defined(AC_WIFI_STA_PASS)
     if (!sta_configured_) {
         if (add_profile(String(AC_WIFI_STA_SSID),
                         String(AC_WIFI_STA_PASS),
                         false)) {
-            return start_next_profile(0);
+            return start_next_profile(preferred_profile_index_);
         }
     }
 #endif
@@ -167,7 +168,7 @@ void WifiManager::poll() {
             start_profile(static_cast<size_t>(active_profile_index_),
                           softap_running_);
         } else {
-            start_next_profile(0, softap_running_);
+            start_next_profile(preferred_profile_index_, softap_running_);
         }
         return;
     }
@@ -186,6 +187,7 @@ void WifiManager::load_config() {
 
     bool needs_save = false;
     profile_count_ = prefs.getUInt(WIFI_PREF_COUNT, 0);
+    uint32_t saved_preferred_profile = prefs.getUInt(WIFI_PREF_LAST_GOOD, 0);
     if (profile_count_ > AC_WIFI_PROFILE_MAX) {
         profile_count_ = AC_WIFI_PROFILE_MAX;
         needs_save = true;
@@ -225,6 +227,14 @@ void WifiManager::load_config() {
     for (size_t i = write; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     if (write != loaded_count) needs_save = true;
     profile_count_ = write;
+    if (profile_count_ == 0) {
+        preferred_profile_index_ = 0;
+    } else if (saved_preferred_profile < profile_count_) {
+        preferred_profile_index_ = saved_preferred_profile;
+    } else {
+        preferred_profile_index_ = 0;
+        needs_save = true;
+    }
     sta_configured_ = profile_count_ > 0;
     if (sta_configured_) {
         sta_ssid_ = profiles_[0].ssid;
@@ -245,6 +255,12 @@ void WifiManager::save_config(size_t first_dirty_index) {
     }
     prefs.putBool(WIFI_PREF_HAS, sta_configured_);
     prefs.putUInt(WIFI_PREF_COUNT, profile_count_);
+    if (profile_count_ == 0) preferred_profile_index_ = 0;
+    else if (preferred_profile_index_ >= profile_count_) {
+        preferred_profile_index_ = 0;
+    }
+    prefs.putUInt(WIFI_PREF_LAST_GOOD,
+                  static_cast<uint32_t>(preferred_profile_index_));
     if (first_dirty_index > AC_WIFI_PROFILE_MAX) first_dirty_index = 0;
     for (size_t i = first_dirty_index; i < AC_WIFI_PROFILE_MAX; ++i) {
         char key[16];
@@ -423,6 +439,7 @@ bool WifiManager::configure_sta(const String &ssid, const String &password) {
     profiles_[0].ssid = ssid;
     profiles_[0].password = password;
     profile_count_ = 1;
+    preferred_profile_index_ = 0;
     sta_configured_ = true;
     save_config();
     Log::logf(CAT_WIFI, LOG_INFO,
@@ -506,6 +523,7 @@ bool WifiManager::configure_open_sta(const String &ssid) {
     profiles_[0].ssid = ssid;
     profiles_[0].password = "";
     profile_count_ = 1;
+    preferred_profile_index_ = 0;
     sta_configured_ = true;
     save_config();
     Log::logf(CAT_WIFI, LOG_INFO,
@@ -578,6 +596,7 @@ bool WifiManager::replace_profiles(const WifiProfile *profiles,
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     for (size_t i = 0; i < write; ++i) profiles_[i] = cleaned[i];
     profile_count_ = write;
+    preferred_profile_index_ = 0;
     sta_configured_ = profile_count_ > 0;
     active_profile_index_ = -1;
     if (sta_configured_) {
@@ -604,6 +623,13 @@ bool WifiManager::remove_profile(size_t index) {
     profile_count_--;
     profiles_[profile_count_] = {};
     sta_configured_ = profile_count_ > 0;
+    if (profile_count_ == 0) {
+        preferred_profile_index_ = 0;
+    } else if (preferred_profile_index_ == index) {
+        preferred_profile_index_ = index < profile_count_ ? index : 0;
+    } else if (preferred_profile_index_ > index) {
+        preferred_profile_index_--;
+    }
     save_config(index);
     Log::logf(CAT_WIFI, LOG_INFO,
               "removed STA profile %u SSID=%s remaining=%u\n",
@@ -618,6 +644,7 @@ void WifiManager::clear_sta_config() {
     sta_ssid_ = "";
     sta_pass_ = "";
     profile_count_ = 0;
+    preferred_profile_index_ = 0;
     active_profile_index_ = -1;
     for (size_t i = 0; i < AC_WIFI_PROFILE_MAX; ++i) profiles_[i] = {};
     save_config();
@@ -631,7 +658,7 @@ bool WifiManager::reconnect() {
     if (softap_mode_ == SoftApMode::Forced) {
         start_softap(sta_configured_);
     }
-    if (sta_configured_) return start_next_profile(0);
+    if (sta_configured_) return start_next_profile(preferred_profile_index_);
 
     management_reachable_ = start_softap(false);
     return management_reachable_;
@@ -784,6 +811,26 @@ bool WifiManager::candidate_ip_failed(uint8_t profile_index,
     return false;
 }
 
+void WifiManager::remember_successful_profile(size_t profile_index) {
+    if (profile_index >= profile_count_) return;
+    if (preferred_profile_index_ == profile_index) return;
+
+    preferred_profile_index_ = profile_index;
+    Preferences prefs;
+    if (!prefs.begin(WIFI_PREF_NS, false)) {
+        Log::logf(CAT_WIFI, LOG_WARN,
+                  "failed to persist last successful STA profile\n");
+        return;
+    }
+    prefs.putUInt(WIFI_PREF_LAST_GOOD,
+                  static_cast<uint32_t>(preferred_profile_index_));
+    prefs.end();
+    Log::logf(CAT_WIFI, LOG_INFO,
+              "last successful STA profile=%u SSID=%s\n",
+              static_cast<unsigned>(preferred_profile_index_),
+              profiles_[preferred_profile_index_].ssid.c_str());
+}
+
 void WifiManager::remember_good_candidate(uint8_t profile_index,
                                           const uint8_t *bssid) {
     if (!bssid) return;
@@ -875,6 +922,7 @@ void WifiManager::handle_connected() {
         roam_connect_pending_ = false;
     }
     if (active_profile_index_ >= 0) {
+        remember_successful_profile(static_cast<size_t>(active_profile_index_));
         remember_good_candidate(static_cast<uint8_t>(active_profile_index_),
                                 WiFi.BSSID());
     }
@@ -1016,7 +1064,7 @@ void WifiManager::maybe_retry_softap_sta() {
     consecutive_profile_failures_ = 0;
     Log::logf(CAT_WIFI, LOG_INFO,
               "retrying STA profiles from SoftAP\n");
-    if (!start_next_profile(0, true)) {
+    if (!start_next_profile(preferred_profile_index_, true)) {
         softap_retry_deadline_ms_ = millis() + AC_WIFI_SOFTAP_RETRY_MS;
     }
 }
@@ -1198,7 +1246,7 @@ void WifiManager::handle_roam_scan() {
                           softap_running_);
 
         } else {
-            start_next_profile(0, softap_running_);
+            start_next_profile(preferred_profile_index_, softap_running_);
         }
 
         return;
@@ -1298,7 +1346,7 @@ void WifiManager::handle_roam_scan() {
                       softap_running_);
 
     } else {
-        start_next_profile(0, softap_running_);
+        start_next_profile(preferred_profile_index_, softap_running_);
     }
 }
 
