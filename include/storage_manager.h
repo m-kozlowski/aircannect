@@ -54,6 +54,7 @@ bool rename(const char *from, const char *to);
 File open(const char *path, const char *mode);
 
 void lock();
+bool try_lock(uint32_t timeout_ms);
 void unlock();
 
 class Guard {
@@ -62,6 +63,23 @@ public:
     ~Guard() { unlock(); }
     Guard(const Guard &) = delete;
     Guard &operator=(const Guard &) = delete;
+};
+
+class TimedGuard {
+public:
+    explicit TimedGuard(uint32_t timeout_ms) :
+        locked_(try_lock(timeout_ms)) {}
+    ~TimedGuard() {
+        if (locked_) unlock();
+    }
+
+    TimedGuard(const TimedGuard &) = delete;
+    TimedGuard &operator=(const TimedGuard &) = delete;
+
+    bool locked() const { return locked_; }
+
+private:
+    bool locked_ = false;
 };
 
 const char *type_name(StorageType type);

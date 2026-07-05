@@ -51,6 +51,44 @@ static constexpr size_t WEB_REPORT_RESULT_JSON_RESERVE = 4096;
 static constexpr size_t WEB_REPORT_SUMMARY_JSON_RESERVE = 24 * 1024;
 static constexpr size_t WEB_REPORT_PLOT_HTTP_ETAG_MAX = 144;
 static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
+static constexpr uint32_t WEB_STORAGE_LIST_BUDGET_MS = 50;
+static constexpr uint32_t WEB_STORAGE_LIST_LOCK_TIMEOUT_MS = 20;
+static constexpr uint32_t WEB_REPORT_SLOW_HANDLER_MS = 1000;
+
+class ScopedReportHttpTimer {
+public:
+    ScopedReportHttpTimer(const char *endpoint, long index = -1) :
+        endpoint_(endpoint), index_(index), start_ms_(millis()) {}
+
+    ~ScopedReportHttpTimer() {
+        const uint32_t elapsed_ms =
+            static_cast<uint32_t>(millis() - start_ms_);
+        if (elapsed_ms < WEB_REPORT_SLOW_HANDLER_MS) return;
+
+        if (index_ >= 0) {
+            Log::logf(CAT_REPORT,
+                      LOG_WARN,
+                      "slow HTTP report endpoint=%s index=%ld ms=%lu\n",
+                      endpoint_ ? endpoint_ : "--",
+                      index_,
+                      static_cast<unsigned long>(elapsed_ms));
+        } else {
+            Log::logf(CAT_REPORT,
+                      LOG_WARN,
+                      "slow HTTP report endpoint=%s ms=%lu\n",
+                      endpoint_ ? endpoint_ : "--",
+                      static_cast<unsigned long>(elapsed_ms));
+        }
+    }
+
+    ScopedReportHttpTimer(const ScopedReportHttpTimer &) = delete;
+    ScopedReportHttpTimer &operator=(const ScopedReportHttpTimer &) = delete;
+
+private:
+    const char *endpoint_ = nullptr;
+    long index_ = -1;
+    uint32_t start_ms_ = 0;
+};
 
 const char *web_command_name(uint8_t kind) {
     switch (kind) {
@@ -1720,6 +1758,8 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad index\"}");
         return;
     }
+    ScopedReportHttpTimer timer("/api/report/result", index);
+
     uint64_t night_start_ms = 0;
     bool have_night_start = false;
     if (request->hasArg("night")) {
@@ -2092,6 +2132,8 @@ void WebUI::send_report_summary(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"report unavailable\"}");
         return;
     }
+    ScopedReportHttpTimer timer("/api/report/summary");
+
     LargeTextBuffer json;
     if (!json.reserve(WEB_REPORT_SUMMARY_JSON_RESERVE)) {
         request->send(503, "application/json",
@@ -2166,6 +2208,8 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad index\"}");
         return;
     }
+    ScopedReportHttpTimer timer("/api/report/plot", index);
+
     String version;
     if (request->hasArg("v")) version = request->arg("v");
     int64_t range_from_ms = 0;
@@ -2367,72 +2411,74 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
     json_add_int(json, "limit", static_cast<long>(limit));
     json += ",\"entries\":[";
 
-    File dir;
-    {
-        Storage::Guard guard;
-        dir = Storage::open(path.c_str(), "r");
-    }
-    if (!dir) {
-        request->send(404, "application/json",
-                      "{\"ok\":false,\"error\":\"not_found\"}");
-        return;
-    }
-    bool is_directory = false;
-    {
-        Storage::Guard guard;
-        is_directory = dir.isDirectory();
-    }
-    if (!is_directory) {
-        Storage::Guard guard;
-        dir.close();
-        request->send(404, "application/json",
-                      "{\"ok\":false,\"error\":\"not_directory\"}");
-        return;
-    }
-
     size_t matched = 0;
     size_t returned = 0;
     bool truncated = false;
     bool first = true;
-    while (!truncated) {
-        StorageDirChild child;
-        if (!storage_read_next_dir_child(dir, child)) break;
+    const uint32_t started_ms = millis();
 
-        char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-        const bool path_ok = storage_append_child_path(path.c_str(),
-                                                       child.name,
-                                                       child_path,
-                                                       sizeof(child_path));
-
-        if (!path_ok || !storage_user_path_valid(child_path)) continue;
-        if (matched++ < offset) continue;
-        if (returned >= limit) {
-            truncated = true;
-            break;
-        }
-        const uint64_t modified = child.last_write > 0
-            ? static_cast<uint64_t>(child.last_write)
-            : 0;
-        if (!append_storage_list_entry(json,
-                                       child.name,
-                                       child_path,
-                                       child.is_dir,
-                                       child.size,
-                                       modified,
-                                       first)) {
-            {
-                Storage::Guard guard;
-                dir.close();
-            }
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"list_alloc\"}");
+    {
+        Storage::TimedGuard storage_guard(WEB_STORAGE_LIST_LOCK_TIMEOUT_MS);
+        if (!storage_guard.locked()) {
+            request->send(409, "application/json",
+                          "{\"ok\":false,\"error\":\"storage_busy\"}");
             return;
         }
-        first = false;
-        returned++;
-    }
-    {
-        Storage::Guard guard;
+
+        File dir = Storage::open(path.c_str(), "r");
+        if (!dir) {
+            request->send(404, "application/json",
+                          "{\"ok\":false,\"error\":\"not_found\"}");
+            return;
+        }
+
+        if (!dir.isDirectory()) {
+            dir.close();
+            request->send(404, "application/json",
+                          "{\"ok\":false,\"error\":\"not_directory\"}");
+            return;
+        }
+
+        while (!truncated) {
+            StorageDirChild child;
+            if (!storage_read_next_dir_child(dir, child)) break;
+
+            char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
+            const bool path_ok = storage_append_child_path(path.c_str(),
+                                                           child.name,
+                                                           child_path,
+                                                           sizeof(child_path));
+
+            if (!path_ok || !storage_user_path_valid(child_path)) continue;
+            if (matched++ < offset) continue;
+            if (returned >= limit) {
+                truncated = true;
+                break;
+            }
+            const uint64_t modified = child.last_write > 0
+                ? static_cast<uint64_t>(child.last_write)
+                : 0;
+            if (!append_storage_list_entry(json,
+                                           child.name,
+                                           child_path,
+                                           child.is_dir,
+                                           child.size,
+                                           modified,
+                                           first)) {
+                dir.close();
+                request->send(503, "application/json",
+                              "{\"ok\":false,\"error\":\"list_alloc\"}");
+                return;
+            }
+            first = false;
+            returned++;
+
+            const uint32_t elapsed_ms =
+                static_cast<uint32_t>(millis() - started_ms);
+            if (elapsed_ms >= WEB_STORAGE_LIST_BUDGET_MS) {
+                truncated = true;
+            }
+        }
         dir.close();
     }
 

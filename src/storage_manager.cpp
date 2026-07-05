@@ -240,6 +240,12 @@ void lock() {
     if (m) xSemaphoreTakeRecursive(m, portMAX_DELAY);
 }
 
+bool try_lock(uint32_t timeout_ms) {
+    SemaphoreHandle_t m = sd_mutex();
+    if (!m) return true;
+    return xSemaphoreTakeRecursive(m, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
 void unlock() {
     SemaphoreHandle_t m = sd_mutex();
     if (m) xSemaphoreGiveRecursive(m);

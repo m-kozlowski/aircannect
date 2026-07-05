@@ -89,9 +89,36 @@ void ReportRuntimeService::poll(RpcArbiter &arbiter) {
         if (edf_catalog_.ready_refresh_changed(catalog_status)) {
             result_cache_.invalidate(0, true);
 
-            if (summary_.publish_json_snapshot()) {
+            const uint32_t publish_start_ms = millis();
+            Log::logf(CAT_REPORT,
+                      LOG_INFO,
+                      "Summary snapshot publish start reason=edf_catalog "
+                      "refresh_id=%lu sessions=%lu\n",
+                      static_cast<unsigned long>(catalog_status.refresh_id),
+                      static_cast<unsigned long>(catalog_status.sessions));
+
+            const bool published = summary_.publish_json_snapshot();
+            const uint32_t publish_ms =
+                static_cast<uint32_t>(millis() - publish_start_ms);
+
+            if (published) {
+                Log::logf(CAT_REPORT,
+                          publish_ms > 500 ? LOG_WARN : LOG_DEBUG,
+                          "Summary snapshot publish done reason=edf_catalog "
+                          "refresh_id=%lu ms=%lu\n",
+                          static_cast<unsigned long>(
+                              catalog_status.refresh_id),
+                          static_cast<unsigned long>(publish_ms));
                 edf_catalog_.mark_summary_published(
                     catalog_status.refresh_id);
+            } else {
+                Log::logf(CAT_REPORT,
+                          LOG_WARN,
+                          "Summary snapshot publish failed "
+                          "reason=edf_catalog refresh_id=%lu ms=%lu\n",
+                          static_cast<unsigned long>(
+                              catalog_status.refresh_id),
+                          static_cast<unsigned long>(publish_ms));
             }
         }
     }
