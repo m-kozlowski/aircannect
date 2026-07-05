@@ -29,6 +29,10 @@ bool ReportBuildRuntime::has_pending() const {
     return queue_.has_pending();
 }
 
+bool ReportBuildRuntime::has_foreground_pending() const {
+    return queue_.has_foreground_pending();
+}
+
 void ReportBuildRuntime::clear(uint64_t night_start_ms, bool all) {
     queue_.clear(night_start_ms, all);
 }

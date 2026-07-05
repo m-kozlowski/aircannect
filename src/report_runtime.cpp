@@ -156,13 +156,20 @@ bool ReportRuntimeService::drain_source_events(RpcArbiter &arbiter) {
 
 void ReportRuntimeService::service_build_queue(bool realtime_active) {
     // Existing report work owns the materialization pipeline.
-    if (summary_.active() || result_build_.plot_builder().active() ||
-        range_plot_.active()) {
+    if (result_build_.plot_builder().active()) {
+        if (result_build_.plot_builder().idle_prebuild_active() &&
+            build_queue_.has_foreground_pending()) {
+            result_build_.plot_builder().preempt_idle_prebuild();
+        } else {
+            build_queue_.note_service_block("plot");
+            return;
+        }
+    }
+
+    if (summary_.active() || range_plot_.active()) {
         const char *reason = "range";
         if (summary_.active()) {
             reason = "summary";
-        } else if (result_build_.plot_builder().active()) {
-            reason = "plot";
         }
 
         build_queue_.note_service_block(reason);

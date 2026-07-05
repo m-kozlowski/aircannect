@@ -191,6 +191,24 @@ bool ReportBuildQueue::has_pending() const {
     return pending;
 }
 
+bool ReportBuildQueue::has_foreground_pending() const {
+    if (!lock_) return false;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    bool pending = false;
+    for (size_t k = 0; k < count_; ++k) {
+        const size_t idx = (head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
+        if (!queue_[idx].idle_prebuild) {
+            pending = true;
+            break;
+        }
+    }
+
+    xSemaphoreGive(lock_);
+    return pending;
+}
+
 void ReportBuildQueue::clear(uint64_t night_start_ms, bool all) {
     if (!lock_) return;
 
@@ -324,6 +342,10 @@ ReportBuildQueueSnapshot ReportBuildQueueService::snapshot() const {
 
 bool ReportBuildQueueService::has_pending() const {
     return build_.has_pending();
+}
+
+bool ReportBuildQueueService::has_foreground_pending() const {
+    return build_.has_foreground_pending();
 }
 
 void ReportBuildQueueService::clear(uint64_t night_start_ms, bool all) {

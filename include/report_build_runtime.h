@@ -24,6 +24,7 @@ public:
                              bool idle_prebuild);
     bool has_capacity() const;
     bool has_pending() const;
+    bool has_foreground_pending() const;
     void clear(uint64_t night_start_ms, bool all);
 
     void note_read(const char *state);
