@@ -1,0 +1,112 @@
+    .bottom {
+      display: none;
+      flex: 0 0 auto;
+      background: var(--surface);
+      border-top: 1px solid var(--line);
+      overflow-x: auto;
+      padding: 0;
+    }
+
+    .bottom .nav {
+      border-left: 0;
+      border-top: 3px solid transparent;
+      flex-direction: column;
+      gap: 2px;
+      font-size: 10px;
+      padding: 7px 12px;
+      white-space: nowrap;
+    }
+
+    .bottom .nav.active {
+      border-top-color: var(--accent);
+    }
+
+    @media (max-width: 760px) {
+      body {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .app {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(0, 1fr);
+        height: auto;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .sidebar {
+        display: none;
+      }
+
+      .bottom {
+        display: flex;
+        flex-shrink: 0;
+      }
+
+      .content {
+        padding: 16px;
+      }
+
+      .topbar {
+        padding: 0 14px;
+      }
+
+      .topbar .right #heap {
+        display: none;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .chart-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .sensor-device {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .sensor-device-actions {
+        justify-content: flex-start;
+      }
+
+      .storage-entry,
+      .storage-selection-bar {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+      }
+
+      .storage-entry .btn,
+      .storage-selection-bar .btn {
+        width: 100%;
+      }
+
+      .storage-entry .storage-action {
+        width: 38px;
+        justify-self: end;
+      }
+
+      .row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      input,
+      select {
+        width: 100%;
+      }
+
+      .config-helper {
+        width: 100%;
+      }
+
+      .config-helper input,
+      .config-helper select,
+      .config-helper .btn {
+        width: 100%;
+      }
+    }

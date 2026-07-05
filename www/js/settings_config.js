@@ -1,0 +1,1560 @@
+    function row(label, control, small) {
+      const element = document.createElement("div");
+      element.className = "row";
+      const labelElement = document.createElement("label");
+      labelElement.textContent = label;
+      if (small) {
+        const smallElement = document.createElement("small");
+        smallElement.textContent = small;
+        labelElement.appendChild(smallElement);
+      }
+      element.appendChild(labelElement);
+      element.appendChild(control);
+      return element;
+    }
+
+    function valueSpan(text) {
+      const value = document.createElement("span");
+      value.className = "value";
+      value.textContent =
+        text === undefined || text === null || text === "" ? "--" : text;
+      return value;
+    }
+
+    function scheduleSettingsPoll(data) {
+      if (settingsPollTimer) {
+        clearTimeout(settingsPollTimer);
+        settingsPollTimer = null;
+      }
+
+      const active = clinicalTabActive();
+      const refreshing = Date.now() < settingsRefreshUntil;
+      if (active && (data.refresh_queued || refreshing || !data.valid ||
+          data.pending_count)) {
+        settingsPollTimer = setTimeout(() => loadSettings(false, true), 1200);
+      }
+    }
+
+    function invalidateSettingsCatalog() {
+      settingsCatalog = [];
+      settingsComposites = [];
+      settingsCatalogPromise = null;
+      settingsProfileMode = null;
+      settingsModeDirty = false;
+      if (clinicalTabActive()) loadSettings(true);
+    }
+
+    function modeBit(mode) {
+      const value = Number(mode);
+      if (!Number.isInteger(value) || value < 0 || value > 15) return 0;
+      return 1 << value;
+    }
+
+    async function ensureSettingsCatalog() {
+      if (settingsCatalog.length) return;
+      if (!settingsCatalogPromise) {
+        settingsCatalogPromise = api("/api/settings-catalog")
+          .then((response) => response.json())
+          .then((data) => {
+            const catalog = Array.isArray(data.settings) ?
+              data.settings : [];
+            if (!catalog.some((item) => item && item.kind && item.label)) {
+              throw new Error("settings catalog unavailable");
+            }
+            settingsCatalog = catalog.map((item, index) =>
+              Object.assign({_catalogIndex: index}, item));
+            settingsComposites = Array.isArray(data.composites) ?
+              data.composites.map((item, index) =>
+                Object.assign({_catalogIndex: 10000 + index}, item)) : [];
+          })
+          .finally(() => {
+            settingsCatalogPromise = null;
+          });
+      }
+      await settingsCatalogPromise;
+    }
+
+    function settingMetaFor(setting, mode) {
+      const bit = modeBit(mode);
+      let fallback = null;
+      for (const meta of settingsCatalog) {
+        if (meta.key !== setting.key) continue;
+        if (!fallback) fallback = meta;
+        if (bit && (Number(meta.modes || 0) & bit)) return meta;
+      }
+      return fallback;
+    }
+
+    function settingsTherapyMode(data) {
+      const setting = (data.settings || []).find((item) =>
+        item && item.key === "MOP");
+      if (!setting || setting.value === undefined || setting.value === null) {
+        return null;
+      }
+      const mode = Number(setting.value);
+      return Number.isFinite(mode) ? mode : null;
+    }
+
+    function mergeSettingsCatalog(data) {
+      const activeMode = settingsTherapyMode(data);
+      const mode = settingsModeDirty && settingsProfileMode !== null ?
+        settingsProfileMode : activeMode;
+      const merged = Object.assign({}, data);
+      merged.settings = (data.settings || []).map((setting) => {
+        const meta = settingMetaFor(setting, mode);
+        return meta ? Object.assign({}, meta, setting) : setting;
+      });
+      return merged;
+    }
+
+    function optionValue(item, index) {
+      return item && typeof item === "object" && item.value !== undefined ?
+        String(item.value) : String(index);
+    }
+
+    function optionLabel(item) {
+      return item && typeof item === "object" ?
+        (item.label || String(item.value)) : String(item);
+    }
+
+    function visibleOptions(setting, supportedMask) {
+      const options = setting.options || [];
+      if (setting.key !== "MOP" || !supportedMask) return options;
+      return options.filter((item, index) =>
+        supportedMask & modeBit(optionValue(item, index)));
+    }
+
+    function settingRawValue(setting) {
+      if (!setting) return "";
+      if (setting.pending) return setting.pending_value || "";
+      return setting.value || "";
+    }
+
+    function compositeOptionValue(item) {
+      if (!item || typeof item !== "object") return "";
+      if (item.numeric_raw !== undefined && item.numeric_raw !== null) {
+        return "n:" + String(item.numeric_raw);
+      }
+      return "e:" + String(item.enum_value);
+    }
+
+    function compositeOptionLabel(item) {
+      return item && typeof item === "object" ?
+        (item.label || compositeOptionValue(item)) : String(item);
+    }
+
+    function compositeCurrentValue(composite, enumSetting, numericSetting) {
+      const enumRaw = String(settingRawValue(enumSetting));
+      const branch = String(composite.numeric_branch_enum_value);
+      if (enumRaw === branch) {
+        const numericRaw = String(settingRawValue(numericSetting));
+        if (numericRaw !== "") return "n:" + numericRaw;
+      }
+      return "e:" + enumRaw;
+    }
+
+    function compositeDisplayFallback(value) {
+      if (String(value).startsWith("n:")) return String(value).slice(2);
+      if (String(value).startsWith("e:")) return String(value).slice(2);
+      return String(value || "");
+    }
+
+    function formatSettingValue(setting, value) {
+      if (value === undefined || value === null || value === "") return "";
+      const raw = String(value);
+      if (setting.kind === "composite") {
+        const options = setting.options || [];
+        for (let i = 0; i < options.length; i++) {
+          if (optionValue(options[i], i) === raw) {
+            return optionLabel(options[i]) || raw;
+          }
+        }
+        return compositeDisplayFallback(raw);
+      }
+      if (setting.kind === "enum") {
+        const options = setting.options || [];
+        for (let i = 0; i < options.length; i++) {
+          if (optionValue(options[i], i) === raw) {
+            return optionLabel(options[i]) || raw;
+          }
+        }
+        return raw;
+      }
+      if (setting.kind === "number") {
+        const numeric = Number(raw);
+        if (!Number.isFinite(numeric)) return raw;
+        const scale = Number(setting.scale_div || 1);
+        const displayValue = scale > 1 ? numeric / scale : numeric;
+        const decimals = Number(setting.decimals || 0);
+        if (Number.isInteger(decimals) && decimals >= 0) {
+          return displayValue.toFixed(decimals);
+        }
+        return String(displayValue);
+      }
+      return raw;
+    }
+
+    function settingAvailable(setting) {
+      return setting.available !== false;
+    }
+
+    function settingWritable(setting) {
+      return setting.writable !== false;
+    }
+
+    function settingSmallText(setting) {
+      const parts = [];
+      if (setting.rpc_name) parts.push(setting.rpc_name);
+
+      if (setting.pending) {
+        parts.push("Pending readback; current " +
+          (formatSettingValue(setting, setting.value) || "--"));
+      } else if (setting.inferred && setting.key !== "MOP") {
+        parts.push("Inferred from device status");
+      }
+
+      return parts.join("; ");
+    }
+
+    function settingGroupRank(group) {
+      const order = {
+        Therapy: 0,
+        Comfort: 1,
+        Circuit: 2,
+        Preferences: 3,
+        Device: 4,
+      };
+      return Object.prototype.hasOwnProperty.call(order, group) ?
+        order[group] : 100;
+    }
+
+    function settingCategoryRank(category) {
+      const order = {
+        therapy: 0,
+        pressure: 1,
+        pressure_support: 2,
+        backup_rate: 3,
+        comfort: 4,
+        timing: 5,
+        trigger_cycle: 6,
+        therapy_start_pressure: 10,
+        ramp: 11,
+        therapy_behavior: 12,
+        climate: 13,
+        circuit: 20,
+        locale: 30,
+        patient_access: 31,
+        display: 32,
+      };
+      return Object.prototype.hasOwnProperty.call(order, category) ?
+        order[category] : 100;
+    }
+
+    function compareSettings(a, b) {
+      const groupDelta =
+        settingGroupRank(a.group || "") - settingGroupRank(b.group || "");
+      if (groupDelta) return groupDelta;
+
+      const categoryDelta =
+        settingCategoryRank(a.category || "") -
+        settingCategoryRank(b.category || "");
+      if (categoryDelta) return categoryDelta;
+
+      return Number(a._catalogIndex || 0) - Number(b._catalogIndex || 0);
+    }
+
+    function buildCompositeSettings(settings) {
+      const byKey = new Map();
+      settings.forEach((setting) => byKey.set(setting.key, setting));
+
+      const hiddenKeys = new Set();
+      const composites = [];
+      settingsComposites.forEach((composite) => {
+        if (composite.kind !== "paired_enum_numeric") return;
+
+        const enumSetting = byKey.get(composite.enum_key);
+        const numericSetting = byKey.get(composite.numeric_key);
+        if (!enumSetting || !numericSetting) return;
+
+        const available =
+          (settingAvailable(enumSetting) || enumSetting.pending) &&
+          (settingAvailable(numericSetting) || numericSetting.pending);
+        if (!available) return;
+
+        const options = (composite.options || []).map((item) =>
+          Object.assign({}, item, {value: compositeOptionValue(item)}));
+        const value = compositeCurrentValue(
+          composite, enumSetting, numericSetting);
+
+        hiddenKeys.add(composite.enum_key);
+        hiddenKeys.add(composite.numeric_key);
+        composites.push(Object.assign({}, composite, {
+          kind: "composite",
+          value,
+          pending_value: value,
+          options,
+          pending: enumSetting.pending || numericSetting.pending,
+          writable: settingWritable(enumSetting) &&
+            settingWritable(numericSetting),
+          available: true,
+          enum_setting: enumSetting,
+          numeric_setting: numericSetting,
+        }));
+      });
+
+      return {hiddenKeys, composites};
+    }
+
+    async function loadSettings(refresh, poll) {
+      try {
+        if (refresh) settingsRefreshUntil = Date.now() + 7000;
+
+        const query = [];
+        if (refresh) query.push("refresh=1");
+        if (poll) query.push("poll=1");
+        if (settingsModeDirty && settingsProfileMode !== null) {
+          query.push("profile_mode=" + encodeURIComponent(settingsProfileMode));
+        }
+
+        const response = await api("/api/settings" +
+          (query.length ? "?" + query.join("&") : ""));
+        const data = await response.json();
+        await ensureSettingsCatalog();
+        settingsData = mergeSettingsCatalog(data);
+        renderSettings(settingsData, !!refresh);
+      } catch (error) {
+        msg("settingsMsg", error.message, false);
+      }
+    }
+
+    function renderSettings(data, requestedRefresh) {
+      const parts = [];
+      const activeMode = settingsTherapyMode(data);
+      if (activeMode !== null) settingsActiveMode = activeMode;
+      if (!settingsModeDirty && settingsActiveMode !== null) {
+        settingsProfileMode = settingsActiveMode;
+      }
+      if (settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode === settingsActiveMode && !data.pending_count) {
+        settingsModeDirty = false;
+      }
+      if (!requestedRefresh && data.valid && !data.refresh_queued &&
+          (data.age_ms || 0) < 2500) {
+        settingsRefreshUntil = 0;
+      }
+
+      const refreshing = Date.now() < settingsRefreshUntil;
+      if (data.refresh_queued || refreshing) {
+        parts.push("Refreshing settings");
+      } else if (!data.valid) {
+        parts.push("Waiting for device");
+      }
+      if (settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode !== settingsActiveMode) {
+        parts.push("Unsaved mode change");
+      }
+      if (data.pending_count) parts.push(data.pending_count + " pending readback");
+
+      const meta = document.getElementById("settingsMeta");
+      const metaText = parts.join("; ");
+      meta.textContent = metaText;
+      meta.style.display = metaText ? "block" : "none";
+
+      const root = document.getElementById("settingsFields");
+      const save = document.getElementById("settingsSave");
+      const revert = document.getElementById("settingsRevert");
+      root.innerHTML = "";
+      scheduleSettingsPoll(data);
+      if (revert) {
+        revert.style.display =
+          settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode !== settingsActiveMode ? "" : "none";
+      }
+
+      const baseVisible = (data.settings || []).filter((setting) =>
+        settingAvailable(setting) || setting.inferred || setting.pending);
+      const compositeState = buildCompositeSettings(baseVisible);
+      const visible = baseVisible.filter((setting) =>
+          !compositeState.hiddenKeys.has(setting.key))
+        .concat(compositeState.composites)
+        .sort(compareSettings);
+      if (!visible.length) {
+        root.innerHTML = '<div class="value" style="text-align:left">' +
+          (data.valid ? "No readable settings for this mode" :
+            "Waiting for AS11 settings readback") +
+          "</div>";
+        if (save) save.disabled = true;
+        return;
+      }
+
+      let group = "";
+      visible.forEach((setting) => {
+        const settingGroup = setting.group || "";
+        if (settingGroup !== group) {
+          group = settingGroup;
+          const heading = document.createElement("div");
+          heading.className = "section-title";
+          heading.textContent = group || "settings";
+          root.appendChild(heading);
+        }
+
+        let raw = setting.pending ?
+          setting.pending_value : (setting.value || "");
+        if (setting.key === "MOP" && settingsModeDirty &&
+            settingsProfileMode !== null) {
+          raw = String(settingsProfileMode);
+        }
+        const shown = formatSettingValue(setting, raw);
+        let control;
+
+        if (setting.kind === "enum" || setting.kind === "composite") {
+          control = document.createElement("select");
+          let seen = false;
+          if (raw === "") {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "--";
+            option.selected = true;
+            option.disabled = true;
+            control.appendChild(option);
+          }
+          visibleOptions(setting, data.supported_mode_mask || 0)
+            .forEach((item, index) => {
+              const label = setting.kind === "composite" ?
+                compositeOptionLabel(item) : optionLabel(item);
+              const value = optionValue(item, index);
+              const option = document.createElement("option");
+              option.value = value;
+              option.textContent = label;
+              if (setting.kind === "composite") {
+                option.dataset.enumValue = item.enum_value;
+                if (item.numeric_raw !== undefined &&
+                    item.numeric_raw !== null) {
+                  option.dataset.numericRaw = item.numeric_raw;
+                }
+              }
+              if (value === String(raw)) {
+                option.selected = true;
+                seen = true;
+              }
+              control.appendChild(option);
+            });
+          if (raw !== "" && !seen) {
+            const option = document.createElement("option");
+            option.value = raw;
+            option.textContent = shown || raw;
+            option.selected = true;
+            control.appendChild(option);
+          }
+          if (setting.key === "MOP") {
+            control.onchange = () => {
+              const nextMode = Number(control.value);
+              if (!Number.isNaN(nextMode)) {
+                settingsProfileMode = nextMode;
+                settingsModeDirty = settingsActiveMode !== null &&
+                  nextMode !== settingsActiveMode;
+                loadSettings(false);
+              }
+            };
+          }
+        } else if (setting.kind === "bool") {
+          control = document.createElement("select");
+          ["false", "true"].forEach((value) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value === "true" ? "On" : "Off";
+            const current = String(raw).toLowerCase();
+            if (current === value ||
+                current === (value === "true" ? "on" : "off")) {
+              option.selected = true;
+            }
+            control.appendChild(option);
+          });
+        } else {
+          control = document.createElement("input");
+          control.type = setting.kind === "number" ? "number" : "text";
+          control.value = settingAvailable(setting) || setting.inferred ?
+            (shown || "") : "";
+          if (setting.kind === "number") {
+            control.min = setting.min;
+            control.max = setting.max;
+            control.step = setting.step;
+          }
+        }
+
+        control.dataset.key = setting.key;
+        control.dataset.kind = setting.kind;
+        if (setting.kind === "composite") {
+          control.dataset.enumKey = setting.enum_key;
+          control.dataset.numericKey = setting.numeric_key;
+          control.dataset.numericScaleDiv =
+            setting.numeric_setting && setting.numeric_setting.scale_div ?
+              setting.numeric_setting.scale_div : 1;
+        }
+        control.dataset.orig =
+          setting.kind === "enum" || setting.kind === "bool" ?
+            (raw || "") : (control.value || "");
+        if (setting.kind === "composite") control.dataset.orig = raw || "";
+        if (!settingAvailable(setting) || !settingWritable(setting)) {
+          control.disabled = true;
+        }
+        if (setting.pending) control.classList.add("pending");
+
+        const entry = row(
+          setting.label || setting.key,
+          control,
+          settingSmallText(setting));
+        if (setting.pending) entry.classList.add("pending");
+        root.appendChild(entry);
+      });
+
+      if (save) save.disabled = !root.querySelector("[data-key]:not(:disabled)");
+    }
+
+    async function saveSettings() {
+      const changes = {};
+      if (settingsModeDirty && settingsProfileMode !== null &&
+          settingsActiveMode !== null &&
+          settingsProfileMode !== settingsActiveMode) {
+        changes.MOP = settingsProfileMode;
+      }
+      document.querySelectorAll("#settingsFields [data-key]").forEach((input) => {
+        if (input.disabled) return;
+        if (String(input.value) === String(input.dataset.orig)) return;
+
+        if (input.dataset.kind === "number") {
+          if (input.value === "") return;
+          changes[input.dataset.key] = Number(input.value);
+        } else if (input.dataset.kind === "bool") {
+          changes[input.dataset.key] = input.value === "true";
+        } else if (input.dataset.kind === "enum") {
+          if (input.value === "") return;
+          changes[input.dataset.key] = Number(input.value);
+        } else if (input.dataset.kind === "composite") {
+          const selected = input.selectedOptions && input.selectedOptions[0];
+          if (!selected || selected.dataset.enumValue === undefined) return;
+
+          changes[input.dataset.enumKey] = Number(selected.dataset.enumValue);
+          if (selected.dataset.numericRaw !== undefined) {
+            const numeric = Number(selected.dataset.numericRaw);
+            const scale = Number(input.dataset.numericScaleDiv || 1);
+            changes[input.dataset.numericKey] =
+              scale > 1 ? numeric / scale : numeric;
+          }
+        } else {
+          changes[input.dataset.key] = input.value;
+        }
+      });
+
+      if (!Object.keys(changes).length) {
+        msg("settingsMsg", "No changes", true);
+        return;
+      }
+
+      try {
+        const response = await api("/api/settings", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(changes),
+        });
+        const data = await response.json();
+        msg("settingsMsg",
+          data.ok ? "Settings queued" : "Queue failed",
+          data.ok);
+        settingsRefreshUntil = Date.now() + 7000;
+        setTimeout(() => loadSettings(true), 1200);
+      } catch (error) {
+        msg("settingsMsg", error.message, false);
+      }
+    }
+
+    function revertSettingsDraft() {
+      if (settingsActiveMode === null) return;
+      settingsProfileMode = settingsActiveMode;
+      settingsModeDirty = false;
+      loadSettings(false);
+    }
+
+    function renderWifiCurrent(data) {
+      const root = document.getElementById("wifiCurrent");
+      if (!root) return;
+      root.innerHTML = "";
+
+      const status = statusData || {};
+      const state = data.state || status.wifi_state || "--";
+      const ssid = data.ssid || status.wifi_ssid || "";
+      const ip = data.ip || status.wifi_ip || "";
+      const channel = data.channel || status.wifi_channel || 0;
+      const bssid = data.bssid || status.wifi_bssid || "";
+      const rssi = data.rssi !== undefined ? data.rssi : status.wifi_rssi;
+      const roam = data.roam !== undefined ? data.roam : status.wifi_roam;
+      const active = Number.isFinite(Number(data.active)) ?
+        Number(data.active) : Number(status.wifi_profile);
+
+      root.appendChild(row("State", valueSpan(state),
+        roam ? "roaming on" : "roaming off"));
+      root.appendChild(row("SSID", valueSpan(ssid),
+        Number.isFinite(active) && active >= 0 ? "profile " + active : ""));
+      root.appendChild(row("Signal", wifiSignalValue(rssi),
+        channel > 0 ? "channel " + channel : ""));
+      root.appendChild(row("IP", valueSpan(ip),
+        bssid && bssid !== "00:00:00:00:00:00" ? bssid : ""));
+    }
+
+    async function loadWifi() {
+      try {
+        const response = await api("/api/wifi");
+        const data = await response.json();
+        renderWifiCurrent(data);
+        const root = document.getElementById("wifiProfiles");
+        root.innerHTML = "";
+        if (!data.profiles.length) {
+          root.innerHTML = '<div class="value" style="text-align:left">No profiles</div>';
+        }
+        data.profiles.forEach((profile, index) => {
+          const button = document.createElement("button");
+          button.className = "btn danger";
+          button.textContent = "Remove";
+          button.onclick = () => wifiRemove(index);
+          root.appendChild(row(profile.ssid, button,
+            (index === data.active ? "active, " : "") +
+            (profile.open ? "open" : "password")));
+        });
+      } catch (error) {
+        msg("wifiMsg", error.message, false);
+      }
+    }
+
+    async function wifiAction(action, extra) {
+      try {
+        const body = Object.assign({action}, extra || {});
+        const response = await api("/api/wifi", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        msg("wifiMsg", data.result, data.ok);
+        setTimeout(loadWifi, 600);
+        setTimeout(loadStatus, 900);
+      } catch (error) {
+        msg("wifiMsg", error.message, false);
+      }
+    }
+
+    function wifiAdd() {
+      wifiAction("add", {
+        ssid: document.getElementById("wifiSsid").value,
+        pass: document.getElementById("wifiPass").value,
+      });
+    }
+
+    function wifiRemove(index) {
+      wifiAction("remove", {index});
+    }
+
+    let otaReloadTimer = null;
+
+    function scheduleOtaReload() {
+      if (otaReloadTimer ||
+          (location.protocol !== "http:" && location.protocol !== "https:")) {
+        return;
+      }
+
+      const started = Date.now();
+      const path = location.pathname || "/";
+      const check = async () => {
+        try {
+          const response = await fetch(path, {cache: "no-store"});
+          if (response.ok) {
+            location.reload();
+            return;
+          }
+        } catch (error) {}
+
+        if (Date.now() - started < 120000) {
+          otaReloadTimer = setTimeout(check, 2000);
+        } else {
+          otaReloadTimer = null;
+        }
+      };
+
+      otaReloadTimer = setTimeout(check, 6000);
+    }
+
+    async function loadOta() {
+      try {
+        const response = await api("/api/ota");
+        const data = await response.json();
+        renderOta(data);
+
+        const resmedResponse = await api("/api/resmed-ota");
+        renderResmedOta(await resmedResponse.json());
+      } catch (error) {
+        msg("otaMsg", error.message, false);
+      }
+    }
+
+    function renderOta(data) {
+      up("otaVersion", data.version || "--");
+      const active = data.http_prepare_pending || data.http_prepared ||
+        data.http_active || data.http_ready ||
+        data.reboot_pending || data.method === "http" ||
+        data.method === "http_prepare" || data.method === "arduino";
+      if (!active && !(data.bytes || data.progress)) {
+        up("otaProgress", "--");
+        return;
+      }
+      if (data.http_prepare_pending) {
+        up("otaProgress", "Preparing / " + fmtBytes(data.total_size || 0));
+        return;
+      }
+      if (data.http_prepared && !data.http_active) {
+        up("otaProgress", "Ready / " + fmtBytes(data.total_size || 0));
+        return;
+      }
+      up("otaProgress", (data.progress || 0) + "% / " +
+        fmtBytes(data.bytes || 0));
+    }
+
+    function setOtaUploadProgress(percent, bytes) {
+      up("otaProgress", percent + "% / " + fmtBytes(bytes || 0));
+    }
+
+    async function prepareOtaUpload(size) {
+      const prepareResponse = await api("/api/ota/prepare?size=" +
+        encodeURIComponent(size), {method: "POST"});
+      let data = await prepareResponse.json();
+      renderOta(data);
+
+      const started = Date.now();
+      while (!data.http_prepared) {
+        if (data.last_error) throw new Error(data.last_error);
+        if (!data.http_prepare_pending) {
+          throw new Error("OTA prepare did not start");
+        }
+        if (Date.now() - started > 15000) {
+          throw new Error("OTA prepare timed out");
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+        const pollResponse = await api("/api/ota");
+        data = await pollResponse.json();
+        renderOta(data);
+      }
+      return data;
+    }
+
+    async function otaUpload() {
+      const file = document.getElementById("otaFile").files[0];
+      if (!file) {
+        msg("otaMsg", "Select firmware .bin", false);
+        return;
+      }
+
+      const progress = document.getElementById("otaUploadProgress");
+      const bar = document.getElementById("otaUploadBar");
+      progress.style.display = "block";
+      bar.style.width = "0%";
+      setOtaUploadProgress(0, 0);
+
+      try {
+        msg("otaMsg", "Preparing OTA...", true, true);
+        await prepareOtaUpload(file.size);
+        msg("otaMsg", "Uploading...", true, true);
+
+        const xhr = new XMLHttpRequest();
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percent = Math.min(100,
+              Math.floor(event.loaded / event.total * 100));
+            const bytes = Math.min(file.size, event.loaded);
+            bar.style.width = percent + "%";
+            setOtaUploadProgress(percent, bytes);
+          }
+        };
+        xhr.onload = () => {
+          try {
+            const data = JSON.parse(xhr.responseText || "{}");
+            if (xhr.status < 300) {
+              bar.style.width = "100%";
+              setOtaUploadProgress(100, data.bytes || file.size);
+            } else {
+              renderOta(data);
+            }
+            msg("otaMsg",
+              xhr.status < 300 ?
+                (data.reboot_pending ? "Upload OK. Restarting..." :
+                  data.http_ready ? "Upload OK. Restarting shortly." :
+                  "Upload finished") :
+                ("Upload failed: " + (data.last_error || xhr.statusText)),
+              xhr.status < 300 && data.http_ready);
+            if (xhr.status < 300 && (data.reboot_pending || data.http_ready)) {
+              scheduleOtaReload();
+            }
+            if (xhr.status >= 300) loadOta();
+          } catch (error) {
+            msg("otaMsg", "Upload failed", false);
+          }
+        };
+        xhr.onerror = () => msg("otaMsg", "Upload error", false);
+        xhr.open("POST", "/api/ota/upload?size=" +
+          encodeURIComponent(file.size));
+
+        const form = new FormData();
+        form.append("firmware", file);
+        xhr.send(form);
+      } catch (error) {
+        msg("otaMsg", error.message, false);
+      }
+    }
+
+    function resmedOtaStatusText(data) {
+      const target = data.target && data.target !== "ABC" ? " " + data.target : "";
+      if (data.phase === "staging") return "Preparing image" + target;
+      if (data.phase === "staged") return "Image prepared" + target;
+      if (data.phase === "initiating") return "Starting device upload" + target;
+      if (data.phase === "ready" || data.phase === "uploading") {
+        return "Sending to ResMed" + target;
+      }
+      if (data.phase === "uploaded" || data.phase === "checking") {
+        return "Verifying on ResMed";
+      }
+      if (data.phase === "verified") return "Upload complete. Ready to apply.";
+      if (data.phase === "applying") return "Applying firmware";
+      if (data.phase === "complete") return "Apply complete";
+      if (data.phase === "error") return data.last_error || "ResMed OTA failed";
+      return data.phase || "--";
+    }
+
+    function resmedOtaTransferActive(data) {
+      return data.phase === "ready" || data.phase === "uploading";
+    }
+
+    function resetResmedOtaRate(data, now, bytes, total) {
+      resmedOtaRate.phase = data.phase || "";
+      resmedOtaRate.total = total || 0;
+      resmedOtaRate.bytes = bytes || 0;
+      resmedOtaRate.time = now || performance.now();
+      resmedOtaRate.bps = 0;
+    }
+
+    function resmedOtaRateText(data) {
+      const now = performance.now();
+      const bytes = Number(data.uploaded_bytes || 0);
+      const total = Number(data.total_size || 0);
+      if (!resmedOtaTransferActive(data) || total <= 0) {
+        resetResmedOtaRate(data, now, bytes, total);
+        return "";
+      }
+
+      if (resmedOtaRate.phase !== data.phase ||
+          resmedOtaRate.total !== total ||
+          bytes < resmedOtaRate.bytes) {
+        resetResmedOtaRate(data, now, bytes, total);
+        return "";
+      }
+
+      const elapsed = (now - resmedOtaRate.time) / 1000;
+      if (bytes > resmedOtaRate.bytes && elapsed > 0) {
+        const sample = (bytes - resmedOtaRate.bytes) / elapsed;
+        resmedOtaRate.bps =
+          resmedOtaRate.bps ? (resmedOtaRate.bps * 0.7 + sample * 0.3) : sample;
+        resmedOtaRate.bytes = bytes;
+        resmedOtaRate.time = now;
+      }
+
+      if (!resmedOtaRate.bps) return "";
+      const remaining = Math.max(0, total - bytes);
+      const eta = fmtDuration(remaining / resmedOtaRate.bps);
+      return fmtBytes(resmedOtaRate.bps) + "/s" + (eta ? " ETA " + eta : "");
+    }
+
+    function renderResmedOta(data) {
+      const rateText = resmedOtaRateText(data);
+      const stateText = resmedOtaStatusText(data) +
+        (data.waiting ? " / waiting" : "");
+      const progressText = (data.progress || 0) + "%" +
+        (rateText ? " " + rateText : "");
+      up("resmedOtaState", stateText);
+      up("resmedOtaProgress", progressText);
+      up("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
+
+      const apply = document.getElementById("resmedOtaApplyBtn");
+      if (apply) {
+        const canApply = data.phase === "verified" && !data.waiting;
+        const applying = data.phase === "applying";
+        const complete = data.phase === "complete";
+        apply.style.display = canApply || applying || complete ? "" : "none";
+        apply.disabled = !canApply;
+        apply.textContent = applying ? "Applying" : complete ? "Applied" : "Apply";
+      }
+
+      const cancel = document.getElementById("resmedOtaCancelBtn");
+      if (cancel) {
+        const cancellable = data.active && data.phase !== "applying";
+        cancel.style.display = cancellable ? "" : "none";
+        cancel.disabled = !cancellable;
+      }
+
+      const progress = document.getElementById("resmedOtaUploadProgress");
+      const bar = document.getElementById("resmedOtaUploadBar");
+      progress.style.display =
+        data.active || data.phase === "complete" || data.phase === "verified" ?
+          "block" : "none";
+      bar.style.width = (data.progress || 0) + "%";
+      if (data.last_error) {
+        msg("resmedOtaMsg", data.last_error, false, true);
+      } else if (data.phase === "verified") {
+        msg("resmedOtaMsg", "Upload complete. Ready to apply.", true, true);
+      } else if (data.phase === "complete") {
+        msg("resmedOtaMsg", "Apply complete", true, true);
+      } else if (data.active) {
+        msg("resmedOtaMsg", stateText, true, true);
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function hexFromBytes(bytes) {
+      let output = "";
+      const hex = "0123456789ABCDEF";
+      for (const byte of bytes) {
+        output += hex[byte >> 4] + hex[byte & 15];
+      }
+      return output;
+    }
+
+    async function readFileMagicHex(file) {
+      const len = Math.min(8, file.size);
+      const buffer = await file.slice(0, len).arrayBuffer();
+      return hexFromBytes(new Uint8Array(buffer));
+    }
+
+    async function getResmedOta() {
+      const response = await api("/api/resmed-ota");
+      const data = await response.json();
+      renderResmedOta(data);
+      return data;
+    }
+
+    async function waitResmedOta(predicate, attempts) {
+      for (let index = 0; index < (attempts || 360); index++) {
+        const data = await getResmedOta();
+        if (data.phase === "error") {
+          throw new Error(data.last_error || "ResMed OTA failed");
+        }
+        if (predicate(data)) return data;
+        await sleep(500);
+      }
+      throw new Error("ResMed OTA timeout");
+    }
+
+    async function postResmedOta(url, body) {
+      const response = await api(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body || {}),
+      });
+      const data = await response.json();
+      if (!response.ok && data.error) throw new Error(data.error);
+      if (data.queued) {
+        setTimeout(getResmedOta, 300);
+        return data;
+      }
+      renderResmedOta(data);
+      return data;
+    }
+
+    async function uploadResmedImage(file, magic) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const progress = document.getElementById("resmedOtaUploadProgress");
+        const bar = document.getElementById("resmedOtaUploadBar");
+
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) return;
+          progress.style.display = "block";
+          bar.style.width = Math.round((event.loaded * 100) / event.total) + "%";
+        };
+        xhr.onload = () => {
+          let data = {};
+          try {
+            data = JSON.parse(xhr.responseText || "{}");
+          } catch (error) {}
+          renderResmedOta(data);
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(data);
+          } else {
+            reject(new Error(data.last_error || data.error ||
+              ("Upload failed: HTTP " + xhr.status)));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Upload error"));
+        xhr.open("POST", "/api/resmed-ota/upload?size=" +
+          encodeURIComponent(file.size) + "&magic=" +
+          encodeURIComponent(magic || ""));
+
+        const form = new FormData();
+        form.append("firmware", file);
+        xhr.send(form);
+      });
+    }
+
+    async function resmedOtaUpload() {
+      const file = document.getElementById("resmedOtaFile").files[0];
+      if (!file) {
+        msg("resmedOtaMsg", "Select firmware image", false, true);
+        return;
+      }
+
+      try {
+        msg("resmedOtaMsg", "Uploading", true, true);
+        const magic = await readFileMagicHex(file);
+        await uploadResmedImage(file, magic);
+        const result = await waitResmedOta((data) =>
+          data.phase === "complete" || data.phase === "verified", 4200);
+        msg("resmedOtaMsg",
+          result.phase === "complete" ?
+            "Apply complete" : "Upload complete. Ready to apply.",
+          true, true);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false, true);
+        loadOta();
+      }
+    }
+
+    async function resmedOtaApply() {
+      if (!confirm("Apply uploaded firmware to the ResMed device now?")) {
+        return;
+      }
+
+      try {
+        await postResmedOta("/api/resmed-ota/apply", {
+          mode: "plain",
+          reset: false,
+          confirm: "APPLY_RESMED_OTA",
+        });
+        await waitResmedOta((data) =>
+          data.phase === "complete" || data.phase === "error", 240);
+        msg("resmedOtaMsg", "Apply complete", true, true);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false, true);
+      }
+    }
+
+    async function resmedOtaCancel() {
+      if (!confirm("Cancel the current ResMed firmware operation?")) {
+        return;
+      }
+
+      try {
+        await postResmedOta("/api/resmed-ota/abort", {});
+        msg("resmedOtaMsg", "Cancelled", false, true);
+        setTimeout(getResmedOta, 300);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false, true);
+      }
+    }
+
+    async function loadConsole(showError) {
+      try {
+        const response = await api("/api/console");
+        const before = consoleSeq;
+        renderConsole(await response.json());
+        return consoleSeq !== before;
+      } catch (error) {
+        if (showError) {
+          const output = document.getElementById("consoleLog");
+          output.textContent += "\nERR: " + error.message + "\n";
+          output.scrollTop = output.scrollHeight;
+        }
+      }
+      return false;
+    }
+
+    function renderConsole(data) {
+      const seq = Number(data && data.seq);
+      if (!data || !Number.isFinite(seq) || seq <= consoleSeq) return;
+      const output = document.getElementById("consoleLog");
+      if (data.reset || data.log !== undefined) {
+        output.textContent = data.log || "";
+        consoleEnd = Number(data.end ?? output.textContent.length);
+        consoleSeq = seq;
+      } else if (data.append !== undefined) {
+        const from = Number(data.from ?? consoleEnd);
+        const to = Number(data.to ?? (from + (data.append || "").length));
+        if (from !== consoleEnd) {
+          if (to > consoleEnd) setTimeout(() => loadConsole(false), 0);
+          return;
+        }
+        output.textContent += data.append || "";
+        if (output.textContent.length > 4096) {
+          output.textContent = output.textContent.slice(-4096);
+        }
+        consoleEnd = to;
+        consoleSeq = seq;
+      }
+      output.scrollTop = output.scrollHeight;
+    }
+
+    async function sendConsoleCommand() {
+      const input = document.getElementById("consoleInput");
+      const command = input.value.trim();
+      if (!command) return;
+      input.value = "";
+
+      try {
+        const response = await api("/api/console", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({cmd: command}),
+        });
+        const data = await response.json();
+        if (data.log !== undefined) renderConsole(data);
+        setTimeout(() => loadConsole(true), 300);
+      } catch (error) {
+        const output = document.getElementById("consoleLog");
+        output.textContent += "\nERR: " + error.message + "\n";
+        output.scrollTop = output.scrollHeight;
+      }
+    }
+
+    async function clearConsoleLog() {
+      try {
+        await api("/api/console/clear", {method: "POST"});
+        const output = document.getElementById("consoleLog");
+        output.textContent = "";
+        consoleSeq = -1;
+        consoleEnd = 0;
+        output.scrollTop = 0;
+      } catch (error) {
+        const output = document.getElementById("consoleLog");
+        output.textContent += "\nERR: " + error.message + "\n";
+        output.scrollTop = output.scrollHeight;
+      }
+    }
+
+    function normalizeConfigSchema(data) {
+      const groups = Array.isArray(data && data.groups) ? data.groups : [];
+      configSections = groups.map((group) => ({
+        id: group.id,
+        title: group.label || group.id,
+        fields: Array.isArray(group.fields) ? group.fields : [],
+      })).filter((group) => group.id);
+      rebuildConfigSectionMaps();
+    }
+
+    async function loadConfigSchema() {
+      const response = await api("/api/config/schema");
+      normalizeConfigSchema(await response.json());
+      return configSections;
+    }
+
+    async function ensureConfigSchema() {
+      if (configSections.length) return configSections;
+      if (!configSchemaPromise) {
+        configSchemaPromise = loadConfigSchema().finally(() => {
+          configSchemaPromise = null;
+        });
+      }
+      return await configSchemaPromise;
+    }
+
+    async function fetchConfigSection(sectionId) {
+      const response = await api("/api/config/" + encodeURIComponent(sectionId));
+      return await response.json();
+    }
+
+    async function fetchConfigData() {
+      await ensureConfigSchema();
+      const parts = await Promise.all(configSections.map(async (section) => {
+        return await fetchConfigSection(section.id);
+      }));
+      return Object.assign({}, ...parts);
+    }
+
+    function renderConfigField(root, section, field, data) {
+      data = data || configData || {};
+      let control;
+      if (field.type === "bool") {
+        control = document.createElement("select");
+        ["false", "true"].forEach((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value === "true" ? "On" : "Off";
+          if (String(data[field.key]) === value) option.selected = true;
+          control.appendChild(option);
+        });
+      } else if (field.type === "enum") {
+        control = document.createElement("select");
+        (field.enum || []).forEach((entry) => {
+          const value = typeof entry === "string" ? entry : entry.value;
+          const label = typeof entry === "string" ? entry : entry.label;
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label || value;
+          if (String(data[field.key]) === value) option.selected = true;
+          control.appendChild(option);
+        });
+      } else {
+        control = document.createElement("input");
+        control.type = field.type === "password" ? "password" : field.type;
+        control.value = data[field.key] || "";
+        if (field.secret) {
+          const setKey = field.key + "_set";
+          control.placeholder = data[setKey] ? "set" : "empty";
+          if (data[setKey]) control.value = "********";
+        }
+        if (field.key === "smb_ep") {
+          control.placeholder = "smb://host/share/path";
+        }
+        if (field.key === "shq_team" || field.key === "shq_device") {
+          control.placeholder = "optional numeric id";
+        }
+        if (field.key === "syslog_host") {
+          control.placeholder = "IPv4 address";
+        }
+      }
+
+      control.dataset.key = field.key;
+      control.dataset.section = section.id;
+      control.dataset.type = field.type;
+      control.dataset.orig = String(control.value || "");
+      let rendered = control;
+      if (field.key === "tz") rendered = timezoneHelper(control);
+      if (field.key === "wifi_ctry") rendered = wifiCountryHelper(control);
+      root.appendChild(row(field.label || field.key, rendered, field.key));
+    }
+
+    async function loadConfig() {
+      try {
+        await ensureConfigSchema();
+        configData = await fetchConfigData();
+
+        const root = document.getElementById("configFields");
+        root.innerHTML = "";
+        configSections.forEach((section) => {
+          const wrapper = document.createElement("details");
+          wrapper.className = "config-section";
+          if (section.id !== "logging") wrapper.open = true;
+
+          const heading = document.createElement("summary");
+          heading.className = "section-title";
+          heading.textContent = section.title;
+          wrapper.appendChild(heading);
+
+          const fields = document.createElement("div");
+          fields.className = "config-section-fields";
+          wrapper.appendChild(fields);
+          root.appendChild(wrapper);
+
+          section.fields.forEach((field) =>
+            renderConfigField(fields, section, field));
+        });
+      } catch (error) {
+        msg("configMsg", error.message, false);
+      }
+    }
+
+    function configFieldApplied(data, key, value) {
+      if (!data) return false;
+      const field = configFieldByKey[key];
+      if (field && field.secret) {
+        if (value === "********") return true;
+        const setKey = key + "_set";
+        const expectedSet = String(value || "").length > 0;
+        return !!data[setKey] === expectedSet;
+      }
+      if (typeof value === "boolean") return !!data[key] === value;
+      if (typeof value === "number") return Number(data[key]) === value;
+      return String(data[key] || "") === String(value || "");
+    }
+
+    function configChangesApplied(data, changes) {
+      return Object.keys(changes).every((key) =>
+        configFieldApplied(data, key, changes[key]));
+    }
+
+    async function fetchConfigSections(sectionIds) {
+      await ensureConfigSchema();
+      const parts = await Promise.all(sectionIds.map((sectionId) =>
+        fetchConfigSection(sectionId)));
+      return Object.assign({}, ...parts);
+    }
+
+    function configSectionsForChanges(changes) {
+      const ids = [];
+      Object.keys(changes).forEach((key) => {
+        const section = configSectionByKey[key] || "device";
+        if (!ids.includes(section)) ids.push(section);
+      });
+      return ids;
+    }
+
+    async function waitForConfigChanges(changes, sectionIds) {
+      const started = Date.now();
+      let latest = null;
+      while (Date.now() - started < 5000) {
+        const fetched = sectionIds && sectionIds.length ?
+          await fetchConfigSections(sectionIds) : await fetchConfigData();
+        latest = Object.assign({}, configData || {}, fetched);
+        if (configChangesApplied(latest, changes)) return latest;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      return latest;
+    }
+
+    function normalizeSmbEndpoint(value) {
+      let endpoint = String(value || "").trim().replace(/\\/g, "/");
+      if (endpoint.toLowerCase().startsWith("smb://")) {
+        endpoint = "//" + endpoint.slice(6);
+      }
+      return endpoint;
+    }
+
+    function validSmbEndpoint(value) {
+      const endpoint = normalizeSmbEndpoint(value);
+      if (!endpoint.length) return true;
+      if (!endpoint.startsWith("//")) return false;
+      const parts = endpoint.slice(2).split("/");
+      return parts.length >= 2 && parts[0].length > 0 && parts[1].length > 0;
+    }
+
+    function validOptionalNumericId(value) {
+      const text = String(value || "").trim();
+      return !text.length || /^\d+$/.test(text);
+    }
+
+    function validIpv4(value) {
+      const text = String(value || "").trim();
+      if (!text.length) return true;
+      const parts = text.split(".");
+      if (parts.length !== 4) return false;
+      return parts.every((part) => {
+        if (!/^\d+$/.test(part)) return false;
+        const byte = Number(part);
+        return byte >= 0 && byte <= 255;
+      });
+    }
+
+    function collectConfigChanges(root) {
+      const changes = {};
+      if (!root) return changes;
+      root.querySelectorAll("[data-key]").forEach((input) => {
+        let rawValue = input.value;
+        let originalValue = input.dataset.orig;
+        if (input.dataset.key === "smb_ep") {
+          rawValue = normalizeSmbEndpoint(rawValue);
+          originalValue = normalizeSmbEndpoint(originalValue);
+        }
+        if (input.dataset.key === "syslog_host") {
+          rawValue = String(rawValue || "").trim();
+          originalValue = String(originalValue || "").trim();
+        }
+        if (String(rawValue) === String(originalValue)) return;
+        if (input.dataset.type === "bool") {
+          changes[input.dataset.key] = rawValue === "true";
+        } else if (input.dataset.type === "number") {
+          changes[input.dataset.key] = Number(rawValue);
+        } else {
+          changes[input.dataset.key] = rawValue;
+        }
+      });
+      return changes;
+    }
+
+    function validateConfigChanges(changes, messageId) {
+      if (Object.prototype.hasOwnProperty.call(changes, "smb_ep") &&
+          !validSmbEndpoint(changes.smb_ep)) {
+        msg(messageId, "smb_ep must be smb://host/share[/path]", false);
+        return false;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, "shq_team") &&
+          !validOptionalNumericId(changes.shq_team)) {
+        msg(messageId, "shq_team must be numeric", false);
+        return false;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, "shq_device") &&
+          !validOptionalNumericId(changes.shq_device)) {
+        msg(messageId, "shq_device must be numeric", false);
+        return false;
+      }
+
+      const syslogHost = Object.prototype.hasOwnProperty.call(changes, "syslog_host") ?
+        changes.syslog_host : (configData ? configData.syslog_host : "");
+      const syslogEnabled = Object.prototype.hasOwnProperty.call(changes, "syslog_en") ?
+        changes.syslog_en : !!(configData && configData.syslog_en);
+      if (!validIpv4(syslogHost)) {
+        msg(messageId, "syslog_host must be an IPv4 address", false);
+        return false;
+      }
+      if (syslogEnabled && !String(syslogHost || "").trim().length) {
+        msg(messageId, "syslog_host is required when syslog_en is true", false);
+        return false;
+      }
+      return true;
+    }
+
+    async function postConfigChanges(changes) {
+      await ensureConfigSchema();
+      const sections = {};
+      Object.keys(changes).forEach((key) => {
+        const section = configSectionByKey[key] || "device";
+        if (!sections[section]) sections[section] = {};
+        sections[section][key] = changes[key];
+      });
+      const sectionOrder = configSections
+        .map((section) => section.id)
+        .filter((id) => id !== "access");
+      sectionOrder.push("access");
+
+      let queued = false;
+      for (const section of sectionOrder) {
+        if (!sections[section]) continue;
+        const response = await api("/api/config/" +
+          encodeURIComponent(section), {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(sections[section]),
+        });
+        const data = await response.json();
+        queued = queued || !!data.queued;
+      }
+      return queued;
+    }
+
+    async function saveConfigFields(root, messageId, reload) {
+      await ensureConfigSchema();
+      const changes = collectConfigChanges(root);
+      if (!validateConfigChanges(changes, messageId)) return false;
+
+      if (!Object.keys(changes).length) {
+        msg(messageId, "No changes", true);
+        return false;
+      }
+
+      try {
+        const sectionIds = configSectionsForChanges(changes);
+        const queued = await postConfigChanges(changes);
+
+        if (queued) {
+          const latest = await waitForConfigChanges(changes, sectionIds);
+          if (latest) {
+            configData = Object.assign({}, configData || {}, latest);
+          }
+          if (reload) await reload();
+          msg(messageId,
+            latest && configChangesApplied(latest, changes) ?
+              "Saved" : "Config update queued", true);
+        } else {
+          const latest = await fetchConfigSections(sectionIds);
+          configData = Object.assign({}, configData || {}, latest);
+          if (reload) await reload();
+          msg(messageId, "Saved", true);
+        }
+        return true;
+      } catch (error) {
+        msg(messageId, error.message, false);
+        return false;
+      }
+    }
+
+    async function saveConfig() {
+      await saveConfigFields(document.getElementById("configFields"),
+        "configMsg", loadConfig);
+    }
+
+    function clearMsg(id) {
+      const element = document.getElementById(id);
+      if (!element) return;
+      if (msgTimers[id]) {
+        clearTimeout(msgTimers[id]);
+        msgTimers[id] = null;
+      }
+      element.textContent = "";
+      element.className = "msg";
+    }
+
+    const endpointConfigPanels = {
+      smb: {
+        section: "smb",
+        panel: "edfSmbConfig",
+        fields: "edfSmbConfigFields",
+        msg: "edfSmbConfigMsg",
+        save: "edfSmbSaveBtn",
+        status: loadSmbSyncStatus,
+      },
+      sleephq: {
+        section: "sleephq",
+        panel: "edfSleepHqConfig",
+        fields: "edfSleepHqConfigFields",
+        msg: "edfSleepHqConfigMsg",
+        save: "edfSleepHqSaveBtn",
+        status: loadSleepHqSyncStatus,
+      },
+    };
+
+    async function loadEndpointConfig(id, clearMessage) {
+      await ensureConfigSchema();
+      const panel = endpointConfigPanels[id];
+      if (!panel) return false;
+      const section = configSectionById[panel.section];
+      const root = document.getElementById(panel.fields);
+      if (!section || !root) return false;
+      if (clearMessage) clearMsg(panel.msg);
+      try {
+        const data = await fetchConfigSection(panel.section);
+        configData = Object.assign({}, configData || {}, data);
+        root.innerHTML = "";
+        section.fields.forEach((field) =>
+          renderConfigField(root, section, field, configData));
+        return true;
+      } catch (error) {
+        msg(panel.msg, error.message, false, true);
+        return false;
+      }
+    }
+
+    async function toggleEndpointConfig(id) {
+      const panel = endpointConfigPanels[id];
+      if (!panel) return;
+      const element = document.getElementById(panel.panel);
+      if (!element) return;
+      if (!element.hidden) {
+        element.hidden = true;
+        clearMsg(panel.msg);
+        return;
+      }
+      element.hidden = false;
+      await loadEndpointConfig(id, true);
+    }
+
+    function cancelEndpointConfig(id) {
+      const panel = endpointConfigPanels[id];
+      if (!panel) return;
+      const element = document.getElementById(panel.panel);
+      if (element) element.hidden = true;
+      clearMsg(panel.msg);
+    }
+
+    async function saveEndpointConfig(id) {
+      const panel = endpointConfigPanels[id];
+      if (!panel) return;
+      const root = document.getElementById(panel.fields);
+      const save = document.getElementById(panel.save);
+      if (save) save.disabled = true;
+      try {
+        await saveConfigFields(root, panel.msg, async () => {
+          await loadEndpointConfig(id, false);
+          if (panel.status) await panel.status();
+        });
+      } finally {
+        if (save) save.disabled = false;
+      }
+    }
+

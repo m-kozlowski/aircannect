@@ -1,0 +1,314 @@
+    .report-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .report-actions select {
+      min-width: 260px;
+    }
+
+    .report-night {
+      display: grid;
+      grid-template-columns: minmax(130px, 1fr) auto auto;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid #ffffff08;
+    }
+
+    .report-night:last-child {
+      border-bottom: 0;
+    }
+
+    .report-sessions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 0;
+    }
+
+    .report-session {
+      border: 1px solid #0f766e;
+      background: #0f766e33;
+      color: var(--accent);
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .report-session.toggle {
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .report-session.hidden {
+      border-color: #3a3f4b;
+      background: transparent;
+      color: var(--muted);
+      text-decoration: line-through;
+      opacity: 0.6;
+    }
+
+    .night-picker {
+      position: relative;
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .np-arrow {
+      padding: 7px 9px;
+    }
+
+    .np-date {
+      min-width: 150px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .np-date .np-dur {
+      color: var(--muted);
+      font-weight: 400;
+      margin-left: 6px;
+    }
+
+    .np-pop {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      width: 262px;
+      max-width: calc(100vw - 16px);
+      padding: 10px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    }
+
+    .np-pop.open {
+      display: block;
+    }
+
+    .np-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .np-head span {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .np-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 2px;
+    }
+
+    .np-dow {
+      text-align: center;
+      padding: 2px 0;
+      font-size: 10px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .np-day {
+      position: relative;
+      text-align: center;
+      padding: 7px 0;
+      border-radius: 5px;
+      font-size: 13px;
+      color: #5b626d;
+    }
+
+    .np-day.has {
+      color: var(--text);
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .np-day.has:hover {
+      background: var(--line);
+    }
+
+    .np-day.has::after {
+      content: "";
+      position: absolute;
+      bottom: 4px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .np-day.sel {
+      background: var(--accent);
+      color: #04221c;
+    }
+
+    .np-day.sel::after {
+      background: #04221c;
+    }
+
+    .np-day.empty {
+      visibility: hidden;
+    }
+
+    .report-charts {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .report-chart {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--card);
+      padding: 12px;
+      min-width: 0;
+    }
+
+    .report-chart canvas,
+    .report-chart svg {
+      width: 100%;
+      height: 210px;
+      display: block;
+      background: #080a0f;
+      border: 1px solid #202837;
+      margin-top: 8px;
+      cursor: crosshair;
+    }
+
+    .report-chart-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .report-chart-title .value {
+      color: var(--text);
+    }
+
+    .report-chart-title .readout {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+      font-family: "SF Mono", Consolas, monospace;
+    }
+
+    /* Placeholder for a signal with no data (high-res aged out, or backfilling). */
+    .report-chart-empty {
+      opacity: 0.6;
+    }
+    .report-chart-note {
+      color: var(--muted);
+      font-style: italic;
+      padding: 4px 0;
+    }
+
+    /* Badge marking a chart drawn from the low-res 1-minute trend (high-res
+       aged out for this night). */
+    .report-res-badge {
+      margin-left: 8px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: #3a2e12;
+      color: #f0b760;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    /* Compact report metric strip: therapy time, AHI, event breakdown. */
+    .report-metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .report-metric {
+      border: 1px solid #30364166;
+      border-radius: 6px;
+      padding: 6px 12px;
+      background: #10111466;
+    }
+
+    .report-metric-value {
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1.15;
+    }
+
+    .report-metric-label {
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 5px;
+    }
+
+    .report-metric-events {
+      flex: 1 1 240px;
+    }
+
+    /* Fixed width so AHI up to NNN.NN never resizes the box / shifts layout. */
+    .report-metric-ahi {
+      min-width: 84px;
+    }
+
+    .report-metric-ahi .report-metric-value {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .report-metric-small {
+      min-width: 104px;
+    }
+
+    .report-metric-small .report-metric-value {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .report-events {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      min-height: 22px;
+    }
+
+    .report-events .evt {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      background: #1E293B;
+      border-radius: 5px;
+      padding: 12px;
+    }
+
+    .report-events .evt b {
+      color: var(--text);
+      font-weight: 700;
+      margin-left: 3px;
+    }
+
+    .report-legend-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+

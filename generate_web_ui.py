@@ -9,6 +9,42 @@ import re
 Import("env")
 
 
+def inline_assets(html, base_dir):
+    deps = []
+
+    def read_asset(path_text):
+        if os.path.isabs(path_text) or ".." in path_text.split("/"):
+            raise ValueError(f"unsafe inline asset path: {path_text}")
+        path = os.path.join(base_dir, path_text)
+        deps.append(path)
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def inline_css(match):
+        href = match.group("href")
+        return "<style>\n" + read_asset(href) + "\n</style>"
+
+    def inline_js(match):
+        src = match.group("src")
+        return "<script>\n" + read_asset(src) + "\n</script>"
+
+    html = re.sub(
+        r"<link\b(?=[^>]*\bdata-inline\b)(?=[^>]*\brel=[\"']stylesheet[\"'])"
+        r"(?=[^>]*\bhref=[\"'](?P<href>[^\"']+)[\"'])[^>]*>",
+        inline_css,
+        html,
+        flags=re.IGNORECASE,
+    )
+    html = re.sub(
+        r"<script\b(?=[^>]*\bdata-inline\b)"
+        r"(?=[^>]*\bsrc=[\"'](?P<src>[^\"']+)[\"'])[^>]*>\s*</script>",
+        inline_js,
+        html,
+        flags=re.IGNORECASE,
+    )
+    return html, deps
+
+
 def minify_html(html):
     html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
     blocks = []
@@ -51,19 +87,23 @@ def minify_html(html):
 
 project_dir = env.get("PROJECT_DIR", ".")
 html_path = os.path.join(project_dir, "www", "index.html")
+web_dir = os.path.dirname(html_path)
 header_path = os.path.join(project_dir, "src", "web_ui_html.h")
 generator_path = os.path.join(project_dir, "generate_web_ui.py")
 
 if os.path.exists(html_path):
+    with open(html_path, "r", encoding="utf-8") as f:
+        raw = f.read()
+    inlined, deps = inline_assets(raw, web_dir)
     needs_update = (
         not os.path.exists(header_path)
         or os.path.getmtime(html_path) > os.path.getmtime(header_path)
         or os.path.getmtime(generator_path) > os.path.getmtime(header_path)
+        or any(os.path.getmtime(dep) > os.path.getmtime(header_path)
+               for dep in deps)
     )
     if needs_update:
-        with open(html_path, "r", encoding="utf-8") as f:
-            raw = f.read()
-        minified = minify_html(raw)
+        minified = minify_html(inlined)
         compressed = gzip.compress(minified.encode("utf-8"), compresslevel=9)
         with open(header_path, "w", encoding="utf-8") as f:
             f.write("// Auto-generated from www/index.html, do not edit.\n")
@@ -78,7 +118,8 @@ if os.path.exists(html_path):
             f.write("};\n")
         print(
             f"[web_ui] {html_path} ({len(raw)} -> "
-            f"{len(minified)} -> {len(compressed)} gz)"
+            f"{len(inlined)} inline -> {len(minified)} -> "
+            f"{len(compressed)} gz)"
         )
 else:
     print(f"[web_ui] WARNING: {html_path} not found")
