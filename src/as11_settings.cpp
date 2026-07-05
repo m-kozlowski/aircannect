@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <ctype.h>
 #include <math.h>
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,8 +56,6 @@ constexpr uint8_t option_count(const T (&)[N]) {
 constexpr size_t SETTINGS_COUNT = sizeof(SETTINGS) / sizeof(SETTINGS[0]);
 constexpr size_t SETTING_COMPOSITES_COUNT =
     sizeof(SETTING_COMPOSITES) / sizeof(SETTING_COMPOSITES[0]);
-static_assert(SETTINGS_COUNT <= As11SettingsState::MaxSettings,
-              "As11SettingsState value storage too small");
 
 bool json_is_number(JsonVariantConst value) {
     return value.is<int>() || value.is<unsigned int>() ||
@@ -618,6 +617,98 @@ void As11StoredValue::clear() {
     inline_[0] = 0;
 }
 
+As11SettingsState::~As11SettingsState() {
+    release_storage();
+}
+
+bool As11SettingsState::ensure_storage() {
+    if (setting_capacity_ == SETTINGS_COUNT &&
+        profile_capacity_ == MaxProfileValues &&
+        values_ && pending_values_ && profile_values_ &&
+        feature_present_ && pending_ && pending_since_ms_) {
+        return true;
+    }
+
+    release_storage();
+
+    values_ = static_cast<As11StoredValue *>(
+        settings_alloc_large(sizeof(As11StoredValue) * SETTINGS_COUNT));
+    if (!values_) goto fail;
+    setting_capacity_ = SETTINGS_COUNT;
+    for (size_t i = 0; i < setting_capacity_; ++i) {
+        new (&values_[i]) As11StoredValue();
+    }
+
+    pending_values_ = static_cast<As11StoredValue *>(
+        settings_alloc_large(sizeof(As11StoredValue) * setting_capacity_));
+    if (!pending_values_) goto fail;
+    for (size_t i = 0; i < setting_capacity_; ++i) {
+        new (&pending_values_[i]) As11StoredValue();
+    }
+
+    profile_values_ = static_cast<ProfileValueSlot *>(
+        settings_alloc_large(sizeof(ProfileValueSlot) * MaxProfileValues));
+    if (!profile_values_) goto fail;
+    profile_capacity_ = MaxProfileValues;
+    for (size_t i = 0; i < profile_capacity_; ++i) {
+        new (&profile_values_[i]) ProfileValueSlot();
+    }
+
+    feature_present_ = static_cast<bool *>(
+        settings_alloc_large(sizeof(bool) * setting_capacity_));
+    pending_ = static_cast<bool *>(
+        settings_alloc_large(sizeof(bool) * setting_capacity_));
+    pending_since_ms_ = static_cast<uint32_t *>(
+        settings_alloc_large(sizeof(uint32_t) * setting_capacity_));
+    if (!feature_present_ || !pending_ || !pending_since_ms_) goto fail;
+
+    memset(feature_present_, 0, sizeof(bool) * setting_capacity_);
+    memset(pending_, 0, sizeof(bool) * setting_capacity_);
+    memset(pending_since_ms_, 0, sizeof(uint32_t) * setting_capacity_);
+    return true;
+
+fail:
+    release_storage();
+    last_write_status_ = "settings_alloc_failed";
+    return false;
+}
+
+void As11SettingsState::release_storage() {
+    if (values_) {
+        for (size_t i = 0; i < setting_capacity_; ++i) {
+            values_[i].~As11StoredValue();
+        }
+        settings_free(values_);
+    }
+
+    if (pending_values_) {
+        for (size_t i = 0; i < setting_capacity_; ++i) {
+            pending_values_[i].~As11StoredValue();
+        }
+        settings_free(pending_values_);
+    }
+
+    if (profile_values_) {
+        for (size_t i = 0; i < profile_capacity_; ++i) {
+            profile_values_[i].~ProfileValueSlot();
+        }
+        settings_free(profile_values_);
+    }
+
+    settings_free(feature_present_);
+    settings_free(pending_);
+    settings_free(pending_since_ms_);
+
+    values_ = nullptr;
+    pending_values_ = nullptr;
+    profile_values_ = nullptr;
+    feature_present_ = nullptr;
+    pending_ = nullptr;
+    pending_since_ms_ = nullptr;
+    setting_capacity_ = 0;
+    profile_capacity_ = 0;
+}
+
 bool As11SettingsState::apply_settings_get_response(
     const std::string &payload,
     uint32_t now_ms) {
@@ -630,6 +721,7 @@ bool As11SettingsState::apply_settings_get_response(
         result = doc["error"]["data"].as<JsonObjectConst>();
     }
     if (result.isNull()) return false;
+    if (!ensure_storage()) return false;
 
     int fallback_mode = mode_index();
     JsonVariantConst active = result["_MOP"];
@@ -643,12 +735,16 @@ bool As11SettingsState::apply_settings_get_response(
     }
 
     bool any = false;
+    bool storage_ok = true;
     auto remember_value = [&](size_t index, const std::string &normalized) {
-        values_[index] = normalized;
+        if (!values_[index].set(normalized)) {
+            storage_ok = false;
+            return;
+        }
         if (pending_[index] &&
             setting_value_matches(SETTINGS[index],
-                                  values_[index],
-                                  pending_values_[index])) {
+                                  values_[index].str(),
+                                  pending_values_[index].str())) {
             clear_pending(index);
             last_write_status_ = pending_count_ ? "waiting_readback"
                                                 : "confirmed";
@@ -659,12 +755,18 @@ bool As11SettingsState::apply_settings_get_response(
     auto remember_profile_value = [&](int mode,
                                       size_t index,
                                       const std::string &normalized) {
-        set_profile_value(mode, index, normalized);
-        if (mode == fallback_mode) values_[index] = normalized;
+        if (!set_profile_value(mode, index, normalized)) {
+            storage_ok = false;
+            return;
+        }
+        if (mode == fallback_mode && !values_[index].set(normalized)) {
+            storage_ok = false;
+            return;
+        }
         if (pending_[index] &&
             setting_value_matches(SETTINGS[index],
                                   normalized,
-                                  pending_values_[index])) {
+                                  pending_values_[index].str())) {
             clear_pending(index);
             last_write_status_ = pending_count_ ? "waiting_readback"
                                                 : "confirmed";
@@ -682,7 +784,7 @@ bool As11SettingsState::apply_settings_get_response(
             feature_present_[i] = true;
             value = feature[SETTINGS[i].source_field];
             if (value.isNull()) {
-                values_[i] = "";
+                values_[i].clear();
                 continue;
             }
         } else {
@@ -711,11 +813,11 @@ bool As11SettingsState::apply_settings_get_response(
             mode, i, normalize_value_for_def(SETTINGS[i], value));
     }
 
-    if (any) {
+    if (any && storage_ok) {
         valid_ = true;
         updated_ms_ = now_ms;
     }
-    return any;
+    return any && storage_ok;
 }
 
 bool As11SettingsState::note_set_request(const std::string &params_json,
@@ -723,6 +825,7 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, params_json);
     if (err || !doc.is<JsonObjectConst>()) return false;
+    if (!ensure_storage()) return false;
 
     JsonObjectConst root = doc.as<JsonObjectConst>();
     int mode = mode_index();
@@ -739,9 +842,14 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
         if (value.isNull()) continue;
         std::string pending_value = normalize_value_for_def(SETTINGS[i], value);
         if (pending_value.empty()) continue;
-        if (!pending_[i]) pending_count_++;
+
+        const bool was_pending = pending_[i];
+        if (!pending_values_[i].set(pending_value)) {
+            continue;
+        }
+
+        if (!was_pending) pending_count_++;
         pending_[i] = true;
-        pending_values_[i] = pending_value;
         pending_since_ms_[i] = now_ms;
         any = true;
     }
@@ -773,10 +881,20 @@ void As11SettingsState::note_set_cancelled(const char *reason,
 }
 
 void As11SettingsState::clear() {
+    if (!values_) {
+        pending_count_ = 0;
+        last_write_status_ = "";
+        last_write_ms_ = 0;
+        valid_ = false;
+        updated_ms_ = 0;
+        supported_mode_mask_ = 0;
+        return;
+    }
+
     for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-        values_[i] = "";
+        values_[i].clear();
         feature_present_[i] = false;
-        pending_values_[i] = "";
+        pending_values_[i].clear();
         pending_since_ms_[i] = 0;
         pending_[i] = false;
     }
@@ -790,9 +908,9 @@ void As11SettingsState::clear() {
 }
 
 void As11SettingsState::clear_pending(size_t index) {
-    if (index >= SETTINGS_COUNT || !pending_[index]) return;
+    if (!pending_ || index >= SETTINGS_COUNT || !pending_[index]) return;
     pending_[index] = false;
-    pending_values_[index] = "";
+    if (pending_values_) pending_values_[index].clear();
     pending_since_ms_[index] = 0;
     if (pending_count_) pending_count_--;
 }
@@ -802,7 +920,10 @@ void As11SettingsState::clear_all_pending() {
 }
 
 void As11SettingsState::clear_profile_values() {
-    for (ProfileValueSlot &slot : profile_values_) {
+    if (!profile_values_) return;
+
+    for (size_t i = 0; i < profile_capacity_; ++i) {
+        ProfileValueSlot &slot = profile_values_[i];
         slot.used = false;
         slot.mode = 0;
         slot.index = 0;
@@ -813,11 +934,12 @@ void As11SettingsState::clear_profile_values() {
 const As11StoredValue *As11SettingsState::profile_value(
     size_t index,
     int mode) const {
-    if (index >= SETTINGS_COUNT || mode < 0 ||
+    if (!profile_values_ || index >= SETTINGS_COUNT || mode < 0 ||
         mode >= static_cast<int>(MaxModes)) {
         return nullptr;
     }
-    for (const ProfileValueSlot &slot : profile_values_) {
+    for (size_t i = 0; i < profile_capacity_; ++i) {
+        const ProfileValueSlot &slot = profile_values_[i];
         if (!slot.used) continue;
         if (slot.mode == static_cast<uint8_t>(mode) &&
             slot.index == static_cast<uint8_t>(index)) {
@@ -830,12 +952,14 @@ const As11StoredValue *As11SettingsState::profile_value(
 bool As11SettingsState::set_profile_value(int mode,
                                           size_t index,
                                           const std::string &value) {
-    if (mode < 0 || mode >= static_cast<int>(MaxModes) ||
+    if (!ensure_storage() ||
+        mode < 0 || mode >= static_cast<int>(MaxModes) ||
         index >= SETTINGS_COUNT) {
         return false;
     }
 
-    for (ProfileValueSlot &slot : profile_values_) {
+    for (size_t i = 0; i < profile_capacity_; ++i) {
+        ProfileValueSlot &slot = profile_values_[i];
         if (!slot.used) continue;
         if (slot.mode == static_cast<uint8_t>(mode) &&
             slot.index == static_cast<uint8_t>(index)) {
@@ -843,7 +967,8 @@ bool As11SettingsState::set_profile_value(int mode,
         }
     }
 
-    for (ProfileValueSlot &slot : profile_values_) {
+    for (size_t i = 0; i < profile_capacity_; ++i) {
+        ProfileValueSlot &slot = profile_values_[i];
         if (slot.used) continue;
         slot.mode = static_cast<uint8_t>(mode);
         slot.index = static_cast<uint8_t>(index);
@@ -859,8 +984,13 @@ bool As11SettingsState::set_profile_value(int mode,
     return false;
 }
 
+std::string As11SettingsState::value(size_t index) const {
+    if (!values_ || index >= SETTINGS_COUNT) return "";
+    return values_[index].str();
+}
+
 std::string As11SettingsState::value(size_t index, int mode) const {
-    if (index >= SETTINGS_COUNT) return "";
+    if (!values_ || index >= SETTINGS_COUNT) return "";
     if (mode >= 0 && mode < static_cast<int>(MaxModes)) {
         if (setting_is_therapy_mode(SETTINGS[index])) {
             return std::to_string(mode);
@@ -871,16 +1001,21 @@ std::string As11SettingsState::value(size_t index, int mode) const {
             return stored->str();
         }
     }
-    return values_[index];
+    return values_[index].str();
+}
+
+std::string As11SettingsState::pending_value(size_t index) const {
+    if (!pending_values_ || index >= SETTINGS_COUNT) return "";
+    return pending_values_[index].str();
 }
 
 bool As11SettingsState::feature_present(size_t index) const {
-    if (index >= SETTINGS_COUNT) return false;
+    if (!feature_present_ || index >= SETTINGS_COUNT) return false;
     return feature_present_[index];
 }
 
 bool As11SettingsState::setting_visible(size_t index, int mode) const {
-    if (index >= SETTINGS_COUNT) return false;
+    if (!feature_present_ || index >= SETTINGS_COUNT) return false;
     const As11SettingDef &def = SETTINGS[index];
     if (!as11_setting_visible_for_mode(def, mode)) return false;
     if (def.source != As11SettingSource::FeatureProfile) return true;
@@ -888,9 +1023,11 @@ bool As11SettingsState::setting_visible(size_t index, int mode) const {
 }
 
 int As11SettingsState::mode_index() const {
+    if (!values_) return -1;
+
     for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
         if (setting_is_therapy_mode(SETTINGS[i])) {
-            return as11_mode_index_from_value(values_[i]);
+            return as11_mode_index_from_value(values_[i].str());
         }
     }
     return -1;

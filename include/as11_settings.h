@@ -105,9 +105,13 @@ bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
 
 class As11SettingsState {
 public:
-    static constexpr size_t MaxSettings = 128;
     static constexpr size_t MaxModes = 11;
     static constexpr size_t MaxProfileValues = 128;
+
+    As11SettingsState() = default;
+    As11SettingsState(const As11SettingsState &) = delete;
+    As11SettingsState &operator=(const As11SettingsState &) = delete;
+    ~As11SettingsState();
 
     bool apply_settings_get_response(const std::string &payload,
                                      uint32_t now_ms);
@@ -120,13 +124,14 @@ public:
     bool valid() const { return valid_; }
     uint32_t updated_ms() const { return updated_ms_; }
 
-    const std::string &value(size_t index) const { return values_[index]; }
+    std::string value(size_t index) const;
     std::string value(size_t index, int mode) const;
-    bool pending(size_t index) const { return pending_[index]; }
-    const std::string &pending_value(size_t index) const {
-        return pending_values_[index];
+    bool pending(size_t index) const {
+        return pending_ && index < setting_capacity_ && pending_[index];
     }
+    std::string pending_value(size_t index) const;
     uint32_t pending_since_ms(size_t index) const {
+        if (!pending_since_ms_ || index >= setting_capacity_) return 0;
         return pending_since_ms_[index];
     }
     size_t pending_count() const { return pending_count_; }
@@ -148,6 +153,9 @@ private:
         As11StoredValue value;
     };
 
+    bool ensure_storage();
+    void release_storage();
+
     void clear_pending(size_t index);
     void clear_all_pending();
     void clear_profile_values();
@@ -156,13 +164,16 @@ private:
                            size_t index,
                            const std::string &value);
 
-    std::string values_[MaxSettings];
-    ProfileValueSlot profile_values_[MaxProfileValues];
-    bool feature_present_[MaxSettings] = {};
+    As11StoredValue *values_ = nullptr;
+    As11StoredValue *pending_values_ = nullptr;
+    ProfileValueSlot *profile_values_ = nullptr;
 
-    std::string pending_values_[MaxSettings];
-    uint32_t pending_since_ms_[MaxSettings] = {};
-    bool pending_[MaxSettings] = {};
+    bool *feature_present_ = nullptr;
+    bool *pending_ = nullptr;
+    uint32_t *pending_since_ms_ = nullptr;
+
+    size_t setting_capacity_ = 0;
+    size_t profile_capacity_ = 0;
     size_t pending_count_ = 0;
 
     std::string last_write_status_;
