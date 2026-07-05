@@ -21,6 +21,8 @@ namespace {
 
 static constexpr const char *SLEEPHQ_HOST = "sleephq.com";
 static constexpr uint16_t SLEEPHQ_PORT = 443;
+static constexpr uint32_t SLEEPHQ_CONNECT_TIMEOUT_MS = 5000;
+static constexpr unsigned long SLEEPHQ_HANDSHAKE_TIMEOUT_SECONDS = 10;
 static constexpr uint32_t SLEEPHQ_HTTP_TIMEOUT_MS = 15000;
 static constexpr size_t SLEEPHQ_IO_CHUNK = 384;
 static constexpr size_t SLEEPHQ_UPLOAD_CHUNK = 4096;
@@ -189,8 +191,10 @@ bool SleepHqClient::ensure_connected() {
 
     client_.stop();
     client_.setCACert(SLEEPHQ_TRUST_ANCHOR_GTS_ROOT_R4_CA);
-    client_.setTimeout(SLEEPHQ_HTTP_TIMEOUT_MS / 1000);
-    if (!client_.connect(SLEEPHQ_HOST, SLEEPHQ_PORT)) {
+    client_.setTimeout(SLEEPHQ_HTTP_TIMEOUT_MS);
+    client_.setHandshakeTimeout(SLEEPHQ_HANDSHAKE_TIMEOUT_SECONDS);
+    if (!client_.connect(SLEEPHQ_HOST, SLEEPHQ_PORT,
+                         SLEEPHQ_CONNECT_TIMEOUT_MS)) {
         set_error("connect_failed");
         Log::logf(CAT_SLEEPHQ, LOG_WARN, "connect failed\n");
         return false;

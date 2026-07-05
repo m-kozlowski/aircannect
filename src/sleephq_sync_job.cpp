@@ -715,6 +715,7 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
         const bool configured = status_.configured;
         const bool network_available = status_.network_available;
         const uint32_t generation = status_.config_generation;
+        const uint32_t team_id = status_.team_id;
         const uint64_t last_check = status_.last_check_epoch;
         const uint64_t last_sync = status_.last_sync_epoch;
         const uint32_t last_sync_seen = status_.last_sync_files_seen;
@@ -726,6 +727,7 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
         status_.configured = configured;
         status_.network_available = network_available;
         status_.config_generation = generation;
+        status_.team_id = last_check != 0 ? team_id : 0;
         status_.last_check_epoch = last_check;
         status_.last_sync_epoch = last_sync;
         status_.last_sync_files_seen = last_sync_seen;
@@ -1830,11 +1832,16 @@ JobStep SleepHqSyncJob::step_find_remote_machine_locked(char *error,
 
 JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
     client_.configure(client_config_from_snapshot(config_));
-    uint32_t team_id = 0;
-    if (!client_.resolve_team_id(team_id)) {
-        fail_locked(client_.last_error());
-        return JobStep::Idle;
+
+    uint32_t team_id =
+        current_run_kind_ == RunKind::Check ? 0 : status_.team_id;
+    if (team_id == 0) {
+        if (!client_.resolve_team_id(team_id)) {
+            fail_locked(client_.last_error());
+            return JobStep::Idle;
+        }
     }
+
     status_.team_id = team_id;
     if (current_run_kind_ == RunKind::Check) {
         finish_check_locked(team_id);
