@@ -34,6 +34,7 @@ void settings_free(void *ptr) {
 }
 
 #define MODE_BIT(mode) (static_cast<uint16_t>(1u << (mode)))
+#define MODES_NONE 0x0000u
 #define MODES_ALL 0x07FFu
 #define MODES_CPAP MODE_BIT(0)
 #define MODES_AUTO (MODE_BIT(1) | MODE_BIT(2))
@@ -44,362 +45,16 @@ void settings_free(void *ptr) {
 #define MODES_ASVAUTO MODE_BIT(8)
 #define MODES_IVAPS MODE_BIT(9)
 
-template <size_t N>
-constexpr uint8_t option_count(const char *const (&)[N]) {
+template <typename T, size_t N>
+constexpr uint8_t option_count(const T (&)[N]) {
     return static_cast<uint8_t>(N);
 }
 
-const char *const MODE_OPTIONS[] = {
-    "CPAP", "AutoSet", "AutoSet For Her", "S", "ST", "T",
-    "VAuto", "ASV", "ASVAuto", "iVAPS", "PAC",
-};
-const char *const ON_OFF_OPTIONS[] = {"Off", "On"};
-const char *const YES_NO_OPTIONS[] = {"No", "Yes"};
-const char *const RAMP_OPTIONS[] = {"Off", "On", "Auto"};
-const char *const AUTO_MANUAL_OPTIONS[] = {"Auto", "Manual"};
-const char *const STANDARD_SOFT_OPTIONS[] = {"Standard", "Soft"};
-const char *const EPR_TYPE_OPTIONS[] = {"RampOnly", "FullTime"};
-const char *const TEMPERATURE_UNIT_OPTIONS[] = {"Celsius", "Fahrenheit"};
-const char *const PATIENT_VIEW_OPTIONS[] = {"Simple", "Full"};
-const char *const SENSITIVITY_OPTIONS[] = {
-    "Very Low", "Low", "Medium", "High", "Very High",
-};
-const char *const MASK_OPTIONS[] = {
-    "Pillows", "Full Face", "Nasal", "Pediatric",
-};
-const char *const TUBE_OPTIONS[] = {
-    "15mmNonHeated", "19mm", "15mmHeated",
-};
-
-struct KnownVarAlias {
-    const char *name;
-    const char *alias;
-};
-
-const KnownVarAlias KNOWN_VAR_ALIASES[] = {
-    {"ActiveTherapyProfile", "_MOP"},
-
-    {"ASV-MaxPressureSupport", "_XC2"},
-    {"ASV-MinPressureSupport", "_XC3"},
-    {"ASV-StartPressure", "_XC0"},
-    {"ASV-TargetExpiratoryPressure", "_XC1"},
-    {"ASVAuto-MaxExpiratoryPressure", "_XD1"},
-    {"ASVAuto-MaxPressureSupport", "_XD3"},
-    {"ASVAuto-MinExpiratoryPressure", "_XD2"},
-    {"ASVAuto-MinPressureSupport", "_XD4"},
-    {"ASVAuto-StartPressure", "_XD0"},
-    {"AutoSet-MaxPressure", "_MPA"},
-    {"AutoSet-MinPressure", "_MPI"},
-    {"AutoSet-StartPressure", "_STU"},
-    {"Cpap-SetPressure", "_IPC"},
-    {"Cpap-StartPressure", "_STP"},
-    {"Cpap-TriggerSensitivity", "_C11"},
-    {"HerAuto-MaxPressure", "_HMA"},
-    {"HerAuto-MinPressure", "_HMI"},
-    {"HerAuto-StartPressure", "_HSP"},
-    {"PAC-RiseTime", "_PA4"},
-    {"PAC-SetInspiratoryTime", "_PA5"},
-    {"PAC-SetRespiratoryRate", "_PA6"},
-    {"PAC-StartPressure", "_PA0"},
-    {"PAC-TargetExpiratoryPressure", "_PA2"},
-    {"PAC-TargetInspiratoryPressure", "_PA1"},
-    {"PAC-TriggerSensitivity", "_PA7"},
-    {"ST-CycleSensitivity", "_XAB"},
-    {"ST-RiseTime", "_XAA"},
-    {"ST-SetMaxInspiratoryTime", "_XA7"},
-    {"ST-SetMinInspiratoryTime", "_XA8"},
-    {"ST-SetRespiratoryRate", "_XA6"},
-    {"ST-StartPressure", "_XA3"},
-    {"ST-TargetExpiratoryPressure", "_XA2"},
-    {"ST-TargetInspiratoryPressure", "_XA1"},
-    {"ST-TriggerSensitivity", "_ZU1"},
-    {"Spont-CycleSensitivity", "_Z12"},
-    {"Spont-RiseTime", "_Z10"},
-    {"Spont-SetMaxInspiratoryTime", "_ZZ7"},
-    {"Spont-SetMinInspiratoryTime", "_ZZ8"},
-    {"Spont-StartPressure", "_ZZ3"},
-    {"Spont-TargetExpiratoryPressure", "_ZZ2"},
-    {"Spont-TargetInspiratoryPressure", "_ZZ1"},
-    {"Spont-TriggerSensitivity", "_Z11"},
-    {"Timed-RiseTime", "_XB7"},
-    {"Timed-SetInspiratoryTime", "_XB5"},
-    {"Timed-SetRespiratoryRate", "_XB4"},
-    {"Timed-StartPressure", "_XB0"},
-    {"Timed-TargetExpiratoryPressure", "_XB2"},
-    {"Timed-TargetInspiratoryPressure", "_XB1"},
-    {"VAuto-CycleSensitivity", "_XE7"},
-    {"VAuto-MaxInspiratoryPressure", "_XE1"},
-    {"VAuto-MinExpiratoryPressure", "_XE2"},
-    {"VAuto-SetMaxInspiratoryTime", "_XE4"},
-    {"VAuto-SetMinInspiratoryTime", "_XE5"},
-    {"VAuto-SetPressureSupport", "_XE3"},
-    {"VAuto-StartPressure", "_XE0"},
-    {"VAuto-TriggerSensitivity", "_XE6"},
-    {"iVAPS-AutoEPAPEnable", "_IEU"},
-    {"iVAPS-CycleSensitivity", "_VCS"},
-    {"iVAPS-MaxExpiratoryPressure", "_IMX"},
-    {"iVAPS-MaxPressureSupport", "_WPA"},
-    {"iVAPS-MinExpiratoryPressure", "_IMN"},
-    {"iVAPS-MinPressureSupport", "_WPM"},
-    {"iVAPS-RiseTime", "_IRT"},
-    {"iVAPS-SetMaxInspiratoryTime", "_IVX"},
-    {"iVAPS-SetMinInspiratoryTime", "_IVN"},
-    {"iVAPS-StartPressure", "_IVS"},
-    {"iVAPS-TargetExpiratoryPressure", "_EPI"},
-    {"iVAPS-TriggerSensitivity", "_VTS"},
-
-    {"AntiBacterialFilter", "_ABF"},
-    {"AutoSetComfort", "_AFC"},
-    {"CareCheckInAvailable", "_CCA"},
-    {"CareCheckToggle", "_MAI"},
-    {"ClinicalConfirmation", "_CFC"},
-    {"ClimateControl", "_CCO"},
-    {"ConfirmStopEnable", "_SCF"},
-    {"DisplayAHI", "_DAH"},
-    {"EprEnable", "_EPX"},
-    {"EprEnablePatientAccess", "_EPA"},
-    {"EprPressure", "_EPR"},
-    {"EprType", "_EPT"},
-    {"ExternalHumidifier", "_EXH"},
-    {"HeatedTubeSettingEnable", "_HTX"},
-    {"HeatedTubeTemperature", "_HTS"},
-    {"HumidifierLevel", "_HMS"},
-    {"HumidifierSettingEnable", "_HMX"},
-    {"MaskType", "_MSK"},
-    {"MaskSenseToggle", "_MKD"},
-    {"MyAirScreens", "_MAS"},
-    {"PatientView", "_ACC"},
-    {"RampEnable", "_RMA"},
-    {"RampEnablePatientAccess", "_RPE"},
-    {"RampTime", "_RMT"},
-    {"SmartStart", "_SST"},
-    {"SmartStop", "_SSP"},
-    {"SplashScreenDisplaySelection", "_SSE"},
-    {"TemperatureUnit", "_TMU"},
-    {"TherapyLEDAlwaysOn", "_TLF"},
-    {"TotalUsedHoursDisplayToggle", "_TUD"},
-    {"TubeType", "_TBT"},
-    {"SoundcheckFeatureToggle", "_SCO"},
-    {"SoundcheckRunFrequency", "_SCK"},
-};
-
-const As11SettingDef SETTINGS[] = {
-    {"TherapyMode", "TherapyMode", nullptr, nullptr, "_MOP",
-     "Therapy Mode", "clinical", As11SettingKind::Enum,
-     0, 10, 1, MODE_OPTIONS, option_count(MODE_OPTIONS), MODES_ALL, 1, 0},
-
-    {"SetPressure", "SetPressure", nullptr, nullptr, nullptr,
-     "Set Pressure", "mode", As11SettingKind::Number,
-     4.0f, 20.0f, 0.2f, nullptr, 0, MODES_CPAP, 50, 1},
-    {"MaxPressure", "MaxPressure", nullptr, nullptr, nullptr,
-     "Max Pressure", "mode", As11SettingKind::Number,
-     4.0f, 20.0f, 0.2f, nullptr, 0, MODES_AUTO, 50, 1},
-    {"MinPressure", "MinPressure", nullptr, nullptr, nullptr,
-     "Min Pressure", "mode", As11SettingKind::Number,
-     4.0f, 20.0f, 0.2f, nullptr, 0, MODES_AUTO, 50, 1},
-    {"TargetInspiratoryPressure", "TargetInspiratoryPressure", nullptr,
-     nullptr, nullptr, "IPAP", "mode", As11SettingKind::Number,
-     4.0f, 30.0f, 0.2f, nullptr, 0,
-     MODE_BIT(3) | MODE_BIT(4) | MODE_BIT(5) | MODE_BIT(10), 50, 1},
-    {"TargetExpiratoryPressure", "TargetExpiratoryPressure", nullptr,
-     nullptr, nullptr, "EPAP", "mode", As11SettingKind::Number,
-     4.0f, 25.0f, 0.2f, nullptr, 0,
-     MODE_BIT(3) | MODE_BIT(4) | MODE_BIT(5) | MODE_BIT(10), 50, 1},
-    {"MaxInspiratoryPressure", "MaxInspiratoryPressure", nullptr, nullptr,
-     nullptr, "Max IPAP", "mode", As11SettingKind::Number,
-     4.0f, 30.0f, 0.2f, nullptr, 0, MODES_VAUTO, 50, 1},
-    {"MinExpiratoryPressure", "MinExpiratoryPressure", nullptr, nullptr,
-     nullptr, "Min EPAP", "mode", As11SettingKind::Number,
-     4.0f, 25.0f, 0.2f, nullptr, 0, MODES_VAUTO, 50, 1},
-    {"SetPressureSupport", "SetPressureSupport", nullptr, nullptr,
-     nullptr, "Pressure Support", "mode", As11SettingKind::Number,
-     0.0f, 20.0f, 0.2f, nullptr, 0, MODES_VAUTO, 50, 1},
-    {"TargetExpiratoryPressure", "TargetExpiratoryPressure", nullptr,
-     nullptr, nullptr, "EPAP", "mode", As11SettingKind::Number,
-     4.0f, 25.0f, 0.2f, nullptr, 0, MODES_ASV, 50, 1},
-    {"MinPressureSupport", "MinPressureSupport", nullptr, nullptr,
-     nullptr, "Min PS", "mode", As11SettingKind::Number,
-     0.0f, 20.0f, 0.2f, nullptr, 0, MODES_ASV, 50, 1},
-    {"MaxPressureSupport", "MaxPressureSupport", nullptr, nullptr,
-     nullptr, "Max PS", "mode", As11SettingKind::Number,
-     0.0f, 20.0f, 0.2f, nullptr, 0, MODES_ASV, 50, 1},
-    {"MinExpiratoryPressure", "MinExpiratoryPressure", nullptr, nullptr,
-     nullptr, "Min EPAP", "mode", As11SettingKind::Number,
-     4.0f, 25.0f, 0.2f, nullptr, 0, MODES_ASVAUTO, 50, 1},
-    {"MaxExpiratoryPressure", "MaxExpiratoryPressure", nullptr, nullptr,
-     nullptr, "Max EPAP", "mode", As11SettingKind::Number,
-     4.0f, 25.0f, 0.2f, nullptr, 0, MODES_ASVAUTO, 50, 1},
-    {"MinPressureSupport", "MinPressureSupport", nullptr, nullptr,
-     nullptr, "Min PS", "mode", As11SettingKind::Number,
-     0.0f, 20.0f, 0.2f, nullptr, 0, MODES_ASVAUTO, 50, 1},
-    {"MaxPressureSupport", "MaxPressureSupport", nullptr, nullptr,
-     nullptr, "Max PS", "mode", As11SettingKind::Number,
-     0.0f, 20.0f, 0.2f, nullptr, 0, MODES_ASVAUTO, 50, 1},
-
-    {"SetRespiratoryRate", "SetRespiratoryRate", nullptr, nullptr,
-     nullptr, "Resp. Rate", "timing", As11SettingKind::Number,
-     0, 50, 0.2f, nullptr, 0, MODE_BIT(4) | MODE_BIT(5) | MODE_BIT(10),
-     5, 1},
-    {"SetMinInspiratoryTime", "SetMinInspiratoryTime", nullptr, nullptr,
-     nullptr, "Ti Min", "timing", As11SettingKind::Number,
-     0.1f, 4.0f, 0.02f, nullptr, 0,
-     MODE_BIT(3) | MODE_BIT(4) | MODE_BIT(6) | MODE_BIT(9), 50, 2},
-    {"SetMaxInspiratoryTime", "SetMaxInspiratoryTime", nullptr, nullptr,
-     nullptr, "Ti Max", "timing", As11SettingKind::Number,
-     0.1f, 4.0f, 0.02f, nullptr, 0,
-     MODE_BIT(3) | MODE_BIT(4) | MODE_BIT(6) | MODE_BIT(9), 50, 2},
-    {"SetInspiratoryTime", "SetInspiratoryTime", nullptr, nullptr,
-     nullptr, "Ti", "timing", As11SettingKind::Number,
-     0.1f, 4.0f, 0.02f, nullptr, 0,
-     MODE_BIT(5) | MODE_BIT(10), 50, 2},
-    {"RiseTime", "RiseTime", nullptr, nullptr, nullptr,
-     "Rise Time", "timing", As11SettingKind::Number,
-     0, 900, 1, nullptr, 0,
-     MODE_BIT(3) | MODE_BIT(4) | MODE_BIT(5) | MODE_BIT(9) | MODE_BIT(10),
-     1, 0},
-    {"TriggerSensitivity", "TriggerSensitivity", nullptr, nullptr,
-     nullptr, "Trigger Sens.", "timing", As11SettingKind::Enum,
-     0, 4, 1, SENSITIVITY_OPTIONS, option_count(SENSITIVITY_OPTIONS),
-     MODE_BIT(3) | MODE_BIT(4) | MODE_BIT(6) | MODE_BIT(9) | MODE_BIT(10),
-     1, 0},
-    {"CycleSensitivity", "CycleSensitivity", nullptr, nullptr, nullptr, "Cycle Sens.", "timing", As11SettingKind::Enum,
-     0, 4, 1, SENSITIVITY_OPTIONS, option_count(SENSITIVITY_OPTIONS),
-     MODE_BIT(3) | MODE_BIT(4) | MODE_BIT(6) | MODE_BIT(9), 1, 0},
-
-    {"StartPressure", "StartPressure", nullptr, nullptr, nullptr,
-     "Start Pressure", "comfort", As11SettingKind::Number,
-     4.0f, 20.0f, 0.2f, nullptr, 0, MODES_CPAP | MODES_AUTO, 50, 1},
-    {"StartPressure", "StartPressure", nullptr, nullptr, nullptr,
-     "Start EPAP", "comfort", As11SettingKind::Number,
-     4.0f, 25.0f, 0.2f, nullptr, 0,
-     MODES_BILEVEL | MODES_ASV | MODES_ASVAUTO, 50, 1},
-    {"AutoSetComfort", nullptr, "ComfortFeature", "AutoSetComfort",
-     nullptr, "Response", "comfort", As11SettingKind::Enum,
-     0, 1, 1, STANDARD_SOFT_OPTIONS, option_count(STANDARD_SOFT_OPTIONS),
-     MODE_BIT(1), 1, 0, ON_OFF_OPTIONS},
-    {"RampEnable", nullptr, "AutoRampFeature", "RampEnable", nullptr, "Ramp", "comfort", As11SettingKind::Enum,
-     0, 2, 1, RAMP_OPTIONS, option_count(RAMP_OPTIONS), MODES_ALL, 1, 0},
-    {"RampEnablePatientAccess", nullptr, "AutoRampFeature",
-     "RampEnablePatientAccess", nullptr, "Ramp Patient Access", "comfort",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-    {"RampTime", nullptr, "AutoRampFeature", "RampTime", nullptr,
-     "Ramp Time", "comfort", As11SettingKind::Number,
-     5, 45, 1, nullptr, 0, MODES_ALL, 1, 0},
-    {"EprEnable", nullptr, "EprFeature", "EprEnable", nullptr,
-     "EPR", "comfort", As11SettingKind::Enum,
-     0, 1, 1, ON_OFF_OPTIONS, option_count(ON_OFF_OPTIONS),
-     MODES_CPAP | MODES_AUTO, 1, 0},
-    {"EprPressure", nullptr, "EprFeature", "EprPressure", nullptr,
-     "EPR Level", "comfort", As11SettingKind::Number,
-     0, 3, 1, nullptr, 0, MODES_CPAP | MODES_AUTO, 50, 0},
-    {"EprEnablePatientAccess", nullptr, "EprFeature",
-     "EprEnablePatientAccess", nullptr, "EPR Patient Access", "comfort",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_CPAP | MODES_AUTO, 1, 0},
-    {"EprType", nullptr, "EprFeature", "EprType", nullptr,
-     "EPR Type", "comfort", As11SettingKind::Enum,
-     0, 1, 1, EPR_TYPE_OPTIONS, option_count(EPR_TYPE_OPTIONS),
-     MODES_CPAP | MODES_AUTO, 1, 0},
-    {"SmartStart", nullptr, "SmartStartStopFeature", "SmartStart",
-     nullptr, "SmartStart", "comfort", As11SettingKind::Enum,
-     0, 1, 1, ON_OFF_OPTIONS, option_count(ON_OFF_OPTIONS), MODES_ALL, 1,
-     0},
-    {"SmartStop", nullptr, "SmartStartStopFeature", "SmartStop",
-     nullptr, "SmartStop", "comfort", As11SettingKind::Enum,
-     0, 1, 1, ON_OFF_OPTIONS, option_count(ON_OFF_OPTIONS), MODES_ALL, 1,
-     0},
-
-    {"MaskType", nullptr, "CircuitFeature", "MaskType", nullptr,
-     "Mask Type", "circuit", As11SettingKind::Enum,
-     0, 3, 1, MASK_OPTIONS, option_count(MASK_OPTIONS), MODES_ALL, 1, 0},
-    {"TubeType", nullptr, "CircuitFeature", "TubeType", nullptr,
-     "Tube Type", "circuit", As11SettingKind::Enum,
-     0, 2, 1, TUBE_OPTIONS, option_count(TUBE_OPTIONS), MODES_ALL, 1, 0},
-    {"AntiBacterialFilter", nullptr, "CircuitFeature",
-     "AntiBacterialFilter", nullptr, "AB Filter", "circuit",
-     As11SettingKind::Enum, 0, 1, 1, YES_NO_OPTIONS,
-     option_count(YES_NO_OPTIONS), MODES_ALL, 1, 0},
-    {"MaskSenseToggle", nullptr, "MaskSenseFeature", "MaskSenseToggle",
-     nullptr, "Mask Sense", "circuit", As11SettingKind::Enum,
-     0, 1, 1, ON_OFF_OPTIONS, option_count(ON_OFF_OPTIONS), MODES_ALL, 1,
-     0},
-
-    {"ClimateControl", nullptr, "ClimateFeature", "ClimateControl",
-     nullptr, "Climate Control", "climate", As11SettingKind::Enum,
-     0, 1, 1, AUTO_MANUAL_OPTIONS, option_count(AUTO_MANUAL_OPTIONS),
-     MODES_ALL, 1, 0},
-    {"HumidifierSettingEnable", nullptr, "ClimateFeature",
-     "HumidifierSettingEnable", nullptr, "Humidity", "climate",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-    {"HumidifierLevel", nullptr, "ClimateFeature", "HumidifierLevel",
-     nullptr, "Humidity Level", "climate", As11SettingKind::Number,
-     0, 8, 1, nullptr, 0, MODES_ALL, 1, 0},
-    {"HeatedTubeSettingEnable", nullptr, "ClimateFeature",
-     "HeatedTubeSettingEnable", nullptr, "Tube Heating", "climate",
-     As11SettingKind::Enum, 0, 2, 1, RAMP_OPTIONS,
-     option_count(RAMP_OPTIONS), MODES_ALL, 1, 0},
-    {"HeatedTubeTemperature", nullptr, "ClimateFeature",
-     "HeatedTubeTemperature", nullptr, "Tube Temp C", "climate",
-     As11SettingKind::Number, 15.0f, 30.0f, 0.1f, nullptr, 0, MODES_ALL,
-     10, 0},
-    {"ExternalHumidifier", nullptr, "ClimateFeature", "ExternalHumidifier",
-     nullptr, "External Humidifier", "climate", As11SettingKind::Enum,
-     0, 1, 1, YES_NO_OPTIONS, option_count(YES_NO_OPTIONS), MODES_ALL, 1,
-     0},
-
-    {"ConfirmStopEnable", nullptr, "ConfirmStopFeature", "ConfirmStopEnable",
-     nullptr, "Confirm Stop", "preferences", As11SettingKind::Enum,
-     0, 1, 1, ON_OFF_OPTIONS, option_count(ON_OFF_OPTIONS), MODES_ALL, 1,
-     0},
-    {"TemperatureUnit", nullptr, "TemperatureFeature", "TemperatureUnit",
-     nullptr, "Temperature Unit", "preferences", As11SettingKind::Enum,
-     0, 1, 1, TEMPERATURE_UNIT_OPTIONS, option_count(TEMPERATURE_UNIT_OPTIONS),
-     MODES_ALL, 1, 0},
-    {"PatientView", nullptr, "PatientViewFeature", "PatientView",
-     nullptr, "Patient View", "preferences", As11SettingKind::Enum,
-     0, 1, 1, PATIENT_VIEW_OPTIONS, option_count(PATIENT_VIEW_OPTIONS),
-     MODES_ALL, 1, 0},
-    {"DisplayAHI", nullptr, "PatientViewFeature", "DisplayAHI",
-     nullptr, "Display AHI", "preferences", As11SettingKind::Enum,
-     0, 1, 1, YES_NO_OPTIONS, option_count(YES_NO_OPTIONS), MODES_ALL, 1,
-     0},
-    {"TherapyLEDAlwaysOn", nullptr, "TherapyLEDFeature",
-     "TherapyLEDAlwaysOn", nullptr, "Therapy LED", "preferences",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-    {"TotalUsedHoursDisplayToggle", nullptr, "DisplayFeature",
-     "TotalUsedHoursDisplayToggle", nullptr, "Show Used Hours", "preferences",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-    {"CareCheckInAvailable", nullptr, "DisplayFeature",
-     "CareCheckInAvailable", nullptr, "Care Check-In", "preferences",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-    {"MyAirScreens", nullptr, "DisplayFeature", "MyAirScreens",
-     nullptr, "myAir Screens", "preferences", As11SettingKind::Enum,
-     0, 1, 1, ON_OFF_OPTIONS, option_count(ON_OFF_OPTIONS), MODES_ALL, 1,
-     0},
-    {"ClinicalConfirmation", nullptr, "DisplayFeature",
-     "ClinicalConfirmation", nullptr, "Clinical Confirmation", "preferences",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-    {"CareCheckToggle", nullptr, "CareCheckFeature", "CareCheckToggle",
-     nullptr, "Care Check", "preferences", As11SettingKind::Enum,
-     0, 1, 1, ON_OFF_OPTIONS, option_count(ON_OFF_OPTIONS), MODES_ALL, 1,
-     0},
-    {"SoundcheckFeatureToggle", nullptr, "DeviceHealthFeature",
-     "SoundcheckFeatureToggle", nullptr, "Sound Check", "preferences",
-     As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-    {"SoundcheckRunFrequency", nullptr, "DeviceHealthFeature",
-     "SoundcheckRunFrequency", nullptr, "Sound Check Frequency",
-     "preferences", As11SettingKind::Enum, 0, 1, 1, ON_OFF_OPTIONS,
-     option_count(ON_OFF_OPTIONS), MODES_ALL, 1, 0},
-};
+#include "as11_settings_catalog.inc"
 
 constexpr size_t SETTINGS_COUNT = sizeof(SETTINGS) / sizeof(SETTINGS[0]);
+constexpr size_t SETTING_COMPOSITES_COUNT =
+    sizeof(SETTING_COMPOSITES) / sizeof(SETTING_COMPOSITES[0]);
 static_assert(SETTINGS_COUNT <= As11SettingsState::MaxSettings,
               "As11SettingsState value storage too small");
 
@@ -492,32 +147,26 @@ const char *option_wire_value_at(const As11SettingDef &def, int index) {
     return def.wire_options ? def.wire_options[index] : def.options[index];
 }
 
-const char *known_var_alias(const char *name) {
-    if (!name) return nullptr;
-    for (size_t i = 0;
-         i < sizeof(KNOWN_VAR_ALIASES) / sizeof(KNOWN_VAR_ALIASES[0]);
-         ++i) {
-        if (strcmp(KNOWN_VAR_ALIASES[i].name, name) == 0) {
-            return KNOWN_VAR_ALIASES[i].alias;
-        }
-    }
-    return nullptr;
-}
-
-bool rpc_name_matches_alias(const char *rpc_name, const char *alias) {
-    if (!rpc_name || !alias) return false;
+bool rpc_name_matches_key(const char *rpc_name, const char *key) {
+    if (!rpc_name || !key) return false;
     if (*rpc_name == '_') rpc_name++;
-    if (*alias == '_') alias++;
-    return strcmp(rpc_name, alias) == 0;
+    if (*key == '_') key++;
+    return strcmp(rpc_name, key) == 0;
 }
 
-const char *known_var_name_for_rpc_name(const char *rpc_name) {
+bool setting_is_therapy_mode(const As11SettingDef &def) {
+    return rpc_name_matches_key(def.key, "MOP");
+}
+
+const char *setting_field_name(const As11SettingDef &def) {
+    return def.source_field ? def.source_field : def.key;
+}
+
+const As11SettingDef *setting_def_for_rpc_name(const char *rpc_name) {
     if (!rpc_name) return nullptr;
-    for (size_t i = 0;
-         i < sizeof(KNOWN_VAR_ALIASES) / sizeof(KNOWN_VAR_ALIASES[0]);
-         ++i) {
-        if (rpc_name_matches_alias(rpc_name, KNOWN_VAR_ALIASES[i].alias)) {
-            return KNOWN_VAR_ALIASES[i].name;
+    for (const As11SettingDef &def : SETTINGS) {
+        if (rpc_name_matches_key(rpc_name, def.key)) {
+            return &def;
         }
     }
     return nullptr;
@@ -543,23 +192,34 @@ const char *profile_name_for_mode(int mode) {
     return names[mode];
 }
 
-const char *setting_field_name_from_known_var(const char *known_var) {
-    if (!known_var) return nullptr;
-    const char *dash = strrchr(known_var, '-');
-    return dash && dash[1] ? dash + 1 : known_var;
-}
-
-const As11SettingDef *setting_def_for_known_var(const char *known_var) {
-    const char *field = setting_field_name_from_known_var(known_var);
-    if (!field) return nullptr;
-    for (const As11SettingDef &def : SETTINGS) {
-        if ((def.name && strcmp(def.name, field) == 0) ||
-            (def.profile_field && strcmp(def.profile_field, field) == 0) ||
-            (def.feature_field && strcmp(def.feature_field, field) == 0) ||
-            (def.flat_name && strcmp(def.flat_name, field) == 0)) {
-            return &def;
-        }
+const char *profile_long_name_prefix(As11ProfileId profile) {
+    switch (profile) {
+        case As11ProfileId::Cpap:
+            return "Cpap";
+        case As11ProfileId::AutoSet:
+            return "AutoSet";
+        case As11ProfileId::HerAuto:
+            return "HerAuto";
+        case As11ProfileId::Spont:
+            return "Spont";
+        case As11ProfileId::ST:
+            return "ST";
+        case As11ProfileId::Timed:
+            return "Timed";
+        case As11ProfileId::VAuto:
+            return "VAuto";
+        case As11ProfileId::ASV:
+            return "ASV";
+        case As11ProfileId::ASVAuto:
+            return "ASVAuto";
+        case As11ProfileId::iVAPS:
+            return "iVAPS";
+        case As11ProfileId::PAC:
+            return "PAC";
+        case As11ProfileId::None:
+            return nullptr;
     }
+
     return nullptr;
 }
 
@@ -570,17 +230,18 @@ bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
                                             int16_t &index) {
     if (!rpc_name || !wire_value) return false;
 
-    const char *known_var = known_var_name_for_rpc_name(rpc_name);
-    if (!known_var) return false;
+    const As11SettingDef *def = setting_def_for_rpc_name(rpc_name);
+    if (!def) return false;
 
-    if (strcmp(known_var, "ActiveTherapyProfile") == 0) {
+    if (setting_is_therapy_mode(*def)) {
         for (int mode = 0; mode <= 10; ++mode) {
             const char *profile = profile_name_for_mode(mode);
             if (profile && strcmp(profile, wire_value) == 0) {
                 index = static_cast<int16_t>(mode);
                 return true;
             }
-            if (strcmp(MODE_OPTIONS[mode], wire_value) == 0) {
+            if (mode < def->option_count &&
+                strcmp(def->options[mode], wire_value) == 0) {
                 index = static_cast<int16_t>(mode);
                 return true;
             }
@@ -588,16 +249,12 @@ bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
         return false;
     }
 
-    const As11SettingDef *def = setting_def_for_known_var(known_var);
-    if (!def || !def->options || !def->option_count) return false;
-    for (uint8_t i = 0; i < def->option_count; ++i) {
-        const char *option = option_wire_value_at(*def, i);
-        if (option && strcmp(option, wire_value) == 0) {
-            index = static_cast<int16_t>(i);
-            return true;
-        }
-    }
-    return false;
+    if (!def->options || !def->option_count) return false;
+    const int matched_index = option_index_of(*def, wire_value);
+    if (matched_index < 0) return false;
+
+    index = static_cast<int16_t>(matched_index);
+    return true;
 }
 
 namespace {
@@ -619,74 +276,110 @@ uint16_t profile_modes_from_result(JsonObjectConst result) {
     return mask;
 }
 
-JsonObjectConst profile_from_result(JsonObjectConst result, int mode) {
-    const char *profile_name = profile_name_for_mode(mode);
+const char *profile_object_name(As11ProfileId profile) {
+    switch (profile) {
+        case As11ProfileId::Cpap:
+            return "CpapProfile";
+        case As11ProfileId::AutoSet:
+            return "AutoSetProfile";
+        case As11ProfileId::HerAuto:
+            return "AutoSetForHerProfile";
+        case As11ProfileId::Spont:
+            return "SpontProfile";
+        case As11ProfileId::ST:
+            return "STProfile";
+        case As11ProfileId::Timed:
+            return "TimedProfile";
+        case As11ProfileId::VAuto:
+            return "VAutoProfile";
+        case As11ProfileId::ASV:
+            return "ASVProfile";
+        case As11ProfileId::ASVAuto:
+            return "ASVAutoProfile";
+        case As11ProfileId::iVAPS:
+            return "iVAPSProfile";
+        case As11ProfileId::PAC:
+            return "PACProfile";
+        case As11ProfileId::None:
+            return nullptr;
+    }
+
+    return nullptr;
+}
+
+int profile_mode_index(As11ProfileId profile) {
+    if (profile == As11ProfileId::None) return -1;
+
+    const uint8_t raw = static_cast<uint8_t>(profile);
+    return raw <= static_cast<uint8_t>(As11ProfileId::PAC) ? raw : -1;
+}
+
+JsonObjectConst therapy_profile_object_from_result(
+    JsonObjectConst result,
+    const As11SettingDef &def) {
+    if (def.source != As11SettingSource::TherapyProfile) {
+        return JsonObjectConst();
+    }
+
+    const char *profile_name = profile_object_name(def.profile);
     if (!profile_name) return JsonObjectConst();
 
     JsonObjectConst profile = result[profile_name].as<JsonObjectConst>();
     if (!profile.isNull()) return profile;
+
     return result["TherapyProfiles"][profile_name].as<JsonObjectConst>();
 }
 
-const char *profile_prefix_for_mode(int mode) {
-    static const char *const prefixes[] = {
-        "Cpap", "AutoSet", "HerAuto", "Spont", "ST", "Timed",
-        "VAuto", "ASV", "ASVAuto", "iVAPS", "PAC",
-    };
-    if (mode < 0 ||
-        mode >= static_cast<int>(sizeof(prefixes) / sizeof(prefixes[0]))) {
+const char *setting_rpc_key(const As11SettingDef &def,
+                            char *buffer,
+                            size_t buffer_len) {
+    if (!def.key || buffer_len < 2) return nullptr;
+
+    const int written = snprintf(buffer, buffer_len, "_%s", def.key);
+    if (written < 0 || static_cast<size_t>(written) >= buffer_len) {
         return nullptr;
     }
-    return prefixes[mode];
-}
 
-const char *setting_write_key(const As11SettingDef &def,
-                              int mode,
-                              char *buffer,
-                              size_t buffer_len) {
-    if (strcmp(def.name, "TherapyMode") == 0) {
-        return known_var_alias("ActiveTherapyProfile");
-    }
-    if (def.profile_field) {
-        const char *prefix = profile_prefix_for_mode(mode);
-        if (!prefix || !buffer || !buffer_len) return nullptr;
-        const int written = snprintf(buffer, buffer_len, "%s-%s",
-                                     prefix, def.profile_field);
-        if (written < 0 || static_cast<size_t>(written) >= buffer_len) {
-            return nullptr;
-        }
-        return known_var_alias(buffer);
-    }
-    if (def.feature_field) {
-        return known_var_alias(def.feature_field);
-    }
-    return nullptr;
+    return buffer;
 }
 
 JsonVariantConst value_for_setting(JsonObjectConst object,
                                    const As11SettingDef &def) {
-    JsonVariantConst value = object[def.name];
-    if (!value.isNull()) return value;
-    return def.flat_name ? object[def.flat_name] : JsonVariantConst();
+    char key[8];
+    const char *rpc_key = setting_rpc_key(def, key, sizeof(key));
+    return rpc_key ? object[rpc_key] : JsonVariantConst();
+}
+
+JsonObjectConst nested_object(JsonObjectConst root, const char *path) {
+    JsonObjectConst current = root;
+    if (!path || current.isNull()) return JsonObjectConst();
+
+    const char *segment = path;
+    while (*segment) {
+        const char *dot = strchr(segment, '.');
+        if (!dot) return current[segment].as<JsonObjectConst>();
+
+        char key[48];
+        const size_t len = static_cast<size_t>(dot - segment);
+        if (len == 0 || len >= sizeof(key)) return JsonObjectConst();
+        memcpy(key, segment, len);
+        key[len] = 0;
+
+        current = current[key].as<JsonObjectConst>();
+        if (current.isNull()) return JsonObjectConst();
+        segment = dot + 1;
+    }
+    return current;
 }
 
 JsonObjectConst feature_object_from_result(JsonObjectConst result,
                                            const As11SettingDef &def) {
-    if (!def.feature_name) return JsonObjectConst();
-    return result["FeatureProfiles"][def.feature_name].as<JsonObjectConst>();
-}
+    if (def.source != As11SettingSource::FeatureProfile) {
+        return JsonObjectConst();
+    }
 
-bool cpap_like_mode(int mode) {
-    return mode == 0 || mode == 1 || mode == 2;
-}
-
-bool feature_available_for_mode(const char *feature_name,
-                                int mode,
-                                bool present) {
-    if (!feature_name || !present) return false;
-    if (strcmp(feature_name, "ComfortFeature") == 0) return mode == 1;
-    if (strcmp(feature_name, "EprFeature") == 0) return cpap_like_mode(mode);
-    return true;
+    JsonObjectConst profiles = result["FeatureProfiles"].as<JsonObjectConst>();
+    return nested_object(profiles, def.source_object);
 }
 
 int enum_index_from_text(const As11SettingDef &def, const char *text) {
@@ -696,7 +389,7 @@ int enum_index_from_text(const As11SettingDef &def, const char *text) {
     int parsed = -1;
     if (text && parse_int_text(text, parsed)) return parsed;
 
-    if (strcmp(def.name, "TherapyMode") != 0) return -1;
+    if (!setting_is_therapy_mode(def)) return -1;
     const std::string wanted = compact_mode_key(text);
     if (wanted.empty()) return -1;
     for (uint8_t i = 0; i < def.option_count; ++i) {
@@ -716,6 +409,14 @@ int mode_index_from_json(JsonVariantConst value) {
         return as11_mode_index_from_value(value.as<std::string>());
     }
     return as11_mode_index_from_value(value_to_string(value));
+}
+
+bool setting_uses_iso_seconds(const As11SettingDef &def) {
+    const char *field = setting_field_name(def);
+    if (!field) return false;
+    return strstr(field, "InspiratoryTime") != nullptr ||
+           strcmp(field, "RiseTime") == 0 ||
+           strcmp(field, "FallTime") == 0;
 }
 
 std::string normalize_value_for_def(const As11SettingDef &def,
@@ -741,6 +442,8 @@ std::string normalize_value_for_def(const As11SettingDef &def,
             index = value.as<int>();
         } else if (value.is<long>()) {
             index = static_cast<int>(value.as<long>());
+        } else if (value.is<bool>()) {
+            index = value.as<bool>() ? 1 : 0;
         } else if (value.is<const char *>()) {
             index = enum_index_from_text(def, value.as<const char *>());
         }
@@ -778,7 +481,7 @@ bool setting_value_matches(const As11SettingDef &def,
 bool json_literal_for_set(const As11SettingDef &def,
                           JsonVariantConst value,
                           std::string &out) {
-    if (strcmp(def.name, "TherapyMode") == 0) {
+    if (setting_is_therapy_mode(def)) {
         int index = mode_index_from_json(value);
         const char *profile = profile_name_for_mode(index);
         if (!profile) return false;
@@ -791,10 +494,7 @@ bool json_literal_for_set(const As11SettingDef &def,
     if (def.kind == As11SettingKind::Number) {
         if (!json_is_number(value)) return false;
         const double numeric = value.as<double>();
-        if (numeric < def.min_value || numeric > def.max_value) return false;
-        if (strcmp(def.name, "SetMinInspiratoryTime") == 0 ||
-            strcmp(def.name, "SetMaxInspiratoryTime") == 0 ||
-            strcmp(def.name, "SetInspiratoryTime") == 0) {
+        if (setting_uses_iso_seconds(def)) {
             char buf[32];
             snprintf(buf, sizeof(buf), "\"PT%gS\"", numeric);
             out = buf;
@@ -810,6 +510,8 @@ bool json_literal_for_set(const As11SettingDef &def,
             index = value.as<int>();
         } else if (value.is<long>()) {
             index = static_cast<int>(value.as<long>());
+        } else if (value.is<bool>()) {
+            index = value.as<bool>() ? 1 : 0;
         } else if (value.is<const char *>()) {
             index = enum_index_from_text(def, value.as<const char *>());
         }
@@ -973,12 +675,12 @@ bool As11SettingsState::apply_settings_get_response(
 
     for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
         JsonVariantConst value;
-        if (SETTINGS[i].feature_name) {
+        if (SETTINGS[i].source == As11SettingSource::FeatureProfile) {
             JsonObjectConst feature = feature_object_from_result(result,
                                                                  SETTINGS[i]);
             if (feature.isNull()) continue;
             feature_present_[i] = true;
-            value = feature[SETTINGS[i].feature_field];
+            value = feature[SETTINGS[i].source_field];
             if (value.isNull()) {
                 values_[i] = "";
                 continue;
@@ -990,18 +692,23 @@ bool As11SettingsState::apply_settings_get_response(
         remember_value(i, normalize_value_for_def(SETTINGS[i], value));
     }
 
-    for (int mode = 0; mode < static_cast<int>(MaxModes); ++mode) {
-        JsonObjectConst profile = profile_from_result(result, mode);
+    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
+        if (SETTINGS[i].source != As11SettingSource::TherapyProfile) {
+            continue;
+        }
+
+        JsonObjectConst profile =
+            therapy_profile_object_from_result(result, SETTINGS[i]);
         if (profile.isNull()) continue;
 
-        for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-            if (!SETTINGS[i].profile_field) continue;
-            if (!as11_setting_visible_for_mode(SETTINGS[i], mode)) continue;
-            JsonVariantConst value = profile[SETTINGS[i].profile_field];
-            if (value.isNull()) continue;
-            remember_profile_value(
-                mode, i, normalize_value_for_def(SETTINGS[i], value));
-        }
+        JsonVariantConst value = profile[SETTINGS[i].source_field];
+        if (value.isNull()) continue;
+
+        const int mode = profile_mode_index(SETTINGS[i].profile);
+        if (!as11_setting_visible_for_mode(SETTINGS[i], mode)) continue;
+
+        remember_profile_value(
+            mode, i, normalize_value_for_def(SETTINGS[i], value));
     }
 
     if (any) {
@@ -1019,7 +726,7 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
 
     JsonObjectConst root = doc.as<JsonObjectConst>();
     int mode = mode_index();
-    int target_mode = mode_index_from_json(root["TherapyMode"]);
+    int target_mode = mode_index_from_json(root["MOP"]);
     if (target_mode < 0) {
         target_mode = mode_index_from_json(root["_MOP"]);
     }
@@ -1029,14 +736,6 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
     for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
         if (!as11_setting_visible_for_mode(SETTINGS[i], mode)) continue;
         JsonVariantConst value = value_for_setting(root, SETTINGS[i]);
-        if (value.isNull()) {
-            char key[80];
-            const char *write_key = setting_write_key(SETTINGS[i],
-                                                      mode,
-                                                      key,
-                                                      sizeof(key));
-            if (write_key) value = root[write_key];
-        }
         if (value.isNull()) continue;
         std::string pending_value = normalize_value_for_def(SETTINGS[i], value);
         if (pending_value.empty()) continue;
@@ -1163,11 +862,12 @@ bool As11SettingsState::set_profile_value(int mode,
 std::string As11SettingsState::value(size_t index, int mode) const {
     if (index >= SETTINGS_COUNT) return "";
     if (mode >= 0 && mode < static_cast<int>(MaxModes)) {
-        if (strcmp(SETTINGS[index].name, "TherapyMode") == 0) {
+        if (setting_is_therapy_mode(SETTINGS[index])) {
             return std::to_string(mode);
         }
         const As11StoredValue *stored = profile_value(index, mode);
-        if (SETTINGS[index].profile_field && stored && !stored->empty()) {
+        if (SETTINGS[index].source == As11SettingSource::TherapyProfile &&
+            stored && !stored->empty()) {
             return stored->str();
         }
     }
@@ -1183,15 +883,13 @@ bool As11SettingsState::setting_visible(size_t index, int mode) const {
     if (index >= SETTINGS_COUNT) return false;
     const As11SettingDef &def = SETTINGS[index];
     if (!as11_setting_visible_for_mode(def, mode)) return false;
-    if (!def.feature_name) return true;
-    return feature_available_for_mode(def.feature_name,
-                                      mode,
-                                      feature_present_[index]);
+    if (def.source != As11SettingSource::FeatureProfile) return true;
+    return feature_present_[index];
 }
 
 int As11SettingsState::mode_index() const {
     for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-        if (strcmp(SETTINGS[i].name, "TherapyMode") == 0) {
+        if (setting_is_therapy_mode(SETTINGS[i])) {
             return as11_mode_index_from_value(values_[i]);
         }
     }
@@ -1206,39 +904,69 @@ const As11SettingDef &as11_setting(size_t index) {
     return SETTINGS[index];
 }
 
-const As11SettingDef *as11_find_setting(const char *name) {
-    if (!name) return nullptr;
+const As11SettingDef *as11_find_setting(const char *key) {
+    if (!key) return nullptr;
     for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-        if (strcmp(SETTINGS[i].name, name) == 0 ||
-            (SETTINGS[i].flat_name && strcmp(SETTINGS[i].flat_name, name) == 0)) {
+        if (rpc_name_matches_key(key, SETTINGS[i].key)) {
             return &SETTINGS[i];
         }
     }
     return nullptr;
 }
 
+std::string as11_setting_rpc_long_name(const As11SettingDef &def) {
+    if (setting_is_therapy_mode(def)) return "ActiveTherapyProfile";
+
+    const char *field = setting_field_name(def);
+    if (!field || !field[0]) return def.key ? def.key : "";
+
+    if (def.source == As11SettingSource::TherapyProfile) {
+        const char *prefix = profile_long_name_prefix(def.profile);
+        if (!prefix || !prefix[0]) return field;
+
+        std::string out(prefix);
+        out += "-";
+        out += field;
+        return out;
+    }
+
+    return field;
+}
+
+size_t as11_setting_composite_count() {
+    return SETTING_COMPOSITES_COUNT;
+}
+
+const As11SettingCompositeDef &as11_setting_composite(size_t index) {
+    return SETTING_COMPOSITES[index];
+}
+
 bool as11_setting_visible_for_mode(const As11SettingDef &def, int mode) {
-    if (mode < 0 || mode > 10) return strcmp(def.name, "TherapyMode") == 0;
+    if (mode < 0 || mode > 10) return setting_is_therapy_mode(def);
     return (def.mode_mask & MODE_BIT(mode)) != 0;
 }
 
 bool as11_setting_option_supported(const As11SettingDef &def,
                                    uint8_t option_index,
                                    uint16_t supported_mode_mask) {
-    if (strcmp(def.name, "TherapyMode") != 0) return true;
+    if (!setting_is_therapy_mode(def)) return true;
     if (option_index >= def.option_count) return false;
     return supported_mode_mask &&
            (supported_mode_mask & (1u << option_index)) != 0;
 }
 
 bool as11_setting_readable_via_rpc(const As11SettingDef &def) {
-    return def.flat_name != nullptr || def.profile_field != nullptr ||
-           (def.feature_name != nullptr && def.feature_field != nullptr);
+    return def.source == As11SettingSource::Flat ||
+           (def.source == As11SettingSource::TherapyProfile &&
+            def.profile != As11ProfileId::None &&
+            def.source_field != nullptr) ||
+           (def.source == As11SettingSource::FeatureProfile &&
+            def.source_object != nullptr && def.source_field != nullptr);
 }
 
-bool as11_setting_writable_via_rpc(const As11SettingDef &def, int mode) {
+bool as11_setting_writable_via_rpc(const As11SettingDef &def) {
     char key[80];
-    return setting_write_key(def, mode, key, sizeof(key)) != nullptr;
+    return setting_rpc_key(def, key, sizeof(key)) != nullptr;
 }
 
 int as11_mode_index_from_value(const std::string &value) {
@@ -1246,7 +974,7 @@ int as11_mode_index_from_value(const std::string &value) {
     if (parse_int_text(value, parsed) && parsed >= 0 && parsed <= 10) {
         return parsed;
     }
-    const As11SettingDef *mode_def = as11_find_setting("TherapyMode");
+    const As11SettingDef *mode_def = as11_find_setting("MOP");
     if (!mode_def) return -1;
     const int index = enum_index_from_text(*mode_def, value.c_str());
     return index >= 0 && index <= 10 ? index : -1;
@@ -1281,26 +1009,25 @@ std::string as11_build_set_params_from_json(const std::string &body,
     }
 
     JsonObjectConst root = doc.as<JsonObjectConst>();
-    int target_mode = mode_index_from_json(root["TherapyMode"]);
+    int target_mode = mode_index_from_json(root["MOP"]);
     if (target_mode >= 0) mode = target_mode;
 
     std::string out = "{";
     accepted = 0;
     for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
         if (!as11_setting_visible_for_mode(SETTINGS[i], mode)) continue;
-        JsonVariantConst value = root[SETTINGS[i].name];
+        JsonVariantConst value = root[SETTINGS[i].key];
         if (value.isNull()) continue;
         char key[80];
-        const char *write_key = setting_write_key(SETTINGS[i],
-                                                  mode,
-                                                  key,
-                                                  sizeof(key));
-        if (!write_key) continue;
+        const char *rpc_key = setting_rpc_key(SETTINGS[i],
+                                              key,
+                                              sizeof(key));
+        if (!rpc_key) continue;
         std::string literal;
         if (!json_literal_for_set(SETTINGS[i], value, literal)) continue;
         if (accepted) out += ",";
         out += "\"";
-        out += write_key;
+        out += rpc_key;
         out += "\":";
         out += literal;
         accepted++;

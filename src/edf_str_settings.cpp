@@ -272,9 +272,23 @@ bool fallback_option_index_from_text(const char *text, int16_t &index) {
     return false;
 }
 
+bool str_option_index_override_from_text(const char *rpc_name,
+                                         const char *text,
+                                         int16_t &index) {
+    if (!text_equals(rpc_name, "_ABF")) return false;
+
+    // The live setting catalog follows the firmware option order for ABF
+    // (Yes, No), while native STR exports use the common boolean digital order
+    // (No, Yes) before remapping to EDF codes.
+    return fallback_option_index_from_text(text, index);
+}
+
 bool option_index_from_text(const char *text,
                             const char *rpc_name,
                             int16_t &index) {
+    if (str_option_index_override_from_text(rpc_name, text, index)) {
+        return true;
+    }
     if (as11_setting_option_index_for_rpc_name(rpc_name, text, index)) {
         return true;
     }

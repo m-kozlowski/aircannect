@@ -3283,17 +3283,17 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
         if (!state.setting_visible(i, profile_mode)) continue;
         if (!as11_setting_readable_via_rpc(def)) continue;
 
-        const bool is_therapy_mode = strcmp(def.name, "TherapyMode") == 0;
+        const bool is_therapy_mode = strcmp(def.key, "MOP") == 0;
         std::string value =
             state.value(i, is_therapy_mode ? active_mode : profile_mode);
         const bool available = !value.empty() || state.pending(i);
         const bool pending = state.pending(i);
-        const bool writable = as11_setting_writable_via_rpc(def, profile_mode);
+        const bool writable = as11_setting_writable_via_rpc(def);
         if (!available && !pending) continue;
 
         if (emitted++) json += ',';
         json += "{";
-        json_add_string(json, "name", def.name, false);
+        json_add_string(json, "key", def.key, false);
         json_add_string(json, "value", value.c_str());
         if (!available) json_add_bool(json, "available", false);
         if (!writable) json_add_bool(json, "writable", false);
@@ -3314,13 +3314,17 @@ void WebUI::build_settings_catalog_json(LargeTextBuffer &json) const {
     size_t emitted = 0;
     for (size_t i = 0; i < as11_setting_count(); ++i) {
         const As11SettingDef &def = as11_setting(i);
+        if (!def.mode_mask) continue;
         if (!as11_setting_readable_via_rpc(def)) continue;
 
         if (emitted++) json += ',';
         json += "{";
-        json_add_string(json, "name", def.name, false);
+        json_add_string(json, "key", def.key, false);
         json_add_string(json, "label", def.label);
+        const std::string rpc_name = as11_setting_rpc_long_name(def);
+        json_add_string(json, "rpc_name", rpc_name.c_str());
         json_add_string(json, "group", def.group);
+        json_add_string(json, "category", def.category);
         json_add_string(json, "kind", setting_kind_name(def.kind));
         json_add_int(json, "modes", def.mode_mask);
         json_add_float(json, "min", def.min_value);
@@ -3342,6 +3346,50 @@ void WebUI::build_settings_catalog_json(LargeTextBuffer &json) const {
             json += ']';
         }
         json += '}';
+    }
+    json += "],\"composites\":[";
+    for (size_t i = 0; i < as11_setting_composite_count(); ++i) {
+        const As11SettingCompositeDef &def = as11_setting_composite(i);
+        if (i) json += ',';
+        json += "{";
+        json_add_string(json, "key", def.key, false);
+        json_add_string(json, "kind", "paired_enum_numeric");
+        json_add_string(json, "label", def.label);
+        json_add_string(json, "enum_key", def.enum_key);
+        json_add_string(json, "numeric_key", def.numeric_key);
+
+        const As11SettingDef *enum_def = as11_find_setting(def.enum_key);
+        const As11SettingDef *numeric_def = as11_find_setting(def.numeric_key);
+        const std::string enum_rpc_name =
+            enum_def ? as11_setting_rpc_long_name(*enum_def) : def.enum_key;
+        const std::string numeric_rpc_name =
+            numeric_def ? as11_setting_rpc_long_name(*numeric_def)
+                        : def.numeric_key;
+        std::string rpc_name = enum_rpc_name;
+        rpc_name += " + ";
+        rpc_name += numeric_rpc_name;
+        json_add_string(json, "rpc_name", rpc_name.c_str());
+        json_add_string(json, "enum_rpc_name", enum_rpc_name.c_str());
+        json_add_string(json, "numeric_rpc_name", numeric_rpc_name.c_str());
+
+        json_add_int(json, "numeric_branch_enum_value",
+                     def.numeric_branch_enum_value);
+        json_add_string(json, "group", def.group);
+        json_add_string(json, "category", def.category);
+        json += ",\"options\":[";
+        for (uint8_t opt_index = 0; opt_index < def.option_count; ++opt_index) {
+            const As11SettingCompositeOption &option = def.options[opt_index];
+            if (opt_index) json += ',';
+            json += "{";
+            json_add_int(json, "value", opt_index, false);
+            json_add_string(json, "label", option.label);
+            json_add_int(json, "enum_value", option.enum_value);
+            if (option.numeric_raw) {
+                json_add_string(json, "numeric_raw", option.numeric_raw);
+            }
+            json += "}";
+        }
+        json += "]}";
     }
     json += "]}";
 }

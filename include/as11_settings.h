@@ -13,6 +13,27 @@ enum class As11SettingKind {
     Text,
 };
 
+enum class As11SettingSource {
+    Flat,
+    TherapyProfile,
+    FeatureProfile,
+};
+
+enum class As11ProfileId : uint8_t {
+    Cpap = 0,
+    AutoSet = 1,
+    HerAuto = 2,
+    Spont = 3,
+    ST = 4,
+    Timed = 5,
+    VAuto = 6,
+    ASV = 7,
+    ASVAuto = 8,
+    iVAPS = 9,
+    PAC = 10,
+    None = 255,
+};
+
 class As11StoredValue {
 public:
     As11StoredValue() = default;
@@ -38,13 +59,15 @@ private:
 };
 
 struct As11SettingDef {
-    const char *name;
-    const char *profile_field;
-    const char *feature_name;
-    const char *feature_field;
-    const char *flat_name;
+    const char *key;
+    As11SettingSource source;
+    As11ProfileId profile;
+    // FeatureProfiles object path. TherapyProfiles use profile instead.
+    const char *source_object;
+    const char *source_field;
     const char *label;
     const char *group;
+    const char *category;
     As11SettingKind kind;
     float min_value;
     float max_value;
@@ -58,13 +81,31 @@ struct As11SettingDef {
     const char *const *wire_options = nullptr;
 };
 
+struct As11SettingCompositeOption {
+    const char *label;
+    int16_t enum_value;
+    const char *numeric_raw;
+};
+
+struct As11SettingCompositeDef {
+    const char *key;
+    const char *label;
+    const char *enum_key;
+    const char *numeric_key;
+    int16_t numeric_branch_enum_value;
+    const char *group;
+    const char *category;
+    const As11SettingCompositeOption *options;
+    uint8_t option_count;
+};
+
 bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
                                             const char *wire_value,
                                             int16_t &index);
 
 class As11SettingsState {
 public:
-    static constexpr size_t MaxSettings = 64;
+    static constexpr size_t MaxSettings = 128;
     static constexpr size_t MaxModes = 11;
     static constexpr size_t MaxProfileValues = 128;
 
@@ -133,14 +174,18 @@ private:
 
 size_t as11_setting_count();
 const As11SettingDef &as11_setting(size_t index);
-const As11SettingDef *as11_find_setting(const char *name);
+const As11SettingDef *as11_find_setting(const char *key);
+std::string as11_setting_rpc_long_name(const As11SettingDef &def);
+
+size_t as11_setting_composite_count();
+const As11SettingCompositeDef &as11_setting_composite(size_t index);
 
 bool as11_setting_visible_for_mode(const As11SettingDef &def, int mode);
 bool as11_setting_option_supported(const As11SettingDef &def,
                                    uint8_t option_index,
                                    uint16_t supported_mode_mask);
 bool as11_setting_readable_via_rpc(const As11SettingDef &def);
-bool as11_setting_writable_via_rpc(const As11SettingDef &def, int mode);
+bool as11_setting_writable_via_rpc(const As11SettingDef &def);
 int as11_mode_index_from_value(const std::string &value);
 const char *as11_mode_name(int mode);
 

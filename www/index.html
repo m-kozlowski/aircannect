@@ -1966,6 +1966,7 @@
     let streamData = {};
     let settingsData = null;
     let settingsCatalog = [];
+    let settingsComposites = [];
     let settingsCatalogPromise = null;
     let configData = null;
     let configSections = [];
@@ -6632,6 +6633,7 @@
 
     function invalidateSettingsCatalog() {
       settingsCatalog = [];
+      settingsComposites = [];
       settingsCatalogPromise = null;
       settingsProfileMode = null;
       settingsModeDirty = false;
@@ -6655,7 +6657,11 @@
             if (!catalog.some((item) => item && item.kind && item.label)) {
               throw new Error("settings catalog unavailable");
             }
-            settingsCatalog = catalog;
+            settingsCatalog = catalog.map((item, index) =>
+              Object.assign({_catalogIndex: index}, item));
+            settingsComposites = Array.isArray(data.composites) ?
+              data.composites.map((item, index) =>
+                Object.assign({_catalogIndex: 10000 + index}, item)) : [];
           })
           .finally(() => {
             settingsCatalogPromise = null;
@@ -6668,7 +6674,7 @@
       const bit = modeBit(mode);
       let fallback = null;
       for (const meta of settingsCatalog) {
-        if (meta.name !== setting.name) continue;
+        if (meta.key !== setting.key) continue;
         if (!fallback) fallback = meta;
         if (bit && (Number(meta.modes || 0) & bit)) return meta;
       }
@@ -6677,7 +6683,7 @@
 
     function settingsTherapyMode(data) {
       const setting = (data.settings || []).find((item) =>
-        item && item.name === "TherapyMode");
+        item && item.key === "MOP");
       if (!setting || setting.value === undefined || setting.value === null) {
         return null;
       }
@@ -6709,14 +6715,58 @@
 
     function visibleOptions(setting, supportedMask) {
       const options = setting.options || [];
-      if (setting.name !== "TherapyMode" || !supportedMask) return options;
+      if (setting.key !== "MOP" || !supportedMask) return options;
       return options.filter((item, index) =>
         supportedMask & modeBit(optionValue(item, index)));
+    }
+
+    function settingRawValue(setting) {
+      if (!setting) return "";
+      if (setting.pending) return setting.pending_value || "";
+      return setting.value || "";
+    }
+
+    function compositeOptionValue(item) {
+      if (!item || typeof item !== "object") return "";
+      if (item.numeric_raw !== undefined && item.numeric_raw !== null) {
+        return "n:" + String(item.numeric_raw);
+      }
+      return "e:" + String(item.enum_value);
+    }
+
+    function compositeOptionLabel(item) {
+      return item && typeof item === "object" ?
+        (item.label || compositeOptionValue(item)) : String(item);
+    }
+
+    function compositeCurrentValue(composite, enumSetting, numericSetting) {
+      const enumRaw = String(settingRawValue(enumSetting));
+      const branch = String(composite.numeric_branch_enum_value);
+      if (enumRaw === branch) {
+        const numericRaw = String(settingRawValue(numericSetting));
+        if (numericRaw !== "") return "n:" + numericRaw;
+      }
+      return "e:" + enumRaw;
+    }
+
+    function compositeDisplayFallback(value) {
+      if (String(value).startsWith("n:")) return String(value).slice(2);
+      if (String(value).startsWith("e:")) return String(value).slice(2);
+      return String(value || "");
     }
 
     function formatSettingValue(setting, value) {
       if (value === undefined || value === null || value === "") return "";
       const raw = String(value);
+      if (setting.kind === "composite") {
+        const options = setting.options || [];
+        for (let i = 0; i < options.length; i++) {
+          if (optionValue(options[i], i) === raw) {
+            return optionLabel(options[i]) || raw;
+          }
+        }
+        return compositeDisplayFallback(raw);
+      }
       if (setting.kind === "enum") {
         const options = setting.options || [];
         for (let i = 0; i < options.length; i++) {
@@ -6746,6 +6796,109 @@
 
     function settingWritable(setting) {
       return setting.writable !== false;
+    }
+
+    function settingSmallText(setting) {
+      const parts = [];
+      if (setting.rpc_name) parts.push(setting.rpc_name);
+
+      if (setting.pending) {
+        parts.push("Pending readback; current " +
+          (formatSettingValue(setting, setting.value) || "--"));
+      } else if (setting.inferred && setting.key !== "MOP") {
+        parts.push("Inferred from device status");
+      }
+
+      return parts.join("; ");
+    }
+
+    function settingGroupRank(group) {
+      const order = {
+        Therapy: 0,
+        Comfort: 1,
+        Circuit: 2,
+        Preferences: 3,
+        Device: 4,
+      };
+      return Object.prototype.hasOwnProperty.call(order, group) ?
+        order[group] : 100;
+    }
+
+    function settingCategoryRank(category) {
+      const order = {
+        therapy: 0,
+        pressure: 1,
+        pressure_support: 2,
+        backup_rate: 3,
+        comfort: 4,
+        timing: 5,
+        trigger_cycle: 6,
+        therapy_start_pressure: 10,
+        ramp: 11,
+        therapy_behavior: 12,
+        climate: 13,
+        circuit: 20,
+        locale: 30,
+        patient_access: 31,
+        display: 32,
+      };
+      return Object.prototype.hasOwnProperty.call(order, category) ?
+        order[category] : 100;
+    }
+
+    function compareSettings(a, b) {
+      const groupDelta =
+        settingGroupRank(a.group || "") - settingGroupRank(b.group || "");
+      if (groupDelta) return groupDelta;
+
+      const categoryDelta =
+        settingCategoryRank(a.category || "") -
+        settingCategoryRank(b.category || "");
+      if (categoryDelta) return categoryDelta;
+
+      return Number(a._catalogIndex || 0) - Number(b._catalogIndex || 0);
+    }
+
+    function buildCompositeSettings(settings) {
+      const byKey = new Map();
+      settings.forEach((setting) => byKey.set(setting.key, setting));
+
+      const hiddenKeys = new Set();
+      const composites = [];
+      settingsComposites.forEach((composite) => {
+        if (composite.kind !== "paired_enum_numeric") return;
+
+        const enumSetting = byKey.get(composite.enum_key);
+        const numericSetting = byKey.get(composite.numeric_key);
+        if (!enumSetting || !numericSetting) return;
+
+        const available =
+          (settingAvailable(enumSetting) || enumSetting.pending) &&
+          (settingAvailable(numericSetting) || numericSetting.pending);
+        if (!available) return;
+
+        const options = (composite.options || []).map((item) =>
+          Object.assign({}, item, {value: compositeOptionValue(item)}));
+        const value = compositeCurrentValue(
+          composite, enumSetting, numericSetting);
+
+        hiddenKeys.add(composite.enum_key);
+        hiddenKeys.add(composite.numeric_key);
+        composites.push(Object.assign({}, composite, {
+          kind: "composite",
+          value,
+          pending_value: value,
+          options,
+          pending: enumSetting.pending || numericSetting.pending,
+          writable: settingWritable(enumSetting) &&
+            settingWritable(numericSetting),
+          available: true,
+          enum_setting: enumSetting,
+          numeric_setting: numericSetting,
+        }));
+      });
+
+      return {hiddenKeys, composites};
     }
 
     async function loadSettings(refresh, poll) {
@@ -6817,8 +6970,13 @@
           settingsProfileMode !== settingsActiveMode ? "" : "none";
       }
 
-      const visible = (data.settings || []).filter((setting) =>
+      const baseVisible = (data.settings || []).filter((setting) =>
         settingAvailable(setting) || setting.inferred || setting.pending);
+      const compositeState = buildCompositeSettings(baseVisible);
+      const visible = baseVisible.filter((setting) =>
+          !compositeState.hiddenKeys.has(setting.key))
+        .concat(compositeState.composites)
+        .sort(compareSettings);
       if (!visible.length) {
         root.innerHTML = '<div class="value" style="text-align:left">' +
           (data.valid ? "No readable settings for this mode" :
@@ -6841,14 +6999,14 @@
 
         let raw = setting.pending ?
           setting.pending_value : (setting.value || "");
-        if (setting.name === "TherapyMode" && settingsModeDirty &&
+        if (setting.key === "MOP" && settingsModeDirty &&
             settingsProfileMode !== null) {
           raw = String(settingsProfileMode);
         }
         const shown = formatSettingValue(setting, raw);
         let control;
 
-        if (setting.kind === "enum") {
+        if (setting.kind === "enum" || setting.kind === "composite") {
           control = document.createElement("select");
           let seen = false;
           if (raw === "") {
@@ -6861,11 +7019,19 @@
           }
           visibleOptions(setting, data.supported_mode_mask || 0)
             .forEach((item, index) => {
-              const label = optionLabel(item);
+              const label = setting.kind === "composite" ?
+                compositeOptionLabel(item) : optionLabel(item);
               const value = optionValue(item, index);
               const option = document.createElement("option");
               option.value = value;
               option.textContent = label;
+              if (setting.kind === "composite") {
+                option.dataset.enumValue = item.enum_value;
+                if (item.numeric_raw !== undefined &&
+                    item.numeric_raw !== null) {
+                  option.dataset.numericRaw = item.numeric_raw;
+                }
+              }
               if (value === String(raw)) {
                 option.selected = true;
                 seen = true;
@@ -6879,7 +7045,7 @@
             option.selected = true;
             control.appendChild(option);
           }
-          if (setting.name === "TherapyMode") {
+          if (setting.key === "MOP") {
             control.onchange = () => {
               const nextMode = Number(control.value);
               if (!Number.isNaN(nextMode)) {
@@ -6915,31 +7081,33 @@
           }
         }
 
-        control.dataset.name = setting.name;
+        control.dataset.key = setting.key;
         control.dataset.kind = setting.kind;
+        if (setting.kind === "composite") {
+          control.dataset.enumKey = setting.enum_key;
+          control.dataset.numericKey = setting.numeric_key;
+          control.dataset.numericScaleDiv =
+            setting.numeric_setting && setting.numeric_setting.scale_div ?
+              setting.numeric_setting.scale_div : 1;
+        }
         control.dataset.orig =
           setting.kind === "enum" || setting.kind === "bool" ?
             (raw || "") : (control.value || "");
+        if (setting.kind === "composite") control.dataset.orig = raw || "";
         if (!settingAvailable(setting) || !settingWritable(setting)) {
           control.disabled = true;
         }
         if (setting.pending) control.classList.add("pending");
 
-        let small = "";
-        if (setting.pending) {
-          small = "Pending readback; current " +
-            (formatSettingValue(setting, setting.value) || "--");
-        } else if (setting.inferred) {
-          small = setting.name === "TherapyMode" ?
-            "" : "Inferred from device status";
-        }
-
-        const entry = row(setting.label || setting.name, control, small);
+        const entry = row(
+          setting.label || setting.key,
+          control,
+          settingSmallText(setting));
         if (setting.pending) entry.classList.add("pending");
         root.appendChild(entry);
       });
 
-      if (save) save.disabled = !root.querySelector("[data-name]:not(:disabled)");
+      if (save) save.disabled = !root.querySelector("[data-key]:not(:disabled)");
     }
 
     async function saveSettings() {
@@ -6947,22 +7115,33 @@
       if (settingsModeDirty && settingsProfileMode !== null &&
           settingsActiveMode !== null &&
           settingsProfileMode !== settingsActiveMode) {
-        changes.TherapyMode = settingsProfileMode;
+        changes.MOP = settingsProfileMode;
       }
-      document.querySelectorAll("#settingsFields [data-name]").forEach((input) => {
+      document.querySelectorAll("#settingsFields [data-key]").forEach((input) => {
         if (input.disabled) return;
         if (String(input.value) === String(input.dataset.orig)) return;
 
         if (input.dataset.kind === "number") {
           if (input.value === "") return;
-          changes[input.dataset.name] = Number(input.value);
+          changes[input.dataset.key] = Number(input.value);
         } else if (input.dataset.kind === "bool") {
-          changes[input.dataset.name] = input.value === "true";
+          changes[input.dataset.key] = input.value === "true";
         } else if (input.dataset.kind === "enum") {
           if (input.value === "") return;
-          changes[input.dataset.name] = Number(input.value);
+          changes[input.dataset.key] = Number(input.value);
+        } else if (input.dataset.kind === "composite") {
+          const selected = input.selectedOptions && input.selectedOptions[0];
+          if (!selected || selected.dataset.enumValue === undefined) return;
+
+          changes[input.dataset.enumKey] = Number(selected.dataset.enumValue);
+          if (selected.dataset.numericRaw !== undefined) {
+            const numeric = Number(selected.dataset.numericRaw);
+            const scale = Number(input.dataset.numericScaleDiv || 1);
+            changes[input.dataset.numericKey] =
+              scale > 1 ? numeric / scale : numeric;
+          }
         } else {
-          changes[input.dataset.name] = input.value;
+          changes[input.dataset.key] = input.value;
         }
       });
 
