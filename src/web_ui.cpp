@@ -314,6 +314,33 @@ bool request_size_arg_limited(AsyncWebServerRequest *request,
     return true;
 }
 
+bool request_ota_upload_args(AsyncWebServerRequest *request,
+                             size_t &image_size,
+                             OtaUploadEncoding &encoding,
+                             size_t &wire_size) {
+    image_size = 0;
+    wire_size = 0;
+    encoding = OtaUploadEncoding::Plain;
+
+    if (!request_size_arg(request, "size", image_size)) return false;
+
+    if (request && request->hasArg("encoding")) {
+        const String value = request->arg("encoding");
+        if (!parse_ota_upload_encoding(value.c_str(), encoding)) {
+            return false;
+        }
+    }
+
+    if (request && request->hasArg("wire_size")) {
+        if (!request_size_arg(request, "wire_size", wire_size)) return false;
+    } else {
+        if (encoding == OtaUploadEncoding::Zlib) return false;
+        wire_size = image_size;
+    }
+
+    return wire_size > 0;
+}
+
 bool request_int64_arg(AsyncWebServerRequest *request,
                        const char *name,
                        int64_t &out) {
@@ -759,6 +786,7 @@ template <typename JsonOut>
 void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
     json = "{";
     json_add_string(json, "version", aircannect_version(), false);
+    json += ",\"upload_encodings\":[\"plain\",\"zlib\"]";
     json_add_bool(json, "arduino_started", ota.arduino_started);
     json_add_bool(json, "arduino_active", ota.arduino_active);
     json_add_bool(json, "http_prepare_pending", ota.http_prepare_pending);
@@ -770,8 +798,12 @@ void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
     json_add_int(json, "arduino_port", ota.arduino_port);
     json_add_int(json, "bytes", static_cast<long>(ota.bytes));
     json_add_int(json, "total_size", static_cast<long>(ota.total_size));
+    json_add_int(json, "wire_bytes", static_cast<long>(ota.wire_bytes));
+    json_add_int(json, "wire_total_size",
+                 static_cast<long>(ota.wire_total_size));
     json_add_int(json, "progress", ota.progress_percent);
     json_add_string(json, "method", ota.method.c_str());
+    json_add_string(json, "encoding", ota.encoding.c_str());
     json_add_string(json, "partition", ota.partition.c_str());
     json_add_string(json, "last_error", ota.last_error.c_str());
     json += '}';
@@ -4277,9 +4309,12 @@ void WebUI::register_routes() {
             }
 
             size_t declared_size = 0;
+            size_t wire_size = 0;
+            OtaUploadEncoding encoding = OtaUploadEncoding::Plain;
 
-            if (!request_size_arg(request, "size", declared_size)) {
-                ota_manager_->abort_http_upload("missing_size");
+            if (!request_ota_upload_args(request, declared_size, encoding,
+                                         wire_size)) {
+                ota_manager_->abort_http_upload("invalid_upload_args");
                 mark_snapshots_dirty(SNAPSHOT_OTA);
 
                 String json;
@@ -4291,7 +4326,9 @@ void WebUI::register_routes() {
             }
 
             const bool ok =
-                ota_manager_->request_http_upload_prepare(declared_size);
+                ota_manager_->request_http_upload_prepare(declared_size,
+                                                          encoding,
+                                                          wire_size);
 
             mark_snapshots_dirty(SNAPSHOT_OTA);
 
@@ -4319,14 +4356,18 @@ void WebUI::register_routes() {
                size_t index, uint8_t *data, size_t len, bool final) {
             if (index == 0) {
                 size_t declared_size = 0;
+                size_t wire_size = 0;
+                OtaUploadEncoding encoding = OtaUploadEncoding::Plain;
 
-                if (!request_size_arg(request, "size", declared_size)) {
-                    ota_manager_->abort_http_upload("missing_size");
+                if (!request_ota_upload_args(request, declared_size, encoding,
+                                             wire_size)) {
+                    ota_manager_->abort_http_upload("invalid_upload_args");
                     mark_snapshots_dirty(SNAPSHOT_OTA);
                     return;
                 }
 
-                if (!ota_manager_->begin_http_upload(filename, declared_size)) {
+                if (!ota_manager_->begin_http_upload(filename, declared_size,
+                                                     encoding, wire_size)) {
                     mark_snapshots_dirty(SNAPSHOT_OTA);
                     return;
                 }

@@ -696,8 +696,20 @@ void ManagementConsole::handle_ota(Print &out, String rest,
                                     : (ota.http_ready ? "ready" : "idle"))));
         out.print(" method=");
         out.print(ota.method);
+        if (ota.encoding != "plain") {
+            out.print(" encoding=");
+            out.print(ota.encoding);
+        }
         out.print(" bytes=");
         out.print(static_cast<unsigned long>(ota.bytes));
+        out.print("/");
+        out.print(static_cast<unsigned long>(ota.total_size));
+        if (ota.encoding != "plain") {
+            out.print(" wire=");
+            out.print(static_cast<unsigned long>(ota.wire_bytes));
+            out.print("/");
+            out.print(static_cast<unsigned long>(ota.wire_total_size));
+        }
         out.print(" progress=");
         out.print(ota.progress_percent);
         out.print("% partition=");

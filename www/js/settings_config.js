@@ -716,17 +716,70 @@
         up("otaProgress", "Ready / " + fmtBytes(data.total_size || 0));
         return;
       }
-      up("otaProgress", (data.progress || 0) + "% / " +
-        fmtBytes(data.bytes || 0));
+      let text = (data.progress || 0) + "% / " + fmtBytes(data.bytes || 0);
+      if (data.encoding === "zlib" && data.wire_total_size) {
+        text += " raw, " + fmtBytes(data.wire_bytes || 0) + " wire";
+      }
+      up("otaProgress", text);
     }
 
     function setOtaUploadProgress(percent, bytes) {
       up("otaProgress", percent + "% / " + fmtBytes(bytes || 0));
     }
 
-    async function prepareOtaUpload(size) {
-      const prepareResponse = await api("/api/ota/prepare?size=" +
-        encodeURIComponent(size), {method: "POST"});
+    function otaCompressedChanged() {
+      const compressed = document.getElementById("otaCompressed").checked;
+      const row = document.getElementById("otaRawSizeRow");
+      if (row) row.style.display = compressed ? "" : "none";
+    }
+
+    function otaFileChanged() {
+      const file = document.getElementById("otaFile").files[0];
+      if (!file) return;
+
+      const compressed =
+        file.name.endsWith(".zlib") || file.name.endsWith(".deflate");
+      const checkbox = document.getElementById("otaCompressed");
+      if (checkbox) checkbox.checked = compressed;
+      otaCompressedChanged();
+    }
+
+    function otaUploadQuery(plan) {
+      const params = new URLSearchParams();
+      params.set("size", String(plan.rawSize));
+      if (plan.encoding !== "plain") {
+        params.set("encoding", plan.encoding);
+        params.set("wire_size", String(plan.wireSize));
+      }
+      return params.toString();
+    }
+
+    function otaUploadPlan(file) {
+      const compressed = document.getElementById("otaCompressed").checked;
+      if (!compressed) {
+        return {
+          encoding: "plain",
+          rawSize: file.size,
+          wireSize: file.size,
+        };
+      }
+
+      const rawInput = document.getElementById("otaRawSize");
+      const rawSize = Number(rawInput.value || 0);
+      if (!Number.isFinite(rawSize) || rawSize <= 0) {
+        throw new Error("Enter raw decompressed image size");
+      }
+
+      return {
+        encoding: "zlib",
+        rawSize: Math.floor(rawSize),
+        wireSize: file.size,
+      };
+    }
+
+    async function prepareOtaUpload(plan) {
+      const prepareResponse = await api("/api/ota/prepare?" +
+        otaUploadQuery(plan), {method: "POST"});
       let data = await prepareResponse.json();
       renderOta(data);
 
@@ -750,7 +803,7 @@
     async function otaUpload() {
       const file = document.getElementById("otaFile").files[0];
       if (!file) {
-        msg("otaMsg", "Select firmware .bin", false);
+        msg("otaMsg", "Select firmware image", false);
         return;
       }
 
@@ -761,8 +814,10 @@
       setOtaUploadProgress(0, 0);
 
       try {
+        const plan = otaUploadPlan(file);
+
         msg("otaMsg", "Preparing OTA...", true, true);
-        await prepareOtaUpload(file.size);
+        await prepareOtaUpload(plan);
         msg("otaMsg", "Uploading...", true, true);
 
         const xhr = new XMLHttpRequest();
@@ -780,7 +835,7 @@
             const data = JSON.parse(xhr.responseText || "{}");
             if (xhr.status < 300) {
               bar.style.width = "100%";
-              setOtaUploadProgress(100, data.bytes || file.size);
+              setOtaUploadProgress(100, data.wire_bytes || file.size);
             } else {
               renderOta(data);
             }
@@ -800,8 +855,7 @@
           }
         };
         xhr.onerror = () => msg("otaMsg", "Upload error", false);
-        xhr.open("POST", "/api/ota/upload?size=" +
-          encodeURIComponent(file.size));
+        xhr.open("POST", "/api/ota/upload?" + otaUploadQuery(plan));
 
         const form = new FormData();
         form.append("firmware", file);
@@ -1557,4 +1611,3 @@
         if (save) save.disabled = false;
       }
     }
-

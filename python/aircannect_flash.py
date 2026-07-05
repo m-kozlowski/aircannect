@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
+import zlib
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -36,6 +37,15 @@ class Target:
     host: str
     port: int
     base_path: str
+
+
+@dataclass(frozen=True)
+class UploadPayload:
+    filename: str
+    data: bytes
+    raw_size: int
+    wire_size: int
+    encoding: str
 
 
 def die(message: str, code: int = 1) -> None:
@@ -98,6 +108,56 @@ def validate_firmware(path: pathlib.Path) -> int:
     return size
 
 
+def make_upload_payload(path: pathlib.Path, compression: str | None) -> UploadPayload:
+    raw = path.read_bytes()
+
+    if compression is None or compression == "none":
+        return UploadPayload(
+            filename=path.name,
+            data=raw,
+            raw_size=len(raw),
+            wire_size=len(raw),
+            encoding="plain",
+        )
+
+    if compression != "zlib":
+        die(f"unsupported compression: {compression}")
+
+    compressed = zlib.compress(raw, level=6)
+    return UploadPayload(
+        filename=path.name + ".zlib",
+        data=compressed,
+        raw_size=len(raw),
+        wire_size=len(compressed),
+        encoding="zlib",
+    )
+
+
+def detect_upload_compression(
+    target: Target,
+    *,
+    auth: str | None,
+    timeout: float,
+) -> str:
+    try:
+        status, body = request_json(
+            target, "GET", "/api/ota", auth=auth, timeout=timeout
+        )
+    except (OSError, http.client.HTTPException, socket.timeout) as error:
+        print(f"compression autodetect failed: {error}; using plain")
+        return "none"
+
+    if status >= 400:
+        print(f"compression autodetect failed: HTTP {status}; using plain")
+        return "none"
+
+    encodings = body.get("upload_encodings")
+    if isinstance(encodings, list) and "zlib" in encodings:
+        return "zlib"
+
+    return "none"
+
+
 def make_connection(target: Target, timeout: float) -> http.client.HTTPConnection:
     return http.client.HTTPConnection(target.host, target.port, timeout=timeout)
 
@@ -145,17 +205,22 @@ def describe_ota_error(status: int, body: dict[str, Any]) -> str:
 def prepare_upload(
     target: Target,
     *,
-    size: int,
+    payload: UploadPayload,
     auth: str | None,
     timeout: float,
     prepare_timeout: float,
 ) -> None:
-    print(f"preparing HTTP OTA for {format_bytes(size)}...")
+    query = {"size": str(payload.raw_size)}
+    if payload.encoding != "plain":
+        query["encoding"] = payload.encoding
+        query["wire_size"] = str(payload.wire_size)
+
+    print(f"preparing HTTP OTA for {format_bytes(payload.raw_size)}...")
     status, body = request_json(
         target,
         "POST",
         "/api/ota/prepare",
-        query={"size": str(size)},
+        query=query,
         auth=auth,
         timeout=timeout,
     )
@@ -203,14 +268,13 @@ def print_progress(sent: int, total: int, *, force: bool = False) -> None:
 def upload_multipart(
     target: Target,
     *,
-    firmware: pathlib.Path,
-    size: int,
+    payload: UploadPayload,
     auth: str | None,
     timeout: float,
     chunk_size: int,
 ) -> dict[str, Any]:
     boundary = "----aircannect-" + uuid.uuid4().hex
-    filename = firmware.name
+    filename = payload.filename
     prefix = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="firmware"; '
@@ -219,7 +283,7 @@ def upload_multipart(
         "\r\n"
     ).encode("utf-8")
     suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
-    content_length = len(prefix) + size + len(suffix)
+    content_length = len(prefix) + payload.wire_size + len(suffix)
 
     headers = {
         "Accept": "application/json",
@@ -231,9 +295,14 @@ def upload_multipart(
 
     conn = make_connection(target, timeout)
     try:
+        query = {"size": str(payload.raw_size)}
+        if payload.encoding != "plain":
+            query["encoding"] = payload.encoding
+            query["wire_size"] = str(payload.wire_size)
+
         conn.putrequest(
             "POST",
-            api_path(target, "/api/ota/upload", {"size": str(size)}),
+            api_path(target, "/api/ota/upload", query),
             skip_host=False,
             skip_accept_encoding=True,
         )
@@ -242,18 +311,15 @@ def upload_multipart(
         conn.endheaders()
         conn.send(prefix)
 
-        print_progress(0, size, force=True)
+        print_progress(0, payload.wire_size, force=True)
         sent = 0
-        with firmware.open("rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                conn.send(chunk)
-                sent += len(chunk)
-                print_progress(sent, size)
+        for offset in range(0, payload.wire_size, chunk_size):
+            chunk = payload.data[offset:offset + chunk_size]
+            conn.send(chunk)
+            sent += len(chunk)
+            print_progress(sent, payload.wire_size)
         conn.send(suffix)
-        print_progress(size, size, force=True)
+        print_progress(payload.wire_size, payload.wire_size, force=True)
         print()
 
         response = conn.getresponse()
@@ -326,6 +392,18 @@ def main() -> int:
         help="run pio build for --env before flashing",
     )
     parser.add_argument(
+        "--compress",
+        nargs="?",
+        const="zlib",
+        default="auto",
+        choices=("auto", "zlib", "none"),
+        help=(
+            "transport compression: auto probes target support, zlib forces "
+            "compressed upload, none forces plain upload (bare --compress "
+            "means zlib)"
+        ),
+    )
+    parser.add_argument(
         "-u",
         "--user",
         default=os.environ.get("AIRCANNECT_HTTP_USER", DEFAULT_USER),
@@ -369,23 +447,43 @@ def main() -> int:
     )
     print(f"firmware: {firmware} ({format_bytes(size)})")
 
+    compression = args.compress
+    if compression == "auto":
+        compression = detect_upload_compression(
+            target, auth=authorization, timeout=args.timeout
+        )
+
+    payload = make_upload_payload(firmware, compression)
+
+    if payload.encoding != "plain":
+        ratio = payload.wire_size / payload.raw_size * 100.0
+        print(
+            f"transport: {payload.encoding} "
+            f"{format_bytes(payload.wire_size)} ({ratio:.1f}% of raw)"
+        )
+    else:
+        print("transport: plain")
+
     prepare_upload(
         target,
-        size=size,
+        payload=payload,
         auth=authorization,
         timeout=args.timeout,
         prepare_timeout=args.prepare_timeout,
     )
     body = upload_multipart(
         target,
-        firmware=firmware,
-        size=size,
+        payload=payload,
         auth=authorization,
         timeout=max(args.timeout, 60.0),
         chunk_size=args.chunk_size,
     )
     partition = body.get("partition") or "--"
-    print(f"upload complete: bytes={body.get('bytes', size)} partition={partition}")
+    print(
+        f"upload complete: bytes={body.get('bytes', size)} "
+        f"wire_bytes={body.get('wire_bytes', payload.wire_size)} "
+        f"partition={partition}"
+    )
     if not args.no_wait:
         wait_for_reboot(
             target,
