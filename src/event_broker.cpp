@@ -16,6 +16,7 @@ const char *const EMPTY_SUBSCRIBE_PARAMS = "{\"dataIds\":[]}";
 const char *const BASE_EVENT_DATA_IDS[] = {
     "SystemActivityEvents-FrequentActivityEvents",
     "SystemActivityEvents-SporadicActivityEvents",
+    "UsageEvents-TherapyStatusEvents",
     SETTINGS_HISTORY_CHANGE_DATA_ID,
 };
 
@@ -179,16 +180,24 @@ bool response_data_id_valid(JsonArrayConst ids, const char *data_id) {
 }
 
 bool response_has_valid_activity_selector(JsonArrayConst ids) {
+    bool system_activity_valid = false;
+    bool usage_events_valid = false;
+
     for (JsonObjectConst item : ids) {
         std::string returned_id;
         if (!variant_to_string(item["dataId"], returned_id)) continue;
         if ((returned_id == "SystemActivityEvents-FrequentActivityEvents" ||
              returned_id == "SystemActivityEvents-SporadicActivityEvents") &&
             item["valid"].as<bool>()) {
-            return true;
+            system_activity_valid = true;
+        }
+        if (returned_id == "UsageEvents-TherapyStatusEvents" &&
+            item["valid"].as<bool>()) {
+            usage_events_valid = true;
         }
     }
-    return false;
+
+    return system_activity_valid && usage_events_valid;
 }
 
 bool variant_to_int32(JsonVariantConst value, int32_t &out) {

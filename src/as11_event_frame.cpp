@@ -9,7 +9,8 @@ const char *const AS11_EVENT_NAME_VALUE_CHANGE = "ValueChange";
 
 bool as11_event_data_id_is_activity(const std::string &data_id) {
     return data_id == "SystemActivityEvents-FrequentActivityEvents" ||
-           data_id == "SystemActivityEvents-SporadicActivityEvents";
+           data_id == "SystemActivityEvents-SporadicActivityEvents" ||
+           data_id == "UsageEvents-TherapyStatusEvents";
 }
 
 As11EventRecordKind as11_event_record_kind_from_name(

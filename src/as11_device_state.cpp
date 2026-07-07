@@ -137,10 +137,10 @@ As11TherapyTarget target_for_method(const std::string &method) {
 }
 
 As11TherapyState therapy_state_for_event(const std::string &event) {
-    if (event == "TherapyStarted") {
+    if (event == "TherapyStarted" || event == "TherapyStart") {
         return As11TherapyState::Running;
     }
-    if (event == "StandbyStarted") {
+    if (event == "StandbyStarted" || event == "TherapyStop") {
         return As11TherapyState::Standby;
     }
     if (event == "MaskfitStarted" || event == "TestDriveStarted" ||
@@ -282,8 +282,7 @@ bool as11_parse_event_subscription_response(const std::string &payload,
     for (JsonObjectConst item : ids) {
         std::string data_id;
         if (!variant_to_string(item["dataId"], data_id)) continue;
-        if (data_id != "SystemActivityEvents-FrequentActivityEvents" &&
-            data_id != "SystemActivityEvents-SporadicActivityEvents") {
+        if (!as11_event_data_id_is_activity(data_id)) {
             continue;
         }
         saw_supported_selector = true;

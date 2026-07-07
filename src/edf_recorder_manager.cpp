@@ -338,11 +338,12 @@ void EdfRecorderManager::begin_mask_event(const char *start_time,
 void EdfRecorderManager::finish_mask_event(const char *end_time,
                                            uint32_t now_ms) {
     (void)now_ms;
+
     if (!end_time || !end_time[0]) {
         status_.mask_bad_events++;
         return;
     }
-    if (!status_.active) return;
+    if (!str_.active()) return;
 
     EdfLocalDateTime end;
     if (!parse_session_local_time(end_time, end)) {
@@ -372,6 +373,15 @@ void EdfRecorderManager::finish_mask_event(const char *end_time,
     copy_cstr(status_.last_mask_event_time,
               sizeof(status_.last_mask_event_time),
               end_time);
+
+    if (!str_.therapy_open()) {
+        if (str_summary_rpc_.active) {
+            str_record_pending_write_ = true;
+        } else {
+            str_record_pending_write_ = false;
+            (void)write_str_day_record();
+        }
+    }
 }
 
 bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {

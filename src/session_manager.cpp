@@ -27,7 +27,7 @@ bool recent_therapy_start_activity(const As11DeviceState &as11,
         return false;
     }
     const std::string &event = as11.last_activity_event();
-    return event == "TherapyStarted";
+    return event == "TherapyStarted" || event == "TherapyStart";
 }
 
 }  // namespace
