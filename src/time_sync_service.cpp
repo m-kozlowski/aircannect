@@ -175,6 +175,8 @@ void TimeSyncService::apply_timezone() {
     }
     tzset();
     applied_timezone_ = timezone;
+    timezone_revision_++;
+    if (timezone_revision_ == 0) timezone_revision_ = 1;
 }
 
 void TimeSyncService::start_ntp() {

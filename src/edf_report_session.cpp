@@ -10,27 +10,89 @@ namespace {
 
 constexpr int64_t ANNOTATION_MATCH_TOLERANCE_MS = 2 * 60 * 1000;
 
-bool valid_file_bounds(const EdfReportSessionFileDescriptor &file) {
+bool valid_file_bounds(const EdfReportSessionFileDescriptor &file,
+                       bool local) {
+    const int64_t start_ms = local ? file.local_header_start_ms
+                                   : file.header_start_ms;
+    const int64_t end_ms = local ? file.local_header_end_ms
+                                 : file.header_end_ms;
+
     return file.kind != EdfInventoryFileKind::Unknown && file.path[0] &&
-           file.header_start_ms > 0 && file.header_end_ms >= file.header_start_ms;
+           start_ms > 0 && end_ms >= start_ms;
 }
 
 bool add_file_bounds(const EdfReportSessionDescriptor &session,
                      EdfInventoryFileKind kind,
+                     bool local,
                      int64_t &start_ms,
                      int64_t &end_ms) {
     const size_t slot = edf_report_session_file_slot(kind);
     if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return false;
 
     const EdfReportSessionFileDescriptor &file = session.files[slot];
-    if (file.kind != kind || !valid_file_bounds(file)) return false;
+    if (file.kind != kind || !valid_file_bounds(file, local)) return false;
 
-    if (start_ms == 0 || file.header_start_ms < start_ms) {
-        start_ms = file.header_start_ms;
+    const int64_t file_start_ms = local ? file.local_header_start_ms
+                                        : file.header_start_ms;
+    const int64_t file_end_ms = local ? file.local_header_end_ms
+                                      : file.header_end_ms;
+
+    if (start_ms == 0 || file_start_ms < start_ms) {
+        start_ms = file_start_ms;
     }
-    end_ms = std::max(end_ms,
-                      std::max(file.header_end_ms, file.header_start_ms));
+    end_ms = std::max(end_ms, std::max(file_end_ms, file_start_ms));
     return true;
+}
+
+void refresh_bounds(EdfReportSessionDescriptor &session,
+                    bool local,
+                    int64_t &start_ms,
+                    int64_t &end_ms) {
+    start_ms = 0;
+    end_ms = 0;
+
+    if (!add_file_bounds(session,
+                         EdfInventoryFileKind::Brp,
+                         local,
+                         start_ms,
+                         end_ms)) {
+        (void)add_file_bounds(session,
+                              EdfInventoryFileKind::Pld,
+                              local,
+                              start_ms,
+                              end_ms);
+        (void)add_file_bounds(session,
+                              EdfInventoryFileKind::Sa2,
+                              local,
+                              start_ms,
+                              end_ms);
+    }
+
+    if (start_ms == 0) {
+        (void)add_file_bounds(session,
+                              EdfInventoryFileKind::Eve,
+                              local,
+                              start_ms,
+                              end_ms);
+        (void)add_file_bounds(session,
+                              EdfInventoryFileKind::Csl,
+                              local,
+                              start_ms,
+                              end_ms);
+    }
+}
+
+int64_t session_match_start_ms(
+    const EdfReportSessionDescriptor &session) {
+    return session.local_earliest_header_start_ms > 0
+        ? session.local_earliest_header_start_ms
+        : session.earliest_header_start_ms;
+}
+
+int64_t session_match_end_ms(const EdfReportSessionDescriptor &session) {
+    return session.local_latest_header_end_ms > 0
+        ? session.local_latest_header_end_ms
+        : session.latest_header_end_ms;
 }
 
 bool session_windows_match_with_tolerance(int64_t first_start_ms,
@@ -133,45 +195,50 @@ bool edf_session_annotation_matches_numeric(
     }
 
     return session_windows_match_with_tolerance(
-        numeric_session.earliest_header_start_ms,
-        numeric_session.latest_header_end_ms,
-        annotation_session.earliest_header_start_ms,
-        annotation_session.latest_header_end_ms);
+        session_match_start_ms(numeric_session),
+        session_match_end_ms(numeric_session),
+        session_match_start_ms(annotation_session),
+        session_match_end_ms(annotation_session));
 }
 
 void edf_report_session_refresh_bounds(EdfReportSessionDescriptor &session) {
-    int64_t start_ms = 0;
-    int64_t end_ms = 0;
+    // BRP carries the two required high-resolution report signals. Its
+    // physical window remains canonical in both wall-clock and UTC timelines.
+    refresh_bounds(session,
+                   true,
+                   session.local_earliest_header_start_ms,
+                   session.local_latest_header_end_ms);
+    refresh_bounds(session,
+                   false,
+                   session.earliest_header_start_ms,
+                   session.latest_header_end_ms);
+}
 
-    // BRP carries the two required high-resolution report signals. Its physical
-    // window is the canonical numeric session window when it is available.
-    if (!add_file_bounds(session,
-                         EdfInventoryFileKind::Brp,
-                         start_ms,
-                         end_ms)) {
-        (void)add_file_bounds(session,
-                              EdfInventoryFileKind::Pld,
-                              start_ms,
-                              end_ms);
-        (void)add_file_bounds(session,
-                              EdfInventoryFileKind::Sa2,
-                              start_ms,
-                              end_ms);
+bool edf_report_session_apply_timezone_offset(
+    EdfReportSessionDescriptor &session,
+    int32_t timezone_offset_minutes) {
+    constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
+    if (timezone_offset_minutes < -MAX_TIMEZONE_OFFSET_MINUTES ||
+        timezone_offset_minutes > MAX_TIMEZONE_OFFSET_MINUTES) {
+        return false;
     }
 
-    if (start_ms == 0) {
-        (void)add_file_bounds(session,
-                              EdfInventoryFileKind::Eve,
-                              start_ms,
-                              end_ms);
-        (void)add_file_bounds(session,
-                              EdfInventoryFileKind::Csl,
-                              start_ms,
-                              end_ms);
+    const int64_t offset_ms =
+        static_cast<int64_t>(timezone_offset_minutes) * 60LL * 1000LL;
+    bool applied = false;
+    for (size_t i = 0; i < AC_EDF_REPORT_SESSION_FILE_MAX; ++i) {
+        EdfReportSessionFileDescriptor &file = session.files[i];
+        if (!valid_file_bounds(file, true)) continue;
+
+        file.header_start_ms = file.local_header_start_ms - offset_ms;
+        file.header_end_ms = file.local_header_end_ms - offset_ms;
+        applied = true;
     }
 
-    session.earliest_header_start_ms = start_ms;
-    session.latest_header_end_ms = end_ms;
+    if (!applied) return false;
+    edf_report_session_refresh_bounds(session);
+    return session.earliest_header_start_ms > 0 &&
+           session.latest_header_end_ms >= session.earliest_header_start_ms;
 }
 
 void normalize_edf_report_sessions(EdfReportSessionDescriptor *sessions,
@@ -201,8 +268,8 @@ void normalize_edf_report_sessions(EdfReportSessionDescriptor *sessions,
             }
 
             const int64_t distance =
-                llabs(sessions[j].earliest_header_start_ms -
-                      sessions[i].earliest_header_start_ms);
+                llabs(session_match_start_ms(sessions[j]) -
+                      session_match_start_ms(sessions[i]));
             if (distance < best_distance) {
                 best = j;
                 best_distance = distance;

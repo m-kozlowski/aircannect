@@ -48,7 +48,7 @@ public:
     bool idle_prebuild = false;
     std::atomic<uint64_t> night_start_ms{0};
     ReportPlotBuildPhase phase = ReportPlotBuildPhase::Idle;
-    PlotRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    const PlotRange *ranges = nullptr;
     size_t range_count = 0;
     int64_t start_ms = 0;
     int64_t end_ms = 0;

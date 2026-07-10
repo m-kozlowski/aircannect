@@ -65,7 +65,7 @@ bool ReportSourceResolver::build_plan(const ReportIndexedNight &night,
     const size_t source_range_count =
         collect_indexed_night_report_ranges(night,
                                             source_ranges,
-                                            AC_REPORT_SUMMARY_SESSION_MAX);
+                                            AC_REPORT_NIGHT_SESSION_MAX);
 
     ReportSessionRange *required_ranges = scratch_.required_ranges;
     const size_t required_range_count =
@@ -74,7 +74,7 @@ bool ReportSourceResolver::build_plan(const ReportIndexedNight &night,
                                 range_start_ms,
                                 range_end_ms,
                                 required_ranges,
-                                AC_REPORT_SUMMARY_SESSION_MAX);
+                                AC_REPORT_NIGHT_SESSION_MAX);
     if (required_range_count == 0) return true;
 
     out.range_count = required_range_count;

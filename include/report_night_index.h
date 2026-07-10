@@ -9,12 +9,13 @@
 
 namespace aircannect {
 
-// EDF catalog groups numeric and annotation files separately. Keep provider and
-// source-signature capacity independent from display/session ranges so a
-// multi-session sleep-day can carry split descriptor classes without dropping
-// the tail of short-session-heavy nights.
+// Summary RPC records carry at most 16 intervals, but EDF-backed nights can
+// contain many more short logical sessions. Keep the report model independent
+// from the Summary wire-format limit.
 static constexpr size_t AC_REPORT_EDF_SESSION_MAX =
     AC_REPORT_SUMMARY_SESSION_MAX * 4;
+static constexpr size_t AC_REPORT_NIGHT_SESSION_MAX =
+    AC_REPORT_EDF_SESSION_MAX + AC_REPORT_SUMMARY_SESSION_MAX;
 
 struct ReportSessionRange {
     int64_t start_ms = 0;
@@ -23,9 +24,9 @@ struct ReportSessionRange {
 
 struct ReportIndexedNight {
     ReportSummaryRecord summary;
-    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    ReportSessionRange ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
     size_t range_count = 0;
-    ReportSessionRange data_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    ReportSessionRange data_ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
     size_t data_range_count = 0;
     uint64_t edf_source_signatures[AC_REPORT_EDF_SESSION_MAX] = {};
     size_t edf_source_signature_count = 0;

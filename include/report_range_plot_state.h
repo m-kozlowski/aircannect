@@ -58,7 +58,7 @@ public:
     size_t stream_count = 0;
     EdfReportSessionDescriptor *edf_sessions = nullptr;
     size_t edf_session_count = 0;
-    PlotRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    PlotRange *ranges = nullptr;
     size_t range_count = 0;
 
     std::shared_ptr<ReportSpoolBuffer> bytes;

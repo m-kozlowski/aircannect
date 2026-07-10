@@ -94,10 +94,10 @@ bool ReportRangePlotBuilder::process_edf_series_batch(
         return false;
     }
 
-    EdfReportPlotRange fast_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    EdfReportPlotRange fast_ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
     const size_t fast_range_count =
         std::min(state.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     for (size_t i = 0; i < fast_range_count; ++i) {
         fast_ranges[i].start_ms = state.ranges[i].start_ms;
         fast_ranges[i].end_ms = state.ranges[i].end_ms;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include "edf_report_catalog_job.h"
+#include "report_edf_timezone.h"
 #include "report_night_index.h"
 
 namespace aircannect {
@@ -53,6 +54,27 @@ bool ReportEdfCatalogContext::session_reportable(
     return catalog_ && edf_report_session_reportable(session);
 }
 
+bool ReportEdfCatalogContext::resolve_session_timezone(
+    EdfReportSessionDescriptor &session,
+    const ReportSummaryRecord *matching_summary,
+    int32_t &offset_minutes) const {
+    int32_t current_offset_minutes = 0;
+    const bool current_offset_valid =
+        timezone_offset_minutes(current_offset_minutes);
+
+    ReportEdfTimezoneResolution resolution;
+    if (!report_edf_resolve_session_timezone(session,
+                                             matching_summary,
+                                             current_offset_valid,
+                                             current_offset_minutes,
+                                             resolution)) {
+        return false;
+    }
+
+    offset_minutes = resolution.offset_minutes;
+    return true;
+}
+
 bool ReportEdfCatalogContext::collect_sessions_for_night(
     const ReportSummaryRecord &night,
     int64_t range_start_ms,
@@ -93,6 +115,17 @@ bool ReportEdfCatalogContext::collect_sessions_for_night(
         const bool matches_sleep_day =
             have_target_sleep_day &&
             strcmp(session.sleep_day, target_sleep_day) == 0;
+        if (have_target_sleep_day && !matches_sleep_day) continue;
+
+        int32_t resolved_offset_minutes = 0;
+        const ReportSummaryRecord *matching_summary =
+            matches_sleep_day ? &night : nullptr;
+        if (!resolve_session_timezone(session,
+                                      matching_summary,
+                                      resolved_offset_minutes)) {
+            continue;
+        }
+
         const bool matches_range =
             session.earliest_header_start_ms > 0 &&
             session.latest_header_end_ms > session.earliest_header_start_ms &&

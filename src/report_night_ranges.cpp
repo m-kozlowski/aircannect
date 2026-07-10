@@ -19,6 +19,20 @@ bool range_covers_with_tolerance(const ReportSessionRange &outer,
            outer.end_ms + tolerance_ms >= inner.end_ms;
 }
 
+int64_t range_gap_ms(const ReportSessionRange &first,
+                     const ReportSessionRange &second) {
+    if (ranges_overlap(first.start_ms,
+                       first.end_ms,
+                       second.start_ms,
+                       second.end_ms)) {
+        return 0;
+    }
+    if (first.end_ms <= second.start_ms) {
+        return second.start_ms - first.end_ms;
+    }
+    return first.start_ms - second.end_ms;
+}
+
 }  // namespace
 
 void normalize_range_array(ReportSessionRange *ranges, size_t &count) {
@@ -28,7 +42,7 @@ void normalize_range_array(ReportSessionRange *ranges, size_t &count) {
     }
 
     count = std::min(count,
-                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                     static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     std::sort(ranges,
               ranges + count,
               [](const ReportSessionRange &a,
@@ -43,9 +57,6 @@ void normalize_range_array(ReportSessionRange *ranges, size_t &count) {
         ranges[write++] = range;
     }
 
-    for (size_t i = write; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
-        ranges[i] = ReportSessionRange{};
-    }
     count = write;
 }
 
@@ -59,12 +70,11 @@ void coalesce_sorted_range_array(ReportSessionRange *ranges, size_t &count) {
 
         if (write > 0) {
             ReportSessionRange &previous = ranges[write - 1];
-            const int64_t gap_ms =
-                range.start_ms > previous.end_ms
-                    ? range.start_ms - previous.end_ms
-                    : 0;
-
-            if (gap_ms <= REPORT_SESSION_MERGE_TOLERANCE_MS) {
+            if (ranges_overlap(previous.start_ms,
+                               previous.end_ms,
+                               range.start_ms,
+                               range.end_ms) ||
+                range.start_ms == previous.end_ms) {
                 previous.start_ms = std::min(previous.start_ms,
                                              range.start_ms);
                 previous.end_ms = std::max(previous.end_ms, range.end_ms);
@@ -75,9 +85,6 @@ void coalesce_sorted_range_array(ReportSessionRange *ranges, size_t &count) {
         ranges[write++] = range;
     }
 
-    for (size_t i = write; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
-        ranges[i] = ReportSessionRange{};
-    }
     count = write;
 }
 
@@ -175,17 +182,17 @@ bool indexed_night_data_span(const ReportIndexedNight &night,
         }
     };
 
-    ReportSessionRange data_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-    const size_t data_count =
-        collect_indexed_night_data_ranges(night,
-                                          data_ranges,
-                                          AC_REPORT_SUMMARY_SESSION_MAX);
+    const size_t data_count = std::min(
+        night.data_range_count,
+        static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     if (night.has_edf && data_count > 0) {
-        for (size_t i = 0; i < data_count; ++i) add_range(data_ranges[i]);
+        for (size_t i = 0; i < data_count; ++i) {
+            add_range(night.data_ranges[i]);
+        }
     } else {
         const size_t display_count =
             std::min(night.range_count,
-                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                     static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
         for (size_t i = 0; i < display_count; ++i) {
             add_range(night.ranges[i]);
         }
@@ -209,15 +216,13 @@ bool indexed_night_summary_ranges_covered_by_data(
                                AC_REPORT_SUMMARY_SESSION_MAX);
     if (summary_count == 0) return false;
 
-    ReportSessionRange data_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-    const size_t data_count =
-        collect_indexed_night_data_ranges(night,
-                                          data_ranges,
-                                          AC_REPORT_SUMMARY_SESSION_MAX);
+    const size_t data_count = std::min(
+        night.data_range_count,
+        static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     for (size_t i = 0; i < summary_count; ++i) {
         bool covered = false;
         for (size_t j = 0; j < data_count; ++j) {
-            if (range_covers_with_tolerance(data_ranges[j],
+            if (range_covers_with_tolerance(night.data_ranges[j],
                                             summary_ranges[i],
                                             REPORT_SESSION_MERGE_TOLERANCE_MS)) {
                 covered = true;
@@ -238,7 +243,7 @@ size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
     size_t count = 0;
     const size_t edf_count =
         std::min(night.data_range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     if (night.has_edf && edf_count > 0) {
         for (size_t i = 0; i < edf_count && count < max_ranges; ++i) {
             if (night.data_ranges[i].end_ms <=
@@ -250,7 +255,7 @@ size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
     } else {
         const size_t display_count =
             std::min(night.range_count,
-                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                     static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
         for (size_t i = 0; i < display_count && count < max_ranges; ++i) {
             if (night.ranges[i].end_ms <= night.ranges[i].start_ms) {
                 continue;
@@ -271,36 +276,94 @@ size_t collect_indexed_night_report_ranges(const ReportIndexedNight &night,
 
     const size_t display_count =
         std::min(night.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     const size_t edf_count =
         std::min(night.data_range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    const bool use_display_ranges =
-        display_count > 0 &&
-        (!night.has_edf ||
-         edf_count == 0 ||
-         indexed_night_summary_ranges_covered_by_data(night));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
 
     size_t count = 0;
-    if (use_display_ranges) {
-        for (size_t i = 0; i < display_count && count < max_ranges; ++i) {
-            if (night.ranges[i].end_ms <= night.ranges[i].start_ms) continue;
-            ranges[count++] = night.ranges[i];
-        }
-    } else if (night.has_edf && edf_count > 0) {
-        for (size_t i = 0; i < edf_count && count < max_ranges; ++i) {
-            if (night.data_ranges[i].end_ms <=
-                night.data_ranges[i].start_ms) {
-                continue;
+    auto append = [&](const ReportSessionRange &range) {
+        if (count >= max_ranges || range.end_ms <= range.start_ms) return;
+        ranges[count++] = range;
+    };
+
+    if (display_count == 0) {
+        for (size_t i = 0; i < edf_count; ++i) append(night.data_ranges[i]);
+        normalize_range_array(ranges, count);
+        return count;
+    }
+    if (!night.has_edf || edf_count == 0) {
+        for (size_t i = 0; i < display_count; ++i) append(night.ranges[i]);
+        normalize_range_array(ranges, count);
+        return count;
+    }
+
+    bool data_used[AC_REPORT_NIGHT_SESSION_MAX] = {};
+    for (size_t display_index = 0;
+         display_index < display_count;
+         ++display_index) {
+        const ReportSessionRange &display = night.ranges[display_index];
+        if (display.end_ms <= display.start_ms) continue;
+
+        size_t matches[AC_REPORT_NIGHT_SESSION_MAX] = {};
+        size_t match_count = 0;
+        for (size_t data_index = 0; data_index < edf_count; ++data_index) {
+            if (data_used[data_index]) continue;
+            const ReportSessionRange &data = night.data_ranges[data_index];
+            if (ranges_overlap(display.start_ms,
+                               display.end_ms,
+                               data.start_ms,
+                               data.end_ms)) {
+                matches[match_count++] = data_index;
             }
-            ranges[count++] = night.data_ranges[i];
         }
+
+        if (match_count == 0) {
+            size_t nearest = edf_count;
+            int64_t nearest_gap_ms = INT64_MAX;
+            for (size_t data_index = 0; data_index < edf_count; ++data_index) {
+                if (data_used[data_index]) continue;
+                const int64_t gap_ms =
+                    range_gap_ms(display, night.data_ranges[data_index]);
+                if (gap_ms <= REPORT_SESSION_MERGE_TOLERANCE_MS &&
+                    gap_ms < nearest_gap_ms) {
+                    nearest = data_index;
+                    nearest_gap_ms = gap_ms;
+                }
+            }
+            if (nearest < edf_count) matches[match_count++] = nearest;
+        }
+
+        if (match_count == 0) {
+            append(display);
+            continue;
+        }
+
+        bool display_covered = false;
+        for (size_t i = 0; i < match_count; ++i) {
+            const size_t data_index = matches[i];
+            data_used[data_index] = true;
+            display_covered = display_covered ||
+                range_covers_with_tolerance(
+                    night.data_ranges[data_index],
+                    display,
+                    REPORT_SESSION_MERGE_TOLERANCE_MS);
+        }
+
+        if (display_covered) {
+            append(display);
+        } else {
+            for (size_t i = 0; i < match_count; ++i) {
+                append(night.data_ranges[matches[i]]);
+            }
+        }
+    }
+
+    for (size_t data_index = 0; data_index < edf_count; ++data_index) {
+        if (!data_used[data_index]) append(night.data_ranges[data_index]);
     }
 
     normalize_range_array(ranges, count);
-    if (!use_display_ranges) {
-        coalesce_sorted_range_array(ranges, count);
-    }
     return count;
 }
 

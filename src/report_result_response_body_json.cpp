@@ -63,7 +63,7 @@ void build_report_result_json_from(
     const size_t session_json_count =
         have_index_ranges
             ? std::min(indexed_night.range_count,
-                       static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX))
+                       static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX))
             : (have_resolved_ranges
                    ? range_count
                    : result_night.session_interval_count);

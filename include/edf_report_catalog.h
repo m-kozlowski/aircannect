@@ -39,6 +39,8 @@ struct EdfReportFileDescriptor {
     char path[AC_EDF_REPORT_PATH_MAX] = {};
     uint64_t file_size = 0;
     time_t last_write = 0;
+    int64_t local_header_start_ms = 0;
+    int64_t local_header_end_ms = 0;
     int64_t header_start_ms = 0;
     int64_t header_end_ms = 0;
     uint32_t header_size = 0;
@@ -69,6 +71,8 @@ struct EdfReportSessionFileDescriptor {
     char path[AC_EDF_REPORT_PATH_MAX] = {};
     uint64_t file_size = 0;
     time_t last_write = 0;
+    int64_t local_header_start_ms = 0;
+    int64_t local_header_end_ms = 0;
     int64_t header_start_ms = 0;
     int64_t header_end_ms = 0;
     uint32_t header_size = 0;
@@ -87,6 +91,8 @@ struct EdfReportSessionDescriptor {
     size_t file_count = 0;
     uint64_t total_size = 0;
     time_t latest_write = 0;
+    int64_t local_earliest_header_start_ms = 0;
+    int64_t local_latest_header_end_ms = 0;
     int64_t earliest_header_start_ms = 0;
     int64_t latest_header_end_ms = 0;
     EdfReportSessionFileDescriptor files[AC_EDF_REPORT_SESSION_FILE_MAX] = {};

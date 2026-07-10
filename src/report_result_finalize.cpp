@@ -15,7 +15,7 @@ namespace aircannect {
 bool ReportResultBuildService::count_events_from_chunks() {
     const size_t range_count =
         std::min(runtime_.ranges().count(),
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     runtime_.status().oa_count = 0;
     runtime_.status().ca_count = 0;
     runtime_.status().ua_count = 0;

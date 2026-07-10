@@ -33,7 +33,7 @@ void append_summary_sessions_json(LargeTextBuffer &json,
                                   const ReportIndexedNight &night) {
     const size_t range_count =
         std::min(night.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     bool first = true;
 
     if (range_count > 0) {
@@ -94,7 +94,7 @@ uint32_t report_indexed_night_display_duration_min(
     uint32_t duration_min = 0;
     const size_t range_count =
         std::min(night.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
 
     for (size_t i = 0; i < range_count; ++i) {
         duration_min += report_ceil_duration_min(night.ranges[i].start_ms,

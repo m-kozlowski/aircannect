@@ -16,6 +16,7 @@ struct ReportNightIndexCacheKey {
     bool catalog_present = false;
     uint8_t catalog_state = 0;
     uint32_t catalog_refresh_id = 0;
+    uint32_t timezone_revision = 0;
 };
 
 bool report_night_index_cache_key_equal(

@@ -35,6 +35,7 @@ public:
     bool esp_clock_valid() const;
     EspClockSource esp_clock_source() const { return esp_clock_source_; }
     const char *esp_clock_source_name() const;
+    uint32_t timezone_revision() const { return timezone_revision_; }
     const char *last_status() const { return last_status_.c_str(); }
     bool utc_now_iso(char *out, size_t size) const;
     std::string utc_now_iso() const;
@@ -61,6 +62,7 @@ private:
     WifiManager *wifi_manager_ = nullptr;
     RpcArbiter *arbiter_ = nullptr;
     String applied_timezone_;
+    uint32_t timezone_revision_ = 0;
 
     bool ntp_started_ = false;
     bool ntp_synced_ = false;

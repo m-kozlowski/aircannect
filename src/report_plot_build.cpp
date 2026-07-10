@@ -102,18 +102,17 @@ bool ReportResultPlotBuilder::start() {
 
     const size_t range_count =
         std::min(result_.ranges().count(),
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     if (range_count == 0) {
         report_build_empty_plot_bin(result_.plot().result_bin);
         return cache_.publish_result(result_);
     }
 
+    result_.plot().ranges = result_.ranges().data();
     result_.plot().range_count = range_count;
     result_.plot().start_ms = result_.ranges()[0].start_ms;
     result_.plot().end_ms = result_.ranges()[0].end_ms;
     for (size_t i = 0; i < range_count; ++i) {
-        result_.plot().ranges[i] = result_.ranges()[i];
-
         result_.plot().start_ms =
             std::min(result_.plot().start_ms, result_.ranges()[i].start_ms);
         result_.plot().end_ms =

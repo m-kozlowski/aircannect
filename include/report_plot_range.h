@@ -1,14 +1,11 @@
 #pragma once
 
-#include <stdint.h>
+#include "report_night_index.h"
 
 namespace aircannect {
 namespace report_manager_internal {
 
-struct PlotRange {
-    int64_t start_ms = 0;
-    int64_t end_ms = 0;
-};
+using PlotRange = ReportSessionRange;
 
 }  // namespace report_manager_internal
 }  // namespace aircannect

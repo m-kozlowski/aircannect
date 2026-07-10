@@ -16,7 +16,7 @@ void ReportPlotBuildState::reset() {
     build_bin.clear();
     tmp.clear();
     ok = true;
-    memset(ranges, 0, sizeof(ranges));
+    ranges = nullptr;
     range_count = 0;
     start_ms = 0;
     end_ms = 0;

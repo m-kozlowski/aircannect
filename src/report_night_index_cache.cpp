@@ -13,7 +13,8 @@ bool report_night_index_cache_key_equal(
     return a.summary_revision == b.summary_revision &&
            a.catalog_present == b.catalog_present &&
            a.catalog_state == b.catalog_state &&
-           a.catalog_refresh_id == b.catalog_refresh_id;
+           a.catalog_refresh_id == b.catalog_refresh_id &&
+           a.timezone_revision == b.timezone_revision;
 }
 
 ReportNightIndexCache::~ReportNightIndexCache() {

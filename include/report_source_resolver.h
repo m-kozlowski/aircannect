@@ -13,7 +13,7 @@ namespace aircannect {
 
 static constexpr size_t AC_REPORT_RESOLVED_STREAM_MAX = 32;
 static constexpr size_t AC_REPORT_RESOLVED_SEGMENT_MAX =
-    AC_REPORT_SUMMARY_SESSION_MAX * 12;
+    AC_REPORT_NIGHT_SESSION_MAX * 12;
 
 struct ReportCoverageInterval {
     int64_t start_ms = 0;
@@ -24,9 +24,9 @@ struct ReportCoverageInterval {
 struct ReportResolveScratch {
     ReportCoverageInterval coverage[AC_REPORT_RESOLVED_SEGMENT_MAX] = {};
     ReportCoverageInterval fallback[AC_REPORT_RESOLVED_SEGMENT_MAX] = {};
-    ReportSessionRange source_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-    ReportSessionRange required_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-    EdfReportRequiredRange edf_required_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    ReportSessionRange source_ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
+    ReportSessionRange required_ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
+    EdfReportRequiredRange edf_required_ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
 };
 
 enum class ReportResolvedProvider : uint8_t {
@@ -65,7 +65,7 @@ struct ReportResolvedSegment {
 };
 
 struct ReportResolvedPlan {
-    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    ReportSessionRange ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
     size_t range_count = 0;
 
     ReportResolvedStream streams[AC_REPORT_RESOLVED_STREAM_MAX] = {};

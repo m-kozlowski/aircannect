@@ -79,6 +79,7 @@ static StackProfiler stack_profiler;
 static uint32_t edf_report_catalog_seen_sessions_ended = 0;
 static bool edf_report_catalog_post_session_pending = false;
 static uint32_t edf_report_catalog_refresh_due_ms = 0;
+static uint32_t edf_report_catalog_timezone_revision = 0;
 
 class FileLogBackgroundJob : public BackgroundJob {
 public:
@@ -402,6 +403,11 @@ void setup() {
     report_manager.begin();
     resmed_ota_manager.begin(rpc_arbiter);
     time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
+    if (edf_report_catalog_job.set_posix_timezone(
+            app_config.data().timezone.c_str())) {
+        edf_report_catalog_timezone_revision =
+            time_sync_service.timezone_revision();
+    }
     ota_manager.begin(app_config);
 
     // Network configuration
@@ -544,6 +550,14 @@ void loop() {
 
     if (!resmed_ota_transport_active) {
         time_sync_service.poll();
+    }
+
+    if (edf_report_catalog_timezone_revision !=
+            time_sync_service.timezone_revision() &&
+        edf_report_catalog_job.set_posix_timezone(
+            app_config.data().timezone.c_str())) {
+        edf_report_catalog_timezone_revision =
+            time_sync_service.timezone_revision();
     }
 
     drain_can_rx_after("time_sync");

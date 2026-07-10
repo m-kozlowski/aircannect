@@ -14,22 +14,22 @@ namespace aircannect {
 namespace ReportNightIndexStore {
 namespace {
 
-constexpr const char *INDEX_DIR = "/aircannect/report/v4/index/v2";
+constexpr const char *INDEX_DIR = "/aircannect/report/v4/index/v3";
 constexpr const char *INDEX_PATH =
-    "/aircannect/report/v4/index/v2/night-index.bin";
+    "/aircannect/report/v4/index/v3/night-index.bin";
 constexpr const char *INDEX_TMP_PATH =
-    "/aircannect/report/v4/index/v2/night-index.bin.tmp";
+    "/aircannect/report/v4/index/v3/night-index.bin.tmp";
 constexpr uint32_t INDEX_MAGIC = 0x494e4341u;  // "ACNI", little-endian.
-constexpr uint16_t INDEX_SCHEMA = 2;
+constexpr uint16_t INDEX_SCHEMA = 3;
 constexpr size_t INDEX_HEADER_SIZE = 32;
-constexpr size_t INDEX_RECORD_SIZE = 2048;
+constexpr size_t INDEX_RECORD_SIZE = 4096;
 constexpr size_t RECORD_SUMMARY_OFFSET = 32;
 constexpr size_t RECORD_RANGES_OFFSET =
     RECORD_SUMMARY_OFFSET + AC_REPORT_SUMMARY_RECORD_CODEC_SIZE;
 constexpr size_t RECORD_DATA_RANGES_OFFSET =
-    RECORD_RANGES_OFFSET + AC_REPORT_SUMMARY_SESSION_MAX * 16;
+    RECORD_RANGES_OFFSET + AC_REPORT_NIGHT_SESSION_MAX * 16;
 constexpr size_t RECORD_EDF_SIGNATURES_OFFSET =
-    RECORD_DATA_RANGES_OFFSET + AC_REPORT_SUMMARY_SESSION_MAX * 16;
+    RECORD_DATA_RANGES_OFFSET + AC_REPORT_NIGHT_SESSION_MAX * 16;
 static_assert(RECORD_EDF_SIGNATURES_OFFSET +
                       AC_REPORT_EDF_SESSION_MAX * sizeof(uint64_t) <=
                   INDEX_RECORD_SIZE,
@@ -142,10 +142,10 @@ bool encode_record(uint8_t *raw, const ReportIndexedNight &night) {
     put_le64(raw + 8, night.source_signature);
     const uint16_t range_count = static_cast<uint16_t>(
         std::min(night.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX)));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX)));
     const uint16_t data_range_count = static_cast<uint16_t>(
         std::min(night.data_range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX)));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX)));
     const uint16_t edf_signature_count = static_cast<uint16_t>(
         std::min(night.edf_source_signature_count,
                  static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX)));
@@ -181,10 +181,10 @@ bool decode_record(const uint8_t *raw, ReportIndexedNight &night) {
     night.source_signature = get_le64(raw + 8);
     const uint16_t range_count = static_cast<uint16_t>(
         std::min<size_t>(get_le16(raw + 16),
-                         AC_REPORT_SUMMARY_SESSION_MAX));
+                         AC_REPORT_NIGHT_SESSION_MAX));
     const uint16_t data_range_count = static_cast<uint16_t>(
         std::min<size_t>(get_le16(raw + 18),
-                         AC_REPORT_SUMMARY_SESSION_MAX));
+                         AC_REPORT_NIGHT_SESSION_MAX));
     const uint16_t edf_signature_count = static_cast<uint16_t>(
         std::min<size_t>(get_le16(raw + 20),
                          AC_REPORT_EDF_SESSION_MAX));

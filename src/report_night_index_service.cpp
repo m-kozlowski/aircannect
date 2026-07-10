@@ -8,6 +8,7 @@
 #include "edf_report_catalog_job.h"
 #include "memory_manager.h"
 #include "report_diagnostics.h"
+#include "report_edf_timezone.h"
 #include "report_night_index.h"
 #include "report_night_index_store.h"
 
@@ -76,8 +77,15 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
     count = 0;
     if (!out || capacity == 0) return false;
 
+    EdfReportCatalogStatus catalog_status;
+    const bool have_catalog_status =
+        edf_catalog_ && edf_catalog_.status(catalog_status, 0);
+    const bool catalog_ready =
+        have_catalog_status &&
+        catalog_status.state == EdfReportCatalogState::Ready;
+
     ReportNightIndex index(out, capacity);
-    (void)runtime_.seed_from_durable(index);
+    if (!catalog_ready) (void)runtime_.seed_from_durable(index);
 
     if (summary_.take(pdMS_TO_TICKS(20))) {
         const ReportSummaryRecord *records = summary_.records();
@@ -130,8 +138,6 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
         return finish_index(false, false);
     }
 
-    EdfReportCatalogStatus catalog_status;
-    const bool have_catalog_status = edf_catalog_.status(catalog_status, 0);
     if (!have_catalog_status ||
         catalog_status.state != EdfReportCatalogState::Ready) {
         if (!have_catalog_status ||
@@ -144,9 +150,6 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
                             false);
     }
 
-    int32_t timezone_offset_min = 0;
-    const bool have_timezone =
-        edf_catalog_.timezone_offset_minutes(timezone_offset_min);
     const size_t catalog_count = edf_catalog_.session_count();
 
     EdfReportSessionDescriptor *session_scratch =
@@ -162,6 +165,24 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
     for (size_t i = 0; i < catalog_count; ++i) {
         if (!edf_catalog_.copy_session(i, *session_scratch)) continue;
         if (!edf_catalog_.session_reportable(*session_scratch)) continue;
+
+        const ReportSummaryRecord *matching_summary = nullptr;
+        for (size_t night_index = 0;
+             night_index < index.count();
+             ++night_index) {
+            if (report_edf_summary_matches_sleep_day(
+                    out[night_index].summary,
+                    session_scratch->sleep_day)) {
+                matching_summary = &out[night_index].summary;
+                break;
+            }
+        }
+
+        int32_t timezone_offset_min = 0;
+        const bool have_timezone =
+            edf_catalog_.resolve_session_timezone(*session_scratch,
+                                                  matching_summary,
+                                                  timezone_offset_min);
 
         if (!index.add_edf_session(*session_scratch,
                                    have_timezone,
@@ -199,6 +220,7 @@ bool ReportNightIndexService::cache_key(ReportNightIndexCacheKey &key) const {
     }
     key.catalog_state = static_cast<uint8_t>(catalog_status.state);
     key.catalog_refresh_id = catalog_status.refresh_id;
+    key.timezone_revision = catalog_status.timezone_revision;
     return true;
 }
 

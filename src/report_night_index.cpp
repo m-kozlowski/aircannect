@@ -9,7 +9,7 @@ namespace {
 void seed_night_ranges_from_summary(ReportIndexedNight &night) {
     night.range_count = collect_session_ranges(night.summary,
                                                night.ranges,
-                                               AC_REPORT_SUMMARY_SESSION_MAX);
+                                               AC_REPORT_NIGHT_SESSION_MAX);
     normalize_range_array(night.ranges, night.range_count);
 }
 
@@ -53,34 +53,10 @@ bool ReportNightIndex::add_summary_record(
     ReportIndexedNight &night = existing >= 0
         ? nights_[static_cast<size_t>(existing)]
         : nights_[count_];
-    const bool had_edf = night.has_edf;
-    const size_t old_data_range_count = std::min(
-        night.data_range_count,
-        static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    ReportSessionRange old_data_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-    for (size_t i = 0; i < old_data_range_count; ++i) {
-        old_data_ranges[i] = night.data_ranges[i];
-    }
-    const size_t old_signature_count = std::min(
-        night.edf_source_signature_count,
-        static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX));
-    uint64_t old_signatures[AC_REPORT_EDF_SESSION_MAX] = {};
-    for (size_t i = 0; i < old_signature_count; ++i) {
-        old_signatures[i] = night.edf_source_signatures[i];
-    }
+    if (existing < 0) night = ReportIndexedNight{};
 
-    night = ReportIndexedNight{};
     night.summary = record;
     night.has_summary = true;
-    night.has_edf = had_edf;
-    night.data_range_count = old_data_range_count;
-    for (size_t i = 0; i < old_data_range_count; ++i) {
-        night.data_ranges[i] = old_data_ranges[i];
-    }
-    night.edf_source_signature_count = old_signature_count;
-    for (size_t i = 0; i < old_signature_count; ++i) {
-        night.edf_source_signatures[i] = old_signatures[i];
-    }
     night.source_signature = report_summary_identity_signature(record);
     seed_night_ranges_from_summary(night);
 
@@ -91,19 +67,20 @@ bool ReportNightIndex::add_summary_record(
 bool ReportNightIndex::add_indexed_night(const ReportIndexedNight &night) {
     if (!nights_ || !night.summary.valid) return false;
 
-    ReportIndexedNight normalized = night;
-    normalize_report_indexed_night(normalized);
-
     const int existing = find_indexed_night_by_start(nights_,
                                                      count_,
-                                                     normalized.summary.start_ms);
+                                                     night.summary.start_ms);
     if (existing >= 0) {
-        nights_[static_cast<size_t>(existing)] = normalized;
+        ReportIndexedNight &stored = nights_[static_cast<size_t>(existing)];
+        stored = night;
+        normalize_report_indexed_night(stored);
         return true;
     }
     if (count_ >= capacity_) return false;
 
-    nights_[count_++] = normalized;
+    ReportIndexedNight &stored = nights_[count_++];
+    stored = night;
+    normalize_report_indexed_night(stored);
     return true;
 }
 

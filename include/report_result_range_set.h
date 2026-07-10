@@ -15,6 +15,11 @@ class ReportResultRangeSet {
 public:
     using PlotRange = report_manager_internal::PlotRange;
 
+    ReportResultRangeSet() = default;
+    ~ReportResultRangeSet();
+    ReportResultRangeSet(const ReportResultRangeSet &) = delete;
+    ReportResultRangeSet &operator=(const ReportResultRangeSet &) = delete;
+
     void clear();
     bool append(int64_t start_ms, int64_t end_ms);
     void sort();
@@ -38,7 +43,9 @@ public:
     PlotRange &operator[](size_t index) { return ranges_[index]; }
 
 private:
-    PlotRange ranges_[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    bool ensure_ranges();
+
+    PlotRange *ranges_ = nullptr;
     size_t count_ = 0;
 };
 

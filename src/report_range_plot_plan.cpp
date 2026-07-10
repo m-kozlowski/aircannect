@@ -223,8 +223,8 @@ bool ReportRangePlotBuilder::materialize_plan(
     }
     range_plot_.state().range_count =
         std::min(plan.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
+    for (size_t i = 0; i < AC_REPORT_NIGHT_SESSION_MAX; ++i) {
         if (i < range_plot_.state().range_count) {
             range_plot_.state().ranges[i].start_ms = plan.ranges[i].start_ms;
             range_plot_.state().ranges[i].end_ms = plan.ranges[i].end_ms;

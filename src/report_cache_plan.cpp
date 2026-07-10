@@ -68,27 +68,25 @@ bool ReportCacheFetchService::build_plan(
             }
         };
 
-        ReportSessionRange data_ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-        const size_t data_count =
-            collect_indexed_night_data_ranges(indexed_night,
-                                              data_ranges,
-                                              AC_REPORT_SUMMARY_SESSION_MAX);
+        const size_t data_count = std::min(
+            indexed_night.data_range_count,
+            static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
         if (indexed_night.has_edf && data_count > 0) {
             for (size_t i = 0; i < data_count; ++i) {
-                maybe_use_latest_range(data_ranges[i]);
+                maybe_use_latest_range(indexed_night.data_ranges[i]);
             }
 
             const size_t display_count =
                 std::min(indexed_night.range_count,
-                         static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                         static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
             for (size_t i = 0; i < display_count; ++i) {
                 const ReportSessionRange &display = indexed_night.ranges[i];
                 bool overlaps_edf = false;
                 for (size_t k = 0; k < data_count; ++k) {
                     if (ranges_overlap(display.start_ms,
                                        display.end_ms,
-                                       data_ranges[k].start_ms,
-                                       data_ranges[k].end_ms)) {
+                                       indexed_night.data_ranges[k].start_ms,
+                                       indexed_night.data_ranges[k].end_ms)) {
                         overlaps_edf = true;
                         break;
                     }
@@ -98,7 +96,7 @@ bool ReportCacheFetchService::build_plan(
         } else {
             const size_t display_count =
                 std::min(indexed_night.range_count,
-                         static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                         static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
             for (size_t i = 0; i < display_count; ++i) {
                 maybe_use_latest_range(indexed_night.ranges[i]);
             }

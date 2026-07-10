@@ -133,7 +133,7 @@ struct MaterializedResult {
     uint32_t last_used = 0;
     ReportResultStatus status;
     ReportIndexedNight night;
-    PlotRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    PlotRange ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
     size_t range_count = 0;
     ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
     size_t stream_count = 0;

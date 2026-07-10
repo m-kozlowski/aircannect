@@ -199,24 +199,29 @@ EdfReportFileStatus edf_report_describe_file(
         out.status = EdfReportFileStatus::TooManySignals;
         return out.status;
     }
-    if (!edf_parse_header_start_ms(inventory.header, out.header_start_ms) ||
+    if (!edf_parse_header_start_ms(inventory.header,
+                                   out.local_header_start_ms) ||
         !edf_parse_header_record_duration_ms(inventory.header,
                                              out.record_duration_ms)) {
         out.status = EdfReportFileStatus::TimingError;
         return out.status;
     }
-    out.header_start_ms -=
+    out.header_start_ms = out.local_header_start_ms -
         static_cast<int64_t>(timezone_offset_minutes) * 60LL * 1000LL;
     out.header_size = inventory.header.header_size;
     out.record_size = inventory.header.record_size;
     const uint64_t duration_ms =
         static_cast<uint64_t>(inventory.complete_records_from_size) *
         static_cast<uint64_t>(out.record_duration_ms);
-    if (out.header_start_ms < 0 ||
+    if (out.local_header_start_ms < 0 || out.header_start_ms < 0 ||
+        duration_ms >
+            static_cast<uint64_t>(INT64_MAX - out.local_header_start_ms) ||
         duration_ms > static_cast<uint64_t>(INT64_MAX - out.header_start_ms)) {
         out.status = EdfReportFileStatus::TimingError;
         return out.status;
     }
+    out.local_header_end_ms =
+        out.local_header_start_ms + static_cast<int64_t>(duration_ms);
     out.header_end_ms = out.header_start_ms + static_cast<int64_t>(duration_ms);
 
     out.signal_count = inventory.header.signal_count;
@@ -367,6 +372,8 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
     copy_cstr(dst.path, sizeof(dst.path), file.path);
     dst.file_size = file.file_size;
     dst.last_write = file.last_write;
+    dst.local_header_start_ms = file.local_header_start_ms;
+    dst.local_header_end_ms = file.local_header_end_ms;
     dst.header_start_ms = file.header_start_ms;
     dst.header_end_ms = file.header_end_ms;
     dst.header_size = file.header_size;

@@ -57,7 +57,11 @@ void ReportResultBuildService::begin_prepare_for_night(
     runtime_.status().state = ReportResultState::Preparing;
     runtime_.status().therapy_index = therapy_index;
 
-    runtime_.identity().set(night, current_etag);
+    if (!runtime_.identity().set(night, current_etag)) {
+        fail_prepare("result_identity_alloc_failed");
+        return;
+    }
+
     runtime_.set_ranges_from_indexed_night(night);
     runtime_.status().night_start_ms = night.summary.start_ms;
     runtime_.status().night_end_ms = night.summary.end_ms;

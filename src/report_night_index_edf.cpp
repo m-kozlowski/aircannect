@@ -1,7 +1,6 @@
 #include "report_night_index_internal.h"
 
 #include <algorithm>
-#include <stdlib.h>
 #include <string.h>
 
 #include "calendar_utils.h"
@@ -56,6 +55,9 @@ bool append_edf_source_signature(ReportIndexedNight &night,
     size_t count = std::min(
         night.edf_source_signature_count,
         static_cast<size_t>(AC_REPORT_EDF_SESSION_MAX));
+    for (size_t i = 0; i < count; ++i) {
+        if (night.edf_source_signatures[i] == signature) return true;
+    }
     if (count >= AC_REPORT_EDF_SESSION_MAX) return false;
 
     night.edf_source_signatures[count] = signature;
@@ -69,23 +71,26 @@ void sync_summary_sessions_from_ranges(ReportIndexedNight &night) {
         night.summary.sessions[i] = ReportSummarySession{};
     }
 
-    const uint32_t session_count =
+    const uint32_t stored_session_count =
         static_cast<uint32_t>(std::min<size_t>(
             night.range_count,
             AC_REPORT_SUMMARY_SESSION_MAX));
-    for (uint32_t i = 0; i < session_count; ++i) {
+    for (uint32_t i = 0; i < stored_session_count; ++i) {
         night.summary.sessions[i].start_ms =
             static_cast<uint64_t>(night.ranges[i].start_ms);
         night.summary.sessions[i].duration_min =
             report_ceil_duration_min(night.ranges[i].start_ms,
                                      night.ranges[i].end_ms);
-        duration_sum += night.summary.sessions[i].duration_min;
+    }
+    for (size_t i = 0; i < night.range_count; ++i) {
+        duration_sum += report_ceil_duration_min(night.ranges[i].start_ms,
+                                                 night.ranges[i].end_ms);
     }
 
-    night.summary.session_interval_count = session_count;
-    night.summary.session_count = session_count;
-    night.summary.has_session_count = session_count > 0;
-    if (session_count > 0) night.summary.duration_min = duration_sum;
+    night.summary.session_interval_count = stored_session_count;
+    night.summary.session_count = static_cast<uint32_t>(night.range_count);
+    night.summary.has_session_count = night.range_count > 0;
+    if (night.range_count > 0) night.summary.duration_min = duration_sum;
 }
 
 bool merge_range_into_indexed_night(ReportIndexedNight &night,
@@ -94,29 +99,18 @@ bool merge_range_into_indexed_night(ReportIndexedNight &night,
     if (end_ms <= start_ms) return false;
     size_t count = std::min(night.range_count,
                             static_cast<size_t>(
-                                AC_REPORT_SUMMARY_SESSION_MAX));
+                                AC_REPORT_NIGHT_SESSION_MAX));
 
     int best = -1;
-    int64_t best_gap = INT64_MAX;
     for (size_t i = 0; i < count; ++i) {
         const ReportSessionRange &existing = night.ranges[i];
         if (existing.end_ms <= existing.start_ms) continue;
-
-        int64_t gap = 0;
         if (ranges_overlap(start_ms,
                            end_ms,
                            existing.start_ms,
                            existing.end_ms)) {
-            gap = 0;
-        } else if (end_ms <= existing.start_ms) {
-            gap = existing.start_ms - end_ms;
-        } else {
-            gap = start_ms - existing.end_ms;
-        }
-
-        if (gap <= REPORT_SESSION_MERGE_TOLERANCE_MS && gap < best_gap) {
             best = static_cast<int>(i);
-            best_gap = gap;
+            break;
         }
     }
 
@@ -131,7 +125,7 @@ bool merge_range_into_indexed_night(ReportIndexedNight &night,
         return true;
     }
 
-    if (count >= AC_REPORT_SUMMARY_SESSION_MAX) return false;
+    if (count >= AC_REPORT_NIGHT_SESSION_MAX) return false;
 
     night.ranges[count].start_ms = start_ms;
     night.ranges[count].end_ms = end_ms;
@@ -148,25 +142,17 @@ bool merge_data_range_into_indexed_night(ReportIndexedNight &night,
     if (end_ms <= start_ms) return false;
     size_t count = std::min(night.data_range_count,
                             static_cast<size_t>(
-                                AC_REPORT_SUMMARY_SESSION_MAX));
+                                AC_REPORT_NIGHT_SESSION_MAX));
 
     for (size_t i = 0; i < count; ++i) {
         ReportSessionRange &existing = night.data_ranges[i];
         if (existing.end_ms <= existing.start_ms) continue;
 
-        int64_t gap_ms = 0;
         if (ranges_overlap(start_ms,
                            end_ms,
                            existing.start_ms,
-                           existing.end_ms)) {
-            gap_ms = 0;
-        } else if (end_ms <= existing.start_ms) {
-            gap_ms = existing.start_ms - end_ms;
-        } else {
-            gap_ms = start_ms - existing.end_ms;
-        }
-
-        if (gap_ms <= REPORT_SESSION_MERGE_TOLERANCE_MS) {
+                           existing.end_ms) ||
+            start_ms == existing.end_ms || end_ms == existing.start_ms) {
             existing.start_ms = std::min(existing.start_ms, start_ms);
             existing.end_ms = std::max(existing.end_ms, end_ms);
 
@@ -177,7 +163,7 @@ bool merge_data_range_into_indexed_night(ReportIndexedNight &night,
         }
     }
 
-    if (count >= AC_REPORT_SUMMARY_SESSION_MAX) return false;
+    if (count >= AC_REPORT_NIGHT_SESSION_MAX) return false;
 
     night.data_ranges[count].start_ms = start_ms;
     night.data_ranges[count].end_ms = end_ms;
@@ -195,7 +181,7 @@ int find_matching_indexed_range(const ReportIndexedNight &night,
 
     const size_t count =
         std::min(night.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     int best = -1;
     int64_t best_gap = INT64_MAX;
 
@@ -235,13 +221,11 @@ int find_indexed_night_for_edf_session(const ReportIndexedNight *nights,
         for (size_t i = 0; i < count; ++i) {
             const ReportSummaryRecord &record = nights[i].summary;
             if (!record.valid) continue;
-
-            const int64_t delta =
-                static_cast<int64_t>(record.start_ms) - day_start_ms;
-            if (llabs(delta) <= REPORT_SLEEP_DAY_MATCH_TOLERANCE_MS) {
+            if (static_cast<int64_t>(record.start_ms) == day_start_ms) {
                 return static_cast<int>(i);
             }
         }
+        return -1;
     }
 
     for (size_t i = 0; i < count; ++i) {
@@ -288,9 +272,8 @@ bool ReportNightIndex::add_edf_session(
                                                    session_end_ms);
 
     if (index < 0) {
-        if (!has_numeric || !have_day_start || count_ >= capacity_) {
-            return true;
-        }
+        if (!has_numeric || !have_day_start) return true;
+        if (count_ >= capacity_) return false;
 
         ReportIndexedNight &night = nights_[count_];
         night = ReportIndexedNight{};
@@ -332,14 +315,15 @@ bool ReportNightIndex::add_edf_session(
         accepted = true;
     }
 
-    if (accepted) {
-        night.has_edf = true;
-        (void)append_edf_source_signature(
+    if (!accepted) return false;
+    if (!append_edf_source_signature(
             night,
-            report_edf_session_signature(session));
-        night.edf_catalog_pending = false;
+            report_edf_session_signature(session))) {
+        return false;
     }
 
+    night.has_edf = true;
+    night.edf_catalog_pending = false;
     return true;
 }
 

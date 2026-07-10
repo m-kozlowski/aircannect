@@ -13,6 +13,7 @@ ReportRangePlotBuildState::~ReportRangePlotBuildState() {
     Memory::free(indexed_night);
     Memory::free(chunks);
     Memory::free(edf_sessions);
+    Memory::free(ranges);
 }
 
 bool ReportRangePlotBuildState::ensure_buffers() {
@@ -53,6 +54,19 @@ bool ReportRangePlotBuildState::ensure_buffers() {
         }
     }
 
+    if (!ranges) {
+        ranges = static_cast<PlotRange *>(
+            Memory::calloc_large(AC_REPORT_NIGHT_SESSION_MAX,
+                                 sizeof(PlotRange),
+                                 false));
+        if (!ranges) {
+            log_report_alloc_failed(
+                "range_plot_ranges",
+                AC_REPORT_NIGHT_SESSION_MAX * sizeof(PlotRange));
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -68,8 +82,10 @@ void ReportRangePlotBuildState::reset() {
     stream_count = 0;
     edf_session_count = 0;
     range_count = 0;
-    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
-        ranges[i] = PlotRange{};
+    if (ranges) {
+        memset(ranges,
+               0,
+               AC_REPORT_NIGHT_SESSION_MAX * sizeof(PlotRange));
     }
 
     bytes.reset();

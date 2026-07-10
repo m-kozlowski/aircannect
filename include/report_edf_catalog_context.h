@@ -25,6 +25,10 @@ public:
     bool copy_session(size_t index, EdfReportSessionDescriptor &out) const;
     bool session_reportable(
         const EdfReportSessionDescriptor &session) const;
+    bool resolve_session_timezone(
+        EdfReportSessionDescriptor &session,
+        const ReportSummaryRecord *matching_summary,
+        int32_t &offset_minutes) const;
     bool collect_sessions_for_night(const ReportSummaryRecord &night,
                                     int64_t range_start_ms,
                                     int64_t range_end_ms,

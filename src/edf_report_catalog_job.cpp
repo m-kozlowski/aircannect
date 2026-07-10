@@ -286,6 +286,22 @@ bool EdfReportCatalogJob::request_refresh_after_current(
     return accepted;
 }
 
+bool EdfReportCatalogJob::set_posix_timezone(const char *timezone) {
+    begin();
+    if (!lock(0)) return false;
+
+    const char *value = timezone ? timezone : "";
+    const bool changed = strcmp(posix_timezone_, value) != 0;
+    if (changed) {
+        copy_cstr(posix_timezone_, sizeof(posix_timezone_), value);
+        status_.timezone_revision++;
+        if (status_.timezone_revision == 0) status_.timezone_revision = 1;
+    }
+
+    unlock();
+    return true;
+}
+
 bool EdfReportCatalogJob::set_timezone_offset_minutes(int32_t offset_minutes) {
     begin();
     if (!lock(0)) return false;
@@ -294,28 +310,11 @@ bool EdfReportCatalogJob::set_timezone_offset_minutes(int32_t offset_minutes) {
     if (changed) {
         timezone_offset_valid_ = true;
         timezone_offset_minutes_ = offset_minutes;
-        timezone_refresh_pending_ = true;
-        if (status_.state == EdfReportCatalogState::Refreshing) {
-            close_dirs_locked();
-            release_build_locked();
-            status_.state = session_count_ > 0 ? EdfReportCatalogState::Ready
-                                               : EdfReportCatalogState::Idle;
-            status_.sessions = session_count_;
-            phase_ = Phase::Idle;
-            status_.phase = static_cast<uint8_t>(phase_);
-            update_current_path_locked("");
-        }
+        status_.timezone_revision++;
+        if (status_.timezone_revision == 0) status_.timezone_revision = 1;
     }
-    bool started = false;
-    if (timezone_refresh_pending_ &&
-        status_.state != EdfReportCatalogState::Refreshing) {
-        started = start_refresh_locked(nullptr);
-        if (started) timezone_refresh_pending_ = false;
-    }
+
     unlock();
-    if (started) {
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
-    }
     return changed;
 }
 

@@ -18,8 +18,9 @@ using BuildQueueResult = ReportBuildRuntime::BuildQueueResult;
 bool indexed_night_by_newest_cursor(const ReportIndexedNight *nights,
                                     size_t count,
                                     size_t cursor,
-                                    ReportIndexedNight &out,
+                                    const ReportIndexedNight *&out,
                                     size_t &therapy_index) {
+    out = nullptr;
     if (!nights) return false;
 
     size_t seen = 0;
@@ -32,7 +33,7 @@ bool indexed_night_by_newest_cursor(const ReportIndexedNight *nights,
         }
 
         if (seen == cursor) {
-            out = night;
+            out = &night;
             therapy_index = seen;
             return true;
         }
@@ -157,7 +158,7 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
 
     constexpr size_t SCAN_STEPS_PER_CALL = 4;
     for (size_t step = 0; step < SCAN_STEPS_PER_CALL; ++step) {
-        ReportIndexedNight night;
+        const ReportIndexedNight *night = nullptr;
         size_t therapy_index = 0;
         const bool found =
             indexed_night_by_newest_cursor(snapshot.data(),
@@ -173,17 +174,17 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
         }
 
         build_.advance_prebuild_cursor();
-        if (night.edf_catalog_pending) return ReportPlotPrebuildResult::Waiting;
+        if (night->edf_catalog_pending) return ReportPlotPrebuildResult::Waiting;
 
         char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-        night_index_.format_result_etag(night, etag, sizeof(etag));
+        night_index_.format_result_etag(*night, etag, sizeof(etag));
 
-        if (result_plot_cache_exists_for_etag(night.summary.start_ms, etag)) {
+        if (result_plot_cache_exists_for_etag(night->summary.start_ms, etag)) {
             continue;
         }
 
         const BuildQueueResult queued =
-            build_.enqueue(night.summary.start_ms,
+            build_.enqueue(night->summary.start_ms,
                            therapy_index,
                            false,
                            true);
@@ -192,7 +193,7 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
                       LOG_DEBUG,
                       "Idle plot prebuild queued night=%llu index=%lu\n",
                       static_cast<unsigned long long>(
-                          night.summary.start_ms),
+                          night->summary.start_ms),
                       static_cast<unsigned long>(therapy_index));
             return ReportPlotPrebuildResult::Queued;
         }

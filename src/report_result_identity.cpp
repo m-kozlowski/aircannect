@@ -3,23 +3,42 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "memory_manager.h"
+#include "report_diagnostics.h"
+
 namespace aircannect {
 
+ReportResultIdentity::~ReportResultIdentity() {
+    Memory::free(indexed_night_);
+}
+
 void ReportResultIdentity::clear() {
-    indexed_night_ = {};
+    if (indexed_night_) *indexed_night_ = {};
     summary_ = {};
     etag_[0] = '\0';
 }
 
-void ReportResultIdentity::set(const ReportIndexedNight &night,
+bool ReportResultIdentity::set(const ReportIndexedNight &night,
                                const char *etag) {
-    indexed_night_ = night;
+    if (!indexed_night_) {
+        indexed_night_ = static_cast<ReportIndexedNight *>(
+            Memory::alloc_large(sizeof(ReportIndexedNight), false));
+        if (!indexed_night_) {
+            log_report_alloc_failed("result_identity",
+                                    sizeof(ReportIndexedNight));
+            return false;
+        }
+    }
+
+    *indexed_night_ = night;
     summary_ = night.summary;
     snprintf(etag_, sizeof(etag_), "%s", etag ? etag : "");
+    return true;
 }
 
 bool ReportResultIdentity::valid() const {
-    return etag_[0] && indexed_night_.summary.start_ms != 0;
+    return indexed_night_ && etag_[0] &&
+           indexed_night_->summary.start_ms != 0;
 }
 
 bool ReportResultIdentity::etag_matches(const char *etag) const {
@@ -31,7 +50,7 @@ void report_format_result_etag(const ReportSummaryRecord &record,
                                uint32_t night_epoch,
                                char *out,
                                size_t out_size) {
-    constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 30;
+    constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 31;
 
     if (!out || !out_size) return;
 

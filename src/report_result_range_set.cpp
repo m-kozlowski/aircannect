@@ -3,16 +3,42 @@
 #include <algorithm>
 #include <string.h>
 
+#include "memory_manager.h"
+#include "report_diagnostics.h"
+
 namespace aircannect {
 
+ReportResultRangeSet::~ReportResultRangeSet() {
+    Memory::free(ranges_);
+}
+
+bool ReportResultRangeSet::ensure_ranges() {
+    if (ranges_) return true;
+
+    ranges_ = static_cast<PlotRange *>(
+        Memory::calloc_large(AC_REPORT_NIGHT_SESSION_MAX,
+                             sizeof(PlotRange),
+                             false));
+    if (ranges_) return true;
+
+    log_report_alloc_failed("result_ranges",
+                            AC_REPORT_NIGHT_SESSION_MAX * sizeof(PlotRange));
+    return false;
+}
+
 void ReportResultRangeSet::clear() {
-    memset(ranges_, 0, sizeof(ranges_));
+    if (ranges_) {
+        memset(ranges_,
+               0,
+               AC_REPORT_NIGHT_SESSION_MAX * sizeof(PlotRange));
+    }
     count_ = 0;
 }
 
 bool ReportResultRangeSet::append(int64_t start_ms, int64_t end_ms) {
-    if (count_ >= AC_REPORT_SUMMARY_SESSION_MAX) return false;
+    if (count_ >= AC_REPORT_NIGHT_SESSION_MAX) return false;
     if (start_ms <= 0 || end_ms <= start_ms) return false;
+    if (!ensure_ranges()) return false;
 
     PlotRange &range = ranges_[count_++];
     range.start_ms = start_ms;
@@ -21,6 +47,8 @@ bool ReportResultRangeSet::append(int64_t start_ms, int64_t end_ms) {
 }
 
 void ReportResultRangeSet::sort() {
+    if (!ranges_) return;
+
     std::sort(ranges_,
               ranges_ + count_,
               [](const PlotRange &a, const PlotRange &b) {
@@ -31,17 +59,10 @@ void ReportResultRangeSet::sort() {
 bool ReportResultRangeSet::set_from_indexed_night(
     const ReportIndexedNight &night) {
     clear();
+    if (!ensure_ranges()) return false;
 
-    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
-    const size_t range_count =
-        collect_indexed_night_report_ranges(night,
-                                            ranges,
-                                            AC_REPORT_SUMMARY_SESSION_MAX);
-    for (size_t i = 0; i < range_count; ++i) {
-        (void)append(ranges[i].start_ms, ranges[i].end_ms);
-    }
-
-    sort();
+    count_ = collect_indexed_night_report_ranges(
+        night, ranges_, AC_REPORT_NIGHT_SESSION_MAX);
     return count_ > 0;
 }
 
@@ -69,7 +90,7 @@ bool ReportResultRangeSet::set_from_resolved_plan(
 
     const size_t range_count =
         std::min(plan.range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     for (size_t i = 0; i < range_count; ++i) {
         (void)append(plan.ranges[i].start_ms, plan.ranges[i].end_ms);
     }

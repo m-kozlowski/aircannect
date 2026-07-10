@@ -121,8 +121,8 @@ bool ReportResultSlotCache::publish(
 
     slot.range_count =
         std::min(range_count,
-                 static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX));
-    for (size_t i = 0; i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
+                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
+    for (size_t i = 0; i < AC_REPORT_NIGHT_SESSION_MAX; ++i) {
         slot.ranges[i] = (ranges && i < slot.range_count) ? ranges[i]
                                                           : PlotRange{};
     }
@@ -200,7 +200,7 @@ ReportResultSlotRead ReportResultSlotCache::read_result(
             slot.night,
             slot.ranges,
             std::min(slot.range_count,
-                     static_cast<size_t>(AC_REPORT_SUMMARY_SESSION_MAX)),
+                     static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX)),
             slot.streams,
             std::min(slot.stream_count,
                      static_cast<size_t>(AC_REPORT_RESULT_STREAM_MAX)),

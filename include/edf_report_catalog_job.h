@@ -38,6 +38,7 @@ struct EdfReportCatalogStatus {
     uint32_t files_scanned = 0;
     uint32_t files_indexed = 0;
     uint32_t files_skipped = 0;
+    uint32_t timezone_revision = 0;
     bool truncated = false;
     char current_path[AC_STORAGE_PATH_MAX] = {};
     char error[AC_STORAGE_ERROR_MAX] = {};
@@ -56,6 +57,7 @@ public:
     void on_preempt() override;
 
     // refresh/configuration
+    bool set_posix_timezone(const char *timezone);
     bool set_timezone_offset_minutes(int32_t offset_minutes);
     bool request_refresh(uint32_t *refresh_id_out = nullptr);
     bool request_refresh_after_current(uint32_t *refresh_id_out = nullptr);
@@ -138,7 +140,7 @@ private:
     // timezone mapping
     bool timezone_offset_valid_ = false;
     int32_t timezone_offset_minutes_ = 0;
-    bool timezone_refresh_pending_ = false;
+    char posix_timezone_[65] = {};
 };
 
 }  // namespace aircannect
