@@ -1,24 +1,10 @@
 #include "report_edf_catalog_context.h"
 
 #include <algorithm>
-#include <string.h>
-
-#include "debug_log.h"
 #include "edf_report_catalog_job.h"
-#include "memory_manager.h"
-#include "report_diagnostics.h"
 #include "report_night_index.h"
 
 namespace aircannect {
-namespace {
-
-bool edf_session_same_identity(const EdfReportSessionDescriptor &a,
-                               const EdfReportSessionDescriptor &b) {
-    return strcmp(a.sleep_day, b.sleep_day) == 0 &&
-           strcmp(a.session_stamp, b.session_stamp) == 0;
-}
-
-}  // namespace
 
 void ReportEdfCatalogContext::set_catalog(EdfReportCatalogJob *catalog) {
     catalog_ = catalog;
@@ -62,52 +48,9 @@ bool ReportEdfCatalogContext::copy_session(
     return catalog_ && catalog_->copy_session(index, out);
 }
 
-bool ReportEdfCatalogContext::session_has_annotation_marker(
-    const EdfReportSessionDescriptor &session,
-    EdfReportSessionDescriptor &scratch) const {
-    if (!catalog_ || !edf_session_has_report_numeric(session)) {
-        return false;
-    }
-    if (edf_session_has_report_annotation(session)) return true;
-
-    const size_t count = session_count();
-    for (size_t i = 0; i < count; ++i) {
-        if (!copy_session(i, scratch)) continue;
-        if (edf_session_annotation_matches_numeric(session, scratch)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool ReportEdfCatalogContext::annotation_has_numeric_session(
-    const EdfReportSessionDescriptor &session,
-    EdfReportSessionDescriptor &scratch) const {
-    if (!catalog_ || !edf_session_has_report_annotation(session)) {
-        return false;
-    }
-    if (edf_session_has_report_numeric(session)) return true;
-
-    const size_t count = session_count();
-    for (size_t i = 0; i < count; ++i) {
-        if (!copy_session(i, scratch)) continue;
-        if (edf_session_annotation_matches_numeric(scratch, session)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 bool ReportEdfCatalogContext::session_reportable(
-    const EdfReportSessionDescriptor &session,
-    EdfReportSessionDescriptor &scratch) const {
-    if (edf_session_has_report_numeric(session)) {
-        return session_has_annotation_marker(session, scratch);
-    }
-
-    return annotation_has_numeric_session(session, scratch);
+    const EdfReportSessionDescriptor &session) const {
+    return catalog_ && edf_report_session_reportable(session);
 }
 
 bool ReportEdfCatalogContext::collect_sessions_for_night(
@@ -141,15 +84,6 @@ bool ReportEdfCatalogContext::collect_sessions_for_night(
         report_summary_sleep_day_yyyymmdd(night,
                                           target_sleep_day,
                                           sizeof(target_sleep_day));
-    EdfReportSessionDescriptor *marker_scratch =
-        static_cast<EdfReportSessionDescriptor *>(
-            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
-    if (!marker_scratch) {
-        log_report_alloc_failed("edf_session_marker_scratch",
-                                sizeof(EdfReportSessionDescriptor));
-        return false;
-    }
-
     const size_t count = session_count();
     for (size_t i = 0; i < count &&
                        out_session_count < session_capacity; ++i) {
@@ -169,12 +103,9 @@ bool ReportEdfCatalogContext::collect_sessions_for_night(
         if (!matches_sleep_day && !matches_range) {
             continue;
         }
-        if (!session_reportable(session, *marker_scratch)) {
-            continue;
-        }
+        if (!session_reportable(session)) continue;
         out_session_count++;
     }
-    Memory::free(marker_scratch);
 
     std::sort(sessions,
               sessions + out_session_count,
@@ -183,11 +114,6 @@ bool ReportEdfCatalogContext::collect_sessions_for_night(
                   return a.earliest_header_start_ms <
                          b.earliest_header_start_ms;
               });
-    if (!append_sessions_for_selected_days(sessions,
-                                           session_capacity,
-                                           out_session_count)) {
-        return false;
-    }
     if (out_session_count == 0 &&
         status.state == EdfReportCatalogState::Refreshing) {
         if (pending_out) *pending_out = true;
@@ -195,84 +121,6 @@ bool ReportEdfCatalogContext::collect_sessions_for_night(
     }
 
     return out_session_count > 0;
-}
-
-bool ReportEdfCatalogContext::append_sessions_for_selected_days(
-    EdfReportSessionDescriptor *sessions,
-    size_t session_capacity,
-    size_t &out_session_count) const {
-    if (!catalog_ || !sessions || out_session_count == 0 ||
-        session_capacity == 0) {
-        return true;
-    }
-
-    const size_t base_count = out_session_count;
-    const size_t catalog_count = session_count();
-    EdfReportSessionDescriptor *candidate =
-        static_cast<EdfReportSessionDescriptor *>(
-            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
-    if (!candidate) {
-        log_report_alloc_failed("edf_event_session_scratch",
-                                sizeof(EdfReportSessionDescriptor));
-        return false;
-    }
-
-    EdfReportSessionDescriptor *marker_scratch =
-        static_cast<EdfReportSessionDescriptor *>(
-            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
-    if (!marker_scratch) {
-        Memory::free(candidate);
-        log_report_alloc_failed("edf_event_marker_scratch",
-                                sizeof(EdfReportSessionDescriptor));
-        return false;
-    }
-
-    for (size_t i = 0; i < catalog_count; ++i) {
-        if (!copy_session(i, *candidate)) continue;
-
-        bool selected_day = false;
-        for (size_t base = 0; base < base_count; ++base) {
-            if (strcmp(sessions[base].sleep_day, candidate->sleep_day) == 0) {
-                selected_day = true;
-                break;
-            }
-        }
-        if (!selected_day) continue;
-        if (!session_reportable(*candidate, *marker_scratch)) continue;
-
-        bool duplicate = false;
-        for (size_t existing = 0; existing < out_session_count; ++existing) {
-            if (edf_session_same_identity(sessions[existing], *candidate)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-
-        if (out_session_count >= session_capacity) {
-            Log::logf(CAT_REPORT,
-                      LOG_WARN,
-                      "EDF report session list full capacity=%u\n",
-                      static_cast<unsigned>(session_capacity));
-            break;
-        }
-        sessions[out_session_count++] = *candidate;
-    }
-    Memory::free(marker_scratch);
-    Memory::free(candidate);
-
-    merge_edf_annotation_sessions(sessions, out_session_count);
-
-    std::sort(sessions,
-              sessions + out_session_count,
-              [](const EdfReportSessionDescriptor &a,
-                 const EdfReportSessionDescriptor &b) {
-                  if (strcmp(a.sleep_day, b.sleep_day) != 0) {
-                      return strcmp(a.sleep_day, b.sleep_day) < 0;
-                  }
-                  return strcmp(a.session_stamp, b.session_stamp) < 0;
-              });
-    return true;
 }
 
 bool ReportEdfCatalogContext::ready_refresh_changed(

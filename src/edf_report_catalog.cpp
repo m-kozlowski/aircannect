@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "edf_report_session.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -379,13 +380,7 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
     if (file.last_write > session.latest_write) {
         session.latest_write = file.last_write;
     }
-    if (session.earliest_header_start_ms == 0 ||
-        file.header_start_ms < session.earliest_header_start_ms) {
-        session.earliest_header_start_ms = file.header_start_ms;
-    }
-    if (file.header_end_ms > session.latest_header_end_ms) {
-        session.latest_header_end_ms = file.header_end_ms;
-    }
+    edf_report_session_refresh_bounds(session);
     session.warnings |= file.inventory.warnings;
 
     for (uint32_t i = 0; i < file.signal_count; ++i) {

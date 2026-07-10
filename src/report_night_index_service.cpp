@@ -159,48 +159,19 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
         return false;
     }
 
-    EdfReportSessionDescriptor *marker_scratch =
-        static_cast<EdfReportSessionDescriptor *>(
-            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
-    if (!marker_scratch) {
-        Memory::free(session_scratch);
-        Memory::free(sort_scratch);
-        log_report_alloc_failed("report_night_edf_marker_scratch",
-                                sizeof(EdfReportSessionDescriptor));
-        return false;
-    }
+    for (size_t i = 0; i < catalog_count; ++i) {
+        if (!edf_catalog_.copy_session(i, *session_scratch)) continue;
+        if (!edf_catalog_.session_reportable(*session_scratch)) continue;
 
-    for (int pass = 0; pass < 2; ++pass) {
-        for (size_t i = 0; i < catalog_count; ++i) {
-            if (!edf_catalog_.copy_session(i, *session_scratch)) continue;
-
-            const bool has_numeric =
-                edf_session_has_report_numeric(*session_scratch);
-            const bool has_annotation =
-                edf_session_has_report_annotation(*session_scratch);
-            if (pass == 0) {
-                if (!has_numeric ||
-                    !edf_catalog_.session_reportable(*session_scratch,
-                                                     *marker_scratch)) {
-                    continue;
-                }
-            } else {
-                if (has_numeric || !has_annotation ||
-                    !edf_catalog_.session_reportable(*session_scratch,
-                                                     *marker_scratch)) {
-                    continue;
-                }
-            }
-
-            if (!index.add_edf_session(*session_scratch,
-                                       have_timezone,
-                                       timezone_offset_min)) {
-                break;
-            }
+        if (!index.add_edf_session(*session_scratch,
+                                   have_timezone,
+                                   timezone_offset_min)) {
+            Memory::free(session_scratch);
+            Memory::free(sort_scratch);
+            return false;
         }
     }
 
-    Memory::free(marker_scratch);
     Memory::free(session_scratch);
 
     return finish_index(false, true);

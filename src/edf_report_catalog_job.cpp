@@ -7,6 +7,7 @@
 #include "edf_file_inventory.h"
 #include "edf_file_reader.h"
 #include "edf_layout.h"
+#include "edf_report_session.h"
 #include "memory_manager.h"
 #include "storage_directory.h"
 #include "storage_export_plan.h"
@@ -146,6 +147,10 @@ bool EdfReportCatalogJob::allocate_build_locked() {
 void EdfReportCatalogJob::publish_snapshot_locked(bool final) {
     EdfReportSessionDescriptor *packed = nullptr;
     size_t packed_count = 0;
+
+    if (final && build_sessions_ && build_session_count_ > 0) {
+        normalize_edf_report_sessions(build_sessions_, build_session_count_);
+    }
 
     if (build_session_count_ > 0) {
         packed = static_cast<EdfReportSessionDescriptor *>(Memory::alloc_large(

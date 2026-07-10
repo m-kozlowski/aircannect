@@ -76,17 +76,16 @@ bool session_has_event_file(const EdfReportSessionDescriptor &session,
     return edf_report_session_has_file(session, kind);
 }
 
-bool session_time_covers_range(const EdfReportSessionDescriptor &session,
-                               int64_t start_ms,
-                               int64_t end_ms) {
-    if (end_ms <= start_ms || session.latest_header_end_ms <= 0) {
-        return false;
-    }
-    const int64_t session_start =
-        session.earliest_header_start_ms - 90000;
-    const int64_t session_end =
-        session.latest_header_end_ms + 90000;
-    return session_start <= start_ms && session_end >= end_ms;
+bool session_covers_range(const EdfReportSessionDescriptor &session,
+                          int64_t start_ms,
+                          int64_t end_ms) {
+    if (end_ms <= start_ms || session.latest_header_end_ms <= 0) return false;
+
+    const int64_t session_start_ms =
+        session.earliest_header_start_ms - AC_EDF_REPORT_COVERAGE_TOLERANCE_MS;
+    const int64_t session_end_ms =
+        session.latest_header_end_ms + AC_EDF_REPORT_COVERAGE_TOLERANCE_MS;
+    return session_start_ms <= start_ms && session_end_ms >= end_ms;
 }
 
 bool event_file_covers_range(const EdfReportSessionDescriptor *sessions,
@@ -97,7 +96,7 @@ bool event_file_covers_range(const EdfReportSessionDescriptor *sessions,
     if (!valid_sessions(sessions, session_count)) return false;
     for (size_t i = 0; i < session_count; ++i) {
         if (session_has_event_file(sessions[i], kind) &&
-            session_time_covers_range(sessions[i], start_ms, end_ms)) {
+            session_covers_range(sessions[i], start_ms, end_ms)) {
             return true;
         }
     }

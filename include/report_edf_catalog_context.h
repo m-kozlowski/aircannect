@@ -23,14 +23,8 @@ public:
     bool timezone_offset_minutes(int32_t &out) const;
     size_t session_count() const;
     bool copy_session(size_t index, EdfReportSessionDescriptor &out) const;
-    bool session_has_annotation_marker(
-        const EdfReportSessionDescriptor &session,
-        EdfReportSessionDescriptor &scratch) const;
-    bool annotation_has_numeric_session(
-        const EdfReportSessionDescriptor &session,
-        EdfReportSessionDescriptor &scratch) const;
-    bool session_reportable(const EdfReportSessionDescriptor &session,
-                            EdfReportSessionDescriptor &scratch) const;
+    bool session_reportable(
+        const EdfReportSessionDescriptor &session) const;
     bool collect_sessions_for_night(const ReportSummaryRecord &night,
                                     int64_t range_start_ms,
                                     int64_t range_end_ms,
@@ -38,10 +32,6 @@ public:
                                     size_t session_capacity,
                                     size_t &session_count,
                                     bool *pending_out = nullptr) const;
-    bool append_sessions_for_selected_days(
-        EdfReportSessionDescriptor *sessions,
-        size_t session_capacity,
-        size_t &session_count) const;
 
     bool ready_refresh_changed(EdfReportCatalogStatus &out) const;
     void mark_summary_published(uint32_t refresh_id);

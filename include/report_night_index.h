@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "edf_report_catalog.h"
+#include "edf_report_session.h"
 #include "report_proto.h"
 
 namespace aircannect {
@@ -62,16 +63,6 @@ uint64_t report_summary_identity_signature(
 bool report_summary_sleep_day_yyyymmdd(const ReportSummaryRecord &record,
                                        char *out,
                                        size_t out_size);
-bool edf_session_has_report_numeric(
-    const EdfReportSessionDescriptor &session);
-bool edf_session_has_report_annotation(
-    const EdfReportSessionDescriptor &session);
-bool edf_session_annotation_matches_numeric(
-    const EdfReportSessionDescriptor &numeric_session,
-    const EdfReportSessionDescriptor &annotation_session);
-void merge_edf_annotation_sessions(EdfReportSessionDescriptor *sessions,
-                                   size_t &session_count);
-
 class ReportNightIndex {
 public:
     ReportNightIndex(ReportIndexedNight *nights, size_t capacity);
