@@ -8,43 +8,11 @@
 namespace aircannect {
 namespace {
 
-bool parse_sleep_day(const char *sleep_day,
-                     int &year,
-                     unsigned &month,
-                     unsigned &day) {
-    if (!sleep_day || strlen(sleep_day) != 8) return false;
-    for (size_t i = 0; i < 8; ++i) {
-        if (sleep_day[i] < '0' || sleep_day[i] > '9') return false;
-    }
-
-    char buf[5] = {};
-    memcpy(buf, sleep_day, 4);
-    year = static_cast<int>(strtol(buf, nullptr, 10));
-
-    buf[0] = sleep_day[4];
-    buf[1] = sleep_day[5];
-    buf[2] = '\0';
-    month = static_cast<unsigned>(strtoul(buf, nullptr, 10));
-
-    buf[0] = sleep_day[6];
-    buf[1] = sleep_day[7];
-    day = static_cast<unsigned>(strtoul(buf, nullptr, 10));
-
-    return year > 0 &&
-           month >= 1 && month <= 12 &&
-           day >= 1 &&
-           day <= calendar_days_in_month(year, static_cast<int>(month));
-}
-
 bool sleep_day_start_utc_ms(const char *sleep_day,
                             int32_t timezone_offset_minutes,
                             int64_t &out_ms) {
-    int year = 0;
-    unsigned month = 0;
-    unsigned day = 0;
-    if (!parse_sleep_day(sleep_day, year, month, day)) return false;
-
-    const int64_t days = calendar_days_from_civil(year, month, day);
+    int64_t days = 0;
+    if (!calendar_yyyymmdd_to_days(sleep_day, days)) return false;
     out_ms = days * REPORT_DAY_MS + REPORT_NOON_MS -
              static_cast<int64_t>(timezone_offset_minutes) * 60LL * 1000LL;
     return true;

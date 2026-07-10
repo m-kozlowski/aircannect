@@ -230,7 +230,7 @@ bool ReportRangePlotBuilder::materialize_plan(
             range_plot_.state().ranges[i].end_ms = plan.ranges[i].end_ms;
         } else {
             range_plot_.state().ranges[i] =
-                report_manager_internal::PlotRange{};
+                ReportSessionRange{};
         }
     }
 

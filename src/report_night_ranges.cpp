@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <stdio.h>
+#include <string.h>
 
 #include "calendar_utils.h"
 
@@ -95,6 +96,30 @@ bool ranges_overlap(int64_t start_a,
     return start_a < end_b && start_b < end_a;
 }
 
+bool report_range_span(const ReportSessionRange *ranges,
+                       size_t count,
+                       int64_t &span_start,
+                       int64_t &span_end) {
+    if (!ranges || count == 0) return false;
+
+    bool found = false;
+    for (size_t i = 0; i < count; ++i) {
+        const ReportSessionRange &range = ranges[i];
+        if (range.end_ms <= range.start_ms) continue;
+
+        if (!found) {
+            span_start = range.start_ms;
+            span_end = range.end_ms;
+            found = true;
+        } else {
+            span_start = std::min(span_start, range.start_ms);
+            span_end = std::max(span_end, range.end_ms);
+        }
+    }
+
+    return found;
+}
+
 size_t collect_session_ranges(const ReportSummaryRecord &night,
                               ReportSessionRange *ranges,
                               size_t max_ranges) {
@@ -133,73 +158,32 @@ size_t collect_session_ranges(const ReportSummaryRecord &night,
 bool night_data_span(const ReportSummaryRecord &night,
                      int64_t &span_start,
                      int64_t &span_end) {
-    bool found = false;
-    for (uint32_t i = 0; i < night.session_interval_count &&
-                         i < AC_REPORT_SUMMARY_SESSION_MAX; ++i) {
-        const ReportSummarySession &session = night.sessions[i];
-        if (!session.start_ms || !session.duration_min) continue;
-
-        const int64_t start = static_cast<int64_t>(session.start_ms);
-        const int64_t end =
-            start + static_cast<int64_t>(session.duration_min) * 60000LL;
-        if (end <= start) continue;
-
-        if (!found) {
-            span_start = start;
-            span_end = end;
-            found = true;
-        } else {
-            span_start = std::min(span_start, start);
-            span_end = std::max(span_end, end);
-        }
-    }
-
-    if (!found && night.valid && night.duration_min &&
-        night.end_ms > night.start_ms) {
-        span_start = static_cast<int64_t>(night.start_ms);
-        span_end = static_cast<int64_t>(night.end_ms);
-        found = true;
-    }
-
-    if (!found) return false;
-    return span_end > span_start;
+    ReportSessionRange ranges[AC_REPORT_SUMMARY_SESSION_MAX] = {};
+    const size_t count = collect_session_ranges(
+        night, ranges, AC_REPORT_SUMMARY_SESSION_MAX);
+    return report_range_span(ranges, count, span_start, span_end);
 }
 
 bool indexed_night_data_span(const ReportIndexedNight &night,
                              int64_t &span_start,
                              int64_t &span_end) {
-    bool found = false;
-    auto add_range = [&](const ReportSessionRange &range) {
-        if (range.end_ms <= range.start_ms) return;
-
-        if (!found) {
-            span_start = range.start_ms;
-            span_end = range.end_ms;
-            found = true;
-        } else {
-            span_start = std::min(span_start, range.start_ms);
-            span_end = std::max(span_end, range.end_ms);
-        }
-    };
-
     const size_t data_count = std::min(
         night.data_range_count,
         static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
     if (night.has_edf && data_count > 0) {
-        for (size_t i = 0; i < data_count; ++i) {
-            add_range(night.data_ranges[i]);
-        }
-    } else {
-        const size_t display_count =
-            std::min(night.range_count,
-                     static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
-        for (size_t i = 0; i < display_count; ++i) {
-            add_range(night.ranges[i]);
-        }
+        return report_range_span(night.data_ranges,
+                                 data_count,
+                                 span_start,
+                                 span_end);
     }
 
-    if (!found) return false;
-    return span_end > span_start;
+    const size_t display_count = std::min(
+        night.range_count,
+        static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
+    return report_range_span(night.ranges,
+                             display_count,
+                             span_start,
+                             span_end);
 }
 
 bool indexed_night_summary_ranges_covered_by_data(
@@ -233,40 +217,6 @@ bool indexed_night_summary_ranges_covered_by_data(
     }
 
     return true;
-}
-
-size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
-                                         ReportSessionRange *ranges,
-                                         size_t max_ranges) {
-    if (!ranges || max_ranges == 0) return 0;
-
-    size_t count = 0;
-    const size_t edf_count =
-        std::min(night.data_range_count,
-                 static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
-    if (night.has_edf && edf_count > 0) {
-        for (size_t i = 0; i < edf_count && count < max_ranges; ++i) {
-            if (night.data_ranges[i].end_ms <=
-                night.data_ranges[i].start_ms) {
-                continue;
-            }
-            ranges[count++] = night.data_ranges[i];
-        }
-    } else {
-        const size_t display_count =
-            std::min(night.range_count,
-                     static_cast<size_t>(AC_REPORT_NIGHT_SESSION_MAX));
-        for (size_t i = 0; i < display_count && count < max_ranges; ++i) {
-            if (night.ranges[i].end_ms <= night.ranges[i].start_ms) {
-                continue;
-            }
-            ranges[count++] = night.ranges[i];
-        }
-    }
-
-    normalize_range_array(ranges, count);
-    coalesce_sorted_range_array(ranges, count);
-    return count;
 }
 
 size_t collect_indexed_night_report_ranges(const ReportIndexedNight &night,
@@ -400,6 +350,17 @@ bool report_summary_sleep_day_yyyymmdd(const ReportSummaryRecord &record,
     snprintf(out, out_size, "%04d%02u%02u", year, month, day);
     out[out_size - 1] = '\0';
     return true;
+}
+
+bool report_summary_matches_sleep_day(const ReportSummaryRecord &record,
+                                      const char *sleep_day) {
+    if (!sleep_day || !sleep_day[0]) return false;
+
+    char summary_sleep_day[9] = {};
+    return report_summary_sleep_day_yyyymmdd(record,
+                                             summary_sleep_day,
+                                             sizeof(summary_sleep_day)) &&
+           strcmp(summary_sleep_day, sleep_day) == 0;
 }
 
 }  // namespace aircannect

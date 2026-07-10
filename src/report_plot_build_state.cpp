@@ -66,7 +66,8 @@ bool ReportPlotBuildState::process_series_sample(
     int range_index = -1;
     if (state.last_range_index >= 0 &&
         static_cast<size_t>(state.last_range_index) < range_count) {
-        const PlotRange &last_range = ranges[state.last_range_index];
+        const ReportSessionRange &last_range =
+            ranges[state.last_range_index];
         if (sample.timestamp_ms >= last_range.start_ms &&
             sample.timestamp_ms < last_range.end_ms) {
             range_index = state.last_range_index;

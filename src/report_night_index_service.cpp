@@ -8,7 +8,6 @@
 #include "edf_report_catalog_job.h"
 #include "memory_manager.h"
 #include "report_diagnostics.h"
-#include "report_edf_timezone.h"
 #include "report_night_index.h"
 #include "report_night_index_store.h"
 
@@ -164,13 +163,13 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
 
     for (size_t i = 0; i < catalog_count; ++i) {
         if (!edf_catalog_.copy_session(i, *session_scratch)) continue;
-        if (!edf_catalog_.session_reportable(*session_scratch)) continue;
+        if (!edf_report_session_reportable(*session_scratch)) continue;
 
         const ReportSummaryRecord *matching_summary = nullptr;
         for (size_t night_index = 0;
              night_index < index.count();
              ++night_index) {
-            if (report_edf_summary_matches_sleep_day(
+            if (report_summary_matches_sleep_day(
                     out[night_index].summary,
                     session_scratch->sleep_day)) {
                 matching_summary = &out[night_index].summary;

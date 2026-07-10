@@ -55,14 +55,14 @@ bool ReportRangePlotBuildState::ensure_buffers() {
     }
 
     if (!ranges) {
-        ranges = static_cast<PlotRange *>(
+        ranges = static_cast<ReportSessionRange *>(
             Memory::calloc_large(AC_REPORT_NIGHT_SESSION_MAX,
-                                 sizeof(PlotRange),
+                                 sizeof(ReportSessionRange),
                                  false));
         if (!ranges) {
             log_report_alloc_failed(
                 "range_plot_ranges",
-                AC_REPORT_NIGHT_SESSION_MAX * sizeof(PlotRange));
+                AC_REPORT_NIGHT_SESSION_MAX * sizeof(ReportSessionRange));
             return false;
         }
     }
@@ -85,7 +85,7 @@ void ReportRangePlotBuildState::reset() {
     if (ranges) {
         memset(ranges,
                0,
-               AC_REPORT_NIGHT_SESSION_MAX * sizeof(PlotRange));
+               AC_REPORT_NIGHT_SESSION_MAX * sizeof(ReportSessionRange));
     }
 
     bytes.reset();

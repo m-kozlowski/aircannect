@@ -14,7 +14,6 @@ ReportResultIdentity::~ReportResultIdentity() {
 
 void ReportResultIdentity::clear() {
     if (indexed_night_) *indexed_night_ = {};
-    summary_ = {};
     etag_[0] = '\0';
 }
 
@@ -31,7 +30,6 @@ bool ReportResultIdentity::set(const ReportIndexedNight &night,
     }
 
     *indexed_night_ = night;
-    summary_ = night.summary;
     snprintf(etag_, sizeof(etag_), "%s", etag ? etag : "");
     return true;
 }

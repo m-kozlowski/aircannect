@@ -13,7 +13,6 @@ namespace aircannect {
 
 class ReportPlotBuildState {
 public:
-    using PlotRange = report_manager_internal::PlotRange;
     using ReportResultChunk = report_manager_internal::ReportResultChunk;
     using PlotSeriesBuildState =
         report_manager_internal::PlotSeriesBuildState;
@@ -48,7 +47,7 @@ public:
     bool idle_prebuild = false;
     std::atomic<uint64_t> night_start_ms{0};
     ReportPlotBuildPhase phase = ReportPlotBuildPhase::Idle;
-    const PlotRange *ranges = nullptr;
+    const ReportSessionRange *ranges = nullptr;
     size_t range_count = 0;
     int64_t start_ms = 0;
     int64_t end_ms = 0;

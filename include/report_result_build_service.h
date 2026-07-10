@@ -48,7 +48,6 @@ public:
     bool plot_active() const { return plot_builder_.active(); }
 
 private:
-    using PlotRange = report_manager_internal::PlotRange;
     using ReportResultChunk = report_manager_internal::ReportResultChunk;
 
     bool count_events_from_chunks();

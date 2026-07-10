@@ -23,13 +23,16 @@ public:
     bool etag_matches(const char *etag) const;
 
     const ReportIndexedNight &indexed_night() const { return *indexed_night_; }
-    const ReportSummaryRecord &summary() const { return summary_; }
+    const ReportSummaryRecord &summary() const {
+        return indexed_night_->summary;
+    }
     const char *etag() const { return etag_; }
-    uint64_t night_start_ms() const { return summary_.start_ms; }
+    uint64_t night_start_ms() const {
+        return indexed_night_ ? indexed_night_->summary.start_ms : 0;
+    }
 
 private:
     ReportIndexedNight *indexed_night_ = nullptr;
-    ReportSummaryRecord summary_;
     char etag_[AC_REPORT_RESULT_ETAG_MAX] = {};
 };
 

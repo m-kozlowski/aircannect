@@ -47,7 +47,6 @@ struct ReportRangePlotRequest {
 class ReportResultSlotCache {
 public:
     using MaterializedResult = report_manager_internal::MaterializedResult;
-    using PlotRange = report_manager_internal::PlotRange;
     using ReportResultChunk = report_manager_internal::ReportResultChunk;
 
     ~ReportResultSlotCache();
@@ -58,7 +57,7 @@ public:
     bool publish(const ReportResultStatus &status,
                  const ReportIndexedNight &night,
                  const char *etag,
-                 const PlotRange *ranges,
+                 const ReportSessionRange *ranges,
                  size_t range_count,
                  const ReportResultStream *streams,
                  size_t stream_count,

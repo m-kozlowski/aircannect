@@ -150,7 +150,7 @@ void report_build_empty_plot_bin(ReportSpoolBuffer &out) {
 }
 
 int report_plot_range_index(
-    const report_manager_internal::PlotRange *ranges,
+    const ReportSessionRange *ranges,
     size_t range_count,
     int64_t timestamp_ms) {
     if (!ranges) return -1;

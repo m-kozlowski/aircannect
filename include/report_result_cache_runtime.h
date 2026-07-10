@@ -66,7 +66,7 @@ private:
     bool publish(const ReportResultStatus &status,
                  const ReportIndexedNight &night,
                  const char *etag,
-                 const ReportResultSlotCache::PlotRange *ranges,
+                 const ReportSessionRange *ranges,
                  size_t range_count,
                  const ReportResultStream *streams,
                  size_t stream_count,

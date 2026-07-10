@@ -16,7 +16,6 @@ namespace aircannect {
 class ReportRangePlotBuildState {
 public:
     using PlotBuildBucket = report_manager_internal::PlotBuildBucket;
-    using PlotRange = report_manager_internal::PlotRange;
     using ReportResultChunk = report_manager_internal::ReportResultChunk;
 
     ~ReportRangePlotBuildState();
@@ -58,7 +57,7 @@ public:
     size_t stream_count = 0;
     EdfReportSessionDescriptor *edf_sessions = nullptr;
     size_t edf_session_count = 0;
-    PlotRange *ranges = nullptr;
+    ReportSessionRange *ranges = nullptr;
     size_t range_count = 0;
 
     std::shared_ptr<ReportSpoolBuffer> bytes;

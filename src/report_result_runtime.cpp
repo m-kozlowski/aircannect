@@ -42,24 +42,14 @@ void ReportResultRuntime::release_edf_sessions() {
     scratch_.release_edf_sessions();
 }
 
-void ReportResultRuntime::clear_ranges() {
-    ranges_.clear();
-}
-
 bool ReportResultRuntime::set_ranges_from_indexed_night(
     const ReportIndexedNight &night) {
     return ranges_.set_from_indexed_night(night);
 }
 
-bool ReportResultRuntime::set_ranges_from_edf_sessions() {
-    return ranges_.set_from_edf_sessions(scratch_.edf_sessions(),
-                                         scratch_.edf_session_count());
-}
-
 bool ReportResultRuntime::data_span(int64_t &span_start_ms,
                                     int64_t &span_end_ms) const {
     return ranges_.data_span(identity_.indexed_night(),
-                             identity_.summary(),
                              span_start_ms,
                              span_end_ms);
 }

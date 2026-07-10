@@ -1,7 +1,6 @@
 #include "report_edf_timezone.h"
 
 #include <stdlib.h>
-#include <string.h>
 #include <time.h>
 
 #include "calendar_utils.h"
@@ -17,31 +16,12 @@ constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
 
 bool sleep_day_local_noon_seconds(const char *sleep_day,
                                   int64_t &local_seconds) {
-    if (!sleep_day || strlen(sleep_day) != 8) return false;
-    for (size_t i = 0; i < 8; ++i) {
-        if (sleep_day[i] < '0' || sleep_day[i] > '9') return false;
-    }
-
-    char value[5] = {};
-    memcpy(value, sleep_day, 4);
-    const int year = static_cast<int>(strtol(value, nullptr, 10));
-
-    value[0] = sleep_day[4];
-    value[1] = sleep_day[5];
-    value[2] = '\0';
-    const unsigned month = static_cast<unsigned>(strtoul(value, nullptr, 10));
-
-    value[0] = sleep_day[6];
-    value[1] = sleep_day[7];
-    const unsigned day = static_cast<unsigned>(strtoul(value, nullptr, 10));
-
-    if (year <= 0 || month < 1 || month > 12 || day < 1 ||
-        day > calendar_days_in_month(year, static_cast<int>(month))) {
+    int64_t days = 0;
+    if (!calendar_yyyymmdd_to_days(sleep_day, days)) {
         return false;
     }
 
-    local_seconds = calendar_days_from_civil(year, month, day) *
-                    SECONDS_PER_DAY + 12LL * SECONDS_PER_HOUR;
+    local_seconds = days * SECONDS_PER_DAY + 12LL * SECONDS_PER_HOUR;
     return true;
 }
 
@@ -49,7 +29,7 @@ bool summary_period_offset_minutes(const ReportSummaryRecord &summary,
                                    const char *sleep_day,
                                    int32_t &offset_minutes) {
     if (!summary.valid || !summary.start_ms ||
-        !report_edf_summary_matches_sleep_day(summary, sleep_day)) {
+        !report_summary_matches_sleep_day(summary, sleep_day)) {
         return false;
     }
 
@@ -114,8 +94,7 @@ bool posix_offset_for_local_ms(int64_t local_ms, int32_t &offset_minutes) {
 
 bool apply_resolution(EdfReportSessionDescriptor &session,
                       int32_t offset_minutes,
-                      ReportEdfTimezoneSource source,
-                      ReportEdfTimezoneResolution &out) {
+                      int32_t &resolved_offset_minutes) {
     const bool has_local_time =
         session.local_earliest_header_start_ms > 0;
     if (has_local_time &&
@@ -123,33 +102,19 @@ bool apply_resolution(EdfReportSessionDescriptor &session,
         return false;
     }
 
-    out.valid = true;
-    out.offset_minutes = offset_minutes;
-    out.source = source;
+    resolved_offset_minutes = offset_minutes;
     return true;
 }
 
 }  // namespace
-
-bool report_edf_summary_matches_sleep_day(
-    const ReportSummaryRecord &summary,
-    const char *sleep_day) {
-    if (!sleep_day || !sleep_day[0]) return false;
-
-    char summary_sleep_day[9] = {};
-    return report_summary_sleep_day_yyyymmdd(summary,
-                                             summary_sleep_day,
-                                             sizeof(summary_sleep_day)) &&
-           strcmp(summary_sleep_day, sleep_day) == 0;
-}
 
 bool report_edf_resolve_session_timezone(
     EdfReportSessionDescriptor &session,
     const ReportSummaryRecord *matching_summary,
     bool current_offset_valid,
     int32_t current_offset_minutes,
-    ReportEdfTimezoneResolution &out) {
-    out = {};
+    int32_t &resolved_offset_minutes) {
+    resolved_offset_minutes = 0;
 
     int32_t summary_offset_minutes = 0;
     if (matching_summary &&
@@ -158,8 +123,7 @@ bool report_edf_resolve_session_timezone(
                                       summary_offset_minutes)) {
         return apply_resolution(session,
                                 summary_offset_minutes,
-                                ReportEdfTimezoneSource::Summary,
-                                out);
+                                resolved_offset_minutes);
     }
 
     int32_t posix_offset_minutes = 0;
@@ -167,15 +131,13 @@ bool report_edf_resolve_session_timezone(
                                   posix_offset_minutes)) {
         return apply_resolution(session,
                                 posix_offset_minutes,
-                                ReportEdfTimezoneSource::PosixRule,
-                                out);
+                                resolved_offset_minutes);
     }
 
     if (current_offset_valid) {
         return apply_resolution(session,
                                 current_offset_minutes,
-                                ReportEdfTimezoneSource::CurrentDeviceOffset,
-                                out);
+                                resolved_offset_minutes);
     }
 
     return false;

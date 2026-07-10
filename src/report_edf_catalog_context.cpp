@@ -49,11 +49,6 @@ bool ReportEdfCatalogContext::copy_session(
     return catalog_ && catalog_->copy_session(index, out);
 }
 
-bool ReportEdfCatalogContext::session_reportable(
-    const EdfReportSessionDescriptor &session) const {
-    return catalog_ && edf_report_session_reportable(session);
-}
-
 bool ReportEdfCatalogContext::resolve_session_timezone(
     EdfReportSessionDescriptor &session,
     const ReportSummaryRecord *matching_summary,
@@ -62,17 +57,11 @@ bool ReportEdfCatalogContext::resolve_session_timezone(
     const bool current_offset_valid =
         timezone_offset_minutes(current_offset_minutes);
 
-    ReportEdfTimezoneResolution resolution;
-    if (!report_edf_resolve_session_timezone(session,
-                                             matching_summary,
-                                             current_offset_valid,
-                                             current_offset_minutes,
-                                             resolution)) {
-        return false;
-    }
-
-    offset_minutes = resolution.offset_minutes;
-    return true;
+    return report_edf_resolve_session_timezone(session,
+                                               matching_summary,
+                                               current_offset_valid,
+                                               current_offset_minutes,
+                                               offset_minutes);
 }
 
 bool ReportEdfCatalogContext::collect_sessions_for_night(
@@ -136,7 +125,7 @@ bool ReportEdfCatalogContext::collect_sessions_for_night(
         if (!matches_sleep_day && !matches_range) {
             continue;
         }
-        if (!session_reportable(session)) continue;
+        if (!edf_report_session_reportable(session)) continue;
         out_session_count++;
     }
 

@@ -8,13 +8,6 @@ namespace {
 
 constexpr int64_t COVERAGE_TOLERANCE_MS = 5 * 60 * 1000;
 
-bool report_ranges_overlap_local(int64_t a_start,
-                                 int64_t a_end,
-                                 int64_t b_start,
-                                 int64_t b_end) {
-    return a_start < b_end && b_start < a_end;
-}
-
 size_t collect_required_ranges(const ReportSessionRange *session_ranges,
                                size_t session_range_count,
                                int64_t range_start_ms,
@@ -28,10 +21,10 @@ size_t collect_required_ranges(const ReportSessionRange *session_ranges,
     size_t required_range_count = 0;
     for (size_t i = 0; i < session_range_count &&
                        required_range_count < max_ranges; ++i) {
-        if (!report_ranges_overlap_local(session_ranges[i].start_ms,
-                                         session_ranges[i].end_ms,
-                                         range_start_ms,
-                                         range_end_ms)) {
+        if (!ranges_overlap(session_ranges[i].start_ms,
+                            session_ranges[i].end_ms,
+                            range_start_ms,
+                            range_end_ms)) {
             continue;
         }
         ReportSessionRange &range = required_ranges[required_range_count];

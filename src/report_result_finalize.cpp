@@ -52,7 +52,8 @@ bool ReportResultBuildService::count_events_from_chunks() {
             bool overlaps_result_range = false;
             for (size_t range_index = 0; range_index < range_count;
                  ++range_index) {
-                const PlotRange &range = runtime_.ranges()[range_index];
+                const ReportSessionRange &range =
+                    runtime_.ranges()[range_index];
                 if (report_event_overlaps_window(
                         event,
                         range.start_ms,

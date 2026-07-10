@@ -1,5 +1,7 @@
 #include "calendar_utils.h"
 
+#include <stddef.h>
+
 namespace aircannect {
 
 bool calendar_is_leap_year(int year) {
@@ -13,6 +15,42 @@ uint8_t calendar_days_in_month(int year, int month) {
     if (month < 1 || month > 12) return 0;
     if (month == 2 && calendar_is_leap_year(year)) return 29;
     return days[month - 1];
+}
+
+bool calendar_parse_yyyymmdd(const char *text,
+                             int &year,
+                             unsigned &month,
+                             unsigned &day) {
+    if (!text) return false;
+
+    unsigned values[3] = {};
+    constexpr uint8_t widths[] = {4, 2, 2};
+    size_t offset = 0;
+    for (size_t field = 0; field < 3; ++field) {
+        for (uint8_t digit = 0; digit < widths[field]; ++digit) {
+            const char c = text[offset++];
+            if (c < '0' || c > '9') return false;
+            values[field] = values[field] * 10u +
+                            static_cast<unsigned>(c - '0');
+        }
+    }
+    if (text[offset] != '\0') return false;
+
+    year = static_cast<int>(values[0]);
+    month = values[1];
+    day = values[2];
+    return year > 0 && month >= 1 && month <= 12 && day >= 1 &&
+           day <= calendar_days_in_month(year, static_cast<int>(month));
+}
+
+bool calendar_yyyymmdd_to_days(const char *text, int64_t &days) {
+    int year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    if (!calendar_parse_yyyymmdd(text, year, month, day)) return false;
+
+    days = calendar_days_from_civil(year, month, day);
+    return true;
 }
 
 int64_t calendar_days_from_civil(int year, unsigned month, unsigned day) {

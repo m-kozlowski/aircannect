@@ -20,11 +20,8 @@ public:
     bool status(EdfReportCatalogStatus &out, uint32_t timeout_ms) const;
     bool request_refresh() const;
     bool pending_or_request_refresh() const;
-    bool timezone_offset_minutes(int32_t &out) const;
     size_t session_count() const;
     bool copy_session(size_t index, EdfReportSessionDescriptor &out) const;
-    bool session_reportable(
-        const EdfReportSessionDescriptor &session) const;
     bool resolve_session_timezone(
         EdfReportSessionDescriptor &session,
         const ReportSummaryRecord *matching_summary,
@@ -41,6 +38,8 @@ public:
     void mark_summary_published(uint32_t refresh_id);
 
 private:
+    bool timezone_offset_minutes(int32_t &out) const;
+
     EdfReportCatalogJob *catalog_ = nullptr;
     uint32_t summary_refresh_id_ = 0;
 };

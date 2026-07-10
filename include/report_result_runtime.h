@@ -46,9 +46,7 @@ public:
     bool uses_edf_provider() const;
     void release_edf_sessions();
 
-    void clear_ranges();
     bool set_ranges_from_indexed_night(const ReportIndexedNight &night);
-    bool set_ranges_from_edf_sessions();
     bool data_span(int64_t &span_start_ms, int64_t &span_end_ms) const;
 
     void clear_prepare_state();

@@ -40,6 +40,10 @@ bool ranges_overlap(int64_t start_a,
                     int64_t end_a,
                     int64_t start_b,
                     int64_t end_b);
+bool report_range_span(const ReportSessionRange *ranges,
+                       size_t count,
+                       int64_t &span_start,
+                       int64_t &span_end);
 size_t collect_session_ranges(const ReportSummaryRecord &night,
                               ReportSessionRange *ranges,
                               size_t max_ranges);
@@ -52,9 +56,6 @@ bool indexed_night_data_span(const ReportIndexedNight &night,
 bool indexed_night_summary_ranges_covered_by_data(
     const ReportIndexedNight &night);
 void normalize_report_indexed_night(ReportIndexedNight &night);
-size_t collect_indexed_night_data_ranges(const ReportIndexedNight &night,
-                                         ReportSessionRange *ranges,
-                                         size_t max_ranges);
 size_t collect_indexed_night_report_ranges(const ReportIndexedNight &night,
                                            ReportSessionRange *ranges,
                                            size_t max_ranges);
@@ -64,6 +65,8 @@ uint64_t report_summary_identity_signature(
 bool report_summary_sleep_day_yyyymmdd(const ReportSummaryRecord &record,
                                        char *out,
                                        size_t out_size);
+bool report_summary_matches_sleep_day(const ReportSummaryRecord &record,
+                                      const char *sleep_day);
 class ReportNightIndex {
 public:
     ReportNightIndex(ReportIndexedNight *nights, size_t capacity);

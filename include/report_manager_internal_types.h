@@ -10,7 +10,6 @@
 #include "report_data_provider.h"
 #include "report_manager_limits.h"
 #include "report_night_index.h"
-#include "report_plot_range.h"
 #include "report_result_types.h"
 #include "report_spool_types.h"
 
@@ -133,7 +132,7 @@ struct MaterializedResult {
     uint32_t last_used = 0;
     ReportResultStatus status;
     ReportIndexedNight night;
-    PlotRange ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
+    ReportSessionRange ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
     size_t range_count = 0;
     ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
     size_t stream_count = 0;

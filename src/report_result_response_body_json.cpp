@@ -10,7 +10,7 @@ namespace aircannect {
 void build_report_result_json_from(
     const ReportResultStatus &result_status,
     const ReportIndexedNight &indexed_night,
-    const report_manager_internal::PlotRange *ranges,
+    const ReportSessionRange *ranges,
     size_t range_count,
     const ReportResultStream *result_streams,
     size_t result_stream_count,
@@ -80,7 +80,7 @@ void build_report_result_json_from(
             duration_min =
                 report_ceil_duration_min(range.start_ms, range.end_ms);
         } else if (have_resolved_ranges) {
-            const report_manager_internal::PlotRange &range = ranges[i];
+            const ReportSessionRange &range = ranges[i];
             session_start = static_cast<uint64_t>(range.start_ms);
             session_end = static_cast<uint64_t>(range.end_ms);
             duration_min =
