@@ -212,11 +212,25 @@ int find_matching_indexed_range(const ReportIndexedNight &night,
 
 int find_indexed_night_for_edf_session(const ReportIndexedNight *nights,
                                        size_t count,
+                                       const char *sleep_day,
                                        bool have_day_start,
                                        int64_t day_start_ms,
                                        int64_t session_start_ms,
                                        int64_t session_end_ms) {
     if (!nights) return -1;
+
+    if (sleep_day && sleep_day[0]) {
+        for (size_t i = 0; i < count; ++i) {
+            char indexed_sleep_day[9] = {};
+            if (report_summary_sleep_day_yyyymmdd(nights[i].summary,
+                                                  indexed_sleep_day,
+                                                  sizeof(indexed_sleep_day)) &&
+                strcmp(indexed_sleep_day, sleep_day) == 0) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+
     if (have_day_start) {
         for (size_t i = 0; i < count; ++i) {
             const ReportSummaryRecord &record = nights[i].summary;
@@ -266,6 +280,7 @@ bool ReportNightIndex::add_edf_session(
     const int64_t session_end_ms = session.latest_header_end_ms;
     int index = find_indexed_night_for_edf_session(nights_,
                                                    count_,
+                                                   session.sleep_day,
                                                    have_day_start,
                                                    day_start_ms,
                                                    session_start_ms,

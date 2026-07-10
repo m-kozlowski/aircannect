@@ -12,7 +12,66 @@ namespace aircannect {
 namespace {
 
 constexpr int64_t SECONDS_PER_DAY = 24LL * 60LL * 60LL;
+constexpr int64_t SECONDS_PER_HOUR = 60LL * 60LL;
 constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
+
+bool sleep_day_local_noon_seconds(const char *sleep_day,
+                                  int64_t &local_seconds) {
+    if (!sleep_day || strlen(sleep_day) != 8) return false;
+    for (size_t i = 0; i < 8; ++i) {
+        if (sleep_day[i] < '0' || sleep_day[i] > '9') return false;
+    }
+
+    char value[5] = {};
+    memcpy(value, sleep_day, 4);
+    const int year = static_cast<int>(strtol(value, nullptr, 10));
+
+    value[0] = sleep_day[4];
+    value[1] = sleep_day[5];
+    value[2] = '\0';
+    const unsigned month = static_cast<unsigned>(strtoul(value, nullptr, 10));
+
+    value[0] = sleep_day[6];
+    value[1] = sleep_day[7];
+    const unsigned day = static_cast<unsigned>(strtoul(value, nullptr, 10));
+
+    if (year <= 0 || month < 1 || month > 12 || day < 1 ||
+        day > calendar_days_in_month(year, static_cast<int>(month))) {
+        return false;
+    }
+
+    local_seconds = calendar_days_from_civil(year, month, day) *
+                    SECONDS_PER_DAY + 12LL * SECONDS_PER_HOUR;
+    return true;
+}
+
+bool summary_period_offset_minutes(const ReportSummaryRecord &summary,
+                                   const char *sleep_day,
+                                   int32_t &offset_minutes) {
+    if (!summary.valid || !summary.start_ms ||
+        !report_edf_summary_matches_sleep_day(summary, sleep_day)) {
+        return false;
+    }
+
+    int64_t local_noon_seconds = 0;
+    if (!sleep_day_local_noon_seconds(sleep_day, local_noon_seconds)) {
+        return false;
+    }
+
+    const int64_t local_noon_ms = local_noon_seconds * 1000LL;
+    const int64_t offset_ms =
+        local_noon_ms - static_cast<int64_t>(summary.start_ms);
+    if (offset_ms % 60000LL != 0) return false;
+
+    const int64_t candidate = offset_ms / 60000LL;
+    if (candidate < -MAX_TIMEZONE_OFFSET_MINUTES ||
+        candidate > MAX_TIMEZONE_OFFSET_MINUTES) {
+        return false;
+    }
+
+    offset_minutes = static_cast<int32_t>(candidate);
+    return true;
+}
 
 bool posix_offset_for_local_ms(int64_t local_ms, int32_t &offset_minutes) {
     const char *timezone = getenv("TZ");
@@ -92,11 +151,13 @@ bool report_edf_resolve_session_timezone(
     ReportEdfTimezoneResolution &out) {
     out = {};
 
-    if (matching_summary && matching_summary->has_tz_offset_min &&
-        report_edf_summary_matches_sleep_day(*matching_summary,
-                                             session.sleep_day)) {
+    int32_t summary_offset_minutes = 0;
+    if (matching_summary &&
+        summary_period_offset_minutes(*matching_summary,
+                                      session.sleep_day,
+                                      summary_offset_minutes)) {
         return apply_resolution(session,
-                                matching_summary->tz_offset_min,
+                                summary_offset_minutes,
                                 ReportEdfTimezoneSource::Summary,
                                 out);
     }
