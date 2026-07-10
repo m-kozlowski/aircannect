@@ -31,7 +31,7 @@ void report_format_result_etag(const ReportSummaryRecord &record,
                                uint32_t night_epoch,
                                char *out,
                                size_t out_size) {
-    constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 29;
+    constexpr uint32_t REPORT_RESULT_ETAG_VERSION = 30;
 
     if (!out || !out_size) return;
 

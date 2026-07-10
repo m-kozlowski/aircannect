@@ -298,7 +298,9 @@ size_t collect_indexed_night_report_ranges(const ReportIndexedNight &night,
     }
 
     normalize_range_array(ranges, count);
-    coalesce_sorted_range_array(ranges, count);
+    if (!use_display_ranges) {
+        coalesce_sorted_range_array(ranges, count);
+    }
     return count;
 }
 
