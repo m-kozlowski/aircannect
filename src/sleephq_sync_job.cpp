@@ -1980,12 +1980,9 @@ JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
     SleepHqUploadResult upload;
     bool attached = false;
     if (current_file_.attach_by_hash) {
-        if (!compute_current_file_content_hash_locked(
-                current_file_.content_hash,
-                sizeof(current_file_.content_hash))) {
-            fail_locked("hash_failed");
-            return JobStep::Idle;
-        }
+        // ResolveRemoteFile computed this hash for the same size/mtime
+        // snapshot validated above. Re-reading the complete file here would
+        // add no integrity guarantee and doubles SD traffic on attach.
         SleepHqAttachRequest attach;
         attach.import_id = status_.import_id;
         attach.name = current_file_.name;
