@@ -9,6 +9,7 @@
 
 #include "large_text_buffer.h"
 #include "report_manager_limits.h"
+#include "report_range_plot_cache.h"
 #include "report_result_types.h"
 #include "report_spool_types.h"
 
@@ -26,22 +27,6 @@ enum class ReportCachedPlotRead : uint8_t {
     Error,
     Ready,
     ResultWithoutPlot,
-};
-
-enum class ReportRangePlotRead : uint8_t {
-    Building,
-    Empty,
-    Error,
-    Ready,
-};
-
-struct ReportRangePlotRequest {
-    bool active = false;
-    size_t index = 0;
-    uint64_t night_start_ms = 0;
-    char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-    int64_t from_ms = 0;
-    int64_t to_ms = 0;
 };
 
 class ReportResultSlotCache {
@@ -92,16 +77,11 @@ public:
 
 private:
     struct ResultCacheEntry;
-    struct RangePlotCacheEntry;
 
     bool ensure_lock();
     bool ensure_range_cache();
     void clear_slot_locked(ResultCacheEntry &slot);
-    void clear_range_entry_locked(RangePlotCacheEntry &entry);
-    void trim_range_cache_locked(size_t incoming_bytes,
-                                 size_t protected_index);
     void update_counts_locked();
-    void clear_range_locked(uint64_t night_start_ms, bool all);
 
     ResultCacheEntry *slots_ = nullptr;
     SemaphoreHandle_t lock_ = nullptr;
@@ -109,15 +89,7 @@ private:
     uint32_t materialized_slots_ = 0;
     uint32_t materialized_plot_slots_ = 0;
 
-    bool range_req_active_ = false;
-    size_t range_req_index_ = 0;
-    uint64_t range_req_night_start_ms_ = 0;
-    char range_req_etag_[AC_REPORT_RESULT_ETAG_MAX] = {};
-    int64_t range_req_from_ = 0;
-    int64_t range_req_to_ = 0;
-
-    RangePlotCacheEntry *range_cache_ = nullptr;
-    uint32_t range_cache_tick_ = 0;
+    ReportRangePlotCache *range_cache_ = nullptr;
 };
 
 }  // namespace aircannect
