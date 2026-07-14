@@ -241,10 +241,6 @@ bool StorageDeleteJob::start_selected(const char *base_path,
             copy_cstr(error_out, error_out_size, "bad_child_path");
             return false;
         }
-        if (storage_path_contains_protected_root(child_path)) {
-            copy_cstr(error_out, error_out_size, "protected_path");
-            return false;
-        }
         if (!storage_user_path_valid(child_path) ||
             strcmp(child_path, "/") == 0) {
             copy_cstr(error_out, error_out_size, "bad_child_path");

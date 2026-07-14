@@ -8,8 +8,6 @@ static constexpr size_t AC_STORAGE_PATH_MAX = 192;
 static constexpr size_t AC_STORAGE_NAME_MAX = 80;
 static constexpr size_t AC_STORAGE_ERROR_MAX = 64;
 static constexpr size_t AC_STORAGE_MAX_SELECTIONS = 64;
-static constexpr const char *AC_STORAGE_ARCHIVE_TEMP_DIR =
-    "/aircannect/tmp/archive";
 
 const char *storage_basename_from_path(const char *path);
 bool storage_path_equals_or_under(const char *path, const char *root);
@@ -19,7 +17,6 @@ bool storage_append_child_path(const char *parent,
                                size_t out_size);
 bool storage_valid_child_name(const char *name);
 bool storage_user_path_valid(const char *path);
-bool storage_path_contains_protected_root(const char *path);
 void storage_normalize_path(char *path);
 
 }  // namespace aircannect

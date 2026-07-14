@@ -118,7 +118,6 @@ private:
     void release_selection_locked();
     void release_build_buffers_locked();
     void apply_preempt_locked();
-    void cleanup_stale_temp_locked();
     bool begin_job_locked(const char *source_path,
                           bool recursive,
                           const char *filename_base,
@@ -171,9 +170,6 @@ private:
     WalkFrame *walk_stack_ = nullptr;
     size_t walk_depth_ = 0;
     size_t walk_capacity_ = 0;
-
-    // temp maintenance
-    uint32_t stale_cleanup_due_ms_ = 1;
 
     // active prepared-byte producer
     std::shared_ptr<StorageArchiveDownload> active_download_;

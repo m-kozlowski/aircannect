@@ -23,7 +23,6 @@ static constexpr uint32_t ARCHIVE_PREPARE_SLICE_US = 10 * 1000;
 static constexpr size_t ARCHIVE_INITIAL_ENTRY_CAPACITY = 64;
 static constexpr size_t ARCHIVE_INITIAL_PATH_BYTES = 4096;
 static constexpr size_t ARCHIVE_MAX_DEPTH = 16;
-static constexpr uint32_t ARCHIVE_STALE_CLEANUP_MS = 60UL * 60UL * 1000UL;
 static constexpr uint32_t ARCHIVE_CONSUMER_TIMEOUT_MS = 60UL * 1000UL;
 static constexpr uint32_t ZIP32_MAX = 0xFFFFFFFFu;
 static constexpr uint32_t ZIP_LOCAL_HEADER_SIZE = 30;
@@ -49,11 +48,6 @@ const char *relative_archive_name(const char *source, const char *path) {
     if (strncmp(source, path, source_len) != 0) return "";
     if (path[source_len] == '/') return path + source_len + 1;
     return storage_basename_from_path(path);
-}
-
-bool archive_temp_name(const char *path) {
-    const char *base = storage_basename_from_path(path);
-    return strncmp(base, "archive-", 8) == 0 && strstr(base, ".zip") != nullptr;
 }
 
 void put_le16(uint8_t *dst, size_t offset, uint16_t value) {
@@ -349,44 +343,6 @@ void StorageArchiveJob::apply_preempt_locked() {
     }
 }
 
-void StorageArchiveJob::cleanup_stale_temp_locked() {
-    if (!Storage::mounted()) return;
-    File dir;
-    {
-        Storage::Guard guard;
-        dir = Storage::open(AC_STORAGE_ARCHIVE_TEMP_DIR, "r");
-    }
-    bool is_dir = false;
-    {
-        Storage::Guard guard;
-        is_dir = dir && dir.isDirectory();
-    }
-    if (!dir || !is_dir) {
-        if (dir) {
-            Storage::Guard guard;
-            dir.close();
-        }
-        return;
-    }
-    for (;;) {
-        StorageDirChild child;
-        if (!storage_read_next_dir_child(dir, child)) break;
-        char path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-        if (!child.is_dir &&
-            storage_append_child_path(AC_STORAGE_ARCHIVE_TEMP_DIR,
-                                      child.name,
-                                      path,
-                                      sizeof(path)) &&
-            archive_temp_name(path)) {
-            (void)Storage::remove(path);
-        }
-    }
-    {
-        Storage::Guard guard;
-        dir.close();
-    }
-}
-
 bool StorageArchiveJob::begin_job_locked(const char *source_path,
                                          bool recursive,
                                          const char *filename_base,
@@ -645,17 +601,6 @@ JobStep StorageArchiveJob::step() {
 
     apply_preempt_locked();
 
-    const uint32_t now = millis_nonzero();
-    if (status_.state == StorageArchiveState::Idle &&
-        stale_cleanup_due_ms_ != 0 &&
-        static_cast<int32_t>(now - stale_cleanup_due_ms_) >= 0) {
-        cleanup_stale_temp_locked();
-        stale_cleanup_due_ms_ = now + ARCHIVE_STALE_CLEANUP_MS;
-        if (stale_cleanup_due_ms_ == 0) stale_cleanup_due_ms_ = 1;
-        unlock();
-        return JobStep::Idle;
-    }
-
     JobStep result = JobStep::Idle;
     if (status_.state == StorageArchiveState::Preparing) {
         result = prepare_step_locked() ? JobStep::Working : JobStep::Idle;
@@ -905,9 +850,6 @@ bool StorageArchiveJob::prepare_step_locked() {
         if (!path_ok) {
             set_error_locked("bad_child_path");
             return false;
-        }
-        if (storage_path_equals_or_under(child_path, AC_STORAGE_ARCHIVE_TEMP_DIR)) {
-            continue;
         }
         if (!storage_archive_valid_path(child_path)) {
             set_error_locked("bad_child_path");

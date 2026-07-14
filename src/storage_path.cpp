@@ -4,26 +4,6 @@
 #include <stdio.h>
 
 namespace aircannect {
-namespace {
-
-size_t trimmed_path_len(const char *path) {
-    if (!path) return 0;
-    size_t len = strlen(path);
-    while (len > 1 && path[len - 1] == '/') len--;
-    return len;
-}
-
-bool path_is_same_or_ancestor_of(const char *path, const char *target) {
-    const size_t path_len = trimmed_path_len(path);
-    const size_t target_len = trimmed_path_len(target);
-    if (path_len == 0 || target_len == 0) return false;
-    if (path_len == 1 && path[0] == '/') return true;
-    if (path_len > target_len) return false;
-    if (strncmp(path, target, path_len) != 0) return false;
-    return path_len == target_len || target[path_len] == '/';
-}
-
-}  // namespace
 
 const char *storage_basename_from_path(const char *path) {
     if (!path || !*path) return "";
@@ -65,9 +45,6 @@ bool storage_user_path_valid(const char *path) {
     if (!path || path[0] != '/') return false;
     const size_t len = strlen(path);
     if (len == 0 || len >= AC_STORAGE_PATH_MAX) return false;
-    if (storage_path_equals_or_under(path, AC_STORAGE_ARCHIVE_TEMP_DIR)) {
-        return false;
-    }
 
     size_t segment_start = 1;
     for (size_t i = 0; i <= len; ++i) {
@@ -86,10 +63,6 @@ bool storage_user_path_valid(const char *path) {
         }
     }
     return true;
-}
-
-bool storage_path_contains_protected_root(const char *path) {
-    return path_is_same_or_ancestor_of(path, AC_STORAGE_ARCHIVE_TEMP_DIR);
 }
 
 void storage_normalize_path(char *path) {
