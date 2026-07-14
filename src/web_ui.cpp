@@ -2784,9 +2784,9 @@ void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
         return;
     }
     StorageArchiveStatus status;
-    if (!storage_archive_job_->status(status, 0)) {
+    if (!storage_archive_job_->status(status)) {
         request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"status_busy\"}");
+                      "{\"ok\":false,\"error\":\"status_unavailable\"}");
         return;
     }
     LargeTextBuffer json;
@@ -2970,7 +2970,7 @@ void WebUI::send_storage_delete_status(AsyncWebServerRequest *request) const {
     StorageDeleteStatus status;
     if (!storage_delete_job_->status(status)) {
         request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"status_busy\"}");
+                      "{\"ok\":false,\"error\":\"status_unavailable\"}");
         return;
     }
     LargeTextBuffer json;

@@ -46,6 +46,10 @@ const char *storage_delete_state_name(StorageDeleteState state) {
 
 void StorageDeleteJob::begin() {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
+    if (!published_status_.begin(status_)) {
+        Log::logf(CAT_STORAGE, LOG_ERROR,
+                  "[DELETE] status snapshot unavailable\n");
+    }
 }
 
 bool StorageDeleteJob::lock(uint32_t timeout_ms) const {
@@ -53,7 +57,15 @@ bool StorageDeleteJob::lock(uint32_t timeout_ms) const {
 }
 
 void StorageDeleteJob::unlock() const {
+    if (status_dirty_ && published_status_.publish(status_)) {
+        status_dirty_ = false;
+    }
     if (lock_) xSemaphoreGive(lock_);
+}
+
+void StorageDeleteJob::touch_status_locked() {
+    status_.updated_ms = nonzero_millis(millis());
+    status_dirty_ = true;
 }
 
 void StorageDeleteJob::set_error_locked(const char *error) {
@@ -61,7 +73,7 @@ void StorageDeleteJob::set_error_locked(const char *error) {
     release_path_metadata_locked();
     status_.state = StorageDeleteState::Error;
     copy_cstr(status_.error, sizeof(status_.error), error);
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     Log::logf(CAT_STORAGE, LOG_WARN, "[DELETE] error=%s\n",
               status_.error[0] ? status_.error : "error");
 }
@@ -74,7 +86,7 @@ void StorageDeleteJob::reset_job_locked(bool keep_status) {
     if (!keep_status) {
         status_ = StorageDeleteStatus();
         status_.state = StorageDeleteState::Idle;
-        status_.updated_ms = nonzero_millis(millis());
+        touch_status_locked();
     }
 }
 
@@ -133,7 +145,7 @@ void StorageDeleteJob::apply_preempt_locked() {
     if (!preempt_requested_.exchange(false)) return;
     if (status_.state == StorageDeleteState::Deleting) {
         close_walk_locked();
-        status_.updated_ms = nonzero_millis(millis());
+        touch_status_locked();
     }
 }
 
@@ -266,6 +278,7 @@ bool StorageDeleteJob::start_selected(const char *base_path,
     copy_cstr(status_.base_path, sizeof(status_.base_path), normalized_base);
     status_.started_ms = nonzero_millis(millis());
     status_.updated_ms = status_.started_ms;
+    status_dirty_ = true;
 
     bool base_ok = false;
     {
@@ -301,10 +314,7 @@ bool StorageDeleteJob::start_selected(const char *base_path,
 
 bool StorageDeleteJob::status(StorageDeleteStatus &out,
                               uint32_t timeout_ms) const {
-    if (!lock(timeout_ms)) return false;
-    out = status_;
-    unlock();
-    return true;
+    return published_status_.read(out, timeout_ms);
 }
 
 StorageDeleteStatus StorageDeleteJob::status() const {
@@ -376,7 +386,7 @@ bool StorageDeleteJob::delete_next_locked() {
     if (!exists) {
         status_.roots_done++;
         current_root_++;
-        status_.updated_ms = nonzero_millis(millis());
+        touch_status_locked();
         return true;
     }
     if (is_dir) {
@@ -390,7 +400,7 @@ bool StorageDeleteJob::delete_next_locked() {
     status_.files_deleted++;
     status_.roots_done++;
     current_root_++;
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     return true;
 }
 
@@ -417,7 +427,7 @@ bool StorageDeleteJob::delete_dir_step_locked() {
             status_.roots_done++;
             current_root_++;
         }
-        status_.updated_ms = nonzero_millis(millis());
+        touch_status_locked();
         return true;
     }
 
@@ -439,7 +449,7 @@ bool StorageDeleteJob::delete_dir_step_locked() {
         return false;
     }
     status_.files_deleted++;
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     return true;
 }
 
@@ -447,7 +457,7 @@ bool StorageDeleteJob::finish_done_locked() {
     release_walk_stack_locked();
     release_path_metadata_locked();
     status_.state = StorageDeleteState::Done;
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     Log::logf(CAT_STORAGE, LOG_INFO,
               "[DELETE] done roots=%u files=%u dirs=%u\n",
               static_cast<unsigned>(status_.roots),

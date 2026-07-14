@@ -217,6 +217,10 @@ bool storage_archive_valid_path(const char *path) {
 
 void StorageArchiveJob::begin() {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
+    if (!published_status_.begin(status_)) {
+        Log::logf(CAT_STORAGE, LOG_ERROR,
+                  "[ARCHIVE] status snapshot unavailable\n");
+    }
 }
 
 bool StorageArchiveJob::lock(uint32_t timeout_ms) const {
@@ -224,7 +228,15 @@ bool StorageArchiveJob::lock(uint32_t timeout_ms) const {
 }
 
 void StorageArchiveJob::unlock() const {
+    if (status_dirty_ && published_status_.publish(status_)) {
+        status_dirty_ = false;
+    }
     if (lock_) xSemaphoreGive(lock_);
+}
+
+void StorageArchiveJob::touch_status_locked() {
+    status_.updated_ms = nonzero_millis(millis());
+    status_dirty_ = true;
 }
 
 void StorageArchiveJob::set_error_locked(const char *error) {
@@ -232,7 +244,7 @@ void StorageArchiveJob::set_error_locked(const char *error) {
     release_build_buffers_locked();
     status_.state = StorageArchiveState::Error;
     copy_cstr(status_.error, sizeof(status_.error), error);
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     Log::logf(CAT_STORAGE, LOG_WARN, "[ARCHIVE] error=%s\n",
               status_.error[0] ? status_.error : "error");
 }
@@ -245,7 +257,7 @@ void StorageArchiveJob::reset_job_locked(bool keep_status) {
     if (!keep_status) {
         status_ = StorageArchiveStatus();
         status_.state = StorageArchiveState::Idle;
-        status_.updated_ms = nonzero_millis(millis());
+        touch_status_locked();
     }
 }
 
@@ -323,7 +335,7 @@ void StorageArchiveJob::apply_preempt_locked() {
     if (!preempt_requested_.exchange(false)) return;
     if (status_.state == StorageArchiveState::Preparing) {
         close_walk_files_locked();
-        status_.updated_ms = nonzero_millis(millis());
+        touch_status_locked();
     } else if (status_.state == StorageArchiveState::Downloading &&
                active_download_) {
         std::shared_ptr<StorageArchiveDownload> download = active_download_;
@@ -365,6 +377,7 @@ bool StorageArchiveJob::begin_job_locked(const char *source_path,
     snprintf(status_.filename, sizeof(status_.filename), "%s.zip", base);
     status_.started_ms = nonzero_millis(millis());
     status_.updated_ms = status_.started_ms;
+    status_dirty_ = true;
     return true;
 }
 
@@ -470,10 +483,7 @@ bool StorageArchiveJob::start_selected(const char *base_path,
 
 bool StorageArchiveJob::status(StorageArchiveStatus &out,
                                uint32_t timeout_ms) const {
-    if (!lock(timeout_ms)) return false;
-    out = status_;
-    unlock();
-    return true;
+    return published_status_.read(out, timeout_ms);
 }
 
 StorageArchiveStatus StorageArchiveJob::status() const {
@@ -533,7 +543,7 @@ bool StorageArchiveJob::begin_download(
     status_.state = StorageArchiveState::Downloading;
     status_.bytes_done = 0;
     status_.files_done = 0;
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     download->id = id;
     download->transfer.attach(status_.updated_ms);
     copy_cstr(filename_out, filename_out_size, status_.filename);
@@ -787,7 +797,7 @@ bool StorageArchiveJob::prepare_selection_step_locked() {
 
     selection_index_++;
     if (selection_index_ >= selection_count_) release_selection_locked();
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     return true;
 }
 
@@ -861,7 +871,7 @@ bool StorageArchiveJob::prepare_step_locked() {
         status_.state == StorageArchiveState::Preparing) {
         return finalize_prepare_locked();
     }
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     return true;
 }
 
@@ -876,7 +886,7 @@ bool StorageArchiveJob::finalize_prepare_locked() {
     status_.state = StorageArchiveState::Ready;
     status_.archive_bytes = status_.estimated_archive_bytes;
     status_.bytes_done = 0;
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     release_walk_stack_locked();
     Log::logf(CAT_STORAGE,
               LOG_INFO,
@@ -1267,7 +1277,7 @@ size_t StorageArchiveJob::produce_download_locked(
 
     status_.bytes_done = download.output_offset;
     status_.archive_bytes = status_.estimated_archive_bytes;
-    status_.updated_ms = nonzero_millis(millis());
+    touch_status_locked();
     return written;
 }
 

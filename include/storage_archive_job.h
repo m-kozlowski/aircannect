@@ -12,6 +12,7 @@
 
 #include "background_worker.h"
 #include "prepared_byte_ring.h"
+#include "published_status_snapshot.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -81,8 +82,7 @@ public:
                         size_t error_out_size = 0);
 
     // status
-    bool status(StorageArchiveStatus &out,
-                uint32_t timeout_ms = 1000) const;
+    bool status(StorageArchiveStatus &out, uint32_t timeout_ms = 20) const;
     StorageArchiveStatus status() const;
     bool active() const;
 
@@ -107,6 +107,7 @@ private:
     // locking/status
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
+    void touch_status_locked();
     void set_error_locked(const char *error);
     void reset_job_locked(bool keep_status);
 
@@ -148,8 +149,10 @@ private:
 
     // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
+    PublishedStatusSnapshot<StorageArchiveStatus> published_status_;
     std::atomic<bool> preempt_requested_{false};
     StorageArchiveStatus status_;
+    mutable bool status_dirty_ = false;
     uint32_t next_id_ = 1;
 
     // archive metadata
