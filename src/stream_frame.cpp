@@ -1,8 +1,10 @@
 #include "stream_frame.h"
 
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
 
 #include "as11_stream_signals.h"
 #include "json_cursor.h"
@@ -14,6 +16,9 @@
 
 namespace aircannect {
 namespace {
+
+static_assert(std::is_trivially_destructible<StreamFrameData>::value,
+              "stream frame pool reset requires trivial destruction");
 
 void set_valid(StreamFrameData &frame, size_t index, bool valid) {
     if (index >= AC_STREAM_FRAME_VALUES_MAX) return;
@@ -475,7 +480,7 @@ void StreamFramePool::release(StreamFrameData *data) {
 }
 
 void stream_frame_reset(StreamFrameData &frame) {
-    memset(&frame, 0, sizeof(frame));
+    new (&frame) StreamFrameData();
 }
 
 bool stream_parse_metadata(const std::string &payload,

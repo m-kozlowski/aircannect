@@ -82,7 +82,8 @@ bool parse_rc03_block(const uint8_t *block,
     }
 
     const uint8_t header_len = block[0];
-    if (header_len < 4 || block_len < 1 + header_len) {
+    if (header_len < 4 ||
+        block_len < 1u + static_cast<size_t>(header_len)) {
         report_series_set_error(error, error_len, "bad_rc03_header");
         return false;
     }

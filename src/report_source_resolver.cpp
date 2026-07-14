@@ -1,10 +1,15 @@
 #include "report_source_resolver.h"
 
 #include <algorithm>
+#include <new>
 #include <string.h>
+#include <type_traits>
 
 namespace aircannect {
 namespace {
+
+static_assert(std::is_trivially_destructible<ReportResolvedPlan>::value,
+              "in-place report plan reset requires trivial destruction");
 
 constexpr int64_t COVERAGE_TOLERANCE_MS = 5 * 60 * 1000;
 
@@ -51,7 +56,7 @@ bool ReportSourceResolver::build_plan(const ReportIndexedNight &night,
     // Value-assigning a default instance can materialize the whole object on
     // the main-loop stack, which is exactly where report builds must not spend
     // several kilobytes.
-    memset(&out, 0, sizeof(out));
+    new (&out) ReportResolvedPlan();
     if (range_end_ms <= range_start_ms) return true;
 
     ReportSessionRange *source_ranges = scratch_.source_ranges;

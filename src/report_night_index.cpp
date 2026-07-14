@@ -1,10 +1,14 @@
 #include "report_night_index_internal.h"
 
 #include <algorithm>
-#include <string.h>
+#include <new>
+#include <type_traits>
 
 namespace aircannect {
 namespace {
+
+static_assert(std::is_trivially_destructible<ReportIndexedNight>::value,
+              "PSRAM night-index entries require trivial destruction");
 
 void seed_night_ranges_from_summary(ReportIndexedNight &night) {
     night.range_count = collect_session_ranges(night.summary,
@@ -37,7 +41,9 @@ ReportNightIndex::ReportNightIndex(ReportIndexedNight *nights,
 void ReportNightIndex::reset() {
     count_ = 0;
     if (nights_ && capacity_ > 0) {
-        memset(nights_, 0, capacity_ * sizeof(ReportIndexedNight));
+        for (size_t i = 0; i < capacity_; ++i) {
+            new (&nights_[i]) ReportIndexedNight();
+        }
     }
 }
 

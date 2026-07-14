@@ -92,6 +92,8 @@ void SessionManager::start_session(const As11DeviceState &as11,
                                    uint32_t now_ms,
                                    const char *reason,
                                    bool recovered_active_start) {
+    (void)reason;
+
     const uint32_t start_count = status_.start_count;
     const uint32_t end_count = status_.end_count;
     status_ = SessionStatus();
@@ -138,6 +140,8 @@ void SessionManager::end_session(const As11DeviceState &as11,
     const uint32_t duration_s = status_.started_ms
         ? (now_ms - status_.started_ms) / 1000
         : 0;
+    (void)duration_s;
+
     AC_SESSION_LOG(CAT_STREAM, LOG_INFO,
                    "[THERAPY] stopped time=%s duration_s=%lu\n",
                    status_.end_device_time[0] ? status_.end_device_time : "--",
