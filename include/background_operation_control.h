@@ -32,4 +32,10 @@ struct BackgroundOperationControl {
 
 const char *background_operation_stop_error(BackgroundOperationStop reason);
 
+inline bool background_operation_result_current(uint32_t started_generation,
+                                                uint32_t current_generation,
+                                                bool abort_requested) {
+    return !abort_requested && started_generation == current_generation;
+}
+
 }  // namespace aircannect

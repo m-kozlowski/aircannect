@@ -112,14 +112,17 @@ private:
         Idle,
         Connect,
         FindRemoteMachine,
-        Check,
         NextFile,
+        ResolveDatalogDay,
         CreateImport,
         OpenLocal,
+        HashLocalFile,
         ResolveRemoteFile,
+        FetchRemoteFiles,
         UploadFile,
         ProcessImport,
         WaitImport,
+        FetchImport,
         MarkState,
         Finish,
     };
@@ -179,6 +182,35 @@ private:
         bool exists = false;
     };
 
+    struct UploadContext {
+        File *file = nullptr;
+        std::atomic<bool> *abort_requested = nullptr;
+        uint64_t offset = 0;
+    };
+
+    struct MachineListContext {
+        const char *serial = nullptr;
+        uint32_t machine_id = 0;
+    };
+
+    struct BlockingResult {
+        uint32_t operation_generation = 0;
+        bool ok = false;
+        bool performed = false;
+        bool has_more = false;
+        bool retryable = false;
+        bool remote_date_exists = false;
+        size_t count = 0;
+        uint32_t team_id = 0;
+        uint32_t machine_id = 0;
+        SleepHqImportInfo import;
+        SleepHqUploadResult upload;
+        SleepHqRemoteFileCache remote_files;
+        File local;
+        char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
+        char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    };
+
     // locking/config
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
@@ -191,6 +223,7 @@ private:
     static bool parse_inflight_phase(const char *text, InflightPhase &out);
 
     void apply_config_locked(const ConfigSnapshot &config);
+    void apply_pending_config_locked();
     bool config_matches_locked(const ConfigSnapshot &config) const;
     bool request_locked(RunKind kind,
                         const char *reason,
@@ -236,10 +269,7 @@ private:
     void clear_staged_locked();
 
     // remote file cache
-    bool add_remote_file_locked(const SleepHqRemoteFile &file);
     bool remote_file_cache_contains_locked(const CurrentFile &file) const;
-    bool fetch_next_remote_file_page_locked(char *error,
-                                            size_t error_size);
     void clear_remote_files_locked();
 
     // remote machine/date reconcile
@@ -267,59 +297,50 @@ private:
                                           char *error,
                                           size_t error_size);
     bool prepare_remote_reconcile_locked(char *error, size_t error_size);
-    bool note_remote_machine_locked(const SleepHqMachine &machine);
     void note_remote_machine_missing_locked();
 
     // work phases
     JobStep begin_export_work_locked();
-    JobStep step_find_remote_machine_locked(char *error, size_t error_size);
-    bool datalog_day_decision_locked(const char *day,
-                                     bool local_complete,
-                                     bool &force_export,
-                                     char *error,
-                                     size_t error_size);
+    bool resolve_pending_datalog_day_locked(bool &needs_lookup,
+                                            char *error,
+                                            size_t error_size);
     bool build_sleep_path_locked(const char *local_path,
                                  char *path_out,
                                  size_t path_out_size,
                                  char *name_out,
                                  size_t name_out_size) const;
-    bool current_file_matches_snapshot_locked() const;
-    bool compute_current_file_content_hash_locked(char *out,
-                                                  size_t out_size);
+    bool current_file_matches_snapshot() const;
+    bool compute_current_file_content_hash(char *out, size_t out_size);
     BackgroundOperationControl operation_control(uint32_t timeout_ms) const;
+    void request_operation_abort();
 
-    JobStep step_connect_locked(char *error, size_t error_size);
-    JobStep step_check_locked(char *error, size_t error_size);
-    JobStep step_create_import_locked(char *error, size_t error_size);
-    JobStep step_open_local_locked();
-    JobStep step_resolve_remote_file_locked(char *error,
-                                            size_t error_size);
-    JobStep step_upload_file_locked(char *error, size_t error_size);
-    JobStep step_process_import_locked(char *error, size_t error_size);
-    JobStep step_wait_import_locked(char *error, size_t error_size);
+    JobStep step_resolve_remote_file_locked();
+    JobStep step_wait_import_locked();
     JobStep step_mark_state_locked(char *error, size_t error_size);
     JobStep step_work_phase_locked();
+    static bool phase_has_blocking_io(WorkPhase phase);
+    void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
+    JobStep publish_blocking_phase_locked(WorkPhase phase,
+                                          BlockingResult &result);
 
     // client callbacks
-    static bool upload_read_cb(void *ctx, uint8_t *out,
-                               size_t len, size_t &read);
+    static bool upload_read_cb(void *ctx,
+                               uint8_t *out,
+                               size_t len,
+                               size_t &read);
     static bool upload_reset_cb(void *ctx);
     static bool operation_abort_cb(void *ctx);
     static bool remote_file_list_cb(void *ctx,
                                     const SleepHqRemoteFile &file);
     static bool remote_machine_list_cb(void *ctx,
                                        const SleepHqMachine &machine);
-    static bool datalog_day_decision_cb(void *ctx,
-                                        const char *day,
-                                        bool local_complete,
-                                        bool &force_export,
-                                        char *error,
-                                        size_t error_size);
 
     // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
     SleepHqSyncStatus status_;
     ConfigSnapshot config_;
+    ConfigSnapshot pending_config_;
+    bool pending_config_valid_ = false;
     uint32_t last_config_check_ms_ = 0;
     WorkPhase phase_ = WorkPhase::Idle;
     RunKind pending_run_kind_ = RunKind::Check;
@@ -328,6 +349,7 @@ private:
     std::atomic<bool> network_available_{false};
     std::atomic<bool> runtime_blocked_{false};
     std::atomic<bool> abort_requested_{false};
+    std::atomic<uint32_t> operation_generation_{1};
     std::atomic<uint8_t> runtime_state_{
         static_cast<uint8_t>(SleepHqSyncState::Disabled)};
     std::atomic<bool> runtime_pending_{false};
@@ -362,6 +384,8 @@ private:
     // day/state tracking
     char pending_rebuild_day_[9] = {};
     char pending_done_day_[9] = {};
+    char pending_remote_day_[9] = {};
+    bool pending_remote_day_local_complete_ = false;
     char pending_datalog_day_[9] = {};
     char current_datalog_day_filter_[9] = {};
     char latest_datalog_day_[9] = {};

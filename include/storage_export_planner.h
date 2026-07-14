@@ -16,6 +16,7 @@ enum class StorageExportPlannerScope : uint8_t {
 enum class StorageExportPlannerResult : uint8_t {
     Item,
     Yield,
+    DecisionRequired,
     Done,
     Error,
 };
@@ -25,26 +26,17 @@ enum class StorageExportPlannerItemKind : uint8_t {
     DatalogDayComplete,
 };
 
-using StorageExportDatalogDayDecisionCallback =
-    bool (*)(void *ctx,
-             const char *day,
-             bool local_complete,
-             bool &force_export,
-             char *error_out,
-             size_t error_out_size);
-
 struct StorageExportPlannerConfig {
     StorageExportPlannerScope scope = StorageExportPlannerScope::FullCard;
     const char *state_dir = nullptr;
     StorageExportStateCache *state_cache = nullptr;
     const char *latest_datalog_day = nullptr;
     const char *only_datalog_day = nullptr;
-    StorageExportDatalogDayDecisionCallback datalog_day_decision = nullptr;
-    void *datalog_day_decision_ctx = nullptr;
     uint32_t max_datalog_days = 0;
     bool skip_completed_finalized_datalog_days = false;
     bool trust_completed_finalized_datalog_days = false;
     bool require_pending_datalog_file = false;
+    bool defer_datalog_day_decision = false;
 };
 
 struct StorageExportPlannerItem {
@@ -73,7 +65,21 @@ public:
                                     char *error_out,
                                     size_t error_out_size);
 
+    bool pending_datalog_day_decision(char *day_out,
+                                      size_t day_out_size,
+                                      bool &local_complete_out) const;
+    bool resolve_datalog_day_decision(bool force_export,
+                                      char *error_out,
+                                      size_t error_out_size);
+
 private:
+    enum class DatalogDaySelection : uint8_t {
+        Selected,
+        DecisionRequired,
+        Done,
+        Error,
+    };
+
     struct WalkFrame {
         char path[AC_STORAGE_PATH_MAX] = {};
         uint32_t next_index = 0;
@@ -109,12 +115,6 @@ private:
     bool datalog_day_has_pending_files(const DatalogDay &day,
                                        char *error_out,
                                        size_t error_out_size);
-    bool datalog_day_force_export(const char *day,
-                                  bool local_complete,
-                                  bool &force_export,
-                                  char *error_out,
-                                  size_t error_out_size);
-
     StorageExportPlannerResult next_full_card(StorageExportPlannerItem &out,
                                               char *error_out,
                                               size_t error_out_size,
@@ -137,7 +137,9 @@ private:
     StorageExportPlannerResult scan_datalog_days(char *error_out,
                                                  size_t error_out_size,
                                                  uint32_t &budget);
-    bool select_next_datalog_day(char *error_out, size_t error_out_size);
+    DatalogDaySelection select_next_datalog_day(char *error_out,
+                                                size_t error_out_size);
+    void activate_datalog_day(const DatalogDay &day, bool force_export);
 
     StorageExportPlannerConfig config_;
     char state_dir_[AC_STORAGE_PATH_MAX] = {};
@@ -164,6 +166,10 @@ private:
     size_t day_root_index_ = 0;
     char day_path_[AC_STORAGE_PATH_MAX] = {};
     char day_name_[9] = {};
+
+    bool day_decision_pending_ = false;
+    bool pending_day_local_complete_ = false;
+    bool pending_day_has_files_ = false;
 };
 
 }  // namespace aircannect

@@ -165,6 +165,22 @@ bool SleepHqRemoteFileCache::add(const SleepHqRemoteFile &file) {
     return true;
 }
 
+bool SleepHqRemoteFileCache::merge_from(
+    const SleepHqRemoteFileCache &other) {
+    for (size_t i = 0; i < other.count_; ++i) {
+        const Entry &source = other.entries_[i];
+        SleepHqRemoteFile file;
+        file.size = source.size;
+        copy_cstr(file.name, sizeof(file.name), source.name);
+        copy_cstr(file.path, sizeof(file.path), source.path);
+        copy_cstr(file.content_hash,
+                  sizeof(file.content_hash),
+                  source.content_hash);
+        if (!add(file)) return false;
+    }
+    return true;
+}
+
 bool SleepHqRemoteFileCache::contains(const char *name,
                                       const char *path,
                                       const char *content_hash,

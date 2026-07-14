@@ -93,6 +93,9 @@ void StorageExportPlanner::reset() {
     day_root_index_ = 0;
     day_path_[0] = '\0';
     day_name_[0] = '\0';
+    day_decision_pending_ = false;
+    pending_day_local_complete_ = false;
+    pending_day_has_files_ = false;
     state_dir_[0] = '\0';
     latest_datalog_day_[0] = '\0';
     only_datalog_day_[0] = '\0';
@@ -281,22 +284,6 @@ bool StorageExportPlanner::datalog_day_has_pending_files(
     return pending;
 }
 
-bool StorageExportPlanner::datalog_day_force_export(
-    const char *day,
-    bool local_complete,
-    bool &force_export,
-    char *error_out,
-    size_t error_out_size) {
-    force_export = false;
-    if (!config_.datalog_day_decision) return true;
-    return config_.datalog_day_decision(config_.datalog_day_decision_ctx,
-                                        day,
-                                        local_complete,
-                                        force_export,
-                                        error_out,
-                                        error_out_size);
-}
-
 StorageExportPlannerResult StorageExportPlanner::next(
     StorageExportPlannerItem &out,
     char *error_out,
@@ -310,6 +297,50 @@ StorageExportPlannerResult StorageExportPlanner::next(
         return next_sleep_hq(out, error_out, error_out_size, budget);
     }
     return next_full_card(out, error_out, error_out_size, budget);
+}
+
+bool StorageExportPlanner::pending_datalog_day_decision(
+    char *day_out,
+    size_t day_out_size,
+    bool &local_complete_out) const {
+    if (!day_decision_pending_ ||
+        datalog_day_index_ >= datalog_day_count_ ||
+        !day_out || day_out_size == 0) {
+        return false;
+    }
+
+    copy_cstr(day_out,
+              day_out_size,
+              datalog_days_[datalog_day_index_].day);
+    local_complete_out = pending_day_local_complete_;
+    return true;
+}
+
+bool StorageExportPlanner::resolve_datalog_day_decision(
+    bool force_export,
+    char *error_out,
+    size_t error_out_size) {
+    if (!day_decision_pending_ ||
+        datalog_day_index_ >= datalog_day_count_) {
+        set_error(error_out, error_out_size, "datalog_decision_not_pending");
+        return false;
+    }
+
+    const DatalogDay &day = datalog_days_[datalog_day_index_];
+    day_decision_pending_ = false;
+    pending_day_local_complete_ = false;
+
+    if (config_.require_pending_datalog_file &&
+        !force_export &&
+        !pending_day_has_files_) {
+        pending_day_has_files_ = false;
+        datalog_day_index_++;
+        return true;
+    }
+
+    pending_day_has_files_ = false;
+    activate_datalog_day(day, force_export);
+    return true;
 }
 
 StorageExportPlannerResult StorageExportPlanner::next_full_card(
@@ -545,14 +576,30 @@ StorageExportPlannerResult StorageExportPlanner::scan_datalog_days(
     return StorageExportPlannerResult::Yield;
 }
 
-bool StorageExportPlanner::select_next_datalog_day(char *error_out,
-                                                   size_t error_out_size) {
+void StorageExportPlanner::activate_datalog_day(const DatalogDay &day,
+                                                bool force_export) {
+    copy_cstr(day_name_, sizeof(day_name_), day.day);
+    copy_cstr(day_path_, sizeof(day_path_), day.path);
+    day_active_ = true;
+    day_force_export_ = force_export;
+    day_root_index_ = 0;
+    datalog_day_index_++;
+    datalog_days_started_++;
+}
+
+StorageExportPlanner::DatalogDaySelection
+StorageExportPlanner::select_next_datalog_day(char *error_out,
+                                              size_t error_out_size) {
+    if (day_decision_pending_) {
+        return DatalogDaySelection::DecisionRequired;
+    }
+
     while (datalog_day_index_ < datalog_day_count_) {
         if (config_.max_datalog_days != 0 &&
             datalog_days_started_ >= config_.max_datalog_days) {
-            return false;
+            return DatalogDaySelection::Done;
         }
-        const DatalogDay &day = datalog_days_[datalog_day_index_++];
+        const DatalogDay &day = datalog_days_[datalog_day_index_];
         bool has_pending = false;
         const bool trusted_done =
             config_.trust_completed_finalized_datalog_days &&
@@ -562,32 +609,30 @@ bool StorageExportPlanner::select_next_datalog_day(char *error_out,
             has_pending =
                 datalog_day_has_pending_files(day, error_out, error_out_size);
             if (error_out && error_out[0]) {
-                return false;
+                return DatalogDaySelection::Error;
             }
         }
         const bool local_complete = trusted_done || !has_pending;
-        bool force_export = false;
-        if (!datalog_day_force_export(day.day,
-                                      local_complete,
-                                      force_export,
-                                      error_out,
-                                      error_out_size)) {
-            return false;
+
+        if (config_.defer_datalog_day_decision) {
+            day_decision_pending_ = true;
+            pending_day_local_complete_ = local_complete;
+            pending_day_has_files_ = has_pending;
+            return DatalogDaySelection::DecisionRequired;
         }
+
+        const bool force_export = false;
         if (config_.require_pending_datalog_file &&
             !force_export &&
             !has_pending) {
+            datalog_day_index_++;
             continue;
         }
-        copy_cstr(day_name_, sizeof(day_name_), day.day);
-        copy_cstr(day_path_, sizeof(day_path_), day.path);
-        day_active_ = true;
-        day_force_export_ = force_export;
-        day_root_index_ = 0;
-        datalog_days_started_++;
-        return true;
+
+        activate_datalog_day(day, force_export);
+        return DatalogDaySelection::Selected;
     }
-    return false;
+    return DatalogDaySelection::Done;
 }
 
 StorageExportPlannerResult StorageExportPlanner::next_sleep_hq(
@@ -606,11 +651,17 @@ StorageExportPlannerResult StorageExportPlanner::next_sleep_hq(
         }
 
         if (!day_active_) {
-            if (!select_next_datalog_day(error_out, error_out_size)) {
-                if (error_out && error_out[0]) {
+            const DatalogDaySelection selection =
+                select_next_datalog_day(error_out, error_out_size);
+            switch (selection) {
+                case DatalogDaySelection::Selected:
+                    break;
+                case DatalogDaySelection::DecisionRequired:
+                    return StorageExportPlannerResult::DecisionRequired;
+                case DatalogDaySelection::Done:
+                    return StorageExportPlannerResult::Done;
+                case DatalogDaySelection::Error:
                     return StorageExportPlannerResult::Error;
-                }
-                return StorageExportPlannerResult::Done;
             }
         }
 

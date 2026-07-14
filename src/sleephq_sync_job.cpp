@@ -263,18 +263,15 @@ void SleepHqSyncJob::begin(const AppConfigData &config) {
 
 bool SleepHqSyncJob::config_matches_locked(
     const ConfigSnapshot &config) const {
-    return strcmp(config_.client_id, config.client_id) == 0 &&
-           strcmp(config_.client_secret, config.client_secret) == 0 &&
-           strcmp(config_.team_id, config.team_id) == 0 &&
-           strcmp(config_.device_id, config.device_id) == 0;
+    const ConfigSnapshot &active =
+        pending_config_valid_ ? pending_config_ : config_;
+    return strcmp(active.client_id, config.client_id) == 0 &&
+           strcmp(active.client_secret, config.client_secret) == 0 &&
+           strcmp(active.team_id, config.team_id) == 0 &&
+           strcmp(active.device_id, config.device_id) == 0;
 }
 
 void SleepHqSyncJob::apply_config_locked(const ConfigSnapshot &config) {
-    if (config_matches_locked(config)) return;
-    if (status_.state == SleepHqSyncState::Working) {
-        abort_requested_.store(true);
-        return;
-    }
     config_ = config;
     status_.config_generation++;
     status_.configured = snapshot_configured(config_);
@@ -292,6 +289,19 @@ void SleepHqSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     publish_runtime_locked();
 }
 
+void SleepHqSyncJob::apply_pending_config_locked() {
+    if (!pending_config_valid_) return;
+
+    const ConfigSnapshot pending = pending_config_;
+    pending_config_valid_ = false;
+    pending_config_ = ConfigSnapshot();
+
+    if (status_.state == SleepHqSyncState::Working) {
+        fail_locked("preempted");
+    }
+    apply_config_locked(pending);
+}
+
 void SleepHqSyncJob::refresh_config(const AppConfigData &config,
                                     uint32_t now_ms) {
     if (last_config_check_ms_ != 0 &&
@@ -302,24 +312,36 @@ void SleepHqSyncJob::refresh_config(const AppConfigData &config,
     const ConfigSnapshot snapshot = make_config_snapshot(config);
     if (!lock(0)) return;
     last_config_check_ms_ = now_ms == 0 ? 1 : now_ms;
-    apply_config_locked(snapshot);
+    if (!config_matches_locked(snapshot)) {
+        if (status_.state == SleepHqSyncState::Working) {
+            pending_config_ = snapshot;
+            pending_config_valid_ = true;
+            request_operation_abort();
+        } else {
+            apply_config_locked(snapshot);
+        }
+    }
     unlock();
 }
 
 void SleepHqSyncJob::set_network_available(bool available) {
-    network_available_.store(available);
+    const bool was_available = network_available_.exchange(available);
+    if (was_available && !available) request_operation_abort();
     if (!lock(0)) return;
     status_.network_available = available;
     publish_runtime_locked();
     unlock();
-    if (available) {
+    if (available && !was_available) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
 }
 
 void SleepHqSyncJob::set_runtime_blocked(bool blocked) {
-    runtime_blocked_.store(blocked);
-    if (blocked) abort_requested_.store(true);
+    const bool was_blocked = runtime_blocked_.exchange(blocked);
+    if (!was_blocked && blocked) request_operation_abort();
+    if (was_blocked && !blocked) {
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+    }
 }
 
 bool SleepHqSyncJob::request_locked(RunKind kind,
@@ -716,6 +738,8 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     inflight_phase_ = InflightPhase::None;
     pending_rebuild_day_[0] = '\0';
     pending_done_day_[0] = '\0';
+    pending_remote_day_[0] = '\0';
+    pending_remote_day_local_complete_ = false;
     pending_datalog_day_[0] = '\0';
     current_datalog_day_filter_[0] = '\0';
     latest_datalog_day_[0] = '\0';
@@ -905,9 +929,7 @@ bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
     config.latest_datalog_day = latest_datalog_day_;
     config.trust_completed_finalized_datalog_days = true;
     config.require_pending_datalog_file = true;
-    config.datalog_day_decision =
-        &SleepHqSyncJob::datalog_day_decision_cb;
-    config.datalog_day_decision_ctx = this;
+    config.defer_datalog_day_decision = true;
     if (current_run_kind_ == RunKind::PostTherapySync) {
         config.max_datalog_days = SLEEPHQ_POST_THERAPY_DATALOG_DAY_LIMIT;
     }
@@ -972,6 +994,28 @@ bool SleepHqSyncJob::next_file_locked() {
             return plan_file_locked(item);
         case StorageExportPlannerResult::Yield:
             return true;
+        case StorageExportPlannerResult::DecisionRequired: {
+            bool local_complete = false;
+            if (!export_planner_.pending_datalog_day_decision(
+                    pending_remote_day_,
+                    sizeof(pending_remote_day_),
+                    local_complete)) {
+                fail_locked("planner_decision_missing");
+                return false;
+            }
+            pending_remote_day_local_complete_ = local_complete;
+
+            bool needs_lookup = false;
+            if (!resolve_pending_datalog_day_locked(needs_lookup,
+                                                    error,
+                                                    sizeof(error))) {
+                fail_locked(error[0] ? error : "planner_decision_failed");
+                return false;
+            }
+            phase_ = needs_lookup ? WorkPhase::ResolveDatalogDay
+                                  : WorkPhase::NextFile;
+            return true;
+        }
         case StorageExportPlannerResult::Done:
             phase_ = staged_count_ == 0 ? WorkPhase::Finish
                                         : WorkPhase::ProcessImport;
@@ -996,15 +1040,15 @@ bool SleepHqSyncJob::build_sleep_path_locked(const char *local_path,
                                                    name_out_size);
 }
 
-bool SleepHqSyncJob::current_file_matches_snapshot_locked() const {
+bool SleepHqSyncJob::current_file_matches_snapshot() const {
     const StorageLocalNodeInfo info = storage_stat_local_node(current_file_.path);
     return info.exists && !info.is_dir &&
            info.size == current_file_.size &&
            info.mtime == current_file_.mtime;
 }
 
-bool SleepHqSyncJob::compute_current_file_content_hash_locked(char *out,
-                                                              size_t out_size) {
+bool SleepHqSyncJob::compute_current_file_content_hash(char *out,
+                                                       size_t out_size) {
     if (!out || out_size < AC_SLEEPHQ_CONTENT_HASH_MAX ||
         !current_file_.local_open || !current_file_.name[0]) {
         return false;
@@ -1449,10 +1493,6 @@ bool SleepHqSyncJob::add_staged_locked(const SleepHqUploadResult &upload) {
     return true;
 }
 
-bool SleepHqSyncJob::add_remote_file_locked(const SleepHqRemoteFile &file) {
-    return remote_files_.add(file);
-}
-
 bool SleepHqSyncJob::remote_file_cache_contains_locked(
     const CurrentFile &file) const {
     if (!file.name[0] || !file.sleep_path[0] || !file.content_hash[0]) {
@@ -1464,65 +1504,18 @@ bool SleepHqSyncJob::remote_file_cache_contains_locked(
 
 bool SleepHqSyncJob::remote_file_list_cb(void *ctx,
                                          const SleepHqRemoteFile &file) {
-    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
-    return job && job->add_remote_file_locked(file);
+    SleepHqRemoteFileCache *cache =
+        static_cast<SleepHqRemoteFileCache *>(ctx);
+    return cache && cache->add(file);
 }
 
 bool SleepHqSyncJob::remote_machine_list_cb(void *ctx,
                                             const SleepHqMachine &machine) {
-    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
-    return job && job->note_remote_machine_locked(machine);
-}
-
-bool SleepHqSyncJob::datalog_day_decision_cb(void *ctx,
-                                             const char *day,
-                                             bool local_complete,
-                                             bool &force_export,
-                                             char *error,
-                                             size_t error_size) {
-    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
-    if (!job) {
-        copy_cstr(error, error_size, "reconcile_context_missing");
-        return false;
+    MachineListContext *lookup = static_cast<MachineListContext *>(ctx);
+    if (!lookup || lookup->machine_id || !lookup->serial) return lookup != nullptr;
+    if (machine.id && strcmp(machine.serial_number, lookup->serial) == 0) {
+        lookup->machine_id = machine.id;
     }
-    return job->datalog_day_decision_locked(day, local_complete, force_export,
-                                            error, error_size);
-}
-
-bool SleepHqSyncJob::fetch_next_remote_file_page_locked(char *error,
-                                                         size_t error_size) {
-    if (remote_file_cache_complete_ ||
-        remote_file_pages_loaded_ >= SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
-        remote_file_cache_complete_ = true;
-        return true;
-    }
-    size_t count = 0;
-    bool has_more = false;
-    BackgroundOperationControl operation =
-        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
-    if (!client_.list_team_files(status_.team_id,
-                                 remote_file_next_page_,
-                                 SLEEPHQ_REMOTE_FILE_PER_PAGE,
-                                 &SleepHqSyncJob::remote_file_list_cb,
-                                 this,
-                                 count,
-                                 has_more,
-                                 &operation)) {
-        copy_cstr(error, error_size, client_.last_error());
-        return false;
-    }
-    remote_file_pages_loaded_++;
-    remote_file_next_page_++;
-    if (!has_more ||
-        remote_file_pages_loaded_ >= SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
-        remote_file_cache_complete_ = true;
-    }
-    Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
-              "remote file page loaded page=%lu count=%u total=%u complete=%u\n",
-              static_cast<unsigned long>(remote_file_next_page_ - 1),
-              static_cast<unsigned>(count),
-              static_cast<unsigned>(remote_files_.size()),
-              remote_file_cache_complete_ ? 1U : 0U);
     return true;
 }
 
@@ -1586,15 +1579,6 @@ bool SleepHqSyncJob::read_local_machine_serial_locked(char *out,
     return true;
 }
 
-bool SleepHqSyncJob::note_remote_machine_locked(
-    const SleepHqMachine &machine) {
-    if (remote_machine_id_ || !remote_serial_[0]) return true;
-    if (machine.id && strcmp(machine.serial_number, remote_serial_) == 0) {
-        remote_machine_id_ = machine.id;
-    }
-    return true;
-}
-
 void SleepHqSyncJob::note_remote_machine_missing_locked() {
     if (remote_reconcile_all_missing_) return;
     remote_reconcile_all_missing_ = true;
@@ -1633,76 +1617,64 @@ bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
     return true;
 }
 
-bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
-                                                 bool local_complete,
-                                                 bool &force_export,
-                                                 char *error,
-                                                 size_t error_size) {
-    force_export = false;
-    if (!remote_reconcile_enabled_) return true;
-    if (!day || !day[0]) {
+bool SleepHqSyncJob::resolve_pending_datalog_day_locked(
+    bool &needs_lookup,
+    char *error,
+    size_t error_size) {
+    needs_lookup = false;
+    if (!pending_remote_day_[0]) {
         copy_cstr(error, error_size, "bad_datalog_day");
         return false;
     }
+
+    bool force_export = false;
+    if (!remote_reconcile_enabled_) {
+        const bool resolved = export_planner_.resolve_datalog_day_decision(
+            false, error, error_size);
+        if (resolved) {
+            pending_remote_day_[0] = '\0';
+            pending_remote_day_local_complete_ = false;
+        }
+        return resolved;
+    }
     if (remote_reconcile_all_missing_) {
-        force_export = true;
-        return true;
+        const bool resolved = export_planner_.resolve_datalog_day_decision(
+            true, error, error_size);
+        if (resolved) {
+            pending_remote_day_[0] = '\0';
+            pending_remote_day_local_complete_ = false;
+        }
+        return resolved;
     }
 
     bool exists = false;
-    if (cached_remote_date_exists_locked(day, exists)) {
-        if (exists) {
-            force_export = false;
-            return true;
+    if (cached_remote_date_exists_locked(pending_remote_day_, exists)) {
+        if (!exists &&
+            !force_remote_missing_datalog_day_locked(
+                pending_remote_day_,
+                pending_remote_day_local_complete_,
+                force_export)) {
+            copy_cstr(error, error_size, "remote_date_decision_failed");
+            return false;
         }
-        return force_remote_missing_datalog_day_locked(day,
-                                                       local_complete,
-                                                       force_export);
+        const bool resolved = export_planner_.resolve_datalog_day_decision(
+            force_export, error, error_size);
+        if (resolved) {
+            pending_remote_day_[0] = '\0';
+            pending_remote_day_local_complete_ = false;
+        }
+        return resolved;
     }
 
     char iso_date[11] = {};
-    if (!datalog_day_to_iso_date(day, iso_date, sizeof(iso_date))) {
+    if (!datalog_day_to_iso_date(pending_remote_day_,
+                                 iso_date,
+                                 sizeof(iso_date))) {
         copy_cstr(error, error_size, "bad_datalog_day");
         return false;
     }
-
-    SleepHqMachineDate remote_date;
-    BackgroundOperationControl operation =
-        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
-    if (client_.get_machine_date(remote_machine_id_, iso_date, remote_date,
-                                 &operation)) {
-        if (!cache_remote_date_locked(day, true)) {
-            copy_cstr(error, error_size, "remote_date_cache_alloc");
-            return false;
-        }
-        force_export = false;
-        return true;
-    }
-
-    const char *client_error = client_.last_error();
-    if (strcmp(client_error, "http_404") == 0) {
-        if (!cache_remote_date_locked(day, false)) {
-            copy_cstr(error, error_size, "remote_date_cache_alloc");
-            return false;
-        }
-        return force_remote_missing_datalog_day_locked(day,
-                                                       local_complete,
-                                                       force_export);
-    }
-
-    copy_cstr(error, error_size,
-              client_error && client_error[0]
-                  ? client_error
-                  : "machine_date_lookup_failed");
-    if (sleep_hq_error_retryable(error)) {
-        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
-                  "remote machine-date lookup skipped day=%s error=%s\n",
-                  day,
-                  error[0] ? error : "machine_date_lookup_failed");
-        force_export = false;
-        return true;
-    }
-    return false;
+    needs_lookup = true;
+    return true;
 }
 
 JobStep SleepHqSyncJob::begin_export_work_locked() {
@@ -1733,154 +1705,10 @@ JobStep SleepHqSyncJob::begin_export_work_locked() {
     return JobStep::Working;
 }
 
-JobStep SleepHqSyncJob::step_find_remote_machine_locked(char *error,
-                                                        size_t error_size) {
-    if (abort_requested_.load() || runtime_blocked_.load()) {
-        fail_locked("preempted");
-        return JobStep::Idle;
-    }
-    if (!remote_reconcile_enabled_ || !remote_serial_[0] ||
-        remote_machine_id_ || remote_reconcile_all_missing_) {
-        return begin_export_work_locked();
-    }
-    if (remote_machine_pages_loaded_ >= SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT) {
-        note_remote_machine_missing_locked();
-        return begin_export_work_locked();
-    }
-
-    size_t count = 0;
-    bool has_more = false;
-    const uint32_t page = remote_machine_next_page_;
-    BackgroundOperationControl operation =
-        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
-    if (!client_.list_team_machines(status_.team_id,
-                                    page,
-                                    SLEEPHQ_REMOTE_MACHINE_PER_PAGE,
-                                    &SleepHqSyncJob::remote_machine_list_cb,
-                                    this,
-                                    count,
-                                    has_more,
-                                    &operation)) {
-        const char *client_error = client_.last_error();
-        if (sleep_hq_error_retryable(client_error)) {
-            Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                      "remote machine lookup skipped: %s\n",
-                      client_error && client_error[0]
-                          ? client_error
-                          : "machine_list_failed");
-            remote_reconcile_enabled_ = false;
-            return begin_export_work_locked();
-        }
-        copy_cstr(error, error_size,
-                  client_error && client_error[0]
-                      ? client_error
-                      : "machine_list_failed");
-        fail_locked(error[0] ? error : "machine_list_failed");
-        return JobStep::Idle;
-    }
-
-    remote_machine_pages_loaded_++;
-    remote_machine_next_page_++;
-    if (remote_machine_id_) {
-        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
-                  "remote machine matched serial=%s id=%lu\n",
-                  remote_serial_,
-                  static_cast<unsigned long>(remote_machine_id_));
-        return begin_export_work_locked();
-    }
-    if (!has_more ||
-        remote_machine_pages_loaded_ >= SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT) {
-        note_remote_machine_missing_locked();
-        return begin_export_work_locked();
-    }
-    return JobStep::Working;
-}
-
-JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
-    client_.configure(client_config_from_snapshot(config_));
-
-    uint32_t team_id =
-        current_run_kind_ == RunKind::Check ? 0 : status_.team_id;
-    if (team_id == 0) {
-        BackgroundOperationControl operation =
-            operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
-        if (!client_.resolve_team_id(team_id, &operation)) {
-            fail_locked(client_.last_error());
-            return JobStep::Idle;
-        }
-    }
-
-    status_.team_id = team_id;
-    if (current_run_kind_ == RunKind::Check) {
-        finish_check_locked(team_id);
-        return JobStep::Idle;
-    }
-    if (!build_endpoint_state_dir_locked(team_id,
-                                         state_dir_,
-                                         sizeof(state_dir_))) {
-        fail_locked("state_path_failed");
-        return JobStep::Idle;
-    }
-    if (!prepare_remote_reconcile_locked(error, error_size)) {
-        fail_locked(error[0] ? error : "remote_reconcile_failed");
-        return JobStep::Idle;
-    }
-    phase_ = WorkPhase::FindRemoteMachine;
-    return JobStep::Working;
-}
-
-JobStep SleepHqSyncJob::step_check_locked(char *error, size_t error_size) {
-    (void)error;
-    (void)error_size;
-    phase_ = WorkPhase::Connect;
-    return JobStep::Working;
-}
-
-JobStep SleepHqSyncJob::step_create_import_locked(char *error,
-                                                  size_t error_size) {
-    SleepHqImportInfo import;
-    BackgroundOperationControl operation =
-        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
-    if (!client_.create_import(status_.team_id, import, &operation)) {
-        fail_locked(client_.last_error());
-        return JobStep::Idle;
-    }
-    if (!import.id) {
-        copy_cstr(error, error_size, "import_id_missing");
-        fail_locked(error);
-        return JobStep::Idle;
-    }
-    status_.import_id = import.id;
-    if (!write_inflight_locked(InflightPhase::Uploading)) {
-        fail_locked("inflight_write_failed");
-        return JobStep::Idle;
-    }
-    phase_ = WorkPhase::OpenLocal;
-    return JobStep::Working;
-}
-
-JobStep SleepHqSyncJob::step_open_local_locked() {
-    Storage::Guard guard;
-    current_file_.local = Storage::open(current_file_.path, "r");
-    if (!current_file_.local || current_file_.local.isDirectory()) {
-        fail_locked("local_open_failed");
-        return JobStep::Idle;
-    }
-    current_file_.local_open = true;
-    current_file_.offset = 0;
-    phase_ = WorkPhase::ResolveRemoteFile;
-    return JobStep::Working;
-}
-
-JobStep SleepHqSyncJob::step_resolve_remote_file_locked(char *error,
-                                                        size_t error_size) {
+JobStep SleepHqSyncJob::step_resolve_remote_file_locked() {
     if (!current_file_.content_hash[0]) {
-        if (!compute_current_file_content_hash_locked(
-                current_file_.content_hash,
-                sizeof(current_file_.content_hash))) {
-            fail_locked("hash_failed");
-            return JobStep::Idle;
-        }
+        phase_ = WorkPhase::HashLocalFile;
+        return JobStep::Working;
     }
 
     if (current_file_.attach_by_hash ||
@@ -1890,24 +1718,13 @@ JobStep SleepHqSyncJob::step_resolve_remote_file_locked(char *error,
         return JobStep::Working;
     }
 
-    while (!remote_file_cache_complete_ &&
-           remote_file_pages_loaded_ < SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
-        if (!fetch_next_remote_file_page_locked(error, error_size)) {
-            Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                      "remote file lookup failed; falling back to upload: %s\n",
-                      error[0] ? error : "remote_file_list_failed");
-            remote_file_cache_complete_ = true;
-            break;
-        }
-        if (remote_file_cache_contains_locked(current_file_)) {
-            current_file_.attach_by_hash = true;
-            break;
-        }
-        if (!remote_file_cache_complete_) {
-            return JobStep::Working;
-        }
+    if (!remote_file_cache_complete_ &&
+        remote_file_pages_loaded_ < SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
+        phase_ = WorkPhase::FetchRemoteFiles;
+        return JobStep::Working;
     }
 
+    remote_file_cache_complete_ = true;
     phase_ = WorkPhase::UploadFile;
     return JobStep::Working;
 }
@@ -1916,21 +1733,26 @@ bool SleepHqSyncJob::upload_read_cb(void *ctx,
                                     uint8_t *out,
                                     size_t len,
                                     size_t &read) {
-    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
+    UploadContext *upload = static_cast<UploadContext *>(ctx);
     read = 0;
-    if (!job || !out || job->abort_requested_.load()) return false;
+    if (!upload || !upload->file || !out ||
+        (upload->abort_requested && upload->abort_requested->load())) {
+        return false;
+    }
+
     Storage::Guard guard;
-    read = job->current_file_.local.read(out, len);
-    job->current_file_.offset += static_cast<uint64_t>(read);
+    read = upload->file->read(out, len);
+    upload->offset += static_cast<uint64_t>(read);
     return read == len;
 }
 
 bool SleepHqSyncJob::upload_reset_cb(void *ctx) {
-    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
-    if (!job || !job->current_file_.local_open) return false;
+    UploadContext *upload = static_cast<UploadContext *>(ctx);
+    if (!upload || !upload->file) return false;
+
     Storage::Guard guard;
-    const bool ok = job->current_file_.local.seek(0);
-    if (ok) job->current_file_.offset = 0;
+    const bool ok = upload->file->seek(0);
+    if (ok) upload->offset = 0;
     return ok;
 }
 
@@ -1950,95 +1772,14 @@ BackgroundOperationControl SleepHqSyncJob::operation_control(
     return operation;
 }
 
-JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
-                                                size_t error_size) {
-    if (!current_file_matches_snapshot_locked()) {
-        fail_locked("local_changed");
-        return JobStep::Idle;
+void SleepHqSyncJob::request_operation_abort() {
+    bool expected = false;
+    if (abort_requested_.compare_exchange_strong(expected, true)) {
+        operation_generation_.fetch_add(1);
     }
-
-    SleepHqUploadResult upload;
-    bool attached = false;
-    BackgroundOperationControl operation = operation_control(
-        sleep_hq_upload_timeout_ms(current_file_.size));
-    if (current_file_.attach_by_hash) {
-        // ResolveRemoteFile computed this hash for the same size/mtime
-        // snapshot validated above. Re-reading the complete file here would
-        // add no integrity guarantee and doubles SD traffic on attach.
-        SleepHqAttachRequest attach;
-        attach.import_id = status_.import_id;
-        attach.name = current_file_.name;
-        attach.path = current_file_.sleep_path;
-        attach.content_hash = current_file_.content_hash;
-        if (client_.attach_file(attach, upload, &operation)) {
-            attached = true;
-        } else if (!upload_reset_cb(this)) {
-            copy_cstr(error, error_size, client_.last_error());
-            fail_locked(error[0] ? error : "attach_failed");
-            return JobStep::Idle;
-        }
-    }
-    if (!attached) {
-        SleepHqUploadRequest request;
-        request.import_id = status_.import_id;
-        request.name = current_file_.name;
-        request.path = current_file_.sleep_path;
-        request.content_hash = current_file_.content_hash[0]
-            ? current_file_.content_hash
-            : nullptr;
-        request.size = current_file_.size;
-        request.read = &SleepHqSyncJob::upload_read_cb;
-        request.reset = &SleepHqSyncJob::upload_reset_cb;
-        request.ctx = this;
-        request.operation = &operation;
-        if (!client_.upload_file(request, upload)) {
-            copy_cstr(error, error_size, client_.last_error());
-            fail_locked(error[0] ? error : "upload_failed");
-            return JobStep::Idle;
-        }
-    }
-    close_local_locked();
-    if (!add_staged_locked(upload)) {
-        fail_locked("staged_alloc");
-        return JobStep::Idle;
-    }
-    if (!write_inflight_locked(InflightPhase::Uploading)) {
-        fail_locked("inflight_write_failed");
-        return JobStep::Idle;
-    }
-    status_.bytes_uploaded += upload.bytes;
-    status_.files_uploaded++;
-    clear_current_file_locked();
-    phase_ = WorkPhase::NextFile;
-    return JobStep::Working;
 }
 
-JobStep SleepHqSyncJob::step_process_import_locked(char *error,
-                                                   size_t error_size) {
-    if (staged_count_ == 0) {
-        phase_ = WorkPhase::Finish;
-        return JobStep::Working;
-    }
-    BackgroundOperationControl operation =
-        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
-    if (!client_.process_import(status_.import_id, nullptr, &operation)) {
-        copy_cstr(error, error_size, client_.last_error());
-        fail_locked(error[0] ? error : "process_import_failed");
-        return JobStep::Idle;
-    }
-    if (!write_inflight_locked(InflightPhase::Processing)) {
-        fail_locked("inflight_write_failed");
-        return JobStep::Idle;
-    }
-    import_process_started_ms_ = millis_nonzero();
-    import_poll_due_ms_ = import_process_started_ms_;
-    status_.import_status[0] = 0;
-    phase_ = WorkPhase::WaitImport;
-    return JobStep::Waiting;
-}
-
-JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
-                                                size_t error_size) {
+JobStep SleepHqSyncJob::step_wait_import_locked() {
     if (staged_count_ == 0) {
         phase_ = WorkPhase::Finish;
         return JobStep::Working;
@@ -2049,57 +1790,8 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
         static_cast<int32_t>(now - import_poll_due_ms_) < 0) {
         return JobStep::Waiting;
     }
-
-    SleepHqImportInfo import;
-    BackgroundOperationControl operation =
-        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
-    if (!client_.get_import(status_.import_id, import, &operation)) {
-        copy_cstr(error, error_size, client_.last_error());
-        if (strcmp(error, "http_404") == 0) {
-            remove_inflight_locked();
-        }
-        fail_locked(error[0] ? error : "import_status_failed");
-        return JobStep::Idle;
-    }
-    char previous_status[AC_SLEEPHQ_STATUS_MAX] = {};
-    copy_cstr(previous_status, sizeof(previous_status),
-              status_.import_status);
-    copy_cstr(status_.import_status, sizeof(status_.import_status),
-              import.status);
-    if (import.id) status_.import_id = import.id;
-    status_.updated_ms = now;
-
-    switch (sleephq_classify_import_status(import.status)) {
-        case SleepHqImportStatusKind::Success:
-            mark_index_ = 0;
-            phase_ = WorkPhase::MarkState;
-            return JobStep::Working;
-        case SleepHqImportStatusKind::Failure:
-            copy_cstr(error, error_size,
-                      import.failed_reason[0] ? import.failed_reason
-                                               : "import_failed");
-            remove_inflight_locked();
-            fail_locked(error);
-            return JobStep::Idle;
-        case SleepHqImportStatusKind::Unknown:
-            if (strcmp(previous_status, import.status) != 0) {
-                Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                          "unknown import status treated as transient: %s\n",
-                          import.status[0] ? import.status : "<empty>");
-            }
-            break;
-        case SleepHqImportStatusKind::Transient:
-            break;
-    }
-
-    if (import_process_started_ms_ == 0 ||
-        static_cast<uint32_t>(now - import_process_started_ms_) >=
-            SLEEPHQ_IMPORT_POLL_TIMEOUT_MS) {
-        fail_locked("import_process_timeout");
-        return JobStep::Idle;
-    }
-    import_poll_due_ms_ = now + SLEEPHQ_IMPORT_POLL_INTERVAL_MS;
-    return JobStep::Waiting;
+    phase_ = WorkPhase::FetchImport;
+    return JobStep::Working;
 }
 
 JobStep SleepHqSyncJob::step_mark_state_locked(char *error,
@@ -2120,34 +1812,600 @@ JobStep SleepHqSyncJob::step_mark_state_locked(char *error,
     return JobStep::Working;
 }
 
+bool SleepHqSyncJob::phase_has_blocking_io(WorkPhase phase) {
+    switch (phase) {
+        case WorkPhase::Connect:
+        case WorkPhase::FindRemoteMachine:
+        case WorkPhase::ResolveDatalogDay:
+        case WorkPhase::CreateImport:
+        case WorkPhase::OpenLocal:
+        case WorkPhase::HashLocalFile:
+        case WorkPhase::FetchRemoteFiles:
+        case WorkPhase::UploadFile:
+        case WorkPhase::ProcessImport:
+        case WorkPhase::FetchImport:
+            return true;
+
+        case WorkPhase::Idle:
+        case WorkPhase::NextFile:
+        case WorkPhase::ResolveRemoteFile:
+        case WorkPhase::WaitImport:
+        case WorkPhase::MarkState:
+        case WorkPhase::Finish:
+            return false;
+    }
+    return false;
+}
+
+void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
+                                            BlockingResult &result) {
+    BackgroundOperationControl operation =
+        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
+
+    switch (phase) {
+        case WorkPhase::Connect: {
+            if (!client_.configure(client_config_from_snapshot(config_))) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          "not_configured");
+                return;
+            }
+
+            result.team_id =
+                current_run_kind_ == RunKind::Check ? 0 : status_.team_id;
+            if (result.team_id == 0 &&
+                !client_.resolve_team_id(result.team_id, &operation)) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          client_.last_error());
+                return;
+            }
+            result.ok = result.team_id != 0;
+            if (!result.ok) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          "team_id_missing");
+            }
+            return;
+        }
+
+        case WorkPhase::FindRemoteMachine: {
+            if (!remote_reconcile_enabled_ || !remote_serial_[0] ||
+                remote_machine_id_ || remote_reconcile_all_missing_ ||
+                remote_machine_pages_loaded_ >=
+                    SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT) {
+                result.ok = true;
+                return;
+            }
+
+            MachineListContext lookup;
+            lookup.serial = remote_serial_;
+            result.performed = true;
+            result.ok = client_.list_team_machines(
+                status_.team_id,
+                remote_machine_next_page_,
+                SLEEPHQ_REMOTE_MACHINE_PER_PAGE,
+                &SleepHqSyncJob::remote_machine_list_cb,
+                &lookup,
+                result.count,
+                result.has_more,
+                &operation);
+            result.machine_id = lookup.machine_id;
+            if (!result.ok) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          client_.last_error());
+                result.retryable = sleep_hq_error_retryable(result.error);
+            }
+            return;
+        }
+
+        case WorkPhase::ResolveDatalogDay: {
+            char iso_date[11] = {};
+            if (!datalog_day_to_iso_date(pending_remote_day_,
+                                         iso_date,
+                                         sizeof(iso_date))) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          "bad_datalog_day");
+                return;
+            }
+
+            SleepHqMachineDate remote_date;
+            result.performed = true;
+            if (client_.get_machine_date(remote_machine_id_,
+                                         iso_date,
+                                         remote_date,
+                                         &operation)) {
+                result.ok = true;
+                result.remote_date_exists = true;
+                return;
+            }
+
+            copy_cstr(result.error,
+                      sizeof(result.error),
+                      client_.last_error());
+            if (strcmp(result.error, "http_404") == 0) {
+                result.ok = true;
+                return;
+            }
+            result.retryable = sleep_hq_error_retryable(result.error);
+            return;
+        }
+
+        case WorkPhase::CreateImport:
+            result.performed = true;
+            result.ok = client_.create_import(status_.team_id,
+                                               result.import,
+                                               &operation);
+            if (!result.ok) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          client_.last_error());
+            }
+            return;
+
+        case WorkPhase::OpenLocal: {
+            Storage::Guard guard;
+            result.local = Storage::open(current_file_.path, "r");
+            result.ok = result.local && !result.local.isDirectory();
+            if (!result.ok) {
+                if (result.local) result.local.close();
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          "local_open_failed");
+            }
+            return;
+        }
+
+        case WorkPhase::HashLocalFile:
+            result.ok = compute_current_file_content_hash(
+                result.content_hash,
+                sizeof(result.content_hash));
+            if (!result.ok) {
+                copy_cstr(result.error, sizeof(result.error), "hash_failed");
+            }
+            return;
+
+        case WorkPhase::FetchRemoteFiles:
+            result.performed = true;
+            result.ok = client_.list_team_files(
+                status_.team_id,
+                remote_file_next_page_,
+                SLEEPHQ_REMOTE_FILE_PER_PAGE,
+                &SleepHqSyncJob::remote_file_list_cb,
+                &result.remote_files,
+                result.count,
+                result.has_more,
+                &operation);
+            if (!result.ok) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          client_.last_error());
+            }
+            return;
+
+        case WorkPhase::UploadFile: {
+            if (!current_file_matches_snapshot()) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          "local_changed");
+                return;
+            }
+
+            UploadContext upload_context;
+            upload_context.file = &current_file_.local;
+            upload_context.abort_requested = &abort_requested_;
+            bool attached = false;
+            operation.timeout_ms =
+                sleep_hq_upload_timeout_ms(current_file_.size);
+            operation.started_ms = millis();
+
+            if (current_file_.attach_by_hash) {
+                SleepHqAttachRequest attach;
+                attach.import_id = status_.import_id;
+                attach.name = current_file_.name;
+                attach.path = current_file_.sleep_path;
+                attach.content_hash = current_file_.content_hash;
+                if (client_.attach_file(attach, result.upload, &operation)) {
+                    attached = true;
+                } else if (!upload_reset_cb(&upload_context)) {
+                    copy_cstr(result.error,
+                              sizeof(result.error),
+                              client_.last_error());
+                    return;
+                }
+            }
+
+            if (!attached) {
+                SleepHqUploadRequest request;
+                request.import_id = status_.import_id;
+                request.name = current_file_.name;
+                request.path = current_file_.sleep_path;
+                request.content_hash = current_file_.content_hash[0]
+                    ? current_file_.content_hash
+                    : nullptr;
+                request.size = current_file_.size;
+                request.read = &SleepHqSyncJob::upload_read_cb;
+                request.reset = &SleepHqSyncJob::upload_reset_cb;
+                request.ctx = &upload_context;
+                request.operation = &operation;
+                if (!client_.upload_file(request, result.upload)) {
+                    copy_cstr(result.error,
+                              sizeof(result.error),
+                              client_.last_error());
+                    return;
+                }
+            }
+
+            result.ok = true;
+            return;
+        }
+
+        case WorkPhase::ProcessImport:
+            result.performed = true;
+            result.ok = client_.process_import(status_.import_id,
+                                               nullptr,
+                                               &operation);
+            if (!result.ok) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          client_.last_error());
+            }
+            return;
+
+        case WorkPhase::FetchImport:
+            result.performed = true;
+            result.ok = client_.get_import(status_.import_id,
+                                           result.import,
+                                           &operation);
+            if (!result.ok) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          client_.last_error());
+            }
+            return;
+
+        case WorkPhase::Idle:
+        case WorkPhase::NextFile:
+        case WorkPhase::ResolveRemoteFile:
+        case WorkPhase::WaitImport:
+        case WorkPhase::MarkState:
+        case WorkPhase::Finish:
+            copy_cstr(result.error,
+                      sizeof(result.error),
+                      "invalid_blocking_phase");
+            return;
+    }
+}
+
+JobStep SleepHqSyncJob::publish_blocking_phase_locked(
+    WorkPhase phase,
+    BlockingResult &result) {
+    if (status_.state != SleepHqSyncState::Working || phase_ != phase) {
+        if (result.local) result.local.close();
+        client_.disconnect();
+        return JobStep::Idle;
+    }
+
+    if (!background_operation_result_current(
+            result.operation_generation,
+            operation_generation_.load(),
+            abort_requested_.load()) ||
+        pending_config_valid_ ||
+        runtime_blocked_.load() ||
+        !network_available_.load()) {
+        if (result.local) result.local.close();
+        fail_locked("preempted");
+        apply_pending_config_locked();
+        return status_.pending ? JobStep::Waiting : JobStep::Idle;
+    }
+
+    if (!result.ok) {
+        if (result.local) result.local.close();
+        if (phase == WorkPhase::FindRemoteMachine && result.retryable) {
+            Log::logf(CAT_SLEEPHQ,
+                      LOG_WARN,
+                      "remote machine lookup skipped: %s\n",
+                      result.error[0] ? result.error : "machine_list_failed");
+            remote_reconcile_enabled_ = false;
+            return begin_export_work_locked();
+        }
+
+        if (phase == WorkPhase::ResolveDatalogDay && result.retryable) {
+            Log::logf(CAT_SLEEPHQ,
+                      LOG_DEBUG,
+                      "remote machine-date lookup skipped day=%s error=%s\n",
+                      pending_remote_day_,
+                      result.error[0]
+                          ? result.error
+                          : "machine_date_lookup_failed");
+            char planner_error[AC_SLEEPHQ_ERROR_MAX] = {};
+            if (!export_planner_.resolve_datalog_day_decision(
+                    false,
+                    planner_error,
+                    sizeof(planner_error))) {
+                fail_locked(planner_error[0]
+                                ? planner_error
+                                : "planner_decision_failed");
+                return JobStep::Idle;
+            }
+            pending_remote_day_[0] = '\0';
+            pending_remote_day_local_complete_ = false;
+            phase_ = WorkPhase::NextFile;
+            return JobStep::Working;
+        }
+
+        if (phase == WorkPhase::FetchRemoteFiles) {
+            Log::logf(CAT_SLEEPHQ,
+                      LOG_WARN,
+                      "remote file lookup failed; falling back to upload: %s\n",
+                      result.error[0]
+                          ? result.error
+                          : "remote_file_list_failed");
+            remote_file_cache_complete_ = true;
+            phase_ = WorkPhase::UploadFile;
+            return JobStep::Working;
+        }
+
+        if (phase == WorkPhase::FetchImport &&
+            strcmp(result.error, "http_404") == 0) {
+            remove_inflight_locked();
+        }
+        fail_locked(result.error[0] ? result.error : "network_io_failed");
+        return JobStep::Idle;
+    }
+
+    switch (phase) {
+        case WorkPhase::Connect: {
+            status_.team_id = result.team_id;
+            if (current_run_kind_ == RunKind::Check) {
+                finish_check_locked(result.team_id);
+                return JobStep::Idle;
+            }
+            if (!build_endpoint_state_dir_locked(result.team_id,
+                                                 state_dir_,
+                                                 sizeof(state_dir_))) {
+                fail_locked("state_path_failed");
+                return JobStep::Idle;
+            }
+
+            char error[AC_SLEEPHQ_ERROR_MAX] = {};
+            if (!prepare_remote_reconcile_locked(error, sizeof(error))) {
+                fail_locked(error[0] ? error : "remote_reconcile_failed");
+                return JobStep::Idle;
+            }
+            phase_ = WorkPhase::FindRemoteMachine;
+            return JobStep::Working;
+        }
+
+        case WorkPhase::FindRemoteMachine:
+            if (!result.performed) {
+                if (remote_reconcile_enabled_ && remote_serial_[0] &&
+                    !remote_machine_id_ && !remote_reconcile_all_missing_ &&
+                    remote_machine_pages_loaded_ >=
+                        SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT) {
+                    note_remote_machine_missing_locked();
+                }
+                return begin_export_work_locked();
+            }
+
+            remote_machine_pages_loaded_++;
+            remote_machine_next_page_++;
+            if (result.machine_id) {
+                remote_machine_id_ = result.machine_id;
+                Log::logf(CAT_SLEEPHQ,
+                          LOG_DEBUG,
+                          "remote machine matched serial=%s id=%lu\n",
+                          remote_serial_,
+                          static_cast<unsigned long>(remote_machine_id_));
+                return begin_export_work_locked();
+            }
+            if (!result.has_more ||
+                remote_machine_pages_loaded_ >=
+                    SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT) {
+                note_remote_machine_missing_locked();
+                return begin_export_work_locked();
+            }
+            return JobStep::Working;
+
+        case WorkPhase::ResolveDatalogDay: {
+            if (!cache_remote_date_locked(pending_remote_day_,
+                                          result.remote_date_exists)) {
+                fail_locked("remote_date_cache_alloc");
+                return JobStep::Idle;
+            }
+
+            bool force_export = false;
+            if (!result.remote_date_exists &&
+                !force_remote_missing_datalog_day_locked(
+                    pending_remote_day_,
+                    pending_remote_day_local_complete_,
+                    force_export)) {
+                fail_locked("remote_date_decision_failed");
+                return JobStep::Idle;
+            }
+
+            char error[AC_SLEEPHQ_ERROR_MAX] = {};
+            if (!export_planner_.resolve_datalog_day_decision(
+                    force_export,
+                    error,
+                    sizeof(error))) {
+                fail_locked(error[0] ? error : "planner_decision_failed");
+                return JobStep::Idle;
+            }
+            pending_remote_day_[0] = '\0';
+            pending_remote_day_local_complete_ = false;
+            phase_ = WorkPhase::NextFile;
+            return JobStep::Working;
+        }
+
+        case WorkPhase::CreateImport:
+            if (!result.import.id) {
+                fail_locked("import_id_missing");
+                return JobStep::Idle;
+            }
+            status_.import_id = result.import.id;
+            if (!write_inflight_locked(InflightPhase::Uploading)) {
+                fail_locked("inflight_write_failed");
+                return JobStep::Idle;
+            }
+            phase_ = WorkPhase::OpenLocal;
+            return JobStep::Working;
+
+        case WorkPhase::OpenLocal:
+            current_file_.local = result.local;
+            result.local = File();
+            current_file_.local_open = true;
+            current_file_.offset = 0;
+            phase_ = WorkPhase::ResolveRemoteFile;
+            return JobStep::Working;
+
+        case WorkPhase::HashLocalFile:
+            copy_cstr(current_file_.content_hash,
+                      sizeof(current_file_.content_hash),
+                      result.content_hash);
+            current_file_.offset = 0;
+            phase_ = WorkPhase::ResolveRemoteFile;
+            return JobStep::Working;
+
+        case WorkPhase::FetchRemoteFiles:
+            if (!remote_files_.merge_from(result.remote_files)) {
+                fail_locked("remote_file_cache_alloc");
+                return JobStep::Idle;
+            }
+            remote_file_pages_loaded_++;
+            remote_file_next_page_++;
+            if (!result.has_more ||
+                remote_file_pages_loaded_ >=
+                    SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
+                remote_file_cache_complete_ = true;
+            }
+            Log::logf(CAT_SLEEPHQ,
+                      LOG_DEBUG,
+                      "remote file page loaded page=%lu count=%u total=%u "
+                      "complete=%u\n",
+                      static_cast<unsigned long>(remote_file_next_page_ - 1),
+                      static_cast<unsigned>(result.count),
+                      static_cast<unsigned>(remote_files_.size()),
+                      remote_file_cache_complete_ ? 1U : 0U);
+            phase_ = WorkPhase::ResolveRemoteFile;
+            return JobStep::Working;
+
+        case WorkPhase::UploadFile:
+            close_local_locked();
+            if (!add_staged_locked(result.upload)) {
+                fail_locked("staged_alloc");
+                return JobStep::Idle;
+            }
+            if (!write_inflight_locked(InflightPhase::Uploading)) {
+                fail_locked("inflight_write_failed");
+                return JobStep::Idle;
+            }
+            status_.bytes_uploaded += result.upload.bytes;
+            status_.files_uploaded++;
+            clear_current_file_locked();
+            phase_ = WorkPhase::NextFile;
+            return JobStep::Working;
+
+        case WorkPhase::ProcessImport:
+            if (!write_inflight_locked(InflightPhase::Processing)) {
+                fail_locked("inflight_write_failed");
+                return JobStep::Idle;
+            }
+            import_process_started_ms_ = millis_nonzero();
+            import_poll_due_ms_ = import_process_started_ms_;
+            status_.import_status[0] = '\0';
+            phase_ = WorkPhase::WaitImport;
+            return JobStep::Waiting;
+
+        case WorkPhase::FetchImport: {
+            const uint32_t now = millis_nonzero();
+            char previous_status[AC_SLEEPHQ_STATUS_MAX] = {};
+            copy_cstr(previous_status,
+                      sizeof(previous_status),
+                      status_.import_status);
+            copy_cstr(status_.import_status,
+                      sizeof(status_.import_status),
+                      result.import.status);
+            if (result.import.id) status_.import_id = result.import.id;
+            status_.updated_ms = now;
+
+            switch (sleephq_classify_import_status(result.import.status)) {
+                case SleepHqImportStatusKind::Success:
+                    mark_index_ = 0;
+                    phase_ = WorkPhase::MarkState;
+                    return JobStep::Working;
+                case SleepHqImportStatusKind::Failure:
+                    remove_inflight_locked();
+                    fail_locked(result.import.failed_reason[0]
+                                    ? result.import.failed_reason
+                                    : "import_failed");
+                    return JobStep::Idle;
+                case SleepHqImportStatusKind::Unknown:
+                    if (strcmp(previous_status, result.import.status) != 0) {
+                        Log::logf(
+                            CAT_SLEEPHQ,
+                            LOG_WARN,
+                            "unknown import status treated as transient: %s\n",
+                            result.import.status[0]
+                                ? result.import.status
+                                : "<empty>");
+                    }
+                    break;
+                case SleepHqImportStatusKind::Transient:
+                    break;
+            }
+
+            if (import_process_started_ms_ == 0 ||
+                static_cast<uint32_t>(now - import_process_started_ms_) >=
+                    SLEEPHQ_IMPORT_POLL_TIMEOUT_MS) {
+                fail_locked("import_process_timeout");
+                return JobStep::Idle;
+            }
+            import_poll_due_ms_ = now + SLEEPHQ_IMPORT_POLL_INTERVAL_MS;
+            phase_ = WorkPhase::WaitImport;
+            return JobStep::Waiting;
+        }
+
+        case WorkPhase::Idle:
+        case WorkPhase::NextFile:
+        case WorkPhase::ResolveRemoteFile:
+        case WorkPhase::WaitImport:
+        case WorkPhase::MarkState:
+        case WorkPhase::Finish:
+            fail_locked("invalid_blocking_phase");
+            return JobStep::Idle;
+    }
+    return JobStep::Idle;
+}
+
 JobStep SleepHqSyncJob::step_work_phase_locked() {
-    char error[AC_SLEEPHQ_ERROR_MAX] = {};
     switch (phase_) {
         case WorkPhase::Idle:
             phase_ = WorkPhase::Connect;
             return JobStep::Working;
         case WorkPhase::Connect:
-            return step_connect_locked(error, sizeof(error));
         case WorkPhase::FindRemoteMachine:
-            return step_find_remote_machine_locked(error, sizeof(error));
-        case WorkPhase::Check:
-            return step_check_locked(error, sizeof(error));
+        case WorkPhase::ResolveDatalogDay:
+        case WorkPhase::CreateImport:
+        case WorkPhase::OpenLocal:
+        case WorkPhase::HashLocalFile:
+        case WorkPhase::FetchRemoteFiles:
+        case WorkPhase::UploadFile:
+        case WorkPhase::ProcessImport:
+        case WorkPhase::FetchImport:
+            return JobStep::Waiting;
         case WorkPhase::NextFile:
             return next_file_locked() ? JobStep::Working : JobStep::Idle;
-        case WorkPhase::CreateImport:
-            return step_create_import_locked(error, sizeof(error));
-        case WorkPhase::OpenLocal:
-            return step_open_local_locked();
         case WorkPhase::ResolveRemoteFile:
-            return step_resolve_remote_file_locked(error, sizeof(error));
-        case WorkPhase::UploadFile:
-            return step_upload_file_locked(error, sizeof(error));
-        case WorkPhase::ProcessImport:
-            return step_process_import_locked(error, sizeof(error));
+            return step_resolve_remote_file_locked();
         case WorkPhase::WaitImport:
-            return step_wait_import_locked(error, sizeof(error));
-        case WorkPhase::MarkState:
+            return step_wait_import_locked();
+        case WorkPhase::MarkState: {
+            char error[AC_SLEEPHQ_ERROR_MAX] = {};
             return step_mark_state_locked(error, sizeof(error));
+        }
         case WorkPhase::Finish:
             return finish_import_or_sync_locked();
     }
@@ -2157,9 +2415,10 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
 JobStep SleepHqSyncJob::step() {
     if (!lock(20)) return JobStep::Waiting;
     const uint32_t now = millis_nonzero();
+    apply_pending_config_locked();
     queue_retry_locked(now);
-    if (runtime_blocked_.load() && status_.state == SleepHqSyncState::Working) {
-        abort_requested_.store(true);
+    if (abort_requested_.load() &&
+        status_.state == SleepHqSyncState::Working) {
         fail_locked("preempted");
         unlock();
         return JobStep::Idle;
@@ -2174,33 +2433,38 @@ JobStep SleepHqSyncJob::step() {
         unlock();
         return JobStep::Idle;
     }
-    const JobStep result = step_work_phase_locked();
+
+    const WorkPhase phase = phase_;
+    if (!phase_has_blocking_io(phase)) {
+        const JobStep result = step_work_phase_locked();
+        unlock();
+        return result;
+    }
+
+    const uint32_t operation_generation = operation_generation_.load();
+    unlock();
+
+    BlockingResult blocking_result;
+    execute_blocking_phase(phase, blocking_result);
+    blocking_result.operation_generation = operation_generation;
+
+    if (!lock_ || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) {
+        if (blocking_result.local) blocking_result.local.close();
+        client_.disconnect();
+        Log::logf(CAT_SLEEPHQ,
+                  LOG_ERROR,
+                  "state publish lock unavailable phase=%u\n",
+                  static_cast<unsigned>(phase));
+        return JobStep::Idle;
+    }
+    const JobStep result =
+        publish_blocking_phase_locked(phase, blocking_result);
     unlock();
     return result;
 }
 
 void SleepHqSyncJob::on_preempt() {
-    abort_requested_.store(true);
-    if (!lock(5)) return;
-    if (status_.state == SleepHqSyncState::Working) {
-        const RunKind kind = current_run_kind_;
-        char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
-        copy_cstr(reason, sizeof(reason),
-                  status_.pending_reason[0]
-                      ? status_.pending_reason
-                      : "preempted");
-        reset_run_locked(true);
-        pending_run_kind_ = kind;
-        status_.state = SleepHqSyncState::Pending;
-        status_.pending = true;
-        copy_cstr(status_.pending_reason,
-                  sizeof(status_.pending_reason),
-                  reason);
-        status_.updated_ms = millis_nonzero();
-        retry_due_ms_ = 0;
-        publish_runtime_locked();
-    }
-    unlock();
+    request_operation_abort();
 }
 
 SleepHqSyncStatus SleepHqSyncJob::status() const {
@@ -2212,11 +2476,13 @@ SleepHqSyncStatus SleepHqSyncJob::status() const {
         out.network_available = network_available_.load();
         unlock();
     } else {
-        out = status_;
-        out.retry_due_ms = retry_due_ms_;
-        out.retry_attempt = retry_attempt_;
-        out.network_available = network_available_.load();
-        out.state = SleepHqSyncState::Working;
+        const SleepHqSyncRuntimeStatus runtime = runtime_status();
+        out.state = runtime.state;
+        out.pending = runtime.pending;
+        out.configured = runtime.configured;
+        out.network_available = runtime.network_available;
+        out.config_generation = runtime.config_generation;
+        out.team_id = runtime.team_id;
     }
     if (out.last_sync_epoch != 0 &&
         out.last_sync_epoch > out.last_check_epoch) {

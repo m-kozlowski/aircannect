@@ -117,9 +117,11 @@ const char *StorageSyncJob::work_phase_name(WorkPhase phase) {
         case WorkPhase::Connect: return "connect";
         case WorkPhase::VerifyLatestStart: return "verify_latest_start";
         case WorkPhase::VerifyLatestFile: return "verify_latest_file";
+        case WorkPhase::VerifyLatestRemote: return "verify_latest_remote";
         case WorkPhase::VerifyLatestInvalidate:
             return "verify_latest_invalidate";
         case WorkPhase::NextFile: return "next_file";
+        case WorkPhase::ResolveRemoteFile: return "resolve_remote_file";
         case WorkPhase::EnsureRemoteDir: return "ensure_remote_dir";
         case WorkPhase::OpenLocal: return "open_local";
         case WorkPhase::OpenRemote: return "open_remote";
@@ -154,10 +156,12 @@ bool StorageSyncJob::run_kind_is_reconcile(RunKind kind) {
 
 bool StorageSyncJob::config_matches_locked(
     const ConfigSnapshot &config) const {
-    return config_.enabled == config.enabled &&
-           strcmp(config_.endpoint, config.endpoint) == 0 &&
-           strcmp(config_.user, config.user) == 0 &&
-           strcmp(config_.password, config.password) == 0;
+    const ConfigSnapshot &active =
+        pending_config_valid_ ? pending_config_ : config_;
+    return active.enabled == config.enabled &&
+           strcmp(active.endpoint, config.endpoint) == 0 &&
+           strcmp(active.user, config.user) == 0 &&
+           strcmp(active.password, config.password) == 0;
 }
 
 void StorageSyncJob::reset_run_locked(bool keep_status) {
@@ -175,6 +179,7 @@ void StorageSyncJob::reset_run_locked(bool keep_status) {
     ensured_remote_dir_[0] = '\0';
     latest_datalog_day_[0] = '\0';
     pending_run_kind_ = RunKind::Manual;
+    abort_requested_.store(false);
     state_cache_.clear();
     if (!keep_status) {
         const StorageSyncPersistentStatus preserved = status_;
@@ -345,8 +350,6 @@ bool StorageSyncJob::save_result_metadata_locked() {
 }
 
 void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
-    const bool was_working = status_.state == StorageSyncState::Working;
-    if (was_working) reset_run_locked(true);
     config_ = config;
     status_.enabled = config.enabled;
     status_.configured = snapshot_configured(config);
@@ -413,9 +416,22 @@ void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     publish_runtime_locked();
 }
 
+void StorageSyncJob::apply_pending_config_locked() {
+    if (!pending_config_valid_) return;
+
+    const ConfigSnapshot pending = pending_config_;
+    pending_config_valid_ = false;
+    pending_config_ = ConfigSnapshot();
+
+    if (status_.state == StorageSyncState::Working) {
+        preempt_run_locked();
+    }
+    apply_config_locked(pending);
+}
+
 void StorageSyncJob::set_network_available(bool available) {
     const bool was_available = network_available_.exchange(available);
-    if (!available) abort_requested_.store(true);
+    if (was_available && !available) request_operation_abort();
     if (was_available == available) return;
     if (!lock(0)) return;
     status_.network_available = available;
@@ -428,7 +444,7 @@ void StorageSyncJob::set_network_available(bool available) {
 
 void StorageSyncJob::set_runtime_blocked(bool blocked) {
     const bool was_blocked = runtime_blocked_.exchange(blocked);
-    if (blocked) abort_requested_.store(true);
+    if (!was_blocked && blocked) request_operation_abort();
     if (was_blocked && !blocked) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
@@ -442,7 +458,13 @@ void StorageSyncJob::configure(const AppConfigData &config) {
     const ConfigSnapshot snapshot = make_config_snapshot(config);
     if (!lock(50)) return;
     if (!config_matches_locked(snapshot)) {
-        apply_config_locked(snapshot);
+        if (status_.state == StorageSyncState::Working) {
+            pending_config_ = snapshot;
+            pending_config_valid_ = true;
+            request_operation_abort();
+        } else {
+            apply_config_locked(snapshot);
+        }
     }
     unlock();
 }
@@ -458,7 +480,13 @@ void StorageSyncJob::refresh_config(const AppConfigData &config,
     if (!lock(0)) return;
     last_config_check_ms_ = now_ms == 0 ? 1 : now_ms;
     if (!config_matches_locked(snapshot)) {
-        apply_config_locked(snapshot);
+        if (status_.state == StorageSyncState::Working) {
+            pending_config_ = snapshot;
+            pending_config_valid_ = true;
+            request_operation_abort();
+        } else {
+            apply_config_locked(snapshot);
+        }
     }
     unlock();
 }
@@ -643,6 +671,13 @@ BackgroundOperationControl StorageSyncJob::operation_control() const {
     return operation;
 }
 
+void StorageSyncJob::request_operation_abort() {
+    bool expected = false;
+    if (abort_requested_.compare_exchange_strong(expected, true)) {
+        operation_generation_.fetch_add(1);
+    }
+}
+
 bool StorageSyncJob::latest_datalog_day_locked(char *out,
                                                size_t out_size,
                                                char *error_out,
@@ -743,36 +778,47 @@ bool StorageSyncJob::latest_verify_file_step_locked(char *error_out,
         return true;
     }
 
-    char remote_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+    copy_cstr(latest_verify_.current_path,
+              sizeof(latest_verify_.current_path),
+              child_path);
+    latest_verify_.current_size = child.size;
     if (!smb_.make_remote_path(child_path,
-                               remote_path,
-                               sizeof(remote_path))) {
+                               latest_verify_.remote_path,
+                               sizeof(latest_verify_.remote_path))) {
         copy_cstr(error_out, error_out_size, "remote_path_failed");
         return false;
     }
-    StorageSmbRemoteStat remote;
-    BackgroundOperationControl operation = operation_control();
-    if (!smb_.stat(remote_path, remote, error_out, error_out_size,
-                   &operation)) {
-        return false;
-    }
-    if (!remote.exists || remote.directory || remote.size != child.size) {
+
+    phase_ = WorkPhase::VerifyLatestRemote;
+    return true;
+}
+
+JobStep StorageSyncJob::publish_verify_latest_remote_locked(
+    const StorageSmbRemoteStat &remote) {
+    if (!remote.exists || remote.directory ||
+        remote.size != latest_verify_.current_size) {
         sync_after_verify_ = true;
         latest_verify_.invalidate_state = true;
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
                   "[SYNC] latest cache mismatch local=%s remote=%s "
                   "exists=%u dir=%u remote_size=%llu local_size=%llu\n",
-                  child_path,
-                  remote_path,
+                  latest_verify_.current_path,
+                  latest_verify_.remote_path,
                   remote.exists ? 1u : 0u,
                   remote.directory ? 1u : 0u,
                   static_cast<unsigned long long>(remote.size),
-                  static_cast<unsigned long long>(child.size));
-        return true;
+                  static_cast<unsigned long long>(
+                      latest_verify_.current_size));
+    } else {
+        status_.files_skipped++;
     }
-    status_.files_skipped++;
-    return true;
+
+    latest_verify_.current_path[0] = '\0';
+    latest_verify_.remote_path[0] = '\0';
+    latest_verify_.current_size = 0;
+    phase_ = WorkPhase::VerifyLatestFile;
+    return JobStep::Working;
 }
 
 bool StorageSyncJob::invalidate_latest_state_locked(char *error_out,
@@ -815,6 +861,9 @@ bool StorageSyncJob::next_file_locked() {
             return plan_file_locked(item);
         case StorageExportPlannerResult::Yield:
             return true;
+        case StorageExportPlannerResult::DecisionRequired:
+            fail_locked("unexpected_planner_decision");
+            return false;
         case StorageExportPlannerResult::Done:
             phase_ = WorkPhase::Finish;
             return true;
@@ -983,8 +1032,8 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
         item.state_write_mode == StorageExportStateWriteMode::Append
             ? StateWriteMode::Append
             : StateWriteMode::Replace;
-    const bool local_state_complete = item.local_state_complete;
-    if (local_state_complete) {
+    current_file_.local_state_complete = item.local_state_complete;
+    if (current_file_.local_state_complete) {
         if (!run_kind_is_reconcile(current_run_kind_)) {
             status_.files_skipped++;
             clear_current_file_locked();
@@ -1002,46 +1051,8 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
         return false;
     }
     if (run_kind_is_reconcile(current_run_kind_)) {
-        char error[AC_STORAGE_ERROR_MAX] = {};
-        StorageSmbRemoteStat remote;
-        BackgroundOperationControl operation = operation_control();
-        if (!smb_.stat(current_file_.remote_path,
-                       remote,
-                       error,
-                       sizeof(error),
-                       &operation)) {
-            fail_locked(error[0] ? error : "remote_stat_failed");
-            return false;
-        }
-        if (remote.exists && !remote.directory &&
-            remote.size == item.info.size) {
-            if (!local_state_complete) {
-                if (!write_state_locked(current_file_.state_path,
-                                        current_file_.path,
-                                        current_file_.size,
-                                        current_file_.mtime,
-                                        current_file_.state_write_mode)) {
-                    if (status_.state != StorageSyncState::Error) {
-                        fail_locked("state_write_failed");
-                    }
-                    return false;
-                }
-            }
-            status_.files_skipped++;
-            clear_current_file_locked();
-            phase_ = WorkPhase::NextFile;
-            return true;
-        }
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[SYNC] reconcile upload local=%s remote=%s exists=%u "
-                  "dir=%u remote_size=%llu local_size=%llu\n",
-                  path,
-                  current_file_.remote_path,
-                  remote.exists ? 1u : 0u,
-                  remote.directory ? 1u : 0u,
-                  static_cast<unsigned long long>(remote.size),
-                  static_cast<unsigned long long>(item.info.size));
+        phase_ = WorkPhase::ResolveRemoteFile;
+        return true;
     }
     phase_ = WorkPhase::EnsureRemoteDir;
     return true;
@@ -1062,8 +1073,6 @@ void StorageSyncJob::clear_current_file_locked() {
 }
 
 void StorageSyncJob::finish_run_locked() {
-    BackgroundOperationControl operation = operation_control();
-    smb_.disconnect(&operation);
     close_latest_verify_locked();
     export_planner_.reset();
     release_upload_buffer_locked();
@@ -1251,21 +1260,6 @@ void StorageSyncJob::fail_locked(const char *error) {
     publish_runtime_locked();
 }
 
-bool StorageSyncJob::verify_endpoint_base_locked(char *error_out,
-                                                 size_t error_out_size) {
-    char base_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
-    if (!smb_.make_remote_path("/", base_path, sizeof(base_path))) {
-        copy_cstr(error_out, error_out_size, "remote_path_failed");
-        return false;
-    }
-    BackgroundOperationControl operation = operation_control();
-    if (!smb_.ensure_directory(base_path, error_out, error_out_size,
-                               &operation)) {
-        return false;
-    }
-    return true;
-}
-
 void StorageSyncJob::queue_retry_locked(uint32_t now_ms) {
     if (status_.state != StorageSyncState::Error || retry_due_ms_ == 0 ||
         static_cast<int32_t>(now_ms - retry_due_ms_) < 0) {
@@ -1320,6 +1314,8 @@ void StorageSyncJob::queue_reconcile_if_due_locked(uint32_t now_ms) {
 }
 
 bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
+    apply_pending_config_locked();
+
     const uint32_t defer_until = idle_defer_until_ms_.load();
     if (defer_until != 0 &&
         static_cast<int32_t>(now_ms - defer_until) < 0 &&
@@ -1331,11 +1327,14 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
     queue_reconcile_if_due_locked(now_ms);
     queue_deferred_post_therapy_locked(now_ms);
 
+    if (abort_requested_.load() &&
+        status_.state == StorageSyncState::Working) {
+        preempt_run_locked();
+        result = status_.pending ? JobStep::Waiting : JobStep::Idle;
+        return false;
+    }
+
     if (runtime_blocked_.load()) {
-        if (status_.state == StorageSyncState::Working) {
-            abort_requested_.store(true);
-            preempt_run_locked();
-        }
         result = status_.pending ? JobStep::Waiting : JobStep::Idle;
         return false;
     }
@@ -1365,33 +1364,6 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
         return false;
     }
     return true;
-}
-
-JobStep StorageSyncJob::step_connect_locked(char *error_out,
-                                            size_t error_out_size) {
-    BackgroundOperationControl operation = operation_control();
-    if (!smb_.configure(config_.endpoint, config_.user,
-                        config_.password, error_out, error_out_size,
-                        &operation) ||
-        !smb_.connect(error_out, error_out_size, &operation)) {
-        fail_locked(error_out[0] ? error_out : "smb_connect_failed");
-        return JobStep::Idle;
-    }
-    if (run_kind_is_verify(current_run_kind_) &&
-        !run_kind_is_reconcile(current_run_kind_)) {
-        if (!verify_endpoint_base_locked(error_out, error_out_size)) {
-            fail_locked(error_out[0] ? error_out : "endpoint_verify_failed");
-            return JobStep::Idle;
-        }
-        phase_ = WorkPhase::VerifyLatestStart;
-        return JobStep::Working;
-    }
-    if (!prepare_upload_buffer_locked()) {
-        fail_locked("upload_buffer_alloc");
-        return JobStep::Idle;
-    }
-    phase_ = WorkPhase::NextFile;
-    return JobStep::Working;
 }
 
 JobStep StorageSyncJob::step_verify_latest_start_locked(
@@ -1424,26 +1396,6 @@ JobStep StorageSyncJob::step_verify_latest_invalidate_locked(
     return JobStep::Working;
 }
 
-JobStep StorageSyncJob::step_ensure_remote_dir_locked(
-    char *error_out,
-    size_t error_out_size) {
-    if (strcmp(ensured_remote_dir_, current_file_.remote_dir) != 0) {
-        BackgroundOperationControl operation = operation_control();
-        if (!smb_.ensure_directory(current_file_.remote_dir,
-                                   error_out,
-                                   error_out_size,
-                                   &operation)) {
-            fail_locked(error_out[0] ? error_out : "remote_mkdir_failed");
-            return JobStep::Idle;
-        }
-        copy_cstr(ensured_remote_dir_,
-                  sizeof(ensured_remote_dir_),
-                  current_file_.remote_dir);
-    }
-    phase_ = WorkPhase::OpenLocal;
-    return JobStep::Working;
-}
-
 JobStep StorageSyncJob::step_open_local_locked() {
     Storage::Guard guard;
     current_file_.local = Storage::open(current_file_.path, "r");
@@ -1453,64 +1405,6 @@ JobStep StorageSyncJob::step_open_local_locked() {
     }
     current_file_.local_open = true;
     phase_ = WorkPhase::OpenRemote;
-    return JobStep::Working;
-}
-
-JobStep StorageSyncJob::step_open_remote_locked(char *error_out,
-                                                size_t error_out_size) {
-    BackgroundOperationControl operation = operation_control();
-    if (!smb_.open_writer(current_file_.remote_path,
-                          error_out,
-                          error_out_size,
-                          &operation)) {
-        fail_locked(error_out[0] ? error_out : "remote_open_failed");
-        return JobStep::Idle;
-    }
-    current_file_.offset = 0;
-    phase_ = current_file_.size == 0 ? WorkPhase::CloseRemote
-                                     : WorkPhase::UploadChunk;
-    return JobStep::Working;
-}
-
-JobStep StorageSyncJob::step_upload_chunk_locked(char *error_out,
-                                                 size_t error_out_size) {
-    uint64_t remaining = current_file_.size - current_file_.offset;
-    size_t to_read = upload_buffer_size_;
-    if (remaining < to_read) to_read = static_cast<size_t>(remaining);
-    size_t read = 0;
-    {
-        Storage::Guard guard;
-        read = current_file_.local.read(upload_buffer_, to_read);
-    }
-    if (read != to_read) {
-        fail_locked("local_read_short");
-        return JobStep::Idle;
-    }
-    BackgroundOperationControl operation = operation_control();
-    const int written = smb_.write(upload_buffer_, read, error_out,
-                                   error_out_size, &operation);
-    if (written < 0 || static_cast<size_t>(written) != read) {
-        fail_locked(error_out[0] ? error_out : "remote_write_failed");
-        return JobStep::Idle;
-    }
-    current_file_.offset += static_cast<uint64_t>(written);
-    status_.bytes_uploaded += static_cast<uint64_t>(written);
-    status_.updated_ms = millis_nonzero();
-    if (current_file_.offset >= current_file_.size) {
-        phase_ = WorkPhase::CloseRemote;
-    }
-    return JobStep::Working;
-}
-
-JobStep StorageSyncJob::step_close_remote_locked(char *error_out,
-                                                 size_t error_out_size) {
-    BackgroundOperationControl operation = operation_control();
-    if (!smb_.close_writer(error_out, error_out_size, &operation)) {
-        fail_locked(error_out[0] ? error_out : "remote_close_failed");
-        return JobStep::Idle;
-    }
-    close_local_locked();
-    phase_ = WorkPhase::MarkState;
     return JobStep::Working;
 }
 
@@ -1538,6 +1432,278 @@ JobStep StorageSyncJob::step_mark_state_locked() {
     return JobStep::Working;
 }
 
+bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
+    switch (phase) {
+        case WorkPhase::Connect:
+        case WorkPhase::VerifyLatestRemote:
+        case WorkPhase::ResolveRemoteFile:
+        case WorkPhase::EnsureRemoteDir:
+        case WorkPhase::OpenRemote:
+        case WorkPhase::UploadChunk:
+        case WorkPhase::CloseRemote:
+        case WorkPhase::Finish:
+            return true;
+
+        case WorkPhase::Idle:
+        case WorkPhase::VerifyLatestStart:
+        case WorkPhase::VerifyLatestFile:
+        case WorkPhase::VerifyLatestInvalidate:
+        case WorkPhase::NextFile:
+        case WorkPhase::OpenLocal:
+        case WorkPhase::MarkState:
+            return false;
+    }
+    return false;
+}
+
+void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
+                                            BlockingResult &result) {
+    result = BlockingResult();
+    BackgroundOperationControl operation = operation_control();
+
+    switch (phase) {
+        case WorkPhase::Connect: {
+            if (!smb_.configure(config_.endpoint,
+                                config_.user,
+                                config_.password,
+                                result.error,
+                                sizeof(result.error),
+                                &operation) ||
+                !smb_.connect(result.error,
+                              sizeof(result.error),
+                              &operation)) {
+                return;
+            }
+
+            if (run_kind_is_verify(current_run_kind_) &&
+                !run_kind_is_reconcile(current_run_kind_)) {
+                char base_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+                if (!smb_.make_remote_path("/",
+                                           base_path,
+                                           sizeof(base_path))) {
+                    copy_cstr(result.error,
+                              sizeof(result.error),
+                              "remote_path_failed");
+                    return;
+                }
+                if (!smb_.ensure_directory(base_path,
+                                           result.error,
+                                           sizeof(result.error),
+                                           &operation)) {
+                    return;
+                }
+            }
+            result.ok = true;
+            return;
+        }
+
+        case WorkPhase::VerifyLatestRemote:
+            result.ok = smb_.stat(latest_verify_.remote_path,
+                                  result.remote,
+                                  result.error,
+                                  sizeof(result.error),
+                                  &operation);
+            return;
+
+        case WorkPhase::ResolveRemoteFile:
+            result.ok = smb_.stat(current_file_.remote_path,
+                                  result.remote,
+                                  result.error,
+                                  sizeof(result.error),
+                                  &operation);
+            return;
+
+        case WorkPhase::EnsureRemoteDir:
+            result.ok =
+                strcmp(ensured_remote_dir_, current_file_.remote_dir) == 0 ||
+                smb_.ensure_directory(current_file_.remote_dir,
+                                      result.error,
+                                      sizeof(result.error),
+                                      &operation);
+            return;
+
+        case WorkPhase::OpenRemote:
+            result.ok = smb_.open_writer(current_file_.remote_path,
+                                         result.error,
+                                         sizeof(result.error),
+                                         &operation);
+            return;
+
+        case WorkPhase::UploadChunk: {
+            const uint64_t remaining =
+                current_file_.size - current_file_.offset;
+            size_t to_read = upload_buffer_size_;
+            if (remaining < to_read) {
+                to_read = static_cast<size_t>(remaining);
+            }
+
+            size_t read = 0;
+            {
+                Storage::Guard guard;
+                read = current_file_.local.read(upload_buffer_, to_read);
+            }
+            if (read != to_read) {
+                copy_cstr(result.error,
+                          sizeof(result.error),
+                          "local_read_short");
+                return;
+            }
+
+            result.transferred = smb_.write(upload_buffer_,
+                                            read,
+                                            result.error,
+                                            sizeof(result.error),
+                                            &operation);
+            result.ok = result.transferred >= 0 &&
+                        static_cast<size_t>(result.transferred) == read;
+            return;
+        }
+
+        case WorkPhase::CloseRemote:
+            result.ok = smb_.close_writer(result.error,
+                                          sizeof(result.error),
+                                          &operation);
+            return;
+
+        case WorkPhase::Finish:
+            smb_.disconnect(&operation);
+            result.ok = true;
+            return;
+
+        case WorkPhase::Idle:
+        case WorkPhase::VerifyLatestStart:
+        case WorkPhase::VerifyLatestFile:
+        case WorkPhase::VerifyLatestInvalidate:
+        case WorkPhase::NextFile:
+        case WorkPhase::OpenLocal:
+        case WorkPhase::MarkState:
+            copy_cstr(result.error,
+                      sizeof(result.error),
+                      "invalid_blocking_phase");
+            return;
+    }
+}
+
+JobStep StorageSyncJob::publish_blocking_phase_locked(
+    WorkPhase phase,
+    const BlockingResult &result) {
+    if (status_.state != StorageSyncState::Working || phase_ != phase) {
+        smb_.abort_connection();
+        return JobStep::Idle;
+    }
+
+    if (!background_operation_result_current(
+            result.operation_generation,
+            operation_generation_.load(),
+            abort_requested_.load()) ||
+        pending_config_valid_ ||
+        runtime_blocked_.load() ||
+        !network_available_.load()) {
+        preempt_run_locked();
+        apply_pending_config_locked();
+        return status_.pending ? JobStep::Waiting : JobStep::Idle;
+    }
+
+    if (!result.ok) {
+        fail_locked(result.error[0] ? result.error : "network_io_failed");
+        return JobStep::Idle;
+    }
+
+    switch (phase) {
+        case WorkPhase::Connect:
+            if (run_kind_is_verify(current_run_kind_) &&
+                !run_kind_is_reconcile(current_run_kind_)) {
+                phase_ = WorkPhase::VerifyLatestStart;
+                return JobStep::Working;
+            }
+            if (!prepare_upload_buffer_locked()) {
+                fail_locked("upload_buffer_alloc");
+                return JobStep::Idle;
+            }
+            phase_ = WorkPhase::NextFile;
+            return JobStep::Working;
+
+        case WorkPhase::VerifyLatestRemote:
+            return publish_verify_latest_remote_locked(result.remote);
+
+        case WorkPhase::ResolveRemoteFile:
+            if (result.remote.exists && !result.remote.directory &&
+                result.remote.size == current_file_.size) {
+                if (!current_file_.local_state_complete &&
+                    !write_state_locked(current_file_.state_path,
+                                        current_file_.path,
+                                        current_file_.size,
+                                        current_file_.mtime,
+                                        current_file_.state_write_mode)) {
+                    fail_locked("state_write_failed");
+                    return JobStep::Idle;
+                }
+                status_.files_skipped++;
+                clear_current_file_locked();
+                phase_ = WorkPhase::NextFile;
+                return JobStep::Working;
+            }
+
+            Log::logf(CAT_STORAGE,
+                      LOG_WARN,
+                      "[SYNC] reconcile upload local=%s remote=%s "
+                      "exists=%u dir=%u remote_size=%llu local_size=%llu\n",
+                      current_file_.path,
+                      current_file_.remote_path,
+                      result.remote.exists ? 1u : 0u,
+                      result.remote.directory ? 1u : 0u,
+                      static_cast<unsigned long long>(result.remote.size),
+                      static_cast<unsigned long long>(current_file_.size));
+            phase_ = WorkPhase::EnsureRemoteDir;
+            return JobStep::Working;
+
+        case WorkPhase::EnsureRemoteDir:
+            copy_cstr(ensured_remote_dir_,
+                      sizeof(ensured_remote_dir_),
+                      current_file_.remote_dir);
+            phase_ = WorkPhase::OpenLocal;
+            return JobStep::Working;
+
+        case WorkPhase::OpenRemote:
+            current_file_.offset = 0;
+            phase_ = current_file_.size == 0
+                ? WorkPhase::CloseRemote
+                : WorkPhase::UploadChunk;
+            return JobStep::Working;
+
+        case WorkPhase::UploadChunk:
+            current_file_.offset +=
+                static_cast<uint64_t>(result.transferred);
+            status_.bytes_uploaded +=
+                static_cast<uint64_t>(result.transferred);
+            status_.updated_ms = millis_nonzero();
+            if (current_file_.offset >= current_file_.size) {
+                phase_ = WorkPhase::CloseRemote;
+            }
+            return JobStep::Working;
+
+        case WorkPhase::CloseRemote:
+            close_local_locked();
+            phase_ = WorkPhase::MarkState;
+            return JobStep::Working;
+
+        case WorkPhase::Finish:
+            finish_run_locked();
+            return JobStep::Idle;
+
+        case WorkPhase::Idle:
+        case WorkPhase::VerifyLatestStart:
+        case WorkPhase::VerifyLatestFile:
+        case WorkPhase::VerifyLatestInvalidate:
+        case WorkPhase::NextFile:
+        case WorkPhase::OpenLocal:
+        case WorkPhase::MarkState:
+            fail_locked("invalid_blocking_phase");
+            return JobStep::Idle;
+    }
+    return JobStep::Idle;
+}
+
 JobStep StorageSyncJob::step_work_phase_locked() {
     char error[AC_STORAGE_ERROR_MAX] = {};
     switch (phase_) {
@@ -1546,7 +1712,14 @@ JobStep StorageSyncJob::step_work_phase_locked() {
             return JobStep::Working;
 
         case WorkPhase::Connect:
-            return step_connect_locked(error, sizeof(error));
+        case WorkPhase::VerifyLatestRemote:
+        case WorkPhase::ResolveRemoteFile:
+        case WorkPhase::EnsureRemoteDir:
+        case WorkPhase::OpenRemote:
+        case WorkPhase::UploadChunk:
+        case WorkPhase::CloseRemote:
+        case WorkPhase::Finish:
+            return JobStep::Waiting;
 
         case WorkPhase::VerifyLatestStart:
             return step_verify_latest_start_locked(error, sizeof(error));
@@ -1560,27 +1733,11 @@ JobStep StorageSyncJob::step_work_phase_locked() {
         case WorkPhase::NextFile:
             return next_file_locked() ? JobStep::Working : JobStep::Idle;
 
-        case WorkPhase::EnsureRemoteDir:
-            return step_ensure_remote_dir_locked(error, sizeof(error));
-
         case WorkPhase::OpenLocal:
             return step_open_local_locked();
 
-        case WorkPhase::OpenRemote:
-            return step_open_remote_locked(error, sizeof(error));
-
-        case WorkPhase::UploadChunk:
-            return step_upload_chunk_locked(error, sizeof(error));
-
-        case WorkPhase::CloseRemote:
-            return step_close_remote_locked(error, sizeof(error));
-
         case WorkPhase::MarkState:
             return step_mark_state_locked();
-
-        case WorkPhase::Finish:
-            finish_run_locked();
-            return JobStep::Idle;
     }
     return JobStep::Idle;
 }
@@ -1588,20 +1745,40 @@ JobStep StorageSyncJob::step_work_phase_locked() {
 JobStep StorageSyncJob::step() {
     if (!lock(20)) return JobStep::Waiting;
     JobStep result = JobStep::Idle;
-    if (prepare_step_locked(millis_nonzero(), result)) {
-        result = step_work_phase_locked();
+    if (!prepare_step_locked(millis_nonzero(), result)) {
+        unlock();
+        return result;
     }
+
+    const WorkPhase phase = phase_;
+    if (!phase_has_blocking_io(phase)) {
+        result = step_work_phase_locked();
+        unlock();
+        return result;
+    }
+
+    const uint32_t operation_generation = operation_generation_.load();
+    unlock();
+
+    BlockingResult blocking_result;
+    execute_blocking_phase(phase, blocking_result);
+    blocking_result.operation_generation = operation_generation;
+
+    if (!lock_ || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) {
+        smb_.abort_connection();
+        Log::logf(CAT_STORAGE,
+                  LOG_ERROR,
+                  "[SYNC] state publish lock unavailable phase=%s\n",
+                  work_phase_name(phase));
+        return JobStep::Idle;
+    }
+    result = publish_blocking_phase_locked(phase, blocking_result);
     unlock();
     return result;
 }
 
 void StorageSyncJob::on_preempt() {
-    abort_requested_.store(true);
-    if (!lock(5)) return;
-    if (status_.state == StorageSyncState::Working) {
-        preempt_run_locked();
-    }
-    unlock();
+    request_operation_abort();
 }
 
 StorageSyncStatus StorageSyncJob::status() const {
@@ -1613,13 +1790,12 @@ StorageSyncStatus StorageSyncJob::status() const {
         out.network_available = network_available_.load();
         unlock();
     } else {
-        // Telemetry fallback only: preserve the last public fields instead of
-        // fabricating an empty status while the worker holds the lock in SMB I/O.
-        out = status_;
-        out.state = StorageSyncState::Working;
-        out.pending = true;
-        out.network_available = network_available_.load();
-        out.updated_ms = millis_nonzero();
+        const StorageSyncRuntimeStatus runtime = runtime_status();
+        out.state = runtime.state;
+        out.pending = runtime.pending;
+        out.enabled = runtime.enabled;
+        out.configured = runtime.configured;
+        out.network_available = runtime.network_available;
     }
     if (out.last_sync_epoch != 0 &&
         out.last_sync_epoch > out.last_verify_epoch) {

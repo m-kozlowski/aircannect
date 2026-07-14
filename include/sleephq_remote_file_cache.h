@@ -16,6 +16,7 @@ public:
     SleepHqRemoteFileCache &operator=(const SleepHqRemoteFileCache &) = delete;
 
     bool add(const SleepHqRemoteFile &file);
+    bool merge_from(const SleepHqRemoteFileCache &other);
     bool contains(const char *name, const char *path,
                   const char *content_hash, uint64_t size) const;
     void clear();

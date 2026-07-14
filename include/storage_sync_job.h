@@ -132,8 +132,10 @@ private:
         Connect,
         VerifyLatestStart,
         VerifyLatestFile,
+        VerifyLatestRemote,
         VerifyLatestInvalidate,
         NextFile,
+        ResolveRemoteFile,
         EnsureRemoteDir,
         OpenLocal,
         OpenRemote,
@@ -173,6 +175,7 @@ private:
         uint64_t mtime = 0;
         uint64_t offset = 0;
         StateWriteMode state_write_mode = StateWriteMode::Append;
+        bool local_state_complete = false;
         bool local_open = false;
         File local;
     };
@@ -180,15 +183,27 @@ private:
     struct LatestVerify {
         char day_path[AC_STORAGE_PATH_MAX] = {};
         char state_path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+        char current_path[AC_STORAGE_PATH_MAX] = {};
+        char remote_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+        uint64_t current_size = 0;
         bool opened = false;
         bool invalidate_state = false;
         File dir;
+    };
+
+    struct BlockingResult {
+        uint32_t operation_generation = 0;
+        bool ok = false;
+        int transferred = 0;
+        StorageSmbRemoteStat remote;
+        char error[AC_STORAGE_ERROR_MAX] = {};
     };
 
     // locking/config
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void apply_config_locked(const ConfigSnapshot &config);
+    void apply_pending_config_locked();
     bool config_matches_locked(const ConfigSnapshot &config) const;
     static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
     static bool snapshot_configured(const ConfigSnapshot &config);
@@ -207,21 +222,21 @@ private:
     void queue_retry_locked(uint32_t now_ms);
     void queue_reconcile_if_due_locked(uint32_t now_ms);
     JobStep step_work_phase_locked();
+    static bool phase_has_blocking_io(WorkPhase phase);
+    void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
+    JobStep publish_blocking_phase_locked(WorkPhase phase,
+                                          const BlockingResult &result);
 
     // SMB connection and transfer phases
-    JobStep step_connect_locked(char *error_out, size_t error_out_size);
     JobStep step_verify_latest_start_locked(char *error_out,
                                             size_t error_out_size);
     JobStep step_verify_latest_file_locked(char *error_out,
                                            size_t error_out_size);
+    JobStep publish_verify_latest_remote_locked(
+        const StorageSmbRemoteStat &remote);
     JobStep step_verify_latest_invalidate_locked(char *error_out,
                                                  size_t error_out_size);
-    JobStep step_ensure_remote_dir_locked(char *error_out,
-                                          size_t error_out_size);
     JobStep step_open_local_locked();
-    JobStep step_open_remote_locked(char *error_out, size_t error_out_size);
-    JobStep step_upload_chunk_locked(char *error_out, size_t error_out_size);
-    JobStep step_close_remote_locked(char *error_out, size_t error_out_size);
     JobStep step_mark_state_locked();
 
     // endpoint/state metadata
@@ -236,7 +251,6 @@ private:
     void clear_result_metadata_locked();
     bool load_result_metadata_locked();
     bool save_result_metadata_locked();
-    bool verify_endpoint_base_locked(char *error_out, size_t error_out_size);
     bool latest_datalog_day_locked(char *out,
                                    size_t out_size,
                                    char *error_out,
@@ -282,6 +296,7 @@ private:
     bool prepare_upload_buffer_locked();
     void release_upload_buffer_locked();
     BackgroundOperationControl operation_control() const;
+    void request_operation_abort();
     static bool operation_abort_cb(void *ctx);
     void close_local_locked();
     void clear_current_file_locked();
@@ -290,6 +305,8 @@ private:
     // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
     ConfigSnapshot config_;
+    ConfigSnapshot pending_config_;
+    bool pending_config_valid_ = false;
     StorageSyncStatus status_;
     uint32_t next_config_generation_ = 1;
     uint32_t last_config_check_ms_ = 0;
@@ -298,6 +315,7 @@ private:
     std::atomic<bool> network_available_{false};
     std::atomic<bool> runtime_blocked_{false};
     std::atomic<bool> abort_requested_{false};
+    std::atomic<uint32_t> operation_generation_{1};
     std::atomic<uint8_t> runtime_state_{
         static_cast<uint8_t>(StorageSyncState::Disabled)};
     std::atomic<bool> runtime_pending_{false};
