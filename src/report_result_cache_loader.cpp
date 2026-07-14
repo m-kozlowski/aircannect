@@ -26,16 +26,11 @@ namespace {
 
 constexpr size_t REPORT_CACHE_READ_CHUNK = 4096;
 constexpr uint32_t REPORT_CACHE_FAILED_RETRY_MS = 2000;
-constexpr uint8_t REPORT_CACHE_ALL_ARTIFACTS =
-    static_cast<uint8_t>(ReportCacheArtifact::Result) |
-    static_cast<uint8_t>(ReportCacheArtifact::Plot);
 
 enum class LoadPhase : uint8_t {
     Prepare,
-    OpenResult,
-    ReadResult,
-    OpenPlot,
-    ReadPlot,
+    OpenArtifact,
+    ReadArtifact,
     Complete,
 };
 
@@ -66,6 +61,40 @@ struct ProbeEntry {
     uint32_t retry_after_ms = 0;
     uint32_t last_used = 0;
 };
+
+using CachePathBuilder = bool (*)(uint64_t, const char *, char *, size_t);
+using CachePayloadValidator = bool (*)(const uint8_t *, size_t);
+
+struct CacheArtifactSpec {
+    ReportCacheArtifact artifact;
+    size_t min_size;
+    size_t max_size;
+    CachePathBuilder build_path;
+    CachePayloadValidator payload_valid;
+    const char *label;
+};
+
+constexpr CacheArtifactSpec CACHE_ARTIFACTS[] = {
+    {
+        ReportCacheArtifact::Result,
+        16,
+        REPORT_RESULT_JSON_CACHE_MAX,
+        result_json_cache_path_for_etag,
+        report_result_json_cache_payload_valid,
+        "JSON",
+    },
+    {
+        ReportCacheArtifact::Plot,
+        8,
+        AC_REPORT_PLOT_MAX_BYTES,
+        result_plot_cache_path_for_etag,
+        report_result_plot_cache_payload_valid,
+        "plot",
+    },
+};
+
+constexpr size_t CACHE_ARTIFACT_COUNT =
+    sizeof(CACHE_ARTIFACTS) / sizeof(CACHE_ARTIFACTS[0]);
 
 bool key_matches(const LoadKey &key,
                  uint64_t night_start_ms,
@@ -165,13 +194,12 @@ struct ReportResultCacheLoader::State {
     uint8_t available_mask = 0;
     uint8_t failed_mask = 0;
 
-    char result_path[REPORT_CACHE_PATH_MAX] = {};
-    char plot_path[REPORT_CACHE_PATH_MAX] = {};
+    size_t artifact_index = 0;
+    char path[REPORT_CACHE_PATH_MAX] = {};
     File file;
     size_t expected_size = 0;
     size_t offset = 0;
-    std::shared_ptr<ReportSpoolBuffer> result_json;
-    std::shared_ptr<ReportSpoolBuffer> plot;
+    std::shared_ptr<ReportSpoolBuffer> payload;
 
     ProbeEntry probes[AC_REPORT_RESULT_CACHE_PROBE_MAX] = {};
     uint32_t probe_tick = 0;
@@ -302,173 +330,120 @@ bool ReportResultCacheLoader::service() {
         state_->checked_mask = 0;
         state_->available_mask = 0;
         state_->failed_mask = 0;
-        state_->result_path[0] = '\0';
-        state_->plot_path[0] = '\0';
+        state_->artifact_index = 0;
+        state_->path[0] = '\0';
         state_->expected_size = 0;
         state_->offset = 0;
-        state_->result_json.reset();
-        state_->plot.reset();
+        state_->payload.reset();
         xSemaphoreGive(lock_);
     }
 
     switch (state_->phase) {
-        case LoadPhase::Prepare: {
-            const bool paths_ok =
-                result_json_cache_path_for_etag(
-                    state_->current.night_start_ms,
-                    state_->current.etag,
-                    state_->result_path,
-                    sizeof(state_->result_path)) &&
-                result_plot_cache_path_for_etag(
-                    state_->current.night_start_ms,
-                    state_->current.etag,
-                    state_->plot_path,
-                    sizeof(state_->plot_path));
-
-            if (!paths_ok) {
-                state_->checked_mask = REPORT_CACHE_ALL_ARTIFACTS;
-                state_->failed_mask = REPORT_CACHE_ALL_ARTIFACTS;
-                state_->phase = LoadPhase::Complete;
-            } else {
-                state_->phase = LoadPhase::OpenResult;
-            }
+        case LoadPhase::Prepare:
+            state_->artifact_index = 0;
+            state_->phase = LoadPhase::OpenArtifact;
             break;
-        }
 
-        case LoadPhase::OpenResult: {
-            const OpenOutcome outcome =
-                open_cache_file(state_->result_path,
-                                16,
-                                REPORT_RESULT_JSON_CACHE_MAX,
-                                state_->file,
-                                state_->expected_size,
-                                state_->result_json);
-            state_->checked_mask |=
-                static_cast<uint8_t>(ReportCacheArtifact::Result);
+        case LoadPhase::OpenArtifact: {
+            const CacheArtifactSpec &artifact =
+                CACHE_ARTIFACTS[state_->artifact_index];
+            const uint8_t artifact_mask =
+                static_cast<uint8_t>(artifact.artifact);
+            state_->checked_mask |= artifact_mask;
+
+            if (!artifact.build_path(state_->current.night_start_ms,
+                                     state_->current.etag,
+                                     state_->path,
+                                     sizeof(state_->path))) {
+                state_->failed_mask |= artifact_mask;
+                state_->artifact_index++;
+                state_->phase = state_->artifact_index < CACHE_ARTIFACT_COUNT
+                    ? LoadPhase::OpenArtifact
+                    : LoadPhase::Complete;
+                break;
+            }
+
+            const OpenOutcome outcome = open_cache_file(state_->path,
+                                                        artifact.min_size,
+                                                        artifact.max_size,
+                                                        state_->file,
+                                                        state_->expected_size,
+                                                        state_->payload);
 
             if (outcome == OpenOutcome::Opened) {
                 state_->offset = 0;
-                state_->phase = LoadPhase::ReadResult;
+                state_->phase = LoadPhase::ReadArtifact;
             } else {
                 if (outcome == OpenOutcome::Failed) {
-                    state_->failed_mask |=
-                        static_cast<uint8_t>(ReportCacheArtifact::Result);
+                    state_->failed_mask |= artifact_mask;
                 }
                 if (outcome == OpenOutcome::Invalid) {
                     Log::logf(CAT_REPORT,
                               LOG_WARN,
-                              "Result cache JSON rejected night=%llu\n",
+                              "Result cache %s rejected night=%llu\n",
+                              artifact.label,
                               static_cast<unsigned long long>(
                                   state_->current.night_start_ms));
                 }
 
-                state_->result_json.reset();
-                state_->phase = LoadPhase::OpenPlot;
+                state_->payload.reset();
+                state_->artifact_index++;
+                state_->phase = state_->artifact_index < CACHE_ARTIFACT_COUNT
+                    ? LoadPhase::OpenArtifact
+                    : LoadPhase::Complete;
             }
             break;
         }
 
-        case LoadPhase::ReadResult: {
-            const ReadOutcome outcome =
-                read_cache_file_step(state_->file,
-                                     state_->expected_size,
-                                     state_->offset,
-                                     *state_->result_json);
+        case LoadPhase::ReadArtifact: {
+            const CacheArtifactSpec &artifact =
+                CACHE_ARTIFACTS[state_->artifact_index];
+            const uint8_t artifact_mask =
+                static_cast<uint8_t>(artifact.artifact);
+            const ReadOutcome outcome = read_cache_file_step(
+                state_->file,
+                state_->expected_size,
+                state_->offset,
+                *state_->payload);
             if (outcome == ReadOutcome::Working) break;
 
             close_cache_file(state_->file);
+            bool published = false;
             if (outcome == ReadOutcome::Complete &&
-                report_result_json_cache_payload_valid(
-                    state_->result_json->data(),
-                    state_->result_json->size()) &&
-                slots_.publish(ReportResultState::Ready,
-                               state_->current.night_start_ms,
-                               state_->current.etag,
-                               state_->result_json,
-                               nullptr)) {
-                state_->available_mask |=
-                    static_cast<uint8_t>(ReportCacheArtifact::Result);
+                artifact.payload_valid(state_->payload->data(),
+                                       state_->payload->size())) {
+                const std::shared_ptr<ReportSpoolBuffer> empty;
+                published = artifact.artifact == ReportCacheArtifact::Result
+                    ? slots_.publish(ReportResultState::Ready,
+                                     state_->current.night_start_ms,
+                                     state_->current.etag,
+                                     state_->payload,
+                                     empty)
+                    : slots_.publish(ReportResultState::Ready,
+                                     state_->current.night_start_ms,
+                                     state_->current.etag,
+                                     empty,
+                                     state_->payload);
+            }
+
+            if (published) {
+                state_->available_mask |= artifact_mask;
             } else if (outcome == ReadOutcome::Failed) {
-                state_->failed_mask |=
-                    static_cast<uint8_t>(ReportCacheArtifact::Result);
+                state_->failed_mask |= artifact_mask;
             } else {
                 Log::logf(CAT_REPORT,
                           LOG_WARN,
-                          "Result cache JSON rejected night=%llu\n",
+                          "Result cache %s rejected night=%llu\n",
+                          artifact.label,
                           static_cast<unsigned long long>(
                               state_->current.night_start_ms));
             }
 
-            state_->result_json.reset();
-            state_->phase = LoadPhase::OpenPlot;
-            break;
-        }
-
-        case LoadPhase::OpenPlot: {
-            const OpenOutcome outcome =
-                open_cache_file(state_->plot_path,
-                                8,
-                                AC_REPORT_PLOT_MAX_BYTES,
-                                state_->file,
-                                state_->expected_size,
-                                state_->plot);
-            state_->checked_mask |=
-                static_cast<uint8_t>(ReportCacheArtifact::Plot);
-
-            if (outcome == OpenOutcome::Opened) {
-                state_->offset = 0;
-                state_->phase = LoadPhase::ReadPlot;
-            } else {
-                if (outcome == OpenOutcome::Failed) {
-                    state_->failed_mask |=
-                        static_cast<uint8_t>(ReportCacheArtifact::Plot);
-                }
-                if (outcome == OpenOutcome::Invalid) {
-                    Log::logf(CAT_REPORT,
-                              LOG_WARN,
-                              "Result cache plot rejected night=%llu\n",
-                              static_cast<unsigned long long>(
-                                  state_->current.night_start_ms));
-                }
-
-                state_->plot.reset();
-                state_->phase = LoadPhase::Complete;
-            }
-            break;
-        }
-
-        case LoadPhase::ReadPlot: {
-            const ReadOutcome outcome =
-                read_cache_file_step(state_->file,
-                                     state_->expected_size,
-                                     state_->offset,
-                                     *state_->plot);
-            if (outcome == ReadOutcome::Working) break;
-
-            close_cache_file(state_->file);
-            if (outcome == ReadOutcome::Complete &&
-                report_result_plot_cache_payload_valid(
-                    state_->plot->data(), state_->plot->size()) &&
-                slots_.publish(ReportResultState::Ready,
-                               state_->current.night_start_ms,
-                               state_->current.etag,
-                               nullptr,
-                               state_->plot)) {
-                state_->available_mask |=
-                    static_cast<uint8_t>(ReportCacheArtifact::Plot);
-            } else if (outcome == ReadOutcome::Failed) {
-                state_->failed_mask |=
-                    static_cast<uint8_t>(ReportCacheArtifact::Plot);
-            } else {
-                Log::logf(CAT_REPORT,
-                          LOG_WARN,
-                          "Result cache plot rejected night=%llu\n",
-                          static_cast<unsigned long long>(
-                              state_->current.night_start_ms));
-            }
-
-            state_->plot.reset();
-            state_->phase = LoadPhase::Complete;
+            state_->payload.reset();
+            state_->artifact_index++;
+            state_->phase = state_->artifact_index < CACHE_ARTIFACT_COUNT
+                ? LoadPhase::OpenArtifact
+                : LoadPhase::Complete;
             break;
         }
 
@@ -527,10 +502,11 @@ void ReportResultCacheLoader::finish_current() {
     state_->checked_mask = 0;
     state_->available_mask = 0;
     state_->failed_mask = 0;
+    state_->artifact_index = 0;
+    state_->path[0] = '\0';
     state_->expected_size = 0;
     state_->offset = 0;
-    state_->result_json.reset();
-    state_->plot.reset();
+    state_->payload.reset();
     xSemaphoreGive(lock_);
 }
 
