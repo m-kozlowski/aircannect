@@ -392,25 +392,6 @@ bool edf_str_path(char *dst, size_t dst_size) {
     return written == 8;
 }
 
-bool edf_valid_browse_path(const char *path) {
-    if (!path) return false;
-    const size_t len = strlen(path);
-    if (len == 0 || len >= AC_STORAGE_WRITE_PATH_MAX) return false;
-    if (strcmp(path, "/") == 0 || strcmp(path, "/DATALOG") == 0) {
-        return true;
-    }
-
-    static constexpr char kPrefix[] = "/DATALOG/";
-    static constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
-    if (len != kPrefixLen + 8 ||
-        strncmp(path, kPrefix, kPrefixLen) != 0) {
-        return false;
-    }
-
-    EdfLocalDateTime day;
-    return parse_yyyymmdd(path + kPrefixLen, day);
-}
-
 bool edf_valid_pull_path(const char *path) {
     if (!path) return false;
     const size_t len = strlen(path);

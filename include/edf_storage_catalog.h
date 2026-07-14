@@ -62,7 +62,6 @@ bool edf_datalog_annotation_path(EdfAnnotationKind kind,
                                  char *dst,
                                  size_t dst_size);
 bool edf_str_path(char *dst, size_t dst_size);
-bool edf_valid_browse_path(const char *path);
 bool edf_valid_pull_path(const char *path);
 
 }  // namespace aircannect
