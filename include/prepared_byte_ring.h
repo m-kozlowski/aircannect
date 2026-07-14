@@ -5,6 +5,17 @@
 
 namespace aircannect {
 
+enum class PreparedByteReadState : uint8_t {
+    Data,
+    Retry,
+    End,
+};
+
+struct PreparedByteRead {
+    PreparedByteReadState state = PreparedByteReadState::End;
+    size_t bytes = 0;
+};
+
 class PreparedByteRing {
 public:
     void bind(uint8_t *storage, size_t capacity);

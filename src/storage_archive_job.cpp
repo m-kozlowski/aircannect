@@ -17,12 +17,14 @@ namespace aircannect {
 namespace {
 
 static constexpr size_t ARCHIVE_FILE_BUFFER_BYTES = 512;
-static constexpr size_t ARCHIVE_READ_AHEAD_BYTES = 256 * 1024;
+static constexpr size_t ARCHIVE_RING_BYTES = 256 * 1024;
+static constexpr size_t ARCHIVE_PRODUCE_BYTES = 16 * 1024;
 static constexpr size_t ARCHIVE_PREPARE_ENTRY_BUDGET = 12;
 static constexpr size_t ARCHIVE_INITIAL_ENTRY_CAPACITY = 64;
 static constexpr size_t ARCHIVE_INITIAL_PATH_BYTES = 4096;
 static constexpr size_t ARCHIVE_MAX_DEPTH = 16;
 static constexpr uint32_t ARCHIVE_STALE_CLEANUP_MS = 60UL * 60UL * 1000UL;
+static constexpr uint32_t ARCHIVE_CONSUMER_TIMEOUT_MS = 60UL * 1000UL;
 static constexpr uint32_t ZIP32_MAX = 0xFFFFFFFFu;
 static constexpr uint32_t ZIP_LOCAL_HEADER_SIZE = 30;
 static constexpr uint32_t ZIP_DATA_DESCRIPTOR_SIZE = 16;
@@ -104,12 +106,20 @@ uint32_t millis_nonzero() {
     return now == 0 ? 1 : now;
 }
 
+bool deadline_reached(uint32_t now, uint32_t deadline) {
+    return deadline != 0 && static_cast<int32_t>(now - deadline) >= 0;
+}
+
 void log_archive_alloc_failed(const char *context, size_t bytes) {
     Log::logf(CAT_STORAGE,
               LOG_ERROR,
               "[ARCHIVE] allocation failed context=%s bytes=%u\n",
               context ? context : "--",
               static_cast<unsigned>(bytes));
+}
+
+void wake_background_worker() {
+    if (BackgroundWorker *worker = background_worker()) worker->wake();
 }
 
 void set_archive_file_buffer(File &file) {
@@ -178,7 +188,6 @@ enum class ArchiveStreamPhase : uint8_t {
 };
 
 struct StorageArchiveDownload {
-    StorageArchiveJob *job = nullptr;
     uint32_t id = 0;
     ArchiveStreamPhase phase = ArchiveStreamPhase::EntryHeader;
     size_t phase_offset = 0;
@@ -191,20 +200,21 @@ struct StorageArchiveDownload {
     uint64_t central_size = 0;
     uint8_t scratch[ZIP_CENTRAL_HEADER_SIZE] = {};
     size_t scratch_len = 0;
-    uint8_t *read_ahead = nullptr;
-    size_t read_ahead_capacity = 0;
-    size_t read_ahead_offset = 0;
-    size_t read_ahead_len = 0;
+
+    uint8_t *ring_storage = nullptr;
+    PreparedByteRing ring;
+    uint64_t consumed = 0;
+    uint32_t consumer_activity_ms = 0;
+
     File input;
     bool input_open = false;
+    bool consumer_closed = false;
+    bool producer_done = false;
     bool complete = false;
+    std::atomic<bool> cancel_requested{false};
 
     ~StorageArchiveDownload() {
-        if (input_open) {
-            Storage::Guard guard;
-            input.close();
-        }
-        if (read_ahead) Memory::free(read_ahead);
+        if (ring_storage) Memory::free(ring_storage);
     }
 };
 
@@ -257,7 +267,17 @@ void StorageArchiveJob::reset_job_locked(bool keep_status) {
     }
 }
 
+void StorageArchiveJob::release_selection_locked() {
+    if (selection_names_) Memory::free(selection_names_);
+    selection_names_ = nullptr;
+    selection_count_ = 0;
+    selection_index_ = 0;
+    selection_base_checked_ = false;
+}
+
 void StorageArchiveJob::release_build_buffers_locked() {
+    release_selection_locked();
+
     if (entries_) {
         Memory::free(entries_);
         entries_ = nullptr;
@@ -322,6 +342,10 @@ void StorageArchiveJob::apply_preempt_locked() {
     if (status_.state == StorageArchiveState::Preparing) {
         close_walk_files_locked();
         status_.updated_ms = millis_nonzero();
+    } else if (status_.state == StorageArchiveState::Downloading &&
+               active_download_) {
+        std::shared_ptr<StorageArchiveDownload> download = active_download_;
+        fail_download_locked(*download, "preempted");
     }
 }
 
@@ -412,7 +436,7 @@ bool StorageArchiveJob::start(const char *path,
         copy_cstr(error_out, error_out_size, "bad_path");
         return false;
     }
-    if (!lock(50)) {
+    if (!lock(0)) {
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
@@ -431,6 +455,8 @@ bool StorageArchiveJob::start(const char *path,
     }
     if (id_out) *id_out = status_.id;
     unlock();
+
+    wake_background_worker();
     return true;
 }
 
@@ -452,13 +478,14 @@ bool StorageArchiveJob::start_selected(const char *base_path,
         return false;
     }
     for (size_t i = 0; i < count; ++i) {
-        if (!storage_valid_child_name(names[i])) {
+        if (!storage_valid_child_name(names[i]) ||
+            strlen(names[i]) >= AC_STORAGE_ARCHIVE_NAME_MAX) {
             copy_cstr(error_out, error_out_size, "bad_name");
             return false;
         }
     }
 
-    if (!lock(50)) {
+    if (!lock(0)) {
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
@@ -472,70 +499,28 @@ bool StorageArchiveJob::start_selected(const char *base_path,
         return false;
     }
 
-    {
-        Storage::Guard guard;
-        File base_dir = Storage::open(status_.source_path, "r");
-        if (!base_dir || !base_dir.isDirectory()) {
-            if (base_dir) base_dir.close();
-            set_error_locked("not_directory");
-            copy_cstr(error_out, error_out_size, status_.error);
-            unlock();
-            return false;
-        }
-        base_dir.close();
+    const size_t selection_bytes =
+        count * AC_STORAGE_ARCHIVE_NAME_MAX;
+    selection_names_ = static_cast<char *>(
+        Memory::calloc_large(selection_bytes, 1, false));
+    if (!selection_names_) {
+        set_error_locked("selection_alloc");
+        copy_cstr(error_out, error_out_size, status_.error);
+        unlock();
+        return false;
     }
-
     for (size_t i = 0; i < count; ++i) {
-        char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-        if (!storage_append_child_path(status_.source_path,
-                               names[i],
-                               child_path,
-                               sizeof(child_path)) ||
-            !storage_archive_valid_path(child_path)) {
-            set_error_locked("bad_child_path");
-            copy_cstr(error_out, error_out_size, status_.error);
-            unlock();
-            return false;
-        }
-
-        bool is_dir = false;
-        bool child_found = false;
-        uint64_t size = 0;
-        time_t last_write = 0;
-        {
-            Storage::Guard guard;
-            File child = Storage::open(child_path, "r");
-            if (child) {
-                child_found = true;
-                is_dir = child.isDirectory();
-                size = is_dir ? 0 : static_cast<uint64_t>(child.size());
-                last_write = child.getLastWrite();
-                child.close();
-            }
-        }
-        if (!child_found) {
-            set_error_locked("not_found");
-            copy_cstr(error_out, error_out_size, status_.error);
-            unlock();
-            return false;
-        }
-
-        if (is_dir) {
-            if (!append_entry_locked(child_path, 0, true, last_write) ||
-                !push_walk_dir_locked(child_path)) {
-                copy_cstr(error_out, error_out_size, status_.error);
-                unlock();
-                return false;
-            }
-        } else if (!append_entry_locked(child_path, size, false, last_write)) {
-            copy_cstr(error_out, error_out_size, status_.error);
-            unlock();
-            return false;
-        }
+        copy_cstr(selection_names_ + i * AC_STORAGE_ARCHIVE_NAME_MAX,
+                  AC_STORAGE_ARCHIVE_NAME_MAX,
+                  names[i]);
     }
+    selection_count_ = count;
+    selection_index_ = 0;
+    selection_base_checked_ = false;
 
     if (id_out) *id_out = status_.id;
     unlock();
+    wake_background_worker();
     return true;
 }
 
@@ -554,7 +539,7 @@ StorageArchiveStatus StorageArchiveJob::status() const {
 }
 
 bool StorageArchiveJob::active() const {
-    if (!lock(20)) return true;
+    if (!lock(0)) return true;
     const bool out =
         status_.state == StorageArchiveState::Preparing ||
         status_.state == StorageArchiveState::Downloading;
@@ -573,61 +558,85 @@ bool StorageArchiveJob::begin_download(
     download_out.reset();
     size_out = 0;
     copy_cstr(error_out, error_out_size, "");
-    std::shared_ptr<StorageArchiveDownload> download =
-        std::make_shared<StorageArchiveDownload>();
+
+    std::shared_ptr<StorageArchiveDownload> download(
+        new (std::nothrow) StorageArchiveDownload());
     if (!download) {
         copy_cstr(error_out, error_out_size, "download_alloc");
         return false;
     }
-    download->read_ahead = static_cast<uint8_t *>(
-        Memory::alloc_large(ARCHIVE_READ_AHEAD_BYTES, false));
-    if (download->read_ahead) {
-        download->read_ahead_capacity = ARCHIVE_READ_AHEAD_BYTES;
-    } else if (Memory::psram_available()) {
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[ARCHIVE] read_ahead allocation failed bytes=%u\n",
-                  static_cast<unsigned>(ARCHIVE_READ_AHEAD_BYTES));
-    }
-    if (!lock(1000)) {
+
+    if (!lock(0)) {
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
-    if (status_.id != id || status_.state != StorageArchiveState::Ready) {
+    if (status_.id != id || status_.state != StorageArchiveState::Ready ||
+        active_download_) {
         copy_cstr(error_out, error_out_size, "not_ready");
         unlock();
         return false;
     }
+
+    download->ring_storage = static_cast<uint8_t *>(
+        Memory::alloc_large(ARCHIVE_RING_BYTES, false));
+    if (!download->ring_storage) {
+        copy_cstr(error_out, error_out_size, "download_buffer_alloc");
+        unlock();
+        return false;
+    }
+    download->ring.bind(download->ring_storage, ARCHIVE_RING_BYTES);
+
     status_.state = StorageArchiveState::Downloading;
     status_.bytes_done = 0;
     status_.files_done = 0;
     status_.updated_ms = millis_nonzero();
-    download->job = this;
     download->id = id;
+    download->consumer_activity_ms = status_.updated_ms;
     copy_cstr(filename_out, filename_out_size, status_.filename);
     size_out = status_.estimated_archive_bytes;
+    active_download_ = download;
     download_out = download;
     unlock();
+
+    wake_background_worker();
     return true;
 }
 
 void StorageArchiveJob::finish_download(StorageArchiveDownload &download) {
-    if (download.input_open) {
-        Storage::Guard guard;
-        download.input.close();
-        download.input_open = false;
+    if (!lock(0)) {
+        download.cancel_requested.store(true, std::memory_order_relaxed);
+        wake_background_worker();
+        return;
     }
-    if (!lock(1000)) return;
-    if (status_.id == download.id &&
-        status_.state == StorageArchiveState::Downloading) {
-        if (download.complete &&
-            download.output_offset == status_.estimated_archive_bytes) {
-            reset_job_locked(false);
-        } else {
-            set_error_locked("download_aborted");
+    if (active_download_.get() == &download) {
+        download.consumer_closed = true;
+        if (download.consumed != status_.estimated_archive_bytes) {
+            download.cancel_requested.store(true, std::memory_order_relaxed);
         }
     }
     unlock();
+    wake_background_worker();
+}
+
+bool StorageArchiveJob::run_when_gate_closed(const char *reason) const {
+    return reason && strcmp(reason, "web_grace") == 0;
+}
+
+JobStep StorageArchiveJob::step_when_gate_closed(const char *reason) {
+    if (!run_when_gate_closed(reason)) return JobStep::Idle;
+    begin();
+    if (!lock(20)) return JobStep::Waiting;
+
+    apply_preempt_locked();
+
+    JobStep result = JobStep::Idle;
+    if (status_.state == StorageArchiveState::Preparing) {
+        result = prepare_step_locked() ? JobStep::Working : JobStep::Idle;
+    } else if (status_.state == StorageArchiveState::Downloading) {
+        result = download_step_locked();
+    }
+    unlock();
+    return result;
 }
 
 JobStep StorageArchiveJob::step() {
@@ -650,6 +659,8 @@ JobStep StorageArchiveJob::step() {
     JobStep result = JobStep::Idle;
     if (status_.state == StorageArchiveState::Preparing) {
         result = prepare_step_locked() ? JobStep::Working : JobStep::Idle;
+    } else if (status_.state == StorageArchiveState::Downloading) {
+        result = download_step_locked();
     }
     apply_preempt_locked();
     unlock();
@@ -786,10 +797,78 @@ bool StorageArchiveJob::ensure_walk_dir_open_locked(WalkFrame &frame) {
     return true;
 }
 
+bool StorageArchiveJob::prepare_selection_step_locked() {
+    if (!selection_names_) return true;
+
+    if (!selection_base_checked_) {
+        Storage::Guard guard;
+        File base = Storage::open(status_.source_path, "r");
+        if (!base || !base.isDirectory()) {
+            if (base) base.close();
+            set_error_locked("not_directory");
+            return false;
+        }
+        base.close();
+        selection_base_checked_ = true;
+    }
+
+    if (selection_index_ >= selection_count_) {
+        release_selection_locked();
+        return true;
+    }
+
+    const char *name = selection_names_ +
+        selection_index_ * AC_STORAGE_ARCHIVE_NAME_MAX;
+    char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
+    if (!storage_append_child_path(status_.source_path,
+                                   name,
+                                   child_path,
+                                   sizeof(child_path)) ||
+        !storage_archive_valid_path(child_path)) {
+        set_error_locked("bad_child_path");
+        return false;
+    }
+
+    bool found = false;
+    bool directory = false;
+    uint64_t size = 0;
+    time_t last_write = 0;
+    {
+        Storage::Guard guard;
+        File child = Storage::open(child_path, "r");
+        if (child) {
+            found = true;
+            directory = child.isDirectory();
+            size = directory ? 0 : static_cast<uint64_t>(child.size());
+            last_write = child.getLastWrite();
+            child.close();
+        }
+    }
+    if (!found) {
+        set_error_locked("not_found");
+        return false;
+    }
+
+    if (!append_entry_locked(child_path, size, directory, last_write)) {
+        return false;
+    }
+    if (directory && !push_walk_dir_locked(child_path)) return false;
+
+    selection_index_++;
+    if (selection_index_ >= selection_count_) release_selection_locked();
+    status_.updated_ms = millis_nonzero();
+    return true;
+}
+
 bool StorageArchiveJob::prepare_step_locked() {
     if (!Storage::mounted()) {
         set_error_locked("storage_unavailable");
         return false;
+    }
+
+    if (selection_names_) {
+        if (!prepare_selection_step_locked()) return false;
+        if (selection_names_) return true;
     }
 
     size_t budget = ARCHIVE_PREPARE_ENTRY_BUDGET;
@@ -878,27 +957,131 @@ bool StorageArchiveJob::finalize_prepare_locked() {
     return true;
 }
 
-size_t StorageArchiveJob::read_download(StorageArchiveDownload &download,
-                                        uint8_t *buffer,
-                                        size_t max_len,
-                                        size_t offset) {
-    if (!buffer || max_len == 0) return 0;
-    if (!lock(1000)) return 0;
-    const size_t out = read_download_locked(download, buffer, max_len, offset);
-    unlock();
-    return out;
+void StorageArchiveJob::close_download_input_locked(
+    StorageArchiveDownload &download) {
+    if (!download.input_open) return;
+
+    Storage::Guard guard;
+    download.input.close();
+    download.input_open = false;
 }
 
-size_t StorageArchiveJob::read_download_locked(StorageArchiveDownload &download,
-                                               uint8_t *buffer,
-                                               size_t max_len,
-                                               size_t offset) {
-    if (download.id != status_.id ||
-        status_.state != StorageArchiveState::Downloading ||
-        offset != download.output_offset) {
-        return 0;
+void StorageArchiveJob::fail_download_locked(
+    StorageArchiveDownload &download,
+    const char *error) {
+    close_download_input_locked(download);
+    download.producer_done = true;
+    active_download_.reset();
+
+    if (status_.state != StorageArchiveState::Error) {
+        set_error_locked(error);
+    }
+}
+
+JobStep StorageArchiveJob::download_step_locked() {
+    std::shared_ptr<StorageArchiveDownload> download = active_download_;
+    if (!download || download->id != status_.id) {
+        set_error_locked("download_state");
+        active_download_.reset();
+        return JobStep::Idle;
     }
 
+    const uint32_t now = millis_nonzero();
+    const bool consumer_expired =
+        deadline_reached(now,
+                         download->consumer_activity_ms +
+                             ARCHIVE_CONSUMER_TIMEOUT_MS);
+    if (download->cancel_requested.load(std::memory_order_relaxed) ||
+        consumer_expired) {
+        fail_download_locked(*download, "download_aborted");
+        return JobStep::Idle;
+    }
+
+    if (download->producer_done) {
+        if (!download->consumer_closed) return JobStep::Waiting;
+
+        const bool complete = download->complete &&
+            download->output_offset == status_.estimated_archive_bytes &&
+            download->consumed == status_.estimated_archive_bytes;
+        close_download_input_locked(*download);
+        active_download_.reset();
+        if (complete) {
+            reset_job_locked(false);
+        } else {
+            set_error_locked("download_aborted");
+        }
+        return JobStep::Idle;
+    }
+
+    size_t span_length = 0;
+    uint8_t *span = download->ring.write_span(span_length);
+    if (!span || span_length == 0) return JobStep::Waiting;
+    span_length = std::min(span_length, ARCHIVE_PRODUCE_BYTES);
+
+    const size_t produced =
+        produce_download_locked(*download, span, span_length);
+    if (status_.state == StorageArchiveState::Error) {
+        fail_download_locked(*download, status_.error);
+        return JobStep::Idle;
+    }
+    if (!download->ring.commit_write(produced)) {
+        fail_download_locked(*download, "ring_commit");
+        return JobStep::Idle;
+    }
+    if (produced == 0 && !download->complete) {
+        fail_download_locked(*download, "archive_stalled");
+        return JobStep::Idle;
+    }
+
+    if (download->complete) {
+        if (download->output_offset != status_.estimated_archive_bytes) {
+            fail_download_locked(*download, "archive_size_mismatch");
+            return JobStep::Idle;
+        }
+        download->producer_done = true;
+        close_download_input_locked(*download);
+    }
+    return JobStep::Working;
+}
+
+PreparedByteRead StorageArchiveJob::read_download(
+    StorageArchiveDownload &download,
+    uint8_t *buffer,
+    size_t max_len,
+    size_t offset) {
+    PreparedByteRead result;
+    if (!buffer || max_len == 0 || !lock(0)) {
+        result.state = PreparedByteReadState::Retry;
+        return result;
+    }
+
+    if (!active_download_ || active_download_.get() != &download ||
+        status_.state != StorageArchiveState::Downloading ||
+        offset != download.consumed) {
+        unlock();
+        return result;
+    }
+
+    download.consumer_activity_ms = millis_nonzero();
+    result.bytes = download.ring.read(buffer, max_len);
+    if (result.bytes > 0) {
+        download.consumed += result.bytes;
+        result.state = PreparedByteReadState::Data;
+    } else if (download.producer_done) {
+        result.state = PreparedByteReadState::End;
+    } else {
+        result.state = PreparedByteReadState::Retry;
+    }
+    unlock();
+
+    if (result.bytes > 0) wake_background_worker();
+    return result;
+}
+
+size_t StorageArchiveJob::produce_download_locked(
+    StorageArchiveDownload &download,
+    uint8_t *buffer,
+    size_t max_len) {
     size_t written = 0;
     while (written < max_len && download.phase != ArchiveStreamPhase::Done) {
         if (download.phase == ArchiveStreamPhase::EntryHeader) {
@@ -977,8 +1160,6 @@ size_t StorageArchiveJob::read_download_locked(StorageArchiveDownload &download,
                     download.input.close();
                     download.input_open = false;
                 }
-                download.read_ahead_offset = 0;
-                download.read_ahead_len = 0;
                 entry.crc = crc32_ieee_finish_state(download.current_crc);
                 download.phase = ArchiveStreamPhase::DataDescriptor;
                 download.phase_offset = 0;
@@ -1009,60 +1190,25 @@ size_t StorageArchiveJob::read_download_locked(StorageArchiveDownload &download,
             const uint64_t file_remaining =
                 entry.size - download.current_file_offset;
             const size_t out_remaining = max_len - written;
-            if (download.read_ahead_capacity > 0) {
-                if (download.read_ahead_offset >= download.read_ahead_len) {
-                    const size_t want = static_cast<size_t>(
-                        file_remaining < download.read_ahead_capacity
-                            ? file_remaining
-                            : download.read_ahead_capacity);
-                    size_t read = 0;
-                    {
-                        Storage::Guard guard;
-                        read = download.input.read(download.read_ahead, want);
-                    }
-                    if (read == 0) {
-                        set_error_locked("input_read");
-                        return written;
-                    }
-                    download.read_ahead_offset = 0;
-                    download.read_ahead_len = read;
-                }
-                const size_t buffered =
-                    download.read_ahead_len - download.read_ahead_offset;
-                const size_t n = buffered < out_remaining ? buffered
-                                                          : out_remaining;
-                memcpy(buffer + written,
-                       download.read_ahead + download.read_ahead_offset,
-                       n);
-                download.current_crc =
-                    crc32_ieee_update_state(download.current_crc,
-                                            buffer + written,
-                                            n);
-                download.read_ahead_offset += n;
-                download.current_file_offset += n;
-                download.output_offset += n;
-                written += n;
-            } else {
-                const size_t want = static_cast<size_t>(
-                    file_remaining < out_remaining ? file_remaining
-                                                    : out_remaining);
-                size_t read = 0;
-                {
-                    Storage::Guard guard;
-                    read = download.input.read(buffer + written, want);
-                }
-                if (read == 0) {
-                    set_error_locked("input_read");
-                    return written;
-                }
-                download.current_crc =
-                    crc32_ieee_update_state(download.current_crc,
-                                            buffer + written,
-                                            read);
-                download.current_file_offset += read;
-                download.output_offset += read;
-                written += read;
+            const size_t want = static_cast<size_t>(
+                file_remaining < out_remaining ? file_remaining
+                                                : out_remaining);
+            size_t read = 0;
+            {
+                Storage::Guard guard;
+                read = download.input.read(buffer + written, want);
             }
+            if (read == 0) {
+                set_error_locked("input_read");
+                return written;
+            }
+            download.current_crc =
+                crc32_ieee_update_state(download.current_crc,
+                                        buffer + written,
+                                        read);
+            download.current_file_offset += read;
+            download.output_offset += read;
+            written += read;
             continue;
         }
 

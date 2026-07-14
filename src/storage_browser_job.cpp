@@ -618,14 +618,14 @@ bool StorageBrowserJob::begin_download(
     return true;
 }
 
-StoragePreparedRead StorageBrowserJob::read_download(
+PreparedByteRead StorageBrowserJob::read_download(
     StoragePreparedDownload &download,
     uint8_t *buffer,
     size_t max_length,
     size_t offset) {
-    StoragePreparedRead result;
+    PreparedByteRead result;
     if (!buffer || max_length == 0 || !lock(0)) {
-        result.state = StoragePreparedReadState::Retry;
+        result.state = PreparedByteReadState::Retry;
         return result;
     }
 
@@ -639,11 +639,11 @@ StoragePreparedRead StorageBrowserJob::read_download(
     if (result.bytes > 0) {
         download.consumed += result.bytes;
         download.consumer_activity_ms = millis_nonzero();
-        result.state = StoragePreparedReadState::Data;
+        result.state = PreparedByteReadState::Data;
     } else if (download.producer_done) {
-        result.state = StoragePreparedReadState::End;
+        result.state = PreparedByteReadState::End;
     } else {
-        result.state = StoragePreparedReadState::Retry;
+        result.state = PreparedByteReadState::Retry;
     }
     unlock();
 

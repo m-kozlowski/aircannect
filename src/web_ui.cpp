@@ -2667,9 +2667,9 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
         static_cast<size_t>(file_size),
         [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
             if (!buffer || !ref || !ref->job || !ref->download) return 0;
-            const StoragePreparedRead read = ref->job->read_download(
+            const PreparedByteRead read = ref->job->read_download(
                 *ref->download, buffer, max_len, offset);
-            if (read.state == StoragePreparedReadState::Retry) {
+            if (read.state == PreparedByteReadState::Retry) {
                 return RESPONSE_TRY_AGAIN;
             }
             return read.bytes;
@@ -2806,7 +2806,7 @@ void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
         return;
     }
     StorageArchiveStatus status;
-    if (!storage_archive_job_->status(status)) {
+    if (!storage_archive_job_->status(status, 0)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"status_busy\"}");
         return;
@@ -2906,10 +2906,12 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
         static_cast<size_t>(archive_size),
         [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
             if (!buffer || !ref || !ref->job || !ref->download) return 0;
-            return ref->job->read_download(*ref->download,
-                                           buffer,
-                                           max_len,
-                                           offset);
+            const PreparedByteRead read = ref->job->read_download(
+                *ref->download, buffer, max_len, offset);
+            if (read.state == PreparedByteReadState::Retry) {
+                return RESPONSE_TRY_AGAIN;
+            }
+            return read.bytes;
         });
     if (!response) {
         request->send(503, "application/json",

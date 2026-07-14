@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "background_worker.h"
+#include "prepared_byte_ring.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -61,6 +62,9 @@ public:
     // background worker
     const char *name() const override { return "storage_archive"; }
     JobStep step() override;
+    bool run_when_gate_closed(const char *reason) const override;
+    JobStep step_when_gate_closed(const char *reason) override;
+    bool drain_before_regular_jobs() const override { return true; }
     void on_preempt() override;
 
     // archive requests
@@ -90,10 +94,10 @@ public:
                         uint64_t &size_out,
                         char *error_out = nullptr,
                         size_t error_out_size = 0);
-    size_t read_download(StorageArchiveDownload &download,
-                         uint8_t *buffer,
-                         size_t max_len,
-                         size_t offset);
+    PreparedByteRead read_download(StorageArchiveDownload &download,
+                                   uint8_t *buffer,
+                                   size_t max_len,
+                                   size_t offset);
     void finish_download(StorageArchiveDownload &download);
 
 private:
@@ -111,6 +115,7 @@ private:
     void close_walk_locked();
     bool ensure_walk_stack_locked();
     void release_walk_stack_locked();
+    void release_selection_locked();
     void release_build_buffers_locked();
     void apply_preempt_locked();
     void cleanup_stale_temp_locked();
@@ -121,6 +126,7 @@ private:
                           size_t error_out_size);
 
     // metadata prewalk
+    bool prepare_selection_step_locked();
     bool prepare_step_locked();
     bool append_entry_locked(const char *path,
                              uint64_t size,
@@ -132,11 +138,14 @@ private:
     bool ensure_walk_dir_open_locked(WalkFrame &frame);
     bool finalize_prepare_locked();
 
-    // response streaming
-    size_t read_download_locked(StorageArchiveDownload &download,
-                                uint8_t *buffer,
-                                size_t max_len,
-                                size_t offset);
+    // archive production and response streaming
+    JobStep download_step_locked();
+    size_t produce_download_locked(StorageArchiveDownload &download,
+                                   uint8_t *buffer,
+                                   size_t max_len);
+    void close_download_input_locked(StorageArchiveDownload &download);
+    void fail_download_locked(StorageArchiveDownload &download,
+                              const char *error);
 
     // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
@@ -152,6 +161,12 @@ private:
     size_t path_bytes_len_ = 0;
     size_t path_bytes_capacity_ = 0;
 
+    // selected-child staging
+    char *selection_names_ = nullptr;
+    size_t selection_count_ = 0;
+    size_t selection_index_ = 0;
+    bool selection_base_checked_ = false;
+
     // directory walk
     WalkFrame *walk_stack_ = nullptr;
     size_t walk_depth_ = 0;
@@ -159,6 +174,9 @@ private:
 
     // temp maintenance
     uint32_t stale_cleanup_due_ms_ = 1;
+
+    // active prepared-byte producer
+    std::shared_ptr<StorageArchiveDownload> active_download_;
 };
 
 bool storage_archive_valid_path(const char *path);

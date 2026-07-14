@@ -74,17 +74,6 @@ struct StorageDownloadPrepareStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 
-enum class StoragePreparedReadState : uint8_t {
-    Data,
-    Retry,
-    End,
-};
-
-struct StoragePreparedRead {
-    StoragePreparedReadState state = StoragePreparedReadState::End;
-    size_t bytes = 0;
-};
-
 class StorageBrowserJob : public BackgroundJob {
 public:
     // lifecycle and background service
@@ -114,10 +103,10 @@ public:
                         uint64_t &size_out,
                         char *error_out = nullptr,
                         size_t error_out_size = 0);
-    StoragePreparedRead read_download(StoragePreparedDownload &download,
-                                      uint8_t *buffer,
-                                      size_t max_length,
-                                      size_t offset);
+    PreparedByteRead read_download(StoragePreparedDownload &download,
+                                   uint8_t *buffer,
+                                   size_t max_length,
+                                   size_t offset);
     void finish_download(StoragePreparedDownload &download);
 
 private:
