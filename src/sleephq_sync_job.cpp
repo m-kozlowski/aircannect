@@ -486,15 +486,7 @@ void SleepHqSyncJob::clear_staged_locked() {
 }
 
 void SleepHqSyncJob::clear_remote_files_locked() {
-    if (remote_files_) {
-        for (size_t i = 0; i < remote_file_capacity_; ++i) {
-            remote_files_[i].~RemoteFile();
-        }
-        Memory::free(remote_files_);
-    }
-    remote_files_ = nullptr;
-    remote_file_count_ = 0;
-    remote_file_capacity_ = 0;
+    remote_files_.clear();
     remote_file_next_page_ = 1;
     remote_file_pages_loaded_ = 0;
     remote_file_cache_complete_ = false;
@@ -1438,54 +1430,8 @@ bool SleepHqSyncJob::add_staged_locked(const SleepHqUploadResult &upload) {
     return true;
 }
 
-bool SleepHqSyncJob::reserve_remote_files_locked(size_t needed) {
-    if (needed <= remote_file_capacity_) return true;
-    size_t next = remote_file_capacity_ == 0 ? 32 : remote_file_capacity_ * 2;
-    while (next < needed) next *= 2;
-    RemoteFile *items = static_cast<RemoteFile *>(
-        Memory::alloc_large(sizeof(RemoteFile) * next, false));
-    if (!items) {
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "remote file cache allocation failed entries=%u bytes=%u\n",
-                  static_cast<unsigned>(next),
-                  static_cast<unsigned>(sizeof(RemoteFile) * next));
-        return false;
-    }
-    for (size_t i = 0; i < next; ++i) new (&items[i]) RemoteFile();
-    for (size_t i = 0; i < remote_file_count_; ++i) {
-        items[i] = remote_files_[i];
-    }
-    if (remote_files_) Memory::free(remote_files_);
-    remote_files_ = items;
-    remote_file_capacity_ = next;
-    return true;
-}
-
 bool SleepHqSyncJob::add_remote_file_locked(const SleepHqRemoteFile &file) {
-    if (!file.name[0] || !file.path[0] || !file.content_hash[0]) {
-        return true;
-    }
-    for (size_t i = 0; i < remote_file_count_; ++i) {
-        const RemoteFile &entry = remote_files_[i];
-        if (entry.size == file.size &&
-            strcmp(entry.name, file.name) == 0 &&
-            strcmp(entry.path, file.path) == 0 &&
-            strcmp(entry.content_hash, file.content_hash) == 0) {
-            return true;
-        }
-    }
-    if (!reserve_remote_files_locked(remote_file_count_ + 1)) {
-        return false;
-    }
-    RemoteFile &entry = remote_files_[remote_file_count_++];
-    entry.id = file.id;
-    entry.size = file.size;
-    copy_cstr(entry.name, sizeof(entry.name), file.name);
-    copy_cstr(entry.path, sizeof(entry.path), file.path);
-    copy_cstr(entry.content_hash,
-              sizeof(entry.content_hash),
-              file.content_hash);
-    return true;
+    return remote_files_.add(file);
 }
 
 bool SleepHqSyncJob::remote_file_cache_contains_locked(
@@ -1493,16 +1439,8 @@ bool SleepHqSyncJob::remote_file_cache_contains_locked(
     if (!file.name[0] || !file.sleep_path[0] || !file.content_hash[0]) {
         return false;
     }
-    for (size_t i = 0; i < remote_file_count_; ++i) {
-        const RemoteFile &entry = remote_files_[i];
-        if (entry.size == file.size &&
-            strcmp(entry.name, file.name) == 0 &&
-            strcmp(entry.path, file.sleep_path) == 0 &&
-            strcmp(entry.content_hash, file.content_hash) == 0) {
-            return true;
-        }
-    }
-    return false;
+    return remote_files_.contains(file.name, file.sleep_path,
+                                  file.content_hash, file.size);
 }
 
 bool SleepHqSyncJob::remote_file_list_cb(void *ctx,
@@ -1561,7 +1499,7 @@ bool SleepHqSyncJob::fetch_next_remote_file_page_locked(char *error,
               "remote file page loaded page=%lu count=%u total=%u complete=%u\n",
               static_cast<unsigned long>(remote_file_next_page_ - 1),
               static_cast<unsigned>(count),
-              static_cast<unsigned>(remote_file_count_),
+              static_cast<unsigned>(remote_files_.size()),
               remote_file_cache_complete_ ? 1U : 0U);
     return true;
 }

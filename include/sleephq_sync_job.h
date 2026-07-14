@@ -10,6 +10,7 @@
 #include "app_config.h"
 #include "background_worker.h"
 #include "sleephq_client.h"
+#include "sleephq_remote_file_cache.h"
 #include "storage_export_plan.h"
 #include "storage_export_planner.h"
 #include "storage_path.h"
@@ -173,14 +174,6 @@ private:
         StateWriteMode state_write_mode = StateWriteMode::Append;
     };
 
-    struct RemoteFile {
-        uint32_t id = 0;
-        uint64_t size = 0;
-        char name[AC_STORAGE_NAME_MAX] = {};
-        char path[AC_STORAGE_PATH_MAX] = {};
-        char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
-    };
-
     struct RemoteMachineDateCache {
         char day[9] = {};
         bool exists = false;
@@ -243,7 +236,6 @@ private:
     void clear_staged_locked();
 
     // remote file cache
-    bool reserve_remote_files_locked(size_t needed);
     bool add_remote_file_locked(const SleepHqRemoteFile &file);
     bool remote_file_cache_contains_locked(const CurrentFile &file) const;
     bool fetch_next_remote_file_page_locked(char *error,
@@ -350,9 +342,7 @@ private:
     StagedFile *staged_ = nullptr;
     size_t staged_count_ = 0;
     size_t staged_capacity_ = 0;
-    RemoteFile *remote_files_ = nullptr;
-    size_t remote_file_count_ = 0;
-    size_t remote_file_capacity_ = 0;
+    SleepHqRemoteFileCache remote_files_;
     uint32_t remote_file_next_page_ = 1;
     uint32_t remote_file_pages_loaded_ = 0;
     bool remote_file_cache_complete_ = false;
