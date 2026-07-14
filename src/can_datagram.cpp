@@ -60,15 +60,24 @@ std::string hex_bytes(const uint8_t *data, size_t len) {
     return out;
 }
 
-std::vector<DatagramFrame> encode_datagram(const uint8_t *payload, size_t len) {
-    std::vector<DatagramFrame> frames;
+size_t datagram_frame_count(size_t payload_len) {
+    if (payload_len <= 7) return 1;
+    const size_t tail = payload_len - 3;
+    return 1 + ((tail + 6) / 7);
+}
+
+bool visit_encoded_datagram(const uint8_t *payload,
+                            size_t len,
+                            DatagramFrameVisitor visitor,
+                            void *context) {
+    if (!visitor || (!payload && len > 0)) return false;
+
     if (len <= 7) {
         DatagramFrame frame;
         frame.data[0] = DG_SINGLE;
         if (len) std::copy(payload, payload + len, frame.data.begin() + 1);
         frame.len = static_cast<uint8_t>(len + 1);
-        frames.push_back(frame);
-        return frames;
+        return visitor(context, frame);
     }
 
     const uint32_t crc = crc32_ieee(payload, len);
@@ -81,7 +90,7 @@ std::vector<DatagramFrame> encode_datagram(const uint8_t *payload, size_t len) {
     const size_t first_len = std::min<size_t>(3, len);
     std::copy(payload, payload + first_len, start.data.begin() + 5);
     start.len = static_cast<uint8_t>(first_len + 5);
-    frames.push_back(start);
+    if (!visitor(context, start)) return false;
 
     size_t offset = first_len;
     while (offset < len) {
@@ -91,9 +100,30 @@ std::vector<DatagramFrame> encode_datagram(const uint8_t *payload, size_t len) {
         std::copy(payload + offset, payload + offset + chunk_len,
                   frame.data.begin() + 1);
         frame.len = static_cast<uint8_t>(chunk_len + 1);
-        frames.push_back(frame);
+        if (!visitor(context, frame)) return false;
         offset += chunk_len;
     }
+    return true;
+}
+
+bool visit_encoded_datagram(const std::string &payload,
+                            DatagramFrameVisitor visitor,
+                            void *context) {
+    return visit_encoded_datagram(
+        reinterpret_cast<const uint8_t *>(payload.data()), payload.size(),
+        visitor, context);
+}
+
+std::vector<DatagramFrame> encode_datagram(const uint8_t *payload, size_t len) {
+    std::vector<DatagramFrame> frames;
+    frames.reserve(datagram_frame_count(len));
+    (void)visit_encoded_datagram(
+        payload, len,
+        [](void *context, const DatagramFrame &frame) {
+            static_cast<std::vector<DatagramFrame> *>(context)->push_back(frame);
+            return true;
+        },
+        &frames);
     return frames;
 }
 

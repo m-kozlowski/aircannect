@@ -349,16 +349,18 @@ StreamPublishResult StreamBroker::publish_stream_data(
     uint32_t now_ms) {
     StreamPublishResult result;
 
-    StreamFrameMetadata metadata;
-    if (stream_parse_metadata(payload, payload_len, metadata)) {
-        note_stream_data(metadata.stream_id, metadata.start_time, now_ms);
+    const size_t consumers = consumer_count();
+    if (consumers == 0) {
+        StreamFrameMetadata metadata;
+        if (stream_parse_metadata(payload, payload_len, metadata)) {
+            note_stream_data(metadata.stream_id, metadata.start_time, now_ms);
+        }
+        return result;
     }
-
-    if (consumer_count() == 0) return result;
 
     if (!ensure_frame_pool()) {
         result.pool_exhausted = true;
-        result.drops = consumer_count();
+        result.drops = consumers;
         pool_exhaustions_++;
         total_queue_drops_ += result.drops;
         return result;
@@ -366,7 +368,7 @@ StreamPublishResult StreamBroker::publish_stream_data(
     StreamFrameRef frame = frame_pool_.allocate(now_ms);
     if (!frame) {
         result.pool_exhausted = true;
-        result.drops = consumer_count();
+        result.drops = consumers;
         pool_exhaustions_++;
         total_queue_drops_ += result.drops;
         return result;

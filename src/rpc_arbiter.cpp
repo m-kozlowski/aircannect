@@ -279,26 +279,27 @@ bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source
 bool RpcArbiter::enqueue_payload_frames(const std::string &payload,
                                         RpcSource source) {
     (void)source;
-    const auto frames = encode_datagram(payload);
-    if (frames.size() > can_.tx_queue_free()) {
+    const size_t frame_count = datagram_frame_count(payload.size());
+    if (frame_count > can_.tx_queue_free()) {
         push_event(RpcEventKind::Info, "CAN TX queue full; payload rejected");
         return false;
     }
 
-    return enqueue_encoded_frames(frames);
+    return visit_encoded_datagram(payload, enqueue_datagram_frame, this);
 }
 
-bool RpcArbiter::enqueue_encoded_frames(
-    const std::vector<DatagramFrame> &frames) {
-    for (const auto &frame : frames) {
-        RawCanFrame raw;
-        raw.id = AC_CAN_TX_ID;
-        raw.len = frame.len;
-        for (uint8_t i = 0; i < frame.len; ++i) raw.data[i] = frame.data[i];
-        if (!can_.enqueue_tx(raw)) {
-            push_event(RpcEventKind::Info, "CAN TX enqueue failed");
-            return false;
-        }
+bool RpcArbiter::enqueue_datagram_frame(void *context,
+                                        const DatagramFrame &frame) {
+    RpcArbiter *arbiter = static_cast<RpcArbiter *>(context);
+    if (!arbiter) return false;
+
+    RawCanFrame raw;
+    raw.id = AC_CAN_TX_ID;
+    raw.len = frame.len;
+    for (uint8_t i = 0; i < frame.len; ++i) raw.data[i] = frame.data[i];
+    if (!arbiter->can_.enqueue_tx(raw)) {
+        arbiter->push_event(RpcEventKind::Info, "CAN TX enqueue failed");
+        return false;
     }
 
     return true;
@@ -1125,10 +1126,10 @@ void RpcArbiter::dispatch_next_request() {
     }
 
     const std::string payload = build_rpc_request(request.method,
-                                                 request.params_json,
-                                                 request.id);
-    const auto frames = encode_datagram(payload);
-    if (frames.size() > can_.tx_queue_free()) {
+                                                  request.params_json,
+                                                  request.id);
+    const size_t frame_count = datagram_frame_count(payload.size());
+    if (frame_count > can_.tx_queue_free()) {
         if (!dispatch_retry_active_) {
             dispatch_retry_ = request;
             dispatch_retry_active_ = true;
@@ -1146,7 +1147,7 @@ void RpcArbiter::dispatch_next_request() {
         return;
     }
 
-    if (!enqueue_encoded_frames(frames)) {
+    if (!visit_encoded_datagram(payload, enqueue_datagram_frame, this)) {
         if (!dispatch_retry_active_) {
             dispatch_retry_ = request;
             dispatch_retry_active_ = true;
@@ -1568,7 +1569,6 @@ bool RpcArbiter::handle_event_notification(const char *payload,
 
 void RpcArbiter::handle_stream_notification(const char *payload,
                                             size_t payload_len) {
-    if (!json_method_is(payload, payload_len, "StreamData")) return;
     stats_.stream_notifications++;
     StreamPublishResult result =
         stream_.publish_stream_data(payload, payload_len, millis());
@@ -1659,16 +1659,16 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                                       : std::string();
     };
 
-    switch (classify_rpc_payload(payload, payload_len)) {
+    RpcEnvelope envelope;
+    (void)inspect_rpc_envelope(payload, payload_len, envelope);
+
+    switch (envelope.kind) {
         case RpcPayloadKind::Notification: {
             stats_.rpc_notifications++;
-            const bool stream_data =
-                json_method_is(payload, payload_len, "StreamData");
-            const bool spool_fragment =
-                json_method_is(payload, payload_len, "SpoolFragment");
+            const bool stream_data = envelope.method_is("StreamData");
+            const bool spool_fragment = envelope.method_is("SpoolFragment");
             const bool event_notification =
-                !stream_data &&
-                json_method_is(payload, payload_len, "EventNotification");
+                envelope.method_is("EventNotification");
             if (stream_data) {
                 handle_stream_notification(payload, payload_len);
             }
@@ -1709,9 +1709,8 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 }
                 return payload_ref;
             };
-            uint32_t response_id = 0;
-            const bool has_response_id =
-                json_extract_id(owned_payload, response_id);
+            const uint32_t response_id = envelope.id;
+            const bool has_response_id = true;
             if (pending_.active && has_response_id &&
                 response_id == pending_.id) {
                 const uint32_t matched_id = pending_.id;

@@ -293,7 +293,8 @@ private:
 
     bool enqueue_request(QueuedRequest &request);
     bool enqueue_payload_frames(const std::string &payload, RpcSource source);
-    bool enqueue_encoded_frames(const std::vector<DatagramFrame> &frames);
+    static bool enqueue_datagram_frame(void *context,
+                                       const DatagramFrame &frame);
 
     // Request lifecycle
     void cancel_pending_request(const char *reason);

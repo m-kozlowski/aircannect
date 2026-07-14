@@ -37,12 +37,8 @@ bool seek_top_member(JsonCursor &json, const char *member) {
     return false;
 }
 
-bool collect_rpc_top_flags(JsonCursor &json,
-                           bool &has_id,
-                           bool &has_method) {
-    has_id = false;
-    has_method = false;
-
+bool parse_rpc_envelope(JsonCursor &json, RpcEnvelope &envelope) {
+    envelope = {};
     if (!json.consume('{')) return false;
 
     json.skip_ws();
@@ -53,8 +49,21 @@ bool collect_rpc_top_flags(JsonCursor &json,
         if (!json.parse_string(key, sizeof(key))) return false;
         if (!json.consume(':')) return false;
 
-        if (strcmp(key, "id") == 0) has_id = true;
-        if (strcmp(key, "method") == 0) has_method = true;
+        if (strcmp(key, "id") == 0) {
+            if (!json.parse_uint(envelope.id)) return false;
+            envelope.kind = RpcPayloadKind::Response;
+            return true;
+        }
+
+        if (strcmp(key, "method") == 0) {
+            if (!json.parse_string(envelope.method,
+                                   sizeof(envelope.method))) {
+                return false;
+            }
+            envelope.kind = RpcPayloadKind::Notification;
+            return true;
+        }
+
         if (!json.skip_value()) return false;
 
         json.skip_ws();
@@ -69,6 +78,11 @@ bool collect_rpc_top_flags(JsonCursor &json,
 }
 
 }  // namespace
+
+bool RpcEnvelope::method_is(const char *expected) const {
+    return expected && kind == RpcPayloadKind::Notification &&
+           strcmp(method, expected) == 0;
+}
 
 const char *rpc_version_for_method(const std::string &method) {
     if (method == "GetVersion" || method == "EnterMaskFit") return "2.0";
@@ -249,9 +263,9 @@ bool json_extract_id(const std::string &json, uint32_t &id) {
 }
 
 bool json_method_is(const char *json, size_t len, const char *method) {
-    std::string parsed;
-    return method && json_extract_string_member(json, len, "method", parsed) &&
-           parsed == method;
+    RpcEnvelope envelope;
+    return inspect_rpc_envelope(json, len, envelope) &&
+           envelope.method_is(method);
 }
 
 bool json_method_is(const std::string &json, const char *method) {
@@ -287,19 +301,27 @@ bool json_extract_string_member(const std::string &json,
 }
 
 RpcPayloadKind classify_rpc_payload(const char *json, size_t len) {
-    bool has_id = false;
-    bool has_method = false;
-    JsonCursor cursor(json, len);
-    if (!collect_rpc_top_flags(cursor, has_id, has_method)) {
-        return RpcPayloadKind::Unknown;
-    }
-    if (has_method && !has_id) return RpcPayloadKind::Notification;
-    if (has_id) return RpcPayloadKind::Response;
-    return RpcPayloadKind::Unknown;
+    RpcEnvelope envelope;
+    return inspect_rpc_envelope(json, len, envelope)
+               ? envelope.kind
+               : RpcPayloadKind::Unknown;
 }
 
 RpcPayloadKind classify_rpc_payload(const std::string &json) {
     return classify_rpc_payload(json.data(), json.size());
+}
+
+bool inspect_rpc_envelope(const char *json,
+                          size_t len,
+                          RpcEnvelope &envelope) {
+    const char *payload = json ? json : "";
+    const size_t payload_len = json ? len : 0;
+    JsonCursor cursor(payload, payload_len);
+    return parse_rpc_envelope(cursor, envelope);
+}
+
+bool inspect_rpc_envelope(const std::string &json, RpcEnvelope &envelope) {
+    return inspect_rpc_envelope(json.data(), json.size(), envelope);
 }
 
 }  // namespace aircannect

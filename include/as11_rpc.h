@@ -12,6 +12,16 @@ enum class RpcPayloadKind {
     Unknown,
 };
 
+struct RpcEnvelope {
+    static constexpr size_t MethodCapacity = 48;
+
+    RpcPayloadKind kind = RpcPayloadKind::Unknown;
+    uint32_t id = 0;
+    char method[MethodCapacity] = {};
+
+    bool method_is(const char *expected) const;
+};
+
 const char *rpc_version_for_method(const std::string &method);
 std::string json_escape(const std::string &text);
 std::string build_rpc_request(const std::string &method,
@@ -24,6 +34,8 @@ std::string build_stream_params(const std::string &ids_csv,
                                 uint32_t report_ms);
 
 // Lightweight response inspection
+bool inspect_rpc_envelope(const char *json, size_t len, RpcEnvelope &envelope);
+bool inspect_rpc_envelope(const std::string &json, RpcEnvelope &envelope);
 RpcPayloadKind classify_rpc_payload(const char *json, size_t len);
 RpcPayloadKind classify_rpc_payload(const std::string &json);
 bool json_has_id(const char *json, size_t len, uint32_t id);
