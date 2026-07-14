@@ -1,7 +1,6 @@
 #include "storage_browser_job.h"
 
 #include <algorithm>
-#include <atomic>
 #include <new>
 #include <string.h>
 
@@ -11,6 +10,7 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "prepared_byte_transfer.h"
 #include "runtime_clock.h"
 #include "storage_directory.h"
 #include "storage_directory_order.h"
@@ -42,21 +42,15 @@ struct StoragePreparedDownload {
     char error[AC_STORAGE_ERROR_MAX] = {};
 
     uint8_t *ring_storage = nullptr;
-    PreparedByteRing ring;
+    PreparedByteTransfer transfer;
     File input;
     uint64_t size = 0;
     uint64_t produced = 0;
-    uint64_t consumed = 0;
 
     uint32_t ready_ms = 0;
-    uint32_t consumer_activity_ms = 0;
     bool opening = false;
     bool metadata_ready = false;
     bool input_open = false;
-    bool producer_done = false;
-    bool consumer_attached = false;
-    bool consumer_closed = false;
-    std::atomic<bool> cancel_requested{false};
 
     ~StoragePreparedDownload() {
         if (ring_storage) Memory::free(ring_storage);
@@ -665,8 +659,8 @@ StorageDownloadPrepareState StorageDownloadProducer::prepare(
         copy_cstr(status_out.filename, sizeof(status_out.filename),
                   active.filename);
         const bool ready = active.metadata_ready &&
-            (active.ring.readable() >= DOWNLOAD_READY_BYTES ||
-             active.producer_done);
+            (active.transfer.readable() >= DOWNLOAD_READY_BYTES ||
+             active.transfer.producer_done());
         status_out.state = ready ? StorageDownloadPrepareState::Ready
                                  : StorageDownloadPrepareState::Preparing;
         unlock();
@@ -717,16 +711,15 @@ bool StorageDownloadProducer::attach(
     if (!active_ || active_->id != id ||
         active_->error[0] ||
         !active_->metadata_ready ||
-        (active_->ring.readable() < DOWNLOAD_READY_BYTES &&
-         !active_->producer_done) ||
-        active_->consumer_attached) {
+        (active_->transfer.readable() < DOWNLOAD_READY_BYTES &&
+         !active_->transfer.producer_done()) ||
+        active_->transfer.consumer_attached()) {
         copy_cstr(error_out, error_out_size, "not_ready");
         unlock();
         return false;
     }
 
-    active_->consumer_attached = true;
-    active_->consumer_activity_ms = nonzero_millis(millis());
+    active_->transfer.attach(nonzero_millis(millis()));
     copy_cstr(filename_out, filename_out_size, active_->filename);
     size_out = active_->size;
     download_out = active_;
@@ -747,22 +740,15 @@ PreparedByteRead StorageDownloadProducer::read(
         return result;
     }
 
-    if (!active_ || active_.get() != &download ||
-        download.error[0] || offset != download.consumed) {
+    if (!active_ || active_.get() != &download || download.error[0]) {
         unlock();
         return result;
     }
 
-    result.bytes = download.ring.read(buffer, max_length);
-    if (result.bytes > 0) {
-        download.consumed += result.bytes;
-        download.consumer_activity_ms = nonzero_millis(millis());
-        result.state = PreparedByteReadState::Data;
-    } else if (download.producer_done) {
-        result.state = PreparedByteReadState::End;
-    } else {
-        result.state = PreparedByteReadState::Retry;
-    }
+    result = download.transfer.read(buffer,
+                                    max_length,
+                                    offset,
+                                    nonzero_millis(millis()));
     unlock();
 
     if (result.bytes > 0) wake_background_worker();
@@ -771,15 +757,12 @@ PreparedByteRead StorageDownloadProducer::read(
 
 void StorageDownloadProducer::finish(StoragePreparedDownload &download) {
     if (!lock(0)) {
-        download.cancel_requested.store(true, std::memory_order_relaxed);
+        download.transfer.request_cancel();
         wake_background_worker();
         return;
     }
     if (active_.get() == &download) {
-        download.consumer_closed = true;
-        if (download.consumed < download.size) {
-            download.cancel_requested.store(true, std::memory_order_relaxed);
-        }
+        download.transfer.finish(download.transfer.consumed() == download.size);
     }
     unlock();
     wake_background_worker();
@@ -797,7 +780,7 @@ void StorageDownloadProducer::fail_locked(StoragePreparedDownload &download,
                                           const char *error) {
     copy_cstr(download.error, sizeof(download.error), error);
     if (download.ready_ms == 0) download.ready_ms = nonzero_millis(millis());
-    download.producer_done = true;
+    download.transfer.mark_producer_done();
 }
 
 void StorageDownloadProducer::retire_locked(StoragePreparedDownload &download,
@@ -816,7 +799,7 @@ JobStep StorageDownloadProducer::step() {
         return JobStep::Idle;
     }
 
-    if (download->cancel_requested.load(std::memory_order_relaxed)) {
+    if (download->transfer.cancel_requested()) {
         unlock();
         close_file(*download);
         if (!lock(20)) return JobStep::Waiting;
@@ -827,9 +810,10 @@ JobStep StorageDownloadProducer::step() {
         return JobStep::Idle;
     }
 
-    if (download->producer_done) {
+    if (download->transfer.producer_done()) {
         const uint32_t now_ms = nonzero_millis(millis());
-        const bool attach_expired = !download->consumer_attached &&
+        const bool attach_expired =
+            !download->transfer.consumer_attached() &&
             millis_deadline_reached(
                 now_ms, download->ready_ms + DOWNLOAD_ATTACH_TIMEOUT_MS);
 
@@ -839,8 +823,8 @@ JobStep StorageDownloadProducer::step() {
             return JobStep::Idle;
         }
 
-        const bool complete = download->consumed == download->size;
-        const bool retire = download->consumer_closed &&
+        const bool complete = download->transfer.consumed() == download->size;
+        const bool retire = download->transfer.consumer_closed() &&
             (complete || download->error[0]);
         if (retire) retire_locked(*download, complete);
         unlock();
@@ -880,41 +864,43 @@ JobStep StorageDownloadProducer::step() {
                         directory ? "not_file" : "not_found");
         } else {
             download->ring_storage = ring_storage;
-            download->ring.bind(ring_storage, DOWNLOAD_RING_BYTES);
+            download->transfer.bind(ring_storage, DOWNLOAD_RING_BYTES);
             download->input = input;
             download->input_open = true;
             download->size = size;
             download->metadata_ready = true;
             download->ready_ms = nonzero_millis(millis());
             if (size == 0) {
-                download->producer_done = true;
+                download->transfer.mark_producer_done();
             }
         }
         const bool failed = download->error[0] != 0;
         unlock();
 
-        if (download->producer_done) close_file(*download);
+        if (download->transfer.producer_done()) close_file(*download);
         return failed ? JobStep::Idle : JobStep::Working;
     }
 
     const uint32_t now_ms = nonzero_millis(millis());
-    if (!download->consumer_attached && millis_deadline_reached(
+    if (!download->transfer.consumer_attached() && millis_deadline_reached(
             now_ms, download->ready_ms + DOWNLOAD_ATTACH_TIMEOUT_MS)) {
-        download->cancel_requested.store(true, std::memory_order_relaxed);
+        download->transfer.request_cancel();
         unlock();
         return JobStep::Working;
     }
-    if (download->consumer_attached && !download->consumer_closed &&
+    if (download->transfer.consumer_attached() &&
+        !download->transfer.consumer_closed() &&
         millis_deadline_reached(
             now_ms,
-            download->consumer_activity_ms + DOWNLOAD_ATTACH_TIMEOUT_MS)) {
-        download->cancel_requested.store(true, std::memory_order_relaxed);
+            download->transfer.consumer_activity_ms() +
+                DOWNLOAD_ATTACH_TIMEOUT_MS)) {
+        download->transfer.request_cancel();
         unlock();
         return JobStep::Working;
     }
 
     size_t span_length = 0;
-    uint8_t *span = download->ring.write_span(span_length);
+    uint8_t *span = download->transfer.write_span(span_length);
     if (!span || span_length == 0) {
         unlock();
         return JobStep::Waiting;
@@ -937,7 +923,7 @@ JobStep StorageDownloadProducer::step() {
         close_file(*download);
         return JobStep::Idle;
     }
-    if (!download->ring.commit_write(bytes_read)) {
+    if (!download->transfer.commit_write(bytes_read)) {
         fail_locked(*download, "ring_commit");
         unlock();
         close_file(*download);
@@ -946,9 +932,9 @@ JobStep StorageDownloadProducer::step() {
 
     download->produced += bytes_read;
     if (download->produced >= download->size) {
-        download->producer_done = true;
+        download->transfer.mark_producer_done();
     }
-    const bool done = download->producer_done;
+    const bool done = download->transfer.producer_done();
     unlock();
 
     if (done) close_file(*download);
@@ -987,7 +973,7 @@ void StorageDownloadProducer::on_preempt() {
 
     std::shared_ptr<StoragePreparedDownload> download = active_;
     if (download) {
-        download->cancel_requested.store(true, std::memory_order_relaxed);
+        download->transfer.request_cancel();
     }
     unlock();
 
@@ -996,7 +982,8 @@ void StorageDownloadProducer::on_preempt() {
     if (!lock(20)) return;
     if (active_.get() == download.get()) {
         fail_locked(*download, "preempted");
-        if (!download->consumer_attached || download->consumer_closed) {
+        if (!download->transfer.consumer_attached() ||
+            download->transfer.consumer_closed()) {
             active_.reset();
         }
     }

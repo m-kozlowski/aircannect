@@ -9,6 +9,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "prepared_byte_transfer.h"
 #include "runtime_clock.h"
 #include "storage_directory.h"
 #include "storage_manager.h"
@@ -188,16 +189,11 @@ struct StorageArchiveDownload {
     size_t scratch_len = 0;
 
     uint8_t *ring_storage = nullptr;
-    PreparedByteRing ring;
-    uint64_t consumed = 0;
-    uint32_t consumer_activity_ms = 0;
+    PreparedByteTransfer transfer;
 
     File input;
     bool input_open = false;
-    bool consumer_closed = false;
-    bool producer_done = false;
     bool complete = false;
-    std::atomic<bool> cancel_requested{false};
 
     ~StorageArchiveDownload() {
         if (ring_storage) Memory::free(ring_storage);
@@ -532,14 +528,14 @@ bool StorageArchiveJob::begin_download(
         unlock();
         return false;
     }
-    download->ring.bind(download->ring_storage, ARCHIVE_RING_BYTES);
+    download->transfer.bind(download->ring_storage, ARCHIVE_RING_BYTES);
 
     status_.state = StorageArchiveState::Downloading;
     status_.bytes_done = 0;
     status_.files_done = 0;
     status_.updated_ms = nonzero_millis(millis());
     download->id = id;
-    download->consumer_activity_ms = status_.updated_ms;
+    download->transfer.attach(status_.updated_ms);
     copy_cstr(filename_out, filename_out_size, status_.filename);
     size_out = status_.estimated_archive_bytes;
     active_download_ = download;
@@ -552,15 +548,13 @@ bool StorageArchiveJob::begin_download(
 
 void StorageArchiveJob::finish_download(StorageArchiveDownload &download) {
     if (!lock(0)) {
-        download.cancel_requested.store(true, std::memory_order_relaxed);
+        download.transfer.request_cancel();
         wake_background_worker();
         return;
     }
     if (active_download_.get() == &download) {
-        download.consumer_closed = true;
-        if (download.consumed != status_.estimated_archive_bytes) {
-            download.cancel_requested.store(true, std::memory_order_relaxed);
-        }
+        download.transfer.finish(
+            download.transfer.consumed() == status_.estimated_archive_bytes);
     }
     unlock();
     wake_background_worker();
@@ -910,7 +904,7 @@ void StorageArchiveJob::fail_download_locked(
     StorageArchiveDownload &download,
     const char *error) {
     close_download_input_locked(download);
-    download.producer_done = true;
+    download.transfer.mark_producer_done();
     active_download_.reset();
 
     if (status_.state != StorageArchiveState::Error) {
@@ -929,20 +923,20 @@ JobStep StorageArchiveJob::download_step_locked() {
     const uint32_t now = nonzero_millis(millis());
     const bool consumer_expired =
         millis_deadline_reached(now,
-                         download->consumer_activity_ms +
-                             ARCHIVE_CONSUMER_TIMEOUT_MS);
-    if (download->cancel_requested.load(std::memory_order_relaxed) ||
+                                download->transfer.consumer_activity_ms() +
+                                    ARCHIVE_CONSUMER_TIMEOUT_MS);
+    if (download->transfer.cancel_requested() ||
         consumer_expired) {
         fail_download_locked(*download, "download_aborted");
         return JobStep::Idle;
     }
 
-    if (download->producer_done) {
-        if (!download->consumer_closed) return JobStep::Waiting;
+    if (download->transfer.producer_done()) {
+        if (!download->transfer.consumer_closed()) return JobStep::Waiting;
 
         const bool complete = download->complete &&
             download->output_offset == status_.estimated_archive_bytes &&
-            download->consumed == status_.estimated_archive_bytes;
+            download->transfer.consumed() == status_.estimated_archive_bytes;
         close_download_input_locked(*download);
         active_download_.reset();
         if (complete) {
@@ -954,7 +948,7 @@ JobStep StorageArchiveJob::download_step_locked() {
     }
 
     size_t span_length = 0;
-    uint8_t *span = download->ring.write_span(span_length);
+    uint8_t *span = download->transfer.write_span(span_length);
     if (!span || span_length == 0) return JobStep::Waiting;
     span_length = std::min(span_length, ARCHIVE_PRODUCE_BYTES);
 
@@ -964,7 +958,7 @@ JobStep StorageArchiveJob::download_step_locked() {
         fail_download_locked(*download, status_.error);
         return JobStep::Idle;
     }
-    if (!download->ring.commit_write(produced)) {
+    if (!download->transfer.commit_write(produced)) {
         fail_download_locked(*download, "ring_commit");
         return JobStep::Idle;
     }
@@ -978,7 +972,7 @@ JobStep StorageArchiveJob::download_step_locked() {
             fail_download_locked(*download, "archive_size_mismatch");
             return JobStep::Idle;
         }
-        download->producer_done = true;
+        download->transfer.mark_producer_done();
         close_download_input_locked(*download);
     }
     return JobStep::Working;
@@ -996,22 +990,15 @@ PreparedByteRead StorageArchiveJob::read_download(
     }
 
     if (!active_download_ || active_download_.get() != &download ||
-        status_.state != StorageArchiveState::Downloading ||
-        offset != download.consumed) {
+        status_.state != StorageArchiveState::Downloading) {
         unlock();
         return result;
     }
 
-    download.consumer_activity_ms = nonzero_millis(millis());
-    result.bytes = download.ring.read(buffer, max_len);
-    if (result.bytes > 0) {
-        download.consumed += result.bytes;
-        result.state = PreparedByteReadState::Data;
-    } else if (download.producer_done) {
-        result.state = PreparedByteReadState::End;
-    } else {
-        result.state = PreparedByteReadState::Retry;
-    }
+    result = download.transfer.read(buffer,
+                                    max_len,
+                                    offset,
+                                    nonzero_millis(millis()));
     unlock();
 
     if (result.bytes > 0) wake_background_worker();
