@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "large_text_buffer.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -45,6 +46,49 @@ using SleepHqRemoteFileCallback =
     bool (*)(void *ctx, const SleepHqRemoteFile &file);
 using SleepHqMachineCallback =
     bool (*)(void *ctx, const SleepHqMachine &machine);
+
+class SleepHqRemoteFileListStreamParser {
+public:
+    bool begin(uint32_t per_page, SleepHqRemoteFileCallback callback,
+               void *ctx);
+    bool feed(const uint8_t *data, size_t size);
+    bool finish(size_t &count, bool &has_more,
+                char *error, size_t error_size);
+
+private:
+    enum class Stage : uint8_t {
+        SeekData,
+        SeekArray,
+        SeekItem,
+        CaptureItem,
+        Done,
+        Failed,
+    };
+
+    bool feed_seek_data(char ch);
+    bool feed_seek_array(char ch);
+    bool feed_seek_item(char ch);
+    bool feed_capture_item(char ch);
+    bool publish_item();
+    bool fail(const char *error);
+
+    uint32_t per_page_ = 0;
+    SleepHqRemoteFileCallback callback_ = nullptr;
+    void *ctx_ = nullptr;
+    size_t count_ = 0;
+
+    Stage stage_ = Stage::SeekData;
+    size_t container_depth_ = 0;
+    size_t item_depth_ = 0;
+    bool in_string_ = false;
+    bool escaped_ = false;
+    bool capture_key_ = false;
+    bool data_key_candidate_ = false;
+    char key_[8] = {};
+    size_t key_length_ = 0;
+    LargeTextBuffer item_;
+    char error_[AC_SLEEPHQ_ERROR_MAX] = {};
+};
 
 SleepHqImportStatusKind sleephq_classify_import_status(const char *status);
 

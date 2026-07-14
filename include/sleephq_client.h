@@ -15,6 +15,8 @@ using SleepHqUploadReadCallback =
     bool (*)(void *ctx, uint8_t *out, size_t len, size_t &read);
 using SleepHqUploadResetCallback = bool (*)(void *ctx);
 using SleepHqUploadAbortCallback = bool (*)(void *ctx);
+using SleepHqResponseBodyCallback =
+    bool (*)(void *ctx, const uint8_t *data, size_t size);
 
 struct SleepHqConfig {
     char client_id[AC_SLEEPHQ_SECRET_MAX] = {};
@@ -104,14 +106,20 @@ private:
                  const char *body,
                  const char *content_type,
                  bool authorize,
-                 SleepHqHttpResponse &out);
+                 SleepHqHttpResponse &out,
+                 SleepHqResponseBodyCallback body_callback = nullptr,
+                 void *body_ctx = nullptr);
     bool raw_request(const char *method,
                      const char *path,
                      const char *body,
                      const char *content_type,
                      bool authorize,
-                     SleepHqHttpResponse &out);
-    bool read_response(SleepHqHttpResponse &out);
+                     SleepHqHttpResponse &out,
+                     SleepHqResponseBodyCallback body_callback = nullptr,
+                     void *body_ctx = nullptr);
+    bool read_response(SleepHqHttpResponse &out,
+                       SleepHqResponseBodyCallback body_callback = nullptr,
+                       void *body_ctx = nullptr);
 
     bool ensure_connected();
     bool tls_heap_available();
@@ -125,8 +133,17 @@ private:
     bool read_response_body(size_t content_length,
                             bool has_content_length,
                             bool chunked,
-                            SleepHqHttpResponse &out);
-    bool read_chunked_body(SleepHqHttpResponse &out);
+                            SleepHqHttpResponse &out,
+                            SleepHqResponseBodyCallback body_callback,
+                            void *body_ctx,
+                            bool buffer_body);
+    bool read_chunked_body(SleepHqHttpResponse &out,
+                           SleepHqResponseBodyCallback body_callback,
+                           void *body_ctx,
+                           bool buffer_body);
+    bool consume_body(SleepHqHttpResponse &out, const uint8_t *data,
+                      size_t len, SleepHqResponseBodyCallback body_callback,
+                      void *body_ctx, bool buffer_body);
     bool append_body(SleepHqHttpResponse &out, const char *data, size_t len);
 
     bool parse_token(const SleepHqHttpResponse &response);
@@ -134,12 +151,6 @@ private:
                        uint32_t &team_id);
     bool parse_import(const SleepHqHttpResponse &response,
                       SleepHqImportInfo &out);
-    bool parse_file_list(const SleepHqHttpResponse &response,
-                         uint32_t per_page,
-                         SleepHqRemoteFileCallback callback,
-                         void *ctx,
-                         size_t &count,
-                         bool &has_more);
     bool parse_machine_list(const SleepHqHttpResponse &response,
                             uint32_t per_page,
                             SleepHqMachineCallback callback,

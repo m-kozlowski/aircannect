@@ -11,6 +11,8 @@
 namespace aircannect {
 namespace {
 
+static constexpr size_t SLEEPHQ_REMOTE_FILE_ITEM_MAX = 8 * 1024;
+
 bool parse_u32_text(const char *text, uint32_t &out) {
     if (!text || !*text) return false;
     char *end = nullptr;
@@ -77,7 +79,213 @@ bool status_contains_failure_token(const char *status) {
            strstr(lower, "reject") || strstr(lower, "cancel");
 }
 
+bool parse_remote_file_item(JsonVariantConst item, SleepHqRemoteFile &file) {
+    JsonVariantConst attr = item["attributes"];
+    json_string_to_u32(attr["id"], file.id);
+    json_string_to_u64(attr["size"], file.size);
+    copy_cstr(file.name, sizeof(file.name),
+              json_string_or_empty(attr["name"]));
+    copy_cstr(file.path, sizeof(file.path),
+              json_string_or_empty(attr["path"]));
+    copy_cstr(file.content_hash, sizeof(file.content_hash),
+              json_string_or_empty(attr["content_hash"]));
+    if (file.id == 0) json_string_to_u32(item["id"], file.id);
+    return true;
+}
+
 }  // namespace
+
+bool SleepHqRemoteFileListStreamParser::begin(
+    uint32_t per_page, SleepHqRemoteFileCallback callback, void *ctx) {
+    per_page_ = per_page;
+    callback_ = callback;
+    ctx_ = ctx;
+    count_ = 0;
+    stage_ = Stage::SeekData;
+    container_depth_ = 0;
+    item_depth_ = 0;
+    in_string_ = false;
+    escaped_ = false;
+    capture_key_ = false;
+    data_key_candidate_ = false;
+    key_[0] = '\0';
+    key_length_ = 0;
+    item_.clear();
+    error_[0] = '\0';
+
+    if (per_page == 0 || !callback) return fail("bad_file_list_request");
+    return true;
+}
+
+bool SleepHqRemoteFileListStreamParser::fail(const char *error) {
+    copy_cstr(error_, sizeof(error_), error ? error : "file_list_json_parse");
+    stage_ = Stage::Failed;
+    return false;
+}
+
+bool SleepHqRemoteFileListStreamParser::feed_seek_data(char ch) {
+    if (in_string_) {
+        if (escaped_) {
+            escaped_ = false;
+            if (capture_key_ && key_length_ + 1 < sizeof(key_)) {
+                key_[key_length_++] = ch;
+            }
+            return true;
+        }
+        if (ch == '\\') {
+            escaped_ = true;
+            return true;
+        }
+        if (ch == '"') {
+            in_string_ = false;
+            if (capture_key_) {
+                key_[key_length_] = '\0';
+                data_key_candidate_ = strcmp(key_, "data") == 0;
+            }
+            capture_key_ = false;
+            return true;
+        }
+        if (capture_key_ && key_length_ + 1 < sizeof(key_)) {
+            key_[key_length_++] = ch;
+        }
+        return true;
+    }
+
+    if (data_key_candidate_) {
+        if (isspace(static_cast<unsigned char>(ch))) return true;
+        if (ch == ':') {
+            data_key_candidate_ = false;
+            stage_ = Stage::SeekArray;
+            return true;
+        }
+        data_key_candidate_ = false;
+    }
+
+    if (ch == '"') {
+        in_string_ = true;
+        escaped_ = false;
+        capture_key_ = container_depth_ == 1;
+        key_length_ = 0;
+        return true;
+    }
+    if (ch == '{' || ch == '[') {
+        container_depth_++;
+    } else if (ch == '}' || ch == ']') {
+        if (container_depth_ == 0) return fail("file_list_json_parse");
+        container_depth_--;
+    }
+    return true;
+}
+
+bool SleepHqRemoteFileListStreamParser::feed_seek_array(char ch) {
+    if (isspace(static_cast<unsigned char>(ch))) return true;
+    if (ch != '[') return fail("file_list_missing");
+    stage_ = Stage::SeekItem;
+    return true;
+}
+
+bool SleepHqRemoteFileListStreamParser::feed_seek_item(char ch) {
+    if (isspace(static_cast<unsigned char>(ch)) || ch == ',') return true;
+    if (ch == ']') {
+        stage_ = Stage::Done;
+        return true;
+    }
+    if (ch != '{') return fail("file_list_json_parse");
+
+    item_.clear();
+    if (!item_.reserve(512) || !item_.append(&ch, 1)) {
+        return fail("file_list_item_alloc");
+    }
+    item_depth_ = 1;
+    in_string_ = false;
+    escaped_ = false;
+    stage_ = Stage::CaptureItem;
+    return true;
+}
+
+bool SleepHqRemoteFileListStreamParser::publish_item() {
+    JsonDocument doc;
+    const DeserializationError err = deserializeJson(doc, item_.c_str());
+    if (err) return fail("file_list_json_parse");
+
+    SleepHqRemoteFile file;
+    parse_remote_file_item(doc.as<JsonVariantConst>(), file);
+    if (!callback_(ctx_, file)) return fail("file_list_callback_failed");
+    count_++;
+    item_.clear();
+    stage_ = Stage::SeekItem;
+    return true;
+}
+
+bool SleepHqRemoteFileListStreamParser::feed_capture_item(char ch) {
+    if (item_.length() >= SLEEPHQ_REMOTE_FILE_ITEM_MAX ||
+        !item_.append(&ch, 1)) {
+        return fail("file_list_item_too_large");
+    }
+
+    if (in_string_) {
+        if (escaped_) {
+            escaped_ = false;
+        } else if (ch == '\\') {
+            escaped_ = true;
+        } else if (ch == '"') {
+            in_string_ = false;
+        }
+        return true;
+    }
+    if (ch == '"') {
+        in_string_ = true;
+        return true;
+    }
+    if (ch == '{' || ch == '[') {
+        item_depth_++;
+        return true;
+    }
+    if (ch != '}' && ch != ']') return true;
+    if (item_depth_ == 0) return fail("file_list_json_parse");
+    item_depth_--;
+    return item_depth_ != 0 || publish_item();
+}
+
+bool SleepHqRemoteFileListStreamParser::feed(const uint8_t *data,
+                                             size_t size) {
+    if ((!data && size) || stage_ == Stage::Failed) return false;
+    for (size_t i = 0; i < size; ++i) {
+        const char ch = static_cast<char>(data[i]);
+        bool ok = true;
+        switch (stage_) {
+            case Stage::SeekData: ok = feed_seek_data(ch); break;
+            case Stage::SeekArray: ok = feed_seek_array(ch); break;
+            case Stage::SeekItem: ok = feed_seek_item(ch); break;
+            case Stage::CaptureItem: ok = feed_capture_item(ch); break;
+            case Stage::Done: break;
+            case Stage::Failed: return false;
+        }
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool SleepHqRemoteFileListStreamParser::finish(size_t &count,
+                                               bool &has_more,
+                                               char *error,
+                                               size_t error_size) {
+    count = count_;
+    has_more = count_ >= per_page_;
+    if (stage_ != Stage::Done) {
+        if (stage_ != Stage::Failed) {
+            const bool complete_without_data =
+                stage_ == Stage::SeekData && !in_string_ &&
+                container_depth_ == 0;
+            fail(complete_without_data ? "file_list_missing"
+                                       : "file_list_json_parse");
+        }
+        set_error(error, error_size, error_);
+        return false;
+    }
+    set_error(error, error_size, "");
+    return true;
+}
 
 SleepHqImportStatusKind sleephq_classify_import_status(const char *status) {
     static const char *const SUCCESS[] = {
@@ -134,50 +342,19 @@ bool sleephq_parse_remote_file_list_json(const char *json,
                                          bool &has_more,
                                          char *error,
                                          size_t error_size) {
-    count = 0;
-    has_more = false;
-    if (!json || !callback || per_page == 0) {
+    if (!json) {
+        count = 0;
+        has_more = false;
         set_error(error, error_size, "bad_file_list_request");
         return false;
     }
 
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json);
-    if (err) {
-        set_error(error, error_size, "file_list_json_parse");
-        return false;
+    SleepHqRemoteFileListStreamParser parser;
+    if (!parser.begin(per_page, callback, ctx) ||
+        !parser.feed(reinterpret_cast<const uint8_t *>(json), strlen(json))) {
+        return parser.finish(count, has_more, error, error_size);
     }
-    JsonArrayConst data = doc["data"].as<JsonArrayConst>();
-    if (data.isNull()) {
-        set_error(error, error_size, "file_list_missing");
-        return false;
-    }
-
-    for (JsonVariantConst item : data) {
-        JsonVariantConst attr = item["attributes"];
-        SleepHqRemoteFile file;
-        json_string_to_u32(attr["id"], file.id);
-        json_string_to_u64(attr["size"], file.size);
-        copy_cstr(file.name,
-                  sizeof(file.name),
-                  json_string_or_empty(attr["name"]));
-        copy_cstr(file.path,
-                  sizeof(file.path),
-                  json_string_or_empty(attr["path"]));
-        copy_cstr(file.content_hash,
-                  sizeof(file.content_hash),
-                  json_string_or_empty(attr["content_hash"]));
-        if (file.id == 0) {
-            json_string_to_u32(item["id"], file.id);
-        }
-        if (!callback(ctx, file)) {
-            set_error(error, error_size, "file_list_callback_failed");
-            return false;
-        }
-        count++;
-    }
-    has_more = count >= per_page;
-    return true;
+    return parser.finish(count, has_more, error, error_size);
 }
 
 bool sleephq_parse_machine_list_json(const char *json,
