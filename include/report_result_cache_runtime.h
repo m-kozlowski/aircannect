@@ -37,17 +37,20 @@ public:
     ReportRangePlotRead read_or_request_range(
         size_t index,
         uint64_t night_start_ms,
+        const char *etag,
         int64_t from_ms,
         int64_t to_ms,
         std::shared_ptr<ReportSpoolBuffer> &out);
     bool range_request_snapshot(ReportRangePlotRequest &out) const;
     void finish_range_request(size_t index,
                               uint64_t night_start_ms,
+                              const char *etag,
                               int64_t from_ms,
                               int64_t to_ms,
                               const std::shared_ptr<ReportSpoolBuffer> &plot);
     void fail_range_request(size_t index,
                             uint64_t night_start_ms,
+                            const char *etag,
                             int64_t from_ms,
                             int64_t to_ms);
     void reset_range(bool clear_ready);

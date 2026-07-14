@@ -98,6 +98,8 @@ static constexpr size_t AC_REPORT_RANGE_PLOT_MAX_BYTES = 2 * 1024 * 1024;
 static constexpr size_t AC_REPORT_RANGE_MAX_POINTS = 32768;
 static constexpr uint32_t AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS = 10;
 static constexpr size_t AC_REPORT_RANGE_PLOT_POLL_CHUNK_CAP = 32;
+static constexpr int64_t AC_REPORT_RANGE_TILE_MS =
+    15LL * 60LL * 1000LL;
 // Range plots are the high-detail zoom path. Requests wider than this should
 // use the full-night plot instead of forcing a near-full rebuild through the
 // foreground range endpoint.

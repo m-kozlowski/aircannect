@@ -41,6 +41,7 @@ void ReportRuntimeService::service_range_plot(bool realtime_active) {
     if (range_plot_.active()) {
         if (range_plot_.matches(request.index,
                                 request.night_start_ms,
+                                request.etag,
                                 request.from_ms,
                                 request.to_ms)) {
             return;
@@ -52,6 +53,7 @@ void ReportRuntimeService::service_range_plot(bool realtime_active) {
     bool waiting_for_result = false;
     if (!range_plot_.start(request.night_start_ms,
                            request.index,
+                           request.etag,
                            request.from_ms,
                            request.to_ms,
                            waiting_for_result)) {
@@ -59,6 +61,7 @@ void ReportRuntimeService::service_range_plot(bool realtime_active) {
 
         result_cache_.fail_range_request(request.index,
                                          request.night_start_ms,
+                                         request.etag,
                                          request.from_ms,
                                          request.to_ms);
     }

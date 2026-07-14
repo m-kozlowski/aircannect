@@ -23,6 +23,7 @@
 #include "json_util.h"
 #include "memory_manager.h"
 #include "report_records.h"
+#include "report_range_tile.h"
 #include "report_store.h"
 #include "session_manager.h"
 #include "sink_manager.h"
@@ -2257,13 +2258,24 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
                           "{\"ok\":false,\"error\":\"bad range\"}");
             return;
         }
-        if (range_to_ms - range_from_ms >
-            AC_REPORT_RANGE_PLOT_MAX_WINDOW_MS) {
+
+        int64_t normalized_from_ms = 0;
+        int64_t normalized_to_ms = 0;
+        if (!normalize_report_range_tiles(
+                range_from_ms,
+                range_to_ms,
+                AC_REPORT_RANGE_TILE_MS,
+                AC_REPORT_RANGE_PLOT_MAX_WINDOW_MS,
+                normalized_from_ms,
+                normalized_to_ms)) {
             request->send(400,
                           "application/json",
                           "{\"ok\":false,\"error\":\"range too wide\"}");
             return;
         }
+
+        range_from_ms = normalized_from_ms;
+        range_to_ms = normalized_to_ms;
     }
     char request_http_etag[WEB_REPORT_PLOT_HTTP_ETAG_MAX] = {};
     if (version.length()) {

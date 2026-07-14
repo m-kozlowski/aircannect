@@ -10,7 +10,7 @@
 namespace aircannect {
 
 bool ReportResultCacheRuntime::begin() {
-    return writer_.begin();
+    return ensure_slots() && writer_.begin();
 }
 
 bool ReportResultCacheRuntime::ensure_slots() {
@@ -206,11 +206,13 @@ bool ReportResultCacheRuntime::attach_plot(
 ReportRangePlotRead ReportResultCacheRuntime::read_or_request_range(
     size_t index,
     uint64_t night_start_ms,
+    const char *etag,
     int64_t from_ms,
     int64_t to_ms,
     std::shared_ptr<ReportSpoolBuffer> &out) {
     return slots_.read_or_request_range(index,
                                         night_start_ms,
+                                        etag,
                                         from_ms,
                                         to_ms,
                                         out);
@@ -224,17 +226,28 @@ bool ReportResultCacheRuntime::range_request_snapshot(
 void ReportResultCacheRuntime::finish_range_request(
     size_t index,
     uint64_t night_start_ms,
+    const char *etag,
     int64_t from_ms,
     int64_t to_ms,
     const std::shared_ptr<ReportSpoolBuffer> &plot) {
-    slots_.finish_range_request(index, night_start_ms, from_ms, to_ms, plot);
+    slots_.finish_range_request(index,
+                                night_start_ms,
+                                etag,
+                                from_ms,
+                                to_ms,
+                                plot);
 }
 
 void ReportResultCacheRuntime::fail_range_request(size_t index,
                                                   uint64_t night_start_ms,
+                                                  const char *etag,
                                                   int64_t from_ms,
                                                   int64_t to_ms) {
-    slots_.fail_range_request(index, night_start_ms, from_ms, to_ms);
+    slots_.fail_range_request(index,
+                              night_start_ms,
+                              etag,
+                              from_ms,
+                              to_ms);
 }
 
 void ReportResultCacheRuntime::reset_range(bool clear_ready) {

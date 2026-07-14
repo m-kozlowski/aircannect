@@ -28,12 +28,14 @@ public:
     bool active() const;
     bool matches(size_t index,
                  uint64_t night_start_ms,
+                 const char *etag,
                  int64_t from_ms,
                  int64_t to_ms) const;
 
     void reset(bool clear_ready);
     bool start(uint64_t night_start_ms,
                size_t therapy_index_hint,
+               const char *etag,
                int64_t from_ms,
                int64_t to_ms,
                bool &waiting_for_result);

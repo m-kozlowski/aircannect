@@ -5,7 +5,9 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "board_report.h"
 #include "report_index_scratch.h"
+#include "report_range_tile.h"
 #include "report_result_cache_files.h"
 
 namespace aircannect {
@@ -319,7 +321,17 @@ ReportPlotRead ReportResultServingService::read_plot_range(
     int64_t to_ms,
     std::shared_ptr<ReportSpoolBuffer> &out) {
     if (etag_out && etag_out_size) etag_out[0] = '\0';
-    if (to_ms <= from_ms) return ReportPlotRead::NotFound;
+
+    int64_t normalized_from_ms = 0;
+    int64_t normalized_to_ms = 0;
+    if (!normalize_report_range_tiles(from_ms,
+                                      to_ms,
+                                      AC_REPORT_RANGE_TILE_MS,
+                                      AC_REPORT_RANGE_PLOT_MAX_WINDOW_MS,
+                                      normalized_from_ms,
+                                      normalized_to_ms)) {
+        return ReportPlotRead::NotFound;
+    }
 
     ScopedIndexedNight indexed_night("read_plot_range_index");
     if (!indexed_night) return ReportPlotRead::Unavailable;
@@ -349,8 +361,9 @@ ReportPlotRead ReportResultServingService::read_plot_range(
     const uint64_t night_start_ms = indexed_night->summary.start_ms;
     switch (cache_.read_or_request_range(resolved_therapy_index,
                                          night_start_ms,
-                                         from_ms,
-                                         to_ms,
+                                         current_etag,
+                                         normalized_from_ms,
+                                         normalized_to_ms,
                                          out)) {
         case ReportRangePlotRead::Ready:
             return ReportPlotRead::Ready;

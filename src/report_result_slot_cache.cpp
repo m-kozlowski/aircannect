@@ -13,6 +13,17 @@
 
 namespace aircannect {
 
+struct ReportResultSlotCache::RangePlotCacheEntry {
+    bool valid = false;
+    bool empty = false;
+    uint64_t night_start_ms = 0;
+    char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
+    int64_t from_ms = 0;
+    int64_t to_ms = 0;
+    uint32_t last_used = 0;
+    std::shared_ptr<ReportSpoolBuffer> bytes;
+};
+
 ReportResultSlotCache::~ReportResultSlotCache() {
     if (slots_) {
         for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
@@ -20,6 +31,14 @@ ReportResultSlotCache::~ReportResultSlotCache() {
         }
         Memory::free(slots_);
         slots_ = nullptr;
+    }
+
+    if (range_cache_) {
+        for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+            range_cache_[i].~RangePlotCacheEntry();
+        }
+        Memory::free(range_cache_);
+        range_cache_ = nullptr;
     }
 
     if (lock_) {
@@ -42,19 +61,38 @@ bool ReportResultSlotCache::ensure_lock() {
 
 bool ReportResultSlotCache::ensure_slots() {
     if (!ensure_lock()) return false;
-    if (slots_) return true;
-
-    slots_ = static_cast<MaterializedResult *>(Memory::alloc_large(
-        AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult), false));
     if (!slots_) {
+        slots_ = static_cast<MaterializedResult *>(Memory::alloc_large(
+            AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult), false));
+        if (!slots_) {
+            log_report_alloc_failed(
+                "result_slots",
+                AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult));
+            return false;
+        }
+
+        for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
+            new (&slots_[i]) MaterializedResult();
+        }
+    }
+
+    return ensure_range_cache();
+}
+
+bool ReportResultSlotCache::ensure_range_cache() {
+    if (range_cache_) return true;
+
+    range_cache_ = static_cast<RangePlotCacheEntry *>(Memory::alloc_large(
+        AC_REPORT_RANGE_CACHE_SLOT_MAX * sizeof(RangePlotCacheEntry), false));
+    if (!range_cache_) {
         log_report_alloc_failed(
-            "result_slots",
-            AC_REPORT_RESULT_SLOT_MAX * sizeof(MaterializedResult));
+            "range_plot_cache",
+            AC_REPORT_RANGE_CACHE_SLOT_MAX * sizeof(RangePlotCacheEntry));
         return false;
     }
 
-    for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
-        new (&slots_[i]) MaterializedResult();
+    for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+        new (&range_cache_[i]) RangePlotCacheEntry();
     }
 
     return true;
@@ -288,43 +326,49 @@ bool ReportResultSlotCache::attach_plot(
 ReportRangePlotRead ReportResultSlotCache::read_or_request_range(
     size_t index,
     uint64_t night_start_ms,
+    const char *etag,
     int64_t from_ms,
     int64_t to_ms,
     std::shared_ptr<ReportSpoolBuffer> &out) {
-    if (!ensure_lock()) return ReportRangePlotRead::Error;
+    if (!etag || !etag[0] || !ensure_slots()) {
+        return ReportRangePlotRead::Error;
+    }
 
     xSemaphoreTake(lock_, portMAX_DELAY);
 
-    if (range_plot_bytes_ && range_plot_index_ == index &&
-        range_plot_night_start_ms_ == night_start_ms &&
-        range_plot_from_ == from_ms && range_plot_to_ == to_ms) {
-        const PlotBlobScan scan = scan_plot_blob(*range_plot_bytes_);
-        if (!scan.valid) {
-            clear_range_locked(night_start_ms, true);
-            xSemaphoreGive(lock_);
-            return ReportRangePlotRead::Error;
+    for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+        RangePlotCacheEntry &entry = range_cache_[i];
+        if (!entry.valid || entry.night_start_ms != night_start_ms ||
+            strcmp(entry.etag, etag) != 0 || entry.from_ms != from_ms ||
+            entry.to_ms != to_ms) {
+            continue;
         }
-        if (scan.events == 0 && scan.points == 0) {
-            xSemaphoreGive(lock_);
-            return ReportRangePlotRead::Empty;
+        if (!entry.bytes) {
+            clear_range_entry_locked(entry);
+            continue;
         }
 
-        out = range_plot_bytes_;
+        entry.last_used = ++range_cache_tick_;
+        out = entry.bytes;
+        const ReportRangePlotRead result =
+            entry.empty ? ReportRangePlotRead::Empty
+                        : ReportRangePlotRead::Ready;
         xSemaphoreGive(lock_);
-        return ReportRangePlotRead::Ready;
+        return result;
     }
 
-    if (range_plot_bytes_) {
-        range_plot_bytes_.reset();
-        range_plot_index_ = 0;
-        range_plot_night_start_ms_ = 0;
-        range_plot_from_ = 0;
-        range_plot_to_ = 0;
+    if (range_req_active_ &&
+        range_req_night_start_ms_ == night_start_ms &&
+        strcmp(range_req_etag_, etag) == 0 &&
+        range_req_from_ == from_ms && range_req_to_ == to_ms) {
+        xSemaphoreGive(lock_);
+        return ReportRangePlotRead::Building;
     }
 
     range_req_active_ = true;
     range_req_index_ = index;
     range_req_night_start_ms_ = night_start_ms;
+    snprintf(range_req_etag_, sizeof(range_req_etag_), "%s", etag);
     range_req_from_ = from_ms;
     range_req_to_ = to_ms;
 
@@ -341,6 +385,7 @@ bool ReportResultSlotCache::range_request_snapshot(
     out.active = range_req_active_;
     out.index = range_req_index_;
     out.night_start_ms = range_req_night_start_ms_;
+    snprintf(out.etag, sizeof(out.etag), "%s", range_req_etag_);
     out.from_ms = range_req_from_;
     out.to_ms = range_req_to_;
 
@@ -351,22 +396,79 @@ bool ReportResultSlotCache::range_request_snapshot(
 void ReportResultSlotCache::finish_range_request(
     size_t index,
     uint64_t night_start_ms,
+    const char *etag,
     int64_t from_ms,
     int64_t to_ms,
     const std::shared_ptr<ReportSpoolBuffer> &plot) {
-    if (!lock_ || !plot) return;
+    if (!lock_ || !range_cache_ || !etag || !etag[0] || !plot) return;
+
+    const PlotBlobScan scan = scan_plot_blob(*plot);
+    if (!scan.valid) {
+        fail_range_request(index,
+                           night_start_ms,
+                           etag,
+                           from_ms,
+                           to_ms);
+        return;
+    }
 
     xSemaphoreTake(lock_, portMAX_DELAY);
 
     if (range_req_active_ && range_req_index_ == index &&
         range_req_night_start_ms_ == night_start_ms &&
+        strcmp(range_req_etag_, etag) == 0 &&
         range_req_from_ == from_ms && range_req_to_ == to_ms) {
-        range_plot_bytes_ = plot;
-        range_plot_index_ = index;
-        range_plot_night_start_ms_ = night_start_ms;
-        range_plot_from_ = from_ms;
-        range_plot_to_ = to_ms;
+        size_t pick = 0;
+        bool have_pick = false;
+
+        for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+            RangePlotCacheEntry &entry = range_cache_[i];
+            if (entry.valid && entry.night_start_ms == night_start_ms &&
+                strcmp(entry.etag, etag) == 0 && entry.from_ms == from_ms &&
+                entry.to_ms == to_ms) {
+                pick = i;
+                have_pick = true;
+                break;
+            }
+        }
+
+        if (!have_pick) {
+            for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+                if (range_cache_[i].valid) continue;
+
+                pick = i;
+                have_pick = true;
+                break;
+            }
+        }
+
+        if (!have_pick) {
+            for (size_t i = 1; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+                if (range_cache_[i].last_used < range_cache_[pick].last_used) {
+                    pick = i;
+                }
+            }
+        }
+
+        clear_range_entry_locked(range_cache_[pick]);
+        trim_range_cache_locked(plot->size(), pick);
+
+        RangePlotCacheEntry &entry = range_cache_[pick];
+        entry.valid = true;
+        entry.empty = scan.events == 0 && scan.points == 0;
+        entry.night_start_ms = night_start_ms;
+        snprintf(entry.etag, sizeof(entry.etag), "%s", etag);
+        entry.from_ms = from_ms;
+        entry.to_ms = to_ms;
+        entry.last_used = ++range_cache_tick_;
+        entry.bytes = plot;
+
         range_req_active_ = false;
+        range_req_index_ = 0;
+        range_req_night_start_ms_ = 0;
+        range_req_etag_[0] = '\0';
+        range_req_from_ = 0;
+        range_req_to_ = 0;
     }
 
     xSemaphoreGive(lock_);
@@ -374,16 +476,23 @@ void ReportResultSlotCache::finish_range_request(
 
 void ReportResultSlotCache::fail_range_request(size_t index,
                                                uint64_t night_start_ms,
+                                               const char *etag,
                                                int64_t from_ms,
                                                int64_t to_ms) {
-    if (!lock_) return;
+    if (!lock_ || !etag) return;
 
     xSemaphoreTake(lock_, portMAX_DELAY);
 
     if (range_req_active_ && range_req_index_ == index &&
         range_req_night_start_ms_ == night_start_ms &&
+        strcmp(range_req_etag_, etag) == 0 &&
         range_req_from_ == from_ms && range_req_to_ == to_ms) {
         range_req_active_ = false;
+        range_req_index_ = 0;
+        range_req_night_start_ms_ = 0;
+        range_req_etag_[0] = '\0';
+        range_req_from_ = 0;
+        range_req_to_ = 0;
     }
 
     xSemaphoreGive(lock_);
@@ -393,20 +502,22 @@ void ReportResultSlotCache::reset_range(bool clear_ready) {
     if (!lock_) {
         range_req_active_ = false;
         range_req_night_start_ms_ = 0;
-        if (clear_ready) range_plot_bytes_.reset();
+        range_req_etag_[0] = '\0';
         return;
     }
 
     xSemaphoreTake(lock_, portMAX_DELAY);
 
     range_req_active_ = false;
+    range_req_index_ = 0;
     range_req_night_start_ms_ = 0;
-    if (clear_ready) {
-        range_plot_bytes_.reset();
-        range_plot_index_ = 0;
-        range_plot_night_start_ms_ = 0;
-        range_plot_from_ = 0;
-        range_plot_to_ = 0;
+    range_req_etag_[0] = '\0';
+    range_req_from_ = 0;
+    range_req_to_ = 0;
+    if (clear_ready && range_cache_) {
+        for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+            clear_range_entry_locked(range_cache_[i]);
+        }
     }
 
     xSemaphoreGive(lock_);
@@ -417,18 +528,16 @@ void ReportResultSlotCache::invalidate(uint64_t night_start_ms, bool all) {
 
     xSemaphoreTake(lock_, portMAX_DELAY);
 
-    bool invalidated = false;
     if (slots_) {
         for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
             if (slots_[i].valid &&
                 (all || slots_[i].night_start_ms == night_start_ms)) {
                 clear_slot_locked(slots_[i]);
-                invalidated = true;
             }
         }
     }
 
-    if (invalidated) clear_range_locked(night_start_ms, all);
+    clear_range_locked(night_start_ms, all);
     update_counts_locked();
 
     xSemaphoreGive(lock_);
@@ -449,6 +558,50 @@ void ReportResultSlotCache::clear_slot_locked(MaterializedResult &slot) {
     memset(slot.edf_sessions, 0, sizeof(slot.edf_sessions));
     slot.edf_session_count = 0;
     slot.plot.reset();
+}
+
+void ReportResultSlotCache::clear_range_entry_locked(
+    RangePlotCacheEntry &entry) {
+    entry.valid = false;
+    entry.empty = false;
+    entry.night_start_ms = 0;
+    entry.etag[0] = '\0';
+    entry.from_ms = 0;
+    entry.to_ms = 0;
+    entry.last_used = 0;
+    entry.bytes.reset();
+}
+
+void ReportResultSlotCache::trim_range_cache_locked(
+    size_t incoming_bytes,
+    size_t protected_index) {
+    if (!range_cache_) return;
+
+    size_t retained_bytes = 0;
+    for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+        const RangePlotCacheEntry &entry = range_cache_[i];
+        if (entry.valid && entry.bytes) retained_bytes += entry.bytes->size();
+    }
+
+    while (retained_bytes > AC_REPORT_RANGE_CACHE_MAX_BYTES ||
+           incoming_bytes > AC_REPORT_RANGE_CACHE_MAX_BYTES -
+                                retained_bytes) {
+        size_t victim = AC_REPORT_RANGE_CACHE_SLOT_MAX;
+        for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+            const RangePlotCacheEntry &entry = range_cache_[i];
+            if (i == protected_index || !entry.valid) continue;
+            if (victim == AC_REPORT_RANGE_CACHE_SLOT_MAX ||
+                entry.last_used < range_cache_[victim].last_used) {
+                victim = i;
+            }
+        }
+        if (victim == AC_REPORT_RANGE_CACHE_SLOT_MAX) break;
+
+        if (range_cache_[victim].bytes) {
+            retained_bytes -= range_cache_[victim].bytes->size();
+        }
+        clear_range_entry_locked(range_cache_[victim]);
+    }
 }
 
 void ReportResultSlotCache::update_counts_locked() {
@@ -473,25 +626,22 @@ void ReportResultSlotCache::clear_range_locked(uint64_t night_start_ms,
     const bool matches_request =
         range_req_active_ &&
         (all || range_req_night_start_ms_ == night_start_ms);
-    const bool matches_plot =
-        range_plot_bytes_ &&
-        (all || range_plot_night_start_ms_ == night_start_ms);
-    if (!matches_request && !matches_plot) return;
 
     if (matches_request) {
         range_req_active_ = false;
         range_req_index_ = 0;
         range_req_night_start_ms_ = 0;
+        range_req_etag_[0] = '\0';
         range_req_from_ = 0;
         range_req_to_ = 0;
     }
 
-    if (matches_plot) {
-        range_plot_bytes_.reset();
-        range_plot_index_ = 0;
-        range_plot_night_start_ms_ = 0;
-        range_plot_from_ = 0;
-        range_plot_to_ = 0;
+    if (!range_cache_) return;
+    for (size_t i = 0; i < AC_REPORT_RANGE_CACHE_SLOT_MAX; ++i) {
+        RangePlotCacheEntry &entry = range_cache_[i];
+        if (entry.valid && (all || entry.night_start_ms == night_start_ms)) {
+            clear_range_entry_locked(entry);
+        }
     }
 }
 

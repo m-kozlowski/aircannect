@@ -25,6 +25,7 @@ public:
 
     bool matches(size_t index,
                  uint64_t night_start_ms,
+                 const char *etag,
                  int64_t from_ms,
                  int64_t to_ms) const;
 
@@ -50,6 +51,7 @@ public:
     int64_t from_ms = 0;
     int64_t to_ms = 0;
     uint64_t night_start_ms = 0;
+    char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
 
     ReportResultChunk *chunks = nullptr;
     size_t chunk_count = 0;

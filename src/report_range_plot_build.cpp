@@ -116,6 +116,7 @@ void ReportRangePlotBuilder::finish() {
 
     cache_.finish_range_request(range_plot_.state().index,
                                 range_plot_.state().night_start_ms,
+                                range_plot_.state().etag,
                                 range_plot_.state().from_ms,
                                 range_plot_.state().to_ms,
                                 range_plot_.state().bytes);
@@ -144,6 +145,7 @@ void ReportRangePlotBuilder::fail(const char *message) {
               message ? message : "range_failed");
     cache_.fail_range_request(range_plot_.state().index,
                               range_plot_.state().night_start_ms,
+                              range_plot_.state().etag,
                               range_plot_.state().from_ms,
                               range_plot_.state().to_ms);
     reset(false);

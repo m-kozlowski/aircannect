@@ -1,6 +1,7 @@
 #include "report_range_plot_builder.h"
 
 #include <algorithm>
+#include <stdio.h>
 #include <string.h>
 
 #include <Arduino.h>
@@ -42,9 +43,10 @@ bool ReportRangePlotBuilder::active() const {
 
 bool ReportRangePlotBuilder::matches(size_t index,
                                      uint64_t night_start_ms,
+                                     const char *etag,
                                      int64_t from_ms,
                                      int64_t to_ms) const {
-    return range_plot_.matches(index, night_start_ms, from_ms, to_ms);
+    return range_plot_.matches(index, night_start_ms, etag, from_ms, to_ms);
 }
 
 void ReportRangePlotBuilder::reset(bool clear_ready) {
@@ -56,12 +58,13 @@ void ReportRangePlotBuilder::reset(bool clear_ready) {
 
 bool ReportRangePlotBuilder::start(uint64_t night_start_ms,
                                    size_t therapy_index_hint,
+                                   const char *etag,
                                    int64_t from_ms,
                                    int64_t to_ms,
                                    bool &waiting_for_result) {
     waiting_for_result = false;
     reset(false);
-    if (to_ms <= from_ms) return false;
+    if (!etag || !etag[0] || to_ms <= from_ms) return false;
     if (!range_plot_.ensure_buffers()) return false;
 
     auto &range_plot = range_plot_.state();
@@ -123,6 +126,7 @@ bool ReportRangePlotBuilder::start(uint64_t night_start_ms,
     range_plot.index = therapy_index;
     range_plot.from_ms = from_ms;
     range_plot.to_ms = to_ms;
+    snprintf(range_plot.etag, sizeof(range_plot.etag), "%s", etag);
     range_plot.bucket_ms = std::max<int64_t>(
         1,
         (to_ms - from_ms) /

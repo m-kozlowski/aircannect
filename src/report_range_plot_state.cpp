@@ -77,6 +77,7 @@ void ReportRangePlotBuildState::reset() {
     from_ms = 0;
     to_ms = 0;
     night_start_ms = 0;
+    etag[0] = '\0';
 
     chunk_count = 0;
     stream_count = 0;
@@ -116,10 +117,12 @@ void ReportRangePlotBuildState::reset() {
 
 bool ReportRangePlotBuildState::matches(size_t index_,
                                         uint64_t night_start_ms_,
+                                        const char *etag_,
                                         int64_t from_ms_,
                                         int64_t to_ms_) const {
     return index == index_ &&
            night_start_ms == night_start_ms_ &&
+           etag_ && strcmp(etag, etag_) == 0 &&
            from_ms == from_ms_ &&
            to_ms == to_ms_;
 }
