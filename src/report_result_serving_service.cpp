@@ -151,6 +151,10 @@ ReportResultRead ReportResultServingService::read_result_for_indexed_night(
                            current_etag,
                            if_none_match,
                            json_out);
+    if (slot_read == ReportResultSlotRead::Error) {
+        build_.note_read("slot_copy_failed");
+        return ReportResultRead::Unavailable;
+    }
     if (slot_read != ReportResultSlotRead::NotFound) {
         build_.note_read(slot_read == ReportResultSlotRead::NotModified
                              ? "not_modified"

@@ -8,6 +8,39 @@
 #include "report_result_runtime.h"
 
 namespace aircannect {
+namespace {
+
+std::shared_ptr<ReportSpoolBuffer> make_result_json_snapshot(
+    const ReportResultRuntime &result) {
+    LargeTextBuffer text;
+    if (!text.reserve(8192)) return nullptr;
+
+    const ReportCacheFetchStatus inactive_cache{};
+    build_report_result_json_from(result.status(),
+                                  result.identity().indexed_night(),
+                                  result.ranges().data(),
+                                  result.ranges().count(),
+                                  result.streams().data(),
+                                  result.streams().count(),
+                                  inactive_cache,
+                                  text);
+    if (text.overflowed() || text.length() == 0) return nullptr;
+
+    auto snapshot = std::make_shared<ReportSpoolBuffer>();
+    if (!snapshot) return nullptr;
+
+    snapshot->set_max_size(text.length());
+    if (!snapshot->reserve_capacity(text.length()) ||
+        !snapshot->append(
+            reinterpret_cast<const uint8_t *>(text.c_str()),
+            text.length())) {
+        return nullptr;
+    }
+
+    return snapshot;
+}
+
+}  // namespace
 
 bool ReportResultCacheRuntime::begin() {
     return ensure_slots() && writer_.begin();
@@ -91,94 +124,35 @@ bool ReportResultCacheRuntime::publish_result(
         return false;
     }
 
-    if (!publish(status,
-                 result.identity().indexed_night(),
-                 result.identity().etag(),
-                 result.ranges().data(),
-                 result.ranges().count(),
-                 result.streams().data(),
-                 result.streams().count(),
-                 result.scratch().chunks(),
-                 status.chunk_count,
-                 result.scratch().edf_sessions(),
-                 result.scratch().edf_session_count(),
-                 plot)) {
+    const std::shared_ptr<ReportSpoolBuffer> result_json =
+        make_result_json_snapshot(result);
+    if (!result_json) {
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "Result publish skipped: result JSON snapshot failed "
+                  "index=%lu night=%llu\n",
+                  static_cast<unsigned long>(status.therapy_index),
+                  static_cast<unsigned long long>(
+                      result.identity().indexed_night().summary.start_ms));
+        return false;
+    }
+
+    if (!slots_.publish(status.state,
+                        result.identity().indexed_night().summary.start_ms,
+                        result.identity().etag(),
+                        result_json,
+                        plot)) {
         return false;
     }
 
     if (cache_plot && plot) {
-        LargeTextBuffer result_json_text;
-        result_json_text.reserve(8192);
-
-        const ReportCacheFetchStatus inactive_cache{};
-        build_report_result_json_from(status,
-                                      result.identity().indexed_night(),
-                                      result.ranges().data(),
-                                      result.ranges().count(),
-                                      result.streams().data(),
-                                      result.streams().count(),
-                                      inactive_cache,
-                                      result_json_text);
-
-        std::shared_ptr<ReportSpoolBuffer> result_json;
-        if (!result_json_text.overflowed() && result_json_text.length() > 0) {
-            result_json = std::make_shared<ReportSpoolBuffer>();
-            if (result_json) {
-                result_json->set_max_size(result_json_text.length());
-                if (!result_json->reserve_capacity(result_json_text.length()) ||
-                    !result_json->append(
-                        reinterpret_cast<const uint8_t *>(
-                            result_json_text.c_str()),
-                        result_json_text.length())) {
-                    result_json.reset();
-                }
-            }
-        }
-
-        if (result_json) {
-            enqueue_write(result.identity().indexed_night(),
-                          result.identity().etag(),
-                          result_json,
-                          plot);
-        } else {
-            Log::logf(CAT_REPORT,
-                      LOG_WARN,
-                      "Result cache write skipped: result JSON snapshot "
-                      "failed index=%lu night=%llu\n",
-                      static_cast<unsigned long>(status.therapy_index),
-                      static_cast<unsigned long long>(
-                          result.identity().indexed_night().summary.start_ms));
-        }
+        enqueue_write(result.identity().indexed_night(),
+                      result.identity().etag(),
+                      result_json,
+                      plot);
     }
 
     return true;
-}
-
-bool ReportResultCacheRuntime::publish(
-    const ReportResultStatus &status,
-    const ReportIndexedNight &night,
-    const char *etag,
-    const ReportSessionRange *ranges,
-    size_t range_count,
-    const ReportResultStream *streams,
-    size_t stream_count,
-    const ReportResultSlotCache::ReportResultChunk *chunks,
-    size_t chunk_count,
-    const EdfReportSessionDescriptor *edf_sessions,
-    size_t edf_session_count,
-    const std::shared_ptr<ReportSpoolBuffer> &plot) {
-    return slots_.publish(status,
-                          night,
-                          etag,
-                          ranges,
-                          range_count,
-                          streams,
-                          stream_count,
-                          chunks,
-                          chunk_count,
-                          edf_sessions,
-                          edf_session_count,
-                          plot);
 }
 
 ReportResultSlotRead ReportResultCacheRuntime::read_result(

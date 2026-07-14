@@ -125,24 +125,6 @@ struct PlotSeriesBuildState {
     }
 };
 
-struct MaterializedResult {
-    bool valid = false;
-    uint64_t night_start_ms = 0;
-    char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-    uint32_t last_used = 0;
-    ReportResultStatus status;
-    ReportIndexedNight night;
-    ReportSessionRange ranges[AC_REPORT_NIGHT_SESSION_MAX] = {};
-    size_t range_count = 0;
-    ReportResultStream streams[AC_REPORT_RESULT_STREAM_MAX] = {};
-    size_t stream_count = 0;
-    ReportResultChunk chunks[AC_REPORT_RESULT_CHUNK_MAX] = {};
-    size_t chunk_count = 0;
-    EdfReportSessionDescriptor edf_sessions[AC_REPORT_EDF_SESSION_MAX] = {};
-    size_t edf_session_count = 0;
-    std::shared_ptr<ReportSpoolBuffer> plot;
-};
-
 enum class ResultCacheWritePhase : uint8_t {
     Idle,
     ClearOld,

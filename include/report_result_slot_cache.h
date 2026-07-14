@@ -7,10 +7,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#include "edf_report_catalog.h"
 #include "large_text_buffer.h"
-#include "report_manager_internal_types.h"
-#include "report_night_index.h"
+#include "report_manager_limits.h"
 #include "report_result_types.h"
 #include "report_spool_types.h"
 
@@ -19,6 +17,7 @@ namespace aircannect {
 enum class ReportResultSlotRead : uint8_t {
     NotFound,
     NotModified,
+    Error,
     Ready,
 };
 
@@ -47,25 +46,15 @@ struct ReportRangePlotRequest {
 
 class ReportResultSlotCache {
 public:
-    using MaterializedResult = report_manager_internal::MaterializedResult;
-    using ReportResultChunk = report_manager_internal::ReportResultChunk;
-
     ~ReportResultSlotCache();
 
     bool ensure_slots();
     void apply_diagnostics(ReportResultStatus &status) const;
 
-    bool publish(const ReportResultStatus &status,
-                 const ReportIndexedNight &night,
+    bool publish(ReportResultState state,
+                 uint64_t night_start_ms,
                  const char *etag,
-                 const ReportSessionRange *ranges,
-                 size_t range_count,
-                 const ReportResultStream *streams,
-                 size_t stream_count,
-                 const ReportResultChunk *chunks,
-                 size_t chunk_count,
-                 const EdfReportSessionDescriptor *edf_sessions,
-                 size_t edf_session_count,
+                 const std::shared_ptr<ReportSpoolBuffer> &result_json,
                  const std::shared_ptr<ReportSpoolBuffer> &plot);
 
     ReportResultSlotRead read_result(uint64_t night_start_ms,
@@ -105,18 +94,19 @@ public:
     void invalidate(uint64_t night_start_ms, bool all);
 
 private:
+    struct ResultCacheEntry;
     struct RangePlotCacheEntry;
 
     bool ensure_lock();
     bool ensure_range_cache();
-    void clear_slot_locked(MaterializedResult &slot);
+    void clear_slot_locked(ResultCacheEntry &slot);
     void clear_range_entry_locked(RangePlotCacheEntry &entry);
     void trim_range_cache_locked(size_t incoming_bytes,
                                  size_t protected_index);
     void update_counts_locked();
     void clear_range_locked(uint64_t night_start_ms, bool all);
 
-    MaterializedResult *slots_ = nullptr;
+    ResultCacheEntry *slots_ = nullptr;
     SemaphoreHandle_t lock_ = nullptr;
     uint32_t tick_ = 0;
     uint32_t materialized_slots_ = 0;

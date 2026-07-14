@@ -66,18 +66,6 @@ public:
 
 private:
     bool ensure_slots();
-    bool publish(const ReportResultStatus &status,
-                 const ReportIndexedNight &night,
-                 const char *etag,
-                 const ReportSessionRange *ranges,
-                 size_t range_count,
-                 const ReportResultStream *streams,
-                 size_t stream_count,
-                 const ReportResultSlotCache::ReportResultChunk *chunks,
-                 size_t chunk_count,
-                 const EdfReportSessionDescriptor *edf_sessions,
-                 size_t edf_session_count,
-                 const std::shared_ptr<ReportSpoolBuffer> &plot);
 
     ReportResultSlotCache slots_;
     ReportResultCacheWriter writer_;
