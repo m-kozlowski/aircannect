@@ -11,6 +11,7 @@
 #include "background_worker.h"
 #include "sleephq_client.h"
 #include "sleephq_remote_file_cache.h"
+#include "sleephq_sync_file.h"
 #include "storage_export_plan.h"
 #include "storage_export_planner.h"
 #include "storage_path.h"
@@ -133,11 +134,6 @@ private:
         PostTherapySync,
     };
 
-    enum class StateWriteMode : uint8_t {
-        Append,
-        Replace,
-    };
-
     enum class InflightPhase : uint8_t {
         None,
         Uploading,
@@ -151,22 +147,6 @@ private:
         char device_id[AC_SLEEPHQ_ID_MAX] = {};
     };
 
-    struct CurrentFile {
-        char path[AC_STORAGE_PATH_MAX] = {};
-        char sleep_path[AC_STORAGE_PATH_MAX] = {};
-        char name[AC_STORAGE_NAME_MAX] = {};
-        char state_path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
-        uint64_t size = 0;
-        uint64_t mtime = 0;
-        uint64_t offset = 0;
-        StateWriteMode state_write_mode = StateWriteMode::Append;
-        bool local_open = false;
-        bool force_upload = false;
-        bool attach_by_hash = false;
-        char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
-        File local;
-    };
-
     struct StagedFile {
         char path[AC_STORAGE_PATH_MAX] = {};
         char state_path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
@@ -174,18 +154,13 @@ private:
         uint64_t size = 0;
         uint64_t mtime = 0;
         uint32_t import_id = 0;
-        StateWriteMode state_write_mode = StateWriteMode::Append;
+        StorageExportStateWriteMode state_write_mode =
+            StorageExportStateWriteMode::Append;
     };
 
     struct RemoteMachineDateCache {
         char day[9] = {};
         bool exists = false;
-    };
-
-    struct UploadContext {
-        File *file = nullptr;
-        std::atomic<bool> *abort_requested = nullptr;
-        uint64_t offset = 0;
     };
 
     struct MachineListContext {
@@ -236,7 +211,6 @@ private:
     void finish_check_locked(uint32_t team_id);
     void finish_sync_locked();
     void fail_locked(const char *error);
-    void close_local_locked();
     void clear_current_file_locked();
     void publish_runtime_locked();
 
@@ -269,7 +243,7 @@ private:
     void clear_staged_locked();
 
     // remote file cache
-    bool remote_file_cache_contains_locked(const CurrentFile &file) const;
+    bool remote_file_cache_contains_locked() const;
     void clear_remote_files_locked();
 
     // remote machine/date reconcile
@@ -304,13 +278,6 @@ private:
     bool resolve_pending_datalog_day_locked(bool &needs_lookup,
                                             char *error,
                                             size_t error_size);
-    bool build_sleep_path_locked(const char *local_path,
-                                 char *path_out,
-                                 size_t path_out_size,
-                                 char *name_out,
-                                 size_t name_out_size) const;
-    bool current_file_matches_snapshot() const;
-    bool compute_current_file_content_hash(char *out, size_t out_size);
     BackgroundOperationControl operation_control(uint32_t timeout_ms) const;
     void request_operation_abort();
 
@@ -324,11 +291,6 @@ private:
                                           BlockingResult &result);
 
     // client callbacks
-    static bool upload_read_cb(void *ctx,
-                               uint8_t *out,
-                               size_t len,
-                               size_t &read);
-    static bool upload_reset_cb(void *ctx);
     static bool operation_abort_cb(void *ctx);
     static bool remote_file_list_cb(void *ctx,
                                     const SleepHqRemoteFile &file);
@@ -361,7 +323,7 @@ private:
     // active export/import
     StorageExportPlanner export_planner_;
     bool import_batch_active_ = false;
-    CurrentFile current_file_;
+    SleepHqSyncFile current_file_;
     StagedFile *staged_ = nullptr;
     size_t staged_count_ = 0;
     size_t staged_capacity_ = 0;

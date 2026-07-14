@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include <ArduinoJson.h>
-#include <esp_rom_md5.h>
 
 #include "crc32.h"
 #include "debug_log.h"
@@ -55,16 +54,6 @@ static constexpr uint32_t SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT =
     SLEEPHQ_REMOTE_MACHINE_PER_PAGE;
 static constexpr uint32_t SLEEPHQ_DATALOG_REBUILD_COOLDOWN_SECONDS =
     6UL * 60UL * 60UL;
-
-void sleep_hq_digest_to_hex(const uint8_t digest[16],
-                            char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
-    static const char HEX_DIGITS[] = "0123456789abcdef";
-    for (size_t i = 0; i < 16; ++i) {
-        out[i * 2] = HEX_DIGITS[(digest[i] >> 4) & 0x0F];
-        out[i * 2 + 1] = HEX_DIGITS[digest[i] & 0x0F];
-    }
-    out[32] = '\0';
-}
 
 uint32_t sleep_hq_upload_timeout_ms(uint64_t size) {
     const uint64_t transfer_ms =
@@ -495,17 +484,8 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
     return true;
 }
 
-void SleepHqSyncJob::close_local_locked() {
-    if (current_file_.local_open) {
-        Storage::Guard guard;
-        current_file_.local.close();
-        current_file_.local_open = false;
-    }
-}
-
 void SleepHqSyncJob::clear_current_file_locked() {
-    close_local_locked();
-    current_file_ = CurrentFile();
+    current_file_.reset();
     status_.current_path[0] = 0;
 }
 
@@ -720,7 +700,6 @@ bool SleepHqSyncJob::force_remote_missing_datalog_day_locked(
 
 void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     client_.disconnect();
-    close_local_locked();
     export_planner_.reset();
     clear_current_file_locked();
     clear_staged_locked();
@@ -879,7 +858,9 @@ void SleepHqSyncJob::fail_locked(const char *error) {
               "skipped=%u bytes=%llu retry_ms=%lu attempt=%u\n",
               static_cast<unsigned>(phase_),
               status_.last_error,
-              current_file_.path[0] ? current_file_.path : "--",
+              current_file_.state().path[0]
+                  ? current_file_.state().path
+                  : "--",
               static_cast<unsigned>(status_.files_seen),
               static_cast<unsigned>(status_.files_uploaded),
               static_cast<unsigned>(status_.files_skipped),
@@ -937,7 +918,6 @@ bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
 
 void SleepHqSyncJob::reset_import_batch_locked() {
     remove_inflight_locked();
-    close_local_locked();
     clear_current_file_locked();
     clear_staged_locked();
     status_.import_id = 0;
@@ -1024,86 +1004,10 @@ bool SleepHqSyncJob::next_file_locked() {
     return true;
 }
 
-bool SleepHqSyncJob::build_sleep_path_locked(const char *local_path,
-                                             char *path_out,
-                                             size_t path_out_size,
-                                             char *name_out,
-                                             size_t name_out_size) const {
-    return storage_export_build_relative_file_path(local_path,
-                                                   path_out,
-                                                   path_out_size,
-                                                   name_out,
-                                                   name_out_size);
-}
-
-bool SleepHqSyncJob::current_file_matches_snapshot() const {
-    const StorageLocalNodeInfo info = storage_stat_local_node(current_file_.path);
-    return info.exists && !info.is_dir &&
-           info.size == current_file_.size &&
-           info.mtime == current_file_.mtime;
-}
-
-bool SleepHqSyncJob::compute_current_file_content_hash(char *out,
-                                                       size_t out_size) {
-    if (!out || out_size < AC_SLEEPHQ_CONTENT_HASH_MAX ||
-        !current_file_.local_open || !current_file_.name[0]) {
-        return false;
-    }
-    uint8_t *buffer = static_cast<uint8_t *>(Memory::alloc_large(4096, false));
-    if (!buffer) {
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "hash buffer allocation failed bytes=4096\n");
-        return false;
-    }
-
-    md5_context_t md5;
-    esp_rom_md5_init(&md5);
-    uint64_t read_total = 0;
-    bool ok = true;
-    {
-        Storage::Guard guard;
-        ok = current_file_.local.seek(0);
-    }
-    while (ok && read_total < current_file_.size) {
-        const uint64_t remaining = current_file_.size - read_total;
-        const size_t wanted =
-            remaining > 4096 ? 4096 : static_cast<size_t>(remaining);
-        size_t read = 0;
-        {
-            Storage::Guard guard;
-            read = current_file_.local.read(buffer, wanted);
-        }
-        if (read != wanted) {
-            ok = false;
-            break;
-        }
-        esp_rom_md5_update(&md5, buffer, read);
-        read_total += read;
-        taskYIELD();
-    }
-    Memory::free(buffer);
-    if (!ok) return false;
-
-    esp_rom_md5_update(&md5,
-                       reinterpret_cast<const uint8_t *>(current_file_.name),
-                       strlen(current_file_.name));
-    uint8_t digest[16];
-    esp_rom_md5_final(digest, &md5);
-    sleep_hq_digest_to_hex(digest, out);
-    {
-        Storage::Guard guard;
-        ok = current_file_.local.seek(0);
-    }
-    current_file_.offset = 0;
-    return ok;
-}
-
 bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     const char *path = item.path;
     clear_current_file_locked();
-    copy_cstr(current_file_.path, sizeof(current_file_.path), path);
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
-    current_file_.force_upload = item.force_export;
     status_.files_seen++;
     status_.updated_ms = nonzero_millis(millis());
 
@@ -1111,13 +1015,14 @@ bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
         phase_ = WorkPhase::NextFile;
         return true;
     }
-    current_file_.size = item.info.size;
-    current_file_.mtime = item.info.mtime;
-    if (!build_sleep_path_locked(path,
-                                 current_file_.sleep_path,
-                                 sizeof(current_file_.sleep_path),
-                                 current_file_.name,
-                                 sizeof(current_file_.name))) {
+
+    char sleep_path[AC_STORAGE_PATH_MAX] = {};
+    char name[AC_STORAGE_NAME_MAX] = {};
+    if (!storage_export_build_relative_file_path(path,
+                                                 sleep_path,
+                                                 sizeof(sleep_path),
+                                                 name,
+                                                 sizeof(name))) {
         fail_locked("sleep_path_failed");
         return false;
     }
@@ -1125,29 +1030,30 @@ bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
         fail_locked("state_path_failed");
         return false;
     }
-    copy_cstr(current_file_.state_path,
-              sizeof(current_file_.state_path),
-              item.state_path);
-    current_file_.state_write_mode =
-        item.state_write_mode == StorageExportStateWriteMode::Append
-            ? StateWriteMode::Append
-            : StateWriteMode::Replace;
+
     const bool state_has_file = item.local_state_complete;
-    if (!current_file_.force_upload && state_has_file) {
+    if (!item.force_export && state_has_file) {
         status_.files_skipped++;
         clear_current_file_locked();
         phase_ = WorkPhase::NextFile;
         return true;
     }
-    current_file_.attach_by_hash = current_file_.force_upload && state_has_file;
     if (status_.import_id != 0 &&
-        staged_contains_locked(path, current_file_.size,
-                               current_file_.mtime)) {
+        staged_contains_locked(path, item.info.size, item.info.mtime)) {
         status_.files_skipped++;
         clear_current_file_locked();
         phase_ = WorkPhase::NextFile;
         return true;
     }
+
+    current_file_.configure(path,
+                            sleep_path,
+                            name,
+                            item.state_path,
+                            item.info.size,
+                            item.info.mtime,
+                            item.state_write_mode,
+                            item.force_export && state_has_file);
     phase_ = status_.import_id == 0 ? WorkPhase::CreateImport
                                     : WorkPhase::OpenLocal;
     import_batch_active_ = true;
@@ -1244,7 +1150,9 @@ bool SleepHqSyncJob::write_inflight_locked(InflightPhase phase) {
         for (size_t i = 0; i < staged_count_; ++i) {
             const StagedFile &entry = staged_[i];
             const char mode =
-                entry.state_write_mode == StateWriteMode::Replace ? 'r' : 'a';
+                entry.state_write_mode == StorageExportStateWriteMode::Replace
+                    ? 'r'
+                    : 'a';
             written =
                 file.printf("%llu\t%llu\t%s\t%lu\t%c\t%s\t%s\n",
                             static_cast<unsigned long long>(entry.size),
@@ -1360,8 +1268,8 @@ bool SleepHqSyncJob::load_inflight_locked(InflightPhase &phase_out) {
         entry.mtime = static_cast<uint64_t>(parsed_mtime);
         entry.import_id = static_cast<uint32_t>(parsed_import);
         entry.state_write_mode =
-            mode_text[0] == 'r' ? StateWriteMode::Replace
-                                : StateWriteMode::Append;
+            mode_text[0] == 'r' ? StorageExportStateWriteMode::Replace
+                                : StorageExportStateWriteMode::Append;
         copy_cstr(entry.content_hash, sizeof(entry.content_hash), hash);
         copy_cstr(entry.path, sizeof(entry.path), local_path);
         copy_cstr(entry.state_path, sizeof(entry.state_path), state_path);
@@ -1438,17 +1346,13 @@ bool SleepHqSyncJob::write_state_locked(const StagedFile &file_info) {
     if (written <= 0 || static_cast<size_t>(written) >= sizeof(line)) {
         return false;
     }
-    const StorageExportStateWriteMode mode =
-        file_info.state_write_mode == StateWriteMode::Append
-            ? StorageExportStateWriteMode::Append
-            : StorageExportStateWriteMode::Replace;
     return storage_export_write_state_line(&state_cache_,
                                            state_dir_,
                                            file_info.state_path,
                                            file_info.path,
                                            file_info.size,
                                            file_info.mtime,
-                                           mode,
+                                           file_info.state_write_mode,
                                            line,
                                            true);
 }
@@ -1476,21 +1380,22 @@ bool SleepHqSyncJob::reserve_staged_locked(size_t needed) {
 
 bool SleepHqSyncJob::add_staged_locked(const SleepHqUploadResult &upload) {
     if (!reserve_staged_locked(staged_count_ + 1)) return false;
+
+    const SleepHqSyncFileState &file = current_file_.state();
     StagedFile &entry = staged_[staged_count_++];
-    copy_cstr(entry.path, sizeof(entry.path), current_file_.path);
-    copy_cstr(entry.state_path, sizeof(entry.state_path),
-              current_file_.state_path);
+    copy_cstr(entry.path, sizeof(entry.path), file.path);
+    copy_cstr(entry.state_path, sizeof(entry.state_path), file.state_path);
     copy_cstr(entry.content_hash, sizeof(entry.content_hash),
               upload.content_hash);
-    entry.size = current_file_.size;
-    entry.mtime = current_file_.mtime;
+    entry.size = file.size;
+    entry.mtime = file.mtime;
     entry.import_id = status_.import_id;
-    entry.state_write_mode = current_file_.state_write_mode;
+    entry.state_write_mode = file.state_write_mode;
     return true;
 }
 
-bool SleepHqSyncJob::remote_file_cache_contains_locked(
-    const CurrentFile &file) const {
+bool SleepHqSyncJob::remote_file_cache_contains_locked() const {
+    const SleepHqSyncFileState &file = current_file_.state();
     if (!file.name[0] || !file.sleep_path[0] || !file.content_hash[0]) {
         return false;
     }
@@ -1702,14 +1607,14 @@ JobStep SleepHqSyncJob::begin_export_work_locked() {
 }
 
 JobStep SleepHqSyncJob::step_resolve_remote_file_locked() {
-    if (!current_file_.content_hash[0]) {
+    const SleepHqSyncFileState &file = current_file_.state();
+    if (!current_file_.has_content_hash()) {
         phase_ = WorkPhase::HashLocalFile;
         return JobStep::Working;
     }
 
-    if (current_file_.attach_by_hash ||
-        remote_file_cache_contains_locked(current_file_)) {
-        current_file_.attach_by_hash = true;
+    if (file.attach_by_hash || remote_file_cache_contains_locked()) {
+        current_file_.set_attach_by_hash(true);
         phase_ = WorkPhase::UploadFile;
         return JobStep::Working;
     }
@@ -1723,33 +1628,6 @@ JobStep SleepHqSyncJob::step_resolve_remote_file_locked() {
     remote_file_cache_complete_ = true;
     phase_ = WorkPhase::UploadFile;
     return JobStep::Working;
-}
-
-bool SleepHqSyncJob::upload_read_cb(void *ctx,
-                                    uint8_t *out,
-                                    size_t len,
-                                    size_t &read) {
-    UploadContext *upload = static_cast<UploadContext *>(ctx);
-    read = 0;
-    if (!upload || !upload->file || !out ||
-        (upload->abort_requested && upload->abort_requested->load())) {
-        return false;
-    }
-
-    Storage::Guard guard;
-    read = upload->file->read(out, len);
-    upload->offset += static_cast<uint64_t>(read);
-    return read == len;
-}
-
-bool SleepHqSyncJob::upload_reset_cb(void *ctx) {
-    UploadContext *upload = static_cast<UploadContext *>(ctx);
-    if (!upload || !upload->file) return false;
-
-    Storage::Guard guard;
-    const bool ok = upload->file->seek(0);
-    if (ok) upload->offset = 0;
-    return ok;
 }
 
 bool SleepHqSyncJob::operation_abort_cb(void *ctx) {
@@ -1942,11 +1820,8 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::OpenLocal: {
-            Storage::Guard guard;
-            result.local = Storage::open(current_file_.path, "r");
-            result.ok = result.local && !result.local.isDirectory();
+            result.ok = current_file_.open_candidate(result.local);
             if (!result.ok) {
-                if (result.local) result.local.close();
                 copy_cstr(result.error,
                           sizeof(result.error),
                           "local_open_failed");
@@ -1955,7 +1830,7 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
         }
 
         case WorkPhase::HashLocalFile:
-            result.ok = compute_current_file_content_hash(
+            result.ok = current_file_.compute_content_hash(
                 result.content_hash,
                 sizeof(result.content_hash));
             if (!result.ok) {
@@ -1982,30 +1857,29 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::UploadFile: {
-            if (!current_file_matches_snapshot()) {
+            if (!current_file_.matches_snapshot()) {
                 copy_cstr(result.error,
                           sizeof(result.error),
                           "local_changed");
                 return;
             }
 
-            UploadContext upload_context;
-            upload_context.file = &current_file_.local;
-            upload_context.abort_requested = &abort_requested_;
+            const SleepHqSyncFileState &file = current_file_.state();
+            SleepHqSyncFile::UploadReader upload_reader(current_file_,
+                                                         abort_requested_);
             bool attached = false;
-            operation.timeout_ms =
-                sleep_hq_upload_timeout_ms(current_file_.size);
+            operation.timeout_ms = sleep_hq_upload_timeout_ms(file.size);
             operation.started_ms = millis();
 
-            if (current_file_.attach_by_hash) {
+            if (file.attach_by_hash) {
                 SleepHqAttachRequest attach;
                 attach.import_id = status_.import_id;
-                attach.name = current_file_.name;
-                attach.path = current_file_.sleep_path;
-                attach.content_hash = current_file_.content_hash;
+                attach.name = file.name;
+                attach.path = file.sleep_path;
+                attach.content_hash = file.content_hash;
                 if (client_.attach_file(attach, result.upload, &operation)) {
                     attached = true;
-                } else if (!upload_reset_cb(&upload_context)) {
+                } else if (!upload_reader.rewind()) {
                     copy_cstr(result.error,
                               sizeof(result.error),
                               client_.last_error());
@@ -2016,15 +1890,15 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
             if (!attached) {
                 SleepHqUploadRequest request;
                 request.import_id = status_.import_id;
-                request.name = current_file_.name;
-                request.path = current_file_.sleep_path;
-                request.content_hash = current_file_.content_hash[0]
-                    ? current_file_.content_hash
+                request.name = file.name;
+                request.path = file.sleep_path;
+                request.content_hash = file.content_hash[0]
+                    ? file.content_hash
                     : nullptr;
-                request.size = current_file_.size;
-                request.read = &SleepHqSyncJob::upload_read_cb;
-                request.reset = &SleepHqSyncJob::upload_reset_cb;
-                request.ctx = &upload_context;
+                request.size = file.size;
+                request.read = &SleepHqSyncFile::UploadReader::read_callback;
+                request.reset = &SleepHqSyncFile::UploadReader::reset_callback;
+                request.ctx = &upload_reader;
                 request.operation = &operation;
                 if (!client_.upload_file(request, result.upload)) {
                     copy_cstr(result.error,
@@ -2250,18 +2124,12 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
             return JobStep::Working;
 
         case WorkPhase::OpenLocal:
-            current_file_.local = result.local;
-            result.local = File();
-            current_file_.local_open = true;
-            current_file_.offset = 0;
+            current_file_.adopt(result.local);
             phase_ = WorkPhase::ResolveRemoteFile;
             return JobStep::Working;
 
         case WorkPhase::HashLocalFile:
-            copy_cstr(current_file_.content_hash,
-                      sizeof(current_file_.content_hash),
-                      result.content_hash);
-            current_file_.offset = 0;
+            current_file_.set_content_hash(result.content_hash);
             phase_ = WorkPhase::ResolveRemoteFile;
             return JobStep::Working;
 
@@ -2289,7 +2157,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
             return JobStep::Working;
 
         case WorkPhase::UploadFile:
-            close_local_locked();
+            current_file_.close();
             if (!add_staged_locked(result.upload)) {
                 fail_locked("staged_alloc");
                 return JobStep::Idle;
