@@ -19,7 +19,7 @@ namespace {
 static constexpr size_t ARCHIVE_FILE_BUFFER_BYTES = 512;
 static constexpr size_t ARCHIVE_RING_BYTES = 256 * 1024;
 static constexpr size_t ARCHIVE_PRODUCE_BYTES = 16 * 1024;
-static constexpr size_t ARCHIVE_PREPARE_ENTRY_BUDGET = 12;
+static constexpr uint32_t ARCHIVE_PREPARE_SLICE_US = 10 * 1000;
 static constexpr size_t ARCHIVE_INITIAL_ENTRY_CAPACITY = 64;
 static constexpr size_t ARCHIVE_INITIAL_PATH_BYTES = 4096;
 static constexpr size_t ARCHIVE_MAX_DEPTH = 16;
@@ -871,9 +871,16 @@ bool StorageArchiveJob::prepare_step_locked() {
         if (selection_names_) return true;
     }
 
-    size_t budget = ARCHIVE_PREPARE_ENTRY_BUDGET;
-    while (budget > 0 && walk_depth_ > 0 &&
-           status_.state == StorageArchiveState::Preparing) {
+    const uint32_t slice_started_us = micros();
+    bool first_operation = true;
+
+    while (walk_depth_ > 0 &&
+           status_.state == StorageArchiveState::Preparing &&
+           (first_operation ||
+            static_cast<uint32_t>(micros() - slice_started_us) <
+                ARCHIVE_PREPARE_SLICE_US)) {
+        first_operation = false;
+
         WalkFrame &frame = walk_stack_[walk_depth_ - 1];
         if (!ensure_walk_dir_open_locked(frame)) return false;
 
@@ -888,7 +895,6 @@ bool StorageArchiveJob::prepare_step_locked() {
             continue;
         }
         frame.next_index++;
-        budget--;
 
         char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
         const bool path_ok = storage_append_child_path(frame.path,

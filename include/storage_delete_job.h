@@ -78,8 +78,8 @@ private:
     bool append_root_locked(const char *path);
     bool push_dir_locked(const char *path);
     bool ensure_dir_open_locked(WalkFrame &frame);
-    bool delete_next_locked(uint32_t &budget);
-    bool delete_dir_step_locked(uint32_t &budget);
+    bool delete_next_locked();
+    bool delete_dir_step_locked();
     bool finish_done_locked();
 
     // synchronization/status

@@ -14,7 +14,7 @@ namespace aircannect {
 namespace {
 
 static constexpr size_t DELETE_MAX_DEPTH = 16;
-static constexpr size_t DELETE_STEP_BUDGET = 12;
+static constexpr uint32_t DELETE_STEP_SLICE_US = 10 * 1000;
 static constexpr size_t DELETE_INITIAL_PATH_BYTES = 1024;
 
 uint32_t millis_nonzero() {
@@ -341,11 +341,16 @@ JobStep StorageDeleteJob::step() {
         return JobStep::Idle;
     }
 
-    uint32_t budget = DELETE_STEP_BUDGET;
-    while (budget > 0 && status_.state == StorageDeleteState::Deleting) {
-        if (!delete_next_locked(budget)) {
+    const uint32_t slice_started_us = micros();
+
+    while (status_.state == StorageDeleteState::Deleting) {
+        if (!delete_next_locked()) {
             unlock();
             return JobStep::Idle;
+        }
+        if (static_cast<uint32_t>(micros() - slice_started_us) >=
+            DELETE_STEP_SLICE_US) {
+            break;
         }
     }
     const JobStep result =
@@ -359,8 +364,8 @@ void StorageDeleteJob::on_preempt() {
     preempt_requested_.store(true);
 }
 
-bool StorageDeleteJob::delete_next_locked(uint32_t &budget) {
-    if (walk_depth_ > 0) return delete_dir_step_locked(budget);
+bool StorageDeleteJob::delete_next_locked() {
+    if (walk_depth_ > 0) return delete_dir_step_locked();
     if (current_root_ >= status_.roots) return finish_done_locked();
 
     const char *path = path_bytes_ + root_offsets_[current_root_];
@@ -379,13 +384,11 @@ bool StorageDeleteJob::delete_next_locked(uint32_t &budget) {
     if (!exists) {
         status_.roots_done++;
         current_root_++;
-        budget--;
         status_.updated_ms = millis_nonzero();
         return true;
     }
     if (is_dir) {
         if (!push_dir_locked(path)) return false;
-        budget--;
         return true;
     }
     if (!Storage::remove(path)) {
@@ -395,12 +398,11 @@ bool StorageDeleteJob::delete_next_locked(uint32_t &budget) {
     status_.files_deleted++;
     status_.roots_done++;
     current_root_++;
-    budget--;
     status_.updated_ms = millis_nonzero();
     return true;
 }
 
-bool StorageDeleteJob::delete_dir_step_locked(uint32_t &budget) {
+bool StorageDeleteJob::delete_dir_step_locked() {
     WalkFrame &frame = walk_stack_[walk_depth_ - 1];
     if (!ensure_dir_open_locked(frame)) return false;
 
@@ -423,7 +425,6 @@ bool StorageDeleteJob::delete_dir_step_locked(uint32_t &budget) {
             status_.roots_done++;
             current_root_++;
         }
-        budget--;
         status_.updated_ms = millis_nonzero();
         return true;
     }
@@ -439,7 +440,6 @@ bool StorageDeleteJob::delete_dir_step_locked(uint32_t &budget) {
     }
     if (child.is_dir) {
         if (!push_dir_locked(child_path)) return false;
-        budget--;
         return true;
     }
     if (!Storage::remove(child_path)) {
@@ -447,7 +447,6 @@ bool StorageDeleteJob::delete_dir_step_locked(uint32_t &budget) {
         return false;
     }
     status_.files_deleted++;
-    budget--;
     status_.updated_ms = millis_nonzero();
     return true;
 }
