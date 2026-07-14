@@ -478,51 +478,6 @@ void print_storage_status(Print &out, const StorageStatus &s) {
     out.println();
 }
 
-void print_storage_writer_status(Print &out,
-                                 const StorageWriterStatus &s) {
-    out.print("[STORAGE_WRITER] initialized=");
-    out.print(s.initialized ? "yes" : "no");
-    out.print(" available=");
-    out.print(s.available ? "yes" : "no");
-    out.print(" psram=");
-    out.print(s.using_psram ? "yes" : "no");
-    out.print(" q=");
-    out.print(s.queued);
-    out.print('/');
-    out.print(s.capacity);
-    out.print(" chunk=");
-    out.print(s.chunk_bytes);
-    out.print(" enqueued=");
-    out.print(s.enqueued);
-    out.print(" written=");
-    out.print(s.written);
-    out.print(" bytes_enqueued=");
-    print_u64(out, s.bytes_enqueued);
-    out.print(" bytes_written=");
-    print_u64(out, s.bytes_written);
-    out.print(" q_drops=");
-    out.print(s.queue_drops);
-    out.print(" unavailable_drops=");
-    out.print(s.unavailable_drops);
-    out.print(" open_errors=");
-    out.print(s.open_errors);
-    out.print(" write_errors=");
-    out.print(s.write_errors);
-    if (s.rotate_errors) {
-        out.print(" rotate_errors=");
-        out.print(s.rotate_errors);
-    }
-    if (s.last_path[0]) {
-        out.print(" last_path=");
-        out.print(s.last_path);
-    }
-    if (s.last_error[0]) {
-        out.print(" error=");
-        out.print(s.last_error);
-    }
-    out.println();
-}
-
 void print_session_status(Print &out, const SessionStatus &s) {
     out.print("[SESSION] state=");
     out.print(SessionManager::state_name(s.state));

@@ -93,12 +93,7 @@ static constexpr size_t AC_PROVISION_LINE_MAX = 256;
 #endif
 
 static constexpr uint32_t AC_STORAGE_STATUS_POLL_MS = 30000;
-static constexpr size_t AC_STORAGE_WRITE_QUEUE_INTERNAL = 4;
-static constexpr size_t AC_STORAGE_WRITE_QUEUE_PSRAM = 16;
-static constexpr size_t AC_STORAGE_WRITE_CHUNK_BYTES = 512;
 static constexpr size_t AC_STORAGE_WRITE_PATH_MAX = 80;
-static constexpr size_t AC_STORAGE_WRITE_BUDGET_ITEMS = 2;
-static constexpr size_t AC_STORAGE_WRITE_BUDGET_BYTES = 1024;
 
 #ifndef AC_FILE_LOG_ENABLED
 #define AC_FILE_LOG_ENABLED AC_STORAGE_HAS_SDCARD

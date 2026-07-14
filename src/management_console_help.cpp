@@ -133,10 +133,10 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "storage") {
         out.println("[HELP storage]");
-        out.println("  storage status            show mounted storage and writer state");
+        out.println("  storage status            show mounted storage state");
         out.println("  storage remount           retry storage mount");
-        out.println("  storage queue             show async writer queue state");
-        out.println("  storage write-test P T    append test text through writer");
+        out.println("  storage write-test P T    append text in the background");
+        out.println("  storage write-test status show background test result");
         return;
     }
 

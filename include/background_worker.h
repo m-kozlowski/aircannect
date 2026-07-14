@@ -95,7 +95,7 @@ private:
     static constexpr uint32_t GATE_AS11 = 1u << 5;
     static constexpr uint32_t GATE_UNPUBLISHED = 1u << 31;
 
-    static constexpr size_t MAX_JOBS = 10;
+    static constexpr size_t MAX_JOBS = 11;
 
     // task loop
     static void task_entry(void *param);

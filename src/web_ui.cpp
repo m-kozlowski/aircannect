@@ -31,7 +31,6 @@
 #include "storage_directory.h"
 #include "storage_manager.h"
 #include "storage_path.h"
-#include "storage_writer.h"
 #include "system_status_snapshot.h"
 #include "string_util.h"
 #include "string_print.h"

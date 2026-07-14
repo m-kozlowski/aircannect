@@ -18,9 +18,9 @@
 #include "management_console_utils.h"
 #include "memory_manager.h"
 #include "report_store.h"
+#include "storage_diagnostic_job.h"
 #include "storage_export_plan.h"
 #include "storage_manager.h"
-#include "storage_writer.h"
 #include "string_util.h"
 #include "tls_memory.h"
 #include "version.h"
@@ -60,6 +60,21 @@ void print_web_buffer_memory(Print &out,
     out.print(static_cast<unsigned long>(buffer.length));
     out.print(" cap=");
     out.print(static_cast<unsigned long>(buffer.capacity));
+    out.println();
+}
+
+void print_storage_test_status(Print &out,
+                               const StorageDiagnosticStatus &status) {
+    out.print("[STORAGE_TEST] state=");
+    out.print(storage_diagnostic_state_name(status.state));
+    out.print(" path=");
+    out.print(status.path[0] ? status.path : "--");
+    out.print(" bytes=");
+    out.print(status.bytes);
+    if (status.error[0]) {
+        out.print(" error=");
+        out.print(status.error);
+    }
     out.println();
 }
 
@@ -191,20 +206,6 @@ void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
         stream.frame_pool_allocation_failures()));
     out.print(" approx_bytes=");
     out.print(static_cast<unsigned long>(frame_pool_bytes));
-    out.println();
-
-    const StorageWriterStatus storage = StorageWriter::status();
-    out.print("[MEM owner] storage_writer psram=");
-    out.print(storage.using_psram ? "yes" : "no");
-    out.print(" q=");
-    out.print(static_cast<unsigned long>(storage.queued));
-    out.print('/');
-    out.print(static_cast<unsigned long>(storage.capacity));
-    out.print(" chunk=");
-    out.print(static_cast<unsigned long>(storage.chunk_bytes));
-    out.print(" data_bytes=");
-    out.print(static_cast<unsigned long>(
-        storage.capacity * storage.chunk_bytes));
     out.println();
 
     const OximetrySensorStatus oxi = ctx.oximetry_manager.sensor_status();
@@ -1057,7 +1058,6 @@ void ManagementConsole::handle_stats_command(Print &out,
     ConsoleFormat::print_log_stats(out);
     ConsoleFormat::print_memory_status(out, Memory::status());
     ConsoleFormat::print_storage_status(out, Storage::status());
-    ConsoleFormat::print_storage_writer_status(out, StorageWriter::status());
     ConsoleFormat::print_session_status(out, ctx.session_manager.status());
     ConsoleFormat::print_sink_status(out, ctx.sink_manager);
     print_edf_recorder_status(out, ctx.edf_recorder_manager);
@@ -1358,14 +1358,11 @@ void ManagementConsole::handle_report_command(Print &out,
 void ManagementConsole::handle_storage_command(Print &out,
                                                String rest,
                                                ConsoleContext &ctx) {
-    (void)ctx;
     trim_inplace(rest);
     String rest_lower = rest;
     to_lower_inplace(rest_lower);
     if (!rest_lower.length() || rest_lower == "status") {
         ConsoleFormat::print_storage_status(out, Storage::status());
-        ConsoleFormat::print_storage_writer_status(out,
-                                                   StorageWriter::status());
         return;
     }
     if (rest_lower == "remount" || rest_lower == "retry") {
@@ -1373,9 +1370,13 @@ void ManagementConsole::handle_storage_command(Print &out,
         ConsoleFormat::print_storage_status(out, Storage::status());
         return;
     }
-    if (rest_lower == "queue" || rest_lower == "writer") {
-        ConsoleFormat::print_storage_writer_status(out,
-                                                   StorageWriter::status());
+    if (rest_lower == "write-test status") {
+        if (!ctx.storage_diagnostic_job) {
+            out.println("[STORAGE_TEST] unavailable");
+            return;
+        }
+        print_storage_test_status(out,
+                                  ctx.storage_diagnostic_job->status());
         return;
     }
     if (rest_lower == "write-test" || rest_lower.startsWith("write-test ")) {
@@ -1383,26 +1384,28 @@ void ManagementConsole::handle_storage_command(Print &out,
         args.remove(0, String("write-test").length());
         int pos = 0;
         String path = "/aircannect-write-test.txt";
-        String text = "AirCANnect storage writer test";
+        String text = "AirCANnect storage write test";
         String parsed;
         if (parse_console_arg(args, pos, parsed)) {
             path = parsed;
             if (parse_console_arg(args, pos, parsed)) text = parsed;
         }
         text += '\n';
-        const bool queued =
-            StorageWriter::enqueue_append(path.c_str(),
-                                          reinterpret_cast<const uint8_t *>(
-                                              text.c_str()),
-                                          text.length());
-        out.print("[STORAGE_WRITER] test ");
+        StorageDiagnosticJob *job = ctx.storage_diagnostic_job;
+        const bool queued = job && job->request_append(
+            path.c_str(),
+            reinterpret_cast<const uint8_t *>(text.c_str()),
+            text.length());
+
+        out.print("[STORAGE_TEST] ");
         out.println(queued ? "queued" : "rejected");
-        ConsoleFormat::print_storage_writer_status(out,
-                                                   StorageWriter::status());
+        if (job) {
+            print_storage_test_status(out, job->status());
+        }
         return;
     }
     print_unknown_command(out, "STORAGE",
-                          "storage status, remount, queue, write-test");
+                          "storage status, remount, write-test [status|P T]");
 }
 
 void ManagementConsole::handle_smb_command(Print &out,

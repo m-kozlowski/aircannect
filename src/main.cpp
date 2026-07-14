@@ -31,9 +31,9 @@
 #include "storage_archive_job.h"
 #include "storage_browser_job.h"
 #include "storage_delete_job.h"
+#include "storage_diagnostic_job.h"
 #include "storage_manager.h"
 #include "storage_sync_job.h"
-#include "storage_writer.h"
 #if AC_STACK_PROFILE_ENABLED
 #include "stack_profiler.h"
 #endif
@@ -69,6 +69,7 @@ static BackgroundWorker bg_worker;
 static StorageBrowserJob storage_browser_job;
 static StorageArchiveJob storage_archive_job;
 static StorageDeleteJob storage_delete_job;
+static StorageDiagnosticJob storage_diagnostic_job;
 static StorageSyncJob *storage_sync_job = nullptr;
 static SleepHqSyncJob *sleephq_sync_job = nullptr;
 static ExportCoordinator export_coordinator;
@@ -117,6 +118,7 @@ static ConsoleContext console_ctx{
     edf_recorder_manager,
     oximetry_manager,
     report_manager,
+    &storage_diagnostic_job,
     nullptr,
     nullptr,
     nullptr,
@@ -349,7 +351,6 @@ void setup() {
 
     // Persistent storage
     Storage::begin();
-    StorageWriter::begin();
     EdfStorageWorker::begin();
 
     const StorageStatus storage = Storage::status();
@@ -449,6 +450,7 @@ void setup() {
     storage_browser_job.begin();
     storage_archive_job.begin();
     storage_delete_job.begin();
+    storage_diagnostic_job.begin();
 
     if (storage_sync_job) {
         storage_sync_job->begin(app_config.data());
@@ -462,6 +464,7 @@ void setup() {
     bg_worker.add_job(&storage_browser_job);
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
+    bg_worker.add_job(&storage_diagnostic_job);
     bg_worker.add_job(&edf_report_catalog_job);
     bg_worker.add_job(&report_cache_writer_job);
     bg_worker.add_job(&report_prefetch_job);
@@ -545,7 +548,7 @@ void loop() {
     drain_can_rx_after("network_services.sync");
 
     // Log and time services
-    const bool storage_writer_idle_allowed =
+    const bool storage_capacity_update_allowed =
         !rpc_arbiter.stream_activity_active() &&
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
@@ -586,7 +589,7 @@ void loop() {
     drain_can_rx_after("resmed_ota_post");
 
     // Storage and exports
-    Storage::poll(storage_writer_idle_allowed);
+    Storage::poll(storage_capacity_update_allowed);
     drain_can_rx_after("storage_poll");
 
     export_coordinator.poll(
@@ -624,13 +627,6 @@ void loop() {
     // RPC event fanout after network and console frontends.
     drain_rpc_events();
     drain_can_rx_after("rpc_events_post_frontends");
-
-    // Deferred storage writes and diagnostics
-    if (storage_writer_idle_allowed) {
-        StorageWriter::poll();
-    }
-
-    drain_can_rx_after("storage_writer");
 
     poll_stack_profiler(now_ms);
 
