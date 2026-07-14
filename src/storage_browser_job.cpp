@@ -7,6 +7,7 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "runtime_clock.h"
 #include "storage_directory.h"
 #include "storage_directory_order.h"
 #include "storage_manager.h"
@@ -23,15 +24,6 @@ static constexpr size_t DOWNLOAD_RING_BYTES = 256 * 1024;
 static constexpr size_t DOWNLOAD_READ_BYTES = 16 * 1024;
 static constexpr size_t DOWNLOAD_READY_BYTES = 32 * 1024;
 static constexpr uint32_t DOWNLOAD_ATTACH_TIMEOUT_MS = 60 * 1000;
-
-uint32_t millis_nonzero() {
-    uint32_t now = millis();
-    return now == 0 ? 1 : now;
-}
-
-bool deadline_reached(uint32_t now, uint32_t deadline) {
-    return deadline != 0 && static_cast<int32_t>(now - deadline) >= 0;
-}
 
 void wake_background_worker() {
     if (BackgroundWorker *worker = background_worker()) worker->wake();
@@ -608,7 +600,7 @@ bool StorageBrowserJob::begin_download(
     }
 
     active_download_->consumer_attached = true;
-    active_download_->consumer_activity_ms = millis_nonzero();
+    active_download_->consumer_activity_ms = nonzero_millis(millis());
     copy_cstr(filename_out, filename_out_size, active_download_->filename);
     size_out = active_download_->size;
     download_out = active_download_;
@@ -638,7 +630,7 @@ PreparedByteRead StorageBrowserJob::read_download(
     result.bytes = download.ring.read(buffer, max_length);
     if (result.bytes > 0) {
         download.consumed += result.bytes;
-        download.consumer_activity_ms = millis_nonzero();
+        download.consumer_activity_ms = nonzero_millis(millis());
         result.state = PreparedByteReadState::Data;
     } else if (download.producer_done) {
         result.state = PreparedByteReadState::End;
@@ -678,7 +670,7 @@ void StorageBrowserJob::close_download_file(StoragePreparedDownload &download) {
 void StorageBrowserJob::fail_download_locked(StoragePreparedDownload &download,
                                              const char *error) {
     copy_cstr(download.error, sizeof(download.error), error);
-    if (download.ready_ms == 0) download.ready_ms = millis_nonzero();
+    if (download.ready_ms == 0) download.ready_ms = nonzero_millis(millis());
     download.producer_done = true;
 }
 
@@ -711,7 +703,7 @@ JobStep StorageBrowserJob::download_step() {
 
     if (download->producer_done) {
         const bool attach_expired = !download->consumer_attached &&
-            deadline_reached(millis_nonzero(),
+            millis_deadline_reached(nonzero_millis(millis()),
                              download->ready_ms +
                                  DOWNLOAD_ATTACH_TIMEOUT_MS);
         if (attach_expired) {
@@ -766,7 +758,7 @@ JobStep StorageBrowserJob::download_step() {
             download->input_open = true;
             download->size = size;
             download->metadata_ready = true;
-            download->ready_ms = millis_nonzero();
+            download->ready_ms = nonzero_millis(millis());
             if (size == 0) {
                 download->producer_done = true;
             }
@@ -779,14 +771,14 @@ JobStep StorageBrowserJob::download_step() {
     }
 
     if (!download->consumer_attached &&
-        deadline_reached(millis_nonzero(),
+        millis_deadline_reached(nonzero_millis(millis()),
                          download->ready_ms + DOWNLOAD_ATTACH_TIMEOUT_MS)) {
         download->cancel_requested.store(true, std::memory_order_relaxed);
         unlock();
         return JobStep::Working;
     }
     if (download->consumer_attached && !download->consumer_closed &&
-        deadline_reached(millis_nonzero(),
+        millis_deadline_reached(nonzero_millis(millis()),
                          download->consumer_activity_ms +
                              DOWNLOAD_ATTACH_TIMEOUT_MS)) {
         download->cancel_requested.store(true, std::memory_order_relaxed);

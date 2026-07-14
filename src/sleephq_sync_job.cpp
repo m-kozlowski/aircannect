@@ -11,6 +11,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "runtime_clock.h"
 #include "storage_export_plan.h"
 #include "storage_export_state.h"
 #include "storage_manager.h"
@@ -63,11 +64,6 @@ void sleep_hq_digest_to_hex(const uint8_t digest[16],
         out[i * 2 + 1] = HEX_DIGITS[digest[i] & 0x0F];
     }
     out[32] = '\0';
-}
-
-uint32_t millis_nonzero() {
-    const uint32_t now = millis();
-    return now == 0 ? 1 : now;
 }
 
 uint32_t sleep_hq_upload_timeout_ms(uint64_t size) {
@@ -366,7 +362,7 @@ bool SleepHqSyncJob::request_locked(RunKind kind,
     copy_cstr(status_.pending_reason, sizeof(status_.pending_reason),
               reason && *reason ? reason : "manual");
     status_.last_error[0] = 0;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     return true;
@@ -781,7 +777,7 @@ void SleepHqSyncJob::finish_check_locked(uint32_t team_id) {
     status_.state = status_.configured ? SleepHqSyncState::Idle
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     Log::logf(CAT_SLEEPHQ, LOG_INFO, "check ok team_id=%lu\n",
               static_cast<unsigned long>(team_id));
     reset_run_locked(true);
@@ -804,7 +800,7 @@ void SleepHqSyncJob::finish_sync_locked() {
     status_.state = status_.configured ? SleepHqSyncState::Idle
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     Log::logf(CAT_SLEEPHQ, LOG_INFO,
               "done seen=%u uploaded=%u skipped=%u failed=%u bytes=%llu\n",
               static_cast<unsigned>(status_.files_seen),
@@ -837,7 +833,7 @@ void SleepHqSyncJob::fail_locked(const char *error) {
                   sizeof(status_.pending_reason),
                   reason);
         status_.last_error[0] = '\0';
-        status_.updated_ms = millis_nonzero();
+        status_.updated_ms = nonzero_millis(millis());
         retry_due_ms_ = 0;
         retry_attempt_ = 0;
         Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
@@ -852,7 +848,7 @@ void SleepHqSyncJob::fail_locked(const char *error) {
     status_.last_failure_epoch = storage_export_current_epoch_seconds_or_zero();
     status_.state = SleepHqSyncState::Error;
     status_.pending = false;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     status_.files_failed++;
     char retry_datalog_day[9] = {};
     copy_cstr(retry_datalog_day, sizeof(retry_datalog_day),
@@ -1109,7 +1105,7 @@ bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
     current_file_.force_upload = item.force_export;
     status_.files_seen++;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
 
     if (!item.info.exists || item.info.is_dir) {
         phase_ = WorkPhase::NextFile;
@@ -1696,7 +1692,7 @@ JobStep SleepHqSyncJob::begin_export_work_locked() {
     }
     if (restored_phase == InflightPhase::Processing &&
         status_.import_id != 0) {
-        import_process_started_ms_ = millis_nonzero();
+        import_process_started_ms_ = nonzero_millis(millis());
         import_poll_due_ms_ = import_process_started_ms_;
         phase_ = WorkPhase::WaitImport;
         return JobStep::Waiting;
@@ -1785,7 +1781,7 @@ JobStep SleepHqSyncJob::step_wait_import_locked() {
         return JobStep::Working;
     }
 
-    const uint32_t now = millis_nonzero();
+    const uint32_t now = nonzero_millis(millis());
     if (import_poll_due_ms_ != 0 &&
         static_cast<int32_t>(now - import_poll_due_ms_) < 0) {
         return JobStep::Waiting;
@@ -2313,14 +2309,14 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                 fail_locked("inflight_write_failed");
                 return JobStep::Idle;
             }
-            import_process_started_ms_ = millis_nonzero();
+            import_process_started_ms_ = nonzero_millis(millis());
             import_poll_due_ms_ = import_process_started_ms_;
             status_.import_status[0] = '\0';
             phase_ = WorkPhase::WaitImport;
             return JobStep::Waiting;
 
         case WorkPhase::FetchImport: {
-            const uint32_t now = millis_nonzero();
+            const uint32_t now = nonzero_millis(millis());
             char previous_status[AC_SLEEPHQ_STATUS_MAX] = {};
             copy_cstr(previous_status,
                       sizeof(previous_status),
@@ -2414,7 +2410,7 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
 
 JobStep SleepHqSyncJob::step() {
     if (!lock(20)) return JobStep::Waiting;
-    const uint32_t now = millis_nonzero();
+    const uint32_t now = nonzero_millis(millis());
     apply_pending_config_locked();
     queue_retry_locked(now);
     if (abort_requested_.load() &&

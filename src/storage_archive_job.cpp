@@ -9,6 +9,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "runtime_clock.h"
 #include "storage_directory.h"
 #include "storage_manager.h"
 #include "string_util.h"
@@ -93,15 +94,6 @@ ZipDosTimestamp zip_dos_timestamp(time_t seconds) {
                                      (month << 5) |
                                      day);
     return out;
-}
-
-uint32_t millis_nonzero() {
-    uint32_t now = millis();
-    return now == 0 ? 1 : now;
-}
-
-bool deadline_reached(uint32_t now, uint32_t deadline) {
-    return deadline != 0 && static_cast<int32_t>(now - deadline) >= 0;
 }
 
 void log_archive_alloc_failed(const char *context, size_t bytes) {
@@ -244,7 +236,7 @@ void StorageArchiveJob::set_error_locked(const char *error) {
     release_build_buffers_locked();
     status_.state = StorageArchiveState::Error;
     copy_cstr(status_.error, sizeof(status_.error), error);
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     Log::logf(CAT_STORAGE, LOG_WARN, "[ARCHIVE] error=%s\n",
               status_.error[0] ? status_.error : "error");
 }
@@ -257,7 +249,7 @@ void StorageArchiveJob::reset_job_locked(bool keep_status) {
     if (!keep_status) {
         status_ = StorageArchiveStatus();
         status_.state = StorageArchiveState::Idle;
-        status_.updated_ms = millis_nonzero();
+        status_.updated_ms = nonzero_millis(millis());
     }
 }
 
@@ -335,7 +327,7 @@ void StorageArchiveJob::apply_preempt_locked() {
     if (!preempt_requested_.exchange(false)) return;
     if (status_.state == StorageArchiveState::Preparing) {
         close_walk_files_locked();
-        status_.updated_ms = millis_nonzero();
+        status_.updated_ms = nonzero_millis(millis());
     } else if (status_.state == StorageArchiveState::Downloading &&
                active_download_) {
         std::shared_ptr<StorageArchiveDownload> download = active_download_;
@@ -375,7 +367,7 @@ bool StorageArchiveJob::begin_job_locked(const char *source_path,
             : storage_basename_from_path(status_.source_path);
     if (!base || !*base) base = "storage";
     snprintf(status_.filename, sizeof(status_.filename), "%s.zip", base);
-    status_.started_ms = millis_nonzero();
+    status_.started_ms = nonzero_millis(millis());
     status_.updated_ms = status_.started_ms;
     return true;
 }
@@ -545,7 +537,7 @@ bool StorageArchiveJob::begin_download(
     status_.state = StorageArchiveState::Downloading;
     status_.bytes_done = 0;
     status_.files_done = 0;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     download->id = id;
     download->consumer_activity_ms = status_.updated_ms;
     copy_cstr(filename_out, filename_out_size, status_.filename);
@@ -801,7 +793,7 @@ bool StorageArchiveJob::prepare_selection_step_locked() {
 
     selection_index_++;
     if (selection_index_ >= selection_count_) release_selection_locked();
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     return true;
 }
 
@@ -875,7 +867,7 @@ bool StorageArchiveJob::prepare_step_locked() {
         status_.state == StorageArchiveState::Preparing) {
         return finalize_prepare_locked();
     }
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     return true;
 }
 
@@ -890,7 +882,7 @@ bool StorageArchiveJob::finalize_prepare_locked() {
     status_.state = StorageArchiveState::Ready;
     status_.archive_bytes = status_.estimated_archive_bytes;
     status_.bytes_done = 0;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     release_walk_stack_locked();
     Log::logf(CAT_STORAGE,
               LOG_INFO,
@@ -934,9 +926,9 @@ JobStep StorageArchiveJob::download_step_locked() {
         return JobStep::Idle;
     }
 
-    const uint32_t now = millis_nonzero();
+    const uint32_t now = nonzero_millis(millis());
     const bool consumer_expired =
-        deadline_reached(now,
+        millis_deadline_reached(now,
                          download->consumer_activity_ms +
                              ARCHIVE_CONSUMER_TIMEOUT_MS);
     if (download->cancel_requested.load(std::memory_order_relaxed) ||
@@ -1010,7 +1002,7 @@ PreparedByteRead StorageArchiveJob::read_download(
         return result;
     }
 
-    download.consumer_activity_ms = millis_nonzero();
+    download.consumer_activity_ms = nonzero_millis(millis());
     result.bytes = download.ring.read(buffer, max_len);
     if (result.bytes > 0) {
         download.consumed += result.bytes;
@@ -1288,7 +1280,7 @@ size_t StorageArchiveJob::produce_download_locked(
 
     status_.bytes_done = download.output_offset;
     status_.archive_bytes = status_.estimated_archive_bytes;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     return written;
 }
 

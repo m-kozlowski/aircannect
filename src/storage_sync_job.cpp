@@ -10,6 +10,7 @@
 #include "debug_log.h"
 #include "edf_storage_worker.h"
 #include "memory_manager.h"
+#include "runtime_clock.h"
 #include "storage_directory.h"
 #include "storage_export_plan.h"
 #include "storage_export_state.h"
@@ -33,11 +34,6 @@ const uint32_t SYNC_RETRY_BACKOFF_MS[] = {
     6UL * 60UL * 60UL * 1000UL,
     6UL * 60UL * 60UL * 1000UL,
 };
-
-uint32_t millis_nonzero() {
-    uint32_t now = millis();
-    return now == 0 ? 1 : now;
-}
 
 bool parse_uint64_text(const char *text, uint64_t &out) {
     if (!text || !*text) return false;
@@ -358,7 +354,7 @@ void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     status_.password_set = config.password[0] != '\0';
     status_.network_available = network_available_.load();
     status_.config_generation = next_config_generation_++;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     endpoint_hash_ = 0;
     state_dir_[0] = '\0';
     clear_result_metadata_locked();
@@ -505,7 +501,7 @@ bool StorageSyncJob::begin_run_locked() {
     status_.last_error[0] = '\0';
     status_.last_run_verify = run_kind_is_verify(current_run_kind_);
     status_.last_run_reconcile = run_kind_is_reconcile(current_run_kind_);
-    status_.started_ms = millis_nonzero();
+    status_.started_ms = nonzero_millis(millis());
     status_.updated_ms = status_.started_ms;
     publish_runtime_locked();
 
@@ -554,7 +550,7 @@ bool StorageSyncJob::request_sync_with_kind(RunKind kind, const char *label) {
         pending_run_kind_ = kind;
         copy_cstr(status_.pending_reason, sizeof(status_.pending_reason),
                   run_kind_reason(kind));
-        status_.updated_ms = millis_nonzero();
+        status_.updated_ms = nonzero_millis(millis());
         retry_due_ms_ = 0;
         retry_attempt_ = 0;
         Log::logf(CAT_STORAGE,
@@ -587,7 +583,7 @@ bool StorageSyncJob::queue_post_therapy_locked(uint32_t now_ms) {
     copy_cstr(status_.pending_reason,
               sizeof(status_.pending_reason),
               run_kind_reason(pending_run_kind_));
-    status_.updated_ms = now_ms == 0 ? millis_nonzero() : now_ms;
+    status_.updated_ms = now_ms == 0 ? nonzero_millis(millis()) : now_ms;
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     publish_runtime_locked();
@@ -627,7 +623,7 @@ bool StorageSyncJob::request_post_therapy_sync() {
     if (status_.state == StorageSyncState::Working) {
         post_therapy_requested_.store(true);
     } else {
-        (void)queue_post_therapy_locked(millis_nonzero());
+        (void)queue_post_therapy_locked(nonzero_millis(millis()));
     }
     unlock();
     if (BackgroundWorker *worker = background_worker()) worker->wake();
@@ -766,7 +762,7 @@ bool StorageSyncJob::latest_verify_file_step_locked(char *error_out,
     }
 
     status_.files_seen++;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     const uint64_t mtime = child.last_write > 0
         ? static_cast<uint64_t>(child.last_write)
         : 0;
@@ -1012,7 +1008,7 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     copy_cstr(current_file_.path, sizeof(current_file_.path), path);
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
     status_.files_seen++;
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
 
     if (!item.info.exists || item.info.is_dir) {
         phase_ = WorkPhase::NextFile;
@@ -1096,7 +1092,7 @@ void StorageSyncJob::finish_run_locked() {
         status_.pending_reason[0] = '\0';
     }
     status_.last_error[0] = '\0';
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     phase_ = WorkPhase::Idle;
@@ -1175,7 +1171,7 @@ void StorageSyncJob::preempt_run_locked() {
     status_.pending = true;
     copy_cstr(status_.pending_reason, sizeof(status_.pending_reason), reason);
     status_.last_error[0] = '\0';
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     Log::logf(CAT_STORAGE,
@@ -1214,7 +1210,7 @@ void StorageSyncJob::fail_locked(const char *error) {
     copy_cstr(status_.last_failure_error,
               sizeof(status_.last_failure_error),
               status_.last_error);
-    status_.updated_ms = millis_nonzero();
+    status_.updated_ms = nonzero_millis(millis());
     phase_ = WorkPhase::Idle;
     if (status_.enabled && status_.configured) {
         const size_t backoff_count =
@@ -1676,7 +1672,7 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
                 static_cast<uint64_t>(result.transferred);
             status_.bytes_uploaded +=
                 static_cast<uint64_t>(result.transferred);
-            status_.updated_ms = millis_nonzero();
+            status_.updated_ms = nonzero_millis(millis());
             if (current_file_.offset >= current_file_.size) {
                 phase_ = WorkPhase::CloseRemote;
             }
@@ -1745,7 +1741,7 @@ JobStep StorageSyncJob::step_work_phase_locked() {
 JobStep StorageSyncJob::step() {
     if (!lock(20)) return JobStep::Waiting;
     JobStep result = JobStep::Idle;
-    if (!prepare_step_locked(millis_nonzero(), result)) {
+    if (!prepare_step_locked(nonzero_millis(millis()), result)) {
         unlock();
         return result;
     }
