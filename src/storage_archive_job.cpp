@@ -176,6 +176,7 @@ enum class ArchiveStreamPhase : uint8_t {
 
 struct StorageArchiveDownload {
     uint32_t id = 0;
+    uint64_t expected_size = 0;
     ArchiveStreamPhase phase = ArchiveStreamPhase::EntryHeader;
     size_t phase_offset = 0;
     size_t entry_index = 0;
@@ -483,7 +484,15 @@ bool StorageArchiveJob::start_selected(const char *base_path,
 
 bool StorageArchiveJob::status(StorageArchiveStatus &out,
                                uint32_t timeout_ms) const {
-    return published_status_.read(out, timeout_ms);
+    if (!published_status_.read(out, timeout_ms)) return false;
+
+    const uint32_t progress_id =
+        download_progress_id_.load(std::memory_order_acquire);
+    if (progress_id != 0 && progress_id == out.id) {
+        out.bytes_sent =
+            download_bytes_sent_.load(std::memory_order_acquire);
+    }
+    return true;
 }
 
 StorageArchiveStatus StorageArchiveJob::status() const {
@@ -542,14 +551,18 @@ bool StorageArchiveJob::begin_download(
 
     status_.state = StorageArchiveState::Downloading;
     status_.bytes_done = 0;
+    status_.bytes_sent = 0;
     status_.files_done = 0;
     touch_status_locked();
     download->id = id;
+    download->expected_size = status_.estimated_archive_bytes;
     download->transfer.attach(status_.updated_ms);
     copy_cstr(filename_out, filename_out_size, status_.filename);
     size_out = status_.estimated_archive_bytes;
     active_download_ = download;
     download_out = download;
+    download_bytes_sent_.store(0, std::memory_order_relaxed);
+    download_progress_id_.store(id, std::memory_order_release);
     unlock();
 
     wake_background_worker();
@@ -557,16 +570,8 @@ bool StorageArchiveJob::begin_download(
 }
 
 void StorageArchiveJob::finish_download(StorageArchiveDownload &download) {
-    if (!lock(0)) {
-        download.transfer.request_cancel();
-        wake_background_worker();
-        return;
-    }
-    if (active_download_.get() == &download) {
-        download.transfer.finish(
-            download.transfer.consumed() == status_.estimated_archive_bytes);
-    }
-    unlock();
+    download.transfer.finish(
+        download.transfer.consumed() == download.expected_size);
     wake_background_worker();
 }
 
@@ -993,23 +998,14 @@ PreparedByteRead StorageArchiveJob::read_download(
     uint8_t *buffer,
     size_t max_len,
     size_t offset) {
-    PreparedByteRead result;
-    if (!buffer || max_len == 0 || !lock(0)) {
-        result.state = PreparedByteReadState::Retry;
-        return result;
-    }
+    PreparedByteRead result = download.transfer.read(
+        buffer, max_len, offset, nonzero_millis(millis()));
 
-    if (!active_download_ || active_download_.get() != &download ||
-        status_.state != StorageArchiveState::Downloading) {
-        unlock();
-        return result;
+    if (download_progress_id_.load(std::memory_order_acquire) == download.id) {
+        download_bytes_sent_.store(
+            static_cast<uint32_t>(download.transfer.consumed()),
+            std::memory_order_release);
     }
-
-    result = download.transfer.read(buffer,
-                                    max_len,
-                                    offset,
-                                    nonzero_millis(millis()));
-    unlock();
 
     if (result.bytes > 0) wake_background_worker();
     return result;

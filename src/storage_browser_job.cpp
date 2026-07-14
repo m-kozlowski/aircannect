@@ -734,37 +734,15 @@ PreparedByteRead StorageDownloadProducer::read(
     uint8_t *buffer,
     size_t max_length,
     size_t offset) {
-    PreparedByteRead result;
-    if (!buffer || max_length == 0 || !lock(0)) {
-        result.state = PreparedByteReadState::Retry;
-        return result;
-    }
-
-    if (!active_ || active_.get() != &download || download.error[0]) {
-        unlock();
-        return result;
-    }
-
-    result = download.transfer.read(buffer,
-                                    max_length,
-                                    offset,
-                                    nonzero_millis(millis()));
-    unlock();
+    PreparedByteRead result = download.transfer.read(
+        buffer, max_length, offset, nonzero_millis(millis()));
 
     if (result.bytes > 0) wake_background_worker();
     return result;
 }
 
 void StorageDownloadProducer::finish(StoragePreparedDownload &download) {
-    if (!lock(0)) {
-        download.transfer.request_cancel();
-        wake_background_worker();
-        return;
-    }
-    if (active_.get() == &download) {
-        download.transfer.finish(download.transfer.consumed() == download.size);
-    }
-    unlock();
+    download.transfer.finish(download.transfer.consumed() == download.size);
     wake_background_worker();
 }
 

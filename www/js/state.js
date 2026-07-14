@@ -100,6 +100,7 @@
     let storageNextOffset = null;
     let storageListRequestSeq = 0;
     let storageArchivePollTimer = null;
+    let storageArchiveDownloadStartedId = 0;
     let storageDeletePollTimer = null;
     let smbSyncPollTimer = null;
     let sleepHqSyncPollTimer = null;

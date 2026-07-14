@@ -14,6 +14,7 @@
 #include "auth_utils.h"
 #include "app_config_registry.h"
 #include "app_config_update.h"
+#include "async_prepared_response.h"
 #include "as11_rpc.h"
 #include "background_worker.h"
 #include "board.h"
@@ -2640,7 +2641,7 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
         return;
     }
 
-    AsyncWebServerResponse *response = request->beginResponse(
+    AsyncWebServerResponse *response = new (std::nothrow) AsyncPreparedResponse(
         "application/octet-stream",
         static_cast<size_t>(file_size),
         [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
@@ -2804,6 +2805,7 @@ void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
     json_add_int(json, "dirs", static_cast<long>(status.dirs));
     json_add_int(json, "files_done", static_cast<long>(status.files_done));
     json_add_uint64(json, "bytes_done", status.bytes_done);
+    json_add_uint64(json, "bytes_sent", status.bytes_sent);
     json_add_uint64(json, "estimated_archive_bytes",
                     status.estimated_archive_bytes);
     json += '}';
@@ -2879,7 +2881,7 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
         return;
     }
 
-    AsyncWebServerResponse *response = request->beginResponse(
+    AsyncWebServerResponse *response = new (std::nothrow) AsyncPreparedResponse(
         "application/zip",
         static_cast<size_t>(archive_size),
         [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {

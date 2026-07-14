@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -21,8 +22,8 @@ public:
     void bind(uint8_t *storage, size_t capacity);
     void clear();
 
-    size_t readable() const { return size_; }
-    size_t writable() const { return capacity_ - size_; }
+    size_t readable() const;
+    size_t writable() const;
     size_t capacity() const { return capacity_; }
 
     uint8_t *write_span(size_t &length);
@@ -33,8 +34,9 @@ private:
     uint8_t *storage_ = nullptr;
     size_t capacity_ = 0;
     size_t head_ = 0;
-    size_t size_ = 0;
+    size_t tail_ = 0;
     size_t offered_write_ = 0;
+    std::atomic<uint32_t> size_{0};
 };
 
 }  // namespace aircannect

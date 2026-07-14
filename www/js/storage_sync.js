@@ -919,6 +919,7 @@
       const filesDone = Number(data && data.files_done) || 0;
       const files = Number(data && data.files) || 0;
       const bytes = Number(data && data.bytes_done) || 0;
+      const bytesSent = Number(data && data.bytes_sent) || 0;
       const estimate = Number(data && data.estimated_archive_bytes) || 0;
       if (state === "preparing") {
         return files > 0 ? "Preparing " + files + " files" : "Preparing file list";
@@ -928,7 +929,13 @@
         return "Building " + filesDone + "/" + files + pct;
       }
       if (state === "ready") return "Archive ready";
-      if (state === "downloading") return "Downloading";
+      if (state === "downloading") {
+        if (estimate <= 0) return "Downloading";
+        const pct = Math.min(100, Math.floor(bytesSent * 100 / estimate));
+        const sentMiB = (bytesSent / (1024 * 1024)).toFixed(1);
+        const totalMiB = (estimate / (1024 * 1024)).toFixed(1);
+        return "Downloading " + pct + "% (" + sentMiB + "/" + totalMiB + " MiB)";
+      }
       if (state === "error") return data && data.error ? data.error : "Archive failed";
       return state;
     }
@@ -939,18 +946,30 @@
         const text = await response.text();
         if (!response.ok) throw new Error(storageErrorText(text, response.status));
         const data = JSON.parse(text);
-        if (Number(data.id) !== Number(id)) return false;
         const state = data.state || "unknown";
-        msg("storageMsg", storageArchiveStatusText(data), state !== "error", state === "error");
-        if (state === "ready") {
+
+        if (state === "idle" &&
+            Number(storageArchiveDownloadStartedId) === Number(id)) {
           clearInterval(storageArchivePollTimer);
           storageArchivePollTimer = null;
+          storageArchiveDownloadStartedId = 0;
           storageArchiveSetBusy(false);
-          storageArchiveDownload(id);
+          msg("storageMsg", "Archive download complete", true, false);
           return true;
+        }
+        if (Number(data.id) !== Number(id)) return false;
+
+        msg("storageMsg", storageArchiveStatusText(data), state !== "error", state === "error");
+        if (state === "ready") {
+          if (Number(storageArchiveDownloadStartedId) !== Number(id)) {
+            storageArchiveDownloadStartedId = Number(id);
+            storageArchiveDownload(id);
+          }
+          return false;
         } else if (state === "error" || state === "idle") {
           clearInterval(storageArchivePollTimer);
           storageArchivePollTimer = null;
+          storageArchiveDownloadStartedId = 0;
           storageArchiveSetBusy(false);
           return true;
         }
@@ -958,6 +977,7 @@
       } catch (error) {
         clearInterval(storageArchivePollTimer);
         storageArchivePollTimer = null;
+        storageArchiveDownloadStartedId = 0;
         storageArchiveSetBusy(false);
         msg("storageMsg", error.message, false, true);
         return true;
@@ -967,6 +987,7 @@
     async function storageStartArchive(url, options) {
       if (storageArchivePollTimer) clearInterval(storageArchivePollTimer);
       storageArchivePollTimer = null;
+      storageArchiveDownloadStartedId = 0;
       storageArchiveSetBusy(true);
       msg("storageMsg", "Starting archive", true, false);
       try {

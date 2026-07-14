@@ -48,6 +48,7 @@ struct StorageArchiveStatus {
     uint32_t files_done = 0;
     uint64_t input_bytes = 0;
     uint64_t bytes_done = 0;
+    uint64_t bytes_sent = 0;
     uint64_t archive_bytes = 0;
     uint64_t estimated_archive_bytes = 0;
     uint64_t free_bytes_at_start = 0;
@@ -151,6 +152,8 @@ private:
     mutable SemaphoreHandle_t lock_ = nullptr;
     PublishedStatusSnapshot<StorageArchiveStatus> published_status_;
     std::atomic<bool> preempt_requested_{false};
+    std::atomic<uint32_t> download_progress_id_{0};
+    std::atomic<uint32_t> download_bytes_sent_{0};
     StorageArchiveStatus status_;
     mutable bool status_dirty_ = false;
     uint32_t next_id_ = 1;
