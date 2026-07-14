@@ -3,44 +3,17 @@
 #include <string.h>
 
 #include "as11_rpc.h"
+#include "data_id_csv.h"
 #include "json_cursor.h"
 
 namespace aircannect {
 namespace {
 
-void normalize_interval_pair(uint32_t &sample_ms, uint32_t &report_ms) {
-    if (sample_ms < 10) sample_ms = 10;
-    if (sample_ms > 65000) sample_ms = 65000;
-    sample_ms = (sample_ms / 10) * 10;
-    if (sample_ms == 0) sample_ms = 10;
-
-    if (report_ms == 0) report_ms = sample_ms * 5;
-    if (report_ms < sample_ms) report_ms = sample_ms;
-    if (report_ms > sample_ms * 5) report_ms = sample_ms * 5;
-    if (report_ms > 300000) report_ms = 300000;
-    report_ms = (report_ms / 10) * 10;
-    if (report_ms == 0) report_ms = sample_ms;
-}
-
-bool csv_contains_token(const std::string &csv,
-                        const char *token,
-                        size_t token_len) {
-    if (!token || token_len == 0) return false;
-    size_t start = 0;
-    while (start <= csv.size()) {
-        size_t comma = csv.find(',', start);
-        if (comma == std::string::npos) {
-            comma = csv.size();
-        }
-        if (comma > start &&
-            csv.compare(start, comma - start, token, token_len) == 0) {
-            return true;
-        }
-        if (comma >= csv.size()) break;
-        start = comma + 1;
-    }
-    return false;
-}
+static constexpr DataIdCsvLimits STREAM_DATA_ID_LIMITS = {
+    AC_STREAM_FRAME_SIGNAL_MAX,
+    AC_STREAM_FRAME_SIGNAL_NAME_MAX - 1,
+    AC_STREAM_FRAME_SIGNAL_MAX * AC_STREAM_FRAME_SIGNAL_NAME_MAX - 1,
+};
 
 }  // namespace
 
@@ -442,30 +415,15 @@ uint8_t StreamBroker::consumer_source(StreamConsumerHandle handle) const {
 
 bool StreamBroker::accepted_data_id(const char *data_id) const {
     if (!data_id || !*data_id) return false;
-    return csv_contains_token(accepted_subscription_.data_ids_csv,
-                              data_id,
-                              strlen(data_id));
+    return data_id_csv_contains(accepted_subscription_.data_ids_csv,
+                                data_id,
+                                strlen(data_id));
 }
 
 bool StreamBroker::accepted_data_ids_cover(const char *data_ids_csv) const {
     if (!data_ids_csv || !*data_ids_csv) return false;
-    bool saw_id = false;
-    const char *start = data_ids_csv;
-    while (*start) {
-        const char *comma = strchr(start, ',');
-        const char *end = comma ? comma : start + strlen(start);
-        if (end > start) {
-            saw_id = true;
-            if (!csv_contains_token(accepted_subscription_.data_ids_csv,
-                                    start,
-                                    static_cast<size_t>(end - start))) {
-                return false;
-            }
-        }
-        if (!comma) break;
-        start = comma + 1;
-    }
-    return saw_id;
+    return data_id_csv_covers(accepted_subscription_.data_ids_csv,
+                              data_ids_csv);
 }
 
 void StreamBroker::reset_counters() {
@@ -537,7 +495,7 @@ bool StreamBroker::parse_subscription(const std::string &params_json,
     if (!json.consume('}')) return false;
     if (!saw_data_ids) return false;
 
-    normalize_interval_pair(sample_ms, report_ms);
+    normalize_stream_intervals(sample_ms, report_ms);
     subscription.sample_ms = sample_ms;
     subscription.report_ms = report_ms;
     return true;
@@ -552,44 +510,19 @@ std::string StreamBroker::build_subscription_params(
 bool StreamBroker::add_data_id(Subscription &subscription,
                                const std::string &data_id) {
     if (data_id.empty()) return true;
-    size_t start = 0;
-    while (start <= subscription.data_ids_csv.size()) {
-        size_t comma = subscription.data_ids_csv.find(',', start);
-        if (comma == std::string::npos) {
-            comma = subscription.data_ids_csv.size();
-        }
-        if (comma > start &&
-            subscription.data_ids_csv.compare(start, comma - start,
-                                              data_id) == 0) {
-            return true;
-        }
-        if (comma == subscription.data_ids_csv.size()) break;
-        start = comma + 1;
-    }
-    if (subscription.data_id_count >= AC_STREAM_FRAME_SIGNAL_MAX) {
-        return false;
-    }
-    if (!subscription.data_ids_csv.empty()) subscription.data_ids_csv += ",";
-    subscription.data_ids_csv += data_id;
-    subscription.data_id_count++;
-    return true;
+    return data_id_csv_add(subscription.data_ids_csv,
+                           subscription.data_id_count,
+                           data_id.data(),
+                           data_id.size(),
+                           STREAM_DATA_ID_LIMITS);
 }
 
 bool StreamBroker::merge_data_ids(Subscription &subscription,
                                   const Subscription &input) {
-    size_t start = 0;
-    while (start <= input.data_ids_csv.size()) {
-        size_t comma = input.data_ids_csv.find(',', start);
-        if (comma == std::string::npos) comma = input.data_ids_csv.size();
-        if (comma > start &&
-            !add_data_id(subscription,
-                         input.data_ids_csv.substr(start, comma - start))) {
-            return false;
-        }
-        if (comma == input.data_ids_csv.size()) break;
-        start = comma + 1;
-    }
-    return true;
+    return data_id_csv_merge(subscription.data_ids_csv,
+                             subscription.data_id_count,
+                             input.data_ids_csv.c_str(),
+                             STREAM_DATA_ID_LIMITS);
 }
 
 bool StreamBroker::parse_start_response(const std::string &payload,

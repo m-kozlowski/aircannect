@@ -29,6 +29,7 @@ std::string build_rpc_request(const std::string &method,
                               uint32_t id);
 std::string build_get_params(const std::string &names);
 std::string build_set_datetime_params(const std::string &utc_datetime);
+void normalize_stream_intervals(uint32_t &sample_ms, uint32_t &report_ms);
 std::string build_stream_params(const std::string &ids_csv,
                                 uint32_t sample_ms,
                                 uint32_t report_ms);

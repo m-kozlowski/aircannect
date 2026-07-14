@@ -7,6 +7,7 @@
 
 #include <algorithm>
 
+#include "data_id_csv.h"
 #include "json_cursor.h"
 
 namespace aircannect {
@@ -173,45 +174,7 @@ std::string build_set_datetime_params(const std::string &utc_datetime) {
     return out;
 }
 
-static std::string trim_copy(const std::string &text) {
-    size_t start = 0;
-    while (start < text.size() &&
-           isspace(static_cast<unsigned char>(text[start]))) {
-        start++;
-    }
-    size_t end = text.size();
-    while (end > start &&
-           isspace(static_cast<unsigned char>(text[end - 1]))) {
-        end--;
-    }
-    return text.substr(start, end - start);
-}
-
-static std::string build_stream_data_ids_json(const std::string &csv) {
-    std::string out = "[";
-    bool first = true;
-    size_t start = 0;
-    while (start <= csv.size()) {
-        size_t comma = csv.find(',', start);
-        if (comma == std::string::npos) comma = csv.size();
-        std::string item = trim_copy(csv.substr(start, comma - start));
-        if (!item.empty()) {
-            if (!first) out += ",";
-            out += "\"";
-            out += json_escape(item);
-            out += "\"";
-            first = false;
-        }
-        if (comma == csv.size()) break;
-        start = comma + 1;
-    }
-    out += "]";
-    return out;
-}
-
-std::string build_stream_params(const std::string &ids_csv,
-                                uint32_t sample_ms,
-                                uint32_t report_ms) {
+void normalize_stream_intervals(uint32_t &sample_ms, uint32_t &report_ms) {
     if (sample_ms < 10) sample_ms = 10;
     if (sample_ms > 65000) sample_ms = 65000;
     sample_ms = (sample_ms / 10) * 10;
@@ -223,11 +186,17 @@ std::string build_stream_params(const std::string &ids_csv,
     if (report_ms > 300000) report_ms = 300000;
     report_ms = (report_ms / 10) * 10;
     if (report_ms == 0) report_ms = sample_ms;
+}
+
+std::string build_stream_params(const std::string &ids_csv,
+                                uint32_t sample_ms,
+                                uint32_t report_ms) {
+    normalize_stream_intervals(sample_ms, report_ms);
 
     std::string params;
     params.reserve(ids_csv.size() + 96);
-    params += "{\"dataIds\":";
-    params += build_stream_data_ids_json(ids_csv);
+    params = "{\"dataIds\":";
+    if (!data_id_csv_append_json_array(params, ids_csv.c_str())) return {};
     params += ",\"sampleIntervalMs\":";
     params += std::to_string(sample_ms);
     params += ",\"reportIntervalMs\":";

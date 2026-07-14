@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "board_can.h"
+#include "data_id_csv.h"
 
 namespace aircannect {
 namespace {
@@ -20,78 +21,16 @@ const char *const BASE_EVENT_DATA_IDS[] = {
     SETTINGS_HISTORY_CHANGE_DATA_ID,
 };
 
+static constexpr DataIdCsvLimits EVENT_DATA_ID_LIMITS = {
+    32,
+    63,
+    2047,
+};
+
 uint32_t retry_delay_for_command(EventCommandType type) {
     return type == EventCommandType::Quiesce
         ? AC_AS11_EVENT_QUIESCE_RETRY_MS
         : AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-}
-
-bool csv_contains_data_id(const std::string &csv, const char *data_id) {
-    if (!data_id || !*data_id) return true;
-    const size_t id_len = strlen(data_id);
-    size_t pos = 0;
-    while (pos < csv.size()) {
-        const size_t end = csv.find(',', pos);
-        const size_t len =
-            (end == std::string::npos) ? csv.size() - pos : end - pos;
-        if (len == id_len && csv.compare(pos, len, data_id) == 0) {
-            return true;
-        }
-        if (end == std::string::npos) break;
-        pos = end + 1;
-    }
-    return false;
-}
-
-bool add_data_id(std::string &csv, const char *data_id) {
-    if (!data_id || !*data_id) return true;
-    if (strchr(data_id, ',') || strchr(data_id, '"') || strchr(data_id, '\\')) {
-        return false;
-    }
-    if (csv_contains_data_id(csv, data_id)) return true;
-    if (!csv.empty()) csv += ',';
-    csv += data_id;
-    return true;
-}
-
-bool merge_data_ids(std::string &csv, const char *data_ids_csv) {
-    if (!data_ids_csv) return true;
-    const char *pos = data_ids_csv;
-    while (*pos) {
-        while (*pos == ',' || *pos == ' ' || *pos == '\t') pos++;
-        const char *start = pos;
-        while (*pos && *pos != ',') pos++;
-        const char *end = pos;
-        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
-        if (end > start) {
-            std::string token(start, static_cast<size_t>(end - start));
-            if (!add_data_id(csv, token.c_str())) return false;
-        }
-        if (*pos == ',') pos++;
-    }
-    return true;
-}
-
-void build_subscribe_params_from_csv(const std::string &csv,
-                                     std::string &params_json) {
-    params_json = "{\"dataIds\":[";
-    bool first = true;
-    size_t pos = 0;
-    while (pos < csv.size()) {
-        const size_t end = csv.find(',', pos);
-        const size_t len =
-            (end == std::string::npos) ? csv.size() - pos : end - pos;
-        if (len > 0) {
-            if (!first) params_json += ',';
-            first = false;
-            params_json += '"';
-            params_json.append(csv, pos, len);
-            params_json += '"';
-        }
-        if (end == std::string::npos) break;
-        pos = end + 1;
-    }
-    params_json += "]}";
 }
 
 bool variant_to_string(JsonVariantConst value, std::string &out) {
@@ -519,7 +458,11 @@ void EventBroker::clear_quiesce(uint32_t now_ms) {
 EventAcquireResult EventBroker::acquire(const char *data_ids_csv) {
     EventAcquireResult result;
     std::string parsed;
-    if (!merge_data_ids(parsed, data_ids_csv) || parsed.empty()) {
+    size_t parsed_count = 0;
+
+    if (!data_id_csv_merge(parsed, parsed_count, data_ids_csv,
+                           EVENT_DATA_ID_LIMITS) ||
+        parsed.empty()) {
         result.status = EventAcquireStatus::Rejected;
         return result;
     }
@@ -664,16 +607,26 @@ bool EventBroker::refresh_desired_params() {
 
 bool EventBroker::build_desired_params(std::string &params_json) const {
     std::string csv;
+    size_t data_id_count = 0;
+
     for (const char *data_id : BASE_EVENT_DATA_IDS) {
-        if (!add_data_id(csv, data_id)) return false;
-    }
-    for (const Consumer &consumer : consumers_) {
-        if (!consumer.active) continue;
-        if (!merge_data_ids(csv, consumer.data_ids_csv.c_str())) {
+        if (!data_id_csv_add(csv, data_id_count, data_id, strlen(data_id),
+                             EVENT_DATA_ID_LIMITS)) {
             return false;
         }
     }
-    build_subscribe_params_from_csv(csv, params_json);
+    for (const Consumer &consumer : consumers_) {
+        if (!consumer.active) continue;
+        if (!data_id_csv_merge(csv, data_id_count,
+                               consumer.data_ids_csv.c_str(),
+                               EVENT_DATA_ID_LIMITS)) {
+            return false;
+        }
+    }
+
+    params_json = "{\"dataIds\":";
+    if (!data_id_csv_append_json_array(params_json, csv.c_str())) return false;
+    params_json += '}';
     return true;
 }
 
