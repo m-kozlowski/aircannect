@@ -317,74 +317,75 @@ ReportSummaryStatus ReportSummaryService::status() const {
     return snapshot;
 }
 
-bool ReportSummaryService::publish_json_snapshot() {
-    ReportIndexedNight *indexed_snapshot = nullptr;
+ReportSummarySnapshotResult ReportSummaryService::publish_json_snapshot() {
+    snapshot_error_[0] = '\0';
+
     ReportSummaryStatus status_snapshot;
     uint32_t data_epoch_snapshot = 0;
-    size_t record_count_snapshot = 0;
-    bool ok = true;
 
     if (summary_.take(portMAX_DELAY)) {
         status_snapshot = summary_.status();
         data_epoch_snapshot = night_index_.data_epoch();
         summary_.give();
     } else {
-        status_snapshot.state = ReportSummaryState::Error;
-        status_snapshot.error = "summary_busy";
-        ok = false;
+        strlcpy(snapshot_error_, "summary_busy", sizeof(snapshot_error_));
+        return ReportSummarySnapshotResult::Busy;
     }
 
-    indexed_snapshot = static_cast<ReportIndexedNight *>(
-        Memory::calloc_large(AC_REPORT_SUMMARY_RECORD_MAX,
-                             sizeof(ReportIndexedNight),
-                             false));
-    if (!indexed_snapshot) {
-        status_snapshot.state = ReportSummaryState::Error;
-        status_snapshot.error = "summary_snapshot_alloc";
-        record_count_snapshot = 0;
-        ok = false;
-    } else if (!night_index_service_.build(indexed_snapshot,
-                                           AC_REPORT_SUMMARY_RECORD_MAX,
-                                           record_count_snapshot)) {
-        status_snapshot.state = ReportSummaryState::Error;
-        status_snapshot.error = "summary_snapshot_build";
-        record_count_snapshot = 0;
-        Memory::free(indexed_snapshot);
-        indexed_snapshot = nullptr;
-        ok = false;
-    } else {
-        status_snapshot.records_total =
-            static_cast<uint32_t>(record_count_snapshot);
+    ReportNightIndexSnapshotRef indexed_snapshot;
+    const char *index_error = nullptr;
+    const ReportNightIndexSnapshotResult index_result =
+        night_index_service_.snapshot(indexed_snapshot, &index_error);
+    if (index_result == ReportNightIndexSnapshotResult::Busy) {
+        strlcpy(snapshot_error_,
+                index_error ? index_error : "night_index_busy",
+                sizeof(snapshot_error_));
+        return ReportSummarySnapshotResult::Busy;
     }
+    if (index_result != ReportNightIndexSnapshotResult::Ready ||
+        !indexed_snapshot) {
+        strlcpy(snapshot_error_,
+                index_error ? index_error : "night_index_failed",
+                sizeof(snapshot_error_));
 
-    uint32_t nights_with_therapy = 0;
-    for (size_t i = 0; indexed_snapshot && i < record_count_snapshot; ++i) {
-        if (report_indexed_night_visible_in_summary(indexed_snapshot[i])) {
-            nights_with_therapy++;
+        if (!summary_.snapshot_available()) {
+            LargeTextBuffer error_json;
+            error_json =
+                "{\"state\":\"error\",\"error\":\"summary_snapshot_";
+            error_json += snapshot_error_;
+            error_json += "\",\"nights\":[]}";
+            summary_.publish_snapshot(error_json);
         }
+        return ReportSummarySnapshotResult::Failed;
     }
-    status_snapshot.nights_with_therapy = nights_with_therapy;
+
+    status_snapshot.records_total =
+        static_cast<uint32_t>(indexed_snapshot->count());
+    status_snapshot.nights_with_therapy =
+        static_cast<uint32_t>(indexed_snapshot->therapy_night_count());
 
     LargeTextBuffer summary_json_build;
-    report_append_summary_json_from_indexed(summary_json_build,
-                                            status_snapshot,
-                                            data_epoch_snapshot,
-                                            indexed_snapshot,
-                                            record_count_snapshot);
-    Memory::free(indexed_snapshot);
+    const bool json_ok = report_append_summary_json_from_snapshot(
+        summary_json_build,
+        status_snapshot,
+        data_epoch_snapshot,
+        *indexed_snapshot);
 
-    if (summary_json_build.overflowed()) {
-        Log::logf(CAT_REPORT,
-                  LOG_WARN,
-                  "Summary JSON snapshot allocation failed\n");
-        summary_json_build =
-            "{\"state\":\"error\",\"error\":\"summary_snapshot_alloc\","
-            "\"nights\":[]}";
-        ok = false;
+    if (!json_ok || summary_json_build.overflowed()) {
+        strlcpy(snapshot_error_,
+                "summary_json_alloc",
+                sizeof(snapshot_error_));
+        if (!summary_.snapshot_available()) {
+            summary_json_build =
+                "{\"state\":\"error\",\"error\":"
+                "\"summary_json_alloc\",\"nights\":[]}";
+            summary_.publish_snapshot(summary_json_build);
+        }
+        return ReportSummarySnapshotResult::Failed;
     }
 
     summary_.publish_snapshot(summary_json_build);
-    return ok;
+    return ReportSummarySnapshotResult::Published;
 }
 
 void ReportSummaryService::build_json(LargeTextBuffer &json) const {

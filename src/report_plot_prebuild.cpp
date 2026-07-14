@@ -5,8 +5,7 @@
 #include "debug_log.h"
 #include "edf_report_catalog.h"
 #include "edf_report_catalog_job.h"
-#include "memory_manager.h"
-#include "report_diagnostics.h"
+#include "report_index_scratch.h"
 #include "report_result_cache_files.h"
 #include "storage_manager.h"
 
@@ -14,67 +13,6 @@ namespace aircannect {
 namespace {
 
 using BuildQueueResult = ReportBuildRuntime::BuildQueueResult;
-
-bool indexed_night_by_newest_cursor(const ReportIndexedNight *nights,
-                                    size_t count,
-                                    size_t cursor,
-                                    const ReportIndexedNight *&out,
-                                    size_t &therapy_index) {
-    out = nullptr;
-    if (!nights) return false;
-
-    size_t seen = 0;
-    for (size_t i = count; i > 0; --i) {
-        const ReportIndexedNight &night = nights[i - 1];
-        if (!night.summary.valid ||
-            night.summary.start_ms == 0 ||
-            night.summary.duration_min == 0) {
-            continue;
-        }
-
-        if (seen == cursor) {
-            out = &night;
-            therapy_index = seen;
-            return true;
-        }
-
-        seen++;
-    }
-
-    return false;
-}
-
-class ScopedIndexedNightList {
-public:
-    ScopedIndexedNightList(const char *context, size_t capacity)
-        : context_(context),
-          capacity_(capacity),
-          nights_(static_cast<ReportIndexedNight *>(Memory::alloc_large(
-              capacity * sizeof(ReportIndexedNight),
-              false))) {
-        if (!nights_) {
-            log_report_alloc_failed(context_,
-                                    capacity * sizeof(ReportIndexedNight));
-        }
-    }
-
-    ~ScopedIndexedNightList() {
-        Memory::free(nights_);
-    }
-
-    ScopedIndexedNightList(const ScopedIndexedNightList &) = delete;
-    ScopedIndexedNightList &operator=(const ScopedIndexedNightList &) = delete;
-
-    explicit operator bool() const { return nights_ != nullptr; }
-    ReportIndexedNight *data() { return nights_; }
-    const ReportIndexedNight *data() const { return nights_; }
-    size_t capacity() const { return capacity_; }
-
-private:
-    const char *context_ = nullptr;
-    size_t capacity_ = 0;
-    ReportIndexedNight *nights_ = nullptr;
-};
 
 }  // namespace
 
@@ -145,28 +83,24 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
         return ReportPlotPrebuildResult::Waiting;
     }
 
-    ScopedIndexedNightList snapshot("report_night_index_prebuild",
-                                    AC_REPORT_SUMMARY_RECORD_MAX);
-    if (!snapshot) return ReportPlotPrebuildResult::Unavailable;
-
-    size_t snapshot_count = 0;
-    if (!night_index_.build(snapshot.data(),
-                            snapshot.capacity(),
-                            snapshot_count)) {
+    ReportNightIndexSnapshotRef snapshot;
+    const ReportNightIndexSnapshotResult snapshot_result =
+        night_index_.snapshot(snapshot);
+    if (snapshot_result == ReportNightIndexSnapshotResult::Busy) {
         return ReportPlotPrebuildResult::Waiting;
     }
+    if (snapshot_result != ReportNightIndexSnapshotResult::Ready ||
+        !snapshot) {
+        return ReportPlotPrebuildResult::Unavailable;
+    }
+
+    ScopedIndexedNight night("report_night_index_prebuild");
+    if (!night) return ReportPlotPrebuildResult::Unavailable;
 
     constexpr size_t SCAN_STEPS_PER_CALL = 4;
     for (size_t step = 0; step < SCAN_STEPS_PER_CALL; ++step) {
-        const ReportIndexedNight *night = nullptr;
-        size_t therapy_index = 0;
-        const bool found =
-            indexed_night_by_newest_cursor(snapshot.data(),
-                                           snapshot_count,
-                                           build_.prebuild_cursor(),
-                                           night,
-                                           therapy_index);
-        if (!found) {
+        const size_t therapy_index = build_.prebuild_cursor();
+        if (!snapshot->by_therapy_index(therapy_index, night.get())) {
             build_.mark_prebuild_drained(
                 now_ms,
                 AC_REPORT_PLOT_PREBUILD_RESCAN_MS);
@@ -174,10 +108,12 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
         }
 
         build_.advance_prebuild_cursor();
-        if (night->edf_catalog_pending) return ReportPlotPrebuildResult::Waiting;
+        if (night->edf_catalog_pending) {
+            return ReportPlotPrebuildResult::Waiting;
+        }
 
         char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-        night_index_.format_result_etag(*night, etag, sizeof(etag));
+        night_index_.format_result_etag(night.get(), etag, sizeof(etag));
 
         if (result_plot_cache_exists_for_etag(night->summary.start_ms, etag)) {
             continue;

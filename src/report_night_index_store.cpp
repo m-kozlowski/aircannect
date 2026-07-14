@@ -7,7 +7,9 @@
 #include "crc32.h"
 #include "little_endian.h"
 #include "memory_manager.h"
-#include "report_spool_types.h"
+#include "report_diagnostics.h"
+#include "report_index_scratch.h"
+#include "report_manager_limits.h"
 #include "report_summary_record_codec.h"
 #include "storage_manager.h"
 
@@ -86,7 +88,8 @@ bool decode_header(const uint8_t *header,
     record_count = get_le32(header + 12);
     payload_len = get_le32(header + 16);
     payload_crc = get_le32(header + 20);
-    return payload_len == record_count * INDEX_RECORD_SIZE;
+    return record_count <= AC_REPORT_SUMMARY_RECORD_MAX &&
+           payload_len == record_count * INDEX_RECORD_SIZE;
 }
 
 void encode_range(uint8_t *out, const ReportSessionRange &range) {
@@ -184,28 +187,43 @@ bool decode_record(const uint8_t *raw, ReportIndexedNight &night) {
     return night.summary.valid && night.summary.start_ms > 0;
 }
 
-bool encode_payload(ReportSpoolBuffer &payload,
-                    const ReportIndexedNight *nights,
-                    size_t count) {
-    payload.clear();
-    payload.set_max_size(AC_REPORT_MAX_PAYLOAD_BYTES);
-    for (size_t i = 0; i < count; ++i) {
-        size_t offset = 0;
-        uint8_t *raw = payload.append_uninitialized(INDEX_RECORD_SIZE, offset);
-        if (!raw || !encode_record(raw, nights[i])) return false;
+uint8_t *allocate_record_scratch(const char *context) {
+    uint8_t *raw = static_cast<uint8_t *>(
+        Memory::alloc_large(INDEX_RECORD_SIZE, false));
+    if (!raw) log_report_alloc_failed(context, INDEX_RECORD_SIZE);
+    return raw;
+}
+
+struct DurableRecordReaderContext {
+    File *file = nullptr;
+    uint8_t *raw = nullptr;
+    size_t next_index = 0;
+};
+
+bool read_durable_record(void *opaque,
+                         size_t index,
+                         ReportIndexedNight &out) {
+    auto *context = static_cast<DurableRecordReaderContext *>(opaque);
+    if (!context || !context->file || !context->raw) return false;
+
+    if (index != context->next_index) {
+        const size_t offset = INDEX_HEADER_SIZE + index * INDEX_RECORD_SIZE;
+        if (!context->file->seek(offset)) return false;
     }
-    return true;
+
+    if (!read_all(*context->file, context->raw, INDEX_RECORD_SIZE)) {
+        return false;
+    }
+
+    context->next_index = index + 1;
+    return decode_record(context->raw, out);
 }
 
 }  // namespace
 
-bool load(ReportIndexedNight *out,
-          size_t capacity,
-          size_t &count,
-          uint32_t &content_crc) {
-    count = 0;
+bool load(ReportNightIndexSnapshotRef &out, uint32_t &content_crc) {
+    out.reset();
     content_crc = crc32_ieee(nullptr, 0);
-    if (!out || capacity == 0) return false;
 
     Storage::Guard guard;
     if (!Storage::mounted() || !Storage::exists(INDEX_PATH)) return false;
@@ -219,81 +237,106 @@ bool load(ReportIndexedNight *out,
     uint32_t payload_crc = 0;
     bool ok = read_all(file, header, sizeof(header)) &&
               decode_header(header, record_count, payload_len, payload_crc);
-    ReportSpoolBuffer payload;
-    if (ok && payload_len > AC_REPORT_MAX_PAYLOAD_BYTES) ok = false;
-    if (ok && payload_len && !payload.reserve_capacity(payload_len)) ok = false;
-    if (ok && payload_len) {
-        size_t offset = 0;
-        uint8_t *dst = payload.append_uninitialized(payload_len, offset);
-        ok = dst && read_all(file, dst, payload_len);
+
+    uint8_t *raw = ok && record_count > 0
+        ? allocate_record_scratch("durable_night_index_load_record")
+        : nullptr;
+    if (ok && record_count > 0 && !raw) ok = false;
+
+    ScopedIndexedNight verified("durable_night_index_load_night");
+    if (ok && record_count > 0 && !verified) ok = false;
+
+    uint32_t crc_state = crc32_ieee_initial_state();
+    for (uint32_t i = 0; ok && i < record_count; ++i) {
+        ok = read_all(file, raw, INDEX_RECORD_SIZE);
+        if (!ok) break;
+
+        crc_state = crc32_ieee_update_state(crc_state,
+                                            raw,
+                                            INDEX_RECORD_SIZE);
+        ok = decode_record(raw, verified.get());
     }
+
+    const uint32_t actual_crc = crc32_ieee_finish_state(crc_state);
+    if (ok && actual_crc != payload_crc) ok = false;
+
+    if (ok) {
+        if (record_count == 0) {
+            out = ReportNightIndexSnapshot::create(nullptr, 0);
+        } else {
+            DurableRecordReaderContext context;
+            context.file = &file;
+            context.raw = raw;
+            context.next_index = record_count;
+
+            out = ReportNightIndexSnapshot::create_from_reader(
+                record_count,
+                read_durable_record,
+                &context);
+        }
+        ok = out != nullptr;
+    }
+
     file.close();
+    Memory::free(raw);
     if (!ok) return false;
 
-    const uint32_t actual_crc = payload.size()
-        ? crc32_ieee(payload.data(), payload.size())
-        : crc32_ieee(nullptr, 0);
-    if (actual_crc != payload_crc) return false;
-
-    const size_t decoded_count = std::min<size_t>(record_count, capacity);
-    for (size_t i = 0; i < decoded_count; ++i) {
-        if (!decode_record(payload.data() + i * INDEX_RECORD_SIZE, out[i])) {
-            return false;
-        }
-    }
-    count = decoded_count;
     content_crc = actual_crc;
-    return true;
+    return out != nullptr;
 }
 
-bool content_crc(const ReportIndexedNight *nights,
-                 size_t count,
-                 uint32_t &content_crc) {
-    content_crc = crc32_ieee(nullptr, 0);
-    if (!nights && count) return false;
-    if (count > UINT32_MAX ||
-        count > (AC_REPORT_MAX_PAYLOAD_BYTES / INDEX_RECORD_SIZE)) {
-        return false;
-    }
-
-    ReportSpoolBuffer payload;
-    if (!encode_payload(payload, nights, count)) return false;
-    content_crc = payload.size()
-        ? crc32_ieee(payload.data(), payload.size())
-        : crc32_ieee(nullptr, 0);
-    return true;
-}
-
-bool save(const ReportIndexedNight *nights,
-          size_t count,
+bool save(const ReportNightIndexSnapshot &snapshot,
           uint32_t &content_crc) {
     content_crc = crc32_ieee(nullptr, 0);
-    if (!nights && count) return false;
-    if (count > UINT32_MAX ||
-        count > (AC_REPORT_MAX_PAYLOAD_BYTES / INDEX_RECORD_SIZE)) {
+    const size_t count = snapshot.count();
+    if (count > AC_REPORT_SUMMARY_RECORD_MAX) {
         return false;
     }
 
-    ReportSpoolBuffer payload;
-    if (!encode_payload(payload, nights, count)) return false;
-    content_crc = payload.size()
-        ? crc32_ieee(payload.data(), payload.size())
-        : crc32_ieee(nullptr, 0);
+    ScopedIndexedNight night("durable_night_index_save_night");
+    uint8_t *raw = allocate_record_scratch("durable_night_index_save_record");
+    if (!night || !raw) {
+        Memory::free(raw);
+        return false;
+    }
 
     Storage::Guard guard;
-    if (!Storage::mounted() || !ensure_layout()) return false;
+    if (!Storage::mounted() || !ensure_layout()) {
+        Memory::free(raw);
+        return false;
+    }
     Storage::remove(INDEX_TMP_PATH);
     File file = Storage::open(INDEX_TMP_PATH, "w");
-    if (!file) return false;
+    if (!file) {
+        Memory::free(raw);
+        return false;
+    }
 
-    uint8_t header[INDEX_HEADER_SIZE];
-    encode_header(header,
-                  static_cast<uint32_t>(count),
-                  static_cast<uint32_t>(payload.size()),
-                  content_crc);
-    const bool ok = write_all(file, header, sizeof(header)) &&
-                    write_all(file, payload.data(), payload.size());
+    uint8_t header[INDEX_HEADER_SIZE] = {};
+    bool ok = write_all(file, header, sizeof(header));
+    uint32_t crc_state = crc32_ieee_initial_state();
+    for (size_t i = 0; ok && i < count; ++i) {
+        ok = snapshot.materialize(i, night.get()) &&
+             encode_record(raw, night.get());
+        if (!ok) break;
+
+        crc_state = crc32_ieee_update_state(crc_state,
+                                            raw,
+                                            INDEX_RECORD_SIZE);
+        ok = write_all(file, raw, INDEX_RECORD_SIZE);
+    }
+
+    content_crc = crc32_ieee_finish_state(crc_state);
+    if (ok) {
+        encode_header(header,
+                      static_cast<uint32_t>(count),
+                      static_cast<uint32_t>(count * INDEX_RECORD_SIZE),
+                      content_crc);
+        ok = file.seek(0) && write_all(file, header, sizeof(header));
+    }
     file.close();
+    Memory::free(raw);
+
     if (!ok) {
         Storage::remove(INDEX_TMP_PATH);
         return false;

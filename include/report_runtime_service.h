@@ -48,12 +48,25 @@ public:
     bool cancel_cache_fetch();
 
 private:
+    struct SummaryPublishRetryState {
+        uint32_t refresh_id = 0;
+        uint32_t next_attempt_ms = 0;
+        uint32_t next_warning_ms = 0;
+        uint16_t failures = 0;
+        bool cache_invalidated = false;
+    };
+
+    // Event and pipeline service
     bool drain_source_events(RpcArbiter &arbiter);
     void service_build_queue(bool realtime_active);
     void service_range_plot(bool realtime_active);
     void handle_cache_fetch_event(ReportCacheFetchEvent event);
     void handle_summary_fetch_event(ReportSummaryFetchEvent event);
 
+    // Catalog publication
+    void service_catalog_summary_publish();
+
+    // Pipeline dependencies
     ReportFetchRuntime &fetch_;
     ReportSummaryRuntime &summary_runtime_;
     ReportCacheStorageRuntime &cache_storage_;
@@ -67,6 +80,9 @@ private:
     ReportBuildQueueService &build_queue_;
     ReportPrefetchService &prefetch_;
     ReportEdfCatalogContext &edf_catalog_;
+
+    // Catalog publication state
+    SummaryPublishRetryState summary_publish_retry_;
 };
 
 }  // namespace aircannect

@@ -14,15 +14,14 @@ bool ReportNightIndexRuntime::load_durable() {
     return durable_.load();
 }
 
-bool ReportNightIndexRuntime::seed_from_durable(ReportNightIndex &index) const {
-    return durable_.seed(index);
+bool ReportNightIndexRuntime::durable_snapshot(
+    ReportNightIndexSnapshotRef &out) const {
+    return durable_.snapshot(out);
 }
 
 void ReportNightIndexRuntime::schedule_durable_save(
-    const ReportIndexedNight *src,
-    size_t count,
-    uint32_t content_crc) const {
-    durable_.schedule_save(src, count, content_crc);
+    const ReportNightIndexSnapshotRef &snapshot) const {
+    durable_.schedule_save(snapshot);
 }
 
 bool ReportNightIndexRuntime::service_durable_writer() {

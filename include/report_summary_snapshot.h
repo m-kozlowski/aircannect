@@ -10,6 +10,7 @@ class ReportSummarySnapshot {
 public:
     void publish(LargeTextBuffer &build_buffer);
     void build_json(LargeTextBuffer &json) const;
+    bool available() const { return snapshot_.length() > 0; }
     bool progress_due(uint32_t now_ms, uint32_t interval_ms);
 
 private:

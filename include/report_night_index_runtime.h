@@ -13,10 +13,9 @@ public:
     bool begin();
 
     bool load_durable();
-    bool seed_from_durable(ReportNightIndex &index) const;
-    void schedule_durable_save(const ReportIndexedNight *src,
-                               size_t count,
-                               uint32_t content_crc) const;
+    bool durable_snapshot(ReportNightIndexSnapshotRef &out) const;
+    void schedule_durable_save(
+        const ReportNightIndexSnapshotRef &snapshot) const;
     bool service_durable_writer();
 
     void clear_epochs();

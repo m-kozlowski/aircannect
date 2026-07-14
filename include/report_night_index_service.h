@@ -11,6 +11,12 @@
 
 namespace aircannect {
 
+enum class ReportNightIndexSnapshotResult : uint8_t {
+    Ready,
+    Busy,
+    Failed,
+};
+
 class ReportNightIndexService {
 public:
     ReportNightIndexService(ReportSummaryRuntime &summary,
@@ -19,9 +25,9 @@ public:
 
     bool begin();
 
-    bool build(ReportIndexedNight *out,
-               size_t capacity,
-               size_t &count) const;
+    ReportNightIndexSnapshotResult snapshot(
+        ReportNightIndexSnapshotRef &out,
+        const char **error_out = nullptr) const;
     bool by_therapy_index(size_t therapy_index,
                           ReportIndexedNight &out) const;
     bool by_start(uint64_t night_start_ms,
@@ -34,9 +40,10 @@ public:
                             size_t out_size) const;
 
 private:
-    bool build_uncached(ReportIndexedNight *out,
-                        size_t capacity,
-                        size_t &count) const;
+    ReportNightIndexSnapshotResult build_uncached(
+        ReportNightIndexSnapshotRef &out,
+        bool &authoritative,
+        const char *&error) const;
 
     ReportSummaryRuntime &summary_;
     ReportNightIndexRuntime &runtime_;

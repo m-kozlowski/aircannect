@@ -4,10 +4,8 @@
 #include <string.h>
 
 #include "edf_report_provider.h"
-#include "memory_manager.h"
 #include "report_cache_plan.h"
 #include "report_data_provider.h"
-#include "report_diagnostics.h"
 #include "report_index_scratch.h"
 #include "report_night_cache_service.h"
 #include "report_resolve_context.h"
@@ -121,40 +119,33 @@ bool ReportNightCacheService::next_needing_cache(
     ReportNightCacheSkipFn skip,
     const void *skip_context) const {
     const uint32_t now = millis();
-    ReportIndexedNight *nights =
-        static_cast<ReportIndexedNight *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
-            false));
-    if (!nights) {
-        log_report_alloc_failed(
-            "prefetch_night_index",
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+
+    ReportNightIndexSnapshotRef snapshot;
+    if (night_index_.snapshot(snapshot) !=
+            ReportNightIndexSnapshotResult::Ready ||
+        !snapshot) {
         return false;
     }
-    size_t count = 0;
-    if (!night_index_.build(nights,
-                            AC_REPORT_SUMMARY_RECORD_MAX,
-                            count)) {
-        Memory::free(nights);
-        return false;
-    }
+
+    ScopedIndexedNight indexed("prefetch_night_index");
     ScopedReportResolveContext resolve("prefetch_resolver");
-    if (!resolve) {
-        Memory::free(nights);
-        return false;
-    }
+    if (!indexed || !resolve) return false;
 
     // Oldest-first: the spool is open-ended (fromDateTime -> now), so fetching
     // the OLDEST night with a gap streams every source from there forward and
     // backfills all newer nights in a single sweep (deduped on write)
-    for (size_t i = 0; i < count; ++i) {
-        const ReportIndexedNight &indexed = nights[i];
-        const ReportSummaryRecord &record = indexed.summary;
+    for (size_t i = 0; i < snapshot->count(); ++i) {
+        if (!snapshot->materialize(i, indexed.get())) return false;
+
+        const ReportSummaryRecord &record = indexed->summary;
         if (!record.valid || !record.duration_min) continue;
         if (skip && skip(record.start_ms, now, skip_context)) continue;
+
         int64_t span_start_ms = 0;
         int64_t span_end_ms = 0;
-        if (!indexed_night_data_span(indexed, span_start_ms, span_end_ms)) {
+        if (!indexed_night_data_span(indexed.get(),
+                                     span_start_ms,
+                                     span_end_ms)) {
             continue;
         }
 
@@ -171,7 +162,6 @@ bool ReportNightCacheService::next_needing_cache(
                                                      AC_REPORT_EDF_SESSION_MAX,
                                                      session_count,
                                                      &edf_pending)) {
-            Memory::free(nights);
             return false;
         }
         if (edf_pending) continue;
@@ -180,11 +170,10 @@ bool ReportNightCacheService::next_needing_cache(
         ReportSourceResolver resolver(edf_provider,
                                       spool_report_provider(),
                                       resolve.scratch());
-        if (!resolver.build_plan(indexed,
+        if (!resolver.build_plan(indexed.get(),
                                  span_start_ms,
                                  span_end_ms,
                                  resolve.plan())) {
-            Memory::free(nights);
             return false;
         }
         const ReportResolvedPlan &plan = resolve.plan();
@@ -197,12 +186,11 @@ bool ReportNightCacheService::next_needing_cache(
                 segment.required &&
                 report_cache_source_supported(segment.source)) {
                 night_start_ms_out = record.start_ms;
-                Memory::free(nights);
                 return true;
             }
         }
     }
-    Memory::free(nights);
+
     return false;
 }
 

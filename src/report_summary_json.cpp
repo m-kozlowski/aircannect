@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "json_util.h"
+#include "report_index_scratch.h"
 #include "spool_client.h"
 
 namespace aircannect {
@@ -111,14 +112,12 @@ bool report_indexed_night_visible_in_summary(
            report_indexed_night_display_duration_min(night) > 0;
 }
 
-void report_append_summary_json_from_indexed(
+bool report_append_summary_json_from_snapshot(
     LargeTextBuffer &json,
     const ReportSummaryStatus &status,
     uint32_t data_epoch,
-    const ReportIndexedNight *nights,
-    size_t night_count) {
+    const ReportNightIndexSnapshot &snapshot) {
     json.clear();
-    if (!nights) night_count = 0;
 
     json += "{";
     json_add_string(json,
@@ -147,8 +146,13 @@ void report_append_summary_json_from_indexed(
 
     bool first = true;
     size_t therapy_seen = 0;
-    for (size_t i = 0; i < night_count; ++i) {
-        const ReportIndexedNight &night = nights[i];
+    ScopedIndexedNight materialized("summary_json_night");
+    if (snapshot.count() > 0 && !materialized) return false;
+
+    for (size_t i = 0; i < snapshot.count(); ++i) {
+        if (!snapshot.materialize(i, materialized.get())) return false;
+
+        const ReportIndexedNight &night = materialized.get();
         const ReportSummaryRecord &record = night.summary;
         const uint32_t duration_min =
             report_indexed_night_display_duration_min(night);
@@ -213,6 +217,7 @@ void report_append_summary_json_from_indexed(
     }
 
     json += "]}";
+    return true;
 }
 
 }  // namespace aircannect

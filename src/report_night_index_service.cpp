@@ -1,17 +1,91 @@
 #include "report_night_index_service.h"
 
 #include <algorithm>
+#include <ctype.h>
 #include <stdint.h>
-#include <string.h>
+#include <utility>
 
 #include "debug_log.h"
 #include "edf_report_catalog_job.h"
 #include "memory_manager.h"
 #include "report_diagnostics.h"
-#include "report_night_index.h"
-#include "report_night_index_store.h"
+#include "report_index_scratch.h"
+#include "report_manager_limits.h"
 
 namespace aircannect {
+namespace {
+
+class UniqueNightKeySet {
+public:
+    UniqueNightKeySet()
+        : keys_(static_cast<uint64_t *>(Memory::calloc_large(
+              AC_REPORT_SUMMARY_RECORD_MAX,
+              sizeof(uint64_t),
+              false))) {}
+
+    ~UniqueNightKeySet() { Memory::free(keys_); }
+
+    UniqueNightKeySet(const UniqueNightKeySet &) = delete;
+    UniqueNightKeySet &operator=(const UniqueNightKeySet &) = delete;
+
+    explicit operator bool() const { return keys_ != nullptr; }
+
+    bool add(uint64_t key, bool &inserted) {
+        inserted = false;
+        for (size_t i = 0; i < count_; ++i) {
+            if (keys_[i] == key) return true;
+        }
+        if (count_ >= AC_REPORT_SUMMARY_RECORD_MAX) return false;
+
+        keys_[count_++] = key;
+        inserted = true;
+        return true;
+    }
+
+    uint64_t *keys_ = nullptr;
+    size_t count_ = 0;
+};
+
+bool parse_sleep_day_key(const char *sleep_day, uint64_t &out) {
+    out = 0;
+    if (!sleep_day) return false;
+
+    for (size_t i = 0; i < 8; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(sleep_day[i]);
+        if (!isdigit(ch)) return false;
+        out = out * 10u + static_cast<uint64_t>(ch - '0');
+    }
+    return sleep_day[8] == '\0';
+}
+
+bool add_summary_keys(UniqueNightKeySet &starts,
+                      UniqueNightKeySet &sleep_days,
+                      const ReportSummaryRecord &record,
+                      size_t &capacity) {
+    bool start_inserted = false;
+    if (record.start_ms == 0) {
+        capacity++;
+    } else if (!starts.add(record.start_ms, start_inserted)) {
+        return false;
+    } else if (start_inserted) {
+        capacity++;
+    }
+
+    char sleep_day[9] = {};
+    if (!report_summary_sleep_day_yyyymmdd(record,
+                                           sleep_day,
+                                           sizeof(sleep_day))) {
+        return true;
+    }
+
+    uint64_t day_key = 0;
+    if (!parse_sleep_day_key(sleep_day, day_key)) return true;
+
+    bool day_inserted = false;
+    return sleep_days.add(day_key, day_inserted);
+}
+
+}  // namespace
 
 ReportNightIndexService::ReportNightIndexService(
     ReportSummaryRuntime &summary,
@@ -25,56 +99,70 @@ bool ReportNightIndexService::begin() {
     return cache_.begin();
 }
 
-bool ReportNightIndexService::build(ReportIndexedNight *out,
-                                    size_t capacity,
-                                    size_t &count) const {
-    count = 0;
-    if (!out || capacity == 0) return false;
+ReportNightIndexSnapshotResult ReportNightIndexService::snapshot(
+    ReportNightIndexSnapshotRef &out,
+    const char **error_out) const {
+    out.reset();
+    if (error_out) *error_out = nullptr;
 
-    ReportNightIndexCacheKey cache_key;
-    if (!this->cache_key(cache_key)) {
-        return false;
+    ReportNightIndexCacheKey key;
+    if (!cache_key(key)) {
+        if (error_out) *error_out = "cache_key_busy";
+        return ReportNightIndexSnapshotResult::Busy;
     }
 
-    if (cache_.copy(cache_key, out, capacity, count)) {
-        return true;
+    switch (cache_.acquire(key, out)) {
+        case ReportNightIndexCacheAcquire::Hit:
+            return ReportNightIndexSnapshotResult::Ready;
+        case ReportNightIndexCacheAcquire::Busy:
+            if (error_out) *error_out = "snapshot_busy";
+            return ReportNightIndexSnapshotResult::Busy;
+        case ReportNightIndexCacheAcquire::Error:
+            if (error_out) *error_out = "snapshot_cache_unavailable";
+            return ReportNightIndexSnapshotResult::Failed;
+        case ReportNightIndexCacheAcquire::Build:
+            break;
     }
 
-    ReportIndexedNight *fresh =
-        static_cast<ReportIndexedNight *>(Memory::calloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX,
-            sizeof(ReportIndexedNight),
-            false));
-    if (!fresh) {
-        log_report_alloc_failed(
-            "report_night_index_build",
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
-        return false;
+    ReportNightIndexSnapshotRef built;
+    bool authoritative = false;
+    const char *build_error = nullptr;
+    const ReportNightIndexSnapshotResult result =
+        build_uncached(built, authoritative, build_error);
+    if (result != ReportNightIndexSnapshotResult::Ready || !built) {
+        cache_.cancel_build(key);
+        if (error_out) *error_out = build_error ? build_error
+                                                : "snapshot_build_failed";
+        return result;
     }
 
-    size_t fresh_count = 0;
-    const bool ready =
-        build_uncached(fresh, AC_REPORT_SUMMARY_RECORD_MAX, fresh_count);
-    if (!ready) {
-        Memory::free(fresh);
-        return false;
+    ReportNightIndexCacheKey current_key;
+    if (!cache_key(current_key) ||
+        !report_night_index_cache_key_equal(key, current_key)) {
+        cache_.cancel_build(key);
+        if (error_out) *error_out = "snapshot_source_changed";
+        return ReportNightIndexSnapshotResult::Busy;
     }
 
-    (void)cache_.publish(cache_key, fresh, fresh_count);
-
-    count = fresh_count < capacity ? fresh_count : capacity;
-    if (count > 0) {
-        memcpy(out, fresh, count * sizeof(ReportIndexedNight));
+    if (!cache_.complete_build(key, built)) {
+        cache_.cancel_build(key);
+        if (error_out) *error_out = "snapshot_publish_failed";
+        return ReportNightIndexSnapshotResult::Failed;
     }
-    Memory::free(fresh);
-    return true;
+
+    if (authoritative) runtime_.schedule_durable_save(built);
+
+    out = std::move(built);
+    return ReportNightIndexSnapshotResult::Ready;
 }
 
-bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
-                                             size_t capacity,
-                                             size_t &count) const {
-    count = 0;
-    if (!out || capacity == 0) return false;
+ReportNightIndexSnapshotResult ReportNightIndexService::build_uncached(
+    ReportNightIndexSnapshotRef &out,
+    bool &authoritative,
+    const char *&error) const {
+    out.reset();
+    authoritative = false;
+    error = nullptr;
 
     EdfReportCatalogStatus catalog_status;
     const bool have_catalog_status =
@@ -83,82 +171,212 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
         have_catalog_status &&
         catalog_status.state == EdfReportCatalogState::Ready;
 
-    ReportNightIndex index(out, capacity);
-    if (!catalog_ready) (void)runtime_.seed_from_durable(index);
+    ReportNightIndexSnapshotRef durable;
+    if (!catalog_ready) (void)runtime_.durable_snapshot(durable);
 
-    if (summary_.take(pdMS_TO_TICKS(20))) {
-        const ReportSummaryRecord *records = summary_.records();
-        const size_t raw_count = records ? summary_.record_count() : 0;
-        for (size_t i = 0; i < raw_count; ++i) {
-            if (!index.add_summary_record(records[i])) break;
-        }
-        summary_.give();
+    UniqueNightKeySet night_starts;
+    UniqueNightKeySet sleep_days;
+    if (!night_starts || !sleep_days) {
+        log_report_alloc_failed(
+            "report_night_index_keys",
+            2 * AC_REPORT_SUMMARY_RECORD_MAX * sizeof(uint64_t));
+        error = "night_key_alloc";
+        return ReportNightIndexSnapshotResult::Failed;
     }
 
-    ReportIndexedNight *sort_scratch =
-        static_cast<ReportIndexedNight *>(Memory::alloc_large(
-            sizeof(ReportIndexedNight),
-            false));
+    size_t capacity = 0;
+    if (durable) {
+        for (size_t i = 0; i < durable->count(); ++i) {
+            const ReportSummaryRecord *record = durable->summary_at(i);
+            if (!record || !record->valid) continue;
+            if (!add_summary_keys(night_starts,
+                                  sleep_days,
+                                  *record,
+                                  capacity)) {
+                error = "night_key_capacity";
+                return ReportNightIndexSnapshotResult::Failed;
+            }
+        }
+    }
+
+    if (!summary_.take(pdMS_TO_TICKS(20))) {
+        error = "summary_busy";
+        return ReportNightIndexSnapshotResult::Busy;
+    }
+
+    const ReportSummaryRecord *summary_records = summary_.records();
+    const size_t summary_count = summary_.record_count();
+    for (size_t i = 0; summary_records && i < summary_count; ++i) {
+        if (!summary_records[i].valid) continue;
+        if (!add_summary_keys(night_starts,
+                              sleep_days,
+                              summary_records[i],
+                              capacity)) {
+            summary_.give();
+            error = "night_key_capacity";
+            return ReportNightIndexSnapshotResult::Failed;
+        }
+    }
+    summary_.give();
+
+    EdfReportSessionDescriptor *session_scratch = nullptr;
+    const size_t catalog_count = catalog_ready
+        ? edf_catalog_.session_count()
+        : 0;
+    if (catalog_ready && catalog_count > 0) {
+        session_scratch = static_cast<EdfReportSessionDescriptor *>(
+            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
+        if (!session_scratch) {
+            log_report_alloc_failed("report_night_edf_session_scratch",
+                                    sizeof(EdfReportSessionDescriptor));
+            error = "edf_session_alloc";
+            return ReportNightIndexSnapshotResult::Failed;
+        }
+
+        for (size_t i = 0; i < catalog_count; ++i) {
+            if (!edf_catalog_.copy_session(i, *session_scratch)) continue;
+            if (!edf_report_session_reportable(*session_scratch)) continue;
+
+            uint64_t day_key = 0;
+            if (!parse_sleep_day_key(session_scratch->sleep_day, day_key)) {
+                continue;
+            }
+
+            bool inserted = false;
+            if (!sleep_days.add(day_key, inserted)) {
+                Memory::free(session_scratch);
+                error = "night_key_capacity";
+                return ReportNightIndexSnapshotResult::Failed;
+            }
+            if (inserted) capacity++;
+        }
+    }
+
+    if (capacity > AC_REPORT_SUMMARY_RECORD_MAX) {
+        Memory::free(session_scratch);
+        error = "night_index_capacity";
+        return ReportNightIndexSnapshotResult::Failed;
+    }
+
+    if (capacity == 0) {
+        Memory::free(session_scratch);
+        out = ReportNightIndexSnapshot::create(nullptr, 0);
+        authoritative = catalog_ready;
+        if (!out) {
+            error = "snapshot_alloc";
+            return ReportNightIndexSnapshotResult::Failed;
+        }
+        return ReportNightIndexSnapshotResult::Ready;
+    }
+
+    ReportIndexedNight *nights = static_cast<ReportIndexedNight *>(
+        Memory::calloc_large(capacity,
+                             sizeof(ReportIndexedNight),
+                             false));
+    if (!nights) {
+        Memory::free(session_scratch);
+        log_report_alloc_failed("report_night_index_build",
+                                capacity * sizeof(ReportIndexedNight));
+        error = "night_index_alloc";
+        return ReportNightIndexSnapshotResult::Failed;
+    }
+
+    ReportNightIndex index(nights, capacity);
+    if (durable) {
+        ScopedIndexedNight durable_night("report_night_index_durable_seed");
+        if (!durable_night) {
+            Memory::free(session_scratch);
+            Memory::free(nights);
+            error = "durable_seed_alloc";
+            return ReportNightIndexSnapshotResult::Failed;
+        }
+
+        for (size_t i = 0; i < durable->count(); ++i) {
+            if (!durable->materialize(i, durable_night.get()) ||
+                !index.add_indexed_night(durable_night.get())) {
+                Memory::free(session_scratch);
+                Memory::free(nights);
+                error = "durable_seed_failed";
+                return ReportNightIndexSnapshotResult::Failed;
+            }
+        }
+    }
+
+    if (!summary_.take(pdMS_TO_TICKS(20))) {
+        Memory::free(session_scratch);
+        Memory::free(nights);
+        error = "summary_busy";
+        return ReportNightIndexSnapshotResult::Busy;
+    }
+
+    summary_records = summary_.records();
+    const size_t raw_summary_count = summary_.record_count();
+    bool summary_ok = true;
+    for (size_t i = 0; summary_records && i < raw_summary_count; ++i) {
+        if (!index.add_summary_record(summary_records[i])) {
+            summary_ok = false;
+            break;
+        }
+    }
+    summary_.give();
+    if (!summary_ok) {
+        Memory::free(session_scratch);
+        Memory::free(nights);
+        error = "night_index_capacity";
+        return ReportNightIndexSnapshotResult::Failed;
+    }
+
+    ScopedIndexedNight sort_scratch("report_night_index_sort");
     if (!sort_scratch) {
-        log_report_alloc_failed("report_night_index_sort",
-                                sizeof(ReportIndexedNight));
-        return false;
+        Memory::free(session_scratch);
+        Memory::free(nights);
+        error = "sort_alloc";
+        return ReportNightIndexSnapshotResult::Failed;
     }
 
-    auto finish_index = [&](bool catalog_pending,
-                            bool authoritative) -> bool {
-        if (!index.finish(sort_scratch)) {
-            Memory::free(sort_scratch);
-            return false;
+    auto finish = [&](bool catalog_pending) {
+        if (!index.finish(&sort_scratch.get())) {
+            error = "night_index_finish";
+            return ReportNightIndexSnapshotResult::Failed;
         }
 
-        count = index.count();
+        const size_t count = index.count();
         if (catalog_pending) {
             for (size_t i = 0; i < count; ++i) {
-                out[i].edf_catalog_pending =
-                    !out[i].has_edf ||
-                    !indexed_night_summary_ranges_covered_by_data(out[i]);
+                nights[i].edf_catalog_pending =
+                    !nights[i].has_edf ||
+                    !indexed_night_summary_ranges_covered_by_data(nights[i]);
             }
         }
 
-        if (authoritative) {
-            uint32_t crc = 0;
-            if (ReportNightIndexStore::content_crc(out, count, crc)) {
-                runtime_.schedule_durable_save(out, count, crc);
-            }
+        out = ReportNightIndexSnapshot::create(nights, count);
+        if (!out) {
+            error = "snapshot_alloc";
+            return ReportNightIndexSnapshotResult::Failed;
         }
 
-        Memory::free(sort_scratch);
-        sort_scratch = nullptr;
-        return true;
+        return ReportNightIndexSnapshotResult::Ready;
     };
 
     if (!edf_catalog_) {
-        return finish_index(false, false);
+        const ReportNightIndexSnapshotResult result = finish(false);
+        Memory::free(session_scratch);
+        Memory::free(nights);
+        return result;
     }
 
-    if (!have_catalog_status ||
-        catalog_status.state != EdfReportCatalogState::Ready) {
+    if (!catalog_ready) {
         if (!have_catalog_status ||
             catalog_status.state != EdfReportCatalogState::Error) {
             (void)edf_catalog_.request_refresh();
         }
-        return finish_index(!have_catalog_status ||
-                            catalog_status.state !=
-                                EdfReportCatalogState::Error,
-                            false);
-    }
 
-    const size_t catalog_count = edf_catalog_.session_count();
-
-    EdfReportSessionDescriptor *session_scratch =
-        static_cast<EdfReportSessionDescriptor *>(
-            Memory::alloc_large(sizeof(EdfReportSessionDescriptor), false));
-    if (!session_scratch) {
-        Memory::free(sort_scratch);
-        log_report_alloc_failed("report_night_edf_session_scratch",
-                                sizeof(EdfReportSessionDescriptor));
-        return false;
+        const bool pending = !have_catalog_status ||
+            catalog_status.state != EdfReportCatalogState::Error;
+        const ReportNightIndexSnapshotResult result = finish(pending);
+        Memory::free(session_scratch);
+        Memory::free(nights);
+        return result;
     }
 
     for (size_t i = 0; i < catalog_count; ++i) {
@@ -170,9 +388,9 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
              night_index < index.count();
              ++night_index) {
             if (report_summary_matches_sleep_day(
-                    out[night_index].summary,
+                    nights[night_index].summary,
                     session_scratch->sleep_day)) {
-                matching_summary = &out[night_index].summary;
+                matching_summary = &nights[night_index].summary;
                 break;
             }
         }
@@ -187,17 +405,21 @@ bool ReportNightIndexService::build_uncached(ReportIndexedNight *out,
                                    have_timezone,
                                    timezone_offset_min)) {
             Memory::free(session_scratch);
-            Memory::free(sort_scratch);
-            return false;
+            Memory::free(nights);
+            error = "night_index_capacity";
+            return ReportNightIndexSnapshotResult::Failed;
         }
     }
 
+    authoritative = true;
+    const ReportNightIndexSnapshotResult result = finish(false);
     Memory::free(session_scratch);
-
-    return finish_index(false, true);
+    Memory::free(nights);
+    return result;
 }
 
-bool ReportNightIndexService::cache_key(ReportNightIndexCacheKey &key) const {
+bool ReportNightIndexService::cache_key(
+    ReportNightIndexCacheKey &key) const {
     key = {};
     key.catalog_present = edf_catalog_.present();
     key.catalog_state = static_cast<uint8_t>(EdfReportCatalogState::Idle);
@@ -217,6 +439,7 @@ bool ReportNightIndexService::cache_key(ReportNightIndexCacheKey &key) const {
             static_cast<uint8_t>(EdfReportCatalogState::Refreshing);
         return true;
     }
+
     key.catalog_state = static_cast<uint8_t>(catalog_status.state);
     key.catalog_refresh_id = catalog_status.refresh_id;
     key.timezone_revision = catalog_status.timezone_revision;
@@ -226,56 +449,26 @@ bool ReportNightIndexService::cache_key(ReportNightIndexCacheKey &key) const {
 bool ReportNightIndexService::by_therapy_index(
     size_t therapy_index,
     ReportIndexedNight &out) const {
-    ReportIndexedNight *snapshot =
-        static_cast<ReportIndexedNight *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
-            false));
-    if (!snapshot) {
-        log_report_alloc_failed(
-            "report_night_index_lookup",
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+    ReportNightIndexSnapshotRef current;
+    if (snapshot(current) != ReportNightIndexSnapshotResult::Ready ||
+        !current) {
         return false;
     }
 
-    size_t count = 0;
-    bool found = false;
-    if (build(snapshot, AC_REPORT_SUMMARY_RECORD_MAX, count)) {
-        found = ReportNightIndex::by_therapy_index(snapshot,
-                                                   count,
-                                                   therapy_index,
-                                                   out);
-    }
-
-    Memory::free(snapshot);
-    return found;
+    return current->by_therapy_index(therapy_index, out);
 }
 
-bool ReportNightIndexService::by_start(uint64_t night_start_ms,
-                                       ReportIndexedNight &out,
-                                       size_t *therapy_index_out) const {
-    ReportIndexedNight *snapshot =
-        static_cast<ReportIndexedNight *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
-            false));
-    if (!snapshot) {
-        log_report_alloc_failed(
-            "report_night_index_lookup",
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+bool ReportNightIndexService::by_start(
+    uint64_t night_start_ms,
+    ReportIndexedNight &out,
+    size_t *therapy_index_out) const {
+    ReportNightIndexSnapshotRef current;
+    if (snapshot(current) != ReportNightIndexSnapshotResult::Ready ||
+        !current) {
         return false;
     }
 
-    size_t count = 0;
-    bool found = false;
-    if (build(snapshot, AC_REPORT_SUMMARY_RECORD_MAX, count)) {
-        found = ReportNightIndex::by_start(snapshot,
-                                           count,
-                                           night_start_ms,
-                                           out,
-                                           therapy_index_out);
-    }
-
-    Memory::free(snapshot);
-    return found;
+    return current->by_start(night_start_ms, out, therapy_index_out);
 }
 
 void ReportNightIndexService::format_result_etag(

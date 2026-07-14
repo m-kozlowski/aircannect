@@ -132,6 +132,10 @@ void ReportSummaryRuntime::build_snapshot_json(LargeTextBuffer &json) const {
     snapshot_.build_json(json);
 }
 
+bool ReportSummaryRuntime::snapshot_available() const {
+    return snapshot_.available();
+}
+
 bool ReportSummaryRuntime::snapshot_progress_due(uint32_t now_ms,
                                                  uint32_t interval_ms) {
     return snapshot_.progress_due(now_ms, interval_ms);

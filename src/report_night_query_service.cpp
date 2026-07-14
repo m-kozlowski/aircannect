@@ -1,9 +1,6 @@
 #include "report_night_query_service.h"
 
-#include "memory_manager.h"
-#include "report_diagnostics.h"
 #include "report_index_scratch.h"
-#include "report_manager_limits.h"
 #include "report_summary_json.h"
 
 namespace aircannect {
@@ -30,33 +27,26 @@ bool ReportNightQueryService::for_each_summary_night(
     void *context) const {
     if (!callback) return false;
 
-    ReportIndexedNight *snapshot =
-        static_cast<ReportIndexedNight *>(Memory::alloc_large(
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight),
-            false));
-    if (!snapshot) {
-        log_report_alloc_failed(
-            "summary_night_snapshot",
-            AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
+    ReportNightIndexSnapshotRef snapshot;
+    if (night_index_.snapshot(snapshot) !=
+            ReportNightIndexSnapshotResult::Ready ||
+        !snapshot) {
         return false;
     }
 
-    size_t count = 0;
-    if (!night_index_.build(snapshot, AC_REPORT_SUMMARY_RECORD_MAX, count)) {
-        Memory::free(snapshot);
-        return false;
-    }
+    ScopedIndexedNight indexed("summary_night_snapshot");
+    if (!indexed) return false;
 
     bool any = false;
     size_t therapy_index = 0;
-    for (size_t i = count; i > 0; --i) {
+    for (size_t i = snapshot->count(); i > 0; --i) {
         const size_t summary_index = i - 1;
-        const ReportIndexedNight &indexed = snapshot[summary_index];
-        if (!report_indexed_night_visible_in_summary(indexed)) continue;
+        if (!snapshot->materialize(summary_index, indexed.get())) return false;
+        if (!report_indexed_night_visible_in_summary(indexed.get())) continue;
 
-        ReportSummaryRecord record = indexed.summary;
+        ReportSummaryRecord record = indexed->summary;
         record.duration_min =
-            report_indexed_night_display_duration_min(indexed);
+            report_indexed_night_display_duration_min(indexed.get());
 
         ReportSummaryNight night;
         night.summary_index = summary_index;
@@ -66,7 +56,6 @@ bool ReportNightQueryService::for_each_summary_night(
         if (!callback(context, night)) break;
     }
 
-    Memory::free(snapshot);
     return any;
 }
 

@@ -18,6 +18,12 @@ enum class ReportSummaryFetchEvent : uint8_t {
     Failed,
 };
 
+enum class ReportSummarySnapshotResult : uint8_t {
+    Published,
+    Busy,
+    Failed,
+};
+
 class ReportSummaryService {
 public:
     ReportSummaryService(ReportSummaryRuntime &summary,
@@ -35,7 +41,8 @@ public:
 
     ReportSummaryStatus status() const;
     void build_json(LargeTextBuffer &json) const;
-    bool publish_json_snapshot();
+    ReportSummarySnapshotResult publish_json_snapshot();
+    const char *snapshot_error() const { return snapshot_error_; }
 
 private:
     bool ensure_records();
@@ -49,6 +56,7 @@ private:
     ReportNightIndexRuntime &night_index_;
     ReportNightIndexService &night_index_service_;
     ReportResultCacheRuntime &result_cache_;
+    char snapshot_error_[48] = {};
 };
 
 }  // namespace aircannect

@@ -1,9 +1,6 @@
 #include "report_night_index_cache.h"
 
-#include <string.h>
-
-#include "memory_manager.h"
-#include "report_diagnostics.h"
+#include <utility>
 
 namespace aircannect {
 
@@ -33,97 +30,87 @@ bool ReportNightIndexCache::begin() {
     return lock_ != nullptr;
 }
 
-bool ReportNightIndexCache::copy(const ReportNightIndexCacheKey &key,
-                                 ReportIndexedNight *out,
-                                 size_t capacity,
-                                 size_t &count) const {
-    count = 0;
-    if (!lock_ || !out || capacity == 0) return false;
-    if (xSemaphoreTake(lock_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+ReportNightIndexCacheAcquire ReportNightIndexCache::acquire(
+    const ReportNightIndexCacheKey &key,
+    ReportNightIndexSnapshotRef &out) {
+    out.reset();
+    if (!lock_) return ReportNightIndexCacheAcquire::Error;
+    if (xSemaphoreTake(lock_, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return ReportNightIndexCacheAcquire::Busy;
+    }
 
-    if (!matches_locked(key)) {
+    if (matches_locked(key)) {
+        out = snapshot_;
+        xSemaphoreGive(lock_);
+        return ReportNightIndexCacheAcquire::Hit;
+    }
+
+    if (build_active_) {
+        xSemaphoreGive(lock_);
+        return ReportNightIndexCacheAcquire::Busy;
+    }
+
+    build_active_ = true;
+    build_key_ = key;
+    xSemaphoreGive(lock_);
+    return ReportNightIndexCacheAcquire::Build;
+}
+
+bool ReportNightIndexCache::complete_build(
+    const ReportNightIndexCacheKey &key,
+    const ReportNightIndexSnapshotRef &snapshot) {
+    if (!lock_ || !snapshot) return false;
+    if (xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) return false;
+
+    if (!build_active_ ||
+        !report_night_index_cache_key_equal(build_key_, key)) {
         xSemaphoreGive(lock_);
         return false;
     }
 
-    count = count_ < capacity ? count_ : capacity;
-    if (count > 0) {
-        memcpy(out, entries_, count * sizeof(ReportIndexedNight));
-    }
+    ReportNightIndexSnapshotRef old_snapshot = std::move(snapshot_);
+    snapshot_ = snapshot;
+    key_ = key;
+    valid_ = true;
+    build_active_ = false;
+    build_key_ = {};
 
     xSemaphoreGive(lock_);
+    old_snapshot.reset();
     return true;
 }
 
-bool ReportNightIndexCache::publish(const ReportNightIndexCacheKey &key,
-                                    const ReportIndexedNight *src,
-                                    size_t count) {
-    if (!lock_ || !src) return false;
-    if (xSemaphoreTake(lock_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+void ReportNightIndexCache::cancel_build(
+    const ReportNightIndexCacheKey &key) {
+    if (!lock_ || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) return;
 
-    if (!ensure_entries_locked()) {
-        xSemaphoreGive(lock_);
-        return false;
+    if (build_active_ &&
+        report_night_index_cache_key_equal(build_key_, key)) {
+        build_active_ = false;
+        build_key_ = {};
     }
-
-    const size_t stored = count < AC_REPORT_SUMMARY_RECORD_MAX
-                              ? count
-                              : AC_REPORT_SUMMARY_RECORD_MAX;
-    if (stored > 0) {
-        memcpy(entries_, src, stored * sizeof(ReportIndexedNight));
-    }
-    if (stored < count_) {
-        memset(entries_ + stored,
-               0,
-               (count_ - stored) * sizeof(ReportIndexedNight));
-    }
-
-    count_ = stored;
-    key_ = key;
-    valid_ = true;
 
     xSemaphoreGive(lock_);
-    return true;
 }
 
 void ReportNightIndexCache::clear() {
-    if (lock_) xSemaphoreTake(lock_, portMAX_DELAY);
+    if (!lock_ || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) return;
 
-    clear_entries_locked();
+    ReportNightIndexSnapshotRef old_snapshot = std::move(snapshot_);
+    valid_ = false;
+    key_ = {};
+    build_active_ = false;
+    build_key_ = {};
 
-    if (lock_) xSemaphoreGive(lock_);
+    xSemaphoreGive(lock_);
+    old_snapshot.reset();
 }
 
 bool ReportNightIndexCache::matches_locked(
     const ReportNightIndexCacheKey &key) const {
     return valid_ &&
-           entries_ != nullptr &&
+           snapshot_ != nullptr &&
            report_night_index_cache_key_equal(key_, key);
-}
-
-bool ReportNightIndexCache::ensure_entries_locked() {
-    if (entries_) return true;
-
-    entries_ = static_cast<ReportIndexedNight *>(Memory::calloc_large(
-        AC_REPORT_SUMMARY_RECORD_MAX,
-        sizeof(ReportIndexedNight),
-        false));
-    if (entries_) return true;
-
-    log_report_alloc_failed(
-        "report_night_index_cache",
-        AC_REPORT_SUMMARY_RECORD_MAX * sizeof(ReportIndexedNight));
-    valid_ = false;
-    count_ = 0;
-    return false;
-}
-
-void ReportNightIndexCache::clear_entries_locked() {
-    Memory::free(entries_);
-    entries_ = nullptr;
-    count_ = 0;
-    valid_ = false;
-    key_ = {};
 }
 
 }  // namespace aircannect
