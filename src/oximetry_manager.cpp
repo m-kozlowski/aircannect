@@ -424,22 +424,4 @@ uint16_t OximetryManager::encode_plx_sfloat_int(int16_t value) {
     return encode_sfloat_int_value(value);
 }
 
-const char *OximetryManager::sensor_state_name(OximetrySensorState state) {
-    switch (state) {
-        case OximetrySensorState::Off: return "off";
-        case OximetrySensorState::Idle: return "idle";
-        case OximetrySensorState::Scanning: return "scanning";
-        case OximetrySensorState::Connecting: return "connecting";
-        case OximetrySensorState::Connected: return "connected";
-        case OximetrySensorState::Streaming: return "streaming";
-        default: return "?";
-    }
-}
-
-
-
-
-
-
-
 }  // namespace aircannect

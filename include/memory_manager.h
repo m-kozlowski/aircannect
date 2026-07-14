@@ -47,7 +47,6 @@ void *alloc_large(size_t size, bool allow_internal_fallback = true);
 void *calloc_large(size_t count,
                    size_t size,
                    bool allow_internal_fallback = true);
-void *alloc_internal(size_t size);
 void free(void *ptr);
 
 }  // namespace Memory

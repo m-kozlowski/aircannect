@@ -137,21 +137,6 @@ bool session_mapping_available(const EdfReportSessionDescriptor &session,
 
 }  // namespace
 
-const char *edf_report_file_status_name(EdfReportFileStatus status) {
-    switch (status) {
-        case EdfReportFileStatus::Ok: return "ok";
-        case EdfReportFileStatus::UnsupportedKind: return "unsupported_kind";
-        case EdfReportFileStatus::InventoryError: return "inventory_error";
-        case EdfReportFileStatus::FileTooLarge: return "file_too_large";
-        case EdfReportFileStatus::TooManySignals: return "too_many_signals";
-        case EdfReportFileStatus::SignalHeaderError:
-            return "signal_header_error";
-        case EdfReportFileStatus::TimingError: return "timing_error";
-        default:
-            return "unknown";
-    }
-}
-
 bool edf_report_file_kind_supported(EdfInventoryFileKind kind) {
     return report_kind(kind);
 }

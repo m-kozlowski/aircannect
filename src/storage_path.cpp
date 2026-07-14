@@ -11,13 +11,6 @@ const char *storage_basename_from_path(const char *path) {
     return slash ? slash + 1 : path;
 }
 
-bool storage_path_equals_or_under(const char *path, const char *root) {
-    if (!path || !root) return false;
-    const size_t root_len = strlen(root);
-    if (strncmp(path, root, root_len) != 0) return false;
-    return path[root_len] == '\0' || path[root_len] == '/';
-}
-
 bool storage_append_child_path(const char *parent,
                                const char *name,
                                char *out,

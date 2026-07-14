@@ -22,27 +22,6 @@ int32_t physical_to_milli(float value) {
 
 }  // namespace
 
-const char *edf_report_series_status_name(EdfReportSeriesStatus status) {
-    switch (status) {
-        case EdfReportSeriesStatus::Ok: return "ok";
-        case EdfReportSeriesStatus::InvalidArgument:
-            return "invalid_argument";
-        case EdfReportSeriesStatus::SignalNotFound:
-            return "signal_not_found";
-        case EdfReportSeriesStatus::SignalNotMapped:
-            return "signal_not_mapped";
-        case EdfReportSeriesStatus::ScaleError: return "scale_error";
-        case EdfReportSeriesStatus::RecordOutOfRange:
-            return "record_out_of_range";
-        case EdfReportSeriesStatus::RecordSizeMismatch:
-            return "record_size_mismatch";
-        case EdfReportSeriesStatus::CallbackRejected:
-            return "callback_rejected";
-        default:
-            return "unknown";
-    }
-}
-
 EdfReportSeriesStatus edf_report_series_decoder_init(
     const EdfReportFileDescriptor &file,
     const uint8_t *header,

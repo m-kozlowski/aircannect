@@ -146,20 +146,6 @@ bool verify_record_crc(const uint8_t *record, size_t record_size) {
 
 }  // namespace
 
-const char *edf_report_event_status_name(EdfReportEventStatus status) {
-    switch (status) {
-        case EdfReportEventStatus::Ok: return "ok";
-        case EdfReportEventStatus::InvalidArgument:
-            return "invalid_argument";
-        case EdfReportEventStatus::CrcError: return "crc_error";
-        case EdfReportEventStatus::ParseError: return "parse_error";
-        case EdfReportEventStatus::CallbackRejected:
-            return "callback_rejected";
-        default:
-            return "unknown";
-    }
-}
-
 EdfReportEventStatus edf_report_decode_annotation_record(
     const EdfReportFileDescriptor &file,
     const uint8_t *record,

@@ -40,8 +40,6 @@ struct EdfReportSeriesDecodeStats {
 using EdfReportSeriesSampleCallback =
     bool (*)(void *context, const ReportSeriesSample &sample);
 
-const char *edf_report_series_status_name(EdfReportSeriesStatus status);
-
 EdfReportSeriesStatus edf_report_series_decoder_init(
     const EdfReportFileDescriptor &file,
     const uint8_t *header,

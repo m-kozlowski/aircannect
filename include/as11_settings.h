@@ -195,7 +195,6 @@ bool as11_setting_visible_for_mode(const As11SettingDef &def, int mode);
 bool as11_setting_readable_via_rpc(const As11SettingDef &def);
 bool as11_setting_writable_via_rpc(const As11SettingDef &def);
 int as11_mode_index_from_value(const std::string &value);
-const char *as11_mode_name(int mode);
 
 std::string as11_settings_get_params_json();
 std::string as11_build_set_params_from_json(const std::string &body,

@@ -59,35 +59,6 @@ bool metadata_kind(EdfInventoryFileKind kind) {
 
 }  // namespace
 
-const char *edf_inventory_file_kind_name(EdfInventoryFileKind kind) {
-    switch (kind) {
-        case EdfInventoryFileKind::Brp: return "BRP";
-        case EdfInventoryFileKind::Pld: return "PLD";
-        case EdfInventoryFileKind::Sa2: return "SA2";
-        case EdfInventoryFileKind::Eve: return "EVE";
-        case EdfInventoryFileKind::Csl: return "CSL";
-        case EdfInventoryFileKind::Str: return "STR";
-        case EdfInventoryFileKind::IdentificationJson:
-            return "Identification.json";
-        case EdfInventoryFileKind::IdentificationCrc:
-            return "Identification.crc";
-        case EdfInventoryFileKind::Unknown:
-        default:
-            return "unknown";
-    }
-}
-
-const char *edf_inventory_status_name(EdfInventoryStatus status) {
-    switch (status) {
-        case EdfInventoryStatus::Ok: return "ok";
-        case EdfInventoryStatus::InvalidPath: return "invalid_path";
-        case EdfInventoryStatus::InvalidHeader: return "invalid_header";
-        case EdfInventoryStatus::FileTooSmall: return "file_too_small";
-        default:
-            return "unknown";
-    }
-}
-
 bool edf_inventory_describe_path(const char *path, EdfInventoryEntry &out) {
     out = {};
     if (!parse_path(path, out)) {

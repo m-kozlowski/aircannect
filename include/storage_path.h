@@ -10,7 +10,6 @@ static constexpr size_t AC_STORAGE_ERROR_MAX = 64;
 static constexpr size_t AC_STORAGE_MAX_SELECTIONS = 64;
 
 const char *storage_basename_from_path(const char *path);
-bool storage_path_equals_or_under(const char *path, const char *root);
 bool storage_append_child_path(const char *parent,
                                const char *name,
                                char *out,

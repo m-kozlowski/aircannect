@@ -186,7 +186,6 @@ private:
     // Encoding helpers
     static int16_t decode_plx_sfloat(uint16_t raw, bool &valid);
     static uint16_t encode_plx_sfloat_int(int16_t value);
-    static const char *sensor_state_name(OximetrySensorState state);
 
     // Sensor persistence and worker
     bool load_sensor_known();

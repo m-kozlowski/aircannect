@@ -98,7 +98,6 @@ struct EdfReportSessionDescriptor {
     EdfReportSessionFileDescriptor files[AC_EDF_REPORT_SESSION_FILE_MAX] = {};
 };
 
-const char *edf_report_file_status_name(EdfReportFileStatus status);
 bool edf_report_file_kind_supported(EdfInventoryFileKind kind);
 uint32_t edf_report_file_kind_mask(EdfInventoryFileKind kind);
 size_t edf_report_session_file_slot(EdfInventoryFileKind kind);

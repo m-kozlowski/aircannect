@@ -101,11 +101,6 @@ void *calloc_large(size_t count,
     return ptr;
 }
 
-void *alloc_internal(size_t size) {
-    if (size == 0) return nullptr;
-    return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-}
-
 void free(void *ptr) {
     if (ptr) ::free(ptr);
 }

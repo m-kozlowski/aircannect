@@ -1108,17 +1108,6 @@ int as11_mode_index_from_value(const std::string &value) {
     return index >= 0 && index <= 10 ? index : -1;
 }
 
-const char *as11_mode_name(int mode) {
-    static const char *const names[] = {
-        "CPAP", "AutoSet", "AutoSet For Her", "S", "ST", "T",
-        "VAuto", "ASV", "ASVAuto", "iVAPS", "PAC",
-    };
-    if (mode < 0 || mode >= static_cast<int>(sizeof(names) / sizeof(names[0]))) {
-        return "";
-    }
-    return names[mode];
-}
-
 std::string as11_settings_get_params_json() {
     std::string out = "[";
     out += "\"_MOP\",\"TherapyProfiles\",\"FeatureProfiles\"";

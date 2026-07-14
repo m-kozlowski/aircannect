@@ -44,8 +44,6 @@ struct EdfInventoryEntry {
     char tag[4] = {};
 };
 
-const char *edf_inventory_file_kind_name(EdfInventoryFileKind kind);
-const char *edf_inventory_status_name(EdfInventoryStatus status);
 bool edf_inventory_describe_path(const char *path, EdfInventoryEntry &out);
 
 EdfInventoryStatus edf_inventory_describe_file(const char *path,

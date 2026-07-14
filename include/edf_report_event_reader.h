@@ -30,8 +30,6 @@ struct EdfReportEventDecodeContext {
 using EdfReportEventCallback =
     bool (*)(void *context, const ReportEventRecord &event);
 
-const char *edf_report_event_status_name(EdfReportEventStatus status);
-
 EdfReportEventStatus edf_report_decode_annotation_record(
     const EdfReportFileDescriptor &file,
     const uint8_t *record,
