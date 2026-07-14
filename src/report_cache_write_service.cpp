@@ -25,6 +25,8 @@ ReportCacheWriteService::ReportCacheWriteService(
       result_cache_(result_cache) {}
 
 bool ReportCacheWriteService::service() {
+    if (result_cache_.service_loader()) return true;
+
     ReportCacheStorageRuntime::CacheWriteQueueSlot job;
     if (!storage_.take_next_write(job)) {
         if (result_cache_.service_writer()) return true;

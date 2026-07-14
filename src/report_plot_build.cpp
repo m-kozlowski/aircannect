@@ -9,7 +9,6 @@
 #include "report_plot_payload.h"
 #include "report_records.h"
 #include "report_result_cache_runtime.h"
-#include "report_result_cache_files.h"
 #include "report_result_provider_bridge.h"
 #include "report_result_runtime.h"
 #include "report_store.h"
@@ -123,19 +122,6 @@ bool ReportResultPlotBuilder::start() {
     if (result_.plot().start_ms <= 0 ||
         result_.plot().end_ms <= result_.plot().start_ms) {
         report_build_empty_plot_bin(result_.plot().result_bin);
-        return cache_.publish_result(result_);
-    }
-
-    if (!result_.plot().skip_cache &&
-        load_result_plot_cache_for_etag(
-            result_.identity().summary().start_ms,
-            result_.identity().etag(),
-            result_.plot().result_bin)) {
-        Log::logf(CAT_REPORT,
-                  LOG_DEBUG,
-                  "Result plot cache hit index=%lu bytes=%lu\n",
-                  static_cast<unsigned long>(result_.status().therapy_index),
-                  static_cast<unsigned long>(result_.plot().result_bin.size()));
         return cache_.publish_result(result_);
     }
 

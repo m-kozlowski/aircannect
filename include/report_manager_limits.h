@@ -12,6 +12,8 @@ static constexpr size_t AC_REPORT_RESULT_STREAM_MAX = 16;
 static constexpr size_t AC_REPORT_RESULT_SLOT_MAX = 4;
 static constexpr size_t AC_REPORT_RANGE_CACHE_SLOT_MAX = 8;
 static constexpr size_t AC_REPORT_RANGE_CACHE_MAX_BYTES = 4 * 1024 * 1024;
+static constexpr size_t AC_REPORT_RESULT_CACHE_LOAD_QUEUE_MAX = 4;
+static constexpr size_t AC_REPORT_RESULT_CACHE_PROBE_MAX = 8;
 static constexpr size_t AC_REPORT_BUILD_QUEUE_MAX = 4;
 static constexpr size_t AC_REPORT_RESULT_ETAG_MAX = 80;
 

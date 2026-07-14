@@ -42,8 +42,10 @@ std::shared_ptr<ReportSpoolBuffer> make_result_json_snapshot(
 
 }  // namespace
 
+ReportResultCacheRuntime::ReportResultCacheRuntime() : loader_(slots_) {}
+
 bool ReportResultCacheRuntime::begin() {
-    return ensure_slots() && writer_.begin();
+    return ensure_slots() && loader_.begin() && writer_.begin();
 }
 
 bool ReportResultCacheRuntime::ensure_slots() {
@@ -144,6 +146,8 @@ bool ReportResultCacheRuntime::publish_result(
                         plot)) {
         return false;
     }
+    loader_.invalidate(result.identity().indexed_night().summary.start_ms,
+                       false);
 
     if (cache_plot && plot) {
         enqueue_write(result.identity().indexed_night(),
@@ -168,13 +172,6 @@ ReportCachedPlotRead ReportResultCacheRuntime::read_plot(
     const char *etag,
     std::shared_ptr<ReportSpoolBuffer> &out) {
     return slots_.read_plot(night_start_ms, etag, out);
-}
-
-bool ReportResultCacheRuntime::attach_plot(
-    uint64_t night_start_ms,
-    const char *etag,
-    const std::shared_ptr<ReportSpoolBuffer> &plot) {
-    return slots_.attach_plot(night_start_ms, etag, plot);
 }
 
 ReportRangePlotRead ReportResultCacheRuntime::read_or_request_range(
@@ -230,6 +227,22 @@ void ReportResultCacheRuntime::reset_range(bool clear_ready) {
 
 void ReportResultCacheRuntime::invalidate(uint64_t night_start_ms, bool all) {
     slots_.invalidate(night_start_ms, all);
+    loader_.invalidate(night_start_ms, all);
+}
+
+ReportCacheLoadRequest ReportResultCacheRuntime::request_load(
+    uint64_t night_start_ms,
+    const char *etag,
+    ReportCacheArtifact artifact) {
+    return loader_.request(night_start_ms, etag, artifact);
+}
+
+bool ReportResultCacheRuntime::loader_active() const {
+    return loader_.active();
+}
+
+bool ReportResultCacheRuntime::service_loader() {
+    return loader_.service();
 }
 
 bool ReportResultCacheRuntime::enqueue_write(
@@ -237,6 +250,7 @@ bool ReportResultCacheRuntime::enqueue_write(
     const char *etag,
     const std::shared_ptr<ReportSpoolBuffer> &result_json,
     const std::shared_ptr<ReportSpoolBuffer> &plot) {
+    loader_.invalidate(night.summary.start_ms, false);
     return writer_.enqueue(night, etag, result_json, plot);
 }
 

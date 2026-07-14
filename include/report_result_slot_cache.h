@@ -66,9 +66,6 @@ public:
         uint64_t night_start_ms,
         const char *etag,
         std::shared_ptr<ReportSpoolBuffer> &out);
-    bool attach_plot(uint64_t night_start_ms,
-                     const char *etag,
-                     const std::shared_ptr<ReportSpoolBuffer> &plot);
 
     ReportRangePlotRead read_or_request_range(
         size_t index,

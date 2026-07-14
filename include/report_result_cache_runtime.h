@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "large_text_buffer.h"
+#include "report_result_cache_loader.h"
 #include "report_result_cache_writer.h"
 #include "report_result_slot_cache.h"
 
@@ -14,6 +15,8 @@ class ReportResultRuntime;
 
 class ReportResultCacheRuntime {
 public:
+    ReportResultCacheRuntime();
+
     bool begin();
 
     void apply_diagnostics(ReportResultStatus &status) const;
@@ -30,9 +33,6 @@ public:
         uint64_t night_start_ms,
         const char *etag,
         std::shared_ptr<ReportSpoolBuffer> &out);
-    bool attach_plot(uint64_t night_start_ms,
-                     const char *etag,
-                     const std::shared_ptr<ReportSpoolBuffer> &plot);
 
     ReportRangePlotRead read_or_request_range(
         size_t index,
@@ -57,6 +57,12 @@ public:
 
     void invalidate(uint64_t night_start_ms, bool all);
 
+    ReportCacheLoadRequest request_load(uint64_t night_start_ms,
+                                        const char *etag,
+                                        ReportCacheArtifact artifact);
+    bool loader_active() const;
+    bool service_loader();
+
     bool enqueue_write(const ReportIndexedNight &night,
                        const char *etag,
                        const std::shared_ptr<ReportSpoolBuffer> &result_json,
@@ -68,6 +74,7 @@ private:
     bool ensure_slots();
 
     ReportResultSlotCache slots_;
+    ReportResultCacheLoader loader_;
     ReportResultCacheWriter writer_;
 };
 

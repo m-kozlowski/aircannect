@@ -324,7 +324,7 @@ bool ReportRuntimeService::busy() const {
 }
 
 bool ReportRuntimeService::foreground_busy() const {
-    return prefetch_.foreground_busy();
+    return result_cache_.loader_active() || prefetch_.foreground_busy();
 }
 
 bool ReportRuntimeService::background_work_active() const {

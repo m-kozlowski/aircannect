@@ -8,7 +8,6 @@
 #include "board_report.h"
 #include "report_index_scratch.h"
 #include "report_range_tile.h"
-#include "report_result_cache_files.h"
 
 namespace aircannect {
 namespace {
@@ -115,37 +114,6 @@ ReportResultRead ReportResultServingService::read_result_for_indexed_night(
         snprintf(etag_out, etag_out_size, "%s", current_etag);
     }
 
-    if (indexed_night.edf_catalog_pending) {
-        if (load_result_json_cache_for_etag(indexed_night.summary.start_ms,
-                                            current_etag,
-                                            json_out)) {
-            const bool not_modified = if_none_match && if_none_match[0] &&
-                                      strcmp(if_none_match, current_etag) == 0;
-            build_.note_read(not_modified ? "not_modified_sd_pending"
-                                          : "ready_sd_pending");
-
-            Log::logf(CAT_REPORT,
-                      LOG_DEBUG,
-                      "Result cache pending-catalog hit index=%lu "
-                      "night=%llu etag=%s bytes=%lu\n",
-                      static_cast<unsigned long>(therapy_index),
-                      static_cast<unsigned long long>(
-                          indexed_night.summary.start_ms),
-                      current_etag,
-                      static_cast<unsigned long>(json_out.length()));
-            if (not_modified) {
-                json_out.clear();
-                return ReportResultRead::NotModified;
-            }
-
-            return ReportResultRead::Ready;
-        }
-
-        if (etag_out && etag_out_size) etag_out[0] = '\0';
-        build_.note_read("edf_catalog");
-        return ReportResultRead::Building;
-    }
-
     const ReportResultSlotRead slot_read =
         cache_.read_result(indexed_night.summary.start_ms,
                            current_etag,
@@ -164,29 +132,31 @@ ReportResultRead ReportResultServingService::read_result_for_indexed_night(
                    : ReportResultRead::Ready;
     }
 
-    if (load_result_json_cache_for_etag(indexed_night.summary.start_ms,
-                                        current_etag,
-                                        json_out)) {
-        const bool not_modified = if_none_match && if_none_match[0] &&
-                                  strcmp(if_none_match, current_etag) == 0;
-        if (etag_out && etag_out_size) {
-            snprintf(etag_out, etag_out_size, "%s", current_etag);
-        }
-        build_.note_read(not_modified ? "not_modified_sd" : "ready_sd");
+    const ReportCacheLoadRequest load_request =
+        cache_.request_load(indexed_night.summary.start_ms,
+                            current_etag,
+                            ReportCacheArtifact::Result);
+    switch (load_request) {
+        case ReportCacheLoadRequest::Queued:
+        case ReportCacheLoadRequest::Pending:
+            if (etag_out && etag_out_size) etag_out[0] = '\0';
+            build_.note_read("cache_load");
+            return ReportResultRead::Building;
+        case ReportCacheLoadRequest::Full:
+            build_.note_read("cache_load_full");
+            return ReportResultRead::QueueFull;
+        case ReportCacheLoadRequest::Failed:
+        case ReportCacheLoadRequest::Unavailable:
+            build_.note_read("cache_load_failed");
+            return ReportResultRead::Unavailable;
+        case ReportCacheLoadRequest::Missing:
+            break;
+    }
 
-        Log::logf(CAT_REPORT,
-                  LOG_DEBUG,
-                  "Result cache direct hit index=%lu night=%llu bytes=%lu\n",
-                  static_cast<unsigned long>(therapy_index),
-                  static_cast<unsigned long long>(
-                      indexed_night.summary.start_ms),
-                  static_cast<unsigned long>(json_out.length()));
-        if (not_modified) {
-            json_out.clear();
-            return ReportResultRead::NotModified;
-        }
-
-        return ReportResultRead::Ready;
+    if (indexed_night.edf_catalog_pending) {
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        build_.note_read("edf_catalog");
+        return ReportResultRead::Building;
     }
 
     if (etag_out && etag_out_size) etag_out[0] = '\0';
@@ -237,28 +207,6 @@ ReportPlotRead ReportResultServingService::read_plot(
         return ReportPlotRead::Stale;
     }
 
-    if (indexed_night->edf_catalog_pending) {
-        auto cached_plot = std::make_shared<ReportSpoolBuffer>();
-        if (cached_plot &&
-            load_result_plot_cache_for_etag(indexed_night->summary.start_ms,
-                                            current_etag,
-                                            *cached_plot)) {
-            out = cached_plot;
-            Log::logf(CAT_REPORT,
-                      LOG_DEBUG,
-                      "Plot cache pending-catalog hit index=%lu "
-                      "night=%llu bytes=%lu\n",
-                      static_cast<unsigned long>(resolved_therapy_index),
-                      static_cast<unsigned long long>(
-                          indexed_night->summary.start_ms),
-                      static_cast<unsigned long>(cached_plot->size()));
-            return ReportPlotRead::Ready;
-        }
-
-        if (etag_out && etag_out_size) etag_out[0] = '\0';
-        return ReportPlotRead::Building;
-    }
-
     bool matching_result_without_plot = false;
     switch (cache_.read_plot(indexed_night->summary.start_ms,
                              current_etag,
@@ -275,24 +223,26 @@ ReportPlotRead ReportResultServingService::read_plot(
             break;
     }
 
-    auto cached_plot = std::make_shared<ReportSpoolBuffer>();
-    if (cached_plot &&
-        load_result_plot_cache_for_etag(indexed_night->summary.start_ms,
-                                        current_etag,
-                                        *cached_plot)) {
-        cache_.attach_plot(indexed_night->summary.start_ms,
-                           current_etag,
-                           cached_plot);
+    const ReportCacheLoadRequest load_request =
+        cache_.request_load(indexed_night->summary.start_ms,
+                            current_etag,
+                            ReportCacheArtifact::Plot);
+    switch (load_request) {
+        case ReportCacheLoadRequest::Queued:
+        case ReportCacheLoadRequest::Pending:
+            return ReportPlotRead::Building;
+        case ReportCacheLoadRequest::Full:
+            return ReportPlotRead::QueueFull;
+        case ReportCacheLoadRequest::Failed:
+        case ReportCacheLoadRequest::Unavailable:
+            return ReportPlotRead::Unavailable;
+        case ReportCacheLoadRequest::Missing:
+            break;
+    }
 
-        out = cached_plot;
-        Log::logf(CAT_REPORT,
-                  LOG_DEBUG,
-                  "Plot cache direct hit index=%lu night=%llu bytes=%lu\n",
-                  static_cast<unsigned long>(resolved_therapy_index),
-                  static_cast<unsigned long long>(
-                      indexed_night->summary.start_ms),
-                  static_cast<unsigned long>(cached_plot->size()));
-        return ReportPlotRead::Ready;
+    if (indexed_night->edf_catalog_pending) {
+        if (etag_out && etag_out_size) etag_out[0] = '\0';
+        return ReportPlotRead::Building;
     }
 
     if (matching_result_without_plot &&

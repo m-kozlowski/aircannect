@@ -123,7 +123,7 @@ bool ReportResultSlotCache::publish(
     const std::shared_ptr<ReportSpoolBuffer> &result_json,
     const std::shared_ptr<ReportSpoolBuffer> &plot) {
     if (!ensure_slots() || !etag || !etag[0] || night_start_ms == 0 ||
-        !result_json || result_json->size() == 0) {
+        ((!result_json || result_json->size() == 0) && !plot)) {
         return false;
     }
 
@@ -153,12 +153,18 @@ bool ReportResultSlotCache::publish(
     }
 
     ResultCacheEntry &slot = slots_[pick];
+    if (slot.valid && strcmp(slot.etag, etag) != 0) {
+        clear_slot_locked(slot);
+    }
+
     slot.valid = true;
     slot.night_start_ms = night_start_ms;
     snprintf(slot.etag, sizeof(slot.etag), "%s", etag);
-    slot.state = state;
-    slot.result_json = result_json;
-    slot.plot = plot;
+    if (result_json && result_json->size() > 0) {
+        slot.state = state;
+        slot.result_json = result_json;
+    }
+    if (plot) slot.plot = plot;
     slot.last_used = ++tick_;
     update_counts_locked();
 
@@ -181,11 +187,15 @@ ReportResultSlotRead ReportResultSlotCache::read_result(
         ResultCacheEntry &slot = slots_[i];
         if (!slot.valid || slot.night_start_ms != night_start_ms) continue;
 
-        if (strcmp(slot.etag, etag) != 0 || !slot.result_json) {
+        if (strcmp(slot.etag, etag) != 0) {
             clear_slot_locked(slot);
             clear_range_locked(night_start_ms, false);
             update_counts_locked();
             continue;
+        }
+        if (!slot.result_json) {
+            xSemaphoreGive(lock_);
+            return ReportResultSlotRead::NotFound;
         }
 
         slot.last_used = ++tick_;
@@ -254,36 +264,6 @@ ReportCachedPlotRead ReportResultSlotCache::read_plot(
 
     xSemaphoreGive(lock_);
     return ReportCachedPlotRead::NotFound;
-}
-
-bool ReportResultSlotCache::attach_plot(
-    uint64_t night_start_ms,
-    const char *etag,
-    const std::shared_ptr<ReportSpoolBuffer> &plot) {
-    if (!slots_ || !lock_ || !etag || !etag[0] || !plot) return false;
-
-    xSemaphoreTake(lock_, portMAX_DELAY);
-
-    bool attached = false;
-    for (size_t i = 0; i < AC_REPORT_RESULT_SLOT_MAX; ++i) {
-        ResultCacheEntry &slot = slots_[i];
-        if (!slot.valid || slot.night_start_ms != night_start_ms) continue;
-
-        if (strcmp(slot.etag, etag) != 0) {
-            clear_slot_locked(slot);
-            update_counts_locked();
-            continue;
-        }
-
-        slot.plot = plot;
-        slot.last_used = ++tick_;
-        update_counts_locked();
-        attached = true;
-        break;
-    }
-
-    xSemaphoreGive(lock_);
-    return attached;
 }
 
 ReportRangePlotRead ReportResultSlotCache::read_or_request_range(
