@@ -5,7 +5,6 @@
 #include <string>
 
 #include "board.h"
-#include "edf_file_inventory.h"
 #include "edf_file_writer.h"
 
 namespace aircannect {
@@ -24,10 +23,6 @@ static constexpr uint32_t AC_EDF_STORAGE_WORK_TICK_MS = 5;
 
 static constexpr size_t AC_EDF_STORAGE_PATIENT_ID_MAX = 80;
 static constexpr size_t AC_EDF_STORAGE_RECORDING_ID_MAX = 96;
-
-static constexpr size_t AC_EDF_STORAGE_INVENTORY_NAME_MAX = 48;
-static constexpr size_t AC_EDF_STORAGE_INVENTORY_PATH_MAX = 80;
-static constexpr size_t AC_EDF_STORAGE_INVENTORY_HEADER_MAX = 65536;
 
 enum class EdfStorageFileIndex : uint8_t {
     Brp,
@@ -109,34 +104,6 @@ struct EdfStorageWorkerStatus {
     EdfStorageOpenFileStatus files[AC_EDF_STORAGE_FILE_COUNT];
 };
 
-enum class EdfStorageInventoryStatus : uint8_t {
-    Ok,
-    BadPath,
-    StorageUnavailable,
-    Busy,
-    NotFound,
-    NotDirectory,
-    VisitorStopped,
-};
-
-struct EdfStorageInventoryEntry {
-    bool directory = false;
-    uint64_t size = 0;
-    char name[AC_EDF_STORAGE_INVENTORY_NAME_MAX] = {};
-    char path[AC_EDF_STORAGE_INVENTORY_PATH_MAX] = {};
-    EdfInventoryEntry file;
-};
-
-struct EdfStorageInventoryResult {
-    EdfStorageInventoryStatus status = EdfStorageInventoryStatus::Ok;
-    size_t matched = 0;
-    size_t returned = 0;
-    bool truncated = false;
-};
-
-using EdfStorageInventoryVisitor =
-    bool (*)(const EdfStorageInventoryEntry &entry, void *ctx);
-
 namespace EdfStorageWorker {
 
 // lifecycle
@@ -173,16 +140,6 @@ uint32_t stack_high_water_bytes();
 #endif
 bool open_result(const EdfStorageOpenHandle &handle,
                  EdfStorageOpenResult &result);
-
-// inventory
-EdfStorageInventoryResult list_inventory(
-    const char *path,
-    size_t offset,
-    size_t limit,
-    EdfStorageInventoryVisitor visitor,
-    void *ctx);
-
-const char *inventory_status_name(EdfStorageInventoryStatus status);
 
 }  // namespace EdfStorageWorker
 }  // namespace aircannect
