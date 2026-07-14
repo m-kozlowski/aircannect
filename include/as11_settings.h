@@ -192,9 +192,6 @@ size_t as11_setting_composite_count();
 const As11SettingCompositeDef &as11_setting_composite(size_t index);
 
 bool as11_setting_visible_for_mode(const As11SettingDef &def, int mode);
-bool as11_setting_option_supported(const As11SettingDef &def,
-                                   uint8_t option_index,
-                                   uint16_t supported_mode_mask);
 bool as11_setting_readable_via_rpc(const As11SettingDef &def);
 bool as11_setting_writable_via_rpc(const As11SettingDef &def);
 int as11_mode_index_from_value(const std::string &value);

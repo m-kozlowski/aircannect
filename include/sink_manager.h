@@ -43,7 +43,6 @@ public:
     void poll();
 
     void set_live_chart_enabled(bool enabled);
-    bool live_chart_enabled() const;
     const LiveChartRuntimeStatus &live_chart_status() const {
         return live_chart_;
     }

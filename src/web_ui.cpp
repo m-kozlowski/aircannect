@@ -1245,27 +1245,6 @@ void WebUI::enforce_sse_limits() {
     }
 }
 
-size_t WebUI::sse_client_count() {
-    if (!sse_mutex_) return 0;
-    size_t count = 0;
-    if (xSemaphoreTake(sse_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
-        return events_ ? events_->count() : 0;
-    }
-    for (SseClientRef &ref : sse_clients_) {
-        AsyncEventSourceClient *client = ref.client;
-        if (!client) continue;
-        if (!client->connected()) {
-            ref.client = nullptr;
-            ref.connected_ms = 0;
-            ref.last_status_ms = 0;
-            continue;
-        }
-        count++;
-    }
-    xSemaphoreGive(sse_mutex_);
-    return count;
-}
-
 size_t WebUI::healthy_sse_client_count() {
     if (!sse_mutex_) return 0;
     size_t count = 0;

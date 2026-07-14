@@ -37,7 +37,6 @@ public:
     void poll(const As11DeviceState &as11, uint32_t now_ms);
 
     void note_stream_frame(const StreamFrameData &frame, uint32_t now_ms);
-    void note_frame_drops(uint32_t drops, uint32_t now_ms);
     void note_device_boot(uint32_t now_ms);
 
     const SessionStatus &status() const { return status_; }

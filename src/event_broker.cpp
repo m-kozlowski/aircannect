@@ -537,16 +537,6 @@ EventPublishResult EventBroker::publish_notification(const char *payload,
     return result;
 }
 
-void EventBroker::set_frame_observer(EventFrameObserver observer,
-                                     void *context) {
-    for (FrameObserverSlot &slot : frame_observers_) {
-        slot = {};
-    }
-    if (observer) {
-        (void)add_frame_observer(observer, context);
-    }
-}
-
 bool EventBroker::add_frame_observer(EventFrameObserver observer,
                                      void *context) {
     if (!observer) return false;
@@ -563,15 +553,6 @@ bool EventBroker::add_frame_observer(EventFrameObserver observer,
         }
     }
     return false;
-}
-
-void EventBroker::remove_frame_observer(EventFrameObserver observer,
-                                        void *context) {
-    for (FrameObserverSlot &slot : frame_observers_) {
-        if (slot.observer == observer && slot.context == context) {
-            slot = {};
-        }
-    }
 }
 
 void EventBroker::reset_counters() {

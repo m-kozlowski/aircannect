@@ -52,7 +52,6 @@ public:
     bool receive(RawCanFrame &frame, uint32_t wait_ms = 0);
 
     bool recover_or_restart(const char *reason);
-    void clear_rx_state();
 
     void reset_stats();
 

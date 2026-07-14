@@ -119,10 +119,6 @@ void SinkManager::set_live_chart_enabled(bool enabled) {
     }
 }
 
-bool SinkManager::live_chart_enabled() const {
-    return live_chart_.enabled;
-}
-
 void SinkManager::clear_live_chart_batch() {
     clear_live_series(live_chart_.pressure);
     clear_live_series(live_chart_.flow);

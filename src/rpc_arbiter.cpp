@@ -415,11 +415,6 @@ bool RpcArbiter::add_event_frame_observer(EventFrameObserver observer,
     return event_.add_frame_observer(observer, context);
 }
 
-void RpcArbiter::remove_event_frame_observer(EventFrameObserver observer,
-                                             void *context) {
-    event_.remove_frame_observer(observer, context);
-}
-
 EventAcquireResult RpcArbiter::acquire_events(const char *data_ids_csv) {
     return event_.acquire(data_ids_csv);
 }
@@ -481,14 +476,6 @@ bool RpcArbiter::stream_realtime_active() const {
 
 bool RpcArbiter::stream_actual_active() const {
     return stream_.actual_active();
-}
-
-size_t RpcArbiter::stream_accepted_data_id_count() const {
-    return stream_.accepted_data_id_count();
-}
-
-bool RpcArbiter::stream_accepted_data_id(const char *data_id) const {
-    return stream_.accepted_data_id(data_id);
 }
 
 bool RpcArbiter::stream_accepted_data_ids_cover(

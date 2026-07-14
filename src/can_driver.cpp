@@ -408,10 +408,6 @@ void CanDriver::poll_recovery(uint32_t alerts) {
     }
 }
 
-void CanDriver::clear_rx_state() {
-    if (installed_) (void)twai_clear_receive_queue();
-}
-
 bool CanDriver::controller_status(CanControllerStatus &out) const {
     out = {};
     twai_status_info_t status = {};

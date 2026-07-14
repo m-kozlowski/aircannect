@@ -106,9 +106,7 @@ public:
                                             uint32_t now_ms,
                                             As11EventFrame &frame);
 
-    void set_frame_observer(EventFrameObserver observer, void *context);
     bool add_frame_observer(EventFrameObserver observer, void *context);
-    void remove_frame_observer(EventFrameObserver observer, void *context);
 
     void reset_counters();
 

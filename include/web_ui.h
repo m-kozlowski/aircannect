@@ -194,7 +194,6 @@ private:
     void handle_sse_connect(AsyncEventSourceClient *client);
     void handle_sse_disconnect(AsyncEventSourceClient *client);
     void enforce_sse_limits();
-    size_t sse_client_count();
     size_t healthy_sse_client_count();
     enum class SseSendResult : uint8_t { Skipped, Sent, Failed };
     SseSendResult send_sse_to_clients(const char *payload, const char *event,

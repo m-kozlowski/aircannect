@@ -73,12 +73,6 @@ void SessionManager::note_stream_frame(const StreamFrameData &frame,
     }
 }
 
-void SessionManager::note_frame_drops(uint32_t drops, uint32_t now_ms) {
-    if (status_.state != SessionState::Active || drops == 0) return;
-    status_.dropped_frames += drops;
-    status_.last_frame_ms = now_ms;
-}
-
 void SessionManager::note_device_boot(uint32_t now_ms) {
     if (status_.state != SessionState::Active) return;
     As11DeviceState empty;
