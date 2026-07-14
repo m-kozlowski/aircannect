@@ -173,6 +173,7 @@ void RpcArbiter::poll() {
     note_can_rx_pressure(now);
     if (esp_ota_quiesce_requested_ &&
         esp_ota_quiesce_deadline_ms_ &&
+        !esp_ota_quiesce_complete() &&
         !esp_ota_quiesce_timeout_logged_ &&
         static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0) {
         esp_ota_quiesce_timeout_logged_ = true;
