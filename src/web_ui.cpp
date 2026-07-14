@@ -52,8 +52,6 @@ static constexpr size_t WEB_REPORT_RESULT_JSON_RESERVE = 4096;
 static constexpr size_t WEB_REPORT_SUMMARY_JSON_RESERVE = 24 * 1024;
 static constexpr size_t WEB_REPORT_PLOT_HTTP_ETAG_MAX = 144;
 static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
-static constexpr uint32_t WEB_STORAGE_LIST_BUDGET_MS = 50;
-static constexpr uint32_t WEB_STORAGE_LIST_LOCK_TIMEOUT_MS = 20;
 static constexpr uint32_t WEB_REPORT_SLOW_HANDLER_MS = 1000;
 
 class ScopedReportHttpTimer {
@@ -473,6 +471,15 @@ struct ArchiveDownloadRef {
     }
 };
 
+struct StorageDownloadRef {
+    StorageBrowserJob *job = nullptr;
+    std::shared_ptr<StoragePreparedDownload> download;
+
+    ~StorageDownloadRef() {
+        if (job && download) job->finish_download(*download);
+    }
+};
+
 bool therapy_request_idle(AsyncWebServerRequest *request,
                           const SessionManager *session_manager,
                           const RpcArbiter *arbiter) {
@@ -850,6 +857,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
                   ReportManager &report_manager,
+                  StorageBrowserJob &storage_browser_job,
                   StorageArchiveJob &storage_archive_job,
                   StorageDeleteJob &storage_delete_job,
                   ExportCoordinator &export_coordinator,
@@ -870,6 +878,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
     report_manager_ = &report_manager;
+    storage_browser_job_ = &storage_browser_job;
     storage_archive_job_ = &storage_archive_job;
     storage_delete_job_ = &storage_delete_job;
     export_coordinator_ = &export_coordinator;
@@ -2420,6 +2429,12 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
 void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
     if (BackgroundWorker *w = background_worker()) w->note_activity();
 
+    if (!storage_browser_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"list_unavailable\"}");
+        return;
+    }
+
     const String path = request->hasArg("path") ? request->arg("path") : "/";
     size_t offset = 0;
     size_t limit = kStorageListDefaultLimit;
@@ -2440,90 +2455,75 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    StorageJobGate gate(request, storage_job_mutex_);
-    if (!gate.locked()) return;
-    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_read_request_available(request, session_manager_, arbiter_)) {
         return;
     }
 
+    const bool refresh = request_bool_arg_default(request, "refresh", false);
+    std::shared_ptr<const StorageDirectorySnapshot> snapshot;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    const StorageListingRead read = storage_browser_job_->listing(
+        path.c_str(), refresh, snapshot, error, sizeof(error));
+    if (read == StorageListingRead::Preparing) {
+        request->send(202, "application/json",
+                      "{\"ok\":true,\"state\":\"preparing\"}");
+        return;
+    }
+    if (read == StorageListingRead::Error || !snapshot) {
+        const int code = strcmp(error, "not_found") == 0 ||
+                         strcmp(error, "not_directory") == 0
+            ? 404
+            : 503;
+        char body[128] = {};
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 error[0] ? error : "list_failed");
+        request->send(code, "application/json", body);
+        return;
+    }
+
+    const size_t total = snapshot->size();
+    const size_t returned = offset < total
+        ? std::min(limit, total - offset)
+        : 0;
+    const bool truncated = offset + returned < total;
+
     LargeTextBuffer json;
-    json.reserve(512 + limit * 192);
+    json.reserve(512 + returned * 192);
     json = "{";
     json_add_bool(json, "ok", true, false);
-    json_add_string(json, "path", path.c_str());
+    json_add_string(json, "path", snapshot->path());
+    json_add_int(json, "revision", snapshot->revision());
     json_add_int(json, "offset", static_cast<long>(offset));
     json_add_int(json, "limit", static_cast<long>(limit));
     json += ",\"entries\":[";
 
-    size_t matched = 0;
-    size_t returned = 0;
-    bool truncated = false;
     bool first = true;
-    const uint32_t started_ms = millis();
-
-    {
-        Storage::TimedGuard storage_guard(WEB_STORAGE_LIST_LOCK_TIMEOUT_MS);
-        if (!storage_guard.locked()) {
-            request->send(409, "application/json",
-                          "{\"ok\":false,\"error\":\"storage_busy\"}");
+    for (size_t i = 0; i < returned; ++i) {
+        StorageDirectoryEntryView entry;
+        if (!snapshot->entry(offset + i, entry)) {
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"bad_snapshot\"}");
             return;
         }
 
-        File dir = Storage::open(path.c_str(), "r");
-        if (!dir) {
-            request->send(404, "application/json",
-                          "{\"ok\":false,\"error\":\"not_found\"}");
+        char child_path[AC_STORAGE_PATH_MAX] = {};
+        if (!storage_append_child_path(snapshot->path(),
+                                       entry.name,
+                                       child_path,
+                                       sizeof(child_path)) ||
+            !append_storage_list_entry(json,
+                                       entry.name,
+                                       child_path,
+                                       entry.directory,
+                                       entry.size,
+                                       entry.modified,
+                                       first)) {
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"error\":\"list_alloc\"}");
             return;
         }
-
-        if (!dir.isDirectory()) {
-            dir.close();
-            request->send(404, "application/json",
-                          "{\"ok\":false,\"error\":\"not_directory\"}");
-            return;
-        }
-
-        while (!truncated) {
-            StorageDirChild child;
-            if (!storage_read_next_dir_child(dir, child)) break;
-
-            char child_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-            const bool path_ok = storage_append_child_path(path.c_str(),
-                                                           child.name,
-                                                           child_path,
-                                                           sizeof(child_path));
-
-            if (!path_ok || !storage_user_path_valid(child_path)) continue;
-            if (matched++ < offset) continue;
-            if (returned >= limit) {
-                truncated = true;
-                break;
-            }
-            const uint64_t modified = child.last_write > 0
-                ? static_cast<uint64_t>(child.last_write)
-                : 0;
-            if (!append_storage_list_entry(json,
-                                           child.name,
-                                           child_path,
-                                           child.is_dir,
-                                           child.size,
-                                           modified,
-                                           first)) {
-                dir.close();
-                request->send(503, "application/json",
-                              "{\"ok\":false,\"error\":\"list_alloc\"}");
-                return;
-            }
-            first = false;
-            returned++;
-
-            const uint32_t elapsed_ms =
-                static_cast<uint32_t>(millis() - started_ms);
-            if (elapsed_ms >= WEB_STORAGE_LIST_BUDGET_MS) {
-                truncated = true;
-            }
-        }
-        dir.close();
+        first = false;
     }
 
     json += ']';
@@ -2560,15 +2560,9 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
 void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     if (BackgroundWorker *w = background_worker()) w->note_activity();
 
-    if (!request->hasArg("path")) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"missing_path\"}");
-        return;
-    }
-    const String path = request->arg("path");
-    if (!storage_user_path_valid(path.c_str())) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"bad_path\"}");
+    if (!storage_browser_job_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"download_unavailable\"}");
         return;
     }
     if (!storage_read_request_available(request, session_manager_, arbiter_)) {
@@ -2578,31 +2572,107 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
         return;
     }
 
-    std::shared_ptr<File> file_ref = std::make_shared<File>();
-    size_t file_size = 0;
-    {
-        Storage::Guard guard;
-        *file_ref = Storage::open(path.c_str(), "r");
-        if (!*file_ref || file_ref->isDirectory()) {
-            if (*file_ref) file_ref->close();
-            request->send(404, "application/json",
-                          "{\"ok\":false,\"error\":\"not_found\"}");
+    if (!request->hasArg("id")) {
+        if (!request->hasArg("path")) {
+            request->send(400, "application/json",
+                          "{\"ok\":false,\"error\":\"missing_path\"}");
             return;
         }
-        file_size = static_cast<size_t>(file_ref->size());
+        const String path = request->arg("path");
+        if (!storage_user_path_valid(path.c_str())) {
+            request->send(400, "application/json",
+                          "{\"ok\":false,\"error\":\"bad_path\"}");
+            return;
+        }
+
+        StorageDownloadPrepareStatus status;
+        const StorageDownloadPrepareState state =
+            storage_browser_job_->prepare_download(path.c_str(), status);
+        if (state == StorageDownloadPrepareState::Busy ||
+            state == StorageDownloadPrepareState::Error) {
+            const int code = state == StorageDownloadPrepareState::Busy
+                ? 409
+                : (strcmp(status.error, "not_found") == 0 ||
+                   strcmp(status.error, "not_file") == 0 ? 404 : 503);
+            char body[128] = {};
+            snprintf(body, sizeof(body),
+                     "{\"ok\":false,\"error\":\"%s\"}",
+                     status.error[0] ? status.error : "download_failed");
+            request->send(code, "application/json", body);
+            return;
+        }
+
+        LargeTextBuffer json;
+        json.reserve(256);
+        json = "{";
+        json_add_bool(json, "ok", true, false);
+        json_add_string(json, "state",
+                        state == StorageDownloadPrepareState::Ready
+                            ? "ready"
+                            : "preparing");
+        json_add_int(json, "id", static_cast<long>(status.id));
+        if (state == StorageDownloadPrepareState::Ready) {
+            json_add_uint64(json, "size", status.size);
+            json_add_string(json, "filename", status.filename);
+        }
+        json += '}';
+        request->send(state == StorageDownloadPrepareState::Ready ? 200 : 202,
+                      "application/json", json.c_str());
+        return;
+    }
+
+    size_t id_arg = 0;
+    if (!request_size_arg_limited(request, "id", 0, 0xffffffffu, id_arg) ||
+        id_arg == 0) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_id\"}");
+        return;
+    }
+
+    std::shared_ptr<StorageDownloadRef> ref =
+        std::make_shared<StorageDownloadRef>();
+    if (!ref) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+    ref->job = storage_browser_job_;
+
+    char filename[AC_STORAGE_NAME_MAX] = {};
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    uint64_t file_size = 0;
+    if (!storage_browser_job_->begin_download(
+            static_cast<uint32_t>(id_arg),
+            ref->download,
+            filename,
+            sizeof(filename),
+            file_size,
+            error,
+            sizeof(error))) {
+        char body[128] = {};
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 error[0] ? error : "not_ready");
+        request->send(409, "application/json", body);
+        return;
+    }
+    if (file_size > static_cast<uint64_t>(SIZE_MAX)) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"file_too_large\"}");
+        return;
     }
 
     AsyncWebServerResponse *response = request->beginResponse(
         "application/octet-stream",
-        file_size,
-        [file_ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
-            if (!buffer || !file_ref || !*file_ref) return 0;
-            Storage::Guard guard;
-            const size_t size = static_cast<size_t>(file_ref->size());
-            if (offset >= size || !file_ref->seek(offset)) return 0;
-            const size_t remaining = size - offset;
-            const size_t wanted = remaining < max_len ? remaining : max_len;
-            return file_ref->read(buffer, wanted);
+        static_cast<size_t>(file_size),
+        [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
+            if (!buffer || !ref || !ref->job || !ref->download) return 0;
+            const StoragePreparedRead read = ref->job->read_download(
+                *ref->download, buffer, max_len, offset);
+            if (read.state == StoragePreparedReadState::Retry) {
+                return RESPONSE_TRY_AGAIN;
+            }
+            return read.bytes;
         });
     if (!response) {
         request->send(503, "application/json",
@@ -2612,9 +2682,10 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     char disposition[96];
     snprintf(disposition, sizeof(disposition),
              "attachment; filename=\"%s\"",
-             storage_basename_from_path(path.c_str()));
+             filename[0] ? filename : "download");
     response->addHeader("Content-Disposition", disposition);
     response->addHeader("Cache-Control", "no-store");
+    response->addHeader("Accept-Ranges", "none");
     request->send(response);
 }
 

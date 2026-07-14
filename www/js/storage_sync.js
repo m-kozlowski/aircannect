@@ -29,14 +29,31 @@
       return text || ("HTTP " + status);
     }
 
-    async function fetchStorageList(path, offset, limit) {
-      const url = "/api/storage/list?path=" + encodeURIComponent(path) +
-        "&offset=" + encodeURIComponent(offset || 0) +
-        "&limit=" + encodeURIComponent(limit || 128);
-      const response = await fetch(url, {cache: "no-store"});
-      const text = await response.text();
-      if (!response.ok) throw new Error(storageErrorText(text, response.status));
-      return JSON.parse(text);
+    function storageDelay(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function fetchStorageList(path, offset, limit, refresh) {
+      let forceRefresh = !!refresh;
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const url = "/api/storage/list?path=" + encodeURIComponent(path) +
+          "&offset=" + encodeURIComponent(offset || 0) +
+          "&limit=" + encodeURIComponent(limit || 128) +
+          (forceRefresh ? "&refresh=1" : "");
+        forceRefresh = false;
+
+        const response = await fetch(url, {cache: "no-store"});
+        const text = await response.text();
+        if (response.status === 202) {
+          await storageDelay(150);
+          continue;
+        }
+        if (!response.ok) {
+          throw new Error(storageErrorText(text, response.status));
+        }
+        return JSON.parse(text);
+      }
+      throw new Error("list_prepare_timeout");
     }
 
     async function fetchStorageEntries(path, maxPages) {
@@ -316,20 +333,19 @@
     }
 
     async function loadStorageList(reset) {
+      const requestSeq = ++storageListRequestSeq;
       if (reset) {
         storageOffset = 0;
         storageClearSelection();
       }
       storageSetBadge("Loading", "warn");
       try {
-        const url = "/api/storage/list?path=" + encodeURIComponent(storagePath) +
-          "&offset=" + encodeURIComponent(storageOffset) +
-          "&limit=" + encodeURIComponent(storageLimit);
-        const response = await fetch(url, {cache: "no-store"});
-        const text = await response.text();
-        if (!response.ok) throw new Error(storageErrorText(text, response.status));
-        renderStorageList(JSON.parse(text));
+        const data = await fetchStorageList(storagePath,
+          storageOffset, storageLimit, reset);
+        if (requestSeq !== storageListRequestSeq) return;
+        renderStorageList(data);
       } catch (error) {
+        if (requestSeq !== storageListRequestSeq) return;
         storageSetBadge("Unavailable", "bad");
         msg("storageMsg", error.message, false, true);
       }
@@ -356,13 +372,39 @@
       loadStorageList(false);
     }
 
-    function storageDownload(path) {
-      const link = document.createElement("a");
-      link.href = "/api/storage/download?path=" + encodeURIComponent(path);
-      link.download = path.split("/").pop() || "download";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+    async function storageDownload(path) {
+      msg("storageMsg", "Preparing download", true, false);
+      try {
+        for (let attempt = 0; attempt < 400; attempt++) {
+          const response = await fetch("/api/storage/download?path=" +
+            encodeURIComponent(path), {cache: "no-store"});
+          const text = await response.text();
+          if (response.status === 202) {
+            await storageDelay(100);
+            continue;
+          }
+          if (!response.ok) {
+            throw new Error(storageErrorText(text, response.status));
+          }
+
+          const data = JSON.parse(text);
+          if (data.state !== "ready" || !Number(data.id)) {
+            throw new Error("download_not_ready");
+          }
+
+          const link = document.createElement("a");
+          link.href = "/api/storage/download?id=" + encodeURIComponent(data.id);
+          link.download = data.filename || path.split("/").pop() || "download";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          msg("storageMsg", "Download started", true, false);
+          return;
+        }
+        throw new Error("download_prepare_timeout");
+      } catch (error) {
+        msg("storageMsg", error.message, false, true);
+      }
     }
 
     function storageArchiveSetBusy(busy) {
@@ -1048,4 +1090,3 @@
         msg("storageMsg", error.message, false, true);
       }
     }
-

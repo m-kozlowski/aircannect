@@ -19,6 +19,7 @@
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
 #include "storage_archive_job.h"
+#include "storage_browser_job.h"
 #include "storage_delete_job.h"
 #include "storage_sync_job.h"
 #include "tcp_bridge.h"
@@ -98,6 +99,7 @@ public:
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
                ReportManager &report_manager,
+               StorageBrowserJob &storage_browser_job,
                StorageArchiveJob &storage_archive_job,
                StorageDeleteJob &storage_delete_job,
                ExportCoordinator &export_coordinator,
@@ -255,6 +257,7 @@ private:
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
     ReportManager *report_manager_ = nullptr;
+    StorageBrowserJob *storage_browser_job_ = nullptr;
     StorageArchiveJob *storage_archive_job_ = nullptr;
     StorageDeleteJob *storage_delete_job_ = nullptr;
     ExportCoordinator *export_coordinator_ = nullptr;

@@ -98,6 +98,7 @@
     let storageOffset = 0;
     let storageLimit = 64;
     let storageNextOffset = null;
+    let storageListRequestSeq = 0;
     let storageArchivePollTimer = null;
     let storageDeletePollTimer = null;
     let smbSyncPollTimer = null;
@@ -211,4 +212,3 @@
     let liveViewActiveSent = null;
     let liveViewLastPostMs = 0;
     const liveViewHeartbeatMs = 5000;
-
