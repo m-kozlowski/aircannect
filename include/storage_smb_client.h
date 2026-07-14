@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "background_operation_control.h"
 #include "storage_path.h"
 
 struct smb2_context;
@@ -32,10 +33,13 @@ public:
                    const char *user,
                    const char *password,
                    char *error_out = nullptr,
-                   size_t error_out_size = 0);
+                   size_t error_out_size = 0,
+                   const BackgroundOperationControl *operation = nullptr);
 
-    bool connect(char *error_out = nullptr, size_t error_out_size = 0);
-    void disconnect();
+    bool connect(char *error_out = nullptr,
+                 size_t error_out_size = 0,
+                 const BackgroundOperationControl *operation = nullptr);
+    void disconnect(const BackgroundOperationControl *operation = nullptr);
     bool connected() const { return connected_; }
 
     bool make_remote_path(const char *absolute_path,
@@ -45,20 +49,25 @@ public:
     bool stat(const char *remote_path,
               StorageSmbRemoteStat &out,
               char *error_out = nullptr,
-              size_t error_out_size = 0);
+              size_t error_out_size = 0,
+              const BackgroundOperationControl *operation = nullptr);
     bool ensure_directory(const char *remote_path,
                           char *error_out = nullptr,
-                          size_t error_out_size = 0);
+                          size_t error_out_size = 0,
+                          const BackgroundOperationControl *operation = nullptr);
 
     bool open_writer(const char *remote_path,
                      char *error_out = nullptr,
-                     size_t error_out_size = 0);
+                     size_t error_out_size = 0,
+                     const BackgroundOperationControl *operation = nullptr);
     int write(const uint8_t *data,
               size_t len,
               char *error_out = nullptr,
-              size_t error_out_size = 0);
+              size_t error_out_size = 0,
+              const BackgroundOperationControl *operation = nullptr);
     bool close_writer(char *error_out = nullptr,
-                      size_t error_out_size = 0);
+                      size_t error_out_size = 0,
+                      const BackgroundOperationControl *operation = nullptr);
     void abort_connection();
 
 private:
@@ -67,7 +76,8 @@ private:
                         size_t error_out_size);
     bool create_directory_once(const char *remote_path,
                                char *error_out,
-                               size_t error_out_size);
+                               size_t error_out_size,
+                               const BackgroundOperationControl *operation);
     void set_error(char *error_out,
                    size_t error_out_size,
                    const char *error) const;

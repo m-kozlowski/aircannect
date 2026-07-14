@@ -26,6 +26,11 @@ static constexpr uint32_t SLEEPHQ_IMPORT_POLL_INTERVAL_MS = 2000;
 // wait hides a stuck server-side import.
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_TIMEOUT_MS =
     5UL * 60UL * 1000UL;
+static constexpr uint32_t SLEEPHQ_API_OPERATION_TIMEOUT_MS = 30UL * 1000UL;
+static constexpr uint32_t SLEEPHQ_UPLOAD_MIN_TIMEOUT_MS = 60UL * 1000UL;
+static constexpr uint32_t SLEEPHQ_UPLOAD_MAX_TIMEOUT_MS =
+    10UL * 60UL * 1000UL;
+static constexpr uint32_t SLEEPHQ_UPLOAD_MIN_BYTES_PER_SECOND = 8UL * 1024UL;
 static constexpr uint32_t SLEEPHQ_RETRY_BACKOFF_MS[] = {
     15UL * 60UL * 1000UL,
     60UL * 60UL * 1000UL,
@@ -63,6 +68,20 @@ void sleep_hq_digest_to_hex(const uint8_t digest[16],
 uint32_t millis_nonzero() {
     const uint32_t now = millis();
     return now == 0 ? 1 : now;
+}
+
+uint32_t sleep_hq_upload_timeout_ms(uint64_t size) {
+    const uint64_t transfer_ms =
+        (size * 1000ULL + SLEEPHQ_UPLOAD_MIN_BYTES_PER_SECOND - 1) /
+        SLEEPHQ_UPLOAD_MIN_BYTES_PER_SECOND;
+    uint64_t timeout_ms = transfer_ms + SLEEPHQ_API_OPERATION_TIMEOUT_MS;
+    if (timeout_ms < SLEEPHQ_UPLOAD_MIN_TIMEOUT_MS) {
+        timeout_ms = SLEEPHQ_UPLOAD_MIN_TIMEOUT_MS;
+    }
+    if (timeout_ms > SLEEPHQ_UPLOAD_MAX_TIMEOUT_MS) {
+        timeout_ms = SLEEPHQ_UPLOAD_MAX_TIMEOUT_MS;
+    }
+    return static_cast<uint32_t>(timeout_ms);
 }
 
 bool parse_http_error_code(const char *error, int &code) {
@@ -1471,7 +1490,7 @@ bool SleepHqSyncJob::datalog_day_decision_cb(void *ctx,
 }
 
 bool SleepHqSyncJob::fetch_next_remote_file_page_locked(char *error,
-                                                        size_t error_size) {
+                                                         size_t error_size) {
     if (remote_file_cache_complete_ ||
         remote_file_pages_loaded_ >= SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
         remote_file_cache_complete_ = true;
@@ -1479,13 +1498,16 @@ bool SleepHqSyncJob::fetch_next_remote_file_page_locked(char *error,
     }
     size_t count = 0;
     bool has_more = false;
+    BackgroundOperationControl operation =
+        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
     if (!client_.list_team_files(status_.team_id,
                                  remote_file_next_page_,
                                  SLEEPHQ_REMOTE_FILE_PER_PAGE,
                                  &SleepHqSyncJob::remote_file_list_cb,
                                  this,
                                  count,
-                                 has_more)) {
+                                 has_more,
+                                 &operation)) {
         copy_cstr(error, error_size, client_.last_error());
         return false;
     }
@@ -1645,7 +1667,10 @@ bool SleepHqSyncJob::datalog_day_decision_locked(const char *day,
     }
 
     SleepHqMachineDate remote_date;
-    if (client_.get_machine_date(remote_machine_id_, iso_date, remote_date)) {
+    BackgroundOperationControl operation =
+        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
+    if (client_.get_machine_date(remote_machine_id_, iso_date, remote_date,
+                                 &operation)) {
         if (!cache_remote_date_locked(day, true)) {
             copy_cstr(error, error_size, "remote_date_cache_alloc");
             return false;
@@ -1726,13 +1751,16 @@ JobStep SleepHqSyncJob::step_find_remote_machine_locked(char *error,
     size_t count = 0;
     bool has_more = false;
     const uint32_t page = remote_machine_next_page_;
+    BackgroundOperationControl operation =
+        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
     if (!client_.list_team_machines(status_.team_id,
                                     page,
                                     SLEEPHQ_REMOTE_MACHINE_PER_PAGE,
                                     &SleepHqSyncJob::remote_machine_list_cb,
                                     this,
                                     count,
-                                    has_more)) {
+                                    has_more,
+                                    &operation)) {
         const char *client_error = client_.last_error();
         if (sleep_hq_error_retryable(client_error)) {
             Log::logf(CAT_SLEEPHQ, LOG_WARN,
@@ -1774,7 +1802,9 @@ JobStep SleepHqSyncJob::step_connect_locked(char *error, size_t error_size) {
     uint32_t team_id =
         current_run_kind_ == RunKind::Check ? 0 : status_.team_id;
     if (team_id == 0) {
-        if (!client_.resolve_team_id(team_id)) {
+        BackgroundOperationControl operation =
+            operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
+        if (!client_.resolve_team_id(team_id, &operation)) {
             fail_locked(client_.last_error());
             return JobStep::Idle;
         }
@@ -1809,7 +1839,9 @@ JobStep SleepHqSyncJob::step_check_locked(char *error, size_t error_size) {
 JobStep SleepHqSyncJob::step_create_import_locked(char *error,
                                                   size_t error_size) {
     SleepHqImportInfo import;
-    if (!client_.create_import(status_.team_id, import)) {
+    BackgroundOperationControl operation =
+        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
+    if (!client_.create_import(status_.team_id, import, &operation)) {
         fail_locked(client_.last_error());
         return JobStep::Idle;
     }
@@ -1902,10 +1934,20 @@ bool SleepHqSyncJob::upload_reset_cb(void *ctx) {
     return ok;
 }
 
-bool SleepHqSyncJob::upload_abort_cb(void *ctx) {
+bool SleepHqSyncJob::operation_abort_cb(void *ctx) {
     SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
     return !job || job->abort_requested_.load() ||
            job->runtime_blocked_.load();
+}
+
+BackgroundOperationControl SleepHqSyncJob::operation_control(
+    uint32_t timeout_ms) const {
+    BackgroundOperationControl operation;
+    operation.started_ms = millis();
+    operation.timeout_ms = timeout_ms;
+    operation.should_abort = &SleepHqSyncJob::operation_abort_cb;
+    operation.ctx = const_cast<SleepHqSyncJob *>(this);
+    return operation;
 }
 
 JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
@@ -1917,6 +1959,8 @@ JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
 
     SleepHqUploadResult upload;
     bool attached = false;
+    BackgroundOperationControl operation = operation_control(
+        sleep_hq_upload_timeout_ms(current_file_.size));
     if (current_file_.attach_by_hash) {
         // ResolveRemoteFile computed this hash for the same size/mtime
         // snapshot validated above. Re-reading the complete file here would
@@ -1926,7 +1970,7 @@ JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
         attach.name = current_file_.name;
         attach.path = current_file_.sleep_path;
         attach.content_hash = current_file_.content_hash;
-        if (client_.attach_file(attach, upload)) {
+        if (client_.attach_file(attach, upload, &operation)) {
             attached = true;
         } else if (!upload_reset_cb(this)) {
             copy_cstr(error, error_size, client_.last_error());
@@ -1945,8 +1989,8 @@ JobStep SleepHqSyncJob::step_upload_file_locked(char *error,
         request.size = current_file_.size;
         request.read = &SleepHqSyncJob::upload_read_cb;
         request.reset = &SleepHqSyncJob::upload_reset_cb;
-        request.should_abort = &SleepHqSyncJob::upload_abort_cb;
         request.ctx = this;
+        request.operation = &operation;
         if (!client_.upload_file(request, upload)) {
             copy_cstr(error, error_size, client_.last_error());
             fail_locked(error[0] ? error : "upload_failed");
@@ -1975,7 +2019,9 @@ JobStep SleepHqSyncJob::step_process_import_locked(char *error,
         phase_ = WorkPhase::Finish;
         return JobStep::Working;
     }
-    if (!client_.process_import(status_.import_id, nullptr)) {
+    BackgroundOperationControl operation =
+        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
+    if (!client_.process_import(status_.import_id, nullptr, &operation)) {
         copy_cstr(error, error_size, client_.last_error());
         fail_locked(error[0] ? error : "process_import_failed");
         return JobStep::Idle;
@@ -2005,7 +2051,9 @@ JobStep SleepHqSyncJob::step_wait_import_locked(char *error,
     }
 
     SleepHqImportInfo import;
-    if (!client_.get_import(status_.import_id, import)) {
+    BackgroundOperationControl operation =
+        operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
+    if (!client_.get_import(status_.import_id, import, &operation)) {
         copy_cstr(error, error_size, client_.last_error());
         if (strcmp(error, "http_404") == 0) {
             remove_inflight_locked();

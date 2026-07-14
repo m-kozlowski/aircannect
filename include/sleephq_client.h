@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "app_config.h"
+#include "background_operation_control.h"
 #include "large_text_buffer.h"
 #include "sleephq_protocol.h"
 
@@ -14,7 +15,6 @@ namespace aircannect {
 using SleepHqUploadReadCallback =
     bool (*)(void *ctx, uint8_t *out, size_t len, size_t &read);
 using SleepHqUploadResetCallback = bool (*)(void *ctx);
-using SleepHqUploadAbortCallback = bool (*)(void *ctx);
 using SleepHqResponseBodyCallback =
     bool (*)(void *ctx, const uint8_t *data, size_t size);
 
@@ -39,8 +39,8 @@ struct SleepHqUploadRequest {
     uint64_t size = 0;
     SleepHqUploadReadCallback read = nullptr;
     SleepHqUploadResetCallback reset = nullptr;
-    SleepHqUploadAbortCallback should_abort = nullptr;
     void *ctx = nullptr;
+    const BackgroundOperationControl *operation = nullptr;
 };
 
 struct SleepHqAttachRequest {
@@ -73,11 +73,17 @@ public:
     void disconnect();
     const char *last_error() const { return last_error_; }
 
-    bool authenticate();
-    bool resolve_team_id(uint32_t &team_id);
-    bool create_import(uint32_t team_id, SleepHqImportInfo &out);
+    bool authenticate(const BackgroundOperationControl *operation = nullptr);
+    bool resolve_team_id(
+        uint32_t &team_id,
+        const BackgroundOperationControl *operation = nullptr);
+    bool create_import(
+        uint32_t team_id,
+        SleepHqImportInfo &out,
+        const BackgroundOperationControl *operation = nullptr);
     bool attach_file(const SleepHqAttachRequest &request,
-                     SleepHqUploadResult &out);
+                     SleepHqUploadResult &out,
+                     const BackgroundOperationControl *operation = nullptr);
     bool upload_file(const SleepHqUploadRequest &request,
                      SleepHqUploadResult &out);
     bool list_team_files(uint32_t team_id,
@@ -86,19 +92,28 @@ public:
                          SleepHqRemoteFileCallback callback,
                          void *ctx,
                          size_t &count,
-                         bool &has_more);
+                         bool &has_more,
+                         const BackgroundOperationControl *operation = nullptr);
     bool list_team_machines(uint32_t team_id,
                             uint32_t page,
                             uint32_t per_page,
                             SleepHqMachineCallback callback,
                             void *ctx,
                             size_t &count,
-                            bool &has_more);
+                            bool &has_more,
+                            const BackgroundOperationControl *operation = nullptr);
     bool get_machine_date(uint32_t machine_id,
                           const char *date,
-                          SleepHqMachineDate &out);
-    bool process_import(uint32_t import_id, SleepHqImportInfo *out = nullptr);
-    bool get_import(uint32_t import_id, SleepHqImportInfo &out);
+                          SleepHqMachineDate &out,
+                          const BackgroundOperationControl *operation = nullptr);
+    bool process_import(
+        uint32_t import_id,
+        SleepHqImportInfo *out = nullptr,
+        const BackgroundOperationControl *operation = nullptr);
+    bool get_import(
+        uint32_t import_id,
+        SleepHqImportInfo &out,
+        const BackgroundOperationControl *operation = nullptr);
 
 private:
     bool request(const char *method,
@@ -108,7 +123,8 @@ private:
                  bool authorize,
                  SleepHqHttpResponse &out,
                  SleepHqResponseBodyCallback body_callback = nullptr,
-                 void *body_ctx = nullptr);
+                 void *body_ctx = nullptr,
+                 const BackgroundOperationControl *operation = nullptr);
     bool raw_request(const char *method,
                      const char *path,
                      const char *body,
@@ -116,31 +132,42 @@ private:
                      bool authorize,
                      SleepHqHttpResponse &out,
                      SleepHqResponseBodyCallback body_callback = nullptr,
-                     void *body_ctx = nullptr);
+                     void *body_ctx = nullptr,
+                     const BackgroundOperationControl *operation = nullptr);
     bool read_response(SleepHqHttpResponse &out,
                        SleepHqResponseBodyCallback body_callback = nullptr,
-                       void *body_ctx = nullptr);
+                       void *body_ctx = nullptr,
+                       const BackgroundOperationControl *operation = nullptr);
 
-    bool ensure_connected();
+    bool ensure_connected(const BackgroundOperationControl *operation);
     bool tls_heap_available();
     void configure_socket_options();
-    bool write_all(const char *data, size_t len);
-    bool write_bytes(const uint8_t *data, size_t len);
-    bool write_authorization_header();
-    bool read_line(char *out, size_t out_size);
-    bool read_header_line(char *out, size_t out_size, bool &truncated);
-    bool read_exact(uint8_t *out, size_t len);
+    bool operation_allows(const BackgroundOperationControl *operation);
+    bool write_all(const char *data, size_t len,
+                   const BackgroundOperationControl *operation);
+    bool write_bytes(const uint8_t *data, size_t len,
+                     const BackgroundOperationControl *operation);
+    bool write_authorization_header(
+        const BackgroundOperationControl *operation);
+    bool read_line(char *out, size_t out_size,
+                   const BackgroundOperationControl *operation);
+    bool read_header_line(char *out, size_t out_size, bool &truncated,
+                          const BackgroundOperationControl *operation);
+    bool read_exact(uint8_t *out, size_t len,
+                    const BackgroundOperationControl *operation);
     bool read_response_body(size_t content_length,
                             bool has_content_length,
                             bool chunked,
                             SleepHqHttpResponse &out,
                             SleepHqResponseBodyCallback body_callback,
                             void *body_ctx,
-                            bool buffer_body);
+                            bool buffer_body,
+                            const BackgroundOperationControl *operation);
     bool read_chunked_body(SleepHqHttpResponse &out,
                            SleepHqResponseBodyCallback body_callback,
                            void *body_ctx,
-                           bool buffer_body);
+                           bool buffer_body,
+                           const BackgroundOperationControl *operation);
     bool consume_body(SleepHqHttpResponse &out, const uint8_t *data,
                       size_t len, SleepHqResponseBodyCallback body_callback,
                       void *body_ctx, bool buffer_body);

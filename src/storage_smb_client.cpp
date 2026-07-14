@@ -25,7 +25,7 @@ namespace aircannect {
 namespace {
 
 static constexpr int SMB_COMMAND_TIMEOUT_SECONDS = 15;
-static constexpr int SMB_POLL_INTERVAL_MS = 1000;
+static constexpr int SMB_POLL_INTERVAL_MS = 100;
 static constexpr uint32_t SMB_EVENT_LOOP_TIMEOUT_MS =
     SMB_COMMAND_TIMEOUT_SECONDS * 1000UL;
 
@@ -70,10 +70,24 @@ int smb_finish_cb(SmbAsyncCbData *cb, int loop_rc,
     return status;
 }
 
-int smb_run_event_loop(struct smb2_context *ctx, SmbAsyncCbData *cb) {
+int smb_run_event_loop(
+    struct smb2_context *ctx,
+    SmbAsyncCbData *cb,
+    const BackgroundOperationControl *operation) {
     if (!cb) return -ENOMEM;
     const uint32_t started_ms = millis();
     while (!cb->finished) {
+        if (operation) {
+            const BackgroundOperationStop reason =
+                operation->stop_reason(millis());
+            if (reason == BackgroundOperationStop::Aborted) {
+                return -ECANCELED;
+            }
+            if (reason == BackgroundOperationStop::Deadline) {
+                return -ETIMEDOUT;
+            }
+        }
+
         const uint32_t elapsed_ms =
             static_cast<uint32_t>(millis() - started_ms);
         if (elapsed_ms >= SMB_EVENT_LOOP_TIMEOUT_MS) return -ETIMEDOUT;
@@ -102,7 +116,8 @@ int smb_run_event_loop(struct smb2_context *ctx, SmbAsyncCbData *cb) {
 template <typename Submit>
 int smb_submit_ev(struct smb2_context *ctx,
                   Submit submit,
-                  void **result_out = nullptr) {
+                  void **result_out = nullptr,
+                  const BackgroundOperationControl *operation = nullptr) {
     SmbAsyncCbData *cb = smb_alloc_cb();
     if (!cb) return -ENOMEM;
     const int rc = submit(cb);
@@ -110,56 +125,65 @@ int smb_submit_ev(struct smb2_context *ctx,
         delete cb;
         return rc;
     }
-    return smb_finish_cb(cb, smb_run_event_loop(ctx, cb), result_out);
+    return smb_finish_cb(cb, smb_run_event_loop(ctx, cb, operation),
+                         result_out);
 }
 
 int smb_connect_share_ev(struct smb2_context *ctx,
                          const char *server,
                          const char *share,
-                         const char *user) {
+                         const char *user,
+                         const BackgroundOperationControl *operation) {
     return smb_submit_ev(ctx, [ctx, server, share, user](SmbAsyncCbData *cb) {
         return smb2_connect_share_async(ctx, server, share, user,
                                         smb_generic_cb, cb);
-    });
+    }, nullptr, operation);
 }
 
-int smb_disconnect_share_ev(struct smb2_context *ctx) {
+int smb_disconnect_share_ev(
+    struct smb2_context *ctx,
+    const BackgroundOperationControl *operation) {
     return smb_submit_ev(ctx, [ctx](SmbAsyncCbData *cb) {
         return smb2_disconnect_share_async(ctx, smb_generic_cb, cb);
-    });
+    }, nullptr, operation);
 }
 
 int smb_stat_ev(struct smb2_context *ctx,
                 const char *path,
-                smb2_stat_64 *st) {
+                smb2_stat_64 *st,
+                const BackgroundOperationControl *operation) {
     return smb_submit_ev(ctx, [ctx, path, st](SmbAsyncCbData *cb) {
         return smb2_stat_async(ctx, path, st, smb_generic_cb, cb);
-    });
+    }, nullptr, operation);
 }
 
-int smb_mkdir_ev(struct smb2_context *ctx, const char *path) {
+int smb_mkdir_ev(struct smb2_context *ctx,
+                 const char *path,
+                 const BackgroundOperationControl *operation) {
     return smb_submit_ev(ctx, [ctx, path](SmbAsyncCbData *cb) {
         return smb2_mkdir_async(ctx, path, smb_generic_cb, cb);
-    });
+    }, nullptr, operation);
 }
 
 struct smb2fh *smb_open_ev(struct smb2_context *ctx,
                            const char *path,
-                           int flags) {
+                           int flags,
+                           const BackgroundOperationControl *operation) {
     void *result = nullptr;
     const int status = smb_submit_ev(
         ctx, [ctx, path, flags](SmbAsyncCbData *cb) {
             return smb2_open_async(ctx, path, flags, smb_generic_cb, cb);
-        },
-        &result);
+        }, &result, operation);
     if (status < 0) return nullptr;
     return static_cast<struct smb2fh *>(result);
 }
 
-int smb_close_ev(struct smb2_context *ctx, struct smb2fh *fh) {
+int smb_close_ev(struct smb2_context *ctx,
+                 struct smb2fh *fh,
+                 const BackgroundOperationControl *operation) {
     return smb_submit_ev(ctx, [ctx, fh](SmbAsyncCbData *cb) {
         return smb2_close_async(ctx, fh, smb_generic_cb, cb);
-    });
+    }, nullptr, operation);
 }
 
 bool smb_queue_close_for_destroy(struct smb2_context *ctx, struct smb2fh *fh) {
@@ -180,10 +204,11 @@ bool smb_queue_close_for_destroy(struct smb2_context *ctx, struct smb2fh *fh) {
 int smb_write_ev(struct smb2_context *ctx,
                  struct smb2fh *fh,
                  const uint8_t *data,
-                 uint32_t len) {
+                 uint32_t len,
+                 const BackgroundOperationControl *operation) {
     return smb_submit_ev(ctx, [ctx, fh, data, len](SmbAsyncCbData *cb) {
         return smb2_write_async(ctx, fh, data, len, smb_generic_cb, cb);
-    });
+    }, nullptr, operation);
 }
 
 bool is_path_not_found_error(const char *error) {
@@ -257,6 +282,14 @@ void StorageSmbClient::set_smb_error(char *error_out,
                                      int status_hint) const {
     if (!error_out || error_out_size == 0) return;
     if (!operation || !*operation) operation = "smb";
+    if (status_hint == -ECANCELED) {
+        set_error(error_out, error_out_size, "preempted");
+        return;
+    }
+    if (status_hint == -ETIMEDOUT) {
+        set_error(error_out, error_out_size, "operation_timeout");
+        return;
+    }
 
     const char *err = ctx_ ? smb2_get_error(ctx_) : "";
     if (err && *err) {
@@ -350,8 +383,9 @@ bool StorageSmbClient::configure(const char *endpoint,
                                  const char *user,
                                  const char *password,
                                  char *error_out,
-                                 size_t error_out_size) {
-    disconnect();
+                                 size_t error_out_size,
+                                 const BackgroundOperationControl *operation) {
+    disconnect(operation);
     if (!parse_endpoint(endpoint, error_out, error_out_size)) return false;
     copy_cstr(user_, sizeof(user_), user);
     copy_cstr(password_, sizeof(password_), password);
@@ -386,7 +420,10 @@ void StorageSmbClient::configure_socket_options() {
     }
 }
 
-bool StorageSmbClient::connect(char *error_out, size_t error_out_size) {
+bool StorageSmbClient::connect(
+    char *error_out,
+    size_t error_out_size,
+    const BackgroundOperationControl *operation) {
     if (connected_) return true;
     if (!server_[0] || !share_[0]) {
         set_error(error_out, error_out_size, "not_configured");
@@ -410,7 +447,8 @@ bool StorageSmbClient::connect(char *error_out, size_t error_out_size) {
 
     Log::logf(CAT_STORAGE, LOG_INFO,
               "[SMB] connecting //%s/%s\n", server_, share_);
-    const int rc = smb_connect_share_ev(ctx_, server_, share_, nullptr);
+    const int rc = smb_connect_share_ev(ctx_, server_, share_, nullptr,
+                                        operation);
     if (rc != 0) {
         char error[AC_STORAGE_ERROR_MAX] = {};
         set_smb_error(error, sizeof(error), "connect", rc);
@@ -428,7 +466,8 @@ bool StorageSmbClient::connect(char *error_out, size_t error_out_size) {
     return true;
 }
 
-void StorageSmbClient::disconnect() {
+void StorageSmbClient::disconnect(
+    const BackgroundOperationControl *operation) {
     if (!ctx_) {
         connected_ = false;
         writer_ = nullptr;
@@ -436,10 +475,10 @@ void StorageSmbClient::disconnect() {
     }
 
     if (writer_) {
-        (void)smb_close_ev(ctx_, writer_);
+        (void)smb_close_ev(ctx_, writer_, operation);
         writer_ = nullptr;
     }
-    if (connected_) (void)smb_disconnect_share_ev(ctx_);
+    if (connected_) (void)smb_disconnect_share_ev(ctx_, operation);
     smb2_destroy_context(ctx_);
     ctx_ = nullptr;
     connected_ = false;
@@ -466,7 +505,8 @@ bool StorageSmbClient::make_remote_path(const char *absolute_path,
 bool StorageSmbClient::stat(const char *remote_path,
                             StorageSmbRemoteStat &out,
                             char *error_out,
-                            size_t error_out_size) {
+                            size_t error_out_size,
+                            const BackgroundOperationControl *operation) {
     out = StorageSmbRemoteStat();
     if (!connected_ || !ctx_) {
         set_error(error_out, error_out_size, "not_connected");
@@ -480,7 +520,7 @@ bool StorageSmbClient::stat(const char *remote_path,
     }
 
     smb2_stat_64 st = {};
-    const int rc = smb_stat_ev(ctx_, remote_path, &st);
+    const int rc = smb_stat_ev(ctx_, remote_path, &st, operation);
     if (rc == 0) {
         out.exists = true;
         out.directory = st.smb2_type == SMB2_TYPE_DIRECTORY;
@@ -501,9 +541,12 @@ bool StorageSmbClient::stat(const char *remote_path,
 
 bool StorageSmbClient::create_directory_once(const char *remote_path,
                                              char *error_out,
-                                             size_t error_out_size) {
+                                             size_t error_out_size,
+                                             const BackgroundOperationControl *operation) {
     StorageSmbRemoteStat st;
-    if (!stat(remote_path, st, error_out, error_out_size)) return false;
+    if (!stat(remote_path, st, error_out, error_out_size, operation)) {
+        return false;
+    }
     if (st.exists) {
         if (!st.directory) {
             set_error(error_out, error_out_size, "remote_not_directory");
@@ -512,14 +555,15 @@ bool StorageSmbClient::create_directory_once(const char *remote_path,
         return true;
     }
 
-    const int rc = smb_mkdir_ev(ctx_, remote_path);
+    const int rc = smb_mkdir_ev(ctx_, remote_path, operation);
     if (rc == 0) {
         set_error(error_out, error_out_size, "");
         return true;
     }
 
     // Another client may have raced us; verify before reporting failure.
-    if (stat(remote_path, st, nullptr, 0) && st.exists && st.directory) {
+    if (stat(remote_path, st, nullptr, 0, operation) &&
+        st.exists && st.directory) {
         set_error(error_out, error_out_size, "");
         return true;
     }
@@ -534,7 +578,8 @@ bool StorageSmbClient::create_directory_once(const char *remote_path,
 
 bool StorageSmbClient::ensure_directory(const char *remote_path,
                                         char *error_out,
-                                        size_t error_out_size) {
+                                        size_t error_out_size,
+                                        const BackgroundOperationControl *operation) {
     if (!connected_ || !ctx_) {
         set_error(error_out, error_out_size, "not_connected");
         return false;
@@ -554,7 +599,8 @@ bool StorageSmbClient::ensure_directory(const char *remote_path,
                 set_error(error_out, error_out_size, "remote_path_too_long");
                 return false;
             }
-            if (!create_directory_once(current, error_out, error_out_size)) {
+            if (!create_directory_once(current, error_out, error_out_size,
+                                       operation)) {
                 return false;
             }
         }
@@ -567,7 +613,8 @@ bool StorageSmbClient::ensure_directory(const char *remote_path,
 
 bool StorageSmbClient::open_writer(const char *remote_path,
                                    char *error_out,
-                                   size_t error_out_size) {
+                                   size_t error_out_size,
+                                   const BackgroundOperationControl *operation) {
     if (!connected_ || !ctx_) {
         set_error(error_out, error_out_size, "not_connected");
         return false;
@@ -581,7 +628,8 @@ bool StorageSmbClient::open_writer(const char *remote_path,
         return false;
     }
 
-    writer_ = smb_open_ev(ctx_, remote_path, O_WRONLY | O_CREAT | O_TRUNC);
+    writer_ = smb_open_ev(ctx_, remote_path,
+                          O_WRONLY | O_CREAT | O_TRUNC, operation);
     if (!writer_) {
         set_smb_error(error_out, error_out_size, "open", 0);
         return false;
@@ -593,7 +641,8 @@ bool StorageSmbClient::open_writer(const char *remote_path,
 int StorageSmbClient::write(const uint8_t *data,
                             size_t len,
                             char *error_out,
-                            size_t error_out_size) {
+                            size_t error_out_size,
+                            const BackgroundOperationControl *operation) {
     if (!connected_ || !ctx_ || !writer_) {
         set_error(error_out, error_out_size, "writer_not_open");
         return -1;
@@ -613,7 +662,8 @@ int StorageSmbClient::write(const uint8_t *data,
         const int written = smb_write_ev(ctx_,
                                          writer_,
                                          data + offset,
-                                         static_cast<uint32_t>(chunk));
+                                         static_cast<uint32_t>(chunk),
+                                         operation);
         if (written < 0) {
             set_smb_error(error_out, error_out_size, "write", written);
             return -1;
@@ -628,14 +678,17 @@ int StorageSmbClient::write(const uint8_t *data,
     return static_cast<int>(offset);
 }
 
-bool StorageSmbClient::close_writer(char *error_out, size_t error_out_size) {
+bool StorageSmbClient::close_writer(
+    char *error_out,
+    size_t error_out_size,
+    const BackgroundOperationControl *operation) {
     if (!writer_) {
         set_error(error_out, error_out_size, "");
         return true;
     }
     struct smb2fh *fh = writer_;
     writer_ = nullptr;
-    const int rc = smb_close_ev(ctx_, fh);
+    const int rc = smb_close_ev(ctx_, fh, operation);
     if (rc < 0) {
         set_smb_error(error_out, error_out_size, "close", rc);
         return false;

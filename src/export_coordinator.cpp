@@ -101,23 +101,27 @@ void ExportCoordinator::poll(RpcArbiter &arbiter,
     const bool storage_sync_active = storage_runtime.active();
     const bool sleephq_working =
         sleephq_runtime.state == SleepHqSyncState::Working;
+    const bool export_runtime_blocked =
+        report.foreground_busy() ||
+        arbiter.stream_activity_active() ||
+        resmed_ota_active ||
+        esp_ota_active ||
+        arbiter.as11_state().therapy_state() == As11TherapyState::Running;
 
     poll_post_therapy(arbiter, report, storage_sync_active, now_ms);
 
-    if (storage_sync_ && sleephq_working) {
-        storage_sync_->defer_idle_work_until(
-            now_ms + AC_BG_WORKER_BUSY_RECHECK_MS);
+    if (storage_sync_) {
+        storage_sync_->set_runtime_blocked(export_runtime_blocked);
+        if (sleephq_working) {
+            storage_sync_->defer_idle_work_until(
+                now_ms + AC_BG_WORKER_BUSY_RECHECK_MS);
+        }
     }
 
     if (sleephq_sync_) {
         sleephq_sync_->set_runtime_blocked(
-            report.foreground_busy() ||
-            storage_sync_active ||
-            arbiter.stream_activity_active() ||
-            resmed_ota_active ||
-            esp_ota_active ||
-            arbiter.as11_state().therapy_state() ==
-                As11TherapyState::Running);
+            export_runtime_blocked ||
+            storage_sync_active);
     }
 
     maybe_queue_sleephq_startup_check(network_ready,

@@ -113,6 +113,7 @@ public:
     void configure(const AppConfigData &config);
     void refresh_config(const AppConfigData &config, uint32_t now_ms);
     void set_network_available(bool available);
+    void set_runtime_blocked(bool blocked);
     void defer_idle_work_until(uint32_t until_ms);
 
     // sync requests
@@ -230,6 +231,7 @@ private:
                                          uint32_t *hash_out = nullptr) const;
     bool begin_run_locked();
     void finish_run_locked();
+    void preempt_run_locked();
     void fail_locked(const char *error);
     void clear_result_metadata_locked();
     bool load_result_metadata_locked();
@@ -279,6 +281,8 @@ private:
     void maybe_mark_completed_datalog_day_locked(const char *day);
     bool prepare_upload_buffer_locked();
     void release_upload_buffer_locked();
+    BackgroundOperationControl operation_control() const;
+    static bool operation_abort_cb(void *ctx);
     void close_local_locked();
     void clear_current_file_locked();
     void publish_runtime_locked();
@@ -292,6 +296,8 @@ private:
     WorkPhase phase_ = WorkPhase::Idle;
     StorageSmbClient smb_;
     std::atomic<bool> network_available_{false};
+    std::atomic<bool> runtime_blocked_{false};
+    std::atomic<bool> abort_requested_{false};
     std::atomic<uint8_t> runtime_state_{
         static_cast<uint8_t>(StorageSyncState::Disabled)};
     std::atomic<bool> runtime_pending_{false};

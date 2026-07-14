@@ -20,6 +20,7 @@ namespace aircannect {
 namespace {
 
 static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
+static constexpr uint32_t SMB_OPERATION_TIMEOUT_MS = 20UL * 1000UL;
 static constexpr const char *SYNC_METADATA_FILE = "meta.state";
 static constexpr const char *SYNC_REASON_STARTUP_CHECK = "startup_check";
 static constexpr const char *SYNC_REASON_STARTUP_SYNC = "startup_sync";
@@ -414,12 +415,21 @@ void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
 
 void StorageSyncJob::set_network_available(bool available) {
     const bool was_available = network_available_.exchange(available);
+    if (!available) abort_requested_.store(true);
     if (was_available == available) return;
     if (!lock(0)) return;
     status_.network_available = available;
     publish_runtime_locked();
     unlock();
     if (available) {
+        if (BackgroundWorker *worker = background_worker()) worker->wake();
+    }
+}
+
+void StorageSyncJob::set_runtime_blocked(bool blocked) {
+    const bool was_blocked = runtime_blocked_.exchange(blocked);
+    if (blocked) abort_requested_.store(true);
+    if (was_blocked && !blocked) {
         if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
 }
@@ -457,6 +467,7 @@ bool StorageSyncJob::begin_run_locked() {
     const RunKind kind = pending_run_kind_;
     const char *run_reason = run_kind_reason(kind);
     reset_run_locked(false);
+    abort_requested_.store(false);
     current_run_kind_ = kind;
     retry_due_ms_ = 0;
     status_.state = StorageSyncState::Working;
@@ -617,6 +628,21 @@ void StorageSyncJob::release_upload_buffer_locked() {
     upload_buffer_size_ = 0;
 }
 
+bool StorageSyncJob::operation_abort_cb(void *ctx) {
+    StorageSyncJob *job = static_cast<StorageSyncJob *>(ctx);
+    return !job || job->abort_requested_.load() ||
+           job->runtime_blocked_.load();
+}
+
+BackgroundOperationControl StorageSyncJob::operation_control() const {
+    BackgroundOperationControl operation;
+    operation.started_ms = millis();
+    operation.timeout_ms = SMB_OPERATION_TIMEOUT_MS;
+    operation.should_abort = &StorageSyncJob::operation_abort_cb;
+    operation.ctx = const_cast<StorageSyncJob *>(this);
+    return operation;
+}
+
 bool StorageSyncJob::latest_datalog_day_locked(char *out,
                                                size_t out_size,
                                                char *error_out,
@@ -725,7 +751,9 @@ bool StorageSyncJob::latest_verify_file_step_locked(char *error_out,
         return false;
     }
     StorageSmbRemoteStat remote;
-    if (!smb_.stat(remote_path, remote, error_out, error_out_size)) {
+    BackgroundOperationControl operation = operation_control();
+    if (!smb_.stat(remote_path, remote, error_out, error_out_size,
+                   &operation)) {
         return false;
     }
     if (!remote.exists || remote.directory || remote.size != child.size) {
@@ -976,10 +1004,12 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     if (run_kind_is_reconcile(current_run_kind_)) {
         char error[AC_STORAGE_ERROR_MAX] = {};
         StorageSmbRemoteStat remote;
+        BackgroundOperationControl operation = operation_control();
         if (!smb_.stat(current_file_.remote_path,
                        remote,
                        error,
-                       sizeof(error))) {
+                       sizeof(error),
+                       &operation)) {
             fail_locked(error[0] ? error : "remote_stat_failed");
             return false;
         }
@@ -1032,7 +1062,8 @@ void StorageSyncJob::clear_current_file_locked() {
 }
 
 void StorageSyncJob::finish_run_locked() {
-    smb_.disconnect();
+    BackgroundOperationControl operation = operation_control();
+    smb_.disconnect(&operation);
     close_latest_verify_locked();
     export_planner_.reset();
     release_upload_buffer_locked();
@@ -1119,7 +1150,38 @@ void StorageSyncJob::finish_run_locked() {
     publish_runtime_locked();
 }
 
+void StorageSyncJob::preempt_run_locked() {
+    const RunKind kind = current_run_kind_;
+    char reason[AC_STORAGE_SYNC_REASON_MAX] = {};
+    copy_cstr(reason,
+              sizeof(reason),
+              status_.pending_reason[0]
+                  ? status_.pending_reason
+                  : run_kind_reason(kind));
+
+    reset_run_locked(true);
+
+    pending_run_kind_ = kind;
+    status_.state = StorageSyncState::Pending;
+    status_.pending = true;
+    copy_cstr(status_.pending_reason, sizeof(status_.pending_reason), reason);
+    status_.last_error[0] = '\0';
+    status_.updated_ms = millis_nonzero();
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
+    Log::logf(CAT_STORAGE,
+              LOG_DEBUG,
+              "[SYNC] preempted; queued reason=%s\n",
+              status_.pending_reason);
+    publish_runtime_locked();
+}
+
 void StorageSyncJob::fail_locked(const char *error) {
+    if (error && strcmp(error, "preempted") == 0) {
+        preempt_run_locked();
+        return;
+    }
+
     const WorkPhase failed_phase = phase_;
     const RunKind failed_kind = current_run_kind_;
     const bool current_run_verify = run_kind_is_verify(current_run_kind_);
@@ -1196,7 +1258,9 @@ bool StorageSyncJob::verify_endpoint_base_locked(char *error_out,
         copy_cstr(error_out, error_out_size, "remote_path_failed");
         return false;
     }
-    if (!smb_.ensure_directory(base_path, error_out, error_out_size)) {
+    BackgroundOperationControl operation = operation_control();
+    if (!smb_.ensure_directory(base_path, error_out, error_out_size,
+                               &operation)) {
         return false;
     }
     return true;
@@ -1267,6 +1331,15 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
     queue_reconcile_if_due_locked(now_ms);
     queue_deferred_post_therapy_locked(now_ms);
 
+    if (runtime_blocked_.load()) {
+        if (status_.state == StorageSyncState::Working) {
+            abort_requested_.store(true);
+            preempt_run_locked();
+        }
+        result = status_.pending ? JobStep::Waiting : JobStep::Idle;
+        return false;
+    }
+
     const bool ready =
         status_.enabled && status_.configured &&
         (status_.pending || status_.state == StorageSyncState::Working);
@@ -1296,9 +1369,11 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
 
 JobStep StorageSyncJob::step_connect_locked(char *error_out,
                                             size_t error_out_size) {
+    BackgroundOperationControl operation = operation_control();
     if (!smb_.configure(config_.endpoint, config_.user,
-                        config_.password, error_out, error_out_size) ||
-        !smb_.connect(error_out, error_out_size)) {
+                        config_.password, error_out, error_out_size,
+                        &operation) ||
+        !smb_.connect(error_out, error_out_size, &operation)) {
         fail_locked(error_out[0] ? error_out : "smb_connect_failed");
         return JobStep::Idle;
     }
@@ -1353,9 +1428,11 @@ JobStep StorageSyncJob::step_ensure_remote_dir_locked(
     char *error_out,
     size_t error_out_size) {
     if (strcmp(ensured_remote_dir_, current_file_.remote_dir) != 0) {
+        BackgroundOperationControl operation = operation_control();
         if (!smb_.ensure_directory(current_file_.remote_dir,
                                    error_out,
-                                   error_out_size)) {
+                                   error_out_size,
+                                   &operation)) {
             fail_locked(error_out[0] ? error_out : "remote_mkdir_failed");
             return JobStep::Idle;
         }
@@ -1381,9 +1458,11 @@ JobStep StorageSyncJob::step_open_local_locked() {
 
 JobStep StorageSyncJob::step_open_remote_locked(char *error_out,
                                                 size_t error_out_size) {
+    BackgroundOperationControl operation = operation_control();
     if (!smb_.open_writer(current_file_.remote_path,
                           error_out,
-                          error_out_size)) {
+                          error_out_size,
+                          &operation)) {
         fail_locked(error_out[0] ? error_out : "remote_open_failed");
         return JobStep::Idle;
     }
@@ -1407,8 +1486,9 @@ JobStep StorageSyncJob::step_upload_chunk_locked(char *error_out,
         fail_locked("local_read_short");
         return JobStep::Idle;
     }
-    const int written =
-        smb_.write(upload_buffer_, read, error_out, error_out_size);
+    BackgroundOperationControl operation = operation_control();
+    const int written = smb_.write(upload_buffer_, read, error_out,
+                                   error_out_size, &operation);
     if (written < 0 || static_cast<size_t>(written) != read) {
         fail_locked(error_out[0] ? error_out : "remote_write_failed");
         return JobStep::Idle;
@@ -1424,7 +1504,8 @@ JobStep StorageSyncJob::step_upload_chunk_locked(char *error_out,
 
 JobStep StorageSyncJob::step_close_remote_locked(char *error_out,
                                                  size_t error_out_size) {
-    if (!smb_.close_writer(error_out, error_out_size)) {
+    BackgroundOperationControl operation = operation_control();
+    if (!smb_.close_writer(error_out, error_out_size, &operation)) {
         fail_locked(error_out[0] ? error_out : "remote_close_failed");
         return JobStep::Idle;
     }
@@ -1515,18 +1596,10 @@ JobStep StorageSyncJob::step() {
 }
 
 void StorageSyncJob::on_preempt() {
+    abort_requested_.store(true);
     if (!lock(5)) return;
     if (status_.state == StorageSyncState::Working) {
-        const RunKind kind = current_run_kind_;
-        reset_run_locked(true);
-        status_.state = StorageSyncState::Pending;
-        status_.pending = true;
-        pending_run_kind_ = kind;
-        status_.updated_ms = millis_nonzero();
-        copy_cstr(status_.pending_reason,
-                  sizeof(status_.pending_reason),
-                  run_kind_reason(pending_run_kind_));
-        publish_runtime_locked();
+        preempt_run_locked();
     }
     unlock();
 }

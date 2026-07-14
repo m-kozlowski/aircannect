@@ -286,6 +286,7 @@ private:
     bool current_file_matches_snapshot_locked() const;
     bool compute_current_file_content_hash_locked(char *out,
                                                   size_t out_size);
+    BackgroundOperationControl operation_control(uint32_t timeout_ms) const;
 
     JobStep step_connect_locked(char *error, size_t error_size);
     JobStep step_check_locked(char *error, size_t error_size);
@@ -303,7 +304,7 @@ private:
     static bool upload_read_cb(void *ctx, uint8_t *out,
                                size_t len, size_t &read);
     static bool upload_reset_cb(void *ctx);
-    static bool upload_abort_cb(void *ctx);
+    static bool operation_abort_cb(void *ctx);
     static bool remote_file_list_cb(void *ctx,
                                     const SleepHqRemoteFile &file);
     static bool remote_machine_list_cb(void *ctx,
