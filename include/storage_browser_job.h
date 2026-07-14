@@ -1,9 +1,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <FS.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
@@ -13,6 +10,9 @@
 #include "storage_path.h"
 
 namespace aircannect {
+
+class StorageDirectoryListing;
+class StorageDownloadProducer;
 
 struct StorageDirectoryEntryView {
     const char *name = nullptr;
@@ -31,7 +31,7 @@ public:
     bool entry(size_t index, StorageDirectoryEntryView &out) const;
 
 private:
-    friend class StorageBrowserJob;
+    friend class StorageDirectoryListing;
 
     struct Entry {
         uint64_t size = 0;
@@ -77,6 +77,7 @@ struct StorageDownloadPrepareStatus {
 class StorageBrowserJob : public BackgroundJob {
 public:
     // lifecycle and background service
+    ~StorageBrowserJob();
     void begin();
     const char *name() const override { return "storage_browser"; }
     JobStep step() override;
@@ -110,75 +111,10 @@ public:
     void finish_download(StoragePreparedDownload &download);
 
 private:
-    enum class ListingPhase : uint8_t {
-        Idle,
-        Scanning,
-        Sorting,
-    };
+    bool ensure_owners();
 
-    // synchronization
-    bool lock(uint32_t timeout_ms = 20) const;
-    void unlock() const;
-
-    // directory snapshots
-    JobStep listing_step_locked();
-    bool start_pending_listing_locked();
-    bool ensure_listing_dir_open_locked();
-    bool append_listing_entry_locked(const char *name,
-                                     bool directory,
-                                     uint64_t size,
-                                     uint64_t modified);
-    bool reserve_listing_entries_locked(size_t needed);
-    bool reserve_listing_names_locked(size_t needed);
-    JobStep sort_listing_step_locked();
-    void publish_listing_locked();
-    void fail_listing_locked(const char *error);
-    void close_listing_dir_locked();
-    void clear_listing_build_locked();
-    int find_snapshot_locked(const char *path) const;
-    void touch_snapshot_locked(size_t index);
-
-    // plain downloads
-    JobStep download_step();
-    void fail_download_locked(StoragePreparedDownload &download,
-                              const char *error);
-    void close_download_file(StoragePreparedDownload &download);
-    void retire_download_locked(StoragePreparedDownload &download,
-                                bool success);
-
-    mutable StaticSemaphore_t lock_storage_ = {};
-    mutable SemaphoreHandle_t lock_ = nullptr;
-
-    // published listing cache
-    static constexpr size_t SNAPSHOT_SLOTS = 2;
-    std::shared_ptr<const StorageDirectorySnapshot> snapshots_[SNAPSHOT_SLOTS];
-    uint32_t snapshot_touches_[SNAPSHOT_SLOTS] = {};
-    uint32_t snapshot_touch_counter_ = 0;
-    uint32_t next_snapshot_revision_ = 1;
-
-    // active/pending listing build
-    ListingPhase listing_phase_ = ListingPhase::Idle;
-    std::shared_ptr<StorageDirectorySnapshot> listing_build_;
-    File listing_dir_;
-    bool listing_dir_open_ = false;
-    uint32_t listing_scanned_ = 0;
-    size_t sort_width_ = 0;
-    size_t sort_left_ = 0;
-    size_t sort_mid_ = 0;
-    size_t sort_right_ = 0;
-    size_t sort_source_left_ = 0;
-    size_t sort_source_right_ = 0;
-    size_t sort_destination_ = 0;
-    bool sort_source_is_entries_ = true;
-    bool sort_merge_active_ = false;
-    char pending_listing_path_[AC_STORAGE_PATH_MAX] = {};
-    bool pending_listing_ = false;
-    char listing_error_path_[AC_STORAGE_PATH_MAX] = {};
-    char listing_error_[AC_STORAGE_ERROR_MAX] = {};
-
-    // active plain-file producer
-    std::shared_ptr<StoragePreparedDownload> active_download_;
-    uint32_t next_download_id_ = 1;
+    StorageDirectoryListing *listing_ = nullptr;
+    StorageDownloadProducer *download_ = nullptr;
 };
 
 }  // namespace aircannect
