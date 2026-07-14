@@ -40,9 +40,6 @@ public:
                                  uint32_t now_ms,
                                  int64_t request_epoch_ms = 0,
                                  int64_t response_epoch_ms = 0);
-    bool apply_activity_subscription_response(const std::string &payload,
-                                              uint32_t now_ms,
-                                              uint32_t &subscription_id);
     bool apply_activity_event_frame(const As11EventFrame &frame,
                                     uint32_t now_ms);
 

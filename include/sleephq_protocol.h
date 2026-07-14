@@ -92,15 +92,6 @@ private:
 
 SleepHqImportStatusKind sleephq_classify_import_status(const char *status);
 
-bool sleephq_parse_remote_file_list_json(const char *json,
-                                         uint32_t per_page,
-                                         SleepHqRemoteFileCallback callback,
-                                         void *ctx,
-                                         size_t &count,
-                                         bool &has_more,
-                                         char *error,
-                                         size_t error_size);
-
 bool sleephq_parse_machine_list_json(const char *json,
                                      uint32_t per_page,
                                      SleepHqMachineCallback callback,

@@ -334,29 +334,6 @@ SleepHqImportStatusKind sleephq_classify_import_status(const char *status) {
     return SleepHqImportStatusKind::Unknown;
 }
 
-bool sleephq_parse_remote_file_list_json(const char *json,
-                                         uint32_t per_page,
-                                         SleepHqRemoteFileCallback callback,
-                                         void *ctx,
-                                         size_t &count,
-                                         bool &has_more,
-                                         char *error,
-                                         size_t error_size) {
-    if (!json) {
-        count = 0;
-        has_more = false;
-        set_error(error, error_size, "bad_file_list_request");
-        return false;
-    }
-
-    SleepHqRemoteFileListStreamParser parser;
-    if (!parser.begin(per_page, callback, ctx) ||
-        !parser.feed(reinterpret_cast<const uint8_t *>(json), strlen(json))) {
-        return parser.finish(count, has_more, error, error_size);
-    }
-    return parser.finish(count, has_more, error, error_size);
-}
-
 bool sleephq_parse_machine_list_json(const char *json,
                                      uint32_t per_page,
                                      SleepHqMachineCallback callback,

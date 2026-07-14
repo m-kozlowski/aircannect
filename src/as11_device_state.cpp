@@ -399,15 +399,6 @@ bool As11DeviceState::apply_datetime_response(
     return true;
 }
 
-bool As11DeviceState::apply_activity_subscription_response(
-    const std::string &payload,
-    uint32_t now_ms,
-    uint32_t &subscription_id) {
-    (void)now_ms;
-    return as11_parse_event_subscription_response(payload, true,
-                                                  subscription_id);
-}
-
 bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
                                                  uint32_t now_ms) {
     if (!as11_event_data_id_is_activity(frame.data_id)) return false;
