@@ -133,11 +133,6 @@ const char *report_source_spool_type(ReportSourceId id) {
     return def ? def->spool_type : "";
 }
 
-uint32_t report_source_parser_schema(ReportSourceId id) {
-    const ReportSourceDef *def = report_source_def(id);
-    return def ? def->parser_schema : 0;
-}
-
 const char *report_signal_store_name(ReportSignalId id) {
     size_t count = 0;
     const ReportSignalDef *signals = report_signal_defs(count);
@@ -147,20 +142,6 @@ const char *report_signal_store_name(ReportSignalId id) {
     return "";
 }
 
-bool report_source_required_for_result(ReportSourceId source) {
-    switch (source) {
-        case ReportSourceId::RespiratoryEvents:
-        case ReportSourceId::TherapyOneMinute:
-        case ReportSourceId::RespiratoryFlow6p25Hz:
-        case ReportSourceId::MaskPressure6p25Hz:
-        case ReportSourceId::InspiratoryPressure0p5Hz:
-        case ReportSourceId::Leak0p5Hz:
-            return true;
-        default:
-            return false;
-    }
-}
-
 bool report_signal_required_for_result(const ReportSignalDef &signal) {
     return (signal.flags & REPORT_SIGNAL_REQUIRED) != 0;
 }
@@ -168,11 +149,6 @@ bool report_signal_required_for_result(const ReportSignalDef &signal) {
 bool report_source_is_sampled(const ReportSourceDef &source) {
     return (source.purposes &
             (REPORT_SOURCE_TREND_SERIES | REPORT_SOURCE_HIGH_RES_SERIES)) != 0;
-}
-
-bool report_source_is_sparse_event(const ReportSourceDef &source) {
-    return source.id == ReportSourceId::RespiratoryEvents ||
-           source.id == ReportSourceId::UsageEvents;
 }
 
 }  // namespace aircannect

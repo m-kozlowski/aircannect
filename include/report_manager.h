@@ -72,15 +72,8 @@ public:
     // Coverage and spool cache
     bool night_coverage(uint64_t night_start_ms,
                         ReportNightCoverageStatus &out) const;
-    bool night_coverage_by_therapy_index(
-        size_t therapy_index,
-        ReportNightCoverageStatus &out) const;
-    bool latest_night_coverage(ReportNightCoverageStatus &out) const;
 
     bool request_night_cache(uint64_t night_start_ms, bool force = false);
-    bool request_night_cache_by_therapy_index(size_t therapy_index,
-                                              bool force = false);
-    bool request_latest_night_cache(bool force = false);
     bool cancel_cache_fetch();
 
     bool clear_cache_all(ReportCacheClearResult &out);
@@ -94,7 +87,6 @@ public:
     bool busy() const { return runtime_service_.busy(); }
     bool background_work_active() const;
 
-    bool next_night_needing_cache(uint64_t &night_start_ms_out) const;
     const ReportCacheFetchStatus &cache_fetch_status() const {
         return cache_fetch_.status();
     }

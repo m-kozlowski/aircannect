@@ -13,13 +13,6 @@ namespace ReportStore {
 
 using namespace ReportStoreInternal;
 
-bool chunk_exists(const ReportStoreChunkKey &key) {
-    Storage::Guard g;
-    if (!valid_key(key)) return false;
-    char path[REPORT_PATH_MAX];
-    return build_chunk_path(key, path, sizeof(path)) && Storage::exists(path);
-}
-
 bool write_chunk(const ReportStoreChunkKey &key,
                  const ReportStoreChunkMeta &meta,
                  const uint8_t *payload,

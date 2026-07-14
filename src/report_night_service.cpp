@@ -116,23 +116,6 @@ bool ReportNightCacheService::coverage(
     return true;
 }
 
-bool ReportNightCacheService::coverage_by_therapy_index(
-    size_t therapy_index,
-    ReportNightCoverageStatus &out) const {
-    ScopedIndexedNight night("night_coverage_index");
-    if (!night ||
-        !night_index_.by_therapy_index(therapy_index, night.get())) {
-        return false;
-    }
-
-    return coverage(night->summary.start_ms, out);
-}
-
-bool ReportNightCacheService::latest_coverage(
-    ReportNightCoverageStatus &out) const {
-    return coverage_by_therapy_index(0, out);
-}
-
 bool ReportNightCacheService::next_needing_cache(
     uint64_t &night_start_ms_out,
     ReportNightCacheSkipFn skip,
@@ -246,22 +229,6 @@ bool ReportNightCacheService::request_cache(uint64_t night_start_ms,
     return event != ReportCacheFetchEvent::Failed;
 }
 
-bool ReportNightCacheService::request_cache_by_therapy_index(
-    size_t therapy_index,
-    bool force) {
-    ScopedIndexedNight night("request_night_cache_index");
-    if (!night ||
-        !night_index_.by_therapy_index(therapy_index, night.get())) {
-        return false;
-    }
-
-    return request_cache(night->summary.start_ms, force);
-}
-
-bool ReportNightCacheService::request_latest_cache(bool force) {
-    return request_cache_by_therapy_index(0, force);
-}
-
 bool ReportManager::night_etag(size_t therapy_index, char *out,
                                size_t out_size) const {
     return night_query_.night_etag(therapy_index, out, out_size);
@@ -288,51 +255,11 @@ bool ReportManager::night_coverage(uint64_t night_start_ms,
     return night_cache_.coverage(night_start_ms, out);
 }
 
-bool ReportManager::night_coverage_by_therapy_index(
-    size_t therapy_index,
-    ReportNightCoverageStatus &out) const {
-    return night_cache_.coverage_by_therapy_index(therapy_index, out);
-}
-
-bool ReportManager::latest_night_coverage(
-    ReportNightCoverageStatus &out) const {
-    return night_cache_.latest_coverage(out);
-}
-
-bool ReportManager::next_night_needing_cache(
-    uint64_t &night_start_ms_out) const {
-    return night_cache_.next_needing_cache(night_start_ms_out);
-}
-
 bool ReportManager::request_night_cache(uint64_t night_start_ms, bool force) {
     if (summary_service_.active() || range_plot_builder_.active()) {
         return false;
     }
     if (!night_cache_.request_cache(night_start_ms, force)) return false;
-
-    invalidate_active_fetch_result(cache_fetch_, result_cache_);
-    return true;
-}
-
-bool ReportManager::request_night_cache_by_therapy_index(
-    size_t therapy_index,
-    bool force) {
-    if (summary_service_.active() || range_plot_builder_.active()) {
-        return false;
-    }
-    if (!night_cache_.request_cache_by_therapy_index(therapy_index, force)) {
-        return false;
-    }
-
-    invalidate_active_fetch_result(cache_fetch_, result_cache_);
-    return true;
-}
-
-bool ReportManager::request_latest_night_cache(bool force) {
-    if (summary_service_.active() || range_plot_builder_.active()) {
-        return false;
-    }
-    if (!night_cache_.request_latest_cache(force)) return false;
 
     invalidate_active_fetch_result(cache_fetch_, result_cache_);
     return true;

@@ -62,11 +62,6 @@ bool write_coverage_batch(const char *source,
     return true;
 }
 
-bool write_coverage(const char *source,
-                    const ReportStoreCoverageRecord &record) {
-    return write_coverage_batch(source, &record, 1);
-}
-
 bool coverage_complete(const char *source,
                        int64_t start_ms,
                        int64_t end_ms,

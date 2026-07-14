@@ -249,25 +249,5 @@ bool read_summary_records(ReportSummaryRecordCallback callback,
     return true;
 }
 
-bool clear_summary_records(uint32_t &deleted) {
-    Storage::Guard g;
-
-    deleted = 0;
-
-    char path[REPORT_PATH_MAX];
-    snprintf(path, sizeof(path), "%s/summary/nights.idx", BASE_DIR);
-
-    const bool existed = Storage::exists(path);
-    if (!Storage::remove(path)) {
-        note_error("summary_remove_failed", &current.write_errors);
-        return false;
-    }
-
-    if (existed) deleted = 1;
-
-    set_error(current.last_error, sizeof(current.last_error), "");
-    return true;
-}
-
 }  // namespace ReportStore
 }  // namespace aircannect

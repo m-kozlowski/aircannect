@@ -61,11 +61,8 @@ const ReportSourceDef *report_source_defs(size_t &count);
 const ReportSignalDef *report_signal_defs(size_t &count);
 const ReportSourceDef *report_source_def(ReportSourceId id);
 const char *report_source_spool_type(ReportSourceId id);
-uint32_t report_source_parser_schema(ReportSourceId id);
 const char *report_signal_store_name(ReportSignalId id);
-bool report_source_required_for_result(ReportSourceId source);
 bool report_signal_required_for_result(const ReportSignalDef &signal);
 bool report_source_is_sampled(const ReportSourceDef &source);
-bool report_source_is_sparse_event(const ReportSourceDef &source);
 
 }  // namespace aircannect

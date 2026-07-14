@@ -108,7 +108,6 @@ ReportStoreStatus status();
 bool ready();
 bool ensure_layout();
 
-bool chunk_exists(const ReportStoreChunkKey &key);
 bool write_chunk(const ReportStoreChunkKey &key,
                  const ReportStoreChunkMeta &meta,
                  const uint8_t *payload,
@@ -132,8 +131,6 @@ bool clear_chunks(ReportStoreChunkKind kind,
                   int64_t end_ms,
                   uint32_t &deleted);
 
-bool write_coverage(const char *source,
-                    const ReportStoreCoverageRecord &record);
 // Coalesce-insert many records in ONE load+rewrite
 bool write_coverage_batch(const char *source,
                           const ReportStoreCoverageRecord *records,
@@ -156,7 +153,6 @@ bool write_summary_records(const ReportSummaryRecord *records,
                            size_t count);
 bool read_summary_records(ReportSummaryRecordCallback callback,
                           void *context);
-bool clear_summary_records(uint32_t &deleted);
 
 bool reset_cache_store(uint32_t &renamed);
 bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed);
