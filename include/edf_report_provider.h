@@ -42,26 +42,6 @@ public:
                                 ReportSeriesSampleCallback callback,
                                 void *context) const;
 
-    bool for_each_compatible_series_sample_batch(
-        const ReportProviderChunk *chunks,
-        size_t chunk_count,
-        bool *selected,
-        const EdfReportSessionDescriptor *sessions,
-        size_t session_count,
-        ReportProviderSeriesReadStats *stats,
-        EdfReportSeriesBatchSampleCallback callback,
-        void *context) const;
-
-    bool for_each_compatible_series_plot_batch(
-        const ReportProviderChunk *chunks,
-        size_t chunk_count,
-        const EdfReportSeriesPlotConfig *configs,
-        bool *selected,
-        const EdfReportSessionDescriptor *sessions,
-        size_t session_count,
-        ReportProviderSeriesReadStats *stats,
-        EdfReportSeriesBatchPlotCallback callback,
-        void *context) const;
 };
 
 class EdfReportDataProvider final : public ReportDataProvider {

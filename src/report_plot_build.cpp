@@ -38,6 +38,7 @@ uint64_t ReportResultPlotBuilder::night_start_ms() const {
 }
 
 void ReportResultPlotBuilder::reset() {
+    edf_batch_.reset();
     result_.plot().reset();
 }
 

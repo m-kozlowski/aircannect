@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "report_edf_plot_batch.h"
 #include "report_manager_internal_types.h"
 
 namespace aircannect {
@@ -54,7 +55,9 @@ private:
     bool process_series_chunk(const ReportResultChunk &chunk);
     bool process_series_chunk(const ReportResultChunk &chunk,
                               size_t stream_index);
-    bool process_edf_series_batch(size_t seed_chunk_index, bool &processed);
+    bool process_edf_series_batch(size_t seed_chunk_index,
+                                  uint32_t budget_ms,
+                                  bool &processed);
 
     // Completion
     void finish();
@@ -65,6 +68,7 @@ private:
     ReportResultCacheRuntime &cache_;
     ReportNightIndexService &night_index_;
     ReportEdfCatalogContext &edf_catalog_;
+    ReportEdfPlotBatch edf_batch_;
 };
 
 }  // namespace aircannect

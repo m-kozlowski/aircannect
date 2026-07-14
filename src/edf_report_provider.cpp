@@ -378,53 +378,6 @@ bool EdfReportProvider::for_each_series_sample(
     return false;
 }
 
-bool EdfReportProvider::for_each_compatible_series_sample_batch(
-    const ReportProviderChunk *chunks,
-    size_t chunk_count,
-    bool *selected,
-    const EdfReportSessionDescriptor *sessions,
-    size_t session_count,
-    ReportProviderSeriesReadStats *stats,
-    EdfReportSeriesBatchSampleCallback callback,
-    void *context) const {
-    (void)chunks;
-    (void)sessions;
-    (void)session_count;
-    (void)callback;
-    (void)context;
-    if (selected) {
-        for (size_t i = 0; i < chunk_count; ++i) selected[i] = false;
-    }
-    if (stats) {
-        for (size_t i = 0; i < chunk_count; ++i) stats[i] = {};
-    }
-    return false;
-}
-
-bool EdfReportProvider::for_each_compatible_series_plot_batch(
-    const ReportProviderChunk *chunks,
-    size_t chunk_count,
-    const EdfReportSeriesPlotConfig *configs,
-    bool *selected,
-    const EdfReportSessionDescriptor *sessions,
-    size_t session_count,
-    ReportProviderSeriesReadStats *stats,
-    EdfReportSeriesBatchPlotCallback callback,
-    void *context) const {
-    (void)chunks;
-    (void)configs;
-    (void)sessions;
-    (void)session_count;
-    (void)callback;
-    (void)context;
-    if (selected) {
-        for (size_t i = 0; i < chunk_count; ++i) selected[i] = false;
-    }
-    if (stats) {
-        for (size_t i = 0; i < chunk_count; ++i) stats[i] = {};
-    }
-    return false;
-}
 #endif
 
 bool EdfReportDataProvider::chunk_extent(ReportStoreChunkKind kind,

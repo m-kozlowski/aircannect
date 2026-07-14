@@ -79,6 +79,14 @@ void ReportRangePlotBuilder::poll() {
                AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS;
     };
 
+    auto remaining_budget_ms = [&]() -> uint32_t {
+        const uint32_t elapsed =
+            static_cast<uint32_t>(millis() - started_ms);
+        return elapsed < AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS
+                   ? AC_REPORT_RANGE_PLOT_POLL_BUDGET_MS - elapsed
+                   : 0;
+    };
+
     while (range_plot.active && !budget_spent()) {
         // Event chunks
         if (range_plot.phase == ReportPlotBuildPhase::Events) {
@@ -137,6 +145,20 @@ void ReportRangePlotBuilder::poll() {
 
         // Series chunks
         if (range_plot.phase == ReportPlotBuildPhase::Series) {
+            if (edf_batch_.active()) {
+                bool processed = false;
+                if (!process_edf_series_batch(0,
+                                              remaining_budget_ms(),
+                                              processed)) {
+                    return;
+                }
+                if (edf_batch_.active()) return;
+                if (processed) {
+                    reads++;
+                    continue;
+                }
+            }
+
             if (range_plot.stream_index >= range_plot.stream_count) {
                 finish();
                 return;
@@ -180,9 +202,13 @@ void ReportRangePlotBuilder::poll() {
                 }
 
                 if (chunk.provider_ref.provider == ReportProviderId::Edf) {
-                    if (!process_edf_series_batch(chunk_index, processed)) {
+                    if (!process_edf_series_batch(chunk_index,
+                                                  remaining_budget_ms(),
+                                                  processed)) {
                         return;
                     }
+
+                    if (edf_batch_.active()) return;
 
                     if (processed) {
                         reads++;
@@ -239,6 +265,14 @@ void ReportResultPlotBuilder::poll() {
                AC_REPORT_PLOT_POLL_BUDGET_MS;
     };
 
+    auto remaining_budget_ms = [&]() -> uint32_t {
+        const uint32_t elapsed =
+            static_cast<uint32_t>(millis() - started_ms);
+        return elapsed < AC_REPORT_PLOT_POLL_BUDGET_MS
+                   ? AC_REPORT_PLOT_POLL_BUDGET_MS - elapsed
+                   : 0;
+    };
+
     while (result_.plot().active && !budget_spent()) {
         // Event chunks
         if (result_.plot().phase == ReportPlotBuildPhase::Events) {
@@ -288,6 +322,19 @@ void ReportResultPlotBuilder::poll() {
         if (result_.plot().phase == ReportPlotBuildPhase::Series) {
             bool processed = false;
 
+            if (edf_batch_.active()) {
+                if (!process_edf_series_batch(0,
+                                              remaining_budget_ms(),
+                                              processed)) {
+                    return;
+                }
+                if (edf_batch_.active()) return;
+                if (processed) {
+                    reads++;
+                    continue;
+                }
+            }
+
             const size_t max_chunks = std::min(
                 static_cast<size_t>(result_.status().chunk_count),
                 static_cast<size_t>(AC_REPORT_RESULT_CHUNK_MAX));
@@ -311,9 +358,13 @@ void ReportResultPlotBuilder::poll() {
                 }
 
                 if (chunk.provider_ref.provider == ReportProviderId::Edf) {
-                    if (!process_edf_series_batch(chunk_index, processed)) {
+                    if (!process_edf_series_batch(chunk_index,
+                                                  remaining_budget_ms(),
+                                                  processed)) {
                         return;
                     }
+
+                    if (edf_batch_.active()) return;
 
                     if (processed) {
                         reads++;

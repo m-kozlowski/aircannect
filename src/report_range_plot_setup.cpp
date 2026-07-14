@@ -48,6 +48,7 @@ bool ReportRangePlotBuilder::matches(size_t index,
 }
 
 void ReportRangePlotBuilder::reset(bool clear_ready) {
+    edf_batch_.reset();
     range_plot_.reset();
 
     if (clear_ready) cache_.reset_range(true);

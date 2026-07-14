@@ -19,6 +19,12 @@ enum class EdfReportDataReadStatus : uint8_t {
     CallbackRejected,
 };
 
+enum class EdfReportBatchPollResult : uint8_t {
+    Pending,
+    Complete,
+    Failed,
+};
+
 struct EdfReportDataReadStats {
     uint32_t records_read = 0;
     uint32_t samples_seen = 0;
@@ -77,27 +83,6 @@ EdfReportDataReadStatus edf_report_for_each_entry_series_sample(
     EdfReportDataReadStats &stats,
     uint32_t *interval_ms_out,
     ReportSeriesSampleCallback callback,
-    void *context);
-
-EdfReportDataReadStatus edf_report_for_each_series_batch_sample(
-    const EdfReportSessionDescriptor &session,
-    const EdfReportDataPlanEntry *entries,
-    size_t entry_count,
-    ReportStoreChunkMeta *metas,
-    EdfReportDataReadStats &stats,
-    uint32_t *interval_ms_out,
-    EdfReportSeriesBatchSampleCallback callback,
-    void *context);
-
-EdfReportDataReadStatus edf_report_for_each_series_batch_plot(
-    const EdfReportSessionDescriptor &session,
-    const EdfReportDataPlanEntry *entries,
-    size_t entry_count,
-    const EdfReportSeriesPlotConfig *configs,
-    ReportStoreChunkMeta *metas,
-    EdfReportDataReadStats &stats,
-    uint32_t *interval_ms_out,
-    EdfReportSeriesBatchPlotCallback callback,
     void *context);
 
 }  // namespace aircannect
