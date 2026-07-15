@@ -9,11 +9,14 @@
 #include <stdint.h>
 
 #include "app_config.h"
+#include "ota_release_manifest.h"
 #include "wifi_manager.h"
 
 class ArduinoOTAClass;
 
 namespace aircannect {
+
+struct OtaUrlError;
 
 enum class OtaUploadEncoding : uint8_t {
     Auto,
@@ -32,6 +35,13 @@ struct OtaManagerStatus {
     bool http_active = false;
     bool http_ready = false;
     bool url_active = false;
+    bool update_check_enabled = false;
+    bool update_check_pending = false;
+    bool update_check_active = false;
+    bool update_check_attempted = false;
+    bool update_checked = false;
+    bool update_available = false;
+    bool update_installable = false;
     bool reboot_pending = false;
     bool auth_enabled = true;
     uint16_t arduino_port = AC_ARDUINO_OTA_PORT;
@@ -44,6 +54,15 @@ struct OtaManagerStatus {
     String encoding = "auto";
     String partition;
     String last_error;
+    String update_version;
+    String update_error;
+    uint32_t update_last_check_age_ms = 0;
+};
+
+struct OtaUpdateNotification {
+    bool checking = false;
+    bool available = false;
+    char version[AC_OTA_RELEASE_VERSION_MAX] = {};
 };
 
 class OtaManager {
@@ -52,8 +71,10 @@ public:
     void poll(const WifiManager &wifi_manager,
               bool reboot_allowed = true,
               bool arduino_ota_allowed = true,
-              bool arduino_ota_poll_allowed = true);
+              bool arduino_ota_poll_allowed = true,
+              bool update_check_allowed = true);
     void mark_config_dirty();
+    void mark_update_config_dirty();
 
     bool request_http_upload_prepare(
         size_t image_size,
@@ -76,14 +97,24 @@ public:
         OtaUploadEncoding encoding = OtaUploadEncoding::Auto,
         size_t image_size = 0,
         size_t wire_size = 0);
+    bool request_update_check();
+    bool request_available_update();
     void request_abort(const char *reason);
 
     void schedule_reboot(uint32_t delay_ms = 750);
 
     bool active() const;
     OtaManagerStatus status() const;
+    OtaUpdateNotification update_notification() const;
 
 private:
+    struct UpdateArtifact {
+        char *url = nullptr;
+        size_t image_size = 0;
+        size_t wire_size = 0;
+        OtaUploadEncoding encoding = OtaUploadEncoding::Auto;
+    };
+
     enum class InstallSource : uint8_t {
         HttpUpload,
         Url,
@@ -118,6 +149,22 @@ private:
                                    const uint8_t *data,
                                    size_t len);
     static bool url_continue_callback(void *ctx);
+
+    void poll_update_check(bool network_online, bool check_allowed);
+    bool start_update_check();
+    static void update_check_task_entry(void *ctx);
+    void run_update_check_task();
+    void finish_update_check(char *url,
+                             uint32_t generation,
+                             const OtaReleaseManifest *manifest,
+                             bool update_available,
+                             UpdateArtifact artifact,
+                             const char *error,
+                             bool retry_soon,
+                             const OtaUrlError *transport_error = nullptr);
+    void clear_available_update_locked();
+    bool update_check_cancelled(uint32_t generation) const;
+    static bool update_check_continue_callback(void *ctx);
 
     bool begin_zlib_decoder();
     void reset_zlib_decoder();
@@ -168,6 +215,19 @@ private:
     OtaUploadEncoding url_request_encoding_ = OtaUploadEncoding::Auto;
     TaskHandle_t url_task_ = nullptr;
     bool url_cancel_requested_ = false;
+
+    bool update_config_dirty_ = false;
+    bool update_network_online_ = false;
+    bool update_manual_requested_ = false;
+    bool update_check_cancel_requested_ = false;
+    uint32_t update_network_since_ms_ = 0;
+    uint32_t update_next_check_ms_ = 0;
+    uint32_t update_last_check_ms_ = 0;
+    uint32_t update_config_generation_ = 1;
+    uint32_t update_task_generation_ = 0;
+    char *update_check_url_ = nullptr;
+    TaskHandle_t update_check_task_ = nullptr;
+    UpdateArtifact available_update_;
 
     OtaManagerStatus status_;
     mutable SemaphoreHandle_t status_mutex_ = nullptr;

@@ -65,6 +65,7 @@ struct SystemStatusSnapshot {
     StorageStatus storage;
     WifiStatusSnapshot wifi;
     bool ota_active = false;
+    OtaUpdateNotification update;
     As11StatusSnapshot as11;
     OximetryRuntimeStatus oximetry;
     TimeStatusSnapshot time;

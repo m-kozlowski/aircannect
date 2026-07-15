@@ -18,6 +18,8 @@
         <h1>AirCANnect</h1>
         <small id="ver">--</small>
         <small id="built">--</small>
+        <a id="updateNotice" class="update-notice" href="#ota" hidden
+           onclick="showTab('ota')"></a>
       </div>
 
       <nav>
@@ -616,6 +618,18 @@
               <label>Version</label>
               <span class="value" id="otaVersion">--</span>
             </div>
+            <div class="row">
+              <label>Latest release</label>
+              <span class="value" id="otaLatest">--</span>
+            </div>
+            <div class="btns">
+              <button class="btn" id="otaCheckUpdate"
+                      onclick="otaCheckForUpdates()">Check for updates</button>
+              <button class="btn primary" id="otaInstallUpdate" hidden
+                      onclick="otaInstallAvailableUpdate()">Install update</button>
+            </div>
+            <div class="msg" id="otaUpdateMsg"></div>
+            <div class="section-title">Install firmware</div>
             <div class="row">
               <label>Progress</label>
               <span class="value" id="otaProgress">--</span>

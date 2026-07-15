@@ -60,6 +60,25 @@
       margin-top: 3px;
     }
 
+    .brand .update-notice {
+      display: block;
+      color: var(--orange);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      margin-top: 9px;
+      text-decoration: none;
+    }
+
+    .brand .update-notice:hover {
+      color: var(--text);
+      text-decoration: underline;
+    }
+
+    .brand .update-notice[hidden] {
+      display: none;
+    }
+
     .sidebar nav {
       padding: 8px 0;
       flex: 1;

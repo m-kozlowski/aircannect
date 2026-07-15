@@ -726,6 +726,61 @@ void ManagementConsole::handle_ota(Print &out,
             out.print(ota.last_error);
         }
         out.println();
+
+        const char *update_state = "unknown";
+        if (!ota.update_check_enabled) update_state = "disabled";
+        else if (ota.update_check_active) update_state = "checking";
+        else if (ota.update_check_pending) update_state = "queued";
+        else if (ota.update_available) update_state = "available";
+        else if (ota.update_checked) update_state = "current";
+
+        out.print("[OTA update] state=");
+        out.print(update_state);
+        if (ota.update_version.length()) {
+            out.print(" latest=");
+            out.print(ota.update_version);
+        }
+        if (ota.update_available) {
+            out.print(" installable=");
+            out.print(ota.update_installable ? "yes" : "no");
+        }
+        if (ota.update_check_attempted) {
+            out.print(" checked_age_ms=");
+            out.print(ota.update_last_check_age_ms);
+        }
+        if (ota.update_error.length()) {
+            out.print(" error=");
+            out.print(ota.update_error);
+        }
+        out.println();
+        return;
+    }
+
+    if (command == "check") {
+        if (!ota_manager.request_update_check()) {
+            const OtaManagerStatus ota = ota_manager.status();
+            out.print("[OTA] update check rejected: ");
+            out.println(ota.update_error.length()
+                            ? ota.update_error
+                            : "error");
+            return;
+        }
+
+        out.println("[OTA] update check queued");
+        return;
+    }
+
+    if (command == "install") {
+        if (!ota_manager.request_available_update()) {
+            const OtaManagerStatus ota = ota_manager.status();
+            out.print("[OTA] update install rejected: ");
+            out.println(ota.last_error.length()
+                            ? ota.last_error
+                            : "error");
+            return;
+        }
+
+        out.println("[OTA] update install queued");
         return;
     }
 
@@ -762,7 +817,8 @@ void ManagementConsole::handle_ota(Print &out,
         return;
     }
 
-    print_unknown_command(out, "OTA", "ota status, abort, url URL");
+    print_unknown_command(out, "OTA",
+                          "ota status, check, install, abort, url URL");
 }
 
 void ManagementConsole::handle_resmed_ota(
@@ -1408,6 +1464,9 @@ bool ManagementConsole::handle_config_key(
     }
     if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
         ota_manager.mark_config_dirty();
+    }
+    if (dirty & AC_CONFIG_DIRTY_UPDATE_URL) {
+        ota_manager.mark_update_config_dirty();
     }
     if (dirty & (AC_CONFIG_DIRTY_LOG_LEVELS | AC_CONFIG_DIRTY_SYSLOG |
                  AC_CONFIG_DIRTY_FILE_LOG)) {

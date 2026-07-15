@@ -26,6 +26,17 @@ struct OtaUrlStreamContext {
     OtaUrlError *error = nullptr;
 };
 
+struct OtaUrlFetchContext {
+    uint8_t *buffer = nullptr;
+    size_t capacity = 0;
+    size_t offset = 0;
+    size_t expected_size = 0;
+    bool size_checked = false;
+    OtaUrlContinueCallback continue_callback = nullptr;
+    void *callback_ctx = nullptr;
+    OtaUrlError *error = nullptr;
+};
+
 void clear_error(OtaUrlError &error) {
     error = OtaUrlError();
 }
@@ -154,6 +165,50 @@ esp_err_t stream_event(esp_http_client_event_t *event) {
     return ESP_OK;
 }
 
+esp_err_t fetch_event(esp_http_client_event_t *event) {
+    if (!event || !event->user_data) return ESP_OK;
+    OtaUrlFetchContext &ctx =
+        *static_cast<OtaUrlFetchContext *>(event->user_data);
+
+    if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
+        return ESP_OK;
+    }
+
+    const int status = esp_http_client_get_status_code(event->client);
+    if (status != 200) return ESP_OK;
+
+    if (!operation_allowed(ctx.continue_callback, ctx.callback_ctx)) {
+        set_error_code(*ctx.error, "url_cancelled");
+        return ESP_FAIL;
+    }
+
+    if (!ctx.size_checked) {
+        const int64_t content_length =
+            esp_http_client_get_content_length(event->client);
+        if (content_length <= 0) {
+            set_error_code(*ctx.error, "url_content_length_missing");
+            return ESP_FAIL;
+        }
+        if (static_cast<uint64_t>(content_length) > ctx.capacity) {
+            set_error_code(*ctx.error, "url_response_too_large");
+            return ESP_FAIL;
+        }
+
+        ctx.expected_size = static_cast<size_t>(content_length);
+        ctx.size_checked = true;
+    }
+
+    const size_t len = static_cast<size_t>(event->data_len);
+    if (ctx.offset > ctx.capacity || len > ctx.capacity - ctx.offset) {
+        set_error_code(*ctx.error, "url_response_too_large");
+        return ESP_FAIL;
+    }
+
+    memcpy(ctx.buffer + ctx.offset, event->data, len);
+    ctx.offset += len;
+    return ESP_OK;
+}
+
 }  // namespace
 
 bool ota_url_supported(const char *url) {
@@ -277,6 +332,59 @@ bool ota_url_stream(const char *url,
         return false;
     }
 
+    esp_http_client_cleanup(client);
+    return true;
+}
+
+bool ota_url_fetch(const char *url,
+                   uint8_t *buffer,
+                   size_t capacity,
+                   size_t &length,
+                   OtaUrlError &error,
+                   OtaUrlContinueCallback continue_callback,
+                   void *callback_ctx) {
+    length = 0;
+    clear_error(error);
+    if (!ota_url_supported(url) || !buffer || capacity == 0) {
+        set_error_code(error, "url_invalid_request");
+        return false;
+    }
+
+    OtaUrlFetchContext context;
+    context.buffer = buffer;
+    context.capacity = capacity;
+    context.continue_callback = continue_callback;
+    context.callback_ctx = callback_ctx;
+    context.error = &error;
+
+    esp_http_client_handle_t client =
+        create_client(url, HTTP_METHOD_GET, fetch_event, &context);
+    if (!client) {
+        set_error_code(error, "url_client_alloc_failed");
+        return false;
+    }
+
+    const esp_err_t result = esp_http_client_perform(client);
+    const int status = esp_http_client_get_status_code(client);
+    error.http_status = status;
+
+    if (result != ESP_OK) {
+        capture_transport_error(client, result, error);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+    if (status != 200) {
+        set_http_error(error, status);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+    if (!context.size_checked || context.offset != context.expected_size) {
+        set_error_code(error, "url_incomplete_response");
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    length = context.offset;
     esp_http_client_cleanup(client);
     return true;
 }

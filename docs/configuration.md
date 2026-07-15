@@ -48,6 +48,18 @@ Empty `http_user` and `http_pass` mean open access for HTTP and telnet.
 | `auth_wl` | Empty, `*`, IPv4 addresses, CIDR ranges, or IPv4 start-end ranges separated by commas | empty | IP/range whitelist that bypasses HTTP and telnet auth. |
 | `ota_pass` | ASCII string up to 64 chars, or empty | `aircannect` | ArduinoOTA password. Empty value allows ArduinoOTA without authorization. |
 
+## Updates
+
+| Key | Values | Default | Description |
+| --- | --- | --- | --- |
+| `update_url` | HTTP(S) URL, or empty | GitHub latest-release manifest | Release manifest checked for compatible AirCANnect firmware. Empty disables update checks. |
+
+AirCANnect checks about one minute after IPv4 becomes available and then every
+six hours. Checks wait until the device is idle: no therapy, foreground report
+work, storage export, or firmware update may be active. They only report a
+newer compatible release; firmware installation remains an explicit user
+action from the OTA tab or the `ota install` CLI command.
+
 ## Time
 
 | Key | Values | Default | Description |
@@ -114,4 +126,3 @@ logging changes:
 log level LEVEL
 log level CATEGORY LEVEL
 ```
-

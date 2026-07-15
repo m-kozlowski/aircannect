@@ -20,6 +20,7 @@ enum class AppConfigGroup : uint8_t {
     Device,
     Network,
     Access,
+    Ota,
     Logging,
     Time,
     Oximetry,
@@ -60,6 +61,7 @@ enum AppConfigDirty : uint32_t {
     AC_CONFIG_DIRTY_SMB_SYNC = 1UL << 14,
     AC_CONFIG_DIRTY_SLEEPHQ_SYNC = 1UL << 15,
     AC_CONFIG_DIRTY_FILE_LOG = 1UL << 16,
+    AC_CONFIG_DIRTY_UPDATE_URL = 1UL << 17,
 };
 
 static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
@@ -71,7 +73,7 @@ static constexpr uint32_t AC_CONFIG_DIRTY_ALL =
     AC_CONFIG_DIRTY_OXIMETRY | AC_CONFIG_DIRTY_EDF_CAPTURE |
     AC_CONFIG_DIRTY_LOG_LEVELS | AC_CONFIG_DIRTY_SYSLOG |
     AC_CONFIG_DIRTY_SMB_SYNC | AC_CONFIG_DIRTY_SLEEPHQ_SYNC |
-    AC_CONFIG_DIRTY_FILE_LOG;
+    AC_CONFIG_DIRTY_FILE_LOG | AC_CONFIG_DIRTY_UPDATE_URL;
 
 enum class AppConfigFieldId : uint8_t {
     Hostname,
@@ -98,6 +100,7 @@ enum class AppConfigFieldId : uint8_t {
     TelnetEnabled,
     TelnetPort,
     OtaPassword,
+    UpdateUrl,
     SyslogEnabled,
     SyslogHost,
     SyslogPort,

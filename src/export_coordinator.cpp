@@ -18,6 +18,11 @@ void ExportCoordinator::begin(StorageSyncJob *storage_sync,
     sleephq_sync_ = sleephq_sync;
 }
 
+bool ExportCoordinator::endpoint_work_active() const {
+    return (storage_sync_ && storage_sync_->runtime_status().active()) ||
+           (sleephq_sync_ && sleephq_sync_->runtime_status().active());
+}
+
 bool ExportCoordinator::request_smb_sync() {
     if (!storage_sync_ ||
         (sleephq_sync_ && sleephq_sync_->runtime_status().active())) {

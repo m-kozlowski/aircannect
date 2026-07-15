@@ -70,6 +70,16 @@ bool starts_with_ignore_case(const String &value, const char *prefix) {
     return true;
 }
 
+bool valid_update_url(const String &url) {
+    if (!url.length()) return true;
+    if (printable_ascii_reject_reason(url, AC_OTA_URL_MAX_LENGTH,
+                                      "too_long", "bad_char")) {
+        return false;
+    }
+    return starts_with_ignore_case(url, "http://") ||
+           starts_with_ignore_case(url, "https://");
+}
+
 bool normalize_smb_endpoint(String &endpoint) {
     endpoint.trim();
     if (!endpoint.length()) return true;
@@ -529,6 +539,11 @@ bool AppConfig::normalize() {
         data_.ota_password = defaults.ota_password;
         unchanged = false;
     }
+    data_.update_url.trim();
+    if (!valid_update_url(data_.update_url)) {
+        data_.update_url = defaults.update_url;
+        unchanged = false;
+    }
     for (int i = 0; i < CAT_COUNT; ++i) {
         if (!valid_log_level(data_.log_levels[i])) {
             data_.log_levels[i] = defaults.log_levels[i];
@@ -783,6 +798,15 @@ bool AppConfig::set_ota_password(const String &password) {
     if (data_.ota_password == value) return true;
     data_.ota_password = value;
     return persist(AC_CONFIG_DIRTY_OTA_PASSWORD);
+}
+
+bool AppConfig::set_update_url(const String &url) {
+    String value = url;
+    value.trim();
+    if (!valid_update_url(value)) return false;
+    if (data_.update_url == value) return true;
+    data_.update_url = value;
+    return persist(AC_CONFIG_DIRTY_UPDATE_URL);
 }
 
 bool AppConfig::set_log_level(log_cat_t cat, log_level_t level) {

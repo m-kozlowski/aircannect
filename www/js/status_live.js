@@ -779,6 +779,14 @@
       up("ver", data.version);
       up("built", data.built);
 
+      const updateNotice = document.getElementById("updateNotice");
+      if (updateNotice) {
+        updateNotice.hidden = !data.update_available;
+        updateNotice.textContent = data.update_available
+          ? "Version " + (data.update_version || "new") + " available"
+          : "";
+      }
+
       let memory = (data.heap / 1024).toFixed(1) + " KB heap";
       if (data.psram_available) {
         memory += " / " + (data.psram_free / 1048576).toFixed(1) + " MB psram";
@@ -1178,4 +1186,3 @@
         msg("oxiTabMsg", error.message, false);
       }
     }
-

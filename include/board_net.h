@@ -49,6 +49,12 @@
 #define AC_DEFAULT_OTA_PASSWORD "aircannect"
 #endif
 
+#ifndef AC_DEFAULT_UPDATE_URL
+#define AC_DEFAULT_UPDATE_URL                                                   \
+    "https://github.com/m-kozlowski/aircannect/releases/latest/download/"     \
+    "aircannect-release.json"
+#endif
+
 #ifndef AC_DEFAULT_HTTP_USER
 #define AC_DEFAULT_HTTP_USER "admin"
 #endif
@@ -123,6 +129,12 @@ static constexpr uint8_t AC_OTA_URL_REDIRECT_LIMIT = 5;
 static constexpr uint32_t AC_OTA_URL_TASK_STACK_BYTES = 8192;
 static constexpr uint8_t AC_OTA_URL_TASK_PRIORITY = 1;
 static constexpr int8_t AC_OTA_URL_TASK_CORE = 0;
+static constexpr size_t AC_OTA_MANIFEST_MAX_BYTES = 16 * 1024;
+static constexpr uint32_t AC_OTA_UPDATE_INITIAL_DELAY_MS = 60 * 1000;
+static constexpr uint32_t AC_OTA_UPDATE_CHECK_INTERVAL_MS =
+    6UL * 60UL * 60UL * 1000UL;
+static constexpr uint32_t AC_OTA_UPDATE_RETRY_INTERVAL_MS =
+    30UL * 60UL * 1000UL;
 
 static constexpr size_t AC_LOG_LINE_MAX = 192;
 static constexpr size_t AC_SYSLOG_QUEUE_DEPTH = 32;

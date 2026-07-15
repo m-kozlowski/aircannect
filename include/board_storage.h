@@ -88,6 +88,16 @@ static constexpr size_t AC_PROVISION_LINE_MAX = 256;
     ((AC_STORAGE_SDMMC_ENABLED != 0) || (AC_STORAGE_SPI_SD_ENABLED != 0))
 #endif
 
+#ifndef AC_OTA_RELEASE_TARGET
+#if AC_STORAGE_SPI_SD_ENABLED
+#define AC_OTA_RELEASE_TARGET "xiao-esp32s3-plus-spisd"
+#elif AC_STORAGE_SDMMC_ENABLED && AC_SDMMC_WIDTH == 4
+#define AC_OTA_RELEASE_TARGET "xiao-esp32s3-plus-sdmmc4"
+#else
+#define AC_OTA_RELEASE_TARGET ""
+#endif
+#endif
+
 #ifndef AC_DEFAULT_EDF_CAPTURE_ENABLED
 #define AC_DEFAULT_EDF_CAPTURE_ENABLED AC_STORAGE_HAS_SDCARD
 #endif

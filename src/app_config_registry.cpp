@@ -153,6 +153,12 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
      AC_CONFIG_DIRTY_OTA_PASSWORD, "OTA password", "OTA password.", nullptr,
      0, -1, AC_CFG_OFFSET(ota_password)},
 
+    {"update_url", AppConfigFieldId::UpdateUrl, AppConfigGroup::Ota, 10,
+     AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_UPDATE_URL,
+     "Update manifest URL",
+     "Manifest used to check for compatible firmware releases.", nullptr, 0,
+     -1, AC_CFG_OFFSET(update_url)},
+
     {"syslog_en", AppConfigFieldId::SyslogEnabled, AppConfigGroup::Logging,
      10, AppConfigFieldType::Bool, PROVISIONABLE, AC_CONFIG_DIRTY_SYSLOG,
      "Syslog", "Enable syslog forwarding.", nullptr, 0, -1,
@@ -397,6 +403,8 @@ bool set_field_value(AppConfig &config,
                                              parsed_port);
         case AppConfigFieldId::OtaPassword:
             return config.set_ota_password(value);
+        case AppConfigFieldId::UpdateUrl:
+            return config.set_update_url(value);
         case AppConfigFieldId::SyslogEnabled:
             if (!parse_bool_yesno(value, parsed_bool)) return false;
             return config.set_syslog(parsed_bool, cfg.syslog_host,
@@ -445,6 +453,7 @@ const char *app_config_group_id(AppConfigGroup group) {
         case AppConfigGroup::Device: return "device";
         case AppConfigGroup::Network: return "network";
         case AppConfigGroup::Access: return "access";
+        case AppConfigGroup::Ota: return "ota";
         case AppConfigGroup::Logging: return "logging";
         case AppConfigGroup::Time: return "time";
         case AppConfigGroup::Oximetry: return "oximetry";
@@ -459,6 +468,7 @@ const char *app_config_group_label(AppConfigGroup group) {
         case AppConfigGroup::Device: return "Device";
         case AppConfigGroup::Network: return "Network";
         case AppConfigGroup::Access: return "Access";
+        case AppConfigGroup::Ota: return "Updates";
         case AppConfigGroup::Logging: return "Logging";
         case AppConfigGroup::Time: return "Time";
         case AppConfigGroup::Oximetry: return "Oximetry";

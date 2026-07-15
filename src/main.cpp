@@ -578,10 +578,15 @@ void loop() {
     const bool arduino_ota_poll_allowed =
         rpc_arbiter.as11_state().therapy_state() !=
             As11TherapyState::Running;
+    const bool update_check_allowed =
+        arduino_ota_poll_allowed &&
+        !export_coordinator.endpoint_work_active() &&
+        !report_manager.foreground_busy();
 
     ota_manager.poll(wifi_manager, esp_reboot_allowed,
                      !resmed_ota_transport_active,
-                     arduino_ota_poll_allowed);
+                     arduino_ota_poll_allowed,
+                     update_check_allowed);
 
     drain_can_rx_after("arduino_ota");
 

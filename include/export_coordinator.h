@@ -27,6 +27,7 @@ public:
               bool resmed_ota_active,
               bool esp_ota_active,
               uint32_t now_ms);
+    bool endpoint_work_active() const;
 
     // external requests
     bool request_smb_sync();

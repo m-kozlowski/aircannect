@@ -40,4 +40,12 @@ bool ota_url_stream(const char *url,
                     void *callback_ctx,
                     OtaUrlError &error);
 
+bool ota_url_fetch(const char *url,
+                   uint8_t *buffer,
+                   size_t capacity,
+                   size_t &length,
+                   OtaUrlError &error,
+                   OtaUrlContinueCallback continue_callback = nullptr,
+                   void *callback_ctx = nullptr);
+
 }  // namespace aircannect

@@ -25,6 +25,7 @@ struct AppConfigUpdateResult {
     bool softap_changed = false;
     bool edf_capture_changed = false;
     bool ota_config_dirty = false;
+    bool update_config_changed = false;
     bool log_config_changed = false;
     bool wifi_reconnect_required = false;
 };

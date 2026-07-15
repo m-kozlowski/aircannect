@@ -702,9 +702,37 @@
       up("otaVersion", data.version || "--");
       const active = data.http_prepare_pending || data.http_prepared ||
         data.http_active || data.http_ready || data.url_active ||
-        data.reboot_pending || data.method === "http" ||
-        data.method === "http_prepare" || data.method === "url" ||
-        data.method === "arduino";
+        data.update_check_active || data.reboot_pending ||
+        data.method === "http" || data.method === "http_prepare" ||
+        data.method === "url" || data.method === "arduino";
+
+      let latest = "--";
+      if (!data.update_check_enabled) {
+        latest = "Checks disabled";
+      } else if (data.update_check_active) {
+        latest = "Checking...";
+      } else if (data.update_check_pending) {
+        latest = "Check queued";
+      } else if (data.update_version) {
+        latest = data.update_version +
+          (data.update_available ? " available" : " (current)");
+      }
+      up("otaLatest", latest);
+
+      const check = document.getElementById("otaCheckUpdate");
+      if (check) {
+        check.disabled = !data.update_check_enabled ||
+          data.update_check_active || data.update_check_pending || active;
+      }
+
+      const installUpdate = document.getElementById("otaInstallUpdate");
+      if (installUpdate) {
+        installUpdate.hidden = !data.update_available;
+        installUpdate.textContent = data.update_version
+          ? "Install " + data.update_version
+          : "Install update";
+        installUpdate.disabled = !data.update_installable || active;
+      }
       const install = document.getElementById("otaInstall");
       if (install) install.disabled = active;
 
@@ -744,6 +772,56 @@
       }
     }
 
+    async function otaCheckForUpdates() {
+      const button = document.getElementById("otaCheckUpdate");
+      if (button) button.disabled = true;
+      msg("otaUpdateMsg", "Checking for updates...", true, true);
+
+      let data = null;
+      try {
+        let response = await fetch("/api/ota/check", {method: "POST"});
+        data = await response.json();
+        renderOta(data);
+        if (!response.ok) {
+          throw new Error(data.update_error || "Update check rejected");
+        }
+
+        const started = Date.now();
+        while (data.update_check_pending || data.update_check_active) {
+          if (data.update_check_pending && !data.update_check_active &&
+              Date.now() - started > 10000) {
+            msg("otaUpdateMsg",
+              "Check queued until the device is idle and network is available.",
+              true, true);
+            return;
+          }
+          if (Date.now() - started > 60000) {
+            throw new Error("Update check timed out");
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          response = await api("/api/ota");
+          data = await response.json();
+          renderOta(data);
+        }
+
+        if (data.update_error) throw new Error(data.update_error);
+        if (data.update_available) {
+          msg("otaUpdateMsg",
+            "Version " + data.update_version + " is available.", true);
+        } else {
+          msg("otaUpdateMsg", "This device is up to date.", true);
+        }
+      } catch (error) {
+        msg("otaUpdateMsg", error.message, false);
+      } finally {
+        if (button) {
+          button.disabled = !data || !data.update_check_enabled ||
+            data.update_check_pending || data.update_check_active;
+        }
+      }
+    }
+
     function setOtaUploadProgress(percent, bytes) {
       up("otaProgress", percent + "% / " + fmtBytes(bytes || 0));
     }
@@ -773,11 +851,8 @@
       return new URLSearchParams({url}).toString();
     }
 
-    async function otaInstallFromUrl(url) {
-      const query = otaUrlQuery(url);
-      msg("otaMsg", "Starting URL update...", true, true);
-
-      let response = await fetch("/api/ota/url?" + query, {method: "POST"});
+    async function otaRunUrlUpdate(endpoint, messageId) {
+      let response = await fetch(endpoint, {method: "POST"});
       let data = await response.json();
       renderOta(data);
       if (!response.ok) {
@@ -790,7 +865,7 @@
           throw new Error(data.last_error);
         }
         if (data.reboot_pending || data.http_ready) {
-          msg("otaMsg", "Update installed. Restarting...", true, true);
+          msg(messageId, "Update installed. Restarting...", true, true);
           scheduleOtaReload();
           return true;
         }
@@ -802,6 +877,29 @@
         response = await api("/api/ota");
         data = await response.json();
         renderOta(data);
+      }
+    }
+
+    async function otaInstallFromUrl(url) {
+      const query = otaUrlQuery(url);
+      msg("otaMsg", "Starting URL update...", true, true);
+      return otaRunUrlUpdate("/api/ota/url?" + query, "otaMsg");
+    }
+
+    async function otaInstallAvailableUpdate() {
+      const button = document.getElementById("otaInstallUpdate");
+      if (button) button.disabled = true;
+      msg("otaUpdateMsg", "Starting release update...", true, true);
+
+      let restarting = false;
+      try {
+        restarting = await otaRunUrlUpdate(
+          "/api/ota/install-update", "otaUpdateMsg");
+      } catch (error) {
+        msg("otaUpdateMsg", "Update failed: " + error.message, false, true);
+        loadOta();
+      } finally {
+        if (button && !restarting) button.disabled = false;
       }
     }
 

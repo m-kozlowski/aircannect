@@ -846,6 +846,22 @@ void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
     json_add_bool(json, "http_active", ota.http_active);
     json_add_bool(json, "http_ready", ota.http_ready);
     json_add_bool(json, "url_active", ota.url_active);
+    json_add_bool(json, "update_check_enabled", ota.update_check_enabled);
+    json_add_bool(json, "update_check_pending", ota.update_check_pending);
+    json_add_bool(json, "update_check_active", ota.update_check_active);
+    json_add_bool(json, "update_check_attempted",
+                  ota.update_check_attempted);
+    json_add_bool(json, "update_checked", ota.update_checked);
+    json_add_bool(json, "update_available", ota.update_available);
+    json_add_bool(json, "update_installable", ota.update_installable);
+    json_add_string(json, "update_version", ota.update_version.c_str());
+    json_add_string(json, "update_error", ota.update_error.c_str());
+    if (ota.update_check_attempted) {
+        json_add_int(json, "update_last_check_age_ms",
+                     static_cast<long>(ota.update_last_check_age_ms));
+    } else {
+        json += ",\"update_last_check_age_ms\":null";
+    }
     json_add_bool(json, "reboot_pending", ota.reboot_pending);
     json_add_bool(json, "auth_enabled", ota.auth_enabled);
     json_add_int(json, "arduino_port", ota.arduino_port);
@@ -2091,6 +2107,9 @@ void WebUI::build_status_json(LargeTextBuffer &json,
     json_add_string(json, "wifi_bssid", wifi.bssid);
     json_add_int(json, "wifi_profile", wifi.active_profile);
     json_add_bool(json, "wifi_roam", wifi.roaming_enabled);
+    json_add_bool(json, "update_checking", snap.update.checking);
+    json_add_bool(json, "update_available", snap.update.available);
+    json_add_string(json, "update_version", snap.update.version);
     json_add_string_view(json, "device_name", as11.product_name);
     json_add_string_view(json, "serial", as11.serial_number);
     json_add_string_view(json, "software_id", as11.software_identifier);
@@ -4392,6 +4411,7 @@ void WebUI::register_routes() {
     register_config_section("/api/config/device", "device");
     register_config_section("/api/config/network", "network");
     register_config_section("/api/config/access", "access");
+    register_config_section("/api/config/ota", "ota");
     register_config_section("/api/config/logging", "logging");
     register_config_section("/api/config/time", "time");
     register_config_section("/api/config/oximetry", "oximetry");
@@ -4405,6 +4425,43 @@ void WebUI::register_routes() {
         json.reserve(AC_WEB_OTA_JSON_RESERVE);
         build_ota_json(json, ota_manager_->status());
         request->send(200, "application/json", json);
+    });
+
+    server_->on(AsyncURIMatcher::exact("/api/ota/check"), HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        const bool ok = ota_manager_->request_update_check();
+
+        String json;
+        json.reserve(AC_WEB_OTA_JSON_RESERVE);
+        const OtaManagerStatus status = ota_manager_->status();
+        build_ota_json(json, status);
+
+        const int response_status = ok
+            ? 202
+            : (status.update_error == "ota_busy" ? 409 : 400);
+        request->send(response_status, "application/json", json);
+    });
+
+    server_->on(AsyncURIMatcher::exact("/api/ota/install-update"), HTTP_POST,
+                [this](AsyncWebServerRequest *request) {
+        if (resmed_ota_manager_->transport_active()) {
+            request->send(409, "application/json",
+                          "{\"error\":\"resmed_ota_active\"}");
+            return;
+        }
+
+        const bool ok = ota_manager_->request_available_update();
+        mark_snapshots_dirty(SNAPSHOT_OTA);
+
+        String json;
+        json.reserve(AC_WEB_OTA_JSON_RESERVE);
+        const OtaManagerStatus status = ota_manager_->status();
+        build_ota_json(json, status);
+
+        const int response_status = ok
+            ? 202
+            : (status.last_error == "ota_busy" ? 409 : 400);
+        request->send(response_status, "application/json", json);
     });
 
     server_->on(AsyncURIMatcher::exact("/api/ota/url"), HTTP_POST,

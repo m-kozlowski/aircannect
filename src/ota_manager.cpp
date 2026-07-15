@@ -1,6 +1,7 @@
 #include "ota_manager.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include <ArduinoOTA.h>
@@ -69,6 +70,9 @@ void OtaManager::begin(AppConfig &app_config) {
     if (!lock_status()) return;
     status_.auth_enabled = app_config.data().ota_password.length() > 0;
     status_.arduino_port = AC_ARDUINO_OTA_PORT;
+    status_.update_check_enabled =
+        app_config.data().update_url.length() > 0 &&
+        AC_OTA_RELEASE_TARGET[0];
     unlock_status();
     esp_ota_mark_app_valid_cancel_rollback();
 }
@@ -76,7 +80,8 @@ void OtaManager::begin(AppConfig &app_config) {
 void OtaManager::poll(const WifiManager &wifi_manager,
                       bool reboot_allowed,
                       bool arduino_ota_allowed,
-                      bool arduino_ota_poll_allowed) {
+                      bool arduino_ota_poll_allowed,
+                      bool update_check_allowed) {
     if (reboot_at_ms_ &&
         static_cast<int32_t>(millis() - reboot_at_ms_) >= 0) {
         if (!reboot_allowed) {
@@ -93,6 +98,9 @@ void OtaManager::poll(const WifiManager &wifi_manager,
     }
 
     if (!app_config_) return;
+
+    poll_update_check(wifi_manager.sta_ipv4_online(),
+                      update_check_allowed && arduino_ota_allowed);
 
     if (!lock_status()) return;
     const uint32_t now = millis();
@@ -137,7 +145,7 @@ void OtaManager::poll(const WifiManager &wifi_manager,
     }
     if (status_.http_prepare_pending || status_.http_prepared ||
         status_.http_active || status_.http_ready || status_.url_active ||
-        status_.reboot_pending) {
+        status_.update_check_active || status_.reboot_pending) {
         const bool stop_ota = status_.arduino_started;
         unlock_status();
         if (stop_ota) stop_arduino_ota();
@@ -165,7 +173,8 @@ bool OtaManager::active() const {
     const bool result = status_.http_prepare_pending ||
                         status_.http_prepared || status_.http_active ||
                         status_.http_ready || status_.url_active ||
-                        url_task_ != nullptr || arduino_active_ ||
+                        url_task_ != nullptr || status_.update_check_active ||
+                        update_check_task_ != nullptr || arduino_active_ ||
                         status_.reboot_pending;
     unlock_status();
     return result;
@@ -174,8 +183,25 @@ bool OtaManager::active() const {
 OtaManagerStatus OtaManager::status() const {
     if (!lock_status()) return OtaManagerStatus();
     OtaManagerStatus copy = status_;
+    if (copy.update_check_attempted && update_last_check_ms_) {
+        copy.update_last_check_age_ms = millis() - update_last_check_ms_;
+    }
     unlock_status();
     return copy;
+}
+
+OtaUpdateNotification OtaManager::update_notification() const {
+    OtaUpdateNotification notification;
+    if (!lock_status()) return notification;
+
+    notification.checking = status_.update_check_pending ||
+                            status_.update_check_active;
+    notification.available = status_.update_available;
+    snprintf(notification.version, sizeof(notification.version), "%s",
+             status_.update_version.c_str());
+
+    unlock_status();
+    return notification;
 }
 
 bool OtaManager::request_http_upload_prepare(size_t image_size,
@@ -193,6 +219,7 @@ bool OtaManager::request_upload_prepare(size_t image_size,
 
     if (!lock_status()) return false;
     if ((source == InstallSource::HttpUpload && status_.url_active) ||
+        status_.update_check_active || update_check_task_ ||
         status_.http_active || status_.http_ready || status_.reboot_pending) {
         set_error("ota_busy");
         unlock_status();
@@ -340,7 +367,8 @@ bool OtaManager::begin_upload(const String &filename,
     if (wire_size == 0) wire_size = image_size;
 
     if (!lock_status()) return false;
-    if (source == InstallSource::HttpUpload && status_.url_active) {
+    if ((source == InstallSource::HttpUpload && status_.url_active) ||
+        status_.update_check_active || update_check_task_) {
         set_error("ota_busy");
         unlock_status();
         return false;
@@ -957,7 +985,8 @@ bool OtaManager::request_url_update(const String &url,
         Memory::free(owned_url);
         return false;
     }
-    if (url_task_ || status_.url_active || status_.http_prepare_pending ||
+    if (url_task_ || status_.url_active || update_check_task_ ||
+        status_.update_check_active || status_.http_prepare_pending ||
         status_.http_prepared || status_.http_active || status_.http_ready ||
         status_.reboot_pending || arduino_active_) {
         Memory::free(owned_url);
@@ -1009,6 +1038,12 @@ bool OtaManager::request_url_update(const String &url,
 
 void OtaManager::request_abort(const char *reason) {
     if (!lock_status()) return;
+    if (update_check_task_ || status_.update_check_active) {
+        update_check_cancel_requested_ = true;
+        status_.update_error = reason ? reason : "aborted";
+        unlock_status();
+        return;
+    }
     if (url_task_ || status_.url_active) {
         url_cancel_requested_ = true;
         status_.last_error = reason ? reason : "aborted";

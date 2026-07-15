@@ -77,6 +77,9 @@ void note_dirty(uint32_t dirty,
     if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
         result.ota_config_dirty = true;
     }
+    if (dirty & AC_CONFIG_DIRTY_UPDATE_URL) {
+        result.update_config_changed = true;
+    }
     if (dirty & (AC_CONFIG_DIRTY_LOG_LEVELS |
                  AC_CONFIG_DIRTY_SYSLOG |
                  AC_CONFIG_DIRTY_FILE_LOG)) {
@@ -154,6 +157,9 @@ void apply_config_runtime_effects(const AppConfigUpdateResult &result,
     }
     if (result.ota_config_dirty) {
         ota_manager.mark_config_dirty();
+    }
+    if (result.update_config_changed) {
+        ota_manager.mark_update_config_dirty();
     }
     if (result.log_config_changed) {
         config.apply_log_config();
