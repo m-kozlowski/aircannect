@@ -222,6 +222,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "ota") {
         out.println("[HELP ota]");
         out.println("  ota status                show ArduinoOTA and HTTP OTA state");
+        out.println("  ota url URL               install ESP32 image from URL");
+        out.println("  ota abort                 abort current ESP32 OTA flow");
         return;
     }
 

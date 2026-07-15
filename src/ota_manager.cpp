@@ -7,10 +7,13 @@
 #include <Update.h>
 #include <esp_err.h>
 #include <esp_ota_ops.h>
+#include <freertos/task.h>
 #include <miniz.h>
 
+#include "board_net.h"
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "ota_url_client.h"
 
 namespace aircannect {
 
@@ -35,6 +38,7 @@ const char *arduino_ota_error_name(ota_error_t error) {
 
 const char *ota_upload_encoding_name(OtaUploadEncoding encoding) {
     switch (encoding) {
+        case OtaUploadEncoding::Auto: return "auto";
         case OtaUploadEncoding::Zlib: return "zlib";
         case OtaUploadEncoding::Plain:
         default: return "plain";
@@ -42,7 +46,11 @@ const char *ota_upload_encoding_name(OtaUploadEncoding encoding) {
 }
 
 bool parse_ota_upload_encoding(const char *value, OtaUploadEncoding &out) {
-    if (!value || !*value || strcmp(value, "plain") == 0) {
+    if (!value || !*value || strcmp(value, "auto") == 0) {
+        out = OtaUploadEncoding::Auto;
+        return true;
+    }
+    if (strcmp(value, "plain") == 0) {
         out = OtaUploadEncoding::Plain;
         return true;
     }
@@ -95,7 +103,7 @@ void OtaManager::poll(const WifiManager &wifi_manager,
         status_.http_prepared = false;
         prepared_image_size_ = 0;
         prepared_wire_size_ = 0;
-        prepared_encoding_ = OtaUploadEncoding::Plain;
+        prepared_encoding_ = OtaUploadEncoding::Auto;
         http_prepared_at_ms_ = 0;
         http_partition_ = nullptr;
         status_.method = "idle";
@@ -104,7 +112,8 @@ void OtaManager::poll(const WifiManager &wifi_manager,
         status_.wire_total_size = 0;
         status_.last_error = "ota_prepare_expired";
         Log::logf(CAT_OTA, LOG_WARN,
-                  "HTTP upload prepare expired before upload\n");
+                  "ESP OTA prepare expired source=%s\n",
+                  install_source_ == InstallSource::Url ? "url" : "http_upload");
     }
     if (status_.http_active && http_upload_last_activity_ms_ &&
         !http_write_in_progress_ &&
@@ -127,7 +136,8 @@ void OtaManager::poll(const WifiManager &wifi_manager,
         return;
     }
     if (status_.http_prepare_pending || status_.http_prepared ||
-        status_.http_active || status_.http_ready || status_.reboot_pending) {
+        status_.http_active || status_.http_ready || status_.url_active ||
+        status_.reboot_pending) {
         const bool stop_ota = status_.arduino_started;
         unlock_status();
         if (stop_ota) stop_arduino_ota();
@@ -154,7 +164,8 @@ bool OtaManager::active() const {
     if (!lock_status()) return false;
     const bool result = status_.http_prepare_pending ||
                         status_.http_prepared || status_.http_active ||
-                        status_.http_ready || arduino_active_ ||
+                        status_.http_ready || status_.url_active ||
+                        url_task_ != nullptr || arduino_active_ ||
                         status_.reboot_pending;
     unlock_status();
     return result;
@@ -170,16 +181,26 @@ OtaManagerStatus OtaManager::status() const {
 bool OtaManager::request_http_upload_prepare(size_t image_size,
                                              OtaUploadEncoding encoding,
                                              size_t wire_size) {
+    return request_upload_prepare(image_size, encoding, wire_size,
+                                  InstallSource::HttpUpload);
+}
+
+bool OtaManager::request_upload_prepare(size_t image_size,
+                                        OtaUploadEncoding encoding,
+                                        size_t wire_size,
+                                        InstallSource source) {
     if (wire_size == 0) wire_size = image_size;
 
     if (!lock_status()) return false;
-    if (status_.http_active || status_.http_ready || status_.reboot_pending) {
+    if ((source == InstallSource::HttpUpload && status_.url_active) ||
+        status_.http_active || status_.http_ready || status_.reboot_pending) {
         set_error("ota_busy");
         unlock_status();
         return false;
     }
     if (status_.http_prepared && prepared_image_size_ == image_size &&
-        prepared_encoding_ == encoding && prepared_wire_size_ == wire_size) {
+        prepared_encoding_ == encoding && prepared_wire_size_ == wire_size &&
+        install_source_ == source) {
         unlock_status();
         return true;
     }
@@ -190,7 +211,8 @@ bool OtaManager::request_http_upload_prepare(size_t image_size,
     }
 
     clear_http_state();
-    status_.method = "http_prepare";
+    install_source_ = source;
+    status_.method = source == InstallSource::Url ? "url" : "http_prepare";
     status_.encoding = ota_upload_encoding_name(encoding);
     status_.http_prepare_pending = true;
     status_.bytes = 0;
@@ -210,28 +232,41 @@ bool OtaManager::request_http_upload_prepare(size_t image_size,
         status_.http_prepare_pending = false;
         prepared_image_size_ = 0;
         prepared_wire_size_ = 0;
-        prepared_encoding_ = OtaUploadEncoding::Plain;
+        prepared_encoding_ = OtaUploadEncoding::Auto;
         status_.method = "idle";
         set_error("no_ota_partition");
         unlock_status();
         return false;
     }
-    if (image_size == 0 || image_size > http_partition_->size) {
+    if ((encoding == OtaUploadEncoding::Plain && image_size == 0) ||
+        image_size > http_partition_->size) {
         status_.http_prepare_pending = false;
         http_partition_ = nullptr;
         prepared_image_size_ = 0;
         prepared_wire_size_ = 0;
-        prepared_encoding_ = OtaUploadEncoding::Plain;
+        prepared_encoding_ = OtaUploadEncoding::Auto;
         status_.method = "idle";
         set_error("image_size_invalid");
+        unlock_status();
+        return false;
+    }
+    if (wire_size == 0) {
+        status_.http_prepare_pending = false;
+        http_partition_ = nullptr;
+        prepared_image_size_ = 0;
+        prepared_wire_size_ = 0;
+        prepared_encoding_ = OtaUploadEncoding::Auto;
+        status_.method = "idle";
+        set_error("wire_size_invalid");
         unlock_status();
         return false;
     }
 
     status_.partition = http_partition_->label;
     Log::logf(CAT_OTA, LOG_INFO,
-              "HTTP upload prepare partition=%s image_size=%u encoding=%s "
-              "wire_size=%u\n",
+              "ESP OTA prepare source=%s partition=%s image_size=%u "
+              "encoding=%s wire_size=%u\n",
+              source == InstallSource::Url ? "url" : "http_upload",
               http_partition_->label, static_cast<unsigned>(image_size),
               ota_upload_encoding_name(encoding),
               static_cast<unsigned>(wire_size));
@@ -250,10 +285,11 @@ void OtaManager::poll_http_upload_prepare(bool as11_quiesced,
     if (as11_quiesced) {
         status_.http_prepare_pending = false;
         status_.http_prepared = true;
-        status_.method = "http";
+        status_.method = install_source_ == InstallSource::Url ? "url" : "http";
         http_prepared_at_ms_ = millis();
         Log::logf(CAT_OTA, LOG_INFO,
-                  "HTTP upload prepared; AS11 traffic quiesced\n");
+                  "ESP OTA prepared source=%s; AS11 traffic quiesced\n",
+                  install_source_ == InstallSource::Url ? "url" : "http_upload");
         unlock_status();
         return;
     }
@@ -268,11 +304,12 @@ void OtaManager::poll_http_upload_prepare(bool as11_quiesced,
         http_partition_ = nullptr;
         prepared_image_size_ = 0;
         prepared_wire_size_ = 0;
-        prepared_encoding_ = OtaUploadEncoding::Plain;
+        prepared_encoding_ = OtaUploadEncoding::Auto;
         http_prepared_at_ms_ = 0;
         set_error("as11_quiesce_timeout");
         Log::logf(CAT_OTA, LOG_ERROR,
-                  "HTTP upload prepare failed: AS11 quiesce timeout\n");
+                  "ESP OTA prepare failed source=%s: AS11 quiesce timeout\n",
+                  install_source_ == InstallSource::Url ? "url" : "http_upload");
     }
     unlock_status();
 }
@@ -291,28 +328,46 @@ bool OtaManager::begin_http_upload(const String &filename,
                                    size_t image_size,
                                    OtaUploadEncoding encoding,
                                    size_t wire_size) {
+    return begin_upload(filename, image_size, encoding, wire_size,
+                        InstallSource::HttpUpload);
+}
+
+bool OtaManager::begin_upload(const String &filename,
+                              size_t image_size,
+                              OtaUploadEncoding encoding,
+                              size_t wire_size,
+                              InstallSource source) {
     if (wire_size == 0) wire_size = image_size;
 
     if (!lock_status()) return false;
+    if (source == InstallSource::HttpUpload && status_.url_active) {
+        set_error("ota_busy");
+        unlock_status();
+        return false;
+    }
     if (status_.http_active) {
         set_error("upload_already_active");
         unlock_status();
         return false;
     }
     if (!status_.http_prepared || prepared_image_size_ != image_size ||
-        prepared_encoding_ != encoding || prepared_wire_size_ != wire_size) {
+        prepared_encoding_ != encoding || prepared_wire_size_ != wire_size ||
+        install_source_ != source) {
         set_error("ota_prepare_required");
         unlock_status();
         return false;
     }
 
     clear_http_state();
-    status_.method = "http";
+    install_source_ = source;
+    status_.method = source == InstallSource::Url ? "url" : "http";
     status_.encoding = ota_upload_encoding_name(encoding);
     status_.http_active = true;
     http_prepared_at_ms_ = 0;
     http_upload_last_activity_ms_ = millis();
     http_encoding_ = encoding;
+    http_probe_size_ = 0;
+    memset(http_probe_bytes_, 0, sizeof(http_probe_bytes_));
     http_write_in_progress_ = false;
     http_image_magic_checked_ = false;
     status_.bytes = 0;
@@ -329,7 +384,8 @@ bool OtaManager::begin_http_upload(const String &filename,
         unlock_status();
         return false;
     }
-    if (image_size == 0 || image_size > http_partition_->size) {
+    if ((encoding == OtaUploadEncoding::Plain && image_size == 0) ||
+        image_size > http_partition_->size) {
         abort_http_upload("image_size_invalid");
         unlock_status();
         return false;
@@ -350,8 +406,9 @@ bool OtaManager::begin_http_upload(const String &filename,
     }
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "HTTP upload start file=%s partition=%s image_size=%u "
+              "ESP OTA start source=%s file=%s partition=%s image_size=%u "
               "encoding=%s wire_size=%u\n",
+              source == InstallSource::Url ? "url" : "http_upload",
               filename.c_str(), http_partition_->label,
               static_cast<unsigned>(image_size),
               ota_upload_encoding_name(encoding),
@@ -397,10 +454,103 @@ bool OtaManager::write_http_upload(size_t index, const uint8_t *data,
     const OtaUploadEncoding encoding = http_encoding_;
     unlock_status();
 
+    if (encoding == OtaUploadEncoding::Auto) {
+        return write_auto_http_upload(index, data, len);
+    }
     if (encoding == OtaUploadEncoding::Zlib) {
         return write_zlib_http_upload(index, data, len);
     }
     return write_plain_http_upload(index, data, len);
+}
+
+bool OtaManager::write_auto_http_upload(size_t index,
+                                        const uint8_t *data,
+                                        size_t len) {
+    if (!lock_status()) return false;
+    if (!status_.http_active || !http_partition_ || !http_handle_) {
+        if (!status_.last_error.length()) set_error("upload_not_active");
+        unlock_status();
+        return false;
+    }
+    if (index != http_probe_size_) {
+        unlock_status();
+        abort_http_upload("upload_offset_mismatch");
+        return false;
+    }
+    if (!data || len == 0) {
+        http_upload_last_activity_ms_ = millis();
+        unlock_status();
+        return true;
+    }
+
+    if (http_probe_size_ == 0 && len >= sizeof(http_probe_bytes_)) {
+        uint8_t header[2] = {data[0], data[1]};
+        unlock_status();
+        if (!resolve_http_upload_encoding(header)) return false;
+        return write_http_upload(index, data, len);
+    }
+
+    const size_t needed = sizeof(http_probe_bytes_) - http_probe_size_;
+    const size_t copied = std::min(needed, len);
+    memcpy(http_probe_bytes_ + http_probe_size_, data, copied);
+    http_probe_size_ += copied;
+    http_upload_last_activity_ms_ = millis();
+    const bool ready = http_probe_size_ == sizeof(http_probe_bytes_);
+    uint8_t header[2] = {http_probe_bytes_[0], http_probe_bytes_[1]};
+    unlock_status();
+
+    if (!ready) return true;
+    if (!resolve_http_upload_encoding(header)) return false;
+    if (!write_http_upload(0, header, sizeof(header))) return false;
+    if (len == copied) return true;
+    return write_http_upload(sizeof(header), data + copied, len - copied);
+}
+
+bool OtaManager::resolve_http_upload_encoding(const uint8_t header[2]) {
+    if (!header) return false;
+
+    OtaUploadEncoding encoding = OtaUploadEncoding::Auto;
+    if (header[0] == 0xE9) {
+        encoding = OtaUploadEncoding::Plain;
+    } else {
+        const uint16_t zlib_header =
+            static_cast<uint16_t>(header[0]) << 8 | header[1];
+        const bool deflate = (header[0] & 0x0F) == 8;
+        const bool window_valid = (header[0] >> 4) <= 7;
+        const bool checksum_valid = zlib_header % 31 == 0;
+        const bool preset_dictionary = (header[1] & 0x20) != 0;
+        if (deflate && window_valid && checksum_valid && !preset_dictionary) {
+            encoding = OtaUploadEncoding::Zlib;
+        }
+    }
+    if (encoding == OtaUploadEncoding::Auto) {
+        abort_http_upload("unsupported_ota_image");
+        return false;
+    }
+
+    if (!lock_status()) return false;
+    if (!status_.http_active || http_encoding_ != OtaUploadEncoding::Auto) {
+        unlock_status();
+        return false;
+    }
+    if (encoding == OtaUploadEncoding::Plain) {
+        if (status_.total_size &&
+            status_.total_size != status_.wire_total_size) {
+            unlock_status();
+            abort_http_upload("upload_size_mismatch");
+            return false;
+        }
+        status_.total_size = status_.wire_total_size;
+    } else if (!begin_zlib_decoder()) {
+        unlock_status();
+        abort_http_upload("zlib_alloc_failed");
+        return false;
+    }
+
+    http_encoding_ = encoding;
+    status_.encoding = ota_upload_encoding_name(encoding);
+    unlock_status();
+    return true;
 }
 
 bool OtaManager::write_plain_http_upload(size_t index, const uint8_t *data,
@@ -460,7 +610,8 @@ bool OtaManager::write_plain_http_upload(size_t index, const uint8_t *data,
             write_error = esp_err_to_name(err);
             break;
         }
-        if (!apply_http_progress(chunk)) {
+        if (!apply_http_progress(chunk) ||
+            !apply_http_wire_progress(chunk)) {
             break;
         }
         offset += chunk;
@@ -672,17 +823,25 @@ bool OtaManager::finish_http_upload() {
         unlock_status();
         return false;
     }
+    if (http_encoding_ == OtaUploadEncoding::Auto) {
+        abort_http_upload("image_format_not_detected");
+        unlock_status();
+        return false;
+    }
+
     const bool zlib = http_encoding_ == OtaUploadEncoding::Zlib;
     if (zlib) {
         unlock_status();
         if (!finish_zlib_http_upload()) return false;
         if (!lock_status()) return false;
     }
-    if (status_.total_size == 0 || status_.bytes != status_.total_size) {
+    if (status_.bytes == 0 ||
+        (status_.total_size && status_.bytes != status_.total_size)) {
         abort_http_upload("incomplete_upload");
         unlock_status();
         return false;
     }
+    if (!status_.total_size) status_.total_size = status_.bytes;
 
     esp_err_t err = esp_ota_end(http_handle_);
     if (err == ESP_OK) {
@@ -701,7 +860,7 @@ bool OtaManager::finish_http_upload() {
     status_.http_prepared = false;
     prepared_image_size_ = 0;
     prepared_wire_size_ = 0;
-    prepared_encoding_ = OtaUploadEncoding::Plain;
+    prepared_encoding_ = OtaUploadEncoding::Auto;
     http_prepared_at_ms_ = 0;
     http_upload_last_activity_ms_ = 0;
     http_write_in_progress_ = false;
@@ -709,13 +868,14 @@ bool OtaManager::finish_http_upload() {
     status_.progress_percent = 100;
     status_.last_error = "";
     Log::logf(CAT_OTA, LOG_INFO,
-              "HTTP upload complete bytes=%u wire_bytes=%u encoding=%s "
-              "partition=%s; rebooting\n",
+              "ESP OTA complete source=%s bytes=%u wire_bytes=%u "
+              "encoding=%s partition=%s; rebooting\n",
+              install_source_ == InstallSource::Url ? "url" : "http_upload",
               static_cast<unsigned>(status_.bytes),
               static_cast<unsigned>(status_.wire_bytes),
               ota_upload_encoding_name(http_encoding_),
               http_partition_->label);
-    http_encoding_ = OtaUploadEncoding::Plain;
+    http_encoding_ = OtaUploadEncoding::Auto;
     http_handle_ = 0;
     http_partition_ = nullptr;
     schedule_reboot(2000);
@@ -724,6 +884,10 @@ bool OtaManager::finish_http_upload() {
 }
 
 void OtaManager::abort_http_upload(const char *reason) {
+    abort_upload(reason, true);
+}
+
+void OtaManager::abort_upload(const char *reason, bool log_error) {
     if (!lock_status()) return;
     if (http_handle_) esp_ota_abort(http_handle_);
     reset_zlib_decoder();
@@ -731,10 +895,12 @@ void OtaManager::abort_http_upload(const char *reason) {
     http_partition_ = nullptr;
     prepared_image_size_ = 0;
     prepared_wire_size_ = 0;
-    prepared_encoding_ = OtaUploadEncoding::Plain;
+    prepared_encoding_ = OtaUploadEncoding::Auto;
     http_prepared_at_ms_ = 0;
     http_upload_last_activity_ms_ = 0;
-    http_encoding_ = OtaUploadEncoding::Plain;
+    http_encoding_ = OtaUploadEncoding::Auto;
+    http_probe_size_ = 0;
+    memset(http_probe_bytes_, 0, sizeof(http_probe_bytes_));
     http_image_magic_checked_ = false;
     http_write_in_progress_ = false;
     status_.http_prepare_pending = false;
@@ -744,9 +910,286 @@ void OtaManager::abort_http_upload(const char *reason) {
     status_.method = "idle";
     status_.partition = "";
     set_error(reason ? reason : "aborted");
-    Log::logf(CAT_OTA, LOG_ERROR, "HTTP upload failed: %s\n",
-              status_.last_error.c_str());
+    if (log_error) {
+        Log::logf(CAT_OTA, LOG_ERROR, "ESP OTA failed source=%s: %s\n",
+                  install_source_ == InstallSource::Url ? "url" : "http_upload",
+                  status_.last_error.c_str());
+    }
     unlock_status();
+}
+
+bool OtaManager::request_url_update(const String &url,
+                                    OtaUploadEncoding encoding,
+                                    size_t image_size,
+                                    size_t wire_size) {
+    if (!ota_url_supported(url.c_str()) ||
+        url.length() > AC_OTA_URL_MAX_LENGTH) {
+        if (lock_status()) {
+            set_error("url_invalid");
+            unlock_status();
+        }
+        return false;
+    }
+    if (encoding == OtaUploadEncoding::Plain) {
+        if (image_size && wire_size && image_size != wire_size) {
+            if (lock_status()) {
+                set_error("url_size_mismatch");
+                unlock_status();
+            }
+            return false;
+        }
+        if (!image_size) image_size = wire_size;
+        if (!wire_size) wire_size = image_size;
+    }
+
+    char *owned_url = static_cast<char *>(
+        Memory::alloc_large(url.length() + 1, false));
+    if (!owned_url) {
+        if (lock_status()) {
+            set_error("url_alloc_failed");
+            unlock_status();
+        }
+        return false;
+    }
+    memcpy(owned_url, url.c_str(), url.length() + 1);
+
+    if (!lock_status()) {
+        Memory::free(owned_url);
+        return false;
+    }
+    if (url_task_ || status_.url_active || status_.http_prepare_pending ||
+        status_.http_prepared || status_.http_active || status_.http_ready ||
+        status_.reboot_pending || arduino_active_) {
+        Memory::free(owned_url);
+        set_error("ota_busy");
+        unlock_status();
+        return false;
+    }
+
+    clear_http_state();
+    install_source_ = InstallSource::Url;
+    url_request_ = owned_url;
+    url_request_image_size_ = image_size;
+    url_request_wire_size_ = wire_size;
+    url_request_encoding_ = encoding;
+    url_cancel_requested_ = false;
+    status_.url_active = true;
+    status_.method = "url";
+    status_.encoding = ota_upload_encoding_name(encoding);
+    status_.total_size = image_size;
+    status_.wire_total_size = wire_size;
+    status_.last_error = "";
+
+    BaseType_t task_result = xTaskCreatePinnedToCore(
+        url_task_entry, "ota_url", AC_OTA_URL_TASK_STACK_BYTES, this,
+        AC_OTA_URL_TASK_PRIORITY, &url_task_, AC_OTA_URL_TASK_CORE);
+    if (task_result != pdPASS) {
+        memset(owned_url, 0, url.length());
+        Memory::free(owned_url);
+        url_request_ = nullptr;
+        url_request_image_size_ = 0;
+        url_request_wire_size_ = 0;
+        url_request_encoding_ = OtaUploadEncoding::Auto;
+        url_task_ = nullptr;
+        status_.url_active = false;
+        status_.method = "idle";
+        set_error("url_task_alloc_failed");
+        unlock_status();
+        return false;
+    }
+
+    Log::logf(CAT_OTA, LOG_INFO,
+              "ESP OTA URL queued encoding=%s image_size=%u wire_size=%u\n",
+              ota_upload_encoding_name(encoding),
+              static_cast<unsigned>(image_size),
+              static_cast<unsigned>(wire_size));
+    unlock_status();
+    return true;
+}
+
+void OtaManager::request_abort(const char *reason) {
+    if (!lock_status()) return;
+    if (url_task_ || status_.url_active) {
+        url_cancel_requested_ = true;
+        status_.last_error = reason ? reason : "aborted";
+        unlock_status();
+        return;
+    }
+    unlock_status();
+
+    abort_http_upload(reason);
+}
+
+void OtaManager::url_task_entry(void *ctx) {
+    OtaManager *manager = static_cast<OtaManager *>(ctx);
+    if (manager) manager->run_url_task();
+    vTaskDelete(nullptr);
+}
+
+void OtaManager::run_url_task() {
+    char *url = nullptr;
+    size_t image_size = 0;
+    size_t wire_size = 0;
+    OtaUploadEncoding encoding = OtaUploadEncoding::Auto;
+
+    if (lock_status()) {
+        url = url_request_;
+        image_size = url_request_image_size_;
+        wire_size = url_request_wire_size_;
+        encoding = url_request_encoding_;
+        unlock_status();
+    }
+    if (!url) {
+        fail_url_update("url_request_missing");
+        finish_url_task(nullptr);
+        return;
+    }
+
+    if (wire_size == 0) {
+        OtaUrlMetadata metadata;
+        OtaUrlError error;
+        if (!ota_url_probe(url, metadata, error, url_continue_callback, this)) {
+            fail_url_update(error.code, error.http_status, error.esp_error,
+                            error.socket_error, error.tls_error,
+                            error.tls_flags);
+            finish_url_task(url);
+            return;
+        }
+        wire_size = metadata.content_length;
+    }
+
+    if (encoding == OtaUploadEncoding::Plain) {
+        if (!image_size) image_size = wire_size;
+        if (image_size != wire_size) {
+            fail_url_update("url_size_mismatch");
+            finish_url_task(url);
+            return;
+        }
+    }
+
+    if (!request_upload_prepare(image_size, encoding, wire_size,
+                                InstallSource::Url)) {
+        const OtaManagerStatus current = status();
+        fail_url_update(current.last_error.length()
+                            ? current.last_error.c_str()
+                            : "url_prepare_failed");
+        finish_url_task(url);
+        return;
+    }
+
+    const uint32_t prepare_started = millis();
+    while (true) {
+        if (url_cancelled()) {
+            fail_url_update("url_cancelled");
+            finish_url_task(url);
+            return;
+        }
+
+        const OtaManagerStatus current = status();
+        if (current.http_prepared) break;
+        if (!current.http_prepare_pending && current.last_error.length()) {
+            fail_url_update(current.last_error.c_str());
+            finish_url_task(url);
+            return;
+        }
+        if (static_cast<uint32_t>(millis() - prepare_started) >=
+            AC_OTA_URL_PREPARE_TIMEOUT_MS) {
+            fail_url_update("url_prepare_timeout");
+            finish_url_task(url);
+            return;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+
+    const String filename = "remote_firmware";
+    if (!begin_upload(filename, image_size, encoding, wire_size,
+                      InstallSource::Url)) {
+        const OtaManagerStatus current = status();
+        fail_url_update(current.last_error.length()
+                            ? current.last_error.c_str()
+                            : "url_begin_failed");
+        finish_url_task(url);
+        return;
+    }
+
+    OtaUrlError error;
+    if (!ota_url_stream(url, wire_size, url_write_callback,
+                        url_continue_callback, this, error)) {
+        const OtaManagerStatus current = status();
+        if (current.last_error.length()) {
+            fail_url_update(current.last_error.c_str());
+        } else {
+            fail_url_update(error.code, error.http_status, error.esp_error,
+                            error.socket_error, error.tls_error,
+                            error.tls_flags);
+        }
+        finish_url_task(url);
+        return;
+    }
+
+    if (!finish_http_upload()) {
+        const OtaManagerStatus current = status();
+        fail_url_update(current.last_error.length()
+                            ? current.last_error.c_str()
+                            : "url_finish_failed");
+    }
+    finish_url_task(url);
+}
+
+void OtaManager::finish_url_task(char *url) {
+    if (!lock_status()) return;
+    if (url_request_ == url) url_request_ = nullptr;
+    url_request_image_size_ = 0;
+    url_request_wire_size_ = 0;
+    url_request_encoding_ = OtaUploadEncoding::Auto;
+    url_cancel_requested_ = false;
+    url_task_ = nullptr;
+    status_.url_active = false;
+    unlock_status();
+
+    if (url) {
+        const size_t length = strlen(url);
+        memset(url, 0, length);
+        Memory::free(url);
+    }
+}
+
+void OtaManager::fail_url_update(const char *reason,
+                                 int http_status,
+                                 int esp_error,
+                                 int socket_error,
+                                 int tls_error,
+                                 int tls_flags) {
+    abort_upload(reason && *reason ? reason : "url_failed", false);
+
+    Log::logf(CAT_OTA, LOG_ERROR,
+              "ESP OTA URL failed: %s http=%d esp=%d socket=%d tls=%d "
+              "tls_flags=0x%x\n",
+              reason && *reason ? reason : "url_failed", http_status,
+              esp_error, socket_error, tls_error,
+              static_cast<unsigned>(tls_flags));
+}
+
+bool OtaManager::url_cancelled() const {
+    if (!lock_status()) return true;
+    const bool cancelled = url_cancel_requested_;
+    unlock_status();
+    return cancelled;
+}
+
+bool OtaManager::url_write_callback(void *ctx,
+                                    size_t offset,
+                                    const uint8_t *data,
+                                    size_t len) {
+    OtaManager *manager = static_cast<OtaManager *>(ctx);
+    return manager && !manager->url_cancelled() &&
+           manager->write_http_upload(offset, data, len);
+}
+
+bool OtaManager::url_continue_callback(void *ctx) {
+    OtaManager *manager = static_cast<OtaManager *>(ctx);
+    return manager && !manager->url_cancelled();
 }
 
 void OtaManager::schedule_reboot(uint32_t delay_ms) {
@@ -885,16 +1328,30 @@ void OtaManager::stop_arduino_ota() {
 
 bool OtaManager::apply_http_progress(size_t bytes) {
     if (!lock_status()) return false;
-    if (!status_.http_active || status_.total_size == 0 ||
-        status_.bytes + bytes > status_.total_size) {
-        if (!status_.last_error.length()) set_error("upload_not_active");
+    const bool partition_overrun =
+        http_partition_ &&
+        (status_.bytes > http_partition_->size ||
+         bytes > http_partition_->size - status_.bytes);
+    const bool declared_overrun =
+        status_.total_size &&
+        (status_.bytes > status_.total_size ||
+         bytes > status_.total_size - status_.bytes);
+    if (!status_.http_active || !http_partition_ || partition_overrun ||
+        declared_overrun) {
+        if (!status_.last_error.length()) {
+            set_error(partition_overrun || declared_overrun
+                          ? "upload_overrun"
+                          : "upload_not_active");
+        }
         unlock_status();
         return false;
     }
     status_.bytes += bytes;
     http_upload_last_activity_ms_ = millis();
-    status_.progress_percent =
-        static_cast<uint8_t>((status_.bytes * 100ULL) / status_.total_size);
+    if (status_.total_size) {
+        status_.progress_percent = static_cast<uint8_t>(
+            (status_.bytes * 100ULL) / status_.total_size);
+    }
     if (status_.progress_percent != last_progress_log_percent_ &&
         (status_.progress_percent % 10 == 0 ||
          status_.progress_percent == 100)) {
@@ -909,14 +1366,22 @@ bool OtaManager::apply_http_progress(size_t bytes) {
 bool OtaManager::apply_http_wire_progress(size_t bytes) {
     if (!lock_status()) return false;
     if (!status_.http_active || status_.wire_total_size == 0 ||
-        status_.wire_bytes + bytes > status_.wire_total_size) {
-        if (!status_.last_error.length()) set_error("upload_not_active");
+        status_.wire_bytes > status_.wire_total_size ||
+        bytes > status_.wire_total_size - status_.wire_bytes) {
+        if (!status_.last_error.length()) {
+            set_error(status_.http_active ? "upload_overrun"
+                                          : "upload_not_active");
+        }
         unlock_status();
         return false;
     }
 
     status_.wire_bytes += bytes;
     http_upload_last_activity_ms_ = millis();
+    if (!status_.total_size) {
+        status_.progress_percent = static_cast<uint8_t>(
+            (status_.wire_bytes * 100ULL) / status_.wire_total_size);
+    }
     unlock_status();
     return true;
 }
@@ -934,10 +1399,12 @@ void OtaManager::clear_http_state() {
     http_partition_ = nullptr;
     prepared_image_size_ = 0;
     prepared_wire_size_ = 0;
-    prepared_encoding_ = OtaUploadEncoding::Plain;
+    prepared_encoding_ = OtaUploadEncoding::Auto;
     http_prepared_at_ms_ = 0;
     http_upload_last_activity_ms_ = 0;
-    http_encoding_ = OtaUploadEncoding::Plain;
+    http_encoding_ = OtaUploadEncoding::Auto;
+    http_probe_size_ = 0;
+    memset(http_probe_bytes_, 0, sizeof(http_probe_bytes_));
     http_image_magic_checked_ = false;
     http_write_in_progress_ = false;
     status_.http_prepare_pending = false;
@@ -945,7 +1412,7 @@ void OtaManager::clear_http_state() {
     status_.http_active = false;
     status_.http_ready = false;
     status_.method = "idle";
-    status_.encoding = "plain";
+    status_.encoding = "auto";
     status_.partition = "";
     status_.bytes = 0;
     status_.total_size = 0;

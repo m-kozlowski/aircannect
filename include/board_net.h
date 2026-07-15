@@ -114,6 +114,16 @@ static constexpr size_t AC_WEB_RESMED_OTA_JSON_RESERVE = 1024;
 static constexpr size_t AC_WEB_SETTINGS_JSON_RESERVE = 4096;
 static constexpr size_t AC_WEB_SETTINGS_CATALOG_JSON_RESERVE = 8192;
 
+static constexpr size_t AC_OTA_URL_MAX_LENGTH = 2048;
+static constexpr uint32_t AC_OTA_URL_HTTP_TIMEOUT_MS = 15000;
+static constexpr uint32_t AC_OTA_URL_PREPARE_TIMEOUT_MS = 20000;
+static constexpr size_t AC_OTA_URL_HTTP_BUFFER_BYTES = 4096;
+static constexpr size_t AC_OTA_URL_HTTP_TX_BUFFER_BYTES = 2048;
+static constexpr uint8_t AC_OTA_URL_REDIRECT_LIMIT = 5;
+static constexpr uint32_t AC_OTA_URL_TASK_STACK_BYTES = 8192;
+static constexpr uint8_t AC_OTA_URL_TASK_PRIORITY = 1;
+static constexpr int8_t AC_OTA_URL_TASK_CORE = 0;
+
 static constexpr size_t AC_LOG_LINE_MAX = 192;
 static constexpr size_t AC_SYSLOG_QUEUE_DEPTH = 32;
 static constexpr size_t AC_SYSLOG_SEND_BUDGET = 4;

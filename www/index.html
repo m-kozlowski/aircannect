@@ -621,28 +621,21 @@
               <span class="value" id="otaProgress">--</span>
             </div>
             <div class="row">
-              <label>Firmware image</label>
-              <input id="otaFile" type="file" accept=".bin,.zlib,.deflate" onchange="otaFileChanged()">
+              <label>Firmware URL</label>
+              <input id="otaUrl" type="url" placeholder="https://..."
+                     oninput="otaSourceChanged('url')">
             </div>
             <div class="row">
-              <label>
-                Precompressed zlib
-                <small>Upload a zlib-compressed ESP32 image</small>
-              </label>
-              <input id="otaCompressed" type="checkbox" onchange="otaCompressedChanged()">
-            </div>
-            <div class="row" id="otaRawSizeRow" style="display:none">
-              <label>
-                Raw image size
-                <small>Decompressed .bin size in bytes</small>
-              </label>
-              <input id="otaRawSize" type="number" min="1" step="1">
+              <label>Firmware image</label>
+              <input id="otaFile" type="file" accept=".bin,.zlib,.deflate"
+                     onchange="otaSourceChanged('file')">
             </div>
             <div class="progress" id="otaUploadProgress">
               <div class="bar" id="otaUploadBar"></div>
             </div>
             <div class="btns">
-              <button class="btn primary" onclick="otaUpload()">Upload</button>
+              <button class="btn primary" id="otaInstall"
+                      onclick="otaInstall()">Install</button>
             </div>
             <div class="msg" id="otaMsg"></div>
           </div>

@@ -202,6 +202,124 @@ def describe_ota_error(status: int, body: dict[str, Any]) -> str:
     return f"HTTP {status}"
 
 
+def url_source_encoding(requested: str) -> str:
+    if requested == "none":
+        return "plain"
+    return requested
+
+
+def display_source_url(source_url: str) -> str:
+    parsed = urlparse(source_url)
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host += f":{parsed.port}"
+    return f"{parsed.scheme}://{host}{parsed.path}"
+
+
+def start_url_update(
+    target: Target,
+    *,
+    source_url: str,
+    encoding: str,
+    auth: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    query: dict[str, Any] = {"url": source_url, "encoding": encoding}
+
+    status, capabilities = request_json(
+        target, "GET", "/api/ota", auth=auth, timeout=timeout
+    )
+    if status >= 400:
+        die("OTA status failed: " + describe_ota_error(status, capabilities))
+    if not capabilities.get("url_update"):
+        die("target firmware does not support OTA from URL")
+    if encoding not in capabilities.get("upload_encodings", []):
+        die(f"target firmware does not support {encoding} OTA images")
+
+    print(f"source: {display_source_url(source_url)}")
+    print(f"transport: device download, {encoding}")
+    status, body = request_json(
+        target,
+        "POST",
+        "/api/ota/url",
+        query=query,
+        auth=auth,
+        timeout=timeout,
+    )
+    if status not in (200, 202):
+        die("URL update rejected: " + describe_ota_error(status, body))
+    return body
+
+
+def wait_for_url_update(
+    target: Target,
+    *,
+    initial: dict[str, Any],
+    auth: str | None,
+    timeout: float,
+    url_timeout: float,
+) -> dict[str, Any]:
+    print("device is downloading and installing the image...")
+    body = initial
+    deadline = time.monotonic() + url_timeout
+    last_line = ""
+    saw_disconnect = False
+
+    while time.monotonic() < deadline:
+        total = int(body.get("total_size") or 0)
+        written = int(body.get("bytes") or 0)
+        wire_total = int(body.get("wire_total_size") or 0)
+        wire_read = int(body.get("wire_bytes") or 0)
+        if total:
+            line = f"{int(body.get('progress') or 0):3d}% raw {format_bytes(written)}"
+            if body.get("encoding") == "zlib" and wire_total:
+                line += f", wire {format_bytes(wire_read)} / {format_bytes(wire_total)}"
+        elif wire_total:
+            line = (
+                f"{int(body.get('progress') or 0):3d}% wire "
+                f"{format_bytes(wire_read)} / {format_bytes(wire_total)}"
+            )
+        else:
+            line = "resolving source URL"
+        if line != last_line:
+            sys.stdout.write("\r" + line + " " * max(0, len(last_line) - len(line)))
+            sys.stdout.flush()
+            last_line = line
+
+        if body.get("last_error") and not body.get("url_active"):
+            print()
+            die(f"URL update failed: {body['last_error']}")
+        if body.get("reboot_pending") or body.get("http_ready"):
+            print()
+            return body
+
+        time.sleep(0.5)
+        try:
+            status, body = request_json(
+                target, "GET", "/api/ota", auth=auth, timeout=timeout
+            )
+        except (OSError, http.client.HTTPException, socket.timeout):
+            saw_disconnect = True
+            continue
+        if status >= 400:
+            print()
+            die("status poll failed: " + describe_ota_error(status, body))
+        if (
+            saw_disconnect
+            and not body.get("url_active")
+            and not body.get("http_prepare_pending")
+            and not body.get("http_active")
+            and not body.get("last_error")
+        ):
+            print()
+            return body
+
+    print()
+    die("timed out waiting for URL update")
+
+
 def prepare_upload(
     target: Target,
     *,
@@ -387,6 +505,11 @@ def main() -> int:
         help="firmware .bin path (default: .pio/build/<env>/firmware.bin)",
     )
     parser.add_argument(
+        "--url",
+        dest="source_url",
+        help="ask the device to download and install this HTTP(S) URL",
+    )
+    parser.add_argument(
         "--build",
         action="store_true",
         help="run pio build for --env before flashing",
@@ -400,7 +523,7 @@ def main() -> int:
         help=(
             "transport compression: auto probes target support, zlib forces "
             "compressed upload, none forces plain upload (bare --compress "
-            "means zlib)"
+            "means zlib); URL auto lets the device detect the image format"
         ),
     )
     parser.add_argument(
@@ -427,6 +550,7 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--prepare-timeout", type=float, default=20.0)
+    parser.add_argument("--url-timeout", type=float, default=600.0)
     parser.add_argument("--reboot-timeout", type=float, default=90.0)
     parser.add_argument("--chunk-size", type=int, default=16 * 1024)
     args = parser.parse_args()
@@ -434,17 +558,63 @@ def main() -> int:
     if args.chunk_size <= 0:
         die("--chunk-size must be positive")
 
-    if args.build:
-        run_build(args.env)
-
-    firmware = args.file or firmware_path_for_env(args.env)
-    size = validate_firmware(firmware)
     target = parse_target(args.target)
     authorization = None if args.no_auth else auth_header(args.user, args.password)
 
     print(
         f"target: http://{target.host}:{target.port}{target.base_path or ''}"
     )
+
+    if args.source_url:
+        if args.file or args.build:
+            die("--url cannot be combined with --file or --build")
+        parsed_source = urlparse(args.source_url)
+        try:
+            source_port = parsed_source.port
+        except ValueError:
+            die("--url contains an invalid port")
+        if source_port == 0:
+            die("--url contains an invalid port")
+        if (
+            parsed_source.scheme not in ("http", "https")
+            or not parsed_source.hostname
+        ):
+            die("--url must be an HTTP or HTTPS URL")
+
+        encoding = url_source_encoding(args.compress)
+        body = start_url_update(
+            target,
+            source_url=args.source_url,
+            encoding=encoding,
+            auth=authorization,
+            timeout=args.timeout,
+        )
+        body = wait_for_url_update(
+            target,
+            initial=body,
+            auth=authorization,
+            timeout=args.timeout,
+            url_timeout=args.url_timeout,
+        )
+        print(
+            f"update complete: bytes={body.get('bytes', 0)} "
+            f"wire_bytes={body.get('wire_bytes', 0)} "
+            f"partition={body.get('partition') or '--'}"
+        )
+        if not args.no_wait:
+            wait_for_reboot(
+                target,
+                auth=authorization,
+                timeout=args.timeout,
+                reboot_timeout=args.reboot_timeout,
+            )
+        return 0
+
+    if args.build:
+        run_build(args.env)
+
+    firmware = args.file or firmware_path_for_env(args.env)
+    size = validate_firmware(firmware)
     print(f"firmware: {firmware} ({format_bytes(size)})")
 
     compression = args.compress

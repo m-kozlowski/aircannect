@@ -673,11 +673,17 @@ void ManagementConsole::handle_time(Print &out, String rest,
     print_unknown_command(out, "TIME", "time, get, push, pull, ntp");
 }
 
-void ManagementConsole::handle_ota(Print &out, String rest,
-                                   OtaManager &ota_manager) {
+void ManagementConsole::handle_ota(Print &out,
+                                   String rest,
+                                   OtaManager &ota_manager,
+                                   ResmedOtaManager &resmed_ota_manager) {
     rest.trim();
-    rest.toLowerCase();
-    if (!rest.length() || rest == "status") {
+    int pos = 0;
+    String command;
+    if (!parse_console_arg(rest, pos, command)) command = "status";
+    command.toLowerCase();
+
+    if (command == "status") {
         const OtaManagerStatus ota = ota_manager.status();
         out.print("[OTA] arduino=");
         out.print(ota.arduino_started ? "started" : "stopped");
@@ -723,13 +729,40 @@ void ManagementConsole::handle_ota(Print &out, String rest,
         return;
     }
 
-    if (rest == "abort") {
-        ota_manager.abort_http_upload("aborted_by_console");
+    if (command == "abort") {
+        ota_manager.request_abort("aborted_by_console");
         out.println("[OTA] aborted");
         return;
     }
 
-    print_unknown_command(out, "OTA", "ota status, abort");
+    if (command == "url") {
+        String url;
+        if (!parse_console_arg(rest, pos, url)) {
+            out.println("[OTA] URL is required");
+            return;
+        }
+
+        String extra;
+        if (parse_console_arg(rest, pos, extra)) {
+            out.println("[OTA] too many arguments");
+            return;
+        }
+        if (resmed_ota_manager.transport_active()) {
+            out.println("[OTA] ResMed OTA transport is active");
+            return;
+        }
+        if (!ota_manager.request_url_update(url)) {
+            const OtaManagerStatus ota = ota_manager.status();
+            out.print("[OTA] URL update rejected: ");
+            out.println(ota.last_error.length() ? ota.last_error : "error");
+            return;
+        }
+
+        out.println("[OTA] URL update queued");
+        return;
+    }
+
+    print_unknown_command(out, "OTA", "ota status, abort, url URL");
 }
 
 void ManagementConsole::handle_resmed_ota(

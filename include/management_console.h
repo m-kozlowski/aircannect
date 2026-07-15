@@ -94,7 +94,8 @@ private:
     void handle_therapy(Print &out, String rest, RpcArbiter &arbiter);
     void handle_time(Print &out, String rest, RpcArbiter &arbiter,
                      TimeSyncService &time_sync_service);
-    void handle_ota(Print &out, String rest, OtaManager &ota_manager);
+    void handle_ota(Print &out, String rest, OtaManager &ota_manager,
+                    ResmedOtaManager &resmed_ota_manager);
     void handle_resmed_ota(Print &out, String rest,
                            ResmedOtaManager &resmed_ota_manager);
     void handle_sink(Print &out, String rest, SinkManager &sink_manager);

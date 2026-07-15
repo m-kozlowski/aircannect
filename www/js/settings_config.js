@@ -701,80 +701,119 @@
     function renderOta(data) {
       up("otaVersion", data.version || "--");
       const active = data.http_prepare_pending || data.http_prepared ||
-        data.http_active || data.http_ready ||
+        data.http_active || data.http_ready || data.url_active ||
         data.reboot_pending || data.method === "http" ||
-        data.method === "http_prepare" || data.method === "arduino";
+        data.method === "http_prepare" || data.method === "url" ||
+        data.method === "arduino";
+      const install = document.getElementById("otaInstall");
+      if (install) install.disabled = active;
+
       if (!active && !(data.bytes || data.progress)) {
         up("otaProgress", "--");
         return;
       }
+      if (data.url_active && !data.total_size && !data.wire_total_size) {
+        up("otaProgress", "Resolving firmware URL...");
+        return;
+      }
       if (data.http_prepare_pending) {
-        up("otaProgress", "Preparing / " + fmtBytes(data.total_size || 0));
+        const size = data.total_size || data.wire_total_size || 0;
+        up("otaProgress", "Preparing / " + fmtBytes(size));
         return;
       }
       if (data.http_prepared && !data.http_active) {
-        up("otaProgress", "Ready / " + fmtBytes(data.total_size || 0));
+        const size = data.total_size || data.wire_total_size || 0;
+        up("otaProgress", "Ready / " + fmtBytes(size));
         return;
       }
-      let text = (data.progress || 0) + "% / " + fmtBytes(data.bytes || 0);
+      let text;
       if (data.encoding === "zlib" && data.wire_total_size) {
-        text += " raw, " + fmtBytes(data.wire_bytes || 0) + " wire";
+        text = (data.progress || 0) + "% / " +
+          fmtBytes(data.wire_bytes || 0) + " wire, " +
+          fmtBytes(data.bytes || 0) + " raw";
+      } else {
+        text = (data.progress || 0) + "% / " + fmtBytes(data.bytes || 0);
       }
       up("otaProgress", text);
+
+      const progress = document.getElementById("otaUploadProgress");
+      const bar = document.getElementById("otaUploadBar");
+      if (progress && bar && active) {
+        progress.style.display = "block";
+        bar.style.width = Math.min(100, data.progress || 0) + "%";
+      }
     }
 
     function setOtaUploadProgress(percent, bytes) {
       up("otaProgress", percent + "% / " + fmtBytes(bytes || 0));
     }
 
-    function otaCompressedChanged() {
-      const compressed = document.getElementById("otaCompressed").checked;
-      const row = document.getElementById("otaRawSizeRow");
-      if (row) row.style.display = compressed ? "" : "none";
+    function otaSourceChanged(source) {
+      const urlInput = document.getElementById("otaUrl");
+      const fileInput = document.getElementById("otaFile");
+
+      if (source === "url" && urlInput.value.trim()) {
+        fileInput.value = "";
+      } else if (source === "file" && fileInput.files.length) {
+        urlInput.value = "";
+      }
     }
 
-    function otaFileChanged() {
-      const file = document.getElementById("otaFile").files[0];
-      if (!file) return;
+    function otaUrlQuery(url) {
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch (error) {
+        throw new Error("Enter a valid firmware URL");
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error("Firmware URL must use HTTP or HTTPS");
+      }
 
-      const compressed =
-        file.name.endsWith(".zlib") || file.name.endsWith(".deflate");
-      const checkbox = document.getElementById("otaCompressed");
-      if (checkbox) checkbox.checked = compressed;
-      otaCompressedChanged();
+      return new URLSearchParams({url}).toString();
+    }
+
+    async function otaInstallFromUrl(url) {
+      const query = otaUrlQuery(url);
+      msg("otaMsg", "Starting URL update...", true, true);
+
+      let response = await fetch("/api/ota/url?" + query, {method: "POST"});
+      let data = await response.json();
+      renderOta(data);
+      if (!response.ok) {
+        throw new Error(data.last_error || data.error || "URL update rejected");
+      }
+
+      const started = Date.now();
+      while (true) {
+        if (data.last_error && !data.url_active && !data.reboot_pending) {
+          throw new Error(data.last_error);
+        }
+        if (data.reboot_pending || data.http_ready) {
+          msg("otaMsg", "Update installed. Restarting...", true, true);
+          scheduleOtaReload();
+          return true;
+        }
+        if (Date.now() - started > 15 * 60 * 1000) {
+          throw new Error("URL update timed out");
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+        response = await api("/api/ota");
+        data = await response.json();
+        renderOta(data);
+      }
     }
 
     function otaUploadQuery(plan) {
       const params = new URLSearchParams();
-      params.set("size", String(plan.rawSize));
-      if (plan.encoding !== "plain") {
-        params.set("encoding", plan.encoding);
-        params.set("wire_size", String(plan.wireSize));
-      }
+      params.set("encoding", "auto");
+      params.set("wire_size", String(plan.wireSize));
       return params.toString();
     }
 
     function otaUploadPlan(file) {
-      const compressed = document.getElementById("otaCompressed").checked;
-      if (!compressed) {
-        return {
-          encoding: "plain",
-          rawSize: file.size,
-          wireSize: file.size,
-        };
-      }
-
-      const rawInput = document.getElementById("otaRawSize");
-      const rawSize = Number(rawInput.value || 0);
-      if (!Number.isFinite(rawSize) || rawSize <= 0) {
-        throw new Error("Enter raw decompressed image size");
-      }
-
-      return {
-        encoding: "zlib",
-        rawSize: Math.floor(rawSize),
-        wireSize: file.size,
-      };
+      return {wireSize: file.size};
     }
 
     async function prepareOtaUpload(plan) {
@@ -800,26 +839,15 @@
       return data;
     }
 
-    async function otaUpload() {
-      const file = document.getElementById("otaFile").files[0];
-      if (!file) {
-        msg("otaMsg", "Select firmware image", false);
-        return;
-      }
-
-      const progress = document.getElementById("otaUploadProgress");
+    async function otaInstallFromFile(file) {
+      const plan = otaUploadPlan(file);
       const bar = document.getElementById("otaUploadBar");
-      progress.style.display = "block";
-      bar.style.width = "0%";
-      setOtaUploadProgress(0, 0);
 
-      try {
-        const plan = otaUploadPlan(file);
+      msg("otaMsg", "Preparing OTA...", true, true);
+      await prepareOtaUpload(plan);
+      msg("otaMsg", "Uploading...", true, true);
 
-        msg("otaMsg", "Preparing OTA...", true, true);
-        await prepareOtaUpload(plan);
-        msg("otaMsg", "Uploading...", true, true);
-
+      return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {
@@ -833,35 +861,66 @@
         xhr.onload = () => {
           try {
             const data = JSON.parse(xhr.responseText || "{}");
-            if (xhr.status < 300) {
-              bar.style.width = "100%";
-              setOtaUploadProgress(100, data.wire_bytes || file.size);
-            } else {
+            if (xhr.status >= 300) {
               renderOta(data);
+              reject(new Error(data.last_error || xhr.statusText));
+              return;
             }
-            msg("otaMsg",
-              xhr.status < 300 ?
-                (data.reboot_pending ? "Upload OK. Restarting..." :
-                  data.http_ready ? "Upload OK. Restarting shortly." :
-                  "Upload finished") :
-                ("Upload failed: " + (data.last_error || xhr.statusText)),
-              xhr.status < 300 && data.http_ready);
-            if (xhr.status < 300 && (data.reboot_pending || data.http_ready)) {
+
+            bar.style.width = "100%";
+            setOtaUploadProgress(100, data.wire_bytes || file.size);
+
+            const restarting = data.reboot_pending || data.http_ready;
+            msg("otaMsg", restarting ? "Update installed. Restarting..." :
+              "Upload finished", restarting, true);
+            if (restarting) {
               scheduleOtaReload();
             }
-            if (xhr.status >= 300) loadOta();
+            resolve(restarting);
           } catch (error) {
-            msg("otaMsg", "Upload failed", false);
+            reject(error);
           }
         };
-        xhr.onerror = () => msg("otaMsg", "Upload error", false);
+        xhr.onerror = () => reject(new Error("Upload error"));
+        xhr.onabort = () => reject(new Error("Upload aborted"));
         xhr.open("POST", "/api/ota/upload?" + otaUploadQuery(plan));
 
         const form = new FormData();
         form.append("firmware", file);
         xhr.send(form);
+      });
+    }
+
+    async function otaInstall() {
+      const url = document.getElementById("otaUrl").value.trim();
+      const file = document.getElementById("otaFile").files[0];
+
+      if (!url && !file) {
+        msg("otaMsg", "Enter a firmware URL or select an image", false);
+        return;
+      }
+      if (url && file) {
+        msg("otaMsg", "Choose either a firmware URL or an image", false);
+        return;
+      }
+
+      const button = document.getElementById("otaInstall");
+      const progress = document.getElementById("otaUploadProgress");
+      const bar = document.getElementById("otaUploadBar");
+      button.disabled = true;
+      progress.style.display = "block";
+      bar.style.width = "0%";
+      setOtaUploadProgress(0, 0);
+
+      let restarting = false;
+      try {
+        restarting = file ? await otaInstallFromFile(file) :
+          await otaInstallFromUrl(url);
       } catch (error) {
-        msg("otaMsg", error.message, false);
+        msg("otaMsg", "Update failed: " + error.message, false, true);
+        loadOta();
+      } finally {
+        if (!restarting) button.disabled = false;
       }
     }
 

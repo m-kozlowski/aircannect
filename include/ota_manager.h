@@ -5,6 +5,7 @@
 #include <esp_partition.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <stdint.h>
 
 #include "app_config.h"
@@ -15,6 +16,7 @@ class ArduinoOTAClass;
 namespace aircannect {
 
 enum class OtaUploadEncoding : uint8_t {
+    Auto,
     Plain,
     Zlib,
 };
@@ -29,6 +31,7 @@ struct OtaManagerStatus {
     bool http_prepared = false;
     bool http_active = false;
     bool http_ready = false;
+    bool url_active = false;
     bool reboot_pending = false;
     bool auth_enabled = true;
     uint16_t arduino_port = AC_ARDUINO_OTA_PORT;
@@ -38,7 +41,7 @@ struct OtaManagerStatus {
     size_t wire_total_size = 0;
     uint8_t progress_percent = 0;
     String method = "idle";
-    String encoding = "plain";
+    String encoding = "auto";
     String partition;
     String last_error;
 };
@@ -54,7 +57,7 @@ public:
 
     bool request_http_upload_prepare(
         size_t image_size,
-        OtaUploadEncoding encoding = OtaUploadEncoding::Plain,
+        OtaUploadEncoding encoding = OtaUploadEncoding::Auto,
         size_t wire_size = 0);
     void poll_http_upload_prepare(bool as11_quiesced,
                                   bool as11_quiesce_timed_out);
@@ -62,11 +65,18 @@ public:
     bool begin_http_upload(
         const String &filename,
         size_t image_size,
-        OtaUploadEncoding encoding = OtaUploadEncoding::Plain,
+        OtaUploadEncoding encoding = OtaUploadEncoding::Auto,
         size_t wire_size = 0);
     bool write_http_upload(size_t index, const uint8_t *data, size_t len);
     bool finish_http_upload();
     void abort_http_upload(const char *reason);
+
+    bool request_url_update(
+        const String &url,
+        OtaUploadEncoding encoding = OtaUploadEncoding::Auto,
+        size_t image_size = 0,
+        size_t wire_size = 0);
+    void request_abort(const char *reason);
 
     void schedule_reboot(uint32_t delay_ms = 750);
 
@@ -74,11 +84,45 @@ public:
     OtaManagerStatus status() const;
 
 private:
+    enum class InstallSource : uint8_t {
+        HttpUpload,
+        Url,
+    };
+
     void start_arduino_ota();
     void stop_arduino_ota();
 
+    bool request_upload_prepare(size_t image_size,
+                                OtaUploadEncoding encoding,
+                                size_t wire_size,
+                                InstallSource source);
+    bool begin_upload(const String &filename,
+                      size_t image_size,
+                      OtaUploadEncoding encoding,
+                      size_t wire_size,
+                      InstallSource source);
+    void abort_upload(const char *reason, bool log_error);
+
+    static void url_task_entry(void *ctx);
+    void run_url_task();
+    void finish_url_task(char *url);
+    void fail_url_update(const char *reason,
+                         int http_status = 0,
+                         int esp_error = 0,
+                         int socket_error = 0,
+                         int tls_error = 0,
+                         int tls_flags = 0);
+    bool url_cancelled() const;
+    static bool url_write_callback(void *ctx,
+                                   size_t offset,
+                                   const uint8_t *data,
+                                   size_t len);
+    static bool url_continue_callback(void *ctx);
+
     bool begin_zlib_decoder();
     void reset_zlib_decoder();
+    bool write_auto_http_upload(size_t index, const uint8_t *data, size_t len);
+    bool resolve_http_upload_encoding(const uint8_t header[2]);
     bool write_plain_http_upload(size_t index, const uint8_t *data, size_t len);
     bool write_zlib_http_upload(size_t index, const uint8_t *data, size_t len);
     bool finish_zlib_http_upload();
@@ -104,16 +148,27 @@ private:
     const esp_partition_t *http_partition_ = nullptr;
     size_t prepared_image_size_ = 0;
     size_t prepared_wire_size_ = 0;
+    InstallSource install_source_ = InstallSource::HttpUpload;
     uint32_t http_prepared_at_ms_ = 0;
     uint32_t http_upload_last_activity_ms_ = 0;
-    OtaUploadEncoding prepared_encoding_ = OtaUploadEncoding::Plain;
-    OtaUploadEncoding http_encoding_ = OtaUploadEncoding::Plain;
+    OtaUploadEncoding prepared_encoding_ = OtaUploadEncoding::Auto;
+    OtaUploadEncoding http_encoding_ = OtaUploadEncoding::Auto;
+    uint8_t http_probe_bytes_[2] = {};
+    size_t http_probe_size_ = 0;
     void *zlib_decoder_ = nullptr;
     uint8_t *zlib_dict_ = nullptr;
     size_t zlib_output_offset_ = 0;
     bool zlib_finished_ = false;
     bool http_image_magic_checked_ = false;
     bool http_write_in_progress_ = false;
+
+    char *url_request_ = nullptr;
+    size_t url_request_image_size_ = 0;
+    size_t url_request_wire_size_ = 0;
+    OtaUploadEncoding url_request_encoding_ = OtaUploadEncoding::Auto;
+    TaskHandle_t url_task_ = nullptr;
+    bool url_cancel_requested_ = false;
+
     OtaManagerStatus status_;
     mutable SemaphoreHandle_t status_mutex_ = nullptr;
 };

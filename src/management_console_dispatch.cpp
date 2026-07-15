@@ -1630,7 +1630,7 @@ void ManagementConsole::handle_tcp_command(Print &out,
 void ManagementConsole::handle_ota_command(Print &out,
                                            String rest,
                                            ConsoleContext &ctx) {
-    handle_ota(out, rest, ctx.ota_manager);
+    handle_ota(out, rest, ctx.ota_manager, ctx.resmed_ota_manager);
 }
 
 void ManagementConsole::handle_resmed_ota_command(Print &out,
