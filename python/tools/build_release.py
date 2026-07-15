@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -18,6 +19,9 @@ DEFAULT_ENVIRONMENTS = (
     "xiao-esp32s3-plus-sdmmc4",
     "xiao-esp32s3-plus-spisd",
 )
+MANIFEST_FILENAME = "aircannect-release.json"
+RELEASE_NOTES_FILENAME = "RELEASE_NOTES.md"
+MANIFEST_SCHEMA = 1
 READ_CHUNK_BYTES = 256 * 1024
 
 
@@ -37,6 +41,17 @@ def source_identity() -> tuple[str, str, int]:
 def filename_component(value: str) -> str:
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-.")
     return sanitized or "unknown"
+
+
+def manifest_version(source_version: str) -> str:
+    release_pattern = (
+        r"v\d+\.\d+\.\d+"
+        r"(?:-[0-9A-Za-z.-]+)?"
+        r"(?:\+[0-9A-Za-z.-]+)?"
+    )
+    if re.fullmatch(release_pattern, source_version):
+        return source_version[1:]
+    return source_version
 
 
 def sha256_file(path: pathlib.Path) -> str:
@@ -83,10 +98,9 @@ def build_firmware(pio: str, environment_name: str,
     return firmware_path
 
 
-def artifact_record(path: pathlib.Path, kind: str) -> dict[str, object]:
+def artifact_record(path: pathlib.Path) -> dict[str, object]:
     return {
         "file": path.name,
-        "kind": kind,
         "size": path.stat().st_size,
         "sha256": sha256_file(path),
     }
@@ -95,7 +109,7 @@ def artifact_record(path: pathlib.Path, kind: str) -> dict[str, object]:
 def package_firmware(
     firmware_path: pathlib.Path, output_dir: pathlib.Path,
     environment_name: str, version: str,
-) -> list[dict[str, object]]:
+) -> tuple[dict[str, object], list[dict[str, object]]]:
     stem = "-".join((
         "aircannect",
         filename_component(version),
@@ -106,10 +120,24 @@ def package_firmware(
     shutil.copyfile(firmware_path, raw_path)
     compress_zlib(raw_path, compressed_path)
 
-    return [
-        artifact_record(raw_path, "esp32-application"),
-        artifact_record(compressed_path, "esp32-application-zlib"),
-    ]
+    raw = artifact_record(raw_path)
+    compressed = artifact_record(compressed_path)
+
+    target = {
+        "raw": {
+            "url": raw["file"],
+            "size": raw["size"],
+            "sha256": raw["sha256"],
+        },
+        "zlib": {
+            "url": compressed["file"],
+            "size": compressed["size"],
+            "sha256": compressed["sha256"],
+            "decoded_size": raw["size"],
+            "decoded_sha256": raw["sha256"],
+        },
+    }
+    return target, [raw, compressed]
 
 
 def write_checksums(output_dir: pathlib.Path, artifacts: list[dict[str, object]]) -> None:
@@ -119,6 +147,24 @@ def write_checksums(output_dir: pathlib.Path, artifacts: list[dict[str, object]]
     (output_dir / "SHA256SUMS").write_text(
         "\n".join(checksum_lines) + "\n", encoding="utf-8"
     )
+
+
+def write_release_manifest(
+    output_dir: pathlib.Path, version: str,
+    targets: dict[str, dict[str, object]],
+) -> pathlib.Path:
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "product": "aircannect",
+        "version": manifest_version(version),
+        "release_notes_url": RELEASE_NOTES_FILENAME,
+        "targets": targets,
+    }
+    manifest_path = output_dir / MANIFEST_FILENAME
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    return manifest_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,15 +195,19 @@ def main() -> None:
     output_dir.mkdir(parents=True)
 
     artifacts = []
+    targets = {}
     for environment_name in environments:
         firmware_path = build_firmware(
             args.pio, environment_name, source_date_epoch, version
         )
-        artifacts.extend(package_firmware(
+        target, target_artifacts = package_firmware(
             firmware_path, output_dir, environment_name, version
-        ))
+        )
+        targets[environment_name] = target
+        artifacts.extend(target_artifacts)
 
     write_checksums(output_dir, artifacts)
+    write_release_manifest(output_dir, version, targets)
 
     print(
         f"packaged {version} ({commit[:12]}) for "

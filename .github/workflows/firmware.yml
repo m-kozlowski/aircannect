@@ -33,6 +33,12 @@ jobs:
             --pio .ci-venv/bin/pio \
             --output dist
 
+      - name: Build release notes
+        run: |
+          python3 python/tools/build_release_notes.py \
+            "$GITHUB_REF_NAME" \
+            --output dist/RELEASE_NOTES.md
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,14 +46,18 @@ jobs:
           assets=(
             dist/aircannect-*.bin
             dist/aircannect-*.bin.zlib
+            dist/aircannect-release.json
+            dist/RELEASE_NOTES.md
             dist/SHA256SUMS
           )
 
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --notes-file dist/RELEASE_NOTES.md
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --verify-tag \
               --title "$GITHUB_REF_NAME" \
-              --notes-from-tag
+              --notes-file dist/RELEASE_NOTES.md
           fi

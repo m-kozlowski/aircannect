@@ -34,11 +34,20 @@ jobs:
             --pio .ci-venv/bin/pio \
             --output dist
 
+      - name: Build release notes
+        run: |
+          python3 python/tools/build_release_notes.py \
+            "$GITHUB_REF_NAME" \
+            --output dist/RELEASE_NOTES.md
+
       - name: Publish Gitea release
         uses: https://gitea.com/actions/gitea-release-action@b8d9144f302c68610911db1aaf722708d5c02d94
         with:
           token: ${{ secrets.GITEA_TOKEN }}
+          body_path: dist/RELEASE_NOTES.md
           files: |-
             dist/aircannect-*.bin
             dist/aircannect-*.bin.zlib
+            dist/aircannect-release.json
+            dist/RELEASE_NOTES.md
             dist/SHA256SUMS
