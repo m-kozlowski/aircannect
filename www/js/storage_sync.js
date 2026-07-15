@@ -35,7 +35,8 @@
 
     async function fetchStorageList(path, offset, limit, refresh) {
       let forceRefresh = !!refresh;
-      for (let attempt = 0; attempt < 200; attempt++) {
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
         const url = "/api/storage/list?path=" + encodeURIComponent(path) +
           "&offset=" + encodeURIComponent(offset || 0) +
           "&limit=" + encodeURIComponent(limit || 128) +
@@ -45,7 +46,16 @@
         const response = await fetch(url, {cache: "no-store"});
         const text = await response.text();
         if (response.status === 202) {
-          await storageDelay(150);
+          let retryMs = 750;
+          try {
+            const pending = JSON.parse(text);
+            const requestedRetry = Number(pending && pending.retry_ms);
+            if (Number.isFinite(requestedRetry)) {
+              retryMs = Math.min(5000, Math.max(250, requestedRetry));
+            }
+          } catch (_) {}
+          const remainingMs = Math.max(0, deadline - Date.now());
+          await storageDelay(Math.min(retryMs, remainingMs));
           continue;
         }
         if (!response.ok) {

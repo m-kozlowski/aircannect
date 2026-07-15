@@ -400,6 +400,7 @@ void add_report_plot_cache_headers(AsyncWebServerResponse *response,
 
 static constexpr size_t kStorageListDefaultLimit = 64;
 static constexpr size_t kStorageListMaxLimit = 128;
+static constexpr uint32_t kStorageListRetryMs = 750;
 
 struct StorageSelectionRequest {
     JsonDocument doc;
@@ -2444,8 +2445,11 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
     const StorageListingRead read = storage_browser_job_->listing(
         path.c_str(), refresh, snapshot, error, sizeof(error));
     if (read == StorageListingRead::Preparing) {
-        request->send(202, "application/json",
-                      "{\"ok\":true,\"state\":\"preparing\"}");
+        char body[80] = {};
+        snprintf(body, sizeof(body),
+                 "{\"ok\":true,\"state\":\"preparing\",\"retry_ms\":%lu}",
+                 static_cast<unsigned long>(kStorageListRetryMs));
+        request->send(202, "application/json", body);
         return;
     }
     if (read == StorageListingRead::Error || !snapshot) {
