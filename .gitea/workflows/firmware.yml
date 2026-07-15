@@ -1,0 +1,44 @@
+name: firmware
+run-name: firmware release ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: read
+  releases: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Create build environment
+        run: |
+          python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            platformio==6.1.19
+
+      - name: Build firmware artifacts
+        run: |
+          .ci-venv/bin/python python/tools/build_release.py \
+            --pio .ci-venv/bin/pio \
+            --output dist
+
+      - name: Publish Gitea release
+        uses: https://gitea.com/actions/gitea-release-action@b8d9144f302c68610911db1aaf722708d5c02d94
+        with:
+          token: ${{ secrets.GITEA_TOKEN }}
+          files: |-
+            dist/aircannect-*.bin
+            dist/aircannect-*.bin.zlib
+            dist/SHA256SUMS
