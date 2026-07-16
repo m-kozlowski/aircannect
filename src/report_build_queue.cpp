@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "board_report.h"
 #include "debug_log.h"
 #include "report_build_queue_service.h"
 #include "report_index_scratch.h"
@@ -39,12 +40,18 @@ ReportBuildQueueSnapshot ReportBuildQueue::snapshot() const {
     snap.lock_ok = true;
     snap.count = count_;
     if (count_ > 0) {
-        const ResultBuildJob &job = queue_[head_];
+        const ResultBuildJob &job = queue_[0];
         snap.head_night_ms = job.night_start_ms;
         snap.head_therapy_index = job.therapy_index;
         snap.head_refresh = job.refresh;
         snap.head_idle_prebuild = job.idle_prebuild;
         snap.head_age_ms = job.queued_ms ? now_ms - job.queued_ms : 0;
+
+        const bool waiting = job.next_attempt_ms != 0 &&
+            static_cast<int32_t>(now_ms - job.next_attempt_ms) < 0;
+        snap.head_wait_ms = waiting ? job.next_attempt_ms - now_ms : 0;
+        snap.head_defer_count = job.defer_count;
+        snap.head_retry_attempts = job.retry_attempts;
     }
 
     snap.last_night_ms = last_night_ms_;
@@ -94,20 +101,25 @@ ReportBuildQueue::BuildQueueResult ReportBuildQueue::enqueue(
     last_enqueue_therapy_index_ = therapy_index;
     copy_cstr(last_service_block_, sizeof(last_service_block_), "");
 
-    for (size_t k = 0; k < count_; ++k) {
-        const size_t idx = (head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
-        if (queue_[idx].night_start_ms != night_start_ms) continue;
+    for (size_t i = 0; i < count_; ++i) {
+        ResultBuildJob &job = queue_[i];
+        if (job.night_start_ms != night_start_ms) continue;
 
-        queue_[idx].therapy_index = therapy_index;
-        if (refresh) {
-            queue_[idx].refresh = true;
-            queue_[idx].next_attempt_ms = 0;
+        job.therapy_index = therapy_index;
+        bool upgraded = false;
+        if (refresh && !job.refresh) {
+            job.refresh = true;
+            upgraded = true;
         }
-        if (!idle_prebuild) {
-            if (queue_[idx].idle_prebuild) {
-                queue_[idx].next_attempt_ms = 0;
-            }
-            queue_[idx].idle_prebuild = false;
+        if (!idle_prebuild && job.idle_prebuild) {
+            job.idle_prebuild = false;
+            upgraded = true;
+        }
+        if (upgraded) {
+            job.next_attempt_ms = 0;
+            job.retry_attempts = 0;
+            job.defer_count = 0;
+            job.token = next_token_locked();
         }
 
         already_total_++;
@@ -129,13 +141,14 @@ ReportBuildQueue::BuildQueueResult ReportBuildQueue::enqueue(
     }
 
     if (count_ < AC_REPORT_BUILD_QUEUE_MAX) {
-        const size_t tail = (head_ + count_) % AC_REPORT_BUILD_QUEUE_MAX;
-        queue_[tail].night_start_ms = night_start_ms;
-        queue_[tail].therapy_index = therapy_index;
-        queue_[tail].refresh = refresh;
-        queue_[tail].idle_prebuild = idle_prebuild;
-        queue_[tail].queued_ms = millis();
-        queue_[tail].next_attempt_ms = 0;
+        ResultBuildJob &job = queue_[count_];
+        job = ResultBuildJob{};
+        job.night_start_ms = night_start_ms;
+        job.therapy_index = therapy_index;
+        job.refresh = refresh;
+        job.idle_prebuild = idle_prebuild;
+        job.queued_ms = millis();
+        job.token = next_token_locked();
 
         count_++;
         queued_total_++;
@@ -197,9 +210,8 @@ bool ReportBuildQueue::has_foreground_pending() const {
     xSemaphoreTake(lock_, portMAX_DELAY);
 
     bool pending = false;
-    for (size_t k = 0; k < count_; ++k) {
-        const size_t idx = (head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
-        if (!queue_[idx].idle_prebuild) {
+    for (size_t i = 0; i < count_; ++i) {
+        if (!queue_[i].idle_prebuild) {
             pending = true;
             break;
         }
@@ -216,9 +228,8 @@ void ReportBuildQueue::clear(uint64_t night_start_ms, bool all) {
 
     ResultBuildJob kept[AC_REPORT_BUILD_QUEUE_MAX];
     size_t kept_count = 0;
-    for (size_t k = 0; k < count_; ++k) {
-        const size_t idx = (head_ + k) % AC_REPORT_BUILD_QUEUE_MAX;
-        const ResultBuildJob &job = queue_[idx];
+    for (size_t i = 0; i < count_; ++i) {
+        const ResultBuildJob &job = queue_[i];
         if (!all && job.night_start_ms != night_start_ms) {
             kept[kept_count++] = job;
         }
@@ -228,7 +239,6 @@ void ReportBuildQueue::clear(uint64_t night_start_ms, bool all) {
         queue_[i] = i < kept_count ? kept[i] : ResultBuildJob{};
     }
 
-    head_ = 0;
     count_ = kept_count;
 
     xSemaphoreGive(lock_);
@@ -255,16 +265,23 @@ void ReportBuildQueue::note_service_block(const char *reason) {
     xSemaphoreGive(lock_);
 }
 
-bool ReportBuildQueue::peek_head(ResultBuildJob &out) const {
-    if (!lock_) return false;
+ReportBuildQueue::BuildQueueSelection ReportBuildQueue::select_next(
+    uint32_t now_ms,
+    ResultBuildJob &out) const {
+    if (!lock_) return BuildQueueSelection::Empty;
 
     xSemaphoreTake(lock_, portMAX_DELAY);
 
-    const bool have = count_ > 0;
-    out = have ? queue_[head_] : ResultBuildJob{};
+    size_t selected_index = 0;
+    const BuildQueueSelection selection =
+        report_manager_internal::select_result_build_job(
+            queue_, count_, now_ms, selected_index);
+    out = selection == BuildQueueSelection::Ready
+        ? queue_[selected_index]
+        : ResultBuildJob{};
 
     xSemaphoreGive(lock_);
-    return have;
+    return selection;
 }
 
 void ReportBuildQueue::note_service_started() {
@@ -295,37 +312,86 @@ void ReportBuildQueue::note_build_result(const ResultBuildJob &job,
     xSemaphoreGive(lock_);
 }
 
-bool ReportBuildQueue::defer_head(const ResultBuildJob &job,
-                                  uint32_t next_attempt_ms) {
+ReportBuildQueue::BuildQueueDeferResult ReportBuildQueue::defer(
+    const ResultBuildJob &job,
+    bool retry,
+    uint32_t now_ms) {
+    if (!lock_) return BuildQueueDeferResult::Stale;
+
+    xSemaphoreTake(lock_, portMAX_DELAY);
+
+    size_t index = 0;
+    if (!find_job_locked(job, index)) {
+        xSemaphoreGive(lock_);
+        return BuildQueueDeferResult::Stale;
+    }
+
+    ResultBuildJob &queued = queue_[index];
+    if (queued.defer_count < UINT16_MAX) queued.defer_count++;
+    if (!retry) {
+        queued.retry_attempts = 0;
+        queued.next_attempt_ms = now_ms + AC_BG_WORKER_BUSY_RECHECK_MS;
+        if (queued.next_attempt_ms == 0) queued.next_attempt_ms = 1;
+        xSemaphoreGive(lock_);
+        return BuildQueueDeferResult::Deferred;
+    }
+
+    if (queued.retry_attempts >= AC_REPORT_BUILD_RETRY_MAX) {
+        erase_locked(index);
+        xSemaphoreGive(lock_);
+        return BuildQueueDeferResult::RetryExhausted;
+    }
+
+    queued.retry_attempts++;
+    queued.next_attempt_ms =
+        now_ms + report_manager_internal::result_build_retry_delay_ms(
+                     queued.retry_attempts);
+    if (queued.next_attempt_ms == 0) queued.next_attempt_ms = 1;
+
+    xSemaphoreGive(lock_);
+    return BuildQueueDeferResult::Deferred;
+}
+
+bool ReportBuildQueue::remove(const ResultBuildJob &job) {
     if (!lock_) return false;
 
     xSemaphoreTake(lock_, portMAX_DELAY);
 
-    const bool matched = count_ > 0 && queue_[head_].night_start_ms ==
-                                           job.night_start_ms;
-    if (matched) {
-        queue_[head_].next_attempt_ms = next_attempt_ms;
-    }
+    size_t index = 0;
+    const bool matched = find_job_locked(job, index);
+    if (matched) erase_locked(index);
 
     xSemaphoreGive(lock_);
     return matched;
 }
 
-bool ReportBuildQueue::pop_head(const ResultBuildJob &job) {
-    if (!lock_) return false;
+bool ReportBuildQueue::find_job_locked(const ResultBuildJob &job,
+                                       size_t &index) const {
+    for (size_t i = 0; i < count_; ++i) {
+        if (queue_[i].night_start_ms != job.night_start_ms) continue;
+        if (queue_[i].token != job.token) return false;
 
-    xSemaphoreTake(lock_, portMAX_DELAY);
-
-    const bool matched = count_ > 0 && queue_[head_].night_start_ms ==
-                                           job.night_start_ms;
-    if (matched) {
-        queue_[head_] = ResultBuildJob{};
-        head_ = (head_ + 1) % AC_REPORT_BUILD_QUEUE_MAX;
-        count_--;
+        index = i;
+        return true;
     }
 
-    xSemaphoreGive(lock_);
-    return matched;
+    return false;
+}
+
+void ReportBuildQueue::erase_locked(size_t index) {
+    if (index >= count_) return;
+
+    for (size_t i = index; i + 1 < count_; ++i) {
+        queue_[i] = queue_[i + 1];
+    }
+    queue_[count_ - 1] = ResultBuildJob{};
+    count_--;
+}
+
+uint32_t ReportBuildQueue::next_token_locked() {
+    const uint32_t token = next_token_++;
+    if (next_token_ == 0) next_token_ = 1;
+    return token;
 }
 
 ReportBuildQueueService::ReportBuildQueueService(
@@ -356,8 +422,10 @@ void ReportBuildQueueService::note_service_block(const char *reason) {
     build_.note_service_block(reason);
 }
 
-bool ReportBuildQueueService::peek_head(ResultBuildJob &out) const {
-    return build_.peek_head(out);
+ReportBuildQueueService::BuildQueueSelection
+ReportBuildQueueService::select_next(uint32_t now_ms,
+                                     ResultBuildJob &out) const {
+    return build_.select_next(now_ms, out);
 }
 
 void ReportBuildQueueService::note_service_started() {
@@ -371,13 +439,15 @@ void ReportBuildQueueService::note_build_result(const ResultBuildJob &job,
     build_.note_build_result(job, outcome, state, error);
 }
 
-bool ReportBuildQueueService::defer_head(const ResultBuildJob &job,
-                                         uint32_t next_attempt_ms) {
-    return build_.defer_head(job, next_attempt_ms);
+ReportBuildQueueService::BuildQueueDeferResult
+ReportBuildQueueService::defer(const ResultBuildJob &job,
+                               bool retry,
+                               uint32_t now_ms) {
+    return build_.defer(job, retry, now_ms);
 }
 
-bool ReportBuildQueueService::pop_head(const ResultBuildJob &job) {
-    return build_.pop_head(job);
+bool ReportBuildQueueService::remove(const ResultBuildJob &job) {
+    return build_.remove(job);
 }
 
 bool ReportBuildQueueService::request_prepare_by_therapy_index(

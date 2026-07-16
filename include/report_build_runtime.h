@@ -12,6 +12,8 @@ namespace aircannect {
 class ReportBuildRuntime {
 public:
     using BuildQueueResult = ReportBuildQueue::BuildQueueResult;
+    using BuildQueueSelection = ReportBuildQueue::BuildQueueSelection;
+    using BuildQueueDeferResult = ReportBuildQueue::BuildQueueDeferResult;
     using ResultBuildJob = ReportBuildQueue::ResultBuildJob;
 
     bool begin();
@@ -29,14 +31,17 @@ public:
 
     void note_read(const char *state);
     void note_service_block(const char *reason);
-    bool peek_head(ResultBuildJob &out) const;
+    BuildQueueSelection select_next(uint32_t now_ms,
+                                    ResultBuildJob &out) const;
     void note_service_started();
     void note_build_result(const ResultBuildJob &job,
                            const char *outcome,
                            const char *state,
                            const char *error);
-    bool defer_head(const ResultBuildJob &job, uint32_t next_attempt_ms);
-    bool pop_head(const ResultBuildJob &job);
+    BuildQueueDeferResult defer(const ResultBuildJob &job,
+                                bool retry,
+                                uint32_t now_ms);
+    bool remove(const ResultBuildJob &job);
 
     // Idle prebuild cursor
     bool prebuild_key_matches(const ReportNightIndexCacheKey &key) const;

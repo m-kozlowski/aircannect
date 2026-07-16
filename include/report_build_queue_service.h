@@ -9,6 +9,8 @@ namespace aircannect {
 class ReportBuildQueueService {
 public:
     using ResultBuildJob = ReportBuildRuntime::ResultBuildJob;
+    using BuildQueueSelection = ReportBuildRuntime::BuildQueueSelection;
+    using BuildQueueDeferResult = ReportBuildRuntime::BuildQueueDeferResult;
 
     ReportBuildQueueService(ReportBuildRuntime &build,
                             ReportNightIndexService &night_index,
@@ -22,14 +24,17 @@ public:
 
     // Runtime service accounting
     void note_service_block(const char *reason);
-    bool peek_head(ResultBuildJob &out) const;
+    BuildQueueSelection select_next(uint32_t now_ms,
+                                    ResultBuildJob &out) const;
     void note_service_started();
     void note_build_result(const ResultBuildJob &job,
                            const char *outcome,
                            const char *state,
                            const char *error);
-    bool defer_head(const ResultBuildJob &job, uint32_t next_attempt_ms);
-    bool pop_head(const ResultBuildJob &job);
+    BuildQueueDeferResult defer(const ResultBuildJob &job,
+                                bool retry,
+                                uint32_t now_ms);
+    bool remove(const ResultBuildJob &job);
 
     // User/API enqueue
     bool request_prepare_by_therapy_index(size_t therapy_index,

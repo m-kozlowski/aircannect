@@ -20,6 +20,9 @@ struct ReportBuildQueueSnapshot {
     bool head_refresh = false;
     bool head_idle_prebuild = false;
     uint32_t head_age_ms = 0;
+    uint32_t head_wait_ms = 0;
+    uint16_t head_defer_count = 0;
+    uint8_t head_retry_attempts = 0;
     uint64_t last_night_ms = 0;
     size_t last_therapy_index = 0;
     char last_outcome[16] = {};
@@ -39,6 +42,10 @@ struct ReportBuildQueueSnapshot {
 class ReportBuildQueue {
 public:
     using BuildQueueResult = report_manager_internal::BuildQueueResult;
+    using BuildQueueSelection =
+        report_manager_internal::BuildQueueSelection;
+    using BuildQueueDeferResult =
+        report_manager_internal::BuildQueueDeferResult;
     using ResultBuildJob = report_manager_internal::ResultBuildJob;
 
     ~ReportBuildQueue();
@@ -57,21 +64,28 @@ public:
 
     void note_read(const char *state);
     void note_service_block(const char *reason);
-    bool peek_head(ResultBuildJob &out) const;
+    BuildQueueSelection select_next(uint32_t now_ms,
+                                    ResultBuildJob &out) const;
     void note_service_started();
     void note_build_result(const ResultBuildJob &job,
                            const char *outcome,
                            const char *state,
                            const char *error);
-    bool defer_head(const ResultBuildJob &job, uint32_t next_attempt_ms);
-    bool pop_head(const ResultBuildJob &job);
+    BuildQueueDeferResult defer(const ResultBuildJob &job,
+                                bool retry,
+                                uint32_t now_ms);
+    bool remove(const ResultBuildJob &job);
 
 private:
+    bool find_job_locked(const ResultBuildJob &job, size_t &index) const;
+    void erase_locked(size_t index);
+    uint32_t next_token_locked();
+
     SemaphoreHandle_t lock_ = nullptr;
 
     ResultBuildJob queue_[AC_REPORT_BUILD_QUEUE_MAX];
-    size_t head_ = 0;
     size_t count_ = 0;
+    uint32_t next_token_ = 1;
 
     uint32_t enqueue_total_ = 0;
     uint32_t queued_total_ = 0;

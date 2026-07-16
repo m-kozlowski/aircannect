@@ -7,6 +7,7 @@
 #include <FS.h>
 
 #include "edf_report_catalog.h"
+#include "report_build_queue_policy.h"
 #include "report_data_provider.h"
 #include "report_manager_limits.h"
 #include "report_night_index.h"
@@ -148,22 +149,6 @@ struct ResultCacheWriteJob {
     std::shared_ptr<ReportSpoolBuffer> plot;
     size_t offset = 0;
     File file;
-};
-
-struct ResultBuildJob {
-    uint64_t night_start_ms = 0;
-    size_t therapy_index = 0;
-    bool refresh = false;
-    bool idle_prebuild = false;
-    uint32_t queued_ms = 0;
-    uint32_t next_attempt_ms = 0;
-};
-
-enum class BuildQueueResult : uint8_t {
-    Queued,
-    AlreadyQueued,
-    Full,
-    Unavailable,
 };
 
 enum class CacheWriteEnqueueResult : uint8_t {

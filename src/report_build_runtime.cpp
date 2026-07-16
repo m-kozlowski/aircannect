@@ -45,8 +45,10 @@ void ReportBuildRuntime::note_service_block(const char *reason) {
     queue_.note_service_block(reason);
 }
 
-bool ReportBuildRuntime::peek_head(ResultBuildJob &out) const {
-    return queue_.peek_head(out);
+ReportBuildRuntime::BuildQueueSelection ReportBuildRuntime::select_next(
+    uint32_t now_ms,
+    ResultBuildJob &out) const {
+    return queue_.select_next(now_ms, out);
 }
 
 void ReportBuildRuntime::note_service_started() {
@@ -60,13 +62,15 @@ void ReportBuildRuntime::note_build_result(const ResultBuildJob &job,
     queue_.note_build_result(job, outcome, state, error);
 }
 
-bool ReportBuildRuntime::defer_head(const ResultBuildJob &job,
-                                    uint32_t next_attempt_ms) {
-    return queue_.defer_head(job, next_attempt_ms);
+ReportBuildRuntime::BuildQueueDeferResult ReportBuildRuntime::defer(
+    const ResultBuildJob &job,
+    bool retry,
+    uint32_t now_ms) {
+    return queue_.defer(job, retry, now_ms);
 }
 
-bool ReportBuildRuntime::pop_head(const ResultBuildJob &job) {
-    return queue_.pop_head(job);
+bool ReportBuildRuntime::remove(const ResultBuildJob &job) {
+    return queue_.remove(job);
 }
 
 bool ReportBuildRuntime::prebuild_key_matches(

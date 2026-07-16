@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 
-#include "board_report.h"
 #include "debug_log.h"
 #include "edf_report_catalog_job.h"
 #include "report_build_queue_service.h"
@@ -336,11 +335,14 @@ void ReportRuntimeService::service_build_queue(bool realtime_active) {
     }
 
     ReportBuildQueueService::ResultBuildJob job;
-    if (!build_queue_.peek_head(job)) return;
-
     const uint32_t now_ms = millis();
-    if (job.next_attempt_ms != 0 &&
-        static_cast<int32_t>(now_ms - job.next_attempt_ms) < 0) {
+    const auto selection = build_queue_.select_next(now_ms, job);
+    if (selection ==
+        ReportBuildQueueService::BuildQueueSelection::Empty) {
+        return;
+    }
+    if (selection ==
+        ReportBuildQueueService::BuildQueueSelection::Waiting) {
         build_queue_.note_service_block("retry_wait");
         return;
     }
@@ -404,12 +406,30 @@ void ReportRuntimeService::service_build_queue(bool realtime_active) {
     if (outcome ==
             ReportResultPrepareService::ResultPrepareOutcome::Deferred ||
         outcome == ReportResultPrepareService::ResultPrepareOutcome::Retry) {
-        build_queue_.defer_head(job,
-                                millis() + AC_BG_WORKER_BUSY_RECHECK_MS);
+        const bool retry = outcome ==
+            ReportResultPrepareService::ResultPrepareOutcome::Retry;
+        const auto defer_result = build_queue_.defer(job, retry, millis());
+        if (defer_result ==
+            ReportBuildQueueService::BuildQueueDeferResult::RetryExhausted) {
+            Log::logf(CAT_REPORT,
+                      LOG_WARN,
+                      "Result build retries exhausted night=%llu index=%lu "
+                      "attempts=%u error=%s\n",
+                      static_cast<unsigned long long>(job.night_start_ms),
+                      static_cast<unsigned long>(job.therapy_index),
+                      static_cast<unsigned>(job.retry_attempts),
+                      error);
+            result_prepare_.fail_prepare("prepare_retry_exhausted");
+            build_queue_.note_build_result(
+                job,
+                "failed",
+                runtime.state_name(),
+                runtime.status().error.c_str());
+        }
         return;
     }
 
-    build_queue_.pop_head(job);
+    build_queue_.remove(job);
 }
 
 void ReportRuntimeService::handle_cache_fetch_event(

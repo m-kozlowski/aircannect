@@ -611,6 +611,18 @@ void print_report_result_status(Print &out,
             print_uint64(out, queue.head_night_ms);
             out.print(" refresh=");
             out.print(queue.head_refresh ? "yes" : "no");
+            if (queue.head_wait_ms) {
+                out.print(" wait_ms=");
+                out.print(static_cast<unsigned long>(queue.head_wait_ms));
+            }
+            if (queue.head_defer_count) {
+                out.print(" defers=");
+                out.print(static_cast<unsigned>(queue.head_defer_count));
+            }
+            if (queue.head_retry_attempts) {
+                out.print(" retries=");
+                out.print(static_cast<unsigned>(queue.head_retry_attempts));
+            }
         }
         out.print(" enq=");
         out.print(static_cast<unsigned long>(queue.enqueue_total));
