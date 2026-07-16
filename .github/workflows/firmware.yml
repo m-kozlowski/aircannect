@@ -12,6 +12,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      PLATFORMIO_VERSION: '6.1.19'
+      PLATFORMIO_BUILD_CACHE_DIR: ${{ github.workspace }}/.pio/build-cache
 
     steps:
       - name: Check out source
@@ -20,12 +23,44 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Cache PlatformIO dependencies
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+            .pio/libdeps
+          key: >-
+            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-deps-${{
+            hashFiles('platformio.ini', 'platformio-*.ini',
+            'generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**',
+            'third_party/libsmb2-pio/**') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-deps-
+
+      - name: Cache PlatformIO build objects
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          path: .pio/build-cache
+          key: >-
+            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-${{
+            hashFiles('platformio.ini', 'platformio-*.ini',
+            'generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**',
+            'third_party/libsmb2-pio/**') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-${{ hashFiles('platformio.ini', 'platformio-*.ini', 'generate_libsmb2.py', '.gitmodules', 'patches/libsmb2/**', 'third_party/libsmb2-pio/**') }}-
+            ${{ runner.os }}-pio-${{ env.PLATFORMIO_VERSION }}-build-
+
       - name: Create build environment
         run: |
           python3 -m venv .ci-venv
           .ci-venv/bin/python -m pip install \
             --disable-pip-version-check \
-            platformio==6.1.19
+            platformio=="$PLATFORMIO_VERSION"
 
       - name: Build firmware artifacts
         run: |
