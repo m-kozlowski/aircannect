@@ -47,6 +47,11 @@ enum class ReadOutcome : uint8_t {
     Failed,
 };
 
+enum class CacheArtifact : uint8_t {
+    Result = 1u << 0,
+    Plot = 1u << 1,
+};
+
 struct LoadKey {
     uint64_t night_start_ms = 0;
     char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
@@ -66,7 +71,7 @@ using CachePathBuilder = bool (*)(uint64_t, const char *, char *, size_t);
 using CachePayloadValidator = bool (*)(const uint8_t *, size_t);
 
 struct CacheArtifactSpec {
-    ReportCacheArtifact artifact;
+    CacheArtifact artifact;
     size_t min_size;
     size_t max_size;
     CachePathBuilder build_path;
@@ -76,7 +81,7 @@ struct CacheArtifactSpec {
 
 constexpr CacheArtifactSpec CACHE_ARTIFACTS[] = {
     {
-        ReportCacheArtifact::Result,
+        CacheArtifact::Result,
         16,
         REPORT_RESULT_JSON_CACHE_MAX,
         result_json_cache_path_for_etag,
@@ -84,7 +89,7 @@ constexpr CacheArtifactSpec CACHE_ARTIFACTS[] = {
         "JSON",
     },
     {
-        ReportCacheArtifact::Plot,
+        CacheArtifact::Plot,
         8,
         AC_REPORT_PLOT_MAX_BYTES,
         result_plot_cache_path_for_etag,
@@ -95,6 +100,9 @@ constexpr CacheArtifactSpec CACHE_ARTIFACTS[] = {
 
 constexpr size_t CACHE_ARTIFACT_COUNT =
     sizeof(CACHE_ARTIFACTS) / sizeof(CACHE_ARTIFACTS[0]);
+constexpr uint8_t CACHE_PAIR_MASK =
+    static_cast<uint8_t>(CacheArtifact::Result) |
+    static_cast<uint8_t>(CacheArtifact::Plot);
 
 bool key_matches(const LoadKey &key,
                  uint64_t night_start_ms,
@@ -200,6 +208,8 @@ struct ReportResultCacheLoader::State {
     size_t expected_size = 0;
     size_t offset = 0;
     std::shared_ptr<ReportSpoolBuffer> payload;
+    std::shared_ptr<ReportSpoolBuffer> result_payload;
+    std::shared_ptr<ReportSpoolBuffer> plot_payload;
 
     ProbeEntry probes[AC_REPORT_RESULT_CACHE_PROBE_MAX] = {};
     uint32_t probe_tick = 0;
@@ -243,8 +253,7 @@ bool ReportResultCacheLoader::begin() {
 
 ReportCacheLoadRequest ReportResultCacheLoader::request(
     uint64_t night_start_ms,
-    const char *etag,
-    ReportCacheArtifact artifact) {
+    const char *etag) {
     if (!state_ || !lock_ || night_start_ms == 0 || !etag || !etag[0]) {
         return ReportCacheLoadRequest::Unavailable;
     }
@@ -252,7 +261,6 @@ ReportCacheLoadRequest ReportResultCacheLoader::request(
         return ReportCacheLoadRequest::Unavailable;
     }
 
-    const uint8_t artifact_mask = static_cast<uint8_t>(artifact);
     const uint32_t now_ms = millis();
     for (size_t i = 0; i < AC_REPORT_RESULT_CACHE_PROBE_MAX; ++i) {
         ProbeEntry &probe = state_->probes[i];
@@ -262,14 +270,14 @@ ReportCacheLoadRequest ReportResultCacheLoader::request(
         }
 
         probe.last_used = ++state_->probe_tick;
-        if ((probe.failed_mask & artifact_mask) != 0 &&
+        if (probe.failed_mask != 0 &&
             static_cast<int32_t>(now_ms - probe.retry_after_ms) < 0) {
             xSemaphoreGive(lock_);
             return ReportCacheLoadRequest::Failed;
         }
-        if ((probe.checked_mask & artifact_mask) != 0 &&
-            (probe.available_mask & artifact_mask) == 0 &&
-            (probe.failed_mask & artifact_mask) == 0) {
+        if ((probe.checked_mask & CACHE_PAIR_MASK) == CACHE_PAIR_MASK &&
+            (probe.available_mask & CACHE_PAIR_MASK) != CACHE_PAIR_MASK &&
+            probe.failed_mask == 0) {
             xSemaphoreGive(lock_);
             return ReportCacheLoadRequest::Missing;
         }
@@ -335,6 +343,8 @@ bool ReportResultCacheLoader::service() {
         state_->expected_size = 0;
         state_->offset = 0;
         state_->payload.reset();
+        state_->result_payload.reset();
+        state_->plot_payload.reset();
         xSemaphoreGive(lock_);
     }
 
@@ -408,25 +418,19 @@ bool ReportResultCacheLoader::service() {
             if (outcome == ReadOutcome::Working) break;
 
             close_cache_file(state_->file);
-            bool published = false;
+            bool valid = false;
             if (outcome == ReadOutcome::Complete &&
                 artifact.payload_valid(state_->payload->data(),
                                        state_->payload->size())) {
-                const std::shared_ptr<ReportSpoolBuffer> empty;
-                published = artifact.artifact == ReportCacheArtifact::Result
-                    ? slots_.publish(ReportResultState::Ready,
-                                     state_->current.night_start_ms,
-                                     state_->current.etag,
-                                     state_->payload,
-                                     empty)
-                    : slots_.publish(ReportResultState::Ready,
-                                     state_->current.night_start_ms,
-                                     state_->current.etag,
-                                     empty,
-                                     state_->payload);
+                valid = true;
+                if (artifact.artifact == CacheArtifact::Result) {
+                    state_->result_payload = state_->payload;
+                } else {
+                    state_->plot_payload = state_->payload;
+                }
             }
 
-            if (published) {
+            if (valid) {
                 state_->available_mask |= artifact_mask;
             } else if (outcome == ReadOutcome::Failed) {
                 state_->failed_mask |= artifact_mask;
@@ -447,9 +451,25 @@ bool ReportResultCacheLoader::service() {
             break;
         }
 
-        case LoadPhase::Complete:
+        case LoadPhase::Complete: {
+            if ((state_->available_mask & CACHE_PAIR_MASK) == CACHE_PAIR_MASK &&
+                state_->failed_mask == 0) {
+                const bool published = slots_.publish(
+                    ReportResultState::Ready,
+                    state_->current.night_start_ms,
+                    state_->current.etag,
+                    state_->result_payload,
+                    state_->plot_payload);
+
+                if (!published) {
+                    state_->available_mask = 0;
+                    state_->failed_mask = CACHE_PAIR_MASK;
+                }
+            }
+
             finish_current();
             break;
+        }
     }
 
     return true;
@@ -507,6 +527,8 @@ void ReportResultCacheLoader::finish_current() {
     state_->expected_size = 0;
     state_->offset = 0;
     state_->payload.reset();
+    state_->result_payload.reset();
+    state_->plot_payload.reset();
     xSemaphoreGive(lock_);
 }
 

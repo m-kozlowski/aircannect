@@ -5,20 +5,28 @@
 
 namespace aircannect {
 
-bool result_plot_cache_exists_for_etag(uint64_t night_start_ms,
+bool result_cache_pair_exists_for_etag(uint64_t night_start_ms,
                                        const char *etag) {
     Storage::Guard g;
     if (!Storage::mounted()) return false;
 
-    char path[REPORT_CACHE_PATH_MAX];
+    char plot_path[REPORT_CACHE_PATH_MAX];
     if (!result_plot_cache_path_for_etag(night_start_ms,
                                          etag,
-                                         path,
-                                         sizeof(path))) {
+                                         plot_path,
+                                         sizeof(plot_path))) {
         return false;
     }
 
-    return Storage::exists(path);
+    char result_path[REPORT_CACHE_PATH_MAX];
+    if (!result_json_cache_path_for_etag(night_start_ms,
+                                         etag,
+                                         result_path,
+                                         sizeof(result_path))) {
+        return false;
+    }
+
+    return Storage::exists(result_path) && Storage::exists(plot_path);
 }
 
 }  // namespace aircannect

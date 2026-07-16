@@ -127,9 +127,6 @@ public:
     // index with an ETag, without touching the single build-scratch slot.
     using ResultRead = ReportResultRead;
 
-    ResultRead read_result(size_t therapy_index, const char *if_none_match,
-                           char *etag_out, size_t etag_out_size,
-                           LargeTextBuffer &json_out);
     ResultRead read_result_by_start(uint64_t night_start_ms,
                                     const char *if_none_match,
                                     char *etag_out,

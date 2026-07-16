@@ -17,7 +17,6 @@ namespace aircannect {
 
 enum class ReportResultSlotRead : uint8_t {
     NotFound,
-    NotModified,
     Error,
     Ready,
 };
@@ -44,7 +43,6 @@ public:
 
     ReportResultSlotRead read_result(uint64_t night_start_ms,
                                      const char *etag,
-                                     const char *if_none_match,
                                      LargeTextBuffer &json_out);
 
     ReportCachedPlotRead read_plot(

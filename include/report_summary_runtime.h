@@ -48,9 +48,13 @@ public:
     void give_scratch();
 
     // Published JSON snapshot
+    void request_snapshot_publish();
     void publish_snapshot(LargeTextBuffer &build_buffer);
+    void publish_snapshot_fallback(LargeTextBuffer &build_buffer);
     void build_snapshot_json(LargeTextBuffer &json) const;
     bool snapshot_available() const;
+    bool snapshot_publish_pending() const;
+    uint32_t snapshot_generation() const;
     bool snapshot_progress_due(uint32_t now_ms, uint32_t interval_ms);
 
     // Cache coverage sidecar

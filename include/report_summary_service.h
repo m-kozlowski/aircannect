@@ -41,6 +41,9 @@ public:
 
     ReportSummaryStatus status() const;
     void build_json(LargeTextBuffer &json) const;
+    void request_json_snapshot_publish();
+    bool json_snapshot_publish_pending() const;
+    uint32_t json_snapshot_generation() const;
     ReportSummarySnapshotResult publish_json_snapshot();
     const char *snapshot_error() const { return snapshot_error_; }
 
@@ -50,6 +53,7 @@ private:
     bool load_from_store();
     ReportSummaryFetchEvent finish_fetch();
     ReportSummaryFetchEvent fail_fetch(const char *message);
+    void publish_changed_json_snapshot();
 
     ReportSummaryRuntime &summary_;
     ReportFetchRuntime &fetch_;

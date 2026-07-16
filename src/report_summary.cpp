@@ -59,7 +59,7 @@ void ReportSummaryService::load_initial_snapshot() {
     summary_.reset_status();
 
     if (!load_from_store()) {
-        publish_json_snapshot();
+        publish_changed_json_snapshot();
     }
 }
 
@@ -92,7 +92,7 @@ bool ReportSummaryService::request_refresh(bool force,
         summary_.give();
     }
 
-    publish_json_snapshot();
+    publish_changed_json_snapshot();
     Log::logf(CAT_REPORT, LOG_INFO, "Summary refresh queued\n");
     return true;
 }
@@ -111,7 +111,7 @@ ReportSummaryFetchEvent ReportSummaryService::poll(RpcArbiter &arbiter) {
         summary_.give();
         publish_progress = summary_.snapshot_progress_due(now_ms, 500);
     }
-    if (publish_progress) publish_json_snapshot();
+    if (publish_progress) publish_changed_json_snapshot();
 
     if (fetch_.spool_complete()) return finish_fetch();
     if (fetch_.spool_failed()) {
@@ -241,7 +241,7 @@ bool ReportSummaryService::load_from_store() {
               static_cast<unsigned long>(nights_with_therapy));
 
     summary_.give_scratch();
-    publish_json_snapshot();
+    publish_changed_json_snapshot();
     result_cache_.invalidate(0, true);
     return true;
 }
@@ -272,7 +272,7 @@ ReportSummaryFetchEvent ReportSummaryService::finish_fetch() {
         summary_.give();
     }
 
-    publish_json_snapshot();
+    publish_changed_json_snapshot();
     Log::logf(CAT_REPORT,
               LOG_INFO,
               "Summary ready records=%lu therapy_nights=%lu\n",
@@ -300,7 +300,7 @@ ReportSummaryFetchEvent ReportSummaryService::fail_fetch(
     }
 
     Log::logf(CAT_REPORT, LOG_WARN, "Summary failed: %s\n", error.c_str());
-    publish_json_snapshot();
+    publish_changed_json_snapshot();
     return ReportSummaryFetchEvent::Failed;
 }
 
@@ -317,7 +317,28 @@ ReportSummaryStatus ReportSummaryService::status() const {
     return snapshot;
 }
 
+void ReportSummaryService::request_json_snapshot_publish() {
+    summary_.request_snapshot_publish();
+}
+
+bool ReportSummaryService::json_snapshot_publish_pending() const {
+    return summary_.snapshot_publish_pending();
+}
+
+uint32_t ReportSummaryService::json_snapshot_generation() const {
+    return summary_.snapshot_generation();
+}
+
+void ReportSummaryService::publish_changed_json_snapshot() {
+    request_json_snapshot_publish();
+    (void)publish_json_snapshot();
+}
+
 ReportSummarySnapshotResult ReportSummaryService::publish_json_snapshot() {
+    if (!json_snapshot_publish_pending()) {
+        return ReportSummarySnapshotResult::Published;
+    }
+
     snapshot_error_[0] = '\0';
 
     ReportSummaryStatus status_snapshot;
@@ -354,7 +375,7 @@ ReportSummarySnapshotResult ReportSummaryService::publish_json_snapshot() {
                 "{\"state\":\"error\",\"error\":\"summary_snapshot_";
             error_json += snapshot_error_;
             error_json += "\",\"nights\":[]}";
-            summary_.publish_snapshot(error_json);
+            summary_.publish_snapshot_fallback(error_json);
         }
         return ReportSummarySnapshotResult::Failed;
     }
@@ -379,7 +400,7 @@ ReportSummarySnapshotResult ReportSummaryService::publish_json_snapshot() {
             summary_json_build =
                 "{\"state\":\"error\",\"error\":"
                 "\"summary_json_alloc\",\"nights\":[]}";
-            summary_.publish_snapshot(summary_json_build);
+            summary_.publish_snapshot_fallback(summary_json_build);
         }
         return ReportSummarySnapshotResult::Failed;
     }

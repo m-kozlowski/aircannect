@@ -49,10 +49,14 @@ public:
 
 private:
     struct SummaryPublishRetryState {
-        uint32_t refresh_id = 0;
+        uint32_t snapshot_generation = 0;
+        uint32_t catalog_refresh_id = 0;
+        uint32_t catalog_sessions = 0;
         uint32_t next_attempt_ms = 0;
         uint32_t next_warning_ms = 0;
         uint16_t failures = 0;
+        uint16_t busy_retries = 0;
+        bool catalog_pending = false;
         bool cache_invalidated = false;
     };
 
@@ -63,8 +67,8 @@ private:
     void handle_cache_fetch_event(ReportCacheFetchEvent event);
     void handle_summary_fetch_event(ReportSummaryFetchEvent event);
 
-    // Catalog publication
-    void service_catalog_summary_publish();
+    // Summary snapshot publication
+    void service_summary_snapshot_publish();
 
     // Pipeline dependencies
     ReportFetchRuntime &fetch_;
@@ -81,7 +85,7 @@ private:
     ReportPrefetchService &prefetch_;
     ReportEdfCatalogContext &edf_catalog_;
 
-    // Catalog publication state
+    // Summary snapshot publication state
     SummaryPublishRetryState summary_publish_retry_;
 };
 

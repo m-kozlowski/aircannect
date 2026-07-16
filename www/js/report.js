@@ -1430,8 +1430,8 @@
       }
     }
 
-    // Conditional GET by night index: returns {status, etag, json}. Polls while
-    // the backend is still building (202).
+    // Conditional GET by stable night id: returns {status, etag, json}.
+    // Polls while the backend is still building (202).
     function isTransientReportError(text) {
       try {
         const parsed = JSON.parse(text);
@@ -1469,15 +1469,14 @@
       return options.timeoutValue === undefined ? null : options.timeoutValue;
     }
 
-    async function pollReportResult(token, index, nightStart) {
-      const url = "/api/report/result?index=" + index +
-        (nightStart ? "&night=" + encodeURIComponent(nightStart) : "");
+    async function pollReportResult(token, nightStart) {
+      const url = "/api/report/result?night=" + encodeURIComponent(nightStart);
       return pollReportFetch({
         active: () => token === reportLoadToken,
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
         timeoutValue: {status: 0, etag: "", json: null},
-        request: () => fetch(url, {cache: "no-store"}),
+        request: () => fetch(url),
         handle: async (resp) => {
           if (resp.status === 304) {
             return {done: false, delayMs: 50};
@@ -1900,16 +1899,14 @@
       msg("reportMsg", "Loading report...", true, true);
       try {
         if (refreshCache) {
-          const queued = await fetch("/api/report/result?index=" + therapyIndex +
-                      "&night=" + encodeURIComponent(Number(night.start || 0)) +
+          const queued = await fetch("/api/report/result?night=" +
+                      encodeURIComponent(Number(night.start || 0)) +
                       "&refresh_cache=1", {method: "POST"});
           if (!queued.ok && queued.status !== 202) {
             throw new Error(await queued.text());
           }
         }
-        const res = await pollReportResult(token,
-          therapyIndex,
-          Number(night.start || 0));
+        const res = await pollReportResult(token, Number(night.start || 0));
         if (!res || token !== reportLoadToken) return;
         if (res.status === 404) {
           msg("reportMsg", "Night not found", false, true);
@@ -1977,4 +1974,3 @@
         msg("reportMsg", error.message, false, true);
       }
     }
-

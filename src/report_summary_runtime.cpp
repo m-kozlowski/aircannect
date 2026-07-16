@@ -124,8 +124,17 @@ void ReportSummaryRuntime::give_scratch() {
     scratch_.give();
 }
 
+void ReportSummaryRuntime::request_snapshot_publish() {
+    snapshot_.request_publish();
+}
+
 void ReportSummaryRuntime::publish_snapshot(LargeTextBuffer &build_buffer) {
     snapshot_.publish(build_buffer);
+}
+
+void ReportSummaryRuntime::publish_snapshot_fallback(
+    LargeTextBuffer &build_buffer) {
+    snapshot_.publish_fallback(build_buffer);
 }
 
 void ReportSummaryRuntime::build_snapshot_json(LargeTextBuffer &json) const {
@@ -134,6 +143,14 @@ void ReportSummaryRuntime::build_snapshot_json(LargeTextBuffer &json) const {
 
 bool ReportSummaryRuntime::snapshot_available() const {
     return snapshot_.available();
+}
+
+bool ReportSummaryRuntime::snapshot_publish_pending() const {
+    return snapshot_.publish_pending();
+}
+
+uint32_t ReportSummaryRuntime::snapshot_generation() const {
+    return snapshot_.requested_generation();
 }
 
 bool ReportSummaryRuntime::snapshot_progress_due(uint32_t now_ms,

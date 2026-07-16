@@ -162,9 +162,8 @@ bool ReportResultCacheRuntime::publish_result(
 ReportResultSlotRead ReportResultCacheRuntime::read_result(
     uint64_t night_start_ms,
     const char *etag,
-    const char *if_none_match,
     LargeTextBuffer &json_out) {
-    return slots_.read_result(night_start_ms, etag, if_none_match, json_out);
+    return slots_.read_result(night_start_ms, etag, json_out);
 }
 
 ReportCachedPlotRead ReportResultCacheRuntime::read_plot(
@@ -232,9 +231,8 @@ void ReportResultCacheRuntime::invalidate(uint64_t night_start_ms, bool all) {
 
 ReportCacheLoadRequest ReportResultCacheRuntime::request_load(
     uint64_t night_start_ms,
-    const char *etag,
-    ReportCacheArtifact artifact) {
-    return loader_.request(night_start_ms, etag, artifact);
+    const char *etag) {
+    return loader_.request(night_start_ms, etag);
 }
 
 bool ReportResultCacheRuntime::loader_active() const {

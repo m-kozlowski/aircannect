@@ -43,11 +43,6 @@ public:
                                ReportResultCacheRuntime &cache,
                                ReportResultRuntime &result);
 
-    ReportResultRead read_result(size_t therapy_index,
-                                 const char *if_none_match,
-                                 char *etag_out,
-                                 size_t etag_out_size,
-                                 LargeTextBuffer &json_out);
     ReportResultRead read_result_by_start(uint64_t night_start_ms,
                                           const char *if_none_match,
                                           char *etag_out,

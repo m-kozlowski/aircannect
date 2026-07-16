@@ -396,11 +396,48 @@ bool request_int64_arg(AsyncWebServerRequest *request,
     return true;
 }
 
+bool request_uint64_arg(AsyncWebServerRequest *request,
+                        const char *name,
+                        uint64_t &out) {
+    out = 0;
+    if (!request || !name || !request->hasArg(name)) return false;
+
+    const String value = request->arg(name);
+    if (!value.length()) return false;
+
+    uint64_t parsed = 0;
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char ch = value.charAt(i);
+        if (ch < '0' || ch > '9') return false;
+
+        const uint8_t digit = static_cast<uint8_t>(ch - '0');
+        if (parsed > (UINT64_MAX - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
+    }
+    if (parsed == 0) return false;
+
+    out = parsed;
+    return true;
+}
+
 void strip_http_etag_quotes(String &etag) {
     if (etag.length() >= 2 && etag.charAt(0) == '"' &&
         etag.charAt(etag.length() - 1) == '"') {
         etag = etag.substring(1, etag.length() - 1);
     }
+}
+
+void add_report_result_cache_headers(AsyncWebServerResponse *response,
+                                     const char *etag) {
+    if (!response) return;
+
+    if (etag && etag[0]) {
+        char etag_header[AC_REPORT_RESULT_ETAG_MAX + 4] = {};
+        snprintf(etag_header, sizeof(etag_header), "\"%s\"", etag);
+        response->addHeader("ETag", etag_header);
+    }
+
+    response->addHeader("Cache-Control", "no-cache");
 }
 
 bool format_report_plot_http_etag(const char *plot_etag,
@@ -1829,45 +1866,27 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"report unavailable\"}");
         return;
     }
-    if (!request->hasArg("index")) {
+    if (!request->hasArg("night")) {
         request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"missing index\"}");
+                      "{\"ok\":false,\"error\":\"missing night\"}");
         return;
     }
-    const long index = request->arg("index").toInt();
-    if (index < 0) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"bad index\"}");
-        return;
-    }
-    ScopedReportHttpTimer timer("/api/report/result", index);
 
     uint64_t night_start_ms = 0;
-    bool have_night_start = false;
-    if (request->hasArg("night")) {
-        const String night_arg = request->arg("night");
-        char *end = nullptr;
-        const unsigned long long parsed =
-            strtoull(night_arg.c_str(), &end, 10);
-        if (end == night_arg.c_str() || !end || *end != '\0' || parsed == 0) {
-            request->send(400, "application/json",
-                          "{\"ok\":false,\"error\":\"bad night\"}");
-            return;
-        }
-        night_start_ms = static_cast<uint64_t>(parsed);
-        have_night_start = true;
+    if (!request_uint64_arg(request, "night", night_start_ms)) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad night\"}");
+        return;
     }
+
+    ScopedReportHttpTimer timer("/api/report/result");
+
     String inm;
-    if (request->hasArg("inm")) {
-        inm = request->arg("inm");
-    } else if (request->hasHeader("If-None-Match")) {
-        // Browser HTTP-cache revalidation (e.g. after a reload): strip ETag quotes.
+    if (request->hasHeader("If-None-Match")) {
         inm = request->getHeader("If-None-Match")->value();
-        if (inm.length() >= 2 && inm.charAt(0) == '"' &&
-            inm.charAt(inm.length() - 1) == '"') {
-            inm = inm.substring(1, inm.length() - 1);
-        }
+        strip_http_etag_quotes(inm);
     }
+
     LargeTextBuffer json;
     if (!json.reserve(WEB_REPORT_RESULT_JSON_RESERVE)) {
         request->send(503, "application/json",
@@ -1875,19 +1894,13 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
         return;
     }
     char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-    const ReportManager::ResultRead st = have_night_start
-        ? report_manager_->read_result_by_start(night_start_ms,
-                                                inm.c_str(),
-                                                etag,
-                                                sizeof(etag),
-                                                json)
-        : report_manager_->read_result(static_cast<size_t>(index),
-                                       inm.c_str(),
-                                       etag,
-                                       sizeof(etag),
-                                       json);
-    char etag_hdr[AC_REPORT_RESULT_ETAG_MAX + 4] = {};
-    if (etag[0]) snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", etag);
+    const ReportManager::ResultRead st = report_manager_->read_result_by_start(
+        night_start_ms,
+        inm.c_str(),
+        etag,
+        sizeof(etag),
+        json);
+
     switch (st) {
         case ReportManager::ResultRead::Ready: {
             AsyncResponseStream *response =
@@ -1897,9 +1910,8 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
                               "{\"ok\":false,\"error\":\"response alloc\"}");
                 return;
             }
-            if (etag_hdr[0]) {
-                response->addHeader("ETag", etag_hdr);
-                response->addHeader("Cache-Control", "no-cache");
+            if (etag[0]) {
+                add_report_result_cache_headers(response, etag);
             } else {
                 response->addHeader("Cache-Control", "no-store");
             }
@@ -1909,9 +1921,16 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
             request->send(response);
             return;
         }
-        case ReportManager::ResultRead::NotModified:
-            request->send(304, "application/json", "");
+        case ReportManager::ResultRead::NotModified: {
+            AsyncWebServerResponse *response = request->beginResponse(304);
+            if (response) {
+                add_report_result_cache_headers(response, etag);
+                request->send(response);
+            } else {
+                request->send(304);
+            }
             return;
+        }
         case ReportManager::ResultRead::Building:
             request->send(202, "application/json",
                           "{\"ok\":true,\"state\":\"preparing\"}");
@@ -4083,12 +4102,12 @@ void WebUI::register_routes() {
 
     server_->on(AsyncURIMatcher::exact("/api/report/result"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
-        if (request->hasArg("index")) {
+        if (request->hasArg("night")) {
             send_report_result(request);
             return;
         }
         request->send(400, "application/json",
-                      "{\"error\":\"index_required\"}");
+                      "{\"error\":\"night_required\"}");
     });
 
     server_->on(AsyncURIMatcher::exact("/api/report/chunks"), HTTP_GET,
@@ -4188,49 +4207,24 @@ void WebUI::register_routes() {
                 return;
             }
 
-            if (request->hasArg("index")) {
-                const long index = request->arg("index").toInt();
-
-                if (index < 0) {
+            if (request->hasArg("night")) {
+                uint64_t night_start_ms = 0;
+                if (!request_uint64_arg(request, "night", night_start_ms)) {
                     request->send(400, "application/json",
-                                  "{\"ok\":false,\"error\":\"bad index\"}");
+                                  "{\"ok\":false,\"error\":\"bad night\"}");
                     return;
                 }
 
-                uint64_t night_start_ms = 0;
-                bool have_night_start = false;
-
-                if (request->hasArg("night")) {
-                    const String night_arg = request->arg("night");
-                    char *end = nullptr;
-                    const unsigned long long parsed =
-                        strtoull(night_arg.c_str(), &end, 10);
-
-                    if (end == night_arg.c_str() || !end ||
-                        *end != '\0' || parsed == 0) {
-                        request->send(400, "application/json",
-                                      "{\"ok\":false,\"error\":\"bad night\"}");
-                        return;
-                    }
-
-                    night_start_ms = static_cast<uint64_t>(parsed);
-                    have_night_start = true;
-                }
-
                 bool refresh_cache = false;
-
                 if (request->hasArg("refresh_cache")) {
                     parse_bool_yesno(request->arg("refresh_cache"),
                                      refresh_cache);
                 }
 
-                const bool queued = have_night_start
-                    ? report_manager_->request_result_prepare_by_start(
-                          night_start_ms,
-                          refresh_cache)
-                    : report_manager_->request_result_prepare_by_therapy_index(
-                          static_cast<size_t>(index),
-                          refresh_cache);
+                const bool queued =
+                    report_manager_->request_result_prepare_by_start(
+                        night_start_ms,
+                        refresh_cache);
 
                 if (queued) {
                     request->send(202, "application/json", queued_json());
@@ -4250,9 +4244,9 @@ void WebUI::register_routes() {
                 return;
             }
 
-            if (!doc["index"].is<unsigned long>()) {
+            if (!doc["night"].is<unsigned long long>()) {
                 request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"missing index\"}");
+                              "{\"ok\":false,\"error\":\"missing night\"}");
                 return;
             }
 
@@ -4262,16 +4256,18 @@ void WebUI::register_routes() {
                 refresh_cache = doc["refresh_cache"].as<bool>();
             }
 
+            const uint64_t night_start_ms = static_cast<uint64_t>(
+                doc["night"].as<unsigned long long>());
+            if (night_start_ms == 0) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad night\"}");
+                return;
+            }
+
             const bool queued =
-                doc["night"].is<unsigned long long>()
-                    ? report_manager_->request_result_prepare_by_start(
-                          static_cast<uint64_t>(
-                              doc["night"].as<unsigned long long>()),
-                          refresh_cache)
-                    : report_manager_->request_result_prepare_by_therapy_index(
-                          static_cast<size_t>(
-                          doc["index"].as<unsigned long>()),
-                          refresh_cache);
+                report_manager_->request_result_prepare_by_start(
+                    night_start_ms,
+                    refresh_cache);
 
             if (queued) {
                 request->send(202, "application/json", queued_json());

@@ -51,28 +51,6 @@ ReportResultServingService::ReportResultServingService(
       cache_(cache),
       result_(result) {}
 
-ReportResultRead ReportResultServingService::read_result(
-    size_t therapy_index,
-    const char *if_none_match,
-    char *etag_out,
-    size_t etag_out_size,
-    LargeTextBuffer &json_out) {
-    ScopedIndexedNight indexed_night("read_result_index");
-    if (!indexed_night ||
-        !night_index_.by_therapy_index(therapy_index, indexed_night.get())) {
-        build_.note_read("not_found");
-        if (etag_out && etag_out_size) etag_out[0] = '\0';
-        return ReportResultRead::NotFound;
-    }
-
-    return read_result_for_indexed_night(therapy_index,
-                                         indexed_night.get(),
-                                         if_none_match,
-                                         etag_out,
-                                         etag_out_size,
-                                         json_out);
-}
-
 ReportResultRead ReportResultServingService::read_result_by_start(
     uint64_t night_start_ms,
     const char *if_none_match,
@@ -114,28 +92,28 @@ ReportResultRead ReportResultServingService::read_result_for_indexed_night(
         snprintf(etag_out, etag_out_size, "%s", current_etag);
     }
 
+    if (if_none_match && if_none_match[0] &&
+        strcmp(if_none_match, current_etag) == 0) {
+        build_.note_read("not_modified");
+        return ReportResultRead::NotModified;
+    }
+
     const ReportResultSlotRead slot_read =
         cache_.read_result(indexed_night.summary.start_ms,
                            current_etag,
-                           if_none_match,
                            json_out);
     if (slot_read == ReportResultSlotRead::Error) {
         build_.note_read("slot_copy_failed");
         return ReportResultRead::Unavailable;
     }
     if (slot_read != ReportResultSlotRead::NotFound) {
-        build_.note_read(slot_read == ReportResultSlotRead::NotModified
-                             ? "not_modified"
-                             : "ready");
-        return slot_read == ReportResultSlotRead::NotModified
-                   ? ReportResultRead::NotModified
-                   : ReportResultRead::Ready;
+        build_.note_read("ready");
+        return ReportResultRead::Ready;
     }
 
     const ReportCacheLoadRequest load_request =
         cache_.request_load(indexed_night.summary.start_ms,
-                            current_etag,
-                            ReportCacheArtifact::Result);
+                            current_etag);
     switch (load_request) {
         case ReportCacheLoadRequest::Queued:
         case ReportCacheLoadRequest::Pending:
@@ -225,8 +203,7 @@ ReportPlotRead ReportResultServingService::read_plot(
 
     const ReportCacheLoadRequest load_request =
         cache_.request_load(indexed_night->summary.start_ms,
-                            current_etag,
-                            ReportCacheArtifact::Plot);
+                            current_etag);
     switch (load_request) {
         case ReportCacheLoadRequest::Queued:
         case ReportCacheLoadRequest::Pending:

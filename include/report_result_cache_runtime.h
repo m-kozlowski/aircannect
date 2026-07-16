@@ -26,7 +26,6 @@ public:
 
     ReportResultSlotRead read_result(uint64_t night_start_ms,
                                      const char *etag,
-                                     const char *if_none_match,
                                      LargeTextBuffer &json_out);
 
     ReportCachedPlotRead read_plot(
@@ -58,8 +57,7 @@ public:
     void invalidate(uint64_t night_start_ms, bool all);
 
     ReportCacheLoadRequest request_load(uint64_t night_start_ms,
-                                        const char *etag,
-                                        ReportCacheArtifact artifact);
+                                        const char *etag);
     bool loader_active() const;
     bool service_loader();
 

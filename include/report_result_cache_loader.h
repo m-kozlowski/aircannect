@@ -10,11 +10,6 @@ namespace aircannect {
 
 class ReportResultSlotCache;
 
-enum class ReportCacheArtifact : uint8_t {
-    Result = 1u << 0,
-    Plot = 1u << 1,
-};
-
 enum class ReportCacheLoadRequest : uint8_t {
     Queued,
     Pending,
@@ -31,9 +26,7 @@ public:
     ~ReportResultCacheLoader();
 
     bool begin();
-    ReportCacheLoadRequest request(uint64_t night_start_ms,
-                                   const char *etag,
-                                   ReportCacheArtifact artifact);
+    ReportCacheLoadRequest request(uint64_t night_start_ms, const char *etag);
     bool active() const;
     bool service();
     void invalidate(uint64_t night_start_ms, bool all);

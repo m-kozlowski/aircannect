@@ -160,7 +160,6 @@ bool ReportResultSlotCache::publish(
 ReportResultSlotRead ReportResultSlotCache::read_result(
     uint64_t night_start_ms,
     const char *etag,
-    const char *if_none_match,
     LargeTextBuffer &json_out) {
     if (!slots_ || !lock_ || !etag || !etag[0]) {
         return ReportResultSlotRead::NotFound;
@@ -184,14 +183,6 @@ ReportResultSlotRead ReportResultSlotCache::read_result(
         }
 
         slot.last_used = ++tick_;
-        const bool cacheable = slot.state == ReportResultState::Ready ||
-                               slot.state == ReportResultState::Partial;
-        if (cacheable && if_none_match && if_none_match[0] &&
-            strcmp(if_none_match, etag) == 0) {
-            xSemaphoreGive(lock_);
-            return ReportResultSlotRead::NotModified;
-        }
-
         const std::shared_ptr<ReportSpoolBuffer> result_json =
             slot.result_json;
 

@@ -97,8 +97,8 @@ void ReportRuntimeService::poll(RpcArbiter &arbiter) {
     service_range_plot(realtime_active);
     prefetch_.service(realtime_active);
 
-    // EDF catalog changes invalidate summary-derived materialization.
-    service_catalog_summary_publish();
+    // Summary and EDF catalog changes republish one coherent night snapshot.
+    service_summary_snapshot_publish();
 
     // Cross-task summary revision publication
     if (summary_runtime_.take(0)) {
@@ -143,21 +143,47 @@ void ReportRuntimeService::poll(RpcArbiter &arbiter) {
     handle_summary_fetch_event(summary_.poll(arbiter));
 }
 
-void ReportRuntimeService::service_catalog_summary_publish() {
-    if (!edf_catalog_) return;
-
+void ReportRuntimeService::service_summary_snapshot_publish() {
     EdfReportCatalogStatus catalog_status;
-    if (!edf_catalog_.ready_refresh_changed(catalog_status)) return;
-
     const uint32_t now_ms = millis();
-    if (summary_publish_retry_.refresh_id != catalog_status.refresh_id) {
-        summary_publish_retry_ = {};
-        summary_publish_retry_.refresh_id = catalog_status.refresh_id;
+    if (edf_catalog_ &&
+        edf_catalog_.ready_refresh_changed(catalog_status)) {
+        if (!summary_publish_retry_.catalog_pending ||
+            summary_publish_retry_.catalog_refresh_id !=
+                catalog_status.refresh_id) {
+            summary_publish_retry_ = {};
+            summary_publish_retry_.catalog_pending = true;
+            summary_publish_retry_.catalog_refresh_id =
+                catalog_status.refresh_id;
+            summary_publish_retry_.catalog_sessions =
+                catalog_status.sessions;
+            summary_.request_json_snapshot_publish();
+        }
+
+        if (!summary_publish_retry_.cache_invalidated) {
+            result_cache_.invalidate(0, true);
+            summary_publish_retry_.cache_invalidated = true;
+        }
     }
 
-    if (!summary_publish_retry_.cache_invalidated) {
-        result_cache_.invalidate(0, true);
-        summary_publish_retry_.cache_invalidated = true;
+    if (!summary_.json_snapshot_publish_pending()) {
+        if (summary_publish_retry_.catalog_pending) {
+            edf_catalog_.mark_summary_published(
+                summary_publish_retry_.catalog_refresh_id);
+            summary_publish_retry_ = {};
+        }
+        return;
+    }
+
+    const uint32_t snapshot_generation =
+        summary_.json_snapshot_generation();
+    if (summary_publish_retry_.snapshot_generation !=
+        snapshot_generation) {
+        summary_publish_retry_.snapshot_generation = snapshot_generation;
+        summary_publish_retry_.next_attempt_ms = 0;
+        summary_publish_retry_.next_warning_ms = 0;
+        summary_publish_retry_.failures = 0;
+        summary_publish_retry_.busy_retries = 0;
     }
 
     if (summary_publish_retry_.next_attempt_ms != 0 &&
@@ -173,27 +199,69 @@ void ReportRuntimeService::service_catalog_summary_publish() {
         static_cast<uint32_t>(millis() - publish_start_ms);
 
     if (result == ReportSummarySnapshotResult::Published) {
+        const bool catalog_pending =
+            summary_publish_retry_.catalog_pending;
         const log_level_t level = summary_publish_retry_.failures > 0 ||
-                                        publish_ms > 500
+                                      summary_publish_retry_.busy_retries > 0 ||
+                                      !catalog_pending || publish_ms > 500
             ? LOG_INFO
             : LOG_DEBUG;
 
-        Log::logf(CAT_REPORT,
-                  level,
-                  "Summary snapshot published refresh_id=%lu sessions=%lu "
-                  "ms=%lu retries=%u\n",
-                  static_cast<unsigned long>(catalog_status.refresh_id),
-                  static_cast<unsigned long>(catalog_status.sessions),
-                  static_cast<unsigned long>(publish_ms),
-                  static_cast<unsigned>(summary_publish_retry_.failures));
+        if (catalog_pending) {
+            Log::logf(
+                CAT_REPORT,
+                level,
+                "Summary snapshot published refresh_id=%lu sessions=%lu "
+                "generation=%lu ms=%lu retries=%u\n",
+                static_cast<unsigned long>(
+                    summary_publish_retry_.catalog_refresh_id),
+                static_cast<unsigned long>(
+                    summary_publish_retry_.catalog_sessions),
+                static_cast<unsigned long>(snapshot_generation),
+                static_cast<unsigned long>(publish_ms),
+                static_cast<unsigned>(summary_publish_retry_.failures +
+                                      summary_publish_retry_.busy_retries));
 
-        edf_catalog_.mark_summary_published(catalog_status.refresh_id);
+            edf_catalog_.mark_summary_published(
+                summary_publish_retry_.catalog_refresh_id);
+        } else {
+            Log::logf(CAT_REPORT,
+                      level,
+                      "Summary snapshot recovered generation=%lu ms=%lu "
+                      "retries=%u\n",
+                      static_cast<unsigned long>(snapshot_generation),
+                      static_cast<unsigned long>(publish_ms),
+                      static_cast<unsigned>(
+                          summary_publish_retry_.failures +
+                          summary_publish_retry_.busy_retries));
+        }
+
         summary_publish_retry_ = {};
         return;
     }
 
     if (result == ReportSummarySnapshotResult::Busy) {
+        summary_publish_retry_.busy_retries++;
         summary_publish_retry_.next_attempt_ms = now_ms + 50;
+
+        if (summary_publish_retry_.next_warning_ms == 0) {
+            summary_publish_retry_.next_warning_ms = now_ms + 5000;
+            return;
+        }
+        if (static_cast<int32_t>(
+                now_ms - summary_publish_retry_.next_warning_ms) < 0) {
+            return;
+        }
+
+        summary_publish_retry_.next_warning_ms = now_ms + 60000;
+        Log::logf(CAT_REPORT,
+                  LOG_WARN,
+                  "Summary snapshot still busy generation=%lu error=%s "
+                  "retries=%u\n",
+                  static_cast<unsigned long>(snapshot_generation),
+                  summary_.snapshot_error(),
+                  static_cast<unsigned>(
+                      summary_publish_retry_.busy_retries));
         return;
     }
 
@@ -211,10 +279,11 @@ void ReportRuntimeService::service_catalog_summary_publish() {
     summary_publish_retry_.next_warning_ms = now_ms + 60000;
     Log::logf(CAT_REPORT,
               LOG_WARN,
-              "Summary snapshot publish failed refresh_id=%lu sessions=%lu "
-              "error=%s ms=%lu attempt=%u retry_ms=%lu\n",
-              static_cast<unsigned long>(catalog_status.refresh_id),
-              static_cast<unsigned long>(catalog_status.sessions),
+              "Summary snapshot publish failed generation=%lu "
+              "refresh_id=%lu error=%s ms=%lu attempt=%u retry_ms=%lu\n",
+              static_cast<unsigned long>(snapshot_generation),
+              static_cast<unsigned long>(
+                  summary_publish_retry_.catalog_refresh_id),
               summary_.snapshot_error(),
               static_cast<unsigned long>(publish_ms),
               static_cast<unsigned>(summary_publish_retry_.failures),

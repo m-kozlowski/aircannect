@@ -2,7 +2,19 @@
 
 namespace aircannect {
 
+void ReportSummarySnapshot::request_publish() {
+    requested_generation_++;
+    if (requested_generation_ == published_generation_) {
+        requested_generation_++;
+    }
+}
+
 void ReportSummarySnapshot::publish(LargeTextBuffer &build_buffer) {
+    snapshot_.swap(build_buffer);
+    published_generation_ = requested_generation_;
+}
+
+void ReportSummarySnapshot::publish_fallback(LargeTextBuffer &build_buffer) {
     snapshot_.swap(build_buffer);
 }
 

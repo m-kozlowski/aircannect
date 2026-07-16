@@ -6,6 +6,7 @@
 #include "edf_report_catalog.h"
 #include "edf_report_catalog_job.h"
 #include "report_index_scratch.h"
+#include "report_manager_limits.h"
 #include "report_result_cache_files.h"
 #include "storage_manager.h"
 
@@ -79,10 +80,6 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
         return ReportPlotPrebuildResult::Drained;
     }
 
-    if (!build_.has_capacity()) {
-        return ReportPlotPrebuildResult::Waiting;
-    }
-
     ReportNightIndexSnapshotRef snapshot;
     const ReportNightIndexSnapshotResult snapshot_result =
         night_index_.snapshot(snapshot);
@@ -115,8 +112,38 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
         char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
         night_index_.format_result_etag(night.get(), etag, sizeof(etag));
 
-        if (result_plot_cache_exists_for_etag(night->summary.start_ms, etag)) {
+        bool pair_exists = result_cache_pair_exists_for_etag(
+            night->summary.start_ms,
+            etag);
+        if (pair_exists && therapy_index < AC_REPORT_RESULT_SLOT_MAX) {
+            const ReportCacheLoadRequest load = result_cache_.request_load(
+                night->summary.start_ms,
+                etag);
+
+            if (load == ReportCacheLoadRequest::Queued ||
+                load == ReportCacheLoadRequest::Pending) {
+                return ReportPlotPrebuildResult::Waiting;
+            }
+
+            if (load == ReportCacheLoadRequest::Full ||
+                load == ReportCacheLoadRequest::Failed ||
+                load == ReportCacheLoadRequest::Unavailable) {
+                build_.rewind_prebuild_cursor();
+                return ReportPlotPrebuildResult::Waiting;
+            }
+
+            if (load == ReportCacheLoadRequest::Missing) {
+                pair_exists = false;
+            }
+        }
+
+        if (pair_exists) {
             continue;
+        }
+
+        if (!build_.has_capacity()) {
+            build_.rewind_prebuild_cursor();
+            return ReportPlotPrebuildResult::Waiting;
         }
 
         const BuildQueueResult queued =
