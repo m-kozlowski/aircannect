@@ -17,6 +17,9 @@
 namespace aircannect {
 namespace {
 
+constexpr uint32_t AS11_SETTINGS_READBACK_TIMEOUT_MS = 20000;
+constexpr uint32_t AS11_SETTINGS_REFRESH_RETRY_MS = 1000;
+
 void *alloc_payload_bytes(size_t bytes) {
 #ifdef ARDUINO
     return Memory::alloc_large(bytes);
@@ -210,6 +213,7 @@ void RpcArbiter::poll() {
     process_deferred_payloads(AC_RPC_PAYLOAD_DRAIN_BUDGET);
 
     check_pending_timeout();
+    poll_as11_settings_refresh(millis());
     poll_stream_subscription();
     poll_event_subscription();
     poll_as11_healthcheck();
@@ -902,6 +906,11 @@ bool RpcArbiter::pop_source_event_queue(SourceEventQueue queue,
 
 void RpcArbiter::cancel_pending_request(const char *reason) {
     if (!pending_.active) return;
+    if (pending_.settings_refresh) {
+        finish_as11_settings_refresh();
+        schedule_as11_settings_refresh_retry(RpcSource::Scheduler, millis());
+    }
+
     stats_.request_cancellations++;
     if (pending_.source == RpcSource::ResmedOta) {
         char buf[160];
@@ -938,6 +947,11 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
 
 void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
                                        const char *reason) {
+    if (request.settings_refresh) {
+        finish_as11_settings_refresh();
+        schedule_as11_settings_refresh_retry(RpcSource::Scheduler, millis());
+    }
+
     stats_.request_cancellations++;
     if (request.source == RpcSource::ResmedOta) {
         char buf[160];
@@ -1227,6 +1241,11 @@ void RpcArbiter::check_pending_timeout() {
     if (pending_.method == "Set") {
         as11_settings_.note_set_cancelled("timeout", now);
     }
+    if (pending_.settings_refresh) {
+        finish_as11_settings_refresh();
+        schedule_as11_settings_refresh_retry(RpcSource::Scheduler, now);
+    }
+
     pending_ = {};
 }
 
@@ -1393,6 +1412,7 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
         As11DeviceState::is_therapy_command_method(pending_.method);
     bool get_had_pending_therapy = false;
     bool settings_updated = false;
+    bool settings_snapshot_complete = false;
     if (pending_.method == "Set") {
         as11_settings_.note_set_response(is_error, now);
     }
@@ -1402,8 +1422,8 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
             const As11TherapyState before_get_state =
                 as11_state_.therapy_state();
             as11_state_.apply_status_get_response(payload, now);
-            settings_updated =
-                as11_settings_.apply_settings_get_response(payload, now);
+            settings_updated = as11_settings_.apply_settings_get_response(
+                payload, now, &settings_snapshot_complete);
             if (before_get_state == As11TherapyState::Running &&
                 as11_state_.therapy_state() == As11TherapyState::Standby) {
                 schedule_as11_motor_refresh(
@@ -1457,9 +1477,17 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
                                       is_error, payload, now);
         if (is_error) stats_.stream_command_errors++;
     }
-    if (settings_updated && pending_.settings_refresh) {
+    const bool settings_refresh_succeeded =
+        settings_updated && settings_snapshot_complete && !is_error;
+    if (settings_refresh_succeeded && pending_.settings_refresh) {
         push_event(RpcEventKind::InternalSettingsStateUpdated, "",
                    pending_.source, pending_.id);
+    }
+    if (pending_.settings_refresh) {
+        finish_as11_settings_refresh();
+        if (!settings_refresh_succeeded) {
+            schedule_as11_settings_refresh_retry(RpcSource::Scheduler, now);
+        }
     }
 }
 
@@ -1506,13 +1534,68 @@ bool RpcArbiter::request_as11_healthcheck() {
     return true;
 }
 
-bool RpcArbiter::request_as11_settings_refresh() {
+bool RpcArbiter::enqueue_as11_settings_refresh(RpcSource source) {
     QueuedRequest request;
     request.method = "Get";
     request.params_json = as11_settings_get_params_json();
-    request.source = RpcSource::Scheduler;
+    request.source = source;
     request.settings_refresh = true;
-    return enqueue_request(request);
+    if (!enqueue_request(request)) return false;
+
+    settings_refresh_pending_count_++;
+    return true;
+}
+
+void RpcArbiter::schedule_as11_settings_refresh_retry(RpcSource source,
+                                                      uint32_t now) {
+    if (!settings_refresh_retry_pending_ ||
+        (scheduler_source(settings_refresh_retry_source_) &&
+         !scheduler_source(source))) {
+        settings_refresh_retry_source_ = source;
+    }
+    settings_refresh_retry_pending_ = true;
+
+    uint32_t due = now + AS11_SETTINGS_REFRESH_RETRY_MS;
+    if (scheduler_source(settings_refresh_retry_source_) &&
+        background_backoff_active(now)) {
+        due = background_backoff_until_ms_;
+    }
+    next_settings_refresh_retry_ms_ = due;
+}
+
+bool RpcArbiter::request_as11_settings_refresh(RpcSource source) {
+    if (enqueue_as11_settings_refresh(source)) {
+        settings_refresh_retry_pending_ = false;
+        next_settings_refresh_retry_ms_ = 0;
+        return true;
+    }
+
+    schedule_as11_settings_refresh_retry(source, millis());
+    return false;
+}
+
+void RpcArbiter::poll_as11_settings_refresh(uint32_t now) {
+    if (as11_settings_.expire_pending(
+            now, AS11_SETTINGS_READBACK_TIMEOUT_MS)) {
+        push_event(RpcEventKind::InternalSettingsStateUpdated, "",
+                   RpcSource::Internal);
+    }
+
+    if (!settings_refresh_retry_pending_ || esp_ota_quiesce_requested_) return;
+    if (static_cast<int32_t>(now - next_settings_refresh_retry_ms_) < 0) return;
+
+    const RpcSource source = settings_refresh_retry_source_;
+    if (enqueue_as11_settings_refresh(source)) {
+        settings_refresh_retry_pending_ = false;
+        next_settings_refresh_retry_ms_ = 0;
+        return;
+    }
+
+    schedule_as11_settings_refresh_retry(source, now);
+}
+
+void RpcArbiter::finish_as11_settings_refresh() {
+    if (settings_refresh_pending_count_) settings_refresh_pending_count_--;
 }
 
 bool RpcArbiter::handle_event_notification(const char *payload,
@@ -1531,7 +1614,7 @@ bool RpcArbiter::handle_event_notification(const char *payload,
     if (event_result.settings_history_change) {
         push_event(RpcEventKind::InternalSettingsStateInvalidated, "",
                    RpcSource::Scheduler);
-        request_as11_settings_refresh();
+        request_as11_settings_refresh(RpcSource::Scheduler);
     }
     const std::string event = as11_state_.last_activity_event();
     if (activity_updated && event_suggests_identity_refresh(event)) {
@@ -1704,6 +1787,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 const uint32_t matched_id = pending_.id;
                 const std::string matched_method = pending_.method;
                 const RpcSource response_source = pending_.source;
+                const bool settings_refresh = pending_.settings_refresh;
                 if (response_source != RpcSource::Console) {
                     char prefix[112];
                     snprintf(prefix, sizeof(prefix),
@@ -1724,6 +1808,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                                       matched_id);
                     break;
                 }
+                if (settings_refresh) break;
                 if (!emit_matched_response(response_source)) break;
                 push_event(RpcEventKind::RpcResponse, ref_payload(),
                            response_source, matched_id);

@@ -180,7 +180,12 @@ public:
     void reset_stats();
 
     bool request_as11_healthcheck();
-    bool request_as11_settings_refresh();
+    bool request_as11_settings_refresh(
+        RpcSource source = RpcSource::Scheduler);
+    bool as11_settings_refresh_pending() const {
+        return settings_refresh_pending_count_ != 0 ||
+               settings_refresh_retry_pending_;
+    }
     bool recover_can(const char *reason);
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
@@ -297,6 +302,11 @@ private:
     void cancel_queued_request(const QueuedRequest &request,
                                const char *reason);
     void cancel_all_requests(const char *reason);
+    bool enqueue_as11_settings_refresh(RpcSource source);
+    void schedule_as11_settings_refresh_retry(RpcSource source,
+                                              uint32_t now);
+    void poll_as11_settings_refresh(uint32_t now);
+    void finish_as11_settings_refresh();
 
     void expire_raw_passthrough(uint32_t now);
     void remember_raw_passthrough(uint32_t id,
@@ -420,6 +430,10 @@ private:
     As11SettingsState as11_settings_;
 
     bool as11_healthcheck_initialized_ = false;
+    uint8_t settings_refresh_pending_count_ = 0;
+    bool settings_refresh_retry_pending_ = false;
+    RpcSource settings_refresh_retry_source_ = RpcSource::Scheduler;
+    uint32_t next_settings_refresh_retry_ms_ = 0;
 
     // Background AS11 polls
     uint32_t next_as11_identity_poll_ms_ = 0;

@@ -711,7 +711,8 @@ void As11SettingsState::release_storage() {
 
 bool As11SettingsState::apply_settings_get_response(
     const std::string &payload,
-    uint32_t now_ms) {
+    uint32_t now_ms,
+    bool *complete_snapshot_out) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
     if (err) return false;
@@ -722,6 +723,11 @@ bool As11SettingsState::apply_settings_get_response(
     }
     if (result.isNull()) return false;
     if (!ensure_storage()) return false;
+
+    const bool complete_snapshot =
+        !result["TherapyProfiles"].as<JsonObjectConst>().isNull() &&
+        !result["FeatureProfiles"].as<JsonObjectConst>().isNull();
+    if (complete_snapshot_out) *complete_snapshot_out = complete_snapshot;
 
     int fallback_mode = mode_index();
     JsonVariantConst active = result["_MOP"];
@@ -735,20 +741,23 @@ bool As11SettingsState::apply_settings_get_response(
     }
 
     bool any = false;
+    bool pending_confirmed = false;
+    bool pending_mismatched = false;
     bool storage_ok = true;
     auto remember_value = [&](size_t index, const std::string &normalized) {
         if (!values_[index].set(normalized)) {
             storage_ok = false;
             return;
         }
-        if (pending_[index] &&
-            setting_value_matches(SETTINGS[index],
-                                  values_[index].str(),
-                                  pending_values_[index].str())) {
-            clear_pending(index);
-            last_write_status_ = pending_count_ ? "waiting_readback"
-                                                : "confirmed";
-            last_write_ms_ = now_ms;
+        if (pending_[index]) {
+            const bool matches = setting_value_matches(
+                SETTINGS[index], values_[index].str(),
+                pending_values_[index].str());
+            if (matches || complete_snapshot) {
+                clear_pending(index);
+                pending_confirmed = pending_confirmed || matches;
+                pending_mismatched = pending_mismatched || !matches;
+            }
         }
         any = true;
     };
@@ -763,14 +772,14 @@ bool As11SettingsState::apply_settings_get_response(
             storage_ok = false;
             return;
         }
-        if (pending_[index] &&
-            setting_value_matches(SETTINGS[index],
-                                  normalized,
-                                  pending_values_[index].str())) {
-            clear_pending(index);
-            last_write_status_ = pending_count_ ? "waiting_readback"
-                                                : "confirmed";
-            last_write_ms_ = now_ms;
+        if (pending_[index]) {
+            const bool matches = setting_value_matches(
+                SETTINGS[index], normalized, pending_values_[index].str());
+            if (matches || complete_snapshot) {
+                clear_pending(index);
+                pending_confirmed = pending_confirmed || matches;
+                pending_mismatched = pending_mismatched || !matches;
+            }
         }
         any = true;
     };
@@ -813,10 +822,19 @@ bool As11SettingsState::apply_settings_get_response(
             mode, i, normalize_value_for_def(SETTINGS[i], value));
     }
 
-    if (any && storage_ok) {
+    if (any && storage_ok && complete_snapshot) {
         valid_ = true;
         updated_ms_ = now_ms;
     }
+
+    if (pending_mismatched) {
+        last_write_status_ = "readback_mismatch";
+        last_write_ms_ = now_ms;
+    } else if (pending_confirmed) {
+        last_write_status_ = pending_count_ ? "waiting_readback" : "confirmed";
+        last_write_ms_ = now_ms;
+    }
+
     return any && storage_ok;
 }
 
@@ -867,6 +885,9 @@ void As11SettingsState::note_set_response(bool is_error, uint32_t now_ms) {
         clear_all_pending();
         last_write_status_ = "set_error";
     } else {
+        for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
+            if (pending_[i]) pending_since_ms_[i] = now_ms;
+        }
         last_write_status_ = "waiting_readback";
     }
     last_write_ms_ = now_ms;
@@ -878,6 +899,28 @@ void As11SettingsState::note_set_cancelled(const char *reason,
     clear_all_pending();
     last_write_status_ = reason ? reason : "cancelled";
     last_write_ms_ = now_ms;
+}
+
+bool As11SettingsState::expire_pending(uint32_t now_ms,
+                                       uint32_t timeout_ms) {
+    if (!pending_count_ || timeout_ms == 0) return false;
+
+    bool expired = false;
+    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
+        if (!pending_[i]) continue;
+        if (static_cast<uint32_t>(now_ms - pending_since_ms_[i]) < timeout_ms) {
+            continue;
+        }
+
+        clear_pending(i);
+        expired = true;
+    }
+
+    if (expired) {
+        last_write_status_ = "readback_timeout";
+        last_write_ms_ = now_ms;
+    }
+    return expired;
 }
 
 void As11SettingsState::clear() {

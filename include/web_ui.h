@@ -167,7 +167,8 @@ private:
     void note_console_sse_sent();
     void send_console_snapshot(AsyncWebServerRequest *request) const;
     void send_cached_settings(AsyncWebServerRequest *request,
-                              int requested_mode);
+                              int requested_mode,
+                              bool refresh_requested = false);
     void mark_snapshots_dirty(uint16_t mask);
     void request_sse_push();
     void publish_snapshots(bool force,
@@ -319,7 +320,7 @@ private:
     // snapshot state
     int cached_settings_mode_ = -1;
     int requested_settings_mode_ = -1;
-    bool cached_settings_refresh_queued_ = false;
+    bool observed_settings_refresh_pending_ = false;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;

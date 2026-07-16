@@ -114,10 +114,12 @@ public:
     ~As11SettingsState();
 
     bool apply_settings_get_response(const std::string &payload,
-                                     uint32_t now_ms);
+                                     uint32_t now_ms,
+                                     bool *complete_snapshot = nullptr);
     bool note_set_request(const std::string &params_json, uint32_t now_ms);
     void note_set_response(bool is_error, uint32_t now_ms);
     void note_set_cancelled(const char *reason, uint32_t now_ms);
+    bool expire_pending(uint32_t now_ms, uint32_t timeout_ms);
 
     void clear();
 

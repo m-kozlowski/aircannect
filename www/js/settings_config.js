@@ -29,9 +29,14 @@
 
       const active = clinicalTabActive();
       const refreshing = Date.now() < settingsRefreshUntil;
-      if (active && (data.refresh_queued || refreshing || !data.valid ||
-          data.pending_count)) {
-        settingsPollTimer = setTimeout(() => loadSettings(false, true), 1200);
+      const snapshotPending = !!data.snapshot_pending;
+      const needsRefresh = !data.valid && !data.refresh_queued &&
+        !snapshotPending && !refreshing;
+      if (active && (data.refresh_queued || snapshotPending || refreshing ||
+          !data.valid || data.pending_count)) {
+        settingsPollTimer = setTimeout(
+          () => loadSettings(needsRefresh, !needsRefresh),
+          needsRefresh ? 0 : 1200);
       }
     }
 

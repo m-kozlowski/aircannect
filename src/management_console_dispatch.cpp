@@ -1776,7 +1776,7 @@ void ManagementConsole::handle_set_command(Print &out,
     }
 
     if (ctx.arbiter.send_request("Set", params, RpcSource::Console)) {
-        ctx.arbiter.request_as11_settings_refresh();
+        ctx.arbiter.request_as11_settings_refresh(RpcSource::Console);
         out.println("[RPC] Set queued");
     } else {
         out.println("[RPC] Set queue failed");

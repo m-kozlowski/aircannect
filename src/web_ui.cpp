@@ -752,10 +752,11 @@ bool request_bool_arg_default(AsyncWebServerRequest *request,
     return true;
 }
 
-String settings_placeholder_json(bool refresh_queued) {
+String settings_placeholder_json(bool refresh_queued, bool snapshot_pending) {
     String json = "{";
     json_add_bool(json, "valid", false, false);
     json_add_bool(json, "refresh_queued", refresh_queued);
+    json_add_bool(json, "snapshot_pending", snapshot_pending);
     json_add_int(json, "pending_count", 0);
     json_add_string(json, "last_write_status", "");
     json += ",\"last_write_age_ms\":null";
@@ -1159,6 +1160,7 @@ void WebUI::stop() {
     }
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
+    observed_settings_refresh_pending_ = false;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
@@ -1172,6 +1174,11 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         arbiter_ &&
         (arbiter_->stream_activity_active() ||
          arbiter_->as11_state().therapy_state() == As11TherapyState::Running);
+    if (arbiter_ && observed_settings_refresh_pending_ !=
+                        arbiter_->as11_settings_refresh_pending()) {
+        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+    }
+
     drain_commands();
     if (checkpoint) checkpoint("web_ui.commands");
     enforce_sse_limits();
@@ -1505,23 +1512,9 @@ void WebUI::handle_event(const RpcEvent &event) {
             sse_enforce_needed_ = true;
         }
     } else if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
-        if (cache_mutex_ &&
-            xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
-            cached_settings_refresh_queued_ = true;
-            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-            xSemaphoreGive(cache_mutex_);
-        } else {
-            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-        }
+        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     } else if (event.kind == RpcEventKind::InternalSettingsStateUpdated) {
-        if (cache_mutex_ &&
-            xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
-            cached_settings_refresh_queued_ = false;
-            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-            xSemaphoreGive(cache_mutex_);
-        } else {
-            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-        }
+        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     } else if (event.kind == RpcEventKind::InternalDeviceStateUpdated) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
     }
@@ -1702,10 +1695,11 @@ void WebUI::request_sse_push() {
 }
 
 void WebUI::send_cached_settings(AsyncWebServerRequest *request,
-                                 int requested_mode) {
+                                 int requested_mode,
+                                 bool refresh_requested) {
     bool mismatch = false;
     bool has_cached = false;
-    bool refresh_queued = false;
+    bool refresh_queued = refresh_requested;
     if (!cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
         request->send(503, "application/json",
@@ -1713,6 +1707,8 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
                       "\"settings\":[]}");
         return;
     }
+    refresh_queued = refresh_queued || observed_settings_refresh_pending_;
+
     const int active_mode =
         requested_mode < 0 ? active_settings_mode(arbiter_) : -1;
     const bool explicit_mode_mismatch =
@@ -1729,7 +1725,6 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
         mismatch = true;
     } else {
-        refresh_queued = cached_settings_refresh_queued_;
         has_cached = !refresh_queued && cached_settings_json_.length() > 0;
     }
 
@@ -1752,7 +1747,7 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
     xSemaphoreGive(cache_mutex_);
 
     const String placeholder =
-        settings_placeholder_json(mismatch || refresh_queued);
+        settings_placeholder_json(refresh_queued, mismatch);
     request->send(200, "application/json", placeholder);
 }
 
@@ -3677,7 +3672,9 @@ void WebUI::publish_snapshots(bool force,
     }
     if (rebuild_mask & SNAPSHOT_SETTINGS) {
         const int requested_mode = requested_settings_mode_;
-        const bool refresh_queued = cached_settings_refresh_queued_;
+        const bool refresh_queued =
+            arbiter_ && arbiter_->as11_settings_refresh_pending();
+        observed_settings_refresh_pending_ = refresh_queued;
         int published_settings_mode = requested_mode;
         if (published_settings_mode < 0) {
             published_settings_mode = active_settings_mode(arbiter_);
@@ -3722,7 +3719,7 @@ void WebUI::execute_command(WebCommand &command) {
             execute_time_action(command.text);
             break;
         case WebCommandSettingsRefresh:
-            arbiter_->request_as11_settings_refresh();
+            (void)arbiter_->request_as11_settings_refresh(RpcSource::HttpApi);
             mark_snapshots_dirty(SNAPSHOT_SETTINGS);
             break;
         case WebCommandSettingsUpdate:
@@ -3835,7 +3832,7 @@ void WebUI::execute_settings_update(const std::string &body) {
     std::string params = as11_build_set_params_from_json(body, mode, accepted);
     if (!accepted) return;
     if (arbiter_->send_request("Set", params, RpcSource::HttpApi)) {
-        arbiter_->request_as11_settings_refresh();
+        arbiter_->request_as11_settings_refresh(RpcSource::HttpApi);
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     }
 }
@@ -4812,17 +4809,12 @@ void WebUI::register_routes() {
     server_->on(AsyncURIMatcher::exact("/api/settings"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         const int mode = request_profile_mode_arg(request);
+        bool refresh_requested = false;
         if (request->hasArg("refresh")) {
-            const bool queued =
+            refresh_requested =
                 enqueue_simple_command(WebCommandSettingsRefresh);
-            if (queued && cache_mutex_ &&
-                xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-                cached_settings_refresh_queued_ = true;
-                mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-                xSemaphoreGive(cache_mutex_);
-            }
         }
-        send_cached_settings(request, mode);
+        send_cached_settings(request, mode, refresh_requested);
     });
 
     server_->on(
