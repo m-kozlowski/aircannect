@@ -114,6 +114,8 @@ void OtaManager::poll_update_check(bool network_online, bool check_allowed) {
         deadline_due(now, update_next_check_ms_);
 
     if (!status_.update_check_pending &&
+        !status_.update_check_active &&
+        !update_check_task_ &&
         (first_check_due || periodic_check_due)) {
         status_.update_check_pending = true;
     }
