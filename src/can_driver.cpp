@@ -61,6 +61,22 @@ const char *CanDriver::error_name(esp_err_t err) {
 }
 
 bool CanDriver::begin() {
+    if (!install_controller()) return false;
+    if (!start_controller()) {
+        (void)twai_driver_uninstall();
+        installed_ = false;
+        return false;
+    }
+
+    Log::logf(CAT_CAN, LOG_INFO,
+              "started bitrate=%d timing=%s tx_gpio=%d rx_gpio=%d "
+              "tx_id=0x%03X rx_id=0x%03X\n",
+              AC_CAN_BITRATE, can_timing_name(), AC_CAN_TX_GPIO,
+              AC_CAN_RX_GPIO, AC_CAN_TX_ID, AC_CAN_RX_ID);
+    return true;
+}
+
+bool CanDriver::install_controller() {
     twai_general_config_t general_config = TWAI_GENERAL_CONFIG_DEFAULT(
         static_cast<gpio_num_t>(AC_CAN_TX_GPIO),
         static_cast<gpio_num_t>(AC_CAN_RX_GPIO),
@@ -79,13 +95,6 @@ bool CanDriver::begin() {
         return false;
     }
     installed_ = true;
-
-    if (!start_controller()) return false;
-
-    Log::logf(CAT_CAN, LOG_INFO,
-              "started bitrate=%d timing=%s tx_gpio=%d rx_gpio=%d tx_id=0x%03X rx_id=0x%03X\n",
-              AC_CAN_BITRATE, can_timing_name(), AC_CAN_TX_GPIO,
-              AC_CAN_RX_GPIO, AC_CAN_TX_ID, AC_CAN_RX_ID);
     return true;
 }
 
@@ -107,6 +116,7 @@ bool CanDriver::start_controller() {
                             TWAI_ALERT_ARB_LOST |
                             TWAI_ALERT_ABOVE_ERR_WARN |
                             TWAI_ALERT_BELOW_ERR_WARN |
+                            TWAI_ALERT_RECOVERY_IN_PROGRESS |
                             TWAI_ALERT_BUS_RECOVERED;
     err = twai_reconfigure_alerts(alerts, nullptr);
     if (err != ESP_OK) {
@@ -117,7 +127,10 @@ bool CanDriver::start_controller() {
 }
 
 void CanDriver::poll() {
-    if (!installed_) return;
+    if (!installed_) {
+        if (recovery_active_) poll_recovery(0);
+        return;
+    }
 
     uint32_t alerts = 0;
     esp_err_t err = twai_read_alerts(&alerts, 0);
@@ -282,7 +295,7 @@ void CanDriver::handle_alerts(uint32_t alerts) {
 
     if (suppressed) {
         Log::logf(CAT_CAN, alert_level,
-                  "alert:%s%s%s%s%s%s%s%s%s%s "
+                  "alert:%s%s%s%s%s%s%s%s%s%s%s "
                   "suppressed_bus_errors=%lu%s\n",
                   (visible_alerts & TWAI_ALERT_TX_FAILED) ? " tx_failed" : "",
                   (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) ? " rx_queue_full" : "",
@@ -293,12 +306,13 @@ void CanDriver::handle_alerts(uint32_t alerts) {
                   (visible_alerts & TWAI_ALERT_ARB_LOST) ? " arb_lost" : "",
                   (visible_alerts & TWAI_ALERT_ABOVE_ERR_WARN) ? " above_err_warn" : "",
                   (visible_alerts & TWAI_ALERT_BELOW_ERR_WARN) ? " below_err_warn" : "",
+                  (visible_alerts & TWAI_ALERT_RECOVERY_IN_PROGRESS) ? " recovery_progress" : "",
                   (visible_alerts & TWAI_ALERT_BUS_RECOVERED) ? " bus_recovered" : "",
                   static_cast<unsigned long>(suppressed),
                   detail);
     } else {
         Log::logf(CAT_CAN, alert_level,
-                  "alert:%s%s%s%s%s%s%s%s%s%s%s\n",
+                  "alert:%s%s%s%s%s%s%s%s%s%s%s%s\n",
                   (visible_alerts & TWAI_ALERT_TX_FAILED) ? " tx_failed" : "",
                   (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) ? " rx_queue_full" : "",
                   (visible_alerts & TWAI_ALERT_ERR_PASS) ? " err_passive" : "",
@@ -308,6 +322,7 @@ void CanDriver::handle_alerts(uint32_t alerts) {
                   (visible_alerts & TWAI_ALERT_ARB_LOST) ? " arb_lost" : "",
                   (visible_alerts & TWAI_ALERT_ABOVE_ERR_WARN) ? " above_err_warn" : "",
                   (visible_alerts & TWAI_ALERT_BELOW_ERR_WARN) ? " below_err_warn" : "",
+                  (visible_alerts & TWAI_ALERT_RECOVERY_IN_PROGRESS) ? " recovery_progress" : "",
                   (visible_alerts & TWAI_ALERT_BUS_RECOVERED) ? " bus_recovered" : "",
                   detail);
     }
@@ -316,7 +331,10 @@ void CanDriver::handle_alerts(uint32_t alerts) {
 
 bool CanDriver::recover_or_restart(const char *reason) {
     if (!installed_) return false;
-    if (recovery_active_) return true;
+    if (recovery_active_) {
+        recovery_deadline_ms_ = millis();
+        return true;
+    }
 
     Log::logf(CAT_CAN, LOG_WARN, "recovery requested: %s\n", reason);
 
@@ -331,21 +349,17 @@ bool CanDriver::recover_or_restart(const char *reason) {
 
     if (status.state == TWAI_STATE_BUS_OFF) {
         Log::logf(CAT_CAN, LOG_WARN, "bus_off: initiating TWAI recovery\n");
-        err = twai_initiate_recovery();
-        if (err != ESP_OK) {
-            Log::logf(CAT_CAN, LOG_ERROR, "initiate recovery failed: %s\n",
-                      esp_err_name_short(err));
-            stats_.recovery_failures++;
-            return false;
-        }
         recovery_active_ = true;
-        recovery_deadline_ms_ = millis() + 1500;
-        recovery_timeout_reported_ = false;
-        return true;
+        recovery_started_ms_ = millis();
+        recovery_attempts_ = 0;
+        restart_attempts_ = 0;
+        return initiate_bus_recovery();
     } else if (status.state == TWAI_STATE_RECOVERING) {
         recovery_active_ = true;
-        recovery_deadline_ms_ = millis() + 1500;
-        recovery_timeout_reported_ = false;
+        recovery_started_ms_ = millis();
+        recovery_attempts_ = 1;
+        restart_attempts_ = 0;
+        schedule_recovery_retry(AC_CAN_BUS_RECOVERY_TIMEOUT_MS);
         return true;
     } else if (status.state == TWAI_STATE_RUNNING) {
         err = twai_stop();
@@ -362,29 +376,116 @@ bool CanDriver::recover_or_restart(const char *reason) {
         return false;
     }
 
+    recovery_active_ = true;
+    recovery_started_ms_ = millis();
+    recovery_attempts_ = 0;
+    restart_attempts_ = 0;
     return restart_after_recovery();
 }
 
-bool CanDriver::restart_after_recovery() {
-    (void)twai_clear_transmit_queue();
-    (void)twai_clear_receive_queue();
-    tx_queue_.clear();
-    last_tx_success_ms_ = 0;
+bool CanDriver::initiate_bus_recovery() {
+    if (recovery_attempts_ >= AC_CAN_BUS_RECOVERY_MAX_ATTEMPTS) {
+        return reinstall_controller();
+    }
 
-    esp_err_t err = twai_start();
+    recovery_attempts_++;
+    const esp_err_t err = twai_initiate_recovery();
     if (err != ESP_OK) {
-        Log::logf(CAT_CAN, LOG_ERROR, "start after recovery failed: %s\n",
+        Log::logf(CAT_CAN, LOG_ERROR,
+                  "initiate recovery failed attempt=%u: %s\n",
+                  static_cast<unsigned>(recovery_attempts_),
                   esp_err_name_short(err));
         stats_.recovery_failures++;
-        recovery_active_ = false;
+        schedule_recovery_retry(AC_CAN_RECOVERY_RETRY_MS);
         return false;
     }
 
-    recovery_active_ = false;
-    recovery_timeout_reported_ = false;
-    stats_.recoveries++;
+    schedule_recovery_retry(AC_CAN_BUS_RECOVERY_TIMEOUT_MS);
+    return true;
+}
+
+bool CanDriver::restart_after_recovery() {
+    clear_recovery_queues();
+
+    esp_err_t err = twai_start();
+    if (err != ESP_OK) {
+        restart_attempts_++;
+        Log::logf(CAT_CAN, LOG_ERROR,
+                  "start after recovery failed attempt=%u: %s\n",
+                  static_cast<unsigned>(restart_attempts_),
+                  esp_err_name_short(err));
+        stats_.recovery_failures++;
+
+        if (restart_attempts_ >= AC_CAN_CONTROLLER_RESTART_MAX_ATTEMPTS) {
+            return reinstall_controller();
+        }
+
+        schedule_recovery_retry(AC_CAN_RECOVERY_RETRY_MS);
+        return false;
+    }
+
+    complete_recovery();
     Log::logf(CAT_CAN, LOG_INFO, "controller restarted\n");
     return true;
+}
+
+bool CanDriver::reinstall_controller() {
+    clear_recovery_queues();
+
+    if (installed_) {
+        const esp_err_t err = twai_driver_uninstall();
+        if (err != ESP_OK) {
+            Log::logf(CAT_CAN, LOG_ERROR,
+                      "driver uninstall during recovery failed: %s\n",
+                      esp_err_name_short(err));
+            stats_.recovery_failures++;
+            schedule_recovery_retry(AC_CAN_RECOVERY_RETRY_MS);
+            return false;
+        }
+        installed_ = false;
+    }
+
+    if (!install_controller()) {
+        stats_.recovery_failures++;
+        schedule_recovery_retry(AC_CAN_RECOVERY_RETRY_MS);
+        return false;
+    }
+    stats_.driver_reinstalls++;
+
+    if (!start_controller()) {
+        restart_attempts_ = 1;
+        stats_.recovery_failures++;
+        schedule_recovery_retry(AC_CAN_RECOVERY_RETRY_MS);
+        return false;
+    }
+
+    complete_recovery();
+    Log::logf(CAT_CAN, LOG_INFO, "driver reinstalled after recovery failure\n");
+    return true;
+}
+
+void CanDriver::clear_recovery_queues() {
+    if (installed_) {
+        (void)twai_clear_transmit_queue();
+        (void)twai_clear_receive_queue();
+    }
+
+    tx_queue_.clear();
+    last_tx_success_ms_ = 0;
+}
+
+void CanDriver::complete_recovery() {
+    recovery_active_ = false;
+    recovery_started_ms_ = 0;
+    recovery_deadline_ms_ = 0;
+    recovery_attempts_ = 0;
+    restart_attempts_ = 0;
+    stats_.recoveries++;
+}
+
+void CanDriver::schedule_recovery_retry(uint32_t delay_ms) {
+    recovery_deadline_ms_ = millis() + delay_ms;
+    if (recovery_deadline_ms_ == 0) recovery_deadline_ms_ = 1;
 }
 
 void CanDriver::poll_recovery(uint32_t alerts) {
@@ -393,23 +494,82 @@ void CanDriver::poll_recovery(uint32_t alerts) {
         return;
     }
 
-    twai_status_info_t status = {};
-    if (twai_get_status_info(&status) == ESP_OK &&
-        status.state == TWAI_STATE_STOPPED) {
-        restart_after_recovery();
+    const uint32_t now_ms = millis();
+    const bool retry_due = recovery_deadline_ms_ == 0 ||
+        static_cast<int32_t>(now_ms - recovery_deadline_ms_) >= 0;
+
+    if (!installed_) {
+        if (retry_due) reinstall_controller();
         return;
     }
 
-    if (!recovery_timeout_reported_ &&
-        static_cast<int32_t>(millis() - recovery_deadline_ms_) >= 0) {
-        Log::logf(CAT_CAN, LOG_WARN, "bus-off recovery timed out\n");
+    twai_status_info_t status = {};
+    const esp_err_t err = twai_get_status_info(&status);
+    if (err != ESP_OK) {
+        if (!retry_due) return;
+
+        Log::logf(CAT_CAN, LOG_WARN,
+                  "status during recovery failed: %s\n",
+                  esp_err_name_short(err));
         stats_.recovery_failures++;
-        recovery_timeout_reported_ = true;
+        if (err == ESP_ERR_INVALID_STATE) installed_ = false;
+        schedule_recovery_retry(AC_CAN_RECOVERY_RETRY_MS);
+        return;
+    }
+
+    switch (status.state) {
+        case TWAI_STATE_STOPPED:
+            if (restart_attempts_ == 0 || retry_due) {
+                restart_after_recovery();
+            }
+            return;
+
+        case TWAI_STATE_BUS_OFF:
+            if (retry_due) initiate_bus_recovery();
+            return;
+
+        case TWAI_STATE_RUNNING:
+            complete_recovery();
+            Log::logf(CAT_CAN, LOG_INFO,
+                      "controller already running after recovery\n");
+            return;
+
+        case TWAI_STATE_RECOVERING:
+            if (!retry_due) return;
+
+            // ESP-IDF requires this state to wait for 128 bus-free signals;
+            // stop and uninstall are legal only after it leaves RECOVERING.
+            stats_.recovery_timeouts++;
+            Log::logf(CAT_CAN, LOG_WARN,
+                      "bus-off recovery waiting for bus-free age_ms=%lu "
+                      "timeouts=%lu\n",
+                      static_cast<unsigned long>(now_ms -
+                                                 recovery_started_ms_),
+                      static_cast<unsigned long>(stats_.recovery_timeouts));
+            schedule_recovery_retry(AC_CAN_RECOVERY_LOG_INTERVAL_MS);
+            return;
+
+        default:
+            if (!retry_due) return;
+
+            Log::logf(CAT_CAN, LOG_ERROR,
+                      "unexpected state during recovery: %s\n",
+                      state_name(status.state));
+            stats_.recovery_failures++;
+            schedule_recovery_retry(AC_CAN_RECOVERY_RETRY_MS);
+            return;
     }
 }
 
 bool CanDriver::controller_status(CanControllerStatus &out) const {
     out = {};
+    out.recovery_active = recovery_active_;
+    out.recovery_age_ms = recovery_active_ && recovery_started_ms_
+        ? millis() - recovery_started_ms_
+        : 0;
+    out.recovery_attempts = recovery_attempts_;
+    out.restart_attempts = restart_attempts_;
+
     twai_status_info_t status = {};
     esp_err_t err = twai_get_status_info(&status);
     out.error = err;

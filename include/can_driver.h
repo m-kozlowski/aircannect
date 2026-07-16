@@ -24,6 +24,8 @@ struct CanDriverStats {
     uint32_t tx_failures = 0;
     uint32_t recoveries = 0;
     uint32_t recovery_failures = 0;
+    uint32_t recovery_timeouts = 0;
+    uint32_t driver_reinstalls = 0;
     uint32_t bus_error_alerts = 0;
     uint32_t rx_queue_full_alerts = 0;
 };
@@ -41,6 +43,10 @@ struct CanControllerStatus {
     uint32_t rx_overrun_count = 0;
     uint32_t arb_lost_count = 0;
     uint32_t bus_error_count = 0;
+    bool recovery_active = false;
+    uint32_t recovery_age_ms = 0;
+    uint8_t recovery_attempts = 0;
+    uint8_t restart_attempts = 0;
 };
 
 class CanDriver {
@@ -63,8 +69,14 @@ public:
     static const char *error_name(esp_err_t err);
 
 private:
+    bool install_controller();
+    bool reinstall_controller();
+    bool initiate_bus_recovery();
     void poll_recovery(uint32_t alerts);
     bool restart_after_recovery();
+    void clear_recovery_queues();
+    void complete_recovery();
+    void schedule_recovery_retry(uint32_t delay_ms);
     bool start_controller();
     void handle_alerts(uint32_t alerts);
 
@@ -77,9 +89,11 @@ private:
     uint32_t suppressed_bus_error_alerts_ = 0;
     uint32_t last_rx_queue_full_missed_count_ = 0;
 
+    uint32_t recovery_started_ms_ = 0;
     uint32_t recovery_deadline_ms_ = 0;
+    uint8_t recovery_attempts_ = 0;
+    uint8_t restart_attempts_ = 0;
     bool recovery_active_ = false;
-    bool recovery_timeout_reported_ = false;
 
     bool installed_ = false;
     CanDriverStats stats_ = {};

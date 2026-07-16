@@ -45,7 +45,16 @@ void print_can_status(Print &out, const CanDriver &can_driver) {
     out.print(" arb_lost=");
     out.print(status.arb_lost_count);
     out.print(" bus_errors=");
-    out.println(status.bus_error_count);
+    out.print(status.bus_error_count);
+    if (status.recovery_active) {
+        out.print(" recovery_age_ms=");
+        out.print(status.recovery_age_ms);
+        out.print(" recovery_attempts=");
+        out.print(status.recovery_attempts);
+        out.print(" restart_attempts=");
+        out.print(status.restart_attempts);
+    }
+    out.println();
 }
 
 void print_can_stats(Print &out, const CanDriver &can_driver) {
@@ -64,6 +73,10 @@ void print_can_stats(Print &out, const CanDriver &can_driver) {
     out.print(stats.recoveries);
     out.print(" recovery_failures=");
     out.print(stats.recovery_failures);
+    out.print(" recovery_timeouts=");
+    out.print(stats.recovery_timeouts);
+    out.print(" driver_reinstalls=");
+    out.print(stats.driver_reinstalls);
     out.print(" bus_error_alerts=");
     out.print(stats.bus_error_alerts);
     out.print(" rx_queue_full_alerts=");

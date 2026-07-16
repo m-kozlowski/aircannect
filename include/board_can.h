@@ -57,6 +57,11 @@ static constexpr size_t AC_CAN_RX_QUEUE_LEN = 512;
 static constexpr size_t AC_CAN_RX_DRAIN_BASE_BUDGET = 128;
 static constexpr size_t AC_CAN_RX_DRAIN_PRESSURE_BUDGET = 512;
 static constexpr uint32_t AC_CAN_RX_DRAIN_PRESSURE_MAX_MS = 2;
+static constexpr uint32_t AC_CAN_BUS_RECOVERY_TIMEOUT_MS = 1500;
+static constexpr uint32_t AC_CAN_RECOVERY_RETRY_MS = 250;
+static constexpr uint32_t AC_CAN_RECOVERY_LOG_INTERVAL_MS = 5000;
+static constexpr uint8_t AC_CAN_CONTROLLER_RESTART_MAX_ATTEMPTS = 3;
+static constexpr uint8_t AC_CAN_BUS_RECOVERY_MAX_ATTEMPTS = 3;
 static constexpr size_t AC_CAN_RX_BACKPRESSURE_WATERMARK =
     AC_CAN_RX_QUEUE_LEN / 4;
 static constexpr size_t AC_RPC_PAYLOAD_QUEUE_DEPTH = 8;
