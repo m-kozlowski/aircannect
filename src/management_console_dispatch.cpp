@@ -684,6 +684,13 @@ void print_report_result_status(Print &out,
         out.print(catalog.current_path[0] ? catalog.current_path : "--");
         out.print(" error=");
         out.print(catalog.error[0] ? catalog.error : "--");
+        if (catalog.retry_attempt) {
+            out.print(" retry=");
+            out.print(static_cast<unsigned>(catalog.retry_attempt));
+            out.print("/");
+            out.print(static_cast<unsigned long>(catalog.retry_in_ms));
+            out.print("ms");
+        }
     }
     out.println();
 }

@@ -75,12 +75,31 @@ void EdfReportCatalogJob::unlock() const {
 void EdfReportCatalogJob::set_error_locked(const char *error) {
     close_dirs_locked();
     release_build_locked();
-    refresh_again_pending_ = false;
     status_.state = EdfReportCatalogState::Error;
     phase_ = Phase::Idle;
     status_.phase = static_cast<uint8_t>(phase_);
     copy_cstr(status_.error, sizeof(status_.error), error ? error : "error");
     update_current_path_locked("");
+
+    const uint32_t now = millis();
+    const bool retry_pending = retry_.schedule_for_error(status_.error, now);
+    status_.retry_attempt = retry_.attempts();
+    status_.retry_in_ms = retry_.remaining_ms(now);
+    if (retry_pending) {
+        const log_level_t level =
+            retry_.attempts() == 1 ? LOG_WARN : LOG_DEBUG;
+        Log::logf(CAT_EDF, level,
+                  "report catalog refresh failed error=%s retry_ms=%lu "
+                  "attempt=%u\n",
+                  status_.error,
+                  static_cast<unsigned long>(status_.retry_in_ms),
+                  static_cast<unsigned>(status_.retry_attempt));
+    } else {
+        Log::logf(CAT_EDF, LOG_ERROR,
+                  "report catalog refresh failed error=%s; "
+                  "waiting for explicit refresh\n",
+                  status_.error);
+    }
 }
 
 void EdfReportCatalogJob::close_dirs_locked() {
@@ -119,7 +138,7 @@ bool EdfReportCatalogJob::allocate_build_locked() {
                              false));
     if (!build_sessions_) {
         set_error_locked("alloc_failed");
-        Log::logf(CAT_EDF, LOG_ERROR,
+        Log::logf(CAT_EDF, LOG_DEBUG,
                   "report catalog allocation failed sessions=%u bytes=%u\n",
                   static_cast<unsigned>(AC_EDF_REPORT_CATALOG_SESSION_MAX),
                   static_cast<unsigned>(AC_EDF_REPORT_CATALOG_SESSION_MAX *
@@ -134,7 +153,7 @@ bool EdfReportCatalogJob::allocate_build_locked() {
         Memory::free(build_sessions_);
         build_sessions_ = nullptr;
         set_error_locked("alloc_failed");
-        Log::logf(CAT_EDF, LOG_ERROR,
+        Log::logf(CAT_EDF, LOG_DEBUG,
                   "report catalog allocation failed days=%u bytes=%u\n",
                   static_cast<unsigned>(AC_EDF_REPORT_CATALOG_DAY_MAX),
                   static_cast<unsigned>(AC_EDF_REPORT_CATALOG_DAY_MAX *
@@ -195,6 +214,9 @@ void EdfReportCatalogJob::publish_snapshot_locked(bool final) {
         status_.phase = static_cast<uint8_t>(phase_);
         status_.build_sessions = 0;
         status_.error[0] = '\0';
+        retry_.reset();
+        status_.retry_attempt = 0;
+        status_.retry_in_ms = 0;
         update_current_path_locked("");
     }
     status_.sessions = session_count_;
@@ -224,18 +246,22 @@ bool EdfReportCatalogJob::start_refresh_locked(uint32_t *refresh_id_out) {
         return false;
     }
 
-    refresh_again_pending_ = false;
     close_dirs_locked();
     release_build_locked();
+    retry_.mark_started();
     if (!allocate_build_locked()) {
         return false;
     }
 
+    const uint32_t timezone_revision = status_.timezone_revision;
+    const uint8_t retry_attempt = retry_.attempts();
     status_ = EdfReportCatalogStatus();
     status_.state = EdfReportCatalogState::Refreshing;
     status_.refresh_id = next_refresh_id_++;
     if (next_refresh_id_ == 0) next_refresh_id_ = 1;
     status_.sessions = session_count_;
+    status_.timezone_revision = timezone_revision;
+    status_.retry_attempt = retry_attempt;
     phase_ = Phase::OpenRoot;
     status_.phase = static_cast<uint8_t>(phase_);
     day_path_[0] = '\0';
@@ -256,7 +282,7 @@ bool EdfReportCatalogJob::request_refresh(uint32_t *refresh_id_out) {
         accepted = true;
     } else {
         started = start_refresh_locked(refresh_id_out);
-        accepted = started;
+        accepted = started || retry_.pending();
     }
     unlock();
     if (accepted) {
@@ -277,7 +303,7 @@ bool EdfReportCatalogJob::request_refresh_after_current(
         accepted = true;
     } else {
         started = start_refresh_locked(refresh_id_out);
-        accepted = started;
+        accepted = started || retry_.pending();
     }
     unlock();
     if (accepted) {
@@ -324,7 +350,10 @@ JobStep EdfReportCatalogJob::step() {
     status_.step_calls++;
     status_.phase = static_cast<uint8_t>(phase_);
     if (status_.state != EdfReportCatalogState::Refreshing) {
-        if (refresh_again_pending_) {
+        const uint32_t now = millis();
+        status_.retry_attempt = retry_.attempts();
+        status_.retry_in_ms = retry_.remaining_ms(now);
+        if (refresh_again_pending_ || retry_.due(now)) {
             refresh_again_pending_ = false;
             const bool started = start_refresh_locked(nullptr);
             unlock();
@@ -389,6 +418,8 @@ bool EdfReportCatalogJob::status(EdfReportCatalogStatus &out,
     out = status_;
     out.sessions = session_count_;
     out.build_sessions = build_session_count_;
+    out.retry_attempt = retry_.attempts();
+    out.retry_in_ms = retry_.remaining_ms(millis());
     unlock();
     return true;
 }

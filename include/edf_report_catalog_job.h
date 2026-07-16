@@ -9,6 +9,7 @@
 
 #include "background_worker.h"
 #include "edf_report_catalog.h"
+#include "edf_report_catalog_retry.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -39,6 +40,8 @@ struct EdfReportCatalogStatus {
     uint32_t files_indexed = 0;
     uint32_t files_skipped = 0;
     uint32_t timezone_revision = 0;
+    uint32_t retry_in_ms = 0;
+    uint8_t retry_attempt = 0;
     bool truncated = false;
     char current_path[AC_STORAGE_PATH_MAX] = {};
     char error[AC_STORAGE_ERROR_MAX] = {};
@@ -114,6 +117,7 @@ private:
     uint32_t next_refresh_id_ = 1;
     Phase phase_ = Phase::Idle;
     bool refresh_again_pending_ = false;
+    EdfReportCatalogRetry retry_;
 
     // published snapshot
     EdfReportSessionDescriptor *sessions_ = nullptr;
