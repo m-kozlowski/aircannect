@@ -5,11 +5,18 @@
 #include <WiFiServer.h>
 #include <algorithm>
 #include <stdint.h>
+#include <utility>
 
 #include "board.h"
 #include "fixed_queue.h"
 
 namespace aircannect {
+
+inline void release_line_string(String &value) {
+    // Arduino String move assignment reuses the destination's allocation.
+    String released(std::move(value));
+    (void)released;
+}
 
 struct LineProtocolIoStats {
     uint32_t bytes_out = 0;
@@ -59,7 +66,7 @@ protected:
         }
 
         if (pos >= current.length()) {
-            current = "";
+            release_line_string(current);
             pos = 0;
             result.completed = true;
             return result;
@@ -78,7 +85,7 @@ protected:
         pos += result.written;
         io_stats_.bytes_out += result.written;
         if (pos >= current.length()) {
-            current = "";
+            release_line_string(current);
             pos = 0;
             result.completed = true;
         }

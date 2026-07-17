@@ -1,5 +1,7 @@
 #include "telnet_console.h"
 
+#include <utility>
+
 #include "auth_utils.h"
 #include "debug_log.h"
 #include "string_print.h"
@@ -80,13 +82,13 @@ void TelnetConsole::disconnect_slot(size_t idx, RpcArbiter *arbiter) {
     if (idx >= AC_MAX_TELNET_CLIENTS) return;
     Slot &slot = slots_[idx];
     if (arbiter) slot.console.stop(*arbiter);
-    if (slot.client) slot.client.stop();
+    slot.client.stop();
     slot.output_queue.clear();
-    slot.output_current = "";
+    release_line_string(slot.output_current);
     slot.output_pos = 0;
-    slot.line = "";
-    slot.auth_line = "";
-    slot.auth_user = "";
+    release_line_string(slot.line);
+    release_line_string(slot.auth_line);
+    release_line_string(slot.auth_user);
     slot.auth_state = AuthState::Disconnected;
     slot.telnet_skip = 0;
     slot.last_cr = false;
@@ -96,9 +98,9 @@ void TelnetConsole::authenticate_slot(size_t idx,
                                       const AppConfig &app_config) {
     if (idx >= AC_MAX_TELNET_CLIENTS) return;
     Slot &slot = slots_[idx];
-    slot.line = "";
-    slot.auth_line = "";
-    slot.auth_user = "";
+    release_line_string(slot.line);
+    release_line_string(slot.auth_line);
+    release_line_string(slot.auth_user);
 
     String hello = "\r\nAirCANnect ";
     hello += aircannect_version();
@@ -153,7 +155,8 @@ void TelnetConsole::pump_outputs(RpcArbiter &arbiter) {
 void TelnetConsole::poll_inputs(ConsoleContext &ctx) {
     for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
         Slot &slot = slots_[i];
-        if (!slot.client) continue;
+        if (slot.client.fd() < 0) continue;
+
         if (!slot.client.connected()) {
             Log::logf(CAT_TCP, LOG_INFO, "[TELNET %u] disconnected\n",
                       static_cast<unsigned>(i));
@@ -214,7 +217,7 @@ void TelnetConsole::process_input_char(size_t idx,
         slot.line += c;
     } else {
         stats_.overlong_lines++;
-        slot.line = "";
+        release_line_string(slot.line);
         queue_text(idx, "\r\n[CLI] line too long; dropped\r\n");
         queue_prompt(idx);
     }
@@ -223,11 +226,10 @@ void TelnetConsole::process_input_char(size_t idx,
 void TelnetConsole::process_auth_line(size_t idx,
                                       const AppConfig &app_config) {
     Slot &slot = slots_[idx];
-    String line = slot.auth_line;
-    slot.auth_line = "";
+    String line = std::move(slot.auth_line);
 
     if (slot.auth_state == AuthState::Username) {
-        slot.auth_user = line;
+        slot.auth_user = std::move(line);
         slot.auth_state = AuthState::Password;
         queue_text(idx, "\r\npassword: ");
         return;
@@ -236,7 +238,7 @@ void TelnetConsole::process_auth_line(size_t idx,
     if (slot.auth_state != AuthState::Password) return;
     if (network_credentials_match(app_config.data(), slot.auth_user, line)) {
         slot.auth_state = AuthState::Authenticated;
-        slot.auth_user = "";
+        release_line_string(slot.auth_user);
         stats_.auth_successes++;
         queue_text(idx, "\r\n");
         queue_console_begin(idx);
@@ -246,14 +248,13 @@ void TelnetConsole::process_auth_line(size_t idx,
 
     stats_.auth_failures++;
     slot.auth_state = AuthState::Username;
-    slot.auth_user = "";
+    release_line_string(slot.auth_user);
     queue_text(idx, "\r\nAuthentication failed\r\nlogin: ");
 }
 
 void TelnetConsole::execute_slot_line(size_t idx, ConsoleContext &ctx) {
     Slot &slot = slots_[idx];
-    String line = slot.line;
-    slot.line = "";
+    String line = std::move(slot.line);
     line.trim();
     if (!line.length()) {
         queue_prompt(idx);
