@@ -281,6 +281,8 @@ private:
                     RpcPayloadRef payload,
                     RpcSource source = RpcSource::Internal,
                     uint32_t id = 0);
+    void report_framing_error(const char *channel,
+                              const std::string &error);
     void push_source_event(RpcSource target,
                            RpcEventKind kind,
                            const std::string &payload,

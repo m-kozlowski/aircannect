@@ -20,6 +20,9 @@ static constexpr uint32_t AC_BG_WORKER_BUSY_RECHECK_MS = 250;
 static constexpr uint32_t AC_BG_WORKER_WORK_TICK_MS = 20;
 // Sleep when idle but no job has work to do.
 static constexpr uint32_t AC_BG_WORKER_IDLE_TICK_MS = 10000;
+// Keep automatic idle work out of the boot window while device discovery,
+// Wi-Fi association, time sync, and initial CAN/RPC traffic settle.
+static constexpr uint32_t AC_BG_WORKER_STARTUP_GRACE_MS = 30000;
 // Defer prefetch briefly after foreground (e.g. web) activity.
 static constexpr uint32_t AC_BG_WORKER_ACTIVITY_GRACE_MS = 3000;
 // After therapy stops, AS11 may still be draining live stream/report traffic and

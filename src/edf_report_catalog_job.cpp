@@ -280,6 +280,9 @@ bool EdfReportCatalogJob::request_refresh(uint32_t *refresh_id_out) {
     if (status_.state == EdfReportCatalogState::Refreshing) {
         if (refresh_id_out) *refresh_id_out = status_.refresh_id;
         accepted = true;
+    } else if (refresh_again_pending_) {
+        if (refresh_id_out) *refresh_id_out = 0;
+        accepted = true;
     } else {
         started = start_refresh_locked(refresh_id_out);
         accepted = started || retry_.pending();
@@ -300,6 +303,9 @@ bool EdfReportCatalogJob::request_refresh_after_current(
     if (status_.state == EdfReportCatalogState::Refreshing) {
         refresh_again_pending_ = true;
         if (refresh_id_out) *refresh_id_out = status_.refresh_id;
+        accepted = true;
+    } else if (refresh_again_pending_) {
+        if (refresh_id_out) *refresh_id_out = 0;
         accepted = true;
     } else {
         started = start_refresh_locked(refresh_id_out);

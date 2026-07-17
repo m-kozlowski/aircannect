@@ -228,7 +228,11 @@ static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
 static void drain_rpc_events() {
     RpcEvent event;
     while (rpc_arbiter.next_event(event)) {
-        serial_management_console.handle_event(Serial, event);
+        // Framing failures already reach Serial and persistent sinks through
+        // Log. Keep the event for Telnet and WebUI without printing it twice.
+        if (event.kind != RpcEventKind::FramingError) {
+            serial_management_console.handle_event(Serial, event);
+        }
         telnet_console.handle_event(event);
         web_ui.handle_event(event);
         if (event.kind == RpcEventKind::BootNotification) {

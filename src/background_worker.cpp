@@ -18,6 +18,12 @@ void BackgroundWorker::begin() {
     }
     g_instance = this;
     if (task_) return;
+
+    uint32_t startup_grace_until =
+        millis() + AC_BG_WORKER_STARTUP_GRACE_MS;
+    if (startup_grace_until == 0) startup_grace_until = 1;
+    startup_grace_until_ms_.store(startup_grace_until);
+
     xTaskCreatePinnedToCore(task_entry, "ac_bgworker",
                             AC_BG_WORKER_TASK_STACK, this,
                             AC_BG_WORKER_TASK_PRIO, &task_,
@@ -106,6 +112,14 @@ bool BackgroundWorker::gate_open(const char **reason) const {
         *reason = "web_grace";
         return false;
     }
+
+    const uint32_t startup_grace_until = startup_grace_until_ms_.load();
+    if (startup_grace_until != 0 &&
+        static_cast<int32_t>(millis() - startup_grace_until) < 0) {
+        *reason = "starting";
+        return false;
+    }
+
     *reason = "idle";
     return true;
 }

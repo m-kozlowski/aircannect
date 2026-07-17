@@ -113,6 +113,7 @@ private:
 
     // gate/control state
     std::atomic<bool> enabled_{true};
+    std::atomic<uint32_t> startup_grace_until_ms_{0};
     std::atomic<uint32_t> last_activity_ms_{0};  // web grace; set from AsyncTCP
     // Gate inputs from the main loop; starts "unpublished" so the worker stays
     // gated until the first publish_gate().
