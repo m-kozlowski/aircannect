@@ -334,6 +334,9 @@ private:
     void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_esp_ota_quiesce(
         const QueuedRequest &request) const;
+    bool esp_ota_push_quiesced() const;
+    bool esp_ota_quiesce_deadline_reached(uint32_t now) const;
+    void poll_esp_ota_log_filter(uint32_t now);
     DateTimePrepareResult prepare_set_datetime_request(QueuedRequest &request,
                                                        uint32_t now);
 

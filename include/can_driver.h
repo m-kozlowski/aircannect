@@ -56,6 +56,8 @@ public:
 
     bool enqueue_tx(const RawCanFrame &frame);
     bool receive(RawCanFrame &frame, uint32_t wait_ms = 0);
+    bool set_log_rx_enabled(bool enabled);
+    bool log_rx_enabled() const { return log_rx_enabled_; }
 
     bool recover_or_restart(const char *reason);
 
@@ -96,6 +98,7 @@ private:
     bool recovery_active_ = false;
 
     bool installed_ = false;
+    bool log_rx_enabled_ = true;
     CanDriverStats stats_ = {};
 };
 

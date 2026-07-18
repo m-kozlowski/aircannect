@@ -1,5 +1,7 @@
 #include "can_driver.h"
 
+#include <hal/twai_ll.h>
+#include <soc/twai_struct.h>
 #include <string.h>
 
 #include "debug_log.h"
@@ -7,6 +9,39 @@
 namespace aircannect {
 
 namespace {
+
+constexpr uint32_t CAN_STANDARD_ID_SHIFT = 21;
+constexpr uint32_t CAN_STANDARD_ID_MASK = 0x7FF;
+constexpr uint32_t CAN_FILTER_TRAILING_BITS_MASK =
+    (1UL << CAN_STANDARD_ID_SHIFT) - 1;
+
+constexpr uint32_t OTA_CAN_FILTER_CODE =
+    ((AC_CAN_RX_ID & AC_CAN_BOOT_ID) & CAN_STANDARD_ID_MASK)
+    << CAN_STANDARD_ID_SHIFT;
+constexpr uint32_t OTA_CAN_FILTER_MASK =
+    (((AC_CAN_RX_ID ^ AC_CAN_BOOT_ID) & CAN_STANDARD_ID_MASK)
+     << CAN_STANDARD_ID_SHIFT) |
+    CAN_FILTER_TRAILING_BITS_MASK;
+
+constexpr bool ota_filter_accepts(uint32_t id) {
+    const uint32_t encoded =
+        (id & CAN_STANDARD_ID_MASK) << CAN_STANDARD_ID_SHIFT;
+    return ((encoded ^ OTA_CAN_FILTER_CODE) & ~OTA_CAN_FILTER_MASK) == 0;
+}
+
+static_assert(ota_filter_accepts(AC_CAN_RX_ID));
+static_assert(ota_filter_accepts(AC_CAN_BOOT_ID));
+static_assert(!ota_filter_accepts(AC_CAN_LOG_ID));
+
+twai_filter_config_t can_filter_config(bool log_rx_enabled) {
+    if (log_rx_enabled) return TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+    twai_filter_config_t config = {};
+    config.acceptance_code = OTA_CAN_FILTER_CODE;
+    config.acceptance_mask = OTA_CAN_FILTER_MASK;
+    config.single_filter = true;
+    return config;
+}
 
 const char *esp_err_name_short(esp_err_t err) {
     switch (err) {
@@ -85,7 +120,8 @@ bool CanDriver::install_controller() {
     general_config.rx_queue_len = AC_CAN_RX_QUEUE_LEN;
 
     twai_timing_config_t timing_config = can_timing_config();
-    twai_filter_config_t filter_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    twai_filter_config_t filter_config =
+        can_filter_config(log_rx_enabled_);
 
     esp_err_t err = twai_driver_install(&general_config, &timing_config,
                                         &filter_config);
@@ -248,6 +284,64 @@ bool CanDriver::receive(RawCanFrame &frame, uint32_t wait_ms) {
     frame.remote = msg.rtr != 0;
     memcpy(frame.data, msg.data, frame.len);
     stats_.rx_frames++;
+    return true;
+}
+
+bool CanDriver::set_log_rx_enabled(bool enabled) {
+    if (enabled == log_rx_enabled_) return true;
+    if (!installed_ || recovery_active_ || tx_queue_.count()) return false;
+
+    twai_status_info_t status = {};
+    esp_err_t err = twai_get_status_info(&status);
+    if (err != ESP_OK) {
+        Log::logf(CAT_CAN, LOG_WARN,
+                  "RX filter status failed: %s\n",
+                  esp_err_name_short(err));
+        return false;
+    }
+    if (status.state != TWAI_STATE_RUNNING || status.msgs_to_tx) return false;
+
+    err = twai_stop();
+    if (err != ESP_OK) {
+        Log::logf(CAT_CAN, LOG_WARN,
+                  "RX filter stop failed: %s\n",
+                  esp_err_name_short(err));
+        return false;
+    }
+
+    const twai_filter_config_t next_filter = can_filter_config(enabled);
+    twai_ll_set_acc_filter(&TWAI, next_filter.acceptance_code,
+                           next_filter.acceptance_mask,
+                           next_filter.single_filter);
+
+    err = twai_start();
+    if (err != ESP_OK) {
+        const twai_filter_config_t previous_filter =
+            can_filter_config(log_rx_enabled_);
+        twai_ll_set_acc_filter(&TWAI, previous_filter.acceptance_code,
+                               previous_filter.acceptance_mask,
+                               previous_filter.single_filter);
+
+        const esp_err_t restore_err = twai_start();
+        Log::logf(CAT_CAN, LOG_ERROR,
+                  "RX filter start failed: %s restore=%s\n",
+                  esp_err_name_short(err),
+                  esp_err_name_short(restore_err));
+        stats_.recovery_failures++;
+        if (restore_err != ESP_OK) {
+            recovery_active_ = true;
+            recovery_started_ms_ = millis();
+            recovery_attempts_ = 0;
+            restart_attempts_ = 1;
+            schedule_recovery_retry(0);
+        }
+        return false;
+    }
+
+    log_rx_enabled_ = enabled;
+    last_tx_success_ms_ = 0;
+    Log::logf(CAT_CAN, LOG_INFO,
+              "RX filter AS11 log=%s\n", enabled ? "on" : "off");
     return true;
 }
 

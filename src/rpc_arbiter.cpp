@@ -178,12 +178,12 @@ void RpcArbiter::poll() {
         esp_ota_quiesce_deadline_ms_ &&
         !esp_ota_quiesce_complete() &&
         !esp_ota_quiesce_timeout_logged_ &&
-        static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0) {
+        esp_ota_quiesce_deadline_reached(now)) {
         esp_ota_quiesce_timeout_logged_ = true;
         const EventBrokerStatus event_status = event_.status();
         Log::logf(CAT_OTA, LOG_WARN,
                   "AS11 quiesce timed out stream=%u event=%u pending=%u "
-                  "retry=%u queue=%u tx_q=%u event_active=%u "
+                  "retry=%u queue=%u tx_q=%u log_rx=%u event_active=%u "
                   "event_pending=%u\n",
                   stream_.quiesced() ? 1u : 0u,
                   event_.quiesced() ? 1u : 0u,
@@ -191,6 +191,7 @@ void RpcArbiter::poll() {
                   dispatch_retry_active_ ? 1u : 0u,
                   static_cast<unsigned>(requests_.count()),
                   static_cast<unsigned>(can_.tx_queue_depth()),
+                  can_.log_rx_enabled() ? 1u : 0u,
                   event_status.subscription_active ? 1u : 0u,
                   event_status.subscribe_pending ? 1u : 0u);
     }
@@ -201,10 +202,12 @@ void RpcArbiter::poll() {
         report_framing_error("RPC", rpc_timeout.error);
     }
 
-    DatagramFeedResult log_timeout = log_rx_.poll(now);
-    if (log_timeout.status == DatagramStatus::Error) {
-        stats_.log_framing_errors++;
-        report_framing_error("LOG", log_timeout.error);
+    if (!esp_ota_quiesce_requested_) {
+        DatagramFeedResult log_timeout = log_rx_.poll(now);
+        if (log_timeout.status == DatagramStatus::Error) {
+            stats_.log_framing_errors++;
+            report_framing_error("LOG", log_timeout.error);
+        }
     }
 
     drain_can_rx();
@@ -216,6 +219,7 @@ void RpcArbiter::poll() {
     poll_event_subscription();
     poll_as11_healthcheck();
     dispatch_next_request();
+    poll_esp_ota_log_filter(millis());
 
     // Dispatch may enqueue CAN frames after RX-driven work above. Poll again so
     // the CAN driver can start TX in the same main-loop turn.
@@ -572,6 +576,7 @@ void RpcArbiter::set_esp_ota_quiesce(bool requested) {
 
     Log::logf(CAT_OTA, LOG_INFO,
               "quiescing AS11 push traffic before ESP OTA\n");
+    log_rx_.reset();
     cancel_all_requests("esp_ota");
     stream_.request_quiesce(now);
     event_.request_quiesce(now);
@@ -581,21 +586,43 @@ void RpcArbiter::set_esp_ota_quiesce(bool requested) {
 
 bool RpcArbiter::esp_ota_quiesce_complete() const {
     if (!esp_ota_quiesce_requested_) return true;
+    return esp_ota_push_quiesced() && !can_.log_rx_enabled();
+}
+
+bool RpcArbiter::esp_ota_quiesce_timed_out() const {
+    const uint32_t now = millis();
+    return esp_ota_quiesce_deadline_reached(now) &&
+           !can_.log_rx_enabled();
+}
+
+bool RpcArbiter::esp_ota_reboot_allowed() const {
+    return esp_ota_quiesce_complete() || esp_ota_quiesce_timed_out();
+}
+
+bool RpcArbiter::esp_ota_push_quiesced() const {
     return stream_.quiesced() && event_.quiesced() &&
            !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
            can_.tx_queue_depth() == 0;
 }
 
-bool RpcArbiter::esp_ota_quiesce_timed_out() const {
+bool RpcArbiter::esp_ota_quiesce_deadline_reached(uint32_t now) const {
     if (!esp_ota_quiesce_requested_ || !esp_ota_quiesce_deadline_ms_) {
         return false;
     }
-    const uint32_t now = millis();
     return static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0;
 }
 
-bool RpcArbiter::esp_ota_reboot_allowed() const {
-    return esp_ota_quiesce_complete() || esp_ota_quiesce_timed_out();
+void RpcArbiter::poll_esp_ota_log_filter(uint32_t now) {
+    const bool log_rx_enabled = !esp_ota_quiesce_requested_;
+    if (can_.log_rx_enabled() == log_rx_enabled) return;
+
+    if (esp_ota_quiesce_requested_ &&
+        !esp_ota_push_quiesced() &&
+        !esp_ota_quiesce_deadline_reached(now)) {
+        return;
+    }
+
+    if (can_.set_log_rx_enabled(log_rx_enabled)) log_rx_.reset();
 }
 
 void RpcArbiter::cancel_requests_from_source(RpcSource source,
@@ -1705,6 +1732,8 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
     }
 
     if (frame.id == AC_CAN_LOG_ID) {
+        if (esp_ota_quiesce_requested_) return;
+
         DatagramFeedResult result = log_rx_.feed(frame.data, frame.len, now);
         if (result.status == DatagramStatus::Complete) {
             enqueue_deferred_payload(DeferredPayload::Kind::DebugLog,
