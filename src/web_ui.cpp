@@ -1926,10 +1926,20 @@ void WebUI::send_report_result(AsyncWebServerRequest *request) const {
             }
             return;
         }
-        case ReportManager::ResultRead::Building:
-            request->send(202, "application/json",
-                          "{\"ok\":true,\"state\":\"preparing\"}");
+        case ReportManager::ResultRead::Building: {
+            AsyncWebServerResponse *response = request->beginResponse(
+                202,
+                "application/json",
+                "{\"ok\":true,\"state\":\"preparing\"}");
+            if (response) {
+                response->addHeader("Cache-Control", "no-store");
+                request->send(response);
+            } else {
+                request->send(202, "application/json",
+                              "{\"ok\":true,\"state\":\"preparing\"}");
+            }
             return;
+        }
         case ReportManager::ResultRead::QueueFull:
             request->send(503, "application/json",
                           "{\"ok\":false,\"error\":\"report_queue_full\"}");

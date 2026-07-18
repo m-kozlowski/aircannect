@@ -34,6 +34,18 @@ void ReportResultBuildService::clear_prepare() {
     runtime_.clear_prepare_state();
 }
 
+void ReportResultBuildService::defer_prepare(uint64_t night_start_ms,
+                                             size_t therapy_index,
+                                             const char *message) {
+    clear_prepare();
+
+    ReportResultStatus &status = runtime_.status();
+    status.state = ReportResultState::Preparing;
+    status.therapy_index = therapy_index;
+    status.night_start_ms = night_start_ms;
+    status.error = message ? message : "night_index_busy";
+}
+
 void ReportResultBuildService::fail_prepare(const char *message) {
     plot_builder_.reset();
     runtime_.mark_error(message);

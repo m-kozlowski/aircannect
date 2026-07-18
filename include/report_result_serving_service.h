@@ -70,12 +70,13 @@ private:
         char *etag_out,
         size_t etag_out_size,
         LargeTextBuffer &json_out);
-    bool resolve_plot_night(size_t therapy_index,
-                            const char *version,
-                            ReportIndexedNight &indexed_night,
-                            size_t &resolved_therapy_index,
-                            char *etag_out,
-                            size_t etag_out_size);
+    ReportNightIndexLookupResult resolve_plot_night(
+        size_t therapy_index,
+        const char *version,
+        ReportIndexedNight &indexed_night,
+        size_t &resolved_therapy_index,
+        char *etag_out,
+        size_t etag_out_size);
 
     ReportNightIndexService &night_index_;
     ReportBuildRuntime &build_;

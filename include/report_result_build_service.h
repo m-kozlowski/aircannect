@@ -27,6 +27,9 @@ public:
 
     bool ensure_chunks();
     void clear_prepare();
+    void defer_prepare(uint64_t night_start_ms,
+                       size_t therapy_index,
+                       const char *message);
     void fail_prepare(const char *message);
     void begin_prepare_for_night(size_t therapy_index,
                                  const ReportIndexedNight &night,

@@ -455,7 +455,8 @@ bool ReportBuildQueueService::request_prepare_by_therapy_index(
     bool refresh_cache) {
     ScopedIndexedNight indexed_night("request_result_prepare_index");
     if (!indexed_night ||
-        !night_index_.by_therapy_index(therapy_index, indexed_night.get())) {
+        night_index_.by_therapy_index(therapy_index, indexed_night.get()) !=
+            ReportNightIndexLookupResult::Ready) {
         return false;
     }
 
@@ -476,20 +477,25 @@ bool ReportBuildQueueService::request_prepare_by_start(
     uint64_t night_start_ms,
     bool refresh_cache) {
     ScopedIndexedNight indexed_night("request_result_prepare_start_index");
+    if (!indexed_night) return false;
+
     size_t therapy_index = 0;
-    if (!indexed_night ||
-        !night_index_.by_start(night_start_ms,
-                               indexed_night.get(),
-                               &therapy_index)) {
+    const ReportNightIndexLookupResult lookup =
+        night_index_.by_start(night_start_ms,
+                              indexed_night.get(),
+                              &therapy_index);
+    if (lookup == ReportNightIndexLookupResult::NotFound) {
         return false;
     }
 
     if (refresh_cache) {
-        result_cache_.invalidate(indexed_night->summary.start_ms, false);
+        result_cache_.invalidate(night_start_ms, false);
     }
 
+    // The stable night id is sufficient to retain a request while the index
+    // replacement is busy. The worker resolves the current positional index.
     const ReportBuildRuntime::BuildQueueResult queued =
-        build_.enqueue(indexed_night->summary.start_ms,
+        build_.enqueue(night_start_ms,
                        therapy_index,
                        refresh_cache,
                        false);

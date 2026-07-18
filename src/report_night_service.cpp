@@ -44,7 +44,8 @@ bool ReportNightCacheService::coverage(
     out = {};
     ScopedIndexedNight indexed_night("night_coverage_index");
     if (!indexed_night ||
-        !night_index_.by_start(night_start_ms, indexed_night.get())) {
+        night_index_.by_start(night_start_ms, indexed_night.get()) !=
+            ReportNightIndexLookupResult::Ready) {
         return false;
     }
     const ReportIndexedNight &indexed = indexed_night.get();
@@ -200,7 +201,8 @@ bool ReportNightCacheService::request_cache(uint64_t night_start_ms,
 
     ScopedIndexedNight indexed_night("request_night_cache_index");
     if (!indexed_night ||
-        !night_index_.by_start(night_start_ms, indexed_night.get()) ||
+        night_index_.by_start(night_start_ms, indexed_night.get()) !=
+            ReportNightIndexLookupResult::Ready ||
         !report_indexed_night_visible_in_summary(indexed_night.get())) {
         return false;
     }

@@ -446,29 +446,35 @@ bool ReportNightIndexService::cache_key(
     return true;
 }
 
-bool ReportNightIndexService::by_therapy_index(
+ReportNightIndexLookupResult ReportNightIndexService::by_therapy_index(
     size_t therapy_index,
     ReportIndexedNight &out) const {
     ReportNightIndexSnapshotRef current;
-    if (snapshot(current) != ReportNightIndexSnapshotResult::Ready ||
-        !current) {
-        return false;
-    }
+    const ReportNightIndexSnapshotResult snapshot_result = snapshot(current);
+    const bool found = snapshot_result == ReportNightIndexSnapshotResult::Ready &&
+                       current &&
+                       current->by_therapy_index(therapy_index, out);
 
-    return current->by_therapy_index(therapy_index, out);
+    return classify_report_night_index_lookup(snapshot_result,
+                                              current != nullptr,
+                                              found);
 }
 
-bool ReportNightIndexService::by_start(
+ReportNightIndexLookupResult ReportNightIndexService::by_start(
     uint64_t night_start_ms,
     ReportIndexedNight &out,
     size_t *therapy_index_out) const {
     ReportNightIndexSnapshotRef current;
-    if (snapshot(current) != ReportNightIndexSnapshotResult::Ready ||
-        !current) {
-        return false;
-    }
+    const ReportNightIndexSnapshotResult snapshot_result = snapshot(current);
+    const bool found = snapshot_result == ReportNightIndexSnapshotResult::Ready &&
+                       current &&
+                       current->by_start(night_start_ms,
+                                         out,
+                                         therapy_index_out);
 
-    return current->by_start(night_start_ms, out, therapy_index_out);
+    return classify_report_night_index_lookup(snapshot_result,
+                                              current != nullptr,
+                                              found);
 }
 
 void ReportNightIndexService::format_result_etag(

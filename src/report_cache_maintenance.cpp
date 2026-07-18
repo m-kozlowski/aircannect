@@ -222,7 +222,8 @@ bool ReportCacheMaintenanceService::clear_night(uint64_t night_start_ms,
     }
 
     const bool found =
-        night_index_.by_start(night_start_ms, *indexed_night) &&
+        night_index_.by_start(night_start_ms, *indexed_night) ==
+            ReportNightIndexLookupResult::Ready &&
         indexed_night->summary.end_ms > indexed_night->summary.start_ms;
     const ReportSummaryRecord night = found ? indexed_night->summary
                                             : ReportSummaryRecord{};

@@ -14,7 +14,8 @@ bool ReportNightQueryService::night_etag(size_t therapy_index,
                                          size_t out_size) const {
     ScopedIndexedNight night("night_etag_index");
     if (!night ||
-        !night_index_.by_therapy_index(therapy_index, night.get())) {
+        night_index_.by_therapy_index(therapy_index, night.get()) !=
+            ReportNightIndexLookupResult::Ready) {
         return false;
     }
 
@@ -64,7 +65,8 @@ bool ReportNightQueryService::summary_night_by_therapy_index(
     ReportSummaryRecord &out) const {
     ScopedIndexedNight night("summary_night_index");
     if (!night ||
-        !night_index_.by_therapy_index(therapy_index, night.get())) {
+        night_index_.by_therapy_index(therapy_index, night.get()) !=
+            ReportNightIndexLookupResult::Ready) {
         return false;
     }
 

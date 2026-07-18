@@ -69,8 +69,19 @@ ReportResultPrepareService::prepare_by_therapy_index(
     if (!result_build_.ensure_chunks()) return ResultPrepareOutcome::Failed;
 
     ScopedIndexedNight indexed_night("prepare_result_night_index");
-    if (!indexed_night ||
-        !night_index_.by_therapy_index(therapy_index, indexed_night.get())) {
+    if (!indexed_night) return ResultPrepareOutcome::Retry;
+
+    const ReportNightIndexLookupResult lookup =
+        night_index_.by_therapy_index(therapy_index, indexed_night.get());
+    if (lookup == ReportNightIndexLookupResult::Busy) {
+        result_build_.defer_prepare(0, therapy_index, "night_index_busy");
+        return ResultPrepareOutcome::Deferred;
+    }
+    if (lookup == ReportNightIndexLookupResult::Failed) {
+        result_build_.defer_prepare(0, therapy_index, "night_index_failed");
+        return ResultPrepareOutcome::Retry;
+    }
+    if (lookup == ReportNightIndexLookupResult::NotFound) {
         clear_prepare();
         fail_prepare("night_not_found");
         return ResultPrepareOutcome::Failed;
@@ -111,9 +122,24 @@ ReportResultPrepareService::prepare_by_night_start(
     ReportIndexedNight *prepare_indexed_night =
         runtime().scratch().prepare_indexed_night();
     memset(prepare_indexed_night, 0, sizeof(*prepare_indexed_night));
-    if (!night_index_.by_start(night_start_ms,
-                               *prepare_indexed_night,
-                               &current_therapy_index)) {
+
+    const ReportNightIndexLookupResult lookup =
+        night_index_.by_start(night_start_ms,
+                              *prepare_indexed_night,
+                              &current_therapy_index);
+    if (lookup == ReportNightIndexLookupResult::Busy) {
+        result_build_.defer_prepare(night_start_ms,
+                                    therapy_index,
+                                    "night_index_busy");
+        return ResultPrepareOutcome::Deferred;
+    }
+    if (lookup == ReportNightIndexLookupResult::Failed) {
+        result_build_.defer_prepare(night_start_ms,
+                                    therapy_index,
+                                    "night_index_failed");
+        return ResultPrepareOutcome::Retry;
+    }
+    if (lookup == ReportNightIndexLookupResult::NotFound) {
         clear_prepare();
         fail_prepare("night_not_found");
         return ResultPrepareOutcome::Failed;

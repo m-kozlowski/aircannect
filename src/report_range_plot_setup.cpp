@@ -71,9 +71,15 @@ bool ReportRangePlotBuilder::start(uint64_t night_start_ms,
     size_t therapy_index = therapy_index_hint;
 
     memset(range_plot.indexed_night, 0, sizeof(*range_plot.indexed_night));
-    if (!night_index_.by_start(night_start_ms,
-                               *range_plot.indexed_night,
-                               &therapy_index)) {
+    const ReportNightIndexLookupResult lookup =
+        night_index_.by_start(night_start_ms,
+                              *range_plot.indexed_night,
+                              &therapy_index);
+    if (lookup == ReportNightIndexLookupResult::Busy) {
+        waiting_for_result = true;
+        return false;
+    }
+    if (lookup != ReportNightIndexLookupResult::Ready) {
         return false;
     }
     ReportIndexedNight &indexed_night = *range_plot.indexed_night;

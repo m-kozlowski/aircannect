@@ -57,15 +57,33 @@ ReportResultRead ReportResultServingService::read_result_by_start(
     char *etag_out,
     size_t etag_out_size,
     LargeTextBuffer &json_out) {
+    if (etag_out && etag_out_size) etag_out[0] = '\0';
+
     ScopedIndexedNight indexed_night("read_result_start_index");
+    if (!indexed_night) {
+        build_.note_read("index_alloc_failed");
+        return ReportResultRead::Unavailable;
+    }
+
     size_t therapy_index = 0;
-    if (!indexed_night ||
-        !night_index_.by_start(night_start_ms,
-                               indexed_night.get(),
-                               &therapy_index)) {
-        build_.note_read("not_found");
-        if (etag_out && etag_out_size) etag_out[0] = '\0';
-        return ReportResultRead::NotFound;
+    const ReportNightIndexLookupResult lookup =
+        night_index_.by_start(night_start_ms,
+                              indexed_night.get(),
+                              &therapy_index);
+
+    switch (lookup) {
+        case ReportNightIndexLookupResult::Ready:
+            break;
+        case ReportNightIndexLookupResult::Busy:
+            build_.note_read("index_busy");
+            return ReportResultRead::Building;
+        case ReportNightIndexLookupResult::Failed:
+            build_.note_read("index_failed");
+            return ReportResultRead::Unavailable;
+        case ReportNightIndexLookupResult::NotFound:
+        default:
+            build_.note_read("not_found");
+            return ReportResultRead::NotFound;
     }
 
     return read_result_for_indexed_night(therapy_index,
@@ -168,13 +186,24 @@ ReportPlotRead ReportResultServingService::read_plot(
     if (!indexed_night) return ReportPlotRead::Unavailable;
 
     size_t resolved_therapy_index = therapy_index;
-    if (!resolve_plot_night(therapy_index,
-                            version,
-                            indexed_night.get(),
-                            resolved_therapy_index,
-                            etag_out,
-                            etag_out_size)) {
-        return ReportPlotRead::NotFound;
+    const ReportNightIndexLookupResult lookup =
+        resolve_plot_night(therapy_index,
+                           version,
+                           indexed_night.get(),
+                           resolved_therapy_index,
+                           etag_out,
+                           etag_out_size);
+
+    switch (lookup) {
+        case ReportNightIndexLookupResult::Ready:
+            break;
+        case ReportNightIndexLookupResult::Busy:
+            return ReportPlotRead::Building;
+        case ReportNightIndexLookupResult::Failed:
+            return ReportPlotRead::Unavailable;
+        case ReportNightIndexLookupResult::NotFound:
+        default:
+            return ReportPlotRead::NotFound;
     }
 
     char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
@@ -268,13 +297,24 @@ ReportPlotRead ReportResultServingService::read_plot_range(
     if (!indexed_night) return ReportPlotRead::Unavailable;
 
     size_t resolved_therapy_index = therapy_index;
-    if (!resolve_plot_night(therapy_index,
-                            version,
-                            indexed_night.get(),
-                            resolved_therapy_index,
-                            etag_out,
-                            etag_out_size)) {
-        return ReportPlotRead::NotFound;
+    const ReportNightIndexLookupResult lookup =
+        resolve_plot_night(therapy_index,
+                           version,
+                           indexed_night.get(),
+                           resolved_therapy_index,
+                           etag_out,
+                           etag_out_size);
+
+    switch (lookup) {
+        case ReportNightIndexLookupResult::Ready:
+            break;
+        case ReportNightIndexLookupResult::Busy:
+            return ReportPlotRead::Building;
+        case ReportNightIndexLookupResult::Failed:
+            return ReportPlotRead::Unavailable;
+        case ReportNightIndexLookupResult::NotFound:
+        default:
+            return ReportPlotRead::NotFound;
     }
 
     char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
@@ -308,7 +348,7 @@ ReportPlotRead ReportResultServingService::read_plot_range(
     }
 }
 
-bool ReportResultServingService::resolve_plot_night(
+ReportNightIndexLookupResult ReportResultServingService::resolve_plot_night(
     size_t therapy_index,
     const char *version,
     ReportIndexedNight &indexed_night,
@@ -320,13 +360,13 @@ bool ReportResultServingService::resolve_plot_night(
     uint64_t version_night_start_ms = 0;
     const bool have_version_start =
         parse_report_night_start_from_etag(version, version_night_start_ms);
-    const bool found_night =
+    const ReportNightIndexLookupResult lookup =
         have_version_start
             ? night_index_.by_start(version_night_start_ms,
                                     indexed_night,
                                     &resolved_therapy_index)
             : night_index_.by_therapy_index(therapy_index, indexed_night);
-    if (!found_night) return false;
+    if (lookup != ReportNightIndexLookupResult::Ready) return lookup;
 
     char current_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
     night_index_.format_result_etag(indexed_night,
@@ -336,7 +376,7 @@ bool ReportResultServingService::resolve_plot_night(
         snprintf(etag_out, etag_out_size, "%s", current_etag);
     }
 
-    return true;
+    return ReportNightIndexLookupResult::Ready;
 }
 
 }  // namespace aircannect
