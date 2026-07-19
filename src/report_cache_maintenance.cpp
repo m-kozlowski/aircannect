@@ -199,7 +199,6 @@ bool ReportCacheMaintenanceService::clear_all(ReportCacheClearResult &out) {
     summary_runtime_.give();
 
     summary_.request_json_snapshot_publish();
-    (void)summary_.publish_json_snapshot();
     range_plot_.reset(true);
     result_prepare_.clear_prepare();
 

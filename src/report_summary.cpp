@@ -59,7 +59,7 @@ void ReportSummaryService::load_initial_snapshot() {
     summary_.reset_status();
 
     if (!load_from_store()) {
-        publish_changed_json_snapshot();
+        request_changed_json_snapshot_publish();
     }
 }
 
@@ -92,7 +92,7 @@ bool ReportSummaryService::request_refresh(bool force,
         summary_.give();
     }
 
-    publish_changed_json_snapshot();
+    request_changed_json_snapshot_publish();
     Log::logf(CAT_REPORT, LOG_INFO, "Summary refresh queued\n");
     return true;
 }
@@ -111,7 +111,7 @@ ReportSummaryFetchEvent ReportSummaryService::poll(RpcArbiter &arbiter) {
         summary_.give();
         publish_progress = summary_.snapshot_progress_due(now_ms, 500);
     }
-    if (publish_progress) publish_changed_json_snapshot();
+    if (publish_progress) request_changed_json_snapshot_publish();
 
     if (fetch_.spool_complete()) return finish_fetch();
     if (fetch_.spool_failed()) {
@@ -241,7 +241,7 @@ bool ReportSummaryService::load_from_store() {
               static_cast<unsigned long>(nights_with_therapy));
 
     summary_.give_scratch();
-    publish_changed_json_snapshot();
+    request_changed_json_snapshot_publish();
     result_cache_.invalidate(0, true);
     return true;
 }
@@ -272,7 +272,7 @@ ReportSummaryFetchEvent ReportSummaryService::finish_fetch() {
         summary_.give();
     }
 
-    publish_changed_json_snapshot();
+    request_changed_json_snapshot_publish();
     Log::logf(CAT_REPORT,
               LOG_INFO,
               "Summary ready records=%lu therapy_nights=%lu\n",
@@ -300,7 +300,7 @@ ReportSummaryFetchEvent ReportSummaryService::fail_fetch(
     }
 
     Log::logf(CAT_REPORT, LOG_WARN, "Summary failed: %s\n", error.c_str());
-    publish_changed_json_snapshot();
+    request_changed_json_snapshot_publish();
     return ReportSummaryFetchEvent::Failed;
 }
 
@@ -329,9 +329,8 @@ uint32_t ReportSummaryService::json_snapshot_generation() const {
     return summary_.snapshot_generation();
 }
 
-void ReportSummaryService::publish_changed_json_snapshot() {
+void ReportSummaryService::request_changed_json_snapshot_publish() {
     request_json_snapshot_publish();
-    (void)publish_json_snapshot();
 }
 
 ReportSummarySnapshotResult ReportSummaryService::publish_json_snapshot() {

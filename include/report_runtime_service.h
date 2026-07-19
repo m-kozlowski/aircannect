@@ -68,7 +68,7 @@ private:
     void handle_summary_fetch_event(ReportSummaryFetchEvent event);
 
     // Summary snapshot publication
-    void service_summary_snapshot_publish();
+    void service_summary_snapshot_publish(bool realtime_active);
 
     // Pipeline dependencies
     ReportFetchRuntime &fetch_;

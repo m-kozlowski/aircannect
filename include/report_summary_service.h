@@ -53,7 +53,7 @@ private:
     bool load_from_store();
     ReportSummaryFetchEvent finish_fetch();
     ReportSummaryFetchEvent fail_fetch(const char *message);
-    void publish_changed_json_snapshot();
+    void request_changed_json_snapshot_publish();
 
     ReportSummaryRuntime &summary_;
     ReportFetchRuntime &fetch_;

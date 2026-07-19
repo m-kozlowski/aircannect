@@ -97,7 +97,7 @@ void ReportRuntimeService::poll(RpcArbiter &arbiter) {
     prefetch_.service(realtime_active);
 
     // Summary and EDF catalog changes republish one coherent night snapshot.
-    service_summary_snapshot_publish();
+    service_summary_snapshot_publish(realtime_active);
 
     // Cross-task summary revision publication
     if (summary_runtime_.take(0)) {
@@ -139,10 +139,13 @@ void ReportRuntimeService::poll(RpcArbiter &arbiter) {
         return;
     }
 
+    if (realtime_active) return;
+
     handle_summary_fetch_event(summary_.poll(arbiter));
 }
 
-void ReportRuntimeService::service_summary_snapshot_publish() {
+void ReportRuntimeService::service_summary_snapshot_publish(
+    bool realtime_active) {
     EdfReportCatalogStatus catalog_status;
     const uint32_t now_ms = millis();
     if (edf_catalog_ &&
@@ -158,7 +161,11 @@ void ReportRuntimeService::service_summary_snapshot_publish() {
                 catalog_status.sessions;
             summary_.request_json_snapshot_publish();
         }
+    }
 
+    if (realtime_active) return;
+
+    if (summary_publish_retry_.catalog_pending) {
         if (!summary_publish_retry_.cache_invalidated) {
             result_cache_.invalidate(0, true);
             summary_publish_retry_.cache_invalidated = true;
