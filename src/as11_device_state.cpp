@@ -235,6 +235,23 @@ bool midpoint_epoch_ms(int64_t request_epoch_ms,
     return true;
 }
 
+bool response_midpoint_epoch_ms(int64_t request_epoch_ms,
+                                int64_t response_epoch_ms,
+                                uint32_t request_ms,
+                                uint32_t response_ms,
+                                int64_t &epoch_ms) {
+    const int64_t min_epoch_ms =
+        static_cast<int64_t>(VALID_TIME_MIN_EPOCH) * 1000;
+    if (response_epoch_ms >= min_epoch_ms &&
+        (request_ms != 0 || response_ms != 0)) {
+        const uint32_t elapsed_ms = response_ms - request_ms;
+        epoch_ms = response_epoch_ms - elapsed_ms / 2;
+        return epoch_ms >= min_epoch_ms;
+    }
+
+    return midpoint_epoch_ms(request_epoch_ms, response_epoch_ms, epoch_ms);
+}
+
 }  // namespace
 
 const char *as11_identity_get_params_json() {
@@ -370,7 +387,9 @@ bool As11DeviceState::apply_datetime_response(
     const std::string &payload,
     uint32_t now_ms,
     int64_t request_epoch_ms,
-    int64_t response_epoch_ms) {
+    int64_t response_epoch_ms,
+    uint32_t request_ms,
+    uint32_t response_ms) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
     if (error) return false;
@@ -383,16 +402,11 @@ bool As11DeviceState::apply_datetime_response(
     int64_t device_epoch_ms = 0;
     int64_t esp_epoch_ms = 0;
     if (parse_datetime_epoch_ms(text, device_epoch_ms) &&
-        (midpoint_epoch_ms(request_epoch_ms, response_epoch_ms,
-                           esp_epoch_ms) ||
+        (response_midpoint_epoch_ms(request_epoch_ms, response_epoch_ms,
+                                    request_ms, response_ms, esp_epoch_ms) ||
          current_epoch_ms(esp_epoch_ms))) {
-        const int64_t offset = device_epoch_ms - esp_epoch_ms;
-        if (offset >= INT32_MIN && offset <= INT32_MAX) {
-            clock_offset_ms_ = static_cast<int32_t>(offset);
-            clock_offset_valid_ = true;
-        } else {
-            clock_offset_valid_ = false;
-        }
+        clock_offset_ms_ = device_epoch_ms - esp_epoch_ms;
+        clock_offset_valid_ = true;
     } else {
         clock_offset_valid_ = false;
     }
@@ -412,6 +426,11 @@ bool As11DeviceState::apply_activity_event_frame(const As11EventFrame &frame,
         last_activity_event_report_time_ = event.report_time;
         last_activity_event_ms_ = now_ms;
         if (event_state != As11TherapyState::Unknown) {
+            last_therapy_transition_state_ = event_state;
+            copy_cstr(last_therapy_transition_report_time_,
+                      sizeof(last_therapy_transition_report_time_),
+                      event.report_time.c_str());
+            last_therapy_transition_ms_ = now_ms;
             therapy_state_ = event_state;
             status_valid_ = true;
             status_updated_ms_ = now_ms;

@@ -31,6 +31,7 @@ const ReportResolvedStream *find_stream(const ReportResolvedPlan &plan,
 
 bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
                                       size_t range_count,
+                                      bool spool_allowed,
                                       ReportResolvedPlan &plan) const {
     if (!ranges || range_count == 0) return true;
 
@@ -144,7 +145,8 @@ bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
                                    true)) {
                 return false;
             }
-        } else if (spool_.coverage_complete(*source,
+        } else if (spool_allowed &&
+                   spool_.coverage_complete(*source,
                                             range.start_ms,
                                             range.end_ms)) {
             if (!add_event_segment(ReportResolvedProvider::Spool,
@@ -161,10 +163,12 @@ bool ReportSourceResolver::add_events(const ReportSessionRange *ranges,
                                               range.end_ms)) {
                 return false;
             }
-            if (!add_collected_event_payloads(ReportResolvedProvider::Spool,
-                                              event_name,
-                                              range.start_ms,
-                                              range.end_ms)) {
+            if (spool_allowed &&
+                !add_collected_event_payloads(
+                    ReportResolvedProvider::Spool,
+                    event_name,
+                    range.start_ms,
+                    range.end_ms)) {
                 return false;
             }
         }

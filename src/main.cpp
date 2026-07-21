@@ -400,7 +400,10 @@ void setup() {
 
     sink_manager.begin(rpc_arbiter, session_manager);
 
-    edf_recorder_manager.begin(rpc_arbiter, session_manager);
+    time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
+
+    edf_recorder_manager.begin(rpc_arbiter, session_manager,
+                               time_sync_service);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
 
     edf_report_catalog_job.begin();
@@ -409,7 +412,6 @@ void setup() {
     oximetry_manager.begin(app_config);
     report_manager.begin();
     resmed_ota_manager.begin(rpc_arbiter);
-    time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
     if (edf_report_catalog_job.set_posix_timezone(
             app_config.data().timezone.c_str())) {
         edf_report_catalog_timezone_revision =

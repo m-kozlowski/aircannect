@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "as11_clock.h"
 #include "edf_series.h"
 #include "edf_signal_router.h"
 #include "stream_frame.h"
@@ -82,7 +83,9 @@ public:
 
     void set_record_observer(EdfRecordObserver observer, void *context);
 
-    bool start_session(const char *device_start_time);
+    bool start_session(
+        const char *device_start_time,
+        const As11ClockTransform &clock_transform = As11ClockTransform{});
     void set_current_records(uint32_t brp_record,
                              uint32_t pld_record,
                              uint32_t sa2_record);
@@ -184,6 +187,7 @@ private:
     int64_t timeline_next_frame_start_ms_ = 0;
     int64_t declared_start_epoch_ms_ = 0;
     bool initial_epoch_rebase_allowed_ = false;
+    As11ClockTransform clock_transform_;
 
     EdfStreamAssemblerStatus status_;
 };

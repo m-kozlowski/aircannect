@@ -46,6 +46,7 @@ const char *edf_report_catalog_phase_name(uint8_t phase) {
         case 3: return "open_day";
         case 4: return "read_file";
         case 5: return "read_header";
+        case 6: return "read_metadata";
         default:
             return "unknown";
     }
@@ -119,6 +120,7 @@ void EdfReportCatalogJob::release_build_locked() {
     if (build_sessions_) Memory::free(build_sessions_);
     build_sessions_ = nullptr;
     build_session_count_ = 0;
+    build_metadata_index_ = 0;
     status_.build_sessions = 0;
     release_build_days_locked();
 }
@@ -268,6 +270,7 @@ bool EdfReportCatalogJob::start_refresh_locked(uint32_t *refresh_id_out) {
     current_file_path_[0] = '\0';
     current_file_size_ = 0;
     current_file_mtime_ = 0;
+    build_metadata_index_ = 0;
     if (refresh_id_out) *refresh_id_out = status_.refresh_id;
     return true;
 }
@@ -370,10 +373,12 @@ JobStep EdfReportCatalogJob::step() {
     }
 
     JobStep out = JobStep::Idle;
-    if (phase_ == Phase::ReadHeader) {
+    if (phase_ == Phase::ReadHeader || phase_ == Phase::ReadMetadata) {
         status_.phase = static_cast<uint8_t>(phase_);
         unlock();
-        return read_header_unlocked();
+        return phase_ == Phase::ReadHeader
+            ? read_header_unlocked()
+            : read_metadata_unlocked();
     }
     switch (phase_) {
         case Phase::OpenRoot: out = open_root_locked(); break;
@@ -381,6 +386,7 @@ JobStep EdfReportCatalogJob::step() {
         case Phase::OpenDay: out = open_day_locked(); break;
         case Phase::ReadFile: out = read_file_locked(); break;
         case Phase::ReadHeader: break;
+        case Phase::ReadMetadata: break;
         case Phase::Idle:
         default:
             status_.idle_phase_hits++;
@@ -524,8 +530,9 @@ JobStep EdfReportCatalogJob::read_day_locked() {
 JobStep EdfReportCatalogJob::open_day_locked() {
     if (build_day_index_ >= build_day_count_) {
         close_dirs_locked();
-        publish_build_locked();
-        return JobStep::Idle;
+        build_metadata_index_ = 0;
+        phase_ = Phase::ReadMetadata;
+        return JobStep::Working;
     }
     if (!storage_append_child_path("/DATALOG",
                                    build_days_[build_day_index_].name,
@@ -692,6 +699,130 @@ JobStep EdfReportCatalogJob::read_header_unlocked() {
     }
 
     phase_ = Phase::ReadFile;
+    status_.phase = static_cast<uint8_t>(phase_);
+    unlock();
+    return JobStep::Working;
+}
+
+JobStep EdfReportCatalogJob::read_metadata_unlocked() {
+    static constexpr size_t METADATA_FILE_MAX = 4096;
+
+    char path[AC_STORAGE_PATH_MAX] = {};
+    uint32_t snapshot_refresh_id = 0;
+    size_t snapshot_index = 0;
+
+    if (!lock(20)) return JobStep::Waiting;
+    if (status_.state != EdfReportCatalogState::Refreshing ||
+        phase_ != Phase::ReadMetadata) {
+        unlock();
+        return JobStep::Idle;
+    }
+    if (build_metadata_index_ >= build_session_count_) {
+        publish_build_locked();
+        unlock();
+        return JobStep::Idle;
+    }
+
+    snapshot_refresh_id = status_.refresh_id;
+    snapshot_index = build_metadata_index_;
+    const EdfReportSessionDescriptor &session =
+        build_sessions_[snapshot_index];
+    const int written = snprintf(path,
+                                 sizeof(path),
+                                 "%s/%s/%s.bin",
+                                 EDF_SESSION_METADATA_ROOT,
+                                 session.sleep_day,
+                                 session.session_stamp);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(path)) {
+        set_error_locked("metadata_path_too_long");
+        unlock();
+        return JobStep::Idle;
+    }
+    update_current_path_locked(path);
+    unlock();
+
+    uint8_t *bytes = nullptr;
+    size_t length = 0;
+    bool read_ok = false;
+    bool alloc_failed = false;
+    {
+        Storage::Guard guard;
+        File file = Storage::open(path, "r");
+        if (!file) {
+            char backup[AC_STORAGE_PATH_MAX] = {};
+            const int written = snprintf(backup,
+                                         sizeof(backup),
+                                         "%s.bak",
+                                         path);
+            if (written > 0 &&
+                static_cast<size_t>(written) < sizeof(backup)) {
+                file = Storage::open(backup, "r");
+            }
+        }
+        if (file && !file.isDirectory()) {
+            length = static_cast<size_t>(file.size());
+            if (length >= 16 && length <= METADATA_FILE_MAX) {
+                bytes = static_cast<uint8_t *>(
+                    Memory::alloc_large(length, false));
+                if (bytes) {
+                    read_ok = file.read(bytes, length) == length;
+                } else {
+                    alloc_failed = true;
+                }
+            }
+            file.close();
+        }
+    }
+
+    EdfSessionMetadataFileInfo info;
+    EdfSessionMetadata metadata;
+    const bool inspected =
+        read_ok && EdfSessionMetadataCodec::inspect(bytes, length, info);
+    const uint64_t identity = inspected
+        ? EdfSessionMetadataCodec::identity(bytes, length)
+        : 0;
+    const bool decoded =
+        inspected &&
+        info.version == EdfSessionMetadataCodec::Version &&
+        EdfSessionMetadataCodec::decode(bytes, length, metadata) &&
+        edf_session_metadata_path_matches(path, metadata);
+    const bool opaque =
+        inspected && info.version > EdfSessionMetadataCodec::Version;
+    if (bytes) Memory::free(bytes);
+
+    if (!lock(20)) return JobStep::Waiting;
+    if (status_.state != EdfReportCatalogState::Refreshing ||
+        status_.refresh_id != snapshot_refresh_id ||
+        phase_ != Phase::ReadMetadata ||
+        build_metadata_index_ != snapshot_index) {
+        status_.phase = static_cast<uint8_t>(phase_);
+        unlock();
+        return JobStep::Idle;
+    }
+
+    if (alloc_failed) {
+        set_error_locked("alloc_failed");
+        unlock();
+        return JobStep::Idle;
+    }
+
+    if (decoded || opaque) {
+        EdfReportSessionDescriptor &session =
+            build_sessions_[snapshot_index];
+        session.clock_provenance_present = true;
+        session.clock_provenance_decoded = decoded;
+        session.clock_provenance_identity = identity;
+        if (decoded) session.clock_provenance = metadata;
+    }
+
+    build_metadata_index_++;
+    if (build_metadata_index_ >= build_session_count_) {
+        publish_build_locked();
+        status_.phase = static_cast<uint8_t>(phase_);
+        unlock();
+        return JobStep::Idle;
+    }
+
     status_.phase = static_cast<uint8_t>(phase_);
     unlock();
     return JobStep::Working;

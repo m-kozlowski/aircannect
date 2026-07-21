@@ -67,6 +67,19 @@ struct EdfStorageOpenResult {
     char error[96] = {};
 };
 
+struct EdfStorageMetadataHandle {
+    uint32_t request_id = 0;
+
+    bool valid() const { return request_id != 0; }
+};
+
+struct EdfStorageMetadataResult {
+    bool complete = false;
+    bool success = false;
+    char path[80] = {};
+    char error[96] = {};
+};
+
 struct EdfStorageWorkerStatus {
     bool initialized = false;
     bool available = false;
@@ -82,6 +95,7 @@ struct EdfStorageWorkerStatus {
     uint32_t record_jobs = 0;
     uint32_t close_jobs = 0;
     uint32_t identification_jobs = 0;
+    uint32_t metadata_jobs = 0;
     uint32_t records_written = 0;
 
     uint32_t queue_drops = 0;
@@ -130,6 +144,10 @@ bool enqueue_str_record(const char *path,
 
 // metadata/close jobs
 bool enqueue_identification_files(const std::string &json);
+bool enqueue_session_metadata(const char *path,
+                              const uint8_t *bytes,
+                              size_t length,
+                              EdfStorageMetadataHandle *handle = nullptr);
 bool enqueue_close_numeric(EdfFileKind kind);
 bool enqueue_close_annotation(EdfAnnotationKind kind);
 
@@ -140,6 +158,8 @@ uint32_t stack_high_water_bytes();
 #endif
 bool open_result(const EdfStorageOpenHandle &handle,
                  EdfStorageOpenResult &result);
+bool metadata_result(const EdfStorageMetadataHandle &handle,
+                     EdfStorageMetadataResult &result);
 
 }  // namespace EdfStorageWorker
 }  // namespace aircannect

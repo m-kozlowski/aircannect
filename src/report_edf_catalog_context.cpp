@@ -53,12 +53,26 @@ bool ReportEdfCatalogContext::resolve_session_timezone(
     EdfReportSessionDescriptor &session,
     const ReportSummaryRecord *matching_summary,
     int32_t &offset_minutes) const {
+    if (session.clock_provenance_decoded) {
+        const int32_t frozen_offset =
+            session.clock_provenance.timezone_offset_minutes;
+        if (!edf_report_session_apply_timezone_offset(session,
+                                                      frozen_offset)) {
+            return false;
+        }
+        offset_minutes = frozen_offset;
+        return true;
+    }
+
     int32_t current_offset_minutes = 0;
     const bool current_offset_valid =
         timezone_offset_minutes(current_offset_minutes);
 
+    const ReportSummaryRecord *timezone_summary =
+        session.clock_provenance_present ? nullptr : matching_summary;
+
     return report_edf_resolve_session_timezone(session,
-                                               matching_summary,
+                                               timezone_summary,
                                                current_offset_valid,
                                                current_offset_minutes,
                                                offset_minutes);

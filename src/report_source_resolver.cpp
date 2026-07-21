@@ -80,7 +80,10 @@ bool ReportSourceResolver::build_plan(const ReportIndexedNight &night,
         out.ranges[i] = required_ranges[i];
     }
 
-    if (!add_events(required_ranges, required_range_count, out)) {
+    if (!add_events(required_ranges,
+                    required_range_count,
+                    !night.has_edf_clock_provenance,
+                    out)) {
         return false;
     }
 

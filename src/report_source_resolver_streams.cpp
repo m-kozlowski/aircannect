@@ -26,8 +26,10 @@ bool ReportSourceResolver::add_signal(
         return true;
     }
 
-    const ReportSourceId spool_source = choose_spool_source_for_signal(night,
-                                                                       signal);
+    const bool spool_allowed = !night.has_edf_clock_provenance;
+    const ReportSourceId spool_source = spool_allowed
+        ? choose_spool_source_for_signal(night, signal)
+        : signal.preferred_source;
     const ReportSourceDef *spool_source_def = report_source_def(spool_source);
     const ReportSourceDef *edf_source_def = report_source_def(
         signal.preferred_source);
@@ -100,6 +102,13 @@ bool ReportSourceResolver::add_signal(
 
     auto add_spool_gap = [&](int64_t start_ms, int64_t end_ms) -> bool {
         if (end_ms <= start_ms) return true;
+        if (!spool_allowed) {
+            return add_series_segment(ReportResolvedProvider::None,
+                                      signal.preferred_source,
+                                      start_ms,
+                                      end_ms,
+                                      false);
+        }
         if (!spool_source_def) {
             return add_series_segment(ReportResolvedProvider::Spool,
                                       spool_source,

@@ -129,6 +129,7 @@ private:
 
     bool add_events(const ReportSessionRange *ranges,
                     size_t range_count,
+                    bool spool_allowed,
                     ReportResolvedPlan &plan) const;
 
     bool add_signal(const ReportIndexedNight &night,

@@ -249,6 +249,8 @@ bool ReportNightIndexSnapshot::initialize(size_t count,
         entry.source_signature = night.source_signature;
         entry.has_summary = night.has_summary;
         entry.has_edf = night.has_edf;
+        entry.has_edf_clock_provenance =
+            night.has_edf_clock_provenance;
         entry.edf_catalog_pending = night.edf_catalog_pending;
         if (entry.summary.valid &&
             entry.summary.duration_min > 0 &&
@@ -298,6 +300,7 @@ bool ReportNightIndexSnapshot::materialize(size_t index,
     out.source_signature = entry.source_signature;
     out.has_summary = entry.has_summary;
     out.has_edf = entry.has_edf;
+    out.has_edf_clock_provenance = entry.has_edf_clock_provenance;
     out.edf_catalog_pending = entry.edf_catalog_pending;
     return true;
 }

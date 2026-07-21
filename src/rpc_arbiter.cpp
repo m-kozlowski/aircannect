@@ -1229,10 +1229,11 @@ void RpcArbiter::dispatch_next_request() {
     pending_.stream_command = request.stream_command;
     pending_.event_command = request.event_command;
     pending_.settings_refresh = request.settings_refresh;
-    pending_.deadline_ms = millis() + request.timeout_ms;
+    pending_.dispatch_ms = millis();
+    pending_.deadline_ms = pending_.dispatch_ms + request.timeout_ms;
     pending_.dispatch_epoch_ms = 0;
     (void)current_epoch_ms(pending_.dispatch_epoch_ms);
-    last_integrated_tx_ms_ = millis();
+    last_integrated_tx_ms_ = pending_.dispatch_ms;
     stats_.dispatched_requests++;
     as11_state_.mark_therapy_command_sent(request.method,
                                           last_integrated_tx_ms_);
@@ -1482,7 +1483,8 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
             int64_t response_epoch_ms = 0;
             (void)current_epoch_ms(response_epoch_ms);
             as11_state_.apply_datetime_response(
-                payload, now, pending_.dispatch_epoch_ms, response_epoch_ms);
+                payload, now, pending_.dispatch_epoch_ms, response_epoch_ms,
+                pending_.dispatch_ms, now);
         } else if (pending_.event_command != EventCommandType::None) {
             uint32_t subscription_id = 0;
             const bool subscribed =

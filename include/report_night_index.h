@@ -33,6 +33,7 @@ struct ReportIndexedNight {
     uint64_t source_signature = 0;
     bool has_summary = false;
     bool has_edf = false;
+    bool has_edf_clock_provenance = false;
     bool edf_catalog_pending = false;
 };
 
@@ -74,6 +75,8 @@ public:
     void reset();
     bool add_indexed_night(const ReportIndexedNight &night);
     bool add_summary_record(const ReportSummaryRecord &record);
+    bool suppress_raw_summary_for_edf(
+        const EdfReportSessionDescriptor &session);
     bool add_edf_session(const EdfReportSessionDescriptor &session,
                          bool timezone_offset_valid,
                          int32_t timezone_offset_minutes);

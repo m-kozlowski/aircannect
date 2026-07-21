@@ -111,6 +111,7 @@ bool encode_record(uint8_t *raw, const ReportIndexedNight &night) {
     if (night.has_summary) flags |= 1u << 1;
     if (night.has_edf) flags |= 1u << 2;
     if (night.edf_catalog_pending) flags |= 1u << 3;
+    if (night.has_edf_clock_provenance) flags |= 1u << 4;
     put_le32(raw + 0, flags);
     put_le64(raw + 8, night.source_signature);
     const uint16_t range_count = static_cast<uint16_t>(
@@ -151,6 +152,7 @@ bool decode_record(const uint8_t *raw, ReportIndexedNight &night) {
     night.has_summary = (flags & (1u << 1)) != 0;
     night.has_edf = (flags & (1u << 2)) != 0;
     night.edf_catalog_pending = (flags & (1u << 3)) != 0;
+    night.has_edf_clock_provenance = (flags & (1u << 4)) != 0;
     night.source_signature = get_le64(raw + 8);
     const uint16_t range_count = static_cast<uint16_t>(
         std::min<size_t>(get_le16(raw + 16),

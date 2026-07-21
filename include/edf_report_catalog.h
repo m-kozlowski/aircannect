@@ -6,6 +6,7 @@
 
 #include "edf_file_inventory.h"
 #include "edf_file_reader.h"
+#include "edf_session_metadata.h"
 #include "report_sources.h"
 
 namespace aircannect {
@@ -95,6 +96,10 @@ struct EdfReportSessionDescriptor {
     int64_t local_latest_header_end_ms = 0;
     int64_t earliest_header_start_ms = 0;
     int64_t latest_header_end_ms = 0;
+    EdfSessionMetadata clock_provenance;
+    uint64_t clock_provenance_identity = 0;
+    bool clock_provenance_present = false;
+    bool clock_provenance_decoded = false;
     EdfReportSessionFileDescriptor files[AC_EDF_REPORT_SESSION_FILE_MAX] = {};
 };
 

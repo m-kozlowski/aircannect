@@ -173,6 +173,14 @@ ReportNightIndexSnapshotResult ReportNightIndexService::build_uncached(
 
     ReportNightIndexSnapshotRef durable;
     if (!catalog_ready) (void)runtime_.durable_snapshot(durable);
+    if (durable) {
+        if (!have_catalog_status ||
+            catalog_status.state != EdfReportCatalogState::Error) {
+            (void)edf_catalog_.request_refresh();
+        }
+        out = std::move(durable);
+        return ReportNightIndexSnapshotResult::Ready;
+    }
 
     UniqueNightKeySet night_starts;
     UniqueNightKeySet sleep_days;
@@ -185,20 +193,6 @@ ReportNightIndexSnapshotResult ReportNightIndexService::build_uncached(
     }
 
     size_t capacity = 0;
-    if (durable) {
-        for (size_t i = 0; i < durable->count(); ++i) {
-            const ReportSummaryRecord *record = durable->summary_at(i);
-            if (!record || !record->valid) continue;
-            if (!add_summary_keys(night_starts,
-                                  sleep_days,
-                                  *record,
-                                  capacity)) {
-                error = "night_key_capacity";
-                return ReportNightIndexSnapshotResult::Failed;
-            }
-        }
-    }
-
     if (!summary_.take(pdMS_TO_TICKS(20))) {
         error = "summary_busy";
         return ReportNightIndexSnapshotResult::Busy;
@@ -282,26 +276,6 @@ ReportNightIndexSnapshotResult ReportNightIndexService::build_uncached(
     }
 
     ReportNightIndex index(nights, capacity);
-    if (durable) {
-        ScopedIndexedNight durable_night("report_night_index_durable_seed");
-        if (!durable_night) {
-            Memory::free(session_scratch);
-            Memory::free(nights);
-            error = "durable_seed_alloc";
-            return ReportNightIndexSnapshotResult::Failed;
-        }
-
-        for (size_t i = 0; i < durable->count(); ++i) {
-            if (!durable->materialize(i, durable_night.get()) ||
-                !index.add_indexed_night(durable_night.get())) {
-                Memory::free(session_scratch);
-                Memory::free(nights);
-                error = "durable_seed_failed";
-                return ReportNightIndexSnapshotResult::Failed;
-            }
-        }
-    }
-
     if (!summary_.take(pdMS_TO_TICKS(20))) {
         Memory::free(session_scratch);
         Memory::free(nights);
@@ -377,6 +351,18 @@ ReportNightIndexSnapshotResult ReportNightIndexService::build_uncached(
         Memory::free(session_scratch);
         Memory::free(nights);
         return result;
+    }
+
+    for (size_t i = 0; i < catalog_count; ++i) {
+        if (!edf_catalog_.copy_session(i, *session_scratch)) continue;
+        if (!edf_report_session_reportable(*session_scratch)) continue;
+
+        if (!index.suppress_raw_summary_for_edf(*session_scratch)) {
+            Memory::free(session_scratch);
+            Memory::free(nights);
+            error = "night_index_clock_mapping";
+            return ReportNightIndexSnapshotResult::Failed;
+        }
     }
 
     for (size_t i = 0; i < catalog_count; ++i) {

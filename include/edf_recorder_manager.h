@@ -4,9 +4,11 @@
 #include <stdint.h>
 #include <string>
 
+#include "as11_clock.h"
 #include "as11_event_frame.h"
 #include "edf_numeric_file_layout.h"
 #include "edf_series.h"
+#include "edf_session_metadata.h"
 #include "edf_storage_catalog.h"
 #include "edf_str_session.h"
 #include "edf_storage_worker.h"
@@ -17,6 +19,8 @@
 #include "stream_frame.h"
 
 namespace aircannect {
+
+class TimeSyncService;
 
 static constexpr size_t AC_EDF_STREAM_FRAME_BUDGET = 8;
 static constexpr uint32_t AC_EDF_ATTACH_RETRY_MS = 1000;
@@ -38,6 +42,7 @@ struct EdfRecorderStatus {
     bool recording_gate_is_closed = false;
     bool recording_gate_recovery_is_pending = false;
     bool annotation_open_is_pending = false;
+    bool clock_correction_applied = false;
 
     // subscriptions
     StreamConsumerHandle stream_handle = STREAM_CONSUMER_INVALID;
@@ -113,6 +118,8 @@ struct EdfRecorderStatus {
     uint32_t mask_events = 0;
     uint32_t mask_bad_events = 0;
 
+    int64_t clock_correction_ms = 0;
+
     // last activity
     uint32_t last_frame_ms = 0;
     uint32_t last_event_ms = 0;
@@ -148,7 +155,9 @@ struct EdfRecorderStatus {
 class EdfRecorderManager {
 public:
     // lifecycle
-    void begin(RpcArbiter &arbiter, SessionManager &session);
+    void begin(RpcArbiter &arbiter,
+               SessionManager &session,
+               TimeSyncService &time_sync);
     void poll(uint32_t now_ms);
 
     // control/status
@@ -164,6 +173,8 @@ public:
     void handle_event_frame(const As11EventFrame &frame, uint32_t now_ms);
 
 private:
+    struct SessionMetadataRuntime;
+
     struct NumericSchemaState {
         bool open = false;
         EdfNumericFileLayout layout;
@@ -223,6 +234,21 @@ private:
     bool ensure_annotation_files_open(uint32_t now_ms);
     void begin_recording_gate(const char *start_time, uint32_t now_ms);
     void close_recording_gate(const char *end_time, uint32_t now_ms);
+    void close_recording_segment();
+
+    // session clock provenance
+    bool ensure_segment_metadata_published(const char *start_time,
+                                           uint32_t now_ms);
+    bool build_segment_metadata(const char *start_time,
+                                EdfSessionMetadata &metadata) const;
+    void finalize_segment_metadata(const char *segment_end_time,
+                                   const char *therapy_end_time,
+                                   uint32_t now_ms);
+    void finalize_segment_metadata_at(int64_t raw_segment_end_ms,
+                                      int64_t raw_therapy_end_ms,
+                                      uint32_t now_ms);
+    bool ensure_metadata_runtime();
+    bool queue_pending_final_metadata();
 
     // EDF file opens
     bool open_session_annotation_files(const char *annotation_start_time);
@@ -280,6 +306,11 @@ private:
     bool write_str_day_record();
 
     // device time
+    void freeze_session_clock(uint32_t now_ms);
+    void freeze_session_timezone();
+    void apply_pending_mask_event(uint32_t now_ms);
+    bool parse_session_raw_time(const char *text, int64_t &epoch_ms) const;
+    bool parse_session_utc_time(const char *text, int64_t &epoch_ms) const;
     bool as11_timezone_ready() const;
     bool parse_session_local_time(const char *text, EdfLocalDateTime &out) const;
 
@@ -312,6 +343,7 @@ private:
     // subsystem owners
     RpcArbiter *arbiter_ = nullptr;
     SessionManager *session_ = nullptr;
+    TimeSyncService *time_sync_ = nullptr;
 
     // session cursors
     uint32_t seen_session_starts_ = 0;
@@ -344,6 +376,12 @@ private:
     EdfStorageOpenHandle eve_open_handle_;
     EdfStorageOpenHandle csl_open_handle_;
     uint16_t numeric_segment_day_ = 0;
+    As11ClockTransform session_clock_;
+    bool session_clock_frozen_ = false;
+    int32_t session_timezone_offset_minutes_ = 0;
+    bool session_timezone_frozen_ = false;
+
+    SessionMetadataRuntime *metadata_runtime_ = nullptr;
 
     // STR/identification state
     PendingRpc str_settings_rpc_;

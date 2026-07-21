@@ -92,6 +92,11 @@ uint64_t report_edf_session_signature(
     hash = report_hash_u64(hash, static_cast<uint64_t>(session.latest_write));
     hash = report_hash_i64(hash, session.earliest_header_start_ms);
     hash = report_hash_i64(hash, session.latest_header_end_ms);
+    hash = report_hash_u32(hash,
+                           session.clock_provenance_present ? 1u : 0u);
+    hash = report_hash_u32(hash,
+                           session.clock_provenance_decoded ? 1u : 0u);
+    hash = report_hash_u64(hash, session.clock_provenance_identity);
     return hash;
 }
 
@@ -109,6 +114,8 @@ void recompute_indexed_night_source_signature(ReportIndexedNight &night) {
     hash = report_hash_u32(
         hash,
         static_cast<uint32_t>(night.edf_source_signature_count));
+    hash = report_hash_u32(hash,
+                           night.has_edf_clock_provenance ? 1u : 0u);
     for (size_t i = 0; i < night.edf_source_signature_count; ++i) {
         hash = report_hash_u64(hash, night.edf_source_signatures[i]);
     }

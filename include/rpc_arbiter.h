@@ -211,6 +211,7 @@ private:
         bool active = false;
         uint32_t id = 0;
         uint32_t deadline_ms = 0;
+        uint32_t dispatch_ms = 0;
         int64_t dispatch_epoch_ms = 0;
         RpcSource source = RpcSource::Internal;
         std::string method;

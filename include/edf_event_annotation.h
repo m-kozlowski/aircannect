@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include "as11_clock.h"
 #include "as11_event_frame.h"
 #include "edf_file_writer.h"
 
@@ -24,6 +25,8 @@ bool edf_build_event_annotation(EdfAnnotationKind kind,
                                 const As11EventRecord &record,
                                 int64_t session_start_epoch_ms,
                                 EdfAnnotationRecord &annotation,
-                                EdfEventAnnotationResult &result);
+                                EdfEventAnnotationResult &result,
+                                const As11ClockTransform &clock_transform =
+                                    As11ClockTransform{});
 
 }  // namespace aircannect

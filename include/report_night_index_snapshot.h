@@ -53,6 +53,7 @@ private:
         uint64_t source_signature = 0;
         bool has_summary = false;
         bool has_edf = false;
+        bool has_edf_clock_provenance = false;
         bool edf_catalog_pending = false;
     };
 

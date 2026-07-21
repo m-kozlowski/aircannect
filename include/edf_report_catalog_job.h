@@ -83,6 +83,7 @@ private:
         OpenDay,
         ReadFile,
         ReadHeader,
+        ReadMetadata,
     };
 
     // locking/status
@@ -107,6 +108,7 @@ private:
     JobStep open_day_locked();
     JobStep read_file_locked();
     JobStep read_header_unlocked();
+    JobStep read_metadata_unlocked();
 
     bool add_file_to_build_locked(const EdfReportFileDescriptor &file);
 
@@ -126,6 +128,7 @@ private:
     // build snapshot
     EdfReportSessionDescriptor *build_sessions_ = nullptr;
     size_t build_session_count_ = 0;
+    size_t build_metadata_index_ = 0;
 
     struct DayName {
         char name[9] = {};

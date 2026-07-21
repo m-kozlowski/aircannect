@@ -363,6 +363,12 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.sessions_started));
     out.print('/');
     out.print(static_cast<unsigned long>(status.sessions_ended));
+    out.print(" clock=");
+    out.print(status.clock_correction_applied ? "utc_corrected" : "raw");
+    if (status.clock_correction_applied) {
+        out.print(" clock_offset_ms=");
+        out.print(static_cast<long long>(status.clock_correction_ms));
+    }
     out.print(" segment_rollovers=");
     out.print(static_cast<unsigned long>(status.segment_rollovers));
     out.print(" frames=");

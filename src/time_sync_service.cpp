@@ -145,6 +145,27 @@ const char *TimeSyncService::esp_clock_source_name() const {
     }
 }
 
+As11ClockTransform TimeSyncService::as11_clock_transform() const {
+    As11ClockTransform transform;
+    if (!ntp_synced_ || !arbiter_) return transform;
+
+    const As11DeviceState &state = arbiter_->as11_state();
+    if (!state.clock_offset_valid()) return transform;
+    if (static_cast<int32_t>(state.clock_sample_ms() - ntp_synced_ms_) < 0) {
+        return transform;
+    }
+
+    transform.externally_referenced = true;
+    transform.device_minus_utc_ms = state.clock_offset_ms();
+    transform.sampled_ms = state.clock_sample_ms();
+    return transform;
+}
+
+bool TimeSyncService::refresh_as11_clock_reference() {
+    if (!ntp_synced_ || !arbiter_) return false;
+    return arbiter_->send_request("GetDateTime", "", RpcSource::EdfRecorder);
+}
+
 std::string TimeSyncService::utc_now_iso() const {
     char out[29];
     if (!utc_now_iso(out, sizeof(out))) return "";
@@ -204,13 +225,21 @@ void TimeSyncService::stop_ntp() {
     ntp_started_ms_ = 0;
     ntp_synced_ = false;
     ntp_reported_ = false;
+    ntp_synced_ms_ = 0;
     g_ntp_synced = false;
 }
 
 void TimeSyncService::note_ntp_sync(uint32_t now_ms) {
     ntp_synced_ = true;
+    ntp_synced_ms_ = now_ms;
     esp_clock_source_ = EspClockSource::Ntp;
     last_status_ = "ntp_synced";
+
+    if (arbiter_) {
+        (void)arbiter_->send_request("GetDateTime", "",
+                                     RpcSource::Scheduler);
+    }
+
     if (app_config_ && app_config_->data().resmed_time_sync_enabled) {
         next_resmed_push_ms_ = now_ms;
     }

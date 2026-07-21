@@ -39,7 +39,9 @@ public:
     bool apply_datetime_response(const std::string &payload,
                                  uint32_t now_ms,
                                  int64_t request_epoch_ms = 0,
-                                 int64_t response_epoch_ms = 0);
+                                 int64_t response_epoch_ms = 0,
+                                 uint32_t request_ms = 0,
+                                 uint32_t response_ms = 0);
     bool apply_activity_event_frame(const As11EventFrame &frame,
                                     uint32_t now_ms);
 
@@ -59,7 +61,7 @@ public:
     bool clock_valid() const { return clock_valid_; }
     uint32_t clock_sample_ms() const { return clock_sample_ms_; }
     bool clock_offset_valid() const { return clock_offset_valid_; }
-    int32_t clock_offset_ms() const { return clock_offset_ms_; }
+    int64_t clock_offset_ms() const { return clock_offset_ms_; }
 
     // Identity and runtime facts
     const std::string &serial_number() const { return serial_number_; }
@@ -91,6 +93,15 @@ public:
     uint32_t last_activity_event_ms() const {
         return last_activity_event_ms_;
     }
+    As11TherapyState last_therapy_transition_state() const {
+        return last_therapy_transition_state_;
+    }
+    const char *last_therapy_transition_report_time() const {
+        return last_therapy_transition_report_time_;
+    }
+    uint32_t last_therapy_transition_ms() const {
+        return last_therapy_transition_ms_;
+    }
     As11TherapyState therapy_state() const { return therapy_state_; }
     bool therapy_command_pending() const {
         return pending_therapy_target_ != As11TherapyTarget::None;
@@ -118,7 +129,7 @@ private:
     bool clock_valid_ = false;
     uint32_t clock_sample_ms_ = 0;
     bool clock_offset_valid_ = false;
-    int32_t clock_offset_ms_ = 0;
+    int64_t clock_offset_ms_ = 0;
 
     std::string serial_number_;
     std::string product_name_;
@@ -137,6 +148,10 @@ private:
     std::string last_activity_event_;
     std::string last_activity_event_report_time_;
     uint32_t last_activity_event_ms_ = 0;
+    As11TherapyState last_therapy_transition_state_ =
+        As11TherapyState::Unknown;
+    char last_therapy_transition_report_time_[40] = {};
+    uint32_t last_therapy_transition_ms_ = 0;
 
     std::string device_datetime_;
 

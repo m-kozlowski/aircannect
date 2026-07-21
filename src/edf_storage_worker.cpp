@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -29,6 +30,7 @@ enum class JobType : uint8_t {
     NumericRecord,
     StrRecord,
     Identification,
+    SessionMetadata,
     Close,
 };
 
@@ -88,6 +90,14 @@ struct OpenRequestResult {
     char error[sizeof(EdfStorageWorkerStatus::last_error)] = {};
 };
 
+struct MetadataRequestResult {
+    bool complete = false;
+    bool success = false;
+    uint32_t request_id = 0;
+    char path[sizeof(EdfStorageWorkerStatus::last_path)] = {};
+    char error[sizeof(EdfStorageWorkerStatus::last_error)] = {};
+};
+
 void close_file(OpenFile &state);
 
 EdfStorageWorkerStatus stats;
@@ -104,6 +114,8 @@ size_t queued = 0;
 OpenFile open_files[AC_EDF_STORAGE_FILE_COUNT];
 OpenRequestResult open_results[AC_EDF_STORAGE_FILE_COUNT];
 uint32_t next_open_request_id = 0;
+MetadataRequestResult *metadata_result_state = nullptr;
+uint32_t next_metadata_request_id = 0;
 bool processing_job = false;
 
 constexpr size_t max_size(size_t a, size_t b) {
@@ -296,6 +308,30 @@ EdfStorageOpenHandle reserve_open_handle(StoredFileKind kind) {
     return handle;
 }
 
+EdfStorageMetadataHandle reserve_metadata_handle() {
+    EdfStorageMetadataHandle handle;
+    if (!lock_queue()) return handle;
+    next_metadata_request_id++;
+    if (next_metadata_request_id == 0) next_metadata_request_id++;
+    handle.request_id = next_metadata_request_id;
+    unlock_queue();
+    return handle;
+}
+
+bool ensure_metadata_result_state() {
+    if (metadata_result_state) return true;
+
+    void *memory = Memory::alloc_large(sizeof(MetadataRequestResult), false);
+    if (!memory) {
+        log_alloc_failed("metadata_result", sizeof(MetadataRequestResult));
+        set_error("metadata_result_alloc_failed");
+        return false;
+    }
+
+    metadata_result_state = new (memory) MetadataRequestResult();
+    return true;
+}
+
 void store_open_result(const OpenRequestResult &result,
                        StoredFileKind kind) {
     const size_t index = file_index(kind);
@@ -327,6 +363,28 @@ void mark_open_result(const JobSlot &job,
         copy_cstr(result.error, sizeof(result.error), error);
     }
     store_open_result(result, job.kind);
+}
+
+void mark_metadata_result(const JobSlot &job,
+                          bool success,
+                          const char *error) {
+    if (job.request_id == 0 || !metadata_result_state) return;
+
+    MetadataRequestResult result;
+    result.complete = true;
+    result.success = success;
+    result.request_id = job.request_id;
+    copy_cstr(result.path, sizeof(result.path), job.path);
+    if (!success) {
+        copy_cstr(result.error, sizeof(result.error), error);
+    }
+
+    if (lock_queue(50)) {
+        *metadata_result_state = result;
+        unlock_queue();
+        return;
+    }
+    *metadata_result_state = result;
 }
 
 uint8_t count_open_files() {
@@ -485,11 +543,14 @@ bool ensure_parent_dirs(const char *path) {
     if (!last_slash) return false;
     if (last_slash == dir) return true;
     *last_slash = 0;
-    char *second_slash = strchr(dir + 1, '/');
-    if (second_slash) {
-        *second_slash = 0;
-        if (!Storage::ensure_dir(dir)) return false;
-        *second_slash = '/';
+
+    for (char *slash = strchr(dir + 1, '/');
+         slash;
+         slash = strchr(slash + 1, '/')) {
+        *slash = 0;
+        const bool ready = Storage::ensure_dir(dir);
+        *slash = '/';
+        if (!ready) return false;
     }
     return Storage::ensure_dir(dir);
 }
@@ -964,6 +1025,69 @@ bool write_file_exact(const char *path, const uint8_t *data, size_t len) {
     return written == len;
 }
 
+bool process_session_metadata(const JobSlot &job) {
+    auto fail = [&](const char *error) {
+        stats.write_errors++;
+        set_error(error);
+        mark_metadata_result(job, false, error);
+        log_worker_failure(LOG_WARN, error, job.path);
+        return false;
+    };
+
+    if (!valid_path(job.path) || !job.bytes || job.len == 0) {
+        return fail("metadata_invalid");
+    }
+    if (!Storage::mounted()) {
+        stats.unavailable_drops++;
+        return fail("storage_not_mounted");
+    }
+
+    Storage::Guard guard;
+    if (!ensure_parent_dirs(job.path)) {
+        return fail("metadata_mkdir_failed");
+    }
+
+    char temporary[sizeof(EdfStorageWorkerStatus::last_path)] = {};
+    char backup[sizeof(EdfStorageWorkerStatus::last_path)] = {};
+    const int temporary_len =
+        snprintf(temporary, sizeof(temporary), "%s.tmp", job.path);
+    const int backup_len =
+        snprintf(backup, sizeof(backup), "%s.bak", job.path);
+    if (temporary_len <= 0 ||
+        static_cast<size_t>(temporary_len) >= sizeof(temporary) ||
+        backup_len <= 0 ||
+        static_cast<size_t>(backup_len) >= sizeof(backup)) {
+        return fail("metadata_path_too_long");
+    }
+
+    (void)Storage::remove(temporary);
+    (void)Storage::remove(backup);
+    if (!write_file_exact(temporary, job.bytes, job.len)) {
+        (void)Storage::remove(temporary);
+        return fail("metadata_write_failed");
+    }
+
+    const bool had_previous = Storage::exists(job.path);
+    if (had_previous && !Storage::rename(job.path, backup)) {
+        (void)Storage::remove(temporary);
+        return fail("metadata_backup_failed");
+    }
+    if (!Storage::rename(temporary, job.path)) {
+        if (had_previous) (void)Storage::rename(backup, job.path);
+        (void)Storage::remove(temporary);
+        return fail("metadata_publish_failed");
+    }
+
+    if (had_previous) (void)Storage::remove(backup);
+    stats.metadata_jobs++;
+    stats.bytes_written += job.len;
+    stats.last_activity_ms = millis();
+    copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
+    stats.last_error[0] = 0;
+    mark_metadata_result(job, true, nullptr);
+    return true;
+}
+
 bool process_identification_files(const JobSlot &job) {
     if (!job.bytes || job.len == 0) {
         set_error("identification_empty");
@@ -1040,6 +1164,9 @@ void process_job(JobSlot &job) {
             break;
         case JobType::Identification:
             (void)process_identification_files(job);
+            break;
+        case JobType::SessionMetadata:
+            (void)process_session_metadata(job);
             break;
         default:
             (void)process_record(job);
@@ -1355,6 +1482,39 @@ bool enqueue_identification_files(const std::string &json) {
         "identification_render_failed");
 }
 
+bool enqueue_session_metadata(const char *path,
+                              const uint8_t *bytes,
+                              size_t length,
+                              EdfStorageMetadataHandle *handle) {
+    if (handle) *handle = {};
+    if (!valid_path(path) || !bytes || length == 0 ||
+        length > AC_EDF_STORAGE_SLOT_BYTES) {
+        return false;
+    }
+    if (!stats.initialized) begin();
+    if (!stats.available || !slots) return false;
+    if (!ensure_metadata_result_state()) return false;
+
+    const EdfStorageMetadataHandle reserved = reserve_metadata_handle();
+    if (!reserved.valid()) return false;
+
+    const bool queued = enqueue_rendered_slot(
+        [&](JobSlot &job) {
+            job.type = JobType::SessionMetadata;
+            job.request_id = reserved.request_id;
+            copy_cstr(job.path, sizeof(job.path), path);
+        },
+        [&](JobSlot &job, size_t &written) {
+            memcpy(job.bytes, bytes, length);
+            written = length;
+            return true;
+        },
+        "metadata_snapshot_failed");
+    if (!queued) return false;
+    if (handle) *handle = reserved;
+    return true;
+}
+
 bool enqueue_close_numeric(EdfFileKind kind) {
     JobSlot job;
     job.type = JobType::Close;
@@ -1422,6 +1582,28 @@ bool open_result(const EdfStorageOpenHandle &handle,
         result.success = false;
         result.superseded = true;
         copy_cstr(result.error, sizeof(result.error), "open_superseded");
+    }
+    return true;
+}
+
+bool metadata_result(const EdfStorageMetadataHandle &handle,
+                     EdfStorageMetadataResult &result) {
+    result = {};
+    if (!handle.valid() || !metadata_result_state) return false;
+
+    MetadataRequestResult stored;
+    if (lock_queue()) {
+        stored = *metadata_result_state;
+        unlock_queue();
+    } else {
+        stored = *metadata_result_state;
+    }
+
+    if (stored.request_id == handle.request_id && stored.complete) {
+        result.complete = true;
+        result.success = stored.success;
+        copy_cstr(result.path, sizeof(result.path), stored.path);
+        copy_cstr(result.error, sizeof(result.error), stored.error);
     }
     return true;
 }
