@@ -29,6 +29,11 @@ void ReportSummarySnapshot::build_json(LargeTextBuffer &json) const {
     json.append(snapshot_.c_str(), snapshot_.length());
 }
 
+void ReportSummarySnapshot::begin_progress(uint32_t now_ms,
+                                           uint32_t interval_ms) {
+    next_progress_ms_ = now_ms + interval_ms;
+}
+
 bool ReportSummarySnapshot::progress_due(uint32_t now_ms,
                                          uint32_t interval_ms) {
     if (static_cast<int32_t>(now_ms - next_progress_ms_) < 0) {

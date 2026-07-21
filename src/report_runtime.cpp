@@ -207,9 +207,9 @@ void ReportRuntimeService::service_summary_snapshot_publish(
     if (result == ReportSummarySnapshotResult::Published) {
         const bool catalog_pending =
             summary_publish_retry_.catalog_pending;
-        const log_level_t level = summary_publish_retry_.failures > 0 ||
-                                      summary_publish_retry_.busy_retries > 0 ||
-                                      !catalog_pending || publish_ms > 500
+        const bool retried = summary_publish_retry_.failures > 0 ||
+                             summary_publish_retry_.busy_retries > 0;
+        const log_level_t level = catalog_pending || retried || publish_ms > 500
             ? LOG_INFO
             : LOG_DEBUG;
 
@@ -233,7 +233,7 @@ void ReportRuntimeService::service_summary_snapshot_publish(
         } else {
             Log::logf(CAT_REPORT,
                       level,
-                      "Summary snapshot recovered generation=%lu ms=%lu "
+                      "Summary snapshot updated generation=%lu ms=%lu "
                       "retries=%u\n",
                       static_cast<unsigned long>(snapshot_generation),
                       static_cast<unsigned long>(publish_ms),
@@ -483,6 +483,15 @@ bool ReportRuntimeService::foreground_busy() const {
 bool ReportRuntimeService::background_work_active() const {
     if (busy()) return true;
     if (build_queue_.has_pending()) return true;
+    if (summary_.json_snapshot_publish_pending()) return true;
+
+    if (edf_catalog_) {
+        EdfReportCatalogStatus catalog_status;
+        if (!edf_catalog_.status(catalog_status, 0)) return true;
+        if (catalog_status.state == EdfReportCatalogState::Refreshing) {
+            return true;
+        }
+    }
 
     return prefetch_.work_active();
 }

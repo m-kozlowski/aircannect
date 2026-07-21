@@ -72,6 +72,9 @@ static constexpr size_t AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL = 1;
 static constexpr uint32_t AC_REPORT_SPOOL_PULL_PACE_MS = 100;
 static constexpr size_t AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES = 8192;
 static constexpr size_t AC_REPORT_CACHE_SPOOL_ROUND_BYTES = 8192;
+// Summary progress lives in the same JSON document as the full night list.
+// Keep it visible without rebuilding that list on every spool poll.
+static constexpr uint32_t AC_REPORT_SUMMARY_PROGRESS_SNAPSHOT_MS = 2000;
 
 // Report result assembly and plot build.
 // Full-night overview plot: target min/max envelope buckets across a night's

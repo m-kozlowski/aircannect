@@ -17,6 +17,7 @@ public:
         return requested_generation_ != published_generation_;
     }
     uint32_t requested_generation() const { return requested_generation_; }
+    void begin_progress(uint32_t now_ms, uint32_t interval_ms);
     bool progress_due(uint32_t now_ms, uint32_t interval_ms);
 
 private:

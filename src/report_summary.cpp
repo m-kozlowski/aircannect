@@ -4,6 +4,7 @@
 #include <string.h>
 #include <string>
 
+#include "board_report.h"
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "report_diagnostics.h"
@@ -78,10 +79,15 @@ bool ReportSummaryService::request_refresh(bool force,
     request.pace_on_backpressure = true;
     request.stream_rounds = false;
 
-    if (!fetch_.start_summary_fetch(request, millis())) {
+    const uint32_t now_ms = millis();
+    if (!fetch_.start_summary_fetch(request, now_ms)) {
         (void)fail_fetch("summary_start_failed");
         return false;
     }
+
+    summary_.begin_snapshot_progress(
+        now_ms,
+        AC_REPORT_SUMMARY_PROGRESS_SNAPSHOT_MS);
 
     if (summary_.take(portMAX_DELAY)) {
         ReportSummaryStatus &status = summary_.status();
@@ -109,7 +115,9 @@ ReportSummaryFetchEvent ReportSummaryService::poll(RpcArbiter &arbiter) {
         status.spool = fetch_.spool_status();
         status.elapsed_ms = fetch_.summary_elapsed_ms(now_ms);
         summary_.give();
-        publish_progress = summary_.snapshot_progress_due(now_ms, 500);
+        publish_progress = summary_.snapshot_progress_due(
+            now_ms,
+            AC_REPORT_SUMMARY_PROGRESS_SNAPSHOT_MS);
     }
     if (publish_progress) request_changed_json_snapshot_publish();
 

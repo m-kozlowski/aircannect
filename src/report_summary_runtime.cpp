@@ -153,6 +153,11 @@ uint32_t ReportSummaryRuntime::snapshot_generation() const {
     return snapshot_.requested_generation();
 }
 
+void ReportSummaryRuntime::begin_snapshot_progress(uint32_t now_ms,
+                                                   uint32_t interval_ms) {
+    snapshot_.begin_progress(now_ms, interval_ms);
+}
+
 bool ReportSummaryRuntime::snapshot_progress_due(uint32_t now_ms,
                                                  uint32_t interval_ms) {
     return snapshot_.progress_due(now_ms, interval_ms);

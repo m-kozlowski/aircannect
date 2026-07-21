@@ -55,6 +55,7 @@ public:
     bool snapshot_available() const;
     bool snapshot_publish_pending() const;
     uint32_t snapshot_generation() const;
+    void begin_snapshot_progress(uint32_t now_ms, uint32_t interval_ms);
     bool snapshot_progress_due(uint32_t now_ms, uint32_t interval_ms);
 
     // Cache coverage sidecar
