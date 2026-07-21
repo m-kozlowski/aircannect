@@ -220,11 +220,11 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     sync_annotation_open_status();
     attach_stream(now_ms);
     update_stream_queue_drops();
+    if (!numeric_files_open_ || !numeric_open_synced_) {
+        buffer_numeric_open_stream(now_ms);
+    }
     if (!numeric_files_open_ && !open_numeric_files_from_stream(now_ms)) {
         return;
-    }
-    if (!numeric_open_synced_) {
-        buffer_numeric_open_stream(now_ms);
     }
     if (!sync_numeric_open_status(now_ms)) return;
     drain_stream(now_ms);
@@ -853,14 +853,22 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
         status_.file_open_failures != 0 ||
         status_.event_coverage_session_gap_count != 0 ||
         rpc_failures != 0;
+    const uint32_t stream_queue_drops =
+        status_.frame_drops >= status_.numeric_open_buffer_drops
+            ? status_.frame_drops - status_.numeric_open_buffer_drops
+            : status_.frame_drops;
+
     Log::logf(CAT_EDF, had_failures ? LOG_WARN : LOG_DEBUG,
               "recorder session end id=%lu reason=%s frames=%lu "
-              "drops=%lu numeric_drops=%lu enqueue_failures=%lu "
+              "drops=%lu queue_drops=%lu open_buffer_drops=%lu "
+              "numeric_drops=%lu enqueue_failures=%lu "
               "open_failures=%lu event_gaps=%lu rpc_failures=%lu events=%lu\n",
               static_cast<unsigned long>(status_.session_id),
               reason ? reason : "--",
               static_cast<unsigned long>(status_.frames),
               static_cast<unsigned long>(status_.frame_drops),
+              static_cast<unsigned long>(stream_queue_drops),
+              static_cast<unsigned long>(status_.numeric_open_buffer_drops),
               static_cast<unsigned long>(status_.numeric_record_drops),
               static_cast<unsigned long>(enqueue_failures),
               static_cast<unsigned long>(status_.file_open_failures),
@@ -1061,9 +1069,7 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
             return false;
         }
 
-        if (!pending_stream_frame_ &&
-            !arbiter_->next_stream_frame(status_.stream_handle,
-                                         pending_stream_frame_)) {
+        if (!take_numeric_open_stream_frame(pending_stream_frame_)) {
             return false;
         }
         if (!pending_stream_frame_) return false;
@@ -1093,13 +1099,7 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
         return false;
     }
 
-    if (!pending_stream_frame_) {
-        if (!arbiter_->next_stream_frame(status_.stream_handle,
-                                         pending_stream_frame_)) {
-            return false;
-        }
-    }
-    if (!pending_stream_frame_) return false;
+    if (!take_numeric_open_stream_frame(pending_stream_frame_)) return false;
 
     if (!pending_stream_frame_->start_time[0]) {
         pending_stream_frame_.reset();
@@ -2045,6 +2045,21 @@ void EdfRecorderManager::buffer_numeric_open_stream(uint32_t now_ms) {
     }
 }
 
+bool EdfRecorderManager::take_numeric_open_stream_frame(
+    StreamFrameRef &frame) {
+    if (frame) return true;
+    if (numeric_open_frame_buffer_.pop(frame)) {
+        return static_cast<bool>(frame);
+    }
+    if (!arbiter_ ||
+        status_.stream_handle == STREAM_CONSUMER_INVALID) {
+        return false;
+    }
+
+    return arbiter_->next_stream_frame(status_.stream_handle, frame) &&
+           static_cast<bool>(frame);
+}
+
 void EdfRecorderManager::drain_stream(uint32_t now_ms) {
     if (status_.stream_handle == STREAM_CONSUMER_INVALID ||
         !arbiter_->stream_consumer_active(status_.stream_handle)) {
@@ -2212,11 +2227,24 @@ void EdfRecorderManager::handle_completed_record(
                                                       record)) {
             status_.record_enqueue_failures++;
             set_error("record_queue_failed");
+            return;
+        }
+
+        switch (record.series) {
+            case EdfSeriesId::Brp:
+                status_.brp_records++;
+                break;
+            case EdfSeriesId::Pld:
+                status_.pld_records++;
+                break;
+            case EdfSeriesId::Sa2:
+                status_.sa2_records++;
+                break;
         }
         return;
-    } else {
-        status_.numeric_record_drops++;
     }
+
+    status_.numeric_record_drops++;
 }
 
 bool EdfRecorderManager::enqueue_event_annotation(

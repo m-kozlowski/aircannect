@@ -281,6 +281,7 @@ private:
     void sync_annotation_open_status();
     bool sync_numeric_open_status(uint32_t now_ms);
     void buffer_numeric_open_stream(uint32_t now_ms);
+    bool take_numeric_open_stream_frame(StreamFrameRef &frame);
     uint32_t event_coverage_session_gaps() const;
 
     // STR and identification records
