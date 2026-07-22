@@ -14,12 +14,13 @@ static constexpr size_t CHUNK_FRAME_BYTES = 8;
 }  // namespace
 
 AsyncPreparedResponse::AsyncPreparedResponse(
+    int status_code,
     const char *content_type,
     size_t content_length,
     AwsResponseFiller content)
     : content_(std::move(content)) {
-    _code = 200;
-    _contentType = content_type ? content_type : "application/octet-stream";
+    _code = status_code;
+    _contentType = content_type ? content_type : "";
     _contentLength = content_length;
     addHeader("Connection", "close", false);
 
@@ -30,13 +31,20 @@ AsyncPreparedResponse::AsyncPreparedResponse(
     }
 }
 
+AsyncPreparedResponse::AsyncPreparedResponse(
+    const char *content_type,
+    size_t content_length,
+    AwsResponseFiller content)
+    : AsyncPreparedResponse(
+          200, content_type, content_length, std::move(content)) {}
+
 AsyncPreparedResponse::~AsyncPreparedResponse() {
     if (buffer_) Memory::free(buffer_);
 }
 
 bool AsyncPreparedResponse::_sourceValid() const {
-    return static_cast<bool>(content_) &&
-        (_contentLength == 0 || (buffer_ && buffer_capacity_ > 0));
+    return _contentLength == 0 ||
+        (static_cast<bool>(content_) && buffer_ && buffer_capacity_ > 0);
 }
 
 void AsyncPreparedResponse::_respond(AsyncWebServerRequest *request) {

@@ -258,7 +258,8 @@ void add_artifact_headers(AsyncWebServerResponse *response,
 void send_not_modified(AsyncWebServerRequest *request,
                        const char *etag,
                        SourceRevision source_revision = {}) {
-    AsyncWebServerResponse *response = request->beginResponse(304);
+    AsyncWebServerResponse *response = new (std::nothrow)
+        AsyncPreparedResponse(304, nullptr, 0);
     if (!response) {
         request->send(304);
         return;

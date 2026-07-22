@@ -11,6 +11,10 @@ namespace aircannect {
 // A later TCP poll retries without consuming AsyncAbstractResponse credit.
 class AsyncPreparedResponse final : public AsyncWebServerResponse {
 public:
+    AsyncPreparedResponse(int status_code,
+                          const char *content_type,
+                          size_t content_length,
+                          AwsResponseFiller content = {});
     AsyncPreparedResponse(const char *content_type,
                           size_t content_length,
                           AwsResponseFiller content);
