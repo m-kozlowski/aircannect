@@ -48,7 +48,9 @@ public:
     virtual OperationSubmission request_read(
         const StorageReadCommand &command) = 0;
     virtual bool cancel(OperationTicket ticket) = 0;
-    virtual bool next_completion(StorageReadCompletion &completion) = 0;
+    virtual bool take_completion(
+        OperationTicket ticket,
+        StorageReadCompletion &completion) = 0;
 
     virtual size_t read_prepared(StoragePreparedRead prepared,
                                  size_t offset,

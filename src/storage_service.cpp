@@ -18,7 +18,6 @@
 #include "edf_storage_open_plan.h"
 #include "edf_str_file_layout.h"
 #include "edf_str_record_merge.h"
-#include "fixed_queue.h"
 #include "memory_manager.h"
 #include "storage_archive_service.h"
 #include "storage_browser_service.h"
@@ -124,8 +123,10 @@ struct PreparedReadSlot {
     uint8_t *bytes = nullptr;
 };
 
-using ReadCompletionQueue =
-    FixedQueue<StorageReadCompletion, AC_STORAGE_PREPARED_READ_CAPACITY>;
+struct ReadCompletionSlot {
+    bool used = false;
+    StorageReadCompletion completion;
+};
 
 void close_file(OpenFile &state);
 
@@ -147,7 +148,7 @@ bool processing_job = false;
 
 ReadJob read_jobs[AC_STORAGE_PREPARED_READ_CAPACITY];
 PreparedReadSlot prepared_reads[AC_STORAGE_PREPARED_READ_CAPACITY];
-ReadCompletionQueue read_completions;
+ReadCompletionSlot read_completions[AC_STORAGE_PREPARED_READ_CAPACITY];
 File active_read_file;
 size_t active_read_index = SIZE_MAX;
 size_t read_job_count = 0;
@@ -159,7 +160,8 @@ bool processing_read = false;
 
 OperationSubmission submit_prepared_read(const StorageReadCommand &command);
 bool cancel_prepared_read(OperationTicket ticket);
-bool pop_read_completion(StorageReadCompletion &completion);
+bool take_read_completion(OperationTicket ticket,
+                          StorageReadCompletion &completion);
 size_t copy_prepared_read(StoragePreparedRead prepared,
                           size_t offset,
                           uint8_t *buffer,
@@ -177,8 +179,10 @@ public:
         return cancel_prepared_read(ticket);
     }
 
-    bool next_completion(StorageReadCompletion &completion) override {
-        return pop_read_completion(completion);
+    bool take_completion(
+        OperationTicket ticket,
+        StorageReadCompletion &completion) override {
+        return take_read_completion(ticket, completion);
     }
 
     size_t read_prepared(StoragePreparedRead prepared,
@@ -430,6 +434,29 @@ PreparedReadSlot *find_prepared_read_locked(StoragePreparedRead prepared) {
     return nullptr;
 }
 
+size_t read_completion_count_locked() {
+    size_t count = 0;
+    for (const ReadCompletionSlot &slot : read_completions) {
+        if (slot.used) count++;
+    }
+    return count;
+}
+
+ReadCompletionSlot *find_read_completion_locked(OperationTicket ticket) {
+    if (!ticket.valid()) return nullptr;
+    for (ReadCompletionSlot &slot : read_completions) {
+        if (slot.used && slot.completion.ticket == ticket) return &slot;
+    }
+    return nullptr;
+}
+
+ReadCompletionSlot *find_free_read_completion_locked() {
+    for (ReadCompletionSlot &slot : read_completions) {
+        if (!slot.used) return &slot;
+    }
+    return nullptr;
+}
+
 size_t select_read_job_locked() {
     size_t selected = SIZE_MAX;
     uint8_t selected_priority = UINT8_MAX;
@@ -475,7 +502,7 @@ OperationSubmission submit_prepared_read(const StorageReadCommand &command) {
     if (!stats.initialized) begin();
     if (!stats.available || !lock_queue()) return OperationSubmission::busy();
 
-    const size_t completion_count = read_completions.count();
+    const size_t completion_count = read_completion_count_locked();
     if (read_job_count + completion_count >=
             AC_STORAGE_PREPARED_READ_CAPACITY ||
         read_job_count + prepared_read_count >=
@@ -529,11 +556,20 @@ bool cancel_prepared_read(OperationTicket ticket) {
     return true;
 }
 
-bool pop_read_completion(StorageReadCompletion &completion) {
-    if (!lock_queue()) return false;
-    const bool available = read_completions.pop(completion);
+bool take_read_completion(OperationTicket ticket,
+                          StorageReadCompletion &completion) {
+    if (!ticket.valid() || !lock_queue()) return false;
+
+    ReadCompletionSlot *slot = find_read_completion_locked(ticket);
+    if (!slot) {
+        unlock_queue();
+        return false;
+    }
+
+    completion = slot->completion;
+    *slot = {};
     unlock_queue();
-    return available;
+    return true;
 }
 
 size_t copy_prepared_read(StoragePreparedRead prepared,
@@ -1580,22 +1616,30 @@ void finish_read_job(size_t index,
     job = {};
     if (read_job_count > 0) read_job_count--;
 
-    if (!read_completions.push(completion)) {
+    ReadCompletionSlot *completion_slot =
+        find_free_read_completion_locked();
+    if (!completion_slot) {
         if (prepared_slot) {
             bytes_to_free = prepared_slot->bytes;
             *prepared_slot = {};
             if (prepared_read_count > 0) prepared_read_count--;
         }
         set_error("read_completion_queue_full");
-    } else if (completion.outcome.disposition ==
-               OperationDisposition::Succeeded) {
+    } else {
+        completion_slot->used = true;
+        completion_slot->completion = completion;
+    }
+
+    if (completion_slot &&
+        completion.outcome.disposition == OperationDisposition::Succeeded) {
         stats.read_jobs++;
         stats.bytes_read += completion.prepared.length;
         stats.last_error[0] = 0;
-    } else if (completion.outcome.disposition ==
-               OperationDisposition::Cancelled) {
+    } else if (completion_slot &&
+               completion.outcome.disposition ==
+                   OperationDisposition::Cancelled) {
         stats.read_cancellations++;
-    } else {
+    } else if (completion_slot) {
         stats.read_errors++;
         set_error(error ? error : "read_failed");
     }
