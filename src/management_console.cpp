@@ -373,7 +373,6 @@ bool ManagementConsole::event_has_output(const RpcEvent &event) {
         case RpcEventKind::RpcNotification:
         case RpcEventKind::DebugLog:
         case RpcEventKind::InternalSettingsStateInvalidated:
-        case RpcEventKind::InternalSettingsStateUpdated:
         case RpcEventKind::InternalDeviceStateUpdated:
             return false;
     }
@@ -492,8 +491,6 @@ void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
         case RpcEventKind::DebugLog:
             break;
         case RpcEventKind::InternalSettingsStateInvalidated:
-            break;
-        case RpcEventKind::InternalSettingsStateUpdated:
             break;
         case RpcEventKind::InternalDeviceStateUpdated:
             break;

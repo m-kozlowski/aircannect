@@ -270,9 +270,10 @@ int request_profile_mode_arg(AsyncWebServerRequest *request) {
         std::string(request->arg(arg_name).c_str()));
 }
 
-int active_settings_mode(const RpcArbiter *arbiter) {
-    if (!arbiter) return -1;
-    int mode = arbiter->as11_settings().mode_index();
+int active_settings_mode(const RpcArbiter *arbiter,
+                         const As11SettingsManager *settings_manager) {
+    if (!arbiter || !settings_manager) return -1;
+    int mode = settings_manager->state().mode_index();
     if (mode < 0) {
         mode = as11_mode_index_from_value(
             arbiter->as11_state().active_therapy_profile());
@@ -994,6 +995,7 @@ void build_resmed_ota_json(JsonOut &json, const ResmedOtaManager &ota) {
 }  // namespace
 
 bool WebUI::begin(RpcArbiter &arbiter,
+                  As11SettingsManager &settings_manager,
                   WifiManager &wifi_manager,
                   TcpBridge &tcp_bridge,
                   AppConfig &app_config,
@@ -1016,6 +1018,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     if (started_) return true;
     stop();
     arbiter_ = &arbiter;
+    settings_manager_ = &settings_manager;
     wifi_manager_ = &wifi_manager;
     tcp_bridge_ = &tcp_bridge;
     app_config_ = &app_config;
@@ -1212,6 +1215,7 @@ void WebUI::stop() {
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     observed_settings_refresh_pending_ = false;
+    observed_settings_revision_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
@@ -1225,8 +1229,10 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         arbiter_ &&
         (arbiter_->stream_activity_active() ||
          arbiter_->as11_state().therapy_state() == As11TherapyState::Running);
-    if (arbiter_ && observed_settings_refresh_pending_ !=
-                        arbiter_->as11_settings_refresh_pending()) {
+    if (settings_manager_ &&
+        (observed_settings_refresh_pending_ !=
+             settings_manager_->refresh_pending() ||
+         observed_settings_revision_ != settings_manager_->revision())) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     }
 
@@ -1570,8 +1576,6 @@ void WebUI::handle_event(const RpcEvent &event) {
         }
     } else if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-    } else if (event.kind == RpcEventKind::InternalSettingsStateUpdated) {
-        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     } else if (event.kind == RpcEventKind::InternalDeviceStateUpdated) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
     }
@@ -1767,7 +1771,9 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
     refresh_queued = refresh_queued || observed_settings_refresh_pending_;
 
     const int active_mode =
-        requested_mode < 0 ? active_settings_mode(arbiter_) : -1;
+        requested_mode < 0
+            ? active_settings_mode(arbiter_, settings_manager_)
+            : -1;
     const bool explicit_mode_mismatch =
         requested_mode >= 0 &&
         (requested_settings_mode_ != requested_mode ||
@@ -3572,7 +3578,7 @@ void WebUI::build_wifi_json(LargeTextBuffer &json) const {
 void WebUI::build_settings_json(LargeTextBuffer &json,
                                 int requested_mode,
                                 bool refresh_queued) const {
-    const As11SettingsState &state = arbiter_->as11_settings();
+    const As11SettingsState &state = settings_manager_->state();
     const As11DeviceState &as11 = arbiter_->as11_state();
     int active_mode = state.mode_index();
     if (active_mode < 0) {
@@ -3777,11 +3783,14 @@ void WebUI::publish_snapshots(bool force,
     if (rebuild_mask & SNAPSHOT_SETTINGS) {
         const int requested_mode = requested_settings_mode_;
         const bool refresh_queued =
-            arbiter_ && arbiter_->as11_settings_refresh_pending();
+            settings_manager_ && settings_manager_->refresh_pending();
         observed_settings_refresh_pending_ = refresh_queued;
+        observed_settings_revision_ =
+            settings_manager_ ? settings_manager_->revision() : 0;
         int published_settings_mode = requested_mode;
         if (published_settings_mode < 0) {
-            published_settings_mode = active_settings_mode(arbiter_);
+            published_settings_mode =
+                active_settings_mode(arbiter_, settings_manager_);
         }
 
         build_settings_json(cached_settings_json_,
@@ -3823,7 +3832,8 @@ void WebUI::execute_command(WebCommand &command) {
             execute_time_action(command.text);
             break;
         case WebCommandSettingsRefresh:
-            (void)arbiter_->request_as11_settings_refresh(RpcSource::HttpApi);
+            (void)settings_manager_->request_refresh(
+                *arbiter_, RpcSource::HttpApi, millis());
             mark_snapshots_dirty(SNAPSHOT_SETTINGS);
             break;
         case WebCommandSettingsUpdate:
@@ -3925,7 +3935,7 @@ void WebUI::execute_time_action(const std::string &action) {
 }
 
 void WebUI::execute_settings_update(const std::string &body) {
-    const As11SettingsState &state = arbiter_->as11_settings();
+    const As11SettingsState &state = settings_manager_->state();
     const As11DeviceState &as11 = arbiter_->as11_state();
     int mode = state.mode_index();
     if (mode < 0) {
@@ -3934,8 +3944,8 @@ void WebUI::execute_settings_update(const std::string &body) {
     size_t accepted = 0;
     std::string params = as11_build_set_params_from_json(body, mode, accepted);
     if (!accepted) return;
-    if (arbiter_->send_request("Set", params, RpcSource::HttpApi)) {
-        arbiter_->request_as11_settings_refresh(RpcSource::HttpApi);
+    if (settings_manager_->write(*arbiter_, params, RpcSource::HttpApi,
+                                 millis()).accepted()) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     }
 }

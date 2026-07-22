@@ -1736,6 +1736,7 @@ void ManagementConsole::handle_set_command(Print &out,
     }
 
     std::string params;
+    bool managed_settings = false;
     if (rest.startsWith("{")) {
         params = to_std(rest);
     } else {
@@ -1768,7 +1769,7 @@ void ManagementConsole::handle_set_command(Print &out,
         raw_params += "}";
         setting_body += "}";
 
-        const As11SettingsState &settings = ctx.arbiter.as11_settings();
+        const As11SettingsState &settings = ctx.settings_manager.state();
         const As11DeviceState &as11 = ctx.arbiter.as11_state();
         int mode = settings.mode_index();
         if (mode < 0) {
@@ -1786,6 +1787,7 @@ void ManagementConsole::handle_set_command(Print &out,
             out.println("[RPC] no accepted settings");
             return;
         }
+        managed_settings = accepted != 0;
 
         bool first = true;
         params = "{";
@@ -1794,8 +1796,11 @@ void ManagementConsole::handle_set_command(Print &out,
         params += "}";
     }
 
-    if (ctx.arbiter.send_request("Set", params, RpcSource::Console)) {
-        ctx.arbiter.request_as11_settings_refresh(RpcSource::Console);
+    const bool queued = managed_settings
+        ? ctx.settings_manager.write(ctx.arbiter, params, RpcSource::Console,
+                                     millis()).accepted()
+        : ctx.arbiter.send_request("Set", params, RpcSource::Console);
+    if (queued) {
         out.println("[RPC] Set queued");
     } else {
         out.println("[RPC] Set queue failed");

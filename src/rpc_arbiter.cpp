@@ -17,9 +17,6 @@
 namespace aircannect {
 namespace {
 
-constexpr uint32_t AS11_SETTINGS_READBACK_TIMEOUT_MS = 20000;
-constexpr uint32_t AS11_SETTINGS_REFRESH_RETRY_MS = 1000;
-
 void *alloc_payload_bytes(size_t bytes) {
 #ifdef ARDUINO
     return Memory::alloc_large(bytes);
@@ -213,7 +210,6 @@ void RpcArbiter::poll() {
     process_deferred_payloads(AC_RPC_PAYLOAD_DRAIN_BUDGET);
 
     check_pending_timeout();
-    poll_as11_settings_refresh(millis());
     poll_stream_subscription();
     poll_event_subscription();
     poll_as11_healthcheck();
@@ -981,13 +977,10 @@ bool RpcArbiter::pop_source_event_queue(SourceEventQueue queue,
 
 void RpcArbiter::cancel_pending_request(const char *reason) {
     if (!pending_.active) return;
-    if (pending_.settings_refresh) {
-        finish_as11_settings_refresh();
-        schedule_as11_settings_refresh_retry(RpcSource::Scheduler, millis());
-    }
 
     stats_.request_cancellations++;
-    if (pending_.source == RpcSource::ResmedOta) {
+    const bool addressed_request = pending_.generation != 0;
+    if (!addressed_request && pending_.source == RpcSource::ResmedOta) {
         char buf[160];
         snprintf(buf, sizeof(buf),
                  "RPC request cancelled id=%lu method=%s source=%s reason=%s",
@@ -996,7 +989,8 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
                  source_name(pending_.source),
                  reason ? reason : "unknown");
         push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
-    } else if (pending_.source != RpcSource::Scheduler) {
+    } else if (!addressed_request &&
+               pending_.source != RpcSource::Scheduler) {
         char buf[160];
         snprintf(buf, sizeof(buf),
                  "RPC request cancelled id=%lu method=%s source=%s reason=%s",
@@ -1013,10 +1007,6 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
         event_.mark_command_cancelled(millis());
     }
     as11_state_.mark_therapy_command_timeout(pending_.method, millis());
-    if (pending_.method == "Set") {
-        as11_settings_.note_set_cancelled(reason ? reason : "cancelled",
-                                          millis());
-    }
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::cancelled(),
                      RpcCompletionCause::Cancelled, nullptr,
@@ -1028,13 +1018,9 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
 void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
                                        const char *reason,
                                        RpcCompletionCause cause) {
-    if (request.settings_refresh) {
-        finish_as11_settings_refresh();
-        schedule_as11_settings_refresh_retry(RpcSource::Scheduler, millis());
-    }
-
     stats_.request_cancellations++;
-    if (request.source == RpcSource::ResmedOta) {
+    const bool addressed_request = request.generation != 0;
+    if (!addressed_request && request.source == RpcSource::ResmedOta) {
         char buf[160];
         snprintf(buf, sizeof(buf),
                  "RPC request cancelled id=%lu method=%s source=%s reason=%s",
@@ -1043,7 +1029,8 @@ void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
                  source_name(request.source),
                  reason ? reason : "unknown");
         push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
-    } else if (request.source != RpcSource::Scheduler) {
+    } else if (!addressed_request &&
+               request.source != RpcSource::Scheduler) {
         char buf[160];
         snprintf(buf, sizeof(buf),
                  "RPC request cancelled id=%lu method=%s source=%s reason=%s",
@@ -1295,7 +1282,6 @@ void RpcArbiter::dispatch_next_request() {
     pending_.method = request.method;
     pending_.stream_command = request.stream_command;
     pending_.event_command = request.event_command;
-    pending_.settings_refresh = request.settings_refresh;
     pending_.generation = request.generation;
     pending_.deadline_ms = millis() + request.timeout_ms;
     pending_.dispatch_epoch_ms = 0;
@@ -1304,10 +1290,6 @@ void RpcArbiter::dispatch_next_request() {
     stats_.dispatched_requests++;
     as11_state_.mark_therapy_command_sent(request.method,
                                           last_integrated_tx_ms_);
-    if (request.method == "Set") {
-        as11_settings_.note_set_request(request.params_json,
-                                        last_integrated_tx_ms_);
-    }
 
     Log::logf(CAT_RPC, LOG_DEBUG, "dispatched id=%lu method=%s src=%s\n",
               static_cast<unsigned long>(request.id),
@@ -1332,9 +1314,11 @@ void RpcArbiter::check_pending_timeout() {
              static_cast<unsigned long>(pending_.id),
              pending_.method.c_str(),
              source_name(pending_.source));
-    if (pending_.source == RpcSource::ResmedOta) {
+    const bool addressed_request = pending_.generation != 0;
+    if (!addressed_request && pending_.source == RpcSource::ResmedOta) {
         push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
-    } else if (pending_.source != RpcSource::Scheduler) {
+    } else if (!addressed_request &&
+               pending_.source != RpcSource::Scheduler) {
         push_event(RpcEventKind::Info, buf);
     }
     stats_.request_timeouts++;
@@ -1354,13 +1338,6 @@ void RpcArbiter::check_pending_timeout() {
         event_.mark_command_timeout(now);
     }
     as11_state_.mark_therapy_command_timeout(pending_.method, now);
-    if (pending_.method == "Set") {
-        as11_settings_.note_set_cancelled("timeout", now);
-    }
-    if (pending_.settings_refresh) {
-        finish_as11_settings_refresh();
-        schedule_as11_settings_refresh_retry(RpcSource::Scheduler, now);
-    }
 
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::failed(), RpcCompletionCause::Timeout,
@@ -1526,24 +1503,20 @@ void RpcArbiter::poll_as11_healthcheck() {
 }
 
 void RpcArbiter::handle_matched_response(const std::string &payload) {
+    if (pending_.generation != 0) return;
+
     const uint32_t now = millis();
     const bool is_error = json_member_present(payload, "error");
     const bool therapy_method =
         As11DeviceState::is_therapy_command_method(pending_.method);
     bool get_had_pending_therapy = false;
-    bool settings_updated = false;
-    bool settings_snapshot_complete = false;
-    if (pending_.method == "Set") {
-        as11_settings_.note_set_response(is_error, now);
-    }
+
     if (!is_error) {
         if (pending_.method == "Get") {
             get_had_pending_therapy = as11_state_.therapy_command_pending();
             const As11TherapyState before_get_state =
                 as11_state_.therapy_state();
             as11_state_.apply_status_get_response(payload, now);
-            settings_updated = as11_settings_.apply_settings_get_response(
-                payload, now, &settings_snapshot_complete);
             if (before_get_state == As11TherapyState::Running &&
                 as11_state_.therapy_state() == As11TherapyState::Standby) {
                 schedule_as11_motor_refresh(
@@ -1597,18 +1570,6 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
                                       is_error, payload, now);
         if (is_error) stats_.stream_command_errors++;
     }
-    const bool settings_refresh_succeeded =
-        settings_updated && settings_snapshot_complete && !is_error;
-    if (settings_refresh_succeeded && pending_.settings_refresh) {
-        push_event(RpcEventKind::InternalSettingsStateUpdated, "",
-                   pending_.source, pending_.id);
-    }
-    if (pending_.settings_refresh) {
-        finish_as11_settings_refresh();
-        if (!settings_refresh_succeeded) {
-            schedule_as11_settings_refresh_retry(RpcSource::Scheduler, now);
-        }
-    }
 }
 
 bool RpcArbiter::request_as11_healthcheck() {
@@ -1654,70 +1615,6 @@ bool RpcArbiter::request_as11_healthcheck() {
     return true;
 }
 
-bool RpcArbiter::enqueue_as11_settings_refresh(RpcSource source) {
-    QueuedRequest request;
-    request.method = "Get";
-    request.params_json = as11_settings_get_params_json();
-    request.source = source;
-    request.settings_refresh = true;
-    if (!enqueue_request(request)) return false;
-
-    settings_refresh_pending_count_++;
-    return true;
-}
-
-void RpcArbiter::schedule_as11_settings_refresh_retry(RpcSource source,
-                                                      uint32_t now) {
-    if (!settings_refresh_retry_pending_ ||
-        (scheduler_source(settings_refresh_retry_source_) &&
-         !scheduler_source(source))) {
-        settings_refresh_retry_source_ = source;
-    }
-    settings_refresh_retry_pending_ = true;
-
-    uint32_t due = now + AS11_SETTINGS_REFRESH_RETRY_MS;
-    if (scheduler_source(settings_refresh_retry_source_) &&
-        background_backoff_active(now)) {
-        due = background_backoff_until_ms_;
-    }
-    next_settings_refresh_retry_ms_ = due;
-}
-
-bool RpcArbiter::request_as11_settings_refresh(RpcSource source) {
-    if (enqueue_as11_settings_refresh(source)) {
-        settings_refresh_retry_pending_ = false;
-        next_settings_refresh_retry_ms_ = 0;
-        return true;
-    }
-
-    schedule_as11_settings_refresh_retry(source, millis());
-    return false;
-}
-
-void RpcArbiter::poll_as11_settings_refresh(uint32_t now) {
-    if (as11_settings_.expire_pending(
-            now, AS11_SETTINGS_READBACK_TIMEOUT_MS)) {
-        push_event(RpcEventKind::InternalSettingsStateUpdated, "",
-                   RpcSource::Internal);
-    }
-
-    if (!settings_refresh_retry_pending_ || esp_ota_quiesce_requested_) return;
-    if (static_cast<int32_t>(now - next_settings_refresh_retry_ms_) < 0) return;
-
-    const RpcSource source = settings_refresh_retry_source_;
-    if (enqueue_as11_settings_refresh(source)) {
-        settings_refresh_retry_pending_ = false;
-        next_settings_refresh_retry_ms_ = 0;
-        return;
-    }
-
-    schedule_as11_settings_refresh_retry(source, now);
-}
-
-void RpcArbiter::finish_as11_settings_refresh() {
-    if (settings_refresh_pending_count_) settings_refresh_pending_count_--;
-}
-
 bool RpcArbiter::handle_event_notification(const char *payload,
                                            size_t payload_len) {
     const uint32_t now = millis();
@@ -1734,7 +1631,6 @@ bool RpcArbiter::handle_event_notification(const char *payload,
     if (event_result.settings_history_change) {
         push_event(RpcEventKind::InternalSettingsStateInvalidated, "",
                    RpcSource::Scheduler);
-        request_as11_settings_refresh(RpcSource::Scheduler);
     }
     const std::string event = as11_state_.last_activity_event();
     if (activity_updated && event_suggests_identity_refresh(event)) {
@@ -1827,7 +1723,6 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
         deferred_payloads_.clear();
         cancel_all_requests("device_boot");
         as11_state_.reset();
-        as11_settings_.clear();
         event_.mark_reattach(now);
         as11_healthcheck_initialized_ = true;
         schedule_as11_identity_refresh(now,
@@ -1907,7 +1802,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 const uint32_t matched_id = pending_.id;
                 const std::string matched_method = pending_.method;
                 const RpcSource response_source = pending_.source;
-                const bool settings_refresh = pending_.settings_refresh;
+                const bool addressed_request = pending_.generation != 0;
                 if (response_source != RpcSource::Console) {
                     char prefix[112];
                     snprintf(prefix, sizeof(prefix),
@@ -1929,6 +1824,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                     response_error, request_completions_);
                 note_request_success(response_source, millis());
                 pending_ = {};
+                if (addressed_request) break;
                 if (source_event_route(response_source)) {
                     push_source_event(response_source,
                                       RpcEventKind::RpcResponse,
@@ -1936,7 +1832,6 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                                       matched_id);
                     break;
                 }
-                if (settings_refresh) break;
                 if (!emit_matched_response(response_source)) break;
                 push_event(RpcEventKind::RpcResponse, ref_payload(),
                            response_source, matched_id);

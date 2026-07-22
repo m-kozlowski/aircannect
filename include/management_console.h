@@ -4,6 +4,7 @@
 #include <string>
 
 #include "app_config.h"
+#include "as11_settings_manager.h"
 #include "edf_recorder_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
@@ -27,6 +28,7 @@ class WebUI;
 
 struct ConsoleContext {
     RpcArbiter &arbiter;
+    As11SettingsManager &settings_manager;
     TcpBridge &tcp_bridge;
     WifiManager &wifi_manager;
     AppConfig &app_config;

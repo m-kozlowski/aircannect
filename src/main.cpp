@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "as11_settings_manager.h"
 #include "background_worker.h"
 #include "board.h"
 #include "can_driver.h"
@@ -47,6 +48,7 @@ using namespace aircannect;
 
 static CanDriver can_driver;
 static RpcArbiter rpc_arbiter(can_driver);
+static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
 static WifiManager wifi_manager;
 static TcpBridge tcp_bridge;
@@ -82,6 +84,7 @@ static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
     rpc_arbiter,
+    as11_settings_manager,
     tcp_bridge,
     wifi_manager,
     app_config,
@@ -230,6 +233,14 @@ static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
 static void drain_rpc_events() {
     RpcEvent event;
     while (rpc_arbiter.next_event(event)) {
+        if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
+            as11_settings_manager.invalidate(
+                rpc_arbiter, RpcSource::Scheduler, millis());
+        }
+        if (event.kind == RpcEventKind::BootNotification) {
+            as11_settings_manager.device_reset(rpc_arbiter);
+        }
+
         serial_management_console.handle_event(Serial, event);
         telnet_console.handle_event(event);
         web_ui.handle_event(event);
@@ -440,7 +451,8 @@ void setup() {
 
     sync_network_services();
 
-    web_ui.begin(rpc_arbiter, wifi_manager, tcp_bridge, app_config,
+    web_ui.begin(rpc_arbiter, as11_settings_manager,
+                 wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
                  report_manager,
@@ -507,6 +519,9 @@ void loop() {
         tcp_bridge.raw_client_connected());
 
     rpc_arbiter.poll();
+    as11_settings_manager.poll(
+        rpc_arbiter, millis(),
+        esp_ota_quiesce_requested || resmed_ota_transport_active);
 
     ota_manager.poll_http_upload_prepare(
         esp_ota_quiesce_requested &&

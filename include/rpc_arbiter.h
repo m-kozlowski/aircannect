@@ -6,7 +6,6 @@
 #include <string>
 
 #include "as11_device_state.h"
-#include "as11_settings.h"
 #include "board.h"
 #include "can_datagram.h"
 #include "can_driver.h"
@@ -24,7 +23,6 @@ enum class RpcEventKind {
     DebugLog,
     BootNotification,
     InternalSettingsStateInvalidated,
-    InternalSettingsStateUpdated,
     InternalDeviceStateUpdated,
     FramingError,
     Info,
@@ -174,12 +172,6 @@ public:
     void reset_stats();
 
     bool request_as11_healthcheck();
-    bool request_as11_settings_refresh(
-        RpcSource source = RpcSource::Scheduler);
-    bool as11_settings_refresh_pending() const {
-        return settings_refresh_pending_count_ != 0 ||
-               settings_refresh_retry_pending_;
-    }
     bool recover_can(const char *reason);
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
@@ -197,7 +189,6 @@ public:
     const EventBroker &event_broker() const { return event_; }
     const StreamBroker &stream_broker() const { return stream_; }
     const As11DeviceState &as11_state() const { return as11_state_; }
-    const As11SettingsState &as11_settings() const { return as11_settings_; }
 
 private:
     // Request and payload types
@@ -210,7 +201,6 @@ private:
         std::string method;
         StreamCommandType stream_command = StreamCommandType::None;
         EventCommandType event_command = EventCommandType::None;
-        bool settings_refresh = false;
         uint32_t generation = 0;
     };
 
@@ -224,7 +214,6 @@ private:
         int64_t set_datetime_target_epoch_ms = 0;
         StreamCommandType stream_command = StreamCommandType::None;
         EventCommandType event_command = EventCommandType::None;
-        bool settings_refresh = false;
         uint32_t generation = 0;
     };
 
@@ -310,11 +299,6 @@ private:
                                  const char *reason,
                                  bool response_error,
                                  RequestCompletionQueue &completions);
-    bool enqueue_as11_settings_refresh(RpcSource source);
-    void schedule_as11_settings_refresh_retry(RpcSource source,
-                                              uint32_t now);
-    void poll_as11_settings_refresh(uint32_t now);
-    void finish_as11_settings_refresh();
 
     void expire_raw_passthrough(uint32_t now);
     void remember_raw_passthrough(uint32_t id,
@@ -433,17 +417,12 @@ private:
     uint32_t last_boot_notification_ms_ = 0;
     std::string last_boot_notification_;
 
-    // Owned brokers and AS11 state
+    // Owned brokers and device state
     EventBroker event_;
     StreamBroker stream_;
     As11DeviceState as11_state_;
-    As11SettingsState as11_settings_;
 
     bool as11_healthcheck_initialized_ = false;
-    uint8_t settings_refresh_pending_count_ = 0;
-    bool settings_refresh_retry_pending_ = false;
-    RpcSource settings_refresh_retry_source_ = RpcSource::Scheduler;
-    uint32_t next_settings_refresh_retry_ms_ = 0;
 
     // Background AS11 polls
     uint32_t next_as11_identity_poll_ms_ = 0;
