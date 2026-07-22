@@ -38,6 +38,8 @@
 #include "report_http_controller.h"
 #include "report_spool_service.h"
 #include "report_task.h"
+#include "resmed_firmware_http_controller.h"
+#include "resmed_firmware_repository.h"
 #include "resmed_ota_manager.h"
 #include "rpc_transport.h"
 #include "rpc_quiesce_coordinator.h"
@@ -100,6 +102,8 @@ static ReportTask report_task;
 static ReportHttpController report_http_controller;
 static StorageHttpController storage_http_controller;
 static StorageUploadHttpController storage_upload_http_controller;
+static ResmedFirmwareRepository resmed_firmware_repository;
+static ResmedFirmwareHttpController resmed_firmware_http_controller;
 static ExportHttpController export_http_controller;
 static OtaHttpController ota_http_controller;
 static SettingsHttpController settings_http_controller;
@@ -113,6 +117,7 @@ static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
     &storage_upload_http_controller,
+    &resmed_firmware_http_controller,
     &export_http_controller,
     &ota_http_controller,
     &settings_http_controller,
@@ -152,7 +157,8 @@ static OtaConsoleCommands ota_console_commands(firmware_installer,
                                                firmware_url_source,
                                                arduino_ota_source,
                                                update_checker,
-                                               resmed_ota_manager);
+                                               resmed_ota_manager,
+                                               resmed_firmware_repository);
 static WebDiagnosticsConsoleCommands web_console_commands(web_ui);
 static ConsoleCommandGroup *console_command_groups[] = {
     &can_console_commands,
@@ -320,6 +326,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     export_task.publish_activity(storage_activity);
     storage_http_controller.publish_activity(storage_activity);
     storage_upload_http_controller.publish_activity(storage_activity);
+    resmed_firmware_repository.publish_activity(storage_activity);
 }
 
 static void publish_runtime_network() {
@@ -786,6 +793,13 @@ void setup() {
                   "[INIT] storage upload HTTP controller failed to start\n");
     }
 
+    if (!resmed_firmware_repository.begin(StorageService::scan_port(),
+                                          StorageService::path_port())) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] ResMed firmware repository failed to start\n");
+    }
+    resmed_firmware_http_controller.begin(resmed_firmware_repository);
+
     apply_storage_provisioning(config_service,
                                wifi_manager,
                                StorageService::read_port(),
@@ -1080,6 +1094,9 @@ void loop() {
 
     export_coordinator.poll(report_activity, storage_activity, now_ms);
     drain_can_rx_after("export_coordinator");
+
+    resmed_firmware_repository.poll();
+    drain_can_rx_after("resmed_firmware_repository");
 
     // Web, TCP, and console frontends
     refresh_status_http_snapshot(now_ms);

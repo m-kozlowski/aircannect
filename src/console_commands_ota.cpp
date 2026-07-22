@@ -6,6 +6,7 @@
 #include "firmware_url_source.h"
 #include "management_console_utils.h"
 #include "ota_status.h"
+#include "resmed_firmware_repository.h"
 #include "resmed_ota_manager.h"
 #include "string_util.h"
 #include "update_checker.h"
@@ -176,7 +177,8 @@ void handle_ota(Print &out,
 
 void handle_resmed_ota(Print &out,
                        String rest,
-                       ResmedOtaManager &resmed_ota) {
+                       ResmedOtaManager &resmed_ota,
+                       ResmedFirmwareRepository &repository) {
     trim_inplace(rest);
 
     if (!rest.length() || rest == "status") {
@@ -228,6 +230,65 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
+    if (rest == "repository" || rest == "repository list") {
+        const ResmedFirmwareRepositoryStatus status = repository.status();
+        const std::shared_ptr<const ResmedFirmwareCatalogSnapshot> snapshot =
+            repository.snapshot();
+
+        out.print("[RESMED repository] state=");
+        out.print(resmed_firmware_repository_state_name(status.state));
+        out.print(" entries=");
+        out.print(static_cast<unsigned long>(status.entries));
+        out.print(" revision=");
+        out.print(status.revision);
+        if (status.refresh_pending) out.print(" refresh=pending");
+        if (status.truncated) out.print(" truncated=yes");
+        if (status.error[0]) {
+            out.print(" error=");
+            out.print(status.error);
+        }
+        out.println();
+
+        if (!snapshot) return;
+        for (size_t i = 0; i < snapshot->size(); ++i) {
+            ResmedFirmwareEntryView entry;
+            if (!snapshot->entry(i, entry)) continue;
+
+            out.print("  ");
+            out.print(resmed_firmware_kind_name(entry.kind));
+            out.print(" size=");
+            out.print(static_cast<unsigned long>(entry.size));
+            out.print(" modified=");
+            out.print(static_cast<unsigned long>(entry.modified));
+            out.print(" path=\"");
+            out.print(entry.path);
+            out.println("\"");
+        }
+        return;
+    }
+
+    if (rest == "repository refresh") {
+        if (repository.request_refresh(true)) {
+            out.println("[RESMED repository] refresh queued");
+        } else {
+            out.println("[RESMED repository] refresh rejected");
+        }
+        return;
+    }
+
+    if (rest.startsWith("repository remove ")) {
+        String path = rest.substring(strlen("repository remove "));
+        trim_inplace(path);
+        if (!path.length()) {
+            out.println("[RESMED repository] path is required");
+        } else if (repository.request_remove(path.c_str())) {
+            out.println("[RESMED repository] remove queued");
+        } else {
+            out.println("[RESMED repository] remove rejected");
+        }
+        return;
+    }
+
     if (rest.startsWith("apply ")) {
         String args = rest.substring(6);
         int pos = 0;
@@ -276,7 +337,9 @@ void handle_resmed_ota(Print &out,
         }
     }
 
-    print_unknown_command(out, "RESMED OTA", "status, check, abort, apply");
+    print_unknown_command(
+        out, "RESMED OTA",
+        "status, check, abort, apply, repository [refresh|remove PATH]");
 }
 
 }  // namespace
@@ -285,12 +348,14 @@ OtaConsoleCommands::OtaConsoleCommands(FirmwareInstaller &installer,
                                        FirmwareUrlSource &url_source,
                                        ArduinoOtaSource &arduino_source,
                                        UpdateChecker &update_checker,
-                                       ResmedOtaManager &resmed_ota)
+                                       ResmedOtaManager &resmed_ota,
+                                       ResmedFirmwareRepository &resmed_repository)
     : installer_(installer),
       url_source_(url_source),
       arduino_source_(arduino_source),
       update_checker_(update_checker),
-      resmed_ota_(resmed_ota) {}
+      resmed_ota_(resmed_ota),
+      resmed_repository_(resmed_repository) {}
 
 bool OtaConsoleCommands::execute(const String &command,
                                  const String &rest_arg,
@@ -310,7 +375,7 @@ bool OtaConsoleCommands::execute(const String &command,
         return true;
     }
     if (command == "resmed-ota") {
-        handle_resmed_ota(out, rest, resmed_ota_);
+        handle_resmed_ota(out, rest, resmed_ota_, resmed_repository_);
         return true;
     }
     if (command == "restart") {

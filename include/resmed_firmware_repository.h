@@ -26,6 +26,7 @@ struct ResmedFirmwareRepositoryStatus {
     uint32_t revision = 0;
     size_t entries = 0;
     bool truncated = false;
+    bool refresh_pending = true;
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 

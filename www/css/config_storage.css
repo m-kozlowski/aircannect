@@ -178,3 +178,14 @@
       color: var(--muted);
       font-size: 13px;
     }
+
+    .resmed-repository-actions {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+
+    .resmed-repository-actions .btn {
+      min-height: 32px;
+      padding: 6px 10px;
+    }

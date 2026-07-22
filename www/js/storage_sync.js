@@ -551,7 +551,9 @@
       return true;
     }
 
-    async function storageUploadFile(file, directory, fileIndex, fileCount) {
+    async function storageUploadFile(file, directory, fileIndex, fileCount,
+                                     progressCallback) {
+      const updateProgress = progressCallback || storageUploadProgress;
       let conflict = "fail";
       for (;;) {
         const session = await storageStartUpload(file, directory, conflict);
@@ -561,7 +563,7 @@
             current.state === "ready" || current.state === "done");
           let committed = Number(status.committed_bytes) || 0;
           const chunkSize = Math.max(1, Number(session.chunk_size) || 262144);
-          storageUploadProgress(file.name, committed, file.size,
+          updateProgress(file.name, committed, file.size,
             fileIndex, fileCount);
 
           while (status.state !== "done") {
@@ -577,7 +579,7 @@
                 throw new Error(status.error || status.state);
               }
               committed = Number(status.committed_bytes) || committed;
-              storageUploadProgress(file.name, committed, file.size,
+              updateProgress(file.name, committed, file.size,
                 fileIndex, fileCount);
               continue;
             }
@@ -592,7 +594,7 @@
               (current.state === "ready" &&
                Number(current.committed_bytes) > committed));
             committed = Number(status.committed_bytes) || committed;
-            storageUploadProgress(file.name, committed, file.size,
+            updateProgress(file.name, committed, file.size,
               fileIndex, fileCount);
           }
           storageUploadCurrentId = 0;

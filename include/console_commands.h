@@ -23,6 +23,7 @@ class BleSensorSource;
 class OximetryHub;
 class PlxPeripheral;
 class ReportTask;
+class ResmedFirmwareRepository;
 class ResmedOtaManager;
 class RpcDiagnosticsPort;
 class RpcPassthroughPort;
@@ -286,7 +287,8 @@ public:
                        FirmwareUrlSource &url_source,
                        ArduinoOtaSource &arduino_source,
                        UpdateChecker &update_checker,
-                       ResmedOtaManager &resmed_ota);
+                       ResmedOtaManager &resmed_ota,
+                       ResmedFirmwareRepository &resmed_repository);
 
     bool execute(const String &command,
                  const String &rest,
@@ -299,6 +301,7 @@ private:
     ArduinoOtaSource &arduino_source_;
     UpdateChecker &update_checker_;
     ResmedOtaManager &resmed_ota_;
+    ResmedFirmwareRepository &resmed_repository_;
 };
 
 class WebDiagnosticsConsoleCommands final : public ConsoleCommandGroup {

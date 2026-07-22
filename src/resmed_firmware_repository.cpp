@@ -57,6 +57,7 @@ bool ResmedFirmwareRepository::request_refresh(bool foreground) {
     refresh_requested_ = true;
     foreground_refresh_ = foreground_refresh_ || foreground;
     retry_at_ms_ = 0;
+    status_.refresh_pending = true;
     unlock();
     return true;
 }
@@ -86,6 +87,7 @@ bool ResmedFirmwareRepository::request_remove(const char *path) {
     copy_cstr(remove_path_, sizeof(remove_path_), path);
     remove_requested_ = true;
     retry_at_ms_ = 0;
+    status_.state = ResmedFirmwareRepositoryState::Removing;
     unlock();
     return true;
 }
@@ -185,6 +187,7 @@ void ResmedFirmwareRepository::poll_completion() {
         status_.revision = next->revision();
         status_.entries = next->size();
         status_.truncated = next->truncated();
+        status_.refresh_pending = false;
         status_.error[0] = '\0';
         unlock();
         return;

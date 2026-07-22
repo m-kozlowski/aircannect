@@ -680,6 +680,37 @@
               <label>SHA256</label>
               <span class="value" id="resmedOtaHash">--</span>
             </div>
+            <div class="section-title">Firmware repository</div>
+            <div class="storage-toolbar">
+              <span class="storage-path" id="resmedRepositoryPath">
+                /aircannect/resmed-firmware
+              </span>
+              <div class="btns">
+                <button class="btn primary" id="resmedRepositoryAddBtn"
+                        onclick="resmedRepositoryChooseFiles()">Add</button>
+                <button class="btn" id="resmedRepositoryRefreshBtn"
+                        onclick="loadResmedRepository(true)">Refresh</button>
+              </div>
+              <input id="resmedRepositoryInput" type="file" multiple hidden
+                     accept=".abc,.bin,.img"
+                     onchange="resmedRepositoryFilesSelected(this)">
+            </div>
+            <div class="storage-upload-progress"
+                 id="resmedRepositoryUploadProgress" hidden>
+              <div class="storage-upload-progress-head">
+                <span id="resmedRepositoryUploadName">--</span>
+                <span id="resmedRepositoryUploadAmount">--</span>
+              </div>
+              <progress id="resmedRepositoryUploadBar" max="1" value="0">
+              </progress>
+              <button class="btn" id="resmedRepositoryUploadCancelBtn"
+                      onclick="resmedRepositoryCancelUpload()">Cancel</button>
+            </div>
+            <div class="storage-list" id="resmedRepositoryList">
+              <div class="storage-empty">Loading</div>
+            </div>
+            <div class="msg" id="resmedRepositoryMsg"></div>
+            <div class="section-title">Install another image</div>
             <div class="row">
               <label>Firmware image</label>
               <input id="resmedOtaFile" type="file" accept=".abc,.bin,.img">

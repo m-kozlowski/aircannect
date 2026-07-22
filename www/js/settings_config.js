@@ -698,6 +698,7 @@
 
         const resmedResponse = await api("/api/resmed-ota");
         renderResmedOta(await resmedResponse.json());
+        loadResmedRepository(true);
       } catch (error) {
         msg("otaMsg", error.message, false);
       }
@@ -1130,6 +1131,221 @@
         msg("resmedOtaMsg", "Apply complete", true, true);
       } else if (data.active) {
         msg("resmedOtaMsg", stateText, true, true);
+      }
+    }
+
+    function resmedRepositoryUploadProgress(name, committed, total,
+                                             fileIndex, fileCount) {
+      storageUploadProgress(name, committed, total, fileIndex, fileCount);
+
+      const safeTotal = Math.max(0, Number(total) || 0);
+      const safeCommitted = Math.min(safeTotal,
+        Math.max(0, Number(committed) || 0));
+      const nameNode = document.getElementById("resmedRepositoryUploadName");
+      const amountNode = document.getElementById("resmedRepositoryUploadAmount");
+      const bar = document.getElementById("resmedRepositoryUploadBar");
+      if (nameNode) {
+        nameNode.textContent = (fileCount > 1 ?
+          (fileIndex + 1) + "/" + fileCount + " " : "") + name;
+      }
+      if (amountNode) {
+        amountNode.textContent = fmtBytes(safeCommitted) + " / " +
+          fmtBytes(safeTotal);
+      }
+      if (bar) {
+        bar.max = Math.max(1, safeTotal);
+        bar.value = safeCommitted;
+      }
+    }
+
+    function setResmedRepositoryUploadBusy(busy) {
+      const progress = document.getElementById(
+        "resmedRepositoryUploadProgress");
+      const add = document.getElementById("resmedRepositoryAddBtn");
+      if (progress) progress.hidden = !busy;
+      if (add) add.disabled = !!busy;
+    }
+
+    function renderResmedRepository(data) {
+      up("resmedRepositoryPath", data.directory ||
+        "/aircannect/resmed-firmware");
+
+      const list = document.getElementById("resmedRepositoryList");
+      if (!list) return;
+      list.textContent = "";
+
+      const entries = Array.isArray(data.entries) ? data.entries : [];
+      if (!entries.length) {
+        const empty = document.createElement("div");
+        empty.className = "storage-empty";
+        empty.textContent = data.error ||
+          (data.refresh_pending ? "Refreshing" : "No firmware images");
+        list.appendChild(empty);
+      }
+
+      entries.forEach((entry) => {
+        const row = document.createElement("div");
+        row.className = "storage-entry";
+
+        const marker = document.createElement("span");
+        marker.textContent = entry.kind === "abc" ? "ABC" :
+          entry.kind === "raw" ? "RAW" : "?";
+        marker.className = "storage-meta";
+
+        const details = document.createElement("div");
+        const name = document.createElement("div");
+        name.className = "storage-name";
+        name.textContent = entry.name || entry.path || "--";
+        const meta = document.createElement("div");
+        meta.className = "storage-meta";
+        meta.textContent = fmtBytes(entry.size) +
+          (fmtStorageModified(entry.modified) ?
+            " / " + fmtStorageModified(entry.modified) : "");
+        details.appendChild(name);
+        details.appendChild(meta);
+
+        const actions = document.createElement("div");
+        actions.className = "resmed-repository-actions";
+        const remove = document.createElement("button");
+        remove.className = "btn danger";
+        remove.textContent = "Remove";
+        remove.onclick = () => resmedRepositoryRemove(entry.path,
+          entry.name || entry.path);
+        actions.appendChild(remove);
+
+        row.appendChild(marker);
+        row.appendChild(details);
+        row.appendChild(actions);
+        list.appendChild(row);
+      });
+
+      const refresh = document.getElementById("resmedRepositoryRefreshBtn");
+      if (refresh) {
+        refresh.disabled = !!data.refresh_pending ||
+          ["preparing", "scanning", "removing"].includes(data.state);
+      }
+
+      if (data.error) {
+        msg("resmedRepositoryMsg", data.error, false, true);
+      }
+    }
+
+    async function fetchResmedRepository(refresh) {
+      const entries = [];
+      let offset = 0;
+      let result = null;
+      for (let page = 0; page < 4; page++) {
+        const url = "/api/resmed-ota/repository?offset=" + offset +
+          "&limit=128" + (refresh && page === 0 ? "&refresh=1" : "");
+        const response = await fetch(url, {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok && response.status !== 202) {
+          throw new Error(data.error || ("HTTP " + response.status));
+        }
+        if (!result) result = data;
+        if (Array.isArray(data.entries)) entries.push(...data.entries);
+        if (!data.more) break;
+        offset += Number(data.count) || 0;
+        if (!Number(data.count)) break;
+      }
+      result = result || {};
+      result.entries = entries;
+      return result;
+    }
+
+    async function loadResmedRepository(refresh) {
+      if (resmedRepositoryPollTimer) {
+        clearTimeout(resmedRepositoryPollTimer);
+        resmedRepositoryPollTimer = null;
+      }
+
+      try {
+        const data = await fetchResmedRepository(!!refresh);
+        renderResmedRepository(data);
+        if (data.refresh_pending ||
+            ["idle", "preparing", "scanning", "removing"].includes(data.state)) {
+          resmedRepositoryPollTimer = setTimeout(
+            () => loadResmedRepository(false), 500);
+        }
+      } catch (error) {
+        msg("resmedRepositoryMsg", error.message, false, true);
+      }
+    }
+
+    function resmedRepositoryChooseFiles() {
+      if (storageUploadBusy) return;
+      const input = document.getElementById("resmedRepositoryInput");
+      if (input) input.click();
+    }
+
+    function resmedRepositoryFilesSelected(input) {
+      const files = input && input.files ? Array.from(input.files) : [];
+      if (input) input.value = "";
+      if (!files.length || storageUploadBusy) return;
+      resmedRepositoryUploadQueue(files);
+    }
+
+    async function resmedRepositoryUploadQueue(files) {
+      storageUploadCancelRequested = false;
+      storageUploadSetBusy(true);
+      setResmedRepositoryUploadBusy(true);
+      let uploaded = 0;
+      try {
+        for (let index = 0; index < files.length; index++) {
+          if (storageUploadCancelRequested) break;
+          const file = files[index];
+          resmedRepositoryUploadProgress(file.name, 0, file.size,
+            index, files.length);
+          if (await storageUploadFile(
+              file, "/aircannect/resmed-firmware", index, files.length,
+              resmedRepositoryUploadProgress)) {
+            uploaded++;
+          }
+        }
+
+        if (storageUploadCancelRequested) {
+          msg("resmedRepositoryMsg", "Upload cancelled", true, false);
+        } else {
+          msg("resmedRepositoryMsg", "Added " + uploaded + " image" +
+            (uploaded === 1 ? "" : "s"), true, false);
+        }
+        await loadResmedRepository(true);
+      } catch (error) {
+        msg("resmedRepositoryMsg", error.message, false, true);
+      } finally {
+        storageUploadCurrentId = 0;
+        storageUploadSetBusy(false);
+        setResmedRepositoryUploadBusy(false);
+      }
+    }
+
+    async function resmedRepositoryCancelUpload() {
+      storageUploadCancelRequested = true;
+      const id = storageUploadCurrentId;
+      try {
+        if (id) {
+          await storageUploadRequest("/api/storage/upload/cancel?id=" +
+            encodeURIComponent(id), {method: "POST"});
+        }
+      } catch (_) {}
+    }
+
+    async function resmedRepositoryRemove(path, name) {
+      if (!confirm("Remove " + name + " from the firmware repository?")) {
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/resmed-ota/repository/remove", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({path}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Remove failed");
+        await loadResmedRepository(false);
+      } catch (error) {
+        msg("resmedRepositoryMsg", error.message, false, true);
       }
     }
 

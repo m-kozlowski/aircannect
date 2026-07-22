@@ -48,6 +48,7 @@
       time: 0,
       bps: 0,
     };
+    let resmedRepositoryPollTimer = null;
     const LIVE_FAST_POINTS = 6000;
     const LIVE_MEDIUM_POINTS = 3000;
     const LIVE_SLOW_POINTS = 1800;
