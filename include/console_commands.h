@@ -37,26 +37,54 @@ class UpdateChecker;
 class WebUI;
 class WifiManager;
 
-class As11ConsoleCommands final : public ConsoleCommandGroup {
+class As11DeviceConsoleCommands final : public ConsoleCommandGroup {
 public:
-    As11ConsoleCommands(RpcRequestPort &rpc,
-                        RpcPassthroughPort &passthrough,
-                        RpcDiagnosticsPort &diagnostics,
-                        CanDriver &can,
-                        EventBroker &events,
-                        StreamBroker &stream,
-                        As11DeviceService &device,
-                        As11SettingsManager &settings,
-                        TimeSyncService &time_sync);
+    As11DeviceConsoleCommands(RpcRequestPort &rpc,
+                              RpcPassthroughPort &passthrough,
+                              As11DeviceService &device,
+                              TimeSyncService &time_sync);
+
+    bool execute(const String &command,
+                 const String &rest,
+                 Print &out,
+                 ConsoleCommandSession &session) override;
+    void print_status(Print &out) override;
+
+private:
+    RpcRequestPort &rpc_;
+    RpcPassthroughPort &passthrough_;
+    As11DeviceService &device_;
+    TimeSyncService &time_sync_;
+};
+
+class RpcConsoleCommands final : public ConsoleCommandGroup {
+public:
+    RpcConsoleCommands(RpcRequestPort &rpc,
+                       RpcPassthroughPort &passthrough,
+                       As11DeviceService &device,
+                       As11SettingsManager &settings);
+
+    bool execute(const String &command,
+                 const String &rest,
+                 Print &out,
+                 ConsoleCommandSession &session) override;
+
+private:
+    RpcRequestPort &rpc_;
+    RpcPassthroughPort &passthrough_;
+    As11DeviceService &device_;
+    As11SettingsManager &settings_;
+};
+
+class StreamConsoleCommands final : public ConsoleCommandGroup {
+public:
+    explicit StreamConsoleCommands(StreamBroker &stream);
 
     bool execute(const String &command,
                  const String &rest,
                  Print &out,
                  ConsoleCommandSession &session) override;
     void stop(ConsoleCommandSession &session) override;
-    void print_status(Print &out) override;
-    void print_stats(Print &out) override;
-    void reset_stats() override;
     void print_memory_detail(Print &out) override;
 
 private:
@@ -67,16 +95,30 @@ private:
 
     StreamSessionState *stream_session(uint32_t session_id, bool create);
 
-    RpcRequestPort &rpc_;
-    RpcPassthroughPort &passthrough_;
+    StreamBroker &stream_;
+    StreamSessionState stream_sessions_[AC_CONSOLE_COMMAND_SESSION_CAPACITY];
+};
+
+class CanConsoleCommands final : public ConsoleCommandGroup {
+public:
+    CanConsoleCommands(RpcDiagnosticsPort &diagnostics,
+                       CanDriver &can,
+                       EventBroker &events,
+                       StreamBroker &stream);
+
+    bool execute(const String &command,
+                 const String &rest,
+                 Print &out,
+                 ConsoleCommandSession &session) override;
+    void print_status(Print &out) override;
+    void print_stats(Print &out) override;
+    void reset_stats() override;
+
+private:
     RpcDiagnosticsPort &diagnostics_;
     CanDriver &can_;
     EventBroker &events_;
     StreamBroker &stream_;
-    As11DeviceService &device_;
-    As11SettingsManager &settings_;
-    TimeSyncService &time_sync_;
-    StreamSessionState stream_sessions_[AC_CONSOLE_COMMAND_SESSION_CAPACITY];
 };
 
 class CoreDiagnosticsConsoleCommands final : public ConsoleCommandGroup {

@@ -119,10 +119,13 @@ static HttpRouteModule *web_route_modules[] = {
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
-static As11ConsoleCommands as11_console_commands(
-    rpc_transport, rpc_transport, rpc_transport, can_driver, event_broker,
-    stream_broker, as11_device_service, as11_settings_manager,
-    time_sync_service);
+static CanConsoleCommands can_console_commands(
+    rpc_transport, can_driver, event_broker, stream_broker);
+static As11DeviceConsoleCommands as11_device_console_commands(
+    rpc_transport, rpc_transport, as11_device_service, time_sync_service);
+static RpcConsoleCommands rpc_console_commands(
+    rpc_transport, rpc_transport, as11_device_service, as11_settings_manager);
+static StreamConsoleCommands stream_console_commands(stream_broker);
 static NetworkConsoleCommands network_console_commands(wifi_manager,
                                                        tcp_bridge);
 static CoreDiagnosticsConsoleCommands core_console_commands;
@@ -146,7 +149,10 @@ static OtaConsoleCommands ota_console_commands(firmware_installer,
                                                resmed_ota_manager);
 static WebDiagnosticsConsoleCommands web_console_commands(web_ui);
 static ConsoleCommandGroup *console_command_groups[] = {
-    &as11_console_commands,
+    &can_console_commands,
+    &as11_device_console_commands,
+    &rpc_console_commands,
+    &stream_console_commands,
     &network_console_commands,
     &core_console_commands,
     &storage_console_commands,

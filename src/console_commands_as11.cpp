@@ -347,47 +347,22 @@ void handle_time(Print &out,
 
 }  // namespace
 
-As11ConsoleCommands::As11ConsoleCommands(
+As11DeviceConsoleCommands::As11DeviceConsoleCommands(
     RpcRequestPort &rpc,
     RpcPassthroughPort &passthrough,
-    RpcDiagnosticsPort &diagnostics,
-    CanDriver &can,
-    EventBroker &events,
-    StreamBroker &stream,
     As11DeviceService &device,
-    As11SettingsManager &settings,
     TimeSyncService &time_sync)
     : rpc_(rpc),
       passthrough_(passthrough),
-      diagnostics_(diagnostics),
-      can_(can),
-      events_(events),
-      stream_(stream),
       device_(device),
-      settings_(settings),
       time_sync_(time_sync) {}
 
-As11ConsoleCommands::StreamSessionState *
-As11ConsoleCommands::stream_session(uint32_t session_id, bool create) {
-    StreamSessionState *empty = nullptr;
-    for (StreamSessionState &session : stream_sessions_) {
-        if (session.session_id == session_id) return &session;
-        if (!session.session_id && !empty) empty = &session;
-    }
-    if (!create || !empty) return nullptr;
-
-    empty->session_id = session_id;
-    empty->handle = STREAM_CONSUMER_INVALID;
-    return empty;
-}
-
-bool As11ConsoleCommands::execute(const String &command,
-                                  const String &rest_arg,
-                                  Print &out,
-                                  ConsoleCommandSession &session) {
-    if (command != "as11" && command != "therapy" && command != "time" &&
-        command != "get" && command != "set" && command != "stream" &&
-        command != "rpc" && command != "raw" && command != "can") {
+bool As11DeviceConsoleCommands::execute(
+    const String &command,
+    const String &rest_arg,
+    Print &out,
+    ConsoleCommandSession &) {
+    if (command != "as11" && command != "therapy" && command != "time") {
         return false;
     }
 
@@ -437,6 +412,34 @@ bool As11ConsoleCommands::execute(const String &command,
         handle_time(out, rest, device_, time_sync_);
         return true;
     }
+
+    return false;
+}
+
+void As11DeviceConsoleCommands::print_status(Print &out) {
+    ConsoleFormat::print_as11_status(out, device_.state());
+}
+
+RpcConsoleCommands::RpcConsoleCommands(
+    RpcRequestPort &rpc,
+    RpcPassthroughPort &passthrough,
+    As11DeviceService &device,
+    As11SettingsManager &settings)
+    : rpc_(rpc),
+      passthrough_(passthrough),
+      device_(device),
+      settings_(settings) {}
+
+bool RpcConsoleCommands::execute(const String &command,
+                                 const String &rest_arg,
+                                 Print &out,
+                                 ConsoleCommandSession &) {
+    if (command != "get" && command != "set" && command != "rpc" &&
+        command != "raw") {
+        return false;
+    }
+
+    String rest = rest_arg;
 
     if (command == "get") {
         rest.trim();
@@ -528,18 +531,6 @@ bool As11ConsoleCommands::execute(const String &command,
         return true;
     }
 
-    if (command == "stream") {
-        StreamSessionState *stream_state =
-            stream_session(session.id, true);
-        if (!stream_state) {
-            out.println("[STREAM] console session table full");
-            return true;
-        }
-
-        handle_stream(out, rest, stream_, stream_state->handle);
-        return true;
-    }
-
     if (command == "rpc") {
         rest.trim();
         const int split = rest.indexOf(' ');
@@ -565,23 +556,43 @@ bool As11ConsoleCommands::execute(const String &command,
         return true;
     }
 
-    if (command == "can") {
-        rest.trim();
-        rest.toLowerCase();
-        if (!rest.length() || rest == "status") {
-            ConsoleFormat::print_rpc_status(out, diagnostics_, can_);
-        } else if (rest == "restart") {
-            diagnostics_.recover_can("console CAN restart command");
-        } else {
-            print_unknown_command(out, "CAN", "can status, can restart");
-        }
-        return true;
-    }
-
     return false;
 }
 
-void As11ConsoleCommands::stop(ConsoleCommandSession &session) {
+StreamConsoleCommands::StreamConsoleCommands(StreamBroker &stream)
+    : stream_(stream) {}
+
+StreamConsoleCommands::StreamSessionState *
+StreamConsoleCommands::stream_session(uint32_t session_id, bool create) {
+    StreamSessionState *empty = nullptr;
+    for (StreamSessionState &session : stream_sessions_) {
+        if (session.session_id == session_id) return &session;
+        if (!session.session_id && !empty) empty = &session;
+    }
+    if (!create || !empty) return nullptr;
+
+    empty->session_id = session_id;
+    empty->handle = STREAM_CONSUMER_INVALID;
+    return empty;
+}
+
+bool StreamConsoleCommands::execute(const String &command,
+                                    const String &rest,
+                                    Print &out,
+                                    ConsoleCommandSession &session) {
+    if (command != "stream") return false;
+
+    StreamSessionState *stream_state = stream_session(session.id, true);
+    if (!stream_state) {
+        out.println("[STREAM] console session table full");
+        return true;
+    }
+
+    handle_stream(out, rest, stream_, stream_state->handle);
+    return true;
+}
+
+void StreamConsoleCommands::stop(ConsoleCommandSession &session) {
     StreamSessionState *stream_state = stream_session(session.id, false);
     if (!stream_state) return;
 
@@ -591,23 +602,52 @@ void As11ConsoleCommands::stop(ConsoleCommandSession &session) {
     *stream_state = {};
 }
 
-void As11ConsoleCommands::print_status(Print &out) {
-    ConsoleFormat::print_rpc_status(out, diagnostics_, can_);
-    ConsoleFormat::print_as11_status(out, device_.state());
+void StreamConsoleCommands::print_memory_detail(Print &out) {
+    print_stream_memory_detail(out, stream_);
 }
 
-void As11ConsoleCommands::print_stats(Print &out) {
+CanConsoleCommands::CanConsoleCommands(
+    RpcDiagnosticsPort &diagnostics,
+    CanDriver &can,
+    EventBroker &events,
+    StreamBroker &stream)
+    : diagnostics_(diagnostics),
+      can_(can),
+      events_(events),
+      stream_(stream) {}
+
+bool CanConsoleCommands::execute(const String &command,
+                                 const String &rest_arg,
+                                 Print &out,
+                                 ConsoleCommandSession &) {
+    if (command != "can") return false;
+
+    String rest = rest_arg;
+
+    rest.trim();
+    rest.toLowerCase();
+    if (!rest.length() || rest == "status") {
+        ConsoleFormat::print_rpc_status(out, diagnostics_, can_);
+    } else if (rest == "restart") {
+        diagnostics_.recover_can("console CAN restart command");
+    } else {
+        print_unknown_command(out, "CAN", "can status, can restart");
+    }
+    return true;
+}
+
+void CanConsoleCommands::print_status(Print &out) {
+    ConsoleFormat::print_rpc_status(out, diagnostics_, can_);
+}
+
+void CanConsoleCommands::print_stats(Print &out) {
     ConsoleFormat::print_rpc_stats(out, diagnostics_, can_, events_, stream_);
 }
 
-void As11ConsoleCommands::reset_stats() {
+void CanConsoleCommands::reset_stats() {
     diagnostics_.reset_stats();
     events_.reset_counters();
     stream_.reset_counters();
-}
-
-void As11ConsoleCommands::print_memory_detail(Print &out) {
-    print_stream_memory_detail(out, stream_);
 }
 
 }  // namespace aircannect
