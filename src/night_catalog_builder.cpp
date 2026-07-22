@@ -469,6 +469,17 @@ bool fallback_section_valid(
                static_cast<size_t>(section.record_count) * record_bytes ==
                    section.data_size;
     }
+    if (section.kind == ReportFallbackSectionKind::Unavailable) {
+        const ReportSourceDef *source = report_source_def(section.source);
+        const ReportSignalDef *signal = report_signal_def(section.signal);
+        return source && signal && report_source_is_sampled(*source) &&
+               (section.source == signal->preferred_source ||
+                section.source == signal->fallback_source) &&
+               report_signal_bit(section.signal) != 0 &&
+               section.event_mask == 0 && section.payload_schema == 0 &&
+               section.record_count == 0 &&
+               section.sample_interval_ms == 0 && section.data_size == 0;
+    }
     return false;
 }
 

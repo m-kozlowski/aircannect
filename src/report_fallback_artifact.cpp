@@ -20,7 +20,7 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'F', 'B', 'A', 'C', 'K', '3',
+    'A', 'C', 'F', 'B', 'A', 'C', 'K', '4',
 };
 constexpr uint8_t NO_SIGNAL = UINT8_MAX;
 constexpr size_t IDENTITY_OFFSET = 56;
@@ -139,6 +139,17 @@ bool section_input_valid(const ReportFallbackSectionInput &section) {
                    REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
                expected == section.payload_size;
     }
+    if (section.kind == ReportFallbackSectionKind::Unavailable) {
+        const ReportSignalDef *signal = report_signal_def(section.signal);
+        return signal && valid_series_source(section.source) &&
+               (section.source == signal->preferred_source ||
+                section.source == signal->fallback_source) &&
+               report_signal_bit(section.signal) != 0 &&
+               section.event_mask == 0 && section.payload_schema == 0 &&
+               section.record_count == 0 &&
+               section.sample_interval_ms == 0 &&
+               section.payload_size == 0;
+    }
     return false;
 }
 
@@ -192,7 +203,7 @@ void encode_section(uint8_t *out,
                     uint32_t data_crc32) {
     out[0] = static_cast<uint8_t>(section.kind);
     out[1] = static_cast<uint8_t>(section.source);
-    out[2] = section.kind == ReportFallbackSectionKind::Series
+    out[2] = section.kind != ReportFallbackSectionKind::Events
         ? static_cast<uint8_t>(section.signal)
         : NO_SIGNAL;
     out[3] = section.event_mask;

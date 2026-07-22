@@ -709,11 +709,12 @@ uint8_t edf_captured_events(const ReportPlanRequest &request,
     return captured & request.event_mask;
 }
 
-bool fallback_event_complete(const NightCatalog &catalog,
-                             const NightCatalogRecord &night,
-                             uint8_t event_bit,
-                             const NightCatalogTimeRange &window,
-                             bool &catalog_valid) {
+template <typename SectionMatches>
+bool fallback_sections_complete(const NightCatalog &catalog,
+                                const NightCatalogRecord &night,
+                                const NightCatalogTimeRange &window,
+                                SectionMatches section_matches,
+                                bool &catalog_valid) {
     size_t file_count = 0;
     const NightCatalogFallbackFile *files =
         catalog.fallback_files(night, file_count);
@@ -755,10 +756,7 @@ bool fallback_event_complete(const NightCatalog &catalog,
                 catalog.fallback_sections(files[file_index], section_count);
             for (size_t i = 0; sections && i < section_count; ++i) {
                 const NightCatalogFallbackSection &section = sections[i];
-                if (section.kind != ReportFallbackSectionKind::Events ||
-                    (section.event_mask & event_bit) == 0) {
-                    continue;
-                }
+                if (!section_matches(section)) continue;
 
                 const NightCatalogTimeRange overlap =
                     intersect_ranges(window, section.coverage);
@@ -772,6 +770,46 @@ bool fallback_event_complete(const NightCatalog &catalog,
         cursor = next;
     }
     return cursor >= target_end;
+}
+
+bool fallback_event_complete(const NightCatalog &catalog,
+                             const NightCatalogRecord &night,
+                             uint8_t event_bit,
+                             const NightCatalogTimeRange &window,
+                             bool &catalog_valid) {
+    return fallback_sections_complete(
+        catalog,
+        night,
+        window,
+        [event_bit](const NightCatalogFallbackSection &section) {
+            return section.kind == ReportFallbackSectionKind::Events &&
+                   (section.event_mask & event_bit) != 0;
+        },
+        catalog_valid);
+}
+
+bool fallback_signal_unavailable(const NightCatalog &catalog,
+                                 const NightCatalogRecord &night,
+                                 ReportSignalId signal,
+                                 const NightCatalogTimeRange &window,
+                                 bool &catalog_valid) {
+    const ReportSignalDef *definition = report_signal_def(signal);
+    if (!definition) {
+        catalog_valid = false;
+        return false;
+    }
+
+    const ReportSourceId source = definition->fallback_source;
+    return fallback_sections_complete(
+        catalog,
+        night,
+        window,
+        [signal, source](const NightCatalogFallbackSection &section) {
+            return section.kind ==
+                       ReportFallbackSectionKind::Unavailable &&
+                   section.signal == signal && section.source == source;
+        },
+        catalog_valid);
 }
 
 uint8_t captured_events(const ReportPlanRequest &request,
@@ -1268,6 +1306,8 @@ bool fill_sessions(const ReportPlanRequest &request,
                    size_t plan_session_count,
                    uint32_t &missing_required,
                    uint32_t &missing_optional,
+                   uint32_t &unavailable_signals,
+                   uint32_t &acquirable_signals,
                    uint8_t &missing_events) {
     size_t catalog_session_count = 0;
     const NightCatalogTimeRange *sessions =
@@ -1303,6 +1343,24 @@ bool fill_sessions(const ReportPlanRequest &request,
         output.missing_signal_mask =
             request.signal_mask & ~output.complete_signal_mask;
         bool catalog_valid = true;
+        for (uint8_t signal_index = 0;
+             signal_index < static_cast<uint8_t>(ReportSignalId::Count);
+             ++signal_index) {
+            const ReportSignalId signal =
+                static_cast<ReportSignalId>(signal_index);
+            const uint32_t bit = report_signal_bit(signal);
+            if ((output.missing_signal_mask & bit) == 0) continue;
+
+            if (fallback_signal_unavailable(catalog,
+                                            night,
+                                            signal,
+                                            window,
+                                            catalog_valid)) {
+                output.unavailable_signal_mask |= bit;
+            }
+            if (!catalog_valid) return false;
+        }
+
         output.captured_event_mask = captured_events(
             request,
             catalog,
@@ -1316,6 +1374,9 @@ bool fill_sessions(const ReportPlanRequest &request,
 
         missing_required |= output.missing_signal_mask & required_mask;
         missing_optional |= output.missing_signal_mask & ~required_mask;
+        unavailable_signals |= output.unavailable_signal_mask;
+        acquirable_signals |= output.missing_signal_mask &
+                              ~output.unavailable_signal_mask;
         missing_events |= output.missing_event_mask;
         ++plan_session;
     }
@@ -1485,6 +1546,8 @@ ReportPlanResult ReportPlanner::build(
                        plan->session_count_,
                        plan->missing_required_signal_mask_,
                        plan->missing_optional_signal_mask_,
+                       plan->unavailable_signal_mask_,
+                       plan->acquirable_signal_mask_,
                        plan->missing_event_mask_) ||
         !fill_operations(pending,
                          plan->operations_,

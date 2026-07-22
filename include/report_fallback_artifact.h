@@ -64,7 +64,7 @@ struct ReportFallbackArtifactView {
 
 class ReportFallbackArtifactCodec {
 public:
-    static constexpr uint16_t Version = 3;
+    static constexpr uint16_t Version = 4;
     static constexpr size_t HeaderBytes = 72;
     static constexpr size_t SessionBytes = 16;
     static constexpr size_t SectionBytes = 48;

@@ -30,6 +30,7 @@ struct ReportReadSession {
     uint32_t complete_signal_mask = 0;
     uint32_t fallback_signal_mask = 0;
     uint32_t missing_signal_mask = 0;
+    uint32_t unavailable_signal_mask = 0;
     uint8_t captured_event_mask = 0;
     uint8_t missing_event_mask = 0;
 };
@@ -73,6 +74,12 @@ public:
     }
     uint32_t missing_optional_signal_mask() const {
         return missing_optional_signal_mask_;
+    }
+    uint32_t unavailable_signal_mask() const {
+        return unavailable_signal_mask_;
+    }
+    uint32_t acquirable_signal_mask() const {
+        return acquirable_signal_mask_;
     }
     uint8_t requested_event_mask() const { return requested_event_mask_; }
     uint8_t missing_event_mask() const { return missing_event_mask_; }
@@ -121,6 +128,8 @@ private:
     uint32_t requested_signal_mask_ = 0;
     uint32_t missing_required_signal_mask_ = 0;
     uint32_t missing_optional_signal_mask_ = 0;
+    uint32_t unavailable_signal_mask_ = 0;
+    uint32_t acquirable_signal_mask_ = 0;
     uint8_t requested_event_mask_ = 0;
     uint8_t missing_event_mask_ = 0;
 

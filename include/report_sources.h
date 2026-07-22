@@ -53,6 +53,7 @@ static constexpr uint8_t REPORT_EVENT_ALL =
 enum class ReportFallbackSectionKind : uint8_t {
     Series = 1,
     Events = 2,
+    Unavailable = 3,
 };
 
 struct ReportSourceDef {

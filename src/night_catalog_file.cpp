@@ -21,7 +21,7 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'N', 'C', 'A', 'T', '0', '8',
+    'A', 'C', 'N', 'C', 'A', 'T', '0', '9',
 };
 
 constexpr size_t RECORD_BYTES = 120;
@@ -159,6 +159,17 @@ bool fallback_section_valid(const NightCatalogRecord &record,
                    REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
                static_cast<size_t>(section.record_count) * record_bytes ==
                    section.data_size;
+    }
+    if (section.kind == ReportFallbackSectionKind::Unavailable) {
+        const ReportSourceDef *source = report_source_def(section.source);
+        const ReportSignalDef *signal = report_signal_def(section.signal);
+        return source && signal && report_source_is_sampled(*source) &&
+               (section.source == signal->preferred_source ||
+                section.source == signal->fallback_source) &&
+               report_signal_bit(section.signal) != 0 &&
+               section.event_mask == 0 && section.payload_schema == 0 &&
+               section.record_count == 0 &&
+               section.sample_interval_ms == 0 && section.data_size == 0;
     }
     return false;
 }
