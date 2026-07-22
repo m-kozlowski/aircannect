@@ -85,10 +85,12 @@ void print_can_stats(Print &out, const CanDriver &can_driver) {
     out.print(stats.rx_queue_full_alerts);
 }
 
-void print_rpc_status(Print &out, const RpcArbiter &arbiter) {
-    print_can_status(out, arbiter.can_driver());
+void print_rpc_status(Print &out,
+                      const RpcDiagnosticsPort &rpc,
+                      const CanDriver &can_driver) {
+    print_can_status(out, can_driver);
 
-    const RpcRuntimeStatus runtime = arbiter.runtime_status();
+    const RpcTransportStatus runtime = rpc.runtime_status();
     if (runtime.last_boot_notification.empty()) {
         out.println("[BOOT] notifications=0");
         return;
@@ -103,14 +105,15 @@ void print_rpc_status(Print &out, const RpcArbiter &arbiter) {
 }
 
 void print_rpc_stats(Print &out,
-                     const RpcArbiter &arbiter,
+                     const RpcDiagnosticsPort &rpc,
+                     const CanDriver &can_driver,
                      const EventBroker &events,
                      const StreamBroker &stream) {
-    const RpcRuntimeStatus runtime = arbiter.runtime_status();
-    const RpcArbiterStats &stats = arbiter.stats();
+    const RpcTransportStatus runtime = rpc.runtime_status();
+    const RpcTransportStats stats = rpc.stats();
     const EventBrokerStatus event_status = events.status();
     const EventBrokerStats &event_stats = events.stats();
-    const CanDriverStats &can_stats = arbiter.can_driver().stats();
+    const CanDriverStats &can_stats = can_driver.stats();
     const uint32_t can_rx_fps =
         (can_stats.rx_frames * 1000UL) / runtime.stats_elapsed_ms;
     const uint32_t rpc_dps =
@@ -119,7 +122,7 @@ void print_rpc_stats(Print &out,
     out.print("[STATS]");
     out.print(" elapsed_ms=");
     out.print(runtime.stats_elapsed_ms);
-    print_can_stats(out, arbiter.can_driver());
+    print_can_stats(out, can_driver);
     out.print(" can_rx_fps=");
     out.print(can_rx_fps);
     out.print(" rpc_datagrams=");

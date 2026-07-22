@@ -2,8 +2,9 @@
 
 #include <Arduino.h>
 
+#include "can_driver.h"
 #include "memory_manager.h"
-#include "rpc_arbiter.h"
+#include "rpc_transport_ports.h"
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "storage_manager.h"
@@ -18,9 +19,12 @@ namespace ConsoleFormat {
 
 void print_can_status(Print &out, const CanDriver &can_driver);
 void print_can_stats(Print &out, const CanDriver &can_driver);
-void print_rpc_status(Print &out, const RpcArbiter &arbiter);
+void print_rpc_status(Print &out,
+                      const RpcDiagnosticsPort &rpc,
+                      const CanDriver &can_driver);
 void print_rpc_stats(Print &out,
-                     const RpcArbiter &arbiter,
+                     const RpcDiagnosticsPort &rpc,
+                     const CanDriver &can_driver,
                      const EventBroker &events,
                      const StreamBroker &stream);
 void print_as11_status(Print &out, const As11DeviceState &state);

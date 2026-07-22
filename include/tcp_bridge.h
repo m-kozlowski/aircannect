@@ -9,7 +9,7 @@
 #include "board.h"
 #include "fixed_queue.h"
 #include "line_protocol_server.h"
-#include "rpc_arbiter.h"
+#include "rpc_transport_ports.h"
 
 namespace aircannect {
 
@@ -45,7 +45,7 @@ public:
     bool begin(uint16_t port = AC_TCP_BRIDGE_PORT);
     bool restart(uint16_t port = AC_TCP_BRIDGE_PORT);
     void stop();
-    void poll(RpcArbiter &arbiter);
+    void poll(RpcPassthroughPort &rpc);
 
     // RPC transport
     void broadcast_rpc_payload(const RpcPayloadRef &payload);
@@ -65,7 +65,7 @@ private:
     void accept_clients();
     void pump_outputs();
     LineOutputPumpResult pump_rpc_output(size_t idx);
-    void poll_inputs(RpcArbiter &arbiter);
+    void poll_inputs(RpcPassthroughPort &rpc);
     void disconnect_slot(size_t idx);
 
     WiFiClient clients_[AC_MAX_TCP_CLIENTS];

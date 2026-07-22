@@ -94,6 +94,9 @@ static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
     rpc_arbiter,
+    rpc_arbiter,
+    rpc_arbiter,
+    can_driver,
     event_broker,
     stream_broker,
     as11_device_service,

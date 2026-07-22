@@ -1048,7 +1048,7 @@ void ManagementConsole::handle_status_command(Print &out,
         print_unknown_command(out, "STATUS", "status");
         return;
     }
-    ConsoleFormat::print_rpc_status(out, ctx.arbiter);
+    ConsoleFormat::print_rpc_status(out, ctx.rpc_diagnostics, ctx.can);
     ConsoleFormat::print_as11_status(out, ctx.device.state());
     ConsoleFormat::print_session_status(out, ctx.session_manager.status());
     ConsoleFormat::print_sink_status(out, ctx.sink_manager);
@@ -1062,7 +1062,7 @@ void ManagementConsole::handle_stats_command(Print &out,
     trim_inplace(rest);
     to_lower_inplace(rest);
     if (rest == "reset") {
-        ctx.arbiter.reset_stats();
+        ctx.rpc_diagnostics.reset_stats();
         ctx.events.reset_counters();
         ctx.stream.reset_counters();
         out.println("[STATS] reset");
@@ -1072,7 +1072,8 @@ void ManagementConsole::handle_stats_command(Print &out,
         print_unknown_command(out, "STATS", "stats, stats reset");
         return;
     }
-    ConsoleFormat::print_rpc_stats(out, ctx.arbiter, ctx.events, ctx.stream);
+    ConsoleFormat::print_rpc_stats(out, ctx.rpc_diagnostics, ctx.can,
+                                   ctx.events, ctx.stream);
     ConsoleFormat::print_tcp_stats(out, ctx.tcp_bridge);
     ConsoleFormat::print_log_stats(out);
     ConsoleFormat::print_memory_status(out, Memory::status());
@@ -1611,13 +1612,13 @@ void ManagementConsole::handle_sleephq_command(Print &out,
 void ManagementConsole::handle_as11_command(Print &out,
                                             String rest,
                                             ConsoleContext &ctx) {
-    handle_as11(out, rest, ctx.arbiter, ctx.device);
+    handle_as11(out, rest, ctx.rpc, ctx.rpc_passthrough, ctx.device);
 }
 
 void ManagementConsole::handle_therapy_command(Print &out,
                                                String rest,
                                                ConsoleContext &ctx) {
-    handle_therapy(out, rest, ctx.arbiter, ctx.device);
+    handle_therapy(out, rest, ctx.rpc, ctx.device);
 }
 
 void ManagementConsole::handle_config_command(Print &out,
@@ -1682,11 +1683,11 @@ void ManagementConsole::handle_can_command(Print &out,
     trim_inplace(rest);
     to_lower_inplace(rest);
     if (!rest.length() || rest == "status") {
-        ConsoleFormat::print_rpc_status(out, ctx.arbiter);
+        ConsoleFormat::print_rpc_status(out, ctx.rpc_diagnostics, ctx.can);
         return;
     }
     if (rest == "restart") {
-        ctx.arbiter.recover_can("console CAN restart command");
+        ctx.rpc_diagnostics.recover_can("console CAN restart command");
         return;
     }
     print_unknown_command(out, "CAN", "can status, can restart");
@@ -1721,8 +1722,8 @@ void ManagementConsole::handle_get_command(Print &out,
         out.println("[RPC] usage: get NAME [NAME...]");
         return;
     }
-    ctx.arbiter.send_request("Get", build_get_params(to_std(rest)),
-                             RpcSource::Console);
+    ctx.rpc_passthrough.send_request("Get", build_get_params(to_std(rest)),
+                                     RpcSource::Console);
 }
 
 void ManagementConsole::handle_set_command(Print &out,
@@ -1797,9 +1798,10 @@ void ManagementConsole::handle_set_command(Print &out,
     }
 
     const bool queued = managed_settings
-        ? ctx.settings_manager.write(ctx.arbiter, params, RpcSource::Console,
+        ? ctx.settings_manager.write(ctx.rpc, params, RpcSource::Console,
                                      millis()).accepted()
-        : ctx.arbiter.send_request("Set", params, RpcSource::Console);
+        : ctx.rpc_passthrough.send_request("Set", params,
+                                           RpcSource::Console);
     if (queued) {
         out.println("[RPC] Set queued");
     } else {
@@ -1825,8 +1827,8 @@ void ManagementConsole::handle_rpc_command(Print &out,
         out.println("[RPC] usage: rpc METHOD [JSON_PARAMS]");
         return;
     }
-    ctx.arbiter.send_request(to_std(method), to_std(params),
-                             RpcSource::Console);
+    ctx.rpc_passthrough.send_request(to_std(method), to_std(params),
+                                     RpcSource::Console);
 }
 
 void ManagementConsole::handle_raw_command(Print &out,
@@ -1837,7 +1839,7 @@ void ManagementConsole::handle_raw_command(Print &out,
         out.println("[RPC] usage: raw JSON");
         return;
     }
-    ctx.arbiter.submit_raw_payload(to_std(rest), RpcSource::Console);
+    ctx.rpc_passthrough.submit_raw_payload(to_std(rest), RpcSource::Console);
 }
 
 }  // namespace aircannect

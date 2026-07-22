@@ -610,7 +610,8 @@ void ManagementConsole::handle_stream(Print &out, String rest,
 }
 
 void ManagementConsole::handle_as11(Print &out, String rest,
-                                    RpcArbiter &arbiter,
+                                    RpcRequestPort &rpc,
+                                    RpcPassthroughPort &rpc_passthrough,
                                     As11DeviceService &device) {
     rest.trim();
     if (!rest.length() || rest == "status") {
@@ -619,13 +620,13 @@ void ManagementConsole::handle_as11(Print &out, String rest,
     }
 
     if (rest == "poll" || rest == "refresh") {
-        device.request_healthcheck(arbiter, RpcSource::Console, millis());
+        device.request_healthcheck(rpc, RpcSource::Console, millis());
         out.println("[AS11] healthcheck scheduled");
         return;
     }
 
     if (rest == "version") {
-        arbiter.send_request("GetVersion", "", RpcSource::Console);
+        rpc_passthrough.send_request("GetVersion", "", RpcSource::Console);
         return;
     }
 
@@ -633,7 +634,7 @@ void ManagementConsole::handle_as11(Print &out, String rest,
 }
 
 void ManagementConsole::handle_therapy(Print &out, String rest,
-                                       RpcArbiter &arbiter,
+                                       RpcRequestPort &rpc,
                                        As11DeviceService &device) {
     rest.trim();
     rest.toLowerCase();
@@ -643,7 +644,7 @@ void ManagementConsole::handle_therapy(Print &out, String rest,
     }
 
     if (rest == "start" || rest == "on" || rest == "run") {
-        if (device.request_therapy(arbiter, As11TherapyTarget::Running,
+        if (device.request_therapy(rpc, As11TherapyTarget::Running,
                                    RpcSource::Console, millis()).accepted()) {
             out.println("[THERAPY] EnterTherapy queued");
         } else {
@@ -653,7 +654,7 @@ void ManagementConsole::handle_therapy(Print &out, String rest,
     }
 
     if (rest == "stop" || rest == "off" || rest == "standby") {
-        if (device.request_therapy(arbiter, As11TherapyTarget::Standby,
+        if (device.request_therapy(rpc, As11TherapyTarget::Standby,
                                    RpcSource::Console, millis()).accepted()) {
             out.println("[THERAPY] EnterStandby queued");
         } else {

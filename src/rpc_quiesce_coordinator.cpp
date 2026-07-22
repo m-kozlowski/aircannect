@@ -3,12 +3,11 @@
 #include "board_can.h"
 #include "debug_log.h"
 #include "event_broker.h"
-#include "rpc_arbiter.h"
 #include "stream_broker.h"
 
 namespace aircannect {
 
-RpcQuiesceCoordinator::RpcQuiesceCoordinator(RpcArbiter &transport,
+RpcQuiesceCoordinator::RpcQuiesceCoordinator(RpcQuiescePort &transport,
                                              EventBroker &events,
                                              StreamBroker &streams)
     : transport_(transport), events_(events), streams_(streams) {}
@@ -29,8 +28,9 @@ void RpcQuiesceCoordinator::update(bool requested, uint32_t now_ms) {
 
 bool RpcQuiesceCoordinator::complete() const {
     if (!requested_) return true;
+    const RpcQuiesceStatus transport = transport_.quiesce_status();
     return streams_.quiesced() && events_.quiesced() &&
-           transport_.quiesce_idle();
+           transport.idle;
 }
 
 bool RpcQuiesceCoordinator::timed_out(uint32_t now_ms) const {
@@ -66,7 +66,7 @@ void RpcQuiesceCoordinator::end(uint32_t now_ms) {
 }
 
 void RpcQuiesceCoordinator::log_timeout() {
-    const RpcRuntimeStatus transport = transport_.runtime_status();
+    const RpcQuiesceStatus transport = transport_.quiesce_status();
     const EventBrokerStatus events = events_.status();
 
     Log::logf(CAT_OTA, LOG_WARN,
@@ -75,10 +75,10 @@ void RpcQuiesceCoordinator::log_timeout() {
               "event_pending=%u\n",
               streams_.quiesced() ? 1u : 0u,
               events_.quiesced() ? 1u : 0u,
-              transport.pending_request_id ? 1u : 0u,
-              transport.dispatch_retry_id ? 1u : 0u,
+              transport.pending_request ? 1u : 0u,
+              transport.dispatch_retry ? 1u : 0u,
               static_cast<unsigned>(transport.request_queue_depth),
-              static_cast<unsigned>(transport_.can_driver().tx_queue_depth()),
+              static_cast<unsigned>(transport.tx_queue_depth),
               events.subscription_active ? 1u : 0u,
               events.subscribe_pending ? 1u : 0u);
 }

@@ -22,11 +22,11 @@ void TcpBridge::stop() {
     stop_line_server();
 }
 
-void TcpBridge::poll(RpcArbiter &arbiter) {
+void TcpBridge::poll(RpcPassthroughPort &rpc) {
     if (!started()) return;
     accept_clients();
     pump_outputs();
-    poll_inputs(arbiter);
+    poll_inputs(rpc);
 }
 
 void TcpBridge::broadcast_rpc_payload(const RpcPayloadRef &payload) {
@@ -176,7 +176,7 @@ LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
     return result;
 }
 
-void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
+void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
     for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
         if (!clients_[i]) continue;
 
@@ -207,7 +207,7 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
                              static_cast<unsigned>(i));
                     Log::log_payload(CAT_TCP, LOG_DEBUG, prefix, payload);
                 }
-                if (!arbiter.submit_raw_payload(payload, RpcSource::Tcp)) {
+                if (!rpc.submit_raw_payload(payload, RpcSource::Tcp)) {
                     stats_.enqueue_failures++;
                     Log::logf(CAT_TCP, LOG_WARN,
                               "[CLIENT %u] CAN queue rejected payload\n",

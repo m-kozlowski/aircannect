@@ -6,12 +6,14 @@
 #include "app_config.h"
 #include "as11_device_service.h"
 #include "as11_settings_manager.h"
+#include "can_driver.h"
 #include "edf_recorder_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
 #include "report_manager.h"
 #include "resmed_ota_manager.h"
-#include "rpc_arbiter.h"
+#include "rpc_request_port.h"
+#include "rpc_transport_ports.h"
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
@@ -28,7 +30,10 @@ class StorageDiagnosticJob;
 class WebUI;
 
 struct ConsoleContext {
-    RpcArbiter &arbiter;
+    RpcRequestPort &rpc;
+    RpcPassthroughPort &rpc_passthrough;
+    RpcDiagnosticsPort &rpc_diagnostics;
+    CanDriver &can;
     EventBroker &events;
     StreamBroker &stream;
     As11DeviceService &device;
@@ -104,9 +109,10 @@ private:
     void handle_raw_command(Print &out, String rest, ConsoleContext &ctx);
 
     void handle_stream(Print &out, String rest, StreamBroker &stream);
-    void handle_as11(Print &out, String rest, RpcArbiter &arbiter,
+    void handle_as11(Print &out, String rest, RpcRequestPort &rpc,
+                     RpcPassthroughPort &rpc_passthrough,
                      As11DeviceService &device);
-    void handle_therapy(Print &out, String rest, RpcArbiter &arbiter,
+    void handle_therapy(Print &out, String rest, RpcRequestPort &rpc,
                         As11DeviceService &device);
     void handle_time(Print &out, String rest, As11DeviceService &device,
                      TimeSyncService &time_sync_service);

@@ -993,7 +993,7 @@ void build_resmed_ota_json(JsonOut &json, const ResmedOtaManager &ota) {
 
 }  // namespace
 
-bool WebUI::begin(RpcArbiter &arbiter,
+bool WebUI::begin(RpcRequestPort &rpc,
                   StreamBroker &stream,
                   As11DeviceService &device,
                   As11SettingsManager &settings_manager,
@@ -1018,7 +1018,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   uint16_t port) {
     if (started_) return true;
     stop();
-    arbiter_ = &arbiter;
+    rpc_ = &rpc;
     stream_ = &stream;
     device_ = &device;
     settings_manager_ = &settings_manager;
@@ -3854,7 +3854,7 @@ void WebUI::execute_command(WebCommand &command) {
             break;
         case WebCommandSettingsRefresh:
             (void)settings_manager_->request_refresh(
-                *arbiter_, RpcSource::HttpApi, millis());
+                *rpc_, RpcSource::HttpApi, millis());
             mark_snapshots_dirty(SNAPSHOT_SETTINGS);
             break;
         case WebCommandSettingsUpdate:
@@ -3965,7 +3965,7 @@ void WebUI::execute_settings_update(const std::string &body) {
     size_t accepted = 0;
     std::string params = as11_build_set_params_from_json(body, mode, accepted);
     if (!accepted) return;
-    if (settings_manager_->write(*arbiter_, params, RpcSource::HttpApi,
+    if (settings_manager_->write(*rpc_, params, RpcSource::HttpApi,
                                  millis()).accepted()) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     }
@@ -3979,7 +3979,7 @@ void WebUI::execute_therapy_action(const std::string &action) {
     }
     if (target == As11TherapyTarget::None) return;
 
-    (void)device_->request_therapy(*arbiter_, target, RpcSource::HttpApi,
+    (void)device_->request_therapy(*rpc_, target, RpcSource::HttpApi,
                                    millis());
     mark_snapshots_dirty(SNAPSHOT_STATUS);
 }

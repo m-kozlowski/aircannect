@@ -10,83 +10,19 @@
 #include "can_driver.h"
 #include "fixed_queue.h"
 #include "rpc_request_port.h"
+#include "rpc_transport_ports.h"
 
 namespace aircannect {
 
-enum class RpcEventKind {
-    RpcResponse,
-    RpcNotification,
-    RpcUnmatched,
-    DebugLog,
-    BootNotification,
-    FramingError,
-    Info,
-};
-
-using RpcPayloadRef = std::shared_ptr<const std::string>;
-struct RpcEvent;
 using RpcNotificationObserver = void (*)(void *context,
                                          const char *payload,
                                          size_t payload_len,
                                          uint32_t now_ms);
 
-inline RpcPayloadRef make_rpc_payload_ref(std::string payload) {
-    return std::make_shared<const std::string>(std::move(payload));
-}
-
-struct RpcEvent {
-    RpcEventKind kind = RpcEventKind::Info;
-    RpcSource source = RpcSource::Internal;
-    uint32_t id = 0;
-    RpcPayloadRef payload;
-
-    const std::string &payload_text() const {
-        static const std::string empty;
-        return payload ? *payload : empty;
-    }
-
-    const char *payload_c_str() const {
-        return payload ? payload->c_str() : "";
-    }
-};
-
-struct RpcArbiterStats {
-    uint32_t rpc_datagrams = 0;
-    uint32_t rpc_responses = 0;
-    uint32_t rpc_notifications = 0;
-    uint32_t rpc_unmatched = 0;
-    uint32_t rpc_framing_errors = 0;
-    uint32_t log_datagrams = 0;
-    uint32_t log_framing_errors = 0;
-    uint32_t boot_notifications = 0;
-    uint32_t deferred_payloads = 0;
-    uint32_t deferred_payload_drops = 0;
-    uint32_t deferred_payload_alloc_failures = 0;
-
-    uint32_t queued_requests = 0;
-    uint32_t dispatched_requests = 0;
-    uint32_t request_timeouts = 0;
-    uint32_t request_queue_drops = 0;
-    uint32_t request_cancellations = 0;
-    uint32_t request_dispatch_retries = 0;
-    uint32_t background_backoffs = 0;
-
-    uint32_t event_drops = 0;
-};
-
-struct RpcRuntimeStatus {
-    uint32_t stats_elapsed_ms = 0;
-    size_t request_queue_depth = 0;
-    size_t payload_queue_depth = 0;
-    uint32_t pending_request_id = 0;
-    uint32_t dispatch_retry_id = 0;
-    uint32_t background_backoff_ms = 0;
-    uint32_t boot_notifications = 0;
-    uint32_t last_boot_notification_age_ms = 0;
-    std::string last_boot_notification;
-};
-
-class RpcArbiter final : public RpcRequestPort {
+class RpcArbiter final : public RpcRequestPort,
+                         public RpcPassthroughPort,
+                         public RpcDiagnosticsPort,
+                         public RpcQuiescePort {
 public:
     explicit RpcArbiter(CanDriver &can);
 
@@ -96,12 +32,13 @@ public:
     size_t drain_can_rx();
 
     // RPC submission
-    bool submit_raw_payload(const std::string &payload, RpcSource source);
+    bool submit_raw_payload(const std::string &payload,
+                            RpcSource source) override;
 
     bool send_request(const std::string &method,
                       const std::string &params_json,
                       RpcSource source,
-                      uint32_t timeout_ms = 0);
+                      uint32_t timeout_ms = 0) override;
     OperationSubmission request(const RpcRequestCommand &command) override;
     bool cancel(OperationTicket ticket) override;
     bool take_completion(OperationTicket ticket,
@@ -119,18 +56,18 @@ public:
                                          void *context);
 
     // Device maintenance
-    void reset_stats();
+    void reset_stats() override;
 
-    bool recover_can(const char *reason);
+    bool recover_can(const char *reason) override;
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
     bool background_backpressure_active() const;
-    void set_quiesce_mode(bool requested);
-    bool quiesce_idle() const;
+    void set_quiesce_mode(bool requested) override;
+    RpcQuiesceStatus quiesce_status() const override;
 
     // Status snapshots
-    const RpcArbiterStats &stats() const { return stats_; }
-    RpcRuntimeStatus runtime_status() const;
+    RpcTransportStats stats() const override { return stats_; }
+    RpcTransportStatus runtime_status() const override;
     const CanDriver &can_driver() const { return can_; }
     uint32_t transport_generation() const {
         return transport_generation_;
@@ -242,6 +179,7 @@ private:
     void note_request_success(RpcSource source, uint32_t now);
     void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_quiesce(const QueuedRequest &request) const;
+    bool quiesce_idle() const;
 
     void dispatch_next_request();
     void check_pending_timeout();
@@ -282,7 +220,7 @@ private:
     uint32_t dispatch_retry_deadline_ms_ = 0;
     uint32_t next_dispatch_retry_ms_ = 0;
 
-    RpcArbiterStats stats_ = {};
+    RpcTransportStats stats_ = {};
     uint32_t next_rpc_id_ = 0;
     uint32_t last_integrated_tx_ms_ = 0;
 

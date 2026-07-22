@@ -16,7 +16,7 @@
 #include "oximetry_manager.h"
 #include "report_manager.h"
 #include "resmed_ota_manager.h"
-#include "rpc_arbiter.h"
+#include "rpc_request_port.h"
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
@@ -90,7 +90,7 @@ public:
     using PollCheckpoint = void (*)(const char *section);
 
     // lifecycle
-    bool begin(RpcArbiter &arbiter,
+    bool begin(RpcRequestPort &rpc,
                StreamBroker &stream,
                As11DeviceService &device,
                As11SettingsManager &settings_manager,
@@ -253,7 +253,7 @@ private:
         SNAPSHOT_RESMED_OTA;
 
     // subsystem owners
-    RpcArbiter *arbiter_ = nullptr;
+    RpcRequestPort *rpc_ = nullptr;
     StreamBroker *stream_ = nullptr;
     As11DeviceService *device_ = nullptr;
     As11SettingsManager *settings_manager_ = nullptr;

@@ -385,9 +385,9 @@ void RpcArbiter::reset_stats() {
     stats_started_ms_ = millis();
 }
 
-RpcRuntimeStatus RpcArbiter::runtime_status() const {
+RpcTransportStatus RpcArbiter::runtime_status() const {
     const uint32_t now = millis();
-    RpcRuntimeStatus out;
+    RpcTransportStatus out;
     out.stats_elapsed_ms = std::max<uint32_t>(1, now - stats_started_ms_);
     out.request_queue_depth = requests_.count();
     out.payload_queue_depth = deferred_payloads_.count();
@@ -428,6 +428,16 @@ void RpcArbiter::set_quiesce_mode(bool requested) {
 bool RpcArbiter::quiesce_idle() const {
     return !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
            can_.tx_queue_depth() == 0;
+}
+
+RpcQuiesceStatus RpcArbiter::quiesce_status() const {
+    RpcQuiesceStatus out;
+    out.idle = quiesce_idle();
+    out.pending_request = pending_.active;
+    out.dispatch_retry = dispatch_retry_active_;
+    out.request_queue_depth = requests_.count();
+    out.tx_queue_depth = can_.tx_queue_depth();
+    return out;
 }
 
 void RpcArbiter::cancel_requests_from_source(RpcSource source,
