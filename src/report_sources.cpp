@@ -155,6 +155,16 @@ uint32_t report_signal_mask_all() {
     return count >= 32 ? UINT32_MAX : (1u << count) - 1u;
 }
 
+uint32_t report_signal_required_mask() {
+    uint32_t mask = 0;
+    for (const ReportSignalDef &signal : SIGNALS) {
+        if (report_signal_required_for_result(signal)) {
+            mask |= report_signal_bit(signal.id);
+        }
+    }
+    return mask;
+}
+
 bool report_signal_required_for_result(const ReportSignalDef &signal) {
     return (signal.flags & REPORT_SIGNAL_REQUIRED) != 0;
 }

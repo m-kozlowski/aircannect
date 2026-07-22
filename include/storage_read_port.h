@@ -8,6 +8,8 @@
 
 namespace aircannect {
 
+static constexpr size_t AC_STORAGE_PREPARED_READ_MAX_BYTES = 512 * 1024;
+
 enum class StorageReadLane : uint8_t {
     Foreground,
     Report,

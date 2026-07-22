@@ -31,7 +31,6 @@ static constexpr uint32_t AC_STORAGE_SERVICE_IDLE_TICK_MS = 1000;
 static constexpr uint32_t AC_STORAGE_SERVICE_WORK_TICK_MS = 5;
 
 static constexpr size_t AC_STORAGE_PREPARED_READ_CAPACITY = 4;
-static constexpr size_t AC_STORAGE_PREPARED_READ_MAX_BYTES = 512 * 1024;
 static constexpr size_t AC_STORAGE_READ_STEP_BYTES = 4096;
 
 static constexpr size_t AC_EDF_STORAGE_PATIENT_ID_MAX = 80;
