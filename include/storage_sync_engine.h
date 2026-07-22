@@ -155,6 +155,7 @@ private:
         EnsureRemoteDir,
         OpenLocal,
         OpenRemote,
+        ReadLocalChunk,
         UploadChunk,
         CloseRemote,
         ValidateLocal,
@@ -204,11 +205,10 @@ private:
         bool invalidate_state = false;
     };
 
-    struct BlockingResult {
+    struct LocalIoResult {
         uint32_t operation_generation = 0;
         bool ok = false;
         int transferred = 0;
-        StorageSmbRemoteStat remote;
         char error[AC_STORAGE_ERROR_MAX] = {};
     };
 
@@ -236,20 +236,35 @@ private:
     ExportStep step_work_phase_locked();
     ExportStep step_resolve_host_locked();
     ExportStep step_connect_locked();
-    static bool phase_has_blocking_io(WorkPhase phase);
-    void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
-    ExportStep publish_blocking_phase_locked(
+    static bool phase_has_local_io(WorkPhase phase);
+    void execute_local_io_phase(WorkPhase phase, LocalIoResult &result);
+    ExportStep publish_local_io_phase_locked(
         WorkPhase phase,
-        const BlockingResult &result);
+        const LocalIoResult &result);
 
     // SMB connection and transfer phases
+    ExportStep step_ensure_base_dir_locked(char *error_out,
+                                           size_t error_out_size);
     ExportStep step_verify_latest_start_locked(char *error_out,
                                                size_t error_out_size);
     ExportStep step_verify_latest_file_locked(char *error_out,
                                               size_t error_out_size);
+    ExportStep step_verify_latest_remote_locked(char *error_out,
+                                                size_t error_out_size);
     ExportStep publish_verify_latest_remote_locked(
         const StorageSmbRemoteStat &remote);
     ExportStep step_verify_latest_invalidate_locked();
+    ExportStep step_resolve_remote_file_locked(char *error_out,
+                                               size_t error_out_size);
+    ExportStep step_ensure_remote_dir_locked(char *error_out,
+                                             size_t error_out_size);
+    ExportStep step_open_remote_locked(char *error_out,
+                                       size_t error_out_size);
+    ExportStep step_upload_chunk_locked(char *error_out,
+                                        size_t error_out_size);
+    ExportStep step_close_remote_locked(char *error_out,
+                                        size_t error_out_size);
+    ExportStep step_finish_locked();
     ExportStep step_validate_local_locked();
     ExportStep step_flush_state_locked();
     ExportStep step_write_done_marker_locked();
@@ -347,6 +362,7 @@ private:
     LatestVerify latest_verify_;
     uint8_t *upload_buffer_ = nullptr;
     size_t upload_buffer_size_ = 0;
+    size_t upload_chunk_size_ = 0;
     char ensured_remote_dir_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
     char state_dir_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
     char pending_state_path_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};

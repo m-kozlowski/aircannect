@@ -12,7 +12,7 @@ struct smb2fh;
 
 namespace aircannect {
 
-struct StorageSmbAsyncResult;
+struct StorageSmbPendingOperation;
 
 static constexpr size_t AC_STORAGE_SMB_REMOTE_PATH_MAX = 256;
 static constexpr size_t AC_STORAGE_SMB_ENDPOINT_HOST_MAX = 96;
@@ -42,8 +42,7 @@ public:
                    const char *user,
                    const char *password,
                    char *error_out = nullptr,
-                   size_t error_out_size = 0,
-                   const BackgroundOperationControl *operation = nullptr);
+                   size_t error_out_size = 0);
 
     StorageSmbOperationResult resolve_host(char *error_out = nullptr,
                                            size_t error_out_size = 0);
@@ -51,35 +50,42 @@ public:
         char *error_out = nullptr,
         size_t error_out_size = 0,
         const BackgroundOperationControl *operation = nullptr);
-    void disconnect(const BackgroundOperationControl *operation = nullptr);
+    StorageSmbOperationResult step_disconnect(
+        const BackgroundOperationControl *operation = nullptr);
     bool connected() const { return connected_; }
 
     bool make_remote_path(const char *absolute_path,
                           char *out,
                           size_t out_size) const;
 
-    bool stat(const char *remote_path,
-              StorageSmbRemoteStat &out,
-              char *error_out = nullptr,
-              size_t error_out_size = 0,
-              const BackgroundOperationControl *operation = nullptr);
-    bool ensure_directory(const char *remote_path,
-                          char *error_out = nullptr,
-                          size_t error_out_size = 0,
-                          const BackgroundOperationControl *operation = nullptr);
+    StorageSmbOperationResult step_stat(
+        const char *remote_path,
+        StorageSmbRemoteStat &out,
+        char *error_out = nullptr,
+        size_t error_out_size = 0,
+        const BackgroundOperationControl *operation = nullptr);
+    StorageSmbOperationResult step_ensure_directory(
+        const char *remote_path,
+        char *error_out = nullptr,
+        size_t error_out_size = 0,
+        const BackgroundOperationControl *operation = nullptr);
 
-    bool open_writer(const char *remote_path,
-                     char *error_out = nullptr,
-                     size_t error_out_size = 0,
-                     const BackgroundOperationControl *operation = nullptr);
-    int write(const uint8_t *data,
-              size_t len,
-              char *error_out = nullptr,
-              size_t error_out_size = 0,
-              const BackgroundOperationControl *operation = nullptr);
-    bool close_writer(char *error_out = nullptr,
-                      size_t error_out_size = 0,
-                      const BackgroundOperationControl *operation = nullptr);
+    StorageSmbOperationResult step_open_writer(
+        const char *remote_path,
+        char *error_out = nullptr,
+        size_t error_out_size = 0,
+        const BackgroundOperationControl *operation = nullptr);
+    StorageSmbOperationResult step_write(
+        const uint8_t *data,
+        size_t len,
+        size_t &written_out,
+        char *error_out = nullptr,
+        size_t error_out_size = 0,
+        const BackgroundOperationControl *operation = nullptr);
+    StorageSmbOperationResult step_close_writer(
+        char *error_out = nullptr,
+        size_t error_out_size = 0,
+        const BackgroundOperationControl *operation = nullptr);
     void abort_connection();
 
 private:
@@ -92,15 +98,50 @@ private:
         Error,
     };
 
+    enum class OperationKind : uint8_t {
+        None,
+        Connect,
+        Stat,
+        Mkdir,
+        Open,
+        Write,
+        Close,
+        Disconnect,
+    };
+
+    enum class EnsureDirectoryPhase : uint8_t {
+        Idle,
+        Stat,
+        Mkdir,
+        Verify,
+    };
+
     bool parse_endpoint(const char *endpoint,
                         char *error_out,
                         size_t error_out_size);
     void publish_host_resolution(const void *address, int error);
     void reset_host_resolution();
-    bool create_directory_once(const char *remote_path,
-                               char *error_out,
-                               size_t error_out_size,
-                               const BackgroundOperationControl *operation);
+    bool begin_operation(OperationKind kind,
+                         char *error_out,
+                         size_t error_out_size);
+    StorageSmbOperationResult poll_operation(
+        OperationKind kind,
+        int &status_out,
+        const BackgroundOperationControl *operation,
+        char *error_out,
+        size_t error_out_size);
+    void clear_operation();
+    StorageSmbOperationResult step_mkdir(
+        const char *remote_path,
+        char *error_out,
+        size_t error_out_size,
+        const BackgroundOperationControl *operation);
+    bool begin_ensure_directory(const char *remote_path,
+                                char *error_out,
+                                size_t error_out_size);
+    bool advance_ensure_directory(char *error_out,
+                                  size_t error_out_size);
+    void reset_ensure_directory();
     void set_error(char *error_out,
                    size_t error_out_size,
                    const char *error) const;
@@ -110,10 +151,6 @@ private:
                        size_t error_out_size,
                        const char *operation,
                        int status_hint = 0) const;
-    StorageSmbOperationResult finish_connect(
-        char *error_out,
-        size_t error_out_size,
-        int service_status = 0);
     void configure_socket_options();
 
     char server_[AC_STORAGE_SMB_ENDPOINT_HOST_MAX] = {};
@@ -132,9 +169,21 @@ private:
 
     smb2_context *ctx_ = nullptr;
     struct smb2fh *writer_ = nullptr;
-    StorageSmbAsyncResult *connect_result_ = nullptr;
-    uint32_t connect_started_ms_ = 0;
+    struct smb2fh *closing_writer_ = nullptr;
+    StorageSmbPendingOperation *operation_ = nullptr;
+    OperationKind operation_kind_ = OperationKind::None;
     bool connected_ = false;
+
+    char ensure_target_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+    char ensure_current_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
+    char ensure_mkdir_error_[AC_STORAGE_ERROR_MAX] = {};
+    size_t ensure_cursor_ = 0;
+    EnsureDirectoryPhase ensure_phase_ = EnsureDirectoryPhase::Idle;
+
+    const uint8_t *write_data_ = nullptr;
+    size_t write_size_ = 0;
+    size_t write_offset_ = 0;
+    size_t write_chunk_size_ = 0;
 };
 
 }  // namespace aircannect
