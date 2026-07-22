@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "report_executor.h"
+#include "report_artifact_store_service.h"
 #include "report_planner.h"
 #include "report_request_queue.h"
 
@@ -15,6 +16,7 @@ enum class ReportEngineState : uint8_t {
     Queued,
     WaitingForCatalog,
     Executing,
+    Publishing,
 };
 
 struct ReportEngineCompletion {
@@ -22,6 +24,7 @@ struct ReportEngineCompletion {
     OperationOutcome outcome = OperationOutcome::failed();
     ReportPlanStatus plan_status = ReportPlanStatus::InvalidRequest;
     ReportExecutorError executor_error = ReportExecutorError::None;
+    char error[AC_STORAGE_ERROR_MAX] = {};
 
     bool valid() const { return request.ticket.valid(); }
 };
@@ -31,6 +34,7 @@ struct ReportEngineStatus {
     size_t queued = 0;
     ReportArtifactRequest active_request;
     ReportExecutorStatus executor;
+    ReportArtifactStoreStatus store;
     ReportEngineCompletion last_completion;
 };
 
@@ -42,6 +46,7 @@ public:
                              const ReportReadPlan &plan) = 0;
     virtual bool finish_build() = 0;
     virtual void discard_build() = 0;
+    virtual std::shared_ptr<const ReportArtifactBundle> take_completed() = 0;
 };
 
 class ReportEngine {
@@ -51,7 +56,9 @@ public:
     ReportEngine(const ReportEngine &) = delete;
     ReportEngine &operator=(const ReportEngine &) = delete;
 
-    void begin(StorageReadPort &read_port, ReportArtifactAssembler &assembler);
+    void begin(StorageReadPort &read_port,
+               StorageAtomicWritePort &write_port,
+               ReportArtifactAssembler &assembler);
 
     void publish_catalog(std::shared_ptr<const NightCatalog> catalog);
     ReportRequestEnqueueResult request(
@@ -63,6 +70,7 @@ public:
 
     bool poll(uint32_t now_ms, size_t record_budget = 1);
     ReportEngineStatus status() const;
+    std::shared_ptr<const ReportArtifactBundle> take_published();
 
 private:
     static ReportArtifactKey build_key(const ReportArtifactKey &artifact);
@@ -72,21 +80,27 @@ private:
     bool start_next(uint32_t now_ms);
     bool start_request(ReportArtifactRequest request, uint32_t now_ms);
     bool finish_execution(uint32_t now_ms);
+    bool finish_publication();
     bool retry_active(uint32_t now_ms, uint32_t delay_ms);
+    void cancel_active_work();
     void complete_active(OperationOutcome outcome,
                          ReportPlanStatus plan_status,
-                         ReportExecutorError executor_error);
+                         ReportExecutorError executor_error,
+                         const char *error = nullptr);
     void reset_active();
 
     ReportRequestQueue queue_;
     ReportExecutor executor_;
+    ReportArtifactStoreService artifact_store_;
     StorageReadPort *read_port_ = nullptr;
     ReportArtifactAssembler *assembler_ = nullptr;
     std::shared_ptr<const NightCatalog> catalog_;
     std::shared_ptr<const ReportReadPlan> active_plan_;
     ReportArtifactRequest active_request_;
     ReportEngineCompletion last_completion_;
+    std::shared_ptr<const ReportArtifactBundle> published_;
     bool active_ = false;
+    bool publishing_ = false;
 };
 
 }  // namespace aircannect

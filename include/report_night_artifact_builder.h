@@ -27,7 +27,7 @@ public:
     void discard_build() override;
 
     std::shared_ptr<const ReportArtifactBundle> completed() const;
-    std::shared_ptr<const ReportArtifactBundle> take_completed();
+    std::shared_ptr<const ReportArtifactBundle> take_completed() override;
 
 private:
     struct Runtime;

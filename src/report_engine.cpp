@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "report_sources.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
@@ -16,21 +17,34 @@ ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
                            size_t queue_capacity) :
     queue_(queue_slots, queue_capacity) {}
 
-void ReportEngine::begin(StorageReadPort &read_port, ReportArtifactAssembler &assembler) {
+void ReportEngine::begin(StorageReadPort &read_port,
+                         StorageAtomicWritePort &write_port,
+                         ReportArtifactAssembler &assembler) {
     read_port_ = &read_port;
     assembler_ = &assembler;
     executor_.begin(read_port);
+    artifact_store_.begin(write_port);
 }
 
 void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) {
     catalog_ = std::move(catalog);
+
+    if (published_) {
+        const NightCatalogRecord *published_night =
+            catalog_ ? catalog_->find(published_->key.sleep_day) : nullptr;
+        if (!published_night ||
+            published_night->source_revision != published_->key.source_revision) {
+            published_.reset();
+        }
+    }
+
     if (!active_ || !catalog_) return;
 
     const NightCatalogRecord *night =
         catalog_->find(active_request_.artifact.sleep_day);
     if (!night ||
         night->source_revision != active_request_.artifact.source_revision) {
-        executor_.cancel();
+        cancel_active_work();
     }
 }
 
@@ -47,7 +61,7 @@ ReportRequestEnqueueResult ReportEngine::request(
             return {ReportRequestEnqueueStatus::AlreadyQueued,
                     active_request_.ticket};
         }
-        executor_.cancel();
+        cancel_active_work();
     }
 
     return queue_.enqueue(canonical, priority, generation);
@@ -56,7 +70,7 @@ ReportRequestEnqueueResult ReportEngine::request(
 size_t ReportEngine::cancel_generation(uint32_t generation) {
     size_t cancelled = queue_.cancel_generation(generation);
     if (active_ && active_request_.ticket.generation == generation) {
-        executor_.cancel();
+        cancel_active_work();
         ++cancelled;
     }
     return cancelled;
@@ -65,10 +79,11 @@ size_t ReportEngine::cancel_generation(uint32_t generation) {
 void ReportEngine::clear() {
     queue_.clear();
     if (active_) {
-        executor_.cancel();
-        if (assembler_) assembler_->discard_build();
+        cancel_active_work();
+        if (assembler_ && !publishing_) assembler_->discard_build();
     }
     reset_active();
+    published_.reset();
     last_completion_ = {};
 }
 
@@ -84,9 +99,16 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
 
     if (!active_) return worked;
 
-    worked = executor_.poll(record_budget) || worked;
-    if (executor_.status().terminal()) {
-        worked = finish_execution(now_ms) || worked;
+    if (publishing_) {
+        worked = artifact_store_.poll() || worked;
+        if (artifact_store_.status().terminal()) {
+            worked = finish_publication() || worked;
+        }
+    } else {
+        worked = executor_.poll(record_budget) || worked;
+        if (executor_.status().terminal()) {
+            worked = finish_execution(now_ms) || worked;
+        }
     }
     return worked;
 }
@@ -96,9 +118,12 @@ ReportEngineStatus ReportEngine::status() const {
     out.queued = queue_.size();
     out.active_request = active_request_;
     out.executor = executor_.status();
+    out.store = artifact_store_.status();
     out.last_completion = last_completion_;
 
-    if (active_) {
+    if (active_ && publishing_) {
+        out.state = ReportEngineState::Publishing;
+    } else if (active_) {
         out.state = ReportEngineState::Executing;
     } else if (queue_.size() > 0 && !catalog_) {
         out.state = ReportEngineState::WaitingForCatalog;
@@ -106,6 +131,10 @@ ReportEngineStatus ReportEngine::status() const {
         out.state = ReportEngineState::Queued;
     }
     return out;
+}
+
+std::shared_ptr<const ReportArtifactBundle> ReportEngine::take_published() {
+    return std::move(published_);
 }
 
 ReportArtifactKey ReportEngine::build_key(
@@ -183,12 +212,34 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
     const ReportExecutorStatus executor_status = executor_.status();
     if (executor_status.state == ReportExecutorState::Complete) {
         const bool finished = assembler_->finish_build();
-        if (!finished) assembler_->discard_build();
-        complete_active(finished ? OperationOutcome::succeeded()
-                                 : OperationOutcome::failed(),
-                        ReportPlanStatus::Ready,
-                        finished ? ReportExecutorError::None
-                                 : ReportExecutorError::SinkRejected);
+        std::shared_ptr<const ReportArtifactBundle> bundle =
+            finished ? assembler_->take_completed() : nullptr;
+        if (!finished || !bundle || !bundle->valid()) {
+            assembler_->discard_build();
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::SinkRejected,
+                            "report_artifact_assembly_failed");
+            return true;
+        }
+
+        const StorageAtomicWriteLane lane =
+            active_request_.priority == ReportRequestPriority::Foreground
+                ? StorageAtomicWriteLane::Foreground
+                : StorageAtomicWriteLane::Maintenance;
+        const OperationAdmission admitted = artifact_store_.start(
+            std::move(bundle), active_request_.ticket.generation, lane);
+        if (admitted != OperationAdmission::Accepted) {
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            "report_artifact_publish_rejected");
+            return true;
+        }
+
+        executor_.reset();
+        active_plan_.reset();
+        publishing_ = true;
         return true;
     }
 
@@ -211,6 +262,35 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
     return true;
 }
 
+bool ReportEngine::finish_publication() {
+    const ReportArtifactStoreStatus store_status = artifact_store_.status();
+    if (store_status.state == ReportArtifactStoreState::Ready) {
+        published_ = artifact_store_.published();
+        const bool valid = published_ && published_->valid();
+        complete_active(valid ? OperationOutcome::succeeded()
+                              : OperationOutcome::failed(),
+                        ReportPlanStatus::Ready,
+                        ReportExecutorError::None,
+                        valid ? nullptr : "report_artifact_publish_missing");
+        return true;
+    }
+
+    if (store_status.state == ReportArtifactStoreState::Cancelled) {
+        complete_active(OperationOutcome::cancelled(),
+                        ReportPlanStatus::Ready,
+                        ReportExecutorError::None);
+        return true;
+    }
+
+    complete_active(OperationOutcome::failed(),
+                    ReportPlanStatus::Ready,
+                    ReportExecutorError::None,
+                    store_status.error[0]
+                        ? store_status.error
+                        : "report_artifact_publish_failed");
+    return true;
+}
+
 bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
     const OperationOutcome outcome = queue_.retry(
         active_request_, now_ms, delay_ms, PLAN_RETRY_LIMIT);
@@ -220,21 +300,36 @@ bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
     return true;
 }
 
+void ReportEngine::cancel_active_work() {
+    if (!active_) return;
+    if (publishing_) {
+        artifact_store_.cancel();
+    } else {
+        executor_.cancel();
+    }
+}
+
 void ReportEngine::complete_active(OperationOutcome outcome,
                                    ReportPlanStatus plan_status,
-                                   ReportExecutorError executor_error) {
+                                   ReportExecutorError executor_error,
+                                   const char *error) {
     last_completion_.request = active_request_;
     last_completion_.outcome = outcome;
     last_completion_.plan_status = plan_status;
     last_completion_.executor_error = executor_error;
+    copy_cstr(last_completion_.error,
+              sizeof(last_completion_.error),
+              error ? error : "");
     reset_active();
 }
 
 void ReportEngine::reset_active() {
     executor_.reset();
+    artifact_store_.reset();
     active_plan_.reset();
     active_request_ = {};
     active_ = false;
+    publishing_ = false;
 }
 
 }  // namespace aircannect
