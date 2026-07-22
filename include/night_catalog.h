@@ -116,6 +116,7 @@ struct NightCatalogRecord {
 };
 
 class NightCatalogBuilder;
+class NightCatalogFileCodec;
 
 class NightCatalog {
 public:
@@ -167,6 +168,7 @@ private:
     size_t path_bytes_ = 0;
 
     friend class NightCatalogBuilder;
+    friend class NightCatalogFileCodec;
 };
 
 }  // namespace aircannect
