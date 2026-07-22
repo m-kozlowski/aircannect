@@ -9,6 +9,7 @@
 #include "as11_event_frame.h"
 #include "edf_numeric_file_layout.h"
 #include "edf_series.h"
+#include "edf_session_metadata_publisher.h"
 #include "edf_storage_catalog.h"
 #include "edf_str_session.h"
 #include "edf_stream_assembler.h"
@@ -163,7 +164,8 @@ public:
                StreamBroker &stream,
                const As11DeviceState &device_state,
                SessionManager &session,
-               TimeSyncService &time_sync);
+               TimeSyncService &time_sync,
+               StorageAtomicWritePort &metadata_storage);
     void poll(uint32_t now_ms);
 
     // control/status
@@ -226,6 +228,19 @@ private:
     void close_recording_gate(const char *end_time, uint32_t now_ms);
     void close_recording_segment();
 
+    // session clock provenance
+    bool ensure_segment_metadata_published(const char *start_time,
+                                           uint32_t now_ms);
+    bool build_segment_metadata(const char *start_time,
+                                EdfSessionMetadata &metadata) const;
+    void finalize_segment_metadata(const char *segment_end_time,
+                                   const char *therapy_end_time,
+                                   uint32_t now_ms);
+    void finalize_segment_metadata_at(int64_t raw_segment_end_ms,
+                                      int64_t raw_therapy_end_ms,
+                                      uint32_t now_ms);
+    bool queue_pending_final_metadata();
+
     // EDF file opens
     bool open_session_annotation_files(const char *annotation_start_time);
     bool open_session_annotation_files_at(const EdfLocalDateTime &start,
@@ -286,7 +301,9 @@ private:
 
     // device time
     void freeze_session_clock(uint32_t now_ms);
+    void freeze_session_timezone();
     void apply_pending_mask_event(uint32_t now_ms);
+    bool parse_session_raw_time(const char *text, int64_t &epoch_ms) const;
     bool parse_session_utc_time(const char *text, int64_t &epoch_ms) const;
     bool as11_timezone_ready() const;
     bool parse_session_local_time(const char *text, EdfLocalDateTime &out) const;
@@ -358,6 +375,15 @@ private:
     uint16_t numeric_segment_day_ = 0;
     As11ClockTransform session_clock_;
     bool session_clock_frozen_ = false;
+    int32_t session_timezone_offset_minutes_ = 0;
+    bool session_timezone_frozen_ = false;
+
+    EdfSessionMetadataPublisher metadata_publisher_;
+    EdfSessionMetadata segment_metadata_;
+    EdfSessionMetadata pending_final_metadata_;
+    EdfSessionMetadataPublication metadata_open_publication_;
+    bool segment_metadata_active_ = false;
+    bool pending_final_metadata_valid_ = false;
 
     // STR/identification state
     PendingRpc str_settings_rpc_;

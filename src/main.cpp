@@ -837,7 +837,8 @@ void setup() {
 
     edf_recorder_manager.begin(event_broker, stream_broker,
                                as11_device_service.state(), session_manager,
-                               time_sync_service);
+                               time_sync_service,
+                               StorageService::atomic_write_port());
     edf_recorder_manager.set_enabled(
         config_service.data().edf_capture_enabled);
 

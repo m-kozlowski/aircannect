@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "crc32.h"
+#include "edf_storage_catalog.h"
 #include "little_endian.h"
 
 namespace aircannect {
@@ -53,6 +54,27 @@ bool corrected_time(int64_t raw,
     if (correction > 0 && raw < INT64_MIN + correction) return false;
     if (correction < 0 && raw > INT64_MAX + correction) return false;
     return canonical == raw - correction;
+}
+
+bool apply_correction(int64_t raw,
+                      int64_t correction,
+                      int64_t &canonical) {
+    if (correction > 0 && raw < INT64_MIN + correction) return false;
+    if (correction < 0 && raw > INT64_MAX + correction) return false;
+    canonical = raw - correction;
+    return true;
+}
+
+bool sleep_day(const EdfLocalDateTime &local,
+               SleepDayId &sleep_day,
+               char *text) {
+    char value[9] = {};
+    if (!edf_sleep_day_yyyymmdd(local, value, sizeof(value)) ||
+        !SleepDayId::from_yyyymmdd(value, sleep_day)) {
+        return false;
+    }
+    if (text) memcpy(text, value, sizeof(value));
+    return true;
 }
 
 bool time_pair_valid(int64_t raw,
@@ -168,6 +190,85 @@ bool edf_session_metadata_valid(const EdfSessionMetadata &metadata) {
            metadata.raw_therapy_end_ms > metadata.raw_therapy_start_ms &&
            metadata.canonical_therapy_end_ms >
                metadata.canonical_therapy_start_ms;
+}
+
+bool edf_session_metadata_begin(int64_t raw_segment_start_ms,
+                                int64_t raw_therapy_start_ms,
+                                const As11ClockTransform &clock,
+                                int32_t timezone_offset_minutes,
+                                uint32_t capture_session_id,
+                                EdfSessionMetadata &metadata) {
+    int64_t canonical_segment_start_ms = 0;
+    int64_t canonical_therapy_start_ms = 0;
+    if (raw_segment_start_ms <= 0 || raw_therapy_start_ms <= 0 ||
+        !clock.to_utc_ms(raw_segment_start_ms,
+                         canonical_segment_start_ms) ||
+        !clock.to_utc_ms(raw_therapy_start_ms,
+                         canonical_therapy_start_ms)) {
+        return false;
+    }
+
+    EdfLocalDateTime raw_local;
+    EdfLocalDateTime canonical_local;
+    if (!edf_epoch_ms_to_local_datetime(raw_segment_start_ms,
+                                        timezone_offset_minutes,
+                                        raw_local) ||
+        !edf_epoch_ms_to_local_datetime(canonical_segment_start_ms,
+                                        timezone_offset_minutes,
+                                        canonical_local)) {
+        return false;
+    }
+
+    EdfSessionMetadata opened;
+    opened.raw_segment_start_ms = raw_segment_start_ms;
+    opened.canonical_segment_start_ms = canonical_segment_start_ms;
+    opened.raw_therapy_start_ms = raw_therapy_start_ms;
+    opened.canonical_therapy_start_ms = canonical_therapy_start_ms;
+    opened.device_minus_utc_ms = clock.externally_referenced
+        ? clock.device_minus_utc_ms
+        : 0;
+    opened.timezone_offset_minutes = timezone_offset_minutes;
+    opened.capture_session_id = capture_session_id;
+    opened.externally_corrected = clock.externally_referenced;
+
+    if (!sleep_day(raw_local, opened.raw_sleep_day, nullptr) ||
+        !sleep_day(canonical_local,
+                   opened.canonical_sleep_day,
+                   opened.datalog_sleep_day) ||
+        !edf_session_stamp(canonical_local,
+                           opened.session_stamp,
+                           sizeof(opened.session_stamp)) ||
+        !edf_session_metadata_valid(opened)) {
+        return false;
+    }
+
+    metadata = opened;
+    return true;
+}
+
+bool edf_session_metadata_finalize(EdfSessionMetadata &metadata,
+                                   int64_t raw_segment_end_ms,
+                                   int64_t raw_therapy_end_ms) {
+    EdfSessionMetadata finalized = metadata;
+    if (!finalized.externally_corrected) {
+        finalized.device_minus_utc_ms = 0;
+    }
+    if (!apply_correction(raw_segment_end_ms,
+                          finalized.device_minus_utc_ms,
+                          finalized.canonical_segment_end_ms) ||
+        !apply_correction(raw_therapy_end_ms,
+                          finalized.device_minus_utc_ms,
+                          finalized.canonical_therapy_end_ms)) {
+        return false;
+    }
+
+    finalized.raw_segment_end_ms = raw_segment_end_ms;
+    finalized.raw_therapy_end_ms = raw_therapy_end_ms;
+    finalized.finalized = true;
+    if (!edf_session_metadata_valid(finalized)) return false;
+
+    metadata = finalized;
+    return true;
 }
 
 std::shared_ptr<const LargeByteBuffer> EdfSessionMetadataCodec::encode(

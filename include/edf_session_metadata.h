@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "as11_clock.h"
 #include "large_byte_buffer.h"
 #include "sleep_day_id.h"
 
@@ -51,6 +52,15 @@ public:
 };
 
 bool edf_session_metadata_valid(const EdfSessionMetadata &metadata);
+bool edf_session_metadata_begin(int64_t raw_segment_start_ms,
+                                int64_t raw_therapy_start_ms,
+                                const As11ClockTransform &clock,
+                                int32_t timezone_offset_minutes,
+                                uint32_t capture_session_id,
+                                EdfSessionMetadata &metadata);
+bool edf_session_metadata_finalize(EdfSessionMetadata &metadata,
+                                   int64_t raw_segment_end_ms,
+                                   int64_t raw_therapy_end_ms);
 bool edf_session_metadata_path(const EdfSessionMetadata &metadata,
                                char *out,
                                size_t out_size);
