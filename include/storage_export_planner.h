@@ -16,6 +16,7 @@ enum class StorageExportPlannerScope : uint8_t {
 enum class StorageExportPlannerResult : uint8_t {
     Item,
     Yield,
+    InventoryRequired,
     DecisionRequired,
     Done,
     Error,
@@ -63,6 +64,12 @@ public:
                                     char *error_out,
                                     size_t error_out_size);
 
+    bool pending_datalog_day_inventory(char *day_out,
+                                       size_t day_out_size) const;
+    bool provide_datalog_day_inventory(
+        std::shared_ptr<const StorageExportInventoryView> inventory,
+        char *error_out,
+        size_t error_out_size);
     bool pending_datalog_day_decision(char *day_out,
                                       size_t day_out_size,
                                       bool &local_complete_out) const;
@@ -73,6 +80,7 @@ public:
 private:
     enum class DatalogDaySelection : uint8_t {
         Selected,
+        InventoryRequired,
         DecisionRequired,
         Done,
         Error,
@@ -87,6 +95,12 @@ private:
     bool datalog_day_allowed(const char *day) const;
     bool datalog_day_finalized(const char *day) const;
     bool datalog_day_skipped(const char *day) const;
+    bool datalog_day_inventory_loaded(const char *day) const;
+    StorageExportPlannerResult require_datalog_day_inventory(
+        const char *day,
+        char *error_out,
+        size_t error_out_size);
+    void release_datalog_day_inventory();
     StorageExportPlannerResult emit_datalog_day_complete(
         const char *day,
         StorageExportPlannerItem &out,
@@ -106,20 +120,22 @@ private:
     void activate_datalog_day(const char *day, bool force_export);
 
     StorageExportPlannerConfig config_;
-    std::shared_ptr<const StorageExportInventoryView> inventory_;
+    std::shared_ptr<const StorageExportInventoryView> catalog_;
+    std::shared_ptr<const StorageExportInventoryView> day_inventory_;
     char state_dir_[AC_STORAGE_PATH_MAX] = {};
     char only_datalog_day_[9] = {};
     bool started_ = false;
 
-    size_t full_source_index_ = 0;
-    char full_active_day_[9] = {};
+    size_t catalog_source_index_ = 0;
+    size_t day_source_index_ = 0;
+    bool day_complete_emitted_ = false;
+    char inventory_required_day_[9] = {};
 
     size_t datalog_day_index_ = 0;
     uint32_t datalog_days_started_ = 0;
     bool day_active_ = false;
     bool day_force_export_ = false;
     size_t day_metadata_index_ = 0;
-    size_t day_source_index_ = 0;
     char day_name_[9] = {};
 
     bool day_decision_pending_ = false;

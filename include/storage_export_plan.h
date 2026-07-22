@@ -54,6 +54,10 @@ bool storage_export_build_done_path(const char *state_dir,
                                     const char *day,
                                     char *out,
                                     size_t out_size);
+bool storage_export_state_path_datalog_day(const char *state_dir,
+                                           const char *state_path,
+                                           char *day_out,
+                                           size_t day_out_size);
 bool storage_export_build_state_path(const char *state_dir,
                                      const char *local_path,
                                      char *out,

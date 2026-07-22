@@ -181,6 +181,34 @@ bool storage_export_build_done_path(const char *state_dir,
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
+bool storage_export_state_path_datalog_day(const char *state_dir,
+                                           const char *state_path,
+                                           char *day_out,
+                                           size_t day_out_size) {
+    if (!state_dir || !state_dir[0] || !state_path || !day_out ||
+        day_out_size < 9) {
+        return false;
+    }
+
+    const size_t state_dir_length = strlen(state_dir);
+    if (strncmp(state_path, state_dir, state_dir_length) != 0 ||
+        state_path[state_dir_length] != '/') {
+        return false;
+    }
+
+    const char *name = state_path + state_dir_length + 1;
+    static constexpr char STATE_SUFFIX[] = ".state";
+    if (strlen(name) != 8 + sizeof(STATE_SUFFIX) - 1 ||
+        !storage_export_all_digits(name, 8) ||
+        strcmp(name + 8, STATE_SUFFIX) != 0) {
+        return false;
+    }
+
+    memcpy(day_out, name, 8);
+    day_out[8] = '\0';
+    return storage_export_is_datalog_day_name(day_out);
+}
+
 bool storage_export_build_state_path(const char *state_dir,
                                      const char *local_path,
                                      char *out,

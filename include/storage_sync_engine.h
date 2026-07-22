@@ -143,6 +143,7 @@ private:
         Idle,
         LoadMetadata,
         LoadInventory,
+        LoadDatalogDay,
         ResolveHost,
         Connect,
         EnsureBaseDir,
@@ -252,6 +253,7 @@ private:
     bool begin_run_locked();
     ExportStep step_load_metadata_locked();
     ExportStep step_load_inventory_locked();
+    ExportStep step_load_datalog_day_locked();
     void finish_run_locked();
     void preempt_run_locked();
     void fail_locked(const char *error);
@@ -262,6 +264,8 @@ private:
     // export planning
     bool begin_export_planner_locked(char *error_out,
                                      size_t error_out_size);
+    bool queue_datalog_day_load_locked(const char *day,
+                                       WorkPhase resume_phase);
     bool next_file_locked();
     bool plan_file_locked(const StorageExportPlannerItem &item);
 
@@ -274,6 +278,8 @@ private:
     bool schedule_completed_datalog_day_locked(const char *day);
     bool prepare_state_file_locked();
     bool prepare_done_marker_locked();
+    const StorageExportInventoryView *inventory_for_state_path_locked(
+        const char *state_path) const;
     uint32_t next_storage_generation_locked();
 
     // path helpers and upload resources
@@ -322,6 +328,7 @@ private:
     StorageExportInventoryLoader inventory_loader_;
     StorageStreamPort *stream_port_ = nullptr;
     std::shared_ptr<const StorageExportInventory> export_inventory_;
+    std::shared_ptr<const StorageExportInventory> export_day_inventory_;
     StorageExportPlanner export_planner_;
     StorageExportStateBatch state_batch_;
     StorageFileClient state_io_;
@@ -350,6 +357,9 @@ private:
     uint32_t next_inventory_generation_ = 1;
     uint32_t next_storage_generation_ = 1;
     bool inventory_requested_ = false;
+    bool day_inventory_requested_ = false;
+    WorkPhase day_load_resume_phase_ = WorkPhase::NextFile;
+    char requested_datalog_day_[9] = {};
     uint32_t retry_due_ms_ = 0;
     uint8_t retry_attempt_ = 0;
 };

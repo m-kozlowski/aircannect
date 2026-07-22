@@ -121,6 +121,7 @@ private:
         Idle,
         Connect,
         LoadInventory,
+        LoadDatalogDay,
         ReadIdentification,
         FindRemoteMachine,
         LoadInflight,
@@ -222,6 +223,7 @@ private:
     // run lifecycle
     bool begin_run_locked(uint32_t now_ms);
     ExportStep step_load_inventory_locked();
+    ExportStep step_load_datalog_day_locked();
     void queue_retry_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
     void finish_check_locked(uint32_t team_id);
@@ -233,6 +235,8 @@ private:
     // export planning and import batches
     bool begin_export_planner_locked(char *error_out,
                                      size_t error_out_size);
+    bool queue_datalog_day_load_locked(const char *day,
+                                       WorkPhase resume_phase);
     void reset_import_batch_locked();
     void complete_import_batch_reset_locked();
     ExportStep finish_import_or_sync_locked();
@@ -266,6 +270,8 @@ private:
     ExportStep step_write_done_marker_locked();
     bool prepare_rebuild_marker_locked();
     bool prepare_done_marker_locked();
+    const StorageExportInventoryView *inventory_for_state_path_locked(
+        const char *state_path) const;
     void continue_after_state_flush_locked();
     uint32_t next_storage_generation_locked();
     bool reserve_staged_locked(size_t needed);
@@ -354,6 +360,7 @@ private:
     StorageExportInventoryLoader inventory_loader_;
     StorageStreamPort *stream_port_ = nullptr;
     std::shared_ptr<const StorageExportInventory> export_inventory_;
+    std::shared_ptr<const StorageExportInventory> export_day_inventory_;
     StorageExportPlanner export_planner_;
     StorageExportStateBatch state_batch_;
     StorageFileClient state_io_;
@@ -413,6 +420,9 @@ private:
     uint32_t next_inventory_generation_ = 1;
     uint32_t next_storage_generation_ = 1;
     bool inventory_requested_ = false;
+    bool day_inventory_requested_ = false;
+    WorkPhase day_load_resume_phase_ = WorkPhase::NextFile;
+    char requested_datalog_day_[9] = {};
 };
 
 }  // namespace aircannect

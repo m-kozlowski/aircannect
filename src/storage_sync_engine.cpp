@@ -117,6 +117,7 @@ const char *StorageSyncEngine::work_phase_name(WorkPhase phase) {
         case WorkPhase::Idle: return "idle";
         case WorkPhase::LoadMetadata: return "load_metadata";
         case WorkPhase::LoadInventory: return "load_inventory";
+        case WorkPhase::LoadDatalogDay: return "load_datalog_day";
         case WorkPhase::ResolveHost: return "resolve_host";
         case WorkPhase::Connect: return "connect";
         case WorkPhase::EnsureBaseDir: return "ensure_base_dir";
@@ -177,6 +178,7 @@ void StorageSyncEngine::reset_run_locked(bool keep_status) {
     close_local_locked();
     inventory_loader_.reset();
     export_inventory_.reset();
+    export_day_inventory_.reset();
     export_planner_.reset();
     state_batch_.clear();
     state_io_.reset();
@@ -194,6 +196,9 @@ void StorageSyncEngine::reset_run_locked(bool keep_status) {
     pending_run_kind_ = RunKind::Manual;
     abort_requested_.store(false);
     inventory_requested_ = false;
+    day_inventory_requested_ = false;
+    day_load_resume_phase_ = WorkPhase::NextFile;
+    requested_datalog_day_[0] = '\0';
     pending_state_path_[0] = '\0';
     pending_done_day_[0] = '\0';
     pending_state_bytes_.reset();
@@ -721,6 +726,99 @@ ExportStep StorageSyncEngine::step_load_inventory_locked() {
     return ExportStep::Working;
 }
 
+bool StorageSyncEngine::queue_datalog_day_load_locked(
+    const char *day,
+    WorkPhase resume_phase) {
+    if (!storage_export_is_datalog_day_name(day) ||
+        resume_phase == WorkPhase::LoadDatalogDay) {
+        return false;
+    }
+
+    if (export_day_inventory_ &&
+        strcmp(export_day_inventory_->loaded_datalog_day(), day) == 0) {
+        char pending_day[9] = {};
+        if (export_planner_.pending_datalog_day_inventory(
+                pending_day, sizeof(pending_day))) {
+            char error[AC_STORAGE_ERROR_MAX] = {};
+            if (strcmp(pending_day, day) != 0 ||
+                !export_planner_.provide_datalog_day_inventory(
+                    export_day_inventory_, error, sizeof(error))) {
+                return false;
+            }
+        }
+        phase_ = resume_phase;
+        return true;
+    }
+
+    copy_cstr(requested_datalog_day_,
+              sizeof(requested_datalog_day_),
+              day);
+    day_inventory_requested_ = false;
+    day_load_resume_phase_ = resume_phase;
+    phase_ = WorkPhase::LoadDatalogDay;
+    return true;
+}
+
+ExportStep StorageSyncEngine::step_load_datalog_day_locked() {
+    if (!requested_datalog_day_[0]) {
+        fail_locked("export_day_missing");
+        return ExportStep::Idle;
+    }
+
+    if (!day_inventory_requested_) {
+        const uint32_t generation = next_inventory_generation_;
+        const OperationAdmission admission =
+            inventory_loader_.request_datalog_day(requested_datalog_day_,
+                                                  generation);
+        if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
+        if (admission != OperationAdmission::Accepted) {
+            fail_locked("export_day_inventory_rejected");
+            return ExportStep::Idle;
+        }
+
+        next_inventory_generation_++;
+        if (next_inventory_generation_ == 0) next_inventory_generation_ = 1;
+        day_inventory_requested_ = true;
+    }
+
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    const StorageExportInventoryLoadResult result =
+        inventory_loader_.poll(error, sizeof(error));
+    if (result == StorageExportInventoryLoadResult::Waiting) {
+        return ExportStep::Waiting;
+    }
+    if (result == StorageExportInventoryLoadResult::Error) {
+        fail_locked(error[0] ? error : "export_day_inventory_failed");
+        return ExportStep::Idle;
+    }
+
+    export_day_inventory_ = inventory_loader_.snapshot();
+    if (!export_day_inventory_ ||
+        strcmp(export_day_inventory_->loaded_datalog_day(),
+               requested_datalog_day_) != 0) {
+        fail_locked("export_day_inventory_missing");
+        return ExportStep::Idle;
+    }
+
+    char pending_day[9] = {};
+    if (export_planner_.pending_datalog_day_inventory(
+            pending_day, sizeof(pending_day))) {
+        if (strcmp(pending_day, requested_datalog_day_) != 0 ||
+            !export_planner_.provide_datalog_day_inventory(
+                export_day_inventory_, error, sizeof(error))) {
+            fail_locked(error[0] ? error : "planner_day_inventory_failed");
+            return ExportStep::Idle;
+        }
+    }
+
+    const WorkPhase resume_phase = day_load_resume_phase_;
+    requested_datalog_day_[0] = '\0';
+    day_inventory_requested_ = false;
+    day_load_resume_phase_ = WorkPhase::NextFile;
+    phase_ = resume_phase;
+    return ExportStep::Working;
+}
+
 bool StorageSyncEngine::request_sync_with_kind(RunKind kind, const char *label) {
     if (!lock(0)) {
         Log::logf(CAT_STORAGE, LOG_WARN,
@@ -916,6 +1014,16 @@ bool StorageSyncEngine::next_file_locked() {
             return plan_file_locked(item);
         case StorageExportPlannerResult::Yield:
             return true;
+        case StorageExportPlannerResult::InventoryRequired: {
+            char day[9] = {};
+            if (!export_planner_.pending_datalog_day_inventory(
+                    day, sizeof(day)) ||
+                !queue_datalog_day_load_locked(day, WorkPhase::NextFile)) {
+                fail_locked("planner_day_inventory_missing");
+                return false;
+            }
+            return true;
+        }
         case StorageExportPlannerResult::DecisionRequired:
             fail_locked("unexpected_planner_decision");
             return false;
@@ -1012,14 +1120,33 @@ bool StorageSyncEngine::schedule_completed_datalog_day_locked(const char *day) {
 
 bool StorageSyncEngine::prepare_state_file_locked() {
     if (pending_state_bytes_) return pending_state_path_[0] != '\0';
-    if (!export_inventory_) return false;
 
     const char *state_path = state_batch_.first_state_path();
     if (!state_path || !state_path[0]) return false;
+    const StorageExportInventoryView *inventory =
+        inventory_for_state_path_locked(state_path);
+    if (!inventory) return false;
+
     copy_cstr(pending_state_path_, sizeof(pending_state_path_), state_path);
-    pending_state_bytes_ = state_batch_.build_file(*export_inventory_,
-                                                   state_path);
+    pending_state_bytes_ = state_batch_.build_file(*inventory, state_path);
     return pending_state_bytes_ != nullptr;
+}
+
+const StorageExportInventoryView *
+StorageSyncEngine::inventory_for_state_path_locked(
+    const char *state_path) const {
+    char day[9] = {};
+    if (!storage_export_state_path_datalog_day(state_dir_,
+                                               state_path,
+                                               day,
+                                               sizeof(day))) {
+        return export_inventory_.get();
+    }
+    if (!export_day_inventory_ ||
+        strcmp(export_day_inventory_->loaded_datalog_day(), day) != 0) {
+        return nullptr;
+    }
+    return export_day_inventory_.get();
 }
 
 bool StorageSyncEngine::prepare_done_marker_locked() {
@@ -1125,7 +1252,11 @@ void StorageSyncEngine::finish_run_locked() {
     export_planner_.reset();
     inventory_loader_.reset();
     export_inventory_.reset();
+    export_day_inventory_.reset();
     inventory_requested_ = false;
+    day_inventory_requested_ = false;
+    day_load_resume_phase_ = WorkPhase::NextFile;
+    requested_datalog_day_[0] = '\0';
     release_upload_buffer_locked();
     smb_configured_ = false;
     state_io_.reset();
@@ -1261,7 +1392,11 @@ void StorageSyncEngine::fail_locked(const char *error) {
     export_planner_.reset();
     inventory_loader_.reset();
     export_inventory_.reset();
+    export_day_inventory_.reset();
     inventory_requested_ = false;
+    day_inventory_requested_ = false;
+    day_load_resume_phase_ = WorkPhase::NextFile;
+    requested_datalog_day_[0] = '\0';
     smb_.abort_connection();
     smb_configured_ = false;
     release_upload_buffer_locked();
@@ -1518,6 +1653,24 @@ ExportStep StorageSyncEngine::step_flush_state_locked() {
         return ExportStep::Working;
     }
 
+    const char *state_path = state_batch_.first_state_path();
+    if (!state_path || !state_path[0]) {
+        fail_locked("state_path_missing");
+        return ExportStep::Idle;
+    }
+    if (!inventory_for_state_path_locked(state_path)) {
+        char day[9] = {};
+        if (!storage_export_state_path_datalog_day(state_dir_,
+                                                   state_path,
+                                                   day,
+                                                   sizeof(day)) ||
+            !queue_datalog_day_load_locked(day, WorkPhase::FlushState)) {
+            fail_locked("state_inventory_missing");
+            return ExportStep::Idle;
+        }
+        return ExportStep::Working;
+    }
+
     if (!prepare_state_file_locked()) {
         fail_locked("state_file_build_failed");
         return ExportStep::Idle;
@@ -1589,6 +1742,7 @@ bool StorageSyncEngine::phase_has_local_io(WorkPhase phase) {
         case WorkPhase::Idle:
         case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
+        case WorkPhase::LoadDatalogDay:
         case WorkPhase::ResolveHost:
         case WorkPhase::Connect:
         case WorkPhase::EnsureBaseDir:
@@ -1643,6 +1797,7 @@ void StorageSyncEngine::execute_local_io_phase(WorkPhase phase,
         case WorkPhase::Idle:
         case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
+        case WorkPhase::LoadDatalogDay:
         case WorkPhase::ResolveHost:
         case WorkPhase::Connect:
         case WorkPhase::EnsureBaseDir:
@@ -1701,6 +1856,7 @@ ExportStep StorageSyncEngine::publish_local_io_phase_locked(
         case WorkPhase::Idle:
         case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
+        case WorkPhase::LoadDatalogDay:
         case WorkPhase::ResolveHost:
         case WorkPhase::Connect:
         case WorkPhase::EnsureBaseDir:
@@ -1921,6 +2077,9 @@ ExportStep StorageSyncEngine::step_work_phase_locked() {
 
         case WorkPhase::LoadInventory:
             return step_load_inventory_locked();
+
+        case WorkPhase::LoadDatalogDay:
+            return step_load_datalog_day_locked();
 
         case WorkPhase::ResolveHost:
             return step_resolve_host_locked();
