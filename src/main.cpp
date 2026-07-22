@@ -469,7 +469,9 @@ void setup() {
         sleephq_sync_job->begin(app_config.data(),
                                StorageService::scan_port(),
                                StorageService::read_port(),
-                               StorageService::stream_port());
+                               StorageService::stream_port(),
+                               StorageService::atomic_write_port(),
+                               StorageService::path_port());
     }
 
     bg_worker.add_job(&storage_diagnostic_job);

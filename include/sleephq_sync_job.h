@@ -1,22 +1,26 @@
 #pragma once
 
 #include <Arduino.h>
-#include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <atomic>
+#include <memory>
 #include <stdint.h>
 
 #include "app_config.h"
 #include "background_worker.h"
+#include "large_byte_buffer.h"
 #include "sleephq_client.h"
 #include "sleephq_remote_file_cache.h"
 #include "sleephq_sync_file.h"
+#include "storage_atomic_write_port.h"
 #include "storage_export_inventory.h"
 #include "storage_export_plan.h"
 #include "storage_export_planner.h"
-#include "storage_export_state.h"
+#include "storage_export_state_batch.h"
+#include "storage_file_client.h"
 #include "storage_path.h"
+#include "storage_path_port.h"
 
 namespace aircannect {
 
@@ -90,7 +94,9 @@ public:
     void begin(const AppConfigData &config,
                StorageScanPort &scan_port,
                StorageReadPort &read_port,
-               StorageStreamPort &stream_port);
+               StorageStreamPort &stream_port,
+               StorageAtomicWritePort &write_port,
+               StoragePathPort &path_port);
 
     // background worker
     const char *name() const override { return "sleephq_sync"; }
@@ -120,8 +126,10 @@ private:
         LoadInventory,
         ReadIdentification,
         FindRemoteMachine,
+        LoadInflight,
         NextFile,
         ResolveDatalogDay,
+        ReadRebuildMarker,
         CreateImport,
         OpenLocal,
         HashLocalFile,
@@ -131,7 +139,12 @@ private:
         ProcessImport,
         WaitImport,
         FetchImport,
-        MarkState,
+        WriteInflight,
+        ValidateStaged,
+        FlushState,
+        WriteRebuildMarker,
+        WriteDoneMarker,
+        RemoveInflight,
         Finish,
     };
 
@@ -145,6 +158,13 @@ private:
         None,
         Uploading,
         Processing,
+    };
+
+    enum class InflightRemoveAction : uint8_t {
+        None,
+        ResumeExport,
+        ResetBatch,
+        Fail,
     };
 
     struct ConfigSnapshot {
@@ -161,8 +181,6 @@ private:
         uint64_t size = 0;
         uint64_t mtime = 0;
         uint32_t import_id = 0;
-        StorageExportStateWriteMode state_write_mode =
-            StorageExportStateWriteMode::Append;
     };
 
     struct RemoteMachineDateCache {
@@ -226,6 +244,7 @@ private:
     bool begin_export_planner_locked(char *error_out,
                                      size_t error_out_size);
     void reset_import_batch_locked();
+    void complete_import_batch_reset_locked();
     JobStep finish_import_or_sync_locked();
     bool next_file_locked();
     bool plan_file_locked(const StorageExportPlannerItem &item);
@@ -234,17 +253,31 @@ private:
                                          size_t out_size) const;
 
     // durable sync state
-    bool ensure_state_dir_locked();
     bool build_inflight_path_locked(char *out, size_t out_size) const;
-    bool load_inflight_locked(InflightPhase &phase_out);
-    bool write_inflight_locked(InflightPhase phase);
-    void remove_inflight_locked();
+    bool prepare_inflight_write_locked(InflightPhase phase,
+                                       WorkPhase next_phase);
+    bool build_inflight_bytes_locked(InflightPhase phase);
+    JobStep step_load_inflight_locked();
+    JobStep step_write_inflight_locked();
+    JobStep step_remove_inflight_locked();
+    JobStep step_validate_staged_locked();
+    bool parse_inflight_line_locked(char *line);
+    void reset_inflight_reader_locked();
+    void complete_inflight_load_locked();
+    bool begin_inflight_remove_locked(InflightRemoveAction action,
+                                      const char *failure = nullptr);
     bool staged_contains_locked(const char *path,
                                 uint64_t size,
                                 uint64_t mtime) const;
     void note_completed_datalog_day_locked(const char *day);
-    void maybe_mark_completed_datalog_day_locked();
-    bool write_state_locked(const StagedFile &file);
+    bool prepare_staged_state_locked();
+    JobStep step_flush_state_locked();
+    JobStep step_write_rebuild_marker_locked();
+    JobStep step_write_done_marker_locked();
+    bool prepare_rebuild_marker_locked();
+    bool prepare_done_marker_locked();
+    void continue_after_state_flush_locked();
+    uint32_t next_storage_generation_locked();
     bool reserve_staged_locked(size_t needed);
     bool add_staged_locked(const SleepHqUploadResult &upload);
     void clear_staged_locked();
@@ -262,17 +295,13 @@ private:
     bool build_datalog_rebuild_marker_path_locked(const char *day,
                                                   char *out,
                                                   size_t out_size) const;
-    bool read_datalog_rebuild_marker_locked(const char *day,
-                                            uint64_t &epoch) const;
-    bool datalog_rebuild_marker_recent_locked(const char *day,
-                                              uint64_t now_epoch,
-                                              uint64_t &marker_epoch) const;
-    bool mark_datalog_rebuild_attempt_locked(const char *day,
-                                             uint64_t now_epoch);
-    void maybe_mark_datalog_rebuild_success_locked();
-    bool force_remote_missing_datalog_day_locked(const char *day,
-                                                 bool local_complete,
-                                                 bool &force_export);
+    bool begin_remote_missing_datalog_day_locked(char *error,
+                                                 size_t error_size);
+    bool resolve_remote_missing_datalog_day_locked(bool marker_recent,
+                                                   uint64_t marker_epoch,
+                                                   char *error,
+                                                   size_t error_size);
+    JobStep step_read_rebuild_marker_locked();
     bool read_local_machine_serial(
         char *out,
         size_t out_size,
@@ -292,7 +321,6 @@ private:
 
     JobStep step_resolve_remote_file_locked();
     JobStep step_wait_import_locked();
-    JobStep step_mark_state_locked(char *error, size_t error_size);
     JobStep step_work_phase_locked();
     static bool phase_has_blocking_io(WorkPhase phase);
     void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
@@ -334,6 +362,8 @@ private:
     StorageStreamPort *stream_port_ = nullptr;
     std::shared_ptr<const StorageExportInventory> export_inventory_;
     StorageExportPlanner export_planner_;
+    StorageExportStateBatch state_batch_;
+    StorageFileClient state_io_;
     bool import_batch_active_ = false;
     SleepHqSyncFile current_file_;
     StagedFile *staged_ = nullptr;
@@ -362,15 +392,32 @@ private:
     bool pending_remote_day_local_complete_ = false;
     char pending_datalog_day_[9] = {};
     char current_datalog_day_filter_[9] = {};
-    size_t mark_index_ = 0;
+    size_t staged_validation_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;
     uint32_t retry_due_ms_ = 0;
     uint8_t retry_attempt_ = 0;
     InflightPhase inflight_phase_ = InflightPhase::None;
-    StorageExportStateCache state_cache_;
+    InflightPhase pending_inflight_phase_ = InflightPhase::None;
+    InflightRemoveAction inflight_remove_action_ =
+        InflightRemoveAction::None;
+    WorkPhase storage_next_phase_ = WorkPhase::Idle;
+    char storage_failure_[AC_SLEEPHQ_ERROR_MAX] = {};
+
+    // prepared durable state
     char state_dir_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    char pending_state_path_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    std::shared_ptr<const LargeByteBuffer> pending_state_bytes_;
+    StoragePreparedFile inflight_file_;
+    size_t inflight_read_offset_ = 0;
+    size_t inflight_line_length_ = 0;
+    bool inflight_header_seen_ = false;
+    bool inflight_parse_failed_ = false;
+    char inflight_line_[AC_STORAGE_PATH_MAX * 2 + 160] = {};
+
+    // storage generations
     uint32_t next_inventory_generation_ = 1;
+    uint32_t next_storage_generation_ = 1;
     bool inventory_requested_ = false;
 };
 
