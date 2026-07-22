@@ -6,6 +6,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// New report pipeline owner. It shares core 0 with storage at the same low
+// priority and yields after every bounded decode step, so storage's EDF lane
+// and the main loop remain responsive.
+static constexpr uint32_t AC_REPORT_TASK_STACK = 8192;
+static constexpr uint8_t AC_REPORT_TASK_PRIO = 1;
+static constexpr uint8_t AC_REPORT_TASK_CORE = 0;
+static constexpr uint32_t AC_REPORT_TASK_WORK_TICK_MS = 1;
+static constexpr uint32_t AC_REPORT_TASK_WAIT_TICK_MS = 5;
+static constexpr uint32_t AC_REPORT_TASK_IDLE_TICK_MS = 1000;
+static constexpr size_t AC_REPORT_TASK_COMMAND_CAPACITY = 8;
+static constexpr size_t AC_REPORT_TASK_BUILD_CAPACITY = 8;
+
 // Background storage worker: a low-priority FreeRTOS task that prefetches
 // missing report data and builds plots while the device is idle. Pinned to
 // core 0 so its CPU-heavy work runs parallel to the main loop on core 1; the

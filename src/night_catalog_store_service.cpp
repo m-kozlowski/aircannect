@@ -15,6 +15,7 @@ struct NightCatalogStoreRuntime {
         WaitHeader,
         SubmitBody,
         WaitBody,
+        SubmitWrite,
         WaitWrite,
         Ready,
         Error,
@@ -118,19 +119,9 @@ OperationAdmission NightCatalogStoreService::request_save(
         NightCatalogFileCodec::encode(*catalog);
     if (!encoded) return OperationAdmission::Rejected;
 
-    StorageAtomicWriteCommand command;
-    command.path = NIGHT_CATALOG_STORE_PATH;
-    command.bytes = encoded;
-    command.lane = StorageAtomicWriteLane::Maintenance;
-    command.generation = generation;
-
-    const OperationSubmission submission = write_port_->request_write(command);
-    if (!submission.accepted()) return submission.admission;
-
-    runtime_->write_ticket = submission.ticket;
     runtime_->encoded = std::move(encoded);
     runtime_->saving = std::move(catalog);
-    runtime_->phase = NightCatalogStoreRuntime::Phase::WaitWrite;
+    runtime_->phase = NightCatalogStoreRuntime::Phase::SubmitWrite;
     status_ = {};
     status_.state = NightCatalogStoreState::Saving;
     status_.generation = generation;
@@ -282,6 +273,31 @@ bool NightCatalogStoreService::poll() {
             runtime_->phase = NightCatalogStoreRuntime::Phase::Ready;
             status_.state = NightCatalogStoreState::Ready;
             status_.error[0] = '\0';
+            return true;
+        }
+
+        case NightCatalogStoreRuntime::Phase::SubmitWrite: {
+            if (!runtime_->encoded || !runtime_->saving) {
+                fail("night_catalog_save_not_ready");
+                return true;
+            }
+
+            StorageAtomicWriteCommand command;
+            command.path = NIGHT_CATALOG_STORE_PATH;
+            command.bytes = runtime_->encoded;
+            command.lane = StorageAtomicWriteLane::Maintenance;
+            command.generation = status_.generation;
+
+            const OperationSubmission submission =
+                write_port_->request_write(command);
+            if (submission.admission == OperationAdmission::Busy) return false;
+            if (!submission.accepted()) {
+                fail("night_catalog_save_rejected");
+                return true;
+            }
+
+            runtime_->write_ticket = submission.ticket;
+            runtime_->phase = NightCatalogStoreRuntime::Phase::WaitWrite;
             return true;
         }
 
