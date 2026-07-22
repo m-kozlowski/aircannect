@@ -13,7 +13,6 @@
 #include "async_prepared_response.h"
 #include "board.h"
 #include "debug_log.h"
-#include "export_coordinator.h"
 #include "http_request_utils.h"
 #include "json_util.h"
 #include "large_text_buffer.h"
@@ -28,8 +27,6 @@ namespace aircannect {
 namespace {
 
 static constexpr size_t WEB_JSON_RESERVE_SMALL = 512;
-static constexpr size_t WEB_JSON_RESERVE_MEDIUM = 1024;
-
 static constexpr size_t kStorageListDefaultLimit = 64;
 static constexpr size_t kStorageListMaxLimit = 128;
 static constexpr uint32_t kStorageListRetryMs = 750;
@@ -205,19 +202,13 @@ bool storage_read_request_available(AsyncWebServerRequest *request,
 
 bool storage_jobs_available(AsyncWebServerRequest *request,
                             const StorageArchivePort *archive_port,
-                            const StorageDeletePort *delete_port,
-                            const ExportCoordinator *exports) {
+                            const StorageDeletePort *delete_port) {
     if (archive_port && archive_port->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
     }
     if (delete_port && delete_port->active()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_busy\"}");
-        return false;
-    }
-    if (exports && exports->endpoint_work_active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
@@ -233,61 +224,6 @@ bool storage_delete_available(AsyncWebServerRequest *request,
         return false;
     }
     return true;
-}
-
-void append_sleephq_sync_json(LargeTextBuffer &json,
-                              const SleepHqSyncStatus &status,
-                              const char *configured_team_id,
-                              const char *device_id,
-                              bool include_ok) {
-    bool comma = false;
-    if (include_ok) {
-        json_add_bool(json, "ok", true, false);
-        comma = true;
-    }
-    json_add_string(json, "state", sleephq_sync_state_name(status.state),
-                    comma);
-    json_add_bool(json, "configured", status.configured);
-    json_add_bool(json, "network_available", status.network_available);
-    json_add_bool(json, "pending", status.pending);
-    json_add_string(json, "pending_reason", status.pending_reason);
-    json_add_string(json, "error", status.last_error);
-    json_add_string(json, "current_path", status.current_path);
-    json_add_string(json, "configured_team_id", configured_team_id);
-    json_add_string(json, "device_id", device_id);
-    json_add_int(json, "team_id",
-                 static_cast<long>(status.team_id));
-    json_add_int(json, "import_id",
-                 static_cast<long>(status.import_id));
-    json_add_string(json, "import_status", status.import_status);
-    json_add_int(json, "files_seen",
-                 static_cast<long>(status.files_seen));
-    json_add_int(json, "files_uploaded",
-                 static_cast<long>(status.files_uploaded));
-    json_add_int(json, "files_skipped",
-                 static_cast<long>(status.files_skipped));
-    json_add_int(json, "files_failed",
-                 static_cast<long>(status.files_failed));
-    json_add_uint64(json, "bytes_uploaded", status.bytes_uploaded);
-    json_add_uint64(json, "last_check_epoch", status.last_check_epoch);
-    json_add_uint64(json, "last_sync_epoch", status.last_sync_epoch);
-    json_add_int(json, "last_sync_files_seen",
-                 static_cast<long>(status.last_sync_files_seen));
-    json_add_int(json, "last_sync_files_uploaded",
-                 static_cast<long>(status.last_sync_files_uploaded));
-    json_add_int(json, "last_sync_files_failed",
-                 static_cast<long>(status.last_sync_files_failed));
-    json_add_uint64(json, "last_sync_bytes_uploaded",
-                    status.last_sync_bytes_uploaded);
-    json_add_uint64(json, "last_failure_epoch", status.last_failure_epoch);
-    json_add_int(json, "retry_due_ms",
-                 static_cast<long>(status.retry_due_ms));
-    json_add_int(json, "retry_attempt",
-                 static_cast<long>(status.retry_attempt));
-    json_add_int(json, "started_ms",
-                 static_cast<long>(status.started_ms));
-    json_add_int(json, "updated_ms",
-                 static_cast<long>(status.updated_ms));
 }
 
 class StorageJobGate {
@@ -327,14 +263,12 @@ bool StorageHttpController::begin(StorageReadPort &read_port,
                                   StorageBrowserPort &browser_port,
                                   StorageArchivePort &archive_port,
                                   StorageDeletePort &delete_port,
-                                  StorageStatusPort &status_port,
-                                  ExportCoordinator &exports) {
+                                  StorageStatusPort &status_port) {
     storage_read_ = &read_port;
     storage_browser_ = &browser_port;
     storage_archive_ = &archive_port;
     storage_delete_ = &delete_port;
     storage_status_ = &status_port;
-    export_coordinator_ = &exports;
 
     if (!job_mutex_) {
         job_mutex_ = xSemaphoreCreateMutexStatic(&job_mutex_storage_);
@@ -386,37 +320,6 @@ void StorageHttpController::register_routes(AsyncWebServer &server) {
     server.on(AsyncURIMatcher::exact("/api/storage/delete/status"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
         send_storage_delete_status(request);
-    });
-
-    // Storage exports
-    server.on(AsyncURIMatcher::exact("/api/storage/sync/start"), HTTP_POST,
-              [this](AsyncWebServerRequest *request) {
-        send_storage_sync_start(request);
-    });
-
-    server.on(AsyncURIMatcher::exact("/api/storage/sync/verify"), HTTP_POST,
-              [this](AsyncWebServerRequest *request) {
-        send_storage_sync_verify(request);
-    });
-
-    server.on(AsyncURIMatcher::exact("/api/storage/sync/status"), HTTP_GET,
-              [this](AsyncWebServerRequest *request) {
-        send_storage_sync_status(request);
-    });
-
-    server.on(AsyncURIMatcher::exact("/api/sleephq/sync/start"), HTTP_POST,
-              [this](AsyncWebServerRequest *request) {
-        send_sleephq_sync_start(request);
-    });
-
-    server.on(AsyncURIMatcher::exact("/api/sleephq/sync/check"), HTTP_POST,
-              [this](AsyncWebServerRequest *request) {
-        send_sleephq_sync_check(request);
-    });
-
-    server.on(AsyncURIMatcher::exact("/api/sleephq/sync/status"), HTTP_GET,
-              [this](AsyncWebServerRequest *request) {
-        send_sleephq_sync_status(request);
     });
 
     server.on(AsyncURIMatcher::exact("/api/log/current"), HTTP_GET,
@@ -783,8 +686,7 @@ void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *re
         }
         if (!storage_jobs_available(request,
                                     storage_archive_,
-                                    storage_delete_,
-                                    export_coordinator_)) {
+                                    storage_delete_)) {
             return;
         }
 
@@ -835,8 +737,7 @@ void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *re
     }
     if (!storage_jobs_available(request,
                                 storage_archive_,
-                                storage_delete_,
-                                export_coordinator_)) {
+                                storage_delete_)) {
         return;
     }
 
@@ -1026,8 +927,7 @@ void StorageHttpController::send_storage_delete_start(AsyncWebServerRequest *req
     }
     if (!storage_jobs_available(request,
                                 storage_archive_,
-                                storage_delete_,
-                                export_coordinator_)) {
+                                storage_delete_)) {
         return;
     }
 
@@ -1101,209 +1001,5 @@ void StorageHttpController::send_storage_delete_status(AsyncWebServerRequest *re
                     json.length());
     request->send(response);
 }
-
-void StorageHttpController::send_storage_sync_start(AsyncWebServerRequest *request) const {
-    if (!export_coordinator_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"sync_unavailable\"}");
-        return;
-    }
-    StorageJobGate gate(request, job_mutex_);
-    if (!gate.locked()) return;
-    if (!storage_heavy_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-        return;
-    }
-    if (!storage_jobs_available(request,
-                                storage_archive_,
-                                storage_delete_,
-                                nullptr)) {
-        return;
-    }
-    if (!export_coordinator_->request_smb_sync()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"sync_not_ready\"}");
-        return;
-    }
-    request->send(202, "application/json",
-                  "{\"ok\":true,\"queued\":true}");
-}
-
-void StorageHttpController::send_storage_sync_verify(AsyncWebServerRequest *request) const {
-    if (!export_coordinator_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"sync_unavailable\"}");
-        return;
-    }
-    StorageJobGate gate(request, job_mutex_);
-    if (!gate.locked()) return;
-    if (!storage_heavy_request_available(
-            request,
-            therapy_active_.load(std::memory_order_relaxed),
-            storage_status_)) {
-        return;
-    }
-    if (!storage_jobs_available(request,
-                                storage_archive_,
-                                storage_delete_,
-                                nullptr)) {
-        return;
-    }
-    if (!export_coordinator_->request_smb_verify()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"sync_not_ready\"}");
-        return;
-    }
-    request->send(202, "application/json",
-                  "{\"ok\":true,\"queued\":true}");
-}
-
-void StorageHttpController::send_storage_sync_status(AsyncWebServerRequest *request) const {
-    if (!export_coordinator_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"sync_unavailable\"}");
-        return;
-    }
-    const ExportTaskStatus task_status = export_coordinator_->status();
-    const StorageSyncStatus status = task_status.smb;
-    LargeTextBuffer json;
-    json.reserve(1536);
-    json = "{";
-    json_add_bool(json, "ok", true, false);
-    json_add_string(json, "state",
-                    storage_sync_state_name(status.state));
-    json_add_bool(json, "enabled", status.enabled);
-    json_add_bool(json, "configured", status.configured);
-    json_add_string(json, "endpoint",
-                    task_status.smb_endpoint);
-    json_add_bool(json, "network_available", status.network_available);
-    json_add_bool(json, "pending", status.pending);
-    json_add_bool(json, "last_run_verify", status.last_run_verify);
-    json_add_bool(json, "last_run_reconcile",
-                  status.last_run_reconcile);
-    json_add_string(json, "pending_reason", status.pending_reason);
-    json_add_string(json, "error", status.last_error);
-    json_add_string(json, "current_path", status.current_path);
-    json_add_int(json, "files_seen",
-                 static_cast<long>(status.files_seen));
-    json_add_int(json, "files_uploaded",
-                 static_cast<long>(status.files_uploaded));
-    json_add_int(json, "files_skipped",
-                 static_cast<long>(status.files_skipped));
-    json_add_int(json, "files_failed",
-                 static_cast<long>(status.files_failed));
-    json_add_uint64(json, "bytes_uploaded", status.bytes_uploaded);
-    json_add_uint64(json, "last_sync_epoch", status.last_sync_epoch);
-    json_add_int(json, "last_sync_files_seen",
-                 static_cast<long>(status.last_sync_files_seen));
-    json_add_int(json, "last_sync_files_uploaded",
-                 static_cast<long>(status.last_sync_files_uploaded));
-    json_add_int(json, "last_sync_files_skipped",
-                 static_cast<long>(status.last_sync_files_skipped));
-    json_add_int(json, "last_sync_files_failed",
-                 static_cast<long>(status.last_sync_files_failed));
-    json_add_uint64(json, "last_sync_bytes_uploaded",
-                    status.last_sync_bytes_uploaded);
-    json_add_uint64(json, "last_verify_epoch", status.last_verify_epoch);
-    json_add_int(json, "last_verify_files_seen",
-                 static_cast<long>(status.last_verify_files_seen));
-    json_add_uint64(json, "last_reconcile_epoch",
-                    status.last_reconcile_epoch);
-    json_add_int(json, "last_reconcile_files_seen",
-                 static_cast<long>(status.last_reconcile_files_seen));
-    json_add_uint64(json, "last_failure_epoch",
-                    status.last_failure_epoch);
-    json_add_string(json, "last_failure_error",
-                    status.last_failure_error);
-    json_add_int(json, "started_ms",
-                 static_cast<long>(status.started_ms));
-    json_add_int(json, "updated_ms",
-                 static_cast<long>(status.updated_ms));
-    json_add_int(json, "retry_due_ms",
-                 static_cast<long>(status.retry_due_ms));
-    json_add_int(json, "retry_attempt",
-                 static_cast<long>(status.retry_attempt));
-    json += '}';
-    if (json.overflowed()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"status_alloc\"}");
-        return;
-    }
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response_alloc\"}");
-        return;
-    }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    request->send(response);
-}
-
-void StorageHttpController::send_sleephq_sync_start(AsyncWebServerRequest *request) const {
-    if (!export_coordinator_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
-        return;
-    }
-    if (!export_coordinator_->request_sleephq_sync()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"sync_not_ready\"}");
-        return;
-    }
-    request->send(200, "application/json",
-                  "{\"ok\":true,\"queued\":true}");
-}
-
-void StorageHttpController::send_sleephq_sync_check(AsyncWebServerRequest *request) const {
-    if (!export_coordinator_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
-        return;
-    }
-    if (!export_coordinator_->request_sleephq_check()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"check_not_ready\"}");
-        return;
-    }
-    request->send(200, "application/json",
-                  "{\"ok\":true,\"queued\":true}");
-}
-
-void StorageHttpController::send_sleephq_sync_status(AsyncWebServerRequest *request) const {
-    if (!export_coordinator_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
-        return;
-    }
-    const ExportTaskStatus task_status = export_coordinator_->status();
-    const SleepHqSyncStatus status = task_status.sleephq;
-    LargeTextBuffer json;
-    json.reserve(WEB_JSON_RESERVE_MEDIUM);
-    json = "{";
-    append_sleephq_sync_json(json, status,
-                              task_status.sleephq_team_id,
-                              task_status.sleephq_device_id, true);
-    json += '}';
-    if (json.overflowed()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"status_alloc\"}");
-        return;
-    }
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response_alloc\"}");
-        return;
-    }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    request->send(response);
-}
-
 
 }  // namespace aircannect

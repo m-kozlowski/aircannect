@@ -21,6 +21,7 @@
 #include "event_broker.h"
 #include "export_coordinator.h"
 #include "export_endpoint_config.h"
+#include "export_http_controller.h"
 #include "export_task.h"
 #include "firmware_installer.h"
 #include "firmware_url_source.h"
@@ -97,6 +98,7 @@ static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
 static StorageHttpController storage_http_controller;
+static ExportHttpController export_http_controller;
 static OtaHttpController ota_http_controller;
 static SettingsHttpController settings_http_controller;
 static ConfigHttpController config_http_controller;
@@ -108,6 +110,7 @@ static LiveHttpController live_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
+    &export_http_controller,
     &ota_http_controller,
     &settings_http_controller,
     &config_http_controller,
@@ -750,14 +753,14 @@ void setup() {
     }
 
     export_coordinator.begin(export_task);
+    export_http_controller.begin(export_coordinator);
 
     const bool storage_http_started = storage_http_controller.begin(
         StorageService::read_port(),
         StorageService::browser_port(),
         StorageService::archive_port(),
         StorageService::delete_port(),
-        StorageService::status_port(),
-        export_coordinator);
+        StorageService::status_port());
     if (!storage_http_started) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] storage HTTP controller failed to start\n");
