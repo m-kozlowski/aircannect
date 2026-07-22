@@ -55,6 +55,10 @@ void As11SettingsManager::invalidate(RpcRequestPort &rpc,
     (void)request_refresh(rpc, source, now_ms);
 }
 
+void As11SettingsManager::note_history_change() {
+    history_change_pending_ = true;
+}
+
 void As11SettingsManager::device_reset(RpcRequestPort &rpc) {
     if (write_ticket_.valid()) (void)rpc.cancel(write_ticket_);
     if (refresh_ticket_.valid()) (void)rpc.cancel(refresh_ticket_);
@@ -62,6 +66,7 @@ void As11SettingsManager::device_reset(RpcRequestPort &rpc) {
     state_.clear();
     refresh_retry_pending_ = false;
     refresh_again_pending_ = false;
+    history_change_pending_ = false;
     next_refresh_retry_ms_ = 0;
     note_change();
 }
@@ -83,6 +88,11 @@ void As11SettingsManager::poll(RpcRequestPort &rpc,
     }
 
     if (state_.expire_pending(now_ms, ReadbackTimeoutMs)) note_change();
+
+    if (history_change_pending_) {
+        history_change_pending_ = false;
+        invalidate(rpc, RpcSource::Scheduler, now_ms);
+    }
 
     if (suspended || refresh_ticket_.valid() || !refresh_retry_pending_) {
         return;

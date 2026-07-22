@@ -132,6 +132,11 @@ static void note_as11_device_event(void *context,
         frame, now_ms);
 }
 
+static void note_as11_settings_history(void *context, uint32_t now_ms) {
+    (void)now_ms;
+    static_cast<As11SettingsManager *>(context)->note_history_change();
+}
+
 #if AC_STACK_PROFILE_ENABLED
 static void poll_stack_profiler(uint32_t now_ms) {
     static TaskHandle_t async_tcp_task = nullptr;
@@ -249,10 +254,6 @@ static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
 static void drain_rpc_events() {
     RpcEvent event;
     while (rpc_arbiter.next_event(event)) {
-        if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
-            as11_settings_manager.invalidate(
-                rpc_arbiter, RpcSource::Scheduler, millis());
-        }
         if (event.kind == RpcEventKind::BootNotification) {
             as11_device_service.device_reset(rpc_arbiter, millis());
             as11_settings_manager.device_reset(rpc_arbiter);
@@ -428,6 +429,8 @@ void setup() {
                                      &session_manager);
     (void)event_broker.add_frame_observer(note_as11_device_event,
                                           &as11_device_service);
+    event_broker.set_settings_history_observer(
+        note_as11_settings_history, &as11_settings_manager);
 
     sink_manager.begin(stream_broker, as11_device_service.state(),
                        session_manager);

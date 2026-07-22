@@ -1584,8 +1584,6 @@ void WebUI::handle_event(const RpcEvent &event) {
                                 true) == SseSendResult::Failed) {
             sse_enforce_needed_ = true;
         }
-    } else if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
-        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
     }
 
     if (!ManagementConsole::event_has_output(event)) return;

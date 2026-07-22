@@ -372,7 +372,6 @@ bool ManagementConsole::event_has_output(const RpcEvent &event) {
             return true;
         case RpcEventKind::RpcNotification:
         case RpcEventKind::DebugLog:
-        case RpcEventKind::InternalSettingsStateInvalidated:
             return false;
     }
     return false;
@@ -488,8 +487,6 @@ void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
             out.println(event.payload_c_str());
             break;
         case RpcEventKind::DebugLog:
-            break;
-        case RpcEventKind::InternalSettingsStateInvalidated:
             break;
         case RpcEventKind::BootNotification:
             out.print("[CAN] ");

@@ -1081,12 +1081,7 @@ bool RpcArbiter::handle_event_notification(const char *payload,
     As11EventFrame event_frame;
     const EventPublishResult event_result =
         event_.publish_notification(payload, payload_len, now, event_frame);
-    if (!event_result.accepted) return false;
-    if (event_result.settings_history_change) {
-        push_event(RpcEventKind::InternalSettingsStateInvalidated, "",
-                   RpcSource::Scheduler);
-    }
-    return true;
+    return event_result.accepted;
 }
 
 void RpcArbiter::handle_stream_notification(const char *payload,

@@ -23,6 +23,7 @@ public:
     void invalidate(RpcRequestPort &rpc,
                     RpcSource source,
                     uint32_t now_ms);
+    void note_history_change();
     void device_reset(RpcRequestPort &rpc);
     void poll(RpcRequestPort &rpc, uint32_t now_ms, bool suspended = false);
 
@@ -58,6 +59,7 @@ private:
     RpcSource refresh_source_ = RpcSource::Scheduler;
     bool refresh_retry_pending_ = false;
     bool refresh_again_pending_ = false;
+    bool history_change_pending_ = false;
     uint32_t next_refresh_retry_ms_ = 0;
 
     uint32_t next_generation_ = 0;

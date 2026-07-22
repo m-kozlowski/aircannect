@@ -21,7 +21,6 @@ enum class RpcEventKind {
     RpcUnmatched,
     DebugLog,
     BootNotification,
-    InternalSettingsStateInvalidated,
     FramingError,
     Info,
 };

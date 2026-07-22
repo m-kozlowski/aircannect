@@ -574,6 +574,10 @@ EventPublishResult EventBroker::publish_notification(const char *payload,
         settings_history_change_notification(frame);
     if (result.settings_history_change) {
         stats_.settings_history_changes++;
+        if (settings_history_observer_) {
+            settings_history_observer_(settings_history_observer_context_,
+                                       now_ms);
+        }
     }
     for (FrameObserverSlot &slot : frame_observers_) {
         if (slot.observer) {
@@ -599,6 +603,13 @@ bool EventBroker::add_frame_observer(EventFrameObserver observer,
         }
     }
     return false;
+}
+
+void EventBroker::set_settings_history_observer(
+    SettingsHistoryObserver observer,
+    void *context) {
+    settings_history_observer_ = observer;
+    settings_history_observer_context_ = observer ? context : nullptr;
 }
 
 void EventBroker::reset_counters() {

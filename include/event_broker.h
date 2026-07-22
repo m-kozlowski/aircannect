@@ -74,6 +74,7 @@ struct EventBrokerStatus {
 using EventFrameObserver = void (*)(void *context,
                                     const As11EventFrame &frame,
                                     uint32_t now_ms);
+using SettingsHistoryObserver = void (*)(void *context, uint32_t now_ms);
 
 class EventBroker {
 public:
@@ -113,6 +114,8 @@ public:
                                             As11EventFrame &frame);
 
     bool add_frame_observer(EventFrameObserver observer, void *context);
+    void set_settings_history_observer(SettingsHistoryObserver observer,
+                                       void *context);
 
     void reset_counters();
 
@@ -168,6 +171,8 @@ private:
     Consumer consumers_[AC_EVENT_CONSUMERS_MAX];
     EventBrokerStats stats_ = {};
     FrameObserverSlot frame_observers_[AC_EVENT_FRAME_OBSERVERS_MAX];
+    SettingsHistoryObserver settings_history_observer_ = nullptr;
+    void *settings_history_observer_context_ = nullptr;
 };
 
 }  // namespace aircannect
