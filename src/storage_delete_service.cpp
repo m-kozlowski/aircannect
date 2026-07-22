@@ -1,4 +1,4 @@
-#include "storage_delete_job.h"
+#include "storage_delete_service.h"
 
 #include <new>
 #include <stdio.h>
@@ -16,7 +16,8 @@ namespace {
 
 static constexpr size_t DELETE_MAX_DEPTH = 16;
 static constexpr uint32_t DELETE_STEP_SLICE_US = 10 * 1000;
-static constexpr size_t DELETE_INITIAL_PATH_BYTES = 1024;
+static constexpr size_t DELETE_PATH_BYTES_CAPACITY =
+    AC_STORAGE_MAX_SELECTIONS * AC_STORAGE_PATH_MAX;
 
 void log_delete_alloc_failed(const char *context, size_t bytes) {
     Log::logf(CAT_STORAGE,
@@ -28,7 +29,7 @@ void log_delete_alloc_failed(const char *context, size_t bytes) {
 
 }  // namespace
 
-struct StorageDeleteJob::WalkFrame {
+struct StorageDeleteService::WalkFrame {
     char path[AC_STORAGE_PATH_MAX] = {};
     bool opened = false;
     File dir;
@@ -44,33 +45,95 @@ const char *storage_delete_state_name(StorageDeleteState state) {
     return "unknown";
 }
 
-void StorageDeleteJob::begin() {
-    if (!lock_) lock_ = xSemaphoreCreateMutex();
-    if (!published_status_.begin(status_)) {
-        Log::logf(CAT_STORAGE, LOG_ERROR,
-                  "[DELETE] status snapshot unavailable\n");
+StorageDeleteService::~StorageDeleteService() {
+    if (walk_stack_) {
+        for (size_t i = 0; i < walk_capacity_; ++i) {
+            walk_stack_[i].~WalkFrame();
+        }
+        Memory::free(walk_stack_);
     }
+    if (path_bytes_) Memory::free(path_bytes_);
+    if (lock_) vSemaphoreDelete(lock_);
 }
 
-bool StorageDeleteJob::lock(uint32_t timeout_ms) const {
+bool StorageDeleteService::begin(WakeCallback wake) {
+    if (lock_) return ready();
+
+    wake_ = wake;
+    lock_ = xSemaphoreCreateMutex();
+    if (!lock_ || !published_status_.begin(status_) || !allocate_owners()) {
+        Log::logf(CAT_STORAGE, LOG_ERROR,
+                  "[DELETE] service unavailable\n");
+        return false;
+    }
+    return true;
+}
+
+void StorageDeleteService::set_task_available(bool available) {
+    task_available_ = available;
+    if (available) wake();
+}
+
+void StorageDeleteService::set_paused(bool paused) {
+    const bool changed = paused_.exchange(paused) != paused;
+    if (!changed) return;
+
+    pause_transition_pending_.store(paused);
+    wake();
+}
+
+bool StorageDeleteService::allocate_owners() {
+    path_bytes_capacity_ = DELETE_PATH_BYTES_CAPACITY;
+    path_bytes_ = static_cast<char *>(
+        Memory::alloc_large(path_bytes_capacity_, true));
+    if (!path_bytes_) {
+        log_delete_alloc_failed("paths", path_bytes_capacity_);
+        path_bytes_capacity_ = 0;
+        return false;
+    }
+
+    walk_capacity_ = DELETE_MAX_DEPTH;
+    walk_stack_ = static_cast<WalkFrame *>(
+        Memory::alloc_large(sizeof(WalkFrame) * walk_capacity_, true));
+    if (!walk_stack_) {
+        log_delete_alloc_failed("walk_stack",
+                                sizeof(WalkFrame) * walk_capacity_);
+        walk_capacity_ = 0;
+        return false;
+    }
+    for (size_t i = 0; i < walk_capacity_; ++i) {
+        new (&walk_stack_[i]) WalkFrame();
+    }
+    return true;
+}
+
+bool StorageDeleteService::ready() const {
+    return lock_ && path_bytes_ && walk_stack_ && task_available_;
+}
+
+void StorageDeleteService::wake() const {
+    if (wake_) wake_();
+}
+
+bool StorageDeleteService::lock(uint32_t timeout_ms) const {
     return lock_ && xSemaphoreTake(lock_, pdMS_TO_TICKS(timeout_ms));
 }
 
-void StorageDeleteJob::unlock() const {
+void StorageDeleteService::unlock() const {
     if (status_dirty_ && published_status_.publish(status_)) {
         status_dirty_ = false;
     }
     if (lock_) xSemaphoreGive(lock_);
 }
 
-void StorageDeleteJob::touch_status_locked() {
+void StorageDeleteService::touch_status_locked() {
     status_.updated_ms = nonzero_millis(millis());
     status_dirty_ = true;
 }
 
-void StorageDeleteJob::set_error_locked(const char *error) {
-    release_walk_stack_locked();
-    release_path_metadata_locked();
+void StorageDeleteService::set_error_locked(const char *error) {
+    close_walk_locked();
+    active_.store(false);
     status_.state = StorageDeleteState::Error;
     copy_cstr(status_.error, sizeof(status_.error), error);
     touch_status_locked();
@@ -78,10 +141,13 @@ void StorageDeleteJob::set_error_locked(const char *error) {
               status_.error[0] ? status_.error : "error");
 }
 
-void StorageDeleteJob::reset_job_locked(bool keep_status) {
-    release_walk_stack_locked();
-    preempt_requested_.store(false);
-    release_path_metadata_locked();
+void StorageDeleteService::reset_request_locked(bool keep_status) {
+    close_walk_locked();
+    active_.store(false);
+    base_checked_ = false;
+    path_bytes_len_ = 0;
+    current_root_ = 0;
+    memset(root_offsets_, 0, sizeof(root_offsets_));
 
     if (!keep_status) {
         status_ = StorageDeleteStatus();
@@ -90,18 +156,7 @@ void StorageDeleteJob::reset_job_locked(bool keep_status) {
     }
 }
 
-void StorageDeleteJob::release_path_metadata_locked() {
-    if (path_bytes_) {
-        Memory::free(path_bytes_);
-        path_bytes_ = nullptr;
-    }
-    path_bytes_len_ = 0;
-    path_bytes_capacity_ = 0;
-    current_root_ = 0;
-    memset(root_offsets_, 0, sizeof(root_offsets_));
-}
-
-void StorageDeleteJob::close_walk_locked() {
+void StorageDeleteService::close_walk_locked() {
     if (!walk_stack_) return;
     for (size_t i = 0; i < walk_depth_; ++i) {
         if (walk_stack_[i].opened) {
@@ -112,70 +167,14 @@ void StorageDeleteJob::close_walk_locked() {
     walk_depth_ = 0;
 }
 
-bool StorageDeleteJob::ensure_walk_stack_locked() {
-    if (walk_stack_) return true;
-    walk_capacity_ = DELETE_MAX_DEPTH;
-    walk_stack_ = static_cast<WalkFrame *>(
-        Memory::alloc_large(sizeof(WalkFrame) * walk_capacity_, true));
-    if (walk_stack_) {
-        for (size_t i = 0; i < walk_capacity_; ++i) {
-            new (&walk_stack_[i]) WalkFrame();
-        }
-        return true;
-    }
-    walk_capacity_ = 0;
-    log_delete_alloc_failed("walk_stack",
-                            sizeof(WalkFrame) * DELETE_MAX_DEPTH);
-    return false;
-}
-
-void StorageDeleteJob::release_walk_stack_locked() {
-    close_walk_locked();
-    if (walk_stack_) {
-        for (size_t i = 0; i < walk_capacity_; ++i) {
-            walk_stack_[i].~WalkFrame();
-        }
-        Memory::free(walk_stack_);
-    }
-    walk_stack_ = nullptr;
-    walk_capacity_ = 0;
-}
-
-void StorageDeleteJob::apply_preempt_locked() {
-    if (!preempt_requested_.exchange(false)) return;
-    if (status_.state == StorageDeleteState::Deleting) {
-        close_walk_locked();
-        touch_status_locked();
-    }
-}
-
-bool StorageDeleteJob::reserve_path_bytes_locked(size_t needed) {
-    if (needed <= path_bytes_capacity_) return true;
-    size_t next = path_bytes_capacity_ ? path_bytes_capacity_ * 2
-                                       : DELETE_INITIAL_PATH_BYTES;
-    while (next < needed) next *= 2;
-    char *bytes = static_cast<char *>(Memory::alloc_large(next, true));
-    if (!bytes) {
-        log_delete_alloc_failed("paths", next);
-        return false;
-    }
-    if (path_bytes_) {
-        memcpy(bytes, path_bytes_, path_bytes_len_);
-        Memory::free(path_bytes_);
-    }
-    path_bytes_ = bytes;
-    path_bytes_capacity_ = next;
-    return true;
-}
-
-bool StorageDeleteJob::append_root_locked(const char *path) {
+bool StorageDeleteService::append_root_locked(const char *path) {
     if (!path || status_.roots >= AC_STORAGE_MAX_SELECTIONS) {
         set_error_locked("too_many_items");
         return false;
     }
     const size_t len = strlen(path);
     if (len == 0 || len >= AC_STORAGE_PATH_MAX ||
-        !reserve_path_bytes_locked(path_bytes_len_ + len + 1)) {
+        path_bytes_len_ + len + 1 > path_bytes_capacity_) {
         set_error_locked("metadata_alloc");
         return false;
     }
@@ -185,7 +184,7 @@ bool StorageDeleteJob::append_root_locked(const char *path) {
     return true;
 }
 
-bool StorageDeleteJob::push_dir_locked(const char *path) {
+bool StorageDeleteService::push_dir_locked(const char *path) {
     if (!walk_stack_ || walk_depth_ >= walk_capacity_) {
         set_error_locked("max_depth");
         return false;
@@ -196,7 +195,7 @@ bool StorageDeleteJob::push_dir_locked(const char *path) {
     return true;
 }
 
-bool StorageDeleteJob::ensure_dir_open_locked(WalkFrame &frame) {
+bool StorageDeleteService::ensure_dir_open_locked(WalkFrame &frame) {
     if (frame.opened) return true;
     Storage::Guard guard;
     frame.dir = Storage::open(frame.path, "r");
@@ -213,15 +212,18 @@ bool StorageDeleteJob::ensure_dir_open_locked(WalkFrame &frame) {
     return true;
 }
 
-bool StorageDeleteJob::start_selected(const char *base_path,
-                                      const char *const *names,
-                                      size_t count,
-                                      uint32_t *id_out,
-                                      char *error_out,
-                                      size_t error_out_size) {
+bool StorageDeleteService::start_selected(const char *base_path,
+                                          const char *const *names,
+                                          size_t count,
+                                          uint32_t *id_out,
+                                          char *error_out,
+                                          size_t error_out_size) {
     if (id_out) *id_out = 0;
     copy_cstr(error_out, error_out_size, "");
-    begin();
+    if (!ready()) {
+        copy_cstr(error_out, error_out_size, "delete_unavailable");
+        return false;
+    }
     if (!storage_user_path_valid(base_path)) {
         copy_cstr(error_out, error_out_size, "bad_path");
         return false;
@@ -265,13 +267,7 @@ bool StorageDeleteJob::start_selected(const char *base_path,
         unlock();
         return false;
     }
-    reset_job_locked(false);
-    if (!ensure_walk_stack_locked()) {
-        set_error_locked("metadata_alloc");
-        copy_cstr(error_out, error_out_size, status_.error);
-        unlock();
-        return false;
-    }
+    reset_request_locked(false);
     status_.state = StorageDeleteState::Deleting;
     status_.id = next_id_++;
     if (status_.id == 0) status_.id = next_id_++;
@@ -279,20 +275,6 @@ bool StorageDeleteJob::start_selected(const char *base_path,
     status_.started_ms = nonzero_millis(millis());
     status_.updated_ms = status_.started_ms;
     status_dirty_ = true;
-
-    bool base_ok = false;
-    {
-        Storage::Guard guard;
-        File base_dir = Storage::open(status_.base_path, "r");
-        base_ok = base_dir && base_dir.isDirectory();
-        if (base_dir) base_dir.close();
-    }
-    if (!base_ok) {
-        set_error_locked("not_directory");
-        copy_cstr(error_out, error_out_size, status_.error);
-        unlock();
-        return false;
-    }
 
     for (size_t i = 0; i < count; ++i) {
         char child_path[AC_STORAGE_PATH_MAX] = {};
@@ -307,40 +289,56 @@ bool StorageDeleteJob::start_selected(const char *base_path,
         }
     }
 
+    active_.store(true);
     if (id_out) *id_out = status_.id;
     unlock();
+    wake();
     return true;
 }
 
-bool StorageDeleteJob::status(StorageDeleteStatus &out,
-                              uint32_t timeout_ms) const {
+bool StorageDeleteService::status(StorageDeleteStatus &out,
+                                  uint32_t timeout_ms) const {
     return published_status_.read(out, timeout_ms);
 }
 
-StorageDeleteStatus StorageDeleteJob::status() const {
-    StorageDeleteStatus out;
-    (void)status(out);
-    return out;
+bool StorageDeleteService::validate_base_locked() {
+    Storage::Guard guard;
+    File base_dir = Storage::open(status_.base_path, "r");
+    const bool valid = base_dir && base_dir.isDirectory();
+    if (base_dir) base_dir.close();
+
+    if (!valid) {
+        set_error_locked("not_directory");
+        return false;
+    }
+    base_checked_ = true;
+    return true;
 }
 
-bool StorageDeleteJob::active() const {
-    if (!lock(20)) return true;
-    const bool out = status_.state == StorageDeleteState::Deleting;
-    unlock();
-    return out;
-}
+bool StorageDeleteService::step() {
+    if (!active_.load()) return false;
+    if (paused_.load()) {
+        if (!pause_transition_pending_.exchange(false)) return false;
+        if (!lock(50)) return false;
 
-JobStep StorageDeleteJob::step() {
-    if (!lock(50)) return JobStep::Waiting;
-    apply_preempt_locked();
+        close_walk_locked();
+        touch_status_locked();
+        unlock();
+        return true;
+    }
+    if (!lock(50)) return false;
     if (status_.state != StorageDeleteState::Deleting) {
         unlock();
-        return JobStep::Idle;
+        return false;
     }
     if (!Storage::mounted()) {
         set_error_locked("storage_unavailable");
         unlock();
-        return JobStep::Idle;
+        return true;
+    }
+    if (!base_checked_ && !validate_base_locked()) {
+        unlock();
+        return true;
     }
 
     const uint32_t slice_started_us = micros();
@@ -348,25 +346,18 @@ JobStep StorageDeleteJob::step() {
     while (status_.state == StorageDeleteState::Deleting) {
         if (!delete_next_locked()) {
             unlock();
-            return JobStep::Idle;
+            return true;
         }
         if (static_cast<uint32_t>(micros() - slice_started_us) >=
             DELETE_STEP_SLICE_US) {
             break;
         }
     }
-    const JobStep result =
-        status_.state == StorageDeleteState::Deleting ? JobStep::Working
-                                                      : JobStep::Idle;
     unlock();
-    return result;
+    return true;
 }
 
-void StorageDeleteJob::on_preempt() {
-    preempt_requested_.store(true);
-}
-
-bool StorageDeleteJob::delete_next_locked() {
+bool StorageDeleteService::delete_next_locked() {
     if (walk_depth_ > 0) return delete_dir_step_locked();
     if (current_root_ >= status_.roots) return finish_done_locked();
 
@@ -404,7 +395,7 @@ bool StorageDeleteJob::delete_next_locked() {
     return true;
 }
 
-bool StorageDeleteJob::delete_dir_step_locked() {
+bool StorageDeleteService::delete_dir_step_locked() {
     WalkFrame &frame = walk_stack_[walk_depth_ - 1];
     if (!ensure_dir_open_locked(frame)) return false;
 
@@ -453,9 +444,9 @@ bool StorageDeleteJob::delete_dir_step_locked() {
     return true;
 }
 
-bool StorageDeleteJob::finish_done_locked() {
-    release_walk_stack_locked();
-    release_path_metadata_locked();
+bool StorageDeleteService::finish_done_locked() {
+    close_walk_locked();
+    active_.store(false);
     status_.state = StorageDeleteState::Done;
     touch_status_locked();
     Log::logf(CAT_STORAGE, LOG_INFO,

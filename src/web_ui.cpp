@@ -616,7 +616,7 @@ bool storage_read_request_available(AsyncWebServerRequest *request,
 
 bool storage_jobs_available(AsyncWebServerRequest *request,
                             const StorageArchiveJob *archive_job,
-                            const StorageDeleteJob *delete_job,
+                            const StorageDeletePort *delete_port,
                             const StorageSyncJob *sync_job,
                             const SleepHqSyncJob *sleephq_job) {
     if (archive_job && archive_job->active()) {
@@ -624,7 +624,7 @@ bool storage_jobs_available(AsyncWebServerRequest *request,
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
     }
-    if (delete_job && delete_job->active()) {
+    if (delete_port && delete_port->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
@@ -643,8 +643,8 @@ bool storage_jobs_available(AsyncWebServerRequest *request,
 }
 
 bool storage_delete_available(AsyncWebServerRequest *request,
-                              const StorageDeleteJob *delete_job) {
-    if (delete_job && delete_job->active()) {
+                              const StorageDeletePort *delete_port) {
+    if (delete_port && delete_port->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
@@ -958,7 +958,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   ReportManager &report_manager,
                   StorageBrowserPort &storage_browser,
                   StorageArchiveJob &storage_archive_job,
-                  StorageDeleteJob &storage_delete_job,
+                  StorageDeletePort &storage_delete,
                   ExportCoordinator &export_coordinator,
                   StorageSyncJob *storage_sync_job,
                   SleepHqSyncJob *sleephq_sync_job,
@@ -979,7 +979,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     report_manager_ = &report_manager;
     storage_browser_ = &storage_browser;
     storage_archive_job_ = &storage_archive_job;
-    storage_delete_job_ = &storage_delete_job;
+    storage_delete_ = &storage_delete;
     export_coordinator_ = &export_coordinator;
     storage_sync_job_ = storage_sync_job;
     sleephq_sync_job_ = sleephq_sync_job;
@@ -2628,7 +2628,7 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     if (!storage_read_request_available(request, session_manager_, arbiter_)) {
         return;
     }
-    if (!storage_delete_available(request, storage_delete_job_)) {
+    if (!storage_delete_available(request, storage_delete_)) {
         return;
     }
 
@@ -2777,7 +2777,7 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
         }
         if (!storage_jobs_available(request,
                                     storage_archive_job_,
-                                    storage_delete_job_,
+                                    storage_delete_,
                                     storage_sync_job_,
                                     sleephq_sync_job_)) {
             return;
@@ -2827,7 +2827,7 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
     }
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
-                                storage_delete_job_,
+                                storage_delete_,
                                 storage_sync_job_,
                                 sleephq_sync_job_)) {
         return;
@@ -2925,7 +2925,7 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
     if (!storage_read_request_available(request, session_manager_, arbiter_)) {
         return;
     }
-    if (!storage_delete_available(request, storage_delete_job_)) {
+    if (!storage_delete_available(request, storage_delete_)) {
         return;
     }
 
@@ -2990,7 +2990,7 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
 }
 
 void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
-    if (!storage_delete_job_) {
+    if (!storage_delete_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"delete_unavailable\"}");
         return;
@@ -3013,7 +3013,7 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
     }
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
-                                storage_delete_job_,
+                                storage_delete_,
                                 storage_sync_job_,
                                 sleephq_sync_job_)) {
         return;
@@ -3021,12 +3021,12 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
 
     uint32_t id = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
-    if (!storage_delete_job_->start_selected(selection.base,
-                                             selection.names,
-                                             selection.count,
-                                             &id,
-                                             error,
-                                             sizeof(error))) {
+    if (!storage_delete_->start_selected(selection.base,
+                                         selection.names,
+                                         selection.count,
+                                         &id,
+                                         error,
+                                         sizeof(error))) {
         char body[128] = {};
         snprintf(body,
                  sizeof(body),
@@ -3045,13 +3045,13 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_delete_status(AsyncWebServerRequest *request) const {
-    if (!storage_delete_job_) {
+    if (!storage_delete_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"delete_unavailable\"}");
         return;
     }
     StorageDeleteStatus status;
-    if (!storage_delete_job_->status(status)) {
+    if (!storage_delete_->status(status)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"status_unavailable\"}");
         return;
@@ -3103,7 +3103,7 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
     }
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
-                                storage_delete_job_,
+                                storage_delete_,
                                 nullptr,
                                 nullptr)) {
         return;
@@ -3130,7 +3130,7 @@ void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
     }
     if (!storage_jobs_available(request,
                                 storage_archive_job_,
-                                storage_delete_job_,
+                                storage_delete_,
                                 nullptr,
                                 nullptr)) {
         return;

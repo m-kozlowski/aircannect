@@ -14,6 +14,7 @@
 #include "storage_export_plan.h"
 #include "storage_export_state.h"
 #include "storage_manager.h"
+#include "storage_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -2288,6 +2289,10 @@ JobStep SleepHqSyncJob::step() {
         return JobStep::Idle;
     }
     if (status_.pending && phase_ == WorkPhase::Idle) {
+        if (StorageService::status().maintenance_active) {
+            unlock();
+            return JobStep::Waiting;
+        }
         if (!begin_run_locked(now)) {
             unlock();
             return status_.pending ? JobStep::Waiting : JobStep::Idle;

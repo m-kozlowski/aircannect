@@ -1355,6 +1355,11 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
         return false;
     }
     if (status_.state != StorageSyncState::Working &&
+        edf.maintenance_active) {
+        result = JobStep::Waiting;
+        return false;
+    }
+    if (status_.state != StorageSyncState::Working &&
         !begin_run_locked()) {
         result = JobStep::Idle;
         return false;

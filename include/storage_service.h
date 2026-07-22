@@ -8,6 +8,7 @@
 #include "edf_file_writer.h"
 #include "runtime_snapshots.h"
 #include "storage_browser_port.h"
+#include "storage_delete_port.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -80,6 +81,7 @@ struct StorageServiceStatus {
     bool task_started = false;
     bool using_psram = false;
     bool busy = false;
+    bool maintenance_active = false;
 
     size_t edf_capacity = 0;
     size_t edf_queued = 0;
@@ -166,6 +168,9 @@ StorageReadPort &read_port();
 
 // Foreground storage browsing and downloads
 StorageBrowserPort &browser_port();
+
+// Background storage maintenance
+StorageDeletePort &delete_port();
 
 // File logging
 bool configure_file_log(bool enabled);

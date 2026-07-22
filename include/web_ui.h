@@ -20,7 +20,7 @@
 #include "sleephq_sync_job.h"
 #include "storage_archive_job.h"
 #include "storage_browser_port.h"
-#include "storage_delete_job.h"
+#include "storage_delete_port.h"
 #include "storage_sync_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
@@ -101,7 +101,7 @@ public:
                ReportManager &report_manager,
                StorageBrowserPort &storage_browser,
                StorageArchiveJob &storage_archive_job,
-               StorageDeleteJob &storage_delete_job,
+               StorageDeletePort &storage_delete,
                ExportCoordinator &export_coordinator,
                StorageSyncJob *storage_sync_job,
                SleepHqSyncJob *sleephq_sync_job,
@@ -259,7 +259,7 @@ private:
     ReportManager *report_manager_ = nullptr;
     StorageBrowserPort *storage_browser_ = nullptr;
     StorageArchiveJob *storage_archive_job_ = nullptr;
-    StorageDeleteJob *storage_delete_job_ = nullptr;
+    StorageDeletePort *storage_delete_ = nullptr;
     ExportCoordinator *export_coordinator_ = nullptr;
     StorageSyncJob *storage_sync_job_ = nullptr;
     SleepHqSyncJob *sleephq_sync_job_ = nullptr;

@@ -20,6 +20,7 @@
 #include "fixed_queue.h"
 #include "memory_manager.h"
 #include "storage_browser_service.h"
+#include "storage_delete_service.h"
 #include "storage_file_log_sink.h"
 #include "storage_manager.h"
 #include "storage_path.h"
@@ -186,6 +187,7 @@ public:
 
 ServiceReadPort service_read_port;
 StorageBrowserService browser_service;
+StorageDeleteService delete_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 bool browser_turn = true;
@@ -1775,6 +1777,8 @@ void task_entry(void *) {
             } else if (process_foreground_step()) {
                 did_work = true;
                 file_log_burst = 0;
+            } else if (delete_service.step()) {
+                did_work = true;
             } else if (foreground_due && file_log_sink.step()) {
                 did_work = true;
                 file_log_burst++;
@@ -1871,6 +1875,7 @@ void begin() {
 
     (void)file_log_sink.begin();
     (void)browser_service.begin(wake_service_task);
+    (void)delete_service.begin(wake_service_task);
 
     if (!task) {
         const BaseType_t created =
@@ -1881,6 +1886,7 @@ void begin() {
         if (created != pdPASS || !task) {
             stats.available = false;
             browser_service.set_task_available(false);
+            delete_service.set_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
                       "storage worker task create failed\n");
@@ -1891,6 +1897,7 @@ void begin() {
     stats.available = true;
     stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
     browser_service.set_task_available(true);
+    delete_service.set_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
               "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
@@ -2100,6 +2107,10 @@ StorageBrowserPort &browser_port() {
     return browser_service;
 }
 
+StorageDeletePort &delete_port() {
+    return delete_service;
+}
+
 bool configure_file_log(bool enabled) {
     if (!file_log_sink.begin()) return false;
     file_log_sink.set_enabled(enabled);
@@ -2121,6 +2132,11 @@ StorageFileLogStatus file_log_status() {
 void publish_activity(const ActivitySnapshot &activity) {
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
                                        !activity.ota_install_active);
+    delete_service.set_paused(activity.therapy_active ||
+                              activity.realtime_stream_active ||
+                              activity.foreground_report_demand ||
+                              activity.ota_install_active ||
+                              activity.export_active);
     wake_service_task();
 }
 
@@ -2135,6 +2151,7 @@ StorageServiceStatus status() {
     } else {
         out.busy = processing_job || processing_read;
     }
+    out.maintenance_active = delete_service.active();
 #if AC_STACK_PROFILE_ENABLED
     if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
 #endif

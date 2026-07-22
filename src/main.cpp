@@ -29,7 +29,6 @@
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
 #include "storage_archive_job.h"
-#include "storage_delete_job.h"
 #include "storage_diagnostic_job.h"
 #include "storage_manager.h"
 #include "storage_sync_job.h"
@@ -66,7 +65,6 @@ static OximetryManager oximetry_manager;
 static ReportManager report_manager;
 static BackgroundWorker bg_worker;
 static StorageArchiveJob storage_archive_job;
-static StorageDeleteJob storage_delete_job;
 static StorageDiagnosticJob storage_diagnostic_job;
 static StorageSyncJob *storage_sync_job = nullptr;
 static SleepHqSyncJob *sleephq_sync_job = nullptr;
@@ -445,7 +443,7 @@ void setup() {
                  report_manager,
                  StorageService::browser_port(),
                  storage_archive_job,
-                 storage_delete_job,
+                 StorageService::delete_port(),
                  export_coordinator,
                  storage_sync_job,
                  sleephq_sync_job,
@@ -453,7 +451,6 @@ void setup() {
 
     // Background jobs
     storage_archive_job.begin();
-    storage_delete_job.begin();
     storage_diagnostic_job.begin();
 
     if (storage_sync_job) {
@@ -465,7 +462,6 @@ void setup() {
     }
 
     bg_worker.add_job(&storage_archive_job);
-    bg_worker.add_job(&storage_delete_job);
     bg_worker.add_job(&storage_diagnostic_job);
     bg_worker.add_job(&edf_report_catalog_job);
     bg_worker.add_job(&report_cache_writer_job);
