@@ -3,6 +3,8 @@
 #include <new>
 #include <stdio.h>
 
+#include <esp_heap_caps.h>
+
 #include "board_net.h"
 #include "board_report.h"
 #include "debug_log.h"
@@ -15,7 +17,12 @@ namespace aircannect {
 struct ExportTask::Runtime {
     StorageSyncEngine smb;
     SleepHqSyncEngine sleephq;
+    PublishedInputs inputs;
     PublishedInputs input_snapshot;
+    ExportTaskControlSnapshot control_status;
+    ExportSmbStatusSnapshot smb_status;
+    ExportSleepHqStatusSnapshot sleephq_status;
+    bool task_stack_external = false;
 };
 
 bool ExportTask::begin(const ExportEndpointConfig &config,
@@ -38,20 +45,34 @@ bool ExportTask::begin(const ExportEndpointConfig &config,
     }
 
     runtime_ = new (memory) Runtime();
-    inputs_.config = config;
+    runtime_->inputs.config = config;
     runtime_->smb.begin(config.smb, scan_port, read_port, stream_port,
                         write_port, path_port);
     runtime_->sleephq.begin(config.sleephq, scan_port, read_port, stream_port,
                             write_port, path_port);
-    applied_config_generation_ = inputs_.config_generation;
+    applied_config_generation_ = runtime_->inputs.config_generation;
 
-    status_.initialized = true;
+    runtime_->control_status.initialized = true;
     publish_status();
 
-    const BaseType_t created = xTaskCreatePinnedToCore(
-        task_entry, "ac_export", AC_EXPORT_TASK_STACK, this,
-        AC_EXPORT_TASK_PRIO, &task_, AC_EXPORT_TASK_CORE);
-    if (created != pdPASS) {
+    BaseType_t created = pdFAIL;
+    if (Memory::psram_available()) {
+        created = xTaskCreatePinnedToCoreWithCaps(
+            task_entry, "ac_export", AC_EXPORT_TASK_STACK, this,
+            AC_EXPORT_TASK_PRIO, &task_, AC_EXPORT_TASK_CORE,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        runtime_->task_stack_external =
+            created == pdPASS && task_ != nullptr;
+    }
+
+    if (!runtime_->task_stack_external) {
+        task_ = nullptr;
+        created = xTaskCreatePinnedToCore(
+            task_entry, "ac_export", AC_EXPORT_TASK_STACK, this,
+            AC_EXPORT_TASK_PRIO, &task_, AC_EXPORT_TASK_CORE);
+    }
+
+    if (created != pdPASS || !task_) {
         runtime_->~Runtime();
         Memory::free(runtime_);
         runtime_ = nullptr;
@@ -62,10 +83,11 @@ bool ExportTask::begin(const ExportEndpointConfig &config,
     }
 
     Log::logf(CAT_EXPORT, LOG_INFO,
-              "export task started core=%u prio=%u stack=%u\n",
+              "export task started core=%u prio=%u stack=%u memory=%s\n",
               static_cast<unsigned>(AC_EXPORT_TASK_CORE),
               static_cast<unsigned>(AC_EXPORT_TASK_PRIO),
-              static_cast<unsigned>(AC_EXPORT_TASK_STACK));
+              static_cast<unsigned>(AC_EXPORT_TASK_STACK),
+              runtime_->task_stack_external ? "psram" : "internal");
     return true;
 }
 
@@ -79,14 +101,17 @@ void ExportTask::unlock_inputs() const {
 }
 
 void ExportTask::publish_config(const ExportEndpointConfig &config) {
+    if (!runtime_) return;
     if (!lock_inputs()) return;
 
     const bool changed =
-        !export_endpoint_config_equal(inputs_.config, config);
+        !export_endpoint_config_equal(runtime_->inputs.config, config);
     if (changed) {
-        inputs_.config = config;
-        inputs_.config_generation++;
-        if (inputs_.config_generation == 0) inputs_.config_generation++;
+        runtime_->inputs.config = config;
+        runtime_->inputs.config_generation++;
+        if (runtime_->inputs.config_generation == 0) {
+            runtime_->inputs.config_generation++;
+        }
     }
 
     unlock_inputs();
@@ -102,13 +127,13 @@ void ExportTask::publish_activity(const ActivitySnapshot &activity) {
         runtime_->sleephq.set_runtime_blocked(true);
     }
 
-    if (!lock_inputs()) return;
+    if (!runtime_ || !lock_inputs()) return;
 
     const bool changed =
-        inputs_.activity_generation != activity.generation;
+        runtime_->inputs.activity_generation != activity.generation;
     if (changed) {
-        inputs_.activity = activity;
-        inputs_.activity_generation = activity.generation;
+        runtime_->inputs.activity = activity;
+        runtime_->inputs.activity_generation = activity.generation;
     }
 
     unlock_inputs();
@@ -116,12 +141,14 @@ void ExportTask::publish_activity(const ActivitySnapshot &activity) {
 }
 
 void ExportTask::publish_network(const NetworkSnapshot &network) {
+    if (!runtime_) return;
     if (!lock_inputs()) return;
 
-    const bool changed = inputs_.network_generation != network.generation;
+    const bool changed =
+        runtime_->inputs.network_generation != network.generation;
     if (changed) {
-        inputs_.network = network;
-        inputs_.network_generation = network.generation;
+        runtime_->inputs.network = network;
+        runtime_->inputs.network_generation = network.generation;
     }
 
     unlock_inputs();
@@ -129,12 +156,13 @@ void ExportTask::publish_network(const NetworkSnapshot &network) {
 }
 
 void ExportTask::defer_smb_until(uint32_t until_ms) {
+    if (!runtime_) return;
     if (!lock_inputs()) return;
 
-    inputs_.smb_defer_until_ms = until_ms;
-    inputs_.smb_defer_generation++;
-    if (inputs_.smb_defer_generation == 0) {
-        inputs_.smb_defer_generation++;
+    runtime_->inputs.smb_defer_until_ms = until_ms;
+    runtime_->inputs.smb_defer_generation++;
+    if (runtime_->inputs.smb_defer_generation == 0) {
+        runtime_->inputs.smb_defer_generation++;
     }
 
     unlock_inputs();
@@ -149,23 +177,24 @@ bool ExportTask::queue_command(CommandKind kind, const char *day) {
     }
     if (!lock_inputs()) return false;
 
-    if (inputs_.command.kind != CommandKind::None) {
+    if (runtime_->inputs.command.kind != CommandKind::None) {
         unlock_inputs();
 
         if (status_lock_ &&
             xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
-            status_.command_drops++;
+            runtime_->control_status.command_drops++;
             xSemaphoreGive(status_lock_);
         }
         return false;
     }
 
-    inputs_.command.kind = kind;
-    inputs_.command.sequence = next_command_sequence_++;
+    runtime_->inputs.command.kind = kind;
+    runtime_->inputs.command.sequence = next_command_sequence_++;
     if (next_command_sequence_ == 0) next_command_sequence_++;
-    inputs_.command.day[0] = '\0';
+    runtime_->inputs.command.day[0] = '\0';
     if (day) {
-        snprintf(inputs_.command.day, sizeof(inputs_.command.day), "%s", day);
+        snprintf(runtime_->inputs.command.day,
+                 sizeof(runtime_->inputs.command.day), "%s", day);
     }
 
     unlock_inputs();
@@ -214,9 +243,10 @@ bool ExportTask::request_sleephq_post_therapy() {
 }
 
 bool ExportTask::copy_inputs(PublishedInputs &out) const {
+    if (!runtime_) return false;
     if (!lock_inputs()) return false;
 
-    out = inputs_;
+    out = runtime_->inputs;
     unlock_inputs();
     return true;
 }
@@ -345,16 +375,17 @@ bool ExportTask::apply_command(const Command &command) {
 }
 
 void ExportTask::finish_command(const Command &command, bool failed) {
+    if (!runtime_) return;
     if (!lock_inputs()) return;
 
-    if (inputs_.command.sequence == command.sequence) {
-        inputs_.command = Command();
+    if (runtime_->inputs.command.sequence == command.sequence) {
+        runtime_->inputs.command = Command();
     }
 
     unlock_inputs();
     if (failed && status_lock_ &&
         xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
-        status_.command_failures++;
+        runtime_->control_status.command_failures++;
         xSemaphoreGive(status_lock_);
     }
 }
@@ -386,13 +417,14 @@ void ExportTask::publish_status() {
     char sleephq_team_id[AC_SLEEPHQ_ID_MAX] = {};
     char sleephq_device_id[AC_SLEEPHQ_ID_MAX] = {};
     if (lock_inputs()) {
-        command_pending = inputs_.command.kind != CommandKind::None;
+        command_pending =
+            runtime_->inputs.command.kind != CommandKind::None;
         copy_cstr(smb_endpoint, sizeof(smb_endpoint),
-                  inputs_.config.smb.endpoint);
+                  runtime_->inputs.config.smb.endpoint);
         copy_cstr(sleephq_team_id, sizeof(sleephq_team_id),
-                  inputs_.config.sleephq.team_id);
+                  runtime_->inputs.config.sleephq.team_id);
         copy_cstr(sleephq_device_id, sizeof(sleephq_device_id),
-                  inputs_.config.sleephq.device_id);
+                  runtime_->inputs.config.sleephq.device_id);
         unlock_inputs();
     }
     if (!status_lock_ ||
@@ -400,47 +432,72 @@ void ExportTask::publish_status() {
         return;
     }
 
-    status_.initialized = true;
-    status_.task_started = task_ != nullptr;
-    status_.network_ready = network_ready_;
-    status_.runtime_blocked = runtime_blocked_;
-    status_.command_pending = command_pending;
-    copy_cstr(status_.smb_endpoint, sizeof(status_.smb_endpoint),
+    ExportTaskControlSnapshot &control = runtime_->control_status;
+    ExportSmbStatusSnapshot &smb = runtime_->smb_status;
+    ExportSleepHqStatusSnapshot &sleephq = runtime_->sleephq_status;
+
+    control.initialized = true;
+    control.task_started = task_ != nullptr;
+    control.network_ready = network_ready_;
+    control.runtime_blocked = runtime_blocked_;
+    control.command_pending = command_pending;
+    copy_cstr(smb.smb_endpoint, sizeof(smb.smb_endpoint),
               smb_endpoint);
-    copy_cstr(status_.sleephq_team_id, sizeof(status_.sleephq_team_id),
+    copy_cstr(sleephq.sleephq_team_id,
+              sizeof(sleephq.sleephq_team_id),
               sleephq_team_id);
-    copy_cstr(status_.sleephq_device_id,
-              sizeof(status_.sleephq_device_id),
+    copy_cstr(sleephq.sleephq_device_id,
+              sizeof(sleephq.sleephq_device_id),
               sleephq_device_id);
-    status_.smb = runtime_->smb.status();
-    status_.smb_runtime = runtime_->smb.runtime_status();
-    status_.sleephq = runtime_->sleephq.status();
-    status_.sleephq_runtime = runtime_->sleephq.runtime_status();
-    status_.active = status_.smb_runtime.state == StorageSyncState::Working ||
-                     status_.sleephq_runtime.state ==
-                         SleepHqSyncState::Working;
-    status_.busy = status_.active || status_.smb_runtime.pending ||
-                   status_.sleephq_runtime.pending ||
-                   status_.command_pending;
+    smb.sync = runtime_->smb.status();
+    control.smb = runtime_->smb.runtime_status();
+    control.smb_config_generation = smb.sync.config_generation;
+    sleephq.sync = runtime_->sleephq.status();
+    control.sleephq = runtime_->sleephq.runtime_status();
+    control.active = control.smb.state == StorageSyncState::Working ||
+                     control.sleephq.state == SleepHqSyncState::Working;
+    control.busy = control.active || control.smb.pending ||
+                   control.sleephq.pending || control.command_pending;
 #if AC_STACK_PROFILE_ENABLED
-    status_.stack_high_water_words = uxTaskGetStackHighWaterMark(nullptr);
+    control.stack_high_water_words = uxTaskGetStackHighWaterMark(nullptr);
 #endif
 
     xSemaphoreGive(status_lock_);
 }
 
-ExportTaskStatus ExportTask::status() const {
-    ExportTaskStatus out;
-    if (status_lock_ &&
+ExportTaskControlSnapshot ExportTask::control_snapshot() const {
+    ExportTaskControlSnapshot out;
+    if (runtime_ && status_lock_ &&
         xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
-        out = status_;
+        out = runtime_->control_status;
         xSemaphoreGive(status_lock_);
     }
 
-    if (lock_inputs()) {
-        out.command_pending = inputs_.command.kind != CommandKind::None;
+    if (runtime_ && lock_inputs()) {
+        out.command_pending =
+            runtime_->inputs.command.kind != CommandKind::None;
         out.busy = out.busy || out.command_pending;
         unlock_inputs();
+    }
+    return out;
+}
+
+ExportSmbStatusSnapshot ExportTask::smb_status() const {
+    ExportSmbStatusSnapshot out;
+    if (runtime_ && status_lock_ &&
+        xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        out = runtime_->smb_status;
+        xSemaphoreGive(status_lock_);
+    }
+    return out;
+}
+
+ExportSleepHqStatusSnapshot ExportTask::sleephq_status() const {
+    ExportSleepHqStatusSnapshot out;
+    if (runtime_ && status_lock_ &&
+        xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
+        out = runtime_->sleephq_status;
+        xSemaphoreGive(status_lock_);
     }
     return out;
 }

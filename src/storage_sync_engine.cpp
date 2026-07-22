@@ -950,7 +950,10 @@ ExportStep StorageSyncEngine::publish_verify_latest_remote_locked(
 }
 
 bool StorageSyncEngine::next_file_locked() {
-    if (!StorageService::status().available) {
+    const StorageWorkloadSnapshot storage =
+        StorageService::workload_snapshot();
+    if (!storage.valid) return false;
+    if (!storage.available) {
         fail_locked("storage_unavailable");
         return false;
     }
@@ -1484,13 +1487,15 @@ bool StorageSyncEngine::prepare_step_locked(uint32_t now_ms, ExportStep &result)
         return false;
     }
     status_.network_available = network_available_.load();
-    const StorageServiceStatus edf = StorageService::status();
-    if (edf.busy || edf.edf_queued > 0 || edf.open_file_count > 0) {
+    const StorageWorkloadSnapshot storage =
+        StorageService::workload_snapshot();
+    if (!storage.valid || storage.busy || storage.edf_queued > 0 ||
+        storage.open_file_count > 0) {
         result = ExportStep::Waiting;
         return false;
     }
     if (status_.state != StorageSyncState::Working &&
-        edf.maintenance_active) {
+        storage.maintenance_active) {
         result = ExportStep::Waiting;
         return false;
     }

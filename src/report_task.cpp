@@ -827,12 +827,13 @@ void ReportTask::publish_activity(const ActivitySnapshot &activity) {
 ReportTaskControlSnapshot ReportTask::control_snapshot() const {
     if (!runtime_ || !runtime_->lock(20)) return {};
 
-    const ReportTaskControlSnapshot out{
-        runtime_->status.state,
-        runtime_->status.catalog_generation,
-        runtime_->status.foreground_active,
-        runtime_->status.background_active,
-    };
+    ReportTaskControlSnapshot out;
+    out.initialized = runtime_->status.initialized;
+    out.task_started = runtime_->status.task_started;
+    out.state = runtime_->status.state;
+    out.catalog_generation = runtime_->status.catalog_generation;
+    out.foreground_active = runtime_->status.foreground_active;
+    out.background_active = runtime_->status.background_active;
 
     runtime_->unlock();
     return out;

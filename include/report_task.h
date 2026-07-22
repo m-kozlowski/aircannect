@@ -46,6 +46,8 @@ struct ReportTaskStatus {
 };
 
 struct ReportTaskControlSnapshot {
+    bool initialized = false;
+    bool task_started = false;
     ReportTaskState state = ReportTaskState::Stopped;
     uint32_t catalog_generation = 0;
     bool foreground_active = false;

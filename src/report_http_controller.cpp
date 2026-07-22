@@ -334,7 +334,7 @@ bool send_artifact_stream(AsyncWebServerRequest *request,
 
 bool report_task_available(AsyncWebServerRequest *request,
                            const ReportTask &report_task) {
-    const ReportTaskStatus status = report_task.status();
+    const ReportTaskControlSnapshot status = report_task.control_snapshot();
     if (!status.initialized) {
         send_json_error(request, 503, "report_unavailable");
         return false;
@@ -478,7 +478,8 @@ void ReportHttpController::send_summary(
         return;
     }
 
-    const ReportTaskStatus status = report_task_->status();
+    const ReportTaskControlSnapshot status =
+        report_task_->control_snapshot();
     char number[32] = {};
     *json = "{\"state\":\"ready\",\"generation\":";
     snprintf(number,

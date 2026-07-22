@@ -20,7 +20,7 @@ class StorageReadPort;
 class StorageScanPort;
 class StorageStreamPort;
 
-struct ExportTaskStatus {
+struct ExportTaskControlSnapshot {
     bool initialized = false;
     bool task_started = false;
     bool network_ready = false;
@@ -30,16 +30,23 @@ struct ExportTaskStatus {
     bool busy = false;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
-    char smb_endpoint[AC_SMB_EXPORT_ENDPOINT_MAX] = {};
-    char sleephq_team_id[AC_SLEEPHQ_ID_MAX] = {};
-    char sleephq_device_id[AC_SLEEPHQ_ID_MAX] = {};
-    StorageSyncStatus smb;
-    StorageSyncRuntimeStatus smb_runtime;
-    SleepHqSyncStatus sleephq;
-    SleepHqSyncRuntimeStatus sleephq_runtime;
+    uint32_t smb_config_generation = 0;
+    StorageSyncRuntimeStatus smb;
+    SleepHqSyncRuntimeStatus sleephq;
 #if AC_STACK_PROFILE_ENABLED
     uint32_t stack_high_water_words = 0;
 #endif
+};
+
+struct ExportSmbStatusSnapshot {
+    char smb_endpoint[AC_SMB_EXPORT_ENDPOINT_MAX] = {};
+    StorageSyncStatus sync;
+};
+
+struct ExportSleepHqStatusSnapshot {
+    char sleephq_team_id[AC_SLEEPHQ_ID_MAX] = {};
+    char sleephq_device_id[AC_SLEEPHQ_ID_MAX] = {};
+    SleepHqSyncStatus sync;
 };
 
 // Sole task owner for the SMB and SleepHQ protocol engines. Public methods
@@ -78,7 +85,9 @@ public:
     bool request_sleephq_post_therapy();
 
     // copied status
-    ExportTaskStatus status() const;
+    ExportTaskControlSnapshot control_snapshot() const;
+    ExportSmbStatusSnapshot smb_status() const;
+    ExportSleepHqStatusSnapshot sleephq_status() const;
 #if AC_STACK_PROFILE_ENABLED
     uint32_t stack_high_water_bytes() const;
 #endif
@@ -146,11 +155,9 @@ private:
 
     mutable StaticSemaphore_t input_lock_storage_ = {};
     mutable SemaphoreHandle_t input_lock_ = nullptr;
-    PublishedInputs inputs_;
 
     mutable StaticSemaphore_t status_lock_storage_ = {};
     mutable SemaphoreHandle_t status_lock_ = nullptr;
-    ExportTaskStatus status_;
 
     uint32_t applied_config_generation_ = 0;
     uint32_t applied_activity_generation_ = 0;

@@ -158,8 +158,8 @@ void ExportHttpController::send_smb_sync_status(
         return;
     }
 
-    const ExportTaskStatus task_status = coordinator_->status();
-    const StorageSyncStatus status = task_status.smb;
+    const ExportSmbStatusSnapshot snapshot = coordinator_->smb_snapshot();
+    const StorageSyncStatus &status = snapshot.sync;
     LargeTextBuffer json;
     json.reserve(SMB_STATUS_JSON_RESERVE);
     json = "{";
@@ -167,7 +167,7 @@ void ExportHttpController::send_smb_sync_status(
     json_add_string(json, "state", storage_sync_state_name(status.state));
     json_add_bool(json, "enabled", status.enabled);
     json_add_bool(json, "configured", status.configured);
-    json_add_string(json, "endpoint", task_status.smb_endpoint);
+    json_add_string(json, "endpoint", snapshot.smb_endpoint);
     json_add_bool(json, "network_available", status.network_available);
     json_add_bool(json, "pending", status.pending);
     json_add_bool(json, "last_run_verify", status.last_run_verify);
@@ -256,14 +256,15 @@ void ExportHttpController::send_sleephq_sync_status(
         return;
     }
 
-    const ExportTaskStatus task_status = coordinator_->status();
-    const SleepHqSyncStatus status = task_status.sleephq;
+    const ExportSleepHqStatusSnapshot snapshot =
+        coordinator_->sleephq_snapshot();
+    const SleepHqSyncStatus &status = snapshot.sync;
     LargeTextBuffer json;
     json.reserve(SLEEPHQ_STATUS_JSON_RESERVE);
     json = "{";
     append_sleephq_sync_json(json, status,
-                             task_status.sleephq_team_id,
-                             task_status.sleephq_device_id);
+                             snapshot.sleephq_team_id,
+                             snapshot.sleephq_device_id);
     json += '}';
 
     (void)send_status_json(request, json);

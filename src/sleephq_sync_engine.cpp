@@ -1071,7 +1071,10 @@ bool SleepHqSyncEngine::next_file_locked() {
         fail_locked("preempted");
         return false;
     }
-    if (!StorageService::status().available) {
+    const StorageWorkloadSnapshot storage =
+        StorageService::workload_snapshot();
+    if (!storage.valid) return false;
+    if (!storage.available) {
         fail_locked("storage_unavailable");
         return false;
     }
@@ -2871,7 +2874,9 @@ ExportStep SleepHqSyncEngine::step() {
         return ExportStep::Idle;
     }
     if (status_.pending && phase_ == WorkPhase::Idle) {
-        if (StorageService::maintenance_active()) {
+        const StorageWorkloadSnapshot storage =
+            StorageService::workload_snapshot();
+        if (!storage.valid || storage.maintenance_active) {
             unlock();
             return ExportStep::Waiting;
         }

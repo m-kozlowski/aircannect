@@ -1292,7 +1292,9 @@ void EdfRecorderManager::sync_annotation_open_status() {
         !eve_known || !csl_known ||
         (eve.complete && !eve.success) ||
         (csl.complete && !csl.success);
-    const StorageServiceStatus storage = StorageService::status();
+    const StorageWorkloadSnapshot storage =
+        StorageService::workload_snapshot();
+    if (!storage.valid) return;
     if (failed || (storage.edf_queued == 0 && !storage.busy)) {
         status_.file_open_failures++;
         if (eve_known && eve.complete && !eve.success) {
@@ -1300,8 +1302,7 @@ void EdfRecorderManager::sync_annotation_open_status() {
         } else if (csl_known && csl.complete && !csl.success) {
             set_error(open_result_error(csl, "annotation_open_failed"));
         } else {
-            set_error(storage.last_error[0] ? storage.last_error
-                                            : "annotation_open_failed");
+            set_error("annotation_open_failed");
         }
         (void)StorageService::enqueue_edf_close_annotation(
             EdfAnnotationKind::Eve);
@@ -1344,7 +1345,9 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         (sa2_schema_.open && sa2.complete && !sa2.success);
 
     if (!brp_ready || !pld_ready || !sa2_ready) {
-        const StorageServiceStatus storage = StorageService::status();
+        const StorageWorkloadSnapshot storage =
+            StorageService::workload_snapshot();
+        if (!storage.valid) return false;
         if (!failed && (storage.edf_queued > 0 || storage.busy)) return false;
 
         status_.file_open_failures++;
@@ -1355,8 +1358,7 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         } else if (sa2_schema_.open && sa2.complete && !sa2.success) {
             set_error(open_result_error(sa2, "numeric_open_failed"));
         } else {
-            set_error(storage.last_error[0] ? storage.last_error
-                                            : "numeric_open_failed");
+            set_error("numeric_open_failed");
         }
         if (brp_schema_.open) {
             (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Brp);

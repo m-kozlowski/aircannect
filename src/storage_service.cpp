@@ -2589,8 +2589,27 @@ StorageServiceStatus status() {
     return out;
 }
 
-bool maintenance_active() {
-    return maintenance_owner.load() != MaintenanceOwner::None;
+StorageWorkloadSnapshot workload_snapshot() {
+    StorageWorkloadSnapshot out;
+    StorageUploadStatus upload;
+    const bool upload_active =
+        upload_service.status(0, upload) == StorageUploadStatusRead::Found &&
+        upload.active();
+
+    if (!lock_queue()) return out;
+
+    refresh_read_status_locked();
+    out.valid = true;
+    out.available = stats.available;
+    out.busy = processing_job || processing_read || upload_active ||
+               diagnostic.state == StorageDiagnosticState::Queued ||
+               diagnostic.state == StorageDiagnosticState::Writing;
+    out.maintenance_active =
+        maintenance_owner.load() != MaintenanceOwner::None;
+    out.edf_queued = queued;
+    out.open_file_count = stats.open_file_count;
+    unlock_queue();
+    return out;
 }
 
 #if AC_STACK_PROFILE_ENABLED

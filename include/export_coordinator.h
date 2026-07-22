@@ -25,9 +25,10 @@ public:
               const ActivitySnapshot &activity,
               uint32_t now_ms);
     bool endpoint_work_active() const;
-    ExportTaskStatus status() const;
     StorageSyncStatus smb_status() const;
     SleepHqSyncStatus sleephq_status() const;
+    ExportSmbStatusSnapshot smb_snapshot() const;
+    ExportSleepHqStatusSnapshot sleephq_snapshot() const;
 
     // external requests
     bool request_smb_sync();
@@ -66,6 +67,7 @@ private:
     };
 
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
+    ExportTaskControlSnapshot control_snapshot() const;
 
     // post-therapy sequence
     void poll_post_therapy(const ExportReportActivity &report,
@@ -93,7 +95,8 @@ private:
     bool startup_idle_work_allowed(uint32_t now_ms);
     void maybe_queue_smb_startup_check(
         bool network_connected,
-        const StorageSyncStatus &status,
+        StorageSyncRuntimeStatus status,
+        uint32_t config_generation,
         SleepHqSyncRuntimeStatus sleephq);
     void maybe_queue_sleephq_startup_check(bool network_connected,
                                            bool storage_sync_active,
