@@ -265,7 +265,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
                               activity.ota_install_active;
     const bool background_blocked = activity.realtime_stream_active ||
                                     activity.foreground_report_demand ||
-                                    activity.export_active;
+                                    activity.export_work_claimed;
     if (hard_blocked ||
         (!foreground_refresh && !remove_requested && background_blocked)) {
         return;

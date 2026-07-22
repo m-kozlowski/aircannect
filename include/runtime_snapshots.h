@@ -11,7 +11,7 @@ struct ActivitySnapshot {
     bool realtime_stream_active = false;
     bool foreground_report_demand = false;
     bool ota_install_active = false;
-    bool export_active = false;
+    bool export_work_claimed = false;
     uint32_t generation = 0;
 };
 

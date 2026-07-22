@@ -303,21 +303,21 @@ static void poll_stack_profiler(uint32_t now_ms) {
 
 static void publish_runtime_activity(bool foreground_report_demand,
                                      bool realtime_stream_active,
-                                     bool export_active,
+                                     bool export_work_claimed,
                                      bool ota_install_active,
                                      bool therapy_active) {
     const bool changed =
         !runtime_activity_published ||
         storage_activity.foreground_report_demand != foreground_report_demand ||
         storage_activity.realtime_stream_active != realtime_stream_active ||
-        storage_activity.export_active != export_active ||
+        storage_activity.export_work_claimed != export_work_claimed ||
         storage_activity.ota_install_active != ota_install_active ||
         storage_activity.therapy_active != therapy_active;
     if (!changed) return;
 
     storage_activity.foreground_report_demand = foreground_report_demand;
     storage_activity.realtime_stream_active = realtime_stream_active;
-    storage_activity.export_active = export_active;
+    storage_activity.export_work_claimed = export_work_claimed;
     storage_activity.ota_install_active = ota_install_active;
     storage_activity.therapy_active = therapy_active;
     storage_activity.generation++;
@@ -1093,7 +1093,7 @@ void loop() {
         report_task.control_snapshot();
     const bool update_check_allowed =
         arduino_ota_poll_allowed &&
-        !export_coordinator.endpoint_work_active() &&
+        !export_coordinator.endpoint_work_claimed() &&
         !report_status.foreground_active;
 
     update_checker.poll(runtime_network,
@@ -1117,7 +1117,8 @@ void loop() {
     };
 
     const bool foreground_report_active = report_status.foreground_active;
-    const bool export_active = export_coordinator.endpoint_work_active();
+    const bool export_work_claimed =
+        export_coordinator.endpoint_work_claimed();
     const bool esp_ota_install_active = firmware_installer.active();
     const bool storage_ota_active =
         esp_ota_install_active || resmed_ota_manager.transport_active();
@@ -1128,7 +1129,7 @@ void loop() {
 
     publish_runtime_activity(foreground_report_active,
                              stream_activity_active,
-                             export_active,
+                             export_work_claimed,
                              storage_ota_active,
                              therapy_active);
 

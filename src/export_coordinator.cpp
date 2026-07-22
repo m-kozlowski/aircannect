@@ -45,8 +45,10 @@ ExportSleepHqStatusSnapshot ExportCoordinator::sleephq_snapshot() const {
                  : ExportSleepHqStatusSnapshot();
 }
 
-bool ExportCoordinator::endpoint_work_active() const {
-    return control_snapshot().active;
+bool ExportCoordinator::endpoint_work_claimed() const {
+    const ExportTaskControlSnapshot status = control_snapshot();
+    return status.active ||
+        (status.busy && status.network_ready && !status.runtime_blocked);
 }
 
 bool ExportCoordinator::request_smb_sync() {

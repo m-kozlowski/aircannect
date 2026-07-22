@@ -2568,7 +2568,8 @@ void publish_activity(const ActivitySnapshot &activity) {
     const bool scan_paused =
         activity.therapy_active || activity.realtime_stream_active ||
         activity.foreground_report_demand || activity.ota_install_active;
-    const bool maintenance_paused = scan_paused || activity.export_active;
+    const bool maintenance_paused =
+        scan_paused || activity.export_work_claimed;
     const bool upload_paused = activity.therapy_active ||
                                activity.ota_install_active;
 

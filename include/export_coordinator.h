@@ -24,7 +24,7 @@ public:
     void poll(const ExportReportActivity &report,
               const ActivitySnapshot &activity,
               uint32_t now_ms);
-    bool endpoint_work_active() const;
+    bool endpoint_work_claimed() const;
     StorageSyncStatus smb_status() const;
     SleepHqSyncStatus sleephq_status() const;
     ExportSmbStatusSnapshot smb_snapshot() const;
