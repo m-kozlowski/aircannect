@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include <limits.h>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -11,11 +12,13 @@
 #include "edf_event_annotation.h"
 #include "edf_identification.h"
 #include "edf_numeric_file_layout.h"
+#include "edf_session_metadata_publisher.h"
 #include "edf_storage_catalog.h"
 #include "storage_service.h"
 #include "edf_stream_signal_table.h"
 #include "edf_str_settings.h"
 #include "edf_time.h"
+#include "memory_manager.h"
 #include "string_util.h"
 #include "time_sync_service.h"
 
@@ -137,6 +140,19 @@ bool edf_event_record_is_mask_event(const As11EventFrame &frame,
 
 }  // namespace
 
+struct EdfRecorderManager::ColdState {
+    EdfSessionMetadataPublisher metadata_publisher;
+    EdfSessionMetadata segment_metadata;
+    EdfSessionMetadata pending_final_metadata;
+    EdfSessionMetadataPublication metadata_open_publication;
+    bool segment_metadata_active = false;
+    bool pending_final_metadata_valid = false;
+
+    NumericSchemaState brp_schema;
+    NumericSchemaState pld_schema;
+    NumericSchemaState sa2_schema;
+};
+
 void EdfRecorderManager::begin(EventBroker &events,
                                StreamBroker &stream,
                                const As11DeviceState &device_state,
@@ -144,12 +160,22 @@ void EdfRecorderManager::begin(EventBroker &events,
                                TimeSyncService &time_sync,
                                StorageAtomicWritePort &metadata_storage) {
     if (initialized_) return;
+
+    void *memory = Memory::alloc_large(sizeof(ColdState), false);
+    if (!memory) {
+        set_error("cold_state_allocation_failed");
+        Log::logf(CAT_EDF, LOG_ERROR,
+                  "recorder cold state allocation failed\n");
+        return;
+    }
+    cold_ = new (memory) ColdState();
+
     events_ = &events;
     stream_ = &stream;
     device_state_ = &device_state;
     session_ = &session;
     time_sync_ = &time_sync;
-    metadata_publisher_.begin(metadata_storage);
+    cold_->metadata_publisher.begin(metadata_storage);
 
     // EdfRecorderManager is a program-lifetime singleton; this observer hook
     // intentionally stays registered until reboot.
@@ -164,13 +190,13 @@ void EdfRecorderManager::begin(EventBroker &events,
 }
 
 void EdfRecorderManager::poll(uint32_t now_ms) {
-    if (!initialized_ || !events_ || !stream_ || !device_state_ || !session_ ||
-        !time_sync_) {
+    if (!initialized_ || !cold_ || !events_ || !stream_ || !device_state_ ||
+        !session_ || !time_sync_) {
         return;
     }
 
     (void)queue_pending_final_metadata();
-    metadata_publisher_.poll(now_ms);
+    cold_->metadata_publisher.poll(now_ms);
 
     poll_rpc_completions();
     dispatch_session_edges(now_ms);
@@ -221,6 +247,12 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
 }
 
 void EdfRecorderManager::set_enabled(bool enabled) {
+    if (enabled && !cold_) {
+        status_.enabled = false;
+        set_error("cold_state_unavailable");
+        return;
+    }
+
     if (status_.enabled == enabled) return;
     status_.enabled = enabled;
     if (enabled) {
@@ -440,7 +472,7 @@ void EdfRecorderManager::begin_recording_gate(const char *start_time,
         return;
     }
 
-    if (segment_metadata_active_ && recording_gate_closed_ &&
+    if (cold_->segment_metadata_active && recording_gate_closed_ &&
         status_.recording_end_time[0]) {
         finalize_segment_metadata(status_.recording_end_time,
                                   status_.recording_end_time,
@@ -496,11 +528,11 @@ void EdfRecorderManager::close_recording_segment() {
 bool EdfRecorderManager::ensure_segment_metadata_published(
     const char *start_time,
     uint32_t now_ms) {
-    if (segment_metadata_active_) {
+    if (cold_->segment_metadata_active) {
         const bool ready =
-            metadata_publisher_.completed(metadata_open_publication_);
-        if (!ready && metadata_publisher_.last_error()[0]) {
-            set_error(metadata_publisher_.last_error());
+            cold_->metadata_publisher.completed(cold_->metadata_open_publication);
+        if (!ready && cold_->metadata_publisher.last_error()[0]) {
+            set_error(cold_->metadata_publisher.last_error());
         }
         return ready;
     }
@@ -513,17 +545,17 @@ bool EdfRecorderManager::ensure_segment_metadata_published(
     }
 
     const EdfSessionMetadataPublication publication =
-        metadata_publisher_.publish(metadata);
+        cold_->metadata_publisher.publish(metadata);
     if (!publication.valid()) {
         set_error("session_metadata_queue_full");
         return false;
     }
 
-    segment_metadata_ = metadata;
-    metadata_open_publication_ = publication;
-    segment_metadata_active_ = true;
-    metadata_publisher_.poll(now_ms);
-    return metadata_publisher_.completed(metadata_open_publication_);
+    cold_->segment_metadata = metadata;
+    cold_->metadata_open_publication = publication;
+    cold_->segment_metadata_active = true;
+    cold_->metadata_publisher.poll(now_ms);
+    return cold_->metadata_publisher.completed(cold_->metadata_open_publication);
 }
 
 bool EdfRecorderManager::build_segment_metadata(
@@ -559,15 +591,15 @@ void EdfRecorderManager::finalize_segment_metadata(
     const char *segment_end_time,
     const char *therapy_end_time,
     uint32_t now_ms) {
-    if (!segment_metadata_active_) return;
+    if (!cold_->segment_metadata_active) return;
 
     int64_t raw_segment_end_ms = 0;
     int64_t raw_therapy_end_ms = 0;
     if (!parse_session_raw_time(segment_end_time, raw_segment_end_ms) ||
         !parse_session_raw_time(therapy_end_time, raw_therapy_end_ms)) {
         set_error("session_metadata_end_invalid");
-        segment_metadata_active_ = false;
-        metadata_open_publication_ = {};
+        cold_->segment_metadata_active = false;
+        cold_->metadata_open_publication = {};
         return;
     }
 
@@ -580,40 +612,40 @@ void EdfRecorderManager::finalize_segment_metadata_at(
     int64_t raw_segment_end_ms,
     int64_t raw_therapy_end_ms,
     uint32_t now_ms) {
-    if (!segment_metadata_active_) return;
+    if (!cold_->segment_metadata_active) return;
 
-    EdfSessionMetadata finalized = segment_metadata_;
+    EdfSessionMetadata finalized = cold_->segment_metadata;
     if (!edf_session_metadata_finalize(finalized,
                                        raw_segment_end_ms,
                                        raw_therapy_end_ms)) {
         set_error("session_metadata_finalize_failed");
-        segment_metadata_active_ = false;
-        metadata_open_publication_ = {};
+        cold_->segment_metadata_active = false;
+        cold_->metadata_open_publication = {};
         return;
     }
 
-    if (pending_final_metadata_valid_) {
+    if (cold_->pending_final_metadata_valid) {
         set_error("session_metadata_finalize_queue_full");
         return;
     }
 
-    pending_final_metadata_ = finalized;
-    pending_final_metadata_valid_ = true;
-    segment_metadata_active_ = false;
-    metadata_open_publication_ = {};
+    cold_->pending_final_metadata = finalized;
+    cold_->pending_final_metadata_valid = true;
+    cold_->segment_metadata_active = false;
+    cold_->metadata_open_publication = {};
     (void)queue_pending_final_metadata();
-    metadata_publisher_.poll(now_ms);
+    cold_->metadata_publisher.poll(now_ms);
 }
 
 bool EdfRecorderManager::queue_pending_final_metadata() {
-    if (!pending_final_metadata_valid_) return true;
+    if (!cold_->pending_final_metadata_valid) return true;
 
     const EdfSessionMetadataPublication publication =
-        metadata_publisher_.publish(pending_final_metadata_);
+        cold_->metadata_publisher.publish(cold_->pending_final_metadata);
     if (!publication.valid()) return false;
 
-    pending_final_metadata_ = {};
-    pending_final_metadata_valid_ = false;
+    cold_->pending_final_metadata = {};
+    cold_->pending_final_metadata_valid = false;
     return true;
 }
 
@@ -694,7 +726,7 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
                                        const char *reason) {
     if (status_.active && status_.session_id == session.session_id) return;
 
-    if (segment_metadata_active_ && session.start_device_time[0]) {
+    if (cold_->segment_metadata_active && session.start_device_time[0]) {
         finalize_segment_metadata(session.start_device_time,
                                   session.start_device_time,
                                   now_ms);
@@ -857,8 +889,8 @@ bool EdfRecorderManager::open_session_annotation_files_at(
     const EdfLocalDateTime &start,
     int64_t annotation_start_ms) {
     if (files_open_) return true;
-    if (!segment_metadata_active_ ||
-        !metadata_publisher_.completed(metadata_open_publication_)) {
+    if (!cold_->segment_metadata_active ||
+        !cold_->metadata_publisher.completed(cold_->metadata_open_publication)) {
         set_error("session_metadata_not_durable");
         return false;
     }
@@ -960,9 +992,9 @@ void EdfRecorderManager::reset_numeric_schemas() {
         state.open_handle = {};
         edf_reset_numeric_file_layout(state.layout);
     };
-    reset(brp_schema_);
-    reset(pld_schema_);
-    reset(sa2_schema_);
+    reset(cold_->brp_schema);
+    reset(cold_->pld_schema);
+    reset(cold_->sa2_schema);
 }
 
 bool EdfRecorderManager::build_numeric_schemas() {
@@ -972,18 +1004,18 @@ bool EdfRecorderManager::build_numeric_schemas() {
                                : "";
     if (!edf_build_numeric_file_layout(EdfFileKind::Brp,
                                        accepted,
-                                       brp_schema_.layout) ||
+                                       cold_->brp_schema.layout) ||
         !edf_build_numeric_file_layout(EdfFileKind::Pld,
                                        accepted,
-                                       pld_schema_.layout) ||
+                                       cold_->pld_schema.layout) ||
         !edf_build_numeric_file_layout(EdfFileKind::Sa2,
                                        accepted,
-                                       sa2_schema_.layout)) {
+                                       cold_->sa2_schema.layout)) {
         set_error("numeric_schema_failed");
         return false;
     }
-    if (!brp_schema_.layout.enabled && !pld_schema_.layout.enabled &&
-        !sa2_schema_.layout.enabled) {
+    if (!cold_->brp_schema.layout.enabled && !cold_->pld_schema.layout.enabled &&
+        !cold_->sa2_schema.layout.enabled) {
         set_error("no_accepted_numeric_streams");
         return false;
     }
@@ -1138,60 +1170,60 @@ bool EdfRecorderManager::ensure_numeric_files_open(
     info.start_time = time;
     info.record_count = 0;
 
-    if (brp_schema_.layout.enabled) {
-        if (!enqueue_numeric_file_open(brp_schema_.layout.schema,
+    if (cold_->brp_schema.layout.enabled) {
+        if (!enqueue_numeric_file_open(cold_->brp_schema.layout.schema,
                                        numeric_start, info,
                                        status_.brp_path,
                                        sizeof(status_.brp_path),
-                                       brp_schema_.open_handle)) {
+                                       cold_->brp_schema.open_handle)) {
             status_.file_open_failures++;
             next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
             return false;
         }
-        brp_schema_.open = true;
+        cold_->brp_schema.open = true;
     }
-    if (pld_schema_.layout.enabled) {
-        if (!enqueue_numeric_file_open(pld_schema_.layout.schema,
+    if (cold_->pld_schema.layout.enabled) {
+        if (!enqueue_numeric_file_open(cold_->pld_schema.layout.schema,
                                        numeric_start, info,
                                        status_.pld_path,
                                        sizeof(status_.pld_path),
-                                       pld_schema_.open_handle)) {
-            if (brp_schema_.open) {
+                                       cold_->pld_schema.open_handle)) {
+            if (cold_->brp_schema.open) {
                 (void)StorageService::enqueue_edf_close_numeric(
                     EdfFileKind::Brp);
-                brp_schema_.open = false;
+                cold_->brp_schema.open = false;
             }
             status_.file_open_failures++;
             next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
             return false;
         }
-        pld_schema_.open = true;
+        cold_->pld_schema.open = true;
     }
-    if (sa2_schema_.layout.enabled) {
-        if (!enqueue_numeric_file_open(sa2_schema_.layout.schema,
+    if (cold_->sa2_schema.layout.enabled) {
+        if (!enqueue_numeric_file_open(cold_->sa2_schema.layout.schema,
                                        numeric_start, info,
                                        status_.sa2_path,
                                        sizeof(status_.sa2_path),
-                                       sa2_schema_.open_handle)) {
-            if (brp_schema_.open) {
+                                       cold_->sa2_schema.open_handle)) {
+            if (cold_->brp_schema.open) {
                 (void)StorageService::enqueue_edf_close_numeric(
                     EdfFileKind::Brp);
-                brp_schema_.open = false;
+                cold_->brp_schema.open = false;
             }
-            if (pld_schema_.open) {
+            if (cold_->pld_schema.open) {
                 (void)StorageService::enqueue_edf_close_numeric(
                     EdfFileKind::Pld);
-                pld_schema_.open = false;
+                cold_->pld_schema.open = false;
             }
             status_.file_open_failures++;
             next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
             return false;
         }
-        sa2_schema_.open = true;
+        cold_->sa2_schema.open = true;
     }
 
-    numeric_files_open_ = brp_schema_.open || pld_schema_.open ||
-                          sa2_schema_.open;
+    numeric_files_open_ = cold_->brp_schema.open || cold_->pld_schema.open ||
+                          cold_->sa2_schema.open;
     numeric_segment_day_ = numeric_day;
     if (numeric_files_open_) {
         Log::logf(CAT_EDF, LOG_DEBUG,
@@ -1200,11 +1232,11 @@ bool EdfRecorderManager::ensure_numeric_files_open(
                   numeric_start_time ? numeric_start_time : "--",
                   stream_->accepted_data_ids_csv().c_str(),
                   static_cast<unsigned>(
-                      brp_schema_.layout.schema.source_signal_count),
+                      cold_->brp_schema.layout.schema.source_signal_count),
                   static_cast<unsigned>(
-                      pld_schema_.layout.schema.source_signal_count),
+                      cold_->pld_schema.layout.schema.source_signal_count),
                   static_cast<unsigned>(
-                      sa2_schema_.layout.schema.source_signal_count));
+                      cold_->sa2_schema.layout.schema.source_signal_count));
     }
     return true;
 }
@@ -1237,13 +1269,13 @@ void EdfRecorderManager::close_session_files() {
     if (!files_open_ && !numeric_files_open_) {
         return;
     }
-    if (brp_schema_.open) {
+    if (cold_->brp_schema.open) {
         (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Brp);
     }
-    if (pld_schema_.open) {
+    if (cold_->pld_schema.open) {
         (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Pld);
     }
-    if (sa2_schema_.open) {
+    if (cold_->sa2_schema.open) {
         (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Sa2);
     }
     if (files_open_) {
@@ -1323,26 +1355,26 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     EdfStorageOpenResult pld;
     EdfStorageOpenResult sa2;
     const bool brp_known =
-        !brp_schema_.open ||
-        StorageService::edf_open_result(brp_schema_.open_handle, brp);
+        !cold_->brp_schema.open ||
+        StorageService::edf_open_result(cold_->brp_schema.open_handle, brp);
     const bool pld_known =
-        !pld_schema_.open ||
-        StorageService::edf_open_result(pld_schema_.open_handle, pld);
+        !cold_->pld_schema.open ||
+        StorageService::edf_open_result(cold_->pld_schema.open_handle, pld);
     const bool sa2_known =
-        !sa2_schema_.open ||
-        StorageService::edf_open_result(sa2_schema_.open_handle, sa2);
+        !cold_->sa2_schema.open ||
+        StorageService::edf_open_result(cold_->sa2_schema.open_handle, sa2);
 
     const bool brp_ready =
-        !brp_schema_.open || (brp.complete && brp.success && brp.open);
+        !cold_->brp_schema.open || (brp.complete && brp.success && brp.open);
     const bool pld_ready =
-        !pld_schema_.open || (pld.complete && pld.success && pld.open);
+        !cold_->pld_schema.open || (pld.complete && pld.success && pld.open);
     const bool sa2_ready =
-        !sa2_schema_.open || (sa2.complete && sa2.success && sa2.open);
+        !cold_->sa2_schema.open || (sa2.complete && sa2.success && sa2.open);
     const bool failed =
         !brp_known || !pld_known || !sa2_known ||
-        (brp_schema_.open && brp.complete && !brp.success) ||
-        (pld_schema_.open && pld.complete && !pld.success) ||
-        (sa2_schema_.open && sa2.complete && !sa2.success);
+        (cold_->brp_schema.open && brp.complete && !brp.success) ||
+        (cold_->pld_schema.open && pld.complete && !pld.success) ||
+        (cold_->sa2_schema.open && sa2.complete && !sa2.success);
 
     if (!brp_ready || !pld_ready || !sa2_ready) {
         const StorageWorkloadSnapshot storage =
@@ -1351,22 +1383,22 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         if (!failed && (storage.edf_queued > 0 || storage.busy)) return false;
 
         status_.file_open_failures++;
-        if (brp_schema_.open && brp.complete && !brp.success) {
+        if (cold_->brp_schema.open && brp.complete && !brp.success) {
             set_error(open_result_error(brp, "numeric_open_failed"));
-        } else if (pld_schema_.open && pld.complete && !pld.success) {
+        } else if (cold_->pld_schema.open && pld.complete && !pld.success) {
             set_error(open_result_error(pld, "numeric_open_failed"));
-        } else if (sa2_schema_.open && sa2.complete && !sa2.success) {
+        } else if (cold_->sa2_schema.open && sa2.complete && !sa2.success) {
             set_error(open_result_error(sa2, "numeric_open_failed"));
         } else {
             set_error("numeric_open_failed");
         }
-        if (brp_schema_.open) {
+        if (cold_->brp_schema.open) {
             (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Brp);
         }
-        if (pld_schema_.open) {
+        if (cold_->pld_schema.open) {
             (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Pld);
         }
-        if (sa2_schema_.open) {
+        if (cold_->sa2_schema.open) {
             (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Sa2);
         }
         numeric_files_open_ = false;
@@ -1378,11 +1410,11 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     }
 
     const uint32_t brp_records =
-        brp_schema_.open ? brp.record_count : 0;
+        cold_->brp_schema.open ? brp.record_count : 0;
     const uint32_t pld_records =
-        pld_schema_.open ? pld.record_count : 0;
+        cold_->pld_schema.open ? pld.record_count : 0;
     const uint32_t sa2_records =
-        sa2_schema_.open ? sa2.record_count : 0;
+        cold_->sa2_schema.open ? sa2.record_count : 0;
     assembler_.set_current_records(brp_records, pld_records, sa2_records);
     status_.brp_records = brp_records;
     status_.pld_records = pld_records;
@@ -2216,13 +2248,13 @@ void EdfRecorderManager::handle_completed_record(
     const NumericSchemaState *state = nullptr;
     switch (record.series) {
         case EdfSeriesId::Brp:
-            state = &brp_schema_;
+            state = &cold_->brp_schema;
             break;
         case EdfSeriesId::Pld:
-            state = &pld_schema_;
+            state = &cold_->pld_schema;
             break;
         case EdfSeriesId::Sa2:
-            state = &sa2_schema_;
+            state = &cold_->sa2_schema;
             break;
     }
     if (numeric_files_open_ && state && state->open) {

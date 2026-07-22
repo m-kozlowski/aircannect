@@ -9,7 +9,7 @@
 #include "as11_event_frame.h"
 #include "edf_numeric_file_layout.h"
 #include "edf_series.h"
-#include "edf_session_metadata_publisher.h"
+#include "edf_session_metadata.h"
 #include "edf_storage_catalog.h"
 #include "edf_str_session.h"
 #include "edf_stream_assembler.h"
@@ -180,6 +180,8 @@ public:
     void handle_event_frame(const As11EventFrame &frame, uint32_t now_ms);
 
 private:
+    struct ColdState;
+
     struct NumericSchemaState {
         bool open = false;
         EdfNumericFileLayout layout;
@@ -378,22 +380,14 @@ private:
     int32_t session_timezone_offset_minutes_ = 0;
     bool session_timezone_frozen_ = false;
 
-    EdfSessionMetadataPublisher metadata_publisher_;
-    EdfSessionMetadata segment_metadata_;
-    EdfSessionMetadata pending_final_metadata_;
-    EdfSessionMetadataPublication metadata_open_publication_;
-    bool segment_metadata_active_ = false;
-    bool pending_final_metadata_valid_ = false;
+    // session metadata and numeric schemas
+    ColdState *cold_ = nullptr;
 
     // STR/identification state
     PendingRpc str_settings_rpc_;
     PendingRpc str_summary_rpc_;
     PendingRpc identification_rpc_;
     bool str_record_pending_write_ = false;
-
-    NumericSchemaState brp_schema_;
-    NumericSchemaState pld_schema_;
-    NumericSchemaState sa2_schema_;
 
     // owned subsystems/status
     EdfStrSessionAccumulator str_;
