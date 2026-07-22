@@ -60,6 +60,8 @@ public:
 private:
     void reset_operation();
     void fail(const char *error);
+    OperationAdmission reject_save(uint32_t generation,
+                                   const char *error);
 
     StorageReadPort *read_port_ = nullptr;
     StorageAtomicWritePort *write_port_ = nullptr;

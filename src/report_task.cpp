@@ -1226,10 +1226,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.store_purpose = CatalogStorePurpose::Save;
             worked = true;
         } else if (admitted == OperationAdmission::Rejected) {
-            runtime.catalog_store_retry_at_ms =
-                now_ms + next_background_retry_delay(
-                             runtime.catalog_store_retry_attempt);
-            advance_background_retry(runtime.catalog_store_retry_attempt);
+            runtime.pending_catalog_save.reset();
+            runtime.catalog_store_retry_at_ms = 0;
+            runtime.catalog_store_retry_attempt = 0;
+            runtime.command_failures++;
             worked = true;
         }
     }

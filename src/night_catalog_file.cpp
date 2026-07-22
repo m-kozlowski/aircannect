@@ -8,6 +8,7 @@
 #include "crc32.h"
 #include "little_endian.h"
 #include "report_records.h"
+#include "report_fallback_payload_layout.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -366,19 +367,20 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
                 return false;
             }
 
-            uint64_t expected_data_offset = file.metadata_bytes;
             for (size_t section_index = 0;
                  section_index < section_count;
                  ++section_index) {
                 const NightCatalogFallbackSection &section =
                     sections[section_index];
-                if (!fallback_section_valid(*record, file, section) ||
-                    section.data_offset != expected_data_offset) {
+                if (!fallback_section_valid(*record, file, section)) {
                     return false;
                 }
-                expected_data_offset += section.data_size;
             }
-            if (expected_data_offset != file.file_size ||
+            if (!report_fallback_payload_layout_valid(
+                    file.metadata_bytes,
+                    file.file_size,
+                    sections,
+                    section_count) ||
                 !add_u32(expected_fallback_section, section_count)) {
                 return false;
             }

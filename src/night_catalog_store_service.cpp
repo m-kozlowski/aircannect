@@ -86,6 +86,20 @@ void NightCatalogStoreService::fail(const char *error) {
               error ? error : "night_catalog_store_failed");
 }
 
+OperationAdmission NightCatalogStoreService::reject_save(
+    uint32_t generation,
+    const char *error) {
+    reset_operation();
+    runtime_->phase = NightCatalogStoreRuntime::Phase::Error;
+    status_ = {};
+    status_.state = NightCatalogStoreState::Error;
+    status_.generation = generation;
+    copy_cstr(status_.error,
+              sizeof(status_.error),
+              error ? error : "night_catalog_save_rejected");
+    return OperationAdmission::Rejected;
+}
+
 OperationAdmission NightCatalogStoreService::request_load(
     uint32_t generation) {
     if (!runtime_ || !read_port_ || !write_port_ || active()) {
@@ -115,16 +129,22 @@ OperationAdmission NightCatalogStoreService::request_load(
 OperationAdmission NightCatalogStoreService::request_save(
     std::shared_ptr<const NightCatalog> catalog,
     uint32_t generation) {
-    if (!runtime_ || !read_port_ || !write_port_ || active()) {
-        return OperationAdmission::Busy;
+    if (!runtime_ || !read_port_ || !write_port_) {
+        return OperationAdmission::Rejected;
     }
-    if (!catalog || generation == 0) return OperationAdmission::Rejected;
+    if (active()) return OperationAdmission::Busy;
+    if (!catalog || generation == 0) {
+        return reject_save(generation, "night_catalog_save_invalid");
+    }
 
     reset_operation();
 
     std::shared_ptr<const LargeByteBuffer> encoded =
         NightCatalogFileCodec::encode(*catalog);
-    if (!encoded) return OperationAdmission::Rejected;
+    if (!encoded) {
+        return reject_save(generation,
+                           "night_catalog_save_encode_failed");
+    }
 
     runtime_->encoded = std::move(encoded);
     runtime_->saving = std::move(catalog);

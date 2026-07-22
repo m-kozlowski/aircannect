@@ -9,6 +9,7 @@
 
 #include "report_records.h"
 #include "report_fallback_artifact.h"
+#include "report_fallback_payload_layout.h"
 
 #ifdef ARDUINO
 #include "memory_manager.h"
@@ -534,39 +535,21 @@ bool fallback_section_valid(
 }
 
 bool fallback_payload_valid(const NightCatalogFallbackInput &source) {
-    size_t payload_bytes = 0;
     for (size_t i = 0; i < source.section_count; ++i) {
         const NightCatalogFallbackSectionInput &section = source.sections[i];
         if (!fallback_section_valid(section,
                                     source.day_start_ms,
                                     source.day_end_ms,
                                     source.file_size,
-                                    source.metadata_bytes) ||
-            !add_count(payload_bytes, section.data_size)) {
+                                    source.metadata_bytes)) {
             return false;
-        }
-
-        if (section.data_size == 0) continue;
-        const uint64_t section_end =
-            section.data_offset + section.data_size;
-        for (size_t previous_index = 0;
-             previous_index < i;
-             ++previous_index) {
-            const NightCatalogFallbackSectionInput &previous =
-                source.sections[previous_index];
-            if (previous.data_size == 0) continue;
-
-            const uint64_t previous_end =
-                previous.data_offset + previous.data_size;
-            if (section.data_offset < previous_end &&
-                previous.data_offset < section_end) {
-                return false;
-            }
         }
     }
 
-    return payload_bytes <= source.file_size - source.metadata_bytes &&
-           source.metadata_bytes + payload_bytes == source.file_size;
+    return report_fallback_payload_layout_valid(source.metadata_bytes,
+                                                source.file_size,
+                                                source.sections,
+                                                source.section_count);
 }
 
 bool ingest_fallback(const NightCatalogBuildInput &input,
