@@ -348,12 +348,17 @@ bool StorageDeleteService::step() {
         if (!lock(50)) return false;
 
         close_walk_locked();
+        release_maintenance_locked();
         touch_status_locked();
         unlock();
         return true;
     }
     if (!lock(50)) return false;
     if (status_.state != StorageDeleteState::Deleting) {
+        unlock();
+        return false;
+    }
+    if (!claim_maintenance_locked()) {
         unlock();
         return false;
     }

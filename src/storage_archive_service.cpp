@@ -384,6 +384,7 @@ void StorageArchiveService::release_walk_stack_locked() {
 void StorageArchiveService::apply_pause_locked() {
     if (status_.state == StorageArchiveState::Preparing) {
         close_walk_files_locked();
+        release_maintenance_locked();
         touch_status_locked();
     } else if (status_.state == StorageArchiveState::Downloading &&
                active_download_) {
@@ -658,6 +659,11 @@ bool StorageArchiveService::step() {
         return true;
     }
     if (!lock(50)) return false;
+
+    if (!claim_maintenance_locked()) {
+        unlock();
+        return false;
+    }
 
     bool worked = false;
     if (status_.state == StorageArchiveState::Preparing) {
