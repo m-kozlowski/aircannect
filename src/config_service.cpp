@@ -93,7 +93,7 @@ ConfigTransactionResult ConfigService::commit_transaction() {
     result.accepted_fields = transaction_accepted_;
     result.changed_fields = transaction_changed_;
     result.dirty = transaction_dirty_;
-    result.persisted = transaction_store_->commit_update();
+    result.persisted = transaction_store_->commit_update(store_.data());
 
     if (result.persisted && transaction_dirty_ != 0) {
         store_ = std::move(*transaction_store_);
@@ -101,7 +101,7 @@ ConfigTransactionResult ConfigService::commit_transaction() {
         if (revision_ == 0) revision_ = 1;
         publish_changes(transaction_dirty_);
     } else if (!result.persisted && transaction_dirty_ != 0 &&
-               !store_.save_fields(transaction_dirty_)) {
+               !store_.save_changed_fields(transaction_store_->data())) {
         Log::logf(CAT_CONFIG, LOG_ERROR,
                   "failed to restore config after transaction error\n");
     }
@@ -143,7 +143,7 @@ ConfigTransactionResult ConfigService::reset() {
         revision_++;
         if (revision_ == 0) revision_ = 1;
         publish_changes(result.dirty);
-    } else if (!store_.save_fields(AC_CONFIG_DIRTY_ALL)) {
+    } else if (!store_.save()) {
         Log::logf(CAT_CONFIG, LOG_ERROR,
                   "failed to restore config after reset error\n");
     }

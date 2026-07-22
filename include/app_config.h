@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "app_config_schema.h"
 #include "board.h"
 #include "debug_log.h"
 #include "oximetry_types.h"
@@ -12,8 +13,6 @@ namespace aircannect {
 
 class AppConfigFieldWriter;
 class ConfigService;
-
-static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 18;
 
 struct AppConfigData {
     uint32_t schema_version = AC_CONFIG_SCHEMA_VERSION;
@@ -119,15 +118,15 @@ private:
     bool set_file_log(bool enabled);
 
     void begin_update();
-    bool commit_update();
+    bool commit_update(const AppConfigData &baseline);
 
     bool factory_reset();
     void apply_log_config() const;
 
     bool load();
     bool save() const;
-    bool save_fields(uint32_t dirty) const;
-    bool persist(uint32_t dirty);
+    bool save_changed_fields(const AppConfigData &baseline) const;
+    bool mark_dirty(uint32_t dirty);
     void set_defaults();
     bool normalize();
 

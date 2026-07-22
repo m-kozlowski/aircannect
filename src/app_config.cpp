@@ -254,29 +254,39 @@ void load_config_field(Preferences &prefs,
     String default_raw;
     if (!app_config_field_get_raw_value(defaults, field, default_raw)) return;
 
+    char legacy_key[8] = {};
+    const char *load_key = config_storage_key_for_load(
+        prefs, field, legacy_key, sizeof(legacy_key));
+    if (!prefs.isKey(load_key)) return;
+
+    const PreferenceType stored_type = prefs.getType(load_key);
+
     switch (field.type) {
         case AppConfigFieldType::Bool:
+            if (stored_type != PT_U8) return;
             config_field_ref<bool>(data, field) =
-                prefs.getBool(field.key, default_raw == "1");
+                prefs.getBool(load_key, default_raw == "1");
             return;
         case AppConfigFieldType::UInt16:
+            if (stored_type != PT_U32) return;
             config_field_ref<uint16_t>(data, field) =
                 static_cast<uint16_t>(
-                    prefs.getUInt(field.key,
+                    prefs.getUInt(load_key,
                                   static_cast<uint32_t>(default_raw.toInt())));
             return;
         case AppConfigFieldType::String:
         case AppConfigFieldType::Secret:
+            if (stored_type != PT_STR) return;
             config_field_ref<String>(data, field) =
-                prefs.getString(field.key, default_raw);
+                prefs.getString(load_key, default_raw);
             return;
         case AppConfigFieldType::Enum: {
             if (field.id == AppConfigFieldId::OximetryAdvertiseMode &&
-                prefs.getType(field.key) == PT_U8) {
+                stored_type == PT_U8) {
                 const OximetryAdvertiseMode mode =
                     static_cast<OximetryAdvertiseMode>(
                         prefs.getUChar(
-                            field.key,
+                            load_key,
                             static_cast<uint8_t>(
                                 defaults.oximetry_advertise_mode)));
                 if (oximetry_advertise_mode_valid(mode)) {
@@ -285,7 +295,8 @@ void load_config_field(Preferences &prefs,
                     return;
                 }
             }
-            String value = prefs.getString(field.key, default_raw);
+            if (stored_type != PT_STR) return;
+            String value = prefs.getString(load_key, default_raw);
             if (!assign_enum_field(data, field, value)) {
                 assign_enum_field(data, field, default_raw);
             }
@@ -293,21 +304,19 @@ void load_config_field(Preferences &prefs,
         }
         case AppConfigFieldType::LogLevel: {
             if (field.index < 0 || field.index >= CAT_COUNT) return;
-            char legacy_key[8] = {};
-            const char *load_key =
-                config_storage_key_for_load(prefs, field, legacy_key,
-                                            sizeof(legacy_key));
             log_level_t level = defaults.log_levels[field.index];
-            if (prefs.getType(load_key) == PT_U8) {
+            if (stored_type == PT_U8) {
                 level = static_cast<log_level_t>(
                     prefs.getUChar(load_key,
                                    defaults.log_levels[field.index]));
-            } else {
+            } else if (stored_type == PT_STR) {
                 log_level_t parsed = level;
                 if (Log::parse_level(prefs.getString(load_key, default_raw),
                                      parsed)) {
                     level = parsed;
                 }
+            } else {
+                return;
             }
             data.log_levels[field.index] = level;
             return;
@@ -336,15 +345,56 @@ bool save_config_field(Preferences &prefs,
     return false;
 }
 
+bool save_config(const AppConfigData &data, const AppConfigData *baseline) {
+    const AppConfigWriteMode write_mode =
+        baseline ? AppConfigWriteMode::ChangedFields
+                 : AppConfigWriteMode::Complete;
+
+    Preferences prefs;
+    if (!prefs.begin(CFG_NS, false)) {
+        Log::logf(CAT_CONFIG, LOG_ERROR, "failed to open NVS RW\n");
+        return false;
+    }
+
+    bool ok = true;
+    if (app_config_write_includes_schema(write_mode)) {
+        ok = prefs.putUInt(KEY_SCHEMA, data.schema_version) != 0;
+    }
+
+    size_t field_count = 0;
+    const AppConfigFieldDescriptor *fields = app_config_fields(field_count);
+    for (size_t i = 0; i < field_count; ++i) {
+        bool changed = true;
+        if (baseline) {
+            String before;
+            String after;
+
+            if (!app_config_field_get_raw_value(
+                    *baseline, fields[i], before) ||
+                !app_config_field_get_raw_value(data, fields[i], after)) {
+                ok = false;
+                continue;
+            }
+
+            changed = before != after;
+        }
+        if (!app_config_write_includes_field(write_mode, changed)) continue;
+
+        ok = save_config_field(prefs, fields[i], data) && ok;
+    }
+    prefs.end();
+
+    if (!ok) {
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "one or more values were not persisted\n");
+    }
+    return ok;
+}
+
 }  // namespace
 
 bool AppConfig::begin() {
-    if (!load()) {
-        set_defaults();
-        save();
-        return false;
-    }
-    return true;
+    return load();
 }
 
 bool AppConfig::load() {
@@ -357,18 +407,17 @@ bool AppConfig::load() {
         return false;
     }
 
-    const uint32_t schema = prefs.getUInt(KEY_SCHEMA, 0);
-    if (schema == 0) {
+    if (prefs.isKey(KEY_SCHEMA) && prefs.getType(KEY_SCHEMA) != PT_U32) {
         prefs.end();
-        set_defaults();
-        return save();
+        Log::logf(CAT_CONFIG, LOG_ERROR,
+                  "unsupported config schema storage type\n");
+        return false;
     }
 
-    if (schema > AC_CONFIG_SCHEMA_VERSION) {
+    const uint32_t schema = prefs.getUInt(KEY_SCHEMA, 0);
+    const AppConfigSchemaMode schema_mode = app_config_schema_mode(schema);
+    if (!app_config_schema_loads_known_fields(schema_mode)) {
         prefs.end();
-        Log::logf(CAT_CONFIG, LOG_WARN,
-                  "future schema %lu; using defaults\n",
-                  static_cast<unsigned long>(schema));
         set_defaults();
         return save();
     }
@@ -382,48 +431,30 @@ bool AppConfig::load() {
     }
     prefs.end();
 
+    if (!app_config_schema_allows_automatic_rewrite(schema_mode)) {
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "future schema %lu; loaded known fields without migration\n",
+                  static_cast<unsigned long>(schema));
+        return true;
+    }
+
     if (!normalize()) return save();
     return true;
 }
 
 bool AppConfig::save() const {
-    return save_fields(AC_CONFIG_DIRTY_ALL);
+    return save_config(data_, nullptr);
 }
 
-bool AppConfig::save_fields(uint32_t dirty) const {
-    if (!dirty) return true;
-
-    Preferences prefs;
-    if (!prefs.begin(CFG_NS, false)) {
-        Log::logf(CAT_CONFIG, LOG_ERROR, "failed to open NVS RW\n");
-        return false;
-    }
-
-    bool ok = true;
-    ok = prefs.putUInt(KEY_SCHEMA, data_.schema_version) != 0 && ok;
-    size_t field_count = 0;
-    const AppConfigFieldDescriptor *fields = app_config_fields(field_count);
-    for (size_t i = 0; i < field_count; ++i) {
-        if ((dirty & fields[i].dirty) == 0) continue;
-        ok = save_config_field(prefs, fields[i], data_) && ok;
-    }
-    prefs.end();
-
-    if (!ok) {
-        Log::logf(CAT_CONFIG, LOG_WARN,
-                  "one or more values were not persisted\n");
-    }
-    return ok;
+bool AppConfig::save_changed_fields(const AppConfigData &baseline) const {
+    return save_config(data_, &baseline);
 }
 
-bool AppConfig::persist(uint32_t dirty) {
+bool AppConfig::mark_dirty(uint32_t dirty) {
     if (!dirty) return true;
+    if (update_depth_ == 0) return false;
+
     pending_dirty_ |= dirty;
-    if (update_depth_ > 0) return true;
-
-    const uint32_t to_save = pending_dirty_;
-    if (!save_fields(to_save)) return false;
-    pending_dirty_ &= ~to_save;
     return true;
 }
 
@@ -431,13 +462,13 @@ void AppConfig::begin_update() {
     update_depth_++;
 }
 
-bool AppConfig::commit_update() {
+bool AppConfig::commit_update(const AppConfigData &baseline) {
     if (update_depth_ > 0) update_depth_--;
     if (update_depth_ > 0) return true;
-    const uint32_t to_save = pending_dirty_;
-    if (!to_save) return true;
-    if (!save_fields(to_save)) return false;
-    pending_dirty_ &= ~to_save;
+    if (!pending_dirty_) return true;
+    if (!save_changed_fields(baseline)) return false;
+
+    pending_dirty_ = 0;
     return true;
 }
 
@@ -573,7 +604,7 @@ bool AppConfig::set_hostname(const String &hostname) {
     if (!valid_hostname(value)) return false;
     if (data_.hostname == value) return true;
     data_.hostname = value;
-    return persist(AC_CONFIG_DIRTY_HOSTNAME);
+    return mark_dirty(AC_CONFIG_DIRTY_HOSTNAME);
 }
 
 bool AppConfig::set_tcp_bridge(bool enabled, uint16_t port) {
@@ -583,14 +614,14 @@ bool AppConfig::set_tcp_bridge(bool enabled, uint16_t port) {
     }
     data_.tcp_bridge_enabled = enabled;
     data_.tcp_bridge_port = port;
-    return persist(AC_CONFIG_DIRTY_TCP);
+    return mark_dirty(AC_CONFIG_DIRTY_TCP);
 }
 
 bool AppConfig::set_softap_mode(SoftApMode mode) {
     if (!softap_mode_valid(mode)) return false;
     if (data_.softap_mode == mode) return true;
     data_.softap_mode = mode;
-    return persist(AC_CONFIG_DIRTY_SOFTAP);
+    return mark_dirty(AC_CONFIG_DIRTY_SOFTAP);
 }
 
 bool AppConfig::set_wifi_country(const String &country) {
@@ -604,7 +635,7 @@ bool AppConfig::set_wifi_country(const String &country) {
     if (!valid_wifi_country(value)) return false;
     if (data_.wifi_country == value) return true;
     data_.wifi_country = value;
-    return persist(AC_CONFIG_DIRTY_WIFI_COUNTRY);
+    return mark_dirty(AC_CONFIG_DIRTY_WIFI_COUNTRY);
 }
 
 bool AppConfig::set_timezone(const String &timezone) {
@@ -613,26 +644,26 @@ bool AppConfig::set_timezone(const String &timezone) {
     if (!valid_timezone(value)) return false;
     if (data_.timezone == value) return true;
     data_.timezone = value;
-    return persist(AC_CONFIG_DIRTY_TIMEZONE);
+    return mark_dirty(AC_CONFIG_DIRTY_TIMEZONE);
 }
 
 bool AppConfig::set_resmed_time_sync(bool enabled) {
     if (data_.resmed_time_sync_enabled == enabled) return true;
     data_.resmed_time_sync_enabled = enabled;
-    return persist(AC_CONFIG_DIRTY_RESMED_TIME);
+    return mark_dirty(AC_CONFIG_DIRTY_RESMED_TIME);
 }
 
 bool AppConfig::set_oximetry_enabled(bool enabled) {
     if (data_.oximetry_enabled == enabled) return true;
     data_.oximetry_enabled = enabled;
-    return persist(AC_CONFIG_DIRTY_OXIMETRY);
+    return mark_dirty(AC_CONFIG_DIRTY_OXIMETRY);
 }
 
 bool AppConfig::set_oximetry_udp_port(uint16_t port) {
     if (port == 0) return false;
     if (data_.oximetry_udp_port == port) return true;
     data_.oximetry_udp_port = port;
-    return persist(AC_CONFIG_DIRTY_OXIMETRY);
+    return mark_dirty(AC_CONFIG_DIRTY_OXIMETRY);
 }
 
 bool AppConfig::set_oximetry_advertise_mode(
@@ -640,13 +671,13 @@ bool AppConfig::set_oximetry_advertise_mode(
     if (!oximetry_advertise_mode_valid(mode)) return false;
     if (data_.oximetry_advertise_mode == mode) return true;
     data_.oximetry_advertise_mode = mode;
-    return persist(AC_CONFIG_DIRTY_OXIMETRY);
+    return mark_dirty(AC_CONFIG_DIRTY_OXIMETRY);
 }
 
 bool AppConfig::set_edf_capture_enabled(bool enabled) {
     if (data_.edf_capture_enabled == enabled) return true;
     data_.edf_capture_enabled = enabled;
-    return persist(AC_CONFIG_DIRTY_EDF_CAPTURE);
+    return mark_dirty(AC_CONFIG_DIRTY_EDF_CAPTURE);
 }
 
 bool AppConfig::set_smb_credentials(const String &endpoint,
@@ -688,7 +719,7 @@ bool AppConfig::set_smb_credentials(const String &endpoint,
                                           : "<empty>",
               data_.smb_user.length() ? 1u : 0u,
               data_.smb_password.length() ? 1u : 0u);
-    return persist(AC_CONFIG_DIRTY_SMB_SYNC);
+    return mark_dirty(AC_CONFIG_DIRTY_SMB_SYNC);
 }
 
 bool AppConfig::set_sleephq_credentials(const String &client_id,
@@ -747,7 +778,7 @@ bool AppConfig::set_sleephq_credentials(const String &client_id,
               data_.sleephq_client_secret.length() ? 1u : 0u,
               data_.sleephq_team_id.length() ? 1u : 0u,
               data_.sleephq_device_id.length() ? 1u : 0u);
-    return persist(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
+    return mark_dirty(AC_CONFIG_DIRTY_SLEEPHQ_SYNC);
 }
 
 bool AppConfig::set_http_auth(const String &user, const String &password) {
@@ -765,7 +796,7 @@ bool AppConfig::set_http_auth(const String &user, const String &password) {
     }
     data_.http_user = parsed_user;
     data_.http_password = parsed_password;
-    return persist(AC_CONFIG_DIRTY_HTTP_AUTH);
+    return mark_dirty(AC_CONFIG_DIRTY_HTTP_AUTH);
 }
 
 bool AppConfig::set_auth_whitelist(const String &whitelist) {
@@ -777,7 +808,7 @@ bool AppConfig::set_auth_whitelist(const String &whitelist) {
     if (!valid_auth_whitelist(value)) return false;
     if (data_.auth_whitelist == value) return true;
     data_.auth_whitelist = value;
-    return persist(AC_CONFIG_DIRTY_AUTH_WHITELIST);
+    return mark_dirty(AC_CONFIG_DIRTY_AUTH_WHITELIST);
 }
 
 bool AppConfig::set_telnet_console(bool enabled, uint16_t port) {
@@ -788,7 +819,7 @@ bool AppConfig::set_telnet_console(bool enabled, uint16_t port) {
     }
     data_.telnet_console_enabled = enabled;
     data_.telnet_console_port = port;
-    return persist(AC_CONFIG_DIRTY_TELNET);
+    return mark_dirty(AC_CONFIG_DIRTY_TELNET);
 }
 
 bool AppConfig::set_ota_password(const String &password) {
@@ -797,7 +828,7 @@ bool AppConfig::set_ota_password(const String &password) {
     if (!valid_optional_secret(value)) return false;
     if (data_.ota_password == value) return true;
     data_.ota_password = value;
-    return persist(AC_CONFIG_DIRTY_OTA_PASSWORD);
+    return mark_dirty(AC_CONFIG_DIRTY_OTA_PASSWORD);
 }
 
 bool AppConfig::set_update_url(const String &url) {
@@ -806,14 +837,14 @@ bool AppConfig::set_update_url(const String &url) {
     if (!valid_update_url(value)) return false;
     if (data_.update_url == value) return true;
     data_.update_url = value;
-    return persist(AC_CONFIG_DIRTY_UPDATE_URL);
+    return mark_dirty(AC_CONFIG_DIRTY_UPDATE_URL);
 }
 
 bool AppConfig::set_log_level(log_cat_t cat, log_level_t level) {
     if (cat < 0 || cat >= CAT_COUNT || !valid_log_level(level)) return false;
     if (data_.log_levels[cat] == level) return true;
     data_.log_levels[cat] = level;
-    return persist(AC_CONFIG_DIRTY_LOG_LEVELS);
+    return mark_dirty(AC_CONFIG_DIRTY_LOG_LEVELS);
 }
 
 bool AppConfig::set_syslog(bool enabled, const String &host, uint16_t port) {
@@ -831,13 +862,13 @@ bool AppConfig::set_syslog(bool enabled, const String &host, uint16_t port) {
     data_.syslog_enabled = enabled;
     data_.syslog_host = value;
     data_.syslog_port = port;
-    return persist(AC_CONFIG_DIRTY_SYSLOG);
+    return mark_dirty(AC_CONFIG_DIRTY_SYSLOG);
 }
 
 bool AppConfig::set_file_log(bool enabled) {
     if (data_.file_log_enabled == enabled) return true;
     data_.file_log_enabled = enabled;
-    return persist(AC_CONFIG_DIRTY_FILE_LOG);
+    return mark_dirty(AC_CONFIG_DIRTY_FILE_LOG);
 }
 
 bool AppConfig::factory_reset() {
