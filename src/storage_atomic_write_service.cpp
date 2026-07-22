@@ -170,7 +170,10 @@ OperationTicket StorageAtomicWriteService::next_ticket_locked(uint32_t generatio
 OperationSubmission StorageAtomicWriteService::request_write(
     const StorageAtomicWriteCommand &command) {
     if (!command.valid() || command.path.size() >= AC_STORAGE_PATH_MAX ||
-        reserved_transaction_path(command.path.c_str())) {
+        command.staged_path.size() >= AC_STORAGE_PATH_MAX ||
+        reserved_transaction_path(command.path.c_str()) ||
+        (!command.staged_path.empty() &&
+         reserved_transaction_path(command.staged_path.c_str()))) {
         return OperationSubmission::rejected();
     }
     if (!ready() || !lock()) return OperationSubmission::busy();
@@ -183,8 +186,14 @@ OperationSubmission StorageAtomicWriteService::request_write(
     job_->ticket = next_ticket_locked(command.generation);
     job_->lane = command.lane;
     job_->bytes = command.bytes;
+    job_->source_size = command.bytes ? command.bytes->size()
+                                      : command.staged_size;
     job_->free_reserve_bytes = command.free_reserve_bytes;
+    job_->staged_source = !command.staged_path.empty();
+    job_->replace_existing = command.replace_existing;
     copy_cstr(job_->path, sizeof(job_->path), command.path.c_str());
+    copy_cstr(job_->staged_path, sizeof(job_->staged_path),
+              command.staged_path.c_str());
     recovery_attempt_requested_ = true;
     const OperationTicket ticket = job_->ticket;
     unlock();
@@ -289,9 +298,16 @@ bool StorageAtomicWriteService::open_locked(const char *&error) {
         return false;
     }
 
-    const uint64_t length = job_->bytes->size();
-    if (job_->free_reserve_bytes > UINT64_MAX - length ||
-        storage.free_bytes < length + job_->free_reserve_bytes) {
+    if (!job_->replace_existing && Storage::exists(job_->path)) {
+        error = "destination_exists";
+        return false;
+    }
+
+    const uint64_t additional_bytes = job_->staged_source
+        ? 0
+        : job_->source_size;
+    if (job_->free_reserve_bytes > UINT64_MAX - additional_bytes ||
+        storage.free_bytes < additional_bytes + job_->free_reserve_bytes) {
         error = "not_enough_storage";
         return false;
     }
@@ -304,6 +320,25 @@ bool StorageAtomicWriteService::open_locked(const char *&error) {
     if (!remove_transaction_artifacts()) {
         error = "transaction_cleanup_failed";
         return false;
+    }
+
+    if (job_->staged_source) {
+        File staged = Storage::open(job_->staged_path, "r");
+        if (!staged || staged.isDirectory() ||
+            staged.size() != job_->source_size) {
+            if (staged) staged.close();
+            error = "staged_source_invalid";
+            return false;
+        }
+        staged.close();
+
+        if (!Storage::rename(job_->staged_path, NEW_FILE_PATH)) {
+            error = "staged_source_move_failed";
+            return false;
+        }
+        job_->offset = static_cast<size_t>(job_->source_size);
+        job_->phase = Phase::Record;
+        return true;
     }
 
     job_->output = Storage::open(NEW_FILE_PATH, "w");
@@ -390,6 +425,10 @@ bool StorageAtomicWriteService::record_locked(const char *&error) {
 bool StorageAtomicWriteService::publish_locked(const char *&error) {
 
     const bool had_previous = Storage::exists(job_->path);
+    if (had_previous && !job_->replace_existing) {
+        error = "destination_exists";
+        return false;
+    }
     if (had_previous && !Storage::rename(job_->path, PREVIOUS_FILE_PATH)) {
         error = "previous_preserve_failed";
         return false;

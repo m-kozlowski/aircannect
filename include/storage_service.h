@@ -16,6 +16,7 @@
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
 #include "storage_stream_port.h"
+#include "storage_upload_port.h"
 
 namespace aircannect {
 
@@ -197,6 +198,9 @@ StorageAtomicWritePort &atomic_write_port();
 
 // Foreground storage browsing and downloads
 StorageBrowserPort &browser_port();
+
+// Bounded inbound file uploads
+StorageUploadPort &upload_port();
 
 // Background storage maintenance
 StorageScanPort &scan_port();

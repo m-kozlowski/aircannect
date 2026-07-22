@@ -28,6 +28,7 @@
 #include "storage_path_service.h"
 #include "storage_scan_service.h"
 #include "storage_stream_service.h"
+#include "storage_upload_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -56,6 +57,7 @@ enum class MaintenanceOwner : uint8_t {
     Scan,
     Archive,
     Delete,
+    Upload,
 };
 
 struct JobSlot {
@@ -227,6 +229,7 @@ StoragePathService path_service;
 StorageAtomicWriteService atomic_write_service;
 StorageScanService scan_service;
 StorageStreamService stream_service;
+StorageUploadService upload_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 size_t foreground_turn = 0;
@@ -280,6 +283,14 @@ bool claim_delete_maintenance() {
 
 void release_delete_maintenance() {
     release_maintenance(MaintenanceOwner::Delete);
+}
+
+bool claim_upload_maintenance() {
+    return claim_maintenance(MaintenanceOwner::Upload);
+}
+
+void release_upload_maintenance() {
+    release_maintenance(MaintenanceOwner::Upload);
 }
 
 constexpr size_t max_size(size_t a, size_t b) {
@@ -997,6 +1008,12 @@ bool initialize_storage_resources() {
     }
     if (!path_service.begin(wake_service_task)) ready = false;
     if (!atomic_write_service.begin(wake_service_task)) ready = false;
+    if (!upload_service.begin(wake_service_task,
+                              atomic_write_service,
+                              claim_upload_maintenance,
+                              release_upload_maintenance)) {
+        ready = false;
+    }
     if (!scan_service.begin(wake_service_task,
                             claim_scan_maintenance,
                             release_scan_maintenance)) {
@@ -1012,6 +1029,7 @@ void set_storage_task_available(bool available) {
     delete_service.set_task_available(available);
     path_service.set_task_available(available);
     atomic_write_service.set_task_available(available);
+    upload_service.set_task_available(available);
     scan_service.set_task_available(available);
     stream_service.set_task_available(available);
 }
@@ -1921,17 +1939,19 @@ bool process_foreground_step() {
     }
     if (path_service.step()) return true;
 
-    for (size_t attempt = 0; attempt < 3; ++attempt) {
+    for (size_t attempt = 0; attempt < 4; ++attempt) {
         const size_t current = foreground_turn;
-        foreground_turn = (foreground_turn + 1) % 3;
+        foreground_turn = (foreground_turn + 1) % 4;
 
         bool worked = false;
         if (current == 0) {
             worked = process_browser_step();
         } else if (current == 1) {
             worked = process_read_step();
-        } else {
+        } else if (current == 2) {
             worked = process_stream_step();
+        } else {
+            worked = upload_service.step();
         }
         if (worked) return true;
     }
@@ -2461,6 +2481,10 @@ StorageBrowserPort &browser_port() {
     return browser_service;
 }
 
+StorageUploadPort &upload_port() {
+    return upload_service;
+}
+
 StorageArchivePort &archive_port() {
     return archive_service;
 }
@@ -2521,7 +2545,10 @@ void publish_activity(const ActivitySnapshot &activity) {
         activity.therapy_active || activity.realtime_stream_active ||
         activity.foreground_report_demand || activity.ota_install_active;
     const bool maintenance_paused = scan_paused || activity.export_active;
+    const bool upload_paused = activity.therapy_active ||
+                               activity.ota_install_active;
 
+    upload_service.set_paused(upload_paused);
     scan_service.set_paused(scan_paused);
     archive_service.set_paused(maintenance_paused);
     delete_service.set_paused(maintenance_paused);
@@ -2530,11 +2557,15 @@ void publish_activity(const ActivitySnapshot &activity) {
 
 StorageServiceStatus status() {
     StorageServiceStatus out = stats;
+    StorageUploadStatus upload;
+    const bool upload_active = upload_service.status(0, upload) &&
+                               upload.active();
     if (lock_queue()) {
         refresh_read_status_locked();
         out = stats;
         out.edf_queued = queued;
         out.busy = processing_job || processing_read ||
+                   upload_active ||
                    diagnostic.state == StorageDiagnosticState::Queued ||
                    diagnostic.state == StorageDiagnosticState::Writing;
         unlock_queue();
