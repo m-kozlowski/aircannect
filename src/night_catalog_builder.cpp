@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "report_records.h"
+#include "report_fallback_artifact.h"
 
 #ifdef ARDUINO
 #include "memory_manager.h"
@@ -1302,6 +1303,237 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
         next_fallback_file != final_fallback_files ||
         next_fallback_section != final_fallback_sections ||
         next_path != final_paths) {
+        return {};
+    }
+    return catalog;
+}
+
+std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
+    const NightCatalog &source,
+    const char *path,
+    const std::shared_ptr<const LargeByteBuffer> &artifact,
+    int64_t last_write_ms) {
+    if (!path || !path[0] || !artifact || artifact->size() == 0) return {};
+
+    const size_t path_length = strlen(path);
+    if (path_length > UINT16_MAX) return {};
+
+    ReportFallbackArtifactView replacement;
+    if (!ReportFallbackArtifactCodec::decode_metadata(
+            artifact->data(), artifact->size(), replacement) ||
+        replacement.info.total_bytes != artifact->size()) {
+        return {};
+    }
+
+    const NightCatalogRecord *source_night =
+        source.find(replacement.info.sleep_day);
+    if (!source_night ||
+        source_night->day_start_ms != replacement.info.day_start_ms ||
+        source_night->day_end_ms != replacement.info.day_end_ms) {
+        return {};
+    }
+
+    size_t source_session_count = 0;
+    const NightCatalogTimeRange *source_sessions =
+        source.sessions(*source_night, source_session_count);
+    if (!source_sessions ||
+        source_session_count != replacement.info.session_count) {
+        return {};
+    }
+    for (size_t i = 0; i < source_session_count; ++i) {
+        NightCatalogTimeRange replacement_session;
+        if (!replacement.session(i, replacement_session) ||
+            !same_range(source_sessions[i], replacement_session)) {
+            return {};
+        }
+    }
+
+    size_t removed_file_count = 0;
+    const NightCatalogFallbackFile *removed_files =
+        source.fallback_files(*source_night, removed_file_count);
+    if (removed_file_count > 0 && !removed_files) return {};
+
+    size_t removed_section_count = 0;
+    size_t removed_path_bytes = 0;
+    for (size_t i = 0; i < removed_file_count; ++i) {
+        const NightCatalogFallbackFile &file = removed_files[i];
+        if (!source.path(file) ||
+            !add_count(removed_section_count, file.section_count) ||
+            !add_count(removed_path_bytes,
+                       static_cast<size_t>(file.path_length) + 1)) {
+            return {};
+        }
+    }
+
+    if (removed_file_count > source.fallback_file_count_ ||
+        removed_section_count > source.fallback_section_count_ ||
+        removed_path_bytes > source.path_bytes_) {
+        return {};
+    }
+
+    size_t fallback_file_count =
+        source.fallback_file_count_ - removed_file_count;
+    size_t fallback_section_count =
+        source.fallback_section_count_ - removed_section_count;
+    size_t path_bytes = source.path_bytes_ - removed_path_bytes;
+    if (!add_count(fallback_file_count, 1) ||
+        !add_count(fallback_section_count,
+                   replacement.info.section_count) ||
+        !add_count(path_bytes, path_length + 1)) {
+        return {};
+    }
+
+    std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
+    if (!catalog ||
+        !catalog->allocate(source.record_count_,
+                           source.session_count_,
+                           source.mask_window_count_,
+                           source.file_count_,
+                           source.coverage_count_,
+                           source.signal_layout_count_,
+                           fallback_file_count,
+                           fallback_section_count,
+                           path_bytes)) {
+        return {};
+    }
+
+    if (source.session_count_ > 0) {
+        memcpy(catalog->sessions_,
+               source.sessions_,
+               source.session_count_ * sizeof(*source.sessions_));
+    }
+    if (source.mask_window_count_ > 0) {
+        memcpy(catalog->mask_windows_,
+               source.mask_windows_,
+               source.mask_window_count_ * sizeof(*source.mask_windows_));
+    }
+    if (source.coverage_count_ > 0) {
+        memcpy(catalog->coverage_,
+               source.coverage_,
+               source.coverage_count_ * sizeof(*source.coverage_));
+    }
+    if (source.signal_layout_count_ > 0) {
+        memcpy(catalog->signal_layouts_,
+               source.signal_layouts_,
+               source.signal_layout_count_ * sizeof(*source.signal_layouts_));
+    }
+
+    size_t next_file = 0;
+    size_t next_fallback_file = 0;
+    size_t next_fallback_section = 0;
+    size_t next_path = 0;
+    for (size_t night_index = 0;
+         night_index < source.record_count_;
+         ++night_index) {
+        const NightCatalogRecord &old_record = source.records_[night_index];
+        NightCatalogRecord &record = catalog->records_[night_index];
+        record = old_record;
+        record.file_offset = static_cast<uint32_t>(next_file);
+        record.fallback_file_offset =
+            static_cast<uint32_t>(next_fallback_file);
+
+        size_t file_count = 0;
+        const NightCatalogSourceFile *files =
+            source.files(old_record, file_count);
+        if (file_count > 0 && !files) return {};
+        for (size_t i = 0; i < file_count; ++i) {
+            const char *source_path = source.path(files[i]);
+            if (!source_path) return {};
+
+            NightCatalogSourceFile &file = catalog->files_[next_file++];
+            file = files[i];
+            file.path_offset = static_cast<uint32_t>(next_path);
+            memcpy(catalog->paths_ + next_path,
+                   source_path,
+                   static_cast<size_t>(file.path_length) + 1);
+            next_path += static_cast<size_t>(file.path_length) + 1;
+        }
+
+        if (old_record.sleep_day == replacement.info.sleep_day) {
+            record.source_flags |= NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
+            record.fallback_file_count = 1;
+
+            NightCatalogFallbackFile &file =
+                catalog->fallback_files_[next_fallback_file++];
+            file.path_offset = static_cast<uint32_t>(next_path);
+            file.path_length = static_cast<uint16_t>(path_length);
+            file.section_offset =
+                static_cast<uint32_t>(next_fallback_section);
+            file.section_count = static_cast<uint16_t>(
+                replacement.info.section_count);
+            file.file_size = artifact->size();
+            file.last_write_ms = last_write_ms;
+            file.identity = replacement.info.content_identity;
+            file.metadata_bytes = static_cast<uint32_t>(
+                replacement.info.metadata_bytes);
+
+            for (size_t i = 0;
+                 i < replacement.info.section_count;
+                 ++i) {
+                ReportFallbackSection replacement_section;
+                if (!replacement.section(i, replacement_section)) return {};
+
+                NightCatalogFallbackSection &section =
+                    catalog->fallback_sections_[next_fallback_section++];
+                section.kind = replacement_section.kind;
+                section.source = replacement_section.source;
+                section.signal = replacement_section.signal;
+                section.event_mask = replacement_section.event_mask;
+                section.payload_schema = replacement_section.payload_schema;
+                section.record_count = replacement_section.record_count;
+                section.sample_interval_ms =
+                    replacement_section.sample_interval_ms;
+                section.coverage = replacement_section.coverage;
+                section.data_offset = replacement_section.data_offset;
+                section.data_size = replacement_section.data_size;
+                section.data_crc32 = replacement_section.data_crc32;
+            }
+
+            memcpy(catalog->paths_ + next_path, path, path_length + 1);
+            next_path += path_length + 1;
+        } else {
+            size_t fallback_count = 0;
+            const NightCatalogFallbackFile *fallbacks =
+                source.fallback_files(old_record, fallback_count);
+            if (fallback_count > 0 && !fallbacks) return {};
+            record.fallback_file_count = static_cast<uint16_t>(fallback_count);
+
+            for (size_t i = 0; i < fallback_count; ++i) {
+                const NightCatalogFallbackFile &old_file = fallbacks[i];
+                const char *source_path = source.path(old_file);
+                size_t section_count = 0;
+                const NightCatalogFallbackSection *sections =
+                    source.fallback_sections(old_file, section_count);
+                if (!source_path || (section_count > 0 && !sections)) return {};
+
+                NightCatalogFallbackFile &file =
+                    catalog->fallback_files_[next_fallback_file++];
+                file = old_file;
+                file.path_offset = static_cast<uint32_t>(next_path);
+                file.section_offset =
+                    static_cast<uint32_t>(next_fallback_section);
+                for (size_t section_index = 0;
+                     section_index < section_count;
+                     ++section_index) {
+                    catalog->fallback_sections_[next_fallback_section++] =
+                        sections[section_index];
+                }
+
+                memcpy(catalog->paths_ + next_path,
+                       source_path,
+                       static_cast<size_t>(file.path_length) + 1);
+                next_path += static_cast<size_t>(file.path_length) + 1;
+            }
+        }
+
+        record.source_revision =
+            SourceRevision(calculate_revision(*catalog, record));
+    }
+
+    if (next_file != source.file_count_ ||
+        next_fallback_file != fallback_file_count ||
+        next_fallback_section != fallback_section_count ||
+        next_path != path_bytes) {
         return {};
     }
     return catalog;

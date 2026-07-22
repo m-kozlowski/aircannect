@@ -11,6 +11,8 @@
 
 namespace aircannect {
 
+class LargeByteBuffer;
+
 struct NightCatalogSourceFileInput {
     NightCatalogFileKind kind = NightCatalogFileKind::Brp;
     const char *path = nullptr;
@@ -111,6 +113,11 @@ class NightCatalogBuilder {
 public:
     static std::shared_ptr<const NightCatalog> build(
         const NightCatalogBuildInput &input);
+    static std::shared_ptr<const NightCatalog> replace_fallback(
+        const NightCatalog &catalog,
+        const char *path,
+        const std::shared_ptr<const LargeByteBuffer> &artifact,
+        int64_t last_write_ms = 0);
 };
 
 }  // namespace aircannect

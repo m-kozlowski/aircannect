@@ -1187,7 +1187,9 @@ void ReportFallbackAcquisitionService::finish(
     builder_.reset();
     event_records_.clear();
     plan_.reset();
-    replacement_.reset();
+    if (state != ReportFallbackAcquisitionState::Ready) {
+        replacement_.reset();
+    }
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
     preserve_payload_ = nullptr;

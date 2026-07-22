@@ -77,6 +77,11 @@ public:
     const ReportFallbackAcquisitionStatus &status() const {
         return status_;
     }
+    std::shared_ptr<const LargeByteBuffer> replacement() const {
+        return status_.state == ReportFallbackAcquisitionState::Ready
+            ? replacement_
+            : nullptr;
+    }
 
 private:
     static constexpr size_t MaxSourceTargets = 8;

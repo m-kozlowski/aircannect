@@ -7,6 +7,7 @@
 #include "report_artifact_lookup_service.h"
 #include "report_artifact_store_service.h"
 #include "report_executor.h"
+#include "report_fallback_acquisition_service.h"
 #include "report_planner.h"
 #include "report_request_queue.h"
 
@@ -17,6 +18,7 @@ enum class ReportEngineState : uint8_t {
     Queued,
     WaitingForCatalog,
     LookingUp,
+    AcquiringFallback,
     Executing,
     Publishing,
 };
@@ -36,8 +38,10 @@ struct ReportEngineStatus {
     size_t queued = 0;
     ReportArtifactRequest active_request;
     ReportArtifactLookupStatus lookup;
+    ReportFallbackAcquisitionStatus fallback;
     ReportExecutorStatus executor;
     ReportArtifactStoreStatus store;
+    uint64_t awaited_fallback_identity = 0;
     ReportEngineCompletion last_completion;
 };
 
@@ -61,9 +65,14 @@ public:
 
     void begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
+               ReportSpoolPort &spool_port,
                ReportArtifactAssembler &assembler);
 
     void publish_catalog(std::shared_ptr<const NightCatalog> catalog);
+    bool catalog_update_required() const;
+    std::shared_ptr<const LargeByteBuffer> fallback_replacement() const;
+    void catalog_update_failed(const char *error);
+
     ReportRequestEnqueueResult request(
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
@@ -80,6 +89,8 @@ private:
     enum class ActivePhase : uint8_t {
         Idle,
         LookingUp,
+        AcquiringFallback,
+        WaitingForCatalog,
         Executing,
         Publishing,
     };
@@ -93,6 +104,7 @@ private:
     bool start_request(ReportArtifactRequest request);
     bool finish_lookup(uint32_t now_ms);
     bool start_build(const ReportArtifactKey &artifact, uint32_t now_ms);
+    bool finish_fallback_acquisition();
     bool finish_execution(uint32_t now_ms);
     bool finish_publication(uint32_t now_ms);
     bool retry_active(uint32_t now_ms, uint32_t delay_ms);
@@ -105,6 +117,7 @@ private:
 
     ReportRequestQueue queue_;
     ReportArtifactLookupService lookup_;
+    ReportFallbackAcquisitionService fallback_acquisition_;
     ReportExecutor executor_;
     ReportArtifactStoreService artifact_store_;
     StorageReadPort *read_port_ = nullptr;
@@ -117,8 +130,10 @@ private:
     ReportArtifactAvailability active_availability_;
     ReportArtifactAvailability available_;
     std::shared_ptr<const ReportArtifactBundle> published_;
+    uint64_t awaited_fallback_identity_ = 0;
     ActivePhase phase_ = ActivePhase::Idle;
     bool build_tile_after_pair_ = false;
+    bool clear_after_fallback_cancel_ = false;
 };
 
 }  // namespace aircannect

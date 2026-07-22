@@ -17,6 +17,26 @@ StorageReadLane lookup_lane(ReportRequestPriority priority) {
         : StorageReadLane::Report;
 }
 
+StorageAtomicWriteLane write_lane(ReportRequestPriority priority) {
+    return priority == ReportRequestPriority::Foreground
+        ? StorageAtomicWriteLane::Foreground
+        : StorageAtomicWriteLane::Maintenance;
+}
+
+bool catalog_contains_fallback(const NightCatalog &catalog,
+                               const NightCatalogRecord &night,
+                               uint64_t identity) {
+    if (identity == 0) return false;
+
+    size_t count = 0;
+    const NightCatalogFallbackFile *files =
+        catalog.fallback_files(night, count);
+    for (size_t i = 0; files && i < count; ++i) {
+        if (files[i].identity == identity) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
@@ -25,10 +45,12 @@ ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
 
 void ReportEngine::begin(StorageReadPort &read_port,
                          StorageAtomicWritePort &write_port,
+                         ReportSpoolPort &spool_port,
                          ReportArtifactAssembler &assembler) {
     read_port_ = &read_port;
     assembler_ = &assembler;
     lookup_.begin(read_port);
+    fallback_acquisition_.begin(read_port, write_port, spool_port);
     executor_.begin(read_port);
     artifact_store_.begin(read_port, write_port);
 }
@@ -60,10 +82,51 @@ void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) 
 
     const NightCatalogRecord *night =
         catalog_->find(active_request_.artifact.sleep_day);
+
+    if (phase_ == ActivePhase::WaitingForCatalog) {
+        if (!night ||
+            !catalog_contains_fallback(*catalog_,
+                                       *night,
+                                       awaited_fallback_identity_)) {
+            return;
+        }
+
+        ReportArtifactRequest resumed = active_request_;
+        resumed.artifact.source_revision = night->source_revision;
+        fallback_acquisition_.reset();
+        active_plan_.reset();
+        awaited_fallback_identity_ = 0;
+        phase_ = ActivePhase::Idle;
+        (void)start_request(resumed);
+        return;
+    }
+
     if (!night ||
         night->source_revision != active_request_.artifact.source_revision) {
         cancel_active_work();
     }
+}
+
+bool ReportEngine::catalog_update_required() const {
+    return phase_ == ActivePhase::WaitingForCatalog;
+}
+
+std::shared_ptr<const LargeByteBuffer>
+ReportEngine::fallback_replacement() const {
+    return catalog_update_required()
+        ? fallback_acquisition_.replacement()
+        : nullptr;
+}
+
+void ReportEngine::catalog_update_failed(const char *error) {
+    if (!catalog_update_required()) return;
+
+    complete_active(OperationOutcome::failed(),
+                    ReportPlanStatus::InvalidCatalog,
+                    ReportExecutorError::None,
+                    error && error[0]
+                        ? error
+                        : "fallback_catalog_update_failed");
 }
 
 ReportRequestEnqueueResult ReportEngine::request(
@@ -124,9 +187,20 @@ size_t ReportEngine::cancel_generation(uint32_t generation) {
 
 void ReportEngine::clear() {
     queue_.clear();
+
+    if (phase_ == ActivePhase::AcquiringFallback) {
+        fallback_acquisition_.cancel();
+        clear_after_fallback_cancel_ = true;
+        available_ = {};
+        published_.reset();
+        last_completion_ = {};
+        return;
+    }
+
     if (phase_ != ActivePhase::Idle) {
+        const bool discard_assembly = phase_ == ActivePhase::Executing;
         cancel_active_work();
-        if (assembler_ && phase_ == ActivePhase::Executing) {
+        if (assembler_ && discard_assembly) {
             assembler_->discard_build();
         }
     }
@@ -156,6 +230,16 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
             }
             break;
 
+        case ActivePhase::AcquiringFallback:
+            worked = fallback_acquisition_.poll() || worked;
+            if (fallback_acquisition_.status().terminal()) {
+                worked = finish_fallback_acquisition() || worked;
+            }
+            break;
+
+        case ActivePhase::WaitingForCatalog:
+            break;
+
         case ActivePhase::Executing:
             worked = executor_.poll(record_budget) || worked;
             if (executor_.status().terminal()) {
@@ -181,13 +265,21 @@ ReportEngineStatus ReportEngine::status() const {
     out.queued = queue_.size();
     out.active_request = active_request_;
     out.lookup = lookup_.status();
+    out.fallback = fallback_acquisition_.status();
     out.executor = executor_.status();
     out.store = artifact_store_.status();
+    out.awaited_fallback_identity = awaited_fallback_identity_;
     out.last_completion = last_completion_;
 
     switch (phase_) {
         case ActivePhase::LookingUp:
             out.state = ReportEngineState::LookingUp;
+            break;
+        case ActivePhase::AcquiringFallback:
+            out.state = ReportEngineState::AcquiringFallback;
+            break;
+        case ActivePhase::WaitingForCatalog:
+            out.state = ReportEngineState::WaitingForCatalog;
             break;
         case ActivePhase::Executing:
             out.state = ReportEngineState::Executing;
@@ -379,6 +471,29 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
     }
 
     active_plan_ = std::move(planned.plan);
+    if (active_plan_->acquirable_signal_mask() != 0 ||
+        active_plan_->missing_event_mask() != 0) {
+        const OperationAdmission admitted = fallback_acquisition_.start(
+            active_plan_,
+            active_request_.ticket.generation,
+            lookup_lane(active_request_.priority),
+            write_lane(active_request_.priority));
+        if (admitted != OperationAdmission::Accepted) {
+            const ReportFallbackAcquisitionStatus fallback_status =
+                fallback_acquisition_.status();
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            fallback_status.error[0]
+                                ? fallback_status.error
+                                : "fallback_acquisition_rejected");
+            return true;
+        }
+
+        phase_ = ActivePhase::AcquiringFallback;
+        return true;
+    }
+
     if (!assembler_->begin_build(build_request_, *active_plan_)) {
         assembler_->discard_build();
         complete_active(OperationOutcome::failed(),
@@ -408,6 +523,41 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
     return true;
 }
 
+bool ReportEngine::finish_fallback_acquisition() {
+    const ReportFallbackAcquisitionStatus fallback_status =
+        fallback_acquisition_.status();
+    if (clear_after_fallback_cancel_) {
+        clear_after_fallback_cancel_ = false;
+        reset_active();
+        last_completion_ = {};
+        return true;
+    }
+
+    if (fallback_status.state == ReportFallbackAcquisitionState::Ready &&
+        fallback_status.replacement_identity != 0) {
+        awaited_fallback_identity_ = fallback_status.replacement_identity;
+        active_plan_.reset();
+        phase_ = ActivePhase::WaitingForCatalog;
+        return true;
+    }
+
+    if (fallback_status.state ==
+        ReportFallbackAcquisitionState::Cancelled) {
+        complete_active(OperationOutcome::cancelled(),
+                        ReportPlanStatus::Ready,
+                        ReportExecutorError::None);
+        return true;
+    }
+
+    complete_active(OperationOutcome::failed(),
+                    ReportPlanStatus::Ready,
+                    ReportExecutorError::None,
+                    fallback_status.error[0]
+                        ? fallback_status.error
+                        : "fallback_acquisition_failed");
+    return true;
+}
+
 bool ReportEngine::finish_execution(uint32_t now_ms) {
     const ReportExecutorStatus executor_status = executor_.status();
     if (executor_status.state == ReportExecutorState::Complete) {
@@ -423,12 +573,10 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
             return true;
         }
 
-        const StorageAtomicWriteLane lane =
-            active_request_.priority == ReportRequestPriority::Foreground
-                ? StorageAtomicWriteLane::Foreground
-                : StorageAtomicWriteLane::Maintenance;
         const OperationAdmission admitted = artifact_store_.start(
-            std::move(bundle), active_request_.ticket.generation, lane);
+            std::move(bundle),
+            active_request_.ticket.generation,
+            write_lane(active_request_.priority));
         if (admitted != OperationAdmission::Accepted) {
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
@@ -529,6 +677,14 @@ void ReportEngine::cancel_active_work() {
         case ActivePhase::LookingUp:
             lookup_.cancel();
             break;
+        case ActivePhase::AcquiringFallback:
+            fallback_acquisition_.cancel();
+            break;
+        case ActivePhase::WaitingForCatalog:
+            complete_active(OperationOutcome::cancelled(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
+            break;
         case ActivePhase::Executing:
             executor_.cancel();
             break;
@@ -558,12 +714,15 @@ void ReportEngine::reset_active() {
     lookup_.reset();
     executor_.reset();
     artifact_store_.reset();
+    fallback_acquisition_.reset();
     active_plan_.reset();
     active_request_ = {};
     build_request_ = {};
     active_availability_ = {};
     phase_ = ActivePhase::Idle;
     build_tile_after_pair_ = false;
+    awaited_fallback_identity_ = 0;
+    clear_after_fallback_cancel_ = false;
 }
 
 }  // namespace aircannect

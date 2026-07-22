@@ -5,6 +5,8 @@
 #include <utility>
 
 #include "board_report.h"
+#include "night_catalog_builder.h"
+#include "report_fallback_artifact.h"
 #include "report_night_artifact_builder.h"
 
 #ifdef ARDUINO
@@ -73,6 +75,11 @@ uint32_t next_store_retry_delay(uint8_t attempt) {
 
 void advance_store_retry(uint8_t &attempt) {
     if (attempt < 5) ++attempt;
+}
+
+uint32_t next_catalog_generation(uint32_t generation) {
+    generation++;
+    return generation == 0 ? 1 : generation;
 }
 
 bool deadline_due(uint32_t now_ms, uint32_t deadline_ms) {
@@ -318,7 +325,8 @@ struct ReportTask::Runtime {
                    catalog_load_pending) {
             next.state = ReportTaskState::LoadingCatalog;
         } else if (catalog_refresh.active() || pending_refresh.valid() ||
-                   refresh_generation != 0) {
+                   refresh_generation != 0 ||
+                   engine.catalog_update_required()) {
             next.state = ReportTaskState::RefreshingCatalog;
         } else {
             switch (next.engine.state) {
@@ -329,6 +337,7 @@ struct ReportTask::Runtime {
                     next.state = ReportTaskState::LookingUp;
                     break;
                 case ReportEngineState::Executing:
+                case ReportEngineState::AcquiringFallback:
                     next.state = ReportTaskState::Building;
                     break;
                 case ReportEngineState::Queued:
@@ -411,7 +420,8 @@ ReportTask::~ReportTask() {
 
 bool ReportTask::begin(StorageReadPort &read_port,
                        StorageAtomicWritePort &write_port,
-                       StorageScanPort &scan_port) {
+                       StorageScanPort &scan_port,
+                       ReportSpoolPort &spool_port) {
     if (runtime_) return runtime_->initialized;
 
 #ifdef ARDUINO
@@ -434,7 +444,10 @@ bool ReportTask::begin(StorageReadPort &read_port,
 
     runtime_->catalog_refresh.begin(scan_port, read_port);
     runtime_->catalog_store.begin(read_port, write_port);
-    runtime_->engine.begin(read_port, write_port, runtime_->builder);
+    runtime_->engine.begin(read_port,
+                           write_port,
+                           spool_port,
+                           runtime_->builder);
     runtime_->initialized = true;
     runtime_->publish_status();
 
@@ -659,6 +672,48 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
         runtime.store_purpose != CatalogStorePurpose::Load &&
+        runtime.engine.catalog_update_required()) {
+        const std::shared_ptr<const LargeByteBuffer> replacement =
+            runtime.engine.fallback_replacement();
+        const ReportEngineStatus engine_status = runtime.engine.status();
+        char path[AC_STORAGE_PATH_MAX] = {};
+        std::shared_ptr<const NightCatalog> updated;
+
+        const char *update_error = nullptr;
+        if (!runtime.catalog) {
+            update_error = "fallback_catalog_missing";
+        } else if (!replacement) {
+            update_error = "fallback_replacement_missing";
+        } else if (!report_fallback_artifact_path(
+                       engine_status.active_request.artifact.sleep_day,
+                       path,
+                       sizeof(path))) {
+            update_error = "fallback_replacement_path_invalid";
+        } else {
+            updated = NightCatalogBuilder::replace_fallback(
+                *runtime.catalog, path, replacement);
+            if (!updated) update_error = "fallback_catalog_replace_failed";
+        }
+
+        if (!updated) {
+            runtime.engine.catalog_update_failed(update_error);
+            runtime.command_failures++;
+        } else {
+            const uint32_t generation =
+                next_catalog_generation(runtime.catalog_generation);
+            runtime.accept_catalog(std::move(updated), generation);
+            runtime.pending_catalog_save = runtime.catalog;
+            runtime.catalog_store_retry_at_ms = 0;
+            runtime.catalog_store_retry_attempt = 0;
+        }
+        worked = true;
+    }
+
+    if (!runtime.catalog_refresh.active() &&
+        runtime.refresh_generation == 0 &&
+        !runtime.catalog_load_pending &&
+        runtime.store_purpose != CatalogStorePurpose::Load &&
+        !runtime.engine.catalog_update_required() &&
         runtime.pending_refresh.valid()) {
         const OperationAdmission admitted =
             runtime.catalog_refresh.request_refresh(
@@ -702,6 +757,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.pending_refresh.valid() &&
+        !runtime.engine.catalog_update_required() &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save;
     if (catalog_stable) {

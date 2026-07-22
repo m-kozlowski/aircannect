@@ -48,7 +48,8 @@ public:
 
     bool begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
-               StorageScanPort &scan_port);
+               StorageScanPort &scan_port,
+               ReportSpoolPort &spool_port);
 
     OperationAdmission request_artifact(
         const ReportArtifactKey &artifact,
