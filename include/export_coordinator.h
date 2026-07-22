@@ -44,6 +44,7 @@ private:
         uint32_t report_settle_due_ms = 0;
         bool storage_pending = false;
         bool storage_grace_armed = false;
+        bool storage_fallback_reported = false;
         uint32_t storage_due_ms = 0;
         uint32_t storage_deadline_ms = 0;
         bool sleephq_pending = false;

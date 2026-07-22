@@ -2,6 +2,7 @@
 
 #include <new>
 #include <stdio.h>
+#include <string.h>
 
 #include <esp_heap_caps.h>
 
@@ -178,7 +179,13 @@ bool ExportTask::queue_command(CommandKind kind, const char *day) {
     if (!lock_inputs()) return false;
 
     if (runtime_->inputs.command.kind != CommandKind::None) {
+        const bool same_day = kind != CommandKind::SleepHqSyncDay ||
+                              strcmp(runtime_->inputs.command.day, day) == 0;
+        const bool already_queued =
+            runtime_->inputs.command.kind == kind && same_day;
         unlock_inputs();
+
+        if (already_queued) return true;
 
         if (status_lock_ &&
             xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -375,14 +382,16 @@ bool ExportTask::apply_command(const Command &command) {
 }
 
 void ExportTask::finish_command(const Command &command, bool failed) {
-    if (!runtime_) return;
-    if (!lock_inputs()) return;
+    if (!runtime_ || !input_lock_ ||
+        xSemaphoreTake(input_lock_, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
 
     if (runtime_->inputs.command.sequence == command.sequence) {
         runtime_->inputs.command = Command();
     }
 
-    unlock_inputs();
+    xSemaphoreGive(input_lock_);
     if (failed && status_lock_ &&
         xSemaphoreTake(status_lock_, pdMS_TO_TICKS(20)) == pdTRUE) {
         runtime_->control_status.command_failures++;
