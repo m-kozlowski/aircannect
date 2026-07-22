@@ -2175,7 +2175,7 @@ void begin() {
                   "allocation_failed");
     }
 
-    (void)file_log_sink.begin();
+    (void)file_log_sink.begin(wake_service_task);
     (void)browser_service.begin(wake_service_task);
     (void)archive_service.begin(wake_service_task,
                                 claim_archive_maintenance,
@@ -2497,22 +2497,9 @@ StorageDiagnosticStatus diagnostic_status() {
     return out;
 }
 
-bool configure_file_log(bool enabled) {
-    if (!file_log_sink.begin()) return false;
-    file_log_sink.set_enabled(enabled);
-    if (stats.initialized) wake_service_task();
-    return true;
-}
-
-bool enqueue_file_log_line(const char *line, size_t length) {
-    if (!file_log_sink.begin()) return false;
-    const bool accepted = file_log_sink.enqueue(line, length);
-    if (accepted && stats.initialized) wake_service_task();
-    return accepted;
-}
-
-StorageFileLogStatus file_log_status() {
-    return file_log_sink.status();
+FileLogSinkPort &file_log_port() {
+    (void)file_log_sink.begin(wake_service_task);
+    return file_log_sink;
 }
 
 void publish_activity(const ActivitySnapshot &activity) {

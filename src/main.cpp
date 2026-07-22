@@ -620,6 +620,7 @@ void setup() {
     // Core services
     Memory::begin();
     Log::init();
+    Log::bind_file_log_sink(StorageService::file_log_port());
 
     const bool tls_allocator_ready = TlsMemory::begin();
     const TlsMemoryStatus tls_mem = TlsMemory::status();

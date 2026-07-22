@@ -43,8 +43,9 @@ void StorageFileLogSink::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
 }
 
-bool StorageFileLogSink::begin() {
+bool StorageFileLogSink::begin(WakeTask wake_task) {
 #if AC_FILE_LOG_ENABLED
+    if (wake_task) wake_task_ = wake_task;
     if (!lock_) lock_ = xSemaphoreCreateMutex();
     if (!lock_) return false;
 
@@ -66,17 +67,19 @@ bool StorageFileLogSink::begin() {
 #endif
 }
 
-void StorageFileLogSink::set_enabled(bool enabled) {
+bool StorageFileLogSink::configure(bool enabled) {
 #if AC_FILE_LOG_ENABLED
-    if (!lock_) (void)begin();
-    if (!lock()) return;
+    if (!begin() || !lock()) return false;
 
     desired_enabled_ = enabled;
     if (!enabled && queue_) queue_->clear();
     update_queue_status_locked();
     unlock();
+    if (wake_task_) wake_task_();
+    return true;
 #else
     (void)enabled;
+    return false;
 #endif
 }
 
@@ -106,6 +109,7 @@ bool StorageFileLogSink::enqueue(const char *line, size_t length) {
     }
     update_queue_status_locked();
     unlock();
+    if (accepted && wake_task_) wake_task_();
     return accepted;
 #else
     (void)line;
@@ -382,8 +386,8 @@ bool StorageFileLogSink::step() {
 #endif
 }
 
-StorageFileLogStatus StorageFileLogSink::status() const {
-    StorageFileLogStatus result;
+FileLogSinkStatus StorageFileLogSink::status() const {
+    FileLogSinkStatus result;
     if (!lock()) return result;
     result = status_;
     unlock();

@@ -6,6 +6,7 @@
 
 #include "board.h"
 #include "edf_file_writer.h"
+#include "file_log_sink_port.h"
 #include "runtime_snapshots.h"
 #include "storage_archive_port.h"
 #include "storage_atomic_write_port.h"
@@ -132,18 +133,6 @@ public:
     virtual StorageServiceStatus status() const = 0;
 };
 
-struct StorageFileLogStatus {
-    bool available = false;
-    bool enabled = false;
-    bool open = false;
-    size_t queue_capacity = 0;
-    size_t queued = 0;
-    uint64_t bytes = 0;
-    uint32_t written = 0;
-    uint32_t drops = 0;
-    uint32_t errors = 0;
-};
-
 enum class StorageDiagnosticState : uint8_t {
     Idle,
     Queued,
@@ -219,10 +208,8 @@ bool request_diagnostic_append(const char *path,
                                size_t length);
 StorageDiagnosticStatus diagnostic_status();
 
-// File logging
-bool configure_file_log(bool enabled);
-bool enqueue_file_log_line(const char *line, size_t length);
-StorageFileLogStatus file_log_status();
+// File logging producer
+FileLogSinkPort &file_log_port();
 
 // Runtime facts used by storage-owned scheduling policy
 void publish_activity(const ActivitySnapshot &activity);

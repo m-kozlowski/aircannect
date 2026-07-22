@@ -11,9 +11,9 @@
 #include <time.h>
 
 #include "board.h"
+#include "file_log_sink_port.h"
 #include "fixed_queue.h"
 #include "memory_manager.h"
-#include "storage_service.h"
 #include "string_util.h"
 
 using aircannect::FixedQueue;
@@ -46,6 +46,8 @@ IPAddress syslog_ip;
 String syslog_host_text;
 uint16_t syslog_port_value = AC_SYSLOG_PORT;
 bool syslog_enabled_value = false;
+aircannect::FileLogSinkPort *file_log_sink = nullptr;
+bool file_log_requested_value = false;
 bool file_log_enabled_value = false;
 char syslog_hostname[64] = "aircannect";
 
@@ -224,8 +226,7 @@ void enqueue_file_log_record(const LogRecord &record) {
         log_stats.truncated++;
     }
 
-    if (aircannect::StorageService::enqueue_file_log_line(line,
-                                                          write_length)) {
+    if (file_log_sink && file_log_sink->enqueue(line, write_length)) {
         log_stats.file_enqueued++;
     } else {
         log_stats.file_drops++;
@@ -322,6 +323,19 @@ void init() {
         log_mutex = xSemaphoreCreateMutexStatic(&log_mutex_storage);
     }
     for (int i = 0; i < CAT_COUNT; ++i) levels[i] = LOG_INFO;
+}
+
+void bind_file_log_sink(aircannect::FileLogSinkPort &sink) {
+#if AC_FILE_LOG_ENABLED
+    lock_log();
+    file_log_sink = &sink;
+    file_log_enabled_value =
+        file_log_requested_value && sink.configure(true);
+    if (!file_log_requested_value) (void)sink.configure(false);
+    unlock_log();
+#else
+    (void)sink;
+#endif
 }
 
 void set_level(log_level_t level) {
@@ -496,14 +510,9 @@ void configure_syslog(bool enabled,
 void configure_filelog(bool enabled) {
 #if AC_FILE_LOG_ENABLED
     lock_log();
+    file_log_requested_value = enabled;
     file_log_enabled_value = false;
-    if (!enabled) {
-        (void)aircannect::StorageService::configure_file_log(false);
-        unlock_log();
-        return;
-    }
-
-    if (aircannect::StorageService::configure_file_log(true)) {
+    if (file_log_sink && file_log_sink->configure(enabled) && enabled) {
         file_log_enabled_value = true;
     }
     unlock_log();
@@ -555,7 +564,10 @@ bool filelog_enabled() {
 }
 
 size_t filelog_queue_depth() {
-    return aircannect::StorageService::file_log_status().queued;
+    lock_log();
+    aircannect::FileLogSinkPort *sink = file_log_sink;
+    unlock_log();
+    return sink ? sink->status().queued : 0;
 }
 
 Stats stats() {
@@ -564,10 +576,12 @@ Stats stats() {
     if (syslog_queue) out.syslog_drops += syslog_queue->dropped();
     unlock_log();
 
-    const aircannect::StorageFileLogStatus file_log =
-        aircannect::StorageService::file_log_status();
-    out.file_dequeued = file_log.written;
-    out.file_errors += file_log.errors;
+    aircannect::FileLogSinkPort *sink = file_log_sink;
+    if (sink) {
+        const aircannect::FileLogSinkStatus file_log = sink->status();
+        out.file_dequeued = file_log.written;
+        out.file_errors += file_log.errors;
+    }
     return out;
 }
 

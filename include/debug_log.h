@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <string>
 
+namespace aircannect {
+class FileLogSinkPort;
+}
+
 enum log_level_t {
     LOG_ERROR = 0,
     LOG_WARN = 1,
@@ -48,6 +52,7 @@ struct Stats {
 };
 
 void init();
+void bind_file_log_sink(aircannect::FileLogSinkPort &sink);
 void set_level(log_level_t level);
 void set_cat_level(log_cat_t cat, log_level_t level);
 log_level_t get_cat_level(log_cat_t cat);

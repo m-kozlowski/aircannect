@@ -6,21 +6,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "storage_service.h"
+#include "file_log_sink_port.h"
 
 namespace aircannect {
 
-class StorageFileLogSink {
+class StorageFileLogSink final : public FileLogSinkPort {
 public:
-    bool begin();
+    using WakeTask = void (*)();
 
-    void set_enabled(bool enabled);
+    bool begin(WakeTask wake_task = nullptr);
+
+    bool configure(bool enabled) override;
     void set_rotation_allowed(bool allowed);
-    bool enqueue(const char *line, size_t length);
+    bool enqueue(const char *line, size_t length) override;
 
     bool prepare_tail_read();
     bool step();
-    StorageFileLogStatus status() const;
+    FileLogSinkStatus status() const override;
 
 private:
     struct Line;
@@ -44,9 +46,10 @@ private:
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     Queue *queue_ = nullptr;
+    WakeTask wake_task_ = nullptr;
     bool desired_enabled_ = false;
     bool rotation_allowed_ = true;
-    StorageFileLogStatus status_;
+    FileLogSinkStatus status_;
 
     File file_;
     uint64_t file_size_ = 0;
