@@ -23,4 +23,18 @@ void ReportSpoolFetchCompletion::move_from(
     other.clear();
 }
 
+void ReportSpoolFetchRound::clear() {
+    ticket = {};
+    result.clear();
+}
+
+void ReportSpoolFetchRound::move_from(ReportSpoolFetchRound &other) {
+    if (this == &other) return;
+
+    clear();
+    ticket = other.ticket;
+    result.move_from(other.result);
+    other.clear();
+}
+
 }  // namespace aircannect

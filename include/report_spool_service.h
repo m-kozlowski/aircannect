@@ -27,6 +27,8 @@ public:
     OperationSubmission request_fetch(
         const ReportSpoolFetchCommand &command) override;
     bool cancel(OperationTicket ticket) override;
+    bool take_round(OperationTicket ticket,
+                    ReportSpoolFetchRound &round) override;
     bool take_completion(
         OperationTicket ticket,
         ReportSpoolFetchCompletion &completion) override;
@@ -43,6 +45,9 @@ private:
     bool take_queued(ReportSpoolFetchCommand &command,
                      OperationTicket &ticket);
     bool take_cancel_request(OperationTicket &ticket);
+    bool round_waiting() const;
+    bool publish_completed_round();
+    void clear_published_round(OperationTicket ticket);
     void publish_completion(OperationTicket ticket,
                             OperationOutcome outcome,
                             ReportSpoolResult *result,
@@ -53,9 +58,11 @@ private:
     OperationTicket queued_ticket_;
     OperationTicket active_ticket_;
     OperationTicket cancel_ticket_;
+    ReportSpoolFetchRound round_;
     ReportSpoolFetchCompletion completion_;
     uint32_t next_ticket_id_ = 1;
     bool queued_ = false;
+    bool round_ready_ = false;
     bool completion_ready_ = false;
     bool initialized_ = false;
 

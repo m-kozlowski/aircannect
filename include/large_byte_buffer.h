@@ -19,6 +19,7 @@ public:
     uint8_t *data() { return data_; }
     const uint8_t *data() const { return data_; }
     size_t size() const { return size_; }
+    bool truncate(size_t size);
 
 private:
     LargeByteBuffer(uint8_t *data, size_t size) : data_(data), size_(size) {}

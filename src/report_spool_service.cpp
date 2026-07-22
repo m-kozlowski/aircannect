@@ -56,7 +56,8 @@ OperationSubmission ReportSpoolService::request_fetch(
     if (!initialized_ || !command.valid() || !lock()) {
         return OperationSubmission::rejected();
     }
-    if (queued_ || active_ticket_.valid() || completion_ready_) {
+    if (queued_ || active_ticket_.valid() || round_ready_ ||
+        completion_ready_) {
         unlock();
         return OperationSubmission::busy();
     }
@@ -96,6 +97,20 @@ bool ReportSpoolService::cancel(OperationTicket ticket) {
     return false;
 }
 
+bool ReportSpoolService::take_round(OperationTicket ticket,
+                                    ReportSpoolFetchRound &round) {
+    if (!initialized_ || !ticket.valid() || !lock()) return false;
+    if (!round_ready_ || round_.ticket != ticket) {
+        unlock();
+        return false;
+    }
+
+    round.move_from(round_);
+    round_ready_ = false;
+    unlock();
+    return true;
+}
+
 bool ReportSpoolService::take_completion(
     OperationTicket ticket,
     ReportSpoolFetchCompletion &completion) {
@@ -124,12 +139,15 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
     OperationTicket cancelled;
     if (take_cancel_request(cancelled)) {
         runtime_.reset();
+        clear_published_round(cancelled);
         publish_completion(cancelled,
                            OperationOutcome::cancelled(),
                            nullptr,
                            nullptr);
         return true;
     }
+
+    if (round_waiting()) return true;
 
     ReportSpoolFetchCommand command;
     OperationTicket ticket;
@@ -154,7 +172,7 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
             AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL;
         request.max_rounds = 128;
         request.pace_on_backpressure = true;
-        request.stream_rounds = false;
+        request.stream_rounds = true;
         if (!runtime_.begin(request)) {
             publish_completion(ticket,
                                OperationOutcome::failed(),
@@ -171,6 +189,8 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
 
     const bool drained = runtime_.drain_notification();
     runtime_.poll(transport_backpressure_active, rx_queue_full_alerts);
+
+    if (publish_completed_round()) return true;
 
     if (runtime_.complete()) {
         ReportSpoolResult result;
@@ -211,7 +231,7 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
 
 bool ReportSpoolService::active() const {
     if (!initialized_ || !lock()) return false;
-    const bool value = queued_ || active_ticket_.valid();
+    const bool value = queued_ || active_ticket_.valid() || round_ready_;
     unlock();
     return value;
 }
@@ -262,6 +282,43 @@ bool ReportSpoolService::take_cancel_request(OperationTicket &ticket) {
     active_ticket_ = {};
     unlock();
     return true;
+}
+
+bool ReportSpoolService::round_waiting() const {
+    if (!lock()) return true;
+    const bool waiting = round_ready_;
+    unlock();
+    return waiting;
+}
+
+bool ReportSpoolService::publish_completed_round() {
+    if (!lock()) return false;
+    if (round_ready_ || !active_ticket_.valid()) {
+        unlock();
+        return false;
+    }
+
+    ReportSpoolResult result;
+    if (!runtime_.take_completed_round(result)) {
+        unlock();
+        return false;
+    }
+
+    round_.clear();
+    round_.ticket = active_ticket_;
+    round_.result.move_from(result);
+    round_ready_ = true;
+    unlock();
+    return true;
+}
+
+void ReportSpoolService::clear_published_round(OperationTicket ticket) {
+    if (!ticket.valid() || !lock()) return;
+    if (round_ready_ && round_.ticket == ticket) {
+        round_.clear();
+        round_ready_ = false;
+    }
+    unlock();
 }
 
 void ReportSpoolService::publish_completion(

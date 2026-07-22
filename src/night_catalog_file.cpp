@@ -21,7 +21,7 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'N', 'C', 'A', 'T', '0', '9',
+    'A', 'C', 'N', 'C', 'A', 'T', '1', '0',
 };
 
 constexpr size_t RECORD_BYTES = 120;

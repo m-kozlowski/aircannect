@@ -20,7 +20,7 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'F', 'B', 'A', 'C', 'K', '4',
+    'A', 'C', 'F', 'B', 'A', 'C', 'K', '5',
 };
 constexpr uint8_t NO_SIGNAL = UINT8_MAX;
 constexpr size_t IDENTITY_OFFSET = 56;
@@ -195,6 +195,17 @@ bool section_precedes(const ReportFallbackSectionInput &lhs,
         return lhs.coverage.start_ms < rhs.coverage.start_ms;
     }
     return lhs.coverage.end_ms < rhs.coverage.end_ms;
+}
+
+ReportFallbackSectionInput section_sort_key(
+    const ReportFallbackSection &section) {
+    ReportFallbackSectionInput key;
+    key.kind = section.kind;
+    key.source = section.source;
+    key.signal = section.signal;
+    key.event_mask = section.event_mask;
+    key.coverage = section.coverage;
+    return key;
 }
 
 void encode_section(uint8_t *out,
@@ -375,7 +386,7 @@ bool ReportFallbackArtifactCodec::decode_metadata(
         previous_session = session;
     }
 
-    uint64_t expected_offset = info.metadata_bytes;
+    size_t payload_bytes = 0;
     ReportFallbackSection previous;
     bool have_previous = false;
     for (size_t i = 0; i < info.section_count; ++i) {
@@ -384,30 +395,42 @@ bool ReportFallbackArtifactCodec::decode_metadata(
             !section_valid(section, info.total_bytes) ||
             section.coverage.start_ms < info.day_start_ms ||
             section.coverage.end_ms > info.day_end_ms ||
-            section.data_offset != expected_offset) {
+            section.data_offset < info.metadata_bytes ||
+            section.data_offset > info.total_bytes ||
+            section.data_size > info.payload_bytes - payload_bytes) {
             return false;
         }
         if (have_previous) {
-            ReportFallbackSectionInput lhs;
-            lhs.kind = previous.kind;
-            lhs.source = previous.source;
-            lhs.signal = previous.signal;
-            lhs.event_mask = previous.event_mask;
-            lhs.coverage = previous.coverage;
-            ReportFallbackSectionInput rhs;
-            rhs.kind = section.kind;
-            rhs.source = section.source;
-            rhs.signal = section.signal;
-            rhs.event_mask = section.event_mask;
-            rhs.coverage = section.coverage;
-            if (!section_precedes(lhs, rhs)) return false;
+            if (!section_precedes(section_sort_key(previous),
+                                  section_sort_key(section))) {
+                return false;
+            }
         }
 
-        expected_offset += section.data_size;
+        if (section.data_size > 0) {
+            const uint64_t section_end =
+                section.data_offset + section.data_size;
+            for (size_t j = 0; j < i; ++j) {
+                ReportFallbackSection other;
+                if (!decode_section(section_bytes + j * SectionBytes,
+                                    other)) {
+                    return false;
+                }
+                const uint64_t other_end =
+                    other.data_offset + other.data_size;
+                if (other.data_size > 0 &&
+                    section.data_offset < other_end &&
+                    other.data_offset < section_end) {
+                    return false;
+                }
+            }
+        }
+
+        payload_bytes += section.data_size;
         previous = section;
         have_previous = true;
     }
-    if (expected_offset != info.total_bytes) return false;
+    if (payload_bytes != info.payload_bytes) return false;
 
     view.info = info;
     view.session_bytes = session_bytes;
@@ -434,85 +457,272 @@ std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::encode(
         return {};
     }
 
-    size_t session_bytes = 0;
-    size_t table_bytes = 0;
-    size_t metadata_bytes = 0;
-    size_t payload_bytes = 0;
-    if (!multiply_size(session_count, SessionBytes, session_bytes) ||
-        !multiply_size(section_count, SectionBytes, table_bytes) ||
-        !add_size(HeaderBytes, session_bytes, metadata_bytes) ||
-        !add_size(metadata_bytes, table_bytes, metadata_bytes)) {
-        return {};
-    }
-
     for (size_t i = 0; i < section_count; ++i) {
         if (!section_input_valid(sections[i]) ||
             sections[i].coverage.start_ms < day_start_ms ||
             sections[i].coverage.end_ms > day_end_ms ||
-            (i > 0 && !section_precedes(sections[i - 1], sections[i])) ||
-            !add_size(payload_bytes,
-                      sections[i].payload_size,
-                      payload_bytes)) {
+            (i > 0 && !section_precedes(sections[i - 1], sections[i]))) {
             return {};
         }
     }
 
-    size_t total_bytes = 0;
-    if (!add_size(metadata_bytes, payload_bytes, total_bytes) ||
-        total_bytes > MaxFileBytes) {
+    ReportFallbackArtifactBuilder builder;
+    if (!builder.begin(sleep_day,
+                       day_start_ms,
+                       day_end_ms,
+                       sessions,
+                       session_count)) {
+        return {};
+    }
+    for (size_t i = 0; i < section_count; ++i) {
+        if (!builder.append_section(sections[i])) return {};
+    }
+    return builder.finish();
+}
+
+bool ReportFallbackArtifactBuilder::begin(
+    SleepDayId sleep_day,
+    int64_t day_start_ms,
+    int64_t day_end_ms,
+    const NightCatalogTimeRange *sessions,
+    size_t session_count) {
+    reset();
+    if (!sleep_day.valid() || day_start_ms <= 0 ||
+        day_end_ms <= day_start_ms ||
+        !sessions_valid(sessions,
+                        session_count,
+                        day_start_ms,
+                        day_end_ms)) {
+        return false;
+    }
+
+    output_ = LargeByteBuffer::allocate(
+        ReportFallbackArtifactCodec::MaxFileBytes);
+    if (!output_) return false;
+
+    memset(output_->data(),
+           0,
+           ReportFallbackArtifactCodec::MaxMetadataBytes);
+    uint8_t *session_table = output_->data() +
+        ReportFallbackArtifactCodec::HeaderBytes;
+    for (size_t i = 0; i < session_count; ++i) {
+        encode_range(session_table +
+                         i * ReportFallbackArtifactCodec::SessionBytes,
+                     sessions[i]);
+    }
+
+    sleep_day_ = sleep_day;
+    day_start_ms_ = day_start_ms;
+    day_end_ms_ = day_end_ms;
+    session_count_ = session_count;
+    return true;
+}
+
+void ReportFallbackArtifactBuilder::reset() {
+    output_.reset();
+    sleep_day_ = {};
+    day_start_ms_ = 0;
+    day_end_ms_ = 0;
+    session_count_ = 0;
+    section_count_ = 0;
+    payload_bytes_ = 0;
+    reserved_section_ = {};
+    reserved_payload_offset_ = 0;
+    section_reserved_ = false;
+}
+
+bool ReportFallbackArtifactBuilder::append_section(
+    const ReportFallbackSectionInput &section) {
+    uint8_t *payload = nullptr;
+    if (!reserve_section(section, payload)) return false;
+    if (section.payload_size > 0) {
+        memcpy(payload, section.payload, section.payload_size);
+    }
+    return commit_reserved_section();
+}
+
+bool ReportFallbackArtifactBuilder::reserve_section(
+    const ReportFallbackSectionInput &section,
+    uint8_t *&payload) {
+    payload = nullptr;
+    if (!output_ || section_reserved_ ||
+        section_count_ >= ReportFallbackArtifactCodec::MaxSections ||
+        section.coverage.start_ms < day_start_ms_ ||
+        section.coverage.end_ms > day_end_ms_) {
+        return false;
+    }
+
+    ReportFallbackSectionInput validated = section;
+    validated.payload = section.payload_size > 0
+        ? reinterpret_cast<const uint8_t *>(1)
+        : nullptr;
+    if (!section_input_valid(validated) ||
+        payload_bytes_ > ReportFallbackArtifactCodec::MaxFileBytes -
+            ReportFallbackArtifactCodec::MaxMetadataBytes ||
+        section.payload_size > ReportFallbackArtifactCodec::MaxFileBytes -
+            ReportFallbackArtifactCodec::MaxMetadataBytes -
+            payload_bytes_) {
+        return false;
+    }
+
+    reserved_section_ = section;
+    reserved_section_.payload = nullptr;
+    reserved_payload_offset_ =
+        ReportFallbackArtifactCodec::MaxMetadataBytes + payload_bytes_;
+    section_reserved_ = true;
+    payload = output_->data() + reserved_payload_offset_;
+    return true;
+}
+
+bool ReportFallbackArtifactBuilder::commit_reserved_section(
+    bool verify_crc,
+    uint32_t expected_crc32) {
+    if (!output_ || !section_reserved_) return false;
+
+    const uint32_t payload_crc = crc32_ieee(
+        output_->data() + reserved_payload_offset_,
+        reserved_section_.payload_size);
+    if (verify_crc && payload_crc != expected_crc32) {
+        discard_reserved_section();
+        return false;
+    }
+
+    encode_section(temporary_section_record(section_count_),
+                   reserved_section_,
+                   reserved_payload_offset_,
+                   payload_crc);
+    payload_bytes_ += reserved_section_.payload_size;
+    section_count_++;
+    discard_reserved_section();
+    return true;
+}
+
+void ReportFallbackArtifactBuilder::discard_reserved_section() {
+    reserved_section_ = {};
+    reserved_payload_offset_ = 0;
+    section_reserved_ = false;
+}
+
+uint8_t *ReportFallbackArtifactBuilder::temporary_section_record(
+    size_t index) const {
+    if (!output_ || index >= ReportFallbackArtifactCodec::MaxSections) {
+        return nullptr;
+    }
+
+    return output_->data() + ReportFallbackArtifactCodec::HeaderBytes +
+        ReportFallbackArtifactCodec::MaxSessions *
+            ReportFallbackArtifactCodec::SessionBytes +
+        index * ReportFallbackArtifactCodec::SectionBytes;
+}
+
+bool ReportFallbackArtifactBuilder::sort_sections() {
+    uint8_t record[ReportFallbackArtifactCodec::SectionBytes];
+    for (size_t i = 1; i < section_count_; ++i) {
+        memcpy(record,
+               temporary_section_record(i),
+               sizeof(record));
+
+        ReportFallbackSection current;
+        if (!decode_section(record, current)) return false;
+
+        size_t position = i;
+        while (position > 0) {
+            ReportFallbackSection previous;
+            if (!decode_section(temporary_section_record(position - 1),
+                                previous)) {
+                return false;
+            }
+            if (section_precedes(section_sort_key(previous),
+                                 section_sort_key(current))) {
+                break;
+            }
+
+            memcpy(temporary_section_record(position),
+                   temporary_section_record(position - 1),
+                   sizeof(record));
+            position--;
+        }
+        memcpy(temporary_section_record(position), record, sizeof(record));
+    }
+
+    for (size_t i = 1; i < section_count_; ++i) {
+        ReportFallbackSection previous;
+        ReportFallbackSection current;
+        if (!decode_section(temporary_section_record(i - 1), previous) ||
+            !decode_section(temporary_section_record(i), current) ||
+            !section_precedes(section_sort_key(previous),
+                              section_sort_key(current))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::shared_ptr<const LargeByteBuffer>
+ReportFallbackArtifactBuilder::finish() {
+    if (!output_ || section_reserved_ || section_count_ == 0 ||
+        !sort_sections()) {
         return {};
     }
 
-    std::unique_ptr<LargeByteBuffer> output =
-        LargeByteBuffer::allocate(total_bytes);
-    if (!output) return {};
-    memset(output->data(), 0, metadata_bytes);
+    const size_t session_bytes = session_count_ *
+        ReportFallbackArtifactCodec::SessionBytes;
+    const size_t section_bytes = section_count_ *
+        ReportFallbackArtifactCodec::SectionBytes;
+    const size_t metadata_bytes =
+        ReportFallbackArtifactCodec::HeaderBytes + session_bytes +
+        section_bytes;
+    const size_t total_bytes = metadata_bytes + payload_bytes_;
+    const size_t payload_shift =
+        ReportFallbackArtifactCodec::MaxMetadataBytes - metadata_bytes;
 
-    uint8_t *header = output->data();
+    uint8_t *header = output_->data();
+    uint8_t *section_table = header +
+        ReportFallbackArtifactCodec::HeaderBytes + session_bytes;
+    memmove(section_table,
+            temporary_section_record(0),
+            section_bytes);
+    memmove(header + metadata_bytes,
+            header + ReportFallbackArtifactCodec::MaxMetadataBytes,
+            payload_bytes_);
+
+    for (size_t i = 0; i < section_count_; ++i) {
+        uint8_t *record = section_table +
+            i * ReportFallbackArtifactCodec::SectionBytes;
+        const uint64_t old_offset = get_le64(record + 32);
+        if (old_offset < payload_shift) return {};
+        put_le64(record + 32, old_offset - payload_shift);
+    }
+
     memcpy(header, FILE_MAGIC, sizeof(FILE_MAGIC));
-    put_le16(header + 8, Version);
-    put_le16(header + 10, HeaderBytes);
-    put_le16(header + 12, SessionBytes);
-    put_le16(header + 14, SectionBytes);
+    put_le16(header + 8, ReportFallbackArtifactCodec::Version);
+    put_le16(header + 10, ReportFallbackArtifactCodec::HeaderBytes);
+    put_le16(header + 12, ReportFallbackArtifactCodec::SessionBytes);
+    put_le16(header + 14, ReportFallbackArtifactCodec::SectionBytes);
     put_le32(header + 16,
-             static_cast<uint32_t>(sleep_day.epoch_days()));
-    put_le32(header + 20, static_cast<uint32_t>(session_count));
-    put_le32(header + 24, static_cast<uint32_t>(section_count));
-    put_le64(header + 32, static_cast<uint64_t>(day_start_ms));
-    put_le64(header + 40, static_cast<uint64_t>(day_end_ms));
-    put_le64(header + 48, payload_bytes);
-
-    uint8_t *session_table = header + HeaderBytes;
-    for (size_t i = 0; i < session_count; ++i) {
-        encode_range(session_table + i * SessionBytes, sessions[i]);
-    }
-
-    size_t payload_offset = metadata_bytes;
-    for (size_t i = 0; i < section_count; ++i) {
-        const ReportFallbackSectionInput &section = sections[i];
-        uint8_t *section_record = session_table + session_bytes +
-            i * SectionBytes;
-        const uint32_t payload_crc =
-            crc32_ieee(section.payload, section.payload_size);
-        encode_section(section_record,
-                       section,
-                       payload_offset,
-                       payload_crc);
-        if (section.payload_size > 0) {
-            memcpy(header + payload_offset,
-                   section.payload,
-                   section.payload_size);
-        }
-        payload_offset += section.payload_size;
-    }
-
+             static_cast<uint32_t>(sleep_day_.epoch_days()));
+    put_le32(header + 20, static_cast<uint32_t>(session_count_));
+    put_le32(header + 24, static_cast<uint32_t>(section_count_));
+    put_le64(header + 32, static_cast<uint64_t>(day_start_ms_));
+    put_le64(header + 40, static_cast<uint64_t>(day_end_ms_));
+    put_le64(header + 48, payload_bytes_);
     put_le32(header + METADATA_CRC_OFFSET,
-             crc32_ieee(header + HeaderBytes,
-                        metadata_bytes - HeaderBytes));
+             crc32_ieee(header + ReportFallbackArtifactCodec::HeaderBytes,
+                        metadata_bytes -
+                            ReportFallbackArtifactCodec::HeaderBytes));
     put_le64(header + IDENTITY_OFFSET,
              metadata_identity(header, metadata_bytes));
     put_le32(header + HEADER_CRC_OFFSET,
              crc32_ieee(header, HEADER_CRC_OFFSET));
+    if (!output_->truncate(total_bytes)) return {};
+
+    std::unique_ptr<LargeByteBuffer> output = std::move(output_);
+    sleep_day_ = {};
+    day_start_ms_ = 0;
+    day_end_ms_ = 0;
+    session_count_ = 0;
+    section_count_ = 0;
+    payload_bytes_ = 0;
     return LargeByteBuffer::freeze(std::move(output));
 }
 

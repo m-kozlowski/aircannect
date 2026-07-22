@@ -30,6 +30,14 @@ struct ReportSpoolFetchCompletion {
     void move_from(ReportSpoolFetchCompletion &other);
 };
 
+struct ReportSpoolFetchRound {
+    OperationTicket ticket;
+    ReportSpoolResult result;
+
+    void clear();
+    void move_from(ReportSpoolFetchRound &other);
+};
+
 class ReportSpoolPort {
 public:
     virtual ~ReportSpoolPort() = default;
@@ -37,6 +45,8 @@ public:
     virtual OperationSubmission request_fetch(
         const ReportSpoolFetchCommand &command) = 0;
     virtual bool cancel(OperationTicket ticket) = 0;
+    virtual bool take_round(OperationTicket ticket,
+                            ReportSpoolFetchRound &round) = 0;
     virtual bool take_completion(
         OperationTicket ticket,
         ReportSpoolFetchCompletion &completion) = 0;

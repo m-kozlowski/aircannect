@@ -50,6 +50,13 @@ std::shared_ptr<const LargeByteBuffer> LargeByteBuffer::freeze(
     return std::shared_ptr<const LargeByteBuffer>(buffer.release());
 }
 
+bool LargeByteBuffer::truncate(size_t size) {
+    if (size == 0 || size > size_) return false;
+
+    size_ = size;
+    return true;
+}
+
 LargeByteBuffer::~LargeByteBuffer() {
     free_bytes(data_);
 }
