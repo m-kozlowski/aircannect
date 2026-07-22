@@ -398,6 +398,23 @@ uint32_t night_duration_minutes(const NightCatalog &catalog,
 
 }  // namespace
 
+void ReportHttpController::register_routes(AsyncWebServer &server) {
+    server.on(AsyncURIMatcher::exact("/api/report/summary"), HTTP_GET,
+              [this](AsyncWebServerRequest *request) {
+        send_summary(request);
+    });
+
+    server.on(AsyncURIMatcher::exact("/api/report/result"), HTTP_GET,
+              [this](AsyncWebServerRequest *request) {
+        send_result(request);
+    });
+
+    server.on(AsyncURIMatcher::exact("/api/report/plot"), HTTP_GET,
+              [this](AsyncWebServerRequest *request) {
+        send_plot(request);
+    });
+}
+
 void ReportHttpController::begin(ReportTask &report_task,
                                  StorageStreamPort &stream_port) {
     report_task_ = &report_task;

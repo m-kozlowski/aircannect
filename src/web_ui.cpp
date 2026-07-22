@@ -20,6 +20,7 @@
 #include "debug_log.h"
 #include "storage_service.h"
 #include "export_coordinator.h"
+#include "http_route_module.h"
 #include "json_util.h"
 #include "memory_manager.h"
 #include "session_manager.h"
@@ -899,13 +900,14 @@ bool WebUI::begin(RpcRequestPort &rpc,
                   SessionManager &session_manager,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
-                  ReportHttpController &report_http,
                   StorageReadPort &storage_read,
                   StorageBrowserPort &storage_browser,
                   StorageArchivePort &storage_archive,
                   StorageDeletePort &storage_delete,
                   ExportCoordinator &export_coordinator,
                   ConsoleContext &console_ctx,
+                  HttpRouteModule *const *route_modules,
+                  size_t route_module_count,
                   uint16_t port) {
     if (started_) return true;
     stop();
@@ -923,7 +925,6 @@ bool WebUI::begin(RpcRequestPort &rpc,
     session_manager_ = &session_manager;
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
-    report_http_ = &report_http;
     storage_read_ = &storage_read;
     storage_browser_ = &storage_browser;
     storage_archive_ = &storage_archive;
@@ -979,7 +980,7 @@ bool WebUI::begin(RpcRequestPort &rpc,
         });
         server_->addHandler(events_);
     }
-    register_routes();
+    register_routes(route_modules, route_module_count);
     publish_snapshots(true);
     server_->begin();
     started_ = true;
@@ -1114,7 +1115,6 @@ void WebUI::stop() {
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
-    report_http_ = nullptr;
     stream_ = nullptr;
     started_ = false;
 }
@@ -3660,7 +3660,8 @@ void WebUI::execute_resmed_ota_command(const WebCommand &command) {
     mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
 }
 
-void WebUI::register_routes() {
+void WebUI::register_routes(HttpRouteModule *const *route_modules,
+                            size_t route_module_count) {
     // Static UI and snapshots
     server_->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         AsyncWebServerResponse *response = request->beginResponse(
@@ -3753,22 +3754,6 @@ void WebUI::register_routes() {
     server_->on(AsyncURIMatcher::exact("/api/sleephq/sync/status"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
         send_sleephq_sync_status(request);
-    });
-
-    // Reports
-    server_->on(AsyncURIMatcher::exact("/api/report/summary"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        report_http_->send_summary(request);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/report/result"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        report_http_->send_result(request);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/report/plot"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        report_http_->send_plot(request);
     });
 
     // Web console and file log
@@ -4328,6 +4313,12 @@ void WebUI::register_routes() {
             send_queue_result(request, enqueue_command(std::move(queued)));
         },
         nullptr, handle_body);
+
+    for (size_t i = 0; i < route_module_count; ++i) {
+        if (route_modules && route_modules[i]) {
+            route_modules[i]->register_routes(*server_);
+        }
+    }
 
     server_->onNotFound([](AsyncWebServerRequest *request) {
         request->send(404, "application/json",

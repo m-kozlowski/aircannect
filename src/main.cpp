@@ -16,6 +16,7 @@
 #include "export_coordinator.h"
 #include "export_endpoint_config.h"
 #include "export_task.h"
+#include "http_route_module.h"
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
@@ -70,6 +71,9 @@ static OximetryManager oximetry_manager;
 static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
+static HttpRouteModule *web_route_modules[] = {
+    &report_http_controller,
+};
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
 #if AC_STACK_PROFILE_ENABLED
@@ -663,13 +667,14 @@ void setup() {
                  wifi_manager, tcp_bridge, config_service,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
-                 report_http_controller,
                  StorageService::read_port(),
                  StorageService::browser_port(),
                  StorageService::archive_port(),
                  StorageService::delete_port(),
                  export_coordinator,
-                 console_ctx);
+                 console_ctx,
+                 web_route_modules,
+                 sizeof(web_route_modules) / sizeof(web_route_modules[0]));
 }
 
 void loop() {

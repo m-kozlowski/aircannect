@@ -3,6 +3,9 @@
 #include <atomic>
 #include <stdint.h>
 
+#include "http_route_module.h"
+
+class AsyncWebServer;
 class AsyncWebServerRequest;
 
 namespace aircannect {
@@ -12,9 +15,10 @@ class StorageStreamPort;
 
 // Presents immutable report snapshots and artifacts over HTTP. Report policy
 // stays in ReportTask; this class only validates requests and streams bytes.
-class ReportHttpController {
+class ReportHttpController final : public HttpRouteModule {
 public:
     void begin(ReportTask &report_task, StorageStreamPort &stream_port);
+    void register_routes(AsyncWebServer &server) override;
 
     void send_summary(AsyncWebServerRequest *request) const;
     void send_result(AsyncWebServerRequest *request) const;
