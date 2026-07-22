@@ -38,6 +38,16 @@ size_t ReportRequestQueue::find_ready(ReportRequestPriority priority,
     return count_;
 }
 
+size_t ReportRequestQueue::find_evictable(
+    ReportRequestPriority priority) const {
+    for (size_t i = count_; i > 0; --i) {
+        if (report_request_priority_higher(priority, slots_[i - 1].priority)) {
+            return i - 1;
+        }
+    }
+    return count_;
+}
+
 void ReportRequestQueue::erase(size_t index) {
     if (index >= count_) return;
 
@@ -62,10 +72,16 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     bool replaced = false;
     const size_t existing = find_artifact(artifact);
     if (existing < count_) {
-        if (slots_[existing].artifact == artifact &&
-            slots_[existing].ticket.generation == generation) {
-            if (priority == ReportRequestPriority::Foreground) {
-                slots_[existing].priority = priority;
+        if (slots_[existing].artifact == artifact) {
+            if (report_request_priority_higher(
+                    priority, slots_[existing].priority)) {
+                ReportArtifactRequest &request = slots_[existing];
+                request.ticket = next_ticket(generation);
+                request.priority = priority;
+                request.ready_at_ms = 0;
+                request.attempts = 0;
+                return {ReportRequestEnqueueStatus::Replaced,
+                        request.ticket};
             }
             return {ReportRequestEnqueueStatus::AlreadyQueued,
                     slots_[existing].ticket};
@@ -76,7 +92,13 @@ ReportRequestEnqueueResult ReportRequestQueue::enqueue(
     }
 
     if (count_ >= capacity_) {
-        return {ReportRequestEnqueueStatus::Full, {}};
+        const size_t evictable = find_evictable(priority);
+        if (evictable == count_) {
+            return {ReportRequestEnqueueStatus::Full, {}};
+        }
+
+        erase(evictable);
+        replaced = true;
     }
 
     ReportArtifactRequest &request = slots_[count_++];
@@ -95,6 +117,9 @@ ReportRequestSelection ReportRequestQueue::take_next(
     if (count_ == 0) return ReportRequestSelection::Empty;
 
     size_t index = find_ready(ReportRequestPriority::Foreground, now_ms);
+    if (index == count_) {
+        index = find_ready(ReportRequestPriority::Reconcile, now_ms);
+    }
     if (index == count_) {
         index = find_ready(ReportRequestPriority::Idle, now_ms);
     }
@@ -132,7 +157,8 @@ OperationOutcome ReportRequestQueue::retry(ReportArtifactRequest request,
 size_t ReportRequestQueue::cancel_generation(uint32_t generation) {
     size_t removed = 0;
     for (size_t i = 0; i < count_;) {
-        if (slots_[i].ticket.generation != generation) {
+        if (slots_[i].priority != ReportRequestPriority::Foreground ||
+            slots_[i].ticket.generation != generation) {
             ++i;
             continue;
         }

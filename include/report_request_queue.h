@@ -10,8 +10,14 @@ namespace aircannect {
 
 enum class ReportRequestPriority : uint8_t {
     Foreground,
+    Reconcile,
     Idle,
 };
+
+constexpr bool report_request_priority_higher(ReportRequestPriority lhs,
+                                              ReportRequestPriority rhs) {
+    return static_cast<uint8_t>(lhs) < static_cast<uint8_t>(rhs);
+}
 
 struct ReportArtifactRequest {
     ReportArtifactKey artifact;
@@ -72,6 +78,7 @@ private:
 
     size_t find_artifact(const ReportArtifactKey &artifact) const;
     size_t find_ready(ReportRequestPriority priority, uint32_t now_ms) const;
+    size_t find_evictable(ReportRequestPriority priority) const;
     void erase(size_t index);
     OperationTicket next_ticket(uint32_t generation);
 

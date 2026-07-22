@@ -88,6 +88,7 @@ private:
     static bool same_build(const ReportArtifactKey &lhs,
                            const ReportArtifactKey &rhs);
 
+    bool artifact_current(const ReportArtifactKey &artifact) const;
     bool start_next(uint32_t now_ms);
     bool start_request(ReportArtifactRequest request);
     bool finish_lookup(uint32_t now_ms);

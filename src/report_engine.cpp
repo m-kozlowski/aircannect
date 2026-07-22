@@ -72,23 +72,49 @@ ReportRequestEnqueueResult ReportEngine::request(
     uint32_t generation) {
     const ReportArtifactKey canonical = build_key(artifact);
     if (!canonical.valid() || generation == 0) return {};
+    if (catalog_ && !artifact_current(canonical)) return {};
 
     if (phase_ != ActivePhase::Idle &&
         same_build(active_request_.artifact, canonical)) {
         if (active_request_.artifact == canonical &&
-            active_request_.ticket.generation == generation) {
+            report_request_priority_higher(
+                priority, active_request_.priority)) {
+            active_request_.priority = priority;
+        }
+        if (active_request_.artifact == canonical) {
             return {ReportRequestEnqueueStatus::AlreadyQueued,
                     active_request_.ticket};
         }
         cancel_active_work();
     }
 
-    return queue_.enqueue(canonical, priority, generation);
+    const ReportRequestEnqueueResult queued =
+        queue_.enqueue(canonical, priority, generation);
+    const bool accepted =
+        queued.status != ReportRequestEnqueueStatus::Full &&
+        queued.status != ReportRequestEnqueueStatus::Invalid;
+    const bool can_preempt =
+        accepted && phase_ != ActivePhase::Idle &&
+        phase_ != ActivePhase::Publishing &&
+        report_request_priority_higher(priority, active_request_.priority) &&
+        artifact_current(active_request_.artifact);
+    if (!can_preempt) return queued;
+
+    const ReportRequestEnqueueResult restored = queue_.enqueue(
+        active_request_.artifact,
+        active_request_.priority,
+        active_request_.ticket.generation);
+    if (restored.status != ReportRequestEnqueueStatus::Full &&
+        restored.status != ReportRequestEnqueueStatus::Invalid) {
+        cancel_active_work();
+    }
+    return queued;
 }
 
 size_t ReportEngine::cancel_generation(uint32_t generation) {
     size_t cancelled = queue_.cancel_generation(generation);
     if (phase_ != ActivePhase::Idle &&
+        active_request_.priority == ReportRequestPriority::Foreground &&
         active_request_.ticket.generation == generation) {
         cancel_active_work();
         ++cancelled;
@@ -202,10 +228,26 @@ bool ReportEngine::same_build(const ReportArtifactKey &lhs,
     return build_key(lhs) == build_key(rhs);
 }
 
+bool ReportEngine::artifact_current(
+    const ReportArtifactKey &artifact) const {
+    if (!catalog_ || !artifact.valid()) return false;
+
+    const NightCatalogRecord *night = catalog_->find(artifact.sleep_day);
+    return night && night->source_revision == artifact.source_revision;
+}
+
 bool ReportEngine::start_next(uint32_t now_ms) {
     ReportArtifactRequest request;
     const ReportRequestSelection selected = queue_.take_next(now_ms, request);
     if (selected != ReportRequestSelection::Ready) return false;
+    if (!artifact_current(request.artifact)) {
+        active_request_ = request;
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::StaleRevision,
+                        ReportExecutorError::None,
+                        "report_artifact_revision_stale");
+        return true;
+    }
     return start_request(request);
 }
 
