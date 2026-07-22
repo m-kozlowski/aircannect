@@ -66,6 +66,16 @@ struct EdfReportSignalMapping {
     bool primary = false;
 };
 
+struct EdfReportSignalLayout {
+    EdfSignalScale scale;
+    uint32_t samples_per_record = 0;
+    uint32_t byte_offset_in_record = 0;
+    uint32_t sample_interval_ms = 0;
+    ReportSignalId signal = ReportSignalId::Flow;
+    ReportSourceId source = ReportSourceId::Summary;
+    bool primary = false;
+};
+
 struct EdfReportSessionFileDescriptor {
     EdfInventoryFileKind kind = EdfInventoryFileKind::Unknown;
     char path[AC_EDF_REPORT_PATH_MAX] = {};
@@ -130,6 +140,10 @@ bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
                                          bool require_primary,
                                          uint32_t &signal_index,
                                          EdfReportSignalMapping &mapping);
+bool edf_report_file_signal_layouts(const EdfReportFileDescriptor &file,
+                                    EdfReportSignalLayout *layouts,
+                                    size_t capacity,
+                                    size_t &count);
 
 void edf_report_session_init(EdfReportSessionDescriptor &session);
 bool edf_report_session_add_file(EdfReportSessionDescriptor &session,

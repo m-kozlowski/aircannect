@@ -42,8 +42,7 @@ struct ReportReadSession {
 
 struct ReportReadMapping {
     NightCatalogTimeRange output_window;
-    ReportSignalId signal = ReportSignalId::Flow;
-    ReportReadQuality quality = ReportReadQuality::Primary;
+    EdfReportSignalLayout layout;
 };
 
 struct ReportReadOperation {

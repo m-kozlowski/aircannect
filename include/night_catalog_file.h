@@ -15,6 +15,7 @@ struct NightCatalogFileInfo {
     uint32_t mask_window_count = 0;
     uint32_t file_count = 0;
     uint32_t coverage_count = 0;
+    uint32_t signal_layout_count = 0;
     uint32_t path_bytes = 0;
     size_t body_bytes = 0;
     size_t total_bytes = 0;
@@ -23,7 +24,7 @@ struct NightCatalogFileInfo {
 class NightCatalogFileCodec {
 public:
     static constexpr uint16_t Version = 6;
-    static constexpr size_t HeaderBytes = 64;
+    static constexpr size_t HeaderBytes = 72;
     static constexpr size_t MaximumFileBytes = 512 * 1024;
 
     static bool inspect(const uint8_t *header,

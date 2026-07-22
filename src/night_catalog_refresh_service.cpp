@@ -171,6 +171,12 @@ bool resolve_session_clock(EdfReportSessionDescriptor &session,
                session.earliest_header_start_ms;
 }
 
+struct ParsedEdfLayouts {
+    char path[AC_EDF_REPORT_PATH_MAX] = {};
+    uint32_t layout_offset = 0;
+    uint16_t layout_count = 0;
+};
+
 }  // namespace
 
 struct NightCatalogRefreshRuntime {
@@ -199,6 +205,16 @@ struct NightCatalogRefreshRuntime {
         edf_sessions = nullptr;
         edf_session_capacity = 0;
         edf_session_count = 0;
+
+        destroy_large_array(parsed_edf_files, parsed_edf_file_capacity);
+        parsed_edf_files = nullptr;
+        parsed_edf_file_capacity = 0;
+        parsed_edf_file_count = 0;
+
+        destroy_large_array(edf_signal_layouts, edf_signal_layout_capacity);
+        edf_signal_layouts = nullptr;
+        edf_signal_layout_capacity = 0;
+        edf_signal_layout_count = 0;
 
         destroy_large_array(str_records, str_record_capacity);
         str_records = nullptr;
@@ -242,6 +258,12 @@ struct NightCatalogRefreshRuntime {
     EdfReportSessionDescriptor *edf_sessions = nullptr;
     size_t edf_session_capacity = 0;
     size_t edf_session_count = 0;
+    ParsedEdfLayouts *parsed_edf_files = nullptr;
+    size_t parsed_edf_file_capacity = 0;
+    size_t parsed_edf_file_count = 0;
+    EdfReportSignalLayout *edf_signal_layouts = nullptr;
+    size_t edf_signal_layout_capacity = 0;
+    size_t edf_signal_layout_count = 0;
     NightCatalogStrInput *str_records = nullptr;
     size_t str_record_capacity = 0;
     size_t str_record_count = 0;
@@ -418,7 +440,27 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
     runtime.edf_sessions =
         allocate_large_array<EdfReportSessionDescriptor>(report_file_count);
     runtime.edf_session_capacity = report_file_count;
-    if (report_file_count > 0 && !runtime.edf_sessions) return false;
+    runtime.parsed_edf_files =
+        allocate_large_array<ParsedEdfLayouts>(report_file_count);
+    runtime.parsed_edf_file_capacity = report_file_count;
+
+    const size_t maximum_layout_files = std::min(
+        std::numeric_limits<size_t>::max() /
+            AC_EDF_REPORT_FILE_SIGNAL_MAX,
+        static_cast<size_t>(UINT32_MAX) /
+            AC_EDF_REPORT_FILE_SIGNAL_MAX);
+    if (report_file_count > maximum_layout_files) {
+        return false;
+    }
+    runtime.edf_signal_layout_capacity =
+        report_file_count * AC_EDF_REPORT_FILE_SIGNAL_MAX;
+    runtime.edf_signal_layouts = allocate_large_array<EdfReportSignalLayout>(
+        runtime.edf_signal_layout_capacity);
+    if (report_file_count > 0 &&
+        (!runtime.edf_sessions || !runtime.parsed_edf_files ||
+         !runtime.edf_signal_layouts)) {
+        return false;
+    }
 
     if (!runtime.read_buffer) {
         runtime.read_buffer = static_cast<uint8_t *>(
@@ -555,11 +597,29 @@ bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
         static_cast<time_t>(runtime.current_modified),
         0,
         file);
-    if (file_status == EdfReportFileStatus::Ok &&
+    size_t signal_layout_count = 0;
+    const size_t remaining_layouts =
+        runtime.edf_signal_layout_capacity - runtime.edf_signal_layout_count;
+    const bool layouts_ready = file_status == EdfReportFileStatus::Ok &&
+        runtime.parsed_edf_file_count < runtime.parsed_edf_file_capacity &&
+        edf_report_file_signal_layouts(
+            file,
+            runtime.edf_signal_layouts + runtime.edf_signal_layout_count,
+            remaining_layouts,
+            signal_layout_count) &&
+        signal_layout_count <= UINT16_MAX;
+    if (layouts_ready &&
         add_exact_session_file(runtime.edf_sessions,
                                runtime.edf_session_capacity,
                                runtime.edf_session_count,
                                file)) {
+        ParsedEdfLayouts &parsed =
+            runtime.parsed_edf_files[runtime.parsed_edf_file_count++];
+        copy_cstr(parsed.path, sizeof(parsed.path), file.path);
+        parsed.layout_offset =
+            static_cast<uint32_t>(runtime.edf_signal_layout_count);
+        parsed.layout_count = static_cast<uint16_t>(signal_layout_count);
+        runtime.edf_signal_layout_count += signal_layout_count;
         ++status.files_indexed;
     } else {
         ++status.files_skipped;
@@ -761,6 +821,17 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
 
     size_t output_sessions = 0;
     size_t output_files = 0;
+
+    auto find_layouts = [&runtime](const char *path)
+        -> const ParsedEdfLayouts * {
+        for (size_t i = 0; i < runtime.parsed_edf_file_count; ++i) {
+            if (strcmp(runtime.parsed_edf_files[i].path, path) == 0) {
+                return &runtime.parsed_edf_files[i];
+            }
+        }
+        return nullptr;
+    };
+
     for (size_t i = 0; i < session_count; ++i) {
         EdfReportSessionDescriptor session = runtime.edf_sessions[i];
         SleepDayId sleep_day;
@@ -821,6 +892,20 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             file.record_size = source.record_size;
             file.record_duration_ms = source.record_duration_ms;
             file.complete_records = source.complete_records;
+            const ParsedEdfLayouts *parsed = find_layouts(stored_source.path);
+            if (!parsed ||
+                parsed->layout_offset > runtime.edf_signal_layout_count ||
+                parsed->layout_count > runtime.edf_signal_layout_count -
+                                           parsed->layout_offset) {
+                destroy_large_array(sessions, session_count);
+                destroy_large_array(files, file_capacity);
+                error = "night_catalog_signal_layout_missing";
+                return false;
+            }
+            file.signal_layouts = parsed->layout_count > 0
+                ? runtime.edf_signal_layouts + parsed->layout_offset
+                : nullptr;
+            file.signal_layout_count = parsed->layout_count;
             ++out.file_count;
         }
     }

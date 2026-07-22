@@ -27,6 +27,9 @@ struct NightCatalogSourceFileInput {
     uint32_t record_size = 0;
     uint32_t record_duration_ms = 0;
     uint32_t complete_records = 0;
+
+    const EdfReportSignalLayout *signal_layouts = nullptr;
+    size_t signal_layout_count = 0;
 };
 
 struct NightCatalogEdfSessionInput {

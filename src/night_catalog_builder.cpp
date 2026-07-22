@@ -1,6 +1,7 @@
 #include "night_catalog_builder.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <new>
 #include <stdlib.h>
@@ -297,7 +298,51 @@ uint64_t source_file_identity(const NightCatalogSourceFileInput &file) {
     hash = hash_i64(hash, file.coverage.range.end_ms);
     hash = hash_u32(hash, file.coverage.primary_signal_mask);
     hash = hash_u32(hash, file.coverage.fallback_signal_mask);
+    hash = hash_u32(hash, static_cast<uint32_t>(file.signal_layout_count));
+    for (size_t i = 0; i < file.signal_layout_count; ++i) {
+        const EdfReportSignalLayout &layout = file.signal_layouts[i];
+        hash = hash_byte(hash, static_cast<uint8_t>(layout.signal));
+        hash = hash_byte(hash, static_cast<uint8_t>(layout.source));
+        hash = hash_byte(hash, layout.primary ? 1 : 0);
+        hash = hash_u32(hash, layout.samples_per_record);
+        hash = hash_u32(hash, layout.byte_offset_in_record);
+        hash = hash_u32(hash, layout.sample_interval_ms);
+        hash = hash_u32(hash, static_cast<uint16_t>(layout.scale.digital_min));
+        hash = hash_u32(hash, static_cast<uint16_t>(layout.scale.digital_max));
+        hash = hash_float(hash, layout.scale.scale);
+        hash = hash_float(hash, layout.scale.offset);
+    }
     return hash == 0 ? 1 : hash;
+}
+
+bool signal_layouts_valid(const NightCatalogSourceFileInput &file) {
+    if (file.signal_layout_count > 0 && !file.signal_layouts) return false;
+
+    uint32_t seen_primary = 0;
+    uint32_t seen_fallback = 0;
+    for (size_t i = 0; i < file.signal_layout_count; ++i) {
+        const EdfReportSignalLayout &layout = file.signal_layouts[i];
+        const uint32_t bit = report_signal_bit(layout.signal);
+        const uint64_t signal_end =
+            static_cast<uint64_t>(layout.byte_offset_in_record) +
+            static_cast<uint64_t>(layout.samples_per_record) * 2u;
+        uint32_t &seen = layout.primary ? seen_primary : seen_fallback;
+        if (bit == 0 ||
+            static_cast<uint8_t>(layout.source) >
+                static_cast<uint8_t>(ReportSourceId::Leak0p5Hz) ||
+            layout.samples_per_record == 0 ||
+            layout.sample_interval_ms == 0 || signal_end > file.record_size ||
+            layout.scale.digital_max <= layout.scale.digital_min ||
+            !std::isfinite(layout.scale.scale) ||
+            !std::isfinite(layout.scale.offset) || layout.scale.scale <= 0.0f ||
+            (seen & bit) != 0) {
+            return false;
+        }
+        seen |= bit;
+    }
+
+    return seen_primary == file.coverage.primary_signal_mask &&
+           seen_fallback == file.coverage.fallback_signal_mask;
 }
 
 BuildNight *find_or_add_night(ScratchArray<BuildNight> &nights,
@@ -348,7 +393,9 @@ bool append_file(ScratchArray<BuildFile> &files,
                  size_t owner,
                  const NightCatalogSourceFileInput &source,
                  const NightCatalogTimeRange *session_range) {
-    if (!source.path || !source.path[0]) return false;
+    if (!source.path || !source.path[0] || !signal_layouts_valid(source)) {
+        return false;
+    }
     const bool point_annotation =
         (source.kind == NightCatalogFileKind::Eve ||
          source.kind == NightCatalogFileKind::Csl) &&
@@ -666,6 +713,28 @@ uint64_t calculate_revision(const NightCatalog &catalog,
             hash = hash_u32(hash,
                             coverage[coverage_index].fallback_signal_mask);
         }
+
+        size_t signal_layout_count = 0;
+        const EdfReportSignalLayout *signal_layouts =
+            catalog.signal_layouts(file, signal_layout_count);
+        hash = hash_u32(hash, static_cast<uint32_t>(signal_layout_count));
+        for (size_t layout_index = 0;
+             layout_index < signal_layout_count;
+             ++layout_index) {
+            const EdfReportSignalLayout &layout = signal_layouts[layout_index];
+            hash = hash_byte(hash, static_cast<uint8_t>(layout.signal));
+            hash = hash_byte(hash, static_cast<uint8_t>(layout.source));
+            hash = hash_byte(hash, layout.primary ? 1 : 0);
+            hash = hash_u32(hash, layout.samples_per_record);
+            hash = hash_u32(hash, layout.byte_offset_in_record);
+            hash = hash_u32(hash, layout.sample_interval_ms);
+            hash = hash_u32(
+                hash, static_cast<uint16_t>(layout.scale.digital_min));
+            hash = hash_u32(
+                hash, static_cast<uint16_t>(layout.scale.digital_max));
+            hash = hash_float(hash, layout.scale.scale);
+            hash = hash_float(hash, layout.scale.offset);
+        }
     }
 
     return hash == 0 ? 1 : hash;
@@ -784,6 +853,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     size_t final_sessions = 0;
     size_t final_masks = 0;
     size_t final_files = 0;
+    size_t final_signal_layouts = 0;
     size_t final_paths = 0;
     for (size_t i = 0; i < nights.size(); ++i) {
         BuildNight &night = nights.data()[i];
@@ -799,11 +869,19 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             !add_count(final_files, file_count)) {
             return {};
         }
+
+        for (size_t file_index = 0; file_index < files.size(); ++file_index) {
+            const BuildFile &file = files.data()[file_index];
+            if (file.owner != night.owner) continue;
+            if (file.source.signal_layout_count > UINT16_MAX ||
+                !add_count(final_signal_layouts,
+                           file.source.signal_layout_count)) return {};
+        }
     }
 
     if (nights.size() > UINT32_MAX || final_sessions > UINT32_MAX ||
         final_masks > UINT32_MAX || final_files > UINT32_MAX ||
-        final_paths > UINT32_MAX) {
+        final_signal_layouts > UINT32_MAX || final_paths > UINT32_MAX) {
         return {};
     }
 
@@ -813,6 +891,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                                        final_masks,
                                        final_files,
                                        final_files,
+                                       final_signal_layouts,
                                        final_paths)) {
         return {};
     }
@@ -820,6 +899,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     size_t next_session = 0;
     size_t next_mask = 0;
     size_t next_file = 0;
+    size_t next_signal_layout = 0;
     size_t next_path = 0;
     for (size_t night_index = 0;
          night_index < nights.size();
@@ -901,6 +981,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
 
             file.coverage_offset = static_cast<uint32_t>(next_file);
             file.coverage_count = 1;
+            file.signal_layout_offset =
+                static_cast<uint32_t>(next_signal_layout);
+            file.signal_layout_count = static_cast<uint16_t>(
+                source_file.source.signal_layout_count);
             file.file_size = source_file.source.file_size;
             file.last_write_ms = source_file.source.last_write_ms;
             file.data_offset = source_file.source.data_offset;
@@ -913,6 +997,12 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                 source_file.source.record_duration_ms;
             file.complete_records = source_file.source.complete_records;
             catalog->coverage_[next_file] = source_file.source.coverage;
+            for (size_t layout_index = 0;
+                 layout_index < source_file.source.signal_layout_count;
+                 ++layout_index) {
+                catalog->signal_layouts_[next_signal_layout++] =
+                    source_file.source.signal_layouts[layout_index];
+            }
 
             memcpy(catalog->paths_ + next_path,
                    source_file.source.path,
@@ -927,7 +1017,9 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     }
 
     if (next_session != final_sessions || next_mask != final_masks ||
-        next_file != final_files || next_path != final_paths) {
+        next_file != final_files ||
+        next_signal_layout != final_signal_layouts ||
+        next_path != final_paths) {
         return {};
     }
     return catalog;

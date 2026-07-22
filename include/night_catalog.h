@@ -5,6 +5,7 @@
 
 #include <memory>
 
+#include "edf_report_catalog.h"
 #include "report_artifact_key.h"
 
 namespace aircannect {
@@ -84,6 +85,8 @@ struct NightCatalogSourceFile {
     uint16_t session_index = 0;
     uint32_t coverage_offset = 0;
     uint16_t coverage_count = 0;
+    uint32_t signal_layout_offset = 0;
+    uint16_t signal_layout_count = 0;
 
     uint64_t file_size = 0;
     int64_t last_write_ms = 0;
@@ -141,6 +144,9 @@ public:
     const NightCatalogSourceCoverage *coverage(
         const NightCatalogSourceFile &file,
         size_t &count) const;
+    const EdfReportSignalLayout *signal_layouts(
+        const NightCatalogSourceFile &file,
+        size_t &count) const;
     const char *path(const NightCatalogSourceFile &file) const;
 
 private:
@@ -151,6 +157,7 @@ private:
                   size_t mask_window_count,
                   size_t file_count,
                   size_t coverage_count,
+                  size_t signal_layout_count,
                   size_t path_bytes);
 
     uint8_t *storage_ = nullptr;
@@ -160,12 +167,14 @@ private:
     NightCatalogTimeRange *mask_windows_ = nullptr;
     NightCatalogSourceFile *files_ = nullptr;
     NightCatalogSourceCoverage *coverage_ = nullptr;
+    EdfReportSignalLayout *signal_layouts_ = nullptr;
     char *paths_ = nullptr;
     size_t record_count_ = 0;
     size_t session_count_ = 0;
     size_t mask_window_count_ = 0;
     size_t file_count_ = 0;
     size_t coverage_count_ = 0;
+    size_t signal_layout_count_ = 0;
     size_t path_bytes_ = 0;
 
     friend class NightCatalogBuilder;

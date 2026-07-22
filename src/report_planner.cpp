@@ -16,7 +16,7 @@ namespace {
 
 struct SelectedSource {
     NightCatalogTimeRange output_window;
-    ReportSignalId signal = ReportSignalId::Flow;
+    EdfReportSignalLayout layout;
     ReportReadQuality quality = ReportReadQuality::Primary;
     uint16_t session_index = 0;
     uint16_t catalog_file_index = 0;
@@ -24,6 +24,7 @@ struct SelectedSource {
 };
 
 struct SourceCandidate {
+    EdfReportSignalLayout layout;
     uint16_t catalog_file_index = 0;
     ReportReadQuality quality = ReportReadQuality::Primary;
     int64_t covered_ms = 0;
@@ -156,6 +157,23 @@ uint32_t coverage_mask(const NightCatalogSourceCoverage &coverage,
         : coverage.fallback_signal_mask;
 }
 
+const EdfReportSignalLayout *find_signal_layout(
+    const NightCatalog &catalog,
+    const NightCatalogSourceFile &file,
+    ReportSignalId signal,
+    ReportReadQuality quality) {
+    size_t count = 0;
+    const EdfReportSignalLayout *layouts =
+        catalog.signal_layouts(file, count);
+    const bool primary = quality == ReportReadQuality::Primary;
+    for (size_t i = 0; layouts && i < count; ++i) {
+        if (layouts[i].signal == signal && layouts[i].primary == primary) {
+            return &layouts[i];
+        }
+    }
+    return nullptr;
+}
+
 SourceCandidate evaluate_candidate(const NightCatalog &catalog,
                                    const NightCatalogSourceFile &file,
                                    uint16_t file_index,
@@ -168,6 +186,11 @@ SourceCandidate evaluate_candidate(const NightCatalog &catalog,
     if (!file_data_valid(file) || file.record_duration_ms == 0) {
         return candidate;
     }
+
+    const EdfReportSignalLayout *layout =
+        find_signal_layout(catalog, file, signal, quality);
+    if (!layout) return candidate;
+    candidate.layout = *layout;
 
     const uint32_t bit = report_signal_bit(signal);
     size_t coverage_count = 0;
@@ -334,7 +357,7 @@ bool select_sources(const ReportPlanRequest &request,
             SelectedSource *entry = selected.append();
             if (!entry) return false;
             entry->output_window = window;
-            entry->signal = signal;
+            entry->layout = source.layout;
             entry->quality = source.quality;
             entry->session_index = plan_session_index;
             entry->catalog_file_index = source.catalog_file_index;
@@ -430,7 +453,7 @@ bool count_numeric_operations(const NightCatalog &catalog,
         catalog.coverage(file, coverage_count);
     if (!coverage) return false;
 
-    const uint32_t bit = report_signal_bit(selected.signal);
+    const uint32_t bit = report_signal_bit(selected.layout.signal);
     for (size_t i = 0; i < coverage_count; ++i) {
         if ((coverage_mask(coverage[i], selected.quality) & bit) == 0) {
             continue;
@@ -563,7 +586,7 @@ bool append_numeric_operations(const NightCatalog &catalog,
         catalog.coverage(file, coverage_count);
     if (!coverage) return false;
 
-    const uint32_t bit = report_signal_bit(selected.signal);
+    const uint32_t bit = report_signal_bit(selected.layout.signal);
     for (size_t i = 0; i < coverage_count; ++i) {
         if ((coverage_mask(coverage[i], selected.quality) & bit) == 0) {
             continue;
@@ -572,8 +595,7 @@ bool append_numeric_operations(const NightCatalog &catalog,
         ReportReadMapping mapping;
         mapping.output_window =
             intersect_ranges(selected.output_window, coverage[i].range);
-        mapping.signal = selected.signal;
-        mapping.quality = selected.quality;
+        mapping.layout = selected.layout;
 
         uint32_t first_record = 0;
         uint32_t end_record = 0;
@@ -693,13 +715,12 @@ bool pending_less(const PendingOperation &lhs,
     }
     if (lhs.has_mapping != rhs.has_mapping) return !lhs.has_mapping;
     if (!lhs.has_mapping) return false;
-    if (lhs.mapping.signal != rhs.mapping.signal) {
-        return static_cast<uint8_t>(lhs.mapping.signal) <
-               static_cast<uint8_t>(rhs.mapping.signal);
+    if (lhs.mapping.layout.signal != rhs.mapping.layout.signal) {
+        return static_cast<uint8_t>(lhs.mapping.layout.signal) <
+               static_cast<uint8_t>(rhs.mapping.layout.signal);
     }
-    if (lhs.mapping.quality != rhs.mapping.quality) {
-        return static_cast<uint8_t>(lhs.mapping.quality) <
-               static_cast<uint8_t>(rhs.mapping.quality);
+    if (lhs.mapping.layout.primary != rhs.mapping.layout.primary) {
+        return lhs.mapping.layout.primary < rhs.mapping.layout.primary;
     }
     if (lhs.mapping.output_window.start_ms !=
         rhs.mapping.output_window.start_ms) {
@@ -712,7 +733,8 @@ bool pending_less(const PendingOperation &lhs,
 
 bool mappings_merge(const ReportReadMapping &lhs,
                     const ReportReadMapping &rhs) {
-    return lhs.signal == rhs.signal && lhs.quality == rhs.quality &&
+    return lhs.layout.signal == rhs.layout.signal &&
+           lhs.layout.primary == rhs.layout.primary &&
            rhs.output_window.start_ms <= lhs.output_window.end_ms;
 }
 
@@ -798,7 +820,7 @@ bool fill_sessions(const ReportPlanRequest &request,
             const SelectedSource &source = selected.data()[i];
             if (source.session_index != plan_session) continue;
 
-            const uint32_t bit = report_signal_bit(source.signal);
+            const uint32_t bit = report_signal_bit(source.layout.signal);
             output.selected_signal_mask |= bit;
             if (source.complete) output.complete_signal_mask |= bit;
             if (source.quality == ReportReadQuality::Fallback) {

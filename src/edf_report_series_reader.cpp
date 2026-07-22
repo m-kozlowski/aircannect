@@ -59,14 +59,57 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
         return EdfReportSeriesStatus::ScaleError;
     }
 
-    out.signal_header = signal_header;
-    out.signal_scale = signal_scale;
-    out.mapping = mapping;
-    out.header_start_ms = file.header_start_ms;
-    out.record_duration_ms = file.record_duration_ms;
-    out.record_size = file.inventory.header.record_size;
-    out.complete_records = file.inventory.complete_records_from_size;
+    EdfReportSignalLayout layout;
+    layout.scale = signal_scale;
+    layout.samples_per_record = signal_header.samples_per_record;
+    layout.byte_offset_in_record = signal_header.byte_offset_in_record;
+    layout.sample_interval_ms = mapping.sample_interval_ms;
+    layout.signal = mapping.signal;
+    layout.source = mapping.source;
+    layout.primary = mapping.primary;
+
+    const EdfReportSeriesStatus status = edf_report_series_decoder_init(
+        layout,
+        file.header_start_ms,
+        file.record_duration_ms,
+        file.inventory.header.record_size,
+        file.inventory.complete_records_from_size,
+        out);
+    if (status != EdfReportSeriesStatus::Ok) return status;
     out.signal_index = signal_index;
+    return EdfReportSeriesStatus::Ok;
+}
+
+EdfReportSeriesStatus edf_report_series_decoder_init(
+    const EdfReportSignalLayout &layout,
+    int64_t header_start_ms,
+    uint32_t record_duration_ms,
+    uint32_t record_size,
+    uint32_t complete_records,
+    EdfReportSeriesDecoder &out) {
+    out = {};
+    const uint64_t signal_end =
+        static_cast<uint64_t>(layout.byte_offset_in_record) +
+        static_cast<uint64_t>(layout.samples_per_record) * 2u;
+    if (header_start_ms <= 0 || record_duration_ms == 0 || record_size == 0 ||
+        layout.samples_per_record == 0 || signal_end > record_size ||
+        layout.scale.digital_max <= layout.scale.digital_min ||
+        !isfinite(layout.scale.scale) || !isfinite(layout.scale.offset) ||
+        layout.scale.scale <= 0.0f) {
+        return EdfReportSeriesStatus::InvalidArgument;
+    }
+
+    out.signal_header.samples_per_record = layout.samples_per_record;
+    out.signal_header.byte_offset_in_record = layout.byte_offset_in_record;
+    out.signal_scale = layout.scale;
+    out.mapping.signal = layout.signal;
+    out.mapping.source = layout.source;
+    out.mapping.sample_interval_ms = layout.sample_interval_ms;
+    out.mapping.primary = layout.primary;
+    out.header_start_ms = header_start_ms;
+    out.record_duration_ms = record_duration_ms;
+    out.record_size = record_size;
+    out.complete_records = complete_records;
     return EdfReportSeriesStatus::Ok;
 }
 

@@ -48,6 +48,14 @@ EdfReportSeriesStatus edf_report_series_decoder_init(
     bool require_primary,
     EdfReportSeriesDecoder &out);
 
+EdfReportSeriesStatus edf_report_series_decoder_init(
+    const EdfReportSignalLayout &layout,
+    int64_t header_start_ms,
+    uint32_t record_duration_ms,
+    uint32_t record_size,
+    uint32_t complete_records,
+    EdfReportSeriesDecoder &out);
+
 EdfReportSeriesStatus edf_report_decode_series_record(
     const EdfReportSeriesDecoder &decoder,
     const uint8_t *record,

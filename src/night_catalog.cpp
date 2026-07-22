@@ -89,6 +89,7 @@ bool NightCatalog::allocate(size_t record_count,
                             size_t mask_window_count,
                             size_t file_count,
                             size_t coverage_count,
+                            size_t signal_layout_count,
                             size_t path_bytes) {
     size_t total = 0;
     size_t records_offset = 0;
@@ -96,6 +97,7 @@ bool NightCatalog::allocate(size_t record_count,
     size_t masks_offset = 0;
     size_t files_offset = 0;
     size_t coverage_offset = 0;
+    size_t signal_layouts_offset = 0;
     size_t paths_offset = 0;
 
     if (!reserve_array(total,
@@ -123,6 +125,11 @@ bool NightCatalog::allocate(size_t record_count,
                        sizeof(NightCatalogSourceCoverage),
                        alignof(NightCatalogSourceCoverage),
                        coverage_offset) ||
+        !reserve_array(total,
+                       signal_layout_count,
+                       sizeof(EdfReportSignalLayout),
+                       alignof(EdfReportSignalLayout),
+                       signal_layouts_offset) ||
         !reserve_array(total,
                        path_bytes,
                        sizeof(char),
@@ -153,6 +160,10 @@ bool NightCatalog::allocate(size_t record_count,
         ? reinterpret_cast<NightCatalogSourceCoverage *>(storage_ +
                                                          coverage_offset)
         : nullptr;
+    signal_layouts_ = signal_layout_count > 0
+        ? reinterpret_cast<EdfReportSignalLayout *>(storage_ +
+                                                    signal_layouts_offset)
+        : nullptr;
     paths_ = path_bytes > 0
         ? reinterpret_cast<char *>(storage_ + paths_offset)
         : nullptr;
@@ -162,6 +173,7 @@ bool NightCatalog::allocate(size_t record_count,
     mask_window_count_ = mask_window_count;
     file_count_ = file_count;
     coverage_count_ = coverage_count;
+    signal_layout_count_ = signal_layout_count;
     path_bytes_ = path_bytes;
 
     static_assert(std::is_trivially_destructible<NightCatalogRecord>::value,
@@ -175,6 +187,9 @@ bool NightCatalog::allocate(size_t record_count,
     static_assert(
         std::is_trivially_destructible<NightCatalogSourceCoverage>::value,
         "catalog coverage must remain trivially destructible");
+    static_assert(
+        std::is_trivially_destructible<EdfReportSignalLayout>::value,
+        "catalog signal layouts must remain trivially destructible");
 
     for (size_t i = 0; i < record_count_; ++i) {
         new (&records_[i]) NightCatalogRecord();
@@ -190,6 +205,9 @@ bool NightCatalog::allocate(size_t record_count,
     }
     for (size_t i = 0; i < coverage_count_; ++i) {
         new (&coverage_[i]) NightCatalogSourceCoverage();
+    }
+    for (size_t i = 0; i < signal_layout_count_; ++i) {
+        new (&signal_layouts_[i]) EdfReportSignalLayout();
     }
     return true;
 }
@@ -260,6 +278,18 @@ const NightCatalogSourceCoverage *NightCatalog::coverage(
         return nullptr;
     }
     return count > 0 ? coverage_ + file.coverage_offset : nullptr;
+}
+
+const EdfReportSignalLayout *NightCatalog::signal_layouts(
+    const NightCatalogSourceFile &file,
+    size_t &count) const {
+    count = file.signal_layout_count;
+    if (file.signal_layout_offset > signal_layout_count_ ||
+        count > signal_layout_count_ - file.signal_layout_offset) {
+        count = 0;
+        return nullptr;
+    }
+    return count > 0 ? signal_layouts_ + file.signal_layout_offset : nullptr;
 }
 
 const char *NightCatalog::path(const NightCatalogSourceFile &file) const {

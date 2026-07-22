@@ -313,6 +313,45 @@ bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
     return false;
 }
 
+bool edf_report_file_signal_layouts(const EdfReportFileDescriptor &file,
+                                    EdfReportSignalLayout *layouts,
+                                    size_t capacity,
+                                    size_t &count) {
+    count = 0;
+    if (file.status != EdfReportFileStatus::Ok ||
+        (capacity > 0 && !layouts)) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < file.signal_count; ++i) {
+        EdfReportSignalMapping mapping;
+        if (!edf_report_signal_mapping(file.inventory.kind,
+                                       file.signals[i].label,
+                                       mapping)) {
+            continue;
+        }
+
+        for (size_t existing = 0; existing < count; ++existing) {
+            if (layouts[existing].signal == mapping.signal &&
+                layouts[existing].primary == mapping.primary) {
+                return false;
+            }
+        }
+        if (count >= capacity) return false;
+
+        const EdfReportSignalDescriptor &signal = file.signals[i];
+        EdfReportSignalLayout &layout = layouts[count++];
+        layout.scale = signal.scale;
+        layout.samples_per_record = signal.samples_per_record;
+        layout.byte_offset_in_record = signal.byte_offset_in_record;
+        layout.sample_interval_ms = mapping.sample_interval_ms;
+        layout.signal = mapping.signal;
+        layout.source = mapping.source;
+        layout.primary = mapping.primary;
+    }
+    return true;
+}
+
 void edf_report_session_init(EdfReportSessionDescriptor &session) {
     session = EdfReportSessionDescriptor();
 }
