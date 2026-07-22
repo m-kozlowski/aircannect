@@ -68,14 +68,12 @@ public:
         bool current_offset_valid,
         int32_t current_offset_minutes,
         uint32_t generation);
-    OperationAdmission cancel_generation(uint32_t generation);
     void publish_activity(const ActivitySnapshot &activity);
 
     ReportTaskStatus status() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     bool artifact_availability(const ReportArtifactKey &artifact,
                                ReportArtifactAvailability &availability) const;
-    std::shared_ptr<const ReportArtifactBundle> take_published();
 
 private:
     struct Runtime;

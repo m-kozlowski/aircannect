@@ -154,21 +154,6 @@ OperationOutcome ReportRequestQueue::retry(ReportArtifactRequest request,
     return OperationOutcome::retry(delay_ms);
 }
 
-size_t ReportRequestQueue::cancel_generation(uint32_t generation) {
-    size_t removed = 0;
-    for (size_t i = 0; i < count_;) {
-        if (slots_[i].priority != ReportRequestPriority::Foreground ||
-            slots_[i].ticket.generation != generation) {
-            ++i;
-            continue;
-        }
-
-        erase(i);
-        removed++;
-    }
-    return removed;
-}
-
 size_t ReportRequestQueue::cancel_background() {
     size_t removed = 0;
     for (size_t i = 0; i < count_;) {

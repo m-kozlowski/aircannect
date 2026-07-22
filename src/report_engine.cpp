@@ -58,16 +58,6 @@ void ReportEngine::begin(StorageReadPort &read_port,
 void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) {
     catalog_ = std::move(catalog);
 
-    if (published_) {
-        const NightCatalogRecord *published_night =
-            catalog_ ? catalog_->find(published_->key.sleep_day) : nullptr;
-        if (!published_night ||
-            published_night->source_revision !=
-                published_->key.source_revision) {
-            published_.reset();
-        }
-    }
-
     if (available_.request.valid()) {
         const NightCatalogRecord *available_night =
             catalog_ ? catalog_->find(available_.request.sleep_day) : nullptr;
@@ -174,17 +164,6 @@ ReportRequestEnqueueResult ReportEngine::request(
     return queued;
 }
 
-size_t ReportEngine::cancel_generation(uint32_t generation) {
-    size_t cancelled = queue_.cancel_generation(generation);
-    if (phase_ != ActivePhase::Idle &&
-        active_request_.priority == ReportRequestPriority::Foreground &&
-        active_request_.ticket.generation == generation) {
-        cancel_active_work();
-        ++cancelled;
-    }
-    return cancelled;
-}
-
 size_t ReportEngine::cancel_background() {
     size_t cancelled = queue_.cancel_background();
     if (phase_ != ActivePhase::Idle &&
@@ -202,7 +181,6 @@ void ReportEngine::clear() {
         fallback_acquisition_.cancel();
         clear_after_fallback_cancel_ = true;
         available_ = {};
-        published_.reset();
         last_completion_ = {};
         return;
     }
@@ -217,7 +195,6 @@ void ReportEngine::clear() {
 
     reset_active();
     available_ = {};
-    published_.reset();
     last_completion_ = {};
 }
 
@@ -310,10 +287,6 @@ ReportEngineStatus ReportEngine::status() const {
             break;
     }
     return out;
-}
-
-std::shared_ptr<const ReportArtifactBundle> ReportEngine::take_published() {
-    return std::move(published_);
 }
 
 ReportArtifactAvailability ReportEngine::take_available() {
@@ -653,7 +626,6 @@ bool ReportEngine::finish_publication(uint32_t now_ms) {
             return true;
         }
 
-        published_ = std::move(bundle);
         available_ = active_availability_;
         complete_active(OperationOutcome::succeeded(),
                         ReportPlanStatus::Ready,

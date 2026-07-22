@@ -78,13 +78,11 @@ public:
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
         uint32_t generation);
-    size_t cancel_generation(uint32_t generation);
     size_t cancel_background();
     void clear();
 
     bool poll(uint32_t now_ms, size_t record_budget = 1);
     ReportEngineStatus status() const;
-    std::shared_ptr<const ReportArtifactBundle> take_published();
     ReportArtifactAvailability take_available();
 
 private:
@@ -131,7 +129,6 @@ private:
     ReportEngineCompletion last_completion_;
     ReportArtifactAvailability active_availability_;
     ReportArtifactAvailability available_;
-    std::shared_ptr<const ReportArtifactBundle> published_;
     uint64_t awaited_fallback_identity_ = 0;
     ActivePhase phase_ = ActivePhase::Idle;
     bool build_tile_after_pair_ = false;

@@ -385,11 +385,6 @@ void ReportNightArtifactBuilder::discard_build() {
 }
 
 std::shared_ptr<const ReportArtifactBundle>
-ReportNightArtifactBuilder::completed() const {
-    return runtime_ ? runtime_->completed : nullptr;
-}
-
-std::shared_ptr<const ReportArtifactBundle>
 ReportNightArtifactBuilder::take_completed() {
     if (!runtime_) return {};
     return std::move(runtime_->completed);

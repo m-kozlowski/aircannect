@@ -65,7 +65,6 @@ public:
                            uint32_t delay_ms,
                            uint8_t max_attempts);
 
-    size_t cancel_generation(uint32_t generation);
     size_t cancel_background();
     void clear();
 

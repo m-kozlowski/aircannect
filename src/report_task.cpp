@@ -29,7 +29,6 @@ constexpr size_t IDLE_QUEUE_LOOKAHEAD = 2;
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
     RefreshCatalog,
-    CancelGeneration,
 };
 
 struct ReportTaskCommand {
@@ -134,12 +133,6 @@ struct ReportTask::Runtime {
                 wake();
                 return OperationAdmission::Accepted;
             }
-            if (command.kind == ReportTaskCommandKind::CancelGeneration &&
-                queued.kind == command.kind &&
-                queued.generation == command.generation) {
-                unlock();
-                return OperationAdmission::Accepted;
-            }
         }
 
         if (command_count >= AC_REPORT_TASK_COMMAND_CAPACITY) {
@@ -168,22 +161,6 @@ struct ReportTask::Runtime {
         commands[--command_count] = {};
         unlock();
         return true;
-    }
-
-    void remove_artifact_commands(uint32_t generation) {
-        if (!lock()) return;
-
-        size_t write = 0;
-        for (size_t read = 0; read < command_count; ++read) {
-            if (commands[read].kind == ReportTaskCommandKind::Artifact &&
-                commands[read].generation == generation) {
-                continue;
-            }
-            if (write != read) commands[write] = commands[read];
-            ++write;
-        }
-        while (command_count > write) commands[--command_count] = {};
-        unlock();
     }
 
     void publish_activity(const ActivitySnapshot &next) {
@@ -458,8 +435,6 @@ struct ReportTask::Runtime {
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const NightCatalog> published_catalog;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
-    std::shared_ptr<const ReportArtifactBundle> published;
-    std::shared_ptr<const ReportArtifactBundle> pending_published;
     std::shared_ptr<const ReportArtifactIndex> artifact_index;
     std::shared_ptr<const ReportArtifactIndex> published_artifact_index;
     uint32_t catalog_generation = 0;
@@ -606,19 +581,6 @@ OperationAdmission ReportTask::request_catalog_refresh(
     return runtime_->enqueue(command);
 }
 
-OperationAdmission ReportTask::cancel_generation(uint32_t generation) {
-    if (!runtime_ || !runtime_->initialized || generation == 0) {
-        return OperationAdmission::Rejected;
-    }
-
-    runtime_->remove_artifact_commands(generation);
-
-    ReportTaskCommand command;
-    command.kind = ReportTaskCommandKind::CancelGeneration;
-    command.generation = generation;
-    return runtime_->enqueue(command);
-}
-
 void ReportTask::publish_activity(const ActivitySnapshot &activity) {
     if (!runtime_ || !runtime_->initialized) return;
     runtime_->publish_activity(activity);
@@ -646,14 +608,6 @@ bool ReportTask::artifact_availability(
         return false;
     }
     return runtime_->find_availability(artifact, availability);
-}
-
-std::shared_ptr<const ReportArtifactBundle> ReportTask::take_published() {
-    if (!runtime_ || !runtime_->lock(20)) return {};
-    std::shared_ptr<const ReportArtifactBundle> out =
-        std::move(runtime_->published);
-    runtime_->unlock();
-    return out;
 }
 
 bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
@@ -693,20 +647,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_refresh.summary_attempted = false;
                 break;
 
-            case ReportTaskCommandKind::CancelGeneration:
-                (void)runtime.engine.cancel_generation(command.generation);
-                if (runtime.pending_refresh.generation == command.generation) {
-                    runtime.pending_refresh.clear();
-                }
-                if (runtime.refresh_generation == command.generation) {
-                    runtime.catalog_refresh.cancel();
-                    runtime.refresh_generation = 0;
-                }
-                if (runtime.summary_acquisition.status().generation ==
-                    command.generation) {
-                    runtime.summary_acquisition.cancel();
-                }
-                break;
         }
     }
 
@@ -1004,15 +944,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         if (!runtime.merge_availability(availability)) {
             runtime.command_failures++;
         }
-        worked = true;
-    }
-
-    std::shared_ptr<const ReportArtifactBundle> published =
-        runtime.engine.take_published();
-    if (published) runtime.pending_published = std::move(published);
-    if (runtime.pending_published && runtime.lock()) {
-        runtime.published = std::move(runtime.pending_published);
-        runtime.unlock();
         worked = true;
     }
 
