@@ -346,6 +346,81 @@ bool RpcArbiter::send_set_datetime_now(RpcSource source,
     return enqueue_request(request);
 }
 
+OperationSubmission RpcArbiter::request(const RpcRequestCommand &command) {
+    if (!command.valid()) return OperationSubmission::rejected();
+    if (request_completion_reservations_ >= request_completions_.capacity()) {
+        return OperationSubmission::busy();
+    }
+
+    QueuedRequest request;
+    request.method = command.method;
+    request.params_json = command.params_json;
+    request.source = command.source;
+    request.timeout_ms = command.timeout_ms;
+    request.generation = command.generation;
+    if (!enqueue_request(request)) return OperationSubmission::busy();
+
+    request_completion_reservations_++;
+    return OperationSubmission::accepted({request.id, request.generation});
+}
+
+bool RpcArbiter::cancel(OperationTicket ticket) {
+    if (!ticket.valid()) return false;
+
+    if (pending_.active && pending_.id == ticket.id &&
+        pending_.generation == ticket.generation) {
+        cancel_pending_request("client_cancelled");
+        return true;
+    }
+
+    if (dispatch_retry_active_ && dispatch_retry_.id == ticket.id &&
+        dispatch_retry_.generation == ticket.generation) {
+        cancel_queued_request(dispatch_retry_, "client_cancelled");
+        dispatch_retry_ = {};
+        dispatch_retry_active_ = false;
+        dispatch_retry_deadline_ms_ = 0;
+        next_dispatch_retry_ms_ = 0;
+        return true;
+    }
+
+    bool cancelled = false;
+    QueuedRequest request;
+    FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> keep;
+    while (requests_.pop(request)) {
+        if (!cancelled && request.id == ticket.id &&
+            request.generation == ticket.generation) {
+            cancel_queued_request(request, "client_cancelled");
+            cancelled = true;
+        } else {
+            keep.push(std::move(request));
+        }
+    }
+    while (keep.pop(request)) requests_.push(std::move(request));
+    return cancelled;
+}
+
+bool RpcArbiter::take_completion(OperationTicket ticket,
+                                 RpcRequestCompletion &completion) {
+    if (!ticket.valid()) return false;
+
+    bool found = false;
+    RpcRequestCompletion current;
+    FixedQueue<RpcRequestCompletion, AC_RPC_REQUEST_QUEUE_DEPTH> keep;
+    while (request_completions_.pop(current)) {
+        if (!found && current.ticket == ticket) {
+            completion = std::move(current);
+            found = true;
+        } else {
+            keep.push(std::move(current));
+        }
+    }
+    while (keep.pop(current)) request_completions_.push(std::move(current));
+    if (found && request_completion_reservations_) {
+        request_completion_reservations_--;
+    }
+    return found;
+}
+
 bool RpcArbiter::enqueue_request(QueuedRequest &request) {
     const uint32_t now = millis();
     const bool ota_quiesce_control =
@@ -942,11 +1017,17 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
         as11_settings_.note_set_cancelled(reason ? reason : "cancelled",
                                           millis());
     }
+    complete_request(pending_.id, pending_.generation,
+                     OperationOutcome::cancelled(),
+                     RpcCompletionCause::Cancelled, nullptr,
+                     reason ? reason : "cancelled", false,
+                     request_completions_);
     pending_ = {};
 }
 
 void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
-                                       const char *reason) {
+                                       const char *reason,
+                                       RpcCompletionCause cause) {
     if (request.settings_refresh) {
         finish_as11_settings_refresh();
         schedule_as11_settings_refresh_retry(RpcSource::Scheduler, millis());
@@ -977,6 +1058,37 @@ void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
     }
     if (request.event_command != EventCommandType::None) {
         event_.mark_command_cancelled(millis());
+    }
+    const OperationOutcome outcome =
+        cause == RpcCompletionCause::Cancelled
+            ? OperationOutcome::cancelled()
+            : OperationOutcome::failed();
+    complete_request(request.id, request.generation, outcome, cause, nullptr,
+                     reason ? reason : "cancelled", false,
+                     request_completions_);
+}
+
+void RpcArbiter::complete_request(uint32_t id,
+                                  uint32_t generation,
+                                  OperationOutcome outcome,
+                                  RpcCompletionCause cause,
+                                  const std::string *payload,
+                                  const char *reason,
+                                  bool response_error,
+                                  RequestCompletionQueue &completions) {
+    if (!generation) return;
+
+    RpcRequestCompletion completion;
+    completion.ticket = {id, generation};
+    completion.outcome = outcome;
+    completion.cause = cause;
+    if (payload) completion.payload = *payload;
+    completion.reason = reason ? reason : "";
+    completion.response_error = response_error;
+    if (!completions.push(std::move(completion))) {
+        Log::logf(CAT_RPC, LOG_ERROR,
+                  "RPC completion queue invariant violated id=%lu\n",
+                  static_cast<unsigned long>(id));
     }
 }
 
@@ -1116,7 +1228,8 @@ void RpcArbiter::dispatch_next_request() {
             return;
         }
         if (result == DateTimePrepareResult::InvalidClock) {
-            cancel_queued_request(request, "datetime_clock_invalid");
+            cancel_queued_request(request, "datetime_clock_invalid",
+                                  RpcCompletionCause::DispatchFailure);
             if (from_retry) {
                 dispatch_retry_ = {};
                 dispatch_retry_active_ = false;
@@ -1140,7 +1253,8 @@ void RpcArbiter::dispatch_next_request() {
         next_dispatch_retry_ms_ = now + AC_RPC_MIN_TX_INTERVAL_MS;
         stats_.request_dispatch_retries++;
         if (static_cast<int32_t>(now - dispatch_retry_deadline_ms_) >= 0) {
-            cancel_queued_request(dispatch_retry_, "dispatch_tx_full");
+            cancel_queued_request(dispatch_retry_, "dispatch_tx_full",
+                                  RpcCompletionCause::DispatchFailure);
             dispatch_retry_ = {};
             dispatch_retry_active_ = false;
             dispatch_retry_deadline_ms_ = 0;
@@ -1158,7 +1272,8 @@ void RpcArbiter::dispatch_next_request() {
         next_dispatch_retry_ms_ = now + AC_RPC_MIN_TX_INTERVAL_MS;
         stats_.request_dispatch_retries++;
         if (static_cast<int32_t>(now - dispatch_retry_deadline_ms_) >= 0) {
-            cancel_queued_request(dispatch_retry_, "dispatch_enqueue_failed");
+            cancel_queued_request(dispatch_retry_, "dispatch_enqueue_failed",
+                                  RpcCompletionCause::DispatchFailure);
             dispatch_retry_ = {};
             dispatch_retry_active_ = false;
             dispatch_retry_deadline_ms_ = 0;
@@ -1181,6 +1296,7 @@ void RpcArbiter::dispatch_next_request() {
     pending_.stream_command = request.stream_command;
     pending_.event_command = request.event_command;
     pending_.settings_refresh = request.settings_refresh;
+    pending_.generation = request.generation;
     pending_.deadline_ms = millis() + request.timeout_ms;
     pending_.dispatch_epoch_ms = 0;
     (void)current_epoch_ms(pending_.dispatch_epoch_ms);
@@ -1245,6 +1361,10 @@ void RpcArbiter::check_pending_timeout() {
         finish_as11_settings_refresh();
         schedule_as11_settings_refresh_retry(RpcSource::Scheduler, now);
     }
+
+    complete_request(pending_.id, pending_.generation,
+                     OperationOutcome::failed(), RpcCompletionCause::Timeout,
+                     nullptr, "timeout", false, request_completions_);
 
     pending_ = {};
 }
@@ -1799,6 +1919,14 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                                      owned_payload);
                 }
                 handle_matched_response(owned_payload);
+                const bool response_error =
+                    json_member_present(owned_payload, "error");
+                complete_request(
+                    pending_.id, pending_.generation,
+                    response_error ? OperationOutcome::failed()
+                                   : OperationOutcome::succeeded(),
+                    RpcCompletionCause::Response, &owned_payload, "",
+                    response_error, request_completions_);
                 note_request_success(response_source, millis());
                 pending_ = {};
                 if (source_event_route(response_source)) {

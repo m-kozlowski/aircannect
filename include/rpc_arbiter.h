@@ -12,21 +12,10 @@
 #include "can_driver.h"
 #include "event_broker.h"
 #include "fixed_queue.h"
+#include "rpc_request_port.h"
 #include "stream_broker.h"
 
 namespace aircannect {
-
-enum class RpcSource {
-    Console,
-    Tcp,
-    HttpApi,
-    Scheduler,
-    Internal,
-    ResmedOta,
-    Sink,
-    Report,
-    EdfRecorder,
-};
 
 enum class RpcEventKind {
     RpcResponse,
@@ -116,7 +105,7 @@ struct RpcRuntimeStatus {
     std::string last_boot_notification;
 };
 
-class RpcArbiter {
+class RpcArbiter final : public RpcRequestPort {
 public:
     explicit RpcArbiter(CanDriver &can);
 
@@ -139,6 +128,11 @@ public:
                               uint32_t &id);
     bool send_set_datetime_now(RpcSource source,
                                uint32_t timeout_ms = 0);
+
+    OperationSubmission request(const RpcRequestCommand &command) override;
+    bool cancel(OperationTicket ticket) override;
+    bool take_completion(OperationTicket ticket,
+                         RpcRequestCompletion &completion) override;
 
     // Event routing
     bool next_event(RpcEvent &event);
@@ -217,6 +211,7 @@ private:
         StreamCommandType stream_command = StreamCommandType::None;
         EventCommandType event_command = EventCommandType::None;
         bool settings_refresh = false;
+        uint32_t generation = 0;
     };
 
     struct QueuedRequest {
@@ -230,6 +225,7 @@ private:
         StreamCommandType stream_command = StreamCommandType::None;
         EventCommandType event_command = EventCommandType::None;
         bool settings_refresh = false;
+        uint32_t generation = 0;
     };
 
     enum class DateTimePrepareResult : uint8_t {
@@ -271,6 +267,8 @@ private:
     };
 
     static constexpr size_t RAW_PASSTHROUGH_PENDING_MAX = 8;
+    using RequestCompletionQueue =
+        FixedQueue<RpcRequestCompletion, AC_RPC_REQUEST_QUEUE_DEPTH>;
 
     // Event queues
     void push_event(RpcEventKind kind,
@@ -300,8 +298,18 @@ private:
     // Request lifecycle
     void cancel_pending_request(const char *reason);
     void cancel_queued_request(const QueuedRequest &request,
-                               const char *reason);
+                               const char *reason,
+                               RpcCompletionCause cause =
+                                   RpcCompletionCause::Cancelled);
     void cancel_all_requests(const char *reason);
+    static void complete_request(uint32_t id,
+                                 uint32_t generation,
+                                 OperationOutcome outcome,
+                                 RpcCompletionCause cause,
+                                 const std::string *payload,
+                                 const char *reason,
+                                 bool response_error,
+                                 RequestCompletionQueue &completions);
     bool enqueue_as11_settings_refresh(RpcSource source);
     void schedule_as11_settings_refresh_retry(RpcSource source,
                                               uint32_t now);
@@ -404,8 +412,10 @@ private:
     };
 
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
+    RequestCompletionQueue request_completions_;
     PendingRequest pending_;
     RawPassthroughRequest raw_passthrough_[RAW_PASSTHROUGH_PENDING_MAX];
+    size_t request_completion_reservations_ = 0;
 
     // Dispatch state
     QueuedRequest dispatch_retry_;
