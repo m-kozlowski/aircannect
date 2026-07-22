@@ -311,22 +311,22 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
-    const char *prepare_prefix = nullptr;
-    if (rest.startsWith("repository prepare ")) {
-        prepare_prefix = "repository prepare ";
-    } else if (rest.startsWith("prepare ")) {
-        prepare_prefix = "prepare ";
+    const char *install_prefix = nullptr;
+    if (rest.startsWith("repository install ")) {
+        install_prefix = "repository install ";
+    } else if (rest.startsWith("install ")) {
+        install_prefix = "install ";
     }
-    if (prepare_prefix) {
-        String path = rest.substring(strlen(prepare_prefix));
+    if (install_prefix) {
+        String path = rest.substring(strlen(install_prefix));
         trim_inplace(path);
         if (!path.length()) {
-            out.println("[RESMED prepare] path is required");
+            out.println("[RESMED OTA] image path is required");
         } else if (!resmed_ota.active() &&
                    preparer.request(path.c_str(), nullptr, false)) {
-            out.println("[RESMED prepare] queued");
+            out.println("[RESMED OTA] install queued");
         } else {
-            out.println("[RESMED prepare] rejected");
+            out.println("[RESMED OTA] install rejected");
         }
         return;
     }
@@ -381,8 +381,8 @@ void handle_resmed_ota(Print &out,
 
     print_unknown_command(
         out, "RESMED OTA",
-        "status, check, abort, apply, prepare PATH, repository "
-        "[refresh|remove PATH|prepare PATH]");
+        "status, check, abort, apply, install PATH, repository "
+        "[refresh|remove PATH|install PATH]");
 }
 
 }  // namespace

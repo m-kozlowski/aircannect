@@ -61,7 +61,7 @@ public:
     bool begin_upload(size_t total_size,
                       const String &expected_sha256,
                       const String &filename);
-    bool begin_prepared_upload(const ResmedPreparedFirmware &firmware);
+    bool begin_prepared_install(const ResmedPreparedFirmware &firmware);
     bool discard_prepared_firmware(const ResmedPreparedFirmware &firmware);
     bool submit_block(size_t offset, const String &hex_data);
     bool request_check();
@@ -100,6 +100,7 @@ private:
     bool begin_protocol(size_t total_size,
                         const String &expected_sha256,
                         const String &filename);
+    bool queue_plain_apply(bool reset_settings);
     bool queue_request(const char *method,
                        const std::string &params,
                        uint32_t timeout_ms);
@@ -149,7 +150,7 @@ private:
     size_t prepared_block_bytes_ = 0;
     size_t prepared_block_wanted_ = 0;
     bool prepared_transfer_ = false;
-    bool prepared_check_requested_ = false;
+    bool apply_after_check_ = false;
 
     // Transient source cleanup
     size_t cleanup_count_ = 0;

@@ -1028,7 +1028,7 @@ void loop() {
             const bool accepted = preparation_cancelled
                 ? resmed_ota_manager.discard_prepared_firmware(
                       prepared_firmware)
-                : resmed_ota_manager.begin_prepared_upload(
+                : resmed_ota_manager.begin_prepared_install(
                       prepared_firmware);
             if (!accepted) {
                 Log::logf(CAT_OTA, LOG_WARN,

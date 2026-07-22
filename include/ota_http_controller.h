@@ -35,7 +35,7 @@ private:
     enum class CommandKind : uint8_t {
         ResmedInit,
         ResmedBlock,
-        ResmedPrepare,
+        ResmedInstall,
         ResmedCheck,
         ResmedApplyPlain,
         ResmedApplyAuthenticated,

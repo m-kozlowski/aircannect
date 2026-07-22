@@ -710,7 +710,7 @@
               <div class="storage-empty">Loading</div>
             </div>
             <div class="msg" id="resmedRepositoryMsg"></div>
-            <div class="section-title">Upload another image</div>
+            <div class="section-title">Install another image</div>
             <div class="row">
               <label>Firmware image</label>
               <input id="resmedOtaFile" type="file" accept=".abc,.bin,.img">
@@ -719,9 +719,9 @@
               <div class="bar" id="resmedOtaUploadBar"></div>
             </div>
             <div class="btns">
-              <button class="btn primary" id="resmedOtaUploadBtn"
-                      onclick="resmedOtaUpload()">
-                Upload
+              <button class="btn primary" id="resmedOtaInstallBtn"
+                      onclick="resmedOtaInstall()">
+                Install
               </button>
               <button
                 class="btn danger"
@@ -730,14 +730,6 @@
                 onclick="resmedOtaCancel()"
               >
                 Cancel
-              </button>
-              <button
-                class="btn danger"
-                id="resmedOtaApplyBtn"
-                style="display: none"
-                onclick="resmedOtaApply()"
-              >
-                Apply
               </button>
             </div>
             <div class="msg" id="resmedOtaMsg"></div>

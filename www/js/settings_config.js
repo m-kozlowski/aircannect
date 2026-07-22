@@ -1046,9 +1046,9 @@
       if (data.phase === "uploaded" || data.phase === "checking") {
         return "Verifying on ResMed";
       }
-      if (data.phase === "verified") return "Upload complete. Ready to apply.";
-      if (data.phase === "applying") return "Applying firmware";
-      if (data.phase === "complete") return "Apply complete";
+      if (data.phase === "verified") return "Firmware verified";
+      if (data.phase === "applying") return "Installing firmware";
+      if (data.phase === "complete") return "Installation complete";
       if (data.phase === "error") return data.last_error || "ResMed OTA failed";
       return data.phase || "--";
     }
@@ -1108,16 +1108,6 @@
       up("resmedOtaProgress", progressText);
       up("resmedOtaHash", data.computed_sha256 || data.expected_sha256 || "--");
 
-      const apply = document.getElementById("resmedOtaApplyBtn");
-      if (apply) {
-        const canApply = data.phase === "verified" && !data.waiting;
-        const applying = data.phase === "applying";
-        const complete = data.phase === "complete";
-        apply.style.display = canApply || applying || complete ? "" : "none";
-        apply.disabled = !canApply;
-        apply.textContent = applying ? "Applying" : complete ? "Applied" : "Apply";
-      }
-
       const cancel = document.getElementById("resmedOtaCancelBtn");
       if (cancel) {
         const cancellable = (data.active || resmedDirectUploadBusy) &&
@@ -1126,8 +1116,8 @@
         cancel.disabled = !cancellable;
       }
 
-      const upload = document.getElementById("resmedOtaUploadBtn");
-      if (upload) upload.disabled = data.active || resmedDirectUploadBusy;
+      const install = document.getElementById("resmedOtaInstallBtn");
+      if (install) install.disabled = data.active || resmedDirectUploadBusy;
 
       const progress = document.getElementById("resmedOtaUploadProgress");
       const bar = document.getElementById("resmedOtaUploadBar");
@@ -1140,9 +1130,9 @@
         msg("resmedOtaMsg", data.prepare_error || data.last_error,
           false, true);
       } else if (data.phase === "verified") {
-        msg("resmedOtaMsg", "Upload complete. Ready to apply.", true, true);
+        msg("resmedOtaMsg", "Firmware verified", true, true);
       } else if (data.phase === "complete") {
-        msg("resmedOtaMsg", "Apply complete", true, true);
+        msg("resmedOtaMsg", "Installation complete", true, true);
       } else if (data.active) {
         msg("resmedOtaMsg", stateText, true, true);
       }
@@ -1220,12 +1210,12 @@
 
         const actions = document.createElement("div");
         actions.className = "resmed-repository-actions";
-        const prepare = document.createElement("button");
-        prepare.className = "btn primary";
-        prepare.textContent = "Upload";
-        prepare.onclick = () => resmedRepositoryPrepare(
+        const install = document.createElement("button");
+        install.className = "btn primary";
+        install.textContent = "Install";
+        install.onclick = () => resmedRepositoryInstall(
           entry.path, entry.name || entry.path);
-        actions.appendChild(prepare);
+        actions.appendChild(install);
 
         const remove = document.createElement("button");
         remove.className = "btn danger";
@@ -1375,18 +1365,16 @@
       }
     }
 
-    async function resmedRepositoryPrepare(path, name) {
+    async function resmedRepositoryInstall(path, name) {
       try {
-        msg("resmedRepositoryMsg", "Preparing " + name, true, true);
-        await postResmedOta("/api/resmed-ota/prepare", {
+        msg("resmedRepositoryMsg", "Installing " + name, true, true);
+        await postResmedOta("/api/resmed-ota/install", {
           path,
           filename: name,
           transient: false,
         });
-        await waitResmedOta((data) =>
-          data.phase === "verified" || data.phase === "complete", 4200);
-        msg("resmedRepositoryMsg",
-          "Firmware uploaded to the device and ready to apply", true, true);
+        await waitResmedOta((data) => data.phase === "complete", 4200);
+        msg("resmedRepositoryMsg", "Installation complete", true, true);
       } catch (error) {
         msg("resmedRepositoryMsg", error.message, false, true);
       }
@@ -1447,7 +1435,7 @@
       const progress = document.getElementById("resmedOtaUploadProgress");
       const bar = document.getElementById("resmedOtaUploadBar");
       const cancel = document.getElementById("resmedOtaCancelBtn");
-      const upload = document.getElementById("resmedOtaUploadBtn");
+      const install = document.getElementById("resmedOtaInstallBtn");
 
       up("resmedOtaState", "Uploading " + name);
       up("resmedOtaProgress", percent + "% " + fmtBytes(safeCommitted) +
@@ -1458,10 +1446,10 @@
         cancel.style.display = "";
         cancel.disabled = false;
       }
-      if (upload) upload.disabled = true;
+      if (install) install.disabled = true;
     }
 
-    async function resmedOtaUpload() {
+    async function resmedOtaInstall() {
       const file = document.getElementById("resmedOtaFile").files[0];
       if (!file) {
         msg("resmedOtaMsg", "Select firmware image", false, true);
@@ -1470,15 +1458,15 @@
 
       try {
         const current = await getResmedOta();
-        if (current.active || current.phase === "verified") {
+        if (current.active) {
           throw new Error("Another ResMed firmware operation is active");
         }
 
         storageUploadCancelRequested = false;
         storageUploadSetBusy(true);
         resmedDirectUploadBusy = true;
-        const upload = document.getElementById("resmedOtaUploadBtn");
-        if (upload) upload.disabled = true;
+        const install = document.getElementById("resmedOtaInstallBtn");
+        if (install) install.disabled = true;
         msg("resmedOtaMsg", "Uploading", true, true);
         const uploaded = await storageUploadFile(
           file, "/aircannect", 0, 1, resmedDirectUploadProgress, {
@@ -1491,17 +1479,13 @@
         storageUploadCurrentId = 0;
         storageUploadSetBusy(false);
         resmedDirectUploadBusy = false;
-        await postResmedOta("/api/resmed-ota/prepare", {
+        await postResmedOta("/api/resmed-ota/install", {
           path: "/aircannect/resmed-ota-input.image",
           filename: file.name,
           transient: true,
         });
-        const result = await waitResmedOta((data) =>
-          data.phase === "complete" || data.phase === "verified", 4200);
-        msg("resmedOtaMsg",
-          result.phase === "complete" ?
-            "Apply complete" : "Upload complete. Ready to apply.",
-          true, true);
+        await waitResmedOta((data) => data.phase === "complete", 4200);
+        msg("resmedOtaMsg", "Installation complete", true, true);
       } catch (error) {
         msg("resmedOtaMsg", error.message, false, true);
         loadOta();
@@ -1510,25 +1494,6 @@
         storageUploadSetBusy(false);
         resmedDirectUploadBusy = false;
         setTimeout(getResmedOta, 0);
-      }
-    }
-
-    async function resmedOtaApply() {
-      if (!confirm("Apply uploaded firmware to the ResMed device now?")) {
-        return;
-      }
-
-      try {
-        await postResmedOta("/api/resmed-ota/apply", {
-          mode: "plain",
-          reset: false,
-          confirm: "APPLY_RESMED_OTA",
-        });
-        await waitResmedOta((data) =>
-          data.phase === "complete" || data.phase === "error", 240);
-        msg("resmedOtaMsg", "Apply complete", true, true);
-      } catch (error) {
-        msg("resmedOtaMsg", error.message, false, true);
       }
     }
 

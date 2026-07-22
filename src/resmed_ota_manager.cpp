@@ -184,7 +184,7 @@ bool ResmedOtaManager::begin_upload(size_t total_size,
     return begin_protocol(total_size, expected_sha256, filename);
 }
 
-bool ResmedOtaManager::begin_prepared_upload(
+bool ResmedOtaManager::begin_prepared_install(
     const ResmedPreparedFirmware &firmware) {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
@@ -203,7 +203,7 @@ bool ResmedOtaManager::begin_prepared_upload(
     if (!guard_device_idle_for_upgrade()) return false;
 
     prepared_transfer_ = true;
-    prepared_check_requested_ = false;
+    apply_after_check_ = true;
     cold_->status.phase = ResmedOtaPhase::Opening;
     cold_->status.total_size = static_cast<size_t>(firmware.image.prepared_size);
     cold_->status.filename = firmware.filename;
@@ -228,7 +228,7 @@ bool ResmedOtaManager::begin_prepared_upload(
     }
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "[RESMED] prepared upload opening target=%s size=%u path=%s\n",
+              "[RESMED] prepared install opening target=%s size=%u path=%s\n",
               firmware.image.target,
               static_cast<unsigned>(firmware.image.prepared_size),
               firmware.path);
@@ -386,6 +386,15 @@ bool ResmedOtaManager::request_apply_plain(bool reset_settings,
                                            const String &confirm) {
     ScopedLock lock(*this, 1000);
     if (!lock || !cold_) return false;
+    if (confirm != AC_RESMED_OTA_CONFIRM) {
+        set_error("confirmation_required");
+        return false;
+    }
+
+    return queue_plain_apply(reset_settings);
+}
+
+bool ResmedOtaManager::queue_plain_apply(bool reset_settings) {
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
@@ -393,10 +402,6 @@ bool ResmedOtaManager::request_apply_plain(bool reset_settings,
     if (cold_->status.phase != ResmedOtaPhase::Verified ||
         !cold_->status.computed_sha256.length()) {
         set_error("not_verified");
-        return false;
-    }
-    if (confirm != AC_RESMED_OTA_CONFIRM) {
-        set_error("confirmation_required");
         return false;
     }
 
@@ -413,6 +418,7 @@ bool ResmedOtaManager::request_apply_plain(bool reset_settings,
         set_error("apply_queue_failed");
         return false;
     }
+    apply_after_check_ = false;
 
     Log::logf(CAT_OTA, LOG_WARN, "[RESMED] ApplyUpgrade queued\n");
     return true;
@@ -634,6 +640,7 @@ void ResmedOtaManager::handle_response(const std::string &payload) {
             }
             cold_->status.phase = ResmedOtaPhase::Verified;
             schedule_prepared_cleanup();
+            if (apply_after_check_) (void)queue_plain_apply(false);
             break;
 
         case WaitingFor::Apply:
@@ -655,10 +662,7 @@ void ResmedOtaManager::poll_prepared_transfer() {
     if (waiting_for_ != WaitingFor::None) return;
 
     if (cold_->status.phase == ResmedOtaPhase::Uploaded) {
-        if (prepared_check_requested_) return;
-
         close_prepared_stream(true);
-        prepared_check_requested_ = true;
         prepared_transfer_ = false;
         (void)request_check();
         return;
@@ -852,14 +856,14 @@ void ResmedOtaManager::clear_session() {
     last_activity_ms_ = 0;
     cold_->prepared = {};
     prepared_transfer_ = false;
-    prepared_check_requested_ = false;
+    apply_after_check_ = false;
 }
 
 void ResmedOtaManager::set_error(const char *error) {
     close_prepared_stream(false);
     schedule_prepared_cleanup();
     prepared_transfer_ = false;
-    prepared_check_requested_ = false;
+    apply_after_check_ = false;
 
     cold_->status.phase = ResmedOtaPhase::Error;
     cold_->status.waiting = false;

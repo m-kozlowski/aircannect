@@ -384,7 +384,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
     });
 
     server.on(
-        AsyncURIMatcher::exact("/api/resmed-ota/prepare"), HTTP_POST,
+        AsyncURIMatcher::exact("/api/resmed-ota/install"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
             if (resmed_ota_->active() || resmed_preparer_->active()) {
                 request->send(
@@ -412,7 +412,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             (void)json_get_string(doc, "filename", filename);
 
             Command command;
-            command.kind = CommandKind::ResmedPrepare;
+            command.kind = CommandKind::ResmedInstall;
             command.path = path.c_str();
             command.filename = filename.c_str();
             command.flag = doc["transient"].is<bool>() &&
@@ -573,7 +573,7 @@ void OtaHttpController::execute(Command &command) {
                 command.number, String(command.data.c_str()));
             break;
 
-        case CommandKind::ResmedPrepare:
+        case CommandKind::ResmedInstall:
             if (resmed_ota_->active() ||
                 !resmed_preparer_->request(
                     command.path.c_str(), command.filename.c_str(),
