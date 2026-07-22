@@ -13,9 +13,10 @@ namespace aircannect {
 
 class As11DeviceService;
 class ConfigService;
-class OtaManager;
+class FirmwareInstaller;
 class OximetryManager;
 class TimeSyncService;
+class UpdateChecker;
 class WifiManager;
 
 class StatusHttpController final : public HttpRouteModule {
@@ -26,7 +27,8 @@ public:
                WifiManager &wifi,
                ConfigService &config,
                TimeSyncService &time_sync,
-               OtaManager &ota,
+               FirmwareInstaller &installer,
+               UpdateChecker &update_checker,
                OximetryManager &oximetry);
     void register_routes(AsyncWebServer &server) override;
     void poll(PollCheckpoint checkpoint = nullptr);
@@ -42,7 +44,8 @@ private:
     WifiManager *wifi_ = nullptr;
     ConfigService *config_ = nullptr;
     TimeSyncService *time_sync_ = nullptr;
-    OtaManager *ota_ = nullptr;
+    FirmwareInstaller *installer_ = nullptr;
+    UpdateChecker *update_checker_ = nullptr;
     OximetryManager *oximetry_ = nullptr;
 
     StaticSemaphore_t cache_mutex_storage_ = {};

@@ -16,7 +16,9 @@ class ConfigService;
 class EdfRecorderManager;
 class EventBroker;
 class ExportCoordinator;
-class OtaManager;
+class ArduinoOtaSource;
+class FirmwareInstaller;
+class FirmwareUrlSource;
 class OximetryManager;
 class ReportTask;
 class ResmedOtaManager;
@@ -28,6 +30,7 @@ class SinkManager;
 class StreamBroker;
 class TcpBridge;
 class TimeSyncService;
+class UpdateChecker;
 class WebUI;
 class WifiManager;
 
@@ -228,7 +231,11 @@ private:
 
 class OtaConsoleCommands final : public ConsoleCommandGroup {
 public:
-    OtaConsoleCommands(OtaManager &ota, ResmedOtaManager &resmed_ota);
+    OtaConsoleCommands(FirmwareInstaller &installer,
+                       FirmwareUrlSource &url_source,
+                       ArduinoOtaSource &arduino_source,
+                       UpdateChecker &update_checker,
+                       ResmedOtaManager &resmed_ota);
 
     bool execute(const String &command,
                  const String &rest,
@@ -236,7 +243,10 @@ public:
                  ConsoleCommandSession &session) override;
 
 private:
-    OtaManager &ota_;
+    FirmwareInstaller &installer_;
+    FirmwareUrlSource &url_source_;
+    ArduinoOtaSource &arduino_source_;
+    UpdateChecker &update_checker_;
     ResmedOtaManager &resmed_ota_;
 };
 

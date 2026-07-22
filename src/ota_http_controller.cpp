@@ -6,12 +6,16 @@
 
 #include <utility>
 
+#include "arduino_ota_source.h"
 #include "board.h"
 #include "debug_log.h"
+#include "firmware_installer.h"
+#include "firmware_url_source.h"
 #include "http_request_utils.h"
 #include "json_util.h"
-#include "ota_manager.h"
+#include "ota_status.h"
 #include "resmed_ota_manager.h"
+#include "update_checker.h"
 #include "version.h"
 
 namespace aircannect {
@@ -95,7 +99,7 @@ bool request_url_args(AsyncWebServerRequest *request,
 }
 
 template <typename JsonOut>
-void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
+void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
     json = "{";
     json_add_string(json, "version", aircannect_version(), false);
     json += ",\"upload_encodings\":[\"auto\",\"plain\",\"zlib\"]";
@@ -184,7 +188,7 @@ void build_resmed_ota_json(JsonOut &json,
 }
 
 void send_esp_status(AsyncWebServerRequest *request,
-                     const OtaManagerStatus &status,
+                     const OtaStatusSnapshot &status,
                      int response_status) {
     String json;
     json.reserve(AC_WEB_OTA_JSON_RESERVE);
@@ -203,9 +207,15 @@ void send_resmed_status(AsyncWebServerRequest *request,
 
 }  // namespace
 
-bool OtaHttpController::begin(OtaManager &esp_ota,
+bool OtaHttpController::begin(FirmwareInstaller &installer,
+                              FirmwareUrlSource &url_source,
+                              ArduinoOtaSource &arduino_source,
+                              UpdateChecker &update_checker,
                               ResmedOtaManager &resmed_ota) {
-    esp_ota_ = &esp_ota;
+    installer_ = &installer;
+    url_source_ = &url_source;
+    arduino_source_ = &arduino_source;
+    update_checker_ = &update_checker;
     resmed_ota_ = &resmed_ota;
 
     return commands_.begin();
@@ -214,13 +224,17 @@ bool OtaHttpController::begin(OtaManager &esp_ota,
 void OtaHttpController::register_routes(AsyncWebServer &server) {
     server.on(AsyncURIMatcher::exact("/api/ota"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
-        send_esp_status(request, esp_ota_->status(), 200);
+        send_esp_status(request,
+                        collect_ota_status(*installer_, *url_source_,
+                                           *arduino_source_, *update_checker_),
+                        200);
     });
 
     server.on(AsyncURIMatcher::exact("/api/ota/check"), HTTP_POST,
               [this](AsyncWebServerRequest *request) {
-        const bool ok = esp_ota_->request_update_check();
-        const OtaManagerStatus status = esp_ota_->status();
+        const bool ok = update_checker_->request_check(installer_->active());
+        const OtaStatusSnapshot status = collect_ota_status(
+            *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
             ok ? 202 : (status.update_error == "ota_busy" ? 409 : 400);
         send_esp_status(request, status, response_status);
@@ -234,8 +248,12 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             return;
         }
 
-        const bool ok = esp_ota_->request_available_update();
-        const OtaManagerStatus status = esp_ota_->status();
+        String error;
+        const bool ok = request_selected_update(*update_checker_,
+                                                *url_source_, error);
+        OtaStatusSnapshot status = collect_ota_status(
+            *installer_, *url_source_, *arduino_source_, *update_checker_);
+        if (!ok && error.length()) status.last_error = error;
         const int response_status =
             ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
         send_esp_status(request, status, response_status);
@@ -260,9 +278,10 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             return;
         }
 
-        const bool ok = esp_ota_->request_url_update(
-            url, encoding, image_size, wire_size);
-        const OtaManagerStatus status = esp_ota_->status();
+        const bool ok = url_source_->request(url, encoding, image_size,
+                                             wire_size);
+        const OtaStatusSnapshot status = collect_ota_status(
+            *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
             ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
         send_esp_status(request, status, response_status);
@@ -285,9 +304,11 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             return;
         }
 
-        const bool ok = esp_ota_->request_http_upload_prepare(
-            image_size, encoding, wire_size);
-        const OtaManagerStatus status = esp_ota_->status();
+        const bool ok = installer_->request_prepare(
+            image_size, encoding, wire_size,
+            FirmwareInstallSource::HttpUpload);
+        const OtaStatusSnapshot status = collect_ota_status(
+            *installer_, *url_source_, *arduino_source_, *update_checker_);
         const int response_status =
             ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
         send_esp_status(request, status, response_status);
@@ -296,19 +317,23 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
     server.on(
         AsyncURIMatcher::exact("/api/ota/upload"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
-            if (esp_ota_->status().url_active) {
+            if (url_source_->active()) {
                 request->send(409, "application/json",
                               "{\"error\":\"ota_busy\"}");
                 return;
             }
 
-            const bool ok = esp_ota_->finish_http_upload();
-            send_esp_status(request, esp_ota_->status(), ok ? 200 : 400);
+            const bool ok = installer_->finish();
+            send_esp_status(
+                request,
+                collect_ota_status(*installer_, *url_source_,
+                                   *arduino_source_, *update_checker_),
+                ok ? 200 : 400);
         },
         [this](AsyncWebServerRequest *request, const String &filename,
                size_t index, uint8_t *data, size_t length, bool final) {
             if (index == 0) {
-                if (esp_ota_->status().url_active) {
+                if (url_source_->active()) {
                     if (request && request->client()) request->client()->close();
                     return;
                 }
@@ -322,13 +347,14 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
                     return;
                 }
 
-                if (!esp_ota_->begin_http_upload(
-                        filename, image_size, encoding, wire_size)) {
+                if (!installer_->begin_write(
+                        filename, image_size, encoding, wire_size,
+                        FirmwareInstallSource::HttpUpload)) {
                     return;
                 }
             }
 
-            if (!esp_ota_->write_http_upload(index, data, length)) {
+            if (!installer_->write(index, data, length)) {
                 if (request && request->client()) request->client()->close();
                 return;
             }

@@ -7,6 +7,7 @@
 
 #include "as11_device_service.h"
 #include "as11_settings_manager.h"
+#include "arduino_ota_source.h"
 #include "board.h"
 #include "can_driver.h"
 #include "config_http_controller.h"
@@ -20,11 +21,12 @@
 #include "export_coordinator.h"
 #include "export_endpoint_config.h"
 #include "export_task.h"
+#include "firmware_installer.h"
+#include "firmware_url_source.h"
 #include "http_route_module.h"
 #include "live_http_controller.h"
 #include "management_console.h"
 #include "memory_manager.h"
-#include "ota_manager.h"
 #include "ota_http_controller.h"
 #include "oximetry_http_controller.h"
 #include "oximetry_manager.h"
@@ -51,6 +53,7 @@
 #include "telnet_console.h"
 #include "time_sync_service.h"
 #include "tls_memory.h"
+#include "update_checker.h"
 #include "version.h"
 #include "web_ui.h"
 #include "wifi_manager.h"
@@ -73,7 +76,10 @@ static TelnetConsole telnet_console;
 static ConfigService config_service;
 static WebUI web_ui;
 static TimeSyncService time_sync_service;
-static OtaManager ota_manager;
+static FirmwareInstaller firmware_installer;
+static FirmwareUrlSource firmware_url_source(firmware_installer);
+static ArduinoOtaSource arduino_ota_source(firmware_installer);
+static UpdateChecker update_checker;
 static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
@@ -124,7 +130,10 @@ static ReportConsoleCommands report_console_commands(report_task);
 static ExportConsoleCommands export_console_commands(export_coordinator);
 static ConfigConsoleCommands config_console_commands(config_service,
                                                      wifi_manager);
-static OtaConsoleCommands ota_console_commands(ota_manager,
+static OtaConsoleCommands ota_console_commands(firmware_installer,
+                                               firmware_url_source,
+                                               arduino_ota_source,
+                                               update_checker,
                                                resmed_ota_manager);
 static WebDiagnosticsConsoleCommands web_console_commands(web_ui);
 static ConsoleCommandGroup *console_command_groups[] = {
@@ -152,9 +161,9 @@ static uint32_t report_catalog_timezone_revision = 0;
 static uint32_t report_catalog_request_generation = 0;
 static uint32_t rpc_transport_generation_seen = 0;
 static ActivitySnapshot storage_activity;
-static NetworkSnapshot export_network;
+static NetworkSnapshot runtime_network;
 static bool runtime_activity_published = false;
-static bool export_network_published = false;
+static bool runtime_network_published = false;
 static uint32_t export_config_due_ms = 0;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
@@ -291,7 +300,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_http_controller.publish_activity(storage_activity);
 }
 
-static void publish_export_network() {
+static void publish_runtime_network() {
     NetworkSnapshot next;
     const WifiModeState mode = wifi_manager.mode_state();
 
@@ -304,20 +313,20 @@ static void publish_export_network() {
     if (next.associated) (void)wifi_manager.copy_bssid(next.bssid);
 
     const bool changed =
-        !export_network_published ||
-        export_network.associated != next.associated ||
-        export_network.ipv4_ready != next.ipv4_ready ||
-        export_network.management_reachable != next.management_reachable ||
-        export_network.active_profile != next.active_profile ||
-        memcmp(export_network.bssid, next.bssid,
-               sizeof(export_network.bssid)) != 0;
+        !runtime_network_published ||
+        runtime_network.associated != next.associated ||
+        runtime_network.ipv4_ready != next.ipv4_ready ||
+        runtime_network.management_reachable != next.management_reachable ||
+        runtime_network.active_profile != next.active_profile ||
+        memcmp(runtime_network.bssid, next.bssid,
+               sizeof(runtime_network.bssid)) != 0;
     if (!changed) return;
 
-    next.generation = export_network.generation + 1;
+    next.generation = runtime_network.generation + 1;
     if (next.generation == 0) next.generation = 1;
-    export_network = next;
-    export_network_published = true;
-    export_task.publish_network(export_network);
+    runtime_network = next;
+    runtime_network_published = true;
+    export_task.publish_network(runtime_network);
 }
 
 static void publish_export_config(uint32_t now_ms) {
@@ -371,7 +380,7 @@ static void apply_config_runtime_effects(void *,
 
     if (dirty & AC_CONFIG_DIRTY_HOSTNAME) {
         wifi_manager.set_hostname(config.hostname);
-        ota_manager.mark_config_dirty();
+        arduino_ota_source.mark_config_dirty();
     }
     if (dirty & AC_CONFIG_DIRTY_SOFTAP) {
         const bool retry_sta =
@@ -395,10 +404,10 @@ static void apply_config_runtime_effects(void *,
         oximetry_manager.configuration_changed();
     }
     if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
-        ota_manager.mark_config_dirty();
+        arduino_ota_source.mark_config_dirty();
     }
     if (dirty & AC_CONFIG_DIRTY_UPDATE_URL) {
-        ota_manager.mark_update_config_dirty();
+        update_checker.mark_config_dirty();
     }
     if (dirty & (AC_CONFIG_DIRTY_SMB_SYNC |
                  AC_CONFIG_DIRTY_SLEEPHQ_SYNC)) {
@@ -700,12 +709,17 @@ void setup() {
     time_sync_service.begin(config_service.data(), wifi_manager, rpc_transport,
                             as11_device_service);
     report_catalog_timezone_revision = time_sync_service.timezone_revision();
-    ota_manager.begin(config_service.data());
+    firmware_installer.begin();
+    firmware_url_source.begin();
+    arduino_ota_source.begin(config_service.data());
+    update_checker.begin(config_service.data());
     if (!config_http_controller.begin(config_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] config HTTP controller failed to start\n");
     }
-    if (!ota_http_controller.begin(ota_manager, resmed_ota_manager)) {
+    if (!ota_http_controller.begin(firmware_installer, firmware_url_source,
+                                   arduino_ota_source, update_checker,
+                                   resmed_ota_manager)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] OTA HTTP controller failed to start\n");
     }
@@ -756,7 +770,8 @@ void setup() {
 
     if (!status_http_controller.begin(as11_device_service, wifi_manager,
                                       config_service, time_sync_service,
-                                      ota_manager, oximetry_manager)) {
+                                      firmware_installer, update_checker,
+                                      oximetry_manager)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] status HTTP controller failed to start\n");
     }
@@ -776,7 +791,7 @@ void loop() {
 
     // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =
-        ota_manager.as11_quiesce_required();
+        firmware_installer.as11_quiesce_required();
     rpc_quiesce_coordinator.update(esp_ota_quiesce_requested, now_ms);
 
     const bool resmed_ota_transport_active =
@@ -805,7 +820,7 @@ void loop() {
     oximetry_http_controller.poll();
     wifi_http_controller.poll();
 
-    ota_manager.poll_http_upload_prepare(
+    firmware_installer.poll_prepare(
         esp_ota_quiesce_requested &&
             rpc_quiesce_coordinator.complete(),
         esp_ota_quiesce_requested &&
@@ -843,11 +858,13 @@ void loop() {
         now_ms, AC_WIFI_ROAM_STREAM_QUIET_MS);
 
     wifi_manager.set_roaming_suspended(stream_activity_active ||
-                                       ota_manager.active() ||
+                                       firmware_installer.active() ||
                                        resmed_ota_transport_active);
 
     wifi_manager.poll();
     drain_can_rx_after("wifi.poll");
+
+    publish_runtime_network();
 
     sync_network_services();
     drain_can_rx_after("network_services.sync");
@@ -868,8 +885,9 @@ void loop() {
     drain_can_rx_after("time_sync");
 
     // ESP/Arduino OTA
+    const FirmwareInstallStatus install_status = firmware_installer.status();
     const bool esp_reboot_allowed =
-        !ota_manager.status().reboot_pending ||
+        !install_status.reboot_pending ||
         rpc_quiesce_coordinator.reboot_allowed(now_ms);
 
     const bool arduino_ota_poll_allowed =
@@ -881,10 +899,14 @@ void loop() {
         !export_coordinator.endpoint_work_active() &&
         !report_status.foreground_active;
 
-    ota_manager.poll(wifi_manager, esp_reboot_allowed,
-                     !resmed_ota_transport_active,
-                     arduino_ota_poll_allowed,
-                     update_check_allowed);
+    update_checker.poll(runtime_network,
+                        update_check_allowed &&
+                            !resmed_ota_transport_active,
+                        firmware_installer.active());
+    arduino_ota_source.poll(runtime_network,
+                            !resmed_ota_transport_active,
+                            arduino_ota_poll_allowed);
+    firmware_installer.poll(esp_reboot_allowed);
 
     drain_can_rx_after("arduino_ota");
 
@@ -902,7 +924,7 @@ void loop() {
 
     const bool foreground_report_active = report_status.foreground_active;
     const bool export_active = export_coordinator.endpoint_work_active();
-    const bool esp_ota_install_active = ota_manager.active();
+    const bool esp_ota_install_active = firmware_installer.active();
     const bool storage_ota_active =
         esp_ota_install_active || resmed_ota_manager.transport_active();
     const bool therapy_active =
@@ -916,7 +938,6 @@ void loop() {
                              storage_ota_active,
                              therapy_active);
 
-    publish_export_network();
     publish_export_config(now_ms);
 
     export_coordinator.poll(report_activity, storage_activity, now_ms);

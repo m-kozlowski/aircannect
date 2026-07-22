@@ -1,15 +1,19 @@
 #include "console_commands.h"
 
+#include "arduino_ota_source.h"
 #include "board.h"
+#include "firmware_installer.h"
+#include "firmware_url_source.h"
 #include "management_console_utils.h"
-#include "ota_manager.h"
+#include "ota_status.h"
 #include "resmed_ota_manager.h"
 #include "string_util.h"
+#include "update_checker.h"
 
 namespace aircannect {
 namespace {
 
-void print_ota_status(Print &out, const OtaManagerStatus &status) {
+void print_ota_status(Print &out, const OtaStatusSnapshot &status) {
     out.print("[OTA] arduino=");
     out.print(status.arduino_started ? "started" : "stopped");
     if (status.arduino_active) out.print("/active");
@@ -82,7 +86,10 @@ void print_ota_status(Print &out, const OtaManagerStatus &status) {
 
 void handle_ota(Print &out,
                 String rest,
-                OtaManager &ota,
+                FirmwareInstaller &installer,
+                FirmwareUrlSource &url_source,
+                ArduinoOtaSource &arduino_source,
+                UpdateChecker &update_checker,
                 ResmedOtaManager &resmed_ota) {
     trim_inplace(rest);
     int pos = 0;
@@ -91,13 +98,16 @@ void handle_ota(Print &out,
     to_lower_inplace(command);
 
     if (command == "status") {
-        print_ota_status(out, ota.status());
+        print_ota_status(out, collect_ota_status(
+                                  installer, url_source, arduino_source,
+                                  update_checker));
         return;
     }
 
     if (command == "check") {
-        if (!ota.request_update_check()) {
-            const OtaManagerStatus status = ota.status();
+        if (!update_checker.request_check(installer.active())) {
+            const OtaStatusSnapshot status = collect_ota_status(
+                installer, url_source, arduino_source, update_checker);
             out.print("[OTA] update check rejected: ");
             out.println(status.update_error.length()
                             ? status.update_error
@@ -109,12 +119,16 @@ void handle_ota(Print &out,
     }
 
     if (command == "install") {
-        if (!ota.request_available_update()) {
-            const OtaManagerStatus status = ota.status();
+        String error;
+        if (!request_selected_update(update_checker, url_source, error)) {
+            const OtaStatusSnapshot status = collect_ota_status(
+                installer, url_source, arduino_source, update_checker);
             out.print("[OTA] update install rejected: ");
-            out.println(status.last_error.length()
-                            ? status.last_error
-                            : "error");
+            out.println(error.length()
+                            ? error
+                            : (status.last_error.length()
+                                   ? status.last_error
+                                   : "error"));
             return;
         }
         out.println("[OTA] update install queued");
@@ -122,7 +136,8 @@ void handle_ota(Print &out,
     }
 
     if (command == "abort") {
-        ota.request_abort("aborted_by_console");
+        abort_esp_ota(installer, url_source, arduino_source, update_checker,
+                      "aborted_by_console");
         out.println("[OTA] aborted");
         return;
     }
@@ -143,8 +158,9 @@ void handle_ota(Print &out,
             out.println("[OTA] ResMed OTA transport is active");
             return;
         }
-        if (!ota.request_url_update(url)) {
-            const OtaManagerStatus status = ota.status();
+        if (!url_source.request(url)) {
+            const OtaStatusSnapshot status = collect_ota_status(
+                installer, url_source, arduino_source, update_checker);
             out.print("[OTA] URL update rejected: ");
             out.println(status.last_error.length() ? status.last_error
                                                    : "error");
@@ -265,9 +281,16 @@ void handle_resmed_ota(Print &out,
 
 }  // namespace
 
-OtaConsoleCommands::OtaConsoleCommands(OtaManager &ota,
+OtaConsoleCommands::OtaConsoleCommands(FirmwareInstaller &installer,
+                                       FirmwareUrlSource &url_source,
+                                       ArduinoOtaSource &arduino_source,
+                                       UpdateChecker &update_checker,
                                        ResmedOtaManager &resmed_ota)
-    : ota_(ota), resmed_ota_(resmed_ota) {}
+    : installer_(installer),
+      url_source_(url_source),
+      arduino_source_(arduino_source),
+      update_checker_(update_checker),
+      resmed_ota_(resmed_ota) {}
 
 bool OtaConsoleCommands::execute(const String &command,
                                  const String &rest_arg,
@@ -282,7 +305,8 @@ bool OtaConsoleCommands::execute(const String &command,
     String rest = rest_arg;
 
     if (command == "ota") {
-        handle_ota(out, rest, ota_, resmed_ota_);
+        handle_ota(out, rest, installer_, url_source_, arduino_source_,
+                   update_checker_, resmed_ota_);
         return true;
     }
     if (command == "resmed-ota") {
@@ -294,7 +318,7 @@ bool OtaConsoleCommands::execute(const String &command,
         if (rest.length()) {
             print_unknown_command(out, "SYSTEM", "restart");
         } else {
-            ota_.schedule_reboot(500);
+            installer_.schedule_reboot(500);
             out.println("[SYSTEM] restart scheduled");
         }
         return true;

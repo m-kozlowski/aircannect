@@ -7,11 +7,12 @@
 #include "app_config.h"
 #include "as11_device_service.h"
 #include "board.h"
+#include "firmware_installer.h"
 #include "memory_manager.h"
-#include "ota_manager.h"
 #include "oximetry_manager.h"
 #include "storage_manager.h"
 #include "time_sync_service.h"
+#include "update_checker.h"
 #include "wifi_manager.h"
 
 namespace aircannect {
@@ -76,7 +77,8 @@ struct SystemStatusSources {
     const WifiManager &wifi_manager;
     const AppConfigData &app_config;
     const TimeSyncService &time_sync_service;
-    const OtaManager &ota_manager;
+    const FirmwareInstaller &firmware_installer;
+    const UpdateChecker &update_checker;
     const OximetryManager &oximetry_manager;
 };
 

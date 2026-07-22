@@ -82,8 +82,8 @@ SystemStatusSnapshot collect_system_status(
         sources.wifi_manager.active_profile_index();
     if (checkpoint) checkpoint("web_ui.snapshots.status.wifi");
 
-    out.ota_active = sources.ota_manager.active();
-    out.update = sources.ota_manager.update_notification();
+    out.ota_active = sources.firmware_installer.active();
+    out.update = sources.update_checker.notification();
     if (checkpoint) checkpoint("web_ui.snapshots.status.ota");
 
     const As11DeviceState &as11 = sources.device.state();

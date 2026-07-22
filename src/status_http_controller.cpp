@@ -8,12 +8,13 @@
 #include "as11_device_service.h"
 #include "board.h"
 #include "config_service.h"
+#include "firmware_installer.h"
 #include "json_util.h"
-#include "ota_manager.h"
 #include "oximetry_manager.h"
 #include "storage_manager.h"
 #include "system_status_snapshot.h"
 #include "time_sync_service.h"
+#include "update_checker.h"
 #include "wifi_manager.h"
 
 namespace aircannect {
@@ -59,7 +60,8 @@ bool build_status_json(LargeTextBuffer &json,
                        const WifiManager &wifi_manager,
                        const ConfigService &config,
                        const TimeSyncService &time_sync,
-                       const OtaManager &ota,
+                       const FirmwareInstaller &installer,
+                       const UpdateChecker &update_checker,
                        const OximetryManager &oximetry,
                        StatusHttpController::PollCheckpoint checkpoint) {
     const SystemStatusSnapshot snap = collect_system_status({
@@ -67,7 +69,8 @@ bool build_status_json(LargeTextBuffer &json,
         wifi_manager,
         config.data(),
         time_sync,
-        ota,
+        installer,
+        update_checker,
         oximetry,
     }, checkpoint);
     const MemoryStatus &mem = snap.memory;
@@ -167,13 +170,15 @@ bool StatusHttpController::begin(As11DeviceService &device,
                                  WifiManager &wifi,
                                  ConfigService &config,
                                  TimeSyncService &time_sync,
-                                 OtaManager &ota,
+                                 FirmwareInstaller &installer,
+                                 UpdateChecker &update_checker,
                                  OximetryManager &oximetry) {
     device_ = &device;
     wifi_ = &wifi;
     config_ = &config;
     time_sync_ = &time_sync;
-    ota_ = &ota;
+    installer_ = &installer;
+    update_checker_ = &update_checker;
     oximetry_ = &oximetry;
     observed_device_revision_ = device.revision();
     observed_config_revision_ = config.revision();
@@ -196,8 +201,8 @@ void StatusHttpController::register_routes(AsyncWebServer &server) {
 }
 
 void StatusHttpController::poll(PollCheckpoint checkpoint) {
-    if (!device_ || !wifi_ || !config_ || !time_sync_ || !ota_ ||
-        !oximetry_) {
+    if (!device_ || !wifi_ || !config_ || !time_sync_ || !installer_ ||
+        !update_checker_ || !oximetry_) {
         return;
     }
 
@@ -236,7 +241,8 @@ bool StatusHttpController::copy_snapshot(LargeTextBuffer &out,
 bool StatusHttpController::publish_snapshot(PollCheckpoint checkpoint) {
     build_json_.clear();
     if (!build_status_json(build_json_, *device_, *wifi_, *config_,
-                           *time_sync_, *ota_, *oximetry_, checkpoint)) {
+                           *time_sync_, *installer_, *update_checker_,
+                           *oximetry_, checkpoint)) {
         return false;
     }
 
