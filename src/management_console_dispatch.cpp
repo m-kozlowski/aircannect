@@ -106,10 +106,6 @@ void print_web_memory_detail(Print &out, WebUI *web_ui) {
     print_web_buffer_memory(out, "wifi", web.wifi, total_capacity);
     print_web_buffer_memory(out, "oximetry_sensors",
                             web.oximetry_sensors, total_capacity);
-    print_web_buffer_memory(out, "ota", web.ota, total_capacity);
-    print_web_buffer_memory(out, "resmed_ota", web.resmed_ota,
-                            total_capacity);
-    print_web_buffer_memory(out, "settings", web.settings, total_capacity);
     print_web_buffer_memory(out, "live", web.live, total_capacity);
     out.print("[MEM web] buffer_cap_total=");
     out.print(static_cast<unsigned long>(total_capacity));

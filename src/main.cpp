@@ -20,6 +20,7 @@
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
+#include "ota_http_controller.h"
 #include "oximetry_manager.h"
 #include "provisioning.h"
 #include "report_http_controller.h"
@@ -30,8 +31,9 @@
 #include "rpc_quiesce_coordinator.h"
 #include "session_manager.h"
 #include "sink_manager.h"
-#include "storage_manager.h"
+#include "settings_http_controller.h"
 #include "storage_http_controller.h"
+#include "storage_manager.h"
 #include "storage_service.h"
 #include "stream_broker.h"
 #if AC_STACK_PROFILE_ENABLED
@@ -73,9 +75,13 @@ static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
 static StorageHttpController storage_http_controller;
+static OtaHttpController ota_http_controller;
+static SettingsHttpController settings_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
+    &ota_http_controller,
+    &settings_http_controller,
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
@@ -653,6 +659,16 @@ void setup() {
                             as11_device_service);
     report_catalog_timezone_revision = time_sync_service.timezone_revision();
     ota_manager.begin(config_service.data());
+    if (!ota_http_controller.begin(ota_manager, resmed_ota_manager)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] OTA HTTP controller failed to start\n");
+    }
+    if (!settings_http_controller.begin(rpc_transport,
+                                        as11_device_service,
+                                        as11_settings_manager)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] settings HTTP controller failed to start\n");
+    }
 
     // Network configuration
     wifi_manager.set_hostname(config_service.data().hostname);
@@ -679,9 +695,8 @@ void setup() {
     config_service.activate_runtime_effects(false);
 
     web_ui.begin(rpc_transport, stream_broker, as11_device_service,
-                 as11_settings_manager,
                  wifi_manager, tcp_bridge, config_service,
-                 time_sync_service, ota_manager, resmed_ota_manager,
+                 time_sync_service, ota_manager,
                  session_manager, sink_manager, oximetry_manager,
                  console_ctx,
                  web_route_modules,
@@ -715,6 +730,8 @@ void loop() {
     as11_settings_manager.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
+    settings_http_controller.poll();
+    ota_http_controller.poll();
 
     ota_manager.poll_http_upload_prepare(
         esp_ota_quiesce_requested &&

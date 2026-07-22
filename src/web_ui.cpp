@@ -49,15 +49,8 @@ const char *web_command_name(uint8_t kind) {
         case WebCommandConfigUpdate: return "config_update";
         case WebCommandWifiUpdate: return "wifi_update";
         case WebCommandTimeAction: return "time_action";
-        case WebCommandSettingsRefresh: return "settings_refresh";
-        case WebCommandSettingsUpdate: return "settings_update";
         case WebCommandTherapyAction: return "therapy_action";
         case WebCommandOximetryAction: return "oximetry_action";
-        case WebCommandResmedOtaInit: return "resmed_ota_init";
-        case WebCommandResmedOtaBlock: return "resmed_ota_block";
-        case WebCommandResmedOtaCheck: return "resmed_ota_check";
-        case WebCommandResmedOtaApply: return "resmed_ota_apply";
-        case WebCommandResmedOtaAbort: return "resmed_ota_abort";
         default: return "unknown";
     }
 }
@@ -206,127 +199,6 @@ bool json_get_string(JsonDocument &doc, const char *key, String &out) {
     return true;
 }
 
-int request_profile_mode_arg(AsyncWebServerRequest *request) {
-    if (!request) return -1;
-    const char *arg_name = nullptr;
-    if (request->hasArg("profile_mode")) {
-        arg_name = "profile_mode";
-    } else if (request->hasArg("mode")) {
-        arg_name = "mode";
-    } else {
-        return -1;
-    }
-    return as11_mode_index_from_value(
-        std::string(request->arg(arg_name).c_str()));
-}
-
-int active_settings_mode(const As11DeviceState *device_state,
-                         const As11SettingsManager *settings_manager) {
-    if (!device_state || !settings_manager) return -1;
-    int mode = settings_manager->state().mode_index();
-    if (mode < 0) {
-        mode = as11_mode_index_from_value(
-            device_state->active_therapy_profile());
-    }
-    return mode;
-}
-
-bool request_size_arg(AsyncWebServerRequest *request,
-                      const char *name,
-                      size_t &out) {
-    out = 0;
-    if (!request || !name || !request->hasArg(name)) return false;
-    const String value = request->arg(name);
-    char *end = nullptr;
-    const unsigned long long parsed =
-        strtoull(value.c_str(), &end, 10);
-    if (!end || *end != 0 || parsed == 0 ||
-        parsed > AC_RESMED_OTA_MAX_FILE_BYTES) {
-        return false;
-    }
-    out = static_cast<size_t>(parsed);
-    return true;
-}
-
-bool request_ota_upload_args(AsyncWebServerRequest *request,
-                             size_t &image_size,
-                             OtaUploadEncoding &encoding,
-                             size_t &wire_size) {
-    image_size = 0;
-    wire_size = 0;
-    encoding = OtaUploadEncoding::Auto;
-
-    if (!http_size_arg(request, "size", 0,
-                       AC_RESMED_OTA_MAX_FILE_BYTES, image_size)) {
-        return false;
-    }
-
-    if (request && request->hasArg("encoding")) {
-        const String value = request->arg("encoding");
-        if (!parse_ota_upload_encoding(value.c_str(), encoding)) {
-            return false;
-        }
-    }
-
-    if (request && request->hasArg("wire_size")) {
-        if (!request_size_arg(request, "wire_size", wire_size)) return false;
-    } else if (image_size) {
-        wire_size = image_size;
-    }
-
-    if (!wire_size) return false;
-    if (encoding == OtaUploadEncoding::Plain) {
-        return image_size > 0 && image_size == wire_size;
-    }
-    return true;
-}
-
-bool request_ota_url_args(AsyncWebServerRequest *request,
-                          String &url,
-                          size_t &image_size,
-                          OtaUploadEncoding &encoding,
-                          size_t &wire_size) {
-    url = "";
-    image_size = 0;
-    wire_size = 0;
-    encoding = OtaUploadEncoding::Auto;
-
-    if (!request || !request->hasArg("url")) return false;
-    url = request->arg("url");
-    url.trim();
-    if (!url.length() || url.length() > AC_OTA_URL_MAX_LENGTH) return false;
-
-    if (request->hasArg("encoding")) {
-        const String value = request->arg("encoding");
-        if (!parse_ota_upload_encoding(value.c_str(), encoding)) return false;
-    }
-
-    if (!http_size_arg(request, "size", 0,
-                       AC_RESMED_OTA_MAX_FILE_BYTES, image_size) ||
-        !http_size_arg(request, "wire_size", 0,
-                       AC_RESMED_OTA_MAX_FILE_BYTES, wire_size)) {
-        return false;
-    }
-
-    if (encoding == OtaUploadEncoding::Plain) {
-        return !image_size || !wire_size || image_size == wire_size;
-    }
-    return true;
-}
-
-String settings_placeholder_json(bool refresh_queued, bool snapshot_pending) {
-    String json = "{";
-    json_add_bool(json, "valid", false, false);
-    json_add_bool(json, "refresh_queued", refresh_queued);
-    json_add_bool(json, "snapshot_pending", snapshot_pending);
-    json_add_int(json, "pending_count", 0);
-    json_add_string(json, "last_write_status", "");
-    json += ",\"last_write_age_ms\":null";
-    json += ",\"age_ms\":null";
-    json += ",\"settings\":[]}";
-    return json;
-}
-
 bool motor_hours(std::string_view iso_duration,
                  char *out,
                  size_t out_size) {
@@ -348,16 +220,6 @@ bool motor_hours(std::string_view iso_duration,
         static_cast<unsigned long>((seconds + 1800) / 3600);
     snprintf(out, out_size, "%lu", hours);
     return true;
-}
-
-const char *setting_kind_name(As11SettingKind kind) {
-    switch (kind) {
-        case As11SettingKind::Number: return "number";
-        case As11SettingKind::Enum: return "enum";
-        case As11SettingKind::Bool: return "bool";
-        case As11SettingKind::Text: return "text";
-        default: return "text";
-    }
 }
 
 const char *stream_command_name(StreamCommandType type) {
@@ -433,90 +295,16 @@ void append_live_series(JsonOut &json,
     json += ']';
 }
 
-template <typename JsonOut>
-void build_ota_json(JsonOut &json, const OtaManagerStatus &ota) {
-    json = "{";
-    json_add_string(json, "version", aircannect_version(), false);
-    json += ",\"upload_encodings\":[\"auto\",\"plain\",\"zlib\"]";
-    json_add_bool(json, "url_update", true);
-    json_add_bool(json, "arduino_started", ota.arduino_started);
-    json_add_bool(json, "arduino_active", ota.arduino_active);
-    json_add_bool(json, "http_prepare_pending", ota.http_prepare_pending);
-    json_add_bool(json, "http_prepared", ota.http_prepared);
-    json_add_bool(json, "http_active", ota.http_active);
-    json_add_bool(json, "http_ready", ota.http_ready);
-    json_add_bool(json, "url_active", ota.url_active);
-    json_add_bool(json, "update_check_enabled", ota.update_check_enabled);
-    json_add_bool(json, "update_check_pending", ota.update_check_pending);
-    json_add_bool(json, "update_check_active", ota.update_check_active);
-    json_add_bool(json, "update_check_attempted",
-                  ota.update_check_attempted);
-    json_add_bool(json, "update_checked", ota.update_checked);
-    json_add_bool(json, "update_available", ota.update_available);
-    json_add_bool(json, "update_installable", ota.update_installable);
-    json_add_string(json, "update_version", ota.update_version.c_str());
-    json_add_string(json, "update_error", ota.update_error.c_str());
-    if (ota.update_check_attempted) {
-        json_add_int(json, "update_last_check_age_ms",
-                     static_cast<long>(ota.update_last_check_age_ms));
-    } else {
-        json += ",\"update_last_check_age_ms\":null";
-    }
-    json_add_bool(json, "reboot_pending", ota.reboot_pending);
-    json_add_bool(json, "auth_enabled", ota.auth_enabled);
-    json_add_int(json, "arduino_port", ota.arduino_port);
-    json_add_int(json, "bytes", static_cast<long>(ota.bytes));
-    json_add_int(json, "total_size", static_cast<long>(ota.total_size));
-    json_add_int(json, "wire_bytes", static_cast<long>(ota.wire_bytes));
-    json_add_int(json, "wire_total_size",
-                 static_cast<long>(ota.wire_total_size));
-    json_add_int(json, "progress", ota.progress_percent);
-    json_add_string(json, "method", ota.method.c_str());
-    json_add_string(json, "encoding", ota.encoding.c_str());
-    json_add_string(json, "partition", ota.partition.c_str());
-    json_add_string(json, "last_error", ota.last_error.c_str());
-    json += '}';
-}
-
-template <typename JsonOut>
-void build_resmed_ota_json(JsonOut &json, const ResmedOtaManager &ota) {
-    const ResmedOtaStatus status = ota.status();
-    json = "{";
-    json_add_string(json, "phase", ota.phase_name(), false);
-    json_add_bool(json, "active", ota.active());
-    json_add_bool(json, "waiting", status.waiting);
-    json_add_int(json, "total_size", static_cast<long>(status.total_size));
-    json_add_int(json, "uploaded_bytes",
-                 static_cast<long>(status.uploaded_bytes));
-    json_add_int(json, "xfer_block_size",
-                 static_cast<long>(status.xfer_block_size));
-    json_add_int(json, "progress", status.progress_percent);
-    json_add_string(json, "filename", status.filename.c_str());
-    json_add_string(json, "expected_sha256",
-                    status.expected_sha256.c_str());
-    json_add_string(json, "computed_sha256",
-                    status.computed_sha256.c_str());
-    json_add_string(json, "apply_mode", status.apply_mode.c_str());
-    json_add_string(json, "input_type", status.input_type.c_str());
-    json_add_string(json, "target", status.target.c_str());
-    json_add_string(json, "staged_path", status.staged_path.c_str());
-    json_add_string(json, "last_result", status.last_result.c_str());
-    json_add_string(json, "last_error", status.last_error.c_str());
-    json += '}';
-}
-
 }  // namespace
 
 bool WebUI::begin(RpcRequestPort &rpc,
                   StreamBroker &stream,
                   As11DeviceService &device,
-                  As11SettingsManager &settings_manager,
                   WifiManager &wifi_manager,
                   TcpBridge &tcp_bridge,
                   ConfigService &config_service,
                   TimeSyncService &time_sync_service,
                   OtaManager &ota_manager,
-                  ResmedOtaManager &resmed_ota_manager,
                   SessionManager &session_manager,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
@@ -529,14 +317,12 @@ bool WebUI::begin(RpcRequestPort &rpc,
     rpc_ = &rpc;
     stream_ = &stream;
     device_ = &device;
-    settings_manager_ = &settings_manager;
     wifi_manager_ = &wifi_manager;
     tcp_bridge_ = &tcp_bridge;
     config_service_ = &config_service;
     observed_config_revision_ = config_service.revision();
     time_sync_service_ = &time_sync_service;
     ota_manager_ = &ota_manager;
-    resmed_ota_manager_ = &resmed_ota_manager;
     session_manager_ = &session_manager;
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
@@ -600,9 +386,6 @@ void WebUI::reserve_cached_json() {
     cached_wifi_json_.reserve(AC_WEB_WIFI_JSON_RESERVE);
     cached_oximetry_sensors_json_.reserve(
         AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
-    cached_ota_json_.reserve(AC_WEB_OTA_JSON_RESERVE);
-    cached_resmed_ota_json_.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
-    cached_settings_json_.reserve(AC_WEB_SETTINGS_JSON_RESERVE);
     live_json_.reserve(4096);
 }
 
@@ -646,9 +429,6 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.console.capacity = console_log_capacity_;
     out.wifi = capture(cached_wifi_json_);
     out.oximetry_sensors = capture(cached_oximetry_sensors_json_);
-    out.ota = capture(cached_ota_json_);
-    out.resmed_ota = capture(cached_resmed_ota_json_);
-    out.settings = capture(cached_settings_json_);
     out.live = capture(live_json_);
     out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
@@ -714,8 +494,6 @@ void WebUI::stop() {
     }
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
-    observed_settings_refresh_pending_ = false;
-    observed_settings_revision_ = 0;
     observed_device_revision_ = 0;
     observed_config_revision_ = 0;
     last_snapshot_ms_ = 0;
@@ -734,13 +512,7 @@ void WebUI::poll(PollCheckpoint checkpoint) {
                          As11TherapyState::Running));
     if (device_ && observed_device_revision_ != device_->revision()) {
         observed_device_revision_ = device_->revision();
-        mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_SETTINGS);
-    }
-    if (settings_manager_ &&
-        (observed_settings_refresh_pending_ !=
-             settings_manager_->refresh_pending() ||
-         observed_settings_revision_ != settings_manager_->revision())) {
-        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+        mark_snapshots_dirty(SNAPSHOT_STATUS);
     }
     if (config_service_ &&
         observed_config_revision_ != config_service_->revision()) {
@@ -1080,7 +852,7 @@ void WebUI::send_live_batch(uint32_t now_ms) {
 
 void WebUI::handle_event(const RpcEvent &event) {
     if (event.kind == RpcEventKind::BootNotification) {
-        mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_SETTINGS);
+        mark_snapshots_dirty(SNAPSHOT_STATUS);
         if (events_ &&
             send_sse_to_clients("{}", "device_boot", millis(),
                                 true) == SseSendResult::Failed) {
@@ -1254,73 +1026,11 @@ void WebUI::send_console_snapshot(AsyncWebServerRequest *request) const {
 
 void WebUI::mark_snapshots_dirty(uint16_t mask) {
     snapshots_dirty_mask_ |= mask;
-    if (mask & (SNAPSHOT_STATUS | SNAPSHOT_OTA | SNAPSHOT_RESMED_OTA)) {
-        request_sse_push();
-    }
+    if (mask & SNAPSHOT_STATUS) request_sse_push();
 }
 
 void WebUI::request_sse_push() {
     sse_push_requested_ = true;
-}
-
-void WebUI::send_cached_settings(AsyncWebServerRequest *request,
-                                 int requested_mode,
-                                 bool refresh_requested) {
-    bool mismatch = false;
-    bool has_cached = false;
-    bool refresh_queued = refresh_requested;
-    if (!cache_mutex_ ||
-        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
-        request->send(503, "application/json",
-                      "{\"valid\":false,\"refresh_queued\":true,"
-                      "\"settings\":[]}");
-        return;
-    }
-    refresh_queued = refresh_queued || observed_settings_refresh_pending_;
-
-    const int active_mode =
-        requested_mode < 0
-            ? active_settings_mode(device_ ? &device_->state() : nullptr,
-                                   settings_manager_)
-            : -1;
-    const bool explicit_mode_mismatch =
-        requested_mode >= 0 &&
-        (requested_settings_mode_ != requested_mode ||
-         cached_settings_mode_ != requested_mode);
-    const bool active_mode_mismatch =
-        requested_mode < 0 &&
-        (requested_settings_mode_ >= 0 ||
-         (active_mode >= 0 && cached_settings_mode_ != active_mode));
-
-    if (explicit_mode_mismatch || active_mode_mismatch) {
-        requested_settings_mode_ = requested_mode;
-        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-        mismatch = true;
-    } else {
-        has_cached = !refresh_queued && cached_settings_json_.length() > 0;
-    }
-
-    if (!mismatch && has_cached) {
-        AsyncResponseStream *response =
-            request->beginResponseStream("application/json");
-        if (!response) {
-            xSemaphoreGive(cache_mutex_);
-            request->send(503, "application/json",
-                          "{\"valid\":false,\"error\":\"response alloc\"}");
-            return;
-        }
-        response->write(
-            reinterpret_cast<const uint8_t *>(cached_settings_json_.c_str()),
-            cached_settings_json_.length());
-        xSemaphoreGive(cache_mutex_);
-        request->send(response);
-        return;
-    }
-    xSemaphoreGive(cache_mutex_);
-
-    const String placeholder =
-        settings_placeholder_json(refresh_queued, mismatch);
-    request->send(200, "application/json", placeholder);
 }
 
 String WebUI::queued_json(const char *result) const {
@@ -1882,160 +1592,6 @@ void WebUI::build_wifi_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void WebUI::build_settings_json(LargeTextBuffer &json,
-                                int requested_mode,
-                                bool refresh_queued) const {
-    const As11SettingsState &state = settings_manager_->state();
-    const As11DeviceState &as11 = device_->state();
-    int active_mode = state.mode_index();
-    if (active_mode < 0) {
-        active_mode = as11_mode_index_from_value(
-            as11.active_therapy_profile());
-    }
-    int profile_mode = requested_mode >= 0 ? requested_mode : active_mode;
-    const uint16_t supported_modes = state.supported_mode_mask();
-    if (profile_mode >= 0 && supported_modes &&
-        !(supported_modes & (1u << profile_mode))) {
-        profile_mode = active_mode;
-    }
-
-    json = "{";
-    json_add_bool(json, "valid", state.valid(), false);
-    json_add_bool(json, "refresh_queued", refresh_queued);
-    json_add_int(json, "supported_mode_mask", supported_modes);
-    json_add_int(json, "pending_count",
-                 static_cast<long>(state.pending_count()));
-    json_add_string(json, "last_write_status",
-                    state.last_write_status().c_str());
-    if (state.last_write_ms()) {
-        json_add_int(json, "last_write_age_ms",
-                     millis() - state.last_write_ms());
-    } else {
-        json += ",\"last_write_age_ms\":null";
-    }
-    if (state.valid()) {
-        json_add_int(json, "age_ms", millis() - state.updated_ms());
-    } else {
-        json += ",\"age_ms\":null";
-    }
-    json += ",\"settings\":[";
-    size_t emitted = 0;
-    for (size_t i = 0; i < as11_setting_count(); ++i) {
-        const As11SettingDef &def = as11_setting(i);
-        if (!state.setting_visible(i, profile_mode)) continue;
-        if (!as11_setting_readable_via_rpc(def)) continue;
-
-        const bool is_therapy_mode = strcmp(def.key, "MOP") == 0;
-        std::string value =
-            state.value(i, is_therapy_mode ? active_mode : profile_mode);
-        const bool available = !value.empty() || state.pending(i);
-        const bool pending = state.pending(i);
-        const bool writable = as11_setting_writable_via_rpc(def);
-        if (!available && !pending) continue;
-
-        if (emitted++) json += ',';
-        json += "{";
-        json_add_string(json, "key", def.key, false);
-        json_add_string(json, "value", value.c_str());
-        if (!available) json_add_bool(json, "available", false);
-        if (!writable) json_add_bool(json, "writable", false);
-        if (pending) {
-            json_add_bool(json, "pending", true);
-            json_add_string(json, "pending_value",
-                            state.pending_value(i).c_str());
-            json_add_int(json, "pending_age_ms",
-                         millis() - state.pending_since_ms(i));
-        }
-        json += '}';
-    }
-    json += "]}";
-}
-
-void WebUI::build_settings_catalog_json(LargeTextBuffer &json) const {
-    json = "{\"settings\":[";
-    size_t emitted = 0;
-    for (size_t i = 0; i < as11_setting_count(); ++i) {
-        const As11SettingDef &def = as11_setting(i);
-        if (!def.mode_mask) continue;
-        if (!as11_setting_readable_via_rpc(def)) continue;
-
-        if (emitted++) json += ',';
-        json += "{";
-        json_add_string(json, "key", def.key, false);
-        json_add_string(json, "label", def.label);
-        const std::string rpc_name = as11_setting_rpc_long_name(def);
-        json_add_string(json, "rpc_name", rpc_name.c_str());
-        json_add_string(json, "group", def.group);
-        json_add_string(json, "category", def.category);
-        json_add_string(json, "kind", setting_kind_name(def.kind));
-        json_add_int(json, "modes", def.mode_mask);
-        json_add_float(json, "min", def.min_value);
-        json_add_float(json, "max", def.max_value);
-        json_add_float(json, "step", def.step);
-        json_add_int(json, "scale_div", def.scale_div);
-        json_add_int(json, "decimals", def.decimals);
-        if (def.options && def.option_count) {
-            json += ",\"options\":[";
-            size_t options_emitted = 0;
-            for (uint8_t opt_index = 0; opt_index < def.option_count;
-                 ++opt_index) {
-                if (options_emitted++) json += ',';
-                json += "{";
-                json_add_int(json, "value", opt_index, false);
-                json_add_string(json, "label", def.options[opt_index]);
-                json += "}";
-            }
-            json += ']';
-        }
-        json += '}';
-    }
-    json += "],\"composites\":[";
-    for (size_t i = 0; i < as11_setting_composite_count(); ++i) {
-        const As11SettingCompositeDef &def = as11_setting_composite(i);
-        if (i) json += ',';
-        json += "{";
-        json_add_string(json, "key", def.key, false);
-        json_add_string(json, "kind", "paired_enum_numeric");
-        json_add_string(json, "label", def.label);
-        json_add_string(json, "enum_key", def.enum_key);
-        json_add_string(json, "numeric_key", def.numeric_key);
-
-        const As11SettingDef *enum_def = as11_find_setting(def.enum_key);
-        const As11SettingDef *numeric_def = as11_find_setting(def.numeric_key);
-        const std::string enum_rpc_name =
-            enum_def ? as11_setting_rpc_long_name(*enum_def) : def.enum_key;
-        const std::string numeric_rpc_name =
-            numeric_def ? as11_setting_rpc_long_name(*numeric_def)
-                        : def.numeric_key;
-        std::string rpc_name = enum_rpc_name;
-        rpc_name += " + ";
-        rpc_name += numeric_rpc_name;
-        json_add_string(json, "rpc_name", rpc_name.c_str());
-        json_add_string(json, "enum_rpc_name", enum_rpc_name.c_str());
-        json_add_string(json, "numeric_rpc_name", numeric_rpc_name.c_str());
-
-        json_add_int(json, "numeric_branch_enum_value",
-                     def.numeric_branch_enum_value);
-        json_add_string(json, "group", def.group);
-        json_add_string(json, "category", def.category);
-        json += ",\"options\":[";
-        for (uint8_t opt_index = 0; opt_index < def.option_count; ++opt_index) {
-            const As11SettingCompositeOption &option = def.options[opt_index];
-            if (opt_index) json += ',';
-            json += "{";
-            json_add_int(json, "value", opt_index, false);
-            json_add_string(json, "label", option.label);
-            json_add_int(json, "enum_value", option.enum_value);
-            if (option.numeric_raw) {
-                json_add_string(json, "numeric_raw", option.numeric_raw);
-            }
-            json += "}";
-        }
-        json += "]}";
-    }
-    json += "]}";
-}
-
 void WebUI::publish_snapshots(bool force,
                               bool realtime_active,
                               PollCheckpoint checkpoint) {
@@ -2079,34 +1635,6 @@ void WebUI::publish_snapshots(bool force,
         build_oximetry_sensors_json(cached_oximetry_sensors_json_);
         if (checkpoint) checkpoint("web_ui.snapshots.oximetry_sensors");
     }
-    if (rebuild_mask & SNAPSHOT_OTA) {
-        build_ota_json(cached_ota_json_, ota_manager_->status());
-        if (checkpoint) checkpoint("web_ui.snapshots.ota");
-    }
-    if (rebuild_mask & SNAPSHOT_RESMED_OTA) {
-        build_resmed_ota_json(cached_resmed_ota_json_, *resmed_ota_manager_);
-        if (checkpoint) checkpoint("web_ui.snapshots.resmed_ota");
-    }
-    if (rebuild_mask & SNAPSHOT_SETTINGS) {
-        const int requested_mode = requested_settings_mode_;
-        const bool refresh_queued =
-            settings_manager_ && settings_manager_->refresh_pending();
-        observed_settings_refresh_pending_ = refresh_queued;
-        observed_settings_revision_ =
-            settings_manager_ ? settings_manager_->revision() : 0;
-        int published_settings_mode = requested_mode;
-        if (published_settings_mode < 0) {
-            published_settings_mode =
-                active_settings_mode(device_ ? &device_->state() : nullptr,
-                                     settings_manager_);
-        }
-
-        build_settings_json(cached_settings_json_,
-                            requested_mode,
-                            refresh_queued);
-        cached_settings_mode_ = published_settings_mode;
-        if (checkpoint) checkpoint("web_ui.snapshots.settings");
-    }
     if (rebuild_mask & SNAPSHOT_CONFIG) {
         cached_http_auth_required_ =
             network_auth_required(config_service_->data());
@@ -2140,26 +1668,11 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandTimeAction:
             execute_time_action(command.text);
             break;
-        case WebCommandSettingsRefresh:
-            (void)settings_manager_->request_refresh(
-                *rpc_, RpcSource::HttpApi, millis());
-            mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-            break;
-        case WebCommandSettingsUpdate:
-            execute_settings_update(command.body);
-            break;
         case WebCommandTherapyAction:
             execute_therapy_action(command.text);
             break;
         case WebCommandOximetryAction:
             execute_oximetry_action(command.text, command.body);
-            break;
-        case WebCommandResmedOtaInit:
-        case WebCommandResmedOtaBlock:
-        case WebCommandResmedOtaCheck:
-        case WebCommandResmedOtaApply:
-        case WebCommandResmedOtaAbort:
-            execute_resmed_ota_command(command);
             break;
         default:
             break;
@@ -2261,22 +1774,6 @@ void WebUI::execute_time_action(const std::string &action) {
     mark_snapshots_dirty(SNAPSHOT_STATUS);
 }
 
-void WebUI::execute_settings_update(const std::string &body) {
-    const As11SettingsState &state = settings_manager_->state();
-    const As11DeviceState &as11 = device_->state();
-    int mode = state.mode_index();
-    if (mode < 0) {
-        mode = as11_mode_index_from_value(as11.active_therapy_profile());
-    }
-    size_t accepted = 0;
-    std::string params = as11_build_set_params_from_json(body, mode, accepted);
-    if (!accepted) return;
-    if (settings_manager_->write(*rpc_, params, RpcSource::HttpApi,
-                                 millis()).accepted()) {
-        mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-    }
-}
-
 void WebUI::execute_therapy_action(const std::string &action) {
     As11TherapyTarget target = As11TherapyTarget::None;
     if (action == "start") target = As11TherapyTarget::Running;
@@ -2358,58 +1855,6 @@ void WebUI::execute_oximetry_action(const std::string &action,
     }
     mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_CONFIG |
                          SNAPSHOT_OXIMETRY_SENSORS);
-}
-
-void WebUI::execute_resmed_ota_command(const WebCommand &command) {
-    if (command.kind == WebCommandResmedOtaCheck) {
-        resmed_ota_manager_->request_check();
-        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
-        return;
-    }
-    if (command.kind == WebCommandResmedOtaAbort) {
-        resmed_ota_manager_->abort("aborted");
-        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
-        return;
-    }
-    JsonDocument doc;
-    if (deserializeJson(doc, command.body.c_str())) return;
-    if (command.kind == WebCommandResmedOtaInit) {
-        if (!doc["size"].is<int>()) return;
-        String sha;
-        String filename;
-        json_get_string(doc, "sha256", sha);
-        json_get_string(doc, "filename", filename);
-        const int parsed_size = doc["size"].as<int>();
-        if (parsed_size > 0) {
-            resmed_ota_manager_->begin_upload(
-                static_cast<size_t>(parsed_size), sha, filename);
-        }
-    } else if (command.kind == WebCommandResmedOtaBlock) {
-        if (!doc["offset"].is<int>()) return;
-        String data;
-        if (!json_get_string(doc, "data", data)) return;
-        const int parsed_offset = doc["offset"].as<int>();
-        if (parsed_offset >= 0) {
-            resmed_ota_manager_->submit_block(
-                static_cast<size_t>(parsed_offset), data);
-        }
-    } else if (command.kind == WebCommandResmedOtaApply) {
-        String mode;
-        String confirm;
-        json_get_string(doc, "mode", mode);
-        json_get_string(doc, "confirm", confirm);
-        if (mode == "plain") {
-            const bool reset =
-                doc["reset"].is<bool>() && doc["reset"].as<bool>();
-            resmed_ota_manager_->request_apply_plain(reset, confirm);
-        } else if (mode == "authenticated") {
-            String authentication;
-            json_get_string(doc, "authentication", authentication);
-            resmed_ota_manager_->request_apply_authenticated(authentication,
-                                                            confirm);
-        }
-    }
-    mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
 }
 
 void WebUI::register_routes(HttpRouteModule *const *route_modules,
@@ -2530,302 +1975,6 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
     register_config_section("/api/config/smb", "smb");
     register_config_section("/api/config/sleephq", "sleephq");
 
-    // ESP OTA
-    server_->on(AsyncURIMatcher::exact("/api/ota"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        String json;
-        json.reserve(AC_WEB_OTA_JSON_RESERVE);
-        build_ota_json(json, ota_manager_->status());
-        request->send(200, "application/json", json);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/ota/check"), HTTP_POST,
-                [this](AsyncWebServerRequest *request) {
-        const bool ok = ota_manager_->request_update_check();
-
-        String json;
-        json.reserve(AC_WEB_OTA_JSON_RESERVE);
-        const OtaManagerStatus status = ota_manager_->status();
-        build_ota_json(json, status);
-
-        const int response_status = ok
-            ? 202
-            : (status.update_error == "ota_busy" ? 409 : 400);
-        request->send(response_status, "application/json", json);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/ota/install-update"), HTTP_POST,
-                [this](AsyncWebServerRequest *request) {
-        if (resmed_ota_manager_->transport_active()) {
-            request->send(409, "application/json",
-                          "{\"error\":\"resmed_ota_active\"}");
-            return;
-        }
-
-        const bool ok = ota_manager_->request_available_update();
-        mark_snapshots_dirty(SNAPSHOT_OTA);
-
-        String json;
-        json.reserve(AC_WEB_OTA_JSON_RESERVE);
-        const OtaManagerStatus status = ota_manager_->status();
-        build_ota_json(json, status);
-
-        const int response_status = ok
-            ? 202
-            : (status.last_error == "ota_busy" ? 409 : 400);
-        request->send(response_status, "application/json", json);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/ota/url"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            if (resmed_ota_manager_->transport_active()) {
-                request->send(409, "application/json",
-                              "{\"error\":\"resmed_ota_active\"}");
-                return;
-            }
-
-            String url;
-            size_t image_size = 0;
-            size_t wire_size = 0;
-            OtaUploadEncoding encoding = OtaUploadEncoding::Auto;
-            if (!request_ota_url_args(request, url, image_size, encoding,
-                                      wire_size)) {
-                request->send(400, "application/json",
-                              "{\"error\":\"invalid_url_args\"}");
-                return;
-            }
-
-            const bool ok = ota_manager_->request_url_update(
-                url, encoding, image_size, wire_size);
-            mark_snapshots_dirty(SNAPSHOT_OTA);
-
-            String json;
-            json.reserve(AC_WEB_OTA_JSON_RESERVE);
-            const OtaManagerStatus status = ota_manager_->status();
-            build_ota_json(json, status);
-
-            const int response_status =
-                ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
-            request->send(response_status, "application/json", json);
-        });
-
-    server_->on(AsyncURIMatcher::exact("/api/ota/prepare"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            if (resmed_ota_manager_->transport_active()) {
-                request->send(409, "application/json",
-                              "{\"error\":\"resmed_ota_active\"}");
-                return;
-            }
-
-            size_t declared_size = 0;
-            size_t wire_size = 0;
-            OtaUploadEncoding encoding = OtaUploadEncoding::Auto;
-
-            if (!request_ota_upload_args(request, declared_size, encoding,
-                                         wire_size)) {
-                request->send(400, "application/json",
-                              "{\"error\":\"invalid_upload_args\"}");
-                return;
-            }
-
-            const bool ok =
-                ota_manager_->request_http_upload_prepare(declared_size,
-                                                          encoding,
-                                                          wire_size);
-
-            mark_snapshots_dirty(SNAPSHOT_OTA);
-
-            String json;
-            json.reserve(AC_WEB_OTA_JSON_RESERVE);
-            const OtaManagerStatus status = ota_manager_->status();
-            build_ota_json(json, status);
-
-            const int response_status =
-                ok ? 202 : (status.last_error == "ota_busy" ? 409 : 400);
-            request->send(response_status, "application/json", json);
-        });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/ota/upload"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            if (ota_manager_->status().url_active) {
-                request->send(409, "application/json",
-                              "{\"error\":\"ota_busy\"}");
-                return;
-            }
-
-            const bool ok = ota_manager_->finish_http_upload();
-
-            mark_snapshots_dirty(SNAPSHOT_OTA);
-
-            String json;
-            json.reserve(AC_WEB_OTA_JSON_RESERVE);
-            build_ota_json(json, ota_manager_->status());
-
-            request->send(ok ? 200 : 400, "application/json", json);
-        },
-        [this](AsyncWebServerRequest *request, const String &filename,
-               size_t index, uint8_t *data, size_t len, bool final) {
-            if (index == 0) {
-                if (ota_manager_->status().url_active) {
-                    if (request && request->client()) request->client()->close();
-                    return;
-                }
-
-                size_t declared_size = 0;
-                size_t wire_size = 0;
-                OtaUploadEncoding encoding = OtaUploadEncoding::Auto;
-
-                if (!request_ota_upload_args(request, declared_size, encoding,
-                                             wire_size)) {
-                    if (request && request->client()) request->client()->close();
-                    return;
-                }
-
-                if (!ota_manager_->begin_http_upload(filename, declared_size,
-                                                     encoding, wire_size)) {
-                    mark_snapshots_dirty(SNAPSHOT_OTA);
-                    return;
-                }
-
-                mark_snapshots_dirty(SNAPSHOT_OTA);
-            }
-
-            if (!ota_manager_->write_http_upload(index, data, len)) {
-                mark_snapshots_dirty(SNAPSHOT_OTA);
-                if (request && request->client()) request->client()->close();
-                return;
-            }
-
-            if (final) mark_snapshots_dirty(SNAPSHOT_OTA);
-        });
-
-    // ResMed OTA
-    server_->on(AsyncURIMatcher::exact("/api/resmed-ota"), HTTP_GET,
-        [this](AsyncWebServerRequest *request) {
-            send_cached(request, cached_resmed_ota_json_);
-        });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/resmed-ota/upload"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            const ResmedOtaStatus status = resmed_ota_manager_->status();
-            bool ok = status.phase == ResmedOtaPhase::Staging &&
-                      resmed_ota_manager_->finish_staged_upload();
-
-            mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
-
-            String json;
-            json.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
-            build_resmed_ota_json(json, *resmed_ota_manager_);
-
-            request->send(ok ? 200 : 400, "application/json", json);
-        },
-        [this](AsyncWebServerRequest *request, const String &filename,
-               size_t index, uint8_t *data, size_t len, bool final) {
-            (void)final;
-
-            if (index == 0) {
-                size_t declared_size = 0;
-
-                if (!request_size_arg(request, "size", declared_size)) {
-                    resmed_ota_manager_->abort("missing_size");
-                    return;
-                }
-
-                const String magic =
-                    request->hasArg("magic") ? request->arg("magic") : "";
-
-                if (!resmed_ota_manager_->begin_staged_upload(
-                        declared_size, filename, magic)) {
-                    return;
-                }
-            }
-
-            resmed_ota_manager_->write_staged_upload(index, data, len);
-        });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/resmed-ota/init"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            if (!doc["size"].is<int>()) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"missing size\"}");
-                return;
-            }
-            WebCommand queued;
-            queued.kind = WebCommandResmedOtaInit;
-            queued.body = std::move(body);
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/resmed-ota/block"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            if (!doc["offset"].is<int>()) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"missing offset\"}");
-                return;
-            }
-            String data;
-            if (!json_get_string(doc, "data", data)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"missing data\"}");
-                return;
-            }
-            WebCommand queued;
-            queued.kind = WebCommandResmedOtaBlock;
-            queued.body = std::move(body);
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/resmed-ota/check"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            send_queue_result(request,
-                              enqueue_simple_command(WebCommandResmedOtaCheck));
-        });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/resmed-ota/apply"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            WebCommand queued;
-            queued.kind = WebCommandResmedOtaApply;
-            queued.body = std::move(body);
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/resmed-ota/abort"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            send_queue_result(request,
-                              enqueue_simple_command(WebCommandResmedOtaAbort));
-        });
-
     server_->on(
         AsyncURIMatcher::exact("/api/time"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
@@ -2892,57 +2041,6 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
             }
             WebCommand queued;
             queued.kind = WebCommandWifiUpdate;
-            queued.body = std::move(body);
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
-
-    server_->on(AsyncURIMatcher::exact("/api/settings-catalog"), HTTP_GET,
-        [this](AsyncWebServerRequest *request) {
-            LargeTextBuffer json;
-            json.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
-            build_settings_catalog_json(json);
-            if (json.overflowed()) {
-                request->send(503, "application/json",
-                              "{\"ok\":false,\"error\":\"catalog alloc\"}");
-                return;
-            }
-            AsyncResponseStream *response =
-                request->beginResponseStream("application/json");
-            if (!response) {
-                request->send(503, "application/json",
-                              "{\"ok\":false,\"error\":\"response alloc\"}");
-                return;
-            }
-            response->write(
-                reinterpret_cast<const uint8_t *>(json.c_str()),
-                json.length());
-            request->send(response);
-        });
-
-    server_->on(AsyncURIMatcher::exact("/api/settings"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        const int mode = request_profile_mode_arg(request);
-        bool refresh_requested = false;
-        if (request->hasArg("refresh")) {
-            refresh_requested =
-                enqueue_simple_command(WebCommandSettingsRefresh);
-        }
-        send_cached_settings(request, mode, refresh_requested);
-    });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/settings"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            WebCommand queued;
-            queued.kind = WebCommandSettingsUpdate;
             queued.body = std::move(body);
             send_queue_result(request, enqueue_command(std::move(queued)));
         },

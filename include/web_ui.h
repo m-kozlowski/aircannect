@@ -7,14 +7,12 @@
 #include <freertos/semphr.h>
 
 #include "as11_device_service.h"
-#include "as11_settings_manager.h"
 #include "config_service.h"
 #include "fixed_queue.h"
 #include "large_text_buffer.h"
 #include "management_console.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
-#include "resmed_ota_manager.h"
 #include "rpc_request_port.h"
 #include "session_manager.h"
 #include "sink_manager.h"
@@ -37,15 +35,8 @@ enum WebCommandKind : uint8_t {
     WebCommandConfigUpdate,
     WebCommandWifiUpdate,
     WebCommandTimeAction,
-    WebCommandSettingsRefresh,
-    WebCommandSettingsUpdate,
     WebCommandTherapyAction,
     WebCommandOximetryAction,
-    WebCommandResmedOtaInit,
-    WebCommandResmedOtaBlock,
-    WebCommandResmedOtaCheck,
-    WebCommandResmedOtaApply,
-    WebCommandResmedOtaAbort,
 };
 
 struct WebCommand {
@@ -67,9 +58,6 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus config;
     WebUiBufferMemoryStatus wifi;
     WebUiBufferMemoryStatus oximetry_sensors;
-    WebUiBufferMemoryStatus ota;
-    WebUiBufferMemoryStatus resmed_ota;
-    WebUiBufferMemoryStatus settings;
     WebUiBufferMemoryStatus live;
     size_t console_log_length = 0;
     size_t sse_clients = 0;
@@ -85,13 +73,11 @@ public:
     bool begin(RpcRequestPort &rpc,
                StreamBroker &stream,
                As11DeviceService &device,
-               As11SettingsManager &settings_manager,
                WifiManager &wifi_manager,
                TcpBridge &tcp_bridge,
                ConfigService &config_service,
                TimeSyncService &time_sync_service,
                OtaManager &ota_manager,
-               ResmedOtaManager &resmed_ota_manager,
                SessionManager &session_manager,
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
@@ -127,10 +113,6 @@ private:
     void send_config_schema_json(AsyncWebServerRequest *request) const;
     void send_config_update(AsyncWebServerRequest *request);
     void build_wifi_json(LargeTextBuffer &json) const;
-    void build_settings_json(LargeTextBuffer &json,
-                             int requested_mode,
-                             bool refresh_queued) const;
-    void build_settings_catalog_json(LargeTextBuffer &json) const;
     void reserve_console_log();
     void append_console_log(const String &text);
     void clear_console_log();
@@ -142,9 +124,6 @@ private:
     void build_console_sse_json(LargeTextBuffer &json) const;
     void note_console_sse_sent();
     void send_console_snapshot(AsyncWebServerRequest *request) const;
-    void send_cached_settings(AsyncWebServerRequest *request,
-                              int requested_mode,
-                              bool refresh_requested = false);
     void mark_snapshots_dirty(uint16_t mask);
     void request_sse_push();
     void publish_snapshots(bool force,
@@ -160,11 +139,9 @@ private:
     void execute_config_update(const std::string &body);
     void execute_wifi_update(const std::string &body);
     void execute_time_action(const std::string &action);
-    void execute_settings_update(const std::string &body);
     void execute_therapy_action(const std::string &action);
     void execute_oximetry_action(const std::string &action,
                                  const std::string &body);
-    void execute_resmed_ota_command(const WebCommand &command);
 
     // SSE client tracking
     void handle_sse_connect(AsyncEventSourceClient *client);
@@ -208,29 +185,22 @@ private:
     static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 3;
     static constexpr uint16_t SNAPSHOT_WIFI = 1u << 4;
     static constexpr uint16_t SNAPSHOT_OXIMETRY_SENSORS = 1u << 5;
-    static constexpr uint16_t SNAPSHOT_OTA = 1u << 6;
-    static constexpr uint16_t SNAPSHOT_RESMED_OTA = 1u << 7;
-    static constexpr uint16_t SNAPSHOT_SETTINGS = 1u << 8;
     static constexpr uint16_t SNAPSHOT_ALL =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONFIG |
-        SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
-        SNAPSHOT_RESMED_OTA | SNAPSHOT_SETTINGS;
+        SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_WIFI |
-        SNAPSHOT_OXIMETRY_SENSORS | SNAPSHOT_OTA |
-        SNAPSHOT_RESMED_OTA;
+        SNAPSHOT_OXIMETRY_SENSORS;
 
     // subsystem owners
     RpcRequestPort *rpc_ = nullptr;
     StreamBroker *stream_ = nullptr;
     As11DeviceService *device_ = nullptr;
-    As11SettingsManager *settings_manager_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
     TcpBridge *tcp_bridge_ = nullptr;
     ConfigService *config_service_ = nullptr;
     TimeSyncService *time_sync_service_ = nullptr;
     OtaManager *ota_manager_ = nullptr;
-    ResmedOtaManager *resmed_ota_manager_ = nullptr;
     SessionManager *session_manager_ = nullptr;
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
@@ -275,9 +245,6 @@ private:
     LargeTextBuffer cached_stream_json_;
     LargeTextBuffer cached_wifi_json_;
     LargeTextBuffer cached_oximetry_sensors_json_;
-    LargeTextBuffer cached_ota_json_;
-    LargeTextBuffer cached_resmed_ota_json_;
-    LargeTextBuffer cached_settings_json_;
     LargeTextBuffer live_json_;
 
     // cached auth config
@@ -287,10 +254,6 @@ private:
     String cached_auth_whitelist_;
 
     // snapshot state
-    int cached_settings_mode_ = -1;
-    int requested_settings_mode_ = -1;
-    bool observed_settings_refresh_pending_ = false;
-    uint32_t observed_settings_revision_ = 0;
     uint32_t observed_device_revision_ = 0;
     uint32_t observed_config_revision_ = 0;
     bool snapshots_ready_ = false;
