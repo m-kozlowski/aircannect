@@ -47,6 +47,7 @@ const char *report_catalog_state_name(NightCatalogRefreshState state) {
             return "reading_fallback";
         case NightCatalogRefreshState::ReadingStr: return "reading_str";
         case NightCatalogRefreshState::Building: return "building";
+        case NightCatalogRefreshState::Cancelling: return "cancelling";
         case NightCatalogRefreshState::Ready: return "ready";
         case NightCatalogRefreshState::Error: return "error";
         case NightCatalogRefreshState::Idle:

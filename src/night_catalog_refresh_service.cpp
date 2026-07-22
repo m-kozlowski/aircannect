@@ -329,6 +329,7 @@ struct NightCatalogRefreshRuntime {
         SubmitStr,
         WaitStr,
         Build,
+        Cancelling,
         Ready,
         Error,
     };
@@ -466,12 +467,6 @@ bool NightCatalogRefreshService::active() const {
 void NightCatalogRefreshService::reset_transient() {
     if (!runtime_) return;
 
-    if (scan_port_ && runtime_->scan_ticket.valid()) {
-        (void)scan_port_->abandon(runtime_->scan_ticket);
-    }
-    if (read_port_ && runtime_->read_ticket.valid()) {
-        (void)read_port_->abandon(runtime_->read_ticket);
-    }
     if (read_port_ && runtime_->prepared.valid()) {
         read_port_->release_prepared(runtime_->prepared);
     }
@@ -481,6 +476,40 @@ void NightCatalogRefreshService::reset_transient() {
     runtime_->prepared = {};
     runtime_->clear_sources();
     runtime_->clear_summary();
+}
+
+bool NightCatalogRefreshService::poll_cancel() {
+    if (!runtime_ ||
+        runtime_->phase != NightCatalogRefreshRuntime::Phase::Cancelling) {
+        return false;
+    }
+
+    bool progressed = false;
+    if (runtime_->scan_ticket.valid()) {
+        if (!scan_port_ ||
+            !scan_port_->abandon(runtime_->scan_ticket)) {
+            return false;
+        }
+        runtime_->scan_ticket = {};
+        progressed = true;
+    }
+    if (runtime_->read_ticket.valid()) {
+        if (!read_port_ ||
+            !read_port_->abandon(runtime_->read_ticket)) {
+            return progressed;
+        }
+        runtime_->read_ticket = {};
+    }
+
+    reset_transient();
+    runtime_->phase = published_ ? NightCatalogRefreshRuntime::Phase::Ready
+                                 : NightCatalogRefreshRuntime::Phase::Idle;
+    status_.state = published_ ? NightCatalogRefreshState::Ready
+                               : NightCatalogRefreshState::Idle;
+    status_.retryable = false;
+    status_.current_path[0] = '\0';
+    status_.error[0] = '\0';
+    return true;
 }
 
 void NightCatalogRefreshService::fail(const char *error, bool retryable) {
@@ -1613,6 +1642,9 @@ bool NightCatalogRefreshService::poll() {
 
     const char *error = nullptr;
     switch (runtime_->phase) {
+        case NightCatalogRefreshRuntime::Phase::Cancelling:
+            return poll_cancel();
+
         case NightCatalogRefreshRuntime::Phase::Idle:
         case NightCatalogRefreshRuntime::Phase::Ready:
         case NightCatalogRefreshRuntime::Phase::Error:
@@ -1717,6 +1749,16 @@ bool NightCatalogRefreshService::poll() {
 
 void NightCatalogRefreshService::cancel() {
     if (!runtime_) return;
+
+    if (runtime_->scan_ticket.valid() || runtime_->read_ticket.valid()) {
+        runtime_->phase = NightCatalogRefreshRuntime::Phase::Cancelling;
+        status_.state = NightCatalogRefreshState::Cancelling;
+        status_.retryable = false;
+        status_.current_path[0] = '\0';
+        status_.error[0] = '\0';
+        (void)poll_cancel();
+        return;
+    }
 
     reset_transient();
     runtime_->phase = published_ ? NightCatalogRefreshRuntime::Phase::Ready

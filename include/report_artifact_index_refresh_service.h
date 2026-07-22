@@ -15,6 +15,7 @@ enum class ReportArtifactIndexRefreshState : uint8_t {
     Scanning,
     Reading,
     Building,
+    Cancelling,
     Ready,
     Error,
 };
@@ -61,6 +62,7 @@ public:
 
 private:
     void reset_transient();
+    bool poll_cancel();
     void fail(const char *error);
 
     StorageScanPort *scan_port_ = nullptr;

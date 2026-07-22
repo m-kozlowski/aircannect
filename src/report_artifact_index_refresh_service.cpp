@@ -92,6 +92,7 @@ struct ReportArtifactIndexRefreshRuntime {
         SelectManifest,
         WaitManifest,
         Build,
+        Cancelling,
         Ready,
         Error,
     };
@@ -394,12 +395,6 @@ bool ReportArtifactIndexRefreshService::active() const {
 void ReportArtifactIndexRefreshService::reset_transient() {
     if (!runtime_) return;
 
-    if (scan_port_ && runtime_->scan_ticket.valid()) {
-        (void)scan_port_->abandon(runtime_->scan_ticket);
-    }
-    if (read_port_ && runtime_->read_ticket.valid()) {
-        (void)read_port_->abandon(runtime_->read_ticket);
-    }
     if (read_port_ && runtime_->prepared.valid()) {
         read_port_->release_prepared(runtime_->prepared);
     }
@@ -407,6 +402,36 @@ void ReportArtifactIndexRefreshService::reset_transient() {
     runtime_->read_ticket = {};
     runtime_->prepared = {};
     runtime_->clear();
+}
+
+bool ReportArtifactIndexRefreshService::poll_cancel() {
+    if (!runtime_ ||
+        runtime_->phase !=
+            ReportArtifactIndexRefreshRuntime::Phase::Cancelling) {
+        return false;
+    }
+
+    bool progressed = false;
+    if (runtime_->scan_ticket.valid()) {
+        if (!scan_port_ ||
+            !scan_port_->abandon(runtime_->scan_ticket)) {
+            return false;
+        }
+        runtime_->scan_ticket = {};
+        progressed = true;
+    }
+    if (runtime_->read_ticket.valid()) {
+        if (!read_port_ ||
+            !read_port_->abandon(runtime_->read_ticket)) {
+            return progressed;
+        }
+        runtime_->read_ticket = {};
+    }
+
+    reset_transient();
+    runtime_->phase = ReportArtifactIndexRefreshRuntime::Phase::Idle;
+    status_ = {};
+    return true;
 }
 
 void ReportArtifactIndexRefreshService::fail(const char *error) {
@@ -457,6 +482,9 @@ bool ReportArtifactIndexRefreshService::poll() {
     ReportArtifactIndexRefreshRuntime &runtime = *runtime_;
 
     switch (runtime.phase) {
+        case ReportArtifactIndexRefreshRuntime::Phase::Cancelling:
+            return poll_cancel();
+
         case ReportArtifactIndexRefreshRuntime::Phase::WaitScan: {
             StorageScanCompletion completion;
             if (!scan_port_->take_completion(runtime.scan_ticket,
@@ -516,6 +544,15 @@ bool ReportArtifactIndexRefreshService::poll() {
 
 void ReportArtifactIndexRefreshService::cancel() {
     if (!runtime_) return;
+
+    if (runtime_->scan_ticket.valid() || runtime_->read_ticket.valid()) {
+        runtime_->phase =
+            ReportArtifactIndexRefreshRuntime::Phase::Cancelling;
+        status_.state = ReportArtifactIndexRefreshState::Cancelling;
+        status_.current_path[0] = '\0';
+        (void)poll_cancel();
+        return;
+    }
 
     reset_transient();
     runtime_->phase = ReportArtifactIndexRefreshRuntime::Phase::Idle;
