@@ -13,10 +13,7 @@
 #include "management_console.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
-#include "rpc_request_port.h"
-#include "session_manager.h"
 #include "sink_manager.h"
-#include "tcp_bridge.h"
 #include "time_sync_service.h"
 #include "wifi_manager.h"
 
@@ -32,16 +29,11 @@ class HttpRouteModule;
 enum WebCommandKind : uint8_t {
     WebCommandConsoleLine,
     WebCommandConsoleClear,
-    WebCommandWifiUpdate,
-    WebCommandTimeAction,
-    WebCommandTherapyAction,
-    WebCommandOximetryAction,
 };
 
 struct WebCommand {
     uint8_t kind = WebCommandConsoleLine;
     std::string text;
-    std::string body;
 };
 
 struct WebUiBufferMemoryStatus {
@@ -55,8 +47,6 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
     WebUiBufferMemoryStatus config;
-    WebUiBufferMemoryStatus wifi;
-    WebUiBufferMemoryStatus oximetry_sensors;
     WebUiBufferMemoryStatus live;
     size_t console_log_length = 0;
     size_t sse_clients = 0;
@@ -69,15 +59,12 @@ public:
     using PollCheckpoint = void (*)(const char *section);
 
     // lifecycle
-    bool begin(RpcRequestPort &rpc,
-               StreamBroker &stream,
+    bool begin(StreamBroker &stream,
                As11DeviceService &device,
                WifiManager &wifi_manager,
-               TcpBridge &tcp_bridge,
                ConfigService &config_service,
                TimeSyncService &time_sync_service,
                OtaManager &ota_manager,
-               SessionManager &session_manager,
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
                ConsoleContext &console_ctx,
@@ -101,10 +88,8 @@ private:
     void reserve_cached_json();
     void build_status_json(LargeTextBuffer &json,
                            PollCheckpoint checkpoint = nullptr) const;
-    void build_oximetry_sensors_json(LargeTextBuffer &json) const;
     void send_live_view_state(AsyncWebServerRequest *request);
     void build_stream_json(LargeTextBuffer &json) const;
-    void build_wifi_json(LargeTextBuffer &json) const;
     void reserve_console_log();
     void append_console_log(const String &text);
     void clear_console_log();
@@ -128,11 +113,6 @@ private:
     void drain_commands();
     void execute_command(WebCommand &command);
     void execute_console_line(const std::string &line);
-    void execute_wifi_update(const std::string &body);
-    void execute_time_action(const std::string &action);
-    void execute_therapy_action(const std::string &action);
-    void execute_oximetry_action(const std::string &action,
-                                 const std::string &body);
 
     // SSE client tracking
     void handle_sse_connect(AsyncEventSourceClient *client);
@@ -174,25 +154,18 @@ private:
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
     static constexpr uint16_t SNAPSHOT_STREAM = 1u << 1;
     static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 3;
-    static constexpr uint16_t SNAPSHOT_WIFI = 1u << 4;
-    static constexpr uint16_t SNAPSHOT_OXIMETRY_SENSORS = 1u << 5;
     static constexpr uint16_t SNAPSHOT_ALL =
-        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONFIG |
-        SNAPSHOT_WIFI | SNAPSHOT_OXIMETRY_SENSORS;
+        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONFIG;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
-        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_WIFI |
-        SNAPSHOT_OXIMETRY_SENSORS;
+        SNAPSHOT_STATUS | SNAPSHOT_STREAM;
 
     // subsystem owners
-    RpcRequestPort *rpc_ = nullptr;
     StreamBroker *stream_ = nullptr;
     As11DeviceService *device_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
-    TcpBridge *tcp_bridge_ = nullptr;
     ConfigService *config_service_ = nullptr;
     TimeSyncService *time_sync_service_ = nullptr;
     OtaManager *ota_manager_ = nullptr;
-    SessionManager *session_manager_ = nullptr;
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
@@ -234,8 +207,6 @@ private:
     // cached JSON snapshots
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer cached_stream_json_;
-    LargeTextBuffer cached_wifi_json_;
-    LargeTextBuffer cached_oximetry_sensors_json_;
     LargeTextBuffer live_json_;
 
     // cached auth config

@@ -12,6 +12,7 @@
 #include "config_http_controller.h"
 #include "config_service.h"
 #include "debug_log.h"
+#include "device_http_controller.h"
 #include "edf_recorder_manager.h"
 #include "event_broker.h"
 #include "export_coordinator.h"
@@ -22,6 +23,7 @@
 #include "memory_manager.h"
 #include "ota_manager.h"
 #include "ota_http_controller.h"
+#include "oximetry_http_controller.h"
 #include "oximetry_manager.h"
 #include "provisioning.h"
 #include "report_http_controller.h"
@@ -48,6 +50,7 @@
 #include "version.h"
 #include "web_ui.h"
 #include "wifi_manager.h"
+#include "wifi_http_controller.h"
 
 using namespace aircannect;
 
@@ -79,12 +82,18 @@ static StorageHttpController storage_http_controller;
 static OtaHttpController ota_http_controller;
 static SettingsHttpController settings_http_controller;
 static ConfigHttpController config_http_controller;
+static DeviceHttpController device_http_controller;
+static OximetryHttpController oximetry_http_controller;
+static WifiHttpController wifi_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
     &ota_http_controller,
     &settings_http_controller,
     &config_http_controller,
+    &device_http_controller,
+    &oximetry_http_controller,
+    &wifi_http_controller,
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
@@ -676,7 +685,17 @@ void setup() {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] settings HTTP controller failed to start\n");
     }
-
+    if (!device_http_controller.begin(rpc_transport,
+                                      as11_device_service,
+                                      time_sync_service)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] device HTTP controller failed to start\n");
+    }
+    if (!oximetry_http_controller.begin(oximetry_manager,
+                                        config_service)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] oximetry HTTP controller failed to start\n");
+    }
     // Network configuration
     wifi_manager.set_hostname(config_service.data().hostname);
     wifi_manager.set_softap_mode(config_service.data().softap_mode);
@@ -690,6 +709,10 @@ void setup() {
     }
 
     wifi_manager.begin();
+    if (!wifi_http_controller.begin(wifi_manager)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] Wi-Fi HTTP controller failed to start\n");
+    }
 
     if (!config_service.data().tcp_bridge_enabled) {
         Log::logf(CAT_TCP, LOG_INFO,
@@ -701,11 +724,9 @@ void setup() {
     config_service.set_runtime_effects(apply_config_runtime_effects, nullptr);
     config_service.activate_runtime_effects(false);
 
-    web_ui.begin(rpc_transport, stream_broker, as11_device_service,
-                 wifi_manager, tcp_bridge, config_service,
-                 time_sync_service, ota_manager,
-                 session_manager, sink_manager, oximetry_manager,
-                 console_ctx,
+    web_ui.begin(stream_broker, as11_device_service, wifi_manager,
+                 config_service, time_sync_service, ota_manager,
+                 sink_manager, oximetry_manager, console_ctx,
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
 }
@@ -740,6 +761,9 @@ void loop() {
     config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();
+    device_http_controller.poll();
+    oximetry_http_controller.poll();
+    wifi_http_controller.poll();
 
     ota_manager.poll_http_upload_prepare(
         esp_ota_quiesce_requested &&

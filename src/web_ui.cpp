@@ -39,10 +39,6 @@ const char *web_command_name(uint8_t kind) {
     switch (kind) {
         case WebCommandConsoleLine: return "console_line";
         case WebCommandConsoleClear: return "console_clear";
-        case WebCommandWifiUpdate: return "wifi_update";
-        case WebCommandTimeAction: return "time_action";
-        case WebCommandTherapyAction: return "therapy_action";
-        case WebCommandOximetryAction: return "oximetry_action";
         default: return "unknown";
     }
 }
@@ -119,34 +115,6 @@ const char *oximetry_source_name(OximetrySource source) {
     }
 }
 
-const char *oximetry_sensor_state_name(OximetrySensorState state) {
-    switch (state) {
-        case OximetrySensorState::Off: return "off";
-        case OximetrySensorState::Idle: return "idle";
-        case OximetrySensorState::Scanning: return "scanning";
-        case OximetrySensorState::Connecting: return "connecting";
-        case OximetrySensorState::Connected: return "connected";
-        case OximetrySensorState::Streaming: return "streaming";
-        default: return "unknown";
-    }
-}
-
-template <typename JsonOut>
-void append_oximetry_sensor(JsonOut &json,
-                            const OximetrySensorDevice &device,
-                            size_t index,
-                            bool include_index) {
-    json += '{';
-    if (include_index) json_add_int(json, "index", index, false);
-    else json_add_string(json, "addr", device.addr, false);
-    if (include_index) json_add_string(json, "addr", device.addr);
-    json_add_int(json, "addr_type", device.addr_type);
-    json_add_string(json, "name", device.name);
-    json_add_int(json, "rssi", device.rssi);
-    json_add_bool(json, "autoconnect", device.autoconnect);
-    json += '}';
-}
-
 template <typename JsonOut>
 void append_json_float_value(JsonOut &json, float value) {
     append_json_float(json, value);
@@ -176,15 +144,12 @@ void append_live_series(JsonOut &json,
 
 }  // namespace
 
-bool WebUI::begin(RpcRequestPort &rpc,
-                  StreamBroker &stream,
+bool WebUI::begin(StreamBroker &stream,
                   As11DeviceService &device,
                   WifiManager &wifi_manager,
-                  TcpBridge &tcp_bridge,
                   ConfigService &config_service,
                   TimeSyncService &time_sync_service,
                   OtaManager &ota_manager,
-                  SessionManager &session_manager,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
                   ConsoleContext &console_ctx,
@@ -193,16 +158,13 @@ bool WebUI::begin(RpcRequestPort &rpc,
                   uint16_t port) {
     if (started_) return true;
     stop();
-    rpc_ = &rpc;
     stream_ = &stream;
     device_ = &device;
     wifi_manager_ = &wifi_manager;
-    tcp_bridge_ = &tcp_bridge;
     config_service_ = &config_service;
     observed_config_revision_ = config_service.revision();
     time_sync_service_ = &time_sync_service;
     ota_manager_ = &ota_manager;
-    session_manager_ = &session_manager;
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
     console_ctx_ = &console_ctx;
@@ -262,9 +224,6 @@ bool WebUI::begin(RpcRequestPort &rpc,
 void WebUI::reserve_cached_json() {
     cached_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     cached_stream_json_.reserve(AC_WEB_STREAM_JSON_RESERVE);
-    cached_wifi_json_.reserve(AC_WEB_WIFI_JSON_RESERVE);
-    cached_oximetry_sensors_json_.reserve(
-        AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
     live_json_.reserve(4096);
 }
 
@@ -306,8 +265,6 @@ WebUiMemoryStatus WebUI::memory_status() {
     out.stream = capture(cached_stream_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
-    out.wifi = capture(cached_wifi_json_);
-    out.oximetry_sensors = capture(cached_oximetry_sensors_json_);
     out.live = capture(live_json_);
     out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
@@ -1175,50 +1132,6 @@ void WebUI::build_status_json(LargeTextBuffer &json,
     json += '}';
 }
 
-void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
-    const OximetryRuntimeStatus runtime = oximetry_manager_->runtime_status();
-    const OximetrySensorStatus sensor = oximetry_manager_->sensor_status();
-    OximetrySensorDevice oxi_scan[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
-    OximetrySensorDevice oxi_known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
-    const size_t oxi_scan_count =
-        oximetry_manager_->sensor_scan_results(
-            oxi_scan, AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS);
-    const size_t oxi_known_count =
-        oximetry_manager_->known_sensors(oxi_known,
-                                         AC_OXIMETRY_SENSOR_MAX_KNOWN);
-
-    json = "{";
-    json_add_bool(json, "enabled", runtime.enabled, false);
-    json_add_bool(json, "ble_available", runtime.ble_available);
-    json_add_string(json, "sensor_state",
-                    oximetry_sensor_state_name(sensor.sensor_state));
-    json_add_bool(json, "sensor_task_started", sensor.sensor_task_started);
-#if AC_STACK_PROFILE_ENABLED
-    json_add_int(json, "sensor_task_stack_free",
-                 static_cast<long>(
-                     sensor.sensor_task_stack_high_water_bytes));
-#endif
-    json_add_bool(json, "sensor_scanning", sensor.sensor_scanning);
-    json_add_bool(json, "sensor_connected", sensor.sensor_connected);
-    json_add_int(json, "sensor_known_count", sensor.sensor_known_count);
-    json_add_int(json, "sensor_scan_count", sensor.sensor_scan_count);
-    json_add_int(json, "sensor_scan_generation",
-                 sensor.sensor_scan_generation);
-    json_add_string(json, "sensor_peer", sensor.sensor_peer);
-    json_add_string(json, "sensor_name", sensor.sensor_name);
-    json += ",\"sensor_scan_results\":[";
-    for (size_t i = 0; i < oxi_scan_count; ++i) {
-        if (i) json += ',';
-        append_oximetry_sensor(json, oxi_scan[i], i, true);
-    }
-    json += "],\"sensor_known\":[";
-    for (size_t i = 0; i < oxi_known_count; ++i) {
-        if (i) json += ',';
-        append_oximetry_sensor(json, oxi_known[i], i, false);
-    }
-    json += "]}";
-}
-
 void WebUI::build_stream_json(LargeTextBuffer &json) const {
     const StreamBroker &stream = *stream_;
     const LiveChartRuntimeStatus &live = sink_manager_->live_chart_status();
@@ -1278,30 +1191,6 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void WebUI::build_wifi_json(LargeTextBuffer &json) const {
-    json = "{";
-    json_add_string(json, "state", wifi_manager_->state_name(), false);
-    json_add_string(json, "ssid", wifi_manager_->sta_ssid().c_str());
-    json_add_int(json, "active", wifi_manager_->active_profile_index());
-    json_add_string(json, "ip", wifi_manager_->ip().toString().c_str());
-    char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
-    wifi_manager_->bssid(bssid_text, sizeof(bssid_text));
-    json_add_string(json, "bssid", bssid_text);
-    json_add_int(json, "rssi", wifi_manager_->rssi());
-    json_add_int(json, "channel", wifi_manager_->channel());
-    json_add_bool(json, "roam", wifi_manager_->roaming_enabled());
-    json += ",\"profiles\":[";
-    for (size_t i = 0; i < wifi_manager_->profile_count(); ++i) {
-        const WifiProfile &profile = wifi_manager_->profile(i);
-        if (i) json += ',';
-        json += "{";
-        json_add_string(json, "ssid", profile.ssid.c_str(), false);
-        json_add_bool(json, "open", profile.password.length() == 0);
-        json += '}';
-    }
-    json += "]}";
-}
-
 void WebUI::publish_snapshots(bool force,
                               bool realtime_active,
                               PollCheckpoint checkpoint) {
@@ -1337,14 +1226,6 @@ void WebUI::publish_snapshots(bool force,
     if (rebuild_mask & SNAPSHOT_CONFIG) {
         if (checkpoint) checkpoint("web_ui.snapshots.config");
     }
-    if (rebuild_mask & SNAPSHOT_WIFI) {
-        build_wifi_json(cached_wifi_json_);
-        if (checkpoint) checkpoint("web_ui.snapshots.wifi");
-    }
-    if (rebuild_mask & SNAPSHOT_OXIMETRY_SENSORS) {
-        build_oximetry_sensors_json(cached_oximetry_sensors_json_);
-        if (checkpoint) checkpoint("web_ui.snapshots.oximetry_sensors");
-    }
     if (rebuild_mask & SNAPSHOT_CONFIG) {
         cached_http_auth_required_ =
             network_auth_required(config_service_->data());
@@ -1369,18 +1250,6 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandConsoleClear:
             clear_console_log();
             break;
-        case WebCommandWifiUpdate:
-            execute_wifi_update(command.body);
-            break;
-        case WebCommandTimeAction:
-            execute_time_action(command.text);
-            break;
-        case WebCommandTherapyAction:
-            execute_therapy_action(command.text);
-            break;
-        case WebCommandOximetryAction:
-            execute_oximetry_action(command.text, command.body);
-            break;
         default:
             break;
     }
@@ -1399,126 +1268,6 @@ void WebUI::execute_console_line(const std::string &line) {
     entry += "\n";
     entry += capture.text();
     append_console_log(entry);
-}
-
-void WebUI::execute_wifi_update(const std::string &body) {
-    JsonDocument doc;
-    if (deserializeJson(doc, body.c_str())) return;
-    String action;
-    json_get_string(doc, "action", action);
-    bool changed = false;
-    if (action == "add" || action == "set") {
-        String ssid;
-        String pass;
-        json_get_string(doc, "ssid", ssid);
-        json_get_string(doc, "pass", pass);
-        if (action == "set") changed = wifi_manager_->configure_sta(ssid, pass);
-        else changed = wifi_manager_->add_profile(ssid, pass, !pass.length());
-    } else if (action == "remove" && doc["index"].is<int>()) {
-        changed = wifi_manager_->remove_profile(doc["index"].as<int>());
-    } else if (action == "clear") {
-        wifi_manager_->clear_sta_config();
-        changed = true;
-    } else if (action == "reconnect") {
-        changed = wifi_manager_->reconnect();
-    }
-    if (changed) mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_WIFI);
-}
-
-void WebUI::execute_time_action(const std::string &action) {
-    if (action == "ntp_sync") {
-        time_sync_service_->force_ntp_sync();
-    } else if (action == "sync_to_resmed") {
-        time_sync_service_->request_push_esp_to_resmed(RpcSource::HttpApi);
-    } else if (action == "sync_from_resmed") {
-        time_sync_service_->request_pull_resmed_to_esp(RpcSource::HttpApi);
-    } else if (action == "retry_resmed_push") {
-        time_sync_service_->reset_resmed_push();
-    }
-    mark_snapshots_dirty(SNAPSHOT_STATUS);
-}
-
-void WebUI::execute_therapy_action(const std::string &action) {
-    As11TherapyTarget target = As11TherapyTarget::None;
-    if (action == "start") target = As11TherapyTarget::Running;
-    if (action == "stop" || action == "standby") {
-        target = As11TherapyTarget::Standby;
-    }
-    if (target == As11TherapyTarget::None) return;
-
-    (void)device_->request_therapy(*rpc_, target, RpcSource::HttpApi,
-                                   millis());
-    mark_snapshots_dirty(SNAPSHOT_STATUS);
-}
-
-void WebUI::execute_oximetry_action(const std::string &action,
-                                    const std::string &body) {
-    if (!oximetry_manager_) return;
-    if (action == "enable") {
-        (void)config_service_->set_value("oxi_en", "1", false);
-    } else if (action == "disable") {
-        (void)config_service_->set_value("oxi_en", "0", false);
-    } else if (action == "pair") {
-        (void)config_service_->set_value("oxi_en", "1", false);
-        oximetry_manager_->request_pairing(true);
-    } else if (action == "pair_stop") {
-        oximetry_manager_->request_pairing(false);
-    } else if (action == "forget") {
-        oximetry_manager_->forget_bonds();
-    } else if (action == "advertise_start") {
-        oximetry_manager_->request_advertising(true);
-    } else if (action == "advertise_stop") {
-        oximetry_manager_->request_advertising(false);
-    } else if (action == "sensor_scan") {
-        oximetry_manager_->request_sensor_scan();
-    } else if (action == "sensor_disconnect") {
-        oximetry_manager_->request_sensor_disconnect();
-    } else if (action == "sensor_connect" ||
-               action == "sensor_forget" ||
-               action == "sensor_autoconnect") {
-        JsonDocument doc;
-        if (deserializeJson(doc, body.c_str())) return;
-        String target;
-        String addr;
-        String name;
-        json_get_string(doc, "target", target);
-        json_get_string(doc, "addr", addr);
-        json_get_string(doc, "name", name);
-        if (action == "sensor_connect") {
-            bool ok = false;
-            if (addr.length()) {
-                OximetrySensorDevice device;
-                strncpy(device.addr, addr.c_str(), sizeof(device.addr) - 1);
-                device.addr[sizeof(device.addr) - 1] = 0;
-                if (doc["addr_type"].is<uint8_t>()) {
-                    device.addr_type = doc["addr_type"].as<uint8_t>();
-                }
-                if (name.length()) {
-                    strncpy(device.name, name.c_str(),
-                            sizeof(device.name) - 1);
-                    device.name[sizeof(device.name) - 1] = 0;
-                }
-                if (doc["rssi"].is<int>()) device.rssi = doc["rssi"].as<int>();
-                ok = oximetry_manager_->request_sensor_connect_device(device);
-            } else {
-                ok = oximetry_manager_->request_sensor_connect(target.c_str());
-            }
-            if (!ok) {
-                Log::logf(CAT_OXI, LOG_WARN,
-                          "[WEB] sensor connect command rejected target=\"%s\" addr=\"%s\"\n",
-                          target.c_str(),
-                          addr.c_str());
-            }
-        } else if (action == "sensor_forget") {
-            oximetry_manager_->forget_sensor(addr.c_str());
-        } else if (action == "sensor_autoconnect" &&
-                   doc["enabled"].is<bool>()) {
-            oximetry_manager_->set_sensor_autoconnect(
-                addr.c_str(), doc["enabled"].as<bool>());
-        }
-    }
-    mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_CONFIG |
-                         SNAPSHOT_OXIMETRY_SENSORS);
 }
 
 void WebUI::register_routes(HttpRouteModule *const *route_modules,
@@ -1595,102 +1344,6 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
             send_queue_result(request,
                               enqueue_simple_command(WebCommandConsoleClear));
         });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/time"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            String action;
-            json_get_string(doc, "action", action);
-            WebCommand queued;
-            queued.kind = WebCommandTimeAction;
-            queued.text = action.c_str();
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/oximetry"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            String action;
-            if (!json_get_string(doc, "action", action)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"missing action\"}");
-                return;
-            }
-            action.trim();
-            WebCommand queued;
-            queued.kind = WebCommandOximetryAction;
-            queued.text = action.c_str();
-            queued.body = std::move(body);
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
-
-    server_->on(AsyncURIMatcher::exact("/api/oximetry/sensors"), HTTP_GET,
-        [this](AsyncWebServerRequest *request) {
-            send_cached(request, cached_oximetry_sensors_json_);
-        });
-
-    server_->on(AsyncURIMatcher::exact("/api/wifi"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        send_cached(request, cached_wifi_json_);
-    });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/wifi"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            WebCommand queued;
-            queued.kind = WebCommandWifiUpdate;
-            queued.body = std::move(body);
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/therapy"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            JsonDocument doc;
-            std::string body;
-            if (!http_parse_json_body(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-            String action;
-            json_get_string(doc, "action", action);
-            if (action != "start" && action != "stop" &&
-                action != "standby") {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"unknown action\"}");
-                return;
-            }
-            WebCommand queued;
-            queued.kind = WebCommandTherapyAction;
-            queued.text = action.c_str();
-            send_queue_result(request, enqueue_command(std::move(queued)));
-        },
-        nullptr, http_request_body_handler);
 
     for (size_t i = 0; i < route_module_count; ++i) {
         if (route_modules && route_modules[i]) {
