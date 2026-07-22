@@ -62,16 +62,16 @@ bool parse_ota_upload_encoding(const char *value, OtaUploadEncoding &out) {
     return false;
 }
 
-void OtaManager::begin(AppConfig &app_config) {
+void OtaManager::begin(const AppConfigData &app_config) {
     app_config_ = &app_config;
     if (!status_mutex_) {
         status_mutex_ = xSemaphoreCreateRecursiveMutex();
     }
     if (!lock_status()) return;
-    status_.auth_enabled = app_config.data().ota_password.length() > 0;
+    status_.auth_enabled = app_config.ota_password.length() > 0;
     status_.arduino_port = AC_ARDUINO_OTA_PORT;
     status_.update_check_enabled =
-        app_config.data().update_url.length() > 0 &&
+        app_config.update_url.length() > 0 &&
         AC_OTA_RELEASE_TARGET[0];
     unlock_status();
     esp_ota_mark_app_valid_cancel_rollback();
@@ -104,7 +104,7 @@ void OtaManager::poll(const WifiManager &wifi_manager,
 
     if (!lock_status()) return;
     const uint32_t now = millis();
-    status_.auth_enabled = app_config_->data().ota_password.length() > 0;
+    status_.auth_enabled = app_config_->ota_password.length() > 0;
     if (status_.http_prepared && http_prepared_at_ms_ &&
         static_cast<int32_t>(now - http_prepared_at_ms_) >=
             static_cast<int32_t>(kHttpOtaPreparedTtlMs)) {
@@ -1247,7 +1247,7 @@ void OtaManager::start_arduino_ota() {
         return;
     }
 
-    const AppConfigData &cfg = app_config_->data();
+    const AppConfigData &cfg = *app_config_;
 
     arduino_ota_->setHostname(cfg.hostname.c_str());
     arduino_ota_->setPort(AC_ARDUINO_OTA_PORT);

@@ -1,5 +1,9 @@
 #include "app_config_registry.h"
 
+#if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
+#include "app_config_internal.h"
+#endif
+
 #include <string.h>
 
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
@@ -255,7 +259,11 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
 #undef AC_LOG_FIELD
 #undef AC_CFG_OFFSET
 
+}  // namespace
+
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
+namespace {
+
 void set_empty_text(String &out) {
     out = "<empty>";
 }
@@ -309,16 +317,19 @@ bool raw_value(const AppConfigData &cfg,
     return false;
 }
 
-bool set_field_value(AppConfig &config,
-                     const AppConfigFieldDescriptor &field,
-                     const String &value,
-                     bool keep_secret_sentinel) {
+}  // namespace
+
+bool AppConfigFieldWriter::set_value(
+    AppConfig &config,
+    const AppConfigFieldDescriptor &field,
+    const String &value,
+    bool preserve_secret_sentinel) {
     if (app_config_field_is_secret(field) &&
         value == AC_CONFIG_SECRET_SENTINEL) {
         String current;
         if (raw_value(config.data(), field, current) &&
             app_config_secret_sentinel_should_preserve(
-                current.c_str(), value.c_str(), keep_secret_sentinel)) {
+                current.c_str(), value.c_str(), preserve_secret_sentinel)) {
             return true;
         }
     }
@@ -430,8 +441,6 @@ bool set_field_value(AppConfig &config,
 }
 #endif
 
-}  // namespace
-
 const AppConfigFieldDescriptor *app_config_fields(size_t &count) {
     count = sizeof(CONFIG_FIELDS) / sizeof(CONFIG_FIELDS[0]);
     return CONFIG_FIELDS;
@@ -521,45 +530,29 @@ bool app_config_field_get_console_value(const AppConfigData &cfg,
     return true;
 }
 
-bool app_config_field_set(AppConfig &config,
-                          const AppConfigFieldDescriptor &field,
-                          const String &value,
-                          bool keep_secret_sentinel,
-                          AppConfigFieldSetResult &result) {
-    result = {};
-
-    config.begin_update();
-    const bool ok = app_config_field_set_in_update(
-        config, field, value, keep_secret_sentinel, result);
-    if (!ok) {
-        config.commit_update();
-        return false;
-    }
-
-    const bool committed = config.commit_update();
-    if (!committed) return false;
-    return true;
-}
-
-bool app_config_field_set_in_update(AppConfig &config,
-                                    const AppConfigFieldDescriptor &field,
-                                    const String &value,
-                                    bool keep_secret_sentinel,
-                                    AppConfigFieldSetResult &result) {
+bool AppConfigFieldWriter::set_in_update(
+    AppConfig &config,
+    const AppConfigFieldDescriptor &field,
+    const String &value,
+    bool preserve_secret_sentinel,
+    AppConfigStoreFieldResult &result) {
     result = {};
 
     String before;
     if (!raw_value(config.data(), field, before)) return false;
+    const uint32_t pending_before = config.pending_dirty_;
 
-    const bool ok = set_field_value(config, field, value,
-                                    keep_secret_sentinel);
+    const bool ok = set_value(config, field, value,
+                              preserve_secret_sentinel);
     if (!ok) return false;
 
     String after;
     if (!raw_value(config.data(), field, after)) return false;
 
     result.accepted = true;
-    result.changed = before != after;
+    result.changed = before != after ||
+                     ((config.pending_dirty_ & field.dirty) != 0 &&
+                      (pending_before & field.dirty) == 0);
     result.dirty = result.changed ? field.dirty : 0;
     return true;
 }

@@ -2,8 +2,8 @@
 
 #include <string.h>
 
-#include "app_config_registry.h"
 #include "board.h"
+#include "config_service.h"
 #include "debug_log.h"
 #include "storage_path_port.h"
 #include "storage_read_port.h"
@@ -82,19 +82,14 @@ bool apply_wifi_key(ProvisionState &state,
     return false;
 }
 
-bool apply_app_key(AppConfig &app_config,
+bool apply_app_key(ConfigService &config_service,
                    const String &key,
                    const String &value,
                    bool &known) {
-    const AppConfigFieldDescriptor *field =
-        app_config_find_field(key.c_str());
-    known = field != nullptr;
-    if (!field) return true;
-    if ((field->flags & AC_CONFIG_FIELD_PROVISIONABLE) == 0) return false;
-
-    AppConfigFieldSetResult result;
-    return app_config_field_set_in_update(app_config, *field, value,
-                                          false, result);
+    const ConfigFieldUpdate update = config_service.set_transaction_value(
+        key.c_str(), value, false, true);
+    known = update.disposition != ConfigFieldDisposition::UnknownKey;
+    return update.accepted();
 }
 
 bool commit_wifi(WifiManager &wifi_manager, ProvisionState &state) {
@@ -209,7 +204,7 @@ bool prepare_config_file(StorageReadPort &port,
     return true;
 }
 
-void apply_config_line(AppConfig &app_config,
+void apply_config_line(ConfigService &config_service,
                        ProvisionState &state,
                        ProvisionCounts &counts,
                        String line,
@@ -245,7 +240,7 @@ void apply_config_line(AppConfig &app_config,
 
     bool known = false;
     bool ok = apply_wifi_key(state, key, value, known);
-    if (!known) ok = apply_app_key(app_config, key, value, known);
+    if (!known) ok = apply_app_key(config_service, key, value, known);
     if (known && ok) {
         counts.applied++;
         return;
@@ -257,7 +252,7 @@ void apply_config_line(AppConfig &app_config,
 }
 
 bool parse_config_file(StorageReadPort &port,
-                       AppConfig &app_config,
+                       ConfigService &config_service,
                        StoragePreparedRead prepared,
                        ProvisionState &state,
                        ProvisionCounts &counts) {
@@ -275,7 +270,8 @@ bool parse_config_file(StorageReadPort &port,
         for (size_t i = 0; i < received; ++i) {
             const char value = static_cast<char>(bytes[i]);
             if (value == '\n') {
-                apply_config_line(app_config, state, counts, line, too_long);
+                apply_config_line(config_service, state, counts, line,
+                                  too_long);
                 line = "";
                 too_long = false;
                 continue;
@@ -291,7 +287,7 @@ bool parse_config_file(StorageReadPort &port,
         offset += received;
     }
     if (line.length() > 0 || too_long) {
-        apply_config_line(app_config, state, counts, line, too_long);
+        apply_config_line(config_service, state, counts, line, too_long);
     }
     return true;
 }
@@ -312,7 +308,7 @@ bool mark_config_consumed(StoragePathPort &port) {
                OperationDisposition::Succeeded;
 }
 
-void consume_config_file(AppConfig &app_config,
+void consume_config_file(ConfigService &config_service,
                          WifiManager &wifi_manager,
                          StorageReadPort &read_port,
                          StoragePathPort &path_port,
@@ -323,13 +319,20 @@ void consume_config_file(AppConfig &app_config,
     ProvisionState state;
     ProvisionCounts counts;
 
-    app_config.begin_update();
+    if (!config_service.begin_transaction()) {
+        read_port.release_prepared(prepared);
+        Log::logf(CAT_CONFIG, LOG_WARN,
+                  "[PROVISION] config transaction busy\n");
+        return;
+    }
+
     const bool parsed = parse_config_file(
-        read_port, app_config, prepared, state, counts);
+        read_port, config_service, prepared, state, counts);
     read_port.release_prepared(prepared);
 
-    const bool config_committed = app_config.commit_update();
-    bool ok = parsed && config_committed;
+    const ConfigTransactionResult transaction =
+        config_service.commit_transaction();
+    bool ok = parsed && transaction.persisted;
     ok = commit_wifi(wifi_manager, state) && ok;
 
     const bool renamed = mark_config_consumed(path_port);
@@ -347,7 +350,7 @@ void consume_config_file(AppConfig &app_config,
 
 }  // namespace
 
-void apply_storage_provisioning(AppConfig &app_config,
+void apply_storage_provisioning(ConfigService &config_service,
                                 WifiManager &wifi_manager,
                                 StorageReadPort &read_port,
                                 StoragePathPort &path_port) {
@@ -371,7 +374,7 @@ void apply_storage_provisioning(AppConfig &app_config,
 
     Log::logf(CAT_CONFIG, LOG_INFO, "[PROVISION] found %s\n",
               AC_PROVISION_CONFIG_PATH);
-    consume_config_file(app_config, wifi_manager, read_port, path_port,
+    consume_config_file(config_service, wifi_manager, read_port, path_port,
                         static_cast<size_t>(metadata.size));
 }
 

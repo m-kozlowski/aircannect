@@ -764,18 +764,22 @@ void ManagementConsole::handle_edf_command(Print &out,
         return;
     }
     if (rest == "on" || rest == "enable") {
-        if (!ctx.app_config.set_edf_capture_enabled(true)) {
+        ConfigTransactionResult transaction;
+        const ConfigFieldUpdate update = ctx.config_service.set_value(
+            "edf_cap", "1", false, &transaction);
+        if (!update.accepted() || !transaction.persisted) {
             out.println("[EDF] warning: failed to persist enabled state");
         }
-        ctx.edf_recorder_manager.set_enabled(true);
         print_edf_recorder_status(out, ctx.edf_recorder_manager);
         return;
     }
     if (rest == "off" || rest == "disable") {
-        if (!ctx.app_config.set_edf_capture_enabled(false)) {
+        ConfigTransactionResult transaction;
+        const ConfigFieldUpdate update = ctx.config_service.set_value(
+            "edf_cap", "0", false, &transaction);
+        if (!update.accepted() || !transaction.persisted) {
             out.println("[EDF] warning: failed to persist disabled state");
         }
-        ctx.edf_recorder_manager.set_enabled(false);
         print_edf_recorder_status(out, ctx.edf_recorder_manager);
         return;
     }
@@ -785,7 +789,8 @@ void ManagementConsole::handle_edf_command(Print &out,
 void ManagementConsole::handle_oximetry_command(Print &out,
                                                 String rest,
                                                 ConsoleContext &ctx) {
-    handle_oximetry(out, rest, ctx.oximetry_manager);
+    handle_oximetry(out, rest, ctx.oximetry_manager,
+                    ctx.config_service);
 }
 
 void ManagementConsole::handle_report_command(Print &out,
@@ -1073,15 +1078,13 @@ void ManagementConsole::handle_therapy_command(Print &out,
 void ManagementConsole::handle_config_command(Print &out,
                                               String rest,
                                               ConsoleContext &ctx) {
-    handle_config(out, rest, ctx.app_config, ctx.wifi_manager,
-                  ctx.tcp_bridge, ctx.ota_manager,
-                  ctx.edf_recorder_manager);
+    handle_config(out, rest, ctx.config_service, ctx.wifi_manager);
 }
 
 void ManagementConsole::handle_wifi_command(Print &out,
                                             String rest,
                                             ConsoleContext &ctx) {
-    handle_wifi(out, rest, ctx.wifi_manager, ctx.tcp_bridge, ctx.app_config);
+    handle_wifi(out, rest, ctx.wifi_manager);
 }
 
 void ManagementConsole::handle_tcp_command(Print &out,
@@ -1111,7 +1114,7 @@ void ManagementConsole::handle_resmed_ota_command(Print &out,
 void ManagementConsole::handle_log_command(Print &out,
                                            String rest,
                                            ConsoleContext &ctx) {
-    handle_log(out, rest, ctx.app_config, ctx.storage_read_port);
+    handle_log(out, rest, ctx.config_service, ctx.storage_read_port);
 }
 
 void ManagementConsole::handle_restart_command(Print &out,

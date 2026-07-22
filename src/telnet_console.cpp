@@ -25,7 +25,7 @@ void TelnetConsole::stop(StreamBroker *stream) {
 
 void TelnetConsole::poll(ConsoleContext &ctx) {
     if (!started()) return;
-    accept_clients(ctx.app_config, ctx.stream);
+    accept_clients(ctx.config_service.data(), ctx.stream);
 
     for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
         Slot &slot = slots_[i];
@@ -68,7 +68,7 @@ int TelnetConsole::connected_count() {
     return count;
 }
 
-void TelnetConsole::accept_clients(const AppConfig &app_config,
+void TelnetConsole::accept_clients(const AppConfigData &app_config,
                                    StreamBroker &stream) {
     WiFiClient incoming = accept_line_client();
     if (!incoming) return;
@@ -107,7 +107,7 @@ void TelnetConsole::disconnect_slot(size_t idx, StreamBroker *stream) {
 }
 
 void TelnetConsole::authenticate_slot(size_t idx,
-                                      const AppConfig &app_config) {
+                                      const AppConfigData &app_config) {
     if (idx >= AC_MAX_TELNET_CLIENTS) return;
     Slot &slot = slots_[idx];
     slot.line = "";
@@ -119,7 +119,7 @@ void TelnetConsole::authenticate_slot(size_t idx,
     hello += " management console\r\n";
     queue_text(idx, hello);
 
-    if (network_client_allowed(app_config.data(), slot.client.remoteIP())) {
+    if (network_client_allowed(app_config, slot.client.remoteIP())) {
         slot.auth_state = AuthState::Authenticated;
         stats_.auth_successes++;
         queue_console_begin(idx);
@@ -208,7 +208,7 @@ void TelnetConsole::process_input_char(size_t idx,
     if (slot.auth_state == AuthState::Username ||
         slot.auth_state == AuthState::Password) {
         if (c == '\r' || c == '\n') {
-            process_auth_line(idx, ctx.app_config);
+            process_auth_line(idx, ctx.config_service.data());
         } else if (c == '\b' || c == 0x7F) {
             if (slot.auth_line.length()) {
                 slot.auth_line.remove(slot.auth_line.length() - 1);
@@ -235,7 +235,7 @@ void TelnetConsole::process_input_char(size_t idx,
 }
 
 void TelnetConsole::process_auth_line(size_t idx,
-                                      const AppConfig &app_config) {
+                                      const AppConfigData &app_config) {
     Slot &slot = slots_[idx];
     String line = slot.auth_line;
     slot.auth_line = "";
@@ -248,7 +248,7 @@ void TelnetConsole::process_auth_line(size_t idx,
     }
 
     if (slot.auth_state != AuthState::Password) return;
-    if (network_credentials_match(app_config.data(), slot.auth_user, line)) {
+    if (network_credentials_match(app_config, slot.auth_user, line)) {
         slot.auth_state = AuthState::Authenticated;
         slot.auth_user = "";
         stats_.auth_successes++;

@@ -19,7 +19,7 @@ enum class EspClockSource : uint8_t {
 
 class TimeSyncService {
 public:
-    void begin(AppConfig &app_config,
+    void begin(const AppConfigData &app_config,
                WifiManager &wifi_manager,
                RpcRequestPort &rpc,
                As11DeviceService &device);
@@ -32,7 +32,7 @@ public:
 
     bool ntp_synced() const { return ntp_synced_; }
     bool resmed_time_sync_enabled() const {
-        return app_config_ && app_config_->data().resmed_time_sync_enabled;
+        return app_config_ && app_config_->resmed_time_sync_enabled;
     }
     bool esp_clock_valid() const;
     EspClockSource esp_clock_source() const { return esp_clock_source_; }
@@ -60,7 +60,7 @@ private:
     bool format_utc(int64_t epoch_ms, char *out, size_t size) const;
     std::string format_utc(int64_t epoch_ms) const;
 
-    AppConfig *app_config_ = nullptr;
+    const AppConfigData *app_config_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
     RpcRequestPort *rpc_ = nullptr;
     As11DeviceService *device_ = nullptr;

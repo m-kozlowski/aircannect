@@ -74,7 +74,7 @@ struct SystemStatusSnapshot {
 struct SystemStatusSources {
     const As11DeviceService &device;
     const WifiManager &wifi_manager;
-    const AppConfig &app_config;
+    const AppConfigData &app_config;
     const TimeSyncService &time_sync_service;
     const OtaManager &ota_manager;
     const OximetryManager &oximetry_manager;

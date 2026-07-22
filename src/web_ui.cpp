@@ -14,7 +14,6 @@
 
 #include "auth_utils.h"
 #include "app_config_registry.h"
-#include "app_config_update.h"
 #include "async_prepared_response.h"
 #include "as11_rpc.h"
 #include "board.h"
@@ -124,6 +123,46 @@ const char *web_config_field_type_name(AppConfigFieldType type) {
             return "enum";
     }
     return "text";
+}
+
+bool web_config_value_text(JsonVariantConst value,
+                           const AppConfigFieldDescriptor &field,
+                           String &out) {
+    out = "";
+    switch (field.type) {
+        case AppConfigFieldType::Bool:
+            if (value.is<bool>()) {
+                out = value.as<bool>() ? "1" : "0";
+                return true;
+            }
+            if (value.is<const char *>()) {
+                out = value.as<const char *>();
+                return true;
+            }
+            return false;
+
+        case AppConfigFieldType::UInt16:
+            if (value.is<int>()) {
+                const int parsed = value.as<int>();
+                if (parsed < 0 || parsed > 65535) return false;
+                out = String(parsed);
+                return true;
+            }
+            if (value.is<const char *>()) {
+                out = value.as<const char *>();
+                return true;
+            }
+            return false;
+
+        case AppConfigFieldType::String:
+        case AppConfigFieldType::Secret:
+        case AppConfigFieldType::Enum:
+        case AppConfigFieldType::LogLevel:
+            if (!value.is<const char *>()) return false;
+            out = value.as<const char *>();
+            return true;
+    }
+    return false;
 }
 
 static constexpr AppConfigEnumValue WEB_LOG_LEVEL_VALUES[] = {
@@ -853,7 +892,7 @@ bool WebUI::begin(RpcRequestPort &rpc,
                   As11SettingsManager &settings_manager,
                   WifiManager &wifi_manager,
                   TcpBridge &tcp_bridge,
-                  AppConfig &app_config,
+                  ConfigService &config_service,
                   TimeSyncService &time_sync_service,
                   OtaManager &ota_manager,
                   ResmedOtaManager &resmed_ota_manager,
@@ -876,7 +915,8 @@ bool WebUI::begin(RpcRequestPort &rpc,
     settings_manager_ = &settings_manager;
     wifi_manager_ = &wifi_manager;
     tcp_bridge_ = &tcp_bridge;
-    app_config_ = &app_config;
+    config_service_ = &config_service;
+    observed_config_revision_ = config_service.revision();
     time_sync_service_ = &time_sync_service;
     ota_manager_ = &ota_manager;
     resmed_ota_manager_ = &resmed_ota_manager;
@@ -1070,6 +1110,7 @@ void WebUI::stop() {
     observed_settings_refresh_pending_ = false;
     observed_settings_revision_ = 0;
     observed_device_revision_ = 0;
+    observed_config_revision_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
@@ -1094,6 +1135,11 @@ void WebUI::poll(PollCheckpoint checkpoint) {
              settings_manager_->refresh_pending() ||
          observed_settings_revision_ != settings_manager_->revision())) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+    }
+    if (config_service_ &&
+        observed_config_revision_ != config_service_->revision()) {
+        observed_config_revision_ = config_service_->revision();
+        mark_snapshots_dirty(SNAPSHOT_ALL);
     }
 
     if (web_console_.storage_output_pending()) {
@@ -1914,7 +1960,7 @@ void WebUI::build_status_json(LargeTextBuffer &json,
     const SystemStatusSnapshot snap = collect_system_status({
         *device_,
         *wifi_manager_,
-        *app_config_,
+        config_service_->data(),
         *time_sync_service_,
         *ota_manager_,
         *oximetry_manager_,
@@ -1929,7 +1975,8 @@ void WebUI::build_status_json(LargeTextBuffer &json,
     json = "{";
     json_add_string(json, "version", snap.version, false);
     json_add_string(json, "built", snap.built);
-    json_add_string(json, "hostname", app_config_->data().hostname.c_str());
+    json_add_string(json, "hostname",
+                    config_service_->data().hostname.c_str());
     json_add_int(json, "uptime", snap.uptime_s);
     json_add_int(json, "heap", static_cast<long>(mem.heap_free));
     json_add_bool(json, "psram_available", mem.psram_available);
@@ -2779,7 +2826,7 @@ void WebUI::send_storage_sync_status(AsyncWebServerRequest *request) const {
     json_add_bool(json, "enabled", status.enabled);
     json_add_bool(json, "configured", status.configured);
     json_add_string(json, "endpoint",
-                    app_config_->data().smb_endpoint.c_str());
+                    config_service_->data().smb_endpoint.c_str());
     json_add_bool(json, "network_available", status.network_available);
     json_add_bool(json, "pending", status.pending);
     json_add_bool(json, "last_run_verify", status.last_run_verify);
@@ -2885,7 +2932,7 @@ void WebUI::send_sleephq_sync_status(AsyncWebServerRequest *request) const {
     LargeTextBuffer json;
     json.reserve(WEB_JSON_RESERVE_MEDIUM);
     json = "{";
-    append_sleephq_sync_json(json, status, app_config_->data(), true);
+    append_sleephq_sync_json(json, status, config_service_->data(), true);
     json += '}';
     if (json.overflowed()) {
         request->send(503, "application/json",
@@ -2965,7 +3012,7 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
 
 void WebUI::build_config_json(LargeTextBuffer &json,
                               const char *section) const {
-    const AppConfigData &cfg = app_config_->data();
+    const AppConfigData &cfg = config_service_->data();
     json = "{";
     bool comma = false;
 
@@ -3309,10 +3356,11 @@ void WebUI::publish_snapshots(bool force,
         if (checkpoint) checkpoint("web_ui.snapshots.settings");
     }
     if (rebuild_mask & SNAPSHOT_CONFIG) {
-        cached_http_auth_required_ = network_auth_required(app_config_->data());
-        cached_http_user_ = app_config_->data().http_user;
-        cached_http_password_ = app_config_->data().http_password;
-        cached_auth_whitelist_ = app_config_->data().auth_whitelist;
+        cached_http_auth_required_ =
+            network_auth_required(config_service_->data());
+        cached_http_user_ = config_service_->data().http_user;
+        cached_http_password_ = config_service_->data().http_password;
+        cached_auth_whitelist_ = config_service_->data().auth_whitelist;
     }
 
     snapshots_ready_ = true;
@@ -3382,19 +3430,45 @@ void WebUI::execute_console_line(const std::string &line) {
 }
 
 void WebUI::execute_config_update(const std::string &body) {
-    AppConfigUpdateResult result;
-    const bool parsed = apply_web_config_update(
-        *app_config_, body,
-        {wifi_manager_->mode_state(), wifi_manager_->has_sta_config()},
-        result);
-    if (!parsed) return;
+    JsonDocument doc;
+    if (deserializeJson(doc, body.c_str())) return;
+
+    JsonObjectConst root = doc.as<JsonObjectConst>();
+    if (root.isNull() || !config_service_->begin_transaction()) return;
+
+    for (JsonPairConst pair : root) {
+        const char *key = pair.key().c_str();
+        const AppConfigFieldDescriptor *field = app_config_find_field(key);
+        if (!field) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "rejected web config key=%s reason=unknown\n",
+                      key ? key : "<null>");
+            continue;
+        }
+
+        String value;
+        if (!web_config_value_text(pair.value(), *field, value)) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "rejected web config key=%s reason=bad_type\n",
+                      field->key);
+            continue;
+        }
+
+        const ConfigFieldUpdate update =
+            config_service_->set_transaction_value(field->key, value, true);
+        if (!update.accepted()) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "rejected web config key=%s reason=invalid_value\n",
+                      field->key);
+        }
+    }
+
+    const ConfigTransactionResult result =
+        config_service_->commit_transaction();
     if (!result.persisted) {
         Log::logf(CAT_GENERAL, LOG_WARN,
                   "[WEB] failed to persist one or more config values\n");
     }
-    apply_config_runtime_effects(result, *app_config_, *wifi_manager_,
-                                 console_ctx_->edf_recorder_manager,
-                                 *ota_manager_);
     if (result.changed_fields) mark_snapshots_dirty(SNAPSHOT_ALL);
 }
 
@@ -3468,11 +3542,11 @@ void WebUI::execute_oximetry_action(const std::string &action,
                                     const std::string &body) {
     if (!oximetry_manager_) return;
     if (action == "enable") {
-        oximetry_manager_->set_enabled(true);
+        (void)config_service_->set_value("oxi_en", "1", false);
     } else if (action == "disable") {
-        oximetry_manager_->set_enabled(false);
+        (void)config_service_->set_value("oxi_en", "0", false);
     } else if (action == "pair") {
-        oximetry_manager_->set_enabled(true);
+        (void)config_service_->set_value("oxi_en", "1", false);
         oximetry_manager_->request_pairing(true);
     } else if (action == "pair_stop") {
         oximetry_manager_->request_pairing(false);

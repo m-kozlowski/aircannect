@@ -67,7 +67,7 @@ struct OtaUpdateNotification {
 
 class OtaManager {
 public:
-    void begin(AppConfig &app_config);
+    void begin(const AppConfigData &app_config);
     void poll(const WifiManager &wifi_manager,
               bool reboot_allowed = true,
               bool arduino_ota_allowed = true,
@@ -181,7 +181,7 @@ private:
     bool lock_status(TickType_t timeout = portMAX_DELAY) const;
     void unlock_status() const;
 
-    AppConfig *app_config_ = nullptr;
+    const AppConfigData *app_config_ = nullptr;
     ArduinoOTAClass *arduino_ota_ = nullptr;
 
     bool arduino_config_dirty_ = true;

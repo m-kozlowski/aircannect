@@ -3,10 +3,10 @@
 #include <Arduino.h>
 #include <string>
 
-#include "app_config.h"
 #include "as11_device_service.h"
 #include "as11_settings_manager.h"
 #include "can_driver.h"
+#include "config_service.h"
 #include "edf_recorder_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
@@ -37,7 +37,7 @@ struct ConsoleContext {
     As11SettingsManager &settings_manager;
     TcpBridge &tcp_bridge;
     WifiManager &wifi_manager;
-    AppConfig &app_config;
+    ConfigService &config_service;
 
     TimeSyncService &time_sync_service;
     OtaManager &ota_manager;
@@ -115,29 +115,25 @@ private:
     void handle_resmed_ota(Print &out, String rest,
                            ResmedOtaManager &resmed_ota_manager);
     void handle_sink(Print &out, String rest, SinkManager &sink_manager);
-    void handle_oximetry(Print &out, String rest,
-                         OximetryManager &oximetry_manager);
+    void handle_oximetry(Print &out,
+                         String rest,
+                         OximetryManager &oximetry_manager,
+                         ConfigService &config_service);
     void handle_log(Print &out,
                     String rest,
-                    AppConfig &app_config,
+                    ConfigService &config_service,
                     StorageReadPort &storage_read_port);
-    void handle_wifi(Print &out, String rest, WifiManager &wifi_manager,
-                     TcpBridge &tcp_bridge, const AppConfig &app_config);
-    void handle_config(Print &out, String rest, AppConfig &app_config,
-                       WifiManager &wifi_manager, TcpBridge &tcp_bridge,
-                       OtaManager &ota_manager,
-                       EdfRecorderManager &edf_recorder_manager);
-    bool handle_config_key(Print &out, String rest, AppConfig &app_config,
-                           WifiManager &wifi_manager, TcpBridge &tcp_bridge,
-                           OtaManager &ota_manager,
-                           EdfRecorderManager &edf_recorder_manager);
+    void handle_wifi(Print &out, String rest, WifiManager &wifi_manager);
+    void handle_config(Print &out,
+                       String rest,
+                       ConfigService &config_service,
+                       WifiManager &wifi_manager);
+    bool handle_config_key(Print &out,
+                           String rest,
+                           ConfigService &config_service);
 
     void print_oximetry_status(Print &out,
                                const OximetryManager &oximetry_manager) const;
-
-    void apply_runtime_config(const AppConfig &app_config,
-                              WifiManager &wifi_manager,
-                              TcpBridge &tcp_bridge);
 
     String line_;
     StreamConsumerHandle stream_handle_ = STREAM_CONSUMER_INVALID;

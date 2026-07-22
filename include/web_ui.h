@@ -6,9 +6,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#include "app_config.h"
 #include "as11_device_service.h"
 #include "as11_settings_manager.h"
+#include "config_service.h"
 #include "fixed_queue.h"
 #include "large_text_buffer.h"
 #include "management_console.h"
@@ -93,7 +93,7 @@ public:
                As11SettingsManager &settings_manager,
                WifiManager &wifi_manager,
                TcpBridge &tcp_bridge,
-               AppConfig &app_config,
+               ConfigService &config_service,
                TimeSyncService &time_sync_service,
                OtaManager &ota_manager,
                ResmedOtaManager &resmed_ota_manager,
@@ -249,7 +249,7 @@ private:
     As11SettingsManager *settings_manager_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
     TcpBridge *tcp_bridge_ = nullptr;
-    AppConfig *app_config_ = nullptr;
+    ConfigService *config_service_ = nullptr;
     TimeSyncService *time_sync_service_ = nullptr;
     OtaManager *ota_manager_ = nullptr;
     ResmedOtaManager *resmed_ota_manager_ = nullptr;
@@ -322,6 +322,7 @@ private:
     bool observed_settings_refresh_pending_ = false;
     uint32_t observed_settings_revision_ = 0;
     uint32_t observed_device_revision_ = 0;
+    uint32_t observed_config_revision_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;

@@ -104,7 +104,7 @@ SystemStatusSnapshot collect_system_status(
     if (checkpoint) checkpoint("web_ui.snapshots.status.oxi");
 
     out.time.resmed_time_sync_enabled =
-        sources.app_config.data().resmed_time_sync_enabled;
+        sources.app_config.resmed_time_sync_enabled;
     out.time.ntp_synced = sources.time_sync_service.ntp_synced();
     out.time.esp_time_valid =
         sources.time_sync_service.esp_clock_valid();

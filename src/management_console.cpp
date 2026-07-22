@@ -38,6 +38,18 @@ const char *oximetry_source_text(OximetrySource source) {
     }
 }
 
+const AppConfigFieldDescriptor *log_level_config_field(log_cat_t category) {
+    size_t count = 0;
+    const AppConfigFieldDescriptor *fields = app_config_fields(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (fields[i].id == AppConfigFieldId::LogLevel &&
+            fields[i].index == static_cast<int16_t>(category)) {
+            return &fields[i];
+        }
+    }
+    return nullptr;
+}
+
 void print_yes_no(Print &out, bool value) {
     out.print(value ? "yes" : "no");
 }
@@ -1004,7 +1016,8 @@ void ManagementConsole::handle_sink(Print &out,
 void ManagementConsole::handle_oximetry(
     Print &out,
     String rest,
-    OximetryManager &oximetry_manager) {
+    OximetryManager &oximetry_manager,
+    ConfigService &config_service) {
     rest.trim();
     String lower = rest;
     lower.toLowerCase();
@@ -1014,7 +1027,10 @@ void ManagementConsole::handle_oximetry(
     }
 
     if (lower == "on" || lower == "enable" || lower == "enabled") {
-        if (!oximetry_manager.set_enabled(true)) {
+        ConfigTransactionResult transaction;
+        const ConfigFieldUpdate update = config_service.set_value(
+            "oxi_en", "1", false, &transaction);
+        if (!update.accepted() || !transaction.persisted) {
             out.println("[OXI] failed to enable");
             return;
         }
@@ -1024,7 +1040,10 @@ void ManagementConsole::handle_oximetry(
     }
 
     if (lower == "off" || lower == "disable" || lower == "disabled") {
-        if (!oximetry_manager.set_enabled(false)) {
+        ConfigTransactionResult transaction;
+        const ConfigFieldUpdate update = config_service.set_value(
+            "oxi_en", "0", false, &transaction);
+        if (!update.accepted() || !transaction.persisted) {
             out.println("[OXI] failed to disable");
             return;
         }
@@ -1035,7 +1054,10 @@ void ManagementConsole::handle_oximetry(
 
     if (lower == "cpap pair" || lower == "cpap pairing" ||
         lower == "cpap pair start" || lower == "cpap pairing start") {
-        if (!oximetry_manager.set_enabled(true)) {
+        ConfigTransactionResult transaction;
+        const ConfigFieldUpdate update = config_service.set_value(
+            "oxi_en", "1", false, &transaction);
+        if (!update.accepted() || !transaction.persisted) {
             out.println("[OXI] failed to enable");
             return;
         }
@@ -1162,9 +1184,17 @@ void ManagementConsole::handle_oximetry(
         }
 
         OximetryAdvertiseMode adv_mode;
-        if (!parse_oximetry_advertise_mode(mode, adv_mode) ||
-            !oximetry_manager.set_advertise_mode(adv_mode)) {
+        if (!parse_oximetry_advertise_mode(mode, adv_mode)) {
             out.println("[OXI] usage: oxi advertise auto|manual|start|stop");
+            return;
+        }
+
+        ConfigTransactionResult transaction;
+        const ConfigFieldUpdate update = config_service.set_value(
+            "oxi_adv", oximetry_advertise_mode_name(adv_mode), false,
+            &transaction);
+        if (!update.accepted() || !transaction.persisted) {
+            out.println("[OXI] failed to store advertise mode");
             return;
         }
         out.print("[OXI] advertise=");
@@ -1183,7 +1213,7 @@ void ManagementConsole::handle_oximetry(
 
 void ManagementConsole::handle_log(Print &out,
                                    String rest,
-                                   AppConfig &app_config,
+                                   ConfigService &config_service,
                                    StorageReadPort &storage_read_port) {
     rest.trim();
     if (!rest.length() || rest == "status") {
@@ -1203,11 +1233,27 @@ void ManagementConsole::handle_log(Print &out,
         log_level_t level = LOG_INFO;
         log_cat_t cat = CAT_GENERAL;
         if (Log::parse_level(first, level)) {
-            if (!app_config.set_all_log_levels(level)) {
+            if (!config_service.begin_transaction()) {
+                out.println("[LOG] config transaction busy");
+                return;
+            }
+
+            bool accepted = true;
+            size_t field_count = 0;
+            const AppConfigFieldDescriptor *fields =
+                app_config_fields(field_count);
+            for (size_t i = 0; i < field_count; ++i) {
+                if (fields[i].id != AppConfigFieldId::LogLevel) continue;
+                accepted = config_service.set_transaction_value(
+                    fields[i].key, Log::level_name(level), false).accepted() &&
+                    accepted;
+            }
+            const ConfigTransactionResult transaction =
+                config_service.commit_transaction();
+            if (!accepted || !transaction.persisted) {
                 out.println("[LOG] failed to store level");
                 return;
             }
-            Log::set_level(level);
             ConsoleFormat::print_log_status(out);
             return;
         }
@@ -1222,11 +1268,16 @@ void ManagementConsole::handle_log(Print &out,
             out.println("[LOG] usage: log level CATEGORY LEVEL");
             return;
         }
-        if (!app_config.set_log_level(cat, level)) {
+        const AppConfigFieldDescriptor *field = log_level_config_field(cat);
+        ConfigTransactionResult transaction;
+        const ConfigFieldUpdate update = field
+            ? config_service.set_value(field->key, Log::level_name(level),
+                                       false, &transaction)
+            : ConfigFieldUpdate{};
+        if (!update.accepted() || !transaction.persisted) {
             out.println("[LOG] failed to store level");
             return;
         }
-        Log::set_cat_level(cat, level);
         ConsoleFormat::print_log_status(out);
         return;
     }
@@ -1249,17 +1300,18 @@ void ManagementConsole::handle_log(Print &out,
         host_lower.toLowerCase();
         if (host_lower == "off" || host_lower == "disable" ||
             host_lower == "disabled" || host_lower == "0") {
-            if (!app_config.set_syslog(false, "",
-                                       app_config.data().syslog_port)) {
+            ConfigTransactionResult transaction;
+            const ConfigFieldUpdate update = config_service.set_value(
+                "syslog_en", "0", false, &transaction);
+            if (!update.accepted() || !transaction.persisted) {
                 out.println("[LOG] failed to store syslog config");
                 return;
             }
-            app_config.apply_log_config();
             ConsoleFormat::print_log_status(out);
             return;
         }
 
-        uint16_t port = app_config.data().syslog_port;
+        uint16_t port = config_service.data().syslog_port;
         String port_text;
         if (parse_console_arg(args, pos, port_text)) {
             if (!parse_uint16_arg(port_text, port)) {
@@ -1267,11 +1319,27 @@ void ManagementConsole::handle_log(Print &out,
                 return;
             }
         }
-        if (!app_config.set_syslog(true, host, port)) {
+        if (!config_service.begin_transaction()) {
+            out.println("[LOG] config transaction busy");
+            return;
+        }
+
+        const ConfigFieldUpdate host_update =
+            config_service.set_transaction_value("syslog_host", host,
+                                                 false);
+        String port_value(port);
+        const ConfigFieldUpdate port_update =
+            config_service.set_transaction_value("syslog_port", port_value,
+                                                 false);
+        const ConfigFieldUpdate enabled_update =
+            config_service.set_transaction_value("syslog_en", "1", false);
+        const ConfigTransactionResult transaction =
+            config_service.commit_transaction();
+        if (!host_update.accepted() || !port_update.accepted() ||
+            !enabled_update.accepted() || !transaction.persisted) {
             out.println("[LOG] syslog host must be an IPv4 address");
             return;
         }
-        app_config.apply_log_config();
         ConsoleFormat::print_log_status(out);
         return;
     }
@@ -1345,9 +1413,7 @@ void ManagementConsole::handle_log(Print &out,
 }
 
 void ManagementConsole::handle_wifi(Print &out, String rest,
-                                    WifiManager &wifi_manager,
-                                    TcpBridge &tcp_bridge,
-                                    const AppConfig &app_config) {
+                                    WifiManager &wifi_manager) {
     rest.trim();
     if (!rest.length() || rest == "status") {
         ConsoleFormat::print_wifi_status(out, wifi_manager);
@@ -1388,7 +1454,6 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
     if (rest == "restart" || rest == "reconnect") {
         out.println("[WiFi] reconnecting...");
         bool ok = wifi_manager.reconnect();
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         if (!ok) {
             out.println("[WiFi] no STA credentials and SoftAP fallback is off");
         } else if (!wifi_manager.network_available()) {
@@ -1401,7 +1466,6 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
     if (rest == "clear") {
         out.println("[WiFi] clearing stored STA credentials");
         wifi_manager.clear_sta_config();
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
@@ -1423,7 +1487,6 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         out.print(ssid);
         out.println("\"");
         bool ok = wifi_manager.configure_sta(ssid, password);
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         if (!ok) {
             out.println("[WiFi] STA connect could not be started");
         } else if (!wifi_manager.network_available()) {
@@ -1450,7 +1513,6 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         out.print(ssid);
         out.println("\"");
         bool ok = wifi_manager.add_profile(ssid, password, false);
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         if (!ok) out.println("[WiFi] profile add failed");
         ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
@@ -1469,7 +1531,6 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
         out.print(ssid);
         out.println("\"");
         bool ok = wifi_manager.configure_open_sta(ssid);
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         if (!ok) {
             out.println("[WiFi] STA connect could not be started");
         } else if (!wifi_manager.network_available()) {
@@ -1490,7 +1551,6 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
             out.println("[WiFi] profile remove failed");
             return;
         }
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
         ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
@@ -1502,144 +1562,71 @@ void ManagementConsole::handle_wifi(Print &out, String rest,
 bool ManagementConsole::handle_config_key(
     Print &out,
     String rest,
-    AppConfig &app_config,
-    WifiManager &wifi_manager,
-    TcpBridge &tcp_bridge,
-    OtaManager &ota_manager,
-    EdfRecorderManager &edf_recorder_manager) {
+    ConfigService &config_service) {
     String key;
     String value;
     bool has_value = false;
     if (!split_config_key_value(rest, key, has_value, value)) return false;
 
-    if (!has_value) return print_app_config_value(out, app_config.data(), key);
+    if (!has_value) {
+        return print_app_config_value(out, config_service.data(), key);
+    }
 
     const AppConfigFieldDescriptor *field =
         app_config_find_field(key.c_str());
     if (!field) return false;
 
-    const bool softap_to_auto =
-        (field->dirty & AC_CONFIG_DIRTY_SOFTAP) &&
-        wifi_manager.mode_state() == WifiModeState::SoftAp &&
-        wifi_manager.has_sta_config();
-
-    AppConfigFieldSetResult result;
-    if (!app_config_field_set(app_config, *field, value, false, result)) {
+    ConfigTransactionResult transaction;
+    const ConfigFieldUpdate update = config_service.set_value(
+        field->key, value, false, &transaction);
+    if (!update.accepted()) {
         print_config_invalid(out, field->key);
         return true;
     }
-
-    const uint32_t dirty = result.dirty;
-    bool apply_runtime = false;
-    if (dirty & AC_CONFIG_DIRTY_HOSTNAME) {
-        wifi_manager.set_hostname(app_config.data().hostname);
-        ota_manager.mark_config_dirty();
-        apply_runtime = true;
-    }
-    if (dirty & AC_CONFIG_DIRTY_TCP) {
-        apply_runtime = true;
-    }
-    if (dirty & AC_CONFIG_DIRTY_SOFTAP) {
-        wifi_manager.set_softap_mode(app_config.data().softap_mode);
-        wifi_manager.apply_softap_mode();
-        if (softap_to_auto &&
-            app_config.data().softap_mode == SoftApMode::Auto) {
-            wifi_manager.reconnect();
-        }
-        apply_runtime = true;
-    }
-    if (dirty & AC_CONFIG_DIRTY_WIFI_COUNTRY) {
-        wifi_manager.set_country_code(app_config.data().wifi_country);
-        wifi_manager.reconnect();
-        apply_runtime = true;
-    }
-    if (dirty & AC_CONFIG_DIRTY_EDF_CAPTURE) {
-        edf_recorder_manager.set_enabled(
-            app_config.data().edf_capture_enabled);
-    }
-    if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
-        ota_manager.mark_config_dirty();
-    }
-    if (dirty & AC_CONFIG_DIRTY_UPDATE_URL) {
-        ota_manager.mark_update_config_dirty();
-    }
-    if (dirty & (AC_CONFIG_DIRTY_LOG_LEVELS | AC_CONFIG_DIRTY_SYSLOG |
-                 AC_CONFIG_DIRTY_FILE_LOG)) {
-        app_config.apply_log_config();
-    }
-    if (apply_runtime) {
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
+    if (!transaction.persisted) {
+        out.println("[CONFIG] warning: failed to persist value");
     }
 
-    print_app_config_value(out, app_config.data(), key);
+    print_app_config_value(out, config_service.data(), key);
     return true;
 }
 
 void ManagementConsole::handle_config(Print &out, String rest,
-                                      AppConfig &app_config,
-                                      WifiManager &wifi_manager,
-                                      TcpBridge &tcp_bridge,
-                                      OtaManager &ota_manager,
-                                      EdfRecorderManager &edf_recorder_manager) {
+                                      ConfigService &config_service,
+                                      WifiManager &wifi_manager) {
     rest.trim();
     if (!rest.length() || rest == "show" || rest == "dump") {
-        print_app_config_redacted(out, app_config.data());
+        print_app_config_redacted(out, config_service.data());
         return;
     }
 
     if (rest == "factory-reset" || rest == "factory reset") {
         out.println("[CONFIG] factory reset: clearing app config and Wi-Fi credentials");
-        app_config.factory_reset();
-        wifi_manager.set_hostname(app_config.data().hostname);
-        wifi_manager.set_softap_mode(app_config.data().softap_mode);
-        wifi_manager.set_country_code(app_config.data().wifi_country);
-        ota_manager.mark_config_dirty();
+        const ConfigTransactionResult transaction = config_service.reset();
         wifi_manager.clear_sta_config();
-        app_config.apply_log_config();
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        out.println("[CONFIG] factory reset complete");
+        out.println(transaction.persisted
+                        ? "[CONFIG] factory reset complete"
+                        : "[CONFIG] factory reset persistence failed");
         ConsoleFormat::print_wifi_status(out, wifi_manager);
         return;
     }
 
     if (rest == "reset") {
         out.println("[CONFIG] resetting app config to defaults");
-        app_config.factory_reset();
-        wifi_manager.set_hostname(app_config.data().hostname);
-        wifi_manager.set_softap_mode(app_config.data().softap_mode);
-        wifi_manager.set_country_code(app_config.data().wifi_country);
-        ota_manager.mark_config_dirty();
+        const ConfigTransactionResult transaction = config_service.reset();
         wifi_manager.reconnect();
-        app_config.apply_log_config();
-        apply_runtime_config(app_config, wifi_manager, tcp_bridge);
-        out.println("[CONFIG] reset complete");
+        out.println(transaction.persisted
+                        ? "[CONFIG] reset complete"
+                        : "[CONFIG] reset persistence failed");
         return;
     }
 
-    if (handle_config_key(out, rest, app_config, wifi_manager, tcp_bridge,
-                          ota_manager, edf_recorder_manager)) {
+    if (handle_config_key(out, rest, config_service)) {
         return;
     }
 
     print_unknown_command(out, "CONFIG",
                           "config, config KEY [VALUE], reset, factory-reset");
-}
-
-void ManagementConsole::apply_runtime_config(const AppConfig &app_config,
-                                             WifiManager &wifi_manager,
-                                             TcpBridge &tcp_bridge) {
-    wifi_manager.set_hostname(app_config.data().hostname);
-    wifi_manager.set_softap_mode(app_config.data().softap_mode);
-    wifi_manager.set_country_code(app_config.data().wifi_country);
-    wifi_manager.apply_softap_mode();
-
-    if (!wifi_manager.network_available() ||
-        !app_config.data().tcp_bridge_enabled) {
-        tcp_bridge.stop();
-        return;
-    }
-
-    tcp_bridge.restart(app_config.data().tcp_bridge_port);
 }
 
 }  // namespace aircannect

@@ -10,6 +10,9 @@
 
 namespace aircannect {
 
+class AppConfigFieldWriter;
+class ConfigService;
+
 static constexpr uint32_t AC_CONFIG_SCHEMA_VERSION = 18;
 
 struct AppConfigData {
@@ -76,7 +79,12 @@ struct AppConfigData {
 };
 
 class AppConfig {
-public:
+private:
+    friend class AppConfigFieldWriter;
+    friend class ConfigService;
+
+    AppConfig() = default;
+
     bool begin();
 
     const AppConfigData &data() const { return data_; }
@@ -117,7 +125,6 @@ public:
     bool factory_reset();
     void apply_log_config() const;
 
-private:
     bool load();
     bool save() const;
     bool save_fields(uint32_t dirty) const;

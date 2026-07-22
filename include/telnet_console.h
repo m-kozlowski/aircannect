@@ -69,9 +69,10 @@ private:
         bool last_cr = false;
     };
 
-    void accept_clients(const AppConfig &app_config, StreamBroker &stream);
+    void accept_clients(const AppConfigData &app_config,
+                        StreamBroker &stream);
     void disconnect_slot(size_t idx, StreamBroker *stream = nullptr);
-    void authenticate_slot(size_t idx, const AppConfig &app_config);
+    void authenticate_slot(size_t idx, const AppConfigData &app_config);
 
     void queue_text(size_t idx, const String &text);
     void queue_prompt(size_t idx);
@@ -82,7 +83,7 @@ private:
     void process_input_char(size_t idx,
                             char c,
                             ConsoleContext &ctx);
-    void process_auth_line(size_t idx, const AppConfig &app_config);
+    void process_auth_line(size_t idx, const AppConfigData &app_config);
     void execute_slot_line(size_t idx,
                            ConsoleContext &ctx);
 

@@ -5,11 +5,11 @@
 #include <new>
 #include <string.h>
 
-#include "app_config.h"
 #include "as11_device_service.h"
 #include "as11_settings_manager.h"
 #include "board.h"
 #include "can_driver.h"
+#include "config_service.h"
 #include "debug_log.h"
 #include "edf_recorder_manager.h"
 #include "event_broker.h"
@@ -58,7 +58,7 @@ static ManagementConsole serial_management_console;
 static WifiManager wifi_manager;
 static TcpBridge tcp_bridge;
 static TelnetConsole telnet_console;
-static AppConfig app_config;
+static ConfigService config_service;
 static WebUI web_ui;
 static TimeSyncService time_sync_service;
 static OtaManager ota_manager;
@@ -99,7 +99,7 @@ static ConsoleContext console_ctx{
     as11_settings_manager,
     tcp_bridge,
     wifi_manager,
-    app_config,
+    config_service,
     time_sync_service,
     ota_manager,
     resmed_ota_manager,
@@ -280,24 +280,26 @@ static void publish_export_config(uint32_t now_ms) {
         return;
     }
 
-    export_task.publish_config(make_export_endpoint_config(app_config.data()));
+    export_task.publish_config(
+        make_export_endpoint_config(config_service.data()));
     export_config_due_ms = now_ms + 1000;
     if (export_config_due_ms == 0) export_config_due_ms = 1;
 }
 
 static void sync_network_services() {
     const bool should_run_tcp =
-        app_config.data().tcp_bridge_enabled &&
+        config_service.data().tcp_bridge_enabled &&
         wifi_manager.network_available();
     const bool should_run_telnet =
-        app_config.data().telnet_console_enabled &&
+        config_service.data().telnet_console_enabled &&
         wifi_manager.network_available();
 
     if (should_run_tcp) {
         if (!tcp_bridge.started()) {
-            tcp_bridge.begin(app_config.data().tcp_bridge_port);
-        } else if (tcp_bridge.port() != app_config.data().tcp_bridge_port) {
-            tcp_bridge.restart(app_config.data().tcp_bridge_port);
+            tcp_bridge.begin(config_service.data().tcp_bridge_port);
+        } else if (tcp_bridge.port() !=
+                   config_service.data().tcp_bridge_port) {
+            tcp_bridge.restart(config_service.data().tcp_bridge_port);
         }
     } else if (tcp_bridge.started()) {
         tcp_bridge.stop();
@@ -305,14 +307,61 @@ static void sync_network_services() {
 
     if (should_run_telnet) {
         if (!telnet_console.started()) {
-            telnet_console.begin(app_config.data().telnet_console_port);
+            telnet_console.begin(config_service.data().telnet_console_port);
         } else if (telnet_console.port() !=
-                   app_config.data().telnet_console_port) {
-            telnet_console.restart(app_config.data().telnet_console_port,
+                   config_service.data().telnet_console_port) {
+            telnet_console.restart(config_service.data().telnet_console_port,
                                    &stream_broker);
         }
     } else if (telnet_console.started()) {
         telnet_console.stop(&stream_broker);
+    }
+}
+
+static void apply_config_runtime_effects(void *,
+                                         const AppConfigData &config,
+                                         uint32_t dirty) {
+    bool reconnect_wifi = false;
+
+    if (dirty & AC_CONFIG_DIRTY_HOSTNAME) {
+        wifi_manager.set_hostname(config.hostname);
+        ota_manager.mark_config_dirty();
+    }
+    if (dirty & AC_CONFIG_DIRTY_SOFTAP) {
+        const bool retry_sta =
+            wifi_manager.mode_state() == WifiModeState::SoftAp &&
+            wifi_manager.has_sta_config() &&
+            config.softap_mode == SoftApMode::Auto;
+
+        wifi_manager.set_softap_mode(config.softap_mode);
+        wifi_manager.apply_softap_mode();
+        reconnect_wifi = reconnect_wifi || retry_sta;
+    }
+    if (dirty & AC_CONFIG_DIRTY_WIFI_COUNTRY) {
+        wifi_manager.set_country_code(config.wifi_country);
+        reconnect_wifi = true;
+    }
+    if (dirty & AC_CONFIG_DIRTY_EDF_CAPTURE) {
+        edf_recorder_manager.set_enabled(config.edf_capture_enabled);
+    }
+    if (dirty & (AC_CONFIG_DIRTY_HOSTNAME |
+                 AC_CONFIG_DIRTY_OXIMETRY)) {
+        oximetry_manager.configuration_changed();
+    }
+    if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
+        ota_manager.mark_config_dirty();
+    }
+    if (dirty & AC_CONFIG_DIRTY_UPDATE_URL) {
+        ota_manager.mark_update_config_dirty();
+    }
+    if (dirty & (AC_CONFIG_DIRTY_SMB_SYNC |
+                 AC_CONFIG_DIRTY_SLEEPHQ_SYNC)) {
+        export_config_due_ms = 0;
+    }
+
+    if (reconnect_wifi) wifi_manager.reconnect();
+    if (dirty & (AC_CONFIG_DIRTY_TCP | AC_CONFIG_DIRTY_TELNET)) {
+        sync_network_services();
     }
 }
 
@@ -454,8 +503,7 @@ void setup() {
               static_cast<unsigned>(tls_mem.large_threshold),
               tls_mem.install_result);
 
-    app_config.begin();
-    app_config.apply_log_config();
+    config_service.begin();
 
     // Boot diagnostics
     const MemoryStatus mem = Memory::status();
@@ -515,7 +563,7 @@ void setup() {
 
     // Export task
     const ExportEndpointConfig export_config =
-        make_export_endpoint_config(app_config.data());
+        make_export_endpoint_config(config_service.data());
 
     const bool export_started = export_task.begin(
         export_config,
@@ -532,7 +580,7 @@ void setup() {
     export_coordinator.begin(export_task);
     console_ctx.export_coordinator = &export_coordinator;
 
-    apply_storage_provisioning(app_config,
+    apply_storage_provisioning(config_service,
                                wifi_manager,
                                StorageService::read_port(),
                                StorageService::path_port());
@@ -561,9 +609,10 @@ void setup() {
 
     edf_recorder_manager.begin(event_broker, stream_broker,
                                as11_device_service.state(), session_manager);
-    edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
+    edf_recorder_manager.set_enabled(
+        config_service.data().edf_capture_enabled);
 
-    oximetry_manager.begin(app_config);
+    oximetry_manager.begin(config_service.data());
 
     if (!report_spool_service.begin()) {
         Log::logf(CAT_REPORT, LOG_ERROR,
@@ -580,15 +629,15 @@ void setup() {
 
     resmed_ota_manager.begin(rpc_transport, as11_device_service,
                              StorageService::atomic_write_port());
-    time_sync_service.begin(app_config, wifi_manager, rpc_transport,
+    time_sync_service.begin(config_service.data(), wifi_manager, rpc_transport,
                             as11_device_service);
     report_catalog_timezone_revision = time_sync_service.timezone_revision();
-    ota_manager.begin(app_config);
+    ota_manager.begin(config_service.data());
 
     // Network configuration
-    wifi_manager.set_hostname(app_config.data().hostname);
-    wifi_manager.set_softap_mode(app_config.data().softap_mode);
-    wifi_manager.set_country_code(app_config.data().wifi_country);
+    wifi_manager.set_hostname(config_service.data().hostname);
+    wifi_manager.set_softap_mode(config_service.data().softap_mode);
+    wifi_manager.set_country_code(config_service.data().wifi_country);
 
     // CAN and network frontends
     if (!can_driver.begin()) {
@@ -599,16 +648,19 @@ void setup() {
 
     wifi_manager.begin();
 
-    if (!app_config.data().tcp_bridge_enabled) {
+    if (!config_service.data().tcp_bridge_enabled) {
         Log::logf(CAT_TCP, LOG_INFO,
                   "raw bridge disabled by config\n");
     }
 
     sync_network_services();
 
+    config_service.set_runtime_effects(apply_config_runtime_effects, nullptr);
+    config_service.activate_runtime_effects(false);
+
     web_ui.begin(rpc_transport, stream_broker, as11_device_service,
                  as11_settings_manager,
-                 wifi_manager, tcp_bridge, app_config,
+                 wifi_manager, tcp_bridge, config_service,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
                  report_http_controller,

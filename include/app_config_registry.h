@@ -129,12 +129,6 @@ struct AppConfigFieldDescriptor {
     size_t offset;
 };
 
-struct AppConfigFieldSetResult {
-    bool accepted = false;
-    bool changed = false;
-    uint32_t dirty = 0;
-};
-
 const AppConfigFieldDescriptor *app_config_fields(size_t &count);
 const AppConfigFieldDescriptor *app_config_find_field(const char *key);
 const char *app_config_group_id(AppConfigGroup group);
@@ -151,16 +145,6 @@ bool app_config_field_get_console_value(const AppConfigData &cfg,
 bool app_config_field_get_raw_value(const AppConfigData &cfg,
                                     const AppConfigFieldDescriptor &field,
                                     String &out);
-bool app_config_field_set(AppConfig &config,
-                          const AppConfigFieldDescriptor &field,
-                          const String &value,
-                          bool keep_secret_sentinel,
-                          AppConfigFieldSetResult &result);
-bool app_config_field_set_in_update(AppConfig &config,
-                                    const AppConfigFieldDescriptor &field,
-                                    const String &value,
-                                    bool keep_secret_sentinel,
-                                    AppConfigFieldSetResult &result);
 #endif
 
 }  // namespace aircannect

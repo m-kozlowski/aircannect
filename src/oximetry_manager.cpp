@@ -21,15 +21,15 @@ const char *source_name(OximetrySource source) {
 
 }  // namespace
 
-bool OximetryManager::begin(AppConfig &app_config) {
+bool OximetryManager::begin(const AppConfigData &app_config) {
     app_config_ = &app_config;
 #if AC_OXIMETRY_BLE_ENABLED
     sensor_owner = this;
     if (!ble_runtime_mutex) ble_runtime_mutex = xSemaphoreCreateMutex();
 #endif
-    status_.udp_port = app_config.data().oximetry_udp_port;
-    status_.advertise_mode = app_config.data().oximetry_advertise_mode;
-    status_.enabled = app_config.data().oximetry_enabled;
+    status_.udp_port = app_config.oximetry_udp_port;
+    status_.advertise_mode = app_config.oximetry_advertise_mode;
+    status_.enabled = app_config.oximetry_enabled;
     build_ble_name();
     status_.ble_available = AC_OXIMETRY_BLE_ENABLED != 0;
     load_sensor_known();
@@ -41,8 +41,9 @@ bool OximetryManager::begin(AppConfig &app_config) {
 void OximetryManager::poll(bool network_available) {
     if (!begun_) return;
     const uint32_t now_ms = millis();
-    if (static_cast<int32_t>(now_ms - last_config_check_ms_) >= 500) {
-        last_config_check_ms_ = now_ms;
+
+    if (config_dirty_) {
+        config_dirty_ = false;
         apply_config();
     }
 
@@ -86,18 +87,8 @@ void OximetryManager::poll(bool network_available) {
     notify_ble(now_ms);
 }
 
-bool OximetryManager::set_enabled(bool enabled) {
-    if (!app_config_) return false;
-    const bool ok = app_config_->set_oximetry_enabled(enabled);
-    apply_config();
-    return ok;
-}
-
-bool OximetryManager::set_advertise_mode(OximetryAdvertiseMode mode) {
-    if (!app_config_) return false;
-    const bool ok = app_config_->set_oximetry_advertise_mode(mode);
-    apply_config();
-    return ok;
+void OximetryManager::configuration_changed() {
+    config_dirty_ = true;
 }
 
 bool OximetryManager::request_advertising(bool enabled) {
@@ -196,7 +187,7 @@ uint32_t OximetryManager::sensor_task_stack_high_water_bytes() const {
 
 void OximetryManager::apply_config() {
     if (!app_config_) return;
-    const AppConfigData &cfg = app_config_->data();
+    const AppConfigData &cfg = *app_config_;
     const bool was_enabled = status_.enabled;
     const uint16_t old_port = status_.udp_port;
     const OximetryAdvertiseMode old_mode = status_.advertise_mode;
@@ -237,7 +228,7 @@ void OximetryManager::apply_config() {
 void OximetryManager::build_ble_name() {
     const String fallback = "AirCANnect";
     const String &hostname =
-        app_config_ ? app_config_->data().hostname : fallback;
+        app_config_ ? app_config_->hostname : fallback;
     strncpy(last_hostname_, hostname.c_str(), sizeof(last_hostname_) - 1);
     last_hostname_[sizeof(last_hostname_) - 1] = 0;
 

@@ -36,7 +36,7 @@ void OtaManager::mark_update_config_dirty() {
 bool OtaManager::request_update_check() {
     if (!lock_status()) return false;
 
-    if (!app_config_ || !app_config_->data().update_url.length() ||
+    if (!app_config_ || !app_config_->update_url.length() ||
         !AC_OTA_RELEASE_TARGET[0]) {
         status_.update_error = "update_check_disabled";
         unlock_status();
@@ -67,7 +67,7 @@ void OtaManager::poll_update_check(bool network_online, bool check_allowed) {
 
     if (update_config_dirty_) {
         status_.update_check_enabled =
-            app_config_ && app_config_->data().update_url.length() > 0 &&
+            app_config_ && app_config_->update_url.length() > 0 &&
             AC_OTA_RELEASE_TARGET[0];
         status_.update_check_attempted = false;
         status_.update_checked = false;
@@ -136,7 +136,7 @@ void OtaManager::poll_update_check(bool network_online, bool check_allowed) {
 bool OtaManager::start_update_check() {
     if (!app_config_) return false;
 
-    const String &configured_url = app_config_->data().update_url;
+    const String &configured_url = app_config_->update_url;
     const size_t url_len = configured_url.length();
     char *owned_url = static_cast<char *>(
         Memory::alloc_large(url_len + 1, false));

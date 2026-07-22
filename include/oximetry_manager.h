@@ -104,12 +104,11 @@ struct OximetryInternalState : public OximetryRuntimeStatus,
 class OximetryManager {
 public:
     // Lifecycle
-    bool begin(AppConfig &app_config);
+    bool begin(const AppConfigData &app_config);
     void poll(bool network_available);
+    void configuration_changed();
 
     // Runtime controls
-    bool set_enabled(bool enabled);
-    bool set_advertise_mode(OximetryAdvertiseMode mode);
     bool request_advertising(bool enabled);
     bool request_pairing(bool enabled);
     bool forget_bonds();
@@ -226,7 +225,7 @@ private:
     void on_ble_error(const char *text);
 
     // Runtime state
-    AppConfig *app_config_ = nullptr;
+    const AppConfigData *app_config_ = nullptr;
     OximetryInternalState status_;
     bool begun_ = false;
     bool ble_initialized_ = false;
@@ -236,7 +235,7 @@ private:
     OximetryReading reading_;
     uint32_t last_source_ms_ = 0;
     uint32_t last_notify_ms_ = 0;
-    uint32_t last_config_check_ms_ = 0;
+    bool config_dirty_ = false;
     uint32_t pairing_until_ms_ = 0;
     uint32_t no_source_connected_since_ms_ = 0;
     char ble_name_[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};

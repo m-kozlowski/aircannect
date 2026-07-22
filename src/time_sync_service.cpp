@@ -52,7 +52,7 @@ time_t utc_fields_to_epoch(int year,
 
 }  // namespace
 
-void TimeSyncService::begin(AppConfig &app_config,
+void TimeSyncService::begin(const AppConfigData &app_config,
                             WifiManager &wifi_manager,
                             RpcRequestPort &rpc,
                             As11DeviceService &device) {
@@ -64,7 +64,7 @@ void TimeSyncService::begin(AppConfig &app_config,
     last_status_ = "starting";
     Log::logf(CAT_GENERAL, LOG_INFO,
               "[TIME] NTP enabled, AS11 fallback enabled, AS11 push=%s\n",
-              app_config.data().resmed_time_sync_enabled ? "on" : "off");
+              app_config.resmed_time_sync_enabled ? "on" : "off");
 }
 
 void TimeSyncService::poll() {
@@ -180,7 +180,7 @@ bool TimeSyncService::utc_now_iso(char *out, size_t size) const {
 
 void TimeSyncService::apply_timezone() {
     if (!app_config_) return;
-    const String &timezone = app_config_->data().timezone;
+    const String &timezone = app_config_->timezone;
     if (timezone == applied_timezone_) return;
     if (timezone.length()) {
         setenv("TZ", timezone.c_str(), 1);
@@ -225,7 +225,7 @@ void TimeSyncService::note_ntp_sync(uint32_t now_ms) {
     ntp_synced_ = true;
     esp_clock_source_ = EspClockSource::Ntp;
     last_status_ = "ntp_synced";
-    if (app_config_ && app_config_->data().resmed_time_sync_enabled) {
+    if (app_config_ && app_config_->resmed_time_sync_enabled) {
         next_resmed_push_ms_ = now_ms;
     }
     if (ntp_reported_) return;
@@ -307,7 +307,7 @@ void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
 }
 
 void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
-    if (!app_config_ || !app_config_->data().resmed_time_sync_enabled) {
+    if (!app_config_ || !app_config_->resmed_time_sync_enabled) {
         next_resmed_push_ms_ = 0;
         resmed_push_readback_pending_ = false;
         resmed_push_readback_awaiting_response_ = false;

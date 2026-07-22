@@ -1,6 +1,6 @@
 #pragma once
 
-#include "app_config.h"
+#include "config_service.h"
 #include "wifi_manager.h"
 
 namespace aircannect {
@@ -8,7 +8,7 @@ namespace aircannect {
 class StoragePathPort;
 class StorageReadPort;
 
-void apply_storage_provisioning(AppConfig &app_config,
+void apply_storage_provisioning(ConfigService &config_service,
                                 WifiManager &wifi_manager,
                                 StorageReadPort &read_port,
                                 StoragePathPort &path_port);
