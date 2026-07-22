@@ -28,7 +28,7 @@
 #include "report_store.h"
 #include "session_manager.h"
 #include "sink_manager.h"
-#include "storage_archive_job.h"
+#include "storage_archive_port.h"
 #include "storage_directory.h"
 #include "storage_manager.h"
 #include "storage_path.h"
@@ -543,11 +543,11 @@ bool append_storage_list_entry(LargeTextBuffer &json,
 }
 
 struct ArchiveDownloadRef {
-    StorageArchiveJob *job = nullptr;
+    StorageArchivePort *port = nullptr;
     std::shared_ptr<StorageArchiveDownload> download;
 
     ~ArchiveDownloadRef() {
-        if (job && download) job->finish_download(*download);
+        if (port && download) port->finish_download(*download);
     }
 };
 
@@ -615,11 +615,11 @@ bool storage_read_request_available(AsyncWebServerRequest *request,
 }
 
 bool storage_jobs_available(AsyncWebServerRequest *request,
-                            const StorageArchiveJob *archive_job,
+                            const StorageArchivePort *archive_port,
                             const StorageDeletePort *delete_port,
                             const StorageSyncJob *sync_job,
                             const SleepHqSyncJob *sleephq_job) {
-    if (archive_job && archive_job->active()) {
+    if (archive_port && archive_port->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
@@ -957,7 +957,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   OximetryManager &oximetry_manager,
                   ReportManager &report_manager,
                   StorageBrowserPort &storage_browser,
-                  StorageArchiveJob &storage_archive_job,
+                  StorageArchivePort &storage_archive,
                   StorageDeletePort &storage_delete,
                   ExportCoordinator &export_coordinator,
                   StorageSyncJob *storage_sync_job,
@@ -978,7 +978,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     oximetry_manager_ = &oximetry_manager;
     report_manager_ = &report_manager;
     storage_browser_ = &storage_browser;
-    storage_archive_job_ = &storage_archive_job;
+    storage_archive_ = &storage_archive;
     storage_delete_ = &storage_delete;
     export_coordinator_ = &export_coordinator;
     storage_sync_job_ = storage_sync_job;
@@ -2750,7 +2750,7 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
-    if (!storage_archive_job_) {
+    if (!storage_archive_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
         return;
@@ -2776,7 +2776,7 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
             return;
         }
         if (!storage_jobs_available(request,
-                                    storage_archive_job_,
+                                    storage_archive_,
                                     storage_delete_,
                                     storage_sync_job_,
                                     sleephq_sync_job_)) {
@@ -2785,12 +2785,12 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
 
         uint32_t id = 0;
         char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
-        if (!storage_archive_job_->start_selected(selection.base,
-                                                  selection.names,
-                                                  selection.count,
-                                                  &id,
-                                                  error,
-                                                  sizeof(error))) {
+        if (!storage_archive_->start_selected(selection.base,
+                                              selection.names,
+                                              selection.count,
+                                              &id,
+                                              error,
+                                              sizeof(error))) {
             char body[128] = {};
             snprintf(body,
                      sizeof(body),
@@ -2826,7 +2826,7 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
         return;
     }
     if (!storage_jobs_available(request,
-                                storage_archive_job_,
+                                storage_archive_,
                                 storage_delete_,
                                 storage_sync_job_,
                                 sleephq_sync_job_)) {
@@ -2837,11 +2837,11 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
         request_bool_arg_default(request, "recursive", true);
     uint32_t id = 0;
     char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
-    if (!storage_archive_job_->start(path.c_str(),
-                                     recursive,
-                                     &id,
-                                     error,
-                                     sizeof(error))) {
+    if (!storage_archive_->start(path.c_str(),
+                                 recursive,
+                                 &id,
+                                 error,
+                                 sizeof(error))) {
         char body[128] = {};
         snprintf(body,
                  sizeof(body),
@@ -2860,13 +2860,13 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
-    if (!storage_archive_job_) {
+    if (!storage_archive_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
         return;
     }
     StorageArchiveStatus status;
-    if (!storage_archive_job_->status(status)) {
+    if (!storage_archive_->status(status)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"status_unavailable\"}");
         return;
@@ -2908,7 +2908,7 @@ void WebUI::send_storage_archive_status(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const {
-    if (!storage_archive_job_) {
+    if (!storage_archive_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
         return;
@@ -2938,16 +2938,16 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
     }
-    ref->job = storage_archive_job_;
+    ref->port = storage_archive_;
     uint64_t archive_size = 0;
     char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
-    if (!storage_archive_job_->begin_download(id,
-                                              ref->download,
-                                              filename,
-                                              sizeof(filename),
-                                              archive_size,
-                                              error,
-                                              sizeof(error))) {
+    if (!storage_archive_->begin_download(id,
+                                          ref->download,
+                                          filename,
+                                          sizeof(filename),
+                                          archive_size,
+                                          error,
+                                          sizeof(error))) {
         char body[128] = {};
         snprintf(body,
                  sizeof(body),
@@ -2966,8 +2966,8 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
         "application/zip",
         static_cast<size_t>(archive_size),
         [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
-            if (!buffer || !ref || !ref->job || !ref->download) return 0;
-            const PreparedByteRead read = ref->job->read_download(
+            if (!buffer || !ref || !ref->port || !ref->download) return 0;
+            const PreparedByteRead read = ref->port->read_download(
                 *ref->download, buffer, max_len, offset);
             if (read.state == PreparedByteReadState::Retry) {
                 return RESPONSE_TRY_AGAIN;
@@ -3012,7 +3012,7 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
         return;
     }
     if (!storage_jobs_available(request,
-                                storage_archive_job_,
+                                storage_archive_,
                                 storage_delete_,
                                 storage_sync_job_,
                                 sleephq_sync_job_)) {
@@ -3102,7 +3102,7 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
         return;
     }
     if (!storage_jobs_available(request,
-                                storage_archive_job_,
+                                storage_archive_,
                                 storage_delete_,
                                 nullptr,
                                 nullptr)) {
@@ -3129,7 +3129,7 @@ void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
         return;
     }
     if (!storage_jobs_available(request,
-                                storage_archive_job_,
+                                storage_archive_,
                                 storage_delete_,
                                 nullptr,
                                 nullptr)) {

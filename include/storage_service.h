@@ -7,6 +7,7 @@
 #include "board.h"
 #include "edf_file_writer.h"
 #include "runtime_snapshots.h"
+#include "storage_archive_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_read_port.h"
@@ -170,6 +171,7 @@ StorageReadPort &read_port();
 StorageBrowserPort &browser_port();
 
 // Background storage maintenance
+StorageArchivePort &archive_port();
 StorageDeletePort &delete_port();
 
 // File logging

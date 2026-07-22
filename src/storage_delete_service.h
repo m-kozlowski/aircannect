@@ -15,11 +15,15 @@ namespace aircannect {
 class StorageDeleteService final : public StorageDeletePort {
 public:
     using WakeCallback = void (*)();
+    using ClaimMaintenanceCallback = bool (*)();
+    using ReleaseMaintenanceCallback = void (*)();
 
     ~StorageDeleteService();
 
     // lifecycle and storage-task scheduling
-    bool begin(WakeCallback wake);
+    bool begin(WakeCallback wake,
+               ClaimMaintenanceCallback claim_maintenance,
+               ReleaseMaintenanceCallback release_maintenance);
     void set_task_available(bool available);
     void set_paused(bool paused);
     bool step();
@@ -46,11 +50,12 @@ private:
     void wake() const;
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
+    bool claim_maintenance_locked();
+    void release_maintenance_locked();
 
     // status and request state
     void touch_status_locked();
     void set_error_locked(const char *error);
-    void reset_request_locked(bool keep_status);
     bool append_root_locked(const char *path);
     bool validate_base_locked();
 
@@ -66,10 +71,13 @@ private:
     mutable SemaphoreHandle_t lock_ = nullptr;
     PublishedStatusSnapshot<StorageDeleteStatus> published_status_;
     WakeCallback wake_ = nullptr;
+    ClaimMaintenanceCallback claim_maintenance_ = nullptr;
+    ReleaseMaintenanceCallback release_maintenance_ = nullptr;
     std::atomic<bool> active_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> pause_transition_pending_{false};
-    bool task_available_ = false;
+    std::atomic<bool> task_available_{false};
+    bool maintenance_claimed_ = false;
 
     // request status
     StorageDeleteStatus status_;

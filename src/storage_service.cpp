@@ -1,6 +1,7 @@
 #include "storage_service.h"
 
 #include <algorithm>
+#include <atomic>
 #include <Arduino.h>
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
@@ -19,6 +20,7 @@
 #include "edf_str_record_merge.h"
 #include "fixed_queue.h"
 #include "memory_manager.h"
+#include "storage_archive_service.h"
 #include "storage_browser_service.h"
 #include "storage_delete_service.h"
 #include "storage_file_log_sink.h"
@@ -45,6 +47,12 @@ enum class StoredFileKind : uint8_t {
     Sa2,
     Eve,
     Csl,
+};
+
+enum class MaintenanceOwner : uint8_t {
+    None,
+    Archive,
+    Delete,
 };
 
 struct JobSlot {
@@ -186,11 +194,40 @@ public:
 };
 
 ServiceReadPort service_read_port;
+std::atomic<MaintenanceOwner> maintenance_owner{MaintenanceOwner::None};
 StorageBrowserService browser_service;
+StorageArchiveService archive_service;
 StorageDeleteService delete_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 bool browser_turn = true;
+
+bool claim_maintenance(MaintenanceOwner owner) {
+    MaintenanceOwner expected = MaintenanceOwner::None;
+    return maintenance_owner.compare_exchange_strong(expected, owner);
+}
+
+void release_maintenance(MaintenanceOwner owner) {
+    MaintenanceOwner expected = owner;
+    (void)maintenance_owner.compare_exchange_strong(
+        expected, MaintenanceOwner::None);
+}
+
+bool claim_archive_maintenance() {
+    return claim_maintenance(MaintenanceOwner::Archive);
+}
+
+void release_archive_maintenance() {
+    release_maintenance(MaintenanceOwner::Archive);
+}
+
+bool claim_delete_maintenance() {
+    return claim_maintenance(MaintenanceOwner::Delete);
+}
+
+void release_delete_maintenance() {
+    release_maintenance(MaintenanceOwner::Delete);
+}
 
 constexpr size_t max_size(size_t a, size_t b) {
     return a > b ? a : b;
@@ -1777,6 +1814,8 @@ void task_entry(void *) {
             } else if (process_foreground_step()) {
                 did_work = true;
                 file_log_burst = 0;
+            } else if (archive_service.step()) {
+                did_work = true;
             } else if (delete_service.step()) {
                 did_work = true;
             } else if (foreground_due && file_log_sink.step()) {
@@ -1875,7 +1914,12 @@ void begin() {
 
     (void)file_log_sink.begin();
     (void)browser_service.begin(wake_service_task);
-    (void)delete_service.begin(wake_service_task);
+    (void)archive_service.begin(wake_service_task,
+                                claim_archive_maintenance,
+                                release_archive_maintenance);
+    (void)delete_service.begin(wake_service_task,
+                               claim_delete_maintenance,
+                               release_delete_maintenance);
 
     if (!task) {
         const BaseType_t created =
@@ -1886,6 +1930,7 @@ void begin() {
         if (created != pdPASS || !task) {
             stats.available = false;
             browser_service.set_task_available(false);
+            archive_service.set_task_available(false);
             delete_service.set_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
@@ -1897,6 +1942,7 @@ void begin() {
     stats.available = true;
     stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
     browser_service.set_task_available(true);
+    archive_service.set_task_available(true);
     delete_service.set_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
@@ -2107,6 +2153,10 @@ StorageBrowserPort &browser_port() {
     return browser_service;
 }
 
+StorageArchivePort &archive_port() {
+    return archive_service;
+}
+
 StorageDeletePort &delete_port() {
     return delete_service;
 }
@@ -2132,11 +2182,12 @@ StorageFileLogStatus file_log_status() {
 void publish_activity(const ActivitySnapshot &activity) {
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
                                        !activity.ota_install_active);
-    delete_service.set_paused(activity.therapy_active ||
-                              activity.realtime_stream_active ||
-                              activity.foreground_report_demand ||
-                              activity.ota_install_active ||
-                              activity.export_active);
+    const bool maintenance_paused =
+        activity.therapy_active || activity.realtime_stream_active ||
+        activity.foreground_report_demand || activity.ota_install_active ||
+        activity.export_active;
+    archive_service.set_paused(maintenance_paused);
+    delete_service.set_paused(maintenance_paused);
     wake_service_task();
 }
 
@@ -2151,7 +2202,8 @@ StorageServiceStatus status() {
     } else {
         out.busy = processing_job || processing_read;
     }
-    out.maintenance_active = delete_service.active();
+    out.maintenance_active =
+        maintenance_owner.load() != MaintenanceOwner::None;
 #if AC_STACK_PROFILE_ENABLED
     if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
 #endif

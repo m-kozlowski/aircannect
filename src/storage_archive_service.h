@@ -1,6 +1,5 @@
 #pragma once
 
-#include <Arduino.h>
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -10,116 +9,83 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "background_worker.h"
-#include "prepared_byte_ring.h"
 #include "published_status_snapshot.h"
-#include "storage_path.h"
+#include "storage_archive_port.h"
 
 namespace aircannect {
 
-struct StorageArchiveDownload;
-
-static constexpr size_t AC_STORAGE_ARCHIVE_PATH_MAX = AC_STORAGE_PATH_MAX;
-static constexpr size_t AC_STORAGE_ARCHIVE_NAME_MAX = AC_STORAGE_NAME_MAX;
-static constexpr size_t AC_STORAGE_ARCHIVE_ERROR_MAX = AC_STORAGE_ERROR_MAX;
-static constexpr size_t AC_STORAGE_ARCHIVE_MAX_SELECTIONS =
-    AC_STORAGE_MAX_SELECTIONS;
-
-enum class StorageArchiveState : uint8_t {
-    Idle,
-    Preparing,
-    Ready,
-    Downloading,
-    Error,
-};
-
-const char *storage_archive_state_name(StorageArchiveState state);
-
-struct StorageArchiveStatus {
-    StorageArchiveState state = StorageArchiveState::Idle;
-    uint32_t id = 0;
-    bool recursive = true;
-    bool psram_metadata = false;
-    char source_path[AC_STORAGE_ARCHIVE_PATH_MAX] = {};
-    char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
-    char error[AC_STORAGE_ARCHIVE_ERROR_MAX] = {};
-    uint32_t files = 0;
-    uint32_t dirs = 0;
-    uint32_t files_done = 0;
-    uint64_t input_bytes = 0;
-    uint64_t bytes_done = 0;
-    uint64_t bytes_sent = 0;
-    uint64_t archive_bytes = 0;
-    uint64_t estimated_archive_bytes = 0;
-    uint64_t free_bytes_at_start = 0;
-    uint32_t started_ms = 0;
-    uint32_t updated_ms = 0;
-};
-
-class StorageArchiveJob : public BackgroundJob {
+class StorageArchiveService final : public StorageArchivePort {
 public:
-    // lifecycle
-    void begin();
+    using WakeCallback = void (*)();
+    using ClaimMaintenanceCallback = bool (*)();
+    using ReleaseMaintenanceCallback = void (*)();
 
-    // background worker
-    const char *name() const override { return "storage_archive"; }
-    JobStep step() override;
-    bool run_when_gate_closed(const char *reason) const override;
-    JobStep step_when_gate_closed(const char *reason) override;
-    bool drain_before_regular_jobs() const override { return true; }
-    void on_preempt() override;
+    ~StorageArchiveService();
+
+    // lifecycle and storage-task scheduling
+    bool begin(WakeCallback wake,
+               ClaimMaintenanceCallback claim_maintenance,
+               ReleaseMaintenanceCallback release_maintenance);
+    void set_task_available(bool available);
+    void set_paused(bool paused);
+    bool step();
 
     // archive requests
     bool start(const char *path,
                bool recursive,
                uint32_t *id_out = nullptr,
                char *error_out = nullptr,
-               size_t error_out_size = 0);
+               size_t error_out_size = 0) override;
     bool start_selected(const char *base_path,
                         const char *const *names,
                         size_t count,
                         uint32_t *id_out = nullptr,
                         char *error_out = nullptr,
-                        size_t error_out_size = 0);
+                        size_t error_out_size = 0) override;
 
     // status
-    bool status(StorageArchiveStatus &out, uint32_t timeout_ms = 20) const;
-    StorageArchiveStatus status() const;
-    bool active() const;
+    bool status(StorageArchiveStatus &out,
+                uint32_t timeout_ms = 20) const override;
+    bool active() const override { return active_.load(); }
 
     // download serving
-    bool begin_download(uint32_t id,
-                        std::shared_ptr<StorageArchiveDownload> &download_out,
-                        char *filename_out,
-                        size_t filename_out_size,
-                        uint64_t &size_out,
-                        char *error_out = nullptr,
-                        size_t error_out_size = 0);
+    bool begin_download(
+        uint32_t id,
+        std::shared_ptr<StorageArchiveDownload> &download_out,
+        char *filename_out,
+        size_t filename_out_size,
+        uint64_t &size_out,
+        char *error_out = nullptr,
+        size_t error_out_size = 0) override;
     PreparedByteRead read_download(StorageArchiveDownload &download,
                                    uint8_t *buffer,
                                    size_t max_len,
-                                   size_t offset);
-    void finish_download(StorageArchiveDownload &download);
+                                   size_t offset) override;
+    void finish_download(StorageArchiveDownload &download) override;
 
 private:
     struct ArchiveEntry;
     struct WalkFrame;
 
-    // locking/status
+    // lifecycle and locking
+    bool ready() const;
+    void wake() const;
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
+    bool claim_maintenance_locked();
+    void release_maintenance_locked();
+
+    // status and resource cleanup
     void touch_status_locked();
     void set_error_locked(const char *error);
     void reset_job_locked(bool keep_status);
-
-    // resource cleanup
     void close_walk_files_locked();
     void close_walk_locked();
     bool ensure_walk_stack_locked();
     void release_walk_stack_locked();
     void release_selection_locked();
     void release_build_buffers_locked();
-    void apply_preempt_locked();
+    void apply_pause_locked();
     bool begin_job_locked(const char *source_path,
                           bool recursive,
                           const char *filename_base,
@@ -140,7 +106,7 @@ private:
     bool finalize_prepare_locked();
 
     // archive production and response streaming
-    JobStep download_step_locked();
+    bool download_step_locked();
     size_t produce_download_locked(StorageArchiveDownload &download,
                                    uint8_t *buffer,
                                    size_t max_len);
@@ -148,12 +114,21 @@ private:
     void fail_download_locked(StorageArchiveDownload &download,
                               const char *error);
 
-    // synchronization/status
+    // synchronization and scheduling
     mutable SemaphoreHandle_t lock_ = nullptr;
     PublishedStatusSnapshot<StorageArchiveStatus> published_status_;
-    std::atomic<bool> preempt_requested_{false};
+    WakeCallback wake_ = nullptr;
+    ClaimMaintenanceCallback claim_maintenance_ = nullptr;
+    ReleaseMaintenanceCallback release_maintenance_ = nullptr;
+    std::atomic<bool> active_{false};
+    std::atomic<bool> paused_{false};
+    std::atomic<bool> pause_transition_pending_{false};
     std::atomic<uint32_t> download_progress_id_{0};
     std::atomic<uint32_t> download_bytes_sent_{0};
+    std::atomic<bool> task_available_{false};
+    bool maintenance_claimed_ = false;
+
+    // archive status
     StorageArchiveStatus status_;
     mutable bool status_dirty_ = false;
     uint32_t next_id_ = 1;
@@ -180,7 +155,5 @@ private:
     // active prepared-byte producer
     std::shared_ptr<StorageArchiveDownload> active_download_;
 };
-
-bool storage_archive_valid_path(const char *path);
 
 }  // namespace aircannect

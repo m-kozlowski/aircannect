@@ -53,13 +53,19 @@ StorageDeleteService::~StorageDeleteService() {
         Memory::free(walk_stack_);
     }
     if (path_bytes_) Memory::free(path_bytes_);
+    release_maintenance_locked();
     if (lock_) vSemaphoreDelete(lock_);
 }
 
-bool StorageDeleteService::begin(WakeCallback wake) {
+bool StorageDeleteService::begin(
+    WakeCallback wake,
+    ClaimMaintenanceCallback claim_maintenance,
+    ReleaseMaintenanceCallback release_maintenance) {
     if (lock_) return ready();
 
     wake_ = wake;
+    claim_maintenance_ = claim_maintenance;
+    release_maintenance_ = release_maintenance;
     lock_ = xSemaphoreCreateMutex();
     if (!lock_ || !published_status_.begin(status_) || !allocate_owners()) {
         Log::logf(CAT_STORAGE, LOG_ERROR,
@@ -70,7 +76,7 @@ bool StorageDeleteService::begin(WakeCallback wake) {
 }
 
 void StorageDeleteService::set_task_available(bool available) {
-    task_available_ = available;
+    task_available_.store(available);
     if (available) wake();
 }
 
@@ -108,7 +114,8 @@ bool StorageDeleteService::allocate_owners() {
 }
 
 bool StorageDeleteService::ready() const {
-    return lock_ && path_bytes_ && walk_stack_ && task_available_;
+    return lock_ && path_bytes_ && walk_stack_ && claim_maintenance_ &&
+           release_maintenance_ && task_available_.load();
 }
 
 void StorageDeleteService::wake() const {
@@ -126,6 +133,21 @@ void StorageDeleteService::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
 }
 
+bool StorageDeleteService::claim_maintenance_locked() {
+    if (maintenance_claimed_) return true;
+    if (!claim_maintenance_ || !claim_maintenance_()) return false;
+
+    maintenance_claimed_ = true;
+    return true;
+}
+
+void StorageDeleteService::release_maintenance_locked() {
+    if (!maintenance_claimed_) return;
+
+    maintenance_claimed_ = false;
+    if (release_maintenance_) release_maintenance_();
+}
+
 void StorageDeleteService::touch_status_locked() {
     status_.updated_ms = nonzero_millis(millis());
     status_dirty_ = true;
@@ -134,26 +156,12 @@ void StorageDeleteService::touch_status_locked() {
 void StorageDeleteService::set_error_locked(const char *error) {
     close_walk_locked();
     active_.store(false);
+    release_maintenance_locked();
     status_.state = StorageDeleteState::Error;
     copy_cstr(status_.error, sizeof(status_.error), error);
     touch_status_locked();
     Log::logf(CAT_STORAGE, LOG_WARN, "[DELETE] error=%s\n",
               status_.error[0] ? status_.error : "error");
-}
-
-void StorageDeleteService::reset_request_locked(bool keep_status) {
-    close_walk_locked();
-    active_.store(false);
-    base_checked_ = false;
-    path_bytes_len_ = 0;
-    current_root_ = 0;
-    memset(root_offsets_, 0, sizeof(root_offsets_));
-
-    if (!keep_status) {
-        status_ = StorageDeleteStatus();
-        status_.state = StorageDeleteState::Idle;
-        touch_status_locked();
-    }
 }
 
 void StorageDeleteService::close_walk_locked() {
@@ -262,12 +270,32 @@ bool StorageDeleteService::start_selected(const char *base_path,
         copy_cstr(error_out, error_out_size, "busy");
         return false;
     }
+    if (paused_.load()) {
+        copy_cstr(error_out, error_out_size, "storage_busy");
+        unlock();
+        return false;
+    }
     if (status_.state == StorageDeleteState::Deleting) {
         copy_cstr(error_out, error_out_size, "delete_busy");
         unlock();
         return false;
     }
-    reset_request_locked(false);
+    if (!claim_maintenance_locked()) {
+        copy_cstr(error_out, error_out_size, "storage_busy");
+        unlock();
+        return false;
+    }
+
+    close_walk_locked();
+    active_.store(false);
+    base_checked_ = false;
+    path_bytes_len_ = 0;
+    current_root_ = 0;
+    memset(root_offsets_, 0, sizeof(root_offsets_));
+    status_ = StorageDeleteStatus();
+    status_.state = StorageDeleteState::Idle;
+    touch_status_locked();
+
     status_.state = StorageDeleteState::Deleting;
     status_.id = next_id_++;
     if (status_.id == 0) status_.id = next_id_++;
@@ -447,6 +475,7 @@ bool StorageDeleteService::delete_dir_step_locked() {
 bool StorageDeleteService::finish_done_locked() {
     close_walk_locked();
     active_.store(false);
+    release_maintenance_locked();
     status_.state = StorageDeleteState::Done;
     touch_status_locked();
     Log::logf(CAT_STORAGE, LOG_INFO,

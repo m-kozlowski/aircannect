@@ -18,7 +18,7 @@
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
-#include "storage_archive_job.h"
+#include "storage_archive_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_sync_job.h"
@@ -100,7 +100,7 @@ public:
                OximetryManager &oximetry_manager,
                ReportManager &report_manager,
                StorageBrowserPort &storage_browser,
-               StorageArchiveJob &storage_archive_job,
+               StorageArchivePort &storage_archive,
                StorageDeletePort &storage_delete,
                ExportCoordinator &export_coordinator,
                StorageSyncJob *storage_sync_job,
@@ -258,7 +258,7 @@ private:
     OximetryManager *oximetry_manager_ = nullptr;
     ReportManager *report_manager_ = nullptr;
     StorageBrowserPort *storage_browser_ = nullptr;
-    StorageArchiveJob *storage_archive_job_ = nullptr;
+    StorageArchivePort *storage_archive_ = nullptr;
     StorageDeletePort *storage_delete_ = nullptr;
     ExportCoordinator *export_coordinator_ = nullptr;
     StorageSyncJob *storage_sync_job_ = nullptr;
