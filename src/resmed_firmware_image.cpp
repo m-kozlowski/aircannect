@@ -19,13 +19,18 @@ constexpr uint32_t ConfigFlashStart = 0x08020000;
 constexpr uint32_t ApplicationFlashStart = 0x08040000;
 constexpr char Component0005[] = "PacificFG";
 
+enum class RawDescriptorPolicy : uint8_t {
+    Config,
+    Application,
+    Combined,
+};
+
 struct RawTargetSpec {
     const char *code = nullptr;
     uint32_t flash_start = 0;
     uint64_t payload_size = 0;
     uint64_t source_offset = 0;
-    bool descriptor_word_2_required = false;
-    bool descriptor_word_3_required = false;
+    RawDescriptorPolicy descriptor_policy = RawDescriptorPolicy::Combined;
 };
 
 struct TargetBounds {
@@ -48,12 +53,18 @@ constexpr TargetBounds TargetBoundsTable[] = {
     {"FGCB", FlashBase, FullFlashBytes},
 };
 
+// Keep presets ordered from oldest to newest. Combined CONF+APPL images may
+// use the latest known desc3 because firmware does not validate desc2 there.
 constexpr DescriptorPreset DescriptorPresets[] = {
     {"14.8.3.0", 0x2D89E58Fu, 0xBEB37EE2u},
     {"15.8.4.0", 0xD785ABA6u, 0xBEB37EE2u},
     {"16.8.5.0", 0x7862CBA7u, 0xBEB37EE2u},
     {"17.8.6.0", 0xBECBC5BCu, 0xBEB37EE2u},
 };
+
+constexpr size_t DescriptorPresetCount =
+    sizeof(DescriptorPresets) / sizeof(DescriptorPresets[0]);
+static_assert(DescriptorPresetCount > 0, "descriptor presets required");
 
 uint32_t get_le32(const uint8_t *data, size_t offset) {
     return static_cast<uint32_t>(data[offset]) |
@@ -114,25 +125,29 @@ bool descriptor_preset(const char *version,
     return false;
 }
 
+const DescriptorPreset &latest_descriptor_preset() {
+    return DescriptorPresets[DescriptorPresetCount - 1];
+}
+
 bool infer_raw_target(uint64_t size, RawTargetSpec &target) {
     if (size == FullFlashBytes) {
         target = {"APCX", ConfigFlashStart, ConfigAndApplicationBytes,
-                  ConfigBytes, false, true};
+                  ConfigBytes, RawDescriptorPolicy::Combined};
         return true;
     }
     if (size == ConfigAndApplicationBytes) {
         target = {"APCX", ConfigFlashStart, ConfigAndApplicationBytes,
-                  0, false, true};
+                  0, RawDescriptorPolicy::Combined};
         return true;
     }
     if (size == ApplicationBytes) {
         target = {"APPL", ApplicationFlashStart, ApplicationBytes,
-                  0, true, true};
+                  0, RawDescriptorPolicy::Application};
         return true;
     }
     if (size == ConfigBytes) {
         target = {"CONF", ConfigFlashStart, ConfigBytes,
-                  0, true, false};
+                  0, RawDescriptorPolicy::Config};
         return true;
     }
     return false;
@@ -253,7 +268,14 @@ bool ResmedFirmwareInspector::configure_raw() {
         have_preset = descriptor_preset(info_.descriptor_version,
                                         word_2, word_3);
     }
-    if (!have_preset) return fail("unsupported_descriptor_preset");
+    if (!have_preset) {
+        if (target.descriptor_policy != RawDescriptorPolicy::Combined) {
+            return fail("unsupported_descriptor_preset");
+        }
+
+        word_2 = 0;
+        word_3 = latest_descriptor_preset().word_3;
+    }
 
     info_.kind = ResmedFirmwareImageKind::Raw;
     info_.source_offset = target.source_offset;
@@ -261,10 +283,18 @@ bool ResmedFirmwareInspector::configure_raw() {
     info_.prepared_size = AC_RESMED_RAW_ABC_PREFIX_BYTES +
                           target.payload_size;
     info_.flash_start = target.flash_start;
-    info_.descriptor_word_2 =
-        target.descriptor_word_2_required ? word_2 : 0;
-    info_.descriptor_word_3 =
-        target.descriptor_word_3_required ? word_3 : 0;
+    switch (target.descriptor_policy) {
+        case RawDescriptorPolicy::Config:
+            info_.descriptor_word_2 = word_2;
+            break;
+        case RawDescriptorPolicy::Application:
+            info_.descriptor_word_2 = word_2;
+            info_.descriptor_word_3 = word_3;
+            break;
+        case RawDescriptorPolicy::Combined:
+            info_.descriptor_word_3 = word_3;
+            break;
+    }
     copy_text(info_.target, sizeof(info_.target), target.code);
 
     uint8_t segment[AC_RESMED_ABC_SEGMENT_BYTES] = {};
