@@ -89,6 +89,8 @@ private:
         bool transient_source = false;
     };
 
+    struct ColdState;
+
     static void task_entry(void *context);
     static bool operation_should_abort(void *context);
     void run();
@@ -131,12 +133,8 @@ private:
     StoragePathPort *path_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
     TaskHandle_t task_ = nullptr;
+    ColdState *cold_ = nullptr;
 
-    Request request_;
-    ResmedPreparedFirmware result_;
-    ResmedFirmwarePrepareStatus status_;
-    char device_identifier_[96] = {};
-    bool result_pending_ = false;
     std::atomic<bool> cancel_requested_{false};
     std::atomic<bool> therapy_active_{false};
     std::atomic<bool> ota_install_active_{false};

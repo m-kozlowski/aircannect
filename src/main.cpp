@@ -879,9 +879,12 @@ void setup() {
     }
     report_http_controller.begin(report_task, StorageService::stream_port());
 
-    resmed_ota_manager.begin(rpc_transport, as11_device_service,
-                             StorageService::stream_port(),
-                             StorageService::path_port());
+    if (!resmed_ota_manager.begin(rpc_transport, as11_device_service,
+                                  StorageService::stream_port(),
+                                  StorageService::path_port())) {
+        Log::logf(CAT_OTA, LOG_ERROR,
+                  "ResMed OTA manager failed to start\n");
+    }
     time_sync_service.begin(config_service.data(), wifi_manager, rpc_transport,
                             as11_device_service);
     report_catalog_timezone_revision = time_sync_service.timezone_revision();

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <ctype.h>
+#include <memory>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
@@ -10,7 +12,9 @@
 #include "as11_device_service.h"
 #include "as11_rpc.h"
 #include "debug_log.h"
+#include "memory_manager.h"
 #include "storage_path_port.h"
+#include "storage_stream_port.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -98,6 +102,17 @@ String bytes_to_hex(const uint8_t *bytes, size_t length) {
 
 }  // namespace
 
+struct ResmedOtaManager::ColdState {
+    ResmedOtaStatus status;
+    char pending_block_hex[AC_RESMED_OTA_MAX_BLOCK_BYTES * 2 + 1] = {};
+
+    ResmedPreparedFirmware prepared;
+    std::shared_ptr<StorageByteStream> prepared_stream;
+    uint8_t prepared_block[AC_RESMED_OTA_MAX_BLOCK_BYTES] = {};
+
+    char cleanup_paths[2][AC_STORAGE_PATH_MAX] = {};
+};
+
 ResmedOtaManager::ScopedLock::ScopedLock(
     const ResmedOtaManager &manager,
     uint32_t timeout_ms)
@@ -109,30 +124,43 @@ ResmedOtaManager::ScopedLock::~ScopedLock() {
     if (locked_) manager_.unlock();
 }
 
-void ResmedOtaManager::begin(RpcRequestPort &rpc,
+bool ResmedOtaManager::begin(RpcRequestPort &rpc,
                              As11DeviceService &device,
                              StorageStreamPort &stream_port,
                              StoragePathPort &path_port) {
+    if (cold_) return true;
+
+    if (!mutex_) mutex_ = xSemaphoreCreateRecursiveMutex();
+    if (!mutex_) return false;
+
+    void *memory = Memory::alloc_large(sizeof(ColdState), false);
+    if (!memory) {
+        Log::logf(CAT_OTA, LOG_ERROR,
+                  "[RESMED] OTA state allocation failed\n");
+        return false;
+    }
+
+    cold_ = new (memory) ColdState();
     rpc_ = &rpc;
     device_ = &device;
     stream_port_ = &stream_port;
     path_port_ = &path_port;
-    if (!mutex_) mutex_ = xSemaphoreCreateRecursiveMutex();
     mbedtls_sha256_init(&sha_ctx_);
+    return true;
 }
 
 void ResmedOtaManager::poll() {
     ScopedLock lock(*this, 0);
-    if (!lock || !rpc_) return;
+    if (!lock || !cold_ || !rpc_) return;
 
     poll_rpc_completion();
     poll_prepared_transfer();
     poll_cleanup();
 
     const bool idle_timeout_phase =
-        status_.phase == ResmedOtaPhase::Opening ||
-        status_.phase == ResmedOtaPhase::Ready ||
-        status_.phase == ResmedOtaPhase::Uploaded;
+        cold_->status.phase == ResmedOtaPhase::Opening ||
+        cold_->status.phase == ResmedOtaPhase::Ready ||
+        cold_->status.phase == ResmedOtaPhase::Uploaded;
     if (idle_timeout_phase && last_activity_ms_ &&
         static_cast<int32_t>(millis() - last_activity_ms_) >
             static_cast<int32_t>(AC_RESMED_OTA_IDLE_TIMEOUT_MS)) {
@@ -145,10 +173,7 @@ bool ResmedOtaManager::begin_upload(size_t total_size,
                                     const String &filename) {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
-    if (!rpc_) {
-        set_error("not_initialized");
-        return false;
-    }
+    if (!cold_ || !rpc_) return false;
     if (!guard_device_idle_for_upgrade()) return false;
     if (active() || transport_active()) {
         set_error("session_active");
@@ -163,10 +188,7 @@ bool ResmedOtaManager::begin_prepared_upload(
     const ResmedPreparedFirmware &firmware) {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
-    if (!rpc_ || !stream_port_ || !path_port_) {
-        set_error("not_initialized");
-        return false;
-    }
+    if (!cold_ || !rpc_ || !stream_port_ || !path_port_) return false;
     if (!firmware.valid() ||
         firmware.image.prepared_size > AC_RESMED_OTA_MAX_FILE_BYTES) {
         set_error("invalid_prepared_image");
@@ -177,19 +199,19 @@ bool ResmedOtaManager::begin_prepared_upload(
     }
 
     clear_session();
-    prepared_ = firmware;
+    cold_->prepared = firmware;
     if (!guard_device_idle_for_upgrade()) return false;
 
     prepared_transfer_ = true;
     prepared_check_requested_ = false;
-    status_.phase = ResmedOtaPhase::Opening;
-    status_.total_size = static_cast<size_t>(firmware.image.prepared_size);
-    status_.filename = firmware.filename;
-    status_.input_type =
+    cold_->status.phase = ResmedOtaPhase::Opening;
+    cold_->status.total_size = static_cast<size_t>(firmware.image.prepared_size);
+    cold_->status.filename = firmware.filename;
+    cold_->status.input_type =
         resmed_firmware_image_kind_name(firmware.image.kind);
-    status_.target = firmware.image.target;
-    status_.source_path = firmware.path;
-    status_.last_result = "opening";
+    cold_->status.target = firmware.image.target;
+    cold_->status.source_path = firmware.path;
+    cold_->status.last_result = "opening";
     last_activity_ms_ = millis();
 
     StorageStreamCommand command;
@@ -199,7 +221,7 @@ bool ResmedOtaManager::begin_prepared_upload(
     command.verification = StorageStreamVerification::Size;
 
     char error[AC_STORAGE_ERROR_MAX] = {};
-    if (!stream_port_->request_stream(command, prepared_stream_, error,
+    if (!stream_port_->request_stream(command, cold_->prepared_stream, error,
                                       sizeof(error))) {
         set_error(error[0] ? error : "prepared_stream_rejected");
         return false;
@@ -216,12 +238,13 @@ bool ResmedOtaManager::begin_prepared_upload(
 bool ResmedOtaManager::discard_prepared_firmware(
     const ResmedPreparedFirmware &firmware) {
     ScopedLock lock(*this, 1000);
-    if (!lock || !firmware.valid() || active() || transport_active()) {
+    if (!lock || !cold_ || !firmware.valid() || active() ||
+        transport_active()) {
         return false;
     }
 
     clear_session();
-    prepared_ = firmware;
+    cold_->prepared = firmware;
     schedule_prepared_cleanup();
     return true;
 }
@@ -242,15 +265,15 @@ bool ResmedOtaManager::begin_protocol(size_t total_size,
         return false;
     }
 
-    status_.phase = ResmedOtaPhase::Initiating;
-    status_.total_size = total_size;
-    status_.uploaded_bytes = 0;
-    status_.xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
-    status_.progress_percent = 0;
-    status_.filename = filename;
-    status_.expected_sha256 = expected;
-    status_.computed_sha256 = "";
-    status_.last_error = "";
+    cold_->status.phase = ResmedOtaPhase::Initiating;
+    cold_->status.total_size = total_size;
+    cold_->status.uploaded_bytes = 0;
+    cold_->status.xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
+    cold_->status.progress_percent = 0;
+    cold_->status.filename = filename;
+    cold_->status.expected_sha256 = expected;
+    cold_->status.computed_sha256 = "";
+    cold_->status.last_error = "";
     last_activity_ms_ = millis();
     mbedtls_sha256_starts(&sha_ctx_, 0);
     sha_started_ = true;
@@ -273,28 +296,28 @@ bool ResmedOtaManager::begin_protocol(size_t total_size,
 bool ResmedOtaManager::submit_block(size_t offset,
                                     const String &hex_data) {
     ScopedLock lock(*this, 1000);
-    if (!lock || !rpc_) return false;
+    if (!lock || !cold_ || !rpc_) return false;
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
     }
-    if (status_.phase != ResmedOtaPhase::Ready &&
-        status_.phase != ResmedOtaPhase::Uploading) {
+    if (cold_->status.phase != ResmedOtaPhase::Ready &&
+        cold_->status.phase != ResmedOtaPhase::Uploading) {
         set_error("not_ready");
         return false;
     }
-    if (offset != status_.uploaded_bytes || offset >= status_.total_size) {
+    if (offset != cold_->status.uploaded_bytes || offset >= cold_->status.total_size) {
         set_error("bad_offset");
         return false;
     }
 
     String hex = hex_data;
-    if (!normalize_hex(hex, status_.xfer_block_size)) {
+    if (!normalize_hex(hex, cold_->status.xfer_block_size)) {
         set_error("bad_hex_block");
         return false;
     }
     const size_t raw_length = hex.length() / 2;
-    if (raw_length == 0 || offset + raw_length > status_.total_size) {
+    if (raw_length == 0 || offset + raw_length > cold_->status.total_size) {
         set_error("bad_block_size");
         return false;
     }
@@ -307,15 +330,15 @@ bool ResmedOtaManager::submit_block(size_t offset,
     params += hex.c_str();
     params += "\"}";
 
-    copy_cstr(pending_block_hex_, sizeof(pending_block_hex_),
+    copy_cstr(cold_->pending_block_hex, sizeof(cold_->pending_block_hex),
               hex.c_str());
     pending_block_offset_ = offset;
     pending_block_bytes_ = raw_length;
-    status_.phase = ResmedOtaPhase::Uploading;
+    cold_->status.phase = ResmedOtaPhase::Uploading;
     last_activity_ms_ = millis();
     if (!queue_request("UpgradeDataBlock", params,
                        AC_RESMED_OTA_BLOCK_TIMEOUT_MS)) {
-        pending_block_hex_[0] = '\0';
+        cold_->pending_block_hex[0] = '\0';
         pending_block_offset_ = 0;
         pending_block_bytes_ = 0;
         set_error("block_queue_failed");
@@ -326,27 +349,27 @@ bool ResmedOtaManager::submit_block(size_t offset,
 
 bool ResmedOtaManager::request_check() {
     ScopedLock lock(*this, 1000);
-    if (!lock) return false;
+    if (!lock || !cold_) return false;
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
     }
-    if (status_.phase != ResmedOtaPhase::Uploaded ||
-        status_.uploaded_bytes != status_.total_size) {
+    if (cold_->status.phase != ResmedOtaPhase::Uploaded ||
+        cold_->status.uploaded_bytes != cold_->status.total_size) {
         set_error("upload_not_complete");
         return false;
     }
     if (!finish_hash()) return false;
-    if (status_.expected_sha256.length() &&
-        status_.expected_sha256 != status_.computed_sha256) {
+    if (cold_->status.expected_sha256.length() &&
+        cold_->status.expected_sha256 != cold_->status.computed_sha256) {
         set_error("sha256_mismatch");
         return false;
     }
 
     std::string params = "{\"upgradeFileHash\":\"";
-    params += status_.computed_sha256.c_str();
+    params += cold_->status.computed_sha256.c_str();
     params += "\"}";
-    status_.phase = ResmedOtaPhase::Checking;
+    cold_->status.phase = ResmedOtaPhase::Checking;
     last_activity_ms_ = millis();
     if (!queue_request("CheckUpgradeFile", params,
                        AC_RESMED_OTA_VERIFY_TIMEOUT_MS)) {
@@ -355,20 +378,20 @@ bool ResmedOtaManager::request_check() {
     }
 
     Log::logf(CAT_OTA, LOG_INFO, "[RESMED] check sha256=%s\n",
-              status_.computed_sha256.c_str());
+              cold_->status.computed_sha256.c_str());
     return true;
 }
 
 bool ResmedOtaManager::request_apply_plain(bool reset_settings,
                                            const String &confirm) {
     ScopedLock lock(*this, 1000);
-    if (!lock) return false;
+    if (!lock || !cold_) return false;
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
     }
-    if (status_.phase != ResmedOtaPhase::Verified ||
-        !status_.computed_sha256.length()) {
+    if (cold_->status.phase != ResmedOtaPhase::Verified ||
+        !cold_->status.computed_sha256.length()) {
         set_error("not_verified");
         return false;
     }
@@ -378,12 +401,12 @@ bool ResmedOtaManager::request_apply_plain(bool reset_settings,
     }
 
     std::string params = "{\"upgradeFileHash\":\"";
-    params += status_.computed_sha256.c_str();
+    params += cold_->status.computed_sha256.c_str();
     params += "\",\"resetSettingsToDefault\":";
     params += reset_settings ? "true" : "false";
     params += "}";
-    status_.phase = ResmedOtaPhase::Applying;
-    status_.apply_mode = "plain";
+    cold_->status.phase = ResmedOtaPhase::Applying;
+    cold_->status.apply_mode = "plain";
     last_activity_ms_ = millis();
     if (!queue_request("ApplyUpgrade", params,
                        AC_RESMED_OTA_VERIFY_TIMEOUT_MS)) {
@@ -399,13 +422,13 @@ bool ResmedOtaManager::request_apply_authenticated(
     const String &authentication,
     const String &confirm) {
     ScopedLock lock(*this, 1000);
-    if (!lock) return false;
+    if (!lock || !cold_) return false;
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
     }
-    if (status_.phase != ResmedOtaPhase::Verified ||
-        !status_.computed_sha256.length()) {
+    if (cold_->status.phase != ResmedOtaPhase::Verified ||
+        !cold_->status.computed_sha256.length()) {
         set_error("not_verified");
         return false;
     }
@@ -423,12 +446,12 @@ bool ResmedOtaManager::request_apply_authenticated(
     }
 
     std::string params = "{\"upgradeFileHash\":\"";
-    params += status_.computed_sha256.c_str();
+    params += cold_->status.computed_sha256.c_str();
     params += "\",\"authentication\":\"";
     params += tag.c_str();
     params += "\"}";
-    status_.phase = ResmedOtaPhase::Applying;
-    status_.apply_mode = "authenticated";
+    cold_->status.phase = ResmedOtaPhase::Applying;
+    cold_->status.apply_mode = "authenticated";
     last_activity_ms_ = millis();
     if (!queue_request("ApplyAuthenticatedUpgrade", params,
                        AC_RESMED_OTA_VERIFY_TIMEOUT_MS)) {
@@ -443,7 +466,7 @@ bool ResmedOtaManager::request_apply_authenticated(
 
 void ResmedOtaManager::abort(const char *reason) {
     ScopedLock lock(*this, 1000);
-    if (!lock) return;
+    if (!lock || !cold_) return;
 
     cancel_rpc_request();
     set_error(reason ? reason : "aborted");
@@ -452,42 +475,45 @@ void ResmedOtaManager::abort(const char *reason) {
 bool ResmedOtaManager::active() const {
     ScopedLock lock(*this, 50);
     if (!lock) return true;
+    if (!cold_) return false;
 
     return cleanup_count_ != 0 ||
-           status_.phase == ResmedOtaPhase::Opening ||
-           status_.phase == ResmedOtaPhase::Initiating ||
-           status_.phase == ResmedOtaPhase::Ready ||
-           status_.phase == ResmedOtaPhase::Uploading ||
-           status_.phase == ResmedOtaPhase::Uploaded ||
-           status_.phase == ResmedOtaPhase::Checking ||
-           status_.phase == ResmedOtaPhase::Verified ||
-           status_.phase == ResmedOtaPhase::Applying;
+           cold_->status.phase == ResmedOtaPhase::Opening ||
+           cold_->status.phase == ResmedOtaPhase::Initiating ||
+           cold_->status.phase == ResmedOtaPhase::Ready ||
+           cold_->status.phase == ResmedOtaPhase::Uploading ||
+           cold_->status.phase == ResmedOtaPhase::Uploaded ||
+           cold_->status.phase == ResmedOtaPhase::Checking ||
+           cold_->status.phase == ResmedOtaPhase::Verified ||
+           cold_->status.phase == ResmedOtaPhase::Applying;
 }
 
 bool ResmedOtaManager::transport_active() const {
     ScopedLock lock(*this, 50);
     if (!lock) return true;
+    if (!cold_) return false;
 
     return waiting_for_ != WaitingFor::None || cleanup_count_ != 0 ||
-           status_.phase == ResmedOtaPhase::Opening ||
-           status_.phase == ResmedOtaPhase::Initiating ||
-           status_.phase == ResmedOtaPhase::Ready ||
-           status_.phase == ResmedOtaPhase::Uploading ||
-           status_.phase == ResmedOtaPhase::Uploaded ||
-           status_.phase == ResmedOtaPhase::Checking ||
-           status_.phase == ResmedOtaPhase::Applying;
+           cold_->status.phase == ResmedOtaPhase::Opening ||
+           cold_->status.phase == ResmedOtaPhase::Initiating ||
+           cold_->status.phase == ResmedOtaPhase::Ready ||
+           cold_->status.phase == ResmedOtaPhase::Uploading ||
+           cold_->status.phase == ResmedOtaPhase::Uploaded ||
+           cold_->status.phase == ResmedOtaPhase::Checking ||
+           cold_->status.phase == ResmedOtaPhase::Applying;
 }
 
 ResmedOtaStatus ResmedOtaManager::status() const {
     ScopedLock lock(*this, 50);
-    return lock ? status_ : ResmedOtaStatus{};
+    return lock && cold_ ? cold_->status : ResmedOtaStatus{};
 }
 
 const char *ResmedOtaManager::phase_name() const {
     ScopedLock lock(*this, 50);
     if (!lock) return "busy";
+    if (!cold_) return "unavailable";
 
-    switch (status_.phase) {
+    switch (cold_->status.phase) {
         case ResmedOtaPhase::Idle: return "idle";
         case ResmedOtaPhase::Opening: return "opening";
         case ResmedOtaPhase::Initiating: return "initiating";
@@ -535,7 +561,7 @@ bool ResmedOtaManager::queue_request(const char *method,
 
     rpc_ticket_ = submission.ticket;
     waiting_for_ = waiting;
-    status_.waiting = true;
+    cold_->status.waiting = true;
     return true;
 }
 
@@ -568,8 +594,8 @@ void ResmedOtaManager::cancel_rpc_request() {
 void ResmedOtaManager::handle_response(const std::string &payload) {
     if (waiting_for_ == WaitingFor::None) return;
 
-    status_.last_result = payload.c_str();
-    status_.waiting = false;
+    cold_->status.last_result = payload.c_str();
+    cold_->status.waiting = false;
     last_activity_ms_ = millis();
     if (json_member_present(payload, "error")) {
         waiting_for_ = WaitingFor::None;
@@ -588,8 +614,8 @@ void ResmedOtaManager::handle_response(const std::string &payload) {
                 set_error("bad_xfer_block_size");
                 return;
             }
-            status_.xfer_block_size = block_size;
-            status_.phase = ResmedOtaPhase::Ready;
+            cold_->status.xfer_block_size = block_size;
+            cold_->status.phase = ResmedOtaPhase::Ready;
             break;
         }
 
@@ -606,12 +632,12 @@ void ResmedOtaManager::handle_response(const std::string &payload) {
                 set_error("check_rejected");
                 return;
             }
-            status_.phase = ResmedOtaPhase::Verified;
+            cold_->status.phase = ResmedOtaPhase::Verified;
             schedule_prepared_cleanup();
             break;
 
         case WaitingFor::Apply:
-            status_.phase = ResmedOtaPhase::Complete;
+            cold_->status.phase = ResmedOtaPhase::Complete;
             break;
 
         case WaitingFor::None:
@@ -622,13 +648,13 @@ void ResmedOtaManager::handle_response(const std::string &payload) {
 void ResmedOtaManager::poll_prepared_transfer() {
     if (!prepared_transfer_) return;
 
-    if (status_.phase == ResmedOtaPhase::Opening) {
+    if (cold_->status.phase == ResmedOtaPhase::Opening) {
         (void)open_prepared_stream();
         return;
     }
     if (waiting_for_ != WaitingFor::None) return;
 
-    if (status_.phase == ResmedOtaPhase::Uploaded) {
+    if (cold_->status.phase == ResmedOtaPhase::Uploaded) {
         if (prepared_check_requested_) return;
 
         close_prepared_stream(true);
@@ -637,20 +663,20 @@ void ResmedOtaManager::poll_prepared_transfer() {
         (void)request_check();
         return;
     }
-    if (status_.phase == ResmedOtaPhase::Ready ||
-        status_.phase == ResmedOtaPhase::Uploading) {
+    if (cold_->status.phase == ResmedOtaPhase::Ready ||
+        cold_->status.phase == ResmedOtaPhase::Uploading) {
         (void)fill_prepared_block();
     }
 }
 
 bool ResmedOtaManager::open_prepared_stream() {
-    if (!prepared_stream_ || !stream_port_) {
+    if (!cold_->prepared_stream || !stream_port_) {
         set_error("prepared_stream_missing");
         return false;
     }
 
     StorageStreamStatus stream_status;
-    if (!stream_port_->status(*prepared_stream_, stream_status)) return false;
+    if (!stream_port_->status(*cold_->prepared_stream, stream_status)) return false;
     if (stream_status.state == StorageStreamState::Error ||
         stream_status.state == StorageStreamState::Cancelled) {
         set_error(stream_status.error[0]
@@ -659,29 +685,30 @@ bool ResmedOtaManager::open_prepared_stream() {
         return false;
     }
     if (stream_status.state != StorageStreamState::Ready) return false;
-    if (!stream_port_->attach(*prepared_stream_)) return false;
+    if (!stream_port_->attach(*cold_->prepared_stream)) return false;
 
-    return begin_protocol(static_cast<size_t>(prepared_.image.prepared_size),
-                          "", prepared_.filename);
+    return begin_protocol(static_cast<size_t>(cold_->prepared.image.prepared_size),
+                          "", cold_->prepared.filename);
 }
 
 bool ResmedOtaManager::fill_prepared_block() {
-    if (!prepared_stream_ || !stream_port_) {
+    if (!cold_->prepared_stream || !stream_port_) {
         set_error("prepared_stream_missing");
         return false;
     }
 
     if (prepared_block_wanted_ == 0) {
-        const size_t remaining = status_.total_size - status_.uploaded_bytes;
+        const size_t remaining =
+            cold_->status.total_size - cold_->status.uploaded_bytes;
         if (remaining == 0) return true;
         prepared_block_wanted_ =
-            std::min(status_.xfer_block_size, remaining);
+            std::min(cold_->status.xfer_block_size, remaining);
         prepared_block_bytes_ = 0;
     }
 
-    const size_t offset = status_.uploaded_bytes + prepared_block_bytes_;
+    const size_t offset = cold_->status.uploaded_bytes + prepared_block_bytes_;
     const StorageStreamRead read = stream_port_->read(
-        *prepared_stream_, prepared_block_ + prepared_block_bytes_,
+        *cold_->prepared_stream, cold_->prepared_block + prepared_block_bytes_,
         prepared_block_wanted_ - prepared_block_bytes_, offset);
     if (read.state == StorageStreamReadState::Retry) return false;
     if (read.state != StorageStreamReadState::Data || read.bytes == 0) {
@@ -694,56 +721,56 @@ bool ResmedOtaManager::fill_prepared_block() {
     prepared_block_bytes_ += read.bytes;
     if (prepared_block_bytes_ != prepared_block_wanted_) return true;
 
-    const String hex = bytes_to_hex(prepared_block_, prepared_block_bytes_);
-    return submit_block(status_.uploaded_bytes, hex);
+    const String hex = bytes_to_hex(cold_->prepared_block, prepared_block_bytes_);
+    return submit_block(cold_->status.uploaded_bytes, hex);
 }
 
 void ResmedOtaManager::finish_pending_block() {
     if (!sha_started_ || sha_finished_ || pending_block_bytes_ == 0 ||
-        !update_sha_from_hex(sha_ctx_, pending_block_hex_,
+        !update_sha_from_hex(sha_ctx_, cold_->pending_block_hex,
                              pending_block_bytes_)) {
         set_error("sha_update_failed");
         return;
     }
 
-    status_.uploaded_bytes = pending_block_offset_ + pending_block_bytes_;
-    pending_block_hex_[0] = '\0';
+    cold_->status.uploaded_bytes = pending_block_offset_ + pending_block_bytes_;
+    cold_->pending_block_hex[0] = '\0';
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
     prepared_block_bytes_ = 0;
     prepared_block_wanted_ = 0;
     update_progress();
-    status_.phase = status_.uploaded_bytes >= status_.total_size
+    cold_->status.phase = cold_->status.uploaded_bytes >= cold_->status.total_size
                         ? ResmedOtaPhase::Uploaded
                         : ResmedOtaPhase::Ready;
 }
 
 void ResmedOtaManager::close_prepared_stream(bool complete) {
-    if (stream_port_ && prepared_stream_) {
-        stream_port_->finish(*prepared_stream_, complete);
+    if (stream_port_ && cold_->prepared_stream) {
+        stream_port_->finish(*cold_->prepared_stream, complete);
     }
-    prepared_stream_.reset();
+    cold_->prepared_stream.reset();
     prepared_block_bytes_ = 0;
     prepared_block_wanted_ = 0;
 }
 
 void ResmedOtaManager::schedule_prepared_cleanup() {
-    if (!prepared_.valid() || cleanup_count_ != 0) return;
+    if (!cold_->prepared.valid() || cleanup_count_ != 0) return;
 
-    if (prepared_.cleanup_source) {
-        copy_cstr(cleanup_paths_[cleanup_count_], AC_STORAGE_PATH_MAX,
-                  prepared_.source_path);
+    if (cold_->prepared.cleanup_source) {
+        copy_cstr(cold_->cleanup_paths[cleanup_count_], AC_STORAGE_PATH_MAX,
+                  cold_->prepared.source_path);
         cleanup_count_++;
     }
-    if (prepared_.cleanup_prepared &&
-        (!prepared_.cleanup_source ||
-         strcmp(prepared_.path, prepared_.source_path) != 0) &&
+    if (cold_->prepared.cleanup_prepared &&
+        (!cold_->prepared.cleanup_source ||
+         strcmp(cold_->prepared.path, cold_->prepared.source_path) != 0) &&
         cleanup_count_ < 2) {
-        copy_cstr(cleanup_paths_[cleanup_count_], AC_STORAGE_PATH_MAX,
-                  prepared_.path);
+        copy_cstr(cold_->cleanup_paths[cleanup_count_], AC_STORAGE_PATH_MAX,
+                  cold_->prepared.path);
         cleanup_count_++;
     }
-    prepared_ = {};
+    cold_->prepared = {};
 }
 
 void ResmedOtaManager::poll_cleanup() {
@@ -757,7 +784,7 @@ void ResmedOtaManager::poll_cleanup() {
             OperationDisposition::Succeeded) {
             Log::logf(CAT_OTA, LOG_WARN,
                       "[RESMED] transient cleanup failed path=%s error=%s\n",
-                      cleanup_paths_[cleanup_index_],
+                      cold_->cleanup_paths[cleanup_index_],
                       completion.error[0] ? completion.error : "remove_failed");
         }
         cleanup_ticket_ = {};
@@ -774,7 +801,7 @@ void ResmedOtaManager::poll_cleanup() {
 
     StoragePathCommand command;
     command.operation = StoragePathOperation::Remove;
-    command.source = cleanup_paths_[cleanup_index_];
+    command.source = cold_->cleanup_paths[cleanup_index_];
     command.generation = cleanup_generation_;
     const OperationSubmission submission = path_port_->request(command);
     if (submission.accepted()) {
@@ -782,13 +809,13 @@ void ResmedOtaManager::poll_cleanup() {
     } else if (submission.admission == OperationAdmission::Rejected) {
         Log::logf(CAT_OTA, LOG_WARN,
                   "[RESMED] transient cleanup rejected path=%s\n",
-                  cleanup_paths_[cleanup_index_]);
+                  cold_->cleanup_paths[cleanup_index_]);
         cleanup_index_++;
     }
 }
 
 void ResmedOtaManager::clear_cleanup() {
-    memset(cleanup_paths_, 0, sizeof(cleanup_paths_));
+    memset(cold_->cleanup_paths, 0, sizeof(cold_->cleanup_paths));
     cleanup_count_ = 0;
     cleanup_index_ = 0;
     cleanup_ticket_ = {};
@@ -803,7 +830,7 @@ bool ResmedOtaManager::finish_hash() {
 
     uint8_t hash[32] = {};
     mbedtls_sha256_finish(&sha_ctx_, hash);
-    status_.computed_sha256 = sha_to_hex(hash);
+    cold_->status.computed_sha256 = sha_to_hex(hash);
     sha_finished_ = true;
     return true;
 }
@@ -813,17 +840,17 @@ void ResmedOtaManager::clear_session() {
     close_prepared_stream(false);
     schedule_prepared_cleanup();
 
-    pending_block_hex_[0] = '\0';
+    cold_->pending_block_hex[0] = '\0';
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
     waiting_for_ = WaitingFor::None;
-    status_ = {};
-    status_.phase = ResmedOtaPhase::Idle;
-    status_.xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
+    cold_->status = {};
+    cold_->status.phase = ResmedOtaPhase::Idle;
+    cold_->status.xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
     sha_started_ = false;
     sha_finished_ = false;
     last_activity_ms_ = 0;
-    prepared_ = {};
+    cold_->prepared = {};
     prepared_transfer_ = false;
     prepared_check_requested_ = false;
 }
@@ -834,23 +861,23 @@ void ResmedOtaManager::set_error(const char *error) {
     prepared_transfer_ = false;
     prepared_check_requested_ = false;
 
-    status_.phase = ResmedOtaPhase::Error;
-    status_.waiting = false;
-    status_.last_error = error ? error : "error";
+    cold_->status.phase = ResmedOtaPhase::Error;
+    cold_->status.waiting = false;
+    cold_->status.last_error = error ? error : "error";
     waiting_for_ = WaitingFor::None;
-    pending_block_hex_[0] = '\0';
+    cold_->pending_block_hex[0] = '\0';
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
     last_activity_ms_ = millis();
     Log::logf(CAT_OTA, LOG_ERROR, "[RESMED] %s\n",
-              status_.last_error.c_str());
+              cold_->status.last_error.c_str());
 }
 
 void ResmedOtaManager::update_progress() {
-    status_.progress_percent = status_.total_size == 0
+    cold_->status.progress_percent = cold_->status.total_size == 0
         ? 0
-        : static_cast<uint8_t>((status_.uploaded_bytes * 100ULL) /
-                               status_.total_size);
+        : static_cast<uint8_t>((cold_->status.uploaded_bytes * 100ULL) /
+                               cold_->status.total_size);
 }
 
 bool ResmedOtaManager::guard_device_idle_for_upgrade() {
@@ -890,7 +917,7 @@ bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
 }
 
 bool ResmedOtaManager::lock(uint32_t timeout_ms) const {
-    if (!mutex_) return true;
+    if (!mutex_) return false;
     return xSemaphoreTakeRecursive(
                mutex_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }

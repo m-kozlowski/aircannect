@@ -4,7 +4,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <mbedtls/sha256.h>
-#include <memory>
 #include <stdint.h>
 #include <string>
 
@@ -12,12 +11,12 @@
 #include "operation_outcome.h"
 #include "resmed_firmware_preparer.h"
 #include "rpc_request_port.h"
-#include "storage_stream_port.h"
 
 namespace aircannect {
 
 class As11DeviceService;
 class StoragePathPort;
+class StorageStreamPort;
 
 enum class ResmedOtaPhase {
     Idle,
@@ -53,7 +52,7 @@ struct ResmedOtaStatus {
 
 class ResmedOtaManager {
 public:
-    void begin(RpcRequestPort &rpc,
+    bool begin(RpcRequestPort &rpc,
                As11DeviceService &device,
                StorageStreamPort &stream_port,
                StoragePathPort &path_port);
@@ -96,6 +95,8 @@ private:
         Apply,
     };
 
+    struct ColdState;
+
     bool begin_protocol(size_t total_size,
                         const String &expected_sha256,
                         const String &filename);
@@ -131,13 +132,12 @@ private:
     StorageStreamPort *stream_port_ = nullptr;
     StoragePathPort *path_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
+    ColdState *cold_ = nullptr;
 
     // RPC protocol
-    ResmedOtaStatus status_;
     WaitingFor waiting_for_ = WaitingFor::None;
     OperationTicket rpc_ticket_;
     uint32_t rpc_generation_ = 0;
-    char pending_block_hex_[AC_RESMED_OTA_MAX_BLOCK_BYTES * 2 + 1] = {};
     size_t pending_block_offset_ = 0;
     size_t pending_block_bytes_ = 0;
     bool sha_started_ = false;
@@ -146,16 +146,12 @@ private:
     mbedtls_sha256_context sha_ctx_;
 
     // Prepared storage source
-    ResmedPreparedFirmware prepared_;
-    std::shared_ptr<StorageByteStream> prepared_stream_;
-    uint8_t prepared_block_[AC_RESMED_OTA_MAX_BLOCK_BYTES] = {};
     size_t prepared_block_bytes_ = 0;
     size_t prepared_block_wanted_ = 0;
     bool prepared_transfer_ = false;
     bool prepared_check_requested_ = false;
 
     // Transient source cleanup
-    char cleanup_paths_[2][AC_STORAGE_PATH_MAX] = {};
     size_t cleanup_count_ = 0;
     size_t cleanup_index_ = 0;
     OperationTicket cleanup_ticket_;

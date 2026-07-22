@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <memory>
+#include <new>
 #include <string.h>
 
 #include "background_operation_control.h"
 #include "debug_log.h"
 #include "large_byte_buffer.h"
+#include "memory_manager.h"
 #include "storage_path_port.h"
 #include "storage_stream_port.h"
 #include "storage_stream_reader.h"
@@ -48,18 +50,42 @@ const char *resmed_firmware_prepare_state_name(
     return "unknown";
 }
 
+struct ResmedFirmwarePreparer::ColdState {
+    Request request;
+    ResmedPreparedFirmware result;
+    ResmedFirmwarePrepareStatus status;
+    char device_identifier[96] = {};
+    bool result_pending = false;
+};
+
 ResmedFirmwarePreparer::~ResmedFirmwarePreparer() {
     cancel_requested_.store(true, std::memory_order_release);
-    if (mutex_ && !task_) vSemaphoreDelete(mutex_);
+    if (mutex_ && !task_) {
+        if (cold_) {
+            cold_->~ColdState();
+            Memory::free(cold_);
+            cold_ = nullptr;
+        }
+        vSemaphoreDelete(mutex_);
+    }
 }
 
 bool ResmedFirmwarePreparer::begin(StorageStreamPort &stream_port,
                                    StorageUploadPort &upload_port,
                                    StoragePathPort &path_port) {
-    if (mutex_) return true;
+    if (mutex_ && cold_) return true;
 
-    mutex_ = xSemaphoreCreateMutex();
+    if (!mutex_) mutex_ = xSemaphoreCreateMutex();
     if (!mutex_) return false;
+
+    void *memory = Memory::alloc_large(sizeof(ColdState), false);
+    if (!memory) {
+        Log::logf(CAT_OTA, LOG_ERROR,
+                  "[RESMED] firmware preparer state allocation failed\n");
+        return false;
+    }
+
+    cold_ = new (memory) ColdState();
 
     stream_port_ = &stream_port;
     upload_port_ = &upload_port;
@@ -70,30 +96,30 @@ bool ResmedFirmwarePreparer::begin(StorageStreamPort &stream_port,
 bool ResmedFirmwarePreparer::request(const char *path,
                                      const char *filename,
                                      bool transient_source) {
-    if (!path || !stream_port_ || !upload_port_ || !path_port_ ||
+    if (!cold_ || !path || !stream_port_ || !upload_port_ || !path_port_ ||
         !storage_user_path_valid(path) || !lock(100)) {
         return false;
     }
-    if (task_ || result_pending_ || therapy_active_.load() ||
+    if (task_ || cold_->result_pending || therapy_active_.load() ||
         ota_install_active_.load()) {
         unlock();
         return false;
     }
 
-    request_ = {};
-    copy_cstr(request_.path, sizeof(request_.path), path);
-    copy_cstr(request_.filename, sizeof(request_.filename),
+    cold_->request = {};
+    copy_cstr(cold_->request.path, sizeof(cold_->request.path), path);
+    copy_cstr(cold_->request.filename, sizeof(cold_->request.filename),
               filename && filename[0] ? filename : path_filename(path));
-    copy_cstr(request_.device_identifier,
-              sizeof(request_.device_identifier), device_identifier_);
-    request_.transient_source = transient_source;
+    copy_cstr(cold_->request.device_identifier,
+              sizeof(cold_->request.device_identifier), cold_->device_identifier);
+    cold_->request.transient_source = transient_source;
 
-    result_ = {};
-    status_ = {};
-    status_.state = ResmedFirmwarePrepareState::Queued;
-    copy_cstr(status_.source_path, sizeof(status_.source_path), path);
-    copy_cstr(status_.filename, sizeof(status_.filename),
-              request_.filename);
+    cold_->result = {};
+    cold_->status = {};
+    cold_->status.state = ResmedFirmwarePrepareState::Queued;
+    copy_cstr(cold_->status.source_path, sizeof(cold_->status.source_path), path);
+    copy_cstr(cold_->status.filename, sizeof(cold_->status.filename),
+              cold_->request.filename);
     cancel_requested_.store(false, std::memory_order_release);
 
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -102,8 +128,8 @@ bool ResmedFirmwarePreparer::request(const char *path,
         AC_RESMED_PREPARE_TASK_CORE);
     if (created != pdPASS) {
         task_ = nullptr;
-        status_.state = ResmedFirmwarePrepareState::Error;
-        copy_cstr(status_.error, sizeof(status_.error),
+        cold_->status.state = ResmedFirmwarePrepareState::Error;
+        copy_cstr(cold_->status.error, sizeof(cold_->status.error),
                   "prepare_task_alloc_failed");
         unlock();
         return false;
@@ -129,45 +155,46 @@ void ResmedFirmwarePreparer::publish_activity(
 
 void ResmedFirmwarePreparer::publish_device_identifier(
     const char *identifier) {
-    if (!lock(0)) return;
+    if (!cold_ || !lock(0)) return;
 
-    if (!strcmp(device_identifier_, identifier ? identifier : "")) {
+    if (!strcmp(cold_->device_identifier, identifier ? identifier : "")) {
         unlock();
         return;
     }
 
-    copy_cstr(device_identifier_, sizeof(device_identifier_), identifier);
+    copy_cstr(cold_->device_identifier, sizeof(cold_->device_identifier), identifier);
     unlock();
 }
 
 bool ResmedFirmwarePreparer::active() const {
+    if (!cold_) return false;
     if (!lock()) return true;
 
-    const bool result = task_ || result_pending_ || status_.active();
+    const bool result = task_ || cold_->result_pending || cold_->status.active();
     unlock();
     return result;
 }
 
 ResmedFirmwarePrepareStatus ResmedFirmwarePreparer::status() const {
-    if (!lock()) return {};
+    if (!cold_ || !lock()) return {};
 
-    const ResmedFirmwarePrepareStatus result = status_;
+    const ResmedFirmwarePrepareStatus result = cold_->status;
     unlock();
     return result;
 }
 
 bool ResmedFirmwarePreparer::take_result(ResmedPreparedFirmware &result,
                                          bool &cancelled) {
-    if (!lock()) return false;
-    if (!result_pending_) {
+    if (!cold_ || !lock()) return false;
+    if (!cold_->result_pending) {
         unlock();
         return false;
     }
 
-    result = result_;
+    result = cold_->result;
     cancelled = cancel_requested_.load(std::memory_order_acquire);
-    result_ = {};
-    result_pending_ = false;
+    cold_->result = {};
+    cold_->result_pending = false;
     unlock();
     return true;
 }
@@ -192,7 +219,7 @@ void ResmedFirmwarePreparer::run() {
                     "prepare_lock_failed", nullptr);
         return;
     }
-    request = request_;
+    request = cold_->request;
     unlock();
 
     char error[AC_STORAGE_ERROR_MAX] = {};
@@ -546,17 +573,17 @@ void ResmedFirmwarePreparer::publish_state(
     uint64_t processed_bytes,
     const char *target,
     const char *error) {
-    if (!lock()) return;
+    if (!cold_ || !lock()) return;
 
-    status_.state = state;
-    status_.total_bytes = total_bytes;
-    status_.processed_bytes = processed_bytes;
-    status_.progress_percent = total_bytes == 0
+    cold_->status.state = state;
+    cold_->status.total_bytes = total_bytes;
+    cold_->status.processed_bytes = processed_bytes;
+    cold_->status.progress_percent = total_bytes == 0
         ? 0
         : static_cast<uint8_t>(std::min<uint64_t>(
               100, (processed_bytes * 100) / total_bytes));
-    if (target) copy_cstr(status_.target, sizeof(status_.target), target);
-    copy_cstr(status_.error, sizeof(status_.error), error);
+    if (target) copy_cstr(cold_->status.target, sizeof(cold_->status.target), target);
+    copy_cstr(cold_->status.error, sizeof(cold_->status.error), error);
     unlock();
 }
 
@@ -564,17 +591,17 @@ void ResmedFirmwarePreparer::finish_task(
     ResmedFirmwarePrepareState state,
     const char *error,
     const ResmedPreparedFirmware *result) {
-    if (!lock(100)) return;
+    if (!cold_ || !lock(100)) return;
 
-    status_.state = state;
-    copy_cstr(status_.error, sizeof(status_.error), error);
+    cold_->status.state = state;
+    copy_cstr(cold_->status.error, sizeof(cold_->status.error), error);
     if (result) {
-        result_ = *result;
-        result_pending_ = true;
-        status_.total_bytes = result->image.prepared_size;
-        status_.processed_bytes = result->image.prepared_size;
-        status_.progress_percent = 100;
-        copy_cstr(status_.target, sizeof(status_.target),
+        cold_->result = *result;
+        cold_->result_pending = true;
+        cold_->status.total_bytes = result->image.prepared_size;
+        cold_->status.processed_bytes = result->image.prepared_size;
+        cold_->status.progress_percent = 100;
+        copy_cstr(cold_->status.target, sizeof(cold_->status.target),
                   result->image.target);
     }
     task_ = nullptr;
