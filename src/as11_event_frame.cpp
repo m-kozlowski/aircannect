@@ -21,13 +21,10 @@ As11EventRecordKind as11_event_record_kind_from_name(
     return As11EventRecordKind::Named;
 }
 
-bool as11_event_record_is_value_change(const As11EventRecord &record) {
-    return record.kind == As11EventRecordKind::ValueChange;
-}
-
 bool as11_event_record_value_change(const As11EventRecord &record,
                                     int32_t &value) {
-    if (!as11_event_record_is_value_change(record) || !record.has_value) {
+    if (record.kind != As11EventRecordKind::ValueChange ||
+        !record.has_value) {
         return false;
     }
     value = record.value;

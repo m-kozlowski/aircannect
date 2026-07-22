@@ -38,7 +38,6 @@ struct ReportDailyMetrics {
     uint32_t duration_min = 0;
 };
 
-const char *report_metric_source_name(ReportMetricSource source);
 bool report_daily_metrics_any(const ReportDailyMetrics &metrics);
 bool report_daily_metrics_from_summary(const ReportSummaryRecord &record,
                                        ReportDailyMetrics &out);

@@ -58,7 +58,6 @@ public:
     bool started() const { return line_server_started(); }
     uint16_t port() const { return line_server_port(); }
     const TcpBridgeStats &stats() const { return stats_; }
-    const LineProtocolIoStats &io_stats() const { return line_io_stats(); }
     size_t client_statuses(TcpBridgeClientStatus *out, size_t max);
 
 private:

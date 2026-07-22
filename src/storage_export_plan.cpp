@@ -125,15 +125,6 @@ bool storage_export_datalog_day_allowed_at(const char *name,
     return dir_days >= today_days - static_cast<int64_t>(cutoff_days);
 }
 
-bool storage_export_datalog_day_allowed(const char *name,
-                                        uint32_t cutoff_days) {
-    const time_t now = time(nullptr);
-    const uint64_t now_epoch = now > 0 ? static_cast<uint64_t>(now) : 0;
-    return storage_export_datalog_day_allowed_at(name,
-                                                 now_epoch,
-                                                 cutoff_days);
-}
-
 bool storage_export_path_starts_with(const char *path, const char *prefix) {
     if (!path || !prefix) return false;
     const size_t len = strlen(prefix);

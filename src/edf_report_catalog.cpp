@@ -114,21 +114,6 @@ bool copy_signal_descriptor(const EdfSignalHeader &src,
     return edf_parse_signal_scale(src, dst.scale);
 }
 
-bool session_mapping_available(const EdfReportSessionDescriptor &session,
-                               const EdfReportSignalMappingDef &mapping,
-                               uint32_t bit) {
-    if (bit == 0) return false;
-    const size_t slot = edf_report_session_file_slot(mapping.kind);
-    if (slot >= AC_EDF_REPORT_SESSION_FILE_MAX) return false;
-    const uint32_t file_mask = edf_report_file_kind_mask(mapping.kind);
-    if ((session.file_mask & file_mask) == 0) return false;
-    const EdfReportSessionFileDescriptor &file = session.files[slot];
-    if (file.kind != mapping.kind || !file.path[0]) return false;
-    const uint32_t signal_mask = mapping.primary ? session.primary_signal_mask
-                                                 : session.fallback_signal_mask;
-    return (signal_mask & bit) != 0;
-}
-
 }  // namespace
 
 bool edf_report_file_kind_supported(EdfInventoryFileKind kind) {
@@ -220,18 +205,6 @@ EdfReportFileStatus edf_report_describe_file(
     return out.status;
 }
 
-const EdfReportSignalDescriptor *edf_report_find_signal(
-    const EdfReportFileDescriptor &file,
-    const char *label) {
-    if (!label || !label[0]) return nullptr;
-    for (uint32_t i = 0; i < file.signal_count; ++i) {
-        if (strcmp(file.signals[i].label, label) == 0) {
-            return &file.signals[i];
-        }
-    }
-    return nullptr;
-}
-
 const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
     size_t &count) {
     count = sizeof(REPORT_SIGNAL_MAP) / sizeof(REPORT_SIGNAL_MAP[0]);
@@ -259,28 +232,6 @@ bool edf_report_signal_mapping(EdfInventoryFileKind kind,
         return true;
     }
     return false;
-}
-
-const EdfReportSignalMappingDef *edf_report_session_select_signal_mapping(
-    const EdfReportSessionDescriptor &session,
-    ReportSignalId signal) {
-    size_t count = 0;
-    const EdfReportSignalMappingDef *mappings =
-        edf_report_signal_mapping_defs(count);
-    const uint32_t bit = report_signal_bit(signal);
-    for (size_t pass = 0; pass < 2; ++pass) {
-        const bool want_primary = pass == 0;
-        for (size_t i = 0; i < count; ++i) {
-            const EdfReportSignalMappingDef &mapping = mappings[i];
-            if (mapping.signal != signal || mapping.primary != want_primary) {
-                continue;
-            }
-            if (session_mapping_available(session, mapping, bit)) {
-                return &mapping;
-            }
-        }
-    }
-    return nullptr;
 }
 
 bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
@@ -424,21 +375,6 @@ bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
         }
     }
     return true;
-}
-
-bool edf_report_session_has_primary_signal(
-    const EdfReportSessionDescriptor &session,
-    ReportSignalId signal) {
-    const uint32_t bit = report_signal_bit(signal);
-    return bit != 0 && (session.primary_signal_mask & bit) != 0;
-}
-
-bool edf_report_session_has_signal(const EdfReportSessionDescriptor &session,
-                                   ReportSignalId signal) {
-    const uint32_t bit = report_signal_bit(signal);
-    if (bit == 0) return false;
-    return ((session.primary_signal_mask | session.fallback_signal_mask) &
-            bit) != 0;
 }
 
 }  // namespace aircannect

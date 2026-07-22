@@ -33,7 +33,6 @@ struct As11EventFrame {
 
 bool as11_event_data_id_is_activity(const std::string &data_id);
 As11EventRecordKind as11_event_record_kind_from_name(const std::string &name);
-bool as11_event_record_is_value_change(const As11EventRecord &record);
 bool as11_event_record_value_change(const As11EventRecord &record,
                                     int32_t &value);
 

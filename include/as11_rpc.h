@@ -36,15 +36,8 @@ std::string build_stream_params(const std::string &ids_csv,
 
 // Lightweight response inspection
 bool inspect_rpc_envelope(const char *json, size_t len, RpcEnvelope &envelope);
-bool inspect_rpc_envelope(const std::string &json, RpcEnvelope &envelope);
-RpcPayloadKind classify_rpc_payload(const char *json, size_t len);
-RpcPayloadKind classify_rpc_payload(const std::string &json);
-bool json_has_id(const char *json, size_t len, uint32_t id);
-bool json_has_id(const std::string &json, uint32_t id);
 bool json_extract_id(const char *json, size_t len, uint32_t &id);
 bool json_extract_id(const std::string &json, uint32_t &id);
-bool json_method_is(const char *json, size_t len, const char *method);
-bool json_method_is(const std::string &json, const char *method);
 bool json_extract_uint_member(const char *json,
                               size_t len,
                               const char *member,
@@ -52,13 +45,6 @@ bool json_extract_uint_member(const char *json,
 bool json_extract_uint_member(const std::string &json,
                               const char *member,
                               uint32_t &value);
-bool json_extract_string_member(const char *json,
-                                size_t len,
-                                const char *member,
-                                std::string &value);
-bool json_extract_string_member(const std::string &json,
-                                const char *member,
-                                std::string &value);
 bool json_member_present(const char *json, size_t len, const char *member);
 bool json_member_present(const std::string &json, const char *member);
 

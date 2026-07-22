@@ -450,23 +450,4 @@ bool edf_decode_signal_digital_sample(const EdfSignalHeader &signal,
     return true;
 }
 
-bool edf_decode_signal_physical_sample(const EdfSignalHeader &signal,
-                                       const EdfSignalScale &scale,
-                                       const uint8_t *record,
-                                       size_t record_size,
-                                       uint32_t sample_index,
-                                       float &out) {
-    out = 0.0f;
-    int16_t digital = 0;
-    if (!edf_decode_signal_digital_sample(signal,
-                                          record,
-                                          record_size,
-                                          sample_index,
-                                          digital)) {
-        return false;
-    }
-    out = edf_scale_digital_sample(scale, digital);
-    return true;
-}
-
 }  // namespace aircannect

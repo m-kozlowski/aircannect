@@ -30,17 +30,6 @@ bool summary_scaled_value(const ReportSummaryRecord &record,
 
 }  // namespace
 
-const char *report_metric_source_name(ReportMetricSource source) {
-    switch (source) {
-        case ReportMetricSource::StrEdf: return "str_edf";
-        case ReportMetricSource::Summary: return "summary";
-        case ReportMetricSource::Calculated: return "calculated";
-        case ReportMetricSource::None:
-        default:
-            return "none";
-    }
-}
-
 bool report_daily_metrics_any(const ReportDailyMetrics &metrics) {
     return metrics.has_ahi ||
            metrics.has_oa_index ||

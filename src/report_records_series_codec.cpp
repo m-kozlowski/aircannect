@@ -41,11 +41,10 @@ bool valid_missing_bitmap(uint32_t sample_count, size_t bitmap_bytes) {
 
 bool series_v2_size(uint32_t sample_count,
                     size_t missing_bitmap_bytes,
-                    size_t value_bytes_per_sample,
                     size_t &out) {
     size_t values = 0;
     if (!checked_mul_size(static_cast<size_t>(sample_count),
-                          value_bytes_per_sample,
+                          sizeof(int32_t),
                           values)) {
         return false;
     }
@@ -77,7 +76,9 @@ bool parse_series_v2_header(const uint8_t *data,
     view.missing_bitmap_bytes = get_le32(data + 16);
     const uint32_t value_encoding = get_le32(data + 20);
 
-    if (value_encoding != SERIES_V2_VALUE_INT32_MILLI ||
+    if (view.mode != SERIES_V2_MODE_UNIFORM ||
+        value_encoding != SERIES_V2_VALUE_INT32_MILLI ||
+        view.interval_ms == 0 ||
         view.sample_count == 0 || view.sample_count != record_count ||
         !valid_missing_bitmap(view.sample_count,
                               view.missing_bitmap_bytes)) {
@@ -97,11 +98,10 @@ bool parse_series_v2_header(const uint8_t *data,
 }
 
 bool put_series_v2_header(ReportSpoolBuffer &out,
-                          uint32_t mode,
                           uint32_t interval_ms,
                           uint32_t sample_count,
                           size_t missing_bitmap_bytes) {
-    if (sample_count == 0 ||
+    if (interval_ms == 0 || sample_count == 0 ||
         missing_bitmap_bytes > UINT32_MAX ||
         !valid_missing_bitmap(sample_count, missing_bitmap_bytes)) {
         return false;
@@ -112,7 +112,7 @@ bool put_series_v2_header(ReportSpoolBuffer &out,
     if (!dst) return false;
 
     put_le32(dst + 0, SERIES_V2_MAGIC);
-    put_le32(dst + 4, mode);
+    put_le32(dst + 4, SERIES_V2_MODE_UNIFORM);
     put_le32(dst + 8, interval_ms);
     put_le32(dst + 12, sample_count);
     put_le32(dst + 16, static_cast<uint32_t>(missing_bitmap_bytes));

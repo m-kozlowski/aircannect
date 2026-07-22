@@ -1027,11 +1027,6 @@ bool As11SettingsState::set_profile_value(int mode,
     return false;
 }
 
-std::string As11SettingsState::value(size_t index) const {
-    if (!values_ || index >= SETTINGS_COUNT) return "";
-    return values_[index].str();
-}
-
 std::string As11SettingsState::value(size_t index, int mode) const {
     if (!values_ || index >= SETTINGS_COUNT) return "";
     if (mode >= 0 && mode < static_cast<int>(MaxModes)) {
@@ -1050,11 +1045,6 @@ std::string As11SettingsState::value(size_t index, int mode) const {
 std::string As11SettingsState::pending_value(size_t index) const {
     if (!pending_values_ || index >= SETTINGS_COUNT) return "";
     return pending_values_[index].str();
-}
-
-bool As11SettingsState::feature_present(size_t index) const {
-    if (!feature_present_ || index >= SETTINGS_COUNT) return false;
-    return feature_present_[index];
 }
 
 bool As11SettingsState::setting_visible(size_t index, int mode) const {

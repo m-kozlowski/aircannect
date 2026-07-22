@@ -23,64 +23,6 @@ int32_t physical_to_milli(float value) {
 }  // namespace
 
 EdfReportSeriesStatus edf_report_series_decoder_init(
-    const EdfReportFileDescriptor &file,
-    const uint8_t *header,
-    size_t header_size,
-    ReportSignalId signal,
-    bool require_primary,
-    EdfReportSeriesDecoder &out) {
-    out = {};
-    if (file.status != EdfReportFileStatus::Ok || !header ||
-        header_size < file.inventory.header.header_size ||
-        file.record_duration_ms == 0 || file.inventory.header.record_size == 0) {
-        return EdfReportSeriesStatus::InvalidArgument;
-    }
-
-    uint32_t signal_index = 0;
-    EdfReportSignalMapping mapping;
-    if (!edf_report_file_find_signal_mapping(file,
-                                             signal,
-                                             require_primary,
-                                             signal_index,
-                                             mapping)) {
-        return EdfReportSeriesStatus::SignalNotFound;
-    }
-
-    EdfSignalHeader signal_header;
-    if (!edf_parse_signal_header(header,
-                                 header_size,
-                                 signal_index,
-                                 signal_header)) {
-        return EdfReportSeriesStatus::SignalNotMapped;
-    }
-
-    EdfSignalScale signal_scale;
-    if (!edf_parse_signal_scale(signal_header, signal_scale)) {
-        return EdfReportSeriesStatus::ScaleError;
-    }
-
-    EdfReportSignalLayout layout;
-    layout.scale = signal_scale;
-    layout.samples_per_record = signal_header.samples_per_record;
-    layout.byte_offset_in_record = signal_header.byte_offset_in_record;
-    layout.sample_interval_ms = mapping.sample_interval_ms;
-    layout.signal = mapping.signal;
-    layout.source = mapping.source;
-    layout.primary = mapping.primary;
-
-    const EdfReportSeriesStatus status = edf_report_series_decoder_init(
-        layout,
-        file.header_start_ms,
-        file.record_duration_ms,
-        file.inventory.header.record_size,
-        file.inventory.complete_records_from_size,
-        out);
-    if (status != EdfReportSeriesStatus::Ok) return status;
-    out.signal_index = signal_index;
-    return EdfReportSeriesStatus::Ok;
-}
-
-EdfReportSeriesStatus edf_report_series_decoder_init(
     const EdfReportSignalLayout &layout,
     int64_t header_start_ms,
     uint32_t record_duration_ms,

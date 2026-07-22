@@ -11,11 +11,6 @@
 
 namespace aircannect {
 
-struct LineProtocolIoStats {
-    uint32_t bytes_out = 0;
-    uint32_t write_errors = 0;
-};
-
 struct LineOutputPumpResult {
     bool fatal_error = false;
     bool completed = false;
@@ -33,11 +28,8 @@ protected:
                                   const uint8_t *data,
                                   size_t len,
                                   bool &fatal_error);
-    void note_line_bytes_out(size_t bytes) { io_stats_.bytes_out += bytes; }
-
     bool line_server_started() const { return started_; }
     uint16_t line_server_port() const { return port_; }
-    const LineProtocolIoStats &line_io_stats() const { return io_stats_; }
 
     template <size_t QueueDepth>
     LineOutputPumpResult pump_line_output(WiFiClient &client,
@@ -76,7 +68,6 @@ protected:
         if (result.fatal_error || result.written == 0) return result;
 
         pos += result.written;
-        io_stats_.bytes_out += result.written;
         if (pos >= current.length()) {
             current = "";
             pos = 0;
@@ -89,7 +80,6 @@ private:
     WiFiServer *server_ = nullptr;
     bool started_ = false;
     uint16_t port_ = 0;
-    LineProtocolIoStats io_stats_ = {};
 };
 
 }  // namespace aircannect

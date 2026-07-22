@@ -107,9 +107,6 @@ public:
                                  uint32_t expected_crc32 = 0);
     void discard_reserved_section();
 
-    size_t section_count() const { return section_count_; }
-    size_t payload_bytes() const { return payload_bytes_; }
-    bool section_reserved() const { return section_reserved_; }
     std::shared_ptr<const LargeByteBuffer> finish();
 
 private:

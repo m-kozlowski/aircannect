@@ -13,7 +13,6 @@ static constexpr size_t SERIES_V2_HEADER_SIZE = 24;
 static constexpr size_t EVENT_RECORD_WIRE_SIZE = 16;
 static constexpr uint32_t SERIES_V2_MAGIC = 0x32535241u;  // "ARS2"
 static constexpr uint32_t SERIES_V2_MODE_UNIFORM = 1;
-static constexpr uint32_t SERIES_V2_MODE_EXPLICIT = 2;
 static constexpr uint32_t SERIES_V2_VALUE_INT32_MILLI = 1;
 
 using LittleEndian::get_le16;
@@ -44,14 +43,12 @@ bool bitmap_missing(const uint8_t *bitmap,
 bool valid_missing_bitmap(uint32_t sample_count, size_t bitmap_bytes);
 bool series_v2_size(uint32_t sample_count,
                     size_t missing_bitmap_bytes,
-                    size_t value_bytes_per_sample,
                     size_t &out);
 bool parse_series_v2_header(const uint8_t *data,
                             size_t len,
                             uint32_t record_count,
                             SeriesV2HeaderView &view);
 bool put_series_v2_header(ReportSpoolBuffer &out,
-                          uint32_t mode,
                           uint32_t interval_ms,
                           uint32_t sample_count,
                           size_t missing_bitmap_bytes);

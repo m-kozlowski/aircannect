@@ -38,11 +38,6 @@ bool bin_put_i64(ReportSpoolBuffer &out, int64_t value) {
            bin_put_u32(out, static_cast<uint32_t>(encoded >> 32));
 }
 
-uint16_t read_u16_le(const uint8_t *data) {
-    return static_cast<uint16_t>(data[0]) |
-           static_cast<uint16_t>(data[1]) << 8;
-}
-
 uint32_t read_u32_le(const uint8_t *data) {
     return static_cast<uint32_t>(data[0]) |
            static_cast<uint32_t>(data[1]) << 8 |

@@ -94,11 +94,4 @@ bool edf_decode_signal_digital_sample(const EdfSignalHeader &signal,
                                       size_t record_size,
                                       uint32_t sample_index,
                                       int16_t &out);
-bool edf_decode_signal_physical_sample(const EdfSignalHeader &signal,
-                                       const EdfSignalScale &scale,
-                                       const uint8_t *record,
-                                       size_t record_size,
-                                       uint32_t sample_index,
-                                       float &out);
-
 }  // namespace aircannect

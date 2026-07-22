@@ -61,41 +61,6 @@ StreamSignalId as11_stream_signal_id_from_name(const char *name) {
     return StreamSignalId::Unknown;
 }
 
-const char *as11_stream_signal_id_name(StreamSignalId id) {
-    switch (id) {
-        case StreamSignalId::PatientFlow: return "PatientFlow";
-        case StreamSignalId::MaskPressure: return "MaskPressure";
-        case StreamSignalId::MaskPressureTwoSecond:
-            return "MaskPressure-TwoSecond";
-        case StreamSignalId::InspiratoryPressure:
-            return "InspiratoryPressure";
-        case StreamSignalId::ExpiratoryPressure:
-            return "ExpiratoryPressure";
-        case StreamSignalId::InspiratoryPressureTwoSecond:
-            return "InspiratoryPressure-TwoSecond";
-        case StreamSignalId::ExpiratoryPressureTwoSecond:
-            return "ExpiratoryPressure-TwoSecond";
-        case StreamSignalId::Leak: return "Leak";
-        case StreamSignalId::RespiratoryRate:
-            return "RespiratoryRate";
-        case StreamSignalId::TidalVolume: return "TidalVolume";
-        case StreamSignalId::MinuteVentilation:
-            return "MinuteVentilation";
-        case StreamSignalId::TargetMinuteVentilation:
-            return "TargetMinuteVentilation";
-        case StreamSignalId::IeRatio: return "IeRatio";
-        case StreamSignalId::SnoreIndex: return "SnoreIndex";
-        case StreamSignalId::FlowLimitation:
-            return "FlowLimitation";
-        case StreamSignalId::InspiratoryDuration:
-            return "InspiratoryDuration";
-        case StreamSignalId::HeartRate: return "HeartRate";
-        case StreamSignalId::SpO2: return "SpO2";
-        case StreamSignalId::Unknown:
-        default: return "Unknown";
-    }
-}
-
 uint32_t as11_stream_signal_sample_interval_ms(
     const char *name,
     uint32_t fallback_interval_ms) {

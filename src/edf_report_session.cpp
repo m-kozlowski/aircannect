@@ -214,33 +214,6 @@ void edf_report_session_refresh_bounds(EdfReportSessionDescriptor &session) {
                    session.latest_header_end_ms);
 }
 
-bool edf_report_session_apply_timezone_offset(
-    EdfReportSessionDescriptor &session,
-    int32_t timezone_offset_minutes) {
-    constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
-    if (timezone_offset_minutes < -MAX_TIMEZONE_OFFSET_MINUTES ||
-        timezone_offset_minutes > MAX_TIMEZONE_OFFSET_MINUTES) {
-        return false;
-    }
-
-    const int64_t offset_ms =
-        static_cast<int64_t>(timezone_offset_minutes) * 60LL * 1000LL;
-    bool applied = false;
-    for (size_t i = 0; i < AC_EDF_REPORT_SESSION_FILE_MAX; ++i) {
-        EdfReportSessionFileDescriptor &file = session.files[i];
-        if (!valid_file_bounds(file, true)) continue;
-
-        file.header_start_ms = file.local_header_start_ms - offset_ms;
-        file.header_end_ms = file.local_header_end_ms - offset_ms;
-        applied = true;
-    }
-
-    if (!applied) return false;
-    edf_report_session_refresh_bounds(session);
-    return session.earliest_header_start_ms > 0 &&
-           session.latest_header_end_ms >= session.earliest_header_start_ms;
-}
-
 void normalize_edf_report_sessions(EdfReportSessionDescriptor *sessions,
                                    size_t &session_count) {
     if (!sessions || session_count == 0) {

@@ -60,7 +60,6 @@ public:
 
     bool recover_can(const char *reason) override;
 
-    void cancel_requests_from_source(RpcSource source, const char *reason);
     bool background_backpressure_active() const;
     void set_quiesce_mode(bool requested) override;
     RpcQuiesceStatus quiesce_status() const override;
@@ -68,7 +67,6 @@ public:
     // Status snapshots
     RpcTransportStats stats() const override { return stats_; }
     RpcTransportStatus runtime_status() const override;
-    const CanDriver &can_driver() const { return can_; }
     uint32_t transport_generation() const {
         return transport_generation_;
     }

@@ -121,10 +121,6 @@ EdfReportFileStatus edf_report_describe_file(
     int32_t timezone_offset_minutes,
     EdfReportFileDescriptor &out);
 
-const EdfReportSignalDescriptor *edf_report_find_signal(
-    const EdfReportFileDescriptor &file,
-    const char *label);
-
 const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
     size_t &count);
 const char *edf_report_signal_mapping_label(
@@ -132,9 +128,6 @@ const char *edf_report_signal_mapping_label(
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out);
-const EdfReportSignalMappingDef *edf_report_session_select_signal_mapping(
-    const EdfReportSessionDescriptor &session,
-    ReportSignalId signal);
 bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
                                          ReportSignalId signal,
                                          bool require_primary,
@@ -148,10 +141,4 @@ bool edf_report_file_signal_layouts(const EdfReportFileDescriptor &file,
 void edf_report_session_init(EdfReportSessionDescriptor &session);
 bool edf_report_session_add_file(EdfReportSessionDescriptor &session,
                                  const EdfReportFileDescriptor &file);
-bool edf_report_session_has_primary_signal(
-    const EdfReportSessionDescriptor &session,
-    ReportSignalId signal);
-bool edf_report_session_has_signal(const EdfReportSessionDescriptor &session,
-                                   ReportSignalId signal);
-
 }  // namespace aircannect

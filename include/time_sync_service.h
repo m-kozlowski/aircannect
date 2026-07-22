@@ -35,7 +35,6 @@ public:
         return app_config_ && app_config_->resmed_time_sync_enabled;
     }
     bool esp_clock_valid() const;
-    EspClockSource esp_clock_source() const { return esp_clock_source_; }
     const char *esp_clock_source_name() const;
     uint32_t timezone_revision() const { return timezone_revision_; }
     const char *last_status() const { return last_status_.c_str(); }

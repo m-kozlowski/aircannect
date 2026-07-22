@@ -118,18 +118,6 @@ void json_add_uint64_impl(Out &out, const char *key, uint64_t value, bool comma)
 }  // namespace
 
 #if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
-void append_json_escaped(String &out, const char *value) {
-    append_json_escaped_impl(out, value, value ? strlen(value) : 0);
-}
-
-void append_json_escaped(String &out, const char *value, size_t len) {
-    append_json_escaped_impl(out, value, len);
-}
-
-void append_json_float(String &out, float value) {
-    append_json_float_impl(out, value);
-}
-
 void json_add_string(String &out, const char *key, const char *value, bool comma) {
     json_add_string_impl(out, key, value, comma);
 }
@@ -142,18 +130,7 @@ void json_add_int(String &out, const char *key, long value, bool comma) {
     json_add_int_impl(out, key, value, comma);
 }
 
-void json_add_float(String &out, const char *key, float value, bool comma) {
-    json_add_float_impl(out, key, value, comma);
-}
-
-void json_add_uint64(String &out, const char *key, uint64_t value, bool comma) {
-    json_add_uint64_impl(out, key, value, comma);
-}
 #endif
-
-void append_json_escaped(LargeTextBuffer &out, const char *value) {
-    append_json_escaped_impl(out, value, value ? strlen(value) : 0);
-}
 
 void append_json_escaped(LargeTextBuffer &out, const char *value, size_t len) {
     append_json_escaped_impl(out, value, len);

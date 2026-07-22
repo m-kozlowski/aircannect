@@ -167,7 +167,6 @@ LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
     if (result.fatal_error || result.written == 0) return result;
 
     output_pos_[idx] += result.written;
-    note_line_bytes_out(result.written);
     if (output_pos_[idx] >= total_len) {
         output_current_[idx].reset();
         output_pos_[idx] = 0;

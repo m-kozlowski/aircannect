@@ -14,7 +14,6 @@ bool bin_put_i16(ReportSpoolBuffer &out, int16_t value);
 bool bin_put_i32(ReportSpoolBuffer &out, int32_t value);
 bool bin_put_i64(ReportSpoolBuffer &out, int64_t value);
 
-uint16_t read_u16_le(const uint8_t *data);
 uint32_t read_u32_le(const uint8_t *data);
 int32_t read_i32_le(const uint8_t *data);
 

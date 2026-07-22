@@ -114,24 +114,6 @@ bool visit_encoded_datagram(const std::string &payload,
         visitor, context);
 }
 
-std::vector<DatagramFrame> encode_datagram(const uint8_t *payload, size_t len) {
-    std::vector<DatagramFrame> frames;
-    frames.reserve(datagram_frame_count(len));
-    (void)visit_encoded_datagram(
-        payload, len,
-        [](void *context, const DatagramFrame &frame) {
-            static_cast<std::vector<DatagramFrame> *>(context)->push_back(frame);
-            return true;
-        },
-        &frames);
-    return frames;
-}
-
-std::vector<DatagramFrame> encode_datagram(const std::string &payload) {
-    return encode_datagram(reinterpret_cast<const uint8_t *>(payload.data()),
-                           payload.size());
-}
-
 DatagramRx::DatagramRx()
     : initial_reserve_(AC_DG_INITIAL_RESERVE_BYTES) {}
 

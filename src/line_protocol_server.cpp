@@ -47,7 +47,6 @@ size_t LineProtocolServerBase::write_line_nonblocking(WiFiClient &client,
 
     const int fd = client.fd();
     if (fd < 0) {
-        io_stats_.write_errors++;
         fatal_error = true;
         return 0;
     }
@@ -62,7 +61,6 @@ size_t LineProtocolServerBase::write_line_nonblocking(WiFiClient &client,
         if (errno == EINTR) {
             return 0;
         }
-        io_stats_.write_errors++;
         fatal_error = true;
         Log::logf(CAT_TCP, LOG_WARN,
                   "[%s %u] write readiness failed errno=%d\n",
@@ -85,7 +83,6 @@ size_t LineProtocolServerBase::write_line_nonblocking(WiFiClient &client,
         return 0;
     }
 
-    io_stats_.write_errors++;
     fatal_error = true;
     Log::logf(CAT_TCP, LOG_WARN, "[%s %u] write failed errno=%d\n",
               label, static_cast<unsigned>(idx), errno);

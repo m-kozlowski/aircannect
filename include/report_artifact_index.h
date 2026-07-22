@@ -42,7 +42,6 @@ public:
     size_t size() const { return record_count_; }
     size_t storage_bytes() const { return storage_bytes_; }
 
-    const ReportArtifactIndexRecord *record(size_t index) const;
     const ReportArtifactIndexRecord *find(SleepDayId sleep_day) const;
     const ReportRangeTileArtifact *tiles(
         const ReportArtifactIndexRecord &record,
@@ -71,9 +70,6 @@ public:
     static std::shared_ptr<const ReportArtifactIndex> build(
         const ReportArtifactIndexInput *inputs,
         size_t input_count);
-    static std::shared_ptr<const ReportArtifactIndex> replace_manifest(
-        const ReportArtifactIndex &source,
-        const ReportArtifactManifestView &manifest);
     static std::shared_ptr<const ReportArtifactIndex> merge_availability(
         const ReportArtifactIndex &source,
         const ReportArtifactAvailability &availability);

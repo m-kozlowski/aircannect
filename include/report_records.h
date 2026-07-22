@@ -47,10 +47,8 @@ struct ReportSeriesV2UniformView {
 using ReportSeriesSampleCallback =
     bool (*)(void *context, const ReportSeriesSample &sample);
 
-size_t report_series_v2_header_size();
 size_t report_series_v2_uniform_wire_size(uint32_t sample_count,
                                           size_t missing_bitmap_bytes);
-size_t report_series_v2_explicit_wire_size(uint32_t sample_count);
 size_t report_event_record_wire_size();
 
 uint8_t report_event_source_mask(const ReportEventRecord &event);
@@ -62,13 +60,6 @@ bool report_event_overlaps_window(const ReportEventRecord &event,
                                   int64_t window_end_ms,
                                   int64_t edge_tolerance_ms = 0);
 
-bool report_build_series_payload_v2_uniform(
-    ReportSpoolBuffer &out,
-    uint32_t interval_ms,
-    const int32_t *values_milli,
-    uint32_t sample_count,
-    const uint8_t *missing_bitmap = nullptr,
-    size_t missing_bitmap_bytes = 0);
 bool report_build_series_payload_v2_uniform_values_le(
     ReportSpoolBuffer &out,
     uint32_t interval_ms,
@@ -76,11 +67,6 @@ bool report_build_series_payload_v2_uniform_values_le(
     uint32_t sample_count,
     const uint8_t *missing_bitmap = nullptr,
     size_t missing_bitmap_bytes = 0);
-bool report_build_series_payload_v2_explicit(
-    ReportSpoolBuffer &out,
-    int64_t chunk_start_ms,
-    const ReportSeriesSample *samples,
-    uint32_t sample_count);
 bool report_series_payload_v2_uniform_view(
     const uint8_t *data,
     size_t len,

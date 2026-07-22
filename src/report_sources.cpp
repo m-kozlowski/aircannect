@@ -109,21 +109,14 @@ const ReportSignalDef SIGNALS[] = {
 
 }  // namespace
 
-const ReportSourceDef *report_source_defs(size_t &count) {
-    count = sizeof(SOURCES) / sizeof(SOURCES[0]);
-    return SOURCES;
-}
-
 const ReportSignalDef *report_signal_defs(size_t &count) {
     count = sizeof(SIGNALS) / sizeof(SIGNALS[0]);
     return SIGNALS;
 }
 
 const ReportSourceDef *report_source_def(ReportSourceId id) {
-    size_t count = 0;
-    const ReportSourceDef *sources = report_source_defs(count);
-    for (size_t i = 0; i < count; ++i) {
-        if (sources[i].id == id) return &sources[i];
+    for (const ReportSourceDef &source : SOURCES) {
+        if (source.id == id) return &source;
     }
     return nullptr;
 }
@@ -133,11 +126,6 @@ const ReportSignalDef *report_signal_def(ReportSignalId id) {
         if (signal.id == id) return &signal;
     }
     return nullptr;
-}
-
-const char *report_source_spool_type(ReportSourceId id) {
-    const ReportSourceDef *def = report_source_def(id);
-    return def ? def->spool_type : "";
 }
 
 const char *report_signal_store_name(ReportSignalId id) {
@@ -165,15 +153,11 @@ uint32_t report_signal_mask_all() {
 uint32_t report_signal_required_mask() {
     uint32_t mask = 0;
     for (const ReportSignalDef &signal : SIGNALS) {
-        if (report_signal_required_for_result(signal)) {
+        if ((signal.flags & REPORT_SIGNAL_REQUIRED) != 0) {
             mask |= report_signal_bit(signal.id);
         }
     }
     return mask;
-}
-
-bool report_signal_required_for_result(const ReportSignalDef &signal) {
-    return (signal.flags & REPORT_SIGNAL_REQUIRED) != 0;
 }
 
 bool report_source_is_sampled(const ReportSourceDef &source) {

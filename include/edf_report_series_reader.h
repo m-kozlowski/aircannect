@@ -41,14 +41,6 @@ using EdfReportSeriesSampleCallback =
     bool (*)(void *context, const ReportSeriesSample &sample);
 
 EdfReportSeriesStatus edf_report_series_decoder_init(
-    const EdfReportFileDescriptor &file,
-    const uint8_t *header,
-    size_t header_size,
-    ReportSignalId signal,
-    bool require_primary,
-    EdfReportSeriesDecoder &out);
-
-EdfReportSeriesStatus edf_report_series_decoder_init(
     const EdfReportSignalLayout &layout,
     int64_t header_start_ms,
     uint32_t record_duration_ms,

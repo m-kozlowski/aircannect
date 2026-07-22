@@ -121,8 +121,6 @@ public:
 
     EventBrokerStatus status() const;
     const EventBrokerStats &stats() const { return stats_; }
-    bool subscription_active() const { return subscription_active_; }
-    uint32_t subscription_id() const { return subscription_id_; }
 
 private:
     struct Consumer {

@@ -483,14 +483,6 @@ void stream_frame_reset(StreamFrameData &frame) {
     new (&frame) StreamFrameData();
 }
 
-bool stream_parse_metadata(const std::string &payload,
-                           StreamFrameMetadata &metadata,
-                           char *error,
-                           size_t error_len) {
-    return stream_parse_metadata(payload.data(), payload.size(), metadata,
-                                 error, error_len);
-}
-
 bool stream_parse_metadata(const char *payload,
                            size_t payload_len,
                            StreamFrameMetadata &metadata,
@@ -499,15 +491,6 @@ bool stream_parse_metadata(const char *payload,
     metadata = {};
     JsonCursor json(payload, payload_len, error, error_len);
     return parse_top(json, nullptr, &metadata);
-}
-
-bool stream_parse_frame(const std::string &payload,
-                        uint32_t now_ms,
-                        StreamFrameData &frame,
-                        char *error,
-                        size_t error_len) {
-    return stream_parse_frame(payload.data(), payload.size(), now_ms, frame,
-                              error, error_len);
 }
 
 bool stream_parse_frame(const char *payload,

@@ -2,7 +2,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string>
 
 #include "as11_stream_signals.h"
 #include "board.h"
@@ -101,20 +100,11 @@ private:
 };
 
 void stream_frame_reset(StreamFrameData &frame);
-bool stream_parse_metadata(const std::string &payload,
-                           StreamFrameMetadata &metadata,
-                           char *error = nullptr,
-                           size_t error_len = 0);
 bool stream_parse_metadata(const char *payload,
                            size_t payload_len,
                            StreamFrameMetadata &metadata,
                            char *error = nullptr,
                            size_t error_len = 0);
-bool stream_parse_frame(const std::string &payload,
-                        uint32_t now_ms,
-                        StreamFrameData &frame,
-                        char *error = nullptr,
-                        size_t error_len = 0);
 bool stream_parse_frame(const char *payload,
                         size_t payload_len,
                         uint32_t now_ms,

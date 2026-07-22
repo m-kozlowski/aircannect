@@ -214,31 +214,12 @@ bool json_member_present(const std::string &json, const char *member) {
     return json_member_present(json.data(), json.size(), member);
 }
 
-bool json_has_id(const char *json, size_t len, uint32_t id) {
-    uint32_t parsed = 0;
-    return json_extract_id(json, len, parsed) && parsed == id;
-}
-
-bool json_has_id(const std::string &json, uint32_t id) {
-    return json_has_id(json.data(), json.size(), id);
-}
-
 bool json_extract_id(const char *json, size_t len, uint32_t &id) {
     return json_extract_uint_member(json, len, "id", id);
 }
 
 bool json_extract_id(const std::string &json, uint32_t &id) {
     return json_extract_id(json.data(), json.size(), id);
-}
-
-bool json_method_is(const char *json, size_t len, const char *method) {
-    RpcEnvelope envelope;
-    return inspect_rpc_envelope(json, len, envelope) &&
-           envelope.method_is(method);
-}
-
-bool json_method_is(const std::string &json, const char *method) {
-    return json_method_is(json.data(), json.size(), method);
 }
 
 bool json_extract_uint_member(const char *json,
@@ -255,31 +236,6 @@ bool json_extract_uint_member(const std::string &json,
     return json_extract_uint_member(json.data(), json.size(), member, value);
 }
 
-bool json_extract_string_member(const char *json,
-                                size_t len,
-                                const char *member,
-                                std::string &value) {
-    JsonCursor cursor(json, len);
-    return seek_top_member(cursor, member) && cursor.parse_string(value);
-}
-
-bool json_extract_string_member(const std::string &json,
-                                const char *member,
-                                std::string &value) {
-    return json_extract_string_member(json.data(), json.size(), member, value);
-}
-
-RpcPayloadKind classify_rpc_payload(const char *json, size_t len) {
-    RpcEnvelope envelope;
-    return inspect_rpc_envelope(json, len, envelope)
-               ? envelope.kind
-               : RpcPayloadKind::Unknown;
-}
-
-RpcPayloadKind classify_rpc_payload(const std::string &json) {
-    return classify_rpc_payload(json.data(), json.size());
-}
-
 bool inspect_rpc_envelope(const char *json,
                           size_t len,
                           RpcEnvelope &envelope) {
@@ -287,10 +243,6 @@ bool inspect_rpc_envelope(const char *json,
     const size_t payload_len = json ? len : 0;
     JsonCursor cursor(payload, payload_len);
     return parse_rpc_envelope(cursor, envelope);
-}
-
-bool inspect_rpc_envelope(const std::string &json, RpcEnvelope &envelope) {
-    return inspect_rpc_envelope(json.data(), json.size(), envelope);
 }
 
 }  // namespace aircannect

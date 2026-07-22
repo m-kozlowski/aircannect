@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string>
-#include <vector>
 
 #include "crc32.h"
 
@@ -26,12 +25,6 @@ struct DatagramFeedResult {
     const char *payload_data = nullptr;
     size_t payload_len = 0;
     std::string error;
-
-    bool has_payload() const { return payload_data != nullptr; }
-    std::string payload_string() const {
-        return payload_data ? std::string(payload_data, payload_len)
-                            : std::string();
-    }
 };
 
 using DatagramFrameVisitor = bool (*)(void *context,
@@ -46,8 +39,6 @@ bool visit_encoded_datagram(const std::string &payload,
                             DatagramFrameVisitor visitor,
                             void *context);
 
-std::vector<DatagramFrame> encode_datagram(const uint8_t *payload, size_t len);
-std::vector<DatagramFrame> encode_datagram(const std::string &payload);
 std::string hex_bytes(const uint8_t *data, size_t len);
 
 class DatagramRx {

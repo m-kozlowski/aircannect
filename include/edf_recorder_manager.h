@@ -160,7 +160,6 @@ public:
 
     // control/status
     void set_enabled(bool enabled);
-    bool enabled() const { return status_.enabled; }
     EdfRecorderStatus status() const;
     StorageServiceStatus storage_status() const;
     const EdfStreamAssemblerStatus &assembler_status() const {

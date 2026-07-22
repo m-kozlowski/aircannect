@@ -948,11 +948,6 @@ bool ReportFallbackAcquisitionService::poll_cancellation() {
     return true;
 }
 
-bool ReportFallbackAcquisitionService::source_targeted(
-    ReportSourceId source) const {
-    return source_target(source) != nullptr;
-}
-
 const ReportFallbackAcquisitionService::SourceTarget *
 ReportFallbackAcquisitionService::source_target(
     ReportSourceId source) const {

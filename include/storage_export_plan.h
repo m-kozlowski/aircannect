@@ -43,9 +43,6 @@ bool storage_export_datalog_day_allowed_at(
     const char *name,
     uint64_t now_epoch,
     uint32_t cutoff_days = AC_STORAGE_EXPORT_DATALOG_CUTOFF_DAYS);
-bool storage_export_datalog_day_allowed(const char *name,
-                                        uint32_t cutoff_days =
-                                            AC_STORAGE_EXPORT_DATALOG_CUTOFF_DAYS);
 bool storage_export_path_starts_with(const char *path, const char *prefix);
 bool storage_export_datalog_day_from_path(const char *path,
                                           char *out,

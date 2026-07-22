@@ -31,11 +31,6 @@ struct RpcEvent {
     uint32_t id = 0;
     RpcPayloadRef payload;
 
-    const std::string &payload_text() const {
-        static const std::string empty;
-        return payload ? *payload : empty;
-    }
-
     const char *payload_c_str() const {
         return payload ? payload->c_str() : "";
     }

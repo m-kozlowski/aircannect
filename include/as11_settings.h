@@ -126,8 +126,7 @@ public:
     bool valid() const { return valid_; }
     uint32_t updated_ms() const { return updated_ms_; }
 
-    std::string value(size_t index) const;
-    std::string value(size_t index, int mode) const;
+    std::string value(size_t index, int mode = -1) const;
     bool pending(size_t index) const {
         return pending_ && index < setting_capacity_ && pending_[index];
     }
@@ -144,7 +143,6 @@ public:
 
     int mode_index() const;
     uint16_t supported_mode_mask() const { return supported_mode_mask_; }
-    bool feature_present(size_t index) const;
     bool setting_visible(size_t index, int mode) const;
 
 private:

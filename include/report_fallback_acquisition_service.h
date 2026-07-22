@@ -129,7 +129,6 @@ private:
     bool finish_publication();
     bool poll_cancellation();
 
-    bool source_targeted(ReportSourceId source) const;
     const SourceTarget *source_target(ReportSourceId source) const;
     bool signal_targeted(size_t session_index,
                          ReportSignalId signal,

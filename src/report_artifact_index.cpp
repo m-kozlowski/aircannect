@@ -148,11 +148,6 @@ bool ReportArtifactIndex::allocate(size_t record_count, size_t tile_count) {
     return true;
 }
 
-const ReportArtifactIndexRecord *ReportArtifactIndex::record(
-    size_t index) const {
-    return records_ && index < record_count_ ? records_ + index : nullptr;
-}
-
 const ReportArtifactIndexRecord *ReportArtifactIndex::find(
     SleepDayId sleep_day) const {
     if (!sleep_day.valid()) return nullptr;
@@ -279,53 +274,6 @@ std::shared_ptr<const ReportArtifactIndex> ReportArtifactIndexBuilder::build(
     }
 
     return next_tile == tile_count ? index : nullptr;
-}
-
-std::shared_ptr<const ReportArtifactIndex>
-ReportArtifactIndexBuilder::replace_manifest(
-    const ReportArtifactIndex &source,
-    const ReportArtifactManifestView &manifest) {
-    if (manifest.key.kind != ReportArtifactKind::Result ||
-        !manifest.key.valid() || manifest.result_size == 0 ||
-        manifest.result_size > UINT32_MAX || manifest.overview_size == 0 ||
-        manifest.overview_size > UINT32_MAX ||
-        manifest.tile_count > UINT16_MAX) {
-        return {};
-    }
-
-    ReportRangeTileArtifact *tiles = manifest.tile_count > 0
-        ? static_cast<ReportRangeTileArtifact *>(allocate_large(
-              manifest.tile_count * sizeof(ReportRangeTileArtifact)))
-        : nullptr;
-    if (manifest.tile_count > 0 && !tiles) return {};
-
-    bool valid = true;
-    ReportRangeTileArtifact previous_tile;
-    for (size_t i = 0; i < manifest.tile_count; ++i) {
-        if (!manifest.tile(i, tiles[i]) || !valid_tile(tiles[i]) ||
-            (i > 0 && !tile_follows(previous_tile, tiles[i]))) {
-            valid = false;
-            break;
-        }
-        previous_tile = tiles[i];
-    }
-    if (!valid) {
-        free_large(tiles);
-        return {};
-    }
-
-    ReportArtifactIndexInput input;
-    input.key = manifest.key;
-    input.result_size = manifest.result_size;
-    input.overview_size = manifest.overview_size;
-    input.result_crc32 = manifest.result_crc32;
-    input.overview_crc32 = manifest.overview_crc32;
-    input.tiles = tiles;
-    input.tile_count = manifest.tile_count;
-    std::shared_ptr<const ReportArtifactIndex> replaced =
-        replace_input(source, input);
-    free_large(tiles);
-    return replaced;
 }
 
 std::shared_ptr<const ReportArtifactIndex>

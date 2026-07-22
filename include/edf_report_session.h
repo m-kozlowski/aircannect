@@ -19,9 +19,6 @@ bool edf_session_annotation_matches_numeric(
 
 void edf_report_session_refresh_bounds(
     EdfReportSessionDescriptor &session);
-bool edf_report_session_apply_timezone_offset(
-    EdfReportSessionDescriptor &session,
-    int32_t timezone_offset_minutes);
 void normalize_edf_report_sessions(EdfReportSessionDescriptor *sessions,
                                    size_t &session_count);
 
