@@ -13,6 +13,7 @@
 #include "storage_delete_port.h"
 #include "storage_path_port.h"
 #include "storage_read_port.h"
+#include "storage_scan_port.h"
 
 namespace aircannect {
 
@@ -179,6 +180,7 @@ StorageAtomicWritePort &atomic_write_port();
 StorageBrowserPort &browser_port();
 
 // Background storage maintenance
+StorageScanPort &scan_port();
 StorageArchivePort &archive_port();
 StorageDeletePort &delete_port();
 

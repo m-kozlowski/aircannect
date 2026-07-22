@@ -27,6 +27,7 @@
 #include "storage_manager.h"
 #include "storage_path.h"
 #include "storage_path_service.h"
+#include "storage_scan_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -52,6 +53,7 @@ enum class StoredFileKind : uint8_t {
 
 enum class MaintenanceOwner : uint8_t {
     None,
+    Scan,
     Archive,
     Delete,
 };
@@ -214,6 +216,7 @@ StorageArchiveService archive_service;
 StorageDeleteService delete_service;
 StoragePathService path_service;
 StorageAtomicWriteService atomic_write_service;
+StorageScanService scan_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 bool browser_turn = true;
@@ -231,6 +234,14 @@ void release_maintenance(MaintenanceOwner owner) {
 
 bool claim_archive_maintenance() {
     return claim_maintenance(MaintenanceOwner::Archive);
+}
+
+bool claim_scan_maintenance() {
+    return claim_maintenance(MaintenanceOwner::Scan);
+}
+
+void release_scan_maintenance() {
+    release_maintenance(MaintenanceOwner::Scan);
 }
 
 void release_archive_maintenance() {
@@ -1987,6 +1998,8 @@ void task_entry(void *) {
             } else if (atomic_write_service.step(
                            StorageAtomicWriteLane::Maintenance)) {
                 did_work = true;
+            } else if (scan_service.step()) {
+                did_work = true;
             } else if (archive_service.step()) {
                 did_work = true;
             } else if (delete_service.step()) {
@@ -2096,6 +2109,9 @@ void begin() {
                                release_delete_maintenance);
     (void)path_service.begin(wake_service_task);
     (void)atomic_write_service.begin(wake_service_task);
+    (void)scan_service.begin(wake_service_task,
+                             claim_scan_maintenance,
+                             release_scan_maintenance);
 
     if (!task) {
         const BaseType_t created =
@@ -2110,6 +2126,7 @@ void begin() {
             delete_service.set_task_available(false);
             path_service.set_task_available(false);
             atomic_write_service.set_task_available(false);
+            scan_service.set_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
                       "storage worker task create failed\n");
@@ -2124,6 +2141,7 @@ void begin() {
     delete_service.set_task_available(true);
     path_service.set_task_available(true);
     atomic_write_service.set_task_available(true);
+    scan_service.set_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
               "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
@@ -2337,6 +2355,10 @@ StorageAtomicWritePort &atomic_write_port() {
     return atomic_write_service;
 }
 
+StorageScanPort &scan_port() {
+    return scan_service;
+}
+
 StorageBrowserPort &browser_port() {
     return browser_service;
 }
@@ -2370,10 +2392,12 @@ StorageFileLogStatus file_log_status() {
 void publish_activity(const ActivitySnapshot &activity) {
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
                                        !activity.ota_install_active);
-    const bool maintenance_paused =
+    const bool scan_paused =
         activity.therapy_active || activity.realtime_stream_active ||
-        activity.foreground_report_demand || activity.ota_install_active ||
-        activity.export_active;
+        activity.foreground_report_demand || activity.ota_install_active;
+    const bool maintenance_paused = scan_paused || activity.export_active;
+
+    scan_service.set_paused(scan_paused);
     archive_service.set_paused(maintenance_paused);
     delete_service.set_paused(maintenance_paused);
     wake_service_task();
