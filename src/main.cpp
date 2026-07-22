@@ -954,7 +954,7 @@ void loop() {
         esp_ota_quiesce_requested &&
             rpc_quiesce_coordinator.complete(),
         esp_ota_quiesce_requested &&
-            rpc_quiesce_coordinator.timed_out(now_ms));
+            rpc_quiesce_coordinator.timed_out());
 
     drain_can_rx_after("rpc_ota_prepare");
 
@@ -1013,7 +1013,7 @@ void loop() {
     const FirmwareInstallStatus install_status = firmware_installer.status();
     const bool esp_reboot_allowed =
         !install_status.reboot_pending ||
-        rpc_quiesce_coordinator.reboot_allowed(now_ms);
+        rpc_quiesce_coordinator.reboot_allowed();
 
     const bool arduino_ota_poll_allowed =
         as11_device_service.state().therapy_state() !=

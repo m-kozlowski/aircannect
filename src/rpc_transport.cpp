@@ -120,10 +120,12 @@ void RpcTransport::poll() {
         report_framing_error("RPC", rpc_timeout.error);
     }
 
-    DatagramFeedResult log_timeout = log_rx_.poll(now);
-    if (log_timeout.status == DatagramStatus::Error) {
-        stats_.log_framing_errors++;
-        report_framing_error("LOG", log_timeout.error);
+    if (!quiesce_mode_ && debug_log_rx_requested_) {
+        DatagramFeedResult log_timeout = log_rx_.poll(now);
+        if (log_timeout.status == DatagramStatus::Error) {
+            stats_.log_framing_errors++;
+            report_framing_error("LOG", log_timeout.error);
+        }
     }
 
     drain_can_rx();
@@ -135,6 +137,7 @@ void RpcTransport::poll() {
     // Dispatch may enqueue CAN frames after RX-driven work above. Poll again so
     // the CAN driver can start TX in the same main-loop turn.
     can_.poll();
+    poll_debug_log_rx_filter();
 }
 
 size_t RpcTransport::drain_can_rx() {
@@ -420,12 +423,22 @@ void RpcTransport::set_quiesce_mode(bool requested) {
     if (requested == quiesce_mode_) return;
 
     quiesce_mode_ = requested;
-    if (requested) cancel_all_requests("rpc_quiesce");
+    if (requested) {
+        log_rx_.reset();
+        cancel_all_requests("rpc_quiesce");
+    }
+}
+
+void RpcTransport::request_debug_log_rx(bool enabled) {
+    if (enabled == debug_log_rx_requested_) return;
+
+    debug_log_rx_requested_ = enabled;
+    log_rx_.reset();
 }
 
 bool RpcTransport::quiesce_idle() const {
     return !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
-           can_.tx_queue_depth() == 0;
+           deferred_payloads_.empty() && can_.tx_queue_depth() == 0;
 }
 
 RpcQuiesceStatus RpcTransport::quiesce_status() const {
@@ -433,9 +446,20 @@ RpcQuiesceStatus RpcTransport::quiesce_status() const {
     out.idle = quiesce_idle();
     out.pending_request = pending_.active;
     out.dispatch_retry = dispatch_retry_active_;
+    out.debug_log_rx_enabled = can_.debug_log_rx_enabled();
+    out.debug_log_filter_pending =
+        debug_log_rx_requested_ != out.debug_log_rx_enabled;
     out.request_queue_depth = requests_.count();
+    out.payload_queue_depth = deferred_payloads_.count();
     out.tx_queue_depth = can_.tx_queue_depth();
     return out;
+}
+
+void RpcTransport::poll_debug_log_rx_filter() {
+    if (can_.debug_log_rx_enabled() == debug_log_rx_requested_) return;
+    if (!can_.set_debug_log_rx_enabled(debug_log_rx_requested_)) return;
+
+    log_rx_.reset();
 }
 
 bool RpcTransport::background_backoff_active(uint32_t now) const {
@@ -900,6 +924,8 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
     }
 
     if (frame.id == AC_CAN_LOG_ID) {
+        if (quiesce_mode_ || !debug_log_rx_requested_) return;
+
         DatagramFeedResult result = log_rx_.feed(frame.data, frame.len, now);
         if (result.status == DatagramStatus::Complete) {
             enqueue_deferred_payload(DeferredPayload::Kind::DebugLog,

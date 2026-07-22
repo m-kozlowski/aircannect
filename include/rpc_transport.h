@@ -62,6 +62,7 @@ public:
 
     bool background_backpressure_active() const;
     void set_quiesce_mode(bool requested) override;
+    void request_debug_log_rx(bool enabled) override;
     RpcQuiesceStatus quiesce_status() const override;
 
     // Status snapshots
@@ -179,6 +180,7 @@ private:
     void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_quiesce(const QueuedRequest &request) const;
     bool quiesce_idle() const;
+    void poll_debug_log_rx_filter();
 
     void dispatch_next_request();
     void check_pending_timeout();
@@ -241,6 +243,7 @@ private:
     // Backpressure and transport admission
     bool raw_rpc_forwarding_enabled_ = false;
     bool quiesce_mode_ = false;
+    bool debug_log_rx_requested_ = true;
 
     uint8_t consecutive_scheduler_timeouts_ = 0;
     uint32_t background_backoff_until_ms_ = 0;
