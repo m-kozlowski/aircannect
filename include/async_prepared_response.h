@@ -37,4 +37,34 @@ private:
     bool source_ended_ = false;
 };
 
+// Chunked response whose producer may temporarily have no bytes ready.
+// TCP polls retry the producer without the AsyncAbstractResponse credit gate.
+class AsyncPreparedChunkedResponse final : public AsyncWebServerResponse {
+public:
+    AsyncPreparedChunkedResponse(const char *content_type,
+                                 AwsResponseFiller content);
+    ~AsyncPreparedChunkedResponse() override;
+
+    bool _sourceValid() const override;
+    void _respond(AsyncWebServerRequest *request) override;
+    size_t _ack(AsyncWebServerRequest *request,
+                size_t len,
+                uint32_t time) override;
+
+private:
+    bool fill_chunk();
+    void fail(AsyncWebServerRequest *request);
+
+    AwsResponseFiller content_;
+    String assembled_headers_;
+    size_t written_headers_length_ = 0;
+
+    uint8_t *buffer_ = nullptr;
+    size_t buffer_capacity_ = 0;
+    size_t buffer_offset_ = 0;
+    size_t buffer_length_ = 0;
+    bool final_chunk_ = false;
+    bool source_failed_ = false;
+};
+
 }  // namespace aircannect

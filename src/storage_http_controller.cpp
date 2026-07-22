@@ -649,11 +649,12 @@ void StorageHttpController::send_file_log_tail(AsyncWebServerRequest *request,
     ref->port = storage_read_;
     ref->ticket = submission.ticket;
 
-    AsyncWebServerResponse *response = request->beginChunkedResponse(
-        "text/plain",
-        [ref](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
-            return ref->fill(buffer, capacity, offset);
-        });
+    AsyncWebServerResponse *response =
+        new (std::nothrow) AsyncPreparedChunkedResponse(
+            "text/plain",
+            [ref](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
+                return ref->fill(buffer, capacity, offset);
+            });
     if (!response) {
         request->send(503, "text/plain", "response alloc\n");
         return;
