@@ -505,26 +505,37 @@
       } catch (_) {}
     }
 
-    async function storageWaitForUpload(id, predicate) {
+    function storageUploadRetryMs(status) {
+      const requested = Number(status && status.retry_ms);
+      if (!Number.isFinite(requested) || requested <= 0) return 500;
+      return Math.min(5000, Math.max(100, requested));
+    }
+
+    async function storageWaitForUpload(id, predicate, initialStatus) {
+      let status = initialStatus || null;
       for (;;) {
         if (storageUploadCancelRequested) throw new Error("upload_cancelled");
-        let status;
+
+        if (status) {
+          if (status.state === "error" || status.state === "cancelled") {
+            throw new Error(status.error || status.state);
+          }
+          if (predicate(status)) return status;
+          await storageDelay(storageUploadRetryMs(status));
+        }
+
         try {
           status = await storageUploadStatus(id);
         } catch (error) {
+          status = null;
           if (error.status === 503 && error.message === "status_busy") {
-            await storageDelay(100);
+            await storageDelay(250);
             continue;
           }
           if (Number(error.status) > 0) throw error;
           await storageDelay(1000);
           continue;
         }
-        if (status.state === "error" || status.state === "cancelled") {
-          throw new Error(status.error || status.state);
-        }
-        if (predicate(status)) return status;
-        await storageDelay(status.state === "paused" ? 1000 : 80);
       }
     }
 
@@ -548,7 +559,7 @@
         encodeURIComponent(offset) + "&token=" +
         encodeURIComponent(session.token);
       try {
-        await storageUploadRequest(url, {
+        return await storageUploadRequest(url, {
           method: "POST",
           headers: {"Content-Type": "application/octet-stream"},
           body: chunk
@@ -559,9 +570,8 @@
               error.message)) {
           throw error;
         }
-        return false;
+        return null;
       }
-      return true;
     }
 
     async function storageUploadFile(file, directory, fileIndex, fileCount,
@@ -577,15 +587,18 @@
             file, directory, conflict, destinationName);
           storageUploadCurrentId = Number(session.id) || 0;
 
-          let status = await storageWaitForUpload(session.id, (current) =>
-            current.state === "ready" || current.state === "done");
+          let status = await storageWaitForUpload(
+            session.id,
+            (current) => current.state === "ready" ||
+              current.state === "done",
+            session);
           let committed = Number(status.committed_bytes) || 0;
           const chunkSize = Math.max(1, Number(session.chunk_size) || 262144);
           updateProgress(file.name, committed, file.size,
             fileIndex, fileCount);
 
           while (status.state !== "done") {
-            let accepted = false;
+            let accepted = null;
             try {
               accepted = await storageSendUploadChunk(session, file, committed,
                 Math.min(chunkSize, file.size - committed));
@@ -607,10 +620,12 @@
               committed = Number(status.committed_bytes) || committed;
               continue;
             }
-            status = await storageWaitForUpload(session.id, (current) =>
-              current.state === "done" ||
-              (current.state === "ready" &&
-               Number(current.committed_bytes) > committed));
+            status = await storageWaitForUpload(
+              session.id,
+              (current) => current.state === "done" ||
+                (current.state === "ready" &&
+                 Number(current.committed_bytes) > committed),
+              accepted);
             committed = Number(status.committed_bytes) || committed;
             updateProgress(file.name, committed, file.size,
               fileIndex, fileCount);

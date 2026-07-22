@@ -104,6 +104,16 @@ bool parse_uint32_arg(AsyncWebServerRequest *request,
     return true;
 }
 
+uint32_t upload_retry_ms(StorageUploadState state) {
+    switch (state) {
+        case StorageUploadState::Preparing: return 250;
+        case StorageUploadState::Writing: return 500;
+        case StorageUploadState::Paused: return 1000;
+        case StorageUploadState::Publishing: return 250;
+        default: return 0;
+    }
+}
+
 String upload_status_json(const StorageUploadStatus &status) {
     String json;
     json.reserve(384);
@@ -114,6 +124,11 @@ String upload_status_json(const StorageUploadStatus &status) {
     json_add_u64(json, "committed_bytes", status.committed_bytes);
     json_add_string(json, "path", status.path);
     json_add_string(json, "error", status.error);
+
+    const uint32_t retry_ms = upload_retry_ms(status.state);
+    if (retry_ms > 0) {
+        json_add_int(json, "retry_ms", static_cast<long>(retry_ms));
+    }
     json += '}';
     return json;
 }
@@ -269,6 +284,9 @@ void StorageUploadHttpController::send_start(
         return;
     }
 
+    const uint32_t retry_ms =
+        upload_retry_ms(StorageUploadState::Preparing);
+
     String json;
     json.reserve(256);
     json += '{';
@@ -277,6 +295,8 @@ void StorageUploadHttpController::send_start(
     json_add_string(json, "token", token);
     json_add_int(json, "chunk_size", static_cast<long>(result.chunk_size));
     json_add_u64(json, "committed_bytes", 0);
+    json_add_string(json, "state", "preparing");
+    json_add_int(json, "retry_ms", static_cast<long>(retry_ms));
     json += '}';
     request->send(202, "application/json", json);
 }
@@ -404,11 +424,16 @@ void StorageUploadHttpController::send_chunk_result(
         return;
     }
 
+    const uint32_t retry_ms =
+        upload_retry_ms(StorageUploadState::Writing);
+
     String json;
     json.reserve(96);
     json += '{';
     json_add_bool(json, "ok", true, false);
     json_add_u64(json, "committed_bytes", result.committed_bytes);
+    json_add_string(json, "state", "writing");
+    json_add_int(json, "retry_ms", static_cast<long>(retry_ms));
     json += '}';
     request->send(202, "application/json", json);
 }
