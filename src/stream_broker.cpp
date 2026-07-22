@@ -1,6 +1,8 @@
 #include "stream_broker.h"
 
+#include <ArduinoJson.h>
 #include <string.h>
+#include <utility>
 
 #include "as11_rpc.h"
 #include "data_id_csv.h"
@@ -14,6 +16,39 @@ static constexpr DataIdCsvLimits STREAM_DATA_ID_LIMITS = {
     AC_STREAM_FRAME_SIGNAL_NAME_MAX - 1,
     AC_STREAM_FRAME_SIGNAL_MAX * AC_STREAM_FRAME_SIGNAL_NAME_MAX - 1,
 };
+
+bool parse_external_stream_request(const char *payload,
+                                   size_t payload_len,
+                                   StreamCommandType &command,
+                                   std::string &params_json,
+                                   uint32_t &id,
+                                   bool &has_id) {
+    command = StreamCommandType::None;
+    params_json.clear();
+    id = 0;
+    has_id = false;
+    if (!payload || payload_len == 0) return false;
+
+    JsonDocument doc;
+    if (deserializeJson(doc, payload, payload_len)) return false;
+
+    const char *method = doc["method"] | "";
+    if (strcmp(method, "StartStream") != 0) return false;
+
+    JsonVariantConst params = doc["params"];
+    if (params.isNull()) return false;
+
+    std::string encoded;
+    serializeJson(params, encoded);
+    params_json = std::move(encoded);
+
+    JsonArrayConst data_ids = params["dataIds"].as<JsonArrayConst>();
+    command = !data_ids.isNull() && data_ids.size() == 0
+                  ? StreamCommandType::Stop
+                  : StreamCommandType::Start;
+    has_id = json_extract_id(payload, payload_len, id);
+    return true;
+}
 
 }  // namespace
 
@@ -55,6 +90,7 @@ void StreamBroker::poll(RpcRequestPort &rpc, uint32_t now_ms) {
 
 void StreamBroker::transport_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     release_command_ticket(rpc);
+    clear_external_requests();
     mark_reattach(now_ms);
 }
 
@@ -186,11 +222,11 @@ void StreamBroker::note_external_start(const std::string &params_json,
 }
 
 void StreamBroker::note_external_stop(uint32_t now_ms,
-                                      ExternalStreamStopMode mode) {
+                                      ExternalStopMode mode) {
     last_owned_activity_ms_ = now_ms;
     const bool stop_required =
         external_active_ && actual_active_ &&
-        mode == ExternalStreamStopMode::CommandRequired;
+        mode == ExternalStopMode::CommandRequired;
     external_active_ = false;
     clear_subscription(external_subscription_);
     Subscription desired;
@@ -201,6 +237,57 @@ void StreamBroker::note_external_stop(uint32_t now_ms,
         params_json_.clear();
         clear_subscription(desired_subscription_);
         actual_active_ = stop_required;
+    }
+}
+
+void StreamBroker::observe_external_request(const char *payload,
+                                             size_t payload_len,
+                                             uint32_t now_ms) {
+    StreamCommandType command = StreamCommandType::None;
+    std::string params_json;
+    uint32_t id = 0;
+    bool has_id = false;
+
+    if (!parse_external_stream_request(payload, payload_len, command,
+                                       params_json, id, has_id)) {
+        return;
+    }
+
+    external_transport_connected_ = true;
+    if (command == StreamCommandType::Start) {
+        note_external_start(params_json, now_ms);
+    } else {
+        note_external_stop(now_ms);
+    }
+
+    if (has_id) remember_external_request(id, command, now_ms);
+}
+
+void StreamBroker::observe_external_response(const char *payload,
+                                              size_t payload_len,
+                                              uint32_t now_ms) {
+    uint32_t id = 0;
+    if (!json_extract_id(payload, payload_len, id)) return;
+
+    const StreamCommandType command = match_external_response(id, now_ms);
+    if (command != StreamCommandType::Start ||
+        !json_member_present(payload, payload_len, "error")) {
+        return;
+    }
+
+    note_external_stop(now_ms);
+}
+
+void StreamBroker::set_external_transport_connected(bool connected,
+                                                     uint32_t now_ms) {
+    if (external_transport_connected_ == connected) return;
+
+    external_transport_connected_ = connected;
+    if (connected) return;
+
+    clear_external_requests();
+    if (external_active_) {
+        note_external_stop(now_ms, ExternalStopMode::CommandRequired);
     }
 }
 
@@ -524,6 +611,62 @@ void StreamBroker::release_command_ticket(RpcRequestPort &rpc) {
     (void)rpc.take_completion(command_ticket_, completion);
     command_ticket_ = {};
     command_type_ = StreamCommandType::None;
+}
+
+void StreamBroker::expire_external_requests(uint32_t now_ms) {
+    for (auto &request : external_requests_) {
+        if (!request.active) continue;
+        if (static_cast<int32_t>(now_ms - request.deadline_ms) < 0) continue;
+        request = {};
+    }
+}
+
+void StreamBroker::remember_external_request(uint32_t id,
+                                             StreamCommandType command,
+                                             uint32_t now_ms) {
+    expire_external_requests(now_ms);
+
+    ExternalRequest *slot = nullptr;
+    for (auto &request : external_requests_) {
+        if (request.active && request.id == id) {
+            slot = &request;
+            break;
+        }
+        if (!request.active && !slot) slot = &request;
+    }
+
+    if (!slot) {
+        slot = &external_requests_[0];
+        for (auto &request : external_requests_) {
+            if (static_cast<int32_t>(request.deadline_ms -
+                                     slot->deadline_ms) < 0) {
+                slot = &request;
+            }
+        }
+    }
+
+    slot->active = true;
+    slot->id = id;
+    slot->deadline_ms = now_ms + AC_RPC_RAW_PASSTHROUGH_TIMEOUT_MS;
+    slot->command = command;
+}
+
+StreamCommandType StreamBroker::match_external_response(uint32_t id,
+                                                        uint32_t now_ms) {
+    expire_external_requests(now_ms);
+
+    for (auto &request : external_requests_) {
+        if (!request.active || request.id != id) continue;
+
+        const StreamCommandType command = request.command;
+        request = {};
+        return command;
+    }
+    return StreamCommandType::None;
+}
+
+void StreamBroker::clear_external_requests() {
+    for (auto &request : external_requests_) request = {};
 }
 
 bool StreamBroker::parse_subscription(const std::string &params_json,

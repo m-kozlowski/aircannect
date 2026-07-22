@@ -47,6 +47,12 @@ void TcpBridge::broadcast_rpc_payload(const RpcPayloadRef &payload) {
     }
 }
 
+void TcpBridge::set_raw_request_observer(TcpRawRequestObserver observer,
+                                         void *context) {
+    raw_request_observer_ = observer;
+    raw_request_observer_context_ = context;
+}
+
 int TcpBridge::connected_count() {
     int count = 0;
     for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
@@ -206,6 +212,10 @@ void TcpBridge::poll_inputs(RpcArbiter &arbiter) {
                     Log::logf(CAT_TCP, LOG_WARN,
                               "[CLIENT %u] CAN queue rejected payload\n",
                               static_cast<unsigned>(i));
+                } else if (raw_request_observer_) {
+                    raw_request_observer_(raw_request_observer_context_,
+                                          payload.data(), payload.size(),
+                                          millis());
                 }
             } else if (c != '\r') {
                 if (lines_[i].length() < AC_TCP_LINE_MAX) {

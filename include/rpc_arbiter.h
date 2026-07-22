@@ -10,7 +10,6 @@
 #include "can_driver.h"
 #include "fixed_queue.h"
 #include "rpc_request_port.h"
-#include "stream_broker.h"
 
 namespace aircannect {
 
@@ -90,7 +89,7 @@ struct RpcRuntimeStatus {
 
 class RpcArbiter final : public RpcRequestPort {
 public:
-    RpcArbiter(CanDriver &can, StreamBroker &stream_broker);
+    explicit RpcArbiter(CanDriver &can);
 
     // Lifecycle and CAN pump
     bool reserve_reassembly_buffers();
@@ -122,7 +121,7 @@ public:
                                    RpcEventObserver observer,
                                    void *context);
 
-    void set_raw_rpc_events_enabled(bool enabled);
+    void set_raw_rpc_forwarding_enabled(bool enabled);
     void set_event_notification_observer(RpcNotificationObserver observer,
                                          void *context);
     void set_stream_notification_observer(RpcNotificationObserver observer,
@@ -175,7 +174,6 @@ private:
         uint32_t id = 0;
         uint32_t deadline_ms = 0;
         RpcSource source = RpcSource::Internal;
-        StreamCommandType stream_command = StreamCommandType::None;
     };
 
     struct DeferredPayload {
@@ -252,18 +250,10 @@ private:
     void expire_raw_passthrough(uint32_t now);
     void remember_raw_passthrough(uint32_t id,
                                   RpcSource source,
-                                  StreamCommandType stream_command,
                                   uint32_t now);
-    bool match_raw_passthrough(uint32_t id,
-                               RawPassthroughRequest &request,
-                               uint32_t now);
     bool match_raw_passthrough(uint32_t id,
                                RpcSource &source,
                                uint32_t now);
-    void note_raw_stream_request(StreamCommandType command,
-                                 const std::string &params_json);
-    void note_raw_stream_response(StreamCommandType command,
-                                  bool is_error);
 
     bool background_backoff_active(uint32_t now) const;
     bool background_rx_pressure_active(uint32_t now) const;
@@ -353,7 +343,6 @@ private:
     std::string last_boot_notification_;
 
     // Notification routing
-    StreamBroker &stream_;
     RpcNotificationObserver event_notification_observer_ = nullptr;
     void *event_notification_context_ = nullptr;
     RpcNotificationObserver stream_notification_observer_ = nullptr;
@@ -361,7 +350,7 @@ private:
     uint32_t transport_generation_ = 1;
 
     // Backpressure and transport admission
-    bool raw_rpc_events_enabled_ = false;
+    bool raw_rpc_forwarding_enabled_ = false;
     bool quiesce_mode_ = false;
 
     uint8_t consecutive_scheduler_timeouts_ = 0;

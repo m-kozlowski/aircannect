@@ -13,6 +13,11 @@
 
 namespace aircannect {
 
+using TcpRawRequestObserver = void (*)(void *context,
+                                       const char *payload,
+                                       size_t payload_len,
+                                       uint32_t now_ms);
+
 struct TcpBridgeStats {
     uint32_t accepted_clients = 0;
     uint32_t disconnected_clients = 0;
@@ -36,13 +41,18 @@ struct TcpBridgeClientStatus {
 
 class TcpBridge : private LineProtocolServerBase {
 public:
+    // Lifecycle
     bool begin(uint16_t port = AC_TCP_BRIDGE_PORT);
     bool restart(uint16_t port = AC_TCP_BRIDGE_PORT);
     void stop();
     void poll(RpcArbiter &arbiter);
 
+    // RPC transport
     void broadcast_rpc_payload(const RpcPayloadRef &payload);
+    void set_raw_request_observer(TcpRawRequestObserver observer,
+                                  void *context);
 
+    // Status
     int connected_count();
     bool raw_client_connected();
     bool started() const { return line_server_started(); }
@@ -65,6 +75,9 @@ private:
         output_queues_[AC_MAX_TCP_CLIENTS];
     RpcPayloadRef output_current_[AC_MAX_TCP_CLIENTS];
     size_t output_pos_[AC_MAX_TCP_CLIENTS] = {};
+
+    TcpRawRequestObserver raw_request_observer_ = nullptr;
+    void *raw_request_observer_context_ = nullptr;
 
     TcpBridgeStats stats_ = {};
 };

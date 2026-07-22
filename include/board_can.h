@@ -91,6 +91,7 @@ static constexpr size_t AC_STREAM_FRAME_VALUES_MAX = 256;
 
 static constexpr uint32_t AC_RPC_DEFAULT_TIMEOUT_MS = 5000;
 static constexpr uint32_t AC_RPC_STREAM_TIMEOUT_MS = 8000;
+static constexpr uint32_t AC_RPC_RAW_PASSTHROUGH_TIMEOUT_MS = 120000;
 static constexpr uint32_t AC_RESMED_OTA_BLOCK_TIMEOUT_MS = 15000;
 static constexpr uint32_t AC_RESMED_OTA_VERIFY_TIMEOUT_MS = 120000;
 static constexpr uint32_t AC_RESMED_OTA_IDLE_TIMEOUT_MS = 300000;

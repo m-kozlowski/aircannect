@@ -29,11 +29,6 @@ enum class StreamCommandType {
     Stop,
 };
 
-enum class ExternalStreamStopMode {
-    CommandSent,
-    CommandRequired,
-};
-
 struct StreamAcquireResult {
     StreamAcquireStatus status = StreamAcquireStatus::Rejected;
     StreamConsumerHandle handle = STREAM_CONSUMER_INVALID;
@@ -68,11 +63,13 @@ public:
                                const std::string &params_json);
     void release(StreamConsumerHandle handle);
 
-    void note_external_start(const std::string &params_json,
-                             uint32_t now_ms);
-    void note_external_stop(
-        uint32_t now_ms,
-        ExternalStreamStopMode mode = ExternalStreamStopMode::CommandSent);
+    void observe_external_request(const char *payload,
+                                  size_t payload_len,
+                                  uint32_t now_ms);
+    void observe_external_response(const char *payload,
+                                   size_t payload_len,
+                                   uint32_t now_ms);
+    void set_external_transport_connected(bool connected, uint32_t now_ms);
 
     bool consumer_active(StreamConsumerHandle handle) const;
     size_t consumer_count() const;
@@ -161,6 +158,11 @@ public:
     bool accepted_data_ids_cover(const char *data_ids_csv) const;
 
 private:
+    enum class ExternalStopMode {
+        CommandSent,
+        CommandRequired,
+    };
+
     struct Subscription {
         uint32_t sample_ms = 0;
         uint32_t report_ms = 0;
@@ -176,6 +178,15 @@ private:
         uint32_t queue_drops = 0;
     };
 
+    struct ExternalRequest {
+        bool active = false;
+        uint32_t id = 0;
+        uint32_t deadline_ms = 0;
+        StreamCommandType command = StreamCommandType::None;
+    };
+
+    static constexpr size_t ExternalRequestMax = 8;
+
     int find_free_slot() const;
     void clear_error();
     bool ensure_frame_pool();
@@ -183,6 +194,19 @@ private:
                           uint32_t now_ms);
     uint32_t next_request_generation();
     void release_command_ticket(RpcRequestPort &rpc);
+
+    void note_external_start(const std::string &params_json,
+                             uint32_t now_ms);
+    void note_external_stop(
+        uint32_t now_ms,
+        ExternalStopMode mode = ExternalStopMode::CommandSent);
+    void expire_external_requests(uint32_t now_ms);
+    void remember_external_request(uint32_t id,
+                                   StreamCommandType command,
+                                   uint32_t now_ms);
+    StreamCommandType match_external_response(uint32_t id,
+                                              uint32_t now_ms);
+    void clear_external_requests();
 
     static bool parse_subscription(const std::string &params_json,
                                    Subscription &subscription);
@@ -207,6 +231,7 @@ private:
 
     StreamFramePool frame_pool_;
     Consumer consumers_[AC_STREAM_CONSUMERS_MAX];
+    ExternalRequest external_requests_[ExternalRequestMax];
 
     Subscription external_subscription_;
     Subscription desired_subscription_;
@@ -240,6 +265,7 @@ private:
 
     bool actual_active_ = false;
     bool external_active_ = false;
+    bool external_transport_connected_ = false;
     bool quiesce_requested_ = false;
     bool quiesced_ = false;
     bool error_ = false;

@@ -53,7 +53,7 @@ using namespace aircannect;
 static CanDriver can_driver;
 static EventBroker event_broker;
 static StreamBroker stream_broker;
-static RpcArbiter rpc_arbiter(can_driver, stream_broker);
+static RpcArbiter rpc_arbiter(can_driver);
 static RpcQuiesceCoordinator rpc_quiesce_coordinator(
     rpc_arbiter, event_broker, stream_broker);
 static As11DeviceService as11_device_service;
@@ -159,6 +159,16 @@ static void route_stream_notification(void *context,
     StreamBroker *stream = static_cast<StreamBroker *>(context);
     if (!stream) return;
     (void)stream->publish_stream_data(payload, payload_len, now_ms);
+}
+
+static void route_tcp_raw_request(void *context,
+                                  const char *payload,
+                                  size_t payload_len,
+                                  uint32_t now_ms) {
+    StreamBroker *stream = static_cast<StreamBroker *>(context);
+    if (!stream) return;
+
+    stream->observe_external_request(payload, payload_len, now_ms);
 }
 
 static void sync_rpc_transport_generation(uint32_t now_ms) {
@@ -290,6 +300,12 @@ static void drain_rpc_events() {
         if (event.kind == RpcEventKind::BootNotification) {
             as11_device_service.device_reset(rpc_arbiter, millis());
             as11_settings_manager.device_reset(rpc_arbiter);
+        }
+
+        if (event.kind == RpcEventKind::RpcResponse &&
+            event.source == RpcSource::Tcp && event.payload) {
+            stream_broker.observe_external_response(
+                event.payload->data(), event.payload->size(), millis());
         }
 
         serial_management_console.handle_event(Serial, event);
@@ -468,6 +484,8 @@ void setup() {
                                                 &event_broker);
     rpc_arbiter.set_stream_notification_observer(route_stream_notification,
                                                  &stream_broker);
+    tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
+                                        &stream_broker);
     rpc_transport_generation_seen = rpc_arbiter.transport_generation();
 
     sink_manager.begin(stream_broker, as11_device_service.state(),
@@ -579,8 +597,10 @@ void loop() {
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
 
-    rpc_arbiter.set_raw_rpc_events_enabled(
-        tcp_bridge.raw_client_connected());
+    const bool raw_tcp_connected = tcp_bridge.raw_client_connected();
+    rpc_arbiter.set_raw_rpc_forwarding_enabled(raw_tcp_connected);
+    stream_broker.set_external_transport_connected(raw_tcp_connected,
+                                                   now_ms);
 
     rpc_arbiter.poll();
     sync_rpc_transport_generation(now_ms);

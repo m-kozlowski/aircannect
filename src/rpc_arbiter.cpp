@@ -1,6 +1,5 @@
 #include "rpc_arbiter.h"
 
-#include <ArduinoJson.h>
 #include <algorithm>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,28 +41,6 @@ bool scheduler_source(RpcSource source) {
     return source == RpcSource::Scheduler || source == RpcSource::Internal;
 }
 
-StreamCommandType raw_stream_command(const std::string &payload,
-                                     std::string &params_json) {
-    params_json.clear();
-    if (!json_method_is(payload, "StartStream")) return StreamCommandType::None;
-
-    JsonDocument doc;
-    if (deserializeJson(doc, payload.c_str())) return StreamCommandType::Start;
-
-    JsonVariant params = doc["params"];
-    if (!params.isNull()) {
-        String encoded;
-        serializeJson(params, encoded);
-        params_json = encoded.c_str();
-    }
-
-    JsonArray data_ids = params["dataIds"].as<JsonArray>();
-    if (!data_ids.isNull() && data_ids.size() == 0) {
-        return StreamCommandType::Stop;
-    }
-    return StreamCommandType::Start;
-}
-
 bool current_epoch_ms(int64_t &epoch_ms) {
     struct timeval tv = {};
     if (gettimeofday(&tv, nullptr) != 0) return false;
@@ -75,8 +52,7 @@ bool current_epoch_ms(int64_t &epoch_ms) {
 
 }  // namespace
 
-RpcArbiter::RpcArbiter(CanDriver &can, StreamBroker &stream_broker)
-    : can_(can), stream_(stream_broker) {
+RpcArbiter::RpcArbiter(CanDriver &can) : can_(can) {
     stats_started_ms_ = millis();
 }
 
@@ -202,20 +178,12 @@ bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source
                  source_name(source));
         Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
     }
-    std::string stream_params;
-    const StreamCommandType stream_command =
-        (source == RpcSource::Console || source == RpcSource::Tcp)
-            ? raw_stream_command(payload, stream_params)
-            : StreamCommandType::None;
     if (!enqueue_payload_frames(payload, source)) return false;
 
     uint32_t id = 0;
     if ((source == RpcSource::Console || source == RpcSource::Tcp) &&
         json_extract_id(payload, id)) {
-        remember_raw_passthrough(id, source, stream_command, millis());
-    }
-    if (source == RpcSource::Tcp) {
-        note_raw_stream_request(stream_command, stream_params);
+        remember_raw_passthrough(id, source, millis());
     }
     return true;
 }
@@ -412,12 +380,8 @@ bool RpcArbiter::set_source_event_observer(RpcSource source,
     return true;
 }
 
-void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
-    if (raw_rpc_events_enabled_ && !enabled) {
-        stream_.note_external_stop(millis(),
-                                   ExternalStreamStopMode::CommandRequired);
-    }
-    raw_rpc_events_enabled_ = enabled;
+void RpcArbiter::set_raw_rpc_forwarding_enabled(bool enabled) {
+    raw_rpc_forwarding_enabled_ = enabled;
 }
 
 void RpcArbiter::set_event_notification_observer(
@@ -804,7 +768,6 @@ void RpcArbiter::expire_raw_passthrough(uint32_t now) {
 
 void RpcArbiter::remember_raw_passthrough(uint32_t id,
                                           RpcSource source,
-                                          StreamCommandType stream_command,
                                           uint32_t now) {
     expire_raw_passthrough(now);
 
@@ -829,48 +792,20 @@ void RpcArbiter::remember_raw_passthrough(uint32_t id,
     slot->active = true;
     slot->id = id;
     slot->source = source;
-    slot->stream_command = stream_command;
-    slot->deadline_ms = now + AC_RESMED_OTA_VERIFY_TIMEOUT_MS;
-}
-
-bool RpcArbiter::match_raw_passthrough(uint32_t id,
-                                       RawPassthroughRequest &matched,
-                                       uint32_t now) {
-    expire_raw_passthrough(now);
-    for (auto &request : raw_passthrough_) {
-        if (!request.active || request.id != id) continue;
-        matched = request;
-        request = {};
-        return true;
-    }
-    return false;
+    slot->deadline_ms = now + AC_RPC_RAW_PASSTHROUGH_TIMEOUT_MS;
 }
 
 bool RpcArbiter::match_raw_passthrough(uint32_t id,
                                        RpcSource &source,
                                        uint32_t now) {
-    RawPassthroughRequest request;
-    if (!match_raw_passthrough(id, request, now)) return false;
-    source = request.source;
-    return true;
-}
-
-void RpcArbiter::note_raw_stream_request(StreamCommandType command,
-                                         const std::string &params_json) {
-    const uint32_t now = millis();
-    if (command == StreamCommandType::Start) {
-        stream_.note_external_start(params_json, now);
-    } else if (command == StreamCommandType::Stop) {
-        stream_.note_external_stop(now);
+    expire_raw_passthrough(now);
+    for (auto &request : raw_passthrough_) {
+        if (!request.active || request.id != id) continue;
+        source = request.source;
+        request = {};
+        return true;
     }
-}
-
-void RpcArbiter::note_raw_stream_response(StreamCommandType command,
-                                          bool is_error) {
-    if (!is_error) return;
-    if (command == StreamCommandType::Start) {
-        stream_.note_external_stop(millis());
-    }
+    return false;
 }
 
 void RpcArbiter::dispatch_next_request() {
@@ -1154,7 +1089,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                                   RpcEventKind::RpcNotification,
                                   ref_payload(), RpcSource::Report);
             }
-            if (raw_rpc_events_enabled_) {
+            if (raw_rpc_forwarding_enabled_) {
                 push_event(RpcEventKind::RpcNotification, ref_payload());
             } else if (!stream_data && !event_notification && !spool_fragment) {
                 push_event(RpcEventKind::RpcNotification, ref_payload());
@@ -1216,15 +1151,10 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                            response_source, matched_id);
                 break;
             }
-            RawPassthroughRequest passthrough_request;
+            RpcSource passthrough_source = RpcSource::Internal;
             if (has_response_id &&
-                match_raw_passthrough(response_id, passthrough_request,
+                match_raw_passthrough(response_id, passthrough_source,
                                       millis())) {
-                const RpcSource passthrough_source =
-                    passthrough_request.source;
-                note_raw_stream_response(
-                    passthrough_request.stream_command,
-                    json_member_present(owned_payload, "error"));
                 if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
                     char prefix[112];
                     snprintf(prefix, sizeof(prefix),
@@ -1265,7 +1195,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
 void RpcArbiter::handle_debug_payload(const char *payload, size_t payload_len) {
     stats_.log_datagrams++;
     Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11] ", payload, payload_len);
-    if (raw_rpc_events_enabled_) {
+    if (raw_rpc_forwarding_enabled_) {
         push_event(RpcEventKind::DebugLog,
                    make_rpc_payload_ref(
                        payload && payload_len
