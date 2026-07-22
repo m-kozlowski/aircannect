@@ -14,7 +14,7 @@
 #include "management_console.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
-#include "report_manager.h"
+#include "report_http_controller.h"
 #include "resmed_ota_manager.h"
 #include "rpc_request_port.h"
 #include "session_manager.h"
@@ -48,7 +48,6 @@ enum WebCommandKind : uint8_t {
     WebCommandSettingsUpdate,
     WebCommandTherapyAction,
     WebCommandOximetryAction,
-    WebCommandReportSummaryRefresh,
     WebCommandResmedOtaInit,
     WebCommandResmedOtaBlock,
     WebCommandResmedOtaCheck,
@@ -103,7 +102,7 @@ public:
                SessionManager &session_manager,
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
-               ReportManager &report_manager,
+               ReportHttpController &report_http,
                StorageReadPort &storage_read,
                StorageBrowserPort &storage_browser,
                StorageArchivePort &storage_archive,
@@ -130,10 +129,6 @@ private:
     void build_status_json(LargeTextBuffer &json,
                            PollCheckpoint checkpoint = nullptr) const;
     void build_oximetry_sensors_json(LargeTextBuffer &json) const;
-    void send_report_summary(AsyncWebServerRequest *request) const;
-    void send_report_chunks(AsyncWebServerRequest *request) const;
-    void send_report_plot(AsyncWebServerRequest *request) const;
-    void send_report_result(AsyncWebServerRequest *request) const;
     void send_storage_list(AsyncWebServerRequest *request) const;
     void send_storage_download(AsyncWebServerRequest *request) const;
     void send_file_log_tail(AsyncWebServerRequest *request, size_t lines);
@@ -195,7 +190,6 @@ private:
     void execute_therapy_action(const std::string &action);
     void execute_oximetry_action(const std::string &action,
                                  const std::string &body);
-    void execute_report_summary_refresh();
     void execute_resmed_ota_command(const WebCommand &command);
 
     // SSE client tracking
@@ -266,7 +260,7 @@ private:
     SessionManager *session_manager_ = nullptr;
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
-    ReportManager *report_manager_ = nullptr;
+    ReportHttpController *report_http_ = nullptr;
     StorageReadPort *storage_read_ = nullptr;
     StorageBrowserPort *storage_browser_ = nullptr;
     StorageArchivePort *storage_archive_ = nullptr;

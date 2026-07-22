@@ -185,6 +185,16 @@ size_t ReportEngine::cancel_generation(uint32_t generation) {
     return cancelled;
 }
 
+size_t ReportEngine::cancel_background() {
+    size_t cancelled = queue_.cancel_background();
+    if (phase_ != ActivePhase::Idle &&
+        active_request_.priority != ReportRequestPriority::Foreground) {
+        cancel_active_work();
+        ++cancelled;
+    }
+    return cancelled;
+}
+
 void ReportEngine::clear() {
     queue_.clear();
 

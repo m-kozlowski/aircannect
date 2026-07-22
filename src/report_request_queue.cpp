@@ -169,6 +169,20 @@ size_t ReportRequestQueue::cancel_generation(uint32_t generation) {
     return removed;
 }
 
+size_t ReportRequestQueue::cancel_background() {
+    size_t removed = 0;
+    for (size_t i = 0; i < count_;) {
+        if (slots_[i].priority == ReportRequestPriority::Foreground) {
+            ++i;
+            continue;
+        }
+
+        erase(i);
+        removed++;
+    }
+    return removed;
+}
+
 void ReportRequestQueue::clear() {
     while (count_ > 0) erase(count_ - 1);
 }

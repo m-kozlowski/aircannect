@@ -186,6 +186,63 @@ struct ReportTask::Runtime {
         unlock();
     }
 
+    void publish_activity(const ActivitySnapshot &next) {
+        if (!lock()) return;
+
+        pending_activity = next;
+        activity_pending = true;
+        unlock();
+        wake();
+    }
+
+    bool apply_pending_activity() {
+        ActivitySnapshot next;
+        if (!lock()) return false;
+        if (!activity_pending) {
+            unlock();
+            return false;
+        }
+
+        next = pending_activity;
+        activity_pending = false;
+        unlock();
+
+        const bool was_suspended = background_suspended;
+        activity = next;
+        background_suspended =
+            activity.therapy_active || activity.realtime_stream_active ||
+            activity.ota_install_active || activity.export_active;
+        if (!background_suspended || was_suspended) return true;
+
+        (void)engine.cancel_background();
+        idle_cursor = 0;
+
+        if (summary_acquisition.active()) {
+            summary_acquisition.cancel();
+        }
+
+        if (catalog_refresh.active() && refresh_generation != 0) {
+            pending_refresh.generation = refresh_generation;
+            pending_refresh.current_offset_valid = refresh_offset_valid;
+            pending_refresh.current_offset_minutes = refresh_offset_minutes;
+            pending_refresh.summary_attempted = true;
+            catalog_refresh.cancel();
+            refresh_generation = 0;
+        }
+
+        if (artifact_index_refresh.active()) {
+            artifact_index_refresh.cancel();
+            artifact_index_refresh_generation = 0;
+            artifact_index_refresh_pending = true;
+        }
+
+        if (catalog_store.active()) {
+            catalog_store.cancel();
+            store_purpose = CatalogStorePurpose::None;
+        }
+        return true;
+    }
+
     bool find_availability(const ReportArtifactKey &artifact,
                            ReportArtifactAvailability &out) {
         out = {};
@@ -328,6 +385,7 @@ struct ReportTask::Runtime {
         next.command_drops = drops;
         next.command_failures = command_failures;
         next.catalog_generation = catalog_generation;
+        next.background_suspended = background_suspended;
         next.summary_acquisition = summary_acquisition.status();
         next.catalog_refresh = catalog_refresh.status();
         next.catalog_store = catalog_store.status();
@@ -407,6 +465,14 @@ struct ReportTask::Runtime {
     uint32_t catalog_generation = 0;
     size_t idle_cursor = 0;
     uint32_t idle_generation = 0x80000000u;
+
+    ActivitySnapshot activity;
+    ActivitySnapshot pending_activity;
+    bool activity_pending = false;
+    bool background_suspended = false;
+
+    bool refresh_offset_valid = false;
+    int32_t refresh_offset_minutes = 0;
 
     bool artifact_index_loaded = false;
     bool artifact_index_refresh_pending = false;
@@ -553,6 +619,11 @@ OperationAdmission ReportTask::cancel_generation(uint32_t generation) {
     return runtime_->enqueue(command);
 }
 
+void ReportTask::publish_activity(const ActivitySnapshot &activity) {
+    if (!runtime_ || !runtime_->initialized) return;
+    runtime_->publish_activity(activity);
+}
+
 ReportTaskStatus ReportTask::status() const {
     if (!runtime_ || !runtime_->lock(20)) return {};
     const ReportTaskStatus out = runtime_->status;
@@ -588,7 +659,7 @@ std::shared_ptr<const ReportArtifactBundle> ReportTask::take_published() {
 bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (!runtime_ || !runtime_->initialized) return false;
     Runtime &runtime = *runtime_;
-    bool worked = false;
+    bool worked = runtime.apply_pending_activity();
 
     ReportTaskCommand command;
     if (runtime.pop(command)) {
@@ -692,7 +763,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (runtime.catalog_load_pending &&
+    if (!runtime.background_suspended &&
+        runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
         const OperationAdmission admitted =
@@ -774,7 +846,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (runtime.artifact_index_refresh_pending && runtime.catalog &&
+    if (!runtime.background_suspended &&
+        runtime.artifact_index_refresh_pending && runtime.catalog &&
         !runtime.artifact_index_refresh.active() &&
         runtime.artifact_index_refresh_generation == 0 &&
         deadline_due(now_ms, runtime.artifact_index_retry_at_ms)) {
@@ -835,7 +908,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
-    if (!runtime.catalog_refresh.active() &&
+    if (!runtime.background_suspended &&
+        !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
         runtime.store_purpose != CatalogStorePurpose::Load &&
@@ -855,7 +929,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.catalog_refresh.active() &&
+    if (!runtime.background_suspended &&
+        !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
         runtime.store_purpose != CatalogStorePurpose::Load &&
@@ -873,6 +948,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_refresh.generation);
         if (admitted == OperationAdmission::Accepted) {
             runtime.refresh_generation = runtime.pending_refresh.generation;
+            runtime.refresh_offset_valid =
+                runtime.pending_refresh.current_offset_valid;
+            runtime.refresh_offset_minutes =
+                runtime.pending_refresh.current_offset_minutes;
             runtime.pending_refresh.clear();
             worked = true;
         } else if (admitted == OperationAdmission::Rejected) {
@@ -882,7 +961,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.catalog_load_pending &&
+    if (!runtime.background_suspended &&
+        !runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         runtime.pending_catalog_save &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
@@ -912,7 +992,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.artifact_index_refresh.active() &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save;
-    if (catalog_stable) {
+    if (catalog_stable && !runtime.background_suspended) {
         worked = runtime.schedule_catalog_work() || worked;
     }
 

@@ -21,6 +21,8 @@ namespace aircannect {
 namespace {
 
 static constexpr size_t REPORT_HTTP_ETAG_BYTES = 112;
+static constexpr const char *REPORT_SOURCE_REVISION_HEADER =
+    "X-Report-Source-Revision";
 
 class ReportHttpStream {
 public:
@@ -207,22 +209,34 @@ bool request_etag_matches(AsyncWebServerRequest *request,
 }
 
 void add_artifact_headers(AsyncWebServerResponse *response,
-                          const char *etag) {
+                          const char *etag,
+                          SourceRevision source_revision = {}) {
     if (!response) return;
 
     response->addHeader("Cache-Control", "no-cache");
     response->addHeader("Accept-Ranges", "none");
     if (etag && etag[0]) response->addHeader("ETag", etag);
+
+    if (source_revision.valid()) {
+        char revision[17] = {};
+        snprintf(revision,
+                 sizeof(revision),
+                 "%016llx",
+                 static_cast<unsigned long long>(source_revision.value()));
+        response->addHeader(REPORT_SOURCE_REVISION_HEADER, revision);
+    }
 }
 
-void send_not_modified(AsyncWebServerRequest *request, const char *etag) {
+void send_not_modified(AsyncWebServerRequest *request,
+                       const char *etag,
+                       SourceRevision source_revision = {}) {
     AsyncWebServerResponse *response = request->beginResponse(304);
     if (!response) {
         request->send(304);
         return;
     }
 
-    add_artifact_headers(response, etag);
+    add_artifact_headers(response, etag, source_revision);
     request->send(response);
 }
 
@@ -285,8 +299,22 @@ bool send_artifact_stream(AsyncWebServerRequest *request,
 
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
     (void)format_artifact_etag(artifact, etag, sizeof(etag));
-    add_artifact_headers(response, etag);
+    add_artifact_headers(response, etag, artifact.key.source_revision);
     request->send(response);
+    return true;
+}
+
+bool report_task_available(AsyncWebServerRequest *request,
+                           const ReportTask &report_task) {
+    const ReportTaskStatus status = report_task.status();
+    if (!status.initialized) {
+        send_json_error(request, 503, "report_unavailable");
+        return false;
+    }
+    if (!status.task_started) {
+        send_preparing(request);
+        return false;
+    }
     return true;
 }
 
@@ -382,6 +410,7 @@ void ReportHttpController::send_summary(
         send_json_error(request, 503, "report_unavailable");
         return;
     }
+    if (!report_task_available(request, *report_task_)) return;
 
     const std::shared_ptr<const NightCatalog> catalog =
         report_task_->catalog_snapshot();
@@ -491,6 +520,7 @@ void ReportHttpController::send_result(
         send_json_error(request, 503, "report_unavailable");
         return;
     }
+    if (!report_task_available(request, *report_task_)) return;
 
     SleepDayId sleep_day;
     if (!parse_sleep_day(request, sleep_day)) {
@@ -534,7 +564,7 @@ void ReportHttpController::send_result(
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
     if (format_artifact_etag(artifact, etag, sizeof(etag)) &&
         request_etag_matches(request, etag)) {
-        send_not_modified(request, etag);
+        send_not_modified(request, etag, artifact.key.source_revision);
         return;
     }
 
@@ -548,6 +578,7 @@ void ReportHttpController::send_plot(
         send_json_error(request, 503, "report_unavailable");
         return;
     }
+    if (!report_task_available(request, *report_task_)) return;
 
     SleepDayId sleep_day;
     if (!parse_sleep_day(request, sleep_day)) {
@@ -610,7 +641,7 @@ void ReportHttpController::send_plot(
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
     if (format_artifact_etag(artifact, etag, sizeof(etag)) &&
         request_etag_matches(request, etag)) {
-        send_not_modified(request, etag);
+        send_not_modified(request, etag, artifact.key.source_revision);
         return;
     }
 

@@ -46,7 +46,7 @@
     function pickReportNight(id) {
       reportSelectedNightId = String(id);
       closeReportCalendar();
-      loadSelectedReportNight(false, false);
+      loadSelectedReportNight();
     }
 
     function stepReportNight(delta) {
@@ -167,16 +167,8 @@
     window.addEventListener("scroll", closeReportCalendarOnViewportChange, true);
     window.addEventListener("resize", closeReportCalendarOnViewportChange);
 
-    function reportTherapyIndex(night) {
-      if (!night) return null;
-      const value = Number(night.therapy_index);
-      return Number.isInteger(value) && value >= 0 ? value : null;
-    }
-
     function reportNightLoadKey(night) {
-      if (!night) return "";
-      const start = Number(night.start || 0);
-      return String(start || night.id || "");
+      return night && night.id ? String(night.id) : "";
     }
 
     function fmtReportTime(ms) {
@@ -252,8 +244,9 @@
       reportEvents = [];
       reportBaseSeries = {};
       reportBaseEvents = [];
-      reportCurrentIndex = -1;
-      reportCurrentEtag = null;
+      reportCurrentNightId = "";
+      reportCurrentRevision = "";
+      reportCurrentPlotEtag = "";
       reportRangeCache.clear();
       reportRangeInFlightKey = "";
       reportRangeToken++;
@@ -281,31 +274,17 @@
       }
     }
 
-    function rememberReportPlotClientCache(etag) {
-      if (!etag) return;
-      lruSet(reportPlotClientCache, etag, {
-        series: reportSeries,
-        events: reportEvents,
-      }, REPORT_PLOT_CLIENT_CACHE_MAX);
-    }
-
-    function activateReportBasePlot(index, etag, series, events) {
+    function activateReportBasePlot(nightId, revision, etag, series, events) {
       reportSeries = series || {};
       reportEvents = events || [];
       reportBaseSeries = reportSeries;
       reportBaseEvents = reportEvents;
-      reportCurrentIndex = Number.isFinite(Number(index)) ? Number(index) : -1;
-      reportCurrentEtag = etag || null;
+      reportCurrentNightId = String(nightId || "");
+      reportCurrentRevision = String(revision || "");
+      reportCurrentPlotEtag = String(etag || "");
       reportRangeCache.clear();
       reportRangeInFlightKey = "";
       reportRangeToken++;
-    }
-
-    function restoreReportPlotClientCache(etag, index) {
-      const cached = etag ? lruGet(reportPlotClientCache, etag) : null;
-      if (!cached) return false;
-      activateReportBasePlot(index, etag, cached.series, cached.events);
-      return true;
     }
 
     function reportRange() {
@@ -1231,13 +1210,6 @@
       reportDrawRetryCount = 0;
       if (!reportResult ||
           (reportResult.state !== "ready" && reportResult.state !== "partial")) {
-        if (reportResult && reportResult.state === "incomplete") {
-          const note = document.createElement("div");
-          note.className = "report-chart-note";
-          note.textContent =
-            "Backfilling this night - charts will appear once cached.";
-          container.appendChild(note);
-        }
         updateReportZoomControls();
         return;
       }
@@ -1245,7 +1217,7 @@
         const pnote = document.createElement("div");
         pnote.className = "report-chart-note";
         pnote.textContent =
-          "Incomplete night - best-effort from cached data; missing sources are marked below.";
+          "Incomplete night - available data is shown; missing sources are marked below.";
         container.appendChild(pnote);
       }
       const range = reportZoom || reportRange();
@@ -1368,8 +1340,6 @@
     }
 
     function renderReportSummary() {
-      const state = reportSummary && reportSummary.state ?
-        String(reportSummary.state) : "idle";
       const nights = reportNightsNewestFirst();
       const selected = selectedReportNight();
 
@@ -1380,8 +1350,7 @@
             "<span class=\"np-dur\">" + fmtMinutes(selected.duration_min) +
             "</span>";
         } else {
-          dateBtn.textContent = state === "fetching" ? "Loading..." :
-            (nights.length ? "Select night" : "No nights");
+          dateBtn.textContent = nights.length ? "Select night" : "No nights";
         }
       }
       const selIndex = selected ?
@@ -1415,14 +1384,7 @@
         reportResult.sessions : selected ? selected.sessions : []);
       updateReportZoomControls();
 
-      if (state === "fetching") {
-        const spool = reportSummary && reportSummary.spool ? reportSummary.spool : {};
-        const text = "Fetching Summary" +
-          (spool.bytes ? " " + fmtBytes(spool.bytes) : "");
-        msg("reportMsg", text, true, true);
-      } else if (state === "error") {
-        msg("reportMsg", reportSummary.error || "Summary refresh failed", false, true);
-      } else if (nights.length) {
+      if (nights.length) {
         msg("reportMsg", "Summary loaded", true);
       } else {
         const element = document.getElementById("reportMsg");
@@ -1430,14 +1392,14 @@
       }
     }
 
-    // Conditional GET by stable night id: returns {status, etag, json}.
-    // Polls while the backend is still building (202).
+    // Conditional GET by stable night id. Poll while the backend is building.
     function isTransientReportError(text) {
       try {
         const parsed = JSON.parse(text);
         const code = parsed && parsed.error ? parsed.error : "";
-        return code === "report_cache_busy" ||
-               code === "report_queue_full";
+        return code === "report_queue_busy" ||
+               code === "artifact_stream_unavailable" ||
+               code === "response_alloc";
       } catch (error) {
         return false;
       }
@@ -1469,29 +1431,65 @@
       return options.timeoutValue === undefined ? null : options.timeoutValue;
     }
 
-    async function pollReportResult(token, nightStart) {
-      const url = "/api/report/result?night=" + encodeURIComponent(nightStart);
+    function conditionalRequestOptions(cached) {
+      const headers = {};
+      if (cached && cached.etag) headers["If-None-Match"] = cached.etag;
+      return {cache: "no-cache", headers};
+    }
+
+    function reportArtifactRevision(response) {
+      return String(
+        response.headers.get("X-Report-Source-Revision") || "").toLowerCase();
+    }
+
+    async function pollReportResult(token, nightId) {
+      const url = "/api/report/result?night=" + encodeURIComponent(nightId);
       return pollReportFetch({
         active: () => token === reportLoadToken,
         maxAttempts: REPORT_RESULT_POLL_MAX_ATTEMPTS,
         delayMs: REPORT_POLL_DELAY_MS,
-        timeoutValue: {status: 0, etag: "", json: null},
-        request: () => fetch(url),
+        timeoutValue: {status: 0, etag: "", result: null},
+        request: () => {
+          const cached = lruGet(reportResultClientCache, url);
+          return fetch(url, conditionalRequestOptions(cached));
+        },
         handle: async (resp) => {
           if (resp.status === 304) {
-            return {done: false, delayMs: 50};
+            const cached = lruGet(reportResultClientCache, url);
+            if (!cached) throw new Error("result cache revalidation failed");
+            return {done: true, value: {
+              status: 304,
+              etag: cached.etag,
+              result: cached.decoded,
+            }};
           }
           if (resp.status === 200) {
-            const etag = (resp.headers.get("ETag") || "").replace(/"/g, "");
-            const json = await resp.json();
-            return {done: true, value: {status: 200, etag: etag, json: json}};
+            const decoded = decodeReportResultBinary(await resp.arrayBuffer());
+            if (!decoded.valid) throw new Error("invalid report result");
+
+            const etag = resp.headers.get("ETag") || "";
+            const revision = reportArtifactRevision(resp);
+            if (revision && revision !== decoded.source_revision) {
+              throw new Error("report result revision mismatch");
+            }
+            lruSet(reportResultClientCache, url, {etag, decoded, revision},
+              REPORT_RESULT_CLIENT_CACHE_MAX);
+            return {done: true, value: {
+              status: 200,
+              etag,
+              result: decoded,
+            }};
           }
           if (resp.status === 202) {
             msg("reportMsg", "Preparing report...", true, true);
             return {done: false};
           }
           if (resp.status === 404) {
-            return {done: true, value: {status: 404, etag: "", json: null}};
+            return {done: true, value: {
+              status: 404,
+              etag: "",
+              result: null,
+            }};
           }
           const text = await resp.text();
           if (resp.status === 503 && isTransientReportError(text)) {
@@ -1502,180 +1500,95 @@
       });
     }
 
-    function reportPlotUrl(index, version) {
-      return "/api/report/plot?index=" + index +
-        "&v=" + encodeURIComponent(version);
+    function reportPlotUrl(nightId, from, to) {
+      let url = "/api/report/plot?night=" + encodeURIComponent(nightId);
+      if (Number.isFinite(from) && Number.isFinite(to)) {
+        url += "&from=" + encodeURIComponent(from) +
+          "&to=" + encodeURIComponent(to);
+      }
+      return url;
     }
 
-    function emptyReportPlot() {
-      return {valid: true, series: {}, events: []};
-    }
-
-    async function fetchReportPlotBuffer(index, version) {
-      const response = await fetch(reportPlotUrl(index, version),
-        {cache: "force-cache"});
-      if (response.status === 200) {
-        return {kind: "buffer", buffer: await response.arrayBuffer()};
-      }
-      if (response.status === 304) {
-        return {kind: "not_modified"};
-      }
-      if (response.status === 202) {
-        return {kind: "retry"};
-      }
-      if (response.status === 409) {
-        let stale = null;
-        try { stale = await response.json(); } catch (error) {}
-        if (stale && stale.error === "stale_plot" && stale.etag) {
-          return {kind: "stale", etag: stale.etag};
-        }
-      }
-      if (response.status === 404) throw new Error("plot not found");
-      const text = await response.text();
-      if (response.status === 503 && isTransientReportError(text)) {
-        return {kind: "retry"};
-      }
-      throw new Error(text);
-    }
-
-    async function fetchReportRangePayload(url) {
-      const response = await fetch(url, {cache: "force-cache"});
-      if (response.status === 204) {
-        return {kind: "plot", decoded: emptyReportPlot()};
-      }
-      if (response.status === 200) {
-        const decoded = decodeReportPlotBinary(await response.arrayBuffer());
-        if (!decoded.valid) return {kind: "retry"};
-        return {kind: "plot", decoded};
-      }
-      if (response.status === 202) {
-        return {kind: "retry"};
-      }
-      if (response.status === 409) {
-        return {kind: "stale"};
-      }
-      const text = await response.text();
-      if (response.status === 503 && isTransientReportError(text)) {
-        return {kind: "retry"};
-      }
-      return {kind: "stop"};
-    }
-
-    async function fetchReportPlotReload(index, version) {
-      try {
-        const response = await fetch(reportPlotUrl(index, version) +
-          "&reload=" + Date.now(), {cache: "no-store"});
-        if (response.status !== 200) return null;
-        return response.arrayBuffer();
-      } catch (error) {
-        return null;
-      }
-    }
-
-    async function fetchReportPlot(token, index, version) {
-      // The plot is keyed by (index, version=etag); 202 means it's still building
-      // (poll), 409 means this version is stale and the backend provides the
-      // current etag to retry under a cache-correct URL.
-      if (restoreReportPlotClientCache(version, index)) {
-        return token === reportLoadToken ? version : "";
-      }
-      const fetched = await pollReportFetch({
-        active: () => token === reportLoadToken,
-        maxAttempts: REPORT_PLOT_POLL_MAX_ATTEMPTS,
-        delayMs: REPORT_POLL_DELAY_MS,
-        request: () => fetchReportPlotBuffer(index, version),
-        handle: async (result) => {
-          if (result.kind === "buffer") {
-            return {done: true, value: {version, buffer: result.buffer}};
+    async function pollReportPlot(url, active, maxAttempts, delay) {
+      return pollReportFetch({
+        active,
+        maxAttempts,
+        delayMs: delay,
+        request: () => {
+          const cached = lruGet(reportPlotClientCache, url);
+          return fetch(url, conditionalRequestOptions(cached));
+        },
+        handle: async (response) => {
+          if (response.status === 304) {
+            const cached = lruGet(reportPlotClientCache, url);
+            if (!cached) throw new Error("plot cache revalidation failed");
+            return {done: true, value: cached};
           }
-          if (result.kind === "not_modified") {
-            if (restoreReportPlotClientCache(version, index)) {
-              return {done: true, value: {version, cached: true}};
-            }
-            const reloaded = await fetchReportPlotReload(index, version);
-            if (reloaded) {
-              return {done: true, value: {version, buffer: reloaded}};
-            }
-            return {done: false, delayMs: 50};
+          if (response.status === 200) {
+            const decoded = decodeReportPlotBinary(
+              await response.arrayBuffer());
+            if (!decoded.valid) throw new Error("invalid plot response");
+
+            const entry = {
+              etag: response.headers.get("ETag") || "",
+              revision: reportArtifactRevision(response),
+              decoded,
+            };
+            lruSet(reportPlotClientCache, url, entry,
+              REPORT_PLOT_CLIENT_CACHE_MAX);
+            return {done: true, value: entry};
           }
-          if (result.kind === "stale") {
-            version = result.etag;
-            return {done: false, delayMs: 50};
+          if (response.status === 202) return {done: false};
+          if (response.status === 404) throw new Error("plot not found");
+
+          const text = await response.text();
+          if (response.status === 503 && isTransientReportError(text)) {
+            return {done: false};
           }
-          return {done: false};
+          throw new Error(text || "plot request failed");
         },
       });
-      if (token !== reportLoadToken) return false;
-      if (!fetched) throw new Error("plot not ready");
-      if (fetched.cached) return token === reportLoadToken ? fetched.version : "";
-      const decoded = decodeReportPlotBinary(fetched.buffer);
-      if (!decoded.valid) throw new Error("invalid plot response");
-      activateReportBasePlot(index, fetched.version, decoded.series, decoded.events);
-      rememberReportPlotClientCache(fetched.version);
-      return token === reportLoadToken ? fetched.version : "";
+    }
+
+    async function fetchReportPlot(token, nightId, revision) {
+      const url = reportPlotUrl(nightId);
+      const fetched = await pollReportPlot(
+        url,
+        () => token === reportLoadToken,
+        REPORT_PLOT_POLL_MAX_ATTEMPTS,
+        REPORT_POLL_DELAY_MS);
+      if (!fetched || token !== reportLoadToken) return false;
+      if (fetched.revision && fetched.revision !== revision) {
+        return "revision_changed";
+      }
+
+      activateReportBasePlot(nightId, revision, fetched.etag,
+        fetched.decoded.series, fetched.decoded.events);
+      return true;
     }
 
     function reportRangeWindow(lo, hi) {
       if (!(hi > lo)) return null;
 
-      const viewTiles = Math.max(1,
-        Math.ceil((hi - lo) / REPORT_RANGE_TILE_MS));
-      const maxTiles =
-        Math.floor(REPORT_RANGE_MAX_WINDOW_MS / REPORT_RANGE_TILE_MS);
-      let fetchTiles = viewTiles;
-      if (viewTiles <= 4) {
-        fetchTiles = Math.min(maxTiles, REPORT_RANGE_PAGE_TILES);
-      } else if (viewTiles <= 6) {
-        fetchTiles = Math.min(maxTiles, REPORT_RANGE_PAGE_TILES + 4);
-      }
-
-      if (fetchTiles <= viewTiles) {
-        const from = Math.floor(lo / REPORT_RANGE_TILE_MS) *
-          REPORT_RANGE_TILE_MS;
-        const to = Math.ceil(hi / REPORT_RANGE_TILE_MS) *
-          REPORT_RANGE_TILE_MS;
-        return to > from ? {from, to} : null;
-      }
-
-      const centerTile = Math.floor(((lo + hi) / 2) /
-        REPORT_RANGE_TILE_MS);
-      const stepTiles = Math.max(1, Math.floor(fetchTiles / 2));
-      const pageCenterTile =
-        Math.floor(centerTile / stepTiles) * stepTiles +
-        Math.floor(stepTiles / 2);
-      let fromTile = pageCenterTile - Math.floor(fetchTiles / 2);
-      let toTile = fromTile + fetchTiles;
-
-      const loTile = Math.floor(lo / REPORT_RANGE_TILE_MS);
-      const hiTile = Math.ceil(hi / REPORT_RANGE_TILE_MS);
-      if (fromTile > loTile) {
-        const shift = fromTile - loTile;
-        fromTile -= shift;
-        toTile -= shift;
-      }
-      if (toTile < hiTile) {
-        const shift = hiTile - toTile;
-        fromTile += shift;
-        toTile += shift;
-      }
-
-      const from = fromTile * REPORT_RANGE_TILE_MS;
-      const to = toTile * REPORT_RANGE_TILE_MS;
+      const from = Math.floor(lo / REPORT_RANGE_TILE_MS) *
+        REPORT_RANGE_TILE_MS;
+      const to = Math.ceil(hi / REPORT_RANGE_TILE_MS) *
+        REPORT_RANGE_TILE_MS;
       return to > from ? {from, to} : null;
     }
 
-    function reportRangeCacheKey(index, etag, from, to) {
-      return String(index) + ":" + String(etag || "") + ":" + from + ":" + to;
+    function reportRangeCacheKey(nightId, revision, from, to) {
+      return String(nightId) + ":" + String(revision) + ":" + from + ":" + to;
     }
 
     function currentReportRangeCacheKey() {
-      if (!reportZoom || reportCurrentEtag == null || reportCurrentIndex < 0) {
+      if (!reportZoom || !reportCurrentNightId || !reportCurrentRevision) {
         return "";
       }
       const w = reportRangeWindow(reportZoom.start, reportZoom.end);
       if (!w) return "";
-      return reportRangeCacheKey(reportCurrentIndex,
-        reportCurrentEtag, w.from, w.to);
+      return reportRangeCacheKey(reportCurrentNightId,
+        reportCurrentRevision, w.from, w.to);
     }
 
     function currentReportRangeReady() {
@@ -1692,24 +1605,55 @@
     }
 
     function ensureReportRangeLoaded(lo, hi) {
-      if (reportCurrentEtag == null || reportCurrentIndex < 0) return;
+      if (!reportCurrentNightId || !reportCurrentRevision) return;
       const w = reportRangeWindow(lo, hi);
       if (!w) return;
-      const key = reportRangeCacheKey(reportCurrentIndex,
-        reportCurrentEtag, w.from, w.to);
+      const key = reportRangeCacheKey(reportCurrentNightId,
+        reportCurrentRevision, w.from, w.to);
       if (activateReportRangeCache(key) || reportRangeInFlightKey === key) return;
       fetchReportRange(lo, hi);
     }
 
+    function mergeReportPlots(plots) {
+      const merged = {series: {}, events: []};
+      const eventKeys = new Set();
+
+      plots.forEach((plot) => {
+        Object.keys(plot.series || {}).forEach((name) => {
+          if (!merged.series[name]) merged.series[name] = [];
+          const target = merged.series[name];
+          (plot.series[name] || []).forEach((point) => {
+            const previous = target.length ? target[target.length - 1] : null;
+            if (point.gap && previous && previous.gap) return;
+            if (previous && !point.gap && !previous.gap &&
+                point.t === previous.t && point.value === previous.value &&
+                point.min === previous.min && point.max === previous.max) {
+              return;
+            }
+            target.push(point);
+          });
+        });
+
+        (plot.events || []).forEach((event) => {
+          const key = [event.t, event.duration, event.code, event.flags].join(":");
+          if (eventKeys.has(key)) return;
+          eventKeys.add(key);
+          merged.events.push(event);
+        });
+      });
+      merged.events.sort((a, b) => a.t - b.t || a.code - b.code);
+      return merged;
+    }
+
     async function fetchReportRange(lo, hi) {
-      if (reportCurrentEtag == null || reportCurrentIndex < 0) return;
+      if (!reportCurrentNightId || !reportCurrentRevision) return;
       const w = reportRangeWindow(lo, hi);
       if (!w) return;
-      const etag = reportCurrentEtag;
-      const index = reportCurrentIndex;
+      const nightId = reportCurrentNightId;
+      const revision = reportCurrentRevision;
       const from = w.from;
       const to = w.to;
-      const key = reportRangeCacheKey(index, etag, from, to);
+      const key = reportRangeCacheKey(nightId, revision, from, to);
       if (activateReportRangeCache(key)) {
         renderReportCharts();
         return;
@@ -1717,35 +1661,32 @@
       if (reportRangeInFlightKey === key) return;
       reportRangeInFlightKey = key;
       const token = ++reportRangeToken;
-      const url = "/api/report/plot?index=" + index +
-        "&v=" + encodeURIComponent(etag) +
-        "&from=" + encodeURIComponent(from) +
-        "&to=" + encodeURIComponent(to);
       try {
-        const decoded = await pollReportFetch({
-          active: () => token === reportRangeToken &&
-            etag === reportCurrentEtag &&
-            index === reportCurrentIndex,
-          maxAttempts: REPORT_RANGE_POLL_MAX_ATTEMPTS,
-          delayMs: REPORT_RANGE_POLL_DELAY_MS,
-          request: () => fetchReportRangePayload(url),
-          handle: async (result) => {
-            if (result.kind === "plot") {
-              return {done: true, value: result.decoded};
-            }
-            if (result.kind === "stale" || result.kind === "stop") {
-              return null;
-            }
-            return {done: false};
-          },
-        });
-        if (!decoded || token !== reportRangeToken || etag !== reportCurrentEtag ||
-            index !== reportCurrentIndex) {
-          return;
+        const plots = [];
+        for (let tileStart = from; tileStart < to;
+             tileStart += REPORT_RANGE_TILE_MS) {
+          const tileEnd = tileStart + REPORT_RANGE_TILE_MS;
+          const url = reportPlotUrl(nightId, tileStart, tileEnd);
+          const fetched = await pollReportPlot(
+            url,
+            () => token === reportRangeToken &&
+              nightId === reportCurrentNightId &&
+              revision === reportCurrentRevision,
+            REPORT_RANGE_POLL_MAX_ATTEMPTS,
+            REPORT_RANGE_POLL_DELAY_MS);
+          if (!fetched || token !== reportRangeToken ||
+              nightId !== reportCurrentNightId ||
+              revision !== reportCurrentRevision) {
+            return;
+          }
+          if (fetched.revision && fetched.revision !== revision) {
+            loadSelectedReportNight();
+            return;
+          }
+          plots.push(fetched.decoded);
         }
-        if (!decoded.valid) {
-          return;
-        }
+
+        const decoded = mergeReportPlots(plots);
         lruSet(reportRangeCache, key,
           {series: decoded.series, events: decoded.events},
           REPORT_RANGE_CACHE_MAX);
@@ -1757,7 +1698,185 @@
       }
     }
 
-    // Decode the binary plot blob (mirrors report_manager.cpp, little-endian).
+    function reportCrc32(bytes, start, length) {
+      let crc = 0xFFFFFFFF;
+      const end = start + length;
+      for (let offset = start; offset < end; offset++) {
+        crc ^= bytes[offset];
+        for (let bit = 0; bit < 8; bit++) {
+          crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+        }
+      }
+      return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function reportPopcount(value) {
+      let bits = Number(value) >>> 0;
+      let count = 0;
+      while (bits) {
+        bits &= bits - 1;
+        count++;
+      }
+      return count;
+    }
+
+    function reportMetricSource(validMask, strMask, summaryMask, index) {
+      const bit = 1 << index;
+      if (!(validMask & bit)) return "";
+      if (strMask & bit) return "str_edf";
+      if (summaryMask & bit) return "summary";
+      return "calculated";
+    }
+
+    function decodeReportResultBinary(buf) {
+      const invalid = {valid: false};
+      const dv = new DataView(buf);
+      const bytes = new Uint8Array(buf);
+      const headerBytes = 160;
+      if (dv.byteLength < headerBytes ||
+          dv.getUint32(0, true) !== 0x36524341 ||
+          dv.getUint16(4, true) !== 1 ||
+          dv.getUint16(6, true) !== headerBytes ||
+          dv.getUint32(8, true) !== dv.byteLength) {
+        return invalid;
+      }
+
+      const sessionCount = dv.getUint16(78, true);
+      if (headerBytes + sessionCount * 16 !== dv.byteLength ||
+          reportCrc32(bytes, 0, 152) !== dv.getUint32(152, true) ||
+          reportCrc32(bytes, headerBytes,
+            dv.byteLength - headerBytes) !== dv.getUint32(148, true)) {
+        return invalid;
+      }
+
+      const revision = dv.getBigUint64(16, true);
+      const dayStart = Number(dv.getBigInt64(24, true));
+      const dayEnd = Number(dv.getBigInt64(32, true));
+      const therapyStart = Number(dv.getBigInt64(40, true));
+      const therapyEnd = Number(dv.getBigInt64(48, true));
+      if (revision === 0n || !(dayEnd > dayStart)) return invalid;
+
+      const sessions = [];
+      let previousEnd = 0;
+      for (let index = 0; index < sessionCount; index++) {
+        const offset = headerBytes + index * 16;
+        const start = Number(dv.getBigInt64(offset, true));
+        const end = Number(dv.getBigInt64(offset + 8, true));
+        if (!(end > start) || start < dayStart || end > dayEnd ||
+            (index > 0 && start < previousEnd)) {
+          return invalid;
+        }
+        sessions.push({
+          start,
+          end,
+          duration_min: Math.round((end - start) / 60000),
+        });
+        previousEnd = end;
+      }
+      if ((sessionCount === 0 && (therapyStart || therapyEnd)) ||
+          (sessionCount > 0 &&
+           (sessions[0].start !== therapyStart ||
+            sessions[sessionCount - 1].end !== therapyEnd))) {
+        return invalid;
+      }
+
+      const requestedSignals = dv.getUint32(60, true);
+      const availableSignals = dv.getUint32(64, true);
+      const missingRequired = dv.getUint32(68, true);
+      const missingOptional = dv.getUint32(72, true);
+      const flags = dv.getUint16(76, true);
+      const sourceFlags = dv.getUint8(82);
+      const metricValid = dv.getUint16(84, true);
+      const metricStr = dv.getUint16(86, true);
+      const metricSummary = dv.getUint16(88, true);
+      const metricOffsets = [92, 96, 100, 104, 108, 112, 116, 120];
+      const metrics = metricOffsets.map((offset) =>
+        dv.getInt32(offset, true) / 1000);
+      const signalNames = [
+        "flow",
+        "inspiratory_pressure",
+        "expiratory_pressure",
+        "leak",
+        "minute_ventilation",
+        "mask_pressure",
+        "inspiratory_duration",
+        "respiratory_rate",
+        "ie_ratio",
+        "flow_limitation",
+      ];
+      const streamDetails = [];
+      signalNames.forEach((name, index) => {
+        const bit = 1 << index;
+        if (!(requestedSignals & bit)) return;
+
+        const complete = !!(availableSignals & bit);
+        streamDetails.push({
+          kind: "series",
+          name,
+          source: name,
+          required: index === 0 || index === 5,
+          complete,
+          provider: complete && (sourceFlags & 1) ? "edf" :
+            (complete ? "spool" : "missing"),
+          has_edf: complete && !!(sourceFlags & 1),
+          has_spool: complete && !!(sourceFlags & 8),
+          low_res: false,
+        });
+      });
+
+      const result = {
+        valid: true,
+        state: flags & 1 ? "ready" : "partial",
+        error: "",
+        source_revision: revision.toString(16).padStart(16, "0"),
+        sleep_day_epoch: dv.getInt32(12, true),
+        day_start: dayStart,
+        day_end: dayEnd,
+        start: therapyStart || dayStart,
+        end: therapyEnd || dayEnd,
+        duration_min: dv.getUint32(56, true),
+        missing_required: reportPopcount(missingRequired),
+        missing_streams: reportPopcount(missingRequired | missingOptional),
+        streams: reportPopcount(requestedSignals),
+        events_available: !!(flags & 2),
+        requested_event_mask: dv.getUint8(80),
+        missing_event_mask: dv.getUint8(81),
+        source_flags: sourceFlags,
+        sessions,
+        stream_details: streamDetails,
+        hypopnea_count: dv.getUint32(124, true),
+        ca_count: dv.getUint32(128, true),
+        oa_count: dv.getUint32(132, true),
+        ua_count: dv.getUint32(136, true),
+        arousal_count: dv.getUint32(140, true),
+        csr_count: dv.getUint32(144, true),
+      };
+      const metricFields = [
+        "ahi",
+        "oa_index",
+        "ca_index",
+        "ua_index",
+        "hypopnea_index",
+        "arousal_index",
+        "mask_pressure_50",
+        "leak_50",
+      ];
+      metricFields.forEach((field, index) => {
+        if (!(metricValid & (1 << index))) return;
+        result[field] = metrics[index];
+        result[field + "_source"] = reportMetricSource(
+          metricValid, metricStr, metricSummary, index);
+      });
+      if (result.mask_pressure_50 !== undefined) {
+        result.average_pressure = result.mask_pressure_50;
+      }
+      if (result.leak_50 !== undefined) {
+        result.average_leak = result.leak_50;
+      }
+      return result;
+    }
+
+    // Decode PLOT_BIN v5, little-endian.
     function decodeReportPlotBinary(buf) {
       const decoded = {valid: false, events: [], series: {}};
       const dv = new DataView(buf);
@@ -1873,7 +1992,7 @@
       return decoded;
     }
 
-    async function loadSelectedReportNight(force, refreshCache) {
+    async function loadSelectedReportNight() {
       const night = selectedReportNight();
       if (!night) {
         resetReportData();
@@ -1881,96 +2000,84 @@
         return;
       }
       const nightId = reportNightLoadKey(night);
-      if (!force && reportLoadedId === nightId &&
-          reportResult && reportResult.state === "ready") {
-        renderReportSummary();
-        renderReportCharts();
-        return;
-      }
-      const therapyIndex = reportTherapyIndex(night);
-      if (therapyIndex === null) {
-        msg("reportMsg", "Selected night has no report index", false, true);
-        return;
-      }
       const token = ++reportLoadToken;
       resetReportData();
-      reportLoadedId = "";
       renderReportSummary();
       msg("reportMsg", "Loading report...", true, true);
       try {
-        if (refreshCache) {
-          const queued = await fetch("/api/report/result?night=" +
-                      encodeURIComponent(Number(night.start || 0)) +
-                      "&refresh_cache=1", {method: "POST"});
-          if (!queued.ok && queued.status !== 202) {
-            throw new Error(await queued.text());
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const res = await pollReportResult(token, nightId);
+          if (!res || token !== reportLoadToken) return;
+          if (res.status === 404) {
+            msg("reportMsg", "Night not found", false, true);
+            return;
           }
-        }
-        const res = await pollReportResult(token, Number(night.start || 0));
-        if (!res || token !== reportLoadToken) return;
-        if (res.status === 404) {
-          msg("reportMsg", "Night not found", false, true);
-          return;
-        }
-        if (res.status !== 200 || !res.json) {
-          msg("reportMsg", "Report not ready", false, true);
+          if ((res.status !== 200 && res.status !== 304) || !res.result) {
+            msg("reportMsg", "Report not ready", false, true);
+            renderReportSummary();
+            return;
+          }
+          reportResult = res.result;
+          if (reportResult.state !== "ready" &&
+              reportResult.state !== "partial") {
+            msg("reportMsg", reportResult.error || "Report incomplete",
+                false, true);
+            renderReportSummary();
+            return;
+          }
+
+          const plotStatus = await fetchReportPlot(
+            token, nightId, reportResult.source_revision);
+          if (!plotStatus || token !== reportLoadToken) return;
+          if (plotStatus === "revision_changed") continue;
+
           renderReportSummary();
+          renderReportCharts();
+          msg("reportMsg",
+              reportResult.state === "partial"
+                ? "Report loaded (incomplete - some data missing)"
+                : "Report loaded", true);
           return;
         }
-        reportResult = res.json;
-        if (res.json.state !== "ready" && res.json.state !== "partial") {
-          msg("reportMsg", res.json.error || "Report incomplete", false, true);
-          renderReportSummary();
-          return;
-        }
-        const plotEtag = await fetchReportPlot(token, therapyIndex, res.etag);
-        if (!plotEtag) return;
-        reportLoadedId = nightId;
-        renderReportSummary();
-        renderReportCharts();
-        msg("reportMsg",
-            res.json.state === "partial"
-              ? "Report loaded (incomplete - some data missing)"
-              : "Report loaded", true);
+        throw new Error("report changed while loading");
       } catch (error) {
         if (token !== reportLoadToken) return;
         msg("reportMsg", error.message, false, true);
       }
     }
 
-    function scheduleReportPoll() {
+    function scheduleReportPoll(loadNight) {
       if (reportPollTimer) clearTimeout(reportPollTimer);
-      reportPollTimer = setTimeout(() => loadReportSummary(false), 750);
+      reportPollTimer = setTimeout(() => loadReportSummary(loadNight), 750);
     }
 
-    async function loadReportSummary(autoRefresh) {
+    async function loadReportSummary(loadNight) {
       try {
-        const data = await (await api("/api/report/summary")).json();
-        if (data.state === "busy") {
-          msg("reportMsg", "Summary busy; retrying...", true, true);
-          scheduleReportPoll();
+        const headers = {};
+        if (reportSummaryEtag) {
+          headers["If-None-Match"] = reportSummaryEtag;
+        }
+        const response = await fetch("/api/report/summary",
+          {cache: "no-cache", headers});
+        if (response.status === 202) {
+          msg("reportMsg", "Preparing report index...", true, true);
+          scheduleReportPoll(loadNight);
           return;
         }
-        reportSummary = data;
-        renderReportSummary();
-        if (data.state === "fetching") {
-          scheduleReportPoll();
-        } else if (autoRefresh && data.state === "idle") {
-          await refreshReportSummary(false);
-        } else if (autoRefresh && data.state === "ready") {
-          await loadSelectedReportNight(false);
+        if (response.status === 200) {
+          reportSummary = await response.json();
+          reportSummaryEtag = response.headers.get("ETag") || "";
+        } else if (response.status !== 304 || !reportSummary) {
+          throw new Error(await response.text() || "report summary failed");
         }
+
+        renderReportSummary();
+        if (loadNight) await loadSelectedReportNight();
       } catch (error) {
         msg("reportMsg", error.message, false, true);
       }
     }
 
-    async function refreshReportSummary(force) {
-      try {
-        await api("/api/report/summary", {method: "POST"});
-        await loadReportSummary(false);
-        scheduleReportPoll();
-      } catch (error) {
-        msg("reportMsg", error.message, false, true);
-      }
+    async function refreshReportSummary(loadNight) {
+      await loadReportSummary(loadNight !== false);
     }

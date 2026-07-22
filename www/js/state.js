@@ -69,8 +69,9 @@
     let reportSummary = null;
     let reportPollTimer = null;
     let reportLoadToken = 0;
-    let reportLoadedId = "";
+    let reportSummaryEtag = "";
     let reportResult = null;
+    const reportResultClientCache = new Map();
     let reportSeries = {};
     let reportEvents = [];
     // Non-persistent per-view set of hidden session start timestamps. Cleared
@@ -82,11 +83,12 @@
     let reportResizeObserver = null;
     const reportPlotClientCache = new Map();
     let reportZoom = null;        // {start,end} when drag-zoomed, else null
-    // Zoom: raw samples for a tile-paged window, cached per (index, window).
+    // Zoom: exact 15-minute tiles composed into the selected window.
     let reportBaseSeries = {};
     let reportBaseEvents = [];
-    let reportCurrentIndex = -1;
-    let reportCurrentEtag = null;
+    let reportCurrentNightId = "";
+    let reportCurrentRevision = "";
+    let reportCurrentPlotEtag = "";
     const reportRangeCache = new Map();
     let reportRangeInFlightKey = "";
     let reportRangeToken = 0;
@@ -118,11 +120,10 @@
     let edfOverviewLoading = false;
 
     const SVG_NS = "http:" + "/" + "/www.w3.org/2000/svg";
-    const REPORT_PLOT_CLIENT_CACHE_MAX = 6;
+    const REPORT_RESULT_CLIENT_CACHE_MAX = 8;
+    const REPORT_PLOT_CLIENT_CACHE_MAX = 32;
     const REPORT_RANGE_CACHE_MAX = 24;
     const REPORT_RANGE_TILE_MS = 15 * 60 * 1000;
-    const REPORT_RANGE_MAX_WINDOW_MS = 3 * 60 * 60 * 1000;
-    const REPORT_RANGE_PAGE_TILES = 8;
     const REPORT_RESULT_POLL_MAX_ATTEMPTS = 160;
     const REPORT_PLOT_POLL_MAX_ATTEMPTS = 120;
     const REPORT_RANGE_POLL_MAX_ATTEMPTS = 120;

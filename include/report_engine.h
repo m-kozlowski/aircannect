@@ -79,6 +79,7 @@ public:
         ReportRequestPriority priority,
         uint32_t generation);
     size_t cancel_generation(uint32_t generation);
+    size_t cancel_background();
     void clear();
 
     bool poll(uint32_t now_ms, size_t record_budget = 1);

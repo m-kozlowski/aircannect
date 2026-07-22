@@ -66,6 +66,7 @@ public:
                            uint8_t max_attempts);
 
     size_t cancel_generation(uint32_t generation);
+    size_t cancel_background();
     void clear();
 
     size_t size() const { return count_; }

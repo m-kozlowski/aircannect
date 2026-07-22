@@ -24,9 +24,6 @@
 #include "export_coordinator.h"
 #include "json_util.h"
 #include "memory_manager.h"
-#include "report_records.h"
-#include "report_range_tile.h"
-#include "report_store.h"
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "storage_archive_port.h"
@@ -49,46 +46,7 @@ static constexpr size_t WEB_CONFIG_FULL_JSON_RESERVE = 2304;
 static constexpr size_t WEB_CONFIG_SCHEMA_JSON_RESERVE = 12 * 1024;
 static constexpr size_t WEB_CONFIG_SYNC_JSON_RESERVE = 640;
 static constexpr size_t WEB_CONFIG_SMALL_JSON_RESERVE = 384;
-static constexpr size_t WEB_REPORT_RESULT_JSON_RESERVE = 4096;
-static constexpr size_t WEB_REPORT_SUMMARY_JSON_RESERVE = 24 * 1024;
-static constexpr size_t WEB_REPORT_PLOT_HTTP_ETAG_MAX = 144;
 static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
-static constexpr uint32_t WEB_REPORT_SLOW_HANDLER_MS = 1000;
-
-class ScopedReportHttpTimer {
-public:
-    ScopedReportHttpTimer(const char *endpoint, long index = -1) :
-        endpoint_(endpoint), index_(index), start_ms_(millis()) {}
-
-    ~ScopedReportHttpTimer() {
-        const uint32_t elapsed_ms =
-            static_cast<uint32_t>(millis() - start_ms_);
-        if (elapsed_ms < WEB_REPORT_SLOW_HANDLER_MS) return;
-
-        if (index_ >= 0) {
-            Log::logf(CAT_REPORT,
-                      LOG_WARN,
-                      "slow HTTP report endpoint=%s index=%ld ms=%lu\n",
-                      endpoint_ ? endpoint_ : "--",
-                      index_,
-                      static_cast<unsigned long>(elapsed_ms));
-        } else {
-            Log::logf(CAT_REPORT,
-                      LOG_WARN,
-                      "slow HTTP report endpoint=%s ms=%lu\n",
-                      endpoint_ ? endpoint_ : "--",
-                      static_cast<unsigned long>(elapsed_ms));
-        }
-    }
-
-    ScopedReportHttpTimer(const ScopedReportHttpTimer &) = delete;
-    ScopedReportHttpTimer &operator=(const ScopedReportHttpTimer &) = delete;
-
-private:
-    const char *endpoint_ = nullptr;
-    long index_ = -1;
-    uint32_t start_ms_ = 0;
-};
 
 const char *web_command_name(uint8_t kind) {
     switch (kind) {
@@ -101,8 +59,6 @@ const char *web_command_name(uint8_t kind) {
         case WebCommandSettingsUpdate: return "settings_update";
         case WebCommandTherapyAction: return "therapy_action";
         case WebCommandOximetryAction: return "oximetry_action";
-        case WebCommandReportSummaryRefresh:
-            return "report_summary_refresh";
         case WebCommandResmedOtaInit: return "resmed_ota_init";
         case WebCommandResmedOtaBlock: return "resmed_ota_block";
         case WebCommandResmedOtaCheck: return "resmed_ota_check";
@@ -381,101 +337,6 @@ bool request_ota_url_args(AsyncWebServerRequest *request,
         return !image_size || !wire_size || image_size == wire_size;
     }
     return true;
-}
-
-bool request_int64_arg(AsyncWebServerRequest *request,
-                       const char *name,
-                       int64_t &out) {
-    out = 0;
-    if (!request || !name || !request->hasArg(name)) return false;
-    const String value = request->arg(name);
-    if (!value.length()) return false;
-    char *end = nullptr;
-    const long long parsed = strtoll(value.c_str(), &end, 10);
-    if (!end || *end != 0 || parsed < 0) return false;
-    out = static_cast<int64_t>(parsed);
-    return true;
-}
-
-bool request_uint64_arg(AsyncWebServerRequest *request,
-                        const char *name,
-                        uint64_t &out) {
-    out = 0;
-    if (!request || !name || !request->hasArg(name)) return false;
-
-    const String value = request->arg(name);
-    if (!value.length()) return false;
-
-    uint64_t parsed = 0;
-    for (size_t i = 0; i < value.length(); ++i) {
-        const char ch = value.charAt(i);
-        if (ch < '0' || ch > '9') return false;
-
-        const uint8_t digit = static_cast<uint8_t>(ch - '0');
-        if (parsed > (UINT64_MAX - digit) / 10) return false;
-        parsed = parsed * 10 + digit;
-    }
-    if (parsed == 0) return false;
-
-    out = parsed;
-    return true;
-}
-
-void strip_http_etag_quotes(String &etag) {
-    if (etag.length() >= 2 && etag.charAt(0) == '"' &&
-        etag.charAt(etag.length() - 1) == '"') {
-        etag = etag.substring(1, etag.length() - 1);
-    }
-}
-
-void add_report_result_cache_headers(AsyncWebServerResponse *response,
-                                     const char *etag) {
-    if (!response) return;
-
-    if (etag && etag[0]) {
-        char etag_header[AC_REPORT_RESULT_ETAG_MAX + 4] = {};
-        snprintf(etag_header, sizeof(etag_header), "\"%s\"", etag);
-        response->addHeader("ETag", etag_header);
-    }
-
-    response->addHeader("Cache-Control", "no-cache");
-}
-
-bool format_report_plot_http_etag(const char *plot_etag,
-                                  bool range_requested,
-                                  int64_t range_from_ms,
-                                  int64_t range_to_ms,
-                                  char *out,
-                                  size_t out_size) {
-    if (!plot_etag || !plot_etag[0] || !out || out_size == 0) return false;
-
-    int written = 0;
-    if (range_requested) {
-        written = snprintf(out,
-                           out_size,
-                           "%s-%lld-%lld",
-                           plot_etag,
-                           static_cast<long long>(range_from_ms),
-                           static_cast<long long>(range_to_ms));
-    } else {
-        written = snprintf(out, out_size, "%s", plot_etag);
-    }
-
-    return written > 0 && static_cast<size_t>(written) < out_size;
-}
-
-void add_report_plot_cache_headers(AsyncWebServerResponse *response,
-                                   const char *http_etag) {
-    if (!response) return;
-
-    if (http_etag && http_etag[0]) {
-        char etag_hdr[WEB_REPORT_PLOT_HTTP_ETAG_MAX + 4] = {};
-        snprintf(etag_hdr, sizeof(etag_hdr), "\"%s\"", http_etag);
-        response->addHeader("ETag", etag_hdr);
-    }
-
-    response->addHeader("Cache-Control",
-                        "public, max-age=31536000, immutable");
 }
 
 static constexpr size_t kStorageListDefaultLimit = 64;
@@ -1006,7 +867,7 @@ bool WebUI::begin(RpcRequestPort &rpc,
                   SessionManager &session_manager,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
-                  ReportManager &report_manager,
+                  ReportHttpController &report_http,
                   StorageReadPort &storage_read,
                   StorageBrowserPort &storage_browser,
                   StorageArchivePort &storage_archive,
@@ -1031,7 +892,7 @@ bool WebUI::begin(RpcRequestPort &rpc,
     session_manager_ = &session_manager;
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
-    report_manager_ = &report_manager;
+    report_http_ = &report_http;
     storage_read_ = &storage_read;
     storage_browser_ = &storage_browser;
     storage_archive_ = &storage_archive;
@@ -1223,7 +1084,7 @@ void WebUI::stop() {
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
-    report_manager_ = nullptr;
+    report_http_ = nullptr;
     stream_ = nullptr;
     started_ = false;
 }
@@ -1925,101 +1786,6 @@ void WebUI::send_config_update(AsyncWebServerRequest *request) {
     send_queue_result(request, enqueue_command(std::move(queued)));
 }
 
-void WebUI::send_report_result(AsyncWebServerRequest *request) const {
-    if (!report_manager_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report unavailable\"}");
-        return;
-    }
-    if (!request->hasArg("night")) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"missing night\"}");
-        return;
-    }
-
-    uint64_t night_start_ms = 0;
-    if (!request_uint64_arg(request, "night", night_start_ms)) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"bad night\"}");
-        return;
-    }
-
-    ScopedReportHttpTimer timer("/api/report/result");
-
-    String inm;
-    if (request->hasHeader("If-None-Match")) {
-        inm = request->getHeader("If-None-Match")->value();
-        strip_http_etag_quotes(inm);
-    }
-
-    LargeTextBuffer json;
-    if (!json.reserve(WEB_REPORT_RESULT_JSON_RESERVE)) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report_alloc\"}");
-        return;
-    }
-    char etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-    const ReportManager::ResultRead st = report_manager_->read_result_by_start(
-        night_start_ms,
-        inm.c_str(),
-        etag,
-        sizeof(etag),
-        json);
-
-    switch (st) {
-        case ReportManager::ResultRead::Ready: {
-            AsyncResponseStream *response =
-                request->beginResponseStream("application/json");
-            if (!response) {
-                request->send(503, "application/json",
-                              "{\"ok\":false,\"error\":\"response alloc\"}");
-                return;
-            }
-            if (etag[0]) {
-                add_report_result_cache_headers(response, etag);
-            } else {
-                response->addHeader("Cache-Control", "no-store");
-            }
-            response->write(
-                reinterpret_cast<const uint8_t *>(json.c_str()),
-                json.length());
-            request->send(response);
-            return;
-        }
-        case ReportManager::ResultRead::NotModified: {
-            AsyncWebServerResponse *response = request->beginResponse(304);
-            if (response) {
-                add_report_result_cache_headers(response, etag);
-                request->send(response);
-            } else {
-                request->send(304);
-            }
-            return;
-        }
-        case ReportManager::ResultRead::Building:
-            request->send(202, "application/json",
-                          "{\"ok\":true,\"state\":\"preparing\"}");
-            return;
-        case ReportManager::ResultRead::QueueFull:
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"report_queue_full\"}");
-            return;
-        case ReportManager::ResultRead::Unavailable:
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"report_cache_unavailable\"}");
-            return;
-        case ReportManager::ResultRead::Busy:
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"report_cache_busy\"}");
-            return;
-        case ReportManager::ResultRead::NotFound:
-        default:
-            request->send(404, "application/json",
-                          "{\"ok\":false,\"error\":\"no such night\"}");
-            return;
-    }
-}
-
 void WebUI::send_live_view_state(AsyncWebServerRequest *request) {
     bool active = false;
     if (request->hasArg("active")) {
@@ -2293,264 +2059,6 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
         append_oximetry_sensor(json, oxi_known[i], i, false);
     }
     json += "]}";
-}
-
-void WebUI::send_report_summary(AsyncWebServerRequest *request) const {
-    if (!report_manager_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report unavailable\"}");
-        return;
-    }
-    ScopedReportHttpTimer timer("/api/report/summary");
-
-    LargeTextBuffer json;
-    if (!json.reserve(WEB_REPORT_SUMMARY_JSON_RESERVE)) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"summary_alloc\"}");
-        return;
-    }
-    report_manager_->build_summary_json(json);
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response alloc\"}");
-        return;
-    }
-    response->write(
-        reinterpret_cast<const uint8_t *>(json.c_str()),
-        json.length());
-    request->send(response);
-}
-
-void WebUI::send_report_chunks(AsyncWebServerRequest *request) const {
-    if (!report_manager_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report unavailable\"}");
-        return;
-    }
-
-    size_t offset = 0;
-    size_t limit = 32;
-    if (!request_size_arg_limited(request, "offset", 0, 65535, offset) ||
-        !request_size_arg_limited(request, "limit", 32, 128, limit)) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"bad range\"}");
-        return;
-    }
-
-    LargeTextBuffer json;
-    json.reserve(1024 + limit * 192);
-    report_manager_->build_result_chunks_json(json, offset, limit);
-    if (json.overflowed()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"chunks alloc\"}");
-        return;
-    }
-
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response alloc\"}");
-        return;
-    }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    request->send(response);
-}
-
-void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
-    if (!report_manager_) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report unavailable\"}");
-        return;
-    }
-    if (!request->hasArg("index")) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"missing index\"}");
-        return;
-    }
-    const long index = request->arg("index").toInt();
-    if (index < 0) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"bad index\"}");
-        return;
-    }
-    ScopedReportHttpTimer timer("/api/report/plot", index);
-
-    String version;
-    if (request->hasArg("v")) version = request->arg("v");
-    int64_t range_from_ms = 0;
-    int64_t range_to_ms = 0;
-    const bool range_requested =
-        request->hasArg("from") || request->hasArg("to");
-    if (range_requested) {
-        if (!request_int64_arg(request, "from", range_from_ms) ||
-            !request_int64_arg(request, "to", range_to_ms) ||
-            range_to_ms <= range_from_ms) {
-            request->send(400,
-                          "application/json",
-                          "{\"ok\":false,\"error\":\"bad range\"}");
-            return;
-        }
-
-        int64_t normalized_from_ms = 0;
-        int64_t normalized_to_ms = 0;
-        if (!normalize_report_range_tiles(
-                range_from_ms,
-                range_to_ms,
-                AC_REPORT_RANGE_TILE_MS,
-                AC_REPORT_RANGE_PLOT_MAX_WINDOW_MS,
-                normalized_from_ms,
-                normalized_to_ms)) {
-            request->send(400,
-                          "application/json",
-                          "{\"ok\":false,\"error\":\"range too wide\"}");
-            return;
-        }
-
-        range_from_ms = normalized_from_ms;
-        range_to_ms = normalized_to_ms;
-    }
-    char request_http_etag[WEB_REPORT_PLOT_HTTP_ETAG_MAX] = {};
-    if (version.length()) {
-        format_report_plot_http_etag(version.c_str(),
-                                     range_requested,
-                                     range_from_ms,
-                                     range_to_ms,
-                                     request_http_etag,
-                                     sizeof(request_http_etag));
-    }
-
-    if (request_http_etag[0] && request->hasHeader("If-None-Match")) {
-        String inm = request->getHeader("If-None-Match")->value();
-        strip_http_etag_quotes(inm);
-        if (inm == request_http_etag) {
-            AsyncWebServerResponse *response = request->beginResponse(304);
-            if (response) {
-                add_report_plot_cache_headers(response, request_http_etag);
-                request->send(response);
-            } else {
-                request->send(304);
-            }
-            return;
-        }
-    }
-    std::shared_ptr<ReportSpoolBuffer> payload;
-    ReportManager::PlotRead st;
-    char plot_etag[AC_REPORT_RESULT_ETAG_MAX] = {};
-    if (range_requested) {
-        st = report_manager_->read_plot_range(static_cast<size_t>(index),
-                                              version.c_str(),
-                                              plot_etag,
-                                              sizeof(plot_etag),
-                                              range_from_ms,
-                                              range_to_ms,
-                                              payload);
-    } else {
-        st = report_manager_->read_plot(static_cast<size_t>(index),
-                                        version.c_str(),
-                                        plot_etag,
-                                        sizeof(plot_etag),
-                                        payload);
-    }
-    if (st == ReportManager::PlotRead::NotFound) {
-        request->send(404, "application/json",
-                      "{\"ok\":false,\"error\":\"no such night\"}");
-        return;
-    }
-    if (st == ReportManager::PlotRead::Error) {
-        request->send(500, "application/json",
-                      "{\"ok\":false,\"error\":\"report_plot_failed\"}");
-        return;
-    }
-    if (st == ReportManager::PlotRead::Stale) {
-        char body[96];
-        snprintf(body,
-                 sizeof(body),
-                 "{\"ok\":false,\"error\":\"stale_plot\",\"etag\":\"%s\"}",
-                 plot_etag);
-        AsyncWebServerResponse *response =
-            request->beginResponse(409, "application/json", body);
-        if (response) {
-            response->addHeader("Cache-Control", "no-store");
-            request->send(response);
-        } else {
-            request->send(409, "application/json", body);
-        }
-        return;
-    }
-    if (st == ReportManager::PlotRead::Empty) {
-        AsyncWebServerResponse *response = request->beginResponse(204);
-        if (response) {
-            char http_etag[WEB_REPORT_PLOT_HTTP_ETAG_MAX] = {};
-            format_report_plot_http_etag(plot_etag,
-                                         range_requested,
-                                         range_from_ms,
-                                         range_to_ms,
-                                         http_etag,
-                                         sizeof(http_etag));
-            add_report_plot_cache_headers(response, http_etag);
-            request->send(response);
-        } else {
-            request->send(204);
-        }
-        return;
-    }
-    if (st == ReportManager::PlotRead::QueueFull) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report_queue_full\"}");
-        return;
-    }
-    if (st == ReportManager::PlotRead::Unavailable) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report_cache_unavailable\"}");
-        return;
-    }
-    if (st == ReportManager::PlotRead::Busy) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"report_cache_busy\"}");
-        return;
-    }
-    if (st == ReportManager::PlotRead::Building || !payload ||
-        payload->size() == 0) {
-        AsyncWebServerResponse *response = request->beginResponse(
-            202, "application/json", "{\"ok\":true,\"state\":\"preparing\"}");
-        if (response) {
-            response->addHeader("Cache-Control", "no-store");
-            request->send(response);
-        } else {
-            request->send(202, "application/json",
-                          "{\"ok\":true,\"state\":\"preparing\"}");
-        }
-        return;
-    }
-    AsyncWebServerResponse *response = request->beginResponse(
-        "application/octet-stream",
-        payload->size(),
-        [payload](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
-            if (!buffer || offset >= payload->size()) return 0;
-            const size_t remaining = payload->size() - offset;
-            const size_t n = remaining < max_len ? remaining : max_len;
-            memcpy(buffer, payload->data() + offset, n);
-            return n;
-        });
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response alloc\"}");
-        return;
-    }
-    char http_etag[WEB_REPORT_PLOT_HTTP_ETAG_MAX] = {};
-    format_report_plot_http_etag(plot_etag,
-                                 range_requested,
-                                 range_from_ms,
-                                 range_to_ms,
-                                 http_etag,
-                                 sizeof(http_etag));
-    add_report_plot_cache_headers(response, http_etag);
-    response->addHeader("Accept-Ranges", "none");
-    request->send(response);
 }
 
 void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
@@ -3866,9 +3374,6 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandOximetryAction:
             execute_oximetry_action(command.text, command.body);
             break;
-        case WebCommandReportSummaryRefresh:
-            execute_report_summary_refresh();
-            break;
         case WebCommandResmedOtaInit:
         case WebCommandResmedOtaBlock:
         case WebCommandResmedOtaCheck:
@@ -3879,11 +3384,6 @@ void WebUI::execute_command(WebCommand &command) {
         default:
             break;
     }
-}
-
-void WebUI::execute_report_summary_refresh() {
-    if (!report_manager_) return;
-    report_manager_->request_summary_refresh(true);
 }
 
 void WebUI::execute_console_line(const std::string &line) {
@@ -4202,210 +3702,20 @@ void WebUI::register_routes() {
     });
 
     // Reports
-    server_->on(AsyncURIMatcher::prefix("/api/report/plot"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        String path = request->url();
-        const int query = path.indexOf('?');
-
-        if (query >= 0) path = path.substring(0, query);
-
-        if (path != "/api/report/plot") {
-            request->send(404, "application/json",
-                          "{\"ok\":false,\"error\":\"not found\"}");
-            return;
-        }
-        send_report_plot(request);
-    });
-
     server_->on(AsyncURIMatcher::exact("/api/report/summary"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
-        send_report_summary(request);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/report/summary"), HTTP_POST,
-                [this](AsyncWebServerRequest *request) {
-        send_queue_result(
-            request,
-            enqueue_simple_command(WebCommandReportSummaryRefresh));
+        report_http_->send_summary(request);
     });
 
     server_->on(AsyncURIMatcher::exact("/api/report/result"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
-        if (request->hasArg("night")) {
-            send_report_result(request);
-            return;
-        }
-        request->send(400, "application/json",
-                      "{\"error\":\"night_required\"}");
+        report_http_->send_result(request);
     });
 
-    server_->on(AsyncURIMatcher::exact("/api/report/chunks"), HTTP_GET,
+    server_->on(AsyncURIMatcher::exact("/api/report/plot"), HTTP_GET,
                 [this](AsyncWebServerRequest *request) {
-        send_report_chunks(request);
+        report_http_->send_plot(request);
     });
-
-    server_->on(AsyncURIMatcher::exact("/api/report/prefetch"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        BackgroundWorker *w = background_worker();
-        if (!w || !report_manager_) {
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"worker unavailable\"}");
-            return;
-        }
-
-        const BackgroundWorkerStatus s = w->status();
-        const ReportManager::PrefetchSnapshot p =
-            report_manager_->prefetch_snapshot();
-
-        LargeTextBuffer json;
-        json.reserve(WEB_JSON_RESERVE_SMALL);
-
-        json = "{";
-        json_add_bool(json, "ok", true, false);
-        json_add_bool(json, "started", s.task_started);
-        json_add_bool(json, "enabled", s.enabled);
-        json_add_bool(json, "idle", s.idle);
-        json_add_string(json, "gate", s.gate_reason);
-        json_add_int(json, "ticks", static_cast<long>(s.ticks));
-#if AC_STACK_PROFILE_ENABLED
-        json_add_int(json, "stack_free",
-                     static_cast<long>(s.stack_high_water_words));
-#endif
-        json_add_int(json, "phase", static_cast<long>(p.phase));
-        json_add_uint64(json, "night_ms", p.night_ms);
-        json_add_uint64(json, "last_night_ms", p.last_night_ms);
-        json_add_uint64(json, "last_failed_night_ms",
-                        p.last_failed_night_ms);
-        json_add_string(json, "last_source", p.last_source);
-        json_add_string(json, "last_error", p.last_error);
-        json_add_int(json, "completed", static_cast<long>(p.completed));
-        json_add_int(json, "failed", static_cast<long>(p.failed));
-        json += "}";
-
-        if (json.overflowed()) {
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"prefetch alloc\"}");
-            return;
-        }
-
-        AsyncResponseStream *response =
-            request->beginResponseStream("application/json");
-
-        if (!response) {
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"response alloc\"}");
-            return;
-        }
-
-        response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                        json.length());
-        request->send(response);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/report/prefetch"), HTTP_POST,
-                [](AsyncWebServerRequest *request) {
-        BackgroundWorker *w = background_worker();
-        if (!w) {
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"error\":\"worker unavailable\"}");
-            return;
-        }
-        if (!request->hasArg("enable")) {
-            request->send(400, "application/json",
-                          "{\"ok\":false,\"error\":\"missing enable=0|1\"}");
-            return;
-        }
-
-        const bool on = request->arg("enable") != "0";
-        w->set_enabled(on);
-
-        char buf[64];
-        snprintf(buf, sizeof(buf), "{\"ok\":true,\"enabled\":%s,\"applied\":%s}",
-                 on ? "true" : "false",
-                 w->enabled() ? "true" : "false");
-
-        request->send(200, "application/json", buf);
-    });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/report/result"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            if (!report_manager_) {
-                request->send(503, "application/json",
-                              "{\"ok\":false,\"error\":\"report unavailable\"}");
-                return;
-            }
-
-            if (request->hasArg("night")) {
-                uint64_t night_start_ms = 0;
-                if (!request_uint64_arg(request, "night", night_start_ms)) {
-                    request->send(400, "application/json",
-                                  "{\"ok\":false,\"error\":\"bad night\"}");
-                    return;
-                }
-
-                bool refresh_cache = false;
-                if (request->hasArg("refresh_cache")) {
-                    parse_bool_yesno(request->arg("refresh_cache"),
-                                     refresh_cache);
-                }
-
-                const bool queued =
-                    report_manager_->request_result_prepare_by_start(
-                        night_start_ms,
-                        refresh_cache);
-
-                if (queued) {
-                    request->send(202, "application/json", queued_json());
-                } else {
-                    request->send(503, "application/json",
-                                  "{\"ok\":false,\"error\":\"report_queue_full\"}");
-                }
-                return;
-            }
-
-            JsonDocument doc;
-            std::string body;
-
-            if (!parse_body_copy(request, doc, body)) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad json\"}");
-                return;
-            }
-
-            if (!doc["night"].is<unsigned long long>()) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"missing night\"}");
-                return;
-            }
-
-            bool refresh_cache = false;
-
-            if (doc["refresh_cache"].is<bool>()) {
-                refresh_cache = doc["refresh_cache"].as<bool>();
-            }
-
-            const uint64_t night_start_ms = static_cast<uint64_t>(
-                doc["night"].as<unsigned long long>());
-            if (night_start_ms == 0) {
-                request->send(400, "application/json",
-                              "{\"ok\":false,\"error\":\"bad night\"}");
-                return;
-            }
-
-            const bool queued =
-                report_manager_->request_result_prepare_by_start(
-                    night_start_ms,
-                    refresh_cache);
-
-            if (queued) {
-                request->send(202, "application/json", queued_json());
-            } else {
-                request->send(503, "application/json",
-                              "{\"ok\":false,\"error\":\"report_queue_full\"}");
-            }
-        },
-        nullptr, handle_body);
 
     // Web console and file log
     server_->on(

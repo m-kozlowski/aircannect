@@ -10,7 +10,7 @@
 #include "edf_recorder_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
-#include "report_manager.h"
+#include "report_task.h"
 #include "resmed_ota_manager.h"
 #include "rpc_request_port.h"
 #include "rpc_transport_ports.h"
@@ -49,7 +49,7 @@ struct ConsoleContext {
     SinkManager &sink_manager;
     EdfRecorderManager &edf_recorder_manager;
     OximetryManager &oximetry_manager;
-    ReportManager &report_manager;
+    ReportTask &report_task;
     StorageReadPort &storage_read_port;
     StorageDiagnosticJob *storage_diagnostic_job = nullptr;
     StorageSyncJob *storage_sync_job = nullptr;

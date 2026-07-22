@@ -12,7 +12,6 @@
 #include "board.h"
 #include "can_driver.h"
 #include "debug_log.h"
-#include "edf_report_catalog_job.h"
 #include "edf_recorder_manager.h"
 #include "event_broker.h"
 #include "export_coordinator.h"
@@ -20,11 +19,10 @@
 #include "memory_manager.h"
 #include "ota_manager.h"
 #include "oximetry_manager.h"
-#include "report_cache_writer_job.h"
 #include "provisioning.h"
-#include "report_manager.h"
-#include "report_plot_prebuild_job.h"
-#include "report_prefetch_job.h"
+#include "report_http_controller.h"
+#include "report_spool_service.h"
+#include "report_task.h"
 #include "resmed_ota_manager.h"
 #include "rpc_transport.h"
 #include "rpc_quiesce_coordinator.h"
@@ -70,24 +68,23 @@ static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
-static EdfReportCatalogJob edf_report_catalog_job;
 static OximetryManager oximetry_manager;
-static ReportManager report_manager(rpc_transport);
+static ReportSpoolService report_spool_service(rpc_transport);
+static ReportTask report_task;
+static ReportHttpController report_http_controller;
 static BackgroundWorker bg_worker;
 static StorageDiagnosticJob storage_diagnostic_job;
 static StorageSyncJob *storage_sync_job = nullptr;
 static SleepHqSyncJob *sleephq_sync_job = nullptr;
 static ExportCoordinator export_coordinator;
-static ReportCacheWriterJob report_cache_writer_job(report_manager);
-static ReportPrefetchJob report_prefetch_job(report_manager);
-static ReportPlotPrebuildJob report_plot_prebuild_job(report_manager);
 #if AC_STACK_PROFILE_ENABLED
 static StackProfiler stack_profiler;
 #endif
-static uint32_t edf_report_catalog_seen_sessions_ended = 0;
-static bool edf_report_catalog_post_session_pending = false;
-static uint32_t edf_report_catalog_refresh_due_ms = 0;
-static uint32_t edf_report_catalog_timezone_revision = 0;
+static uint32_t report_catalog_seen_sessions_ended = 0;
+static bool report_catalog_refresh_pending = true;
+static uint32_t report_catalog_refresh_due_ms = 0;
+static uint32_t report_catalog_timezone_revision = 0;
+static uint32_t report_catalog_request_generation = 0;
 static uint32_t rpc_transport_generation_seen = 0;
 static ActivitySnapshot storage_activity;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
@@ -111,7 +108,7 @@ static ConsoleContext console_ctx{
     sink_manager,
     edf_recorder_manager,
     oximetry_manager,
-    report_manager,
+    report_task,
     StorageService::read_port(),
     &storage_diagnostic_job,
     nullptr,
@@ -169,9 +166,9 @@ static void route_spool_notification(void *context,
                                      size_t payload_len,
                                      uint32_t now_ms) {
     (void)now_ms;
-    ReportManager *reports = static_cast<ReportManager *>(context);
-    if (!reports) return;
-    (void)reports->enqueue_spool_notification(payload, payload_len);
+    ReportSpoolService *spool = static_cast<ReportSpoolService *>(context);
+    if (!spool) return;
+    (void)spool->enqueue_notification(payload, payload_len);
 }
 
 static void route_tcp_raw_request(void *context,
@@ -224,7 +221,7 @@ static void poll_stack_profiler(uint32_t now_ms) {
 }
 #endif
 
-static void publish_storage_activity(bool foreground_report_demand,
+static void publish_runtime_activity(bool foreground_report_demand,
                                      bool realtime_stream_active,
                                      bool export_active,
                                      bool ota_install_active,
@@ -246,6 +243,7 @@ static void publish_storage_activity(bool foreground_report_demand,
     if (storage_activity.generation == 0) storage_activity.generation++;
 
     StorageService::publish_activity(storage_activity);
+    report_task.publish_activity(storage_activity);
 }
 
 static void sync_network_services() {
@@ -279,31 +277,57 @@ static void sync_network_services() {
     }
 }
 
-static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
-    const EdfRecorderStatus recorder = edf_recorder_manager.status();
-    if (recorder.sessions_ended != edf_report_catalog_seen_sessions_ended) {
-        edf_report_catalog_seen_sessions_ended = recorder.sessions_ended;
-        edf_report_catalog_post_session_pending = true;
-        edf_report_catalog_refresh_due_ms = now_ms + 5000;
+static uint32_t next_report_catalog_generation() {
+    const uint32_t published = report_task.status().catalog_generation;
+    if (report_catalog_request_generation < published) {
+        report_catalog_request_generation = published;
     }
 
-    if (!edf_report_catalog_post_session_pending) return;
-    if (static_cast<int32_t>(now_ms - edf_report_catalog_refresh_due_ms) < 0) {
+    report_catalog_request_generation++;
+    if (report_catalog_request_generation == 0) {
+        report_catalog_request_generation = 1;
+    }
+    return report_catalog_request_generation;
+}
+
+static void poll_report_catalog_refresh(uint32_t now_ms) {
+    const EdfRecorderStatus recorder = edf_recorder_manager.status();
+    if (recorder.sessions_ended != report_catalog_seen_sessions_ended) {
+        report_catalog_seen_sessions_ended = recorder.sessions_ended;
+        report_catalog_refresh_pending = true;
+        report_catalog_refresh_due_ms = now_ms + 5000;
+    }
+
+    const uint32_t timezone_revision = time_sync_service.timezone_revision();
+    if (timezone_revision != report_catalog_timezone_revision) {
+        report_catalog_timezone_revision = timezone_revision;
+        report_catalog_refresh_pending = true;
+        report_catalog_refresh_due_ms = now_ms;
+    }
+
+    if (!report_catalog_refresh_pending) return;
+    if (static_cast<int32_t>(now_ms - report_catalog_refresh_due_ms) < 0) {
         return;
     }
 
-    const StorageServiceStatus storage =
-        edf_recorder_manager.storage_status();
+    const StorageServiceStatus storage = edf_recorder_manager.storage_status();
     if (storage.busy || storage.edf_queued > 0 ||
         storage.open_file_count > 0) {
-        edf_report_catalog_refresh_due_ms = now_ms + 1000;
+        report_catalog_refresh_due_ms = now_ms + 1000;
         return;
     }
 
-    if (edf_report_catalog_job.request_refresh_after_current()) {
-        edf_report_catalog_post_session_pending = false;
+    const bool offset_valid =
+        as11_device_service.state().timezone_offset_valid();
+    const int32_t offset_minutes = offset_valid
+        ? as11_device_service.state().timezone_offset_minutes()
+        : 0;
+    const OperationAdmission admitted = report_task.request_catalog_refresh(
+        offset_valid, offset_minutes, next_report_catalog_generation());
+    if (admitted == OperationAdmission::Accepted) {
+        report_catalog_refresh_pending = false;
     } else {
-        edf_report_catalog_refresh_due_ms = now_ms + 2000;
+        report_catalog_refresh_due_ms = now_ms + 2000;
     }
 }
 
@@ -498,7 +522,7 @@ void setup() {
     rpc_transport.set_stream_notification_observer(route_stream_notification,
                                                    &stream_broker);
     rpc_transport.set_spool_notification_observer(route_spool_notification,
-                                                  &report_manager);
+                                                  &report_spool_service);
     tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
                                         &stream_broker);
     rpc_transport_generation_seen = rpc_transport.transport_generation();
@@ -510,20 +534,26 @@ void setup() {
                                as11_device_service.state(), session_manager);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
 
-    edf_report_catalog_job.begin();
-    report_manager.set_edf_report_catalog(&edf_report_catalog_job);
-
     oximetry_manager.begin(app_config);
-    report_manager.begin();
+
+    if (!report_spool_service.begin()) {
+        Log::logf(CAT_REPORT, LOG_ERROR,
+                  "report spool service failed to start\n");
+    }
+    if (!report_task.begin(StorageService::read_port(),
+                           StorageService::atomic_write_port(),
+                           StorageService::scan_port(),
+                           report_spool_service)) {
+        Log::logf(CAT_REPORT, LOG_ERROR,
+                  "report task failed to start\n");
+    }
+    report_http_controller.begin(report_task, StorageService::stream_port());
+
     resmed_ota_manager.begin(rpc_transport, as11_device_service,
                              StorageService::atomic_write_port());
     time_sync_service.begin(app_config, wifi_manager, rpc_transport,
                             as11_device_service);
-    if (edf_report_catalog_job.set_posix_timezone(
-            app_config.data().timezone.c_str())) {
-        edf_report_catalog_timezone_revision =
-            time_sync_service.timezone_revision();
-    }
+    report_catalog_timezone_revision = time_sync_service.timezone_revision();
     ota_manager.begin(app_config);
 
     // Network configuration
@@ -552,7 +582,7 @@ void setup() {
                  wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
-                 report_manager,
+                 report_http_controller,
                  StorageService::read_port(),
                  StorageService::browser_port(),
                  StorageService::archive_port(),
@@ -584,9 +614,6 @@ void setup() {
     }
 
     bg_worker.add_job(&storage_diagnostic_job);
-    bg_worker.add_job(&edf_report_catalog_job);
-    bg_worker.add_job(&report_cache_writer_job);
-    bg_worker.add_job(&report_prefetch_job);
     if (storage_sync_job) {
         bg_worker.add_job(storage_sync_job);
     }
@@ -595,10 +622,7 @@ void setup() {
         bg_worker.add_job(sleephq_sync_job);
     }
 
-    bg_worker.add_job(&report_plot_prebuild_job);
     bg_worker.begin();
-
-    (void)edf_report_catalog_job.request_refresh();
 }
 
 void loop() {
@@ -637,13 +661,10 @@ void loop() {
 
     drain_can_rx_after("rpc_ota_prepare");
 
-    // Reports and ResMed OTA
-    report_manager.poll(
+    // Report RPC adapter and ResMed OTA
+    report_spool_service.poll(
         rpc_transport.background_backpressure_active(),
-        can_driver.stats().rx_queue_full_alerts,
-        as11_device_service.state().therapy_state() ==
-            As11TherapyState::Running,
-        stream_broker.realtime_active());
+        can_driver.stats().rx_queue_full_alerts);
     drain_can_rx_after("report");
 
     resmed_ota_manager.poll();
@@ -657,12 +678,7 @@ void loop() {
     session_manager.poll(as11_device_service.state(), now_ms);
     edf_recorder_manager.poll(now_ms);
 
-    if (as11_device_service.state().timezone_offset_valid()) {
-        (void)edf_report_catalog_job.set_timezone_offset_minutes(
-            as11_device_service.state().timezone_offset_minutes());
-    }
-
-    poll_edf_report_catalog_refresh(now_ms);
+    poll_report_catalog_refresh(now_ms);
     drain_can_rx_after("session_edf");
 
     // Live sinks and oximetry
@@ -697,14 +713,6 @@ void loop() {
         time_sync_service.poll();
     }
 
-    if (edf_report_catalog_timezone_revision !=
-            time_sync_service.timezone_revision() &&
-        edf_report_catalog_job.set_posix_timezone(
-            app_config.data().timezone.c_str())) {
-        edf_report_catalog_timezone_revision =
-            time_sync_service.timezone_revision();
-    }
-
     drain_can_rx_after("time_sync");
 
     // ESP/Arduino OTA
@@ -715,10 +723,11 @@ void loop() {
     const bool arduino_ota_poll_allowed =
         as11_device_service.state().therapy_state() !=
             As11TherapyState::Running;
+    const ReportTaskStatus report_status = report_task.status();
     const bool update_check_allowed =
         arduino_ota_poll_allowed &&
         !export_coordinator.endpoint_work_active() &&
-        !report_manager.foreground_busy();
+        !report_status.foreground_active;
 
     ota_manager.poll(wifi_manager, esp_reboot_allowed,
                      !resmed_ota_transport_active,
@@ -735,9 +744,8 @@ void loop() {
     drain_can_rx_after("storage_poll");
 
     const ExportReportActivity report_activity{
-        report_manager.foreground_busy(),
-        report_manager.background_work_active() ||
-            edf_report_catalog_post_session_pending,
+        report_status.foreground_active,
+        report_status.background_active || report_catalog_refresh_pending,
     };
 
     export_coordinator.poll(
@@ -753,7 +761,7 @@ void loop() {
     drain_can_rx_after("export_coordinator");
 
     // Activity snapshots
-    const bool foreground_report_active = report_manager.foreground_busy();
+    const bool foreground_report_active = report_status.foreground_active;
     const bool export_active = export_coordinator.endpoint_work_active();
     const bool esp_ota_install_active = ota_manager.active();
     const bool storage_ota_active =
@@ -762,7 +770,7 @@ void loop() {
         as11_device_service.state().therapy_state() ==
             As11TherapyState::Running;
 
-    publish_storage_activity(foreground_report_active,
+    publish_runtime_activity(foreground_report_active,
                              stream_activity_active,
                              export_active,
                              storage_ota_active,

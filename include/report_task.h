@@ -9,6 +9,7 @@
 #include "report_artifact_index_refresh_service.h"
 #include "report_engine.h"
 #include "report_summary_acquisition.h"
+#include "runtime_snapshots.h"
 
 namespace aircannect {
 
@@ -35,6 +36,7 @@ struct ReportTaskStatus {
     uint32_t catalog_generation = 0;
     bool foreground_active = false;
     bool background_active = false;
+    bool background_suspended = false;
     ReportSummaryAcquisitionStatus summary_acquisition;
     NightCatalogRefreshStatus catalog_refresh;
     NightCatalogStoreStatus catalog_store;
@@ -67,6 +69,7 @@ public:
         int32_t current_offset_minutes,
         uint32_t generation);
     OperationAdmission cancel_generation(uint32_t generation);
+    void publish_activity(const ActivitySnapshot &activity);
 
     ReportTaskStatus status() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;

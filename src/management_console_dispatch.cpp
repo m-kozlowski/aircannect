@@ -8,16 +8,12 @@
 
 #include "as11_rpc.h"
 #include "as11_settings.h"
-#include "background_worker.h"
 #include "board.h"
-#include "board_report.h"
 #include "debug_log.h"
-#include "edf_report_catalog_job.h"
 #include "export_coordinator.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "memory_manager.h"
-#include "report_store.h"
 #include "storage_diagnostic_job.h"
 #include "storage_export_plan.h"
 #include "storage_manager.h"
@@ -118,21 +114,6 @@ void print_web_memory_detail(Print &out, WebUI *web_ui) {
     out.print("[MEM web] buffer_cap_total=");
     out.print(static_cast<unsigned long>(total_capacity));
     out.println();
-}
-
-bool report_store_integrity_allowed(const ConsoleContext &ctx,
-                                    const char *&reason) {
-    const SessionStatus &session = ctx.session_manager.status();
-    if (session.state == SessionState::Active) {
-        reason = "therapy_active";
-        return false;
-    }
-    if (ctx.stream.activity_active(millis(), AC_WIFI_ROAM_STREAM_QUIET_MS)) {
-        reason = "stream_active";
-        return false;
-    }
-    reason = "";
-    return true;
 }
 
 void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
@@ -241,93 +222,6 @@ void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
     out.print(static_cast<unsigned long>(tls.small_fail));
     out.print(" frees=");
     out.print(static_cast<unsigned long>(tls.frees));
-    out.println();
-}
-
-void print_report_store_status(Print &out) {
-    const ReportStoreStatus status = ReportStore::status();
-    out.print("[REPORT_STORE] initialized=");
-    out.print(status.initialized ? "yes" : "no");
-    out.print(" available=");
-    out.print(status.available ? "yes" : "no");
-    out.print(" chunks_written=");
-    out.print(static_cast<unsigned long>(status.chunks_written));
-    out.print(" chunks_read=");
-    out.print(static_cast<unsigned long>(status.chunks_read));
-    out.print(" chunks_listed=");
-    out.print(static_cast<unsigned long>(status.chunks_listed));
-    out.print(" summary_written=");
-    out.print(static_cast<unsigned long>(status.summary_records_written));
-    out.print(" summary_read=");
-    out.print(static_cast<unsigned long>(status.summary_records_read));
-    out.print(" coverage_written=");
-    out.print(static_cast<unsigned long>(status.coverage_records_written));
-    out.print(" coverage_read=");
-    out.print(static_cast<unsigned long>(status.coverage_records_read));
-    out.print(" bytes_written=");
-    print_uint64(out, status.bytes_written);
-    out.print(" bytes_read=");
-    print_uint64(out, status.bytes_read);
-    out.print(" layout_errors=");
-    out.print(static_cast<unsigned long>(status.layout_errors));
-    out.print(" write_errors=");
-    out.print(static_cast<unsigned long>(status.write_errors));
-    out.print(" read_errors=");
-    out.print(static_cast<unsigned long>(status.read_errors));
-    out.print(" coverage_write_errors=");
-    out.print(static_cast<unsigned long>(status.coverage_write_errors));
-    out.print(" coverage_read_errors=");
-    out.print(static_cast<unsigned long>(status.coverage_read_errors));
-    out.print(" last_error=");
-    out.print(status.last_error[0] ? status.last_error : "--");
-    out.println();
-}
-
-void print_report_store_integrity(Print &out,
-                                  const ReportStoreIntegrityResult &result) {
-    out.print("[REPORT_STORE] integrity ");
-    out.print(result.ok ? "ok" : "dirty");
-    out.print(" repaired=");
-    out.print(result.repaired ? "yes" : "no");
-    out.print(" summary_invalid=");
-    out.print(static_cast<unsigned long>(result.summary_invalid));
-    out.print(" chunks_invalid=");
-    out.print(static_cast<unsigned long>(result.chunks_invalid));
-    out.print(" chunks_removed=");
-    out.print(static_cast<unsigned long>(result.chunks_removed));
-    out.print(" indexes_missing=");
-    out.print(static_cast<unsigned long>(result.chunk_indexes_missing));
-    out.print(" indexes_invalid=");
-    out.print(static_cast<unsigned long>(result.chunk_indexes_invalid));
-    out.print(" indexes_rebuilt=");
-    out.print(static_cast<unsigned long>(result.chunk_indexes_rebuilt));
-    out.print(" coverage_dropped=");
-    out.print(static_cast<unsigned long>(result.coverage_records_dropped));
-    out.print(" coverage_rewritten=");
-    out.print(static_cast<unsigned long>(result.coverage_files_rewritten));
-    out.print(" errors=");
-    out.print(static_cast<unsigned long>(result.errors));
-    out.print(" last_error=");
-    out.print(result.last_error[0] ? result.last_error : "--");
-    out.println();
-}
-
-void print_report_cache_clear_result(Print &out,
-                                     const ReportCacheClearResult &result) {
-    out.print("[REPORT] cache cleared reset=");
-    out.print(static_cast<unsigned long>(result.store_reset));
-    out.print(" summary=");
-    out.print(static_cast<unsigned long>(result.summary_deleted));
-    out.print(" nights=");
-    out.print(static_cast<unsigned long>(result.nights_cleared));
-    out.print(" chunks=");
-    out.print(static_cast<unsigned long>(result.chunks_deleted));
-    out.print(" coverage=");
-    out.print(static_cast<unsigned long>(result.coverage_deleted));
-    out.print(" plots=");
-    out.print(static_cast<unsigned long>(result.plots_deleted));
-    out.print(" result_json=");
-    out.print(static_cast<unsigned long>(result.result_json_deleted));
     out.println();
 }
 
@@ -517,410 +411,149 @@ void print_edf_recorder_status(Print &out,
     out.println();
 }
 
-const char *report_summary_state_name(ReportSummaryState state) {
+const char *report_task_state_name(ReportTaskState state) {
     switch (state) {
-        case ReportSummaryState::Fetching: return "fetching";
-        case ReportSummaryState::Ready: return "ready";
-        case ReportSummaryState::Error: return "error";
-        case ReportSummaryState::Idle:
+        case ReportTaskState::LoadingCatalog: return "loading_catalog";
+        case ReportTaskState::IndexingArtifacts: return "indexing_artifacts";
+        case ReportTaskState::Idle: return "idle";
+        case ReportTaskState::RefreshingCatalog: return "refreshing_catalog";
+        case ReportTaskState::Queued: return "queued";
+        case ReportTaskState::LookingUp: return "looking_up";
+        case ReportTaskState::Building: return "building";
+        case ReportTaskState::Publishing: return "publishing";
+        case ReportTaskState::Stopped:
+        default: return "stopped";
+    }
+}
+
+const char *report_engine_state_name(ReportEngineState state) {
+    switch (state) {
+        case ReportEngineState::Queued: return "queued";
+        case ReportEngineState::WaitingForCatalog: return "waiting_catalog";
+        case ReportEngineState::LookingUp: return "looking_up";
+        case ReportEngineState::AcquiringFallback: return "fallback";
+        case ReportEngineState::Executing: return "executing";
+        case ReportEngineState::Publishing: return "publishing";
+        case ReportEngineState::Idle:
         default: return "idle";
     }
 }
 
-const char *report_result_state_name(ReportResultState state) {
+const char *report_catalog_state_name(NightCatalogRefreshState state) {
     switch (state) {
-        case ReportResultState::Preparing: return "preparing";
-        case ReportResultState::Ready: return "ready";
-        case ReportResultState::Incomplete: return "incomplete";
-        case ReportResultState::Partial: return "partial";
-        case ReportResultState::Error: return "error";
-        case ReportResultState::Idle:
+        case NightCatalogRefreshState::Scanning: return "scanning";
+        case NightCatalogRefreshState::ReadingEdf: return "reading_edf";
+        case NightCatalogRefreshState::ReadingFallback:
+            return "reading_fallback";
+        case NightCatalogRefreshState::ReadingStr: return "reading_str";
+        case NightCatalogRefreshState::Building: return "building";
+        case NightCatalogRefreshState::Ready: return "ready";
+        case NightCatalogRefreshState::Error: return "error";
+        case NightCatalogRefreshState::Idle:
         default: return "idle";
     }
 }
 
-void print_duration_min(Print &out, uint32_t duration_min);
+void print_report_status(Print &out, const ReportTask &task) {
+    const ReportTaskStatus status = task.status();
 
-void print_report_summary_status(Print &out,
-                                 const ReportManager &manager) {
-    const ReportSummaryStatus status = manager.summary_status();
-    out.print("[REPORT] summary=");
-    out.print(report_summary_state_name(status.state));
-    out.print(" revision=");
-    out.print(static_cast<unsigned long>(status.revision));
-    out.print(" records=");
-    out.print(static_cast<unsigned long>(status.records_total));
-    out.print(" therapy_nights=");
-    out.print(static_cast<unsigned long>(status.nights_with_therapy));
-    out.print(" elapsed_ms=");
-    out.print(static_cast<unsigned long>(status.elapsed_ms));
-    out.print(" active=");
-    out.print(status.active_spool.length() ? status.active_spool.c_str()
-                                           : "--");
-    out.print(" error=");
-    out.print(status.error.length() ? status.error.c_str() : "--");
+    out.print("[REPORT] state=");
+    out.print(report_task_state_name(status.state));
+    out.print(" started=");
+    out.print(status.task_started ? "yes" : "no");
+    out.print(" nights=");
+    out.print(static_cast<unsigned long>(status.catalog_nights));
+    out.print(" generation=");
+    out.print(static_cast<unsigned long>(status.catalog_generation));
+    out.print(" commands=");
+    out.print(static_cast<unsigned long>(status.commands_queued));
+    out.print(" dropped=");
+    out.print(static_cast<unsigned long>(status.command_drops));
+    out.print(" failed=");
+    out.print(static_cast<unsigned long>(status.command_failures));
     out.println();
-}
 
-void print_report_result_status(Print &out,
-                                const ReportManager &manager) {
-    const ReportResultStatus status = manager.result_status();
-    out.print("[REPORT] result=");
-    out.print(report_result_state_name(status.state));
-    out.print(" index=");
-    out.print(static_cast<unsigned long>(status.therapy_index));
-    out.print(" night=");
-    print_uint64(out, status.night_start_ms);
-    out.print(" duration=");
-    print_duration_min(out, status.duration_min);
-    out.print(" missing_required=");
-    out.print(static_cast<unsigned long>(status.missing_required));
-    out.print(" missing_streams=");
-    out.print(static_cast<unsigned long>(status.missing_streams));
-    out.print(" streams=");
-    out.print(static_cast<unsigned long>(status.stream_count));
-    out.print(" chunks=");
-    out.print(static_cast<unsigned long>(status.chunk_count));
-    out.print(" records=");
-    out.print(static_cast<unsigned long>(status.record_count));
-    out.print(" bytes=");
-    out.print(static_cast<unsigned long>(status.payload_bytes));
-    out.print(" slots=");
-    out.print(static_cast<unsigned long>(status.materialized_slots));
+    out.print("[REPORT] engine=");
+    out.print(report_engine_state_name(status.engine.state));
+    out.print(" queued=");
+    out.print(static_cast<unsigned long>(status.engine.queued));
+    out.print(" foreground=");
+    out.print(status.foreground_active ? "yes" : "no");
+    out.print(" background=");
+    out.print(status.background_active ? "yes" : "no");
+    out.print(" suspended=");
+    out.print(status.background_suspended ? "yes" : "no");
+    out.print(" last_error=");
+    out.print(status.engine.last_completion.error[0]
+                  ? status.engine.last_completion.error
+                  : "--");
+    out.println();
+
+    out.print("[REPORT] catalog=");
+    out.print(report_catalog_state_name(status.catalog_refresh.state));
+    out.print(" files=");
+    out.print(static_cast<unsigned long>(status.catalog_refresh.files_indexed));
     out.print("/");
-    out.print(static_cast<unsigned long>(status.materialized_plot_slots));
+    out.print(static_cast<unsigned long>(status.catalog_refresh.files_seen));
+    out.print(" sessions=");
+    out.print(static_cast<unsigned long>(status.catalog_refresh.sessions));
     out.print(" error=");
-    out.print(status.error.length() ? status.error.c_str() : "--");
-    out.println();
-
-    const ReportManager::BuildQueueSnapshot queue =
-        manager.build_queue_snapshot();
-    out.print("[REPORT] build_queue=");
-    if (!queue.available) {
-        out.print("unavailable");
-    } else if (!queue.lock_ok) {
-        out.print("busy");
-    } else {
-        out.print(static_cast<unsigned long>(queue.count));
-        if (queue.count > 0) {
-            out.print(" head_index=");
-            out.print(static_cast<unsigned long>(queue.head_therapy_index));
-            out.print(" head_night=");
-            print_uint64(out, queue.head_night_ms);
-            out.print(" refresh=");
-            out.print(queue.head_refresh ? "yes" : "no");
-            if (queue.head_wait_ms) {
-                out.print(" wait_ms=");
-                out.print(static_cast<unsigned long>(queue.head_wait_ms));
-            }
-            if (queue.head_defer_count) {
-                out.print(" defers=");
-                out.print(static_cast<unsigned>(queue.head_defer_count));
-            }
-            if (queue.head_retry_attempts) {
-                out.print(" retries=");
-                out.print(static_cast<unsigned>(queue.head_retry_attempts));
-            }
-        }
-        out.print(" enq=");
-        out.print(static_cast<unsigned long>(queue.enqueue_total));
-        out.print("/");
-        out.print(static_cast<unsigned long>(queue.queued_total));
-        out.print("/");
-        out.print(static_cast<unsigned long>(queue.already_total));
-        out.print(" svc=");
-        out.print(static_cast<unsigned long>(queue.service_total));
-        if (queue.last_read[0]) {
-            out.print(" last_read=");
-            out.print(queue.last_read);
-        }
-        if (queue.last_enqueue_result[0]) {
-            out.print(" last_enqueue=");
-            out.print(queue.last_enqueue_result);
-            out.print("@");
-            out.print(static_cast<unsigned long>(
-                queue.last_enqueue_therapy_index));
-            out.print("/");
-            print_uint64(out, queue.last_enqueue_night_ms);
-        }
-        if (queue.last_service_block[0]) {
-            out.print(" blocked=");
-            out.print(queue.last_service_block);
-        }
-        if (queue.last_night_ms != 0 || queue.last_outcome[0]) {
-            out.print(" last_index=");
-            out.print(static_cast<unsigned long>(queue.last_therapy_index));
-            out.print(" last_night=");
-            print_uint64(out, queue.last_night_ms);
-            out.print(" last_outcome=");
-            out.print(queue.last_outcome[0] ? queue.last_outcome : "--");
-            out.print(" last_state=");
-            out.print(queue.last_state[0] ? queue.last_state : "--");
-            out.print(" last_error=");
-            out.print(queue.last_error[0] ? queue.last_error : "--");
-        }
-    }
-    out.println();
-
-    EdfReportCatalogStatus catalog;
-    out.print("[REPORT] edf_catalog=");
-    if (!manager.edf_catalog_status(catalog, 0)) {
-        out.print("unavailable");
-    } else {
-        out.print(edf_report_catalog_state_name(catalog.state));
-        out.print(" phase=");
-        out.print(edf_report_catalog_phase_name(catalog.phase));
-        out.print(" refresh=");
-        out.print(static_cast<unsigned long>(catalog.refresh_id));
-        out.print(" steps=");
-        out.print(static_cast<unsigned long>(catalog.step_calls));
-        out.print("/");
-        out.print(static_cast<unsigned long>(catalog.idle_phase_hits));
-        out.print(" sessions=");
-        out.print(static_cast<unsigned long>(catalog.sessions));
-        out.print(" build_sessions=");
-        out.print(static_cast<unsigned long>(catalog.build_sessions));
-        out.print(" days=");
-        out.print(static_cast<unsigned long>(catalog.days_scanned));
-        out.print(" files=");
-        out.print(static_cast<unsigned long>(catalog.files_scanned));
-        out.print("/");
-        out.print(static_cast<unsigned long>(catalog.files_indexed));
-        out.print(" skipped=");
-        out.print(static_cast<unsigned long>(catalog.files_skipped));
-        out.print(" truncated=");
-        out.print(catalog.truncated ? "yes" : "no");
-        out.print(" current=");
-        out.print(catalog.current_path[0] ? catalog.current_path : "--");
-        out.print(" error=");
-        out.print(catalog.error[0] ? catalog.error : "--");
-        if (catalog.retry_attempt) {
-            out.print(" retry=");
-            out.print(static_cast<unsigned>(catalog.retry_attempt));
-            out.print("/");
-            out.print(static_cast<unsigned long>(catalog.retry_in_ms));
-            out.print("ms");
-        }
-    }
+    out.print(status.catalog_refresh.error[0]
+                  ? status.catalog_refresh.error
+                  : "--");
     out.println();
 }
 
-void print_report_prefetch_status(Print &out, const ReportManager &manager) {
-    char line[128];
-    BackgroundWorker *w = background_worker();
-    if (w) {
-        const BackgroundWorkerStatus s = w->status();
-#if AC_STACK_PROFILE_ENABLED
-        snprintf(line, sizeof(line),
-                 "[REPORT] prefetch worker=%s gate=%s ticks=%lu stack_free=%lu",
-                 s.enabled ? "enabled" : "disabled", s.gate_reason,
-                 static_cast<unsigned long>(s.ticks),
-                 static_cast<unsigned long>(s.stack_high_water_words));
-#else
-        snprintf(line, sizeof(line),
-                 "[REPORT] prefetch worker=%s gate=%s ticks=%lu",
-                 s.enabled ? "enabled" : "disabled", s.gate_reason,
-                 static_cast<unsigned long>(s.ticks));
-#endif
-        out.println(line);
-    } else {
-        out.println("[REPORT] prefetch worker=unavailable");
+uint32_t report_night_duration(const NightCatalog &catalog,
+                               const NightCatalogRecord &night) {
+    if (night.metrics.has(NightCatalogMetric::DurationMinutes)) {
+        return night.metrics.duration_min;
     }
-    const ReportManager::PrefetchSnapshot p = manager.prefetch_snapshot();
-    const char *phase = "?";
-    switch (p.phase) {
-        case ReportManager::PrefetchPhase::Idle: phase = "idle"; break;
-        case ReportManager::PrefetchPhase::Selecting: phase = "selecting"; break;
-        case ReportManager::PrefetchPhase::Pending: phase = "pending"; break;
-        case ReportManager::PrefetchPhase::Fetching: phase = "fetching"; break;
-        case ReportManager::PrefetchPhase::Done: phase = "done"; break;
-        case ReportManager::PrefetchPhase::Failed: phase = "failed"; break;
-        case ReportManager::PrefetchPhase::Drained: phase = "drained"; break;
+
+    uint64_t duration_ms = 0;
+    size_t session_count = 0;
+    const NightCatalogTimeRange *sessions =
+        catalog.sessions(night, session_count);
+    for (size_t i = 0; sessions && i < session_count; ++i) {
+        if (!sessions[i].valid()) continue;
+        duration_ms += static_cast<uint64_t>(
+            sessions[i].end_ms - sessions[i].start_ms);
     }
-    snprintf(line, sizeof(line),
-             "[REPORT] prefetch phase=%s night_ms=%llu completed=%lu failed=%lu",
-             phase, static_cast<unsigned long long>(p.night_ms),
-             static_cast<unsigned long>(p.completed),
-             static_cast<unsigned long>(p.failed));
-    out.println(line);
-    out.print("[REPORT] prefetch last_night=");
-    print_uint64(out, p.last_night_ms);
-    out.print(" last_failed=");
-    print_uint64(out, p.last_failed_night_ms);
-    out.print(" source=");
-    out.print(p.last_source[0] ? p.last_source : "--");
-    out.print(" error=");
-    out.print(p.last_error[0] ? p.last_error : "--");
-    out.println();
+    return static_cast<uint32_t>(duration_ms / 60000);
 }
 
-void print_report_cache_status(Print &out,
-                               const ReportManager &manager) {
-    const ReportCacheFetchStatus status = manager.cache_fetch_status();
-    out.print("[REPORT] cache=");
-    out.print(status.active ? "active" : "idle");
-    out.print(" revision=");
-    out.print(static_cast<unsigned long>(status.revision));
-    out.print(" night=");
-    print_uint64(out, status.night_start_ms);
-    out.print(" source=");
-    out.print(status.source_count ? report_source_spool_type(
-                  status.active_source) : "--");
-    out.print(" index=");
-    out.print(static_cast<unsigned long>(status.source_index));
-    out.print('/');
-    out.print(static_cast<unsigned long>(status.source_count));
-    out.print(" chunks=");
-    out.print(static_cast<unsigned long>(status.chunks_written));
-    out.print(" error=");
-    out.print(status.error.length() ? status.error.c_str() : "--");
-    out.println();
-}
-
-void print_utc_ms(Print &out, uint64_t ms) {
-    const time_t seconds = static_cast<time_t>(ms / 1000);
-    struct tm tmv;
-    if (!gmtime_r(&seconds, &tmv)) {
-        print_uint64(out, ms);
-        return;
-    }
-
-    char buf[24];
-    if (!strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M UTC", &tmv)) {
-        print_uint64(out, ms);
-        return;
-    }
-    out.print(buf);
-}
-
-void print_duration_min(Print &out, uint32_t duration_min) {
-    out.print(static_cast<unsigned long>(duration_min / 60));
-    out.print("h ");
-    out.print(static_cast<unsigned long>(duration_min % 60));
-    out.print('m');
-}
-
-struct ReportNightPrintContext {
-    Print *out = nullptr;
-    size_t count = 0;
-};
-
-bool print_report_night_row(void *context,
-                            const ReportSummaryNight &night) {
-    ReportNightPrintContext *ctx =
-        static_cast<ReportNightPrintContext *>(context);
-    if (!ctx || !ctx->out) return false;
-
-    Print &out = *ctx->out;
-    out.print("  ");
-    out.print(static_cast<unsigned long>(night.therapy_index));
-    out.print(": ");
-    print_utc_ms(out, night.record.start_ms);
-    out.print(" duration=");
-    print_duration_min(out, night.record.duration_min);
-    if (night.record.has_session_count) {
-        out.print(" sessions=");
-        out.print(static_cast<unsigned long>(night.record.session_count));
-    }
-    if (night.record.session_interval_count > 0) {
-        out.print(" intervals=");
-        out.print(static_cast<unsigned long>(
-            night.record.session_interval_count));
-    }
-    out.print(" start_ms=");
-    print_uint64(out, night.record.start_ms);
-    out.println();
-    ctx->count++;
-    return true;
-}
-
-void print_report_nights(Print &out, const ReportManager &manager) {
+void print_report_nights(Print &out, const ReportTask &task) {
+    const std::shared_ptr<const NightCatalog> catalog =
+        task.catalog_snapshot();
     out.println("[REPORT nights]");
-    ReportNightPrintContext ctx;
-    ctx.out = &out;
-    manager.for_each_summary_night(print_report_night_row, &ctx);
-    if (!ctx.count) out.println("  no therapy nights indexed");
-}
-
-bool parse_u64_arg(const String &text, uint64_t &out) {
-    if (!text.length()) return false;
-    uint64_t value = 0;
-    for (size_t i = 0; i < text.length(); ++i) {
-        const char ch = text.charAt(i);
-        if (ch < '0' || ch > '9') return false;
-        const uint8_t digit = static_cast<uint8_t>(ch - '0');
-        if (value > (UINT64_MAX - digit) / 10) return false;
-        value = value * 10 + digit;
-    }
-    out = value;
-    return true;
-}
-
-bool parse_report_coverage_target(const String &arg,
-                                  const ReportManager &manager,
-                                  uint64_t &night_start_ms) {
-    String value = arg;
-    trim_inplace(value);
-    to_lower_inplace(value);
-    if (!value.length()) return false;
-
-    if (value == "latest") {
-        ReportSummaryRecord night;
-        if (!manager.latest_summary_night(night)) return false;
-        night_start_ms = night.start_ms;
-        return true;
-    }
-
-    if (value.startsWith("ms ")) {
-        value.remove(0, 3);
-        trim_inplace(value);
-        return parse_u64_arg(value, night_start_ms);
-    }
-
-    uint64_t numeric = 0;
-    if (!parse_u64_arg(value, numeric)) return false;
-
-    const ReportSummaryStatus status = manager.summary_status();
-    if (numeric < status.nights_with_therapy) {
-        ReportSummaryRecord night;
-        if (!manager.summary_night_by_therapy_index(
-                static_cast<size_t>(numeric), night)) {
-            return false;
-        }
-        night_start_ms = night.start_ms;
-        return true;
-    }
-
-    night_start_ms = numeric;
-    return true;
-}
-
-void print_report_coverage(Print &out,
-                           const ReportManager &manager,
-                           uint64_t night_start_ms) {
-    ReportNightCoverageStatus coverage;
-    if (!manager.night_coverage(night_start_ms, coverage)) {
-        out.println("[REPORT] coverage night not found");
+    if (!catalog || catalog->size() == 0) {
+        out.println("  no therapy nights indexed");
         return;
     }
-    out.print("[REPORT] coverage night=");
-    print_uint64(out, coverage.start_ms);
-    out.print(" end=");
-    print_uint64(out, coverage.end_ms);
-    out.print(" duration_min=");
-    out.print(static_cast<unsigned long>(coverage.duration_min));
-    out.print(" missing_required=");
-    out.print(static_cast<unsigned long>(coverage.missing_required));
-    out.println();
-    for (size_t i = 0; i < coverage.source_count; ++i) {
-        const ReportNightSourceCoverage &source = coverage.sources[i];
+
+    for (size_t i = 0; i < catalog->size(); ++i) {
+        const NightCatalogRecord *night = catalog->record(i);
+        if (!night) continue;
+
+        char day[9] = {};
+        night->sleep_day.format_yyyymmdd(day, sizeof(day));
         out.print("  ");
-        out.print(report_source_spool_type(source.source));
-        out.print(" required=");
-        out.print(source.required ? "yes" : "no");
-        out.print(" coverage=");
-        out.println(source.complete ? "complete" : "missing");
+        out.print(day);
+        out.print(" duration_min=");
+        out.print(static_cast<unsigned long>(
+            report_night_duration(*catalog, *night)));
+        out.print(" sessions=");
+        out.print(static_cast<unsigned long>(night->session_count));
+        out.print(" sources=0x");
+        out.print(static_cast<unsigned>(night->source_flags), HEX);
+        out.println();
     }
+}
+
+bool parse_report_sleep_day(String value, SleepDayId &sleep_day) {
+    trim_inplace(value);
+    return value.length() == 8 &&
+           SleepDayId::from_yyyymmdd(value.c_str(), sleep_day);
 }
 
 std::string cli_set_value_literal(String value) {
@@ -1161,218 +794,67 @@ void ManagementConsole::handle_report_command(Print &out,
     trim_inplace(rest);
     to_lower_inplace(rest);
     if (!rest.length() || rest == "status") {
-        print_report_summary_status(out, ctx.report_manager);
-        print_report_cache_status(out, ctx.report_manager);
-        print_report_result_status(out, ctx.report_manager);
-        print_report_store_status(out);
-        print_report_prefetch_status(out, ctx.report_manager);
-        return;
-    }
-    if (rest == "store" || rest == "store status") {
-        print_report_store_status(out);
-        return;
-    }
-    if (rest == "store check" || rest == "store repair") {
-        const char *reason = nullptr;
-        if (!report_store_integrity_allowed(ctx, reason)) {
-            out.print("[REPORT] store integrity scan refused: ");
-            out.println(reason ? reason : "realtime_active");
-            out.println("[REPORT] retry when therapy and live streams are idle");
-            return;
-        }
-        const bool repair = rest == "store repair";
-        ReportStoreIntegrityResult result;
-        ReportStore::check_integrity(repair, result);
-        print_report_store_integrity(out, result);
-        print_report_store_status(out);
+        print_report_status(out, ctx.report_task);
         return;
     }
     if (rest == "nights" || rest == "list") {
-        print_report_nights(out, ctx.report_manager);
-        return;
-    }
-    if (rest == "prefetch" || rest == "prefetch status") {
-        print_report_prefetch_status(out, ctx.report_manager);
-        return;
-    }
-    if (rest == "prefetch on" || rest == "prefetch off") {
-        BackgroundWorker *w = background_worker();
-        if (!w) {
-            out.println("[REPORT] background worker unavailable");
-            return;
-        }
-        const bool on = rest == "prefetch on";
-        w->set_enabled(on);
-        out.println(on ? "[REPORT] prefetch enabled"
-                       : "[REPORT] prefetch disabled");
-        print_report_prefetch_status(out, ctx.report_manager);
-        return;
-    }
-    if (rest == "coverage") {
-        out.println("[REPORT] usage: report coverage latest|INDEX|ms VALUE|NIGHT_START_MS");
-        return;
-    }
-    if (rest == "cache") {
-        out.println("[REPORT] usage: report cache [force] latest|INDEX|ms VALUE|NIGHT_START_MS");
-        out.println("[REPORT] usage: report cache cancel");
-        out.println("[REPORT] usage: report cache clear all|latest|INDEX|ms VALUE|NIGHT_START_MS");
-        out.println("[REPORT] usage: report cache clear oldest N");
-        out.println("[REPORT] usage: report cache prune [KEEP_LATEST]");
-        out.println("[REPORT] usage: report store check|repair");
+        print_report_nights(out, ctx.report_task);
         return;
     }
     if (rest == "result") {
-        print_report_result_status(out, ctx.report_manager);
-        out.println("[REPORT] usage: report result latest|INDEX");
+        out.println("[REPORT] usage: report result latest|YYYYMMDD");
         return;
     }
     if (rest.startsWith("result ")) {
         String value = rest.substring(strlen("result "));
         trim_inplace(value);
-        size_t index = 0;
+
+        const std::shared_ptr<const NightCatalog> catalog =
+            ctx.report_task.catalog_snapshot();
+        if (!catalog) {
+            out.println("[REPORT] night catalog unavailable");
+            return;
+        }
+
+        SleepDayId sleep_day;
         if (value == "latest") {
-            index = 0;
+            const NightCatalogRecord *latest = catalog->record(0);
+            if (!latest) {
+                out.println("[REPORT] no indexed nights");
+                return;
+            }
+            sleep_day = latest->sleep_day;
+        } else if (!parse_report_sleep_day(value, sleep_day)) {
+            out.println("[REPORT] usage: report result latest|YYYYMMDD");
+            return;
+        }
+
+        const NightCatalogRecord *night = catalog->find(sleep_day);
+        if (!night) {
+            out.println("[REPORT] night not found");
+            return;
+        }
+
+        static uint32_t generation = 0;
+        generation++;
+        if (generation == 0) generation = 1;
+
+        const OperationAdmission admitted = ctx.report_task.request_artifact(
+            ReportArtifactKey::result(sleep_day, night->source_revision),
+            ReportRequestPriority::Foreground,
+            generation);
+        if (admitted == OperationAdmission::Accepted) {
+            out.println("[REPORT] result requested");
+        } else if (admitted == OperationAdmission::Busy) {
+            out.println("[REPORT] request queue busy");
         } else {
-            uint64_t parsed = 0;
-            if (!parse_u64_arg(value, parsed) ||
-                parsed > static_cast<uint64_t>(SIZE_MAX)) {
-                out.println("[REPORT] usage: report result latest|INDEX");
-                return;
-            }
-            index = static_cast<size_t>(parsed);
+            out.println("[REPORT] request rejected");
         }
-        if (!ctx.report_manager.request_result_prepare_by_therapy_index(
-                index,
-                false)) {
-            out.println("[REPORT] result prepare queue failed");
-        } else {
-            out.println("[REPORT] result prepare queued");
-        }
-        print_report_result_status(out, ctx.report_manager);
         return;
     }
-    if (rest.startsWith("cache ")) {
-        String value = rest.substring(strlen("cache "));
-        trim_inplace(value);
-        if (value == "clear") {
-            out.println("[REPORT] usage: report cache clear all|latest|INDEX|ms VALUE|NIGHT_START_MS");
-            return;
-        }
-        if (value == "cancel") {
-            if (!ctx.report_manager.cancel_cache_fetch()) {
-                out.println("[REPORT] no active cache fetch");
-            } else {
-                out.println("[REPORT] cache fetch cancelled");
-            }
-            print_report_cache_status(out, ctx.report_manager);
-            return;
-        }
-        if (value == "prune" || value.startsWith("prune ")) {
-            size_t keep_latest = AC_REPORT_CACHE_QUOTA_NIGHTS;
-            if (value.startsWith("prune ")) {
-                value.remove(0, strlen("prune "));
-                trim_inplace(value);
-                uint64_t parsed = 0;
-                if (!parse_u64_arg(value, parsed) ||
-                    parsed > static_cast<uint64_t>(SIZE_MAX)) {
-                    out.println("[REPORT] usage: report cache prune [KEEP_LATEST]");
-                    return;
-                }
-                keep_latest = static_cast<size_t>(parsed);
-            }
-            ReportCacheClearResult clear_result;
-            if (!ctx.report_manager.prune_cache_to_latest_nights(keep_latest,
-                                                                  clear_result)) {
-                out.println("[REPORT] cache prune rejected");
-                print_report_cache_status(out, ctx.report_manager);
-                return;
-            }
-            print_report_cache_clear_result(out, clear_result);
-            print_report_store_status(out);
-            return;
-        }
-        if (value.startsWith("clear ")) {
-            value.remove(0, strlen("clear "));
-            trim_inplace(value);
-            ReportCacheClearResult clear_result;
-            bool ok = false;
-            if (value == "all") {
-                ok = ctx.report_manager.clear_cache_all(clear_result);
-            } else if (value.startsWith("oldest ")) {
-                value.remove(0, strlen("oldest "));
-                trim_inplace(value);
-                uint64_t parsed = 0;
-                if (!parse_u64_arg(value, parsed) ||
-                    parsed > static_cast<uint64_t>(SIZE_MAX)) {
-                    out.println("[REPORT] usage: report cache clear oldest N");
-                    return;
-                }
-                ok = ctx.report_manager.clear_oldest_cache_nights(
-                    static_cast<size_t>(parsed),
-                    clear_result);
-            } else {
-                uint64_t night_start_ms = 0;
-                if (!parse_report_coverage_target(value,
-                                                  ctx.report_manager,
-                                                  night_start_ms)) {
-                    out.println("[REPORT] usage: report cache clear all|latest|INDEX|ms VALUE|NIGHT_START_MS");
-                    return;
-                }
-                ok = ctx.report_manager.clear_cache_night(night_start_ms,
-                                                          clear_result);
-            }
-            if (!ok) {
-                out.println("[REPORT] cache clear rejected");
-                print_report_cache_status(out, ctx.report_manager);
-                return;
-            }
-            print_report_cache_clear_result(out, clear_result);
-            print_report_store_status(out);
-            return;
-        }
-        bool force = false;
-        if (value.startsWith("force ")) {
-            force = true;
-            value.remove(0, strlen("force "));
-            trim_inplace(value);
-        }
-        uint64_t night_start_ms = 0;
-        if (!parse_report_coverage_target(value, ctx.report_manager,
-                                          night_start_ms)) {
-            out.println("[REPORT] usage: report cache [force] latest|INDEX|ms VALUE|NIGHT_START_MS");
-            return;
-        }
-        if (!ctx.report_manager.request_night_cache(night_start_ms, force)) {
-            out.println("[REPORT] cache request rejected");
-            print_report_cache_status(out, ctx.report_manager);
-            return;
-        }
-        out.println("[REPORT] cache request queued");
-        print_report_cache_status(out, ctx.report_manager);
-        return;
-    }
-    if (rest.startsWith("coverage ")) {
-        String value = rest.substring(strlen("coverage "));
-        trim_inplace(value);
-        uint64_t night_start_ms = 0;
-        if (!parse_report_coverage_target(value, ctx.report_manager,
-                                          night_start_ms)) {
-            out.println("[REPORT] usage: report coverage latest|INDEX|ms VALUE|NIGHT_START_MS");
-            return;
-        }
-        print_report_coverage(out, ctx.report_manager, night_start_ms);
-        return;
-    }
-    print_unknown_command(out, "REPORT",
-                          "report, report status, report store, "
-                          "report store check|repair, "
-                          "report nights, report coverage latest|INDEX|ms VALUE, "
-                          "report cache latest|INDEX|ms VALUE, "
-                          "report cache cancel, "
-                          "report cache clear all|oldest N|latest|INDEX|ms VALUE, "
-                          "report cache prune [KEEP_LATEST], "
-                          "report result latest|INDEX, "
-                          "report prefetch [status|on|off]");
+    print_unknown_command(
+        out, "REPORT",
+        "report, report status, report nights, report result latest|YYYYMMDD");
 }
 
 void ManagementConsole::handle_storage_command(Print &out,
