@@ -20,7 +20,8 @@ public:
     void set_rotation_allowed(bool allowed);
     bool enqueue(const char *line, size_t length) override;
 
-    bool prepare_tail_read();
+    uint32_t capture_tail_fence() const;
+    bool prepare_tail_read(uint32_t fence_sequence);
     bool step();
     FileLogSinkStatus status() const override;
 
@@ -49,6 +50,9 @@ private:
     WakeTask wake_task_ = nullptr;
     bool desired_enabled_ = false;
     bool rotation_allowed_ = true;
+    uint32_t next_sequence_ = 1;
+    uint32_t accepted_sequence_ = 0;
+    uint32_t written_sequence_ = 0;
     FileLogSinkStatus status_;
 
     File file_;

@@ -122,6 +122,8 @@ struct ReadJob {
     size_t target_length = 0;
     size_t bytes_read = 0;
     size_t tail_lines = 0;
+    bool file_log_fence_captured = false;
+    uint32_t file_log_fence_sequence = 0;
     uint8_t *bytes = nullptr;
     char path[AC_STORAGE_PATH_MAX] = {};
 };
@@ -1876,7 +1878,15 @@ bool process_read_step() {
         job.mode == StorageReadMode::TailLines &&
         strcmp(job.path, AC_FILE_LOG_PATH) == 0;
     if (!job.started && file_log_tail) {
-        if (!file_log_sink.prepare_tail_read()) return false;
+        if (!job.file_log_fence_captured) {
+            job.file_log_fence_sequence =
+                file_log_sink.capture_tail_fence();
+            job.file_log_fence_captured = true;
+        }
+        if (!file_log_sink.prepare_tail_read(
+                job.file_log_fence_sequence)) {
+            return false;
+        }
     }
 
     const char *error = nullptr;

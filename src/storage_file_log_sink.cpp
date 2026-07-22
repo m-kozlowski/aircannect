@@ -27,6 +27,7 @@ bool format_archive_path(uint8_t index, char *out, size_t out_size) {
 }  // namespace
 
 struct StorageFileLogSink::Line {
+    uint32_t sequence = 0;
     uint16_t length = 0;
     char bytes[FILE_LOG_LINE_MAX] = {};
 };
@@ -72,7 +73,10 @@ bool StorageFileLogSink::configure(bool enabled) {
     if (!begin() || !lock()) return false;
 
     desired_enabled_ = enabled;
-    if (!enabled && queue_) queue_->clear();
+    if (!enabled && queue_) {
+        queue_->clear();
+        written_sequence_ = accepted_sequence_;
+    }
     update_queue_status_locked();
     unlock();
     if (wake_task_) wake_task_();
@@ -103,9 +107,15 @@ bool StorageFileLogSink::enqueue(const char *line, size_t length) {
     bool accepted = false;
     if (desired_enabled_ && queue_) {
         Line item;
+        item.sequence = next_sequence_;
         item.length = static_cast<uint16_t>(length);
         memcpy(item.bytes, line, length);
         accepted = queue_->push(item);
+        if (accepted) {
+            accepted_sequence_ = item.sequence;
+            next_sequence_++;
+            if (next_sequence_ == 0) next_sequence_++;
+        }
     }
     update_queue_status_locked();
     unlock();
@@ -291,6 +301,7 @@ bool StorageFileLogSink::write_line(const Line &line) {
     if (lock()) {
         status_.written++;
         status_.bytes = file_size_;
+        written_sequence_ = line.sequence;
         unlock();
     }
     return true;
@@ -321,12 +332,24 @@ bool StorageFileLogSink::apply_enabled_state() {
     return true;
 }
 
-bool StorageFileLogSink::prepare_tail_read() {
+uint32_t StorageFileLogSink::capture_tail_fence() const {
+#if AC_FILE_LOG_ENABLED
+    if (!lock()) return 0;
+    const uint32_t sequence = accepted_sequence_;
+    unlock();
+    return sequence;
+#else
+    return 0;
+#endif
+}
+
+bool StorageFileLogSink::prepare_tail_read(uint32_t fence_sequence) {
 #if AC_FILE_LOG_ENABLED
     if (!lock()) return false;
-    const bool queue_empty = !queue_ || queue_->empty();
+    const bool fence_reached =
+        static_cast<int32_t>(written_sequence_ - fence_sequence) >= 0;
     unlock();
-    if (!queue_empty) return false;
+    if (!fence_reached) return false;
 
     if (file_) close_file(true);
     return true;
