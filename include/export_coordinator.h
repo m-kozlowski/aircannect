@@ -52,8 +52,10 @@ private:
     };
 
     struct StartupCheckState {
-        uint32_t requested_generation = 0;
-        uint32_t completed_generation = 0;
+        uint32_t smb_requested_generation = 0;
+        uint32_t sleephq_requested_generation = 0;
+        uint32_t sleephq_completed_generation = 0;
+        bool idle_grace_complete = false;
     };
 
     struct IdleBackfillState {
@@ -88,6 +90,11 @@ private:
     void clear_post_therapy_sleephq();
 
     // startup and idle backfill
+    bool startup_idle_work_allowed(uint32_t now_ms);
+    void maybe_queue_smb_startup_check(
+        bool network_connected,
+        const StorageSyncStatus &status,
+        SleepHqSyncRuntimeStatus sleephq);
     void maybe_queue_sleephq_startup_check(bool network_connected,
                                            bool storage_sync_active,
                                            SleepHqSyncRuntimeStatus status);

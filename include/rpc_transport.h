@@ -139,6 +139,7 @@ private:
                     RpcPayloadRef payload,
                     RpcSource source = RpcSource::Internal,
                     uint32_t id = 0);
+    void report_framing_error(const char *channel, const std::string &error);
     bool enqueue_request(QueuedRequest &request);
     bool enqueue_payload_frames(const std::string &payload, RpcSource source);
     static bool enqueue_datagram_frame(void *context,

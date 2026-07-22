@@ -440,11 +440,10 @@ void StorageSyncEngine::apply_config_locked(const SmbExportConfig &config) {
         status_.last_error[0] = '\0';
     }
     if (status_.enabled && status_.configured) {
-        status_.state = StorageSyncState::Pending;
-        status_.pending = true;
-        pending_run_kind_ = RunKind::StartupCheck;
-        copy_cstr(status_.pending_reason, sizeof(status_.pending_reason),
-                  run_kind_reason(pending_run_kind_));
+        status_.state = StorageSyncState::Idle;
+        status_.pending = false;
+        pending_run_kind_ = RunKind::Manual;
+        status_.pending_reason[0] = '\0';
         status_.last_error[0] = '\0';
         status_.current_path[0] = '\0';
         status_.files_seen = 0;
@@ -703,6 +702,10 @@ bool StorageSyncEngine::request_sync_with_kind(RunKind kind, const char *label) 
 
 bool StorageSyncEngine::request_manual_sync() {
     return request_sync_with_kind(RunKind::Manual, "manual");
+}
+
+bool StorageSyncEngine::request_startup_check() {
+    return request_sync_with_kind(RunKind::StartupCheck, "startup_check");
 }
 
 bool StorageSyncEngine::request_verify_recent() {

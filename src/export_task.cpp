@@ -176,6 +176,10 @@ bool ExportTask::request_smb_sync() {
     return queue_command(CommandKind::SmbSync);
 }
 
+bool ExportTask::request_smb_startup_check() {
+    return queue_command(CommandKind::SmbStartupCheck);
+}
+
 bool ExportTask::request_smb_verify() {
     return queue_command(CommandKind::SmbVerify);
 }
@@ -287,6 +291,10 @@ bool ExportTask::apply_command(const Command &command) {
         case CommandKind::SmbSync:
             configured = smb.enabled && smb.configured;
             accepted = runtime_->smb.request_manual_sync();
+            break;
+        case CommandKind::SmbStartupCheck:
+            configured = smb.enabled && smb.configured;
+            accepted = runtime_->smb.request_startup_check();
             break;
         case CommandKind::SmbVerify:
             configured = smb.enabled && smb.configured;

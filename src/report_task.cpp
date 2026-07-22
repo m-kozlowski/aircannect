@@ -341,6 +341,19 @@ struct ReportTask::Runtime {
         return true;
     }
 
+    bool startup_idle_work_allowed(uint32_t now_ms) {
+        if (startup_idle_grace_complete ||
+            activity.foreground_report_demand) {
+            return true;
+        }
+        if (!deadline_due(now_ms, AC_RUNTIME_STARTUP_IDLE_GRACE_MS)) {
+            return false;
+        }
+
+        startup_idle_grace_complete = true;
+        return true;
+    }
+
     bool schedule_legacy_cache_cleanup(uint32_t now_ms) {
         if (!legacy_cleanup_pending || !delete_port || !catalog ||
             idle_cursor < catalog->size() ||
@@ -482,6 +495,7 @@ struct ReportTask::Runtime {
     ActivitySnapshot pending_activity;
     bool activity_pending = false;
     bool background_suspended = false;
+    bool startup_idle_grace_complete = false;
 
     bool refresh_offset_valid = false;
     int32_t refresh_offset_minutes = 0;
@@ -667,6 +681,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (!runtime_ || !runtime_->initialized) return false;
     Runtime &runtime = *runtime_;
     bool worked = runtime.apply_pending_activity();
+    const bool startup_idle_work_allowed =
+        runtime.startup_idle_work_allowed(now_ms);
 
     ReportTaskCommand command;
     if (runtime.pop(command)) {
@@ -926,7 +942,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
-    if (!runtime.background_suspended &&
+    if (!runtime.background_suspended && startup_idle_work_allowed &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -947,7 +963,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.background_suspended &&
+    if (!runtime.background_suspended && startup_idle_work_allowed &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -1018,7 +1034,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.artifact_index_refresh.active() &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save;
-    if (catalog_stable && !runtime.background_suspended) {
+    if (catalog_stable && !runtime.background_suspended &&
+        startup_idle_work_allowed) {
         worked = runtime.schedule_catalog_work() || worked;
         worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
     }

@@ -28,6 +28,10 @@ static constexpr uint32_t AC_EXPORT_TASK_BUSY_RECHECK_MS = 250;
 static constexpr uint32_t AC_EXPORT_TASK_WORK_TICK_MS = 20;
 static constexpr uint32_t AC_EXPORT_TASK_IDLE_TICK_MS = 10000;
 static constexpr uint32_t AC_EXPORT_ACTIVITY_GRACE_MS = 3000;
+// Automatic report prebuild and export startup checks stay out of the first
+// boot window while CAN/RPC discovery, Wi-Fi, and time synchronization settle.
+// Durable report bootstrap and explicit user requests are not delayed.
+static constexpr uint32_t AC_RUNTIME_STARTUP_IDLE_GRACE_MS = 30000;
 
 // After therapy stops, AS11 may still be draining live stream/report traffic and
 // AirCANnect is closing EDF/SMB work. Let the bus settle before refreshing the

@@ -124,6 +124,7 @@ public:
 
     // sync requests
     bool request_manual_sync();
+    bool request_startup_check();
     bool request_verify_recent();
     bool request_post_therapy_sync();
 

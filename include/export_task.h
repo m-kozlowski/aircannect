@@ -67,6 +67,7 @@ public:
 
     // endpoint commands
     bool request_smb_sync();
+    bool request_smb_startup_check();
     bool request_smb_verify();
     bool request_smb_post_therapy();
     bool request_sleephq_check();
@@ -86,6 +87,7 @@ private:
     enum class CommandKind : uint8_t {
         None,
         SmbSync,
+        SmbStartupCheck,
         SmbVerify,
         SmbPostTherapy,
         SleepHqCheck,

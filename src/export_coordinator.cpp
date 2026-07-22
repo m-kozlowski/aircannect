@@ -32,13 +32,23 @@ bool ExportCoordinator::endpoint_work_active() const {
 }
 
 bool ExportCoordinator::request_smb_sync() {
-    if (!task_ || status().busy) return false;
-    return task_->request_smb_sync();
+    if (!task_) return false;
+    const ExportTaskStatus current = status();
+    if (current.busy || !task_->request_smb_sync()) return false;
+
+    startup_check_.smb_requested_generation =
+        current.smb.config_generation;
+    return true;
 }
 
 bool ExportCoordinator::request_smb_verify() {
-    if (!task_ || status().busy) return false;
-    return task_->request_smb_verify();
+    if (!task_) return false;
+    const ExportTaskStatus current = status();
+    if (current.busy || !task_->request_smb_verify()) return false;
+
+    startup_check_.smb_requested_generation =
+        current.smb.config_generation;
+    return true;
 }
 
 bool ExportCoordinator::request_sleephq_sync() {
@@ -77,9 +87,19 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
             due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS));
     }
 
-    maybe_queue_sleephq_startup_check(task_status.network_ready,
-                                      storage_active,
+    const bool startup_idle =
+        startup_idle_work_allowed(now_ms) &&
+        !report.foreground_active && !report.background_active &&
+        !activity.therapy_active && !activity.realtime_stream_active &&
+        !activity.ota_install_active;
+    if (startup_idle) {
+        maybe_queue_smb_startup_check(task_status.network_ready,
+                                      task_status.smb,
                                       sleephq);
+        maybe_queue_sleephq_startup_check(task_status.network_ready,
+                                          storage_active,
+                                          sleephq);
+    }
     poll_sleephq_idle_backfill(report,
                                task_status.network_ready,
                                activity.realtime_stream_active,
@@ -328,28 +348,65 @@ void ExportCoordinator::clear_post_therapy_sleephq() {
     post_therapy_.sleephq_deadline_ms = 0;
 }
 
+bool ExportCoordinator::startup_idle_work_allowed(uint32_t now_ms) {
+    if (startup_check_.idle_grace_complete) return true;
+    if (static_cast<int32_t>(
+            now_ms - AC_RUNTIME_STARTUP_IDLE_GRACE_MS) < 0) {
+        return false;
+    }
+
+    startup_check_.idle_grace_complete = true;
+    return true;
+}
+
+void ExportCoordinator::maybe_queue_smb_startup_check(
+    bool network_connected,
+    const StorageSyncStatus &status,
+    SleepHqSyncRuntimeStatus sleephq) {
+    if (!task_ || !network_connected) return;
+    if (!status.enabled || !status.configured ||
+        status.config_generation == 0) {
+        startup_check_.smb_requested_generation = 0;
+        return;
+    }
+    if (startup_check_.smb_requested_generation ==
+            status.config_generation ||
+        status.pending || status.state == StorageSyncState::Working ||
+        sleephq.pending || sleephq.state == SleepHqSyncState::Working) {
+        return;
+    }
+
+    if (task_->request_smb_startup_check()) {
+        startup_check_.smb_requested_generation = status.config_generation;
+    }
+}
+
 void ExportCoordinator::maybe_queue_sleephq_startup_check(
     bool network_connected,
     bool storage_sync_active,
     SleepHqSyncRuntimeStatus status) {
     if (!task_ || !network_connected || storage_sync_active) return;
     if (!status.configured || status.config_generation == 0) {
-        startup_check_.requested_generation = 0;
-        startup_check_.completed_generation = 0;
+        startup_check_.sleephq_requested_generation = 0;
+        startup_check_.sleephq_completed_generation = 0;
         return;
     }
     if (status.check_complete()) {
-        startup_check_.completed_generation = status.config_generation;
+        startup_check_.sleephq_completed_generation =
+            status.config_generation;
     }
-    if (startup_check_.completed_generation == status.config_generation ||
-        startup_check_.requested_generation == status.config_generation ||
+    if (startup_check_.sleephq_completed_generation ==
+            status.config_generation ||
+        startup_check_.sleephq_requested_generation ==
+            status.config_generation ||
         status.state == SleepHqSyncState::Pending ||
         status.state == SleepHqSyncState::Working) {
         return;
     }
 
     if (task_->request_sleephq_startup_check()) {
-        startup_check_.requested_generation = status.config_generation;
+        startup_check_.sleephq_requested_generation =
+            status.config_generation;
     }
 }
 
@@ -370,7 +427,8 @@ void ExportCoordinator::poll_sleephq_idle_backfill(
 
     if (status.config_generation != idle_backfill_.queued_generation &&
         status.config_generation != idle_backfill_.armed_generation &&
-        startup_check_.completed_generation == status.config_generation &&
+        startup_check_.sleephq_completed_generation ==
+            status.config_generation &&
         status.state == SleepHqSyncState::Idle) {
         idle_backfill_.pending = true;
         idle_backfill_.armed_generation = status.config_generation;

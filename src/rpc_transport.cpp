@@ -117,15 +117,13 @@ void RpcTransport::poll() {
     DatagramFeedResult rpc_timeout = rpc_rx_.poll(now);
     if (rpc_timeout.status == DatagramStatus::Error) {
         stats_.rpc_framing_errors++;
-        push_event(RpcEventKind::FramingError,
-                   std::string("[RPC] ") + rpc_timeout.error);
+        report_framing_error("RPC", rpc_timeout.error);
     }
 
     DatagramFeedResult log_timeout = log_rx_.poll(now);
     if (log_timeout.status == DatagramStatus::Error) {
         stats_.log_framing_errors++;
-        push_event(RpcEventKind::FramingError,
-                   std::string("[LOG] ") + log_timeout.error);
+        report_framing_error("LOG", log_timeout.error);
     }
 
     drain_can_rx();
@@ -516,6 +514,30 @@ void RpcTransport::push_event(RpcEventKind kind,
     if (!events_.push(std::move(event))) stats_.event_drops++;
 }
 
+void RpcTransport::report_framing_error(const char *channel, const std::string &error) {
+    const char *name = channel ? channel : "?";
+    CanControllerStatus can_status;
+    if (can_.controller_status(can_status)) {
+        Log::logf(
+            CAT_RPC,
+            LOG_WARN,
+            "[FRAMING] [%s] %s can_rx_q=%lu can_rx_missed=%lu "
+            "can_rx_overrun=%lu rx_full_alerts=%lu\n",
+            name,
+            error.c_str(),
+            static_cast<unsigned long>(can_status.msgs_to_rx),
+            static_cast<unsigned long>(can_status.rx_missed_count),
+            static_cast<unsigned long>(can_status.rx_overrun_count),
+            static_cast<unsigned long>(can_.stats().rx_queue_full_alerts));
+    } else {
+        Log::logf(CAT_RPC, LOG_WARN, "[FRAMING] [%s] %s\n",
+                  name, error.c_str());
+    }
+
+    push_event(RpcEventKind::FramingError,
+               std::string("[") + name + "] " + error);
+}
+
 void RpcTransport::cancel_pending_request(const char *reason) {
     if (!pending_.active) return;
 
@@ -872,8 +894,7 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
             rpc_rx_.reset();
         } else if (result.status == DatagramStatus::Error) {
             stats_.rpc_framing_errors++;
-            push_event(RpcEventKind::FramingError,
-                       std::string("[RPC] ") + result.error);
+            report_framing_error("RPC", result.error);
         }
         return;
     }
@@ -887,8 +908,7 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
             log_rx_.reset();
         } else if (result.status == DatagramStatus::Error) {
             stats_.log_framing_errors++;
-            push_event(RpcEventKind::FramingError,
-                       std::string("[LOG] ") + result.error);
+            report_framing_error("LOG", result.error);
         }
         return;
     }
