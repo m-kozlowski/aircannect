@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "report_store_internal.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -49,9 +49,9 @@ bool rewrite_chunk_index_with_record(const ReportStoreChunkKey &key,
         return false;
     }
 
-    Storage::remove(tmp_path);
+    ReportLegacyStorage::remove(tmp_path);
 
-    File tmp = Storage::open(tmp_path, "w");
+    ReportLegacyFile tmp = ReportLegacyStorage::open(tmp_path, "w");
     if (!tmp) {
         note_error("chunk_index_tmp_open_failed", &current.write_errors);
         return false;
@@ -60,11 +60,11 @@ bool rewrite_chunk_index_with_record(const ReportStoreChunkKey &key,
     bool ok = true;
     uint8_t raw[CHUNK_INDEX_RECORD_SIZE];
 
-    if (Storage::exists(path)) {
-        File index = Storage::open(path, "r");
+    if (ReportLegacyStorage::exists(path)) {
+        ReportLegacyFile index = ReportLegacyStorage::open(path, "r");
         if (!index) {
             tmp.close();
-            Storage::remove(tmp_path);
+            ReportLegacyStorage::remove(tmp_path);
             note_error("chunk_index_open_failed", &current.write_errors);
             return false;
         }
@@ -101,14 +101,14 @@ bool rewrite_chunk_index_with_record(const ReportStoreChunkKey &key,
     tmp.close();
 
     if (!ok) {
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
         return false;
     }
 
-    Storage::remove(path);
+    ReportLegacyStorage::remove(path);
 
-    if (!Storage::rename(tmp_path, path)) {
-        Storage::remove(tmp_path);
+    if (!ReportLegacyStorage::rename(tmp_path, path)) {
+        ReportLegacyStorage::remove(tmp_path);
         note_error("chunk_index_commit_failed", &current.write_errors);
         return false;
     }
@@ -121,11 +121,11 @@ bool chunk_index_contains(const ReportStoreChunkKey &key,
                           uint32_t payload_len) {
     char path[REPORT_PATH_MAX];
     if (!build_chunk_index_path(key, path, sizeof(path)) ||
-        !Storage::exists(path)) {
+        !ReportLegacyStorage::exists(path)) {
         return false;
     }
 
-    File file = Storage::open(path, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
     if (!file) return false;
 
     bool found = false;
@@ -189,7 +189,7 @@ bool read_chunk_file_info(const ReportStoreChunkKey &key,
     char path[REPORT_PATH_MAX];
     if (!build_chunk_path(key, path, sizeof(path))) return false;
 
-    File file = Storage::open(path, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
     if (!file) return false;
 
     uint8_t header[CHUNK_HEADER_SIZE];
@@ -249,9 +249,9 @@ bool rebuild_chunk_index_from_directory(const ReportStoreChunkKey &dir_key) {
         return false;
     }
 
-    File dir = Storage::open(dir_path, "r");
+    ReportLegacyFile dir = ReportLegacyStorage::open(dir_path, "r");
     if (!dir) {
-        Storage::remove(index_path);
+        ReportLegacyStorage::remove(index_path);
         return true;
     }
 
@@ -261,9 +261,9 @@ bool rebuild_chunk_index_from_directory(const ReportStoreChunkKey &dir_key) {
         return false;
     }
 
-    Storage::remove(tmp_path);
+    ReportLegacyStorage::remove(tmp_path);
 
-    File tmp = Storage::open(tmp_path, "w");
+    ReportLegacyFile tmp = ReportLegacyStorage::open(tmp_path, "w");
     if (!tmp) {
         dir.close();
         note_error("chunk_index_tmp_open_failed", &current.write_errors);
@@ -274,7 +274,7 @@ bool rebuild_chunk_index_from_directory(const ReportStoreChunkKey &dir_key) {
     bool wrote = false;
 
     while (ok) {
-        File child = dir.openNextFile();
+        ReportLegacyFile child = dir.openNextFile();
         if (!child) break;
 
         const bool child_is_dir = child.isDirectory();
@@ -312,19 +312,19 @@ bool rebuild_chunk_index_from_directory(const ReportStoreChunkKey &dir_key) {
     tmp.close();
 
     if (!ok) {
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
         return false;
     }
 
-    Storage::remove(index_path);
+    ReportLegacyStorage::remove(index_path);
 
     if (!wrote) {
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
         return true;
     }
 
-    if (!Storage::rename(tmp_path, index_path)) {
-        Storage::remove(tmp_path);
+    if (!ReportLegacyStorage::rename(tmp_path, index_path)) {
+        ReportLegacyStorage::remove(tmp_path);
         note_error("chunk_index_commit_failed", &current.write_errors);
         return false;
     }

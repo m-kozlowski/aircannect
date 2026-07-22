@@ -1,14 +1,14 @@
 #include "report_result_cache_files.h"
 
 #include "report_cache_paths.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 
 bool result_cache_pair_exists_for_etag(uint64_t night_start_ms,
                                        const char *etag) {
-    Storage::Guard g;
-    if (!Storage::mounted()) return false;
+    ReportLegacyStorageGuard g;
+    if (!ReportLegacyStorage::mounted()) return false;
 
     char plot_path[REPORT_CACHE_PATH_MAX];
     if (!result_plot_cache_path_for_etag(night_start_ms,
@@ -26,7 +26,7 @@ bool result_cache_pair_exists_for_etag(uint64_t night_start_ms,
         return false;
     }
 
-    return Storage::exists(result_path) && Storage::exists(plot_path);
+    return ReportLegacyStorage::exists(result_path) && ReportLegacyStorage::exists(plot_path);
 }
 
 }  // namespace aircannect

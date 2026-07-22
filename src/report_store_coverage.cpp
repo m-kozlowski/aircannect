@@ -4,7 +4,7 @@
 
 #include "board_report.h"
 #include "debug_log.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace ReportStore {
@@ -26,7 +26,7 @@ bool write_coverage_batch(const char *source,
         return false;
     }
 
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     if (!ensure_layout()) return false;
 
     // One load -> coalesce ALL records -> one atomic rewrite. Doing this per
@@ -96,7 +96,7 @@ bool coverage_first_missing(const char *source,
         return false;
     }
 
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     const size_t count = load_coverage(source, scratch);
     const int64_t tol = AC_REPORT_COVERAGE_TOLERANCE_MS;
     int64_t covered_until = start_ms;
@@ -124,7 +124,7 @@ bool clear_coverage(const char *source,
                     int64_t start_ms,
                     int64_t end_ms,
                     uint32_t &deleted) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     deleted = 0;
     if (!source || !source[0] || start_ms < 0 || end_ms <= start_ms) {
         note_error("bad_coverage_clear_query",
@@ -137,7 +137,7 @@ bool clear_coverage(const char *source,
         note_error("bad_coverage_path", &current.coverage_write_errors);
         return false;
     }
-    if (!Storage::exists(path)) return true;
+    if (!ReportLegacyStorage::exists(path)) return true;
 
     char tmp_path[REPORT_PATH_MAX + 8];
     const int tmp_written =
@@ -147,14 +147,14 @@ bool clear_coverage(const char *source,
         note_error("bad_coverage_tmp", &current.coverage_write_errors);
         return false;
     }
-    Storage::remove(tmp_path);
+    ReportLegacyStorage::remove(tmp_path);
 
-    File in = Storage::open(path, "r");
-    File out = Storage::open(tmp_path, "w");
+    ReportLegacyFile in = ReportLegacyStorage::open(path, "r");
+    ReportLegacyFile out = ReportLegacyStorage::open(tmp_path, "w");
     if (!in || !out) {
         if (in) in.close();
         if (out) out.close();
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
         note_error("coverage_clear_open_failed",
                    &current.coverage_write_errors);
         return false;
@@ -199,23 +199,23 @@ bool clear_coverage(const char *source,
     out.close();
 
     if (!ok) {
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
         return false;
     }
-    if (!Storage::remove(path)) {
-        Storage::remove(tmp_path);
+    if (!ReportLegacyStorage::remove(path)) {
+        ReportLegacyStorage::remove(tmp_path);
         note_error("coverage_remove_failed", &current.coverage_write_errors);
         return false;
     }
     if (kept) {
-        if (!Storage::rename(tmp_path, path)) {
-            Storage::remove(tmp_path);
+        if (!ReportLegacyStorage::rename(tmp_path, path)) {
+            ReportLegacyStorage::remove(tmp_path);
             note_error("coverage_commit_failed",
                        &current.coverage_write_errors);
             return false;
         }
     } else {
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
     }
 
     set_error(current.last_error, sizeof(current.last_error), "");

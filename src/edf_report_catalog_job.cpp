@@ -11,7 +11,7 @@
 #include "memory_manager.h"
 #include "storage_directory.h"
 #include "storage_export_plan.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -104,15 +104,15 @@ void EdfReportCatalogJob::set_error_locked(const char *error) {
 
 void EdfReportCatalogJob::close_dirs_locked() {
     if (root_dir_) {
-        Storage::Guard guard;
+        ReportLegacyStorageGuard guard;
         root_dir_.close();
     }
-    root_dir_ = File();
+    root_dir_ = ReportLegacyFile();
     if (day_dir_) {
-        Storage::Guard guard;
+        ReportLegacyStorageGuard guard;
         day_dir_.close();
     }
-    day_dir_ = File();
+    day_dir_ = ReportLegacyFile();
 }
 
 void EdfReportCatalogJob::release_build_locked() {
@@ -459,12 +459,12 @@ bool EdfReportCatalogJob::copy_session(
 }
 
 JobStep EdfReportCatalogJob::open_root_locked() {
-    if (!Storage::mounted()) {
+    if (!ReportLegacyStorage::mounted()) {
         set_error_locked("storage_unavailable");
         return JobStep::Idle;
     }
-    Storage::Guard guard;
-    root_dir_ = Storage::open("/DATALOG", "r");
+    ReportLegacyStorageGuard guard;
+    root_dir_ = ReportLegacyStorage::open("/DATALOG", "r");
     if (!root_dir_) {
         publish_build_locked();
         return JobStep::Idle;
@@ -482,10 +482,10 @@ JobStep EdfReportCatalogJob::read_day_locked() {
     StorageDirChild child;
     if (!storage_read_next_dir_child(root_dir_, child)) {
         {
-            Storage::Guard guard;
+            ReportLegacyStorageGuard guard;
             root_dir_.close();
         }
-        root_dir_ = File();
+        root_dir_ = ReportLegacyFile();
         if (build_day_count_ == 0) {
             publish_build_locked();
             return JobStep::Idle;
@@ -530,8 +530,8 @@ JobStep EdfReportCatalogJob::open_day_locked() {
     }
     update_current_path_locked(day_path_);
 
-    Storage::Guard guard;
-    day_dir_ = Storage::open(day_path_, "r");
+    ReportLegacyStorageGuard guard;
+    day_dir_ = ReportLegacyStorage::open(day_path_, "r");
     if (!day_dir_) {
         status_.files_skipped++;
         build_day_index_++;
@@ -540,7 +540,7 @@ JobStep EdfReportCatalogJob::open_day_locked() {
     if (!day_dir_.isDirectory()) {
         day_dir_.close();
         status_.files_skipped++;
-        day_dir_ = File();
+        day_dir_ = ReportLegacyFile();
         build_day_index_++;
         return JobStep::Working;
     }
@@ -552,9 +552,9 @@ JobStep EdfReportCatalogJob::open_day_locked() {
 JobStep EdfReportCatalogJob::read_file_locked() {
     StorageDirChild child;
     if (!storage_read_next_dir_child(day_dir_, child)) {
-        Storage::Guard guard;
+        ReportLegacyStorageGuard guard;
         day_dir_.close();
-        day_dir_ = File();
+        day_dir_ = ReportLegacyFile();
         publish_partial_build_locked();
         build_day_index_++;
         phase_ = Phase::OpenDay;
@@ -610,8 +610,8 @@ JobStep EdfReportCatalogJob::read_header_unlocked() {
     bool alloc_failed = false;
 
     {
-        Storage::Guard guard;
-        File file = Storage::open(path, "r");
+        ReportLegacyStorageGuard guard;
+        ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
         if (file && !file.isDirectory()) {
             file_size = static_cast<size_t>(file.size());
             last_write = file.getLastWrite();

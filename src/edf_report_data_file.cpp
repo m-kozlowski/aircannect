@@ -3,7 +3,7 @@
 #include <limits.h>
 
 #include "memory_manager.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 
@@ -28,7 +28,7 @@ const EdfReportSessionFileDescriptor *edf_report_data_entry_file(
     return &file;
 }
 
-EdfReportDataReadStatus edf_report_data_read_exact(File &file,
+EdfReportDataReadStatus edf_report_data_read_exact(ReportLegacyFile &file,
                                                    uint8_t *buffer,
                                                    size_t len) {
     if (!buffer && len > 0) return EdfReportDataReadStatus::InvalidArgument;
@@ -37,7 +37,7 @@ EdfReportDataReadStatus edf_report_data_read_exact(File &file,
     while (done < len) {
         int read = 0;
         {
-            Storage::Guard guard;
+            ReportLegacyStorageGuard guard;
             read = file.read(buffer + done, len - done);
         }
         if (read <= 0) return EdfReportDataReadStatus::RecordReadFailed;
@@ -49,14 +49,14 @@ EdfReportDataReadStatus edf_report_data_read_exact(File &file,
 
 EdfReportDataReadStatus edf_report_data_open_file(
     const EdfReportSessionFileDescriptor &session_file,
-    File &file) {
+    ReportLegacyFile &file) {
     {
-        Storage::Guard guard;
-        file = Storage::open(session_file.path, "r");
+        ReportLegacyStorageGuard guard;
+        file = ReportLegacyStorage::open(session_file.path, "r");
     }
     if (!file || file.isDirectory()) {
         if (file) {
-            Storage::Guard guard;
+            ReportLegacyStorageGuard guard;
             file.close();
         }
         return EdfReportDataReadStatus::FileOpenFailed;
@@ -65,10 +65,10 @@ EdfReportDataReadStatus edf_report_data_open_file(
     return EdfReportDataReadStatus::Ok;
 }
 
-void edf_report_data_close_file(File &file) {
+void edf_report_data_close_file(ReportLegacyFile &file) {
     if (!file) return;
 
-    Storage::Guard guard;
+    ReportLegacyStorageGuard guard;
     file.close();
 }
 
@@ -77,7 +77,7 @@ EdfReportDataReadStatus edf_report_data_read_header(
     EdfReportFileDescriptor &file_desc,
     uint8_t *&header,
     size_t &header_size,
-    File &file) {
+    ReportLegacyFile &file) {
     header = nullptr;
     header_size = session_file.header_size;
     if (header_size == 0) return EdfReportDataReadStatus::HeaderReadFailed;
@@ -88,13 +88,13 @@ EdfReportDataReadStatus edf_report_data_read_header(
 
     header = static_cast<uint8_t *>(Memory::alloc_large(header_size, false));
     if (!header) {
-        Storage::Guard guard;
+        ReportLegacyStorageGuard guard;
         file.close();
         return EdfReportDataReadStatus::HeaderReadFailed;
     }
 
     {
-        Storage::Guard guard;
+        ReportLegacyStorageGuard guard;
         if (!file.seek(0)) {
             Memory::free(header);
             header = nullptr;
@@ -107,13 +107,13 @@ EdfReportDataReadStatus edf_report_data_read_header(
     while (done < header_size) {
         int read = 0;
         {
-            Storage::Guard guard;
+            ReportLegacyStorageGuard guard;
             read = file.read(header + done, header_size - done);
         }
         if (read <= 0) {
             Memory::free(header);
             header = nullptr;
-            Storage::Guard guard;
+            ReportLegacyStorageGuard guard;
             file.close();
             return EdfReportDataReadStatus::HeaderReadFailed;
         }
@@ -131,7 +131,7 @@ EdfReportDataReadStatus edf_report_data_read_header(
     if (desc_status != EdfReportFileStatus::Ok) {
         Memory::free(header);
         header = nullptr;
-        Storage::Guard guard;
+        ReportLegacyStorageGuard guard;
         file.close();
         return EdfReportDataReadStatus::HeaderParseFailed;
     }
@@ -144,7 +144,7 @@ EdfReportDataReadStatus edf_report_data_read_header(
 }
 
 EdfReportDataReadStatus edf_report_data_seek_record(
-    File &file,
+    ReportLegacyFile &file,
     const EdfReportSessionFileDescriptor &session_file,
     uint32_t record_index) {
     const uint64_t offset =
@@ -155,7 +155,7 @@ EdfReportDataReadStatus edf_report_data_seek_record(
         return EdfReportDataReadStatus::RecordReadFailed;
     }
 
-    Storage::Guard guard;
+    ReportLegacyStorageGuard guard;
     return file.seek(static_cast<uint32_t>(offset))
                ? EdfReportDataReadStatus::Ok
                : EdfReportDataReadStatus::RecordReadFailed;

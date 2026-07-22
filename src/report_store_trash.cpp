@@ -6,7 +6,7 @@
 #include "memory_manager.h"
 #include "report_store_internal.h"
 #include "storage_directory.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -19,7 +19,7 @@ namespace {
 struct TrashCleanupFrame {
     char path[REPORT_PATH_MAX] = {};
     bool opened = false;
-    File dir;
+    ReportLegacyFile dir;
 };
 
 struct TrashCleanupState {
@@ -81,7 +81,7 @@ bool push_trash_cleanup_dir(const char *path) {
 }
 
 bool start_next_trash_cleanup_tree() {
-    File root = Storage::open("/aircannect/report", "r");
+    ReportLegacyFile root = ReportLegacyStorage::open("/aircannect/report", "r");
     if (!root) return true;
 
     if (!root.isDirectory()) {
@@ -119,9 +119,9 @@ bool cleanup_trash_tree_step(uint32_t &budget, uint32_t &removed) {
         TrashCleanupFrame &frame =
             trash_cleanup.frames[trash_cleanup.depth - 1];
         if (!frame.opened) {
-            frame.dir = Storage::open(frame.path, "r");
+            frame.dir = ReportLegacyStorage::open(frame.path, "r");
             if (!frame.dir) {
-                if (!Storage::remove(frame.path)) return false;
+                if (!ReportLegacyStorage::remove(frame.path)) return false;
                 trash_cleanup.depth--;
                 budget--;
                 removed++;
@@ -130,7 +130,7 @@ bool cleanup_trash_tree_step(uint32_t &budget, uint32_t &removed) {
 
             if (!frame.dir.isDirectory()) {
                 frame.dir.close();
-                if (!Storage::remove(frame.path)) return false;
+                if (!ReportLegacyStorage::remove(frame.path)) return false;
                 trash_cleanup.depth--;
                 budget--;
                 removed++;
@@ -156,7 +156,7 @@ bool cleanup_trash_tree_step(uint32_t &budget, uint32_t &removed) {
                 return push_trash_cleanup_dir(child_path);
             }
 
-            if (!Storage::remove(child_path)) return false;
+            if (!ReportLegacyStorage::remove(child_path)) return false;
             budget--;
             removed++;
             continue;
@@ -169,7 +169,7 @@ bool cleanup_trash_tree_step(uint32_t &budget, uint32_t &removed) {
         copy_cstr(dir_path, sizeof(dir_path), frame.path);
 
         trash_cleanup.depth--;
-        if (!Storage::rmdir(dir_path)) return false;
+        if (!ReportLegacyStorage::rmdir(dir_path)) return false;
         budget--;
         removed++;
     }
@@ -180,7 +180,7 @@ bool cleanup_trash_tree_step(uint32_t &budget, uint32_t &removed) {
 }  // namespace
 
 bool cleanup_trash_step(uint32_t max_entries, uint32_t &removed) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
 
     removed = 0;
     if (!max_entries) return true;

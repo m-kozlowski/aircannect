@@ -44,12 +44,12 @@ bool valid_coverage_record(const ReportStoreCoverageRecord &record) {
             record.state == ReportStoreCoverageState::Incomplete);
 }
 
-bool write_all(File &file, const uint8_t *data, size_t len) {
+bool write_all(ReportLegacyFile &file, const uint8_t *data, size_t len) {
     if (!len) return true;
     return data && file.write(data, len) == len;
 }
 
-bool read_all(File &file, uint8_t *data, size_t len) {
+bool read_all(ReportLegacyFile &file, uint8_t *data, size_t len) {
     if (!len) return true;
     return data && file.read(data, len) == static_cast<int>(len);
 }
@@ -243,7 +243,7 @@ bool decode_coverage_record(const uint8_t *raw,
     return valid_coverage_record(record);
 }
 
-bool read_coverage_record(File &file,
+bool read_coverage_record(ReportLegacyFile &file,
                           ReportStoreCoverageRecord &record,
                           bool &eof) {
     eof = false;

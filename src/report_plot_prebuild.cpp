@@ -8,7 +8,7 @@
 #include "report_index_scratch.h"
 #include "report_manager_limits.h"
 #include "report_result_cache_files.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace {
@@ -56,8 +56,8 @@ ReportPlotPrebuildResult ReportPlotPrebuildService::request() {
     }
 
     {
-        Storage::Guard g;
-        if (!Storage::mounted()) return ReportPlotPrebuildResult::Unavailable;
+        ReportLegacyStorageGuard g;
+        if (!ReportLegacyStorage::mounted()) return ReportPlotPrebuildResult::Unavailable;
     }
 
     ReportNightIndexCacheKey cache_key;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <FS.h>
+#include "report_legacy_storage.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -19,7 +19,7 @@ public:
         EdfReportFileDescriptor &file_desc,
         const uint8_t *header,
         size_t header_size,
-        File &file,
+        ReportLegacyFile &file,
         ReportStoreChunkMeta *metas,
         EdfReportDataReadStats &stats,
         uint32_t *interval_ms_out,
@@ -34,7 +34,7 @@ public:
         EdfReportFileDescriptor &file_desc,
         const uint8_t *header,
         size_t header_size,
-        File &file,
+        ReportLegacyFile &file,
         ReportStoreChunkMeta *metas,
         EdfReportDataReadStats &stats,
         uint32_t *interval_ms_out,
@@ -65,7 +65,7 @@ private:
                       const EdfReportDataPlanEntry *entries,
                       size_t entry_count,
                       EdfReportFileDescriptor &file_desc,
-                      File &file,
+                      ReportLegacyFile &file,
                       EdfReportDataReadStats &stats);
     bool prepare_sample_items(ReportStoreChunkMeta *metas,
                               uint32_t *interval_ms_out,
@@ -90,7 +90,7 @@ private:
     EdfReportFileDescriptor *file_desc_ = nullptr;
     const uint8_t *header_ = nullptr;
     size_t header_size_ = 0;
-    File *file_ = nullptr;
+    ReportLegacyFile *file_ = nullptr;
     EdfReportDataReadStats *stats_ = nullptr;
 
     void *items_ = nullptr;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <FS.h>
+#include "report_legacy_storage.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -14,7 +14,7 @@ EdfReportDataReadStatus edf_report_read_series_entry_payload(
     EdfReportFileDescriptor &file_desc,
     const uint8_t *header,
     size_t header_size,
-    File &file,
+    ReportLegacyFile &file,
     ReportStoreChunkMeta &meta,
     ReportSpoolBuffer &payload,
     EdfReportDataReadStats &stats);
@@ -22,7 +22,7 @@ EdfReportDataReadStatus edf_report_read_series_entry_payload(
 EdfReportDataReadStatus edf_report_emit_series_entry_samples(
     const EdfReportSessionFileDescriptor &session_file,
     const EdfReportDataPlanEntry &entry,
-    File &file,
+    ReportLegacyFile &file,
     ReportStoreChunkMeta &meta,
     EdfReportDataReadStats &stats,
     uint32_t *interval_ms_out,

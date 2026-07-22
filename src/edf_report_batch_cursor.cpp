@@ -93,7 +93,7 @@ bool EdfReportBatchReaderCursor::start_common(
     const EdfReportDataPlanEntry *entries,
     size_t entry_count,
     EdfReportFileDescriptor &file_desc,
-    File &file,
+    ReportLegacyFile &file,
     EdfReportDataReadStats &stats) {
     reset();
     stats = {};
@@ -278,7 +278,7 @@ bool EdfReportBatchReaderCursor::start_samples(
     EdfReportFileDescriptor &file_desc,
     const uint8_t *header,
     size_t header_size,
-    File &file,
+    ReportLegacyFile &file,
     ReportStoreChunkMeta *metas,
     EdfReportDataReadStats &stats,
     uint32_t *interval_ms_out,
@@ -333,7 +333,7 @@ bool EdfReportBatchReaderCursor::start_plot(
     EdfReportFileDescriptor &file_desc,
     const uint8_t *header,
     size_t header_size,
-    File &file,
+    ReportLegacyFile &file,
     ReportStoreChunkMeta *metas,
     EdfReportDataReadStats &stats,
     uint32_t *interval_ms_out,

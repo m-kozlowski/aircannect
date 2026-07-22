@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -37,7 +37,7 @@ bool check_coverage_file_integrity(const char *source,
         return false;
     }
 
-    File file = Storage::open(path, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
     if (!file) {
         integrity_note_error(out, "coverage_open_failed");
         return false;
@@ -80,7 +80,7 @@ bool check_coverage_integrity(ReportStoreIntegrityResult &out, bool repair) {
     char root_path[REPORT_PATH_MAX];
     snprintf(root_path, sizeof(root_path), "%s/coverage", BASE_DIR);
 
-    File root = Storage::open(root_path, "r");
+    ReportLegacyFile root = ReportLegacyStorage::open(root_path, "r");
     if (!root) return true;
     if (!root.isDirectory()) {
         root.close();
@@ -90,7 +90,7 @@ bool check_coverage_integrity(ReportStoreIntegrityResult &out, bool repair) {
 
     bool ok = true;
     while (true) {
-        File child = root.openNextFile();
+        ReportLegacyFile child = root.openNextFile();
         if (!child) break;
 
         const bool child_is_dir = child.isDirectory();

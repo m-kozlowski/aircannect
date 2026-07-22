@@ -7,7 +7,6 @@
 #include <string.h>
 
 #include <Arduino.h>
-#include <FS.h>
 
 #include "background_worker.h"
 #include "board_report.h"
@@ -19,7 +18,7 @@
 #include "report_result_cache_payload.h"
 #include "report_result_slot_cache.h"
 #include "report_spool_types.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace {
@@ -119,14 +118,14 @@ void set_key(LoadKey &key, uint64_t night_start_ms, const char *etag) {
 OpenOutcome open_cache_file(const char *path,
                             size_t min_size,
                             size_t max_size,
-                            File &file,
+                            ReportLegacyFile &file,
                             size_t &expected_size,
                             std::shared_ptr<ReportSpoolBuffer> &buffer) {
-    Storage::Guard guard;
-    if (!Storage::mounted()) return OpenOutcome::Failed;
-    if (!Storage::exists(path)) return OpenOutcome::Missing;
+    ReportLegacyStorageGuard guard;
+    if (!ReportLegacyStorage::mounted()) return OpenOutcome::Failed;
+    if (!ReportLegacyStorage::exists(path)) return OpenOutcome::Missing;
 
-    file = Storage::open(path, "r");
+    file = ReportLegacyStorage::open(path, "r");
     if (!file) return OpenOutcome::Failed;
 
     expected_size = static_cast<size_t>(file.size());
@@ -151,7 +150,7 @@ OpenOutcome open_cache_file(const char *path,
     return OpenOutcome::Opened;
 }
 
-ReadOutcome read_cache_file_step(File &file,
+ReadOutcome read_cache_file_step(ReportLegacyFile &file,
                                  size_t expected_size,
                                  size_t &offset,
                                  ReportSpoolBuffer &buffer) {
@@ -165,7 +164,7 @@ ReadOutcome read_cache_file_step(File &file,
 
     int read = 0;
     {
-        Storage::Guard guard;
+        ReportLegacyStorageGuard guard;
         read = file.read(destination, len);
     }
 
@@ -182,10 +181,10 @@ ReadOutcome read_cache_file_step(File &file,
                                    : ReadOutcome::Working;
 }
 
-void close_cache_file(File &file) {
+void close_cache_file(ReportLegacyFile &file) {
     if (!file) return;
 
-    Storage::Guard guard;
+    ReportLegacyStorageGuard guard;
     file.close();
 }
 
@@ -204,7 +203,7 @@ struct ReportResultCacheLoader::State {
 
     size_t artifact_index = 0;
     char path[REPORT_CACHE_PATH_MAX] = {};
-    File file;
+    ReportLegacyFile file;
     size_t expected_size = 0;
     size_t offset = 0;
     std::shared_ptr<ReportSpoolBuffer> payload;

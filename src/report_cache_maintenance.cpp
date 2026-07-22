@@ -17,8 +17,6 @@
 #include "report_store.h"
 #include "report_summary_runtime.h"
 #include "report_summary_service.h"
-#include "storage_manager.h"
-
 namespace aircannect {
 namespace {
 

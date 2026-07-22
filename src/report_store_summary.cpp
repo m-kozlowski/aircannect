@@ -7,7 +7,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "report_store_internal.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -25,10 +25,10 @@ void integrity_note_error(ReportStoreIntegrityResult &out,
 bool check_summary_integrity(ReportStoreIntegrityResult &out, bool repair) {
     char path[REPORT_PATH_MAX];
     snprintf(path, sizeof(path), "%s/summary/nights.idx", BASE_DIR);
-    if (!Storage::exists(path)) return true;
+    if (!ReportLegacyStorage::exists(path)) return true;
     out.summary_checked = 1;
 
-    File file = Storage::open(path, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
     if (!file) {
         integrity_note_error(out, "summary_open_failed");
         return false;
@@ -75,7 +75,7 @@ bool check_summary_integrity(ReportStoreIntegrityResult &out, bool repair) {
     out.summary_invalid++;
     if (!repair) return true;
 
-    if (!Storage::remove(path)) {
+    if (!ReportLegacyStorage::remove(path)) {
         integrity_note_error(out, "summary_remove_failed");
         return false;
     }
@@ -93,7 +93,7 @@ using namespace ReportStoreInternal;
 
 bool write_summary_records(const ReportSummaryRecord *records,
                            size_t count) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
 
     if (!records && count) {
         note_error("bad_summary_records", &current.write_errors);
@@ -125,9 +125,9 @@ bool write_summary_records(const ReportSummaryRecord *records,
     snprintf(tmp_path, sizeof(tmp_path), "%s/summary/nights.idx.tmp",
              BASE_DIR);
 
-    Storage::remove(tmp_path);
+    ReportLegacyStorage::remove(tmp_path);
 
-    File file = Storage::open(tmp_path, "w");
+    ReportLegacyFile file = ReportLegacyStorage::open(tmp_path, "w");
     if (!file) {
         note_error("summary_open_failed", &current.write_errors);
         return false;
@@ -148,15 +148,15 @@ bool write_summary_records(const ReportSummaryRecord *records,
     file.close();
 
     if (!ok) {
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
         note_error("summary_write_failed", &current.write_errors);
         return false;
     }
 
-    Storage::remove(final_path);
+    ReportLegacyStorage::remove(final_path);
 
-    if (!Storage::rename(tmp_path, final_path)) {
-        Storage::remove(tmp_path);
+    if (!ReportLegacyStorage::rename(tmp_path, final_path)) {
+        ReportLegacyStorage::remove(tmp_path);
         note_error("summary_commit_failed", &current.write_errors);
         return false;
     }
@@ -175,7 +175,7 @@ bool write_summary_records(const ReportSummaryRecord *records,
 
 bool read_summary_records(ReportSummaryRecordCallback callback,
                           void *context) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
 
     if (!callback) {
         note_error("missing_summary_callback", &current.read_errors);
@@ -184,9 +184,9 @@ bool read_summary_records(ReportSummaryRecordCallback callback,
 
     char path[REPORT_PATH_MAX];
     snprintf(path, sizeof(path), "%s/summary/nights.idx", BASE_DIR);
-    if (!ensure_layout() || !Storage::exists(path)) return false;
+    if (!ensure_layout() || !ReportLegacyStorage::exists(path)) return false;
 
-    File file = Storage::open(path, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
     if (!file) {
         note_error("summary_open_failed", &current.read_errors);
         return false;

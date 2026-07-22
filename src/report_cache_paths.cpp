@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace {
@@ -50,10 +50,10 @@ bool clear_cache_dir_for_night(const char *dir,
     deleted = 0;
     if (!night_start_ms || !dir || !name_matches) return false;
 
-    Storage::Guard g;
-    if (!Storage::mounted()) return false;
+    ReportLegacyStorageGuard g;
+    if (!ReportLegacyStorage::mounted()) return false;
 
-    File dir_file = Storage::open(dir, "r");
+    ReportLegacyFile dir_file = ReportLegacyStorage::open(dir, "r");
     if (!dir_file) return true;
     if (!dir_file.isDirectory()) {
         dir_file.close();
@@ -62,7 +62,7 @@ bool clear_cache_dir_for_night(const char *dir,
 
     bool ok = true;
     while (true) {
-        File file = dir_file.openNextFile();
+        ReportLegacyFile file = dir_file.openNextFile();
         if (!file) break;
 
         const bool is_dir = file.isDirectory();
@@ -77,7 +77,7 @@ bool clear_cache_dir_for_night(const char *dir,
         file.close();
 
         if (!match) continue;
-        if (!path_ok || !Storage::remove(path)) {
+        if (!path_ok || !ReportLegacyStorage::remove(path)) {
             ok = false;
             continue;
         }

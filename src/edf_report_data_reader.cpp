@@ -1,6 +1,6 @@
 #include "edf_report_data_reader.h"
 
-#include <FS.h>
+#include "report_legacy_storage.h"
 #include <stddef.h>
 
 #include "board_report.h"
@@ -80,7 +80,7 @@ EdfReportDataReadStatus edf_report_read_entry_payload(
     EdfReportFileDescriptor file_desc;
     uint8_t *header = nullptr;
     size_t header_size = 0;
-    File file;
+    ReportLegacyFile file;
     EdfReportDataReadStatus status =
         edf_report_data_read_header(*session_file,
                                     file_desc,
@@ -140,7 +140,7 @@ EdfReportDataReadStatus edf_report_for_each_entry_series_sample(
         edf_report_data_entry_file(session, entry);
     if (!session_file) return EdfReportDataReadStatus::InvalidArgument;
 
-    File file;
+    ReportLegacyFile file;
     EdfReportDataReadStatus status =
         edf_report_emit_series_entry_samples(*session_file,
                                              entry,

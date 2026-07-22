@@ -6,7 +6,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "report_store_internal.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace ReportStore {
@@ -17,7 +17,7 @@ bool write_chunk(const ReportStoreChunkKey &key,
                  const ReportStoreChunkMeta &meta,
                  const uint8_t *payload,
                  size_t len) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     if (!valid_key(key)) {
         note_error("bad_chunk_key", &current.write_errors);
         return false;
@@ -38,7 +38,7 @@ bool write_chunk(const ReportStoreChunkKey &key,
         note_error("bad_chunk_path", &current.write_errors);
         return false;
     }
-    if (Storage::exists(final_path)) {
+    if (ReportLegacyStorage::exists(final_path)) {
         ReportStoreChunkInfo existing;
         if (!read_chunk_file_info(key, existing)) {
             note_error("chunk_header_failed", &current.write_errors);
@@ -48,9 +48,9 @@ bool write_chunk(const ReportStoreChunkKey &key,
             existing.key, existing.meta, existing.payload_len);
     }
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path);
-    Storage::remove(tmp_path);
+    ReportLegacyStorage::remove(tmp_path);
 
-    File file = Storage::open(tmp_path, "w");
+    ReportLegacyFile file = ReportLegacyStorage::open(tmp_path, "w");
     if (!file) {
         note_error("chunk_open_failed", &current.write_errors);
         return false;
@@ -64,13 +64,13 @@ bool write_chunk(const ReportStoreChunkKey &key,
     file.close();
 
     if (!ok) {
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
         note_error("chunk_write_failed", &current.write_errors);
         return false;
     }
 
-    if (!Storage::rename(tmp_path, final_path)) {
-        Storage::remove(tmp_path);
+    if (!ReportLegacyStorage::rename(tmp_path, final_path)) {
+        ReportLegacyStorage::remove(tmp_path);
         note_error("chunk_commit_failed", &current.write_errors);
         return false;
     }
@@ -96,7 +96,7 @@ bool write_chunk(const ReportStoreChunkKey &key,
 bool read_chunk(const ReportStoreChunkKey &key,
                 ReportStoreChunkMeta &meta,
                 ReportSpoolBuffer &payload) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     if (!valid_key(key)) {
         note_error("bad_chunk_key", &current.read_errors);
         return false;
@@ -106,7 +106,7 @@ bool read_chunk(const ReportStoreChunkKey &key,
         note_error("bad_chunk_path", &current.read_errors);
         return false;
     }
-    File file = Storage::open(path, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
     if (!file) {
         note_error("chunk_open_failed", &current.read_errors);
         return false;

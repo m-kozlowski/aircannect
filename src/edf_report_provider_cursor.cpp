@@ -1,6 +1,6 @@
 #include "edf_report_provider_cursor.h"
 
-#include <FS.h>
+#include "report_legacy_storage.h"
 #include <new>
 
 #include <Arduino.h>
@@ -20,7 +20,7 @@ struct EdfReportProviderBatchCursor::Impl {
     EdfReportFileDescriptor file_desc;
     uint8_t *header = nullptr;
     size_t header_size = 0;
-    File file;
+    ReportLegacyFile file;
     EdfReportDataReadStats stats;
     EdfReportDataReadStatus status = EdfReportDataReadStatus::Ok;
     EdfReportProviderToken seed_token;

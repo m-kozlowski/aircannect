@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #include "report_store_internal.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -28,12 +28,12 @@ bool check_chunk_index_integrity(const ReportStoreChunkKey &dir_key,
         integrity_note_error(out, "bad_chunk_index_path");
         return false;
     }
-    if (!Storage::exists(index_path)) {
+    if (!ReportLegacyStorage::exists(index_path)) {
         if (valid_chunks > 0) out.chunk_indexes_missing++;
         return true;
     }
 
-    File index = Storage::open(index_path, "r");
+    ReportLegacyFile index = ReportLegacyStorage::open(index_path, "r");
     if (!index) {
         integrity_note_error(out, "chunk_index_open_failed");
         return false;
@@ -81,7 +81,7 @@ bool check_chunk_leaf_integrity(ReportStoreChunkKind kind,
         return false;
     }
 
-    File dir = Storage::open(dir_path, "r");
+    ReportLegacyFile dir = ReportLegacyStorage::open(dir_path, "r");
     if (!dir) return true;
     if (!dir.isDirectory()) {
         dir.close();
@@ -95,7 +95,7 @@ bool check_chunk_leaf_integrity(ReportStoreChunkKind kind,
     bool removed_invalid = false;
 
     while (true) {
-        File child = dir.openNextFile();
+        ReportLegacyFile child = dir.openNextFile();
         if (!child) break;
 
         const bool child_is_dir = child.isDirectory();
@@ -124,7 +124,7 @@ bool check_chunk_leaf_integrity(ReportStoreChunkKind kind,
 
         char chunk_path[REPORT_PATH_MAX];
         if (!build_chunk_path(key, chunk_path, sizeof(chunk_path)) ||
-            !Storage::remove(chunk_path)) {
+            !ReportLegacyStorage::remove(chunk_path)) {
             ok = false;
             integrity_note_error(out, "chunk_remove_failed");
             break;
@@ -175,7 +175,7 @@ bool scan_chunk_name_dir(ReportStoreChunkKind kind,
         return false;
     }
 
-    File dir = Storage::open(name_path, "r");
+    ReportLegacyFile dir = ReportLegacyStorage::open(name_path, "r");
     if (!dir) return true;
     if (!dir.isDirectory()) {
         dir.close();
@@ -187,7 +187,7 @@ bool scan_chunk_name_dir(ReportStoreChunkKind kind,
     bool has_legacy_chunks = false;
 
     while (true) {
-        File child = dir.openNextFile();
+        ReportLegacyFile child = dir.openNextFile();
         if (!child) break;
 
         const bool child_is_dir = child.isDirectory();
@@ -237,7 +237,7 @@ bool scan_chunk_kind_integrity(ReportStoreChunkKind kind,
         return false;
     }
 
-    File kind_dir = Storage::open(kind_path, "r");
+    ReportLegacyFile kind_dir = ReportLegacyStorage::open(kind_path, "r");
     if (!kind_dir) return true;
     if (!kind_dir.isDirectory()) {
         kind_dir.close();
@@ -248,7 +248,7 @@ bool scan_chunk_kind_integrity(ReportStoreChunkKind kind,
     bool ok = true;
 
     while (true) {
-        File source_dir = kind_dir.openNextFile();
+        ReportLegacyFile source_dir = kind_dir.openNextFile();
         if (!source_dir) break;
 
         const bool source_is_dir = source_dir.isDirectory();
@@ -270,7 +270,7 @@ bool scan_chunk_kind_integrity(ReportStoreChunkKind kind,
             continue;
         }
 
-        File names = Storage::open(source_path, "r");
+        ReportLegacyFile names = ReportLegacyStorage::open(source_path, "r");
         if (!names) continue;
         if (!names.isDirectory()) {
             names.close();
@@ -280,7 +280,7 @@ bool scan_chunk_kind_integrity(ReportStoreChunkKind kind,
         }
 
         while (true) {
-            File name_dir = names.openNextFile();
+            ReportLegacyFile name_dir = names.openNextFile();
             if (!name_dir) break;
 
             const bool name_is_dir = name_dir.isDirectory();
@@ -310,9 +310,9 @@ bool scan_chunk_kind_integrity(ReportStoreChunkKind kind,
 }  // namespace
 
 bool check_integrity(bool repair, ReportStoreIntegrityResult &out) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     out = {};
-    current.available = Storage::mounted();
+    current.available = ReportLegacyStorage::mounted();
     if (!current.available) {
         integrity_note_error(out, "storage_unavailable");
         return false;

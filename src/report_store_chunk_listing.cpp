@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 #include "report_store_internal.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -19,7 +19,7 @@ bool for_each_chunk(ReportStoreChunkKind kind,
                     int64_t end_ms,
                     ReportStoreChunkCallback callback,
                     void *context) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     ReportStoreChunkKey dir_key;
     dir_key.kind = kind;
     dir_key.source = source;
@@ -45,8 +45,8 @@ bool for_each_chunk(ReportStoreChunkKind kind,
         return false;
     }
 
-    if (Storage::exists(index_path)) {
-        File index = Storage::open(index_path, "r");
+    if (ReportLegacyStorage::exists(index_path)) {
+        ReportLegacyFile index = ReportLegacyStorage::open(index_path, "r");
         if (!index) {
             note_error("chunk_index_open_failed", &current.read_errors);
             return false;
@@ -93,7 +93,7 @@ bool for_each_chunk(ReportStoreChunkKind kind,
         return ok;
     }
 
-    File dir = Storage::open(dir_path, "r");
+    ReportLegacyFile dir = ReportLegacyStorage::open(dir_path, "r");
     if (!dir) return true;
     if (!dir.isDirectory()) {
         dir.close();
@@ -103,7 +103,7 @@ bool for_each_chunk(ReportStoreChunkKind kind,
 
     bool ok = true;
     while (true) {
-        File file = dir.openNextFile();
+        ReportLegacyFile file = dir.openNextFile();
         if (!file) break;
 
         const bool child_is_dir = file.isDirectory();
@@ -157,7 +157,7 @@ bool clear_chunks(ReportStoreChunkKind kind,
                   int64_t start_ms,
                   int64_t end_ms,
                   uint32_t &deleted) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
     deleted = 0;
     ReportStoreChunkKey dir_key;
     dir_key.kind = kind;
@@ -183,7 +183,7 @@ bool clear_chunks(ReportStoreChunkKind kind,
         return false;
     }
 
-    if (Storage::exists(index_path)) {
+    if (ReportLegacyStorage::exists(index_path)) {
         char tmp_path[REPORT_PATH_MAX + 8];
         const int tmp_written =
             snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", index_path);
@@ -192,14 +192,14 @@ bool clear_chunks(ReportStoreChunkKind kind,
             note_error("bad_chunk_index_tmp", &current.write_errors);
             return false;
         }
-        Storage::remove(tmp_path);
+        ReportLegacyStorage::remove(tmp_path);
 
-        File index = Storage::open(index_path, "r");
-        File tmp = Storage::open(tmp_path, "w");
+        ReportLegacyFile index = ReportLegacyStorage::open(index_path, "r");
+        ReportLegacyFile tmp = ReportLegacyStorage::open(tmp_path, "w");
         if (!index || !tmp) {
             if (index) index.close();
             if (tmp) tmp.close();
-            Storage::remove(tmp_path);
+            ReportLegacyStorage::remove(tmp_path);
             note_error("chunk_index_clear_open_failed",
                        &current.write_errors);
             return false;
@@ -236,8 +236,8 @@ bool clear_chunks(ReportStoreChunkKind kind,
                     break;
                 }
 
-                const bool existed = Storage::exists(chunk_path);
-                if (existed && !Storage::remove(chunk_path)) {
+                const bool existed = ReportLegacyStorage::exists(chunk_path);
+                if (existed && !ReportLegacyStorage::remove(chunk_path)) {
                     ok = false;
                     note_error("chunk_remove_failed", &current.write_errors);
                     break;
@@ -258,29 +258,29 @@ bool clear_chunks(ReportStoreChunkKind kind,
         tmp.close();
 
         if (!ok) {
-            Storage::remove(tmp_path);
+            ReportLegacyStorage::remove(tmp_path);
             return false;
         }
-        if (!Storage::remove(index_path)) {
-            Storage::remove(tmp_path);
+        if (!ReportLegacyStorage::remove(index_path)) {
+            ReportLegacyStorage::remove(tmp_path);
             note_error("chunk_index_remove_failed", &current.write_errors);
             return false;
         }
         if (kept) {
-            if (!Storage::rename(tmp_path, index_path)) {
-                Storage::remove(tmp_path);
+            if (!ReportLegacyStorage::rename(tmp_path, index_path)) {
+                ReportLegacyStorage::remove(tmp_path);
                 note_error("chunk_index_commit_failed",
                            &current.write_errors);
                 return false;
             }
         } else {
-            Storage::remove(tmp_path);
+            ReportLegacyStorage::remove(tmp_path);
         }
         set_error(current.last_error, sizeof(current.last_error), "");
         return true;
     }
 
-    File dir = Storage::open(dir_path, "r");
+    ReportLegacyFile dir = ReportLegacyStorage::open(dir_path, "r");
     if (!dir) return true;
     if (!dir.isDirectory()) {
         dir.close();
@@ -290,7 +290,7 @@ bool clear_chunks(ReportStoreChunkKind kind,
 
     bool ok = true;
     while (true) {
-        File file = dir.openNextFile();
+        ReportLegacyFile file = dir.openNextFile();
         if (!file) break;
 
         const bool child_is_dir = file.isDirectory();
@@ -317,7 +317,7 @@ bool clear_chunks(ReportStoreChunkKind kind,
         char chunk_path[REPORT_PATH_MAX];
         const bool path_ok =
             build_chunk_path(key, chunk_path, sizeof(chunk_path));
-        if (!path_ok || !Storage::remove(chunk_path)) {
+        if (!path_ok || !ReportLegacyStorage::remove(chunk_path)) {
             ok = false;
             note_error("chunk_remove_failed", &current.write_errors);
             break;

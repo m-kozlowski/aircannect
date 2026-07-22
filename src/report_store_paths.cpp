@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -105,7 +105,7 @@ bool ensure_chunk_dir(const ReportStoreChunkKey &key) {
         note_error("bad_chunk_path", &current.layout_errors);
         return false;
     }
-    if (!Storage::ensure_dir(source_dir)) {
+    if (!ReportLegacyStorage::ensure_dir(source_dir)) {
         note_error("chunk_source_dir_failed", &current.layout_errors);
         return false;
     }
@@ -121,7 +121,7 @@ bool ensure_chunk_dir(const ReportStoreChunkKey &key) {
             note_error("bad_chunk_path", &current.layout_errors);
             return false;
         }
-        if (!Storage::ensure_dir(name_dir)) {
+        if (!ReportLegacyStorage::ensure_dir(name_dir)) {
             note_error("chunk_dir_failed", &current.layout_errors);
             return false;
         }
@@ -132,7 +132,7 @@ bool ensure_chunk_dir(const ReportStoreChunkKey &key) {
         note_error("bad_chunk_path", &current.layout_errors);
         return false;
     }
-    if (!Storage::ensure_dir(dir)) {
+    if (!ReportLegacyStorage::ensure_dir(dir)) {
         note_error("chunk_dir_failed", &current.layout_errors);
         return false;
     }

@@ -11,7 +11,7 @@
 #include "report_index_scratch.h"
 #include "report_manager_limits.h"
 #include "report_summary_record_codec.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace ReportNightIndexStore {
@@ -45,22 +45,22 @@ using LittleEndian::put_le16;
 using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
-bool read_all(File &file, uint8_t *data, size_t len) {
+bool read_all(ReportLegacyFile &file, uint8_t *data, size_t len) {
     if (!len) return true;
     return data && file.read(data, len) == static_cast<int>(len);
 }
 
-bool write_all(File &file, const uint8_t *data, size_t len) {
+bool write_all(ReportLegacyFile &file, const uint8_t *data, size_t len) {
     if (!len) return true;
     return data && file.write(data, len) == len;
 }
 
 bool ensure_layout() {
-    return Storage::ensure_dir("/aircannect") &&
-           Storage::ensure_dir("/aircannect/report") &&
-           Storage::ensure_dir("/aircannect/report/v4") &&
-           Storage::ensure_dir("/aircannect/report/v4/index") &&
-           Storage::ensure_dir(INDEX_DIR);
+    return ReportLegacyStorage::ensure_dir("/aircannect") &&
+           ReportLegacyStorage::ensure_dir("/aircannect/report") &&
+           ReportLegacyStorage::ensure_dir("/aircannect/report/v4") &&
+           ReportLegacyStorage::ensure_dir("/aircannect/report/v4/index") &&
+           ReportLegacyStorage::ensure_dir(INDEX_DIR);
 }
 
 void encode_header(uint8_t *header,
@@ -195,7 +195,7 @@ uint8_t *allocate_record_scratch(const char *context) {
 }
 
 struct DurableRecordReaderContext {
-    File *file = nullptr;
+    ReportLegacyFile *file = nullptr;
     uint8_t *raw = nullptr;
     size_t next_index = 0;
 };
@@ -225,10 +225,10 @@ bool load(ReportNightIndexSnapshotRef &out, uint32_t &content_crc) {
     out.reset();
     content_crc = crc32_ieee(nullptr, 0);
 
-    Storage::Guard guard;
-    if (!Storage::mounted() || !Storage::exists(INDEX_PATH)) return false;
+    ReportLegacyStorageGuard guard;
+    if (!ReportLegacyStorage::mounted() || !ReportLegacyStorage::exists(INDEX_PATH)) return false;
 
-    File file = Storage::open(INDEX_PATH, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(INDEX_PATH, "r");
     if (!file) return false;
 
     uint8_t header[INDEX_HEADER_SIZE];
@@ -300,13 +300,13 @@ bool save(const ReportNightIndexSnapshot &snapshot,
         return false;
     }
 
-    Storage::Guard guard;
-    if (!Storage::mounted() || !ensure_layout()) {
+    ReportLegacyStorageGuard guard;
+    if (!ReportLegacyStorage::mounted() || !ensure_layout()) {
         Memory::free(raw);
         return false;
     }
-    Storage::remove(INDEX_TMP_PATH);
-    File file = Storage::open(INDEX_TMP_PATH, "w");
+    ReportLegacyStorage::remove(INDEX_TMP_PATH);
+    ReportLegacyFile file = ReportLegacyStorage::open(INDEX_TMP_PATH, "w");
     if (!file) {
         Memory::free(raw);
         return false;
@@ -338,12 +338,12 @@ bool save(const ReportNightIndexSnapshot &snapshot,
     Memory::free(raw);
 
     if (!ok) {
-        Storage::remove(INDEX_TMP_PATH);
+        ReportLegacyStorage::remove(INDEX_TMP_PATH);
         return false;
     }
-    Storage::remove(INDEX_PATH);
-    if (!Storage::rename(INDEX_TMP_PATH, INDEX_PATH)) {
-        Storage::remove(INDEX_TMP_PATH);
+    ReportLegacyStorage::remove(INDEX_PATH);
+    if (!ReportLegacyStorage::rename(INDEX_TMP_PATH, INDEX_PATH)) {
+        ReportLegacyStorage::remove(INDEX_TMP_PATH);
         return false;
     }
     return true;

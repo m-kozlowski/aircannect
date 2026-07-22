@@ -4,7 +4,7 @@
 
 #include "board_report.h"
 #include "memory_manager.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace ReportStoreInternal {
@@ -80,9 +80,9 @@ size_t load_coverage(const char *source, ReportStoreCoverageRecord *recs) {
 
     char path[REPORT_PATH_MAX];
     if (!build_coverage_path(source, path, sizeof(path))) return 0;
-    if (!Storage::exists(path)) return 0;
+    if (!ReportLegacyStorage::exists(path)) return 0;
 
-    File file = Storage::open(path, "r");
+    ReportLegacyFile file = ReportLegacyStorage::open(path, "r");
     if (!file) return 0;
 
     for (;;) {
@@ -110,8 +110,8 @@ bool rewrite_coverage_file(const char *source,
     const int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     if (n <= 0 || static_cast<size_t>(n) >= sizeof(tmp)) return false;
 
-    Storage::remove(tmp);
-    File out = Storage::open(tmp, "w");
+    ReportLegacyStorage::remove(tmp);
+    ReportLegacyFile out = ReportLegacyStorage::open(tmp, "w");
     if (!out) return false;
 
     bool ok = true;
@@ -122,17 +122,17 @@ bool rewrite_coverage_file(const char *source,
     }
     out.close();
     if (!ok) {
-        Storage::remove(tmp);
+        ReportLegacyStorage::remove(tmp);
         return false;
     }
 
-    Storage::remove(path);
+    ReportLegacyStorage::remove(path);
     if (count == 0) {
-        Storage::remove(tmp);
+        ReportLegacyStorage::remove(tmp);
         return true;
     }
-    if (!Storage::rename(tmp, path)) {
-        Storage::remove(tmp);
+    if (!ReportLegacyStorage::rename(tmp, path)) {
+        ReportLegacyStorage::remove(tmp);
         return false;
     }
     return true;

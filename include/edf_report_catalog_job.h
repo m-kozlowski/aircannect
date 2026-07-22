@@ -1,6 +1,6 @@
 #pragma once
 
-#include <FS.h>
+#include "report_legacy_storage.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <stddef.h>
@@ -134,8 +134,8 @@ private:
     size_t build_day_count_ = 0;
     size_t build_day_index_ = 0;
 
-    File root_dir_;
-    File day_dir_;
+    ReportLegacyFile root_dir_;
+    ReportLegacyFile day_dir_;
     char day_path_[AC_STORAGE_PATH_MAX] = {};
     char current_file_path_[AC_STORAGE_PATH_MAX] = {};
     uint64_t current_file_size_ = 0;

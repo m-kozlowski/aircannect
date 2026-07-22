@@ -4,11 +4,10 @@
 #include <stdint.h>
 
 #include <Arduino.h>
-#include <FS.h>
 
+#include "report_legacy_storage.h"
 #include "report_store.h"
 #include "report_summary_record_codec.h"
-#include "storage_manager.h"
 
 namespace aircannect {
 namespace ReportStoreInternal {
@@ -52,8 +51,8 @@ size_t load_coverage(const char *source, ReportStoreCoverageRecord *recs);
 bool rewrite_coverage_file(const char *source,
                            const ReportStoreCoverageRecord *recs,
                            size_t count);
-bool write_all(File &file, const uint8_t *data, size_t len);
-bool read_all(File &file, uint8_t *data, size_t len);
+bool write_all(ReportLegacyFile &file, const uint8_t *data, size_t len);
+bool read_all(ReportLegacyFile &file, uint8_t *data, size_t len);
 
 bool parse_chunk_filename(const char *name,
                           int64_t &start_ms,
@@ -101,7 +100,7 @@ void encode_coverage_record(uint8_t *raw,
                             const ReportStoreCoverageRecord &record);
 bool decode_coverage_record(const uint8_t *raw,
                             ReportStoreCoverageRecord &record);
-bool read_coverage_record(File &file,
+bool read_coverage_record(ReportLegacyFile &file,
                           ReportStoreCoverageRecord &record,
                           bool &eof);
 

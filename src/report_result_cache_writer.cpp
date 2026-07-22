@@ -6,7 +6,7 @@
 #include "background_worker.h"
 #include "debug_log.h"
 #include "report_cache_paths.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 
 namespace aircannect {
 namespace {
@@ -132,15 +132,15 @@ bool ReportResultCacheWriter::service() {
     switch (job_.phase) {
         case ResultCacheWritePhase::ClearOld: {
             {
-                Storage::Guard g;
-                ok = Storage::mounted() &&
-                     Storage::ensure_dir("/aircannect") &&
-                     Storage::ensure_dir("/aircannect/report") &&
-                     Storage::ensure_dir(REPORT_CACHE_BASE_DIR) &&
-                     Storage::ensure_dir("/aircannect/report/v4/plots") &&
-                     Storage::ensure_dir(REPORT_PLOT_CACHE_DIR) &&
-                     Storage::ensure_dir("/aircannect/report/v4/results") &&
-                     Storage::ensure_dir(REPORT_RESULT_JSON_CACHE_DIR);
+                ReportLegacyStorageGuard g;
+                ok = ReportLegacyStorage::mounted() &&
+                     ReportLegacyStorage::ensure_dir("/aircannect") &&
+                     ReportLegacyStorage::ensure_dir("/aircannect/report") &&
+                     ReportLegacyStorage::ensure_dir(REPORT_CACHE_BASE_DIR) &&
+                     ReportLegacyStorage::ensure_dir("/aircannect/report/v4/plots") &&
+                     ReportLegacyStorage::ensure_dir(REPORT_PLOT_CACHE_DIR) &&
+                     ReportLegacyStorage::ensure_dir("/aircannect/report/v4/results") &&
+                     ReportLegacyStorage::ensure_dir(REPORT_RESULT_JSON_CACHE_DIR);
             }
 
             uint32_t deleted_plot = 0;
@@ -156,9 +156,9 @@ bool ReportResultCacheWriter::service() {
         }
 
         case ResultCacheWritePhase::OpenPlotTmp: {
-            Storage::Guard g;
-            Storage::remove(job_.plot_tmp_path);
-            job_.file = Storage::open(job_.plot_tmp_path, "w");
+            ReportLegacyStorageGuard g;
+            ReportLegacyStorage::remove(job_.plot_tmp_path);
+            job_.file = ReportLegacyStorage::open(job_.plot_tmp_path, "w");
             ok = static_cast<bool>(job_.file);
             job_.phase =
                 ok ? ResultCacheWritePhase::WritePlot
@@ -185,7 +185,7 @@ bool ReportResultCacheWriter::service() {
 
             size_t wrote = 0;
             {
-                Storage::Guard g;
+                ReportLegacyStorageGuard g;
                 wrote = job_.file.write(data, len);
             }
 
@@ -202,12 +202,12 @@ bool ReportResultCacheWriter::service() {
         }
 
         case ResultCacheWritePhase::ClosePlotRename: {
-            Storage::Guard g;
+            ReportLegacyStorageGuard g;
             if (job_.file) job_.file.close();
-            Storage::remove(job_.plot_path);
-            ok = Storage::rename(job_.plot_tmp_path, job_.plot_path);
+            ReportLegacyStorage::remove(job_.plot_path);
+            ok = ReportLegacyStorage::rename(job_.plot_tmp_path, job_.plot_path);
             if (!ok) {
-                Storage::remove(job_.plot_tmp_path);
+                ReportLegacyStorage::remove(job_.plot_tmp_path);
                 job_.phase = ResultCacheWritePhase::Idle;
             } else {
                 job_.offset = 0;
@@ -217,9 +217,9 @@ bool ReportResultCacheWriter::service() {
         }
 
         case ResultCacheWritePhase::OpenResultTmp: {
-            Storage::Guard g;
-            Storage::remove(job_.result_tmp_path);
-            job_.file = Storage::open(job_.result_tmp_path, "w");
+            ReportLegacyStorageGuard g;
+            ReportLegacyStorage::remove(job_.result_tmp_path);
+            job_.file = ReportLegacyStorage::open(job_.result_tmp_path, "w");
             ok = static_cast<bool>(job_.file);
             job_.phase =
                 ok ? ResultCacheWritePhase::WriteResult
@@ -246,7 +246,7 @@ bool ReportResultCacheWriter::service() {
 
             size_t wrote = 0;
             {
-                Storage::Guard g;
+                ReportLegacyStorageGuard g;
                 wrote = job_.file.write(data, len);
             }
 
@@ -263,11 +263,11 @@ bool ReportResultCacheWriter::service() {
         }
 
         case ResultCacheWritePhase::CloseResultRename: {
-            Storage::Guard g;
+            ReportLegacyStorageGuard g;
             if (job_.file) job_.file.close();
-            Storage::remove(job_.result_path);
-            ok = Storage::rename(job_.result_tmp_path, job_.result_path);
-            if (!ok) Storage::remove(job_.result_tmp_path);
+            ReportLegacyStorage::remove(job_.result_path);
+            ok = ReportLegacyStorage::rename(job_.result_tmp_path, job_.result_path);
+            if (!ok) ReportLegacyStorage::remove(job_.result_tmp_path);
             job_.phase = ResultCacheWritePhase::Idle;
             break;
         }
@@ -302,10 +302,10 @@ bool ReportResultCacheWriter::service() {
                       static_cast<unsigned>(result_bytes),
                       static_cast<unsigned>(plot_bytes));
 
-            Storage::Guard g;
+            ReportLegacyStorageGuard g;
             if (job_.file) job_.file.close();
-            if (job_.plot_tmp_path[0]) Storage::remove(job_.plot_tmp_path);
-            if (job_.result_tmp_path[0]) Storage::remove(job_.result_tmp_path);
+            if (job_.plot_tmp_path[0]) ReportLegacyStorage::remove(job_.plot_tmp_path);
+            if (job_.result_tmp_path[0]) ReportLegacyStorage::remove(job_.result_tmp_path);
         }
 
         reset_locked();
@@ -317,11 +317,11 @@ bool ReportResultCacheWriter::service() {
 
 void ReportResultCacheWriter::reset_locked() {
     if (job_.file) {
-        Storage::Guard g;
+        ReportLegacyStorageGuard g;
         job_.file.close();
     }
 
-    job_.file = File();
+    job_.file = ReportLegacyFile();
     job_.active = false;
     job_.phase = ResultCacheWritePhase::Idle;
     job_.night = ReportSummaryRecord{};

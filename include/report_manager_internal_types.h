@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <FS.h>
+#include "report_legacy_storage.h"
 
 #include "edf_report_catalog.h"
 #include "report_build_queue_policy.h"
@@ -148,7 +148,7 @@ struct ResultCacheWriteJob {
     std::shared_ptr<ReportSpoolBuffer> result_json;
     std::shared_ptr<ReportSpoolBuffer> plot;
     size_t offset = 0;
-    File file;
+    ReportLegacyFile file;
 };
 
 enum class CacheWriteEnqueueResult : uint8_t {

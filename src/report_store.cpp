@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #include "report_store_internal.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -29,7 +29,7 @@ namespace ReportStore {
 using namespace ReportStoreInternal;
 
 void begin() {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
 
     if (current.initialized) return;
 
@@ -40,7 +40,7 @@ void begin() {
 ReportStoreStatus status() {
     if (!current.initialized) begin();
 
-    current.available = Storage::mounted();
+    current.available = ReportLegacyStorage::mounted();
     return current;
 }
 
@@ -51,9 +51,9 @@ bool ready() {
 }
 
 bool ensure_layout() {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
 
-    current.available = Storage::mounted();
+    current.available = ReportLegacyStorage::mounted();
     if (!current.available) {
         note_error("storage_unavailable", &current.layout_errors);
         return false;
@@ -70,7 +70,7 @@ bool ensure_layout() {
     };
 
     for (const char *dir : dirs) {
-        if (!Storage::ensure_dir(dir)) {
+        if (!ReportLegacyStorage::ensure_dir(dir)) {
             note_error("layout_dir_failed", &current.layout_errors);
             return false;
         }
@@ -81,7 +81,7 @@ bool ensure_layout() {
 }
 
 bool reset_cache_store(uint32_t &renamed) {
-    Storage::Guard g;
+    ReportLegacyStorageGuard g;
 
     renamed = 0;
     if (!ready()) {
@@ -89,7 +89,7 @@ bool reset_cache_store(uint32_t &renamed) {
         return false;
     }
 
-    if (Storage::exists(BASE_DIR)) {
+    if (ReportLegacyStorage::exists(BASE_DIR)) {
         char trash_path[REPORT_PATH_MAX];
         const int written =
             snprintf(trash_path,
@@ -102,7 +102,7 @@ bool reset_cache_store(uint32_t &renamed) {
             return false;
         }
 
-        if (!Storage::rename(BASE_DIR, trash_path)) {
+        if (!ReportLegacyStorage::rename(BASE_DIR, trash_path)) {
             note_error("report_store_rename_failed", &current.layout_errors);
             return false;
         }

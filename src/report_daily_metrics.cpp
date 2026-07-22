@@ -12,7 +12,7 @@
 #include "calendar_utils.h"
 #include "edf_str_file_layout.h"
 #include "report_night_index.h"
-#include "storage_manager.h"
+#include "report_legacy_storage.h"
 #endif
 
 namespace aircannect {
@@ -105,7 +105,7 @@ bool report_sleep_day_date_sample(const ReportSummaryRecord &night,
     return true;
 }
 
-bool read_str_record_date(File &file,
+bool read_str_record_date(ReportLegacyFile &file,
                           uint32_t record_index,
                           int16_t &date_sample) {
     uint8_t raw[2] = {};
@@ -118,7 +118,7 @@ bool read_str_record_date(File &file,
     return true;
 }
 
-bool read_str_record(File &file,
+bool read_str_record(ReportLegacyFile &file,
                      uint32_t record_index,
                      uint8_t *record,
                      size_t record_size) {
@@ -128,7 +128,7 @@ bool read_str_record(File &file,
     return file.read(record, record_size) == static_cast<int>(record_size);
 }
 
-bool find_str_record_by_date(File &file,
+bool find_str_record_by_date(ReportLegacyFile &file,
                              uint32_t record_count,
                              int16_t target_date,
                              uint32_t &record_index) {
@@ -225,8 +225,8 @@ bool report_daily_metrics_from_str_file(const ReportSummaryRecord &record,
     int16_t target_date = 0;
     if (!report_sleep_day_date_sample(record, target_date)) return false;
 
-    Storage::Guard guard;
-    File file = Storage::open("/STR.edf", "r");
+    ReportLegacyStorageGuard guard;
+    ReportLegacyFile file = ReportLegacyStorage::open("/STR.edf", "r");
     if (!file || file.isDirectory()) return false;
 
     EdfStrFileLayout layout;
