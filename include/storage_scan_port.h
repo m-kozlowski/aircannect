@@ -32,6 +32,7 @@ struct StorageScanCommand {
 struct StorageScanEntryView {
     const char *path = nullptr;
     bool directory = false;
+    uint8_t root_index = 0;
     uint64_t size = 0;
     uint64_t modified = 0;
 };
@@ -52,6 +53,7 @@ private:
         uint64_t modified = 0;
         uint32_t path_offset = 0;
         bool directory = false;
+        uint8_t root_index = 0;
     };
 
     Entry *entries_ = nullptr;

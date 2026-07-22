@@ -11,7 +11,6 @@
 #include "storage_service.h"
 #include "memory_manager.h"
 #include "runtime_clock.h"
-#include "storage_directory.h"
 #include "storage_export_plan.h"
 #include "storage_export_state.h"
 #include "storage_manager.h"
@@ -64,8 +63,11 @@ const char *storage_sync_state_name(StorageSyncState state) {
     return "unknown";
 }
 
-void StorageSyncJob::begin(const AppConfigData &config) {
+void StorageSyncJob::begin(const AppConfigData &config,
+                           StorageScanPort &scan_port,
+                           StorageReadPort &read_port) {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
+    inventory_loader_.begin(scan_port, read_port);
     configure(config);
 }
 
@@ -110,6 +112,7 @@ bool StorageSyncJob::snapshot_configured(const ConfigSnapshot &config) {
 const char *StorageSyncJob::work_phase_name(WorkPhase phase) {
     switch (phase) {
         case WorkPhase::Idle: return "idle";
+        case WorkPhase::LoadInventory: return "load_inventory";
         case WorkPhase::Connect: return "connect";
         case WorkPhase::VerifyLatestStart: return "verify_latest_start";
         case WorkPhase::VerifyLatestFile: return "verify_latest_file";
@@ -163,6 +166,8 @@ bool StorageSyncJob::config_matches_locked(
 void StorageSyncJob::reset_run_locked(bool keep_status) {
     close_local_locked();
     close_latest_verify_locked();
+    inventory_loader_.reset();
+    export_inventory_.reset();
     export_planner_.reset();
     release_upload_buffer_locked();
     smb_.abort_connection();
@@ -173,9 +178,9 @@ void StorageSyncJob::reset_run_locked(bool keep_status) {
     current_run_kind_ = RunKind::Manual;
     sync_after_verify_ = false;
     ensured_remote_dir_[0] = '\0';
-    latest_datalog_day_[0] = '\0';
     pending_run_kind_ = RunKind::Manual;
     abort_requested_.store(false);
+    inventory_requested_ = false;
     state_cache_.clear();
     if (!keep_status) {
         const StorageSyncPersistentStatus preserved = status_;
@@ -512,19 +517,56 @@ bool StorageSyncJob::begin_run_locked() {
         fail_locked("state_path_too_long");
         return false;
     }
-    refresh_latest_datalog_day_name_locked();
-    char planner_error[AC_STORAGE_ERROR_MAX] = {};
-    if (!begin_export_planner_locked(planner_error, sizeof(planner_error))) {
-        fail_locked(planner_error[0] ? planner_error : "planner_failed");
-        return false;
-    }
-    phase_ = WorkPhase::Connect;
+    phase_ = WorkPhase::LoadInventory;
     Log::logf(CAT_STORAGE,
               LOG_INFO,
               "[SYNC] started reason=%s endpoint=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
               config_.endpoint);
     return true;
+}
+
+JobStep StorageSyncJob::step_load_inventory_locked() {
+    if (!inventory_requested_) {
+        const uint32_t generation = next_inventory_generation_;
+        const OperationAdmission admission =
+            inventory_loader_.request(state_dir_, generation);
+        if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+        if (admission != OperationAdmission::Accepted) {
+            fail_locked("export_inventory_rejected");
+            return JobStep::Idle;
+        }
+
+        next_inventory_generation_++;
+        if (next_inventory_generation_ == 0) next_inventory_generation_ = 1;
+        inventory_requested_ = true;
+    }
+
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    const StorageExportInventoryLoadResult result =
+        inventory_loader_.poll(error, sizeof(error));
+    if (result == StorageExportInventoryLoadResult::Waiting) {
+        return JobStep::Waiting;
+    }
+    if (result == StorageExportInventoryLoadResult::Error) {
+        fail_locked(error[0] ? error : "export_inventory_failed");
+        return JobStep::Idle;
+    }
+
+    export_inventory_ = inventory_loader_.snapshot();
+    if (!export_inventory_) {
+        fail_locked("export_inventory_missing");
+        return JobStep::Idle;
+    }
+
+    char planner_error[AC_STORAGE_ERROR_MAX] = {};
+    if (!begin_export_planner_locked(planner_error, sizeof(planner_error))) {
+        fail_locked(planner_error[0] ? planner_error : "planner_failed");
+        return JobStep::Idle;
+    }
+
+    phase_ = WorkPhase::Connect;
+    return JobStep::Working;
 }
 
 bool StorageSyncJob::request_sync_with_kind(RunKind kind, const char *label) {
@@ -674,37 +716,32 @@ void StorageSyncJob::request_operation_abort() {
     }
 }
 
-bool StorageSyncJob::latest_datalog_day_locked(char *out,
-                                               size_t out_size,
-                                               char *error_out,
-                                               size_t error_out_size) const {
-    return storage_export_latest_datalog_day_path(out,
-                                                  out_size,
-                                                  error_out,
-                                                  error_out_size);
-}
-
 void StorageSyncJob::close_latest_verify_locked() {
-    if (latest_verify_.opened) {
-        Storage::Guard guard;
-        latest_verify_.dir.close();
-        latest_verify_.opened = false;
-    }
     latest_verify_ = LatestVerify();
 }
 
 bool StorageSyncJob::begin_latest_verify_locked(char *error_out,
                                                 size_t error_out_size) {
     close_latest_verify_locked();
-    if (!latest_datalog_day_locked(latest_verify_.day_path,
-                                   sizeof(latest_verify_.day_path),
-                                   error_out,
-                                   error_out_size)) {
+    if (!export_inventory_) {
+        copy_cstr(error_out, error_out_size, "export_inventory_missing");
         return false;
     }
-    if (!latest_verify_.day_path[0]) {
+
+    const char *latest_day = export_inventory_->latest_datalog_day();
+    if (!latest_day || !latest_day[0]) {
         phase_ = WorkPhase::Finish;
         return true;
+    }
+
+    const int written = snprintf(latest_verify_.day_path,
+                                 sizeof(latest_verify_.day_path),
+                                 "/DATALOG/%s",
+                                 latest_day);
+    if (written <= 0 ||
+        static_cast<size_t>(written) >= sizeof(latest_verify_.day_path)) {
+        copy_cstr(error_out, error_out_size, "latest_day_path_too_long");
+        return false;
     }
     if (!build_state_path_locked(latest_verify_.day_path,
                                  latest_verify_.state_path,
@@ -712,80 +749,61 @@ bool StorageSyncJob::begin_latest_verify_locked(char *error_out,
         copy_cstr(error_out, error_out_size, "state_path_failed");
         return false;
     }
-    {
-        Storage::Guard guard;
-        latest_verify_.dir = Storage::open(latest_verify_.day_path, "r");
-        if (!latest_verify_.dir) {
-            phase_ = WorkPhase::Finish;
-            return true;
-        }
-        if (!latest_verify_.dir.isDirectory()) {
-            latest_verify_.dir.close();
-            phase_ = WorkPhase::Finish;
-            return true;
-        }
-    }
-    latest_verify_.opened = true;
+
+    latest_verify_.active = true;
     phase_ = WorkPhase::VerifyLatestFile;
     return true;
 }
 
 bool StorageSyncJob::latest_verify_file_step_locked(char *error_out,
                                                     size_t error_out_size) {
-    if (!latest_verify_.opened) {
+    if (!latest_verify_.active || !export_inventory_) {
         phase_ = WorkPhase::Finish;
         return true;
     }
 
-    StorageDirChild child;
-    if (!storage_read_next_dir_child(latest_verify_.dir, child)) {
-        {
-            Storage::Guard guard;
-            latest_verify_.dir.close();
-            latest_verify_.opened = false;
+    size_t budget = 32;
+    while (latest_verify_.source_index < export_inventory_->source_size() &&
+           budget-- > 0) {
+        StorageExportInventoryEntryView entry;
+        const size_t index = latest_verify_.source_index++;
+        char day[9] = {};
+        if (!export_inventory_->entry(index, entry) ||
+            !storage_export_datalog_day_from_descendant(entry.path,
+                                                        day,
+                                                        sizeof(day)) ||
+            strcmp(day, export_inventory_->latest_datalog_day()) != 0) {
+            continue;
         }
+
+        status_.files_seen++;
+        status_.updated_ms = nonzero_millis(millis());
+        if (!entry.local_state_complete) {
+            sync_after_verify_ = true;
+            continue;
+        }
+
+        copy_cstr(latest_verify_.current_path,
+                  sizeof(latest_verify_.current_path),
+                  entry.path);
+        latest_verify_.current_size = entry.info.size;
+        if (!smb_.make_remote_path(entry.path,
+                                   latest_verify_.remote_path,
+                                   sizeof(latest_verify_.remote_path))) {
+            copy_cstr(error_out, error_out_size, "remote_path_failed");
+            return false;
+        }
+
+        phase_ = WorkPhase::VerifyLatestRemote;
+        return true;
+    }
+
+    if (latest_verify_.source_index >= export_inventory_->source_size()) {
+        latest_verify_.active = false;
         phase_ = latest_verify_.invalidate_state
             ? WorkPhase::VerifyLatestInvalidate
             : WorkPhase::Finish;
-        return true;
     }
-    if (child.is_dir) return true;
-
-    char child_path[AC_STORAGE_PATH_MAX] = {};
-    if (!storage_append_child_path(latest_verify_.day_path,
-                                   child.name,
-                                   child_path,
-                                   sizeof(child_path)) ||
-        !storage_user_path_valid(child_path)) {
-        copy_cstr(error_out, error_out_size, "bad_child_path");
-        return false;
-    }
-
-    status_.files_seen++;
-    status_.updated_ms = nonzero_millis(millis());
-    const uint64_t mtime = child.last_write > 0
-        ? static_cast<uint64_t>(child.last_write)
-        : 0;
-    if (!state_contains_locked(latest_verify_.state_path,
-                               child_path,
-                               child.size,
-                               mtime)) {
-        sync_after_verify_ = true;
-        return true;
-    }
-
-    copy_cstr(latest_verify_.current_path,
-              sizeof(latest_verify_.current_path),
-              child_path);
-    latest_verify_.current_size = child.size;
-    if (!smb_.make_remote_path(child_path,
-                               latest_verify_.remote_path,
-                               sizeof(latest_verify_.remote_path))) {
-        copy_cstr(error_out, error_out_size, "remote_path_failed");
-        return false;
-    }
-
-    phase_ = WorkPhase::VerifyLatestRemote;
     return true;
 }
 
@@ -872,14 +890,21 @@ bool StorageSyncJob::next_file_locked() {
 
 bool StorageSyncJob::begin_export_planner_locked(char *error_out,
                                                  size_t error_out_size) {
+    if (!export_inventory_) {
+        copy_cstr(error_out, error_out_size, "export_inventory_missing");
+        return false;
+    }
+
     StorageExportPlannerConfig config;
     config.scope = StorageExportPlannerScope::FullCard;
     config.state_dir = state_dir_;
-    config.state_cache = &state_cache_;
-    config.latest_datalog_day = latest_datalog_day_;
+    config.now_epoch = storage_export_current_epoch_seconds_or_zero();
     config.skip_completed_finalized_datalog_days =
         !run_kind_is_reconcile(current_run_kind_);
-    return export_planner_.begin(config, error_out, error_out_size);
+    return export_planner_.begin(config,
+                                 export_inventory_,
+                                 error_out,
+                                 error_out_size);
 }
 
 bool StorageSyncJob::build_state_path_locked(const char *path,
@@ -905,13 +930,6 @@ bool StorageSyncJob::build_state_path_locked(const char *path,
 
 bool StorageSyncJob::ensure_state_dir_locked() {
     return storage_export_ensure_state_dir(state_dir_);
-}
-
-bool StorageSyncJob::state_contains_locked(const char *state_path,
-                                           const char *path,
-                                           uint64_t size,
-                                           uint64_t mtime) {
-    return state_cache_.contains(state_path, path, size, mtime);
 }
 
 bool StorageSyncJob::write_state_locked(const char *state_path,
@@ -960,35 +978,16 @@ bool StorageSyncJob::remote_parent_dir_locked(const char *remote_path,
     return true;
 }
 
-bool StorageSyncJob::datalog_day_name_from_path(const char *path,
-                                                char *out,
-                                                size_t out_size) const {
-    return storage_export_datalog_day_from_path(path, out, out_size);
-}
-
-void StorageSyncJob::refresh_latest_datalog_day_name_locked() {
-    latest_datalog_day_[0] = '\0';
-    char path[AC_STORAGE_PATH_MAX] = {};
-    char error[AC_STORAGE_ERROR_MAX] = {};
-    if (!latest_datalog_day_locked(path, sizeof(path),
-                                   error, sizeof(error))) {
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[SYNC] latest DATALOG day scan failed error=%s\n",
-                  error[0] ? error : "latest_day_failed");
-        return;
-    }
-    (void)datalog_day_name_from_path(path,
-                                     latest_datalog_day_,
-                                     sizeof(latest_datalog_day_));
-}
-
 void StorageSyncJob::maybe_mark_completed_datalog_day_locked(
     const char *day) {
     if (run_kind_is_reconcile(current_run_kind_)) return;
-    if (!day || !day[0]) return;
-    if (!storage_export_datalog_day_finalized(day, latest_datalog_day_)) return;
-    if (storage_export_datalog_day_done(state_dir_, day)) return;
+    if (!day || !day[0] || !export_inventory_) return;
+    if (!storage_export_datalog_day_finalized(
+            day,
+            export_inventory_->latest_datalog_day())) {
+        return;
+    }
+    if (export_inventory_->datalog_day_done(day)) return;
     if (!storage_export_mark_datalog_day_done(state_dir_, day)) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
@@ -1071,6 +1070,9 @@ void StorageSyncJob::clear_current_file_locked() {
 void StorageSyncJob::finish_run_locked() {
     close_latest_verify_locked();
     export_planner_.reset();
+    inventory_loader_.reset();
+    export_inventory_.reset();
+    inventory_requested_ = false;
     release_upload_buffer_locked();
     state_cache_.clear();
     clear_current_file_locked();
@@ -1196,6 +1198,9 @@ void StorageSyncJob::fail_locked(const char *error) {
         current_run_verify && !current_run_reconcile;
     close_local_locked();
     export_planner_.reset();
+    inventory_loader_.reset();
+    export_inventory_.reset();
+    inventory_requested_ = false;
     close_latest_verify_locked();
     smb_.abort_connection();
     release_upload_buffer_locked();
@@ -1446,6 +1451,7 @@ bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
             return true;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadInventory:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
@@ -1572,6 +1578,7 @@ void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadInventory:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
@@ -1693,6 +1700,7 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
             return JobStep::Idle;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadInventory:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
@@ -1709,8 +1717,11 @@ JobStep StorageSyncJob::step_work_phase_locked() {
     char error[AC_STORAGE_ERROR_MAX] = {};
     switch (phase_) {
         case WorkPhase::Idle:
-            phase_ = WorkPhase::Connect;
+            phase_ = WorkPhase::LoadInventory;
             return JobStep::Working;
+
+        case WorkPhase::LoadInventory:
+            return step_load_inventory_locked();
 
         case WorkPhase::Connect:
         case WorkPhase::VerifyLatestRemote:

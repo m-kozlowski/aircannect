@@ -242,8 +242,11 @@ bool SleepHqSyncJob::parse_inflight_phase(const char *text,
     return false;
 }
 
-void SleepHqSyncJob::begin(const AppConfigData &config) {
+void SleepHqSyncJob::begin(const AppConfigData &config,
+                           StorageScanPort &scan_port,
+                           StorageReadPort &read_port) {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
+    inventory_loader_.begin(scan_port, read_port);
     refresh_config(config, millis());
 }
 
@@ -266,6 +269,9 @@ void SleepHqSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     status_.pending_reason[0] = 0;
     status_.last_error[0] = 0;
     state_dir_[0] = 0;
+    inventory_loader_.reset();
+    export_inventory_.reset();
+    inventory_requested_ = false;
     state_cache_.clear();
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
@@ -485,6 +491,47 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
     return true;
 }
 
+JobStep SleepHqSyncJob::step_load_inventory_locked() {
+    if (!inventory_requested_) {
+        const uint32_t generation = next_inventory_generation_;
+        const OperationAdmission admission =
+            inventory_loader_.request(state_dir_, generation);
+        if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+        if (admission != OperationAdmission::Accepted) {
+            fail_locked("export_inventory_rejected");
+            return JobStep::Idle;
+        }
+
+        next_inventory_generation_++;
+        if (next_inventory_generation_ == 0) next_inventory_generation_ = 1;
+        inventory_requested_ = true;
+    }
+
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    const StorageExportInventoryLoadResult result =
+        inventory_loader_.poll(error, sizeof(error));
+    if (result == StorageExportInventoryLoadResult::Waiting) {
+        return JobStep::Waiting;
+    }
+    if (result == StorageExportInventoryLoadResult::Error) {
+        fail_locked(error[0] ? error : "export_inventory_failed");
+        return JobStep::Idle;
+    }
+
+    export_inventory_ = inventory_loader_.snapshot();
+    if (!export_inventory_) {
+        fail_locked("export_inventory_missing");
+        return JobStep::Idle;
+    }
+    if (!prepare_remote_reconcile_locked(error, sizeof(error))) {
+        fail_locked(error[0] ? error : "remote_reconcile_failed");
+        return JobStep::Idle;
+    }
+
+    phase_ = WorkPhase::FindRemoteMachine;
+    return JobStep::Working;
+}
+
 void SleepHqSyncJob::clear_current_file_locked() {
     current_file_.reset();
     status_.current_path[0] = 0;
@@ -701,6 +748,8 @@ bool SleepHqSyncJob::force_remote_missing_datalog_day_locked(
 
 void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     client_.disconnect();
+    inventory_loader_.reset();
+    export_inventory_.reset();
     export_planner_.reset();
     clear_current_file_locked();
     clear_staged_locked();
@@ -718,8 +767,8 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     pending_remote_day_local_complete_ = false;
     pending_datalog_day_[0] = '\0';
     current_datalog_day_filter_[0] = '\0';
-    latest_datalog_day_[0] = '\0';
     state_dir_[0] = 0;
+    inventory_requested_ = false;
     current_run_kind_ = RunKind::Check;
     abort_requested_.store(false);
     if (!keep_status) {
@@ -899,12 +948,15 @@ void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
 
 bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
                                                  size_t error_out_size) {
-    refresh_latest_datalog_day_name_locked();
+    if (!export_inventory_) {
+        copy_cstr(error_out, error_out_size, "export_inventory_missing");
+        return false;
+    }
+
     StorageExportPlannerConfig config;
     config.scope = StorageExportPlannerScope::SleepHq;
     config.state_dir = state_dir_;
-    config.state_cache = &state_cache_;
-    config.latest_datalog_day = latest_datalog_day_;
+    config.now_epoch = storage_export_current_epoch_seconds_or_zero();
     config.trust_completed_finalized_datalog_days = true;
     config.require_pending_datalog_file = true;
     config.defer_datalog_day_decision = true;
@@ -914,7 +966,10 @@ bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
     if (current_datalog_day_filter_[0]) {
         config.only_datalog_day = current_datalog_day_filter_;
     }
-    return export_planner_.begin(config, error_out, error_out_size);
+    return export_planner_.begin(config,
+                                 export_inventory_,
+                                 error_out,
+                                 error_out_size);
 }
 
 void SleepHqSyncJob::reset_import_batch_locked() {
@@ -1088,26 +1143,15 @@ bool SleepHqSyncJob::staged_contains_locked(const char *path,
     return false;
 }
 
-void SleepHqSyncJob::refresh_latest_datalog_day_name_locked() {
-    latest_datalog_day_[0] = '\0';
-    char path[AC_STORAGE_PATH_MAX] = {};
-    char error[AC_SLEEPHQ_ERROR_MAX] = {};
-    if (!storage_export_latest_datalog_day_path(path, sizeof(path),
-                                                error, sizeof(error))) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "latest DATALOG day scan failed error=%s\n",
-                  error[0] ? error : "latest_day_failed");
-        return;
-    }
-    (void)storage_export_datalog_day_from_path(path,
-                                               latest_datalog_day_,
-                                               sizeof(latest_datalog_day_));
-}
-
 void SleepHqSyncJob::note_completed_datalog_day_locked(const char *day) {
     pending_done_day_[0] = '\0';
-    if (!storage_export_datalog_day_finalized(day, latest_datalog_day_)) return;
-    if (storage_export_datalog_day_done(state_dir_, day)) return;
+    if (!day || !export_inventory_) return;
+    if (!storage_export_datalog_day_finalized(
+            day,
+            export_inventory_->latest_datalog_day())) {
+        return;
+    }
+    if (export_inventory_->datalog_day_done(day)) return;
     copy_cstr(pending_done_day_, sizeof(pending_done_day_), day);
 }
 
@@ -1702,6 +1746,7 @@ bool SleepHqSyncJob::phase_has_blocking_io(WorkPhase phase) {
             return true;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadInventory:
         case WorkPhase::NextFile:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::WaitImport:
@@ -1938,6 +1983,7 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadInventory:
         case WorkPhase::NextFile:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::WaitImport:
@@ -2041,12 +2087,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                 return JobStep::Idle;
             }
 
-            char error[AC_SLEEPHQ_ERROR_MAX] = {};
-            if (!prepare_remote_reconcile_locked(error, sizeof(error))) {
-                fail_locked(error[0] ? error : "remote_reconcile_failed");
-                return JobStep::Idle;
-            }
-            phase_ = WorkPhase::FindRemoteMachine;
+            phase_ = WorkPhase::LoadInventory;
             return JobStep::Working;
         }
 
@@ -2234,6 +2275,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
         }
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadInventory:
         case WorkPhase::NextFile:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::WaitImport:
@@ -2250,6 +2292,10 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
         case WorkPhase::Idle:
             phase_ = WorkPhase::Connect;
             return JobStep::Working;
+
+        case WorkPhase::LoadInventory:
+            return step_load_inventory_locked();
+
         case WorkPhase::Connect:
         case WorkPhase::FindRemoteMachine:
         case WorkPhase::ResolveDatalogDay:

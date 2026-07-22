@@ -12,8 +12,10 @@
 #include "sleephq_client.h"
 #include "sleephq_remote_file_cache.h"
 #include "sleephq_sync_file.h"
+#include "storage_export_inventory.h"
 #include "storage_export_plan.h"
 #include "storage_export_planner.h"
+#include "storage_export_state.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -85,7 +87,9 @@ struct SleepHqSyncRuntimeStatus {
 class SleepHqSyncJob : public BackgroundJob {
 public:
     // lifecycle
-    void begin(const AppConfigData &config);
+    void begin(const AppConfigData &config,
+               StorageScanPort &scan_port,
+               StorageReadPort &read_port);
 
     // background worker
     const char *name() const override { return "sleephq_sync"; }
@@ -112,6 +116,7 @@ private:
     enum class WorkPhase : uint8_t {
         Idle,
         Connect,
+        LoadInventory,
         FindRemoteMachine,
         NextFile,
         ResolveDatalogDay,
@@ -206,6 +211,7 @@ private:
 
     // run lifecycle
     bool begin_run_locked(uint32_t now_ms);
+    JobStep step_load_inventory_locked();
     void queue_retry_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
     void finish_check_locked(uint32_t team_id);
@@ -234,7 +240,6 @@ private:
     bool staged_contains_locked(const char *path,
                                 uint64_t size,
                                 uint64_t mtime) const;
-    void refresh_latest_datalog_day_name_locked();
     void note_completed_datalog_day_locked(const char *day);
     void maybe_mark_completed_datalog_day_locked();
     bool write_state_locked(const StagedFile &file);
@@ -321,6 +326,8 @@ private:
     std::atomic<uint32_t> runtime_completed_check_generation_{0};
 
     // active export/import
+    StorageExportInventoryLoader inventory_loader_;
+    std::shared_ptr<const StorageExportInventory> export_inventory_;
     StorageExportPlanner export_planner_;
     bool import_batch_active_ = false;
     SleepHqSyncFile current_file_;
@@ -350,7 +357,6 @@ private:
     bool pending_remote_day_local_complete_ = false;
     char pending_datalog_day_[9] = {};
     char current_datalog_day_filter_[9] = {};
-    char latest_datalog_day_[9] = {};
     size_t mark_index_ = 0;
     uint32_t import_process_started_ms_ = 0;
     uint32_t import_poll_due_ms_ = 0;
@@ -359,6 +365,8 @@ private:
     InflightPhase inflight_phase_ = InflightPhase::None;
     StorageExportStateCache state_cache_;
     char state_dir_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
+    uint32_t next_inventory_generation_ = 1;
+    bool inventory_requested_ = false;
 };
 
 }  // namespace aircannect

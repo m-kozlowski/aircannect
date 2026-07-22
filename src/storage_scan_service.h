@@ -48,9 +48,11 @@ private:
     bool scan_next_entry_locked(const char *&error);
     bool push_directory_locked(const char *path,
                                bool recursive,
+                               uint8_t root_index,
                                const char *&error);
     bool append_entry_locked(const char *path,
                              bool directory,
+                             uint8_t root_index,
                              uint64_t size,
                              uint64_t modified);
     bool reserve_entries_locked(size_t needed);

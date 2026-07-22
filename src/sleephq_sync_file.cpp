@@ -5,6 +5,7 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
+#include "storage_export_state.h"
 #include "storage_manager.h"
 #include "string_util.h"
 

@@ -1,11 +1,48 @@
 #pragma once
 
+#include <FS.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "storage_export_plan.h"
 
 namespace aircannect {
+
+void storage_read_local_node_info(File &file, StorageLocalNodeInfo &out);
+StorageLocalNodeInfo storage_stat_local_node(const char *path);
+
+class StorageExportStateCache {
+public:
+    ~StorageExportStateCache();
+
+    void clear();
+    bool contains(const char *state_path,
+                  const char *path,
+                  uint64_t size,
+                  uint64_t mtime);
+    void note_written(const char *state_path,
+                      const char *path,
+                      uint64_t size,
+                      uint64_t mtime,
+                      StorageExportStateWriteMode mode);
+
+private:
+    struct Entry {
+        uint64_t size = 0;
+        uint64_t mtime = 0;
+        char path[AC_STORAGE_PATH_MAX] = {};
+    };
+
+    bool load(const char *state_path);
+    bool reserve(size_t needed);
+    bool add(uint64_t size, uint64_t mtime, const char *path);
+
+    char path_[AC_STORAGE_PATH_MAX] = {};
+    Entry *entries_ = nullptr;
+    size_t count_ = 0;
+    size_t capacity_ = 0;
+    bool loaded_ = false;
+};
 
 bool storage_export_ensure_dir(const char *path);
 bool storage_export_ensure_state_dir(const char *state_dir);

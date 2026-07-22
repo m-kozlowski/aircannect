@@ -9,8 +9,10 @@
 
 #include "app_config.h"
 #include "background_worker.h"
+#include "storage_export_inventory.h"
 #include "storage_export_plan.h"
 #include "storage_export_planner.h"
+#include "storage_export_state.h"
 #include "storage_path.h"
 #include "storage_smb_client.h"
 
@@ -102,7 +104,9 @@ struct StorageSyncRuntimeStatus {
 class StorageSyncJob : public BackgroundJob {
 public:
     // lifecycle
-    void begin(const AppConfigData &config);
+    void begin(const AppConfigData &config,
+               StorageScanPort &scan_port,
+               StorageReadPort &read_port);
 
     // background worker
     const char *name() const override { return "storage_sync"; }
@@ -129,6 +133,7 @@ public:
 private:
     enum class WorkPhase : uint8_t {
         Idle,
+        LoadInventory,
         Connect,
         VerifyLatestStart,
         VerifyLatestFile,
@@ -186,9 +191,9 @@ private:
         char current_path[AC_STORAGE_PATH_MAX] = {};
         char remote_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
         uint64_t current_size = 0;
-        bool opened = false;
+        size_t source_index = 0;
+        bool active = false;
         bool invalidate_state = false;
-        File dir;
     };
 
     struct BlockingResult {
@@ -245,16 +250,13 @@ private:
                                          size_t out_size,
                                          uint32_t *hash_out = nullptr) const;
     bool begin_run_locked();
+    JobStep step_load_inventory_locked();
     void finish_run_locked();
     void preempt_run_locked();
     void fail_locked(const char *error);
     void clear_result_metadata_locked();
     bool load_result_metadata_locked();
     bool save_result_metadata_locked();
-    bool latest_datalog_day_locked(char *out,
-                                   size_t out_size,
-                                   char *error_out,
-                                   size_t error_out_size) const;
     void close_latest_verify_locked();
     bool begin_latest_verify_locked(char *error_out, size_t error_out_size);
     bool latest_verify_file_step_locked(char *error_out,
@@ -274,10 +276,6 @@ private:
                                  char *out,
                                  size_t out_size,
                                  StateWriteMode *write_mode = nullptr) const;
-    bool state_contains_locked(const char *state_path,
-                               const char *path,
-                               uint64_t size,
-                               uint64_t mtime);
     bool write_state_locked(const char *state_path,
                             const char *path,
                             uint64_t size,
@@ -288,10 +286,6 @@ private:
     bool remote_parent_dir_locked(const char *remote_path,
                                   char *out,
                                   size_t out_size) const;
-    bool datalog_day_name_from_path(const char *path,
-                                    char *out,
-                                    size_t out_size) const;
-    void refresh_latest_datalog_day_name_locked();
     void maybe_mark_completed_datalog_day_locked(const char *day);
     bool prepare_upload_buffer_locked();
     void release_upload_buffer_locked();
@@ -328,6 +322,8 @@ private:
     bool sync_after_verify_ = false;
 
     // active run
+    StorageExportInventoryLoader inventory_loader_;
+    std::shared_ptr<const StorageExportInventory> export_inventory_;
     StorageExportPlanner export_planner_;
     CurrentFile current_file_;
     LatestVerify latest_verify_;
@@ -335,9 +331,10 @@ private:
     size_t upload_buffer_size_ = 0;
     StorageExportStateCache state_cache_;
     char ensured_remote_dir_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
-    char latest_datalog_day_[9] = {};
     char state_dir_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
     uint32_t endpoint_hash_ = 0;
+    uint32_t next_inventory_generation_ = 1;
+    bool inventory_requested_ = false;
     uint32_t retry_due_ms_ = 0;
     uint8_t retry_attempt_ = 0;
 };

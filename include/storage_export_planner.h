@@ -1,10 +1,10 @@
 #pragma once
 
-#include <FS.h>
+#include <memory>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "storage_export_plan.h"
+#include "storage_export_inventory.h"
 
 namespace aircannect {
 
@@ -29,9 +29,8 @@ enum class StorageExportPlannerItemKind : uint8_t {
 struct StorageExportPlannerConfig {
     StorageExportPlannerScope scope = StorageExportPlannerScope::FullCard;
     const char *state_dir = nullptr;
-    StorageExportStateCache *state_cache = nullptr;
-    const char *latest_datalog_day = nullptr;
     const char *only_datalog_day = nullptr;
+    uint64_t now_epoch = 0;
     uint32_t max_datalog_days = 0;
     bool skip_completed_finalized_datalog_days = false;
     bool trust_completed_finalized_datalog_days = false;
@@ -53,12 +52,11 @@ struct StorageExportPlannerItem {
 
 class StorageExportPlanner {
 public:
-    StorageExportPlanner() = default;
-    ~StorageExportPlanner();
-
-    bool begin(const StorageExportPlannerConfig &config,
-               char *error_out,
-               size_t error_out_size);
+    bool begin(
+        const StorageExportPlannerConfig &config,
+        std::shared_ptr<const StorageExportInventoryView> inventory,
+        char *error_out,
+        size_t error_out_size);
     void reset();
 
     StorageExportPlannerResult next(StorageExportPlannerItem &out,
@@ -80,41 +78,21 @@ private:
         Error,
     };
 
-    struct WalkFrame {
-        char path[AC_STORAGE_PATH_MAX] = {};
-        uint32_t next_index = 0;
-        bool opened = false;
-        File dir;
-    };
-
-    struct DatalogDay {
-        char day[9] = {};
-        char path[AC_STORAGE_PATH_MAX] = {};
-    };
-
-    bool ensure_walk_stack(char *error_out, size_t error_out_size);
-    void close_walk();
-    void release_walk_stack();
-    bool push_dir(const char *path, char *error_out, size_t error_out_size);
-    bool ensure_dir_open(WalkFrame &frame,
-                         char *error_out,
-                         size_t error_out_size);
-
-    bool build_file_item(const char *path,
+    bool build_file_item(const StorageExportInventoryEntryView &entry,
+                         const char *datalog_day,
                          bool force_export,
                          StorageExportPlannerItem &out,
                          char *error_out,
-                         size_t error_out_size);
-    bool state_contains(const char *state_path,
-                        const char *path,
-                        uint64_t size,
-                        uint64_t mtime);
-
+                         size_t error_out_size) const;
+    bool datalog_day_allowed(const char *day) const;
     bool datalog_day_finalized(const char *day) const;
-    bool datalog_day_done(const char *day) const;
-    bool datalog_day_has_pending_files(const DatalogDay &day,
-                                       char *error_out,
-                                       size_t error_out_size);
+    bool datalog_day_skipped(const char *day) const;
+    StorageExportPlannerResult emit_datalog_day_complete(
+        const char *day,
+        StorageExportPlannerItem &out,
+        char *error_out,
+        size_t error_out_size) const;
+
     StorageExportPlannerResult next_full_card(StorageExportPlannerItem &out,
                                               char *error_out,
                                               size_t error_out_size,
@@ -123,48 +101,25 @@ private:
                                              char *error_out,
                                              size_t error_out_size,
                                              uint32_t &budget);
-    StorageExportPlannerResult next_walk_item(StorageExportPlannerItem &out,
-                                              char *error_out,
-                                              size_t error_out_size,
-                                              uint32_t &budget);
-
-    bool reserve_datalog_days(size_t needed,
-                              char *error_out,
-                              size_t error_out_size);
-    bool add_datalog_day(const char *day,
-                         char *error_out,
-                         size_t error_out_size);
-    StorageExportPlannerResult scan_datalog_days(char *error_out,
-                                                 size_t error_out_size,
-                                                 uint32_t &budget);
     DatalogDaySelection select_next_datalog_day(char *error_out,
                                                 size_t error_out_size);
-    void activate_datalog_day(const DatalogDay &day, bool force_export);
+    void activate_datalog_day(const char *day, bool force_export);
 
     StorageExportPlannerConfig config_;
+    std::shared_ptr<const StorageExportInventoryView> inventory_;
     char state_dir_[AC_STORAGE_PATH_MAX] = {};
-    char latest_datalog_day_[9] = {};
     char only_datalog_day_[9] = {};
     bool started_ = false;
 
-    WalkFrame *walk_stack_ = nullptr;
-    size_t walk_depth_ = 0;
-    size_t walk_capacity_ = 0;
-    size_t root_index_ = 0;
+    size_t full_source_index_ = 0;
+    char full_active_day_[9] = {};
 
-    File datalog_scan_dir_;
-    bool datalog_scan_opened_ = false;
-    bool datalog_scan_complete_ = false;
-    uint32_t datalog_scan_next_index_ = 0;
-    DatalogDay *datalog_days_ = nullptr;
-    size_t datalog_day_count_ = 0;
-    size_t datalog_day_capacity_ = 0;
     size_t datalog_day_index_ = 0;
     uint32_t datalog_days_started_ = 0;
     bool day_active_ = false;
     bool day_force_export_ = false;
-    size_t day_root_index_ = 0;
-    char day_path_[AC_STORAGE_PATH_MAX] = {};
+    size_t day_metadata_index_ = 0;
+    size_t day_source_index_ = 0;
     char day_name_[9] = {};
 
     bool day_decision_pending_ = false;

@@ -30,6 +30,7 @@ struct StorageScanService::Job {
     struct WalkFrame {
         char path[AC_STORAGE_PATH_MAX] = {};
         bool recursive = false;
+        uint8_t root_index = 0;
         File directory;
     };
 
@@ -60,6 +61,7 @@ bool StorageScanSnapshot::entry(size_t index,
 
     out.path = paths_ + entry.path_offset;
     out.directory = entry.directory;
+    out.root_index = entry.root_index;
     out.size = entry.size;
     out.modified = entry.modified;
     return true;
@@ -278,6 +280,7 @@ bool StorageScanService::reserve_paths_locked(size_t needed) {
 
 bool StorageScanService::append_entry_locked(const char *path,
                                              bool directory,
+                                             uint8_t root_index,
                                              uint64_t size,
                                              uint64_t modified) {
     if (!job_->snapshot || !path || !path[0]) return false;
@@ -293,6 +296,7 @@ bool StorageScanService::append_entry_locked(const char *path,
         snapshot.entries_[snapshot.entry_count_++];
     entry.path_offset = static_cast<uint32_t>(snapshot.paths_length_);
     entry.directory = directory;
+    entry.root_index = root_index;
     entry.size = directory ? 0 : size;
     entry.modified = modified;
 
@@ -303,6 +307,7 @@ bool StorageScanService::append_entry_locked(const char *path,
 
 bool StorageScanService::push_directory_locked(const char *path,
                                                bool recursive,
+                                               uint8_t root_index,
                                                const char *&error) {
     if (job_->walk_depth >= SCAN_MAX_DEPTH) {
         error = "scan_depth_exceeded";
@@ -320,13 +325,15 @@ bool StorageScanService::push_directory_locked(const char *path,
     Job::WalkFrame &frame = job_->walk[job_->walk_depth++];
     copy_cstr(frame.path, sizeof(frame.path), path);
     frame.recursive = recursive;
+    frame.root_index = root_index;
     frame.directory = directory;
     return true;
 }
 
 bool StorageScanService::start_next_root_locked(const char *&error) {
     while (job_->root_index < job_->root_count) {
-        const Job::Root &root = job_->roots[job_->root_index++];
+        const size_t root_index = job_->root_index++;
+        const Job::Root &root = job_->roots[root_index];
 
         bool exists = false;
         bool directory = false;
@@ -351,14 +358,25 @@ bool StorageScanService::start_next_root_locked(const char *&error) {
 
         if (directory) {
             if (job_->include_directories &&
-                !append_entry_locked(root.path, true, 0, modified)) {
+                !append_entry_locked(root.path,
+                                     true,
+                                     static_cast<uint8_t>(root_index),
+                                     0,
+                                     modified)) {
                 error = "scan_snapshot_alloc_failed";
                 return false;
             }
-            return push_directory_locked(root.path, root.recursive, error);
+            return push_directory_locked(root.path,
+                                         root.recursive,
+                                         static_cast<uint8_t>(root_index),
+                                         error);
         }
 
-        if (!append_entry_locked(root.path, false, size, modified)) {
+        if (!append_entry_locked(root.path,
+                                 false,
+                                 static_cast<uint8_t>(root_index),
+                                 size,
+                                 modified)) {
             error = "scan_snapshot_alloc_failed";
             return false;
         }
@@ -397,17 +415,28 @@ bool StorageScanService::scan_next_entry_locked(const char *&error) {
         : 0;
     if (child.is_dir) {
         if (job_->include_directories &&
-            !append_entry_locked(child_path, true, 0, modified)) {
+            !append_entry_locked(child_path,
+                                 true,
+                                 frame.root_index,
+                                 0,
+                                 modified)) {
             error = "scan_snapshot_alloc_failed";
             return false;
         }
         if (frame.recursive) {
-            return push_directory_locked(child_path, true, error);
+            return push_directory_locked(child_path,
+                                         true,
+                                         frame.root_index,
+                                         error);
         }
         return true;
     }
 
-    if (!append_entry_locked(child_path, false, child.size, modified)) {
+    if (!append_entry_locked(child_path,
+                             false,
+                             frame.root_index,
+                             child.size,
+                             modified)) {
         error = "scan_snapshot_alloc_failed";
         return false;
     }
