@@ -17,7 +17,6 @@
 #include "app_config_update.h"
 #include "async_prepared_response.h"
 #include "as11_rpc.h"
-#include "background_worker.h"
 #include "board.h"
 #include "debug_log.h"
 #include "storage_service.h"
@@ -2052,8 +2051,6 @@ void WebUI::build_oximetry_sensors_json(LargeTextBuffer &json) const {
 }
 
 void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
-    if (BackgroundWorker *w = background_worker()) w->note_activity();
-
     if (!storage_browser_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"list_unavailable\"}");
@@ -2188,8 +2185,6 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
-    if (BackgroundWorker *w = background_worker()) w->note_activity();
-
     if (!storage_browser_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"download_unavailable\"}");

@@ -30,7 +30,7 @@ bool ExportTask::begin(const ExportEndpointConfig &config,
 
     void *memory = Memory::alloc_large(sizeof(Runtime), false);
     if (!memory) {
-        Log::logf(CAT_BGWORKER, LOG_ERROR,
+        Log::logf(CAT_EXPORT, LOG_ERROR,
                   "export task runtime allocation failed\n");
         return false;
     }
@@ -54,12 +54,12 @@ bool ExportTask::begin(const ExportEndpointConfig &config,
         Memory::free(runtime_);
         runtime_ = nullptr;
         task_ = nullptr;
-        Log::logf(CAT_BGWORKER, LOG_ERROR,
+        Log::logf(CAT_EXPORT, LOG_ERROR,
                   "export task creation failed\n");
         return false;
     }
 
-    Log::logf(CAT_BGWORKER, LOG_INFO,
+    Log::logf(CAT_EXPORT, LOG_INFO,
               "export task started core=%u prio=%u stack=%u\n",
               static_cast<unsigned>(AC_EXPORT_TASK_CORE),
               static_cast<unsigned>(AC_EXPORT_TASK_PRIO),

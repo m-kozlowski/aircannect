@@ -8,7 +8,6 @@
 #include "app_config.h"
 #include "as11_device_service.h"
 #include "as11_settings_manager.h"
-#include "background_worker.h"
 #include "board.h"
 #include "can_driver.h"
 #include "debug_log.h"
@@ -71,7 +70,6 @@ static OximetryManager oximetry_manager;
 static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
-static BackgroundWorker bg_worker;
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
 #if AC_STACK_PROFILE_ENABLED
@@ -202,9 +200,9 @@ static void poll_stack_profiler(uint32_t now_ms) {
         {StackProfileTask::AsyncTcp,
          async_tcp_task != nullptr,
          async_tcp_task ? uxTaskGetStackHighWaterMark(async_tcp_task) : 0},
-        {StackProfileTask::BackgroundWorker,
+        {StackProfileTask::ExportTask,
          true,
-         bg_worker.stack_high_water_bytes()},
+         export_task.stack_high_water_bytes()},
         {StackProfileTask::EdfStorage,
          true,
          StorageService::stack_high_water_bytes()},
@@ -620,9 +618,6 @@ void setup() {
                  StorageService::delete_port(),
                  export_coordinator,
                  console_ctx);
-
-    // Legacy worker retained until its remaining runtime shell is removed.
-    bg_worker.begin();
 }
 
 void loop() {
@@ -768,16 +763,6 @@ void loop() {
 
     export_coordinator.poll(report_activity, storage_activity, now_ms);
     drain_can_rx_after("export_coordinator");
-
-    // Legacy diagnostic worker gate
-    bg_worker.publish_gate(foreground_report_active,
-                           as11_device_service.state().status_valid(),
-                           stream_activity_active,
-                           resmed_ota_manager.transport_active(),
-                           esp_ota_install_active,
-                           therapy_active);
-
-    drain_can_rx_after("bgworker_gate");
 
     // Web, TCP, and console frontends
     web_ui.poll(drain_can_rx_after);

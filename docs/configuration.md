@@ -113,7 +113,7 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `log_ota` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | OTA log category level. |
 | `log_oxi` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Oximetry log category level. |
 | `log_storage` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Storage log category level. |
-| `log_bgworker` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Background worker log category level. |
+| `log_export` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Export task log category level. |
 | `log_report` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Report log category level. |
 | `log_edf` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | EDF capture/report log category level. |
 | `log_config` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Configuration log category level. |

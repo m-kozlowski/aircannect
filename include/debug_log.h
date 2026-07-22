@@ -23,7 +23,7 @@ enum log_cat_t {
     CAT_OTA,
     CAT_OXI,
     CAT_STORAGE,
-    CAT_BGWORKER,
+    CAT_EXPORT,
     CAT_REPORT,
     CAT_EDF,
     CAT_CONFIG,

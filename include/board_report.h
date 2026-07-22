@@ -1,7 +1,6 @@
 #pragma once
 
-// Report subsystem config: background worker, prefetch policy, and
-// result-assembly / plot tuning.
+// Report and export task config, prefetch policy, and result/plot tuning.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -30,15 +29,6 @@ static constexpr uint32_t AC_EXPORT_TASK_WORK_TICK_MS = 20;
 static constexpr uint32_t AC_EXPORT_TASK_IDLE_TICK_MS = 10000;
 static constexpr uint32_t AC_EXPORT_ACTIVITY_GRACE_MS = 3000;
 
-// Temporary diagnostic-writer worker. Removed with the final Phase 5 storage
-// diagnostic migration.
-static constexpr uint32_t AC_BG_WORKER_TASK_STACK = 8192;
-static constexpr uint8_t AC_BG_WORKER_TASK_PRIO = 1;
-static constexpr uint8_t AC_BG_WORKER_TASK_CORE = 0;
-static constexpr uint32_t AC_BG_WORKER_BUSY_RECHECK_MS = 250;
-static constexpr uint32_t AC_BG_WORKER_WORK_TICK_MS = 20;
-static constexpr uint32_t AC_BG_WORKER_IDLE_TICK_MS = 10000;
-static constexpr uint32_t AC_BG_WORKER_ACTIVITY_GRACE_MS = 3000;
 // After therapy stops, AS11 may still be draining live stream/report traffic and
 // AirCANnect is closing EDF/SMB work. Let the bus settle before refreshing the
 // report summary index that triggers cache backfill.

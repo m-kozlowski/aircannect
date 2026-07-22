@@ -363,7 +363,7 @@ const char *cat_name(log_cat_t cat) {
         case CAT_OTA: return "OTA";
         case CAT_OXI: return "OXI";
         case CAT_STORAGE: return "STORAGE";
-        case CAT_BGWORKER: return "BGWORKER";
+        case CAT_EXPORT: return "EXPORT";
         case CAT_REPORT: return "REPORT";
         case CAT_EDF: return "EDF";
         case CAT_CONFIG: return "CONFIG";
@@ -437,8 +437,8 @@ bool parse_cat(String value, log_cat_t &cat) {
         cat = CAT_STORAGE;
         return true;
     }
-    if (value == "bgworker") {
-        cat = CAT_BGWORKER;
+    if (value == "export") {
+        cat = CAT_EXPORT;
         return true;
     }
     if (value == "report") {

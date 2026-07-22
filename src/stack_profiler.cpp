@@ -27,7 +27,7 @@ struct StackProfileDef {
 constexpr StackProfileDef STACK_PROFILE_DEFS[] = {
     {"loop", CONFIG_ARDUINO_LOOP_STACK_SIZE},
     {"async_tcp", CONFIG_ASYNC_TCP_STACK_SIZE},
-    {"bg_worker", AC_BG_WORKER_TASK_STACK},
+    {"export", AC_EXPORT_TASK_STACK},
     {"edf_storage", AC_EDF_STORAGE_TASK_STACK},
     {"oximetry", AC_OXIMETRY_SENSOR_TASK_STACK},
 };

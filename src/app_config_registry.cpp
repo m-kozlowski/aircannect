@@ -21,7 +21,7 @@ enum ConfigLogCategoryIndex : int16_t {
     CONFIG_LOG_OTA = 7,
     CONFIG_LOG_OXI = 8,
     CONFIG_LOG_STORAGE = 9,
-    CONFIG_LOG_BGWORKER = 10,
+    CONFIG_LOG_EXPORT = 10,
     CONFIG_LOG_REPORT = 11,
     CONFIG_LOG_EDF = 12,
     CONFIG_LOG_CONFIG = 13,
@@ -55,8 +55,8 @@ static_assert(static_cast<int>(CONFIG_LOG_OXI) == static_cast<int>(CAT_OXI),
 static_assert(static_cast<int>(CONFIG_LOG_STORAGE) ==
                   static_cast<int>(CAT_STORAGE),
               "log category order drift");
-static_assert(static_cast<int>(CONFIG_LOG_BGWORKER) ==
-                  static_cast<int>(CAT_BGWORKER),
+static_assert(static_cast<int>(CONFIG_LOG_EXPORT) ==
+                  static_cast<int>(CAT_EXPORT),
               "log category order drift");
 static_assert(static_cast<int>(CONFIG_LOG_REPORT) ==
                   static_cast<int>(CAT_REPORT),
@@ -185,8 +185,7 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
     AC_LOG_FIELD("log_ota", 107, "OTA", CONFIG_LOG_OTA),
     AC_LOG_FIELD("log_oxi", 108, "Oximetry", CONFIG_LOG_OXI),
     AC_LOG_FIELD("log_storage", 109, "Storage", CONFIG_LOG_STORAGE),
-    AC_LOG_FIELD("log_bgworker", 110, "Background worker",
-                 CONFIG_LOG_BGWORKER),
+    AC_LOG_FIELD("log_export", 110, "Export", CONFIG_LOG_EXPORT),
     AC_LOG_FIELD("log_report", 111, "Report", CONFIG_LOG_REPORT),
     AC_LOG_FIELD("log_edf", 112, "EDF", CONFIG_LOG_EDF),
     AC_LOG_FIELD("log_config", 113, "Config", CONFIG_LOG_CONFIG),
