@@ -125,7 +125,7 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
 
     const bool startup_idle =
         startup_idle_work_allowed(now_ms) &&
-        !report.foreground_active && !report.background_active &&
+        !report.foreground_active &&
         !activity.therapy_active && !activity.realtime_stream_active &&
         !activity.ota_install_active;
     if (startup_idle) {
