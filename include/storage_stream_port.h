@@ -30,12 +30,18 @@ enum class StorageStreamReadState : uint8_t {
     Error,
 };
 
+enum class StorageStreamVerification : uint8_t {
+    None,
+    Size,
+    SizeAndModified,
+};
+
 struct StorageStreamCommand {
     std::string path;
     StorageStreamLane lane = StorageStreamLane::Export;
     uint64_t expected_size = 0;
     uint64_t expected_modified = 0;
-    bool verify_snapshot = false;
+    StorageStreamVerification verification = StorageStreamVerification::None;
 
     bool valid() const {
         return !path.empty() && path.front() == '/';

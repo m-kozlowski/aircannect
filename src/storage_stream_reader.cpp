@@ -70,7 +70,7 @@ void StorageStreamReader::configure(StorageStreamPort &port,
     command_.lane = StorageStreamLane::Export;
     command_.expected_size = expected_size;
     command_.expected_modified = expected_modified;
-    command_.verify_snapshot = true;
+    command_.verification = StorageStreamVerification::SizeAndModified;
     offset_ = 0;
 }
 

@@ -701,7 +701,8 @@ bool report_artifact_overview_path(
     const ReportArtifactKey &key,
     char *out,
     size_t out_size) {
-    return key.kind == ReportArtifactKind::Result &&
+    return (key.kind == ReportArtifactKind::Result ||
+            key.kind == ReportArtifactKind::Overview) &&
            artifact_path(key, "overview", out, out_size);
 }
 

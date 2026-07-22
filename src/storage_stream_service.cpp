@@ -39,7 +39,7 @@ struct StorageByteStream {
     uint64_t modified = 0;
     uint64_t produced = 0;
     uint32_t ready_ms = 0;
-    bool verify_snapshot = false;
+    StorageStreamVerification verification = StorageStreamVerification::None;
     bool metadata_ready = false;
     bool input_open = false;
 
@@ -122,7 +122,7 @@ bool StorageStreamService::request_stream(
     stream->lane = command.lane;
     stream->expected_size = command.expected_size;
     stream->expected_modified = command.expected_modified;
-    stream->verify_snapshot = command.verify_snapshot;
+    stream->verification = command.verification;
 
     if (!lock(0)) {
         copy_cstr(error_out, error_out_size, "stream_busy");
@@ -261,9 +261,13 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
         fail_locked(stream, "stream_open_failed");
         return false;
     }
-    if (stream.verify_snapshot &&
-        (stream.size != stream.expected_size ||
-         stream.modified != stream.expected_modified)) {
+    const bool size_changed =
+        stream.verification != StorageStreamVerification::None &&
+        stream.size != stream.expected_size;
+    const bool modified_changed =
+        stream.verification == StorageStreamVerification::SizeAndModified &&
+        stream.modified != stream.expected_modified;
+    if (size_changed || modified_changed) {
         fail_locked(stream, "snapshot_changed");
         return false;
     }
@@ -317,9 +321,13 @@ bool StorageStreamService::produce_locked(StorageByteStream &stream) {
             final_size = static_cast<uint64_t>(stream.input.size());
             final_modified = file_modified(stream.input);
         }
-        if (stream.verify_snapshot &&
-            (final_size != stream.expected_size ||
-             final_modified != stream.expected_modified)) {
+        const bool size_changed =
+            stream.verification != StorageStreamVerification::None &&
+            final_size != stream.expected_size;
+        const bool modified_changed =
+            stream.verification == StorageStreamVerification::SizeAndModified &&
+            final_modified != stream.expected_modified;
+        if (size_changed || modified_changed) {
             fail_locked(stream, "snapshot_changed");
             return true;
         }
