@@ -24,7 +24,6 @@ namespace {
 constexpr uint32_t CATALOG_STORE_GENERATION = 1;
 constexpr uint32_t CATALOG_STORE_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
-constexpr size_t ARTIFACT_AVAILABILITY_CAPACITY = 8;
 constexpr size_t IDLE_QUEUE_LOOKAHEAD = 2;
 
 enum class ReportTaskCommandKind : uint8_t {
@@ -199,67 +198,59 @@ struct ReportTask::Runtime {
             return false;
         }
 
-        size_t found = ARTIFACT_AVAILABILITY_CAPACITY;
-        uint64_t newest = 0;
-        for (size_t i = 0; i < ARTIFACT_AVAILABILITY_CAPACITY; ++i) {
-            const ReportArtifactAvailability &candidate =
-                availability_slots[i];
-            if (!candidate.pair_ready() ||
-                candidate.request.sleep_day != artifact.sleep_day ||
-                candidate.request.source_revision !=
-                    artifact.source_revision) {
-                continue;
-            }
-
-            const bool matches =
-                artifact.kind != ReportArtifactKind::RangeTile ||
-                (candidate.range_tile.valid() &&
-                 candidate.range_tile.key == artifact);
-            if (matches && (found == ARTIFACT_AVAILABILITY_CAPACITY ||
-                            availability_age[i] > newest)) {
-                found = i;
-                newest = availability_age[i];
-            }
-        }
-
-        if (found == ARTIFACT_AVAILABILITY_CAPACITY) {
-            unlock();
-            return false;
-        }
-
-        out = availability_slots[found];
-        out.request = artifact;
-        availability_age[found] = ++availability_clock;
+        const bool found = published_artifact_index &&
+            published_artifact_index->availability(artifact, out);
         unlock();
-        return out.requested_ready();
+        return found;
     }
 
-    void store_availability_locked(
-        const ReportArtifactAvailability &availability) {
-        size_t target = ARTIFACT_AVAILABILITY_CAPACITY;
-        size_t oldest = 0;
-        for (size_t i = 0; i < ARTIFACT_AVAILABILITY_CAPACITY; ++i) {
-            if (availability_slots[i].request == availability.request) {
-                target = i;
-                break;
-            }
-            if (!availability_slots[i].request.valid()) {
-                target = i;
-                break;
-            }
-            if (availability_age[i] < availability_age[oldest]) oldest = i;
-        }
-        if (target == ARTIFACT_AVAILABILITY_CAPACITY) target = oldest;
+    bool publish_artifact_index(
+        std::shared_ptr<const ReportArtifactIndex> next) {
+        if (!next || !lock(20)) return false;
 
-        availability_slots[target] = availability;
-        availability_age[target] = ++availability_clock;
+        artifact_index = std::move(next);
+        published_artifact_index = artifact_index;
+        unlock();
+        return true;
+    }
+
+    bool merge_availability(
+        const ReportArtifactAvailability &availability) {
+        if (!availability.requested_ready()) return false;
+
+        std::shared_ptr<const ReportArtifactIndex> source = artifact_index;
+        if (!source) source = ReportArtifactIndexBuilder::build(nullptr, 0);
+        if (!source) return false;
+
+        std::shared_ptr<const ReportArtifactIndex> updated =
+            ReportArtifactIndexBuilder::merge_availability(
+                *source, availability);
+        return publish_artifact_index(std::move(updated));
     }
 
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
                         uint32_t generation) {
+        if (artifact_index_refresh.active()) {
+            artifact_index_refresh.cancel();
+            artifact_index_refresh_generation = 0;
+            artifact_index_refresh_pending = true;
+        }
+
         catalog = std::move(next);
         catalog_generation = generation;
         engine.publish_catalog(catalog);
+
+        if (artifact_index) {
+            std::shared_ptr<const ReportArtifactIndex> reconciled =
+                ReportArtifactIndexBuilder::reconcile(
+                    *artifact_index, *catalog);
+            if (!publish_artifact_index(std::move(reconciled))) {
+                artifact_index_refresh_pending = true;
+                command_failures++;
+            }
+        } else {
+            artifact_index_refresh_pending = true;
+        }
 
         idle_cursor = 0;
         idle_generation = (idle_generation + 1) | 0x80000000u;
@@ -284,9 +275,16 @@ struct ReportTask::Runtime {
         const ReportRequestPriority priority = idle_cursor == 0
             ? ReportRequestPriority::Reconcile
             : ReportRequestPriority::Idle;
+        const ReportArtifactKey result = ReportArtifactKey::result(
+            night->sleep_day, night->source_revision);
+        ReportArtifactAvailability available;
+        if (artifact_index && artifact_index->availability(result, available)) {
+            idle_cursor++;
+            return true;
+        }
+
         const ReportRequestEnqueueResult queued = engine.request(
-            ReportArtifactKey::result(
-                night->sleep_day, night->source_revision),
+            result,
             priority,
             idle_generation);
         if (queued.status == ReportRequestEnqueueStatus::Full) return false;
@@ -317,6 +315,7 @@ struct ReportTask::Runtime {
         next.catalog_generation = catalog_generation;
         next.catalog_refresh = catalog_refresh.status();
         next.catalog_store = catalog_store.status();
+        next.artifact_index_refresh = artifact_index_refresh.status();
         next.engine = engine.status();
 
         if (!initialized) {
@@ -324,6 +323,10 @@ struct ReportTask::Runtime {
         } else if (store_purpose == CatalogStorePurpose::Load ||
                    catalog_load_pending) {
             next.state = ReportTaskState::LoadingCatalog;
+        } else if (!artifact_index_loaded &&
+                   (artifact_index_refresh.active() ||
+                    artifact_index_refresh_pending)) {
+            next.state = ReportTaskState::IndexingArtifacts;
         } else if (catalog_refresh.active() || pending_refresh.valid() ||
                    refresh_generation != 0 ||
                    engine.catalog_update_required()) {
@@ -361,6 +364,7 @@ struct ReportTask::Runtime {
     ReportNightArtifactBuilder builder;
     NightCatalogRefreshService catalog_refresh;
     NightCatalogStoreService catalog_store;
+    ReportArtifactIndexRefreshService artifact_index_refresh;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
     size_t command_count = 0;
@@ -374,14 +378,17 @@ struct ReportTask::Runtime {
     std::shared_ptr<const NightCatalog> pending_catalog_save;
     std::shared_ptr<const ReportArtifactBundle> published;
     std::shared_ptr<const ReportArtifactBundle> pending_published;
-    ReportArtifactAvailability availability_slots[
-        ARTIFACT_AVAILABILITY_CAPACITY] = {};
-    uint64_t availability_age[ARTIFACT_AVAILABILITY_CAPACITY] = {};
-    uint64_t availability_clock = 0;
-    ReportArtifactAvailability pending_availability;
+    std::shared_ptr<const ReportArtifactIndex> artifact_index;
+    std::shared_ptr<const ReportArtifactIndex> published_artifact_index;
     uint32_t catalog_generation = 0;
     size_t idle_cursor = 0;
     uint32_t idle_generation = 0x80000000u;
+
+    bool artifact_index_loaded = false;
+    bool artifact_index_refresh_pending = false;
+    uint32_t artifact_index_refresh_generation = 0;
+    uint32_t artifact_index_retry_at_ms = 0;
+    uint8_t artifact_index_retry_attempt = 0;
 
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
     bool catalog_load_pending = true;
@@ -444,6 +451,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
 
     runtime_->catalog_refresh.begin(scan_port, read_port);
     runtime_->catalog_store.begin(read_port, write_port);
+    runtime_->artifact_index_refresh.begin(scan_port, read_port);
     runtime_->engine.begin(read_port,
                            write_port,
                            spool_port,
@@ -562,6 +570,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
         switch (command.kind) {
             case ReportTaskCommandKind::Artifact: {
+                ReportArtifactAvailability available;
+                if (runtime.artifact_index &&
+                    runtime.artifact_index->availability(
+                        command.artifact, available)) {
+                    break;
+                }
+
                 const ReportRequestEnqueueResult queued =
                     runtime.engine.request(command.artifact,
                                            command.priority,
@@ -668,6 +683,67 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
+    if (runtime.artifact_index_refresh.active()) {
+        worked = runtime.artifact_index_refresh.poll() || worked;
+    }
+
+    if (runtime.artifact_index_refresh_generation != 0 &&
+        !runtime.artifact_index_refresh.active()) {
+        const ReportArtifactIndexRefreshStatus refresh_status =
+            runtime.artifact_index_refresh.status();
+        if (refresh_status.state ==
+                ReportArtifactIndexRefreshState::Ready ||
+            refresh_status.state ==
+                ReportArtifactIndexRefreshState::Error) {
+            if (refresh_status.state ==
+                ReportArtifactIndexRefreshState::Ready) {
+                if (!runtime.publish_artifact_index(
+                        runtime.artifact_index_refresh.snapshot())) {
+                    runtime.command_failures++;
+                    runtime.artifact_index_refresh_pending = true;
+                } else {
+                    runtime.artifact_index_loaded = true;
+                    runtime.artifact_index_retry_at_ms = 0;
+                    runtime.artifact_index_retry_attempt = 0;
+                }
+            } else {
+                if (!runtime.artifact_index) {
+                    runtime.publish_artifact_index(
+                        ReportArtifactIndexBuilder::build(nullptr, 0));
+                }
+                runtime.artifact_index_loaded = true;
+                runtime.artifact_index_refresh_pending = true;
+                runtime.artifact_index_retry_at_ms =
+                    now_ms + next_store_retry_delay(
+                                 runtime.artifact_index_retry_attempt);
+                advance_store_retry(runtime.artifact_index_retry_attempt);
+                runtime.command_failures++;
+            }
+            runtime.artifact_index_refresh_generation = 0;
+            worked = true;
+        }
+    }
+
+    if (runtime.artifact_index_refresh_pending && runtime.catalog &&
+        !runtime.artifact_index_refresh.active() &&
+        runtime.artifact_index_refresh_generation == 0 &&
+        deadline_due(now_ms, runtime.artifact_index_retry_at_ms)) {
+        const OperationAdmission admitted =
+            runtime.artifact_index_refresh.request_refresh(
+                runtime.catalog, runtime.catalog_generation);
+        if (admitted == OperationAdmission::Accepted) {
+            runtime.artifact_index_refresh_generation =
+                runtime.catalog_generation;
+            runtime.artifact_index_refresh_pending = false;
+            worked = true;
+        } else if (admitted == OperationAdmission::Rejected) {
+            runtime.artifact_index_refresh_pending = false;
+            runtime.artifact_index_loaded = true;
+            runtime.command_failures++;
+            worked = true;
+        }
+    }
+
     if (!runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -758,6 +834,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         runtime.refresh_generation == 0 &&
         !runtime.pending_refresh.valid() &&
         !runtime.engine.catalog_update_required() &&
+        runtime.artifact_index_loaded &&
+        !runtime.artifact_index_refresh.active() &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save;
     if (catalog_stable) {
@@ -769,12 +847,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     ReportArtifactAvailability availability =
         runtime.engine.take_available();
     if (availability.requested_ready()) {
-        runtime.pending_availability = availability;
-    }
-    if (runtime.pending_availability.requested_ready() && runtime.lock()) {
-        runtime.store_availability_locked(runtime.pending_availability);
-        runtime.pending_availability = {};
-        runtime.unlock();
+        if (!runtime.merge_availability(availability)) {
+            runtime.command_failures++;
+        }
         worked = true;
     }
 

@@ -6,6 +6,7 @@
 
 #include "night_catalog_refresh_service.h"
 #include "night_catalog_store_service.h"
+#include "report_artifact_index_refresh_service.h"
 #include "report_engine.h"
 
 namespace aircannect {
@@ -13,6 +14,7 @@ namespace aircannect {
 enum class ReportTaskState : uint8_t {
     Stopped,
     LoadingCatalog,
+    IndexingArtifacts,
     Idle,
     RefreshingCatalog,
     Queued,
@@ -32,6 +34,7 @@ struct ReportTaskStatus {
     uint32_t catalog_generation = 0;
     NightCatalogRefreshStatus catalog_refresh;
     NightCatalogStoreStatus catalog_store;
+    ReportArtifactIndexRefreshStatus artifact_index_refresh;
     ReportEngineStatus engine;
 };
 
