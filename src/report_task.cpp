@@ -235,12 +235,6 @@ struct ReportTask::Runtime {
             worked = true;
         }
 
-        if (catalog_store.active() &&
-            store_purpose == CatalogStorePurpose::Save) {
-            catalog_store.cancel();
-            store_purpose = CatalogStorePurpose::None;
-            worked = true;
-        }
         return worked;
     }
 
@@ -283,10 +277,6 @@ struct ReportTask::Runtime {
             artifact_index_refresh_pending = true;
         }
 
-        if (catalog_store.active()) {
-            catalog_store.cancel();
-            store_purpose = CatalogStorePurpose::None;
-        }
         return true;
     }
 
@@ -615,8 +605,11 @@ struct ReportTask::Runtime {
                     break;
             }
         }
+        const bool catalog_commit_pending =
+            store_purpose == CatalogStorePurpose::Save ||
+            static_cast<bool>(pending_catalog_save);
         next.background_active =
-            queued > 0 ||
+            queued > 0 || catalog_commit_pending ||
             (next.state != ReportTaskState::Stopped &&
              next.state != ReportTaskState::Idle);
 

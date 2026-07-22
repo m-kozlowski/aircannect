@@ -316,7 +316,7 @@ bool NightCatalogStoreService::poll() {
             StorageAtomicWriteCommand command;
             command.path = NIGHT_CATALOG_STORE_PATH;
             command.bytes = runtime_->encoded;
-            command.lane = StorageAtomicWriteLane::Maintenance;
+            command.lane = StorageAtomicWriteLane::Foreground;
             command.generation = status_.generation;
 
             const OperationSubmission submission =
