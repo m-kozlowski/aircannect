@@ -110,6 +110,9 @@
     let storageSelectedNames = new Set();
     let storageArchiveBusy = false;
     let storageDeleteBusy = false;
+    let storageUploadBusy = false;
+    let storageUploadCancelRequested = false;
+    let storageUploadCurrentId = 0;
     let smbSyncBusy = false;
     let smbSyncEnabled = false;
     let smbSyncConfigured = false;

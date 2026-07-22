@@ -428,8 +428,20 @@
               <div class="storage-path" id="storagePath">/</div>
               <div class="btns" style="margin-top: 0">
                 <button class="btn" id="storageUpBtn" onclick="storageUp()">Up</button>
+                <button class="btn primary" id="storageUploadBtn" onclick="storageChooseUpload()">Upload</button>
                 <button class="btn" onclick="loadStorageList(true)">Refresh</button>
+                <input id="storageUploadInput" type="file" multiple hidden
+                  onchange="storageFilesSelected(this)">
               </div>
+            </div>
+            <div class="storage-upload-progress" id="storageUploadProgress" hidden>
+              <div class="storage-upload-progress-head">
+                <span id="storageUploadName">--</span>
+                <span id="storageUploadAmount">--</span>
+              </div>
+              <progress id="storageUploadBar" max="1" value="0"></progress>
+              <button class="btn" id="storageUploadCancelBtn"
+                onclick="storageCancelUpload()">Cancel</button>
             </div>
             <div class="storage-selection-bar">
               <label class="storage-select">

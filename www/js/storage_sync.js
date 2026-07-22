@@ -168,7 +168,8 @@
 
     function storageSelectionUi() {
       const selected = storageSelectedNames.size;
-      const storageJobBusy = storageArchiveBusy || storageDeleteBusy;
+      const storageJobBusy = storageArchiveBusy || storageDeleteBusy ||
+        storageUploadBusy;
       const exportBusy = smbSyncBusy || sleepHqSyncBusy;
       const archiveBusy = storageJobBusy || exportBusy;
       const destructiveBusy = storageJobBusy || exportBusy;
@@ -196,6 +197,8 @@
         deleteBtn.textContent = selected > 0 ?
           "Delete Selected (" + selected + ")" : "Delete Selected";
       }
+      const uploadBtn = document.getElementById("storageUploadBtn");
+      if (uploadBtn) uploadBtn.disabled = storageJobBusy || exportBusy;
       const syncBtn = document.getElementById("edfSyncBtn");
       if (syncBtn) syncBtn.disabled = endpointBusy || !smbSyncEnabled || !smbSyncConfigured;
       const verifyBtn = document.getElementById("edfVerifyBtn");
@@ -425,6 +428,237 @@
     function storageDeleteSetBusy(busy) {
       storageDeleteBusy = !!busy;
       storageSelectionUi();
+    }
+
+    function storageUploadSetBusy(busy) {
+      storageUploadBusy = !!busy;
+      const progress = document.getElementById("storageUploadProgress");
+      if (progress) progress.hidden = !storageUploadBusy;
+      storageSelectionUi();
+    }
+
+    function storageUploadProgress(name, committed, total, fileIndex, fileCount) {
+      const safeTotal = Math.max(0, Number(total) || 0);
+      const safeCommitted = Math.min(safeTotal,
+        Math.max(0, Number(committed) || 0));
+      const nameNode = document.getElementById("storageUploadName");
+      const amountNode = document.getElementById("storageUploadAmount");
+      const bar = document.getElementById("storageUploadBar");
+      if (nameNode) {
+        nameNode.textContent = (fileCount > 1 ?
+          (fileIndex + 1) + "/" + fileCount + " " : "") + name;
+      }
+      if (amountNode) {
+        amountNode.textContent = fmtBytes(safeCommitted) + " / " +
+          fmtBytes(safeTotal);
+      }
+      if (bar) {
+        bar.max = Math.max(1, safeTotal);
+        bar.value = safeCommitted;
+      }
+    }
+
+    function storageChooseUpload() {
+      if (storageUploadBusy) return;
+      const input = document.getElementById("storageUploadInput");
+      if (input) input.click();
+    }
+
+    function storageFilesSelected(input) {
+      const files = input && input.files ? Array.from(input.files) : [];
+      if (input) input.value = "";
+      if (!files.length || storageUploadBusy) return;
+
+      const directory = storagePath;
+      const queue = files.map((file) => ({file, directory}));
+      storageUploadQueue(queue);
+    }
+
+    async function storageUploadRequest(path, options) {
+      const response = await fetch(path, options || {cache: "no-store"});
+      const text = await response.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (_) {
+        data = {error: text || ("HTTP " + response.status)};
+      }
+      if (!response.ok) {
+        const error = new Error(data.error || ("HTTP " + response.status));
+        error.status = response.status;
+        error.data = data;
+        throw error;
+      }
+      return data;
+    }
+
+    async function storageUploadStatus(id) {
+      return storageUploadRequest("/api/storage/upload/status?id=" +
+        encodeURIComponent(id), {cache: "no-store"});
+    }
+
+    async function storageWaitForUpload(id, predicate) {
+      for (;;) {
+        if (storageUploadCancelRequested) throw new Error("upload_cancelled");
+        let status;
+        try {
+          status = await storageUploadStatus(id);
+        } catch (error) {
+          if (Number(error.status) > 0) throw error;
+          await storageDelay(1000);
+          continue;
+        }
+        if (status.state === "error" || status.state === "cancelled") {
+          throw new Error(status.error || status.state);
+        }
+        if (predicate(status)) return status;
+        await storageDelay(status.state === "paused" ? 1000 : 80);
+      }
+    }
+
+    async function storageStartUpload(file, directory, conflict) {
+      return storageUploadRequest("/api/storage/upload/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          directory,
+          filename: file.name,
+          total_size: file.size,
+          conflict: conflict || "fail"
+        })
+      });
+    }
+
+    async function storageSendUploadChunk(session, file, offset, size) {
+      const chunk = file.slice(offset, offset + size);
+      const url = "/api/storage/upload/chunk?id=" +
+        encodeURIComponent(session.id) + "&offset=" +
+        encodeURIComponent(offset) + "&token=" +
+        encodeURIComponent(session.token);
+      try {
+        await storageUploadRequest(url, {
+          method: "POST",
+          headers: {"Content-Type": "application/octet-stream"},
+          body: chunk
+        });
+      } catch (error) {
+        if (error.status !== 409 ||
+            !["paused", "chunk_pending"].includes(error.message)) {
+          throw error;
+        }
+        return false;
+      }
+      return true;
+    }
+
+    async function storageUploadFile(file, directory, fileIndex, fileCount) {
+      let conflict = "fail";
+      for (;;) {
+        const session = await storageStartUpload(file, directory, conflict);
+        storageUploadCurrentId = Number(session.id) || 0;
+        try {
+          let status = await storageWaitForUpload(session.id, (current) =>
+            current.state === "ready" || current.state === "done");
+          let committed = Number(status.committed_bytes) || 0;
+          const chunkSize = Math.max(1, Number(session.chunk_size) || 262144);
+          storageUploadProgress(file.name, committed, file.size,
+            fileIndex, fileCount);
+
+          while (status.state !== "done") {
+            let accepted = false;
+            try {
+              accepted = await storageSendUploadChunk(session, file, committed,
+                Math.min(chunkSize, file.size - committed));
+            } catch (error) {
+              if (Number(error.status) > 0) throw error;
+              status = await storageWaitForUpload(session.id, (current) =>
+                current.state === "done" || current.state === "ready");
+              if (status.state === "error" || status.state === "cancelled") {
+                throw new Error(status.error || status.state);
+              }
+              committed = Number(status.committed_bytes) || committed;
+              storageUploadProgress(file.name, committed, file.size,
+                fileIndex, fileCount);
+              continue;
+            }
+            if (!accepted) {
+              status = await storageWaitForUpload(session.id, (current) =>
+                current.state === "done" || current.state === "ready");
+              committed = Number(status.committed_bytes) || committed;
+              continue;
+            }
+            status = await storageWaitForUpload(session.id, (current) =>
+              current.state === "done" ||
+              (current.state === "ready" &&
+               Number(current.committed_bytes) > committed));
+            committed = Number(status.committed_bytes) || committed;
+            storageUploadProgress(file.name, committed, file.size,
+              fileIndex, fileCount);
+          }
+          storageUploadCurrentId = 0;
+          return true;
+        } catch (error) {
+          storageUploadCurrentId = 0;
+          if (error.message === "destination_exists" && conflict === "fail") {
+            if (window.confirm(file.name + " already exists. Replace it?")) {
+              conflict = "replace";
+              continue;
+            }
+            return false;
+          }
+          throw error;
+        }
+      }
+    }
+
+    async function storageUploadQueue(queue) {
+      storageUploadCancelRequested = false;
+      storageUploadSetBusy(true);
+      let uploaded = 0;
+      try {
+        for (let index = 0; index < queue.length; index++) {
+          if (storageUploadCancelRequested) break;
+          const item = queue[index];
+          storageUploadProgress(item.file.name, 0, item.file.size,
+            index, queue.length);
+          if (await storageUploadFile(item.file, item.directory,
+                                      index, queue.length)) {
+            uploaded++;
+            await loadStorageList(true);
+          }
+        }
+        if (storageUploadCancelRequested) {
+          msg("storageMsg", "Upload cancelled", true, false);
+        } else {
+          msg("storageMsg", "Uploaded " + uploaded + " file" +
+            (uploaded === 1 ? "" : "s"), true, false);
+        }
+      } catch (error) {
+        if (error.message === "upload_cancelled") {
+          msg("storageMsg", "Upload cancelled", true, false);
+        } else {
+          msg("storageMsg", error.message, false, true);
+        }
+      } finally {
+        storageUploadCurrentId = 0;
+        storageUploadSetBusy(false);
+      }
+    }
+
+    async function storageCancelUpload() {
+      storageUploadCancelRequested = true;
+      const id = storageUploadCurrentId;
+      const button = document.getElementById("storageUploadCancelBtn");
+      if (button) button.disabled = true;
+      try {
+        if (id) {
+          await storageUploadRequest("/api/storage/upload/cancel?id=" +
+            encodeURIComponent(id), {method: "POST"});
+        }
+      } catch (_) {
+      } finally {
+        if (button) button.disabled = false;
+      }
     }
 
     function smbSyncSetBusy(busy) {

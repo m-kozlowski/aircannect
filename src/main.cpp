@@ -45,6 +45,7 @@
 #include "sink_manager.h"
 #include "settings_http_controller.h"
 #include "storage_http_controller.h"
+#include "storage_upload_http_controller.h"
 #include "storage_manager.h"
 #include "storage_service.h"
 #include "status_http_controller.h"
@@ -98,6 +99,7 @@ static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
 static StorageHttpController storage_http_controller;
+static StorageUploadHttpController storage_upload_http_controller;
 static ExportHttpController export_http_controller;
 static OtaHttpController ota_http_controller;
 static SettingsHttpController settings_http_controller;
@@ -110,6 +112,7 @@ static LiveHttpController live_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
+    &storage_upload_http_controller,
     &export_http_controller,
     &ota_http_controller,
     &settings_http_controller,
@@ -316,6 +319,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     report_task.publish_activity(storage_activity);
     export_task.publish_activity(storage_activity);
     storage_http_controller.publish_activity(storage_activity);
+    storage_upload_http_controller.publish_activity(storage_activity);
 }
 
 static void publish_runtime_network() {
@@ -769,6 +773,17 @@ void setup() {
     if (!storage_http_started) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] storage HTTP controller failed to start\n");
+    }
+
+    const bool storage_upload_http_started =
+        storage_upload_http_controller.begin(
+            StorageService::upload_port(),
+            StorageService::archive_port(),
+            StorageService::delete_port(),
+            StorageService::status_port());
+    if (!storage_upload_http_started) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] storage upload HTTP controller failed to start\n");
     }
 
     apply_storage_provisioning(config_service,
