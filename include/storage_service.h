@@ -10,6 +10,7 @@
 #include "storage_archive_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
+#include "storage_path_port.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -166,6 +167,9 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
 
 // Prepared bounded reads
 StorageReadPort &read_port();
+
+// File metadata and path mutations
+StoragePathPort &path_port();
 
 // Foreground storage browsing and downloads
 StorageBrowserPort &browser_port();

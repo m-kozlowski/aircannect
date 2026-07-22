@@ -25,6 +25,7 @@
 #include "storage_file_log_sink.h"
 #include "storage_manager.h"
 #include "storage_path.h"
+#include "storage_path_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -210,6 +211,7 @@ std::atomic<MaintenanceOwner> maintenance_owner{MaintenanceOwner::None};
 StorageBrowserService browser_service;
 StorageArchiveService archive_service;
 StorageDeleteService delete_service;
+StoragePathService path_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 bool browser_turn = true;
@@ -1738,7 +1740,8 @@ bool open_read_job(size_t index, const char *&error) {
             job.target_length = std::min(job.requested_length, file_size);
             job.offset = file_size - job.target_length;
         } else {
-            if (job.offset >= file_size) {
+            if (job.offset > file_size ||
+                (job.offset == file_size && file_size != 0)) {
                 error = "read_offset_out_of_range";
                 return false;
             }
@@ -1883,6 +1886,8 @@ bool process_browser_step() {
 }
 
 bool process_foreground_step() {
+    if (path_service.step()) return true;
+
     if (browser_turn) {
         if (process_browser_step()) {
             browser_turn = false;
@@ -2081,6 +2086,7 @@ void begin() {
     (void)delete_service.begin(wake_service_task,
                                claim_delete_maintenance,
                                release_delete_maintenance);
+    (void)path_service.begin(wake_service_task);
 
     if (!task) {
         const BaseType_t created =
@@ -2093,6 +2099,7 @@ void begin() {
             browser_service.set_task_available(false);
             archive_service.set_task_available(false);
             delete_service.set_task_available(false);
+            path_service.set_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
                       "storage worker task create failed\n");
@@ -2105,6 +2112,7 @@ void begin() {
     browser_service.set_task_available(true);
     archive_service.set_task_available(true);
     delete_service.set_task_available(true);
+    path_service.set_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
               "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
@@ -2308,6 +2316,10 @@ bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
 
 StorageReadPort &read_port() {
     return service_read_port;
+}
+
+StoragePathPort &path_port() {
+    return path_service;
 }
 
 StorageBrowserPort &browser_port() {

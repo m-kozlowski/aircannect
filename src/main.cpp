@@ -388,7 +388,10 @@ void setup() {
     console_ctx.sleephq_sync_job = sleephq_sync_job;
     console_ctx.export_coordinator = &export_coordinator;
 
-    apply_storage_provisioning(app_config, wifi_manager);
+    apply_storage_provisioning(app_config,
+                               wifi_manager,
+                               StorageService::read_port(),
+                               StorageService::path_port());
 
     // Device/session/report managers
     session_manager.begin();
