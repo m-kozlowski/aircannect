@@ -21,6 +21,7 @@ struct ReportFallbackSectionInput {
     uint8_t event_mask = 0;
     uint32_t payload_schema = 0;
     uint32_t record_count = 0;
+    uint32_t sample_interval_ms = 0;
     NightCatalogTimeRange coverage;
     const uint8_t *payload = nullptr;
     size_t payload_size = 0;
@@ -33,6 +34,7 @@ struct ReportFallbackSection {
     uint8_t event_mask = 0;
     uint32_t payload_schema = 0;
     uint32_t record_count = 0;
+    uint32_t sample_interval_ms = 0;
     NightCatalogTimeRange coverage;
     uint64_t data_offset = 0;
     uint32_t data_size = 0;
@@ -62,7 +64,7 @@ struct ReportFallbackArtifactView {
 
 class ReportFallbackArtifactCodec {
 public:
-    static constexpr uint16_t Version = 2;
+    static constexpr uint16_t Version = 3;
     static constexpr size_t HeaderBytes = 72;
     static constexpr size_t SessionBytes = 16;
     static constexpr size_t SectionBytes = 48;

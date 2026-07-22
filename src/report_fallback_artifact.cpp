@@ -20,7 +20,7 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'F', 'B', 'A', 'C', 'K', '2',
+    'A', 'C', 'F', 'B', 'A', 'C', 'K', '3',
 };
 constexpr uint8_t NO_SIGNAL = UINT8_MAX;
 constexpr size_t IDENTITY_OFFSET = 56;
@@ -102,8 +102,7 @@ bool valid_series_source(ReportSourceId source) {
 }
 
 bool valid_event_source(ReportSourceId source) {
-    return source == ReportSourceId::UsageEvents ||
-           source == ReportSourceId::RespiratoryEvents;
+    return source == ReportSourceId::RespiratoryEvents;
 }
 
 bool section_input_valid(const ReportFallbackSectionInput &section) {
@@ -115,9 +114,13 @@ bool section_input_valid(const ReportFallbackSectionInput &section) {
     }
 
     if (section.kind == ReportFallbackSectionKind::Series) {
-        return valid_series_source(section.source) &&
+        const ReportSignalDef *signal = report_signal_def(section.signal);
+        return signal && valid_series_source(section.source) &&
+               (section.source == signal->preferred_source ||
+                section.source == signal->fallback_source) &&
                report_signal_bit(section.signal) != 0 &&
                section.event_mask == 0 && section.record_count > 0 &&
+               section.sample_interval_ms > 0 &&
                section.payload_schema ==
                    REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 &&
                section.payload_size > 0;
@@ -130,6 +133,7 @@ bool section_input_valid(const ReportFallbackSectionInput &section) {
         return valid_event_source(section.source) &&
                section.signal == ReportSignalId::Count &&
                section.event_mask != 0 &&
+               section.sample_interval_ms == 0 &&
                (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&
                section.payload_schema ==
                    REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
@@ -147,6 +151,7 @@ bool section_valid(const ReportFallbackSection &section,
     input.event_mask = section.event_mask;
     input.payload_schema = section.payload_schema;
     input.record_count = section.record_count;
+    input.sample_interval_ms = section.sample_interval_ms;
     input.coverage = section.coverage;
     input.payload = section.data_size > 0
         ? reinterpret_cast<const uint8_t *>(1)
@@ -193,7 +198,7 @@ void encode_section(uint8_t *out,
     out[3] = section.event_mask;
     put_le32(out + 4, section.payload_schema);
     put_le32(out + 8, section.record_count);
-    put_le32(out + 12, 0);
+    put_le32(out + 12, section.sample_interval_ms);
     put_le64(out + 16,
              static_cast<uint64_t>(section.coverage.start_ms));
     put_le64(out + 24,
@@ -213,6 +218,7 @@ bool decode_section(const uint8_t *in, ReportFallbackSection &section) {
     section.event_mask = in[3];
     section.payload_schema = get_le32(in + 4);
     section.record_count = get_le32(in + 8);
+    section.sample_interval_ms = get_le32(in + 12);
     section.coverage.start_ms = static_cast<int64_t>(get_le64(in + 16));
     section.coverage.end_ms = static_cast<int64_t>(get_le64(in + 24));
     section.data_offset = get_le64(in + 32);

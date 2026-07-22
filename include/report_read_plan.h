@@ -19,6 +19,8 @@ enum class ReportReadOperationKind : uint8_t {
     Numeric,
     ScoredEvents,
     CsrEvents,
+    FallbackSeries,
+    FallbackEvents,
 };
 
 struct ReportReadSession {
@@ -34,6 +36,7 @@ struct ReportReadSession {
 
 struct ReportReadMapping {
     NightCatalogTimeRange output_window;
+    ReportSeriesDescriptor series;
     EdfReportSignalLayout layout;
 };
 
@@ -46,7 +49,9 @@ struct ReportReadOperation {
     uint16_t mapping_count = 0;
     uint16_t session_index = 0;
     uint16_t catalog_file_index = 0;
+    uint16_t fallback_section_index = 0;
     ReportReadOperationKind kind = ReportReadOperationKind::Numeric;
+    uint8_t event_mask = 0;
     NightCatalogTimeRange event_filter;
 };
 
@@ -78,6 +83,10 @@ public:
     size_t operation_count() const { return operation_count_; }
     const ReportReadOperation *operation(size_t index) const;
     const NightCatalogSourceFile *source_file(
+        const ReportReadOperation &operation) const;
+    const NightCatalogFallbackFile *fallback_file(
+        const ReportReadOperation &operation) const;
+    const NightCatalogFallbackSection *fallback_section(
         const ReportReadOperation &operation) const;
     const char *source_path(const ReportReadOperation &operation) const;
 

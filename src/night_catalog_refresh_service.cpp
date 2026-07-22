@@ -890,6 +890,7 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
         section.event_mask = source.event_mask;
         section.payload_schema = source.payload_schema;
         section.record_count = source.record_count;
+        section.sample_interval_ms = source.sample_interval_ms;
         section.coverage = source.coverage;
         section.data_offset = source.data_offset;
         section.data_size = source.data_size;

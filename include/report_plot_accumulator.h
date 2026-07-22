@@ -33,7 +33,7 @@ public:
                int64_t end_ms,
                size_t bucket_budget);
     bool accept_series(uint16_t session_index,
-                       const EdfReportSignalLayout &layout,
+                       const ReportSeriesDescriptor &series,
                        const ReportSeriesSample &sample) override;
     bool accept_event(uint16_t session_index,
                       const ReportEventRecord &event) override;

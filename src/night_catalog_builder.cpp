@@ -444,22 +444,25 @@ bool fallback_section_valid(
 
     if (section.kind == ReportFallbackSectionKind::Series) {
         const ReportSourceDef *source = report_source_def(section.source);
-        return source && report_source_is_sampled(*source) &&
+        const ReportSignalDef *signal = report_signal_def(section.signal);
+        return source && signal && report_source_is_sampled(*source) &&
+               (section.source == signal->preferred_source ||
+                section.source == signal->fallback_source) &&
                report_signal_bit(section.signal) != 0 &&
                section.event_mask == 0 && section.record_count > 0 &&
+               section.sample_interval_ms > 0 &&
                section.data_size > 0 &&
                section.payload_schema ==
                    REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
     }
     if (section.kind == ReportFallbackSectionKind::Events) {
-        const bool event_source =
-            section.source == ReportSourceId::UsageEvents ||
-            section.source == ReportSourceId::RespiratoryEvents;
         const size_t record_bytes = report_event_record_wire_size();
         if (section.record_count > SIZE_MAX / record_bytes) return false;
 
-        return event_source && section.signal == ReportSignalId::Count &&
+        return section.source == ReportSourceId::RespiratoryEvents &&
+               section.signal == ReportSignalId::Count &&
                section.event_mask != 0 &&
+               section.sample_interval_ms == 0 &&
                (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&
                section.payload_schema ==
                    REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
@@ -903,6 +906,7 @@ uint64_t calculate_revision(const NightCatalog &catalog,
             hash = hash_byte(hash, section.event_mask);
             hash = hash_u32(hash, section.payload_schema);
             hash = hash_u32(hash, section.record_count);
+            hash = hash_u32(hash, section.sample_interval_ms);
             hash = hash_i64(hash, section.coverage.start_ms);
             hash = hash_i64(hash, section.coverage.end_ms);
             hash = hash_u64(hash, section.data_offset);
@@ -1261,6 +1265,8 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                 section.event_mask = source_section.event_mask;
                 section.payload_schema = source_section.payload_schema;
                 section.record_count = source_section.record_count;
+                section.sample_interval_ms =
+                    source_section.sample_interval_ms;
                 section.coverage = source_section.coverage;
                 section.data_offset = source_section.data_offset;
                 section.data_size = source_section.data_size;

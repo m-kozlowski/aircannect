@@ -21,7 +21,7 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'N', 'C', 'A', 'T', '0', '7',
+    'A', 'C', 'N', 'C', 'A', 'T', '0', '8',
 };
 
 constexpr size_t RECORD_BYTES = 120;
@@ -135,22 +135,25 @@ bool fallback_section_valid(const NightCatalogRecord &record,
 
     if (section.kind == ReportFallbackSectionKind::Series) {
         const ReportSourceDef *source = report_source_def(section.source);
-        return source && report_source_is_sampled(*source) &&
+        const ReportSignalDef *signal = report_signal_def(section.signal);
+        return source && signal && report_source_is_sampled(*source) &&
+               (section.source == signal->preferred_source ||
+                section.source == signal->fallback_source) &&
                report_signal_bit(section.signal) != 0 &&
                section.event_mask == 0 && section.record_count > 0 &&
+               section.sample_interval_ms > 0 &&
                section.data_size > 0 &&
                section.payload_schema ==
                    REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
     }
     if (section.kind == ReportFallbackSectionKind::Events) {
-        const bool event_source =
-            section.source == ReportSourceId::UsageEvents ||
-            section.source == ReportSourceId::RespiratoryEvents;
         const size_t record_bytes = report_event_record_wire_size();
         if (section.record_count > SIZE_MAX / record_bytes) return false;
 
-        return event_source && section.signal == ReportSignalId::Count &&
+        return section.source == ReportSourceId::RespiratoryEvents &&
+               section.signal == ReportSignalId::Count &&
                section.event_mask != 0 &&
+               section.sample_interval_ms == 0 &&
                (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&
                section.payload_schema ==
                    REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
@@ -681,6 +684,7 @@ void encode_fallback_section(
     out[3] = section.event_mask;
     put_le32(out + 4, section.payload_schema);
     put_le32(out + 8, section.record_count);
+    put_le32(out + 12, section.sample_interval_ms);
     encode_range(out + 16, section.coverage);
     put_le64(out + 32, section.data_offset);
     put_le32(out + 40, section.data_size);
@@ -690,14 +694,13 @@ void encode_fallback_section(
 bool decode_fallback_section(
     const uint8_t *in,
     NightCatalogFallbackSection &section) {
-    if (get_le32(in + 12) != 0) return false;
-
     section.kind = static_cast<ReportFallbackSectionKind>(in[0]);
     section.source = static_cast<ReportSourceId>(in[1]);
     section.signal = static_cast<ReportSignalId>(in[2]);
     section.event_mask = in[3];
     section.payload_schema = get_le32(in + 4);
     section.record_count = get_le32(in + 8);
+    section.sample_interval_ms = get_le32(in + 12);
     section.coverage = decode_range(in + 16);
     section.data_offset = get_le64(in + 32);
     section.data_size = get_le32(in + 40);

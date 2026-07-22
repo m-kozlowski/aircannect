@@ -14,19 +14,28 @@
 namespace aircannect {
 namespace {
 
+enum class SelectedStorage : uint8_t {
+    Edf,
+    Fallback,
+};
+
 struct SelectedSource {
     NightCatalogTimeRange output_window;
+    ReportSeriesDescriptor series;
     EdfReportSignalLayout layout;
     ReportReadQuality quality = ReportReadQuality::Primary;
+    SelectedStorage storage = SelectedStorage::Edf;
     uint16_t session_index = 0;
     uint16_t catalog_file_index = 0;
     bool complete = false;
 };
 
 struct SourceCandidate {
+    ReportSeriesDescriptor series;
     EdfReportSignalLayout layout;
     uint16_t catalog_file_index = 0;
     ReportReadQuality quality = ReportReadQuality::Primary;
+    SelectedStorage storage = SelectedStorage::Edf;
     int64_t covered_ms = 0;
     bool available = false;
     bool complete = false;
@@ -137,6 +146,24 @@ size_t bit_count(uint32_t value) {
     return count;
 }
 
+ReportReadQuality source_quality(ReportSignalId signal,
+                                 ReportSourceId source) {
+    const ReportSignalDef *definition = report_signal_def(signal);
+    return definition && source == definition->preferred_source
+        ? ReportReadQuality::Primary
+        : ReportReadQuality::Fallback;
+}
+
+ReportSeriesDescriptor series_descriptor(
+    const EdfReportSignalLayout &layout) {
+    ReportSeriesDescriptor series;
+    series.signal = layout.signal;
+    series.source = layout.source;
+    series.sample_interval_ms = layout.sample_interval_ms;
+    series.primary = layout.primary;
+    return series;
+}
+
 bool file_data_valid(const NightCatalogSourceFile &file) {
     if (file.kind == NightCatalogFileKind::Str ||
         file.identity == 0 || file.record_start_ms <= 0 ||
@@ -174,15 +201,17 @@ const EdfReportSignalLayout *find_signal_layout(
     return nullptr;
 }
 
-SourceCandidate evaluate_candidate(const NightCatalog &catalog,
-                                   const NightCatalogSourceFile &file,
-                                   uint16_t file_index,
-                                   ReportSignalId signal,
-                                   ReportReadQuality quality,
-                                   const NightCatalogTimeRange &window) {
+SourceCandidate evaluate_edf_candidate(
+    const NightCatalog &catalog,
+    const NightCatalogSourceFile &file,
+    uint16_t file_index,
+    ReportSignalId signal,
+    ReportReadQuality quality,
+    const NightCatalogTimeRange &window) {
     SourceCandidate candidate;
     candidate.catalog_file_index = file_index;
     candidate.quality = quality;
+    candidate.storage = SelectedStorage::Edf;
     if (!file_data_valid(file) || file.record_duration_ms == 0) {
         return candidate;
     }
@@ -191,6 +220,7 @@ SourceCandidate evaluate_candidate(const NightCatalog &catalog,
         find_signal_layout(catalog, file, signal, quality);
     if (!layout) return candidate;
     candidate.layout = *layout;
+    candidate.series = series_descriptor(*layout);
 
     const uint32_t bit = report_signal_bit(signal);
     size_t coverage_count = 0;
@@ -249,14 +279,106 @@ SourceCandidate evaluate_candidate(const NightCatalog &catalog,
     return candidate;
 }
 
+SourceCandidate evaluate_fallback_candidate(
+    const NightCatalog &catalog,
+    const NightCatalogFallbackFile &file,
+    uint16_t file_index,
+    ReportSignalId signal,
+    ReportSourceId source,
+    const NightCatalogTimeRange &window,
+    bool &catalog_valid) {
+    SourceCandidate candidate;
+    candidate.catalog_file_index = file_index;
+    candidate.quality = source_quality(signal, source);
+    candidate.storage = SelectedStorage::Fallback;
+    candidate.series.signal = signal;
+    candidate.series.source = source;
+    candidate.series.primary =
+        candidate.quality == ReportReadQuality::Primary;
+
+    size_t section_count = 0;
+    const NightCatalogFallbackSection *sections =
+        catalog.fallback_sections(file, section_count);
+    if (section_count > 0 && !sections) {
+        catalog_valid = false;
+        return candidate;
+    }
+
+    for (size_t i = 0; i < section_count; ++i) {
+        const NightCatalogFallbackSection &section = sections[i];
+        if (section.kind != ReportFallbackSectionKind::Series ||
+            section.signal != signal || section.source != source) {
+            continue;
+        }
+        if (candidate.series.sample_interval_ms != 0 &&
+            candidate.series.sample_interval_ms !=
+                section.sample_interval_ms) {
+            catalog_valid = false;
+            return candidate;
+        }
+
+        const NightCatalogTimeRange overlap =
+            intersect_ranges(window, section.coverage);
+        if (!overlap.valid()) continue;
+
+        candidate.available = true;
+        candidate.series.sample_interval_ms = section.sample_interval_ms;
+        const int64_t duration = overlap.end_ms - overlap.start_ms;
+        if (candidate.covered_ms >
+            window.end_ms - window.start_ms - duration) {
+            candidate.covered_ms = window.end_ms - window.start_ms;
+        } else {
+            candidate.covered_ms += duration;
+        }
+    }
+    if (!candidate.available) return candidate;
+
+    const int64_t target_start = std::min(
+        window.end_ms,
+        window.start_ms + REPORT_SOURCE_EDGE_TOLERANCE_MS);
+    const int64_t target_end = std::max(
+        window.start_ms,
+        window.end_ms - REPORT_SOURCE_EDGE_TOLERANCE_MS);
+    if (target_end <= target_start) {
+        candidate.complete = true;
+        return candidate;
+    }
+
+    int64_t cursor = target_start;
+    for (size_t pass = 0; pass < section_count && cursor < target_end;
+         ++pass) {
+        int64_t next = cursor;
+        for (size_t i = 0; i < section_count; ++i) {
+            const NightCatalogFallbackSection &section = sections[i];
+            if (section.kind != ReportFallbackSectionKind::Series ||
+                section.signal != signal || section.source != source) {
+                continue;
+            }
+
+            const NightCatalogTimeRange overlap =
+                intersect_ranges(window, section.coverage);
+            if (overlap.valid() && overlap.start_ms <= cursor &&
+                overlap.end_ms > next) {
+                next = overlap.end_ms;
+            }
+        }
+        if (next == cursor) break;
+        cursor = next;
+    }
+    candidate.complete = cursor >= target_end;
+    return candidate;
+}
+
 uint8_t candidate_rank(const SourceCandidate &candidate) {
     if (!candidate.available) return 0;
-    if (candidate.complete &&
-        candidate.quality == ReportReadQuality::Primary) {
-        return 4;
+    if (candidate.complete) {
+        if (candidate.storage == SelectedStorage::Fallback) return 6;
+        return candidate.quality == ReportReadQuality::Primary ? 8 : 7;
     }
-    if (candidate.complete) return 3;
-    return candidate.quality == ReportReadQuality::Primary ? 2 : 1;
+    if (candidate.storage == SelectedStorage::Edf) {
+        return candidate.quality == ReportReadQuality::Primary ? 4 : 2;
+    }
+    return candidate.quality == ReportReadQuality::Primary ? 3 : 1;
 }
 
 bool candidate_better(const SourceCandidate &candidate,
@@ -303,13 +425,49 @@ SourceCandidate select_source(const NightCatalog &catalog,
 
         for (ReportReadQuality quality : {ReportReadQuality::Primary,
                                           ReportReadQuality::Fallback}) {
-            const SourceCandidate candidate = evaluate_candidate(
+            const SourceCandidate candidate = evaluate_edf_candidate(
                 catalog,
                 file,
                 static_cast<uint16_t>(i),
                 signal,
                 quality,
                 window);
+            if (candidate_better(candidate, selected)) selected = candidate;
+        }
+    }
+
+    const ReportSignalDef *signal_definition = report_signal_def(signal);
+    size_t fallback_file_count = 0;
+    const NightCatalogFallbackFile *fallback_files =
+        catalog.fallback_files(night, fallback_file_count);
+    if (!signal_definition ||
+        (fallback_file_count > 0 && !fallback_files)) {
+        catalog_valid = false;
+        return selected;
+    }
+
+    for (size_t i = 0; i < fallback_file_count; ++i) {
+        if (i > UINT16_MAX) {
+            catalog_valid = false;
+            return selected;
+        }
+
+        const ReportSourceId sources[] = {
+            signal_definition->preferred_source,
+            signal_definition->fallback_source,
+        };
+        for (size_t source_index = 0; source_index < 2; ++source_index) {
+            if (source_index > 0 && sources[1] == sources[0]) continue;
+
+            const SourceCandidate candidate = evaluate_fallback_candidate(
+                catalog,
+                fallback_files[i],
+                static_cast<uint16_t>(i),
+                signal,
+                sources[source_index],
+                window,
+                catalog_valid);
+            if (!catalog_valid) return selected;
             if (candidate_better(candidate, selected)) selected = candidate;
         }
     }
@@ -357,8 +515,10 @@ bool select_sources(const ReportPlanRequest &request,
             SelectedSource *entry = selected.append();
             if (!entry) return false;
             entry->output_window = window;
+            entry->series = source.series;
             entry->layout = source.layout;
             entry->quality = source.quality;
+            entry->storage = source.storage;
             entry->session_index = plan_session_index;
             entry->catalog_file_index = source.catalog_file_index;
             entry->complete = source.complete;
@@ -439,10 +599,10 @@ size_t operation_count_for_records(const NightCatalogSourceFile &file,
            per_operation;
 }
 
-bool count_numeric_operations(const NightCatalog &catalog,
-                              const NightCatalogRecord &night,
-                              const SelectedSource &selected,
-                              size_t &count) {
+bool count_edf_numeric_operations(const NightCatalog &catalog,
+                                  const NightCatalogRecord &night,
+                                  const SelectedSource &selected,
+                                  size_t &count) {
     size_t file_count = 0;
     const NightCatalogSourceFile *files = catalog.files(night, file_count);
     if (!files || selected.catalog_file_index >= file_count) return false;
@@ -474,6 +634,47 @@ bool count_numeric_operations(const NightCatalog &catalog,
     return true;
 }
 
+bool count_fallback_series_operations(const NightCatalog &catalog,
+                                      const NightCatalogRecord &night,
+                                      const SelectedSource &selected,
+                                      size_t &count) {
+    size_t file_count = 0;
+    const NightCatalogFallbackFile *files =
+        catalog.fallback_files(night, file_count);
+    if (!files || selected.catalog_file_index >= file_count) return false;
+
+    size_t section_count = 0;
+    const NightCatalogFallbackSection *sections =
+        catalog.fallback_sections(files[selected.catalog_file_index],
+                                  section_count);
+    if (section_count > 0 && !sections) return false;
+
+    for (size_t i = 0; i < section_count; ++i) {
+        const NightCatalogFallbackSection &section = sections[i];
+        if (section.kind != ReportFallbackSectionKind::Series ||
+            section.signal != selected.series.signal ||
+            section.source != selected.series.source ||
+            !intersect_ranges(selected.output_window,
+                              section.coverage).valid()) {
+            continue;
+        }
+        if (!add_count(count, 1)) return false;
+    }
+    return true;
+}
+
+bool count_numeric_operations(const NightCatalog &catalog,
+                              const NightCatalogRecord &night,
+                              const SelectedSource &selected,
+                              size_t &count) {
+    return selected.storage == SelectedStorage::Edf
+        ? count_edf_numeric_operations(catalog, night, selected, count)
+        : count_fallback_series_operations(catalog,
+                                           night,
+                                           selected,
+                                           count);
+}
+
 bool event_kind(NightCatalogFileKind kind,
                 uint8_t &event_mask,
                 ReportReadOperationKind &operation_kind) {
@@ -490,6 +691,115 @@ bool event_kind(NightCatalogFileKind kind,
     return false;
 }
 
+uint8_t edf_captured_events(const ReportPlanRequest &request,
+                            const NightCatalog &catalog,
+                            const NightCatalogRecord &night,
+                            uint16_t catalog_session_index) {
+    uint8_t captured = 0;
+    size_t file_count = 0;
+    const NightCatalogSourceFile *files = catalog.files(night, file_count);
+    for (size_t i = 0; files && i < file_count; ++i) {
+        uint8_t mask = 0;
+        ReportReadOperationKind ignored;
+        if (files[i].session_index == catalog_session_index &&
+            event_kind(files[i].kind, mask, ignored)) {
+            captured |= mask;
+        }
+    }
+    return captured & request.event_mask;
+}
+
+bool fallback_event_complete(const NightCatalog &catalog,
+                             const NightCatalogRecord &night,
+                             uint8_t event_bit,
+                             const NightCatalogTimeRange &window,
+                             bool &catalog_valid) {
+    size_t file_count = 0;
+    const NightCatalogFallbackFile *files =
+        catalog.fallback_files(night, file_count);
+    if (file_count > 0 && !files) {
+        catalog_valid = false;
+        return false;
+    }
+
+    const int64_t target_start = std::min(
+        window.end_ms,
+        window.start_ms + REPORT_SOURCE_EDGE_TOLERANCE_MS);
+    const int64_t target_end = std::max(
+        window.start_ms,
+        window.end_ms - REPORT_SOURCE_EDGE_TOLERANCE_MS);
+    if (target_end <= target_start) return true;
+
+    int64_t cursor = target_start;
+    size_t section_total = 0;
+    for (size_t file_index = 0; file_index < file_count; ++file_index) {
+        size_t section_count = 0;
+        const NightCatalogFallbackSection *sections =
+            catalog.fallback_sections(files[file_index], section_count);
+        if (section_count > 0 && !sections) {
+            catalog_valid = false;
+            return false;
+        }
+        if (!add_count(section_total, section_count)) {
+            catalog_valid = false;
+            return false;
+        }
+    }
+
+    for (size_t pass = 0; pass < section_total && cursor < target_end;
+         ++pass) {
+        int64_t next = cursor;
+        for (size_t file_index = 0; file_index < file_count; ++file_index) {
+            size_t section_count = 0;
+            const NightCatalogFallbackSection *sections =
+                catalog.fallback_sections(files[file_index], section_count);
+            for (size_t i = 0; sections && i < section_count; ++i) {
+                const NightCatalogFallbackSection &section = sections[i];
+                if (section.kind != ReportFallbackSectionKind::Events ||
+                    (section.event_mask & event_bit) == 0) {
+                    continue;
+                }
+
+                const NightCatalogTimeRange overlap =
+                    intersect_ranges(window, section.coverage);
+                if (overlap.valid() && overlap.start_ms <= cursor &&
+                    overlap.end_ms > next) {
+                    next = overlap.end_ms;
+                }
+            }
+        }
+        if (next == cursor) break;
+        cursor = next;
+    }
+    return cursor >= target_end;
+}
+
+uint8_t captured_events(const ReportPlanRequest &request,
+                        const NightCatalog &catalog,
+                        const NightCatalogRecord &night,
+                        uint16_t catalog_session_index,
+                        const NightCatalogTimeRange &window,
+                        bool &catalog_valid) {
+    uint8_t captured = edf_captured_events(request,
+                                           catalog,
+                                           night,
+                                           catalog_session_index);
+    for (uint8_t bit : {REPORT_EVENT_SCORED, REPORT_EVENT_CSR}) {
+        if ((request.event_mask & bit) == 0 || (captured & bit) != 0) {
+            continue;
+        }
+        if (fallback_event_complete(catalog,
+                                    night,
+                                    bit,
+                                    window,
+                                    catalog_valid)) {
+            captured |= bit;
+        }
+        if (!catalog_valid) return 0;
+    }
+    return captured;
+}
+
 bool count_event_operations(const ReportPlanRequest &request,
                             const NightCatalog &catalog,
                             const NightCatalogRecord &night,
@@ -499,8 +809,12 @@ bool count_event_operations(const ReportPlanRequest &request,
         catalog.sessions(night, catalog_session_count);
     size_t file_count = 0;
     const NightCatalogSourceFile *files = catalog.files(night, file_count);
+    size_t fallback_file_count = 0;
+    const NightCatalogFallbackFile *fallback_files =
+        catalog.fallback_files(night, fallback_file_count);
     if ((catalog_session_count > 0 && !sessions) ||
-        (file_count > 0 && !files)) {
+        (file_count > 0 && !files) ||
+        (fallback_file_count > 0 && !fallback_files)) {
         return false;
     }
 
@@ -511,6 +825,14 @@ bool count_event_operations(const ReportPlanRequest &request,
                               sessions[catalog_session]).valid()) {
             continue;
         }
+
+        const NightCatalogTimeRange filter =
+            requested_window(request.artifact, sessions[catalog_session]);
+        const uint8_t fallback_mask = request.event_mask &
+            ~edf_captured_events(request,
+                                 catalog,
+                                 night,
+                                 static_cast<uint16_t>(catalog_session));
 
         for (size_t file_index = 0; file_index < file_count; ++file_index) {
             const NightCatalogSourceFile &file = files[file_index];
@@ -528,6 +850,31 @@ bool count_event_operations(const ReportPlanRequest &request,
                 operation_count_for_records(file, file.complete_records);
             if (operations == SIZE_MAX || !add_count(count, operations)) {
                 return false;
+            }
+        }
+
+        if (fallback_mask == 0) continue;
+        for (size_t file_index = 0;
+             file_index < fallback_file_count;
+             ++file_index) {
+            size_t section_count = 0;
+            const NightCatalogFallbackSection *sections =
+                catalog.fallback_sections(fallback_files[file_index],
+                                          section_count);
+            if (section_count > 0 && !sections) return false;
+
+            for (size_t section_index = 0;
+                 section_index < section_count;
+                 ++section_index) {
+                const NightCatalogFallbackSection &section =
+                    sections[section_index];
+                if (section.kind != ReportFallbackSectionKind::Events ||
+                    section.record_count == 0 ||
+                    (section.event_mask & fallback_mask) == 0 ||
+                    !intersect_ranges(filter, section.coverage).valid()) {
+                    continue;
+                }
+                if (!add_count(count, 1)) return false;
             }
         }
     }
@@ -572,10 +919,11 @@ bool append_record_operations(ScratchArray<PendingOperation> &pending,
     return true;
 }
 
-bool append_numeric_operations(const NightCatalog &catalog,
-                               const NightCatalogRecord &night,
-                               const SelectedSource &selected,
-                               ScratchArray<PendingOperation> &pending) {
+bool append_edf_numeric_operations(
+    const NightCatalog &catalog,
+    const NightCatalogRecord &night,
+    const SelectedSource &selected,
+    ScratchArray<PendingOperation> &pending) {
     size_t file_count = 0;
     const NightCatalogSourceFile *files = catalog.files(night, file_count);
     if (!files || selected.catalog_file_index >= file_count) return false;
@@ -595,6 +943,7 @@ bool append_numeric_operations(const NightCatalog &catalog,
         ReportReadMapping mapping;
         mapping.output_window =
             intersect_ranges(selected.output_window, coverage[i].range);
+        mapping.series = selected.series;
         mapping.layout = selected.layout;
 
         uint32_t first_record = 0;
@@ -620,6 +969,72 @@ bool append_numeric_operations(const NightCatalog &catalog,
     return true;
 }
 
+bool append_fallback_series_operations(
+    const NightCatalog &catalog,
+    const NightCatalogRecord &night,
+    const SelectedSource &selected,
+    ScratchArray<PendingOperation> &pending) {
+    size_t file_count = 0;
+    const NightCatalogFallbackFile *files =
+        catalog.fallback_files(night, file_count);
+    if (!files || selected.catalog_file_index >= file_count) return false;
+
+    size_t section_count = 0;
+    const NightCatalogFallbackSection *sections =
+        catalog.fallback_sections(files[selected.catalog_file_index],
+                                  section_count);
+    if (section_count > 0 && !sections) return false;
+
+    for (size_t i = 0; i < section_count; ++i) {
+        const NightCatalogFallbackSection &section = sections[i];
+        if (section.kind != ReportFallbackSectionKind::Series ||
+            section.signal != selected.series.signal ||
+            section.source != selected.series.source) {
+            continue;
+        }
+
+        ReportReadMapping mapping;
+        mapping.output_window =
+            intersect_ranges(selected.output_window, section.coverage);
+        if (!mapping.output_window.valid()) continue;
+        if (i > UINT16_MAX || section.data_size == 0 ||
+            section.data_size > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
+            return false;
+        }
+        mapping.series = selected.series;
+
+        PendingOperation *entry = pending.append();
+        if (!entry) return false;
+        entry->operation.offset = section.data_offset;
+        entry->operation.length = section.data_size;
+        entry->operation.record_count = section.record_count;
+        entry->operation.session_index = selected.session_index;
+        entry->operation.catalog_file_index =
+            selected.catalog_file_index;
+        entry->operation.fallback_section_index =
+            static_cast<uint16_t>(i);
+        entry->operation.kind = ReportReadOperationKind::FallbackSeries;
+        entry->mapping = mapping;
+        entry->has_mapping = true;
+    }
+    return true;
+}
+
+bool append_numeric_operations(const NightCatalog &catalog,
+                               const NightCatalogRecord &night,
+                               const SelectedSource &selected,
+                               ScratchArray<PendingOperation> &pending) {
+    return selected.storage == SelectedStorage::Edf
+        ? append_edf_numeric_operations(catalog,
+                                        night,
+                                        selected,
+                                        pending)
+        : append_fallback_series_operations(catalog,
+                                            night,
+                                            selected,
+                                            pending);
+}
+
 bool append_event_operations(const ReportPlanRequest &request,
                              const NightCatalog &catalog,
                              const NightCatalogRecord &night,
@@ -629,8 +1044,12 @@ bool append_event_operations(const ReportPlanRequest &request,
         catalog.sessions(night, catalog_session_count);
     size_t file_count = 0;
     const NightCatalogSourceFile *files = catalog.files(night, file_count);
+    size_t fallback_file_count = 0;
+    const NightCatalogFallbackFile *fallback_files =
+        catalog.fallback_files(night, fallback_file_count);
     if ((catalog_session_count > 0 && !sessions) ||
-        (file_count > 0 && !files)) {
+        (file_count > 0 && !files) ||
+        (fallback_file_count > 0 && !fallback_files)) {
         return false;
     }
 
@@ -641,6 +1060,11 @@ bool append_event_operations(const ReportPlanRequest &request,
         const NightCatalogTimeRange filter =
             requested_window(request.artifact, sessions[catalog_session]);
         if (!filter.valid()) continue;
+        const uint8_t fallback_mask = request.event_mask &
+            ~edf_captured_events(request,
+                                 catalog,
+                                 night,
+                                 static_cast<uint16_t>(catalog_session));
 
         for (size_t file_index = 0; file_index < file_count; ++file_index) {
             const NightCatalogSourceFile &file = files[file_index];
@@ -669,6 +1093,55 @@ bool append_event_operations(const ReportPlanRequest &request,
                 return false;
             }
         }
+
+        if (fallback_mask != 0) {
+            for (size_t file_index = 0;
+                 file_index < fallback_file_count;
+                 ++file_index) {
+                if (file_index > UINT16_MAX) return false;
+
+                size_t section_count = 0;
+                const NightCatalogFallbackSection *sections =
+                    catalog.fallback_sections(fallback_files[file_index],
+                                              section_count);
+                if (section_count > 0 && !sections) return false;
+
+                for (size_t section_index = 0;
+                     section_index < section_count;
+                     ++section_index) {
+                    const NightCatalogFallbackSection &section =
+                        sections[section_index];
+                    const uint8_t selected_mask =
+                        section.event_mask & fallback_mask;
+                    if (section.kind !=
+                            ReportFallbackSectionKind::Events ||
+                        section.record_count == 0 || selected_mask == 0 ||
+                        !intersect_ranges(filter,
+                                          section.coverage).valid() ||
+                        section_index > UINT16_MAX ||
+                        section.data_size == 0 ||
+                        section.data_size >
+                            AC_STORAGE_PREPARED_READ_MAX_BYTES) {
+                        continue;
+                    }
+
+                    PendingOperation *entry = pending.append();
+                    if (!entry) return false;
+                    entry->operation.offset = section.data_offset;
+                    entry->operation.length = section.data_size;
+                    entry->operation.record_count = section.record_count;
+                    entry->operation.session_index = plan_session;
+                    entry->operation.catalog_file_index =
+                        static_cast<uint16_t>(file_index);
+                    entry->operation.fallback_section_index =
+                        static_cast<uint16_t>(section_index);
+                    entry->operation.kind =
+                        ReportReadOperationKind::FallbackEvents;
+                    entry->operation.event_mask = selected_mask;
+                    entry->operation.event_filter = filter;
+                }
+            }
+        }
         ++plan_session;
     }
     return true;
@@ -683,7 +1156,9 @@ bool same_operation(const PendingOperation &lhs,
            a.record_count == b.record_count &&
            a.session_index == b.session_index &&
            a.catalog_file_index == b.catalog_file_index &&
+           a.fallback_section_index == b.fallback_section_index &&
            a.kind == b.kind &&
+           a.event_mask == b.event_mask &&
            a.event_filter.start_ms == b.event_filter.start_ms &&
            a.event_filter.end_ms == b.event_filter.end_ms;
 }
@@ -694,6 +1169,9 @@ bool pending_less(const PendingOperation &lhs,
     const ReportReadOperation &b = rhs.operation;
     if (a.catalog_file_index != b.catalog_file_index) {
         return a.catalog_file_index < b.catalog_file_index;
+    }
+    if (a.fallback_section_index != b.fallback_section_index) {
+        return a.fallback_section_index < b.fallback_section_index;
     }
     if (a.first_record != b.first_record) {
         return a.first_record < b.first_record;
@@ -707,6 +1185,7 @@ bool pending_less(const PendingOperation &lhs,
     if (a.kind != b.kind) {
         return static_cast<uint8_t>(a.kind) < static_cast<uint8_t>(b.kind);
     }
+    if (a.event_mask != b.event_mask) return a.event_mask < b.event_mask;
     if (a.event_filter.start_ms != b.event_filter.start_ms) {
         return a.event_filter.start_ms < b.event_filter.start_ms;
     }
@@ -715,12 +1194,21 @@ bool pending_less(const PendingOperation &lhs,
     }
     if (lhs.has_mapping != rhs.has_mapping) return !lhs.has_mapping;
     if (!lhs.has_mapping) return false;
-    if (lhs.mapping.layout.signal != rhs.mapping.layout.signal) {
-        return static_cast<uint8_t>(lhs.mapping.layout.signal) <
-               static_cast<uint8_t>(rhs.mapping.layout.signal);
+    if (lhs.mapping.series.signal != rhs.mapping.series.signal) {
+        return static_cast<uint8_t>(lhs.mapping.series.signal) <
+               static_cast<uint8_t>(rhs.mapping.series.signal);
     }
-    if (lhs.mapping.layout.primary != rhs.mapping.layout.primary) {
-        return lhs.mapping.layout.primary < rhs.mapping.layout.primary;
+    if (lhs.mapping.series.source != rhs.mapping.series.source) {
+        return static_cast<uint8_t>(lhs.mapping.series.source) <
+               static_cast<uint8_t>(rhs.mapping.series.source);
+    }
+    if (lhs.mapping.series.primary != rhs.mapping.series.primary) {
+        return lhs.mapping.series.primary < rhs.mapping.series.primary;
+    }
+    if (lhs.mapping.series.sample_interval_ms !=
+        rhs.mapping.series.sample_interval_ms) {
+        return lhs.mapping.series.sample_interval_ms <
+               rhs.mapping.series.sample_interval_ms;
     }
     if (lhs.mapping.output_window.start_ms !=
         rhs.mapping.output_window.start_ms) {
@@ -733,8 +1221,10 @@ bool pending_less(const PendingOperation &lhs,
 
 bool mappings_merge(const ReportReadMapping &lhs,
                     const ReportReadMapping &rhs) {
-    return lhs.layout.signal == rhs.layout.signal &&
-           lhs.layout.primary == rhs.layout.primary &&
+    return lhs.series.signal == rhs.series.signal &&
+           lhs.series.source == rhs.series.source &&
+           lhs.series.primary == rhs.series.primary &&
+           lhs.series.sample_interval_ms == rhs.series.sample_interval_ms &&
            rhs.output_window.start_ms <= lhs.output_window.end_ms;
 }
 
@@ -770,24 +1260,6 @@ void count_final_entries(const ScratchArray<PendingOperation> &pending,
     }
 }
 
-uint8_t captured_events(const ReportPlanRequest &request,
-                        const NightCatalog &catalog,
-                        const NightCatalogRecord &night,
-                        uint16_t catalog_session_index) {
-    uint8_t captured = 0;
-    size_t file_count = 0;
-    const NightCatalogSourceFile *files = catalog.files(night, file_count);
-    for (size_t i = 0; files && i < file_count; ++i) {
-        uint8_t mask = 0;
-        ReportReadOperationKind ignored;
-        if (files[i].session_index == catalog_session_index &&
-            event_kind(files[i].kind, mask, ignored)) {
-            captured |= mask;
-        }
-    }
-    return captured & request.event_mask;
-}
-
 bool fill_sessions(const ReportPlanRequest &request,
                    const NightCatalog &catalog,
                    const NightCatalogRecord &night,
@@ -820,7 +1292,7 @@ bool fill_sessions(const ReportPlanRequest &request,
             const SelectedSource &source = selected.data()[i];
             if (source.session_index != plan_session) continue;
 
-            const uint32_t bit = report_signal_bit(source.layout.signal);
+            const uint32_t bit = report_signal_bit(source.series.signal);
             output.selected_signal_mask |= bit;
             if (source.complete) output.complete_signal_mask |= bit;
             if (source.quality == ReportReadQuality::Fallback) {
@@ -830,11 +1302,15 @@ bool fill_sessions(const ReportPlanRequest &request,
 
         output.missing_signal_mask =
             request.signal_mask & ~output.complete_signal_mask;
+        bool catalog_valid = true;
         output.captured_event_mask = captured_events(
             request,
             catalog,
             night,
-            static_cast<uint16_t>(catalog_session));
+            static_cast<uint16_t>(catalog_session),
+            window,
+            catalog_valid);
+        if (!catalog_valid) return false;
         output.missing_event_mask =
             request.event_mask & ~output.captured_event_mask;
 

@@ -131,6 +131,11 @@ const ReportReadOperation *ReportReadPlan::operation(size_t index) const {
 
 const NightCatalogSourceFile *ReportReadPlan::source_file(
     const ReportReadOperation &operation) const {
+    if (operation.kind == ReportReadOperationKind::FallbackSeries ||
+        operation.kind == ReportReadOperationKind::FallbackEvents) {
+        return nullptr;
+    }
+
     size_t file_count = 0;
     const NightCatalogSourceFile *files = catalog_->files(*night_, file_count);
     return files && operation.catalog_file_index < file_count
@@ -138,8 +143,39 @@ const NightCatalogSourceFile *ReportReadPlan::source_file(
         : nullptr;
 }
 
+const NightCatalogFallbackFile *ReportReadPlan::fallback_file(
+    const ReportReadOperation &operation) const {
+    if (operation.kind != ReportReadOperationKind::FallbackSeries &&
+        operation.kind != ReportReadOperationKind::FallbackEvents) {
+        return nullptr;
+    }
+
+    size_t file_count = 0;
+    const NightCatalogFallbackFile *files =
+        catalog_->fallback_files(*night_, file_count);
+    return files && operation.catalog_file_index < file_count
+        ? &files[operation.catalog_file_index]
+        : nullptr;
+}
+
+const NightCatalogFallbackSection *ReportReadPlan::fallback_section(
+    const ReportReadOperation &operation) const {
+    const NightCatalogFallbackFile *file = fallback_file(operation);
+    if (!file) return nullptr;
+
+    size_t section_count = 0;
+    const NightCatalogFallbackSection *sections =
+        catalog_->fallback_sections(*file, section_count);
+    return sections && operation.fallback_section_index < section_count
+        ? &sections[operation.fallback_section_index]
+        : nullptr;
+}
+
 const char *ReportReadPlan::source_path(
     const ReportReadOperation &operation) const {
+    const NightCatalogFallbackFile *fallback = fallback_file(operation);
+    if (fallback) return catalog_->path(*fallback);
+
     const NightCatalogSourceFile *file = source_file(operation);
     return file ? catalog_->path(*file) : nullptr;
 }

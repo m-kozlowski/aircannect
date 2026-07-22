@@ -287,10 +287,10 @@ bool ReportNightArtifactBuilder::begin_build(
 
 bool ReportNightArtifactBuilder::accept_series(
     uint16_t session_index,
-    const EdfReportSignalLayout &layout,
+    const ReportSeriesDescriptor &series,
     const ReportSeriesSample &sample) {
     return runtime_ && runtime_->active &&
-           runtime_->plot.accept_series(session_index, layout, sample);
+           runtime_->plot.accept_series(session_index, series, sample);
 }
 
 bool ReportNightArtifactBuilder::accept_event(

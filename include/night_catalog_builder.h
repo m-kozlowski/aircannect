@@ -67,6 +67,7 @@ struct NightCatalogFallbackSectionInput {
     uint8_t event_mask = 0;
     uint32_t payload_schema = 0;
     uint32_t record_count = 0;
+    uint32_t sample_interval_ms = 0;
     NightCatalogTimeRange coverage;
     uint64_t data_offset = 0;
     uint32_t data_size = 0;

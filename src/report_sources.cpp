@@ -128,6 +128,13 @@ const ReportSourceDef *report_source_def(ReportSourceId id) {
     return nullptr;
 }
 
+const ReportSignalDef *report_signal_def(ReportSignalId id) {
+    for (const ReportSignalDef &signal : SIGNALS) {
+        if (signal.id == id) return &signal;
+    }
+    return nullptr;
+}
+
 const char *report_source_spool_type(ReportSourceId id) {
     const ReportSourceDef *def = report_source_def(id);
     return def ? def->spool_type : "";

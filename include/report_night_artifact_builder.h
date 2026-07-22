@@ -19,7 +19,7 @@ public:
     bool begin_build(const ReportArtifactRequest &request,
                      const ReportReadPlan &plan) override;
     bool accept_series(uint16_t session_index,
-                       const EdfReportSignalLayout &layout,
+                       const ReportSeriesDescriptor &series,
                        const ReportSeriesSample &sample) override;
     bool accept_event(uint16_t session_index,
                       const ReportEventRecord &event) override;

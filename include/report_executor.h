@@ -58,7 +58,7 @@ public:
     virtual ~ReportExecutionSink() = default;
 
     virtual bool accept_series(uint16_t session_index,
-                               const EdfReportSignalLayout &layout,
+                               const ReportSeriesDescriptor &series,
                                const ReportSeriesSample &sample) = 0;
     virtual bool accept_event(uint16_t session_index,
                               const ReportEventRecord &event) = 0;
@@ -91,6 +91,7 @@ private:
     bool poll_read();
     bool prepare_operation();
     bool decode_record();
+    bool decode_fallback_operation();
     void finish_operation();
     void finish(ReportExecutorState state, ReportExecutorError error);
     void release_run_resources();
@@ -128,6 +129,7 @@ private:
     uint32_t event_next_record_ = 0;
     bool event_context_valid_ = false;
     bool sink_rejected_ = false;
+    uint64_t fallback_emit_count_ = 0;
     const ReportReadMapping *callback_mapping_ = nullptr;
     const ReportReadOperation *callback_operation_ = nullptr;
 };

@@ -71,9 +71,17 @@ struct ReportSignalDef {
     uint16_t flags;
 };
 
+struct ReportSeriesDescriptor {
+    ReportSignalId signal = ReportSignalId::Flow;
+    ReportSourceId source = ReportSourceId::Summary;
+    uint32_t sample_interval_ms = 0;
+    bool primary = false;
+};
+
 const ReportSourceDef *report_source_defs(size_t &count);
 const ReportSignalDef *report_signal_defs(size_t &count);
 const ReportSourceDef *report_source_def(ReportSourceId id);
+const ReportSignalDef *report_signal_def(ReportSignalId id);
 const char *report_source_spool_type(ReportSourceId id);
 const char *report_signal_store_name(ReportSignalId id);
 uint32_t report_signal_bit(ReportSignalId signal);

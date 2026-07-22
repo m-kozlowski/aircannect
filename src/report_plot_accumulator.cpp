@@ -81,13 +81,13 @@ void destroy_large(T *value) {
 #endif
 }
 
-int32_t scaled_plot_value(const EdfReportSignalLayout &layout,
+int32_t scaled_plot_value(const ReportSeriesDescriptor &series,
                           int32_t value_milli) {
     const int32_t multiplier =
-        (layout.signal == ReportSignalId::Flow &&
-         layout.source == ReportSourceId::RespiratoryFlow6p25Hz) ||
-        (layout.signal == ReportSignalId::Leak &&
-         layout.source == ReportSourceId::Leak0p5Hz)
+        (series.signal == ReportSignalId::Flow &&
+         series.source == ReportSourceId::RespiratoryFlow6p25Hz) ||
+        (series.signal == ReportSignalId::Leak &&
+         series.source == ReportSourceId::Leak0p5Hz)
             ? 60
             : 1;
     const int64_t scaled = static_cast<int64_t>(value_milli) * multiplier;
@@ -340,14 +340,14 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
 
 bool ReportPlotAccumulator::accept_series(
     uint16_t session_index,
-    const EdfReportSignalLayout &layout,
+    const ReportSeriesDescriptor &series,
     const ReportSeriesSample &sample) {
     if (!runtime_ || !runtime_->active || !runtime_->plan ||
         session_index >= runtime_->plan->session_count()) {
         return false;
     }
 
-    const size_t signal = static_cast<size_t>(layout.signal);
+    const size_t signal = static_cast<size_t>(series.signal);
     if (signal >= SIGNAL_COUNT) return false;
 
     SeriesState &state = runtime_->series[signal];
@@ -369,7 +369,7 @@ bool ReportPlotAccumulator::accept_series(
         delta / static_cast<uint64_t>(state.bucket_ms));
     if (bucket >= state.cell_count) return false;
 
-    const int32_t value = scaled_plot_value(layout, sample.value_milli);
+    const int32_t value = scaled_plot_value(series, sample.value_milli);
     EnvelopeCell &cell = state.cells[bucket];
     if (!cell.present) {
         cell.minimum = value;
@@ -380,10 +380,10 @@ bool ReportPlotAccumulator::accept_series(
         cell.maximum = std::max(cell.maximum, value);
     }
 
-    if (layout.signal == ReportSignalId::MaskPressure) {
+    if (series.signal == ReportSignalId::MaskPressure) {
         runtime_->pressure_sum_milli += value;
         ++runtime_->pressure_samples;
-    } else if (layout.signal == ReportSignalId::Leak) {
+    } else if (series.signal == ReportSignalId::Leak) {
         runtime_->leak_sum_milli += value;
         ++runtime_->leak_samples;
     }
