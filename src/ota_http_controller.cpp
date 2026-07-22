@@ -386,6 +386,13 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
     server.on(
         AsyncURIMatcher::exact("/api/resmed-ota/prepare"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
+            if (resmed_ota_->active() || resmed_preparer_->active()) {
+                request->send(
+                    409, "application/json",
+                    "{\"ok\":false,\"error\":\"resmed_ota_active\"}");
+                return;
+            }
+
             JsonDocument doc;
             std::string body;
             if (!http_parse_json_body(request, doc, body)) {

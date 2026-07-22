@@ -12,7 +12,6 @@
       element.appendChild(control);
       return element;
     }
-
     function valueSpan(text) {
       const value = document.createElement("span");
       value.className = "value";
@@ -1030,9 +1029,16 @@
 
     function resmedOtaStatusText(data) {
       const target = data.target && data.target !== "ABC" ? " " + data.target : "";
-      if (data.phase === "staging") return "Preparing image" + target;
-      if (data.phase === "publishing") return "Saving image" + target;
-      if (data.phase === "staged") return "Image prepared" + target;
+      const prepareTarget = data.prepare_target ? " " + data.prepare_target : "";
+      if (data.prepare_state === "queued") return "Preparation queued";
+      if (data.prepare_state === "inspecting") {
+        return "Inspecting image" + prepareTarget;
+      }
+      if (data.prepare_state === "converting") {
+        return "Building ABC image" + prepareTarget;
+      }
+      if (data.prepare_state === "publishing") return "Saving ABC image";
+      if (data.phase === "opening") return "Opening prepared image" + target;
       if (data.phase === "initiating") return "Starting device upload" + target;
       if (data.phase === "ready" || data.phase === "uploading") {
         return "Sending to ResMed" + target;
@@ -1094,7 +1100,9 @@
       const rateText = resmedOtaRateText(data);
       const stateText = resmedOtaStatusText(data) +
         (data.waiting ? " / waiting" : "");
-      const progressText = (data.progress || 0) + "%" +
+      const progressValue = data.prepare_active ?
+        Number(data.prepare_progress || 0) : Number(data.progress || 0);
+      const progressText = progressValue + "%" +
         (rateText ? " " + rateText : "");
       up("resmedOtaState", stateText);
       up("resmedOtaProgress", progressText);
@@ -1112,19 +1120,25 @@
 
       const cancel = document.getElementById("resmedOtaCancelBtn");
       if (cancel) {
-        const cancellable = data.active && data.phase !== "applying";
+        const cancellable = (data.active || resmedDirectUploadBusy) &&
+          data.phase !== "applying";
         cancel.style.display = cancellable ? "" : "none";
         cancel.disabled = !cancellable;
       }
 
+      const upload = document.getElementById("resmedOtaUploadBtn");
+      if (upload) upload.disabled = data.active || resmedDirectUploadBusy;
+
       const progress = document.getElementById("resmedOtaUploadProgress");
       const bar = document.getElementById("resmedOtaUploadBar");
       progress.style.display =
-        data.active || data.phase === "complete" || data.phase === "verified" ?
+        data.active || resmedDirectUploadBusy || data.phase === "complete" ||
+          data.phase === "verified" ?
           "block" : "none";
-      bar.style.width = (data.progress || 0) + "%";
-      if (data.last_error) {
-        msg("resmedOtaMsg", data.last_error, false, true);
+      bar.style.width = progressValue + "%";
+      if (data.prepare_error || data.last_error) {
+        msg("resmedOtaMsg", data.prepare_error || data.last_error,
+          false, true);
       } else if (data.phase === "verified") {
         msg("resmedOtaMsg", "Upload complete. Ready to apply.", true, true);
       } else if (data.phase === "complete") {
@@ -1206,6 +1220,13 @@
 
         const actions = document.createElement("div");
         actions.className = "resmed-repository-actions";
+        const prepare = document.createElement("button");
+        prepare.className = "btn primary";
+        prepare.textContent = "Upload";
+        prepare.onclick = () => resmedRepositoryPrepare(
+          entry.path, entry.name || entry.path);
+        actions.appendChild(prepare);
+
         const remove = document.createElement("button");
         remove.className = "btn danger";
         remove.textContent = "Remove";
@@ -1349,23 +1370,25 @@
       }
     }
 
+    async function resmedRepositoryPrepare(path, name) {
+      try {
+        msg("resmedRepositoryMsg", "Preparing " + name, true, true);
+        await postResmedOta("/api/resmed-ota/prepare", {
+          path,
+          filename: name,
+          transient: false,
+        });
+        await waitResmedOta((data) =>
+          data.phase === "verified" || data.phase === "complete", 4200);
+        msg("resmedRepositoryMsg",
+          "Firmware uploaded to the device and ready to apply", true, true);
+      } catch (error) {
+        msg("resmedRepositoryMsg", error.message, false, true);
+      }
+    }
+
     function sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
-    }
-
-    function hexFromBytes(bytes) {
-      let output = "";
-      const hex = "0123456789ABCDEF";
-      for (const byte of bytes) {
-        output += hex[byte >> 4] + hex[byte & 15];
-      }
-      return output;
-    }
-
-    async function readFileMagicHex(file) {
-      const len = Math.min(8, file.size);
-      const buffer = await file.slice(0, len).arrayBuffer();
-      return hexFromBytes(new Uint8Array(buffer));
     }
 
     async function getResmedOta() {
@@ -1381,6 +1404,10 @@
         if (data.phase === "error") {
           throw new Error(data.last_error || "ResMed OTA failed");
         }
+        if (data.prepare_state === "error" ||
+            data.prepare_state === "cancelled") {
+          throw new Error(data.prepare_error || "Image preparation failed");
+        }
         if (predicate(data)) return data;
         await sleep(500);
       }
@@ -1394,8 +1421,11 @@
         body: JSON.stringify(body || {}),
       });
       const data = await response.json();
-      if (!response.ok && data.error) throw new Error(data.error);
-      if (data.queued) {
+      if (!response.ok) {
+        throw new Error(data.error || data.last_error ||
+          ("HTTP " + response.status));
+      }
+      if (data.queued || data.result === "queued") {
         setTimeout(getResmedOta, 300);
         return data;
       }
@@ -1403,39 +1433,27 @@
       return data;
     }
 
-    async function uploadResmedImage(file, magic) {
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        const progress = document.getElementById("resmedOtaUploadProgress");
-        const bar = document.getElementById("resmedOtaUploadBar");
+    function resmedDirectUploadProgress(name, committed, total) {
+      const safeTotal = Math.max(0, Number(total) || 0);
+      const safeCommitted = Math.min(safeTotal,
+        Math.max(0, Number(committed) || 0));
+      const percent = safeTotal > 0 ?
+        Math.round((safeCommitted * 100) / safeTotal) : 0;
+      const progress = document.getElementById("resmedOtaUploadProgress");
+      const bar = document.getElementById("resmedOtaUploadBar");
+      const cancel = document.getElementById("resmedOtaCancelBtn");
+      const upload = document.getElementById("resmedOtaUploadBtn");
 
-        xhr.upload.onprogress = (event) => {
-          if (!event.lengthComputable) return;
-          progress.style.display = "block";
-          bar.style.width = Math.round((event.loaded * 100) / event.total) + "%";
-        };
-        xhr.onload = () => {
-          let data = {};
-          try {
-            data = JSON.parse(xhr.responseText || "{}");
-          } catch (error) {}
-          renderResmedOta(data);
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(data);
-          } else {
-            reject(new Error(data.last_error || data.error ||
-              ("Upload failed: HTTP " + xhr.status)));
-          }
-        };
-        xhr.onerror = () => reject(new Error("Upload error"));
-        xhr.open("POST", "/api/resmed-ota/upload?size=" +
-          encodeURIComponent(file.size) + "&magic=" +
-          encodeURIComponent(magic || ""));
-
-        const form = new FormData();
-        form.append("firmware", file);
-        xhr.send(form);
-      });
+      up("resmedOtaState", "Uploading " + name);
+      up("resmedOtaProgress", percent + "% " + fmtBytes(safeCommitted) +
+        " / " + fmtBytes(safeTotal));
+      if (progress) progress.style.display = "block";
+      if (bar) bar.style.width = percent + "%";
+      if (cancel) {
+        cancel.style.display = "";
+        cancel.disabled = false;
+      }
+      if (upload) upload.disabled = true;
     }
 
     async function resmedOtaUpload() {
@@ -1446,9 +1464,33 @@
       }
 
       try {
+        const current = await getResmedOta();
+        if (current.active || current.phase === "verified") {
+          throw new Error("Another ResMed firmware operation is active");
+        }
+
+        storageUploadCancelRequested = false;
+        storageUploadSetBusy(true);
+        resmedDirectUploadBusy = true;
+        const upload = document.getElementById("resmedOtaUploadBtn");
+        if (upload) upload.disabled = true;
         msg("resmedOtaMsg", "Uploading", true, true);
-        const magic = await readFileMagicHex(file);
-        await uploadResmedImage(file, magic);
+        const uploaded = await storageUploadFile(
+          file, "/aircannect", 0, 1, resmedDirectUploadProgress, {
+            filename: "resmed-ota-input.image",
+            conflict: "replace",
+            confirmReplace: false,
+          });
+        if (!uploaded) throw new Error("Upload was not completed");
+
+        storageUploadCurrentId = 0;
+        storageUploadSetBusy(false);
+        resmedDirectUploadBusy = false;
+        await postResmedOta("/api/resmed-ota/prepare", {
+          path: "/aircannect/resmed-ota-input.image",
+          filename: file.name,
+          transient: true,
+        });
         const result = await waitResmedOta((data) =>
           data.phase === "complete" || data.phase === "verified", 4200);
         msg("resmedOtaMsg",
@@ -1458,6 +1500,11 @@
       } catch (error) {
         msg("resmedOtaMsg", error.message, false, true);
         loadOta();
+      } finally {
+        storageUploadCurrentId = 0;
+        storageUploadSetBusy(false);
+        resmedDirectUploadBusy = false;
+        setTimeout(getResmedOta, 0);
       }
     }
 
@@ -1486,6 +1533,15 @@
       }
 
       try {
+        storageUploadCancelRequested = true;
+        if (storageUploadCurrentId) {
+          try {
+            await storageUploadRequest(
+              "/api/storage/upload/cancel?id=" +
+                encodeURIComponent(storageUploadCurrentId),
+              {method: "POST"});
+          } catch (_) {}
+        }
         await postResmedOta("/api/resmed-ota/abort", {});
         msg("resmedOtaMsg", "Cancelled", false, true);
         setTimeout(getResmedOta, 300);

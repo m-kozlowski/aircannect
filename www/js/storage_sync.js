@@ -516,13 +516,13 @@
       }
     }
 
-    async function storageStartUpload(file, directory, conflict) {
+    async function storageStartUpload(file, directory, conflict, filename) {
       return storageUploadRequest("/api/storage/upload/start", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
           directory,
-          filename: file.name,
+          filename: filename || file.name,
           total_size: file.size,
           conflict: conflict || "fail"
         })
@@ -552,11 +552,14 @@
     }
 
     async function storageUploadFile(file, directory, fileIndex, fileCount,
-                                     progressCallback) {
+                                     progressCallback, options) {
       const updateProgress = progressCallback || storageUploadProgress;
-      let conflict = "fail";
+      const settings = options || {};
+      const destinationName = settings.filename || file.name;
+      let conflict = settings.conflict || "fail";
       for (;;) {
-        const session = await storageStartUpload(file, directory, conflict);
+        const session = await storageStartUpload(
+          file, directory, conflict, destinationName);
         storageUploadCurrentId = Number(session.id) || 0;
         try {
           let status = await storageWaitForUpload(session.id, (current) =>
@@ -602,7 +605,8 @@
         } catch (error) {
           storageUploadCurrentId = 0;
           if (error.message === "destination_exists" && conflict === "fail") {
-            if (window.confirm(file.name + " already exists. Replace it?")) {
+            if (settings.confirmReplace !== false &&
+                window.confirm(file.name + " already exists. Replace it?")) {
               conflict = "replace";
               continue;
             }

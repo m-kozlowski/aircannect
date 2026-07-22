@@ -143,7 +143,7 @@ void ResmedFirmwarePreparer::publish_device_identifier(
 bool ResmedFirmwarePreparer::active() const {
     if (!lock()) return true;
 
-    const bool result = task_ || status_.active();
+    const bool result = task_ || result_pending_ || status_.active();
     unlock();
     return result;
 }
