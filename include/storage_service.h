@@ -155,6 +155,7 @@ namespace StorageService {
 
 // lifecycle
 void begin();
+bool request_mount_retry();
 
 // EDF file opens
 bool enqueue_edf_open_numeric(const char *path,

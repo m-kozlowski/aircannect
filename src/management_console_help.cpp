@@ -134,7 +134,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "storage") {
         out.println("[HELP storage]");
         out.println("  storage status            show mounted storage state");
-        out.println("  storage remount           retry storage mount");
+        out.println("  storage retry             retry storage mount");
         out.println("  storage write-test P T    append text in the background");
         out.println("  storage write-test status show background test result");
         return;

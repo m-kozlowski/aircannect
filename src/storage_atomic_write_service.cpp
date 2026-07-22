@@ -238,7 +238,6 @@ bool StorageAtomicWriteService::take_completion(OperationTicket ticket,
 
 bool StorageAtomicWriteService::recover_transaction_locked(
     const char *&error) {
-    Storage::Guard guard;
 
     if (!Storage::exists(TRANSACTION_DIR)) {
         recovery_needed_ = false;
@@ -305,7 +304,6 @@ bool StorageAtomicWriteService::open_locked(const char *&error) {
         return false;
     }
 
-    Storage::Guard guard;
     if (!ensure_parent_directories(job_->path) ||
         !Storage::ensure_dir(TRANSACTION_DIR)) {
         error = "parent_create_failed";
@@ -336,7 +334,6 @@ bool StorageAtomicWriteService::write_locked(const char *&error) {
     const size_t wanted = std::min(remaining, WRITE_STEP_BYTES);
     size_t written = 0;
     {
-        Storage::Guard guard;
         written = job_->output.write(job_->bytes->data() + job_->offset,
                                      wanted);
     }
@@ -353,7 +350,6 @@ bool StorageAtomicWriteService::write_locked(const char *&error) {
 void StorageAtomicWriteService::close_output_locked() {
     if (!job_->output) return;
 
-    Storage::Guard guard;
     job_->output.close();
 }
 
@@ -364,7 +360,6 @@ bool StorageAtomicWriteService::flush_locked(const char *&error) {
     }
 
     {
-        Storage::Guard guard;
         job_->output.flush();
         job_->output.close();
     }
@@ -377,7 +372,6 @@ bool StorageAtomicWriteService::record_locked(const char *&error) {
     copy_cstr(record.path, sizeof(record.path), job_->path);
     finalize_record(record);
 
-    Storage::Guard guard;
     File file = Storage::open(RECORD_TEMP_PATH, "w");
     if (!file) {
         error = "transaction_record_open_failed";
@@ -402,7 +396,6 @@ bool StorageAtomicWriteService::record_locked(const char *&error) {
 }
 
 bool StorageAtomicWriteService::publish_locked(const char *&error) {
-    Storage::Guard guard;
 
     const bool had_previous = Storage::exists(job_->path);
     if (had_previous && !Storage::rename(job_->path, PREVIOUS_FILE_PATH)) {

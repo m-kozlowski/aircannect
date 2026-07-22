@@ -293,7 +293,6 @@ bool StorageScanService::push_directory_locked(const char *path,
         return false;
     }
 
-    Storage::Guard guard;
     File directory = Storage::open(path, "r");
     if (!directory || !directory.isDirectory()) {
         if (directory) directory.close();
@@ -319,7 +318,6 @@ bool StorageScanService::start_next_root_locked(const char *&error) {
         uint64_t size = 0;
         time_t last_write = 0;
         {
-            Storage::Guard guard;
             File node = Storage::open(root.path, "r");
             if (node) {
                 exists = true;
@@ -371,7 +369,6 @@ bool StorageScanService::scan_next_entry_locked(const char *&error) {
     StorageDirChild child;
     if (!storage_read_next_dir_child(frame.directory, child)) {
         {
-            Storage::Guard guard;
             frame.directory.close();
         }
         frame = Job::WalkFrame();
@@ -427,7 +424,6 @@ void StorageScanService::close_directories_locked() {
     while (job_->walk_depth > 0) {
         Job::WalkFrame &frame = job_->walk[job_->walk_depth - 1];
         if (frame.directory) {
-            Storage::Guard guard;
             frame.directory.close();
         }
         frame = Job::WalkFrame();

@@ -772,7 +772,6 @@ bool StorageArchiveService::push_walk_dir_locked(const char *path) {
 
 bool StorageArchiveService::ensure_walk_dir_open_locked(WalkFrame &frame) {
     if (frame.opened) return true;
-    Storage::Guard guard;
     frame.dir = Storage::open(frame.path, "r");
     if (!frame.dir) {
         set_error_locked("not_found");
@@ -796,7 +795,6 @@ bool StorageArchiveService::prepare_selection_step_locked() {
     if (!selection_names_) return true;
 
     if (!selection_base_checked_) {
-        Storage::Guard guard;
         File base = Storage::open(status_.source_path, "r");
         if (!base || !base.isDirectory()) {
             if (base) base.close();
@@ -829,7 +827,6 @@ bool StorageArchiveService::prepare_selection_step_locked() {
     uint64_t size = 0;
     time_t last_write = 0;
     {
-        Storage::Guard guard;
         File child = Storage::open(child_path, "r");
         if (child) {
             found = true;
@@ -882,7 +879,6 @@ bool StorageArchiveService::prepare_step_locked() {
         StorageDirChild child;
         if (!storage_read_next_dir_child(frame.dir, child)) {
             if (frame.opened) {
-                Storage::Guard guard;
                 frame.dir.close();
                 frame.opened = false;
             }
@@ -961,7 +957,6 @@ void StorageArchiveService::close_download_input_locked(
     StorageArchiveDownload &download) {
     if (!download.input_open) return;
 
-    Storage::Guard guard;
     download.input.close();
     download.input_open = false;
 }
@@ -1142,7 +1137,6 @@ size_t StorageArchiveService::produce_download_locked(
             ArchiveEntry &entry = entries_[download.entry_index];
             if (download.current_file_offset >= entry.size) {
                 if (download.input_open) {
-                    Storage::Guard guard;
                     download.input.close();
                     download.input_open = false;
                 }
@@ -1163,7 +1157,6 @@ size_t StorageArchiveService::produce_download_locked(
                              status_.source_path,
                              name);
                 }
-                Storage::Guard guard;
                 download.input = Storage::open(absolute, "r");
                 if (download.input) set_archive_file_buffer(download.input);
                 if (!download.input || download.input.isDirectory()) {
@@ -1181,7 +1174,6 @@ size_t StorageArchiveService::produce_download_locked(
                                                 : out_remaining);
             size_t read = 0;
             {
-                Storage::Guard guard;
                 read = download.input.read(buffer + written, want);
             }
             if (read == 0) {

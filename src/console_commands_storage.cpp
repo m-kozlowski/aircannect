@@ -49,8 +49,11 @@ void handle_storage(Print &out, String rest) {
         ConsoleFormat::print_storage_status(out, Storage::status());
         return;
     }
-    if (lower == "remount" || lower == "retry") {
-        Storage::remount();
+    if (lower == "retry") {
+        out.print("[STORAGE] mount retry ");
+        out.println(StorageService::request_mount_retry()
+                        ? "queued"
+                        : "rejected");
         ConsoleFormat::print_storage_status(out, Storage::status());
         return;
     }
@@ -81,7 +84,7 @@ void handle_storage(Print &out, String rest) {
     }
 
     print_unknown_command(out, "STORAGE",
-                          "storage status, remount, "
+                          "storage status, retry, "
                           "write-test [status|P T]");
 }
 

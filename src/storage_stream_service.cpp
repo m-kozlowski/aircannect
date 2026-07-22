@@ -221,7 +221,6 @@ void StorageStreamService::finish(StorageByteStream &stream, bool complete) {
 void StorageStreamService::close_input_locked(StorageByteStream &stream) {
     if (!stream.input_open) return;
 
-    Storage::Guard guard;
     stream.input.close();
     stream.input_open = false;
 }
@@ -245,7 +244,6 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
     }
 
     {
-        Storage::Guard guard;
         stream.input = Storage::open(stream.path, "r");
         if (stream.input && !stream.input.isDirectory()) {
             stream.size = static_cast<uint64_t>(stream.input.size());
@@ -300,7 +298,6 @@ bool StorageStreamService::produce_locked(StorageByteStream &stream) {
 
     size_t bytes_read = 0;
     if (wanted > 0) {
-        Storage::Guard guard;
         bytes_read = stream.input.read(span, wanted);
     }
     if (wanted > 0 && bytes_read != wanted) {
@@ -317,7 +314,6 @@ bool StorageStreamService::produce_locked(StorageByteStream &stream) {
         uint64_t final_size = 0;
         uint64_t final_modified = 0;
         {
-            Storage::Guard guard;
             final_size = static_cast<uint64_t>(stream.input.size());
             final_modified = file_modified(stream.input);
         }

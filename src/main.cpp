@@ -959,11 +959,6 @@ void loop() {
     drain_can_rx_after("network_services.sync");
 
     // Log and time services
-    const bool storage_capacity_update_allowed =
-        !stream_activity_active &&
-        as11_device_service.state().therapy_state() !=
-            As11TherapyState::Running;
-
     Log::poll(wifi_manager.sta_ipv4_online());
     drain_can_rx_after("log");
 
@@ -1003,9 +998,6 @@ void loop() {
     drain_can_rx_after("resmed_ota_post");
 
     // Storage and exports
-    Storage::poll(storage_capacity_update_allowed);
-    drain_can_rx_after("storage_poll");
-
     const ExportReportActivity report_activity{
         report_status.foreground_active,
         report_status.background_active || report_catalog_refresh_pending,

@@ -7,7 +7,6 @@ namespace aircannect {
 
 bool storage_read_next_dir_child(File &dir, StorageDirChild &out) {
     out = StorageDirChild();
-    Storage::Guard guard;
     File child = dir.openNextFile();
     if (!child) return false;
 

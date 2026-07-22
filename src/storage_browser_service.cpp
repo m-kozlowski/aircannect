@@ -287,7 +287,6 @@ StorageListingRead StorageDirectoryListing::read(
 void StorageDirectoryListing::close_dir_locked() {
     if (!dir_open_) return;
 
-    Storage::Guard guard;
     dir_.close();
     dir_open_ = false;
 }
@@ -334,7 +333,6 @@ bool StorageDirectoryListing::ensure_dir_open_locked() {
     if (dir_open_) return true;
     if (!build_) return false;
 
-    Storage::Guard guard;
     dir_ = Storage::open(build_->path(), "r");
     if (!dir_) {
         fail_locked("not_found");
@@ -735,7 +733,6 @@ void StorageDownloadProducer::finish(StoragePreparedDownload &download) {
 void StorageDownloadProducer::close_file(StoragePreparedDownload &download) {
     if (!download.input_open) return;
 
-    Storage::Guard guard;
     download.input.close();
     download.input_open = false;
 }
@@ -804,7 +801,6 @@ StorageBrowserStep StorageDownloadProducer::step() {
         bool directory = false;
         uint64_t size = 0;
         if (ring_storage) {
-            Storage::Guard guard;
             input = Storage::open(download->path, "r");
             if (input) {
                 directory = input.isDirectory();
@@ -821,7 +817,6 @@ StorageBrowserStep StorageDownloadProducer::step() {
         } else if (!input || directory) {
             Memory::free(ring_storage);
             if (input) {
-                Storage::Guard guard;
                 input.close();
             }
             fail_locked(*download,
@@ -878,7 +873,6 @@ StorageBrowserStep StorageDownloadProducer::step() {
 
     size_t bytes_read = 0;
     if (wanted > 0) {
-        Storage::Guard guard;
         bytes_read = download->input.read(span, wanted);
     }
 

@@ -157,7 +157,6 @@ bool StorageFileLogSink::ensure_directory() {
 void StorageFileLogSink::close_file(bool flush) {
     if (!file_) return;
 
-    Storage::Guard guard;
     if (flush) file_.flush();
     file_.close();
     last_flush_ms_ = 0;
@@ -233,7 +232,6 @@ bool StorageFileLogSink::open_file(size_t next_write_length) {
         File existing = Storage::open(AC_FILE_LOG_PATH, "r");
         uint64_t existing_size = 0;
         if (existing) {
-            Storage::Guard guard;
             existing_size = existing.size();
             existing.close();
         }
@@ -249,7 +247,6 @@ bool StorageFileLogSink::open_file(size_t next_write_length) {
     file_ = Storage::open(AC_FILE_LOG_PATH, FILE_APPEND);
     if (!file_) return false;
     {
-        Storage::Guard guard;
         file_size_ = file_.size();
     }
     last_flush_ms_ = millis();
@@ -285,7 +282,6 @@ bool StorageFileLogSink::write_line(const Line &line) {
 
     size_t written = 0;
     {
-        Storage::Guard guard;
         written = file_.write(
             reinterpret_cast<const uint8_t *>(line.bytes), line.length);
     }
@@ -307,7 +303,6 @@ bool StorageFileLogSink::flush_if_due() {
         return false;
     }
 
-    Storage::Guard guard;
     file_.flush();
     last_flush_ms_ = millis();
     return true;

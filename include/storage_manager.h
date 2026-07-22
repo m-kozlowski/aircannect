@@ -38,8 +38,6 @@ struct StorageStatus {
 namespace Storage {
 
 void begin();
-void poll(bool allow_capacity_update);
-bool remount();
 
 StorageStatus status();
 bool try_status(StorageStatus &out);

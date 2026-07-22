@@ -204,7 +204,6 @@ StoragePathCompletion StoragePathService::execute_stat(const JobSlot &job) const
     StoragePathCompletion completion;
     completion.ticket = job.ticket;
 
-    Storage::Guard guard;
     if (!Storage::exists(job.source)) {
         completion.outcome = OperationOutcome::succeeded();
         return completion;
@@ -231,7 +230,6 @@ StoragePathCompletion StoragePathService::execute_move_replacing(const JobSlot &
     StoragePathCompletion completion;
     completion.ticket = job.ticket;
 
-    Storage::Guard guard;
     if (!Storage::exists(job.source)) {
         completion.outcome = OperationOutcome::failed();
         copy_cstr(completion.error, sizeof(completion.error),
@@ -261,7 +259,6 @@ StoragePathCompletion StoragePathService::execute_remove(
     StoragePathCompletion completion;
     completion.ticket = job.ticket;
 
-    Storage::Guard guard;
     if (!Storage::exists(job.source)) {
         completion.outcome = OperationOutcome::succeeded();
         return completion;

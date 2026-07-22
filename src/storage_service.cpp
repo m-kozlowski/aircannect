@@ -231,6 +231,8 @@ StorageStreamService stream_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 size_t foreground_turn = 0;
+std::atomic<bool> mount_retry_requested{false};
+std::atomic<bool> capacity_update_allowed{true};
 
 static constexpr size_t AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY = 512;
 StorageDiagnosticStatus diagnostic;
@@ -311,7 +313,6 @@ bool str_backup_artifact_name(const char *name) {
 void cleanup_str_backup_artifacts() {
     if (!Storage::mounted()) return;
     uint32_t removed = 0;
-    Storage::Guard guard;
     File root = Storage::open("/", "r");
     if (!root || !root.isDirectory()) {
         if (root) root.close();
@@ -1158,7 +1159,6 @@ bool process_open(const JobSlot &job) {
         return fail("storage_not_mounted");
     }
 
-    Storage::Guard guard;
     if (!ensure_parent_dirs(job.path)) {
         return fail("mkdir_failed");
     }
@@ -1234,7 +1234,6 @@ bool process_record(const JobSlot &job) {
         return false;
     }
 
-    Storage::Guard guard;
     state.file.seek(state.file.size());
     const size_t written = state.file.write(job.bytes, job.len);
     if (written != job.len) {
@@ -1370,7 +1369,6 @@ bool process_str_record(const JobSlot &job) {
         return false;
     }
 
-    Storage::Guard guard;
     if (!ensure_parent_dirs(job.path)) {
         set_error("str_mkdir_failed");
         return false;
@@ -1589,7 +1587,6 @@ bool process_identification_files(const JobSlot &job) {
         return false;
     }
 
-    Storage::Guard guard;
     if (!write_file_exact(AC_EDF_IDENTIFICATION_JSON_PATH,
                           job.bytes,
                           job.len)) {
@@ -1625,7 +1622,6 @@ bool process_identification_files(const JobSlot &job) {
 }
 
 bool process_close(const JobSlot &job) {
-    Storage::Guard guard;
     OpenFile &state = open_files[file_index(job.kind)];
     close_file(state);
     refresh_open_file_count();
@@ -1637,7 +1633,6 @@ bool process_close(const JobSlot &job) {
 
 void close_active_read_file() {
     if (active_read_file) {
-        Storage::Guard guard;
         active_read_file.close();
     }
     active_read_index = SIZE_MAX;
@@ -1752,7 +1747,6 @@ bool open_read_job(size_t index, const char *&error) {
     if (active_read_index != index) {
         close_active_read_file();
 
-        Storage::Guard guard;
         active_read_file = Storage::open(job.path, "r");
         if (!active_read_file || active_read_file.isDirectory()) {
             if (active_read_file) active_read_file.close();
@@ -1765,7 +1759,6 @@ bool open_read_job(size_t index, const char *&error) {
     if (!job.started) {
         size_t file_size = 0;
         {
-            Storage::Guard guard;
             file_size = active_read_file.size();
         }
 
@@ -1797,7 +1790,6 @@ bool open_read_job(size_t index, const char *&error) {
 
     if (job.target_length == 0) return true;
 
-    Storage::Guard guard;
     const uint64_t position = job.offset + job.bytes_read;
     if (position > UINT32_MAX ||
         !active_read_file.seek(static_cast<uint32_t>(position))) {
@@ -1884,7 +1876,6 @@ bool process_read_step() {
     const size_t requested = std::min(remaining, AC_STORAGE_READ_STEP_BYTES);
     size_t received = 0;
     {
-        Storage::Guard guard;
         const int read = active_read_file.read(job.bytes + job.bytes_read,
                                                requested);
         if (read > 0) received = static_cast<size_t>(read);
@@ -1961,7 +1952,6 @@ bool process_diagnostic_step() {
     size_t written = 0;
     bool opened = false;
     {
-        Storage::Guard guard;
         File file = Storage::open(path, "a");
         opened = static_cast<bool>(file);
         if (opened) {
@@ -2050,8 +2040,12 @@ void task_entry(void *) {
             const bool foreground_due =
                 file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
             const bool tail_read_active = file_log_tail_read_active();
-            if (!foreground_due && !tail_read_active &&
-                file_log_sink.step()) {
+
+            if (mount_retry_requested.exchange(false)) {
+                (void)Storage::retry_mount();
+                did_work = true;
+            } else if (!foreground_due && !tail_read_active &&
+                       file_log_sink.step()) {
                 did_work = true;
                 file_log_burst++;
             } else if (process_foreground_step()) {
@@ -2072,6 +2066,8 @@ void task_entry(void *) {
                        file_log_sink.step()) {
                 did_work = true;
                 file_log_burst++;
+            } else if (Storage::poll(capacity_update_allowed.load())) {
+                did_work = true;
             }
         }
 
@@ -2229,6 +2225,18 @@ void begin() {
               static_cast<unsigned>(AC_STORAGE_PREPARED_READ_CAPACITY),
               static_cast<unsigned>(AC_EDF_STORAGE_SLOT_BYTES),
               stats.using_psram ? "yes" : "no");
+}
+
+bool request_mount_retry() {
+    if (!stats.initialized || !stats.available) return false;
+
+    bool expected = false;
+    if (!mount_retry_requested.compare_exchange_strong(expected, true)) {
+        return false;
+    }
+
+    wake_service_task();
+    return true;
 }
 
 bool enqueue_edf_open_numeric(const char *path,
@@ -2503,6 +2511,8 @@ FileLogSinkPort &file_log_port() {
 }
 
 void publish_activity(const ActivitySnapshot &activity) {
+    capacity_update_allowed.store(!activity.therapy_active &&
+                                  !activity.realtime_stream_active);
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
                                        !activity.ota_install_active);
     const bool scan_paused =

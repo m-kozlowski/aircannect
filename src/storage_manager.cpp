@@ -25,24 +25,41 @@ namespace aircannect {
 namespace Storage {
 namespace {
 
-StorageStatus current;
+StorageStatus owner_status;
+StorageStatus published_status;
 bool initialized = false;
 
-SemaphoreHandle_t sd_mutex() {
-    static SemaphoreHandle_t m = xSemaphoreCreateRecursiveMutex();
+SemaphoreHandle_t status_mutex() {
+    static SemaphoreHandle_t m = xSemaphoreCreateMutex();
     return m;
 }
 
+bool lock_status(TickType_t wait = portMAX_DELAY) {
+    SemaphoreHandle_t mutex = status_mutex();
+    return mutex && xSemaphoreTake(mutex, wait) == pdTRUE;
+}
+
+void unlock_status() {
+    SemaphoreHandle_t mutex = status_mutex();
+    if (mutex) xSemaphoreGive(mutex);
+}
+
+void publish_status() {
+    if (!lock_status()) return;
+    published_status = owner_status;
+    unlock_status();
+}
+
 void reset_status() {
-    current = StorageStatus();
-    copy_cstr(current.mount_point, sizeof(current.mount_point),
+    owner_status = StorageStatus();
+    copy_cstr(owner_status.mount_point, sizeof(owner_status.mount_point),
               AC_STORAGE_MOUNT_POINT);
-    current.max_open_files = AC_STORAGE_MAX_OPEN_FILES;
+    owner_status.max_open_files = AC_STORAGE_MAX_OPEN_FILES;
 }
 
 fs::FS *active_fs() {
-    if (!current.mounted) return nullptr;
-    switch (current.type) {
+    if (!owner_status.mounted) return nullptr;
+    switch (owner_status.type) {
         case StorageType::SdMmc:
 #if AC_STORAGE_SDMMC_ENABLED && SOC_SDMMC_HOST_SUPPORTED
             return &SD_MMC;
@@ -64,11 +81,11 @@ fs::FS *active_fs() {
 void set_state(StorageType type,
                StorageState state,
                const char *error = nullptr) {
-    current.type = type;
-    current.state = state;
-    current.mounted = state == StorageState::Mounted;
-    copy_cstr(current.last_error, sizeof(current.last_error), error);
-    current.last_checked_ms = millis();
+    owner_status.type = type;
+    owner_status.state = state;
+    owner_status.mounted = state == StorageState::Mounted;
+    copy_cstr(owner_status.last_error, sizeof(owner_status.last_error), error);
+    owner_status.last_checked_ms = millis();
 }
 
 #if (AC_STORAGE_SDMMC_ENABLED && SOC_SDMMC_HOST_SUPPORTED) || \
@@ -86,33 +103,35 @@ const char *card_type_name(uint8_t type) {
 
 #if AC_STORAGE_SDMMC_ENABLED && SOC_SDMMC_HOST_SUPPORTED
 void update_sdmmc_capacity() {
-    current.card_size_bytes = SD_MMC.cardSize();
-    current.total_bytes = SD_MMC.totalBytes();
-    current.used_bytes = SD_MMC.usedBytes();
-    current.free_bytes = current.total_bytes > current.used_bytes
-                             ? current.total_bytes - current.used_bytes
-                             : 0;
-    current.last_checked_ms = millis();
+    owner_status.card_size_bytes = SD_MMC.cardSize();
+    owner_status.total_bytes = SD_MMC.totalBytes();
+    owner_status.used_bytes = SD_MMC.usedBytes();
+    owner_status.free_bytes =
+        owner_status.total_bytes > owner_status.used_bytes
+            ? owner_status.total_bytes - owner_status.used_bytes
+            : 0;
+    owner_status.last_checked_ms = millis();
 }
 #endif
 
 #if AC_STORAGE_SPI_SD_ENABLED
 void update_spi_sd_capacity() {
-    current.card_size_bytes = SD.cardSize();
-    current.total_bytes = SD.totalBytes();
-    current.used_bytes = SD.usedBytes();
-    current.free_bytes = current.total_bytes > current.used_bytes
-                             ? current.total_bytes - current.used_bytes
-                             : 0;
-    current.last_checked_ms = millis();
+    owner_status.card_size_bytes = SD.cardSize();
+    owner_status.total_bytes = SD.totalBytes();
+    owner_status.used_bytes = SD.usedBytes();
+    owner_status.free_bytes =
+        owner_status.total_bytes > owner_status.used_bytes
+            ? owner_status.total_bytes - owner_status.used_bytes
+            : 0;
+    owner_status.last_checked_ms = millis();
 }
 #endif
 
 bool mount_sdmmc() {
 #if AC_STORAGE_SDMMC_ENABLED
-    current.configured = true;
-    current.type = StorageType::SdMmc;
-    current.width = AC_SDMMC_WIDTH;
+    owner_status.configured = true;
+    owner_status.type = StorageType::SdMmc;
+    owner_status.width = AC_SDMMC_WIDTH;
 #if !SOC_SDMMC_HOST_SUPPORTED
     set_state(StorageType::SdMmc, StorageState::Error,
               "SDMMC host not supported by this chip");
@@ -150,7 +169,7 @@ bool mount_sdmmc() {
     }
 
     const uint8_t card_type = SD_MMC.cardType();
-    copy_cstr(current.card_type, sizeof(current.card_type),
+    copy_cstr(owner_status.card_type, sizeof(owner_status.card_type),
               card_type_name(card_type));
     if (card_type == CARD_NONE) {
         SD_MMC.end();
@@ -170,9 +189,9 @@ bool mount_sdmmc() {
 
 bool mount_spi_sd() {
 #if AC_STORAGE_SPI_SD_ENABLED
-    current.configured = true;
-    current.type = StorageType::SpiSd;
-    current.width = 1;
+    owner_status.configured = true;
+    owner_status.type = StorageType::SpiSd;
+    owner_status.width = 1;
     if (AC_SPI_SD_CS_GPIO < 0 || AC_SPI_SD_SCK_GPIO < 0 ||
         AC_SPI_SD_MISO_GPIO < 0 || AC_SPI_SD_MOSI_GPIO < 0) {
         set_state(StorageType::SpiSd, StorageState::Error,
@@ -190,7 +209,7 @@ bool mount_spi_sd() {
     }
 
     const uint8_t card_type = SD.cardType();
-    copy_cstr(current.card_type, sizeof(current.card_type),
+    copy_cstr(owner_status.card_type, sizeof(owner_status.card_type),
               card_type_name(card_type));
     if (card_type == CARD_NONE) {
         SD.end();
@@ -208,15 +227,15 @@ bool mount_spi_sd() {
 }
 
 bool capacity_update_due(uint32_t now_ms) {
-    if (!current.mounted) return false;
-    return static_cast<int32_t>(now_ms - current.last_checked_ms) >=
+    if (!owner_status.mounted) return false;
+    return static_cast<int32_t>(now_ms - owner_status.last_checked_ms) >=
         static_cast<int32_t>(AC_STORAGE_STATUS_POLL_MS);
 }
 
 void update_capacity_if_due(uint32_t now_ms) {
     if (!capacity_update_due(now_ms)) return;
 
-    switch (current.type) {
+    switch (owner_status.type) {
         case StorageType::SdMmc:
 #if AC_STORAGE_SDMMC_ENABLED && SOC_SDMMC_HOST_SUPPORTED
             update_sdmmc_capacity();
@@ -233,48 +252,15 @@ void update_capacity_if_due(uint32_t now_ms) {
     }
 }
 
-}  // namespace
-
-Guard::Guard() {
-    SemaphoreHandle_t m = sd_mutex();
-    if (m) xSemaphoreTakeRecursive(m, portMAX_DELAY);
-}
-
-Guard::~Guard() {
-    SemaphoreHandle_t m = sd_mutex();
-    if (m) xSemaphoreGiveRecursive(m);
-}
-
-void begin() {
-    Guard g;
-    if (initialized) return;
-    initialized = true;
-    remount();
-}
-
-void poll(bool allow_capacity_update) {
-    const bool need_begin = !initialized;
-    const uint32_t now = millis();
-    if (!need_begin &&
-        (!allow_capacity_update || !capacity_update_due(now))) {
-        return;
-    }
-
-    Guard g;
-    if (!initialized) begin();
-    if (allow_capacity_update) update_capacity_if_due(now);
-}
-
-bool remount() {
-    Guard g;
+bool mount_storage() {
     reset_status();
 
 #if AC_STORAGE_SDMMC_ENABLED
     if (mount_sdmmc()) {
         Log::logf(CAT_STORAGE, LOG_INFO,
                   "mounted type=%s card=%s mount=%s\n",
-                  type_name(current.type), current.card_type,
-                  current.mount_point);
+                  type_name(owner_status.type), owner_status.card_type,
+                  owner_status.mount_point);
         return true;
     }
 #endif
@@ -282,39 +268,69 @@ bool remount() {
     if (mount_spi_sd()) {
         Log::logf(CAT_STORAGE, LOG_INFO,
                   "mounted type=%s card=%s mount=%s\n",
-                  type_name(current.type), current.card_type,
-                  current.mount_point);
+                  type_name(owner_status.type), owner_status.card_type,
+                  owner_status.mount_point);
         return true;
     }
 #endif
 
-    if (!current.configured) {
+    if (!owner_status.configured) {
         set_state(StorageType::None, StorageState::Disabled,
                   "storage backend disabled");
     }
     Log::logf(CAT_STORAGE,
-              current.state == StorageState::Error ? LOG_WARN : LOG_DEBUG,
+              owner_status.state == StorageState::Error ? LOG_WARN : LOG_DEBUG,
               "unavailable type=%s state=%s error=%s\n",
-              type_name(current.type), state_name(current.state),
-              current.last_error[0] ? current.last_error : "--");
+              type_name(owner_status.type), state_name(owner_status.state),
+              owner_status.last_error[0] ? owner_status.last_error : "--");
     return false;
 }
 
+}  // namespace
+
+void begin() {
+    if (initialized) return;
+
+    initialized = true;
+    (void)mount_storage();
+    publish_status();
+}
+
+bool poll(bool allow_capacity_update) {
+    if (!initialized || !allow_capacity_update) return false;
+
+    const uint32_t now_ms = millis();
+    if (!capacity_update_due(now_ms)) return false;
+
+    update_capacity_if_due(now_ms);
+    publish_status();
+    return true;
+}
+
+bool retry_mount() {
+    if (!initialized) initialized = true;
+
+    if (owner_status.mounted) return true;
+
+    const bool mounted_now = mount_storage();
+    publish_status();
+    return mounted_now;
+}
+
 StorageStatus status() {
-    Guard g;
-    if (!initialized) begin();
-    return current;
+    StorageStatus out;
+    if (!lock_status()) return out;
+
+    out = published_status;
+    unlock_status();
+    return out;
 }
 
 bool try_status(StorageStatus &out) {
-    SemaphoreHandle_t m = sd_mutex();
-    if (m && xSemaphoreTakeRecursive(m, 0) != pdTRUE) return false;
-    if (!initialized) {
-        if (m) xSemaphoreGiveRecursive(m);
-        return false;
-    }
-    out = current;
-    if (m) xSemaphoreGiveRecursive(m);
+    if (!lock_status(0)) return false;
+
+    out = published_status;
+    unlock_status();
     return true;
 }
 
@@ -323,9 +339,7 @@ bool mounted() {
 }
 
 bool ensure_dir(const char *path) {
-    if (!path || !*path) return false;
-    Guard g;
-    if (!initialized) begin();
+    if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
     if (fs->exists(path)) {
@@ -338,17 +352,13 @@ bool ensure_dir(const char *path) {
 }
 
 bool exists(const char *path) {
-    if (!path || !*path) return false;
-    Guard g;
-    if (!initialized) begin();
+    if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     return fs && fs->exists(path);
 }
 
 bool remove(const char *path) {
-    if (!path || !*path) return false;
-    Guard g;
-    if (!initialized) begin();
+    if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
     if (fs->remove(path)) return true;
@@ -356,9 +366,7 @@ bool remove(const char *path) {
 }
 
 bool rmdir(const char *path) {
-    if (!path || !*path) return false;
-    Guard g;
-    if (!initialized) begin();
+    if (!initialized || !path || !*path) return false;
     fs::FS *fs = active_fs();
     if (!fs) return false;
     if (fs->rmdir(path)) return true;
@@ -366,17 +374,13 @@ bool rmdir(const char *path) {
 }
 
 bool rename(const char *from, const char *to) {
-    if (!from || !*from || !to || !*to) return false;
-    Guard g;
-    if (!initialized) begin();
+    if (!initialized || !from || !*from || !to || !*to) return false;
     fs::FS *fs = active_fs();
     return fs && fs->rename(from, to);
 }
 
 File open(const char *path, const char *mode) {
-    if (!path || !*path || !mode || !*mode) return File();
-    Guard g;
-    if (!initialized) begin();
+    if (!initialized || !path || !*path || !mode || !*mode) return File();
     fs::FS *fs = active_fs();
     return fs ? fs->open(path, mode) : File();
 }

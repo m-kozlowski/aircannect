@@ -205,7 +205,6 @@ bool StorageDeleteService::push_dir_locked(const char *path) {
 
 bool StorageDeleteService::ensure_dir_open_locked(WalkFrame &frame) {
     if (frame.opened) return true;
-    Storage::Guard guard;
     frame.dir = Storage::open(frame.path, "r");
     if (!frame.dir) {
         set_error_locked("not_found");
@@ -330,7 +329,6 @@ bool StorageDeleteService::status(StorageDeleteStatus &out,
 }
 
 bool StorageDeleteService::validate_base_locked() {
-    Storage::Guard guard;
     File base_dir = Storage::open(status_.base_path, "r");
     const bool valid = base_dir && base_dir.isDirectory();
     if (base_dir) base_dir.close();
@@ -393,7 +391,6 @@ bool StorageDeleteService::delete_next_locked() {
     bool exists = false;
     bool is_dir = false;
     {
-        Storage::Guard guard;
         File node = Storage::open(path, "r");
         if (node) {
             exists = true;
@@ -430,7 +427,6 @@ bool StorageDeleteService::delete_dir_step_locked() {
     StorageDirChild child;
     if (!storage_read_next_dir_child(frame.dir, child)) {
         {
-            Storage::Guard guard;
             frame.dir.close();
             frame.opened = false;
         }
