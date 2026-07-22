@@ -226,6 +226,24 @@ StoragePathCompletion StoragePathService::execute_stat(const JobSlot &job) const
     return completion;
 }
 
+StoragePathCompletion StoragePathService::execute_ensure_directory(
+    const JobSlot &job) const {
+    StoragePathCompletion completion;
+    completion.ticket = job.ticket;
+
+    if (!Storage::ensure_dir(job.source)) {
+        completion.outcome = OperationOutcome::failed();
+        copy_cstr(completion.error, sizeof(completion.error),
+                  "ensure_directory_failed");
+        return completion;
+    }
+
+    completion.exists = true;
+    completion.directory = true;
+    completion.outcome = OperationOutcome::succeeded();
+    return completion;
+}
+
 StoragePathCompletion StoragePathService::execute_move_replacing(const JobSlot &job) const {
     StoragePathCompletion completion;
     completion.ticket = job.ticket;
@@ -285,6 +303,9 @@ StoragePathCompletion StoragePathService::execute(const JobSlot &job) const {
     }
     if (job.operation == StoragePathOperation::MoveReplacing) {
         return execute_move_replacing(job);
+    }
+    if (job.operation == StoragePathOperation::EnsureDirectory) {
+        return execute_ensure_directory(job);
     }
     if (job.operation == StoragePathOperation::Remove) {
         return execute_remove(job);
