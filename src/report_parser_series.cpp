@@ -354,7 +354,7 @@ bool report_parse_series_spool(const ReportSpoolResult &result,
 
         ReportParsedChunk chunk;
         chunk.source = source;
-        chunk.kind = ReportStoreChunkKind::Series;
+        chunk.kind = ReportParsedChunkKind::Series;
         chunk.name = signal_name;
         chunk.start_ms = chunk_start;
         chunk.end_ms = chunk_end;

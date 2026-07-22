@@ -229,7 +229,7 @@ bool emit_therapy_1minute_signal(const TherapyOneMinuteSignalSpec &spec,
 
     ReportParsedChunk chunk;
     chunk.source = ReportSourceId::TherapyOneMinute;
-    chunk.kind = ReportStoreChunkKind::Series;
+    chunk.kind = ReportParsedChunkKind::Series;
     chunk.name = report_signal_store_name(spec.signal);
     chunk.start_ms = static_cast<int64_t>(start);
     chunk.end_ms =

@@ -159,7 +159,7 @@ bool report_parse_event_spool(const ReportSpoolResult &result,
     const ReportSourceDef *def = report_source_def(source);
     ReportParsedChunk chunk;
     chunk.source = source;
-    chunk.kind = ReportStoreChunkKind::Events;
+    chunk.kind = ReportParsedChunkKind::Events;
     chunk.name = def ? def->spool_type : "";
     chunk.start_ms = parsed.min_start_ms;
     chunk.end_ms = parsed.max_end_ms;

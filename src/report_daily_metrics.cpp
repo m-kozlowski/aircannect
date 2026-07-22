@@ -8,13 +8,6 @@
 #include "edf_str_record_reader.h"
 #include "edf_str_signal_table.h"
 
-#if defined(ARDUINO)
-#include "calendar_utils.h"
-#include "edf_str_file_layout.h"
-#include "report_night_index.h"
-#include "report_legacy_storage.h"
-#endif
-
 namespace aircannect {
 namespace {
 
@@ -34,75 +27,6 @@ bool summary_scaled_value(const ReportSummaryRecord &record,
     out = static_cast<float>(raw) * scale;
     return isfinite(out);
 }
-
-#if defined(ARDUINO)
-bool report_sleep_day_date_sample(const ReportSummaryRecord &night,
-                                  int16_t &out) {
-    char sleep_day[9] = {};
-    if (!report_summary_sleep_day_yyyymmdd(night,
-                                           sleep_day,
-                                           sizeof(sleep_day))) {
-        return false;
-    }
-
-    int64_t days = 0;
-    if (!calendar_yyyymmdd_to_days(sleep_day, days)) return false;
-    if (days < INT16_MIN || days > INT16_MAX) return false;
-
-    out = static_cast<int16_t>(days);
-    return true;
-}
-
-bool read_str_record_date(ReportLegacyFile &file,
-                          uint32_t record_index,
-                          int16_t &date_sample) {
-    uint8_t raw[2] = {};
-    const size_t offset = edf_str_record_offset(record_index);
-    if (!file.seek(offset)) return false;
-    if (file.read(raw, sizeof(raw)) != static_cast<int>(sizeof(raw))) {
-        return false;
-    }
-    date_sample = edf_str_record_date_sample(raw, sizeof(raw));
-    return true;
-}
-
-bool read_str_record(ReportLegacyFile &file,
-                     uint32_t record_index,
-                     uint8_t *record,
-                     size_t record_size) {
-    if (!record || record_size != edf_str_record_size()) return false;
-    const size_t offset = edf_str_record_offset(record_index);
-    if (!file.seek(offset)) return false;
-    return file.read(record, record_size) == static_cast<int>(record_size);
-}
-
-bool find_str_record_by_date(ReportLegacyFile &file,
-                             uint32_t record_count,
-                             int16_t target_date,
-                             uint32_t &record_index) {
-    uint32_t low = 0;
-    uint32_t high = record_count;
-    while (low < high) {
-        const uint32_t mid = low + (high - low) / 2;
-        int16_t mid_date = -1;
-        if (!read_str_record_date(file, mid, mid_date)) return false;
-        if (mid_date < target_date) {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-
-    if (low >= record_count) return false;
-
-    int16_t found_date = -1;
-    if (!read_str_record_date(file, low, found_date)) return false;
-    if (found_date != target_date) return false;
-
-    record_index = low;
-    return true;
-}
-#endif
 
 }  // namespace
 
@@ -157,63 +81,6 @@ bool report_daily_metrics_from_summary(const ReportSummaryRecord &record,
                              1.0f / 100.0f,
                              out.leak_50_l_min);
     return report_daily_metrics_any(out);
-}
-
-bool report_daily_metrics_from_str_file(const ReportSummaryRecord &record,
-                                        uint32_t duration_tolerance_min,
-                                        ReportDailyMetrics &out) {
-#if !defined(ARDUINO)
-    (void)record;
-    (void)duration_tolerance_min;
-    out = ReportDailyMetrics();
-    return false;
-#else
-    out = ReportDailyMetrics();
-
-    int16_t target_date = 0;
-    if (!report_sleep_day_date_sample(record, target_date)) return false;
-
-    ReportLegacyStorageGuard guard;
-    ReportLegacyFile file = ReportLegacyStorage::open("/STR.edf", "r");
-    if (!file || file.isDirectory()) return false;
-
-    EdfStrFileLayout layout;
-    if (!edf_str_file_layout_from_size(static_cast<size_t>(file.size()),
-                                       layout) ||
-        layout.record_count == 0) {
-        file.close();
-        return false;
-    }
-
-    uint8_t str_record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
-    const size_t str_record_size = edf_str_record_size();
-    uint32_t record_index = 0;
-    if (!find_str_record_by_date(file,
-                                 layout.record_count,
-                                 target_date,
-                                 record_index) ||
-        !read_str_record(file, record_index, str_record, str_record_size)) {
-        file.close();
-        return false;
-    }
-    file.close();
-
-    if (!report_daily_metrics_from_str_record(str_record,
-                                              str_record_size,
-                                              out)) {
-        return false;
-    }
-
-    if (record.duration_min > 0 && out.has_duration_min) {
-        const uint32_t expected = static_cast<uint32_t>(record.duration_min);
-        const uint32_t actual = out.duration_min;
-        const uint32_t delta =
-            expected > actual ? expected - actual : actual - expected;
-        if (delta > duration_tolerance_min) return false;
-    }
-
-    return true;
-#endif
 }
 
 bool report_daily_metrics_from_str_record(const uint8_t *record,

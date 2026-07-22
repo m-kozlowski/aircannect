@@ -541,7 +541,7 @@ bool ReportFallbackAcquisitionService::accept_parsed_chunk(
         static_cast<ReportFallbackAcquisitionService *>(context);
     if (!service) return false;
 
-    return chunk.kind == ReportStoreChunkKind::Events
+    return chunk.kind == ReportParsedChunkKind::Events
         ? service->accept_event_chunk(chunk)
         : service->accept_series_chunk(chunk);
 }
@@ -550,7 +550,7 @@ bool ReportFallbackAcquisitionService::accept_series_chunk(
     const ReportParsedChunk &chunk) {
     if (target_index_ >= target_count_ ||
         chunk.source != targets_[target_index_].source ||
-        chunk.kind != ReportStoreChunkKind::Series ||
+        chunk.kind != ReportParsedChunkKind::Series ||
         chunk.payload_schema != REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2 ||
         !chunk.payload || chunk.payload_len == 0 ||
         chunk.end_ms <= chunk.start_ms) {
@@ -717,7 +717,7 @@ bool ReportFallbackAcquisitionService::accept_event_chunk(
         targets_[target_index_].source !=
             ReportSourceId::RespiratoryEvents ||
         chunk.source != ReportSourceId::RespiratoryEvents ||
-        chunk.kind != ReportStoreChunkKind::Events ||
+        chunk.kind != ReportParsedChunkKind::Events ||
         chunk.payload_schema != REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 ||
         chunk.payload_len !=
             static_cast<size_t>(chunk.record_count) *

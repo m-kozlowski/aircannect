@@ -5,14 +5,18 @@
 
 #include "report_proto.h"
 #include "report_sources.h"
-#include "report_store.h"
 #include "report_spool_types.h"
 
 namespace aircannect {
 
+enum class ReportParsedChunkKind : uint8_t {
+    Series,
+    Events,
+};
+
 struct ReportParsedChunk {
     ReportSourceId source = ReportSourceId::Summary;
-    ReportStoreChunkKind kind = ReportStoreChunkKind::Series;
+    ReportParsedChunkKind kind = ReportParsedChunkKind::Series;
     const char *name = nullptr;
     int64_t start_ms = 0;
     int64_t end_ms = 0;
