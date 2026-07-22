@@ -8,12 +8,10 @@
 
 #include "crc32.h"
 #include "debug_log.h"
-#include "storage_service.h"
 #include "memory_manager.h"
 #include "runtime_clock.h"
 #include "storage_export_plan.h"
-#include "storage_export_state.h"
-#include "storage_manager.h"
+#include "storage_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -22,6 +20,7 @@ namespace {
 static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
 static constexpr uint32_t SMB_OPERATION_TIMEOUT_MS = 20UL * 1000UL;
 static constexpr const char *SYNC_METADATA_FILE = "meta.state";
+static constexpr size_t SYNC_METADATA_MAX_BYTES = 511;
 static constexpr const char *SYNC_REASON_STARTUP_CHECK = "startup_check";
 static constexpr const char *SYNC_REASON_STARTUP_SYNC = "startup_sync";
 static constexpr const char *SYNC_REASON_VERIFY_RECENT = "verify_recent";
@@ -50,6 +49,17 @@ bool parse_uint32_text(const char *text, uint32_t &out) {
     return true;
 }
 
+std::shared_ptr<const LargeByteBuffer> freeze_bytes(const void *data,
+                                                    size_t size) {
+    if (!data || size == 0) return {};
+
+    std::unique_ptr<LargeByteBuffer> bytes = LargeByteBuffer::allocate(size);
+    if (!bytes) return {};
+
+    memcpy(bytes->data(), data, size);
+    return LargeByteBuffer::freeze(std::move(bytes));
+}
+
 }  // namespace
 
 const char *storage_sync_state_name(StorageSyncState state) {
@@ -66,9 +76,13 @@ const char *storage_sync_state_name(StorageSyncState state) {
 void StorageSyncJob::begin(const AppConfigData &config,
                            StorageScanPort &scan_port,
                            StorageReadPort &read_port,
-                           StorageStreamPort &stream_port) {
+                           StorageStreamPort &stream_port,
+                           StorageAtomicWritePort &write_port,
+                           StoragePathPort &path_port) {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
     inventory_loader_.begin(scan_port, read_port);
+    state_io_.begin(read_port, write_port, path_port);
+    metadata_io_.begin(read_port, write_port, path_port);
     stream_port_ = &stream_port;
     configure(config);
 }
@@ -114,6 +128,7 @@ bool StorageSyncJob::snapshot_configured(const ConfigSnapshot &config) {
 const char *StorageSyncJob::work_phase_name(WorkPhase phase) {
     switch (phase) {
         case WorkPhase::Idle: return "idle";
+        case WorkPhase::LoadMetadata: return "load_metadata";
         case WorkPhase::LoadInventory: return "load_inventory";
         case WorkPhase::Connect: return "connect";
         case WorkPhase::VerifyLatestStart: return "verify_latest_start";
@@ -128,7 +143,9 @@ const char *StorageSyncJob::work_phase_name(WorkPhase phase) {
         case WorkPhase::OpenRemote: return "open_remote";
         case WorkPhase::UploadChunk: return "upload_chunk";
         case WorkPhase::CloseRemote: return "close_remote";
-        case WorkPhase::MarkState: return "mark_state";
+        case WorkPhase::ValidateLocal: return "validate_local";
+        case WorkPhase::FlushState: return "flush_state";
+        case WorkPhase::WriteDoneMarker: return "write_done_marker";
         case WorkPhase::Finish: return "finish";
     }
     return "unknown";
@@ -171,6 +188,9 @@ void StorageSyncJob::reset_run_locked(bool keep_status) {
     inventory_loader_.reset();
     export_inventory_.reset();
     export_planner_.reset();
+    state_batch_.clear();
+    state_io_.reset();
+    metadata_io_.reset();
     release_upload_buffer_locked();
     smb_.abort_connection();
     clear_current_file_locked();
@@ -183,7 +203,11 @@ void StorageSyncJob::reset_run_locked(bool keep_status) {
     pending_run_kind_ = RunKind::Manual;
     abort_requested_.store(false);
     inventory_requested_ = false;
-    state_cache_.clear();
+    pending_state_path_[0] = '\0';
+    pending_done_day_[0] = '\0';
+    pending_state_bytes_.reset();
+    pending_state_uploaded_ = 0;
+    pending_state_skipped_ = 0;
     if (!keep_status) {
         const StorageSyncPersistentStatus preserved = status_;
         status_ = StorageSyncStatus();
@@ -227,27 +251,8 @@ void StorageSyncJob::clear_result_metadata_locked() {
     status_.last_failure_error[0] = '\0';
 }
 
-bool StorageSyncJob::load_result_metadata_locked() {
-    clear_result_metadata_locked();
-    if (!state_dir_[0]) return false;
-    char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
-    const int written = snprintf(path, sizeof(path), "%s/%s",
-                                 state_dir_, SYNC_METADATA_FILE);
-    if (written <= 0 || static_cast<size_t>(written) >= sizeof(path)) {
-        return false;
-    }
-
-    char buffer[512] = {};
-    size_t read = 0;
-    {
-        Storage::Guard guard;
-        File file = Storage::open(path, "r");
-        if (!file) return false;
-        read = file.read(reinterpret_cast<uint8_t *>(buffer),
-                         sizeof(buffer) - 1);
-        file.close();
-    }
-    buffer[read] = '\0';
+void StorageSyncJob::parse_result_metadata_locked(char *buffer) {
+    if (!buffer) return;
 
     char *line = buffer;
     while (line && *line) {
@@ -301,55 +306,117 @@ bool StorageSyncJob::load_result_metadata_locked() {
         }
         line = next;
     }
+}
+
+bool StorageSyncJob::queue_result_metadata_save_locked() {
+    if (!state_dir_[0] || metadata_save_pending_) return false;
+
+    const int path_written = snprintf(pending_metadata_path_,
+                                      sizeof(pending_metadata_path_),
+                                      "%s/%s",
+                                      state_dir_,
+                                      SYNC_METADATA_FILE);
+    if (path_written <= 0 || static_cast<size_t>(path_written) >=
+                                 sizeof(pending_metadata_path_)) {
+        pending_metadata_path_[0] = '\0';
+        return false;
+    }
+
+    char buffer[768] = {};
+    const int written = snprintf(
+        buffer,
+        sizeof(buffer),
+        "version=1\n"
+        "last_sync_epoch=%llu\n"
+        "last_sync_files_seen=%u\n"
+        "last_sync_files_uploaded=%u\n"
+        "last_sync_files_skipped=%u\n"
+        "last_sync_files_failed=%u\n"
+        "last_sync_bytes_uploaded=%llu\n"
+        "last_verify_epoch=%llu\n"
+        "last_verify_files_seen=%u\n"
+        "last_reconcile_epoch=%llu\n"
+        "last_reconcile_files_seen=%u\n"
+        "last_failure_epoch=%llu\n"
+        "last_failure_error=%s\n",
+        static_cast<unsigned long long>(status_.last_sync_epoch),
+        static_cast<unsigned>(status_.last_sync_files_seen),
+        static_cast<unsigned>(status_.last_sync_files_uploaded),
+        static_cast<unsigned>(status_.last_sync_files_skipped),
+        static_cast<unsigned>(status_.last_sync_files_failed),
+        static_cast<unsigned long long>(status_.last_sync_bytes_uploaded),
+        static_cast<unsigned long long>(status_.last_verify_epoch),
+        static_cast<unsigned>(status_.last_verify_files_seen),
+        static_cast<unsigned long long>(status_.last_reconcile_epoch),
+        static_cast<unsigned>(status_.last_reconcile_files_seen),
+        static_cast<unsigned long long>(status_.last_failure_epoch),
+        status_.last_failure_error);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(buffer)) {
+        pending_metadata_path_[0] = '\0';
+        return false;
+    }
+
+    pending_metadata_bytes_ = freeze_bytes(buffer,
+                                           static_cast<size_t>(written));
+    if (!pending_metadata_bytes_) {
+        pending_metadata_path_[0] = '\0';
+        return false;
+    }
+
+    metadata_save_pending_ = true;
     return true;
 }
 
-bool StorageSyncJob::save_result_metadata_locked() {
-    if (!state_dir_[0] || !ensure_state_dir_locked()) return false;
-    char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
-    const int path_written = snprintf(path, sizeof(path), "%s/%s",
-                                      state_dir_, SYNC_METADATA_FILE);
-    if (path_written <= 0 ||
-        static_cast<size_t>(path_written) >= sizeof(path)) {
+bool StorageSyncJob::service_result_metadata_save_locked(JobStep &result) {
+    if (!metadata_save_pending_) return true;
+
+    const StorageFileClientResult io_result = metadata_io_.poll();
+    if (io_result == StorageFileClientResult::Waiting) {
+        result = JobStep::Waiting;
         return false;
     }
-    {
-        Storage::Guard guard;
-        File file = Storage::open(path, "w");
-        if (!file) return false;
-        file.printf("version=1\n");
-        file.printf("last_sync_epoch=%llu\n",
-                    static_cast<unsigned long long>(
-                        status_.last_sync_epoch));
-        file.printf("last_sync_files_seen=%u\n",
-                    static_cast<unsigned>(status_.last_sync_files_seen));
-        file.printf("last_sync_files_uploaded=%u\n",
-                    static_cast<unsigned>(status_.last_sync_files_uploaded));
-        file.printf("last_sync_files_skipped=%u\n",
-                    static_cast<unsigned>(status_.last_sync_files_skipped));
-        file.printf("last_sync_files_failed=%u\n",
-                    static_cast<unsigned>(status_.last_sync_files_failed));
-        file.printf("last_sync_bytes_uploaded=%llu\n",
-                    static_cast<unsigned long long>(
-                        status_.last_sync_bytes_uploaded));
-        file.printf("last_verify_epoch=%llu\n",
-                    static_cast<unsigned long long>(
-                        status_.last_verify_epoch));
-        file.printf("last_verify_files_seen=%u\n",
-                    static_cast<unsigned>(status_.last_verify_files_seen));
-        file.printf("last_reconcile_epoch=%llu\n",
-                    static_cast<unsigned long long>(
-                        status_.last_reconcile_epoch));
-        file.printf("last_reconcile_files_seen=%u\n",
-                    static_cast<unsigned>(
-                        status_.last_reconcile_files_seen));
-        file.printf("last_failure_epoch=%llu\n",
-                    static_cast<unsigned long long>(
-                        status_.last_failure_epoch));
-        file.printf("last_failure_error=%s\n", status_.last_failure_error);
-        file.close();
+    if (io_result == StorageFileClientResult::Ready) {
+        metadata_io_.reset();
+        pending_metadata_path_[0] = '\0';
+        pending_metadata_bytes_.reset();
+        metadata_save_pending_ = false;
+        return true;
     }
-    return true;
+    if (io_result == StorageFileClientResult::Error) {
+        Log::logf(CAT_STORAGE,
+                  LOG_WARN,
+                  "[SYNC] metadata save failed path=%s error=%s\n",
+                  pending_metadata_path_[0] ? pending_metadata_path_ : "--",
+                  metadata_io_.error()[0] ? metadata_io_.error()
+                                          : "storage_write_failed");
+        metadata_io_.reset();
+        pending_metadata_path_[0] = '\0';
+        pending_metadata_bytes_.reset();
+        metadata_save_pending_ = false;
+        return true;
+    }
+
+    const OperationAdmission admission = metadata_io_.request_replace(
+        pending_metadata_path_,
+        pending_metadata_bytes_,
+        next_storage_generation_locked());
+    if (admission == OperationAdmission::Busy) {
+        result = JobStep::Waiting;
+        return false;
+    }
+    if (admission != OperationAdmission::Accepted) {
+        Log::logf(CAT_STORAGE,
+                  LOG_WARN,
+                  "[SYNC] metadata save rejected path=%s\n",
+                  pending_metadata_path_[0] ? pending_metadata_path_ : "--");
+        pending_metadata_path_[0] = '\0';
+        pending_metadata_bytes_.reset();
+        metadata_save_pending_ = false;
+        return true;
+    }
+
+    result = JobStep::Waiting;
+    return false;
 }
 
 void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
@@ -365,13 +432,12 @@ void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     endpoint_hash_ = 0;
     state_dir_[0] = '\0';
     clear_result_metadata_locked();
+    metadata_loaded_ = false;
     if (status_.configured) {
-        if (build_endpoint_state_dir_locked(config_,
-                                            state_dir_,
-                                            sizeof(state_dir_),
-                                            &endpoint_hash_)) {
-            (void)load_result_metadata_locked();
-        } else {
+        if (!build_endpoint_state_dir_locked(config_,
+                                             state_dir_,
+                                             sizeof(state_dir_),
+                                             &endpoint_hash_)) {
             Log::logf(CAT_STORAGE,
                       LOG_WARN,
                       "[SYNC] state dir build failed endpoint=%s\n",
@@ -519,13 +585,89 @@ bool StorageSyncJob::begin_run_locked() {
         fail_locked("state_path_too_long");
         return false;
     }
-    phase_ = WorkPhase::LoadInventory;
+    phase_ = metadata_loaded_ ? WorkPhase::LoadInventory
+                              : WorkPhase::LoadMetadata;
     Log::logf(CAT_STORAGE,
               LOG_INFO,
               "[SYNC] started reason=%s endpoint=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
               config_.endpoint);
     return true;
+}
+
+JobStep StorageSyncJob::step_load_metadata_locked() {
+    const StorageFileClientResult io_result = metadata_io_.poll();
+    if (io_result == StorageFileClientResult::Waiting) {
+        return JobStep::Waiting;
+    }
+    if (io_result == StorageFileClientResult::Error) {
+        Log::logf(CAT_STORAGE,
+                  LOG_WARN,
+                  "[SYNC] metadata load ignored path=%s/%s error=%s\n",
+                  state_dir_[0] ? state_dir_ : "--",
+                  SYNC_METADATA_FILE,
+                  metadata_io_.error()[0] ? metadata_io_.error()
+                                          : "storage_read_failed");
+        metadata_io_.reset();
+        metadata_loaded_ = true;
+        phase_ = WorkPhase::LoadInventory;
+        return JobStep::Working;
+    }
+    if (io_result == StorageFileClientResult::Ready) {
+        StoragePreparedFile file = metadata_io_.take_file();
+        char buffer[SYNC_METADATA_MAX_BYTES + 1] = {};
+        const size_t read = file.read(0,
+                                      reinterpret_cast<uint8_t *>(buffer),
+                                      sizeof(buffer) - 1);
+        if (file.exists() && read != file.size()) {
+            Log::logf(CAT_STORAGE,
+                      LOG_WARN,
+                      "[SYNC] metadata load ignored path=%s/%s "
+                      "error=short_read\n",
+                      state_dir_[0] ? state_dir_ : "--",
+                      SYNC_METADATA_FILE);
+        } else {
+            buffer[read] = '\0';
+            parse_result_metadata_locked(buffer);
+        }
+
+        metadata_loaded_ = true;
+        phase_ = WorkPhase::LoadInventory;
+        return JobStep::Working;
+    }
+
+    char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+    const int written = snprintf(path,
+                                 sizeof(path),
+                                 "%s/%s",
+                                 state_dir_,
+                                 SYNC_METADATA_FILE);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(path)) {
+        Log::logf(CAT_STORAGE,
+                  LOG_WARN,
+                  "[SYNC] metadata load ignored error=path_too_long\n");
+        metadata_loaded_ = true;
+        phase_ = WorkPhase::LoadInventory;
+        return JobStep::Working;
+    }
+
+    const OperationAdmission admission = metadata_io_.request_read(
+        path,
+        SYNC_METADATA_MAX_BYTES,
+        next_storage_generation_locked());
+    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission != OperationAdmission::Accepted) {
+        Log::logf(CAT_STORAGE,
+                  LOG_WARN,
+                  "[SYNC] metadata load ignored path=%s "
+                  "error=storage_read_rejected\n",
+                  path);
+        metadata_loaded_ = true;
+        phase_ = WorkPhase::LoadInventory;
+        return JobStep::Working;
+    }
+
+    return JobStep::Waiting;
 }
 
 JobStep StorageSyncJob::step_load_inventory_locked() {
@@ -837,28 +979,8 @@ JobStep StorageSyncJob::publish_verify_latest_remote_locked(
     return JobStep::Working;
 }
 
-bool StorageSyncJob::invalidate_latest_state_locked(char *error_out,
-                                                    size_t error_out_size) {
-    bool removed = false;
-    {
-        Storage::Guard guard;
-        removed = Storage::remove(latest_verify_.state_path);
-    }
-    if (!removed) {
-        copy_cstr(error_out, error_out_size, "state_invalidate_failed");
-        return false;
-    }
-    Log::logf(CAT_STORAGE,
-              LOG_WARN,
-              "[SYNC] invalidated latest state path=%s\n",
-              latest_verify_.state_path);
-    close_latest_verify_locked();
-    phase_ = WorkPhase::Finish;
-    return true;
-}
-
 bool StorageSyncJob::next_file_locked() {
-    if (!Storage::mounted()) {
+    if (!StorageService::status().available) {
         fail_locked("storage_unavailable");
         return false;
     }
@@ -871,7 +993,16 @@ bool StorageSyncJob::next_file_locked() {
         case StorageExportPlannerResult::Item:
             if (item.kind ==
                 StorageExportPlannerItemKind::DatalogDayComplete) {
-                maybe_mark_completed_datalog_day_locked(item.datalog_day);
+                if (!schedule_completed_datalog_day_locked(
+                        item.datalog_day)) {
+                    fail_locked("done_marker_path_failed");
+                    return false;
+                }
+                phase_ = !state_batch_.empty()
+                    ? WorkPhase::FlushState
+                    : pending_done_day_[0]
+                        ? WorkPhase::WriteDoneMarker
+                        : WorkPhase::NextFile;
                 return true;
             }
             return plan_file_locked(item);
@@ -881,7 +1012,8 @@ bool StorageSyncJob::next_file_locked() {
             fail_locked("unexpected_planner_decision");
             return false;
         case StorageExportPlannerResult::Done:
-            phase_ = WorkPhase::Finish;
+            phase_ = !state_batch_.empty() ? WorkPhase::FlushState
+                                           : WorkPhase::Finish;
             return true;
         case StorageExportPlannerResult::Error:
             fail_locked(error[0] ? error : "planner_failed");
@@ -911,57 +1043,91 @@ bool StorageSyncJob::begin_export_planner_locked(char *error_out,
 
 bool StorageSyncJob::build_state_path_locked(const char *path,
                                              char *out,
-                                             size_t out_size,
-                                             StateWriteMode *write_mode) const {
+                                             size_t out_size) const {
     if (!path || !out || out_size == 0 || !state_dir_[0]) return false;
-    StorageExportStateWriteMode export_mode =
-        StorageExportStateWriteMode::Replace;
-    const bool ok = storage_export_build_state_path(state_dir_,
-                                                    path,
-                                                    out,
-                                                    out_size,
-                                                    &export_mode);
-    if (write_mode) {
-        *write_mode =
-            export_mode == StorageExportStateWriteMode::Append
-                ? StateWriteMode::Append
-                : StateWriteMode::Replace;
-    }
-    return ok;
+    return storage_export_build_state_path(state_dir_,
+                                           path,
+                                           out,
+                                           out_size);
 }
 
-bool StorageSyncJob::ensure_state_dir_locked() {
-    return storage_export_ensure_state_dir(state_dir_);
+uint32_t StorageSyncJob::next_storage_generation_locked() {
+    const uint32_t generation = next_storage_generation_;
+    next_storage_generation_++;
+    if (next_storage_generation_ == 0) next_storage_generation_ = 1;
+    return generation;
 }
 
-bool StorageSyncJob::write_state_locked(const char *state_path,
-                                        const char *path,
-                                        uint64_t size,
-                                        uint64_t mtime,
-                                        StateWriteMode mode) {
-    char line[AC_STORAGE_PATH_MAX + 64] = {};
-    const int written = snprintf(line,
-                                 sizeof(line),
-                                 "%llu\t%llu\t%s",
-                                 static_cast<unsigned long long>(size),
-                                 static_cast<unsigned long long>(mtime),
-                                 path ? path : "");
-    if (written <= 0 || static_cast<size_t>(written) >= sizeof(line)) {
+bool StorageSyncJob::queue_current_state_locked() {
+    if (current_file_.completion == FileCompletion::None ||
+        !state_batch_.add(current_file_.state_path,
+                          current_file_.path,
+                          current_file_.size,
+                          current_file_.mtime)) {
         return false;
     }
-    const StorageExportStateWriteMode export_mode =
-        mode == StateWriteMode::Append
-            ? StorageExportStateWriteMode::Append
-            : StorageExportStateWriteMode::Replace;
-    return storage_export_write_state_line(&state_cache_,
-                                           state_dir_,
-                                           state_path,
-                                           path,
-                                           size,
-                                           mtime,
-                                           export_mode,
-                                           line,
-                                           false);
+
+    if (current_file_.completion == FileCompletion::Uploaded) {
+        pending_state_uploaded_++;
+    } else {
+        pending_state_skipped_++;
+    }
+
+    const bool batch_state = current_file_.batch_state;
+    clear_current_file_locked();
+    phase_ = batch_state ? WorkPhase::NextFile : WorkPhase::FlushState;
+    return true;
+}
+
+void StorageSyncJob::commit_pending_file_counts_locked() {
+    status_.files_uploaded += pending_state_uploaded_;
+    status_.files_skipped += pending_state_skipped_;
+    pending_state_uploaded_ = 0;
+    pending_state_skipped_ = 0;
+}
+
+bool StorageSyncJob::schedule_completed_datalog_day_locked(const char *day) {
+    pending_done_day_[0] = '\0';
+    if (run_kind_is_reconcile(current_run_kind_)) return true;
+    if (!day || !day[0] || !export_inventory_) return true;
+    if (!storage_export_datalog_day_finalized(
+            day,
+            export_inventory_->latest_datalog_day()) ||
+        export_inventory_->datalog_day_done(day)) {
+        return true;
+    }
+
+    if (strlen(day) != 8) return false;
+    copy_cstr(pending_done_day_, sizeof(pending_done_day_), day);
+    return true;
+}
+
+bool StorageSyncJob::prepare_state_file_locked() {
+    if (pending_state_bytes_) return pending_state_path_[0] != '\0';
+    if (!export_inventory_) return false;
+
+    const char *state_path = state_batch_.first_state_path();
+    if (!state_path || !state_path[0]) return false;
+    copy_cstr(pending_state_path_, sizeof(pending_state_path_), state_path);
+    pending_state_bytes_ = state_batch_.build_file(*export_inventory_,
+                                                   state_path);
+    return pending_state_bytes_ != nullptr;
+}
+
+bool StorageSyncJob::prepare_done_marker_locked() {
+    if (pending_state_bytes_) return pending_state_path_[0] != '\0';
+    if (!pending_done_day_[0] ||
+        !storage_export_build_done_path(state_dir_,
+                                        pending_done_day_,
+                                        pending_state_path_,
+                                        sizeof(pending_state_path_))) {
+        return false;
+    }
+
+    static constexpr char DONE_MARKER[] = "done\n";
+    pending_state_bytes_ = freeze_bytes(DONE_MARKER,
+                                        sizeof(DONE_MARKER) - 1);
+    return pending_state_bytes_ != nullptr;
 }
 
 bool StorageSyncJob::remote_parent_dir_locked(const char *remote_path,
@@ -978,29 +1144,6 @@ bool StorageSyncJob::remote_parent_dir_locked(const char *remote_path,
     memcpy(out, remote_path, len);
     out[len] = '\0';
     return true;
-}
-
-void StorageSyncJob::maybe_mark_completed_datalog_day_locked(
-    const char *day) {
-    if (run_kind_is_reconcile(current_run_kind_)) return;
-    if (!day || !day[0] || !export_inventory_) return;
-    if (!storage_export_datalog_day_finalized(
-            day,
-            export_inventory_->latest_datalog_day())) {
-        return;
-    }
-    if (export_inventory_->datalog_day_done(day)) return;
-    if (!storage_export_mark_datalog_day_done(state_dir_, day)) {
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[SYNC] DATALOG done marker write failed day=%s\n",
-                  day);
-        return;
-    }
-    Log::logf(CAT_STORAGE,
-              LOG_INFO,
-              "[SYNC] DATALOG day complete day=%s\n",
-              day);
 }
 
 bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
@@ -1032,10 +1175,8 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     copy_cstr(current_file_.state_path,
               sizeof(current_file_.state_path),
               item.state_path);
-    current_file_.state_write_mode =
-        item.state_write_mode == StorageExportStateWriteMode::Append
-            ? StateWriteMode::Append
-            : StateWriteMode::Replace;
+    current_file_.batch_state =
+        item.state_write_mode == StorageExportStateWriteMode::Append;
     current_file_.local_state_complete = item.local_state_complete;
     if (current_file_.local_state_complete) {
         if (!run_kind_is_reconcile(current_run_kind_)) {
@@ -1079,7 +1220,13 @@ void StorageSyncJob::finish_run_locked() {
     export_inventory_.reset();
     inventory_requested_ = false;
     release_upload_buffer_locked();
-    state_cache_.clear();
+    state_io_.reset();
+    state_batch_.clear();
+    pending_state_path_[0] = '\0';
+    pending_done_day_[0] = '\0';
+    pending_state_bytes_.reset();
+    pending_state_uploaded_ = 0;
+    pending_state_skipped_ = 0;
     clear_current_file_locked();
     ensured_remote_dir_[0] = '\0';
     const bool current_run_verify = run_kind_is_verify(current_run_kind_);
@@ -1149,10 +1296,10 @@ void StorageSyncJob::finish_run_locked() {
                   static_cast<unsigned>(status_.files_failed),
                   static_cast<unsigned long long>(status_.bytes_uploaded));
     }
-    if (!save_result_metadata_locked()) {
+    if (!queue_result_metadata_save_locked()) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
-                  "[SYNC] metadata save failed path=%s/%s\n",
+                  "[SYNC] metadata save queue failed path=%s/%s\n",
                   state_dir_[0] ? state_dir_ : "--",
                   SYNC_METADATA_FILE);
     }
@@ -1209,7 +1356,13 @@ void StorageSyncJob::fail_locked(const char *error) {
     close_latest_verify_locked();
     smb_.abort_connection();
     release_upload_buffer_locked();
-    state_cache_.clear();
+    state_io_.reset();
+    state_batch_.clear();
+    pending_state_path_[0] = '\0';
+    pending_done_day_[0] = '\0';
+    pending_state_bytes_.reset();
+    pending_state_uploaded_ = 0;
+    pending_state_skipped_ = 0;
     ensured_remote_dir_[0] = '\0';
     status_.state = StorageSyncState::Error;
     status_.pending = false;
@@ -1254,10 +1407,11 @@ void StorageSyncJob::fail_locked(const char *error) {
               static_cast<unsigned>(status_.files_skipped),
               static_cast<unsigned>(status_.files_failed),
               static_cast<unsigned long long>(status_.bytes_uploaded));
-    if (!save_result_metadata_locked()) {
+    if (!queue_result_metadata_save_locked()) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
-                  "[SYNC] metadata save failed after error path=%s/%s\n",
+                  "[SYNC] metadata save queue failed after error "
+                  "path=%s/%s\n",
                   state_dir_[0] ? state_dir_ : "--",
                   SYNC_METADATA_FILE);
     }
@@ -1321,6 +1475,7 @@ void StorageSyncJob::queue_reconcile_if_due_locked(uint32_t now_ms) {
 
 bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
     apply_pending_config_locked();
+    if (!service_result_metadata_save_locked(result)) return false;
 
     const uint32_t defer_until = idle_defer_until_ms_.load();
     if (defer_until != 0 &&
@@ -1397,38 +1552,168 @@ JobStep StorageSyncJob::step_verify_latest_file_locked(
     return JobStep::Working;
 }
 
-JobStep StorageSyncJob::step_verify_latest_invalidate_locked(
-    char *error_out,
-    size_t error_out_size) {
-    if (!invalidate_latest_state_locked(error_out, error_out_size)) {
-        fail_locked(error_out[0] ? error_out : "state_invalidate_failed");
+JobStep StorageSyncJob::step_verify_latest_invalidate_locked() {
+    const StorageFileClientResult io_result = state_io_.poll();
+    if (io_result == StorageFileClientResult::Waiting) {
+        return JobStep::Waiting;
+    }
+    if (io_result == StorageFileClientResult::Error) {
+        fail_locked(state_io_.error()[0] ? state_io_.error()
+                                         : "state_invalidate_failed");
         return JobStep::Idle;
     }
-    return JobStep::Working;
+    if (io_result == StorageFileClientResult::Ready) {
+        state_io_.reset();
+        Log::logf(CAT_STORAGE,
+                  LOG_WARN,
+                  "[SYNC] invalidated latest state path=%s\n",
+                  latest_verify_.state_path);
+        close_latest_verify_locked();
+        phase_ = WorkPhase::Finish;
+        return JobStep::Working;
+    }
+
+    const OperationAdmission admission = state_io_.request_remove(
+        latest_verify_.state_path,
+        next_storage_generation_locked());
+    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission != OperationAdmission::Accepted) {
+        fail_locked("state_invalidate_rejected");
+        return JobStep::Idle;
+    }
+
+    return JobStep::Waiting;
 }
 
-JobStep StorageSyncJob::step_mark_state_locked() {
-    const StorageLocalNodeInfo info = storage_stat_local_node(current_file_.path);
-    if (!info.exists || info.is_dir ||
-        info.size != current_file_.size ||
-        info.mtime != current_file_.mtime) {
-        fail_locked("local_changed");
+JobStep StorageSyncJob::step_validate_local_locked() {
+    const StorageFileClientResult io_result = state_io_.poll();
+    if (io_result == StorageFileClientResult::Waiting) {
+        return JobStep::Waiting;
+    }
+    if (io_result == StorageFileClientResult::Error) {
+        fail_locked(state_io_.error()[0] ? state_io_.error()
+                                         : "local_stat_failed");
         return JobStep::Idle;
     }
-    if (!write_state_locked(current_file_.state_path,
-                            current_file_.path,
-                            current_file_.size,
-                            current_file_.mtime,
-                            current_file_.state_write_mode)) {
-        if (status_.state != StorageSyncState::Error) {
-            fail_locked("state_write_failed");
+    if (io_result == StorageFileClientResult::Ready) {
+        const StorageFileInfo info = state_io_.info();
+        state_io_.reset();
+        if (!info.exists || info.directory ||
+            info.size != current_file_.size ||
+            info.modified != current_file_.mtime) {
+            fail_locked("local_changed");
+            return JobStep::Idle;
         }
+        if (!queue_current_state_locked()) {
+            fail_locked("state_batch_failed");
+            return JobStep::Idle;
+        }
+
+        return JobStep::Working;
+    }
+
+    const OperationAdmission admission = state_io_.request_stat(
+        current_file_.path,
+        next_storage_generation_locked());
+    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission != OperationAdmission::Accepted) {
+        fail_locked("local_stat_rejected");
         return JobStep::Idle;
     }
-    status_.files_uploaded++;
-    clear_current_file_locked();
-    phase_ = WorkPhase::NextFile;
-    return JobStep::Working;
+
+    return JobStep::Waiting;
+}
+
+JobStep StorageSyncJob::step_flush_state_locked() {
+    if (state_batch_.empty()) {
+        commit_pending_file_counts_locked();
+        phase_ = pending_done_day_[0] ? WorkPhase::WriteDoneMarker
+                                      : WorkPhase::NextFile;
+        return JobStep::Working;
+    }
+
+    const StorageFileClientResult io_result = state_io_.poll();
+    if (io_result == StorageFileClientResult::Waiting) {
+        return JobStep::Waiting;
+    }
+    if (io_result == StorageFileClientResult::Error) {
+        fail_locked(state_io_.error()[0] ? state_io_.error()
+                                         : "state_write_failed");
+        return JobStep::Idle;
+    }
+    if (io_result == StorageFileClientResult::Ready) {
+        state_io_.reset();
+        state_batch_.erase_state_path(pending_state_path_);
+        pending_state_path_[0] = '\0';
+        pending_state_bytes_.reset();
+        if (state_batch_.empty()) {
+            commit_pending_file_counts_locked();
+            phase_ = pending_done_day_[0] ? WorkPhase::WriteDoneMarker
+                                          : WorkPhase::NextFile;
+        }
+        return JobStep::Working;
+    }
+
+    if (!prepare_state_file_locked()) {
+        fail_locked("state_file_build_failed");
+        return JobStep::Idle;
+    }
+    const OperationAdmission admission = state_io_.request_replace(
+        pending_state_path_,
+        pending_state_bytes_,
+        next_storage_generation_locked());
+    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission != OperationAdmission::Accepted) {
+        fail_locked("state_write_rejected");
+        return JobStep::Idle;
+    }
+
+    return JobStep::Waiting;
+}
+
+JobStep StorageSyncJob::step_write_done_marker_locked() {
+    if (!pending_done_day_[0]) {
+        phase_ = WorkPhase::NextFile;
+        return JobStep::Working;
+    }
+
+    const StorageFileClientResult io_result = state_io_.poll();
+    if (io_result == StorageFileClientResult::Waiting) {
+        return JobStep::Waiting;
+    }
+    if (io_result == StorageFileClientResult::Error) {
+        fail_locked(state_io_.error()[0] ? state_io_.error()
+                                         : "done_marker_write_failed");
+        return JobStep::Idle;
+    }
+    if (io_result == StorageFileClientResult::Ready) {
+        state_io_.reset();
+        Log::logf(CAT_STORAGE,
+                  LOG_INFO,
+                  "[SYNC] DATALOG day complete day=%s\n",
+                  pending_done_day_);
+        pending_done_day_[0] = '\0';
+        pending_state_path_[0] = '\0';
+        pending_state_bytes_.reset();
+        phase_ = WorkPhase::NextFile;
+        return JobStep::Working;
+    }
+
+    if (!prepare_done_marker_locked()) {
+        fail_locked("done_marker_build_failed");
+        return JobStep::Idle;
+    }
+    const OperationAdmission admission = state_io_.request_replace(
+        pending_state_path_,
+        pending_state_bytes_,
+        next_storage_generation_locked());
+    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission != OperationAdmission::Accepted) {
+        fail_locked("done_marker_write_rejected");
+        return JobStep::Idle;
+    }
+
+    return JobStep::Waiting;
 }
 
 bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
@@ -1445,12 +1730,15 @@ bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
             return true;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
-        case WorkPhase::MarkState:
+        case WorkPhase::ValidateLocal:
+        case WorkPhase::FlushState:
+        case WorkPhase::WriteDoneMarker:
             return false;
     }
     return false;
@@ -1573,12 +1861,15 @@ void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
-        case WorkPhase::MarkState:
+        case WorkPhase::ValidateLocal:
+        case WorkPhase::FlushState:
+        case WorkPhase::WriteDoneMarker:
             copy_cstr(result.error,
                       sizeof(result.error),
                       "invalid_blocking_phase");
@@ -1631,18 +1922,14 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
         case WorkPhase::ResolveRemoteFile:
             if (result.remote.exists && !result.remote.directory &&
                 result.remote.size == current_file_.size) {
-                if (!current_file_.local_state_complete &&
-                    !write_state_locked(current_file_.state_path,
-                                        current_file_.path,
-                                        current_file_.size,
-                                        current_file_.mtime,
-                                        current_file_.state_write_mode)) {
-                    fail_locked("state_write_failed");
-                    return JobStep::Idle;
+                if (current_file_.local_state_complete) {
+                    status_.files_skipped++;
+                    clear_current_file_locked();
+                    phase_ = WorkPhase::NextFile;
+                } else {
+                    current_file_.completion = FileCompletion::Skipped;
+                    phase_ = WorkPhase::ValidateLocal;
                 }
-                status_.files_skipped++;
-                clear_current_file_locked();
-                phase_ = WorkPhase::NextFile;
                 return JobStep::Working;
             }
 
@@ -1690,7 +1977,8 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
 
         case WorkPhase::CloseRemote:
             close_local_locked(true);
-            phase_ = WorkPhase::MarkState;
+            current_file_.completion = FileCompletion::Uploaded;
+            phase_ = WorkPhase::ValidateLocal;
             return JobStep::Working;
 
         case WorkPhase::Finish:
@@ -1698,12 +1986,15 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
             return JobStep::Idle;
 
         case WorkPhase::Idle:
+        case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
-        case WorkPhase::MarkState:
+        case WorkPhase::ValidateLocal:
+        case WorkPhase::FlushState:
+        case WorkPhase::WriteDoneMarker:
             fail_locked("invalid_blocking_phase");
             return JobStep::Idle;
     }
@@ -1714,8 +2005,12 @@ JobStep StorageSyncJob::step_work_phase_locked() {
     char error[AC_STORAGE_ERROR_MAX] = {};
     switch (phase_) {
         case WorkPhase::Idle:
-            phase_ = WorkPhase::LoadInventory;
+            phase_ = metadata_loaded_ ? WorkPhase::LoadInventory
+                                      : WorkPhase::LoadMetadata;
             return JobStep::Working;
+
+        case WorkPhase::LoadMetadata:
+            return step_load_metadata_locked();
 
         case WorkPhase::LoadInventory:
             return step_load_inventory_locked();
@@ -1738,13 +2033,19 @@ JobStep StorageSyncJob::step_work_phase_locked() {
             return step_verify_latest_file_locked(error, sizeof(error));
 
         case WorkPhase::VerifyLatestInvalidate:
-            return step_verify_latest_invalidate_locked(error, sizeof(error));
+            return step_verify_latest_invalidate_locked();
 
         case WorkPhase::NextFile:
             return next_file_locked() ? JobStep::Working : JobStep::Idle;
 
-        case WorkPhase::MarkState:
-            return step_mark_state_locked();
+        case WorkPhase::ValidateLocal:
+            return step_validate_local_locked();
+
+        case WorkPhase::FlushState:
+            return step_flush_state_locked();
+
+        case WorkPhase::WriteDoneMarker:
+            return step_write_done_marker_locked();
     }
     return JobStep::Idle;
 }

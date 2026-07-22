@@ -9,11 +9,15 @@
 
 #include "app_config.h"
 #include "background_worker.h"
+#include "large_byte_buffer.h"
+#include "storage_atomic_write_port.h"
 #include "storage_export_inventory.h"
 #include "storage_export_plan.h"
 #include "storage_export_planner.h"
-#include "storage_export_state.h"
+#include "storage_export_state_batch.h"
+#include "storage_file_client.h"
 #include "storage_path.h"
+#include "storage_path_port.h"
 #include "storage_smb_client.h"
 #include "storage_stream_reader.h"
 
@@ -108,7 +112,9 @@ public:
     void begin(const AppConfigData &config,
                StorageScanPort &scan_port,
                StorageReadPort &read_port,
-               StorageStreamPort &stream_port);
+               StorageStreamPort &stream_port,
+               StorageAtomicWritePort &write_port,
+               StoragePathPort &path_port);
 
     // background worker
     const char *name() const override { return "storage_sync"; }
@@ -135,6 +141,7 @@ public:
 private:
     enum class WorkPhase : uint8_t {
         Idle,
+        LoadMetadata,
         LoadInventory,
         Connect,
         VerifyLatestStart,
@@ -148,13 +155,16 @@ private:
         OpenRemote,
         UploadChunk,
         CloseRemote,
-        MarkState,
+        ValidateLocal,
+        FlushState,
+        WriteDoneMarker,
         Finish,
     };
 
-    enum class StateWriteMode : uint8_t {
-        Append,
-        Replace,
+    enum class FileCompletion : uint8_t {
+        None,
+        Uploaded,
+        Skipped,
     };
 
     enum class RunKind : uint8_t {
@@ -181,8 +191,9 @@ private:
         uint64_t size = 0;
         uint64_t mtime = 0;
         uint64_t offset = 0;
-        StateWriteMode state_write_mode = StateWriteMode::Append;
         bool local_state_complete = false;
+        bool batch_state = false;
+        FileCompletion completion = FileCompletion::None;
         StorageStreamReader local;
     };
 
@@ -240,9 +251,10 @@ private:
                                            size_t error_out_size);
     JobStep publish_verify_latest_remote_locked(
         const StorageSmbRemoteStat &remote);
-    JobStep step_verify_latest_invalidate_locked(char *error_out,
-                                                 size_t error_out_size);
-    JobStep step_mark_state_locked();
+    JobStep step_verify_latest_invalidate_locked();
+    JobStep step_validate_local_locked();
+    JobStep step_flush_state_locked();
+    JobStep step_write_done_marker_locked();
 
     // endpoint/state metadata
     bool build_endpoint_state_dir_locked(const ConfigSnapshot &config,
@@ -250,18 +262,18 @@ private:
                                          size_t out_size,
                                          uint32_t *hash_out = nullptr) const;
     bool begin_run_locked();
+    JobStep step_load_metadata_locked();
     JobStep step_load_inventory_locked();
     void finish_run_locked();
     void preempt_run_locked();
     void fail_locked(const char *error);
     void clear_result_metadata_locked();
-    bool load_result_metadata_locked();
-    bool save_result_metadata_locked();
+    void parse_result_metadata_locked(char *buffer);
+    bool queue_result_metadata_save_locked();
+    bool service_result_metadata_save_locked(JobStep &result);
     void close_latest_verify_locked();
     bool begin_latest_verify_locked(char *error_out, size_t error_out_size);
     bool latest_verify_file_step_locked(char *error_out,
-                                        size_t error_out_size);
-    bool invalidate_latest_state_locked(char *error_out,
                                         size_t error_out_size);
 
     // export planning
@@ -271,22 +283,20 @@ private:
     bool plan_file_locked(const StorageExportPlannerItem &item);
 
     // local state files
-    bool ensure_state_dir_locked();
     bool build_state_path_locked(const char *path,
                                  char *out,
-                                 size_t out_size,
-                                 StateWriteMode *write_mode = nullptr) const;
-    bool write_state_locked(const char *state_path,
-                            const char *path,
-                            uint64_t size,
-                            uint64_t mtime,
-                            StateWriteMode mode);
+                                 size_t out_size) const;
+    bool queue_current_state_locked();
+    void commit_pending_file_counts_locked();
+    bool schedule_completed_datalog_day_locked(const char *day);
+    bool prepare_state_file_locked();
+    bool prepare_done_marker_locked();
+    uint32_t next_storage_generation_locked();
 
     // path helpers and upload resources
     bool remote_parent_dir_locked(const char *remote_path,
                                   char *out,
                                   size_t out_size) const;
-    void maybe_mark_completed_datalog_day_locked(const char *day);
     bool prepare_upload_buffer_locked();
     void release_upload_buffer_locked();
     BackgroundOperationControl operation_control() const;
@@ -326,15 +336,31 @@ private:
     StorageStreamPort *stream_port_ = nullptr;
     std::shared_ptr<const StorageExportInventory> export_inventory_;
     StorageExportPlanner export_planner_;
+    StorageExportStateBatch state_batch_;
+    StorageFileClient state_io_;
+    StorageFileClient metadata_io_;
     CurrentFile current_file_;
     LatestVerify latest_verify_;
     uint8_t *upload_buffer_ = nullptr;
     size_t upload_buffer_size_ = 0;
-    StorageExportStateCache state_cache_;
     char ensured_remote_dir_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
     char state_dir_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+    char pending_state_path_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+    char pending_done_day_[9] = {};
+    std::shared_ptr<const LargeByteBuffer> pending_state_bytes_;
+    uint32_t pending_state_uploaded_ = 0;
+    uint32_t pending_state_skipped_ = 0;
+
+    // durable result metadata
+    char pending_metadata_path_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
+    std::shared_ptr<const LargeByteBuffer> pending_metadata_bytes_;
+    bool metadata_loaded_ = false;
+    bool metadata_save_pending_ = false;
+
+    // generations/retries
     uint32_t endpoint_hash_ = 0;
     uint32_t next_inventory_generation_ = 1;
+    uint32_t next_storage_generation_ = 1;
     bool inventory_requested_ = false;
     uint32_t retry_due_ms_ = 0;
     uint8_t retry_attempt_ = 0;
