@@ -12,7 +12,7 @@
 #include "management_console.h"
 #include "ota_manager.h"
 #include "resmed_ota_manager.h"
-#include "rpc_arbiter.h"
+#include "rpc_transport_ports.h"
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "tcp_bridge.h"

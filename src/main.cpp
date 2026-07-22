@@ -26,7 +26,7 @@
 #include "report_plot_prebuild_job.h"
 #include "report_prefetch_job.h"
 #include "resmed_ota_manager.h"
-#include "rpc_arbiter.h"
+#include "rpc_transport.h"
 #include "rpc_quiesce_coordinator.h"
 #include "session_manager.h"
 #include "sink_manager.h"
@@ -53,9 +53,9 @@ using namespace aircannect;
 static CanDriver can_driver;
 static EventBroker event_broker;
 static StreamBroker stream_broker;
-static RpcArbiter rpc_arbiter(can_driver);
+static RpcTransport rpc_transport(can_driver);
 static RpcQuiesceCoordinator rpc_quiesce_coordinator(
-    rpc_arbiter, event_broker, stream_broker);
+    rpc_transport, event_broker, stream_broker);
 static As11DeviceService as11_device_service;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
@@ -69,10 +69,10 @@ static OtaManager ota_manager;
 static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
-static EdfRecorderManager edf_recorder_manager(rpc_arbiter);
+static EdfRecorderManager edf_recorder_manager(rpc_transport);
 static EdfReportCatalogJob edf_report_catalog_job;
 static OximetryManager oximetry_manager;
-static ReportManager report_manager(rpc_arbiter);
+static ReportManager report_manager(rpc_transport);
 static BackgroundWorker bg_worker;
 static StorageDiagnosticJob storage_diagnostic_job;
 static StorageSyncJob *storage_sync_job = nullptr;
@@ -93,9 +93,9 @@ static ActivitySnapshot storage_activity;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
-    rpc_arbiter,
-    rpc_arbiter,
-    rpc_arbiter,
+    rpc_transport,
+    rpc_transport,
+    rpc_transport,
     can_driver,
     event_broker,
     stream_broker,
@@ -185,11 +185,11 @@ static void route_tcp_raw_request(void *context,
 }
 
 static void sync_rpc_transport_generation(uint32_t now_ms) {
-    const uint32_t generation = rpc_arbiter.transport_generation();
+    const uint32_t generation = rpc_transport.transport_generation();
     if (generation == rpc_transport_generation_seen) return;
 
-    event_broker.transport_reset(rpc_arbiter, now_ms);
-    stream_broker.transport_reset(rpc_arbiter, now_ms);
+    event_broker.transport_reset(rpc_transport, now_ms);
+    stream_broker.transport_reset(rpc_transport, now_ms);
     rpc_transport_generation_seen = generation;
 }
 
@@ -309,10 +309,10 @@ static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
 
 static void drain_rpc_events() {
     RpcEvent event;
-    while (rpc_arbiter.next_event(event)) {
+    while (rpc_transport.next_event(event)) {
         if (event.kind == RpcEventKind::BootNotification) {
-            as11_device_service.device_reset(rpc_arbiter, millis());
-            as11_settings_manager.device_reset(rpc_arbiter);
+            as11_device_service.device_reset(rpc_transport, millis());
+            as11_settings_manager.device_reset(rpc_transport);
         }
 
         if (event.kind == RpcEventKind::RpcResponse &&
@@ -347,7 +347,7 @@ static void drain_can_rx_after(const char *section) {
     const uint32_t gap_ms = last_checkpoint_ms == 0
                                 ? 0
                                 : before_ms - last_checkpoint_ms;
-    const size_t drained = rpc_arbiter.drain_can_rx();
+    const size_t drained = rpc_transport.drain_can_rx();
     const uint32_t after_drain_ms = millis();
     const uint32_t drain_ms = after_drain_ms - before_ms;
 
@@ -437,7 +437,7 @@ void setup() {
     } else {
         Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] psram=no\n");
     }
-    if (!rpc_arbiter.reserve_reassembly_buffers()) {
+    if (!rpc_transport.reserve_reassembly_buffers()) {
         Log::logf(CAT_RPC, LOG_WARN,
                   "[INIT] datagram reassembly buffer prealloc failed\n");
     }
@@ -493,15 +493,15 @@ void setup() {
                                           &as11_device_service);
     event_broker.set_settings_history_observer(
         note_as11_settings_history, &as11_settings_manager);
-    rpc_arbiter.set_event_notification_observer(route_event_notification,
-                                                &event_broker);
-    rpc_arbiter.set_stream_notification_observer(route_stream_notification,
-                                                 &stream_broker);
-    rpc_arbiter.set_spool_notification_observer(route_spool_notification,
-                                                &report_manager);
+    rpc_transport.set_event_notification_observer(route_event_notification,
+                                                  &event_broker);
+    rpc_transport.set_stream_notification_observer(route_stream_notification,
+                                                   &stream_broker);
+    rpc_transport.set_spool_notification_observer(route_spool_notification,
+                                                  &report_manager);
     tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
                                         &stream_broker);
-    rpc_transport_generation_seen = rpc_arbiter.transport_generation();
+    rpc_transport_generation_seen = rpc_transport.transport_generation();
 
     sink_manager.begin(stream_broker, as11_device_service.state(),
                        session_manager);
@@ -515,9 +515,9 @@ void setup() {
 
     oximetry_manager.begin(app_config);
     report_manager.begin();
-    resmed_ota_manager.begin(rpc_arbiter, as11_device_service,
+    resmed_ota_manager.begin(rpc_transport, as11_device_service,
                              StorageService::atomic_write_port());
-    time_sync_service.begin(app_config, wifi_manager, rpc_arbiter,
+    time_sync_service.begin(app_config, wifi_manager, rpc_transport,
                             as11_device_service);
     if (edf_report_catalog_job.set_posix_timezone(
             app_config.data().timezone.c_str())) {
@@ -547,7 +547,7 @@ void setup() {
 
     sync_network_services();
 
-    web_ui.begin(rpc_arbiter, stream_broker, as11_device_service,
+    web_ui.begin(rpc_transport, stream_broker, as11_device_service,
                  as11_settings_manager,
                  wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
@@ -613,20 +613,20 @@ void loop() {
         resmed_ota_manager.transport_active();
 
     const bool raw_tcp_connected = tcp_bridge.raw_client_connected();
-    rpc_arbiter.set_raw_rpc_forwarding_enabled(raw_tcp_connected);
+    rpc_transport.set_raw_rpc_forwarding_enabled(raw_tcp_connected);
     stream_broker.set_external_transport_connected(raw_tcp_connected,
                                                    now_ms);
 
-    rpc_arbiter.poll();
+    rpc_transport.poll();
     sync_rpc_transport_generation(now_ms);
-    stream_broker.poll(rpc_arbiter, now_ms);
-    event_broker.poll(rpc_arbiter, now_ms,
+    stream_broker.poll(rpc_transport, now_ms);
+    event_broker.poll(rpc_transport, now_ms,
                       resmed_ota_transport_active);
     as11_device_service.poll(
-        rpc_arbiter, now_ms,
+        rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
     as11_settings_manager.poll(
-        rpc_arbiter, now_ms,
+        rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
 
     ota_manager.poll_http_upload_prepare(
@@ -635,11 +635,11 @@ void loop() {
         esp_ota_quiesce_requested &&
             rpc_quiesce_coordinator.timed_out(now_ms));
 
-    drain_can_rx_after("arbiter_ota_prepare");
+    drain_can_rx_after("rpc_ota_prepare");
 
     // Reports and ResMed OTA
     report_manager.poll(
-        rpc_arbiter.background_backpressure_active(),
+        rpc_transport.background_backpressure_active(),
         can_driver.stats().rx_queue_full_alerts,
         as11_device_service.state().therapy_state() ==
             As11TherapyState::Running,
@@ -775,7 +775,7 @@ void loop() {
     web_ui.poll(drain_can_rx_after);
     drain_can_rx_after("web_ui");
 
-    tcp_bridge.poll(rpc_arbiter);
+    tcp_bridge.poll(rpc_transport);
     telnet_console.poll(console_ctx);
     serial_management_console.poll(Serial, Serial, console_ctx);
 

@@ -1,4 +1,4 @@
-#include "rpc_arbiter.h"
+#include "rpc_transport.h"
 
 #include <algorithm>
 #include <stdio.h>
@@ -52,19 +52,19 @@ bool current_epoch_ms(int64_t &epoch_ms) {
 
 }  // namespace
 
-RpcArbiter::RpcArbiter(CanDriver &can) : can_(can) {
+RpcTransport::RpcTransport(CanDriver &can) : can_(can) {
     stats_started_ms_ = millis();
 }
 
-RpcArbiter::DeferredPayload::~DeferredPayload() {
+RpcTransport::DeferredPayload::~DeferredPayload() {
     clear();
 }
 
-RpcArbiter::DeferredPayload::DeferredPayload(DeferredPayload &&other) noexcept {
+RpcTransport::DeferredPayload::DeferredPayload(DeferredPayload &&other) noexcept {
     move_from(other);
 }
 
-RpcArbiter::DeferredPayload &RpcArbiter::DeferredPayload::operator=(
+RpcTransport::DeferredPayload &RpcTransport::DeferredPayload::operator=(
     DeferredPayload &&other) noexcept {
     if (this != &other) {
         clear();
@@ -73,7 +73,7 @@ RpcArbiter::DeferredPayload &RpcArbiter::DeferredPayload::operator=(
     return *this;
 }
 
-bool RpcArbiter::DeferredPayload::copy_from(Kind next_kind,
+bool RpcTransport::DeferredPayload::copy_from(Kind next_kind,
                                             const char *payload,
                                             size_t payload_len) {
     clear();
@@ -87,14 +87,14 @@ bool RpcArbiter::DeferredPayload::copy_from(Kind next_kind,
     return true;
 }
 
-void RpcArbiter::DeferredPayload::clear() {
+void RpcTransport::DeferredPayload::clear() {
     free_payload_bytes(data);
     data = nullptr;
     len = 0;
     kind = Kind::Rpc;
 }
 
-void RpcArbiter::DeferredPayload::move_from(DeferredPayload &other) {
+void RpcTransport::DeferredPayload::move_from(DeferredPayload &other) {
     kind = other.kind;
     data = other.data;
     len = other.len;
@@ -103,13 +103,13 @@ void RpcArbiter::DeferredPayload::move_from(DeferredPayload &other) {
     other.len = 0;
 }
 
-bool RpcArbiter::reserve_reassembly_buffers() {
+bool RpcTransport::reserve_reassembly_buffers() {
     const bool rpc_ok = rpc_rx_.reserve_initial();
     const bool log_ok = log_rx_.reserve_initial();
     return rpc_ok && log_ok;
 }
 
-void RpcArbiter::poll() {
+void RpcTransport::poll() {
     can_.poll();
     const uint32_t now = millis();
     note_can_rx_pressure(now);
@@ -139,7 +139,7 @@ void RpcArbiter::poll() {
     can_.poll();
 }
 
-size_t RpcArbiter::drain_can_rx() {
+size_t RpcTransport::drain_can_rx() {
     size_t drained = 0;
     const uint32_t start_ms = millis();
     for (; drained < AC_CAN_RX_DRAIN_PRESSURE_BUDGET; ++drained) {
@@ -153,7 +153,7 @@ size_t RpcArbiter::drain_can_rx() {
     return drained;
 }
 
-void RpcArbiter::process_deferred_payloads(size_t budget) {
+void RpcTransport::process_deferred_payloads(size_t budget) {
     for (size_t i = 0; i < budget; ++i) {
         DeferredPayload payload;
         if (!deferred_payloads_.pop(payload)) return;
@@ -166,7 +166,7 @@ void RpcArbiter::process_deferred_payloads(size_t budget) {
     }
 }
 
-bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source) {
+bool RpcTransport::submit_raw_payload(const std::string &payload, RpcSource source) {
     if (quiesce_mode_) {
         push_event(RpcEventKind::Info,
                    "raw RPC rejected while transport quiesce is active");
@@ -188,7 +188,7 @@ bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source
     return true;
 }
 
-bool RpcArbiter::enqueue_payload_frames(const std::string &payload,
+bool RpcTransport::enqueue_payload_frames(const std::string &payload,
                                         RpcSource source) {
     (void)source;
     const size_t frame_count = datagram_frame_count(payload.size());
@@ -200,24 +200,24 @@ bool RpcArbiter::enqueue_payload_frames(const std::string &payload,
     return visit_encoded_datagram(payload, enqueue_datagram_frame, this);
 }
 
-bool RpcArbiter::enqueue_datagram_frame(void *context,
+bool RpcTransport::enqueue_datagram_frame(void *context,
                                         const DatagramFrame &frame) {
-    RpcArbiter *arbiter = static_cast<RpcArbiter *>(context);
-    if (!arbiter) return false;
+    RpcTransport *transport = static_cast<RpcTransport *>(context);
+    if (!transport) return false;
 
     RawCanFrame raw;
     raw.id = AC_CAN_TX_ID;
     raw.len = frame.len;
     for (uint8_t i = 0; i < frame.len; ++i) raw.data[i] = frame.data[i];
-    if (!arbiter->can_.enqueue_tx(raw)) {
-        arbiter->push_event(RpcEventKind::Info, "CAN TX enqueue failed");
+    if (!transport->can_.enqueue_tx(raw)) {
+        transport->push_event(RpcEventKind::Info, "CAN TX enqueue failed");
         return false;
     }
 
     return true;
 }
 
-bool RpcArbiter::send_request(const std::string &method,
+bool RpcTransport::send_request(const std::string &method,
                               const std::string &params_json,
                               RpcSource source,
                               uint32_t timeout_ms) {
@@ -232,7 +232,7 @@ bool RpcArbiter::send_request(const std::string &method,
     return enqueue_request(request);
 }
 
-OperationSubmission RpcArbiter::request(const RpcRequestCommand &command) {
+OperationSubmission RpcTransport::request(const RpcRequestCommand &command) {
     if (!command.valid()) return OperationSubmission::rejected();
     if (request_completion_reservations_ >= request_completions_.capacity()) {
         return OperationSubmission::busy();
@@ -252,7 +252,7 @@ OperationSubmission RpcArbiter::request(const RpcRequestCommand &command) {
     return OperationSubmission::accepted({request.id, request.generation});
 }
 
-bool RpcArbiter::cancel(OperationTicket ticket) {
+bool RpcTransport::cancel(OperationTicket ticket) {
     if (!ticket.valid()) return false;
 
     if (pending_.active && pending_.id == ticket.id &&
@@ -287,7 +287,7 @@ bool RpcArbiter::cancel(OperationTicket ticket) {
     return cancelled;
 }
 
-bool RpcArbiter::take_completion(OperationTicket ticket,
+bool RpcTransport::take_completion(OperationTicket ticket,
                                  RpcRequestCompletion &completion) {
     if (!ticket.valid()) return false;
 
@@ -309,7 +309,7 @@ bool RpcArbiter::take_completion(OperationTicket ticket,
     return found;
 }
 
-bool RpcArbiter::enqueue_request(QueuedRequest &request) {
+bool RpcTransport::enqueue_request(QueuedRequest &request) {
     const uint32_t now = millis();
     const bool quiesce_control =
         quiesce_mode_ && request_allowed_during_quiesce(request);
@@ -329,11 +329,11 @@ bool RpcArbiter::enqueue_request(QueuedRequest &request) {
     return true;
 }
 
-bool RpcArbiter::next_event(RpcEvent &event) {
+bool RpcTransport::next_event(RpcEvent &event) {
     return events_.pop(event);
 }
 
-bool RpcArbiter::background_backpressure_active() const {
+bool RpcTransport::background_backpressure_active() const {
     if (background_rx_pressure_active(millis())) return true;
 
     if (can_rx_queue_pressure_active()) return true;
@@ -344,38 +344,38 @@ bool RpcArbiter::background_backpressure_active() const {
     return false;
 }
 
-bool RpcArbiter::can_rx_queue_pressure_active() const {
+bool RpcTransport::can_rx_queue_pressure_active() const {
     CanControllerStatus can_status;
     return can_.controller_status(can_status) && can_status.valid &&
            can_status.msgs_to_rx >= AC_CAN_RX_BACKPRESSURE_WATERMARK;
 }
 
-void RpcArbiter::set_raw_rpc_forwarding_enabled(bool enabled) {
+void RpcTransport::set_raw_rpc_forwarding_enabled(bool enabled) {
     raw_rpc_forwarding_enabled_ = enabled;
 }
 
-void RpcArbiter::set_event_notification_observer(
+void RpcTransport::set_event_notification_observer(
     RpcNotificationObserver observer,
     void *context) {
     event_notification_observer_ = observer;
     event_notification_context_ = observer ? context : nullptr;
 }
 
-void RpcArbiter::set_stream_notification_observer(
+void RpcTransport::set_stream_notification_observer(
     RpcNotificationObserver observer,
     void *context) {
     stream_notification_observer_ = observer;
     stream_notification_context_ = observer ? context : nullptr;
 }
 
-void RpcArbiter::set_spool_notification_observer(
+void RpcTransport::set_spool_notification_observer(
     RpcNotificationObserver observer,
     void *context) {
     spool_notification_observer_ = observer;
     spool_notification_context_ = observer ? context : nullptr;
 }
 
-void RpcArbiter::reset_stats() {
+void RpcTransport::reset_stats() {
     stats_ = {};
     can_.reset_stats();
     consecutive_scheduler_timeouts_ = 0;
@@ -385,7 +385,7 @@ void RpcArbiter::reset_stats() {
     stats_started_ms_ = millis();
 }
 
-RpcTransportStatus RpcArbiter::runtime_status() const {
+RpcTransportStatus RpcTransport::runtime_status() const {
     const uint32_t now = millis();
     RpcTransportStatus out;
     out.stats_elapsed_ms = std::max<uint32_t>(1, now - stats_started_ms_);
@@ -409,7 +409,7 @@ RpcTransportStatus RpcArbiter::runtime_status() const {
     return out;
 }
 
-bool RpcArbiter::recover_can(const char *reason) {
+bool RpcTransport::recover_can(const char *reason) {
     rpc_rx_.reset();
     log_rx_.reset();
     deferred_payloads_.clear();
@@ -418,19 +418,19 @@ bool RpcArbiter::recover_can(const char *reason) {
     return can_.recover_or_restart(reason);
 }
 
-void RpcArbiter::set_quiesce_mode(bool requested) {
+void RpcTransport::set_quiesce_mode(bool requested) {
     if (requested == quiesce_mode_) return;
 
     quiesce_mode_ = requested;
     if (requested) cancel_all_requests("rpc_quiesce");
 }
 
-bool RpcArbiter::quiesce_idle() const {
+bool RpcTransport::quiesce_idle() const {
     return !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
            can_.tx_queue_depth() == 0;
 }
 
-RpcQuiesceStatus RpcArbiter::quiesce_status() const {
+RpcQuiesceStatus RpcTransport::quiesce_status() const {
     RpcQuiesceStatus out;
     out.idle = quiesce_idle();
     out.pending_request = pending_.active;
@@ -440,7 +440,7 @@ RpcQuiesceStatus RpcArbiter::quiesce_status() const {
     return out;
 }
 
-void RpcArbiter::cancel_requests_from_source(RpcSource source,
+void RpcTransport::cancel_requests_from_source(RpcSource source,
                                              const char *reason) {
     const char *why = reason ? reason : "cancelled";
     if (pending_.active && pending_.source == source) {
@@ -468,17 +468,17 @@ void RpcArbiter::cancel_requests_from_source(RpcSource source,
     }
 }
 
-bool RpcArbiter::background_backoff_active(uint32_t now) const {
+bool RpcTransport::background_backoff_active(uint32_t now) const {
     return background_backoff_until_ms_ &&
            static_cast<int32_t>(background_backoff_until_ms_ - now) > 0;
 }
 
-bool RpcArbiter::background_rx_pressure_active(uint32_t now) const {
+bool RpcTransport::background_rx_pressure_active(uint32_t now) const {
     return background_rx_pressure_until_ms_ &&
            static_cast<int32_t>(background_rx_pressure_until_ms_ - now) > 0;
 }
 
-void RpcArbiter::note_can_rx_pressure(uint32_t now) {
+void RpcTransport::note_can_rx_pressure(uint32_t now) {
     const uint32_t alerts = can_.stats().rx_queue_full_alerts;
     if (alerts == observed_rx_queue_full_alerts_) return;
     observed_rx_queue_full_alerts_ = alerts;
@@ -491,20 +491,20 @@ void RpcArbiter::note_can_rx_pressure(uint32_t now) {
     }
 }
 
-bool RpcArbiter::request_allowed_during_quiesce(
+bool RpcTransport::request_allowed_during_quiesce(
     const QueuedRequest &request) const {
     if (!quiesce_mode_) return true;
     return request.admission == RpcRequestAdmission::QuiesceControl;
 }
 
-void RpcArbiter::note_request_success(RpcSource source, uint32_t now) {
+void RpcTransport::note_request_success(RpcSource source, uint32_t now) {
     (void)now;
     (void)source;
     consecutive_scheduler_timeouts_ = 0;
     background_backoff_until_ms_ = 0;
 }
 
-void RpcArbiter::note_request_timeout(RpcSource source, uint32_t now) {
+void RpcTransport::note_request_timeout(RpcSource source, uint32_t now) {
     if (!scheduler_source(source)) return;
     if (consecutive_scheduler_timeouts_ < 255) {
         consecutive_scheduler_timeouts_++;
@@ -521,7 +521,7 @@ void RpcArbiter::note_request_timeout(RpcSource source, uint32_t now) {
               static_cast<unsigned>(consecutive_scheduler_timeouts_));
 }
 
-void RpcArbiter::push_event(RpcEventKind kind,
+void RpcTransport::push_event(RpcEventKind kind,
                             const std::string &payload,
                             RpcSource source,
                             uint32_t id) {
@@ -532,7 +532,7 @@ void RpcArbiter::push_event(RpcEventKind kind,
     push_event(kind, make_rpc_payload_ref(std::string(payload)), source, id);
 }
 
-void RpcArbiter::push_event(RpcEventKind kind,
+void RpcTransport::push_event(RpcEventKind kind,
                             RpcPayloadRef payload,
                             RpcSource source,
                             uint32_t id) {
@@ -544,7 +544,7 @@ void RpcArbiter::push_event(RpcEventKind kind,
     if (!events_.push(std::move(event))) stats_.event_drops++;
 }
 
-void RpcArbiter::cancel_pending_request(const char *reason) {
+void RpcTransport::cancel_pending_request(const char *reason) {
     if (!pending_.active) return;
 
     stats_.request_cancellations++;
@@ -567,7 +567,7 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
     pending_ = {};
 }
 
-void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
+void RpcTransport::cancel_queued_request(const QueuedRequest &request,
                                        const char *reason,
                                        RpcCompletionCause cause) {
     stats_.request_cancellations++;
@@ -591,7 +591,7 @@ void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
                      request_completions_);
 }
 
-void RpcArbiter::complete_request(uint32_t id,
+void RpcTransport::complete_request(uint32_t id,
                                   uint32_t generation,
                                   OperationOutcome outcome,
                                   RpcCompletionCause cause,
@@ -619,7 +619,7 @@ void RpcArbiter::complete_request(uint32_t id,
     }
 }
 
-void RpcArbiter::cancel_all_requests(const char *reason) {
+void RpcTransport::cancel_all_requests(const char *reason) {
     cancel_pending_request(reason);
     if (dispatch_retry_active_) {
         cancel_queued_request(dispatch_retry_, reason);
@@ -636,7 +636,7 @@ void RpcArbiter::cancel_all_requests(const char *reason) {
     for (auto &raw : raw_passthrough_) raw = {};
 }
 
-void RpcArbiter::expire_raw_passthrough(uint32_t now) {
+void RpcTransport::expire_raw_passthrough(uint32_t now) {
     for (auto &request : raw_passthrough_) {
         if (!request.active) continue;
         if (static_cast<int32_t>(now - request.deadline_ms) >= 0) {
@@ -645,7 +645,7 @@ void RpcArbiter::expire_raw_passthrough(uint32_t now) {
     }
 }
 
-void RpcArbiter::remember_raw_passthrough(uint32_t id,
+void RpcTransport::remember_raw_passthrough(uint32_t id,
                                           RpcSource source,
                                           uint32_t now) {
     expire_raw_passthrough(now);
@@ -674,7 +674,7 @@ void RpcArbiter::remember_raw_passthrough(uint32_t id,
     slot->deadline_ms = now + AC_RPC_RAW_PASSTHROUGH_TIMEOUT_MS;
 }
 
-bool RpcArbiter::match_raw_passthrough(uint32_t id,
+bool RpcTransport::match_raw_passthrough(uint32_t id,
                                        RpcSource &source,
                                        uint32_t now) {
     expire_raw_passthrough(now);
@@ -687,7 +687,7 @@ bool RpcArbiter::match_raw_passthrough(uint32_t id,
     return false;
 }
 
-void RpcArbiter::dispatch_next_request() {
+void RpcTransport::dispatch_next_request() {
     if (pending_.active) return;
     const uint32_t now = millis();
     if (dispatch_retry_active_ &&
@@ -817,7 +817,7 @@ void RpcArbiter::dispatch_next_request() {
     Log::log_payload(CAT_RPC, LOG_DEBUG, prefix, payload);
 }
 
-void RpcArbiter::check_pending_timeout() {
+void RpcTransport::check_pending_timeout() {
     if (!pending_.active) return;
     const uint32_t now = millis();
     if (static_cast<int32_t>(now - pending_.deadline_ms) < 0) return;
@@ -845,33 +845,33 @@ void RpcArbiter::check_pending_timeout() {
     pending_ = {};
 }
 
-void RpcArbiter::handle_event_notification(const char *payload,
+void RpcTransport::handle_event_notification(const char *payload,
                                            size_t payload_len) {
     if (!event_notification_observer_) return;
     event_notification_observer_(event_notification_context_, payload,
                                  payload_len, millis());
 }
 
-void RpcArbiter::handle_stream_notification(const char *payload,
+void RpcTransport::handle_stream_notification(const char *payload,
                                             size_t payload_len) {
     if (!stream_notification_observer_) return;
     stream_notification_observer_(stream_notification_context_, payload,
                                   payload_len, millis());
 }
 
-void RpcArbiter::handle_spool_notification(const char *payload,
+void RpcTransport::handle_spool_notification(const char *payload,
                                            size_t payload_len) {
     if (!spool_notification_observer_) return;
     spool_notification_observer_(spool_notification_context_, payload,
                                  payload_len, millis());
 }
 
-void RpcArbiter::note_transport_reset() {
+void RpcTransport::note_transport_reset() {
     transport_generation_++;
     if (transport_generation_ == 0) transport_generation_++;
 }
 
-void RpcArbiter::enqueue_deferred_payload(DeferredPayload::Kind kind,
+void RpcTransport::enqueue_deferred_payload(DeferredPayload::Kind kind,
                                           const char *payload,
                                           size_t payload_len) {
     DeferredPayload deferred;
@@ -887,7 +887,7 @@ void RpcArbiter::enqueue_deferred_payload(DeferredPayload::Kind kind,
     stats_.deferred_payloads++;
 }
 
-void RpcArbiter::handle_frame(const RawCanFrame &frame) {
+void RpcTransport::handle_frame(const RawCanFrame &frame) {
     if (frame.extended || frame.remote) return;
     const uint32_t now = millis();
 
@@ -933,7 +933,7 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
     }
 }
 
-void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
+void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
     stats_.rpc_datagrams++;
     auto make_payload_string = [&]() {
         return payload && payload_len ? std::string(payload, payload_len)
@@ -1066,7 +1066,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
     }
 }
 
-void RpcArbiter::handle_debug_payload(const char *payload, size_t payload_len) {
+void RpcTransport::handle_debug_payload(const char *payload, size_t payload_len) {
     stats_.log_datagrams++;
     Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11] ", payload, payload_len);
     if (raw_rpc_forwarding_enabled_) {
@@ -1078,7 +1078,7 @@ void RpcArbiter::handle_debug_payload(const char *payload, size_t payload_len) {
     }
 }
 
-std::string RpcArbiter::format_boot_frame(const RawCanFrame &frame) const {
+std::string RpcTransport::format_boot_frame(const RawCanFrame &frame) const {
     std::string out = "FgPowerup 0x";
     char id[8];
     snprintf(id, sizeof(id), "%03lX", static_cast<unsigned long>(frame.id));
@@ -1090,7 +1090,7 @@ std::string RpcArbiter::format_boot_frame(const RawCanFrame &frame) const {
     return out;
 }
 
-const char *RpcArbiter::source_name(RpcSource source) const {
+const char *RpcTransport::source_name(RpcSource source) const {
     switch (source) {
         case RpcSource::Console: return "console";
         case RpcSource::Tcp: return "tcp";

@@ -19,12 +19,12 @@ using RpcNotificationObserver = void (*)(void *context,
                                          size_t payload_len,
                                          uint32_t now_ms);
 
-class RpcArbiter final : public RpcRequestPort,
-                         public RpcPassthroughPort,
-                         public RpcDiagnosticsPort,
-                         public RpcQuiescePort {
+class RpcTransport final : public RpcRequestPort,
+                           public RpcPassthroughPort,
+                           public RpcDiagnosticsPort,
+                           public RpcQuiescePort {
 public:
-    explicit RpcArbiter(CanDriver &can);
+    explicit RpcTransport(CanDriver &can);
 
     // Lifecycle and CAN pump
     bool reserve_reassembly_buffers();
@@ -55,7 +55,7 @@ public:
     void set_spool_notification_observer(RpcNotificationObserver observer,
                                          void *context);
 
-    // Device maintenance
+    // Transport maintenance
     void reset_stats() override;
 
     bool recover_can(const char *reason) override;
