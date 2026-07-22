@@ -52,6 +52,7 @@ constexpr DescriptorPreset DescriptorPresets[] = {
     {"14.8.3.0", 0x2D89E58Fu, 0xBEB37EE2u},
     {"15.8.4.0", 0xD785ABA6u, 0xBEB37EE2u},
     {"16.8.5.0", 0x7862CBA7u, 0xBEB37EE2u},
+    {"17.8.6.0", 0xBECBC5BCu, 0xBEB37EE2u},
 };
 
 uint32_t get_le32(const uint8_t *data, size_t offset) {
