@@ -18,10 +18,6 @@ uint16_t read_u16_le(const uint8_t *data);
 uint32_t read_u32_le(const uint8_t *data);
 int32_t read_i32_le(const uint8_t *data);
 
-bool append_plot_series_compact(ReportSpoolBuffer &out,
-                                const char *name,
-                                const ReportSpoolBuffer &raw_points,
-                                bool &ok);
 bool append_plot_series_envelope_runs(ReportSpoolBuffer &out,
                                       const char *name,
                                       const ReportSpoolBuffer &raw_buckets,
