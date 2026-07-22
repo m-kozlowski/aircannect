@@ -6,6 +6,7 @@
 #include "firmware_url_source.h"
 #include "management_console_utils.h"
 #include "ota_status.h"
+#include "resmed_firmware_preparer.h"
 #include "resmed_firmware_repository.h"
 #include "resmed_ota_manager.h"
 #include "string_util.h"
@@ -177,11 +178,13 @@ void handle_ota(Print &out,
 
 void handle_resmed_ota(Print &out,
                        String rest,
+                       ResmedFirmwarePreparer &preparer,
                        ResmedOtaManager &resmed_ota,
                        ResmedFirmwareRepository &repository) {
     trim_inplace(rest);
 
     if (!rest.length() || rest == "status") {
+        const ResmedFirmwarePrepareStatus prepare = preparer.status();
         const ResmedOtaStatus status = resmed_ota.status();
         out.print("[RESMED OTA] phase=");
         out.print(resmed_ota.phase_name());
@@ -210,6 +213,24 @@ void handle_resmed_ota(Print &out,
             out.print(status.last_error);
         }
         out.println();
+        out.print("[RESMED prepare] state=");
+        out.print(resmed_firmware_prepare_state_name(prepare.state));
+        out.print(" file=\"");
+        out.print(prepare.filename);
+        out.print("\" progress=");
+        out.print(prepare.progress_percent);
+        out.print("% path=\"");
+        out.print(prepare.source_path);
+        out.print("\"");
+        if (prepare.target[0]) {
+            out.print(" target=");
+            out.print(prepare.target);
+        }
+        if (prepare.error[0]) {
+            out.print(" error=");
+            out.print(prepare.error);
+        }
+        out.println();
         return;
     }
 
@@ -225,6 +246,7 @@ void handle_resmed_ota(Print &out,
     }
 
     if (rest == "abort") {
+        preparer.cancel();
         resmed_ota.abort("aborted_by_console");
         out.println("[RESMED OTA] aborted");
         return;
@@ -289,6 +311,26 @@ void handle_resmed_ota(Print &out,
         return;
     }
 
+    const char *prepare_prefix = nullptr;
+    if (rest.startsWith("repository prepare ")) {
+        prepare_prefix = "repository prepare ";
+    } else if (rest.startsWith("prepare ")) {
+        prepare_prefix = "prepare ";
+    }
+    if (prepare_prefix) {
+        String path = rest.substring(strlen(prepare_prefix));
+        trim_inplace(path);
+        if (!path.length()) {
+            out.println("[RESMED prepare] path is required");
+        } else if (!resmed_ota.active() &&
+                   preparer.request(path.c_str(), nullptr, false)) {
+            out.println("[RESMED prepare] queued");
+        } else {
+            out.println("[RESMED prepare] rejected");
+        }
+        return;
+    }
+
     if (rest.startsWith("apply ")) {
         String args = rest.substring(6);
         int pos = 0;
@@ -339,7 +381,8 @@ void handle_resmed_ota(Print &out,
 
     print_unknown_command(
         out, "RESMED OTA",
-        "status, check, abort, apply, repository [refresh|remove PATH]");
+        "status, check, abort, apply, prepare PATH, repository "
+        "[refresh|remove PATH|prepare PATH]");
 }
 
 }  // namespace
@@ -348,12 +391,14 @@ OtaConsoleCommands::OtaConsoleCommands(FirmwareInstaller &installer,
                                        FirmwareUrlSource &url_source,
                                        ArduinoOtaSource &arduino_source,
                                        UpdateChecker &update_checker,
+                                       ResmedFirmwarePreparer &resmed_preparer,
                                        ResmedOtaManager &resmed_ota,
                                        ResmedFirmwareRepository &resmed_repository)
     : installer_(installer),
       url_source_(url_source),
       arduino_source_(arduino_source),
       update_checker_(update_checker),
+      resmed_preparer_(resmed_preparer),
       resmed_ota_(resmed_ota),
       resmed_repository_(resmed_repository) {}
 
@@ -375,7 +420,8 @@ bool OtaConsoleCommands::execute(const String &command,
         return true;
     }
     if (command == "resmed-ota") {
-        handle_resmed_ota(out, rest, resmed_ota_, resmed_repository_);
+        handle_resmed_ota(out, rest, resmed_preparer_, resmed_ota_,
+                          resmed_repository_);
         return true;
     }
     if (command == "restart") {

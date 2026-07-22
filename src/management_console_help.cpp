@@ -216,9 +216,11 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  resmed-ota status         show upload/apply state");
         out.println("  resmed-ota check          queue CheckUpgradeFile");
         out.println("  resmed-ota abort          abort current AS11 OTA flow");
+        out.println("  resmed-ota prepare PATH   prepare and upload an image");
         out.println("  resmed-ota repository     list repository images");
         out.println("  resmed-ota repository refresh  rebuild repository list");
         out.println("  resmed-ota repository remove PATH  remove one image");
+        out.println("  resmed-ota repository prepare PATH  prepare one image");
         out.println("  resmed-ota apply plain CONFIRM         queue ApplyUpgrade");
         out.println("  resmed-ota apply authenticated TAG CONFIRM  queue ApplyAuthUpgrade");
         return;

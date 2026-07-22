@@ -24,6 +24,7 @@ class OximetryHub;
 class PlxPeripheral;
 class ReportTask;
 class ResmedFirmwareRepository;
+class ResmedFirmwarePreparer;
 class ResmedOtaManager;
 class RpcDiagnosticsPort;
 class RpcPassthroughPort;
@@ -287,6 +288,7 @@ public:
                        FirmwareUrlSource &url_source,
                        ArduinoOtaSource &arduino_source,
                        UpdateChecker &update_checker,
+                       ResmedFirmwarePreparer &resmed_preparer,
                        ResmedOtaManager &resmed_ota,
                        ResmedFirmwareRepository &resmed_repository);
 
@@ -300,6 +302,7 @@ private:
     FirmwareUrlSource &url_source_;
     ArduinoOtaSource &arduino_source_;
     UpdateChecker &update_checker_;
+    ResmedFirmwarePreparer &resmed_preparer_;
     ResmedOtaManager &resmed_ota_;
     ResmedFirmwareRepository &resmed_repository_;
 };

@@ -14,6 +14,7 @@
 #include "http_request_utils.h"
 #include "json_util.h"
 #include "ota_status.h"
+#include "resmed_firmware_preparer.h"
 #include "resmed_ota_manager.h"
 #include "update_checker.h"
 #include "version.h"
@@ -145,9 +146,7 @@ void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
 const char *resmed_phase_name(ResmedOtaPhase phase) {
     switch (phase) {
         case ResmedOtaPhase::Idle: return "idle";
-        case ResmedOtaPhase::Staging: return "staging";
-        case ResmedOtaPhase::Publishing: return "publishing";
-        case ResmedOtaPhase::Staged: return "staged";
+        case ResmedOtaPhase::Opening: return "opening";
         case ResmedOtaPhase::Initiating: return "initiating";
         case ResmedOtaPhase::Ready: return "ready";
         case ResmedOtaPhase::Uploading: return "uploading";
@@ -163,11 +162,25 @@ const char *resmed_phase_name(ResmedOtaPhase phase) {
 
 template <typename JsonOut>
 void build_resmed_ota_json(JsonOut &json,
+                           const ResmedFirmwarePreparer &preparer,
                            const ResmedOtaManager &manager) {
     const ResmedOtaStatus status = manager.status();
+    const ResmedFirmwarePrepareStatus prepare = preparer.status();
     json = "{";
     json_add_string(json, "phase", resmed_phase_name(status.phase), false);
-    json_add_bool(json, "active", manager.active());
+    json_add_bool(json, "active", manager.active() || preparer.active());
+    json_add_string(json, "prepare_state",
+                    resmed_firmware_prepare_state_name(prepare.state));
+    json_add_bool(json, "prepare_active", prepare.active());
+    json_add_int(json, "prepare_total_size",
+                 static_cast<long>(prepare.total_bytes));
+    json_add_int(json, "prepare_processed_bytes",
+                 static_cast<long>(prepare.processed_bytes));
+    json_add_int(json, "prepare_progress", prepare.progress_percent);
+    json_add_string(json, "prepare_source_path", prepare.source_path);
+    json_add_string(json, "prepare_filename", prepare.filename);
+    json_add_string(json, "prepare_target", prepare.target);
+    json_add_string(json, "prepare_error", prepare.error);
     json_add_bool(json, "waiting", status.waiting);
     json_add_int(json, "total_size", static_cast<long>(status.total_size));
     json_add_int(json, "uploaded_bytes",
@@ -181,7 +194,7 @@ void build_resmed_ota_json(JsonOut &json,
     json_add_string(json, "apply_mode", status.apply_mode.c_str());
     json_add_string(json, "input_type", status.input_type.c_str());
     json_add_string(json, "target", status.target.c_str());
-    json_add_string(json, "staged_path", status.staged_path.c_str());
+    json_add_string(json, "source_path", status.source_path.c_str());
     json_add_string(json, "last_result", status.last_result.c_str());
     json_add_string(json, "last_error", status.last_error.c_str());
     json += '}';
@@ -197,11 +210,12 @@ void send_esp_status(AsyncWebServerRequest *request,
 }
 
 void send_resmed_status(AsyncWebServerRequest *request,
+                        const ResmedFirmwarePreparer &preparer,
                         const ResmedOtaManager &manager,
                         int response_status) {
     String json;
     json.reserve(AC_WEB_RESMED_OTA_JSON_RESERVE);
-    build_resmed_ota_json(json, manager);
+    build_resmed_ota_json(json, preparer, manager);
     request->send(response_status, "application/json", json);
 }
 
@@ -211,11 +225,13 @@ bool OtaHttpController::begin(FirmwareInstaller &installer,
                               FirmwareUrlSource &url_source,
                               ArduinoOtaSource &arduino_source,
                               UpdateChecker &update_checker,
+                              ResmedFirmwarePreparer &resmed_preparer,
                               ResmedOtaManager &resmed_ota) {
     installer_ = &installer;
     url_source_ = &url_source;
     arduino_source_ = &arduino_source;
     update_checker_ = &update_checker;
+    resmed_preparer_ = &resmed_preparer;
     resmed_ota_ = &resmed_ota;
 
     return commands_.begin();
@@ -364,36 +380,39 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
 
     server.on(AsyncURIMatcher::exact("/api/resmed-ota"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
-        send_resmed_status(request, *resmed_ota_, 200);
+        send_resmed_status(request, *resmed_preparer_, *resmed_ota_, 200);
     });
 
     server.on(
-        AsyncURIMatcher::exact("/api/resmed-ota/upload"), HTTP_POST,
+        AsyncURIMatcher::exact("/api/resmed-ota/prepare"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
-            const ResmedOtaStatus status = resmed_ota_->status();
-            const bool ok = status.phase == ResmedOtaPhase::Staging &&
-                            resmed_ota_->finish_staged_upload();
-            send_resmed_status(request, *resmed_ota_, ok ? 200 : 400);
-        },
-        [this](AsyncWebServerRequest *request, const String &filename,
-               size_t index, uint8_t *data, size_t length, bool) {
-            if (index == 0) {
-                size_t input_size = 0;
-                if (!required_size_arg(request, "size", input_size)) {
-                    resmed_ota_->abort("missing_size");
-                    return;
-                }
-
-                const String magic =
-                    request->hasArg("magic") ? request->arg("magic") : "";
-                if (!resmed_ota_->begin_staged_upload(
-                        input_size, filename, magic)) {
-                    return;
-                }
+            JsonDocument doc;
+            std::string body;
+            if (!http_parse_json_body(request, doc, body)) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad json\"}");
+                return;
             }
 
-            (void)resmed_ota_->write_staged_upload(index, data, length);
-        });
+            String path;
+            String filename;
+            if (!json_get_string(doc, "path", path)) {
+                request->send(
+                    400, "application/json",
+                    "{\"ok\":false,\"error\":\"missing path\"}");
+                return;
+            }
+            (void)json_get_string(doc, "filename", filename);
+
+            Command command;
+            command.kind = CommandKind::ResmedPrepare;
+            command.path = path.c_str();
+            command.filename = filename.c_str();
+            command.flag = doc["transient"].is<bool>() &&
+                           doc["transient"].as<bool>();
+            send_queue_result(request, enqueue(std::move(command)));
+        },
+        nullptr, http_request_body_handler);
 
     server.on(
         AsyncURIMatcher::exact("/api/resmed-ota/init"), HTTP_POST,
@@ -547,6 +566,16 @@ void OtaHttpController::execute(Command &command) {
                 command.number, String(command.data.c_str()));
             break;
 
+        case CommandKind::ResmedPrepare:
+            if (resmed_ota_->active() ||
+                !resmed_preparer_->request(
+                    command.path.c_str(), command.filename.c_str(),
+                    command.flag)) {
+                Log::logf(CAT_OTA, LOG_WARN,
+                          "[RESMED] firmware preparation rejected\n");
+            }
+            break;
+
         case CommandKind::ResmedCheck:
             (void)resmed_ota_->request_check();
             break;
@@ -563,6 +592,7 @@ void OtaHttpController::execute(Command &command) {
             break;
 
         case CommandKind::ResmedAbort:
+            resmed_preparer_->cancel();
             resmed_ota_->abort("aborted");
             break;
     }

@@ -22,6 +22,8 @@ public:
                    const char *path,
                    uint64_t expected_size,
                    uint64_t expected_modified);
+    void configure(StorageStreamPort &port,
+                   const StorageStreamCommand &command);
     bool open(const BackgroundOperationControl &operation,
               char *error_out,
               size_t error_out_size);
@@ -37,6 +39,8 @@ public:
 
     bool open() const { return stream_ != nullptr; }
     uint64_t offset() const { return offset_; }
+    uint64_t size() const { return size_; }
+    uint64_t modified() const { return modified_; }
 
 private:
     void move_from(StorageStreamReader &other);
@@ -49,6 +53,8 @@ private:
     StorageStreamCommand command_;
     std::shared_ptr<StorageByteStream> stream_;
     uint64_t offset_ = 0;
+    uint64_t size_ = 0;
+    uint64_t modified_ = 0;
 };
 
 }  // namespace aircannect

@@ -14,6 +14,7 @@ namespace aircannect {
 class ArduinoOtaSource;
 class FirmwareInstaller;
 class FirmwareUrlSource;
+class ResmedFirmwarePreparer;
 class ResmedOtaManager;
 class UpdateChecker;
 
@@ -25,6 +26,7 @@ public:
                FirmwareUrlSource &url_source,
                ArduinoOtaSource &arduino_source,
                UpdateChecker &update_checker,
+               ResmedFirmwarePreparer &resmed_preparer,
                ResmedOtaManager &resmed_ota);
     void register_routes(AsyncWebServer &server) override;
     void poll();
@@ -33,6 +35,7 @@ private:
     enum class CommandKind : uint8_t {
         ResmedInit,
         ResmedBlock,
+        ResmedPrepare,
         ResmedCheck,
         ResmedApplyPlain,
         ResmedApplyAuthenticated,
@@ -44,6 +47,7 @@ private:
         size_t number = 0;
         bool flag = false;
         std::string data;
+        std::string path;
         std::string filename;
         std::string sha256;
         std::string authentication;
@@ -61,6 +65,7 @@ private:
     FirmwareUrlSource *url_source_ = nullptr;
     ArduinoOtaSource *arduino_source_ = nullptr;
     UpdateChecker *update_checker_ = nullptr;
+    ResmedFirmwarePreparer *resmed_preparer_ = nullptr;
     ResmedOtaManager *resmed_ota_ = nullptr;
 
     MainLoopInbox<Command, CommandQueueDepth> commands_;

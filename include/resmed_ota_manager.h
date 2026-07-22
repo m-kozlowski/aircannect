@@ -9,20 +9,19 @@
 #include <string>
 
 #include "board.h"
-#include "crc32.h"
-#include "large_byte_buffer.h"
+#include "operation_outcome.h"
+#include "resmed_firmware_preparer.h"
 #include "rpc_request_port.h"
-#include "storage_atomic_write_port.h"
+#include "storage_stream_port.h"
 
 namespace aircannect {
 
 class As11DeviceService;
+class StoragePathPort;
 
 enum class ResmedOtaPhase {
     Idle,
-    Staging,
-    Publishing,
-    Staged,
+    Opening,
     Initiating,
     Ready,
     Uploading,
@@ -47,7 +46,7 @@ struct ResmedOtaStatus {
     String apply_mode;
     String input_type;
     String target;
-    String staged_path;
+    String source_path;
     String last_result;
     String last_error;
 };
@@ -56,24 +55,20 @@ class ResmedOtaManager {
 public:
     void begin(RpcRequestPort &rpc,
                As11DeviceService &device,
-               StorageAtomicWritePort &storage_write_port);
+               StorageStreamPort &stream_port,
+               StoragePathPort &path_port);
     void poll();
 
     bool begin_upload(size_t total_size,
                       const String &expected_sha256,
                       const String &filename);
+    bool begin_prepared_upload(const ResmedPreparedFirmware &firmware);
+    bool discard_prepared_firmware(const ResmedPreparedFirmware &firmware);
     bool submit_block(size_t offset, const String &hex_data);
     bool request_check();
     bool request_apply_plain(bool reset_settings, const String &confirm);
     bool request_apply_authenticated(const String &authentication,
                                      const String &confirm);
-    bool begin_staged_upload(size_t input_size,
-                             const String &filename,
-                             const String &magic_hex);
-    bool write_staged_upload(size_t offset,
-                             const uint8_t *data,
-                             size_t len);
-    bool finish_staged_upload();
     void abort(const char *reason);
 
     bool active() const;
@@ -101,6 +96,9 @@ private:
         Apply,
     };
 
+    bool begin_protocol(size_t total_size,
+                        const String &expected_sha256,
+                        const String &filename);
     bool queue_request(const char *method,
                        const std::string &params,
                        uint32_t timeout_ms);
@@ -108,28 +106,21 @@ private:
     void cancel_rpc_request();
     void handle_response(const std::string &payload);
 
+    void poll_prepared_transfer();
+    bool open_prepared_stream();
+    bool fill_prepared_block();
     void finish_pending_block();
-    void poll_staged_publication();
-    bool request_staged_publication();
-    bool start_staged_transfer();
-    void pump_staged_upload();
+    void close_prepared_stream(bool complete);
+
+    void schedule_prepared_cleanup();
+    void poll_cleanup();
+    void clear_cleanup();
+
     bool finish_hash();
     void clear_session();
-    void release_staged_resources();
     void set_error(const char *error);
     void update_progress();
 
-    bool configure_staged_input(size_t input_size,
-                                const String &filename,
-                                const String &magic_hex);
-    bool write_staging_header();
-    bool write_staging_bytes(size_t output_offset,
-                             const uint8_t *data,
-                             size_t len);
-    bool write_raw_payload_slice(size_t input_offset,
-                                 const uint8_t *data,
-                                 size_t len);
-    bool finalize_raw_abc();
     bool guard_device_idle_for_upgrade();
     bool device_idle_for_upgrade(const char **reason) const;
     bool lock(uint32_t timeout_ms) const;
@@ -137,15 +128,16 @@ private:
 
     RpcRequestPort *rpc_ = nullptr;
     As11DeviceService *device_ = nullptr;
-    StorageAtomicWritePort *storage_write_port_ = nullptr;
+    StorageStreamPort *stream_port_ = nullptr;
+    StoragePathPort *path_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
 
-    // RPC upload state
+    // RPC protocol
     ResmedOtaStatus status_;
     WaitingFor waiting_for_ = WaitingFor::None;
     OperationTicket rpc_ticket_;
     uint32_t rpc_generation_ = 0;
-    String pending_block_hex_;
+    char pending_block_hex_[AC_RESMED_OTA_MAX_BLOCK_BYTES * 2 + 1] = {};
     size_t pending_block_offset_ = 0;
     size_t pending_block_bytes_ = 0;
     bool sha_started_ = false;
@@ -153,28 +145,21 @@ private:
     uint32_t last_activity_ms_ = 0;
     mbedtls_sha256_context sha_ctx_;
 
-    // Browser input, durable publication, and automatic AS11 transfer
-    std::unique_ptr<LargeByteBuffer> staging_buffer_;
-    std::shared_ptr<const LargeByteBuffer> staged_image_;
-    OperationTicket staging_publish_ticket_;
-    uint32_t staging_generation_ = 0;
-    uint32_t staging_publish_retry_at_ms_ = 0;
-    bool staging_passthrough_abc_ = false;
-    bool staged_transfer_active_ = false;
-    bool staged_check_requested_ = false;
-    bool staged_auto_apply_ = false;
-    size_t staging_input_size_ = 0;
-    size_t staging_input_written_ = 0;
-    size_t staging_output_size_ = 0;
-    size_t staging_payload_size_ = 0;
-    size_t staging_payload_written_ = 0;
-    size_t staging_source_offset_ = 0;
-    uint32_t staging_flash_start_ = 0;
-    uint32_t staging_rest_crc_ = crc32_ieee_initial_state();
-    uint32_t staging_desc2_ = 0;
-    uint32_t staging_desc3_ = 0;
-    char staging_target_code_[5] = {};
-    char staging_descriptor_version_[16] = {};
+    // Prepared storage source
+    ResmedPreparedFirmware prepared_;
+    std::shared_ptr<StorageByteStream> prepared_stream_;
+    uint8_t prepared_block_[AC_RESMED_OTA_MAX_BLOCK_BYTES] = {};
+    size_t prepared_block_bytes_ = 0;
+    size_t prepared_block_wanted_ = 0;
+    bool prepared_transfer_ = false;
+    bool prepared_check_requested_ = false;
+
+    // Transient source cleanup
+    char cleanup_paths_[2][AC_STORAGE_PATH_MAX] = {};
+    size_t cleanup_count_ = 0;
+    size_t cleanup_index_ = 0;
+    OperationTicket cleanup_ticket_;
+    uint32_t cleanup_generation_ = 0;
 };
 
 }  // namespace aircannect

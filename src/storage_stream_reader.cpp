@@ -53,25 +53,38 @@ void StorageStreamReader::move_from(StorageStreamReader &other) {
     command_ = std::move(other.command_);
     stream_ = std::move(other.stream_);
     offset_ = other.offset_;
+    size_ = other.size_;
+    modified_ = other.modified_;
 
     other.port_ = nullptr;
     other.offset_ = 0;
+    other.size_ = 0;
+    other.modified_ = 0;
 }
 
 void StorageStreamReader::configure(StorageStreamPort &port,
                                     const char *path,
                                     uint64_t expected_size,
                                     uint64_t expected_modified) {
+    StorageStreamCommand command;
+    command.path = path ? path : "";
+    command.lane = StorageStreamLane::Export;
+    command.expected_size = expected_size;
+    command.expected_modified = expected_modified;
+    command.verification = StorageStreamVerification::SizeAndModified;
+    configure(port, command);
+}
+
+void StorageStreamReader::configure(
+    StorageStreamPort &port,
+    const StorageStreamCommand &command) {
     close(false);
 
     port_ = &port;
-    command_ = StorageStreamCommand();
-    command_.path = path ? path : "";
-    command_.lane = StorageStreamLane::Export;
-    command_.expected_size = expected_size;
-    command_.expected_modified = expected_modified;
-    command_.verification = StorageStreamVerification::SizeAndModified;
+    command_ = command;
     offset_ = 0;
+    size_ = 0;
+    modified_ = 0;
 }
 
 bool StorageStreamReader::wait_for_request_slot(
@@ -122,6 +135,8 @@ bool StorageStreamReader::open(
                 continue;
             }
             offset_ = 0;
+            size_ = status.size;
+            modified_ = status.modified;
             return true;
         }
         if (status.state == StorageStreamState::Error ||
@@ -198,6 +213,8 @@ void StorageStreamReader::close(bool complete) {
     if (port_ && stream_) port_->finish(*stream_, complete);
     stream_.reset();
     offset_ = 0;
+    size_ = 0;
+    modified_ = 0;
 }
 
 }  // namespace aircannect

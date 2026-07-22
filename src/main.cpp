@@ -39,6 +39,7 @@
 #include "report_spool_service.h"
 #include "report_task.h"
 #include "resmed_firmware_http_controller.h"
+#include "resmed_firmware_preparer.h"
 #include "resmed_firmware_repository.h"
 #include "resmed_ota_manager.h"
 #include "rpc_transport.h"
@@ -89,6 +90,7 @@ static FirmwareUrlSource firmware_url_source(firmware_installer);
 static ArduinoOtaSource arduino_ota_source(firmware_installer);
 static UpdateChecker update_checker;
 static ResmedOtaManager resmed_ota_manager;
+static ResmedFirmwarePreparer resmed_firmware_preparer;
 static SessionManager session_manager;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
@@ -157,6 +159,7 @@ static OtaConsoleCommands ota_console_commands(firmware_installer,
                                                firmware_url_source,
                                                arduino_ota_source,
                                                update_checker,
+                                               resmed_firmware_preparer,
                                                resmed_ota_manager,
                                                resmed_firmware_repository);
 static WebDiagnosticsConsoleCommands web_console_commands(web_ui);
@@ -326,6 +329,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     export_task.publish_activity(storage_activity);
     storage_http_controller.publish_activity(storage_activity);
     storage_upload_http_controller.publish_activity(storage_activity);
+    resmed_firmware_preparer.publish_activity(storage_activity);
     resmed_firmware_repository.publish_activity(storage_activity);
 }
 
@@ -799,6 +803,12 @@ void setup() {
                   "[INIT] ResMed firmware repository failed to start\n");
     }
     resmed_firmware_http_controller.begin(resmed_firmware_repository);
+    if (!resmed_firmware_preparer.begin(StorageService::stream_port(),
+                                        StorageService::upload_port(),
+                                        StorageService::path_port())) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] ResMed firmware preparer failed to start\n");
+    }
 
     apply_storage_provisioning(config_service,
                                wifi_manager,
@@ -863,7 +873,8 @@ void setup() {
     report_http_controller.begin(report_task, StorageService::stream_port());
 
     resmed_ota_manager.begin(rpc_transport, as11_device_service,
-                             StorageService::atomic_write_port());
+                             StorageService::stream_port(),
+                             StorageService::path_port());
     time_sync_service.begin(config_service.data(), wifi_manager, rpc_transport,
                             as11_device_service);
     report_catalog_timezone_revision = time_sync_service.timezone_revision();
@@ -877,6 +888,7 @@ void setup() {
     }
     if (!ota_http_controller.begin(firmware_installer, firmware_url_source,
                                    arduino_ota_source, update_checker,
+                                   resmed_firmware_preparer,
                                    resmed_ota_manager)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] OTA HTTP controller failed to start\n");
@@ -969,6 +981,8 @@ void loop() {
     as11_device_service.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
+    resmed_firmware_preparer.publish_device_identifier(
+        as11_device_service.state().software_identifier().c_str());
     as11_settings_manager.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
@@ -994,6 +1008,22 @@ void loop() {
     drain_can_rx_after("report");
 
     resmed_ota_manager.poll();
+    if (!resmed_ota_manager.active()) {
+        ResmedPreparedFirmware prepared_firmware;
+        bool preparation_cancelled = false;
+        if (resmed_firmware_preparer.take_result(
+                prepared_firmware, preparation_cancelled)) {
+            const bool accepted = preparation_cancelled
+                ? resmed_ota_manager.discard_prepared_firmware(
+                      prepared_firmware)
+                : resmed_ota_manager.begin_prepared_upload(
+                      prepared_firmware);
+            if (!accepted) {
+                Log::logf(CAT_OTA, LOG_WARN,
+                          "[RESMED] prepared firmware handoff rejected\n");
+            }
+        }
+    }
     drain_can_rx_after("resmed_ota");
 
     // RPC event fanout before services that depend on fresh state.
