@@ -9,6 +9,10 @@
 
 namespace aircannect {
 
+namespace test {
+class StorageScanSnapshotFixture;
+}
+
 static constexpr size_t AC_STORAGE_SCAN_ROOT_MAX = 8;
 
 struct StorageScanRoot {
@@ -47,6 +51,7 @@ public:
 
 private:
     friend class StorageScanService;
+    friend class test::StorageScanSnapshotFixture;
 
     struct Entry {
         uint64_t size = 0;
