@@ -38,7 +38,6 @@ void print_storage_status(Print &out, const StorageStatus &status);
 void print_session_status(Print &out, const SessionStatus &status);
 void print_sink_status(Print &out, const SinkManager &sink_manager);
 void print_tcp_status(Print &out, TcpBridge &tcp_bridge);
-void print_tcp_stats(Print &out, TcpBridge &tcp_bridge);
 void print_wifi_status(Print &out, const WifiManager &wifi_manager);
 
 }  // namespace ConsoleFormat

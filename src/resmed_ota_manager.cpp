@@ -998,10 +998,6 @@ void ResmedOtaManager::set_error(const char *error) {
               status_.last_error.c_str());
 }
 
-void ResmedOtaManager::set_error(const String &error) {
-    set_error(error.c_str());
-}
-
 void ResmedOtaManager::update_progress() {
     if (status_.total_size == 0) {
         status_.progress_percent = 0;

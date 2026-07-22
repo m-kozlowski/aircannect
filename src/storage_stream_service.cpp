@@ -74,6 +74,10 @@ void StorageStreamService::set_task_available(bool available) {
     task_available_ = available;
 }
 
+bool StorageStreamService::ready() const {
+    return lock_ && task_available_;
+}
+
 bool StorageStreamService::lock(uint32_t timeout_ms) const {
     return lock_ &&
         xSemaphoreTake(lock_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
@@ -81,10 +85,6 @@ bool StorageStreamService::lock(uint32_t timeout_ms) const {
 
 void StorageStreamService::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
-}
-
-bool StorageStreamService::ready() const {
-    return lock_ && task_available_;
 }
 
 void StorageStreamService::wake() const {

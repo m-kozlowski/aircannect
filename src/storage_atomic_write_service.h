@@ -46,10 +46,10 @@ private:
     };
 
     // Service lifecycle
+    bool ready() const;
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     void wake() const;
-    bool ready() const;
 
     // Transaction recovery and execution
     bool recover_transaction_locked(const char *&error);

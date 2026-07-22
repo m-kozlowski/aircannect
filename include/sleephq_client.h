@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "app_config.h"
 #include "background_operation_control.h"
 #include "large_text_buffer.h"
 #include "sleephq_protocol.h"
@@ -66,7 +65,6 @@ public:
     SleepHqClient() = default;
     ~SleepHqClient();
 
-    bool configure(const AppConfigData &config);
     bool configure(const SleepHqConfig &config);
     bool configured() const;
 
@@ -192,8 +190,6 @@ private:
 
     static bool form_encode_append(LargeTextBuffer &out, const char *value);
     static bool parse_uint32_field(const char *text, uint32_t &out);
-    static void copy_config_string(char *dst, size_t dst_size,
-                                   const String &src);
 
     void set_error(const char *error);
 

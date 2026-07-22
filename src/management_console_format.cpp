@@ -596,42 +596,6 @@ void print_tcp_status(Print &out, TcpBridge &tcp_bridge) {
     }
 }
 
-void print_tcp_stats(Print &out, TcpBridge &tcp_bridge) {
-    const TcpBridgeStats &stats = tcp_bridge.stats();
-    const LineProtocolIoStats &io = tcp_bridge.io_stats();
-
-    out.print(" tcp_started=");
-    out.print(tcp_bridge.started() ? "yes" : "no");
-    out.print(" tcp_port=");
-    out.print(tcp_bridge.port());
-    out.print(" tcp_clients=");
-    out.print(tcp_bridge.connected_count());
-    out.print(" tcp_accepted=");
-    out.print(stats.accepted_clients);
-    out.print(" tcp_disconnected=");
-    out.print(stats.disconnected_clients);
-    out.print(" tcp_broadcasts=");
-    out.print(stats.broadcasts);
-    out.print(" tcp_in=");
-    out.print(stats.lines_in);
-    out.print(" tcp_bytes_in=");
-    out.print(stats.bytes_in);
-    out.print(" tcp_out=");
-    out.print(stats.lines_out);
-    out.print(" tcp_bytes_out=");
-    out.print(io.bytes_out);
-    out.print(" tcp_write_errors=");
-    out.print(io.write_errors);
-    out.print(" tcp_overlong=");
-    out.print(stats.overlong_lines);
-    out.print(" tcp_enqueue_fail=");
-    out.print(stats.enqueue_failures);
-    out.print(" tcp_q_drops=");
-    out.print(stats.queue_drops);
-    out.print(" tcp_rejected=");
-    out.print(stats.rejected_clients);
-}
-
 void print_wifi_status(Print &out, const WifiManager &wifi_manager) {
     out.print("[WiFi] mode=");
     out.print(wifi_manager.state_name());

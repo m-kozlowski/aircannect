@@ -34,7 +34,6 @@ public:
 
     void handle_event(const RpcEvent &event);
 
-    int connected_count();
     bool started() const { return line_server_started(); }
     uint16_t port() const { return line_server_port(); }
 

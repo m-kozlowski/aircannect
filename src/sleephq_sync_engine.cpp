@@ -2912,8 +2912,4 @@ SleepHqSyncRuntimeStatus SleepHqSyncEngine::runtime_status() const {
     return out;
 }
 
-bool SleepHqSyncEngine::active() const {
-    return runtime_status().active();
-}
-
 }  // namespace aircannect

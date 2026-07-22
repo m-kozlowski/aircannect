@@ -31,9 +31,6 @@ public:
     LargeTextBuffer &operator=(const char *text);
     LargeTextBuffer &operator+=(const char *text);
     LargeTextBuffer &operator+=(char c);
-#if AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO
-    LargeTextBuffer &operator+=(const String &text);
-#endif
 
     bool append(const char *text);
     bool append(const char *text, size_t len);

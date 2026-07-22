@@ -30,7 +30,6 @@ struct ReportArtifactStoreStatus {
 
     bool active() const;
     bool terminal() const;
-    OperationOutcome outcome() const;
 };
 
 class ReportArtifactStoreService {

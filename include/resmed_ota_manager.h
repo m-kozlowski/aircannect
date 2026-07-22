@@ -117,7 +117,6 @@ private:
     void clear_session();
     void release_staged_resources();
     void set_error(const char *error);
-    void set_error(const String &error);
     void update_progress();
 
     bool configure_staged_input(size_t input_size,

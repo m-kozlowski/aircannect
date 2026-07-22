@@ -816,17 +816,6 @@ bool AppConfig::set_log_level(log_cat_t cat, log_level_t level) {
     return persist(AC_CONFIG_DIRTY_LOG_LEVELS);
 }
 
-bool AppConfig::set_all_log_levels(log_level_t level) {
-    if (!valid_log_level(level)) return false;
-    bool changed = false;
-    for (int i = 0; i < CAT_COUNT; ++i) {
-        if (data_.log_levels[i] != level) changed = true;
-    }
-    if (!changed) return true;
-    for (int i = 0; i < CAT_COUNT; ++i) data_.log_levels[i] = level;
-    return persist(AC_CONFIG_DIRTY_LOG_LEVELS);
-}
-
 bool AppConfig::set_syslog(bool enabled, const String &host, uint16_t port) {
     String value = host;
     value.trim();

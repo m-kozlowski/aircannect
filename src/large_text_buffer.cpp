@@ -77,13 +77,6 @@ LargeTextBuffer &LargeTextBuffer::operator+=(char c) {
     return *this;
 }
 
-#if AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO
-LargeTextBuffer &LargeTextBuffer::operator+=(const String &text) {
-    append(text.c_str(), text.length());
-    return *this;
-}
-#endif
-
 bool LargeTextBuffer::append(const char *text) {
     return append(text, text ? strlen(text) : 0);
 }

@@ -115,7 +115,6 @@ public:
     // status
     SleepHqSyncStatus status() const;
     SleepHqSyncRuntimeStatus runtime_status() const;
-    bool active() const;
 
 private:
     enum class WorkPhase : uint8_t {

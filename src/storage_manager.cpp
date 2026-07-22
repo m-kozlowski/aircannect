@@ -252,10 +252,6 @@ void begin() {
     remount();
 }
 
-void poll() {
-    poll(true);
-}
-
 void poll(bool allow_capacity_update) {
     const bool need_begin = !initialized;
     const uint32_t now = millis();

@@ -33,19 +33,6 @@ bool ReportArtifactStoreStatus::terminal() const {
            state == ReportArtifactStoreState::Cancelled;
 }
 
-OperationOutcome ReportArtifactStoreStatus::outcome() const {
-    switch (state) {
-        case ReportArtifactStoreState::Ready:
-            return OperationOutcome::succeeded();
-        case ReportArtifactStoreState::Cancelled:
-            return OperationOutcome::cancelled();
-        case ReportArtifactStoreState::Failed:
-            return OperationOutcome::failed();
-        default:
-            return OperationOutcome::deferred(0);
-    }
-}
-
 ReportArtifactStoreService::~ReportArtifactStoreService() {
     cancel();
 }

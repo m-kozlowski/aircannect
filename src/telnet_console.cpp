@@ -61,14 +61,6 @@ void TelnetConsole::handle_event(const RpcEvent &event) {
     }
 }
 
-int TelnetConsole::connected_count() {
-    int count = 0;
-    for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
-        if (slots_[i].client && slots_[i].client.connected()) count++;
-    }
-    return count;
-}
-
 void TelnetConsole::accept_clients(const AppConfigData &app_config,
                                    ConsoleCommandRouter &router) {
     WiFiClient incoming = accept_line_client();

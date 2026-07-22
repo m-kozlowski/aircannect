@@ -238,17 +238,17 @@ void StorageArchiveService::set_task_available(bool available) {
     if (available) wake();
 }
 
+bool StorageArchiveService::ready() const {
+    return lock_ && wake_ && claim_maintenance_ && release_maintenance_ &&
+           task_available_.load();
+}
+
 void StorageArchiveService::set_paused(bool paused) {
     const bool changed = paused_.exchange(paused) != paused;
     if (!changed) return;
 
     pause_transition_pending_.store(paused);
     wake();
-}
-
-bool StorageArchiveService::ready() const {
-    return lock_ && wake_ && claim_maintenance_ && release_maintenance_ &&
-           task_available_.load();
 }
 
 void StorageArchiveService::wake() const {

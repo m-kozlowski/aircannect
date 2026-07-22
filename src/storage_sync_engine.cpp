@@ -2067,8 +2067,4 @@ StorageSyncRuntimeStatus StorageSyncEngine::runtime_status() const {
     return out;
 }
 
-bool StorageSyncEngine::active() const {
-    return runtime_status().active();
-}
-
 }  // namespace aircannect

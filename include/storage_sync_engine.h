@@ -130,7 +130,6 @@ public:
     // status
     StorageSyncStatus status() const;
     StorageSyncRuntimeStatus runtime_status() const;
-    bool active() const;
 
 private:
     enum class WorkPhase : uint8_t {

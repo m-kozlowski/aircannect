@@ -35,9 +35,9 @@ public:
     void finish(StorageByteStream &stream, bool complete) override;
 
 private:
+    bool ready() const;
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
-    bool ready() const;
     void wake() const;
 
     bool open_locked(StorageByteStream &stream);

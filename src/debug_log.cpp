@@ -338,11 +338,6 @@ void bind_file_log_sink(aircannect::FileLogSinkPort &sink) {
 #endif
 }
 
-void set_level(log_level_t level) {
-    if (level < LOG_ERROR || level > LOG_DEBUG) return;
-    for (int i = 0; i < CAT_COUNT; ++i) levels[i] = level;
-}
-
 void set_cat_level(log_cat_t cat, log_level_t level) {
     if (cat >= 0 && cat < CAT_COUNT &&
         level >= LOG_ERROR && level <= LOG_DEBUG) {

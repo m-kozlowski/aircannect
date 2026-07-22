@@ -115,7 +115,6 @@ private:
     bool set_update_url(const String &url);
 
     bool set_log_level(log_cat_t cat, log_level_t level);
-    bool set_all_log_levels(log_level_t level);
     bool set_syslog(bool enabled, const String &host, uint16_t port);
     bool set_file_log(bool enabled);
 

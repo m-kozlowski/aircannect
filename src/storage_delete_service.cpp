@@ -88,6 +88,11 @@ void StorageDeleteService::set_paused(bool paused) {
     wake();
 }
 
+bool StorageDeleteService::ready() const {
+    return lock_ && path_bytes_ && walk_stack_ && claim_maintenance_ &&
+           release_maintenance_ && task_available_.load();
+}
+
 bool StorageDeleteService::allocate_owners() {
     path_bytes_capacity_ = DELETE_PATH_BYTES_CAPACITY;
     path_bytes_ = static_cast<char *>(
@@ -111,11 +116,6 @@ bool StorageDeleteService::allocate_owners() {
         new (&walk_stack_[i]) WalkFrame();
     }
     return true;
-}
-
-bool StorageDeleteService::ready() const {
-    return lock_ && path_bytes_ && walk_stack_ && claim_maintenance_ &&
-           release_maintenance_ && task_available_.load();
 }
 
 void StorageDeleteService::wake() const {

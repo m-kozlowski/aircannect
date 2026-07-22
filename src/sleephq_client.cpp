@@ -117,25 +117,6 @@ void SleepHqClient::set_error(const char *error) {
     copy_cstr(last_error_, sizeof(last_error_), error ? error : "");
 }
 
-void SleepHqClient::copy_config_string(char *dst,
-                                       size_t dst_size,
-                                       const String &src) {
-    copy_cstr(dst, dst_size, src.c_str());
-}
-
-bool SleepHqClient::configure(const AppConfigData &config) {
-    SleepHqConfig snapshot;
-    copy_config_string(snapshot.client_id, sizeof(snapshot.client_id),
-                       config.sleephq_client_id);
-    copy_config_string(snapshot.client_secret, sizeof(snapshot.client_secret),
-                       config.sleephq_client_secret);
-    copy_config_string(snapshot.team_id, sizeof(snapshot.team_id),
-                       config.sleephq_team_id);
-    copy_config_string(snapshot.device_id, sizeof(snapshot.device_id),
-                       config.sleephq_device_id);
-    return configure(snapshot);
-}
-
 bool SleepHqClient::configure(const SleepHqConfig &config) {
     disconnect();
     config_ = config;

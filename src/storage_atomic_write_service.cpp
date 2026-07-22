@@ -151,6 +151,11 @@ void StorageAtomicWriteService::set_task_available(bool available) {
     if (available) wake();
 }
 
+bool StorageAtomicWriteService::ready() const {
+    return lock_ && job_ &&
+           task_available_.load(std::memory_order_acquire);
+}
+
 bool StorageAtomicWriteService::lock(uint32_t timeout_ms) const {
     return lock_ &&
            xSemaphoreTake(lock_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
@@ -162,11 +167,6 @@ void StorageAtomicWriteService::unlock() const {
 
 void StorageAtomicWriteService::wake() const {
     if (wake_) wake_();
-}
-
-bool StorageAtomicWriteService::ready() const {
-    return lock_ && job_ &&
-           task_available_.load(std::memory_order_acquire);
 }
 
 OperationTicket StorageAtomicWriteService::next_ticket_locked(uint32_t generation) {
