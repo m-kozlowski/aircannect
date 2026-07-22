@@ -97,10 +97,8 @@ bool ReportSummaryService::request_refresh(bool force,
     return true;
 }
 
-ReportSummaryFetchEvent ReportSummaryService::poll(RpcArbiter &arbiter) {
+ReportSummaryFetchEvent ReportSummaryService::poll() {
     if (!fetch_.summary_active()) return ReportSummaryFetchEvent::None;
-
-    fetch_.poll_spool(arbiter);
 
     bool publish_progress = false;
     const uint32_t now_ms = millis();

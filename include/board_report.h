@@ -52,7 +52,6 @@ static constexpr uint32_t AC_REPORT_PLOT_PREBUILD_RESCAN_MS = 300000;
 // Default manual quota policy: keep roughly the last 90 therapy nights of
 // cached report payloads. Summary records remain intact.
 static constexpr size_t AC_REPORT_CACHE_QUOTA_NIGHTS = 90;
-static constexpr size_t AC_REPORT_SOURCE_EVENT_DRAIN_BUDGET = 1;
 // Report spool backfill is intentionally guarded at three layers:
 // fragment size keeps AS11 happy, max-notifications bounds each CAN burst, and
 // pull pacing gives the arbiter time to observe RX pressure before next pull.
@@ -63,6 +62,12 @@ static constexpr size_t AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES = 2808;
 // already large after base64/JSON wrapping; request boundaries give the arbiter
 // a chance to observe CAN/RPC backpressure before asking for more.
 static constexpr size_t AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL = 1;
+// Spool notifications are copied into report-owned PSRAM before decoding so
+// RPC/CAN dispatch remains bounded. The protocol currently requests one
+// notification per pull; extra slots tolerate delayed report service.
+static constexpr size_t AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH = 4;
+static constexpr size_t AC_REPORT_SPOOL_NOTIFICATION_BACKPRESSURE_WATERMARK =
+    AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH / 2;
 // Minimum spacing between PullSpoolFragments requests. The response is a CAN
 // burst; this keeps report backfill from immediately requesting the next burst
 // before the arbiter has observed queue pressure from the previous one.

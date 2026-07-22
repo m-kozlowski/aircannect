@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "report_cache_fetch_state.h"
@@ -11,6 +12,8 @@ namespace aircannect {
 
 class ReportFetchRuntime {
 public:
+    explicit ReportFetchRuntime(RpcRequestPort &rpc) : spool_(rpc) {}
+
     bool start_summary_fetch(const SpoolClientRequest &request,
                              uint32_t now_ms);
     void finish_summary_fetch();
@@ -48,7 +51,14 @@ public:
         return spool_.begin(request);
     }
     void reset_spool() { spool_.reset(); }
-    void poll_spool(RpcArbiter &arbiter);
+    void poll_spool(bool transport_backpressure_active,
+                    uint32_t rx_queue_full_alerts);
+    bool enqueue_spool_notification(const char *payload, size_t payload_len) {
+        return spool_.enqueue_notification(payload, payload_len);
+    }
+    bool drain_spool_notification() {
+        return spool_.drain_notification();
+    }
     bool spool_complete() const { return spool_.complete(); }
     bool spool_failed() const { return spool_.failed(); }
     SpoolClientStatus spool_status() const { return spool_.status(); }
@@ -59,10 +69,9 @@ public:
         spool_.move_result_to(out);
     }
 
-    void observe_idle(RpcArbiter &arbiter) {
-        spool_.observe_idle(arbiter);
+    void observe_idle(uint32_t rx_queue_full_alerts) {
+        spool_.observe_idle(rx_queue_full_alerts);
     }
-    bool handle_event(const RpcEvent &event);
 
 private:
     ReportSpoolRuntime spool_;

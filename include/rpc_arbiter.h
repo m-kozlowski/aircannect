@@ -115,7 +115,6 @@ public:
 
     // Event routing
     bool next_event(RpcEvent &event);
-    bool next_source_event(RpcSource source, RpcEvent &event);
 
     bool set_source_event_observer(RpcSource source,
                                    RpcEventObserver observer,
@@ -126,6 +125,8 @@ public:
                                          void *context);
     void set_stream_notification_observer(RpcNotificationObserver observer,
                                           void *context);
+    void set_spool_notification_observer(RpcNotificationObserver observer,
+                                         void *context);
 
     // Device maintenance
     void reset_stats();
@@ -270,6 +271,7 @@ private:
     // Payload handling
     void handle_event_notification(const char *payload, size_t payload_len);
     void handle_stream_notification(const char *payload, size_t payload_len);
+    void handle_spool_notification(const char *payload, size_t payload_len);
     void note_transport_reset();
     void handle_frame(const RawCanFrame &frame);
     void enqueue_deferred_payload(DeferredPayload::Kind kind,
@@ -283,15 +285,8 @@ private:
     const char *source_name(RpcSource source) const;
 
     // Source-specific event routes
-    enum class SourceEventQueue {
-        None,
-        Report,
-        ResmedOta,
-    };
-
     struct SourceEventRoute {
         RpcSource source = RpcSource::Internal;
-        SourceEventQueue queue = SourceEventQueue::None;
         RpcEventObserver observer = nullptr;
         void *observer_context = nullptr;
     };
@@ -300,8 +295,6 @@ private:
     const SourceEventRoute *source_event_route(RpcSource source) const;
     bool dispatch_source_event(const SourceEventRoute &route,
                                const RpcEvent &event);
-    bool push_source_event_queue(SourceEventQueue queue, RpcEvent &&event);
-    bool pop_source_event_queue(SourceEventQueue queue, RpcEvent &event);
 
     // CAN/RPC queues and routes
     CanDriver &can_;
@@ -310,14 +303,8 @@ private:
     FixedQueue<DeferredPayload, AC_RPC_PAYLOAD_QUEUE_DEPTH>
         deferred_payloads_;
     FixedQueue<RpcEvent, AC_RPC_EVENT_QUEUE_DEPTH> events_;
-    FixedQueue<RpcEvent, AC_REPORT_EVENT_QUEUE_DEPTH> report_events_;
-    FixedQueue<RpcEvent, AC_RESMED_OTA_EVENT_QUEUE_DEPTH> resmed_ota_events_;
-    SourceEventRoute source_event_routes_[3] = {
-        {RpcSource::ResmedOta, SourceEventQueue::ResmedOta, nullptr,
-         nullptr},
-        {RpcSource::Report, SourceEventQueue::Report, nullptr, nullptr},
-        {RpcSource::EdfRecorder, SourceEventQueue::None, nullptr,
-         nullptr},
+    SourceEventRoute source_event_routes_[1] = {
+        {RpcSource::EdfRecorder, nullptr, nullptr},
     };
 
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
@@ -347,6 +334,8 @@ private:
     void *event_notification_context_ = nullptr;
     RpcNotificationObserver stream_notification_observer_ = nullptr;
     void *stream_notification_context_ = nullptr;
+    RpcNotificationObserver spool_notification_observer_ = nullptr;
+    void *spool_notification_context_ = nullptr;
     uint32_t transport_generation_ = 1;
 
     // Backpressure and transport admission

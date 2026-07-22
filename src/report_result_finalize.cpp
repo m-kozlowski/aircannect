@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "board_report.h"
 #include "debug_log.h"
 #include "report_event_dedupe.h"
 #include "report_records.h"

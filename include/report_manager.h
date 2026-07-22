@@ -34,7 +34,7 @@
 #include "report_summary_runtime.h"
 #include "report_summary_service.h"
 #include "report_summary_types.h"
-#include "rpc_arbiter.h"
+#include "rpc_request_port.h"
 
 namespace aircannect {
 
@@ -46,16 +46,18 @@ struct ReportResolveScratch;
 
 class ReportManager {
 public:
-    ReportManager();
+    explicit ReportManager(RpcRequestPort &rpc);
     ~ReportManager();
 
     // Lifecycle and device events
     void begin();
     void set_edf_report_catalog(EdfReportCatalogJob *catalog);
-    void poll(RpcArbiter &arbiter,
+    void poll(bool transport_backpressure_active,
+              uint32_t rx_queue_full_alerts,
               bool therapy_running,
               bool stream_realtime_active);
-    bool handle_event(const RpcEvent &event);
+    bool enqueue_spool_notification(const char *payload,
+                                    size_t payload_len);
 
     // Summary and night index
     bool request_summary_refresh(bool force = false);

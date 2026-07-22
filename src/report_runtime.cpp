@@ -18,7 +18,6 @@
 #include "report_runtime_service.h"
 #include "report_summary_runtime.h"
 #include "report_summary_service.h"
-#include "rpc_arbiter.h"
 
 namespace aircannect {
 namespace {
@@ -84,14 +83,18 @@ ReportRuntimeService::ReportRuntimeService(
       prefetch_(prefetch),
       edf_catalog_(edf_catalog) {}
 
-void ReportRuntimeService::poll(RpcArbiter &arbiter,
+void ReportRuntimeService::poll(bool transport_backpressure_active,
+                                uint32_t rx_queue_full_alerts,
                                 bool therapy_running,
                                 bool stream_realtime_active) {
     const bool realtime_active = stream_realtime_active || therapy_running;
 
-    // Foreground service points
-    if (drain_source_events(arbiter)) return;
+    // Complete the active spool request before consuming its notifications.
+    fetch_.poll_spool(transport_backpressure_active,
+                      rx_queue_full_alerts);
+    if (fetch_.drain_spool_notification()) return;
 
+    // Foreground service points
     service_build_queue(realtime_active);
     service_range_plot(realtime_active);
     prefetch_.service(realtime_active);
@@ -105,13 +108,13 @@ void ReportRuntimeService::poll(RpcArbiter &arbiter,
         summary_runtime_.give();
     }
 
-    fetch_.observe_idle(arbiter);
+    fetch_.observe_idle(rx_queue_full_alerts);
 
     cache_storage_.service_trash_cleanup(realtime_active, busy());
 
     // Active cache fetch
     if (cache_fetch_.active()) {
-        handle_cache_fetch_event(cache_fetch_.poll(arbiter));
+        handle_cache_fetch_event(cache_fetch_.poll());
     }
 
     // Active full-plot build
@@ -139,7 +142,7 @@ void ReportRuntimeService::poll(RpcArbiter &arbiter,
         return;
     }
 
-    handle_summary_fetch_event(summary_.poll(arbiter));
+    handle_summary_fetch_event(summary_.poll());
 }
 
 void ReportRuntimeService::service_summary_snapshot_publish() {
@@ -291,19 +294,10 @@ void ReportRuntimeService::service_summary_snapshot_publish() {
                       summary_publish_retry_.failures)));
 }
 
-bool ReportRuntimeService::handle_event(const RpcEvent &event) {
-    return fetch_.handle_event(event);
-}
-
-bool ReportRuntimeService::drain_source_events(RpcArbiter &arbiter) {
-    bool handled = false;
-    for (size_t i = 0; i < AC_REPORT_SOURCE_EVENT_DRAIN_BUDGET; ++i) {
-        RpcEvent event;
-        if (!arbiter.next_source_event(RpcSource::Report, event)) break;
-        (void)handle_event(event);
-        handled = true;
-    }
-    return handled;
+bool ReportRuntimeService::enqueue_spool_notification(
+    const char *payload,
+    size_t payload_len) {
+    return fetch_.enqueue_spool_notification(payload, payload_len);
 }
 
 void ReportRuntimeService::service_build_queue(bool realtime_active) {
@@ -486,14 +480,19 @@ bool ReportRuntimeService::cancel_cache_fetch() {
     return true;
 }
 
-void ReportManager::poll(RpcArbiter &arbiter,
+void ReportManager::poll(bool transport_backpressure_active,
+                         uint32_t rx_queue_full_alerts,
                          bool therapy_running,
                          bool stream_realtime_active) {
-    runtime_service_.poll(arbiter, therapy_running, stream_realtime_active);
+    runtime_service_.poll(transport_backpressure_active,
+                          rx_queue_full_alerts,
+                          therapy_running,
+                          stream_realtime_active);
 }
 
-bool ReportManager::handle_event(const RpcEvent &event) {
-    return runtime_service_.handle_event(event);
+bool ReportManager::enqueue_spool_notification(const char *payload,
+                                               size_t payload_len) {
+    return runtime_service_.enqueue_spool_notification(payload, payload_len);
 }
 
 bool ReportManager::edf_catalog_status(EdfReportCatalogStatus &out,

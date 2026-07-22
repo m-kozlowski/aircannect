@@ -1,23 +1,20 @@
 #include "report_spool_pressure_monitor.h"
 
 #include "debug_log.h"
-#include "rpc_arbiter.h"
 #include "spool_client.h"
 
 namespace aircannect {
 
-void ReportSpoolPressureMonitor::observe_idle(const RpcArbiter &arbiter) {
-    observed_rx_queue_full_alerts_ =
-        arbiter.can_driver().stats().rx_queue_full_alerts;
+void ReportSpoolPressureMonitor::observe_idle(uint32_t rx_queue_full_alerts) {
+    observed_rx_queue_full_alerts_ = rx_queue_full_alerts;
 }
 
-void ReportSpoolPressureMonitor::log_if_changed(const RpcArbiter &arbiter,
-                                                const SpoolClient &spool) {
-    const uint32_t alerts =
-        arbiter.can_driver().stats().rx_queue_full_alerts;
-    if (alerts == observed_rx_queue_full_alerts_) return;
+void ReportSpoolPressureMonitor::log_if_changed(
+    uint32_t rx_queue_full_alerts,
+    const SpoolClient &spool) {
+    if (rx_queue_full_alerts == observed_rx_queue_full_alerts_) return;
 
-    observed_rx_queue_full_alerts_ = alerts;
+    observed_rx_queue_full_alerts_ = rx_queue_full_alerts;
     if (!spool.active()) return;
 
     const SpoolClientStatus &status = spool.status();
@@ -34,7 +31,7 @@ void ReportSpoolPressureMonitor::log_if_changed(const RpcArbiter &arbiter,
               static_cast<unsigned long>(status.round_bytes),
               static_cast<unsigned long>(status.fragments),
               static_cast<unsigned long>(status.bytes),
-              static_cast<unsigned long>(alerts));
+              static_cast<unsigned long>(rx_queue_full_alerts));
 }
 
 }  // namespace aircannect

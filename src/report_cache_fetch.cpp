@@ -442,7 +442,7 @@ ReportCacheFetchEvent ReportCacheFetchService::finish_spool_if_terminal() {
     return ReportCacheFetchEvent::None;
 }
 
-ReportCacheFetchEvent ReportCacheFetchService::poll(RpcArbiter &arbiter) {
+ReportCacheFetchEvent ReportCacheFetchService::poll() {
     if (!fetch_.cache_active()) return ReportCacheFetchEvent::None;
 
     if (fetch_.cache().finalizing_source()) {
@@ -450,7 +450,6 @@ ReportCacheFetchEvent ReportCacheFetchService::poll(RpcArbiter &arbiter) {
     }
     if (fail_if_write_failed()) return ReportCacheFetchEvent::Failed;
 
-    fetch_.poll_spool(arbiter);
     fetch_.update_cache_spool();
     if (storage_.write_backpressure_active()) return ReportCacheFetchEvent::None;
 

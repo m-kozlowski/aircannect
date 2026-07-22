@@ -35,14 +35,9 @@ void ReportFetchRuntime::cancel_cache_fetch(const char *message) {
     cache_.cancel(message, spool_.status());
 }
 
-void ReportFetchRuntime::poll_spool(RpcArbiter &arbiter) {
-    spool_.poll(arbiter);
-    spool_.log_pressure_if_changed(arbiter);
-}
-
-bool ReportFetchRuntime::handle_event(const RpcEvent &event) {
-    if (!any_fetch_active()) return false;
-    return spool_.handle_event(event);
+void ReportFetchRuntime::poll_spool(bool transport_backpressure_active,
+                                    uint32_t rx_queue_full_alerts) {
+    spool_.poll(transport_backpressure_active, rx_queue_full_alerts);
 }
 
 }  // namespace aircannect

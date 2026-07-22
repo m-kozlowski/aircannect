@@ -5,7 +5,7 @@
 #include <string>
 
 #include "report_spool_types.h"
-#include "rpc_arbiter.h"
+#include "rpc_request_port.h"
 #include "spool_client_status.h"
 
 namespace aircannect {
@@ -28,11 +28,13 @@ struct SpoolClientRequest {
 
 class SpoolClient {
 public:
+    explicit SpoolClient(RpcRequestPort &rpc) : rpc_(rpc) {}
     ~SpoolClient();
 
     bool begin(const SpoolClientRequest &request);
-    void poll(RpcArbiter &arbiter);
-    bool handle_event(const RpcEvent &event);
+    void poll(bool background_backpressure_active);
+    bool handle_spool_notification(const char *payload, size_t payload_len);
+    void note_notification_loss(const char *reason);
     void reset();
 
     bool active() const;
@@ -67,12 +69,13 @@ private:
 
     void schedule_start();
     void schedule_pull();
-    bool submit_pending(RpcArbiter &arbiter);
-    bool submit_start(RpcArbiter &arbiter);
-    bool submit_pull(RpcArbiter &arbiter);
+    bool submit_pending();
+    bool submit_start();
+    bool submit_pull();
+    void poll_rpc_completion();
+    void cancel_rpc_request();
     bool handle_start_response(const std::string &payload);
     bool handle_pull_response(const std::string &payload);
-    bool handle_spool_fragment(const RpcEvent &event);
     bool append_base64_fragment(const char *data, size_t len, uint32_t seq);
     bool ensure_round_fragment_capacity(size_t count);
     void clear_round_fragments(bool release_storage);
@@ -87,12 +90,15 @@ private:
     std::string build_start_params() const;
     std::string build_pull_params() const;
 
+    RpcRequestPort &rpc_;
     SpoolClientRequest request_;
     SpoolClientStatus status_;
     ReportSpoolResult result_;
     State state_ = State::Idle;
     PendingSubmit pending_submit_ = PendingSubmit::None;
-    uint32_t pending_id_ = 0;
+    PendingSubmit submitted_ = PendingSubmit::None;
+    OperationTicket rpc_ticket_;
+    uint32_t rpc_generation_ = 0;
     uint32_t active_spool_id_ = 0;
     uint32_t state_started_ms_ = 0;
     uint32_t fetch_started_ms_ = 0;

@@ -8,7 +8,6 @@
 #include "report_night_index_service.h"
 #include "report_result_cache_runtime.h"
 #include "report_summary_runtime.h"
-#include "rpc_arbiter.h"
 
 namespace aircannect {
 
@@ -37,7 +36,7 @@ public:
 
     bool active() const { return fetch_.summary_active(); }
     bool request_refresh(bool force, bool cache_fetch_active);
-    ReportSummaryFetchEvent poll(RpcArbiter &arbiter);
+    ReportSummaryFetchEvent poll();
 
     ReportSummaryStatus status() const;
     void build_json(LargeTextBuffer &json) const;

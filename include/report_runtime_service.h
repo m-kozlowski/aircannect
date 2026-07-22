@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 namespace aircannect {
@@ -17,8 +18,6 @@ class ReportResultCacheRuntime;
 class ReportResultPrepareService;
 class ReportSummaryRuntime;
 class ReportSummaryService;
-class RpcArbiter;
-struct RpcEvent;
 
 enum class ReportCacheFetchEvent : uint8_t;
 enum class ReportSummaryFetchEvent : uint8_t;
@@ -39,10 +38,12 @@ public:
                          ReportPrefetchService &prefetch,
                          ReportEdfCatalogContext &edf_catalog);
 
-    void poll(RpcArbiter &arbiter,
+    void poll(bool transport_backpressure_active,
+              uint32_t rx_queue_full_alerts,
               bool therapy_running,
               bool stream_realtime_active);
-    bool handle_event(const RpcEvent &event);
+    bool enqueue_spool_notification(const char *payload,
+                                    size_t payload_len);
 
     bool busy() const;
     bool foreground_busy() const;
@@ -62,8 +63,7 @@ private:
         bool cache_invalidated = false;
     };
 
-    // Event and pipeline service
-    bool drain_source_events(RpcArbiter &arbiter);
+    // Pipeline service
     void service_build_queue(bool realtime_active);
     void service_range_plot(bool realtime_active);
     void handle_cache_fetch_event(ReportCacheFetchEvent event);

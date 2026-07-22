@@ -59,29 +59,35 @@ const char *skip_json_ws(const char *p, const char *end) {
     return p;
 }
 
-const char *find_json_key(const std::string &json, const char *key) {
+const char *find_json_key(const char *json, size_t json_len, const char *key) {
+    if (!json) return nullptr;
+
     std::string needle;
     needle.reserve(strlen(key) + 2);
     needle += '"';
     needle += key;
     needle += '"';
-    size_t pos = json.find(needle);
-    while (pos != std::string::npos) {
-        const char *p = json.c_str() + pos + needle.size();
-        const char *end = json.c_str() + json.size();
+
+    const char *begin = json;
+    const char *end = json + json_len;
+    const char *match = std::search(begin, end, needle.begin(), needle.end());
+    while (match != end) {
+        const char *p = match + needle.size();
         p = skip_json_ws(p, end);
         if (p < end && *p == ':') return p + 1;
-        pos = json.find(needle, pos + 1);
+
+        match = std::search(match + 1, end, needle.begin(), needle.end());
     }
     return nullptr;
 }
 
-bool json_string_view(const std::string &json,
+bool json_string_view(const char *json,
+                      size_t json_len,
                       const char *key,
                       JsonStringView &out) {
-    const char *p = find_json_key(json, key);
+    const char *p = find_json_key(json, json_len, key);
     if (!p) return false;
-    const char *end = json.c_str() + json.size();
+    const char *end = json + json_len;
     p = skip_json_ws(p, end);
     if (p >= end || *p != '"') return false;
     p++;
@@ -102,12 +108,13 @@ bool json_string_view(const std::string &json,
     return false;
 }
 
-bool json_uint_value(const std::string &json,
+bool json_uint_value(const char *json,
+                     size_t json_len,
                      const char *key,
                      uint32_t &out) {
-    const char *p = find_json_key(json, key);
+    const char *p = find_json_key(json, json_len, key);
     if (!p) return false;
-    const char *end = json.c_str() + json.size();
+    const char *end = json + json_len;
     p = skip_json_ws(p, end);
     if (p >= end || *p < '0' || *p > '9') return false;
     uint32_t value = 0;
@@ -121,12 +128,13 @@ bool json_uint_value(const std::string &json,
     return true;
 }
 
-bool json_object_text(const std::string &json,
+bool json_object_text(const char *json,
+                      size_t json_len,
                       const char *key,
                       std::string &out) {
-    const char *p = find_json_key(json, key);
+    const char *p = find_json_key(json, json_len, key);
     if (!p) return false;
-    const char *end = json.c_str() + json.size();
+    const char *end = json + json_len;
     p = skip_json_ws(p, end);
     if (p >= end || *p != '{') return false;
 
@@ -169,6 +177,7 @@ bool json_string_equals(const JsonStringView &view, const char *value) {
 }  // namespace
 
 SpoolClient::~SpoolClient() {
+    cancel_rpc_request();
     clear_round_fragments(true);
 }
 
@@ -194,7 +203,8 @@ void SpoolClient::reset() {
     result_.clear();
     state_ = State::Idle;
     pending_submit_ = PendingSubmit::None;
-    pending_id_ = 0;
+    cancel_rpc_request();
+    submitted_ = PendingSubmit::None;
     active_spool_id_ = 0;
     state_started_ms_ = 0;
     fetch_started_ms_ = 0;
@@ -213,9 +223,11 @@ bool SpoolClient::active() const {
            state_ != State::Failed;
 }
 
-void SpoolClient::poll(RpcArbiter &arbiter) {
+void SpoolClient::poll(bool background_backpressure_active) {
     const uint32_t now = millis();
     update_status(now);
+
+    poll_rpc_completion();
 
     switch (state_) {
         case State::Idle:
@@ -233,9 +245,13 @@ void SpoolClient::poll(RpcArbiter &arbiter) {
         return;
     }
 
+    // A fragment may precede the PullSpoolFragments response. Keep the next
+    // pull pending until the addressed response releases the active ticket.
+    if (rpc_ticket_.valid()) return;
+
     if (pending_submit_ != PendingSubmit::None) {
         if (request_.pace_on_backpressure &&
-            arbiter.background_backpressure_active()) {
+            background_backpressure_active) {
             return;
         }
         if (request_.pace_on_backpressure &&
@@ -244,7 +260,7 @@ void SpoolClient::poll(RpcArbiter &arbiter) {
             static_cast<int32_t>(now - next_pull_submit_ms_) < 0) {
             return;
         }
-        submit_pending(arbiter);
+        submit_pending();
         return;
     }
 
@@ -254,15 +270,7 @@ void SpoolClient::poll(RpcArbiter &arbiter) {
         case State::Failed:
             return;
         case State::WaitStart:
-            if (now - state_started_ms_ > AC_SPOOL_CLIENT_RPC_TIMEOUT_MS) {
-                fail("rpc_timeout");
-            }
-            return;
         case State::WaitPull:
-            if (now - state_started_ms_ >
-                AC_SPOOL_CLIENT_PULL_RPC_TIMEOUT_MS) {
-                fail("rpc_timeout");
-            }
             return;
         case State::WaitFragments:
             if (now - state_started_ms_ >
@@ -280,84 +288,113 @@ void SpoolClient::schedule_start() {
     status_.current_round = result_.rounds + 1;
     status_.fragments = result_.fragments;
     status_.bytes = result_.bytes;
-    pending_id_ = 0;
     pending_submit_ = PendingSubmit::Start;
     state_ = State::WaitStart;
     state_started_ms_ = millis();
 }
 
 void SpoolClient::schedule_pull() {
-    pending_id_ = 0;
     pending_submit_ = PendingSubmit::Pull;
     state_ = State::WaitPull;
     status_.state = SpoolClientState::Pulling;
     state_started_ms_ = millis();
 }
 
-bool SpoolClient::submit_pending(RpcArbiter &arbiter) {
+bool SpoolClient::submit_pending() {
     switch (pending_submit_) {
         case PendingSubmit::None:
             return true;
         case PendingSubmit::Start:
-            return submit_start(arbiter);
+            return submit_start();
         case PendingSubmit::Pull:
-            return submit_pull(arbiter);
+            return submit_pull();
     }
     return false;
 }
 
-bool SpoolClient::submit_start(RpcArbiter &arbiter) {
-    uint32_t id = 0;
-    if (!arbiter.send_request_with_id("StartSpool", build_start_params(),
-                                      RpcSource::Report,
-                                      AC_SPOOL_CLIENT_RPC_TIMEOUT_MS, id)) {
+bool SpoolClient::submit_start() {
+    rpc_generation_++;
+    if (rpc_generation_ == 0) rpc_generation_++;
+
+    RpcRequestCommand command;
+    command.method = "StartSpool";
+    command.params_json = build_start_params();
+    command.source = RpcSource::Report;
+    command.timeout_ms = AC_SPOOL_CLIENT_RPC_TIMEOUT_MS;
+    command.generation = rpc_generation_;
+
+    const OperationSubmission submission = rpc_.request(command);
+    if (!submission.accepted()) {
         fail("submit_start_failed");
         return false;
     }
-    pending_id_ = id;
+
+    rpc_ticket_ = submission.ticket;
+    submitted_ = PendingSubmit::Start;
     pending_submit_ = PendingSubmit::None;
     state_started_ms_ = millis();
     return true;
 }
 
-bool SpoolClient::submit_pull(RpcArbiter &arbiter) {
-    uint32_t id = 0;
-    if (!arbiter.send_request_with_id("PullSpoolFragments",
-                                      build_pull_params(),
-                                      RpcSource::Report,
-                                      AC_SPOOL_CLIENT_PULL_RPC_TIMEOUT_MS,
-                                      id)) {
+bool SpoolClient::submit_pull() {
+    rpc_generation_++;
+    if (rpc_generation_ == 0) rpc_generation_++;
+
+    RpcRequestCommand command;
+    command.method = "PullSpoolFragments";
+    command.params_json = build_pull_params();
+    command.source = RpcSource::Report;
+    command.timeout_ms = AC_SPOOL_CLIENT_PULL_RPC_TIMEOUT_MS;
+    command.generation = rpc_generation_;
+
+    const OperationSubmission submission = rpc_.request(command);
+    if (!submission.accepted()) {
         fail("submit_pull_failed");
         return false;
     }
-    pending_id_ = id;
+
+    rpc_ticket_ = submission.ticket;
+    submitted_ = PendingSubmit::Pull;
     pending_submit_ = PendingSubmit::None;
     state_started_ms_ = millis();
     if (request_.pace_on_backpressure) {
-        next_pull_submit_ms_ = state_started_ms_ +
-            AC_REPORT_SPOOL_PULL_PACE_MS;
+        next_pull_submit_ms_ =
+            state_started_ms_ + AC_REPORT_SPOOL_PULL_PACE_MS;
         if (next_pull_submit_ms_ == 0) next_pull_submit_ms_ = 1;
     }
     return true;
 }
 
-bool SpoolClient::handle_event(const RpcEvent &event) {
-    if (!active()) return false;
-    if (event.kind == RpcEventKind::RpcResponse && pending_id_ &&
-        event.id == pending_id_) {
-        if (state_ == State::WaitStart) {
-            handle_start_response(event.payload_text());
-        } else if (state_ == State::WaitPull) {
-            handle_pull_response(event.payload_text());
-        }
-        return true;
+void SpoolClient::poll_rpc_completion() {
+    if (!rpc_ticket_.valid()) return;
+
+    RpcRequestCompletion completion;
+    if (!rpc_.take_completion(rpc_ticket_, completion)) return;
+
+    rpc_ticket_ = {};
+    const PendingSubmit completed = submitted_;
+    submitted_ = PendingSubmit::None;
+    if (completion.cause != RpcCompletionCause::Response) {
+        fail(completion.reason.empty() ? "rpc_request_failed"
+                                       : completion.reason.c_str());
+        return;
     }
-    if (event.kind == RpcEventKind::RpcNotification &&
-        event.source == RpcSource::Report &&
-        (state_ == State::WaitPull || state_ == State::WaitFragments)) {
-        return handle_spool_fragment(event);
+
+    if (completed == PendingSubmit::Start) {
+        (void)handle_start_response(completion.payload);
+    } else if (completed == PendingSubmit::Pull) {
+        (void)handle_pull_response(completion.payload);
     }
-    return false;
+}
+
+void SpoolClient::cancel_rpc_request() {
+    if (!rpc_ticket_.valid()) return;
+
+    (void)rpc_.cancel(rpc_ticket_);
+    RpcRequestCompletion completion;
+    (void)rpc_.take_completion(rpc_ticket_, completion);
+    rpc_ticket_ = {};
+    submitted_ = PendingSubmit::None;
 }
 
 bool SpoolClient::handle_start_response(const std::string &payload) {
@@ -402,23 +439,30 @@ bool SpoolClient::handle_pull_response(const std::string &payload) {
     return true;
 }
 
-bool SpoolClient::handle_spool_fragment(const RpcEvent &event) {
-    const std::string &payload = event.payload_text();
+bool SpoolClient::handle_spool_notification(const char *payload,
+                                            size_t payload_len) {
+    if (!active() || !payload || payload_len == 0) return false;
+    if (state_ != State::WaitPull && state_ != State::WaitFragments) {
+        return false;
+    }
+
     JsonStringView method;
-    if (!json_string_view(payload, "method", method) ||
+    if (!json_string_view(payload, payload_len, "method", method) ||
         !json_string_equals(method, "SpoolFragment")) {
         return false;
     }
 
     uint32_t spool_id = 0;
-    if (!json_uint_value(payload, "spoolId", spool_id)) return false;
+    if (!json_uint_value(payload, payload_len, "spoolId", spool_id)) {
+        return false;
+    }
     if (!active_spool_id_ || spool_id != active_spool_id_) return false;
 
     uint32_t seq = result_.fragments;
-    json_uint_value(payload, "seq", seq);
+    json_uint_value(payload, payload_len, "seq", seq);
 
     JsonStringView data;
-    if (!json_string_view(payload, "data", data) ||
+    if (!json_string_view(payload, payload_len, "data", data) ||
         !append_base64_fragment(data.data, data.len, seq)) {
         retry_current_round("fragment_decode_failed");
         return true;
@@ -438,7 +482,7 @@ bool SpoolClient::handle_spool_fragment(const RpcEvent &event) {
     state_started_ms_ = millis();
 
     JsonStringView status_view;
-    if (!json_string_view(payload, "status", status_view) ||
+    if (!json_string_view(payload, payload_len, "status", status_view) ||
         json_string_equals(status_view, "SPOOL_INCOMPLETE")) {
         if (request_.max_notifications > 0) {
             schedule_pull();
@@ -448,13 +492,14 @@ bool SpoolClient::handle_spool_fragment(const RpcEvent &event) {
 
     result_.terminal_status.assign(status_view.data, status_view.len);
     JsonStringView hash_view;
-    if (json_string_view(payload, "spoolHash", hash_view)) {
+    if (json_string_view(payload, payload_len, "spoolHash", hash_view)) {
         result_.spool_hash.assign(hash_view.data, hash_view.len);
     } else {
         result_.spool_hash.clear();
     }
     std::string pending_next_spool_address;
-    json_object_text(payload, "nextSpoolAddress", pending_next_spool_address);
+    json_object_text(payload, payload_len, "nextSpoolAddress",
+                     pending_next_spool_address);
 
     if (!normalize_current_round()) {
         retry_current_round("fragment_sequence");
@@ -515,6 +560,11 @@ bool SpoolClient::handle_spool_fragment(const RpcEvent &event) {
     }
     finish();
     return true;
+}
+
+void SpoolClient::note_notification_loss(const char *reason) {
+    if (!active()) return;
+    (void)retry_current_round(reason ? reason : "notification_lost");
 }
 
 bool SpoolClient::append_base64_fragment(const char *data,
@@ -761,7 +811,7 @@ bool SpoolClient::retry_current_round(const char *reason) {
 
     round_fragment_count_ = 0;
     active_spool_id_ = 0;
-    pending_id_ = 0;
+    cancel_rpc_request();
     completed_round_.clear();
     completed_round_ready_ = false;
     round_retry_count_++;
@@ -790,7 +840,7 @@ void SpoolClient::finish() {
     status_.fragments = result_.fragments;
     status_.bytes = result_.bytes;
     state_ = State::Done;
-    pending_id_ = 0;
+    cancel_rpc_request();
     active_spool_id_ = 0;
     pending_submit_ = PendingSubmit::None;
 }
@@ -813,7 +863,7 @@ void SpoolClient::fail(const char *message) {
               static_cast<unsigned long>(result_.fragments),
               static_cast<unsigned long>(result_.payload.size()),
               static_cast<unsigned long>(millis() - state_started_ms_));
-    pending_id_ = 0;
+    cancel_rpc_request();
     active_spool_id_ = 0;
     pending_submit_ = PendingSubmit::None;
 }

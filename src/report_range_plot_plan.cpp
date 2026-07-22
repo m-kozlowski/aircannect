@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "board_report.h"
 #include "edf_report_data_plan.h"
 #include "edf_report_provider.h"
 #include "report_data_provider.h"

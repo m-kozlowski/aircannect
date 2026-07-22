@@ -8,7 +8,6 @@
 #include "report_fetch_runtime.h"
 #include "report_sources.h"
 #include "report_summary_runtime.h"
-#include "rpc_arbiter.h"
 
 namespace aircannect {
 
@@ -45,7 +44,7 @@ public:
                     bool latest_tail_refresh);
     bool activate_plan();
     ReportCacheFetchEvent start_next_source();
-    ReportCacheFetchEvent poll(RpcArbiter &arbiter);
+    ReportCacheFetchEvent poll();
     ReportCacheFetchEvent finish();
     ReportCacheFetchEvent fail(const char *message);
     ReportCacheFetchEvent cancel(const char *message);

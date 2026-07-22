@@ -72,7 +72,7 @@ static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager;
 static EdfReportCatalogJob edf_report_catalog_job;
 static OximetryManager oximetry_manager;
-static ReportManager report_manager;
+static ReportManager report_manager(rpc_arbiter);
 static BackgroundWorker bg_worker;
 static StorageDiagnosticJob storage_diagnostic_job;
 static StorageSyncJob *storage_sync_job = nullptr;
@@ -159,6 +159,16 @@ static void route_stream_notification(void *context,
     StreamBroker *stream = static_cast<StreamBroker *>(context);
     if (!stream) return;
     (void)stream->publish_stream_data(payload, payload_len, now_ms);
+}
+
+static void route_spool_notification(void *context,
+                                     const char *payload,
+                                     size_t payload_len,
+                                     uint32_t now_ms) {
+    (void)now_ms;
+    ReportManager *reports = static_cast<ReportManager *>(context);
+    if (!reports) return;
+    (void)reports->enqueue_spool_notification(payload, payload_len);
 }
 
 static void route_tcp_raw_request(void *context,
@@ -484,6 +494,8 @@ void setup() {
                                                 &event_broker);
     rpc_arbiter.set_stream_notification_observer(route_stream_notification,
                                                  &stream_broker);
+    rpc_arbiter.set_spool_notification_observer(route_spool_notification,
+                                                &report_manager);
     tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
                                         &stream_broker);
     rpc_transport_generation_seen = rpc_arbiter.transport_generation();
@@ -624,7 +636,8 @@ void loop() {
 
     // Reports and ResMed OTA
     report_manager.poll(
-        rpc_arbiter,
+        rpc_arbiter.background_backpressure_active(),
+        can_driver.stats().rx_queue_full_alerts,
         as11_device_service.state().therapy_state() ==
             As11TherapyState::Running,
         stream_broker.realtime_active());

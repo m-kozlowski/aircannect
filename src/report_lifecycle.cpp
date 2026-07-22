@@ -2,8 +2,9 @@
 
 namespace aircannect {
 
-ReportManager::ReportManager()
-    : cache_write_sink_(cache_storage_, summary_),
+ReportManager::ReportManager(RpcRequestPort &rpc)
+    : fetch_runtime_(rpc),
+      cache_write_sink_(cache_storage_, summary_),
       night_index_service_(summary_, night_index_, edf_catalog_),
       night_query_(night_index_service_),
       summary_service_(summary_,

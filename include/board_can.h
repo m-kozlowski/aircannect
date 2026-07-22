@@ -72,10 +72,6 @@ static constexpr size_t AC_DG_MAX_PAYLOAD_BYTES = 8192;
 static constexpr size_t AC_DG_INITIAL_RESERVE_BYTES = 256;
 static constexpr uint32_t AC_DG_IDLE_TIMEOUT_MS = 2000;
 static constexpr size_t AC_RPC_EVENT_QUEUE_DEPTH = 48;
-static constexpr size_t AC_REPORT_EVENT_QUEUE_DEPTH = 32;
-static constexpr size_t AC_REPORT_EVENT_BACKPRESSURE_WATERMARK =
-    AC_REPORT_EVENT_QUEUE_DEPTH / 2;
-static constexpr size_t AC_RESMED_OTA_EVENT_QUEUE_DEPTH = 8;
 static constexpr size_t AC_RPC_REQUEST_QUEUE_DEPTH = 8;
 static constexpr size_t AC_STREAM_CONSUMERS_MAX = 4;
 static constexpr size_t AC_STREAM_CONSUMER_QUEUE_DEPTH = 2;

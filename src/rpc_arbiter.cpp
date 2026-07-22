@@ -344,21 +344,12 @@ bool RpcArbiter::next_event(RpcEvent &event) {
     return events_.pop(event);
 }
 
-bool RpcArbiter::next_source_event(RpcSource source, RpcEvent &event) {
-    const SourceEventRoute *route = source_event_route(source);
-    if (!route) return false;
-    return pop_source_event_queue(route->queue, event);
-}
-
 bool RpcArbiter::background_backpressure_active() const {
     if (background_rx_pressure_active(millis())) return true;
 
     if (can_rx_queue_pressure_active()) return true;
     if (deferred_payloads_.count() >=
         AC_RPC_PAYLOAD_BACKPRESSURE_WATERMARK) {
-        return true;
-    }
-    if (report_events_.count() >= AC_REPORT_EVENT_BACKPRESSURE_WATERMARK) {
         return true;
     }
     return false;
@@ -396,6 +387,13 @@ void RpcArbiter::set_stream_notification_observer(
     void *context) {
     stream_notification_observer_ = observer;
     stream_notification_context_ = observer ? context : nullptr;
+}
+
+void RpcArbiter::set_spool_notification_observer(
+    RpcNotificationObserver observer,
+    void *context) {
+    spool_notification_observer_ = observer;
+    spool_notification_context_ = observer ? context : nullptr;
 }
 
 void RpcArbiter::reset_stats() {
@@ -587,10 +585,9 @@ void RpcArbiter::push_source_event(RpcSource target,
     event.id = id;
     event.payload = std::move(payload);
     if (dispatch_source_event(*route, event)) return;
-    if (push_source_event_queue(route->queue, std::move(event))) return;
     Log::logf(CAT_RPC,
               LOG_WARN,
-              "source event queue full target=%s kind=%u\n",
+              "source event has no observer target=%s kind=%u\n",
               source_name(target),
               static_cast<unsigned>(kind));
     stats_.event_drops++;
@@ -619,48 +616,12 @@ bool RpcArbiter::dispatch_source_event(const SourceEventRoute &route,
     return true;
 }
 
-bool RpcArbiter::push_source_event_queue(SourceEventQueue queue,
-                                         RpcEvent &&event) {
-    switch (queue) {
-        case SourceEventQueue::Report:
-            return report_events_.push(std::move(event));
-        case SourceEventQueue::ResmedOta:
-            return resmed_ota_events_.push(std::move(event));
-        case SourceEventQueue::None:
-        default:
-            return false;
-    }
-}
-
-bool RpcArbiter::pop_source_event_queue(SourceEventQueue queue,
-                                        RpcEvent &event) {
-    switch (queue) {
-        case SourceEventQueue::Report:
-            return report_events_.pop(event);
-        case SourceEventQueue::ResmedOta:
-            return resmed_ota_events_.pop(event);
-        case SourceEventQueue::None:
-        default:
-            return false;
-    }
-}
-
 void RpcArbiter::cancel_pending_request(const char *reason) {
     if (!pending_.active) return;
 
     stats_.request_cancellations++;
     const bool addressed_request = pending_.generation != 0;
-    if (!addressed_request && pending_.source == RpcSource::ResmedOta) {
-        char buf[160];
-        snprintf(buf, sizeof(buf),
-                 "RPC request cancelled id=%lu method=%s source=%s reason=%s",
-                 static_cast<unsigned long>(pending_.id),
-                 pending_.method.c_str(),
-                 source_name(pending_.source),
-                 reason ? reason : "unknown");
-        push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
-    } else if (!addressed_request &&
-               pending_.source != RpcSource::Scheduler) {
+    if (!addressed_request && pending_.source != RpcSource::Scheduler) {
         char buf[160];
         snprintf(buf, sizeof(buf),
                  "RPC request cancelled id=%lu method=%s source=%s reason=%s",
@@ -683,17 +644,7 @@ void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
                                        RpcCompletionCause cause) {
     stats_.request_cancellations++;
     const bool addressed_request = request.generation != 0;
-    if (!addressed_request && request.source == RpcSource::ResmedOta) {
-        char buf[160];
-        snprintf(buf, sizeof(buf),
-                 "RPC request cancelled id=%lu method=%s source=%s reason=%s",
-                 static_cast<unsigned long>(request.id),
-                 request.method.c_str(),
-                 source_name(request.source),
-                 reason ? reason : "unknown");
-        push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
-    } else if (!addressed_request &&
-               request.source != RpcSource::Scheduler) {
+    if (!addressed_request && request.source != RpcSource::Scheduler) {
         char buf[160];
         snprintf(buf, sizeof(buf),
                  "RPC request cancelled id=%lu method=%s source=%s reason=%s",
@@ -949,10 +900,7 @@ void RpcArbiter::check_pending_timeout() {
              pending_.method.c_str(),
              source_name(pending_.source));
     const bool addressed_request = pending_.generation != 0;
-    if (!addressed_request && pending_.source == RpcSource::ResmedOta) {
-        push_source_event(RpcSource::ResmedOta, RpcEventKind::Info, buf);
-    } else if (!addressed_request &&
-               pending_.source != RpcSource::Scheduler) {
+    if (!addressed_request && pending_.source != RpcSource::Scheduler) {
         push_event(RpcEventKind::Info, buf);
     }
     stats_.request_timeouts++;
@@ -981,6 +929,13 @@ void RpcArbiter::handle_stream_notification(const char *payload,
     if (!stream_notification_observer_) return;
     stream_notification_observer_(stream_notification_context_, payload,
                                   payload_len, millis());
+}
+
+void RpcArbiter::handle_spool_notification(const char *payload,
+                                           size_t payload_len) {
+    if (!spool_notification_observer_) return;
+    spool_notification_observer_(spool_notification_context_, payload,
+                                 payload_len, millis());
 }
 
 void RpcArbiter::note_transport_reset() {
@@ -1073,6 +1028,9 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
             if (event_notification) {
                 handle_event_notification(payload, payload_len);
             }
+            if (spool_fragment) {
+                handle_spool_notification(payload, payload_len);
+            }
             if (!stream_data && !spool_fragment) {
                 Log::log_payload(CAT_RPC, LOG_DEBUG, "[NOTIFY] ",
                                  payload, payload_len);
@@ -1084,11 +1042,6 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 }
                 return payload_ref;
             };
-            if (spool_fragment) {
-                push_source_event(RpcSource::Report,
-                                  RpcEventKind::RpcNotification,
-                                  ref_payload(), RpcSource::Report);
-            }
             if (raw_rpc_forwarding_enabled_) {
                 push_event(RpcEventKind::RpcNotification, ref_payload());
             } else if (!stream_data && !event_notification && !spool_fragment) {
