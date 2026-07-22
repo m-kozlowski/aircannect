@@ -1,19 +1,49 @@
-#include "oximetry_sensor_protocols.h"
+#include "ble_sensor_protocols.h"
 
 #include "debug_log.h"
+#include "oximetry_codec.h"
 
 namespace aircannect {
 
 #if AC_OXIMETRY_BLE_ENABLED
-namespace {
+bool BleSensorProtocolEngine::subscribe_plx() {
+    if (!client_) return false;
 
-void sensor_plx_notify_cb(NimBLERemoteCharacteristic *chr,
-                          uint8_t *data,
-                          size_t len,
-                          bool is_notify) {
-    (void)chr;
+    NimBLERemoteService *service =
+        client_->getService(NimBLEUUID("1822"));
+    if (!service) return false;
+
+    NimBLERemoteCharacteristic *continuous =
+        service->getCharacteristic(NimBLEUUID("2A5F"));
+    if (continuous && continuous->canNotify() &&
+        continuous->subscribe(true, plx_notify)) {
+        Log::logf(CAT_OXI, LOG_DEBUG,
+                  "Sensor subscribed PLX continuous\n");
+        return true;
+    }
+
+    NimBLERemoteCharacteristic *spot =
+        service->getCharacteristic(NimBLEUUID("2A5E"));
+    if (spot && (spot->canNotify() || spot->canIndicate()) &&
+        spot->subscribe(spot->canNotify(), plx_notify)) {
+        Log::logf(CAT_OXI, LOG_DEBUG, "Sensor subscribed PLX spot\n");
+        return true;
+    }
+
+    return false;
+}
+
+void BleSensorProtocolEngine::plx_notify(
+    NimBLERemoteCharacteristic *characteristic,
+    uint8_t *data,
+    size_t len,
+    bool is_notify) {
+    (void)characteristic;
     (void)is_notify;
-    if (len < 5 || !data) return;
+    BleSensorProtocolEngine *engine =
+        active_.load(std::memory_order_acquire);
+    if (!engine || !data || len < 5) return;
+
     const uint16_t spo2_raw =
         static_cast<uint16_t>(data[1]) |
         (static_cast<uint16_t>(data[2]) << 8);
@@ -25,43 +55,12 @@ void sensor_plx_notify_cb(NimBLERemoteCharacteristic *chr,
     const int16_t spo2 = decode_sfloat_int_value(spo2_raw, spo2_valid);
     const int16_t pulse = decode_sfloat_int_value(pulse_raw, pulse_valid);
     const bool valid = spo2_valid && pulse_valid;
+
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor PLX reading %s spo2=%d pulse=%d\n",
               valid ? "valid" : "invalid",
-              static_cast<int>(spo2),
-              static_cast<int>(pulse));
-    if (sensor_owner) {
-        sensor_owner->on_sensor_sample(spo2_raw, pulse_raw, !valid);
-    }
-}
-
-}  // namespace
-
-bool sensor_subscribe_plx(NimBLEClient *client) {
-    if (!client) return false;
-    NimBLERemoteService *plx_service =
-        client->getService(NimBLEUUID(PLX_SERVICE_UUID));
-    if (!plx_service) return false;
-
-    NimBLERemoteCharacteristic *continuous =
-        plx_service->getCharacteristic(NimBLEUUID(PLX_CONTINUOUS_UUID));
-    if (continuous && continuous->canNotify() &&
-        continuous->subscribe(true, sensor_plx_notify_cb)) {
-        Log::logf(CAT_OXI, LOG_DEBUG,
-                  "Sensor subscribed PLX continuous\n");
-        return true;
-    }
-
-    NimBLERemoteCharacteristic *spot =
-        plx_service->getCharacteristic(NimBLEUUID(PLX_SPOT_UUID));
-    if (spot && (spot->canNotify() || spot->canIndicate()) &&
-        spot->subscribe(spot->canNotify(), sensor_plx_notify_cb)) {
-        Log::logf(CAT_OXI, LOG_DEBUG,
-                  "Sensor subscribed PLX spot\n");
-        return true;
-    }
-
-    return false;
+              static_cast<int>(spo2), static_cast<int>(pulse));
+    engine->emit_sample(spo2_raw, pulse_raw, !valid);
 }
 #endif
 

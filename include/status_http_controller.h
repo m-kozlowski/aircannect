@@ -14,8 +14,10 @@ namespace aircannect {
 class As11DeviceService;
 class ConfigService;
 class FirmwareInstaller;
-class OximetryManager;
+class OximetryHub;
+class PlxPeripheral;
 class TimeSyncService;
+class UdpOximeterSource;
 class UpdateChecker;
 class WifiManager;
 
@@ -29,7 +31,9 @@ public:
                TimeSyncService &time_sync,
                FirmwareInstaller &installer,
                UpdateChecker &update_checker,
-               OximetryManager &oximetry);
+               OximetryHub &oximetry_hub,
+               UdpOximeterSource &oximetry_udp,
+               PlxPeripheral &plx_peripheral);
     void register_routes(AsyncWebServer &server) override;
     void poll(PollCheckpoint checkpoint = nullptr);
 
@@ -46,7 +50,9 @@ private:
     TimeSyncService *time_sync_ = nullptr;
     FirmwareInstaller *installer_ = nullptr;
     UpdateChecker *update_checker_ = nullptr;
-    OximetryManager *oximetry_ = nullptr;
+    OximetryHub *oximetry_hub_ = nullptr;
+    UdpOximeterSource *oximetry_udp_ = nullptr;
+    PlxPeripheral *plx_peripheral_ = nullptr;
 
     StaticSemaphore_t cache_mutex_storage_ = {};
     SemaphoreHandle_t cache_mutex_ = nullptr;

@@ -10,10 +10,12 @@
 #include "config_service.h"
 #include "firmware_installer.h"
 #include "json_util.h"
-#include "oximetry_manager.h"
+#include "oximetry_hub.h"
+#include "plx_peripheral.h"
 #include "storage_manager.h"
 #include "system_status_snapshot.h"
 #include "time_sync_service.h"
+#include "udp_oximeter_source.h"
 #include "update_checker.h"
 #include "wifi_manager.h"
 
@@ -62,7 +64,9 @@ bool build_status_json(LargeTextBuffer &json,
                        const TimeSyncService &time_sync,
                        const FirmwareInstaller &installer,
                        const UpdateChecker &update_checker,
-                       const OximetryManager &oximetry,
+                       const OximetryHub &oximetry_hub,
+                       const UdpOximeterSource &oximetry_udp,
+                       const PlxPeripheral &plx_peripheral,
                        StatusHttpController::PollCheckpoint checkpoint) {
     const SystemStatusSnapshot snap = collect_system_status({
         device,
@@ -71,7 +75,9 @@ bool build_status_json(LargeTextBuffer &json,
         time_sync,
         installer,
         update_checker,
-        oximetry,
+        oximetry_hub,
+        oximetry_udp,
+        plx_peripheral,
     }, checkpoint);
     const MemoryStatus &mem = snap.memory;
     const StorageStatus &storage = snap.storage;
@@ -172,14 +178,18 @@ bool StatusHttpController::begin(As11DeviceService &device,
                                  TimeSyncService &time_sync,
                                  FirmwareInstaller &installer,
                                  UpdateChecker &update_checker,
-                                 OximetryManager &oximetry) {
+                                 OximetryHub &oximetry_hub,
+                                 UdpOximeterSource &oximetry_udp,
+                                 PlxPeripheral &plx_peripheral) {
     device_ = &device;
     wifi_ = &wifi;
     config_ = &config;
     time_sync_ = &time_sync;
     installer_ = &installer;
     update_checker_ = &update_checker;
-    oximetry_ = &oximetry;
+    oximetry_hub_ = &oximetry_hub;
+    oximetry_udp_ = &oximetry_udp;
+    plx_peripheral_ = &plx_peripheral;
     observed_device_revision_ = device.revision();
     observed_config_revision_ = config.revision();
 
@@ -202,7 +212,8 @@ void StatusHttpController::register_routes(AsyncWebServer &server) {
 
 void StatusHttpController::poll(PollCheckpoint checkpoint) {
     if (!device_ || !wifi_ || !config_ || !time_sync_ || !installer_ ||
-        !update_checker_ || !oximetry_) {
+        !update_checker_ || !oximetry_hub_ || !oximetry_udp_ ||
+        !plx_peripheral_) {
         return;
     }
 
@@ -242,7 +253,8 @@ bool StatusHttpController::publish_snapshot(PollCheckpoint checkpoint) {
     build_json_.clear();
     if (!build_status_json(build_json_, *device_, *wifi_, *config_,
                            *time_sync_, *installer_, *update_checker_,
-                           *oximetry_, checkpoint)) {
+                           *oximetry_hub_, *oximetry_udp_,
+                           *plx_peripheral_, checkpoint)) {
         return false;
     }
 

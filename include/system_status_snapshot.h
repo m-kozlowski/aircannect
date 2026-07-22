@@ -9,13 +9,16 @@
 #include "board.h"
 #include "firmware_installer.h"
 #include "memory_manager.h"
-#include "oximetry_manager.h"
+#include "oximetry_status.h"
 #include "storage_manager.h"
 #include "time_sync_service.h"
 #include "update_checker.h"
 #include "wifi_manager.h"
 
 namespace aircannect {
+
+class PlxPeripheral;
+class UdpOximeterSource;
 
 static constexpr size_t AC_STATUS_IP_TEXT_MAX = 46;
 static constexpr size_t AC_STATUS_ISO_TIME_TEXT_MAX = 29;
@@ -79,7 +82,9 @@ struct SystemStatusSources {
     const TimeSyncService &time_sync_service;
     const FirmwareInstaller &firmware_installer;
     const UpdateChecker &update_checker;
-    const OximetryManager &oximetry_manager;
+    const OximetryHub &oximetry_hub;
+    const UdpOximeterSource &oximetry_udp;
+    const PlxPeripheral &plx_peripheral;
 };
 
 using SystemStatusCheckpoint = void (*)(const char *section);

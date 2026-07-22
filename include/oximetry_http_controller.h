@@ -9,17 +9,23 @@
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
-#include "oximetry_manager.h"
+#include "oximetry_status.h"
 
 class AsyncWebServerRequest;
 
 namespace aircannect {
 
 class ConfigService;
+class BleSensorSource;
+class OximetryHub;
+class PlxPeripheral;
 
 class OximetryHttpController final : public HttpRouteModule {
 public:
-    bool begin(OximetryManager &oximetry, ConfigService &config);
+    bool begin(OximetryHub &hub,
+               BleSensorSource &sensor,
+               PlxPeripheral &peripheral,
+               ConfigService &config);
     void register_routes(AsyncWebServer &server) override;
     void poll();
 
@@ -57,7 +63,9 @@ private:
     void send_snapshot(AsyncWebServerRequest *request) const;
     void send_action(AsyncWebServerRequest *request);
 
-    OximetryManager *oximetry_ = nullptr;
+    OximetryHub *hub_ = nullptr;
+    BleSensorSource *sensor_ = nullptr;
+    PlxPeripheral *peripheral_ = nullptr;
     ConfigService *config_ = nullptr;
     MainLoopInbox<Command, CommandQueueDepth> commands_;
 

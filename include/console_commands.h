@@ -19,7 +19,9 @@ class ExportCoordinator;
 class ArduinoOtaSource;
 class FirmwareInstaller;
 class FirmwareUrlSource;
-class OximetryManager;
+class BleSensorSource;
+class OximetryHub;
+class PlxPeripheral;
 class ReportTask;
 class ResmedOtaManager;
 class RpcDiagnosticsPort;
@@ -30,6 +32,7 @@ class SinkManager;
 class StreamBroker;
 class TcpBridge;
 class TimeSyncService;
+class UdpOximeterSource;
 class UpdateChecker;
 class WebUI;
 class WifiManager;
@@ -120,7 +123,10 @@ private:
 
 class OximetryConsoleCommands final : public ConsoleCommandGroup {
 public:
-    OximetryConsoleCommands(OximetryManager &oximetry,
+    OximetryConsoleCommands(OximetryHub &hub,
+                            UdpOximeterSource &udp,
+                            BleSensorSource &sensor,
+                            PlxPeripheral &peripheral,
                             ConfigService &config);
 
     bool execute(const String &command,
@@ -132,7 +138,10 @@ public:
     void print_memory_detail(Print &out) override;
 
 private:
-    OximetryManager &oximetry_;
+    OximetryHub &hub_;
+    UdpOximeterSource &udp_;
+    BleSensorSource &sensor_;
+    PlxPeripheral &peripheral_;
     ConfigService &config_;
 };
 

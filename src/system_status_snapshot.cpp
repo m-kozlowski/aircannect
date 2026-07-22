@@ -3,6 +3,8 @@
 #include <esp_system.h>
 #include <stdio.h>
 
+#include "plx_peripheral.h"
+#include "udp_oximeter_source.h"
 #include "version.h"
 
 namespace aircannect {
@@ -100,7 +102,10 @@ SystemStatusSnapshot collect_system_status(
     out.as11.clock_sample_ms = as11.clock_sample_ms();
     if (checkpoint) checkpoint("web_ui.snapshots.status.as11");
 
-    out.oximetry = sources.oximetry_manager.runtime_status();
+    out.oximetry = compose_oximetry_status(
+        sources.oximetry_hub.snapshot(out.now_ms),
+        sources.oximetry_udp.status(),
+        sources.plx_peripheral.status(out.now_ms));
     if (checkpoint) checkpoint("web_ui.snapshots.status.oxi");
 
     out.time.resmed_time_sync_enabled =

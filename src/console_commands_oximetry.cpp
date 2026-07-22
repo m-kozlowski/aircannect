@@ -1,9 +1,13 @@
 #include "console_commands.h"
 
+#include "ble_sensor_source.h"
 #include "board.h"
 #include "config_service.h"
 #include "management_console_utils.h"
-#include "oximetry_manager.h"
+#include "oximetry_hub.h"
+#include "oximetry_status.h"
+#include "plx_peripheral.h"
+#include "udp_oximeter_source.h"
 
 namespace aircannect {
 namespace {
@@ -34,9 +38,14 @@ void print_yes_no(Print &out, bool value) {
 }
 
 void print_oximetry_status(Print &out,
-                           const OximetryManager &oximetry) {
-    const OximetryRuntimeStatus status = oximetry.runtime_status();
-    const OximetrySensorStatus sensor = oximetry.sensor_status();
+                           const OximetryHub &hub,
+                           const UdpOximeterSource &udp,
+                           const BleSensorSource &sensor_source,
+                           const PlxPeripheral &peripheral) {
+    const uint32_t now_ms = millis();
+    const OximetryRuntimeStatus status = compose_oximetry_status(
+        hub.snapshot(now_ms), udp.status(), peripheral.status(now_ms));
+    const BleSensorStatus sensor = sensor_source.status();
 
     out.print("[OXI] enabled=");
     print_yes_no(out, status.enabled);
@@ -89,66 +98,65 @@ void print_oximetry_status(Print &out,
     out.print(" disconnect_reason=");
     out.print(status.ble_last_disconnect_reason);
     out.print(" sensor=");
-    out.print(sensor_state_text(sensor.sensor_state));
+    out.print(sensor_state_text(sensor.state));
     out.print(" known=");
-    out.print(sensor.sensor_known_count);
+    out.print(sensor.known_count);
     out.print(" scan=");
-    out.print(sensor.sensor_scan_count);
-    if (sensor.sensor_peer[0]) {
+    out.print(sensor.scan_count);
+    if (sensor.peer[0]) {
         out.print(" peer=");
-        out.print(sensor.sensor_peer);
+        out.print(sensor.peer);
     }
     out.print(" name=\"");
     out.print(status.ble_name);
     out.println("\"");
 }
 
-void print_sensor_status(Print &out, const OximetryManager &oximetry) {
-    const OximetrySensorStatus status = oximetry.sensor_status();
+void print_sensor_status(Print &out, const BleSensorSource &sensor) {
+    const BleSensorStatus status = sensor.status();
     out.print("[OXI sensor] state=");
-    out.print(sensor_state_text(status.sensor_state));
+    out.print(sensor_state_text(status.state));
     out.print(" task=");
-    print_yes_no(out, status.sensor_task_started);
+    print_yes_no(out, status.task_started);
 #if AC_STACK_PROFILE_ENABLED
-    if (status.sensor_task_started) {
+    if (status.task_started) {
         out.print(" stack_free=");
-        out.print(static_cast<unsigned long>(
-            status.sensor_task_stack_high_water_bytes));
+        out.print(static_cast<unsigned long>(status.task_stack_high_water_bytes));
     }
 #endif
     out.print(" scanning=");
-    print_yes_no(out, status.sensor_scanning);
+    print_yes_no(out, status.scanning);
     out.print(" connected=");
-    print_yes_no(out, status.sensor_connected);
-    if (status.sensor_peer[0]) {
+    print_yes_no(out, status.connected);
+    if (status.peer[0]) {
         out.print(" peer=");
-        out.print(status.sensor_peer);
+        out.print(status.peer);
     }
-    if (status.sensor_name[0]) {
+    if (status.name[0]) {
         out.print(" name=\"");
-        out.print(status.sensor_name);
+        out.print(status.name);
         out.print('"');
     }
     out.print(" known=");
-    out.print(status.sensor_known_count);
+    out.print(status.known_count);
     out.print(" results=");
-    out.print(status.sensor_scan_count);
+    out.print(status.scan_count);
     out.print(" notifications=");
-    out.print(status.sensor_notifications);
+    out.print(status.notifications);
     out.print(" invalid=");
-    out.print(status.sensor_invalid_notifications);
+    out.print(status.invalid_notifications);
     out.print(" connects=");
-    out.print(status.sensor_connects);
+    out.print(status.connects);
     out.print(" disconnects=");
-    out.print(status.sensor_disconnects);
+    out.print(status.disconnects);
     out.print(" failures=");
-    out.println(status.sensor_connect_failures);
+    out.println(status.connect_failures);
 }
 
-void print_scan_results(Print &out, const OximetryManager &oximetry) {
+void print_scan_results(Print &out, const BleSensorSource &sensor) {
     out.println("[OXI sensor scan]");
     OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
-    const size_t count = oximetry.sensor_scan_results(
+    const size_t count = sensor.scan_results(
         snapshot, AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS);
     for (size_t i = 0; i < count; ++i) {
         out.print("  ");
@@ -164,10 +172,10 @@ void print_scan_results(Print &out, const OximetryManager &oximetry) {
     if (!count) out.println("  <none>");
 }
 
-void print_known_sensors(Print &out, const OximetryManager &oximetry) {
+void print_known_sensors(Print &out, const BleSensorSource &sensor) {
     out.println("[OXI sensor known]");
     OximetrySensorDevice snapshot[AC_OXIMETRY_SENSOR_MAX_KNOWN];
-    const size_t count = oximetry.known_sensors(
+    const size_t count = sensor.known_sensors(
         snapshot, AC_OXIMETRY_SENSOR_MAX_KNOWN);
     for (size_t i = 0; i < count; ++i) {
         out.print("  ");
@@ -183,9 +191,16 @@ void print_known_sensors(Print &out, const OximetryManager &oximetry) {
 
 }  // namespace
 
-OximetryConsoleCommands::OximetryConsoleCommands(OximetryManager &oximetry,
+OximetryConsoleCommands::OximetryConsoleCommands(OximetryHub &hub,
+                                                 UdpOximeterSource &udp,
+                                                 BleSensorSource &sensor,
+                                                 PlxPeripheral &peripheral,
                                                  ConfigService &config)
-    : oximetry_(oximetry), config_(config) {}
+    : hub_(hub),
+      udp_(udp),
+      sensor_(sensor),
+      peripheral_(peripheral),
+      config_(config) {}
 
 bool OximetryConsoleCommands::execute(const String &command,
                                       const String &rest_arg,
@@ -199,7 +214,7 @@ bool OximetryConsoleCommands::execute(const String &command,
     String lower = rest;
     lower.toLowerCase();
     if (!lower.length() || lower == "status") {
-        print_oximetry_status(out, oximetry_);
+        print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
         return true;
     }
 
@@ -216,7 +231,7 @@ bool OximetryConsoleCommands::execute(const String &command,
             return true;
         }
         out.println(enabled ? "[OXI] enabled" : "[OXI] disabled");
-        print_oximetry_status(out, oximetry_);
+        print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
         return true;
     }
 
@@ -229,74 +244,74 @@ bool OximetryConsoleCommands::execute(const String &command,
             out.println("[OXI] failed to enable");
             return true;
         }
-        oximetry_.request_pairing(true);
+        peripheral_.request_pairing(true);
         out.println("[OXI] CPAP pairing window started");
-        print_oximetry_status(out, oximetry_);
+        print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
         return true;
     }
     if (lower == "cpap pair stop" || lower == "cpap pairing stop") {
-        oximetry_.request_pairing(false);
+        peripheral_.request_pairing(false);
         out.println("[OXI] CPAP pairing window stopped");
-        print_oximetry_status(out, oximetry_);
+        print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
         return true;
     }
     if (lower == "cpap forget" || lower == "cpap forget-bonds") {
-        out.println(oximetry_.forget_bonds()
+        out.println(peripheral_.forget_bonds()
                         ? "[OXI] CPAP BLE bonds cleared"
                         : "[OXI] CPAP BLE bond clear failed");
         return true;
     }
     if (lower == "cpap status") {
-        print_oximetry_status(out, oximetry_);
+        print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
         return true;
     }
 
     if (lower == "sensor" || lower == "sensor status") {
-        print_sensor_status(out, oximetry_);
+        print_sensor_status(out, sensor_);
         return true;
     }
     if (lower == "sensor scan") {
-        out.println(oximetry_.request_sensor_scan()
+        out.println(sensor_.request_scan()
                         ? "[OXI sensor] scan queued"
                         : "[OXI sensor] scan failed");
-        print_sensor_status(out, oximetry_);
+        print_sensor_status(out, sensor_);
         return true;
     }
     if (lower == "sensor results" || lower == "sensor scan-results") {
-        print_scan_results(out, oximetry_);
+        print_scan_results(out, sensor_);
         return true;
     }
     if (lower == "sensor list" || lower == "sensor known") {
-        print_known_sensors(out, oximetry_);
+        print_known_sensors(out, sensor_);
         return true;
     }
     if (lower == "sensor disconnect") {
-        oximetry_.request_sensor_disconnect();
+        sensor_.request_disconnect();
         out.println("[OXI sensor] disconnect queued");
-        print_sensor_status(out, oximetry_);
+        print_sensor_status(out, sensor_);
         return true;
     }
     if (lower.startsWith("sensor connect ")) {
         String target = rest.substring(15);
         target.trim();
-        if (!oximetry_.request_sensor_connect(target.c_str())) {
+        if (!sensor_.request_connect(target.c_str())) {
             out.println(
                 "[OXI sensor] connect failed; use scan result index or "
                 "known address");
         } else {
             out.println("[OXI sensor] connect queued");
-            print_sensor_status(out, oximetry_);
+            print_sensor_status(out, sensor_);
         }
         return true;
     }
     if (lower.startsWith("sensor forget ")) {
         String target = rest.substring(14);
         target.trim();
-        if (!oximetry_.forget_sensor(target.c_str())) {
+        if (!sensor_.forget(target.c_str())) {
             out.println("[OXI sensor] forget failed");
         } else {
             out.println("[OXI sensor] forgotten");
-            print_known_sensors(out, oximetry_);
+            print_known_sensors(out, sensor_);
         }
         return true;
     }
@@ -314,12 +329,12 @@ bool OximetryConsoleCommands::execute(const String &command,
         String value = args.substring(split + 1);
         bool enabled = false;
         if (!parse_on_off(value, enabled) ||
-            !oximetry_.set_sensor_autoconnect(address.c_str(), enabled)) {
+            !sensor_.set_autoconnect(address.c_str(), enabled)) {
             out.println("[OXI sensor] autoconnect failed");
         } else {
             out.print("[OXI sensor] autoconnect=");
             out.println(on_off_text(enabled));
-            print_known_sensors(out, oximetry_);
+            print_known_sensors(out, sensor_);
         }
         return true;
     }
@@ -330,10 +345,10 @@ bool OximetryConsoleCommands::execute(const String &command,
         if (mode == "start" || mode == "on" ||
             mode == "stop" || mode == "off") {
             const bool enabled = mode == "start" || mode == "on";
-            oximetry_.request_advertising(enabled);
+            peripheral_.request_advertising(enabled);
             out.println(enabled ? "[OXI] manual advertising requested"
                                 : "[OXI] manual advertising stopped");
-            print_oximetry_status(out, oximetry_);
+            print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
             return true;
         }
 
@@ -367,22 +382,21 @@ bool OximetryConsoleCommands::execute(const String &command,
 }
 
 void OximetryConsoleCommands::print_status(Print &out) {
-    print_oximetry_status(out, oximetry_);
+    print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
 }
 
 void OximetryConsoleCommands::print_stats(Print &out) {
-    print_oximetry_status(out, oximetry_);
+    print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
 }
 
 void OximetryConsoleCommands::print_memory_detail(Print &out) {
-    const OximetrySensorStatus status = oximetry_.sensor_status();
+    const BleSensorStatus status = sensor_.status();
     out.print("[MEM owner] oximetry_sensor task=");
-    out.print(status.sensor_task_started ? "started" : "stopped");
+    out.print(status.task_started ? "started" : "stopped");
 #if AC_STACK_PROFILE_ENABLED
-    if (status.sensor_task_started) {
+    if (status.task_started) {
         out.print(" stack_free=");
-        out.print(static_cast<unsigned long>(
-            status.sensor_task_stack_high_water_bytes));
+        out.print(static_cast<unsigned long>(status.task_stack_high_water_bytes));
     }
 #endif
     out.println();

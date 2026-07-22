@@ -8,6 +8,7 @@
 #include "as11_device_service.h"
 #include "as11_settings_manager.h"
 #include "arduino_ota_source.h"
+#include "ble_sensor_source.h"
 #include "board.h"
 #include "can_driver.h"
 #include "config_http_controller.h"
@@ -28,8 +29,10 @@
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_http_controller.h"
+#include "oximetry_ble_runtime.h"
+#include "oximetry_hub.h"
 #include "oximetry_http_controller.h"
-#include "oximetry_manager.h"
+#include "plx_peripheral.h"
 #include "provisioning.h"
 #include "report_http_controller.h"
 #include "report_spool_service.h"
@@ -54,6 +57,7 @@
 #include "time_sync_service.h"
 #include "tls_memory.h"
 #include "update_checker.h"
+#include "udp_oximeter_source.h"
 #include "version.h"
 #include "web_ui.h"
 #include "wifi_manager.h"
@@ -84,7 +88,11 @@ static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
 static EdfRecorderManager edf_recorder_manager(rpc_transport);
-static OximetryManager oximetry_manager;
+static OximetryBleRuntime oximetry_ble_runtime;
+static OximetryHub oximetry_hub;
+static UdpOximeterSource oximetry_udp_source;
+static BleSensorSource oximetry_sensor_source(oximetry_ble_runtime);
+static PlxPeripheral plx_peripheral(oximetry_ble_runtime);
 static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
@@ -124,8 +132,9 @@ static RuntimeConsoleCommands runtime_console_commands(session_manager,
                                                        sink_manager);
 static EdfConsoleCommands edf_console_commands(edf_recorder_manager,
                                                config_service);
-static OximetryConsoleCommands oximetry_console_commands(oximetry_manager,
-                                                         config_service);
+static OximetryConsoleCommands oximetry_console_commands(
+    oximetry_hub, oximetry_udp_source, oximetry_sensor_source,
+    plx_peripheral, config_service);
 static ReportConsoleCommands report_console_commands(report_task);
 static ExportConsoleCommands export_console_commands(export_coordinator);
 static ConfigConsoleCommands config_console_commands(config_service,
@@ -247,7 +256,7 @@ static void poll_stack_profiler(uint32_t now_ms) {
         async_tcp_task = xTaskGetHandle("async_tcp");
     }
     const uint32_t oxi_stack =
-        oximetry_manager.sensor_task_stack_high_water_bytes();
+        oximetry_sensor_source.task_stack_high_water_bytes();
 
     StackProfileSample samples[] = {
         {StackProfileTask::Loop, true, uxTaskGetStackHighWaterMark(nullptr)},
@@ -373,6 +382,68 @@ static void sync_network_services() {
     }
 }
 
+static void configure_oximetry(const AppConfigData &config) {
+    oximetry_hub.set_enabled(config.oximetry_enabled);
+    oximetry_udp_source.configure(config.oximetry_enabled,
+                                  config.oximetry_udp_port);
+    oximetry_sensor_source.configure(config.oximetry_enabled,
+                                     config.hostname.c_str());
+    plx_peripheral.configure(config.oximetry_enabled,
+                             config.oximetry_advertise_mode,
+                             config.hostname.c_str());
+}
+
+static const char *oximetry_source_name(OximetrySource source) {
+    switch (source) {
+        case OximetrySource::Udp: return "udp";
+        case OximetrySource::Ble: return "ble";
+        case OximetrySource::None:
+        default:
+            return "none";
+    }
+}
+
+static void poll_oximetry(bool network_available, uint32_t now_ms) {
+    const OximetryHubSnapshot before = oximetry_hub.snapshot(now_ms);
+    OximetryHubAction actions = oximetry_udp_source.poll(
+        network_available, now_ms, oximetry_hub);
+
+    BleSensorEvent event;
+    while (oximetry_sensor_source.take_event(event)) {
+        if (event.kind == BleSensorEventKind::Sample) {
+            OximetryHubAction sample_actions = OximetryHubAction::None;
+            (void)oximetry_hub.ingest(event.sample, now_ms, sample_actions);
+            actions = actions | sample_actions;
+        } else if (event.kind == BleSensorEventKind::Disconnected) {
+            oximetry_hub.source_disconnected(OximetrySource::Ble);
+        }
+    }
+
+    actions = actions | oximetry_hub.poll(now_ms);
+    const OximetryHubSnapshot after = oximetry_hub.snapshot(now_ms);
+
+    oximetry_sensor_source.set_auto_allowed(
+        after.enabled &&
+        (!after.source_present || after.source == OximetrySource::Ble));
+
+    if (oximetry_action_has(actions, OximetryHubAction::DisconnectBleSensor)) {
+        (void)oximetry_sensor_source.request_disconnect(true);
+    }
+    if (oximetry_action_has(actions, OximetryHubAction::SourceBecameStale)) {
+        Log::logf(CAT_OXI, LOG_INFO, "source stale\n");
+    }
+    if (after.source_present &&
+        (!before.source_present || before.source != after.source)) {
+        Log::logf(CAT_OXI, LOG_INFO,
+                  "source active type=%s detail=%s valid=%s\n",
+                  oximetry_source_name(after.source),
+                  after.source_detail[0] ? after.source_detail : "--",
+                  after.reading.valid ? "yes" : "no");
+    }
+
+    plx_peripheral.poll(after, now_ms);
+}
+
 static void apply_config_runtime_effects(void *,
                                          const AppConfigData &config,
                                          uint32_t dirty) {
@@ -401,7 +472,7 @@ static void apply_config_runtime_effects(void *,
     }
     if (dirty & (AC_CONFIG_DIRTY_HOSTNAME |
                  AC_CONFIG_DIRTY_OXIMETRY)) {
-        oximetry_manager.configuration_changed();
+        configure_oximetry(config);
     }
     if (dirty & AC_CONFIG_DIRTY_OTA_PASSWORD) {
         arduino_ota_source.mark_config_dirty();
@@ -689,7 +760,21 @@ void setup() {
     edf_recorder_manager.set_enabled(
         config_service.data().edf_capture_enabled);
 
-    oximetry_manager.begin(config_service.data());
+    const AppConfigData &config = config_service.data();
+    if (!oximetry_ble_runtime.begin()) {
+        Log::logf(CAT_OXI, LOG_ERROR, "BLE runtime mutex init failed\n");
+    }
+    oximetry_hub.set_enabled(config.oximetry_enabled);
+    oximetry_udp_source.configure(config.oximetry_enabled,
+                                  config.oximetry_udp_port);
+    (void)oximetry_sensor_source.begin(config.oximetry_enabled,
+                                       config.hostname.c_str());
+    if (!plx_peripheral.begin(config.oximetry_enabled,
+                              config.oximetry_advertise_mode,
+                              config.hostname.c_str())) {
+        Log::logf(CAT_OXI, LOG_ERROR,
+                  "PLX BLE peripheral failed to start\n");
+    }
 
     if (!report_spool_service.begin()) {
         Log::logf(CAT_REPORT, LOG_ERROR,
@@ -735,7 +820,9 @@ void setup() {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] device HTTP controller failed to start\n");
     }
-    if (!oximetry_http_controller.begin(oximetry_manager,
+    if (!oximetry_http_controller.begin(oximetry_hub,
+                                        oximetry_sensor_source,
+                                        plx_peripheral,
                                         config_service)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] oximetry HTTP controller failed to start\n");
@@ -771,7 +858,8 @@ void setup() {
     if (!status_http_controller.begin(as11_device_service, wifi_manager,
                                       config_service, time_sync_service,
                                       firmware_installer, update_checker,
-                                      oximetry_manager)) {
+                                      oximetry_hub, oximetry_udp_source,
+                                      plx_peripheral)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] status HTTP controller failed to start\n");
     }
@@ -850,7 +938,7 @@ void loop() {
 
     // Live sinks and oximetry
     sink_manager.poll();
-    oximetry_manager.poll(wifi_manager.network_available());
+    poll_oximetry(wifi_manager.network_available(), now_ms);
     drain_can_rx_after("oximetry");
 
     // Wi-Fi and network services

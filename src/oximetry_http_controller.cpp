@@ -8,10 +8,13 @@
 #include <utility>
 
 #include "board.h"
+#include "ble_sensor_source.h"
 #include "config_service.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
 #include "json_util.h"
+#include "oximetry_hub.h"
+#include "plx_peripheral.h"
 
 namespace aircannect {
 namespace {
@@ -44,35 +47,36 @@ void append_sensor(LargeTextBuffer &json,
 }
 
 bool build_sensor_json(LargeTextBuffer &json,
-                       const OximetryManager &oximetry) {
-    const OximetryRuntimeStatus runtime = oximetry.runtime_status();
-    const OximetrySensorStatus sensor = oximetry.sensor_status();
+                       const OximetryHub &hub,
+                       const BleSensorSource &sensor_source,
+                       const PlxPeripheral &peripheral) {
+    const OximetryHubSnapshot source = hub.snapshot(millis());
+    const BleSensorStatus sensor = sensor_source.status();
+    const PlxPeripheralStatus plx = peripheral.status(millis());
     OximetrySensorDevice scan[AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS];
     OximetrySensorDevice known[AC_OXIMETRY_SENSOR_MAX_KNOWN];
-    const size_t scan_count = oximetry.sensor_scan_results(
+    const size_t scan_count = sensor_source.scan_results(
         scan, AC_OXIMETRY_SENSOR_MAX_SCAN_RESULTS);
-    const size_t known_count = oximetry.known_sensors(
+    const size_t known_count = sensor_source.known_sensors(
         known, AC_OXIMETRY_SENSOR_MAX_KNOWN);
 
     json = "{";
-    json_add_bool(json, "enabled", runtime.enabled, false);
-    json_add_bool(json, "ble_available", runtime.ble_available);
+    json_add_bool(json, "enabled", source.enabled, false);
+    json_add_bool(json, "ble_available", plx.ble_available);
     json_add_string(json, "sensor_state",
-                    sensor_state_name(sensor.sensor_state));
-    json_add_bool(json, "sensor_task_started", sensor.sensor_task_started);
+                    sensor_state_name(sensor.state));
+    json_add_bool(json, "sensor_task_started", sensor.task_started);
 #if AC_STACK_PROFILE_ENABLED
     json_add_int(json, "sensor_task_stack_free",
-                 static_cast<long>(
-                     sensor.sensor_task_stack_high_water_bytes));
+                 static_cast<long>(sensor.task_stack_high_water_bytes));
 #endif
-    json_add_bool(json, "sensor_scanning", sensor.sensor_scanning);
-    json_add_bool(json, "sensor_connected", sensor.sensor_connected);
-    json_add_int(json, "sensor_known_count", sensor.sensor_known_count);
-    json_add_int(json, "sensor_scan_count", sensor.sensor_scan_count);
-    json_add_int(json, "sensor_scan_generation",
-                 sensor.sensor_scan_generation);
-    json_add_string(json, "sensor_peer", sensor.sensor_peer);
-    json_add_string(json, "sensor_name", sensor.sensor_name);
+    json_add_bool(json, "sensor_scanning", sensor.scanning);
+    json_add_bool(json, "sensor_connected", sensor.connected);
+    json_add_int(json, "sensor_known_count", sensor.known_count);
+    json_add_int(json, "sensor_scan_count", sensor.scan_count);
+    json_add_int(json, "sensor_scan_generation", sensor.scan_generation);
+    json_add_string(json, "sensor_peer", sensor.peer);
+    json_add_string(json, "sensor_name", sensor.name);
 
     json += ",\"sensor_scan_results\":[";
     for (size_t i = 0; i < scan_count; ++i) {
@@ -109,9 +113,13 @@ void copy_json_text(JsonVariantConst value, char *out, size_t out_size) {
 
 }  // namespace
 
-bool OximetryHttpController::begin(OximetryManager &oximetry,
+bool OximetryHttpController::begin(OximetryHub &hub,
+                                   BleSensorSource &sensor,
+                                   PlxPeripheral &peripheral,
                                    ConfigService &config) {
-    oximetry_ = &oximetry;
+    hub_ = &hub;
+    sensor_ = &sensor;
+    peripheral_ = &peripheral;
     config_ = &config;
     if (!commands_.begin()) return false;
 
@@ -137,7 +145,7 @@ void OximetryHttpController::register_routes(AsyncWebServer &server) {
 }
 
 void OximetryHttpController::poll() {
-    if (!oximetry_ || !config_) return;
+    if (!hub_ || !sensor_ || !peripheral_ || !config_) return;
 
     for (size_t i = 0; i < CommandsPerPoll; ++i) {
         Command command;
@@ -172,30 +180,30 @@ void OximetryHttpController::execute(Command &command) {
             break;
         case CommandKind::PairStart:
             (void)config_->set_value("oxi_en", "1", false);
-            oximetry_->request_pairing(true);
+            peripheral_->request_pairing(true);
             break;
         case CommandKind::PairStop:
-            oximetry_->request_pairing(false);
+            peripheral_->request_pairing(false);
             break;
         case CommandKind::ForgetBonds:
-            oximetry_->forget_bonds();
+            peripheral_->forget_bonds();
             break;
         case CommandKind::AdvertiseStart:
-            oximetry_->request_advertising(true);
+            peripheral_->request_advertising(true);
             break;
         case CommandKind::AdvertiseStop:
-            oximetry_->request_advertising(false);
+            peripheral_->request_advertising(false);
             break;
         case CommandKind::SensorScan:
-            oximetry_->request_sensor_scan();
+            sensor_->request_scan();
             break;
         case CommandKind::SensorDisconnect:
-            oximetry_->request_sensor_disconnect();
+            sensor_->request_disconnect();
             break;
         case CommandKind::SensorConnect: {
             const bool accepted = command.has_device
-                ? oximetry_->request_sensor_connect_device(command.device)
-                : oximetry_->request_sensor_connect(command.target.c_str());
+                ? sensor_->request_connect(command.device)
+                : sensor_->request_connect(command.target.c_str());
             if (!accepted) {
                 Log::logf(CAT_OXI, LOG_WARN,
                           "sensor connect command rejected target=\"%s\" "
@@ -205,11 +213,10 @@ void OximetryHttpController::execute(Command &command) {
             break;
         }
         case CommandKind::SensorForget:
-            oximetry_->forget_sensor(command.target.c_str());
+            sensor_->forget(command.target.c_str());
             break;
         case CommandKind::SensorAutoconnect:
-            oximetry_->set_sensor_autoconnect(command.target.c_str(),
-                                              command.enabled);
+            sensor_->set_autoconnect(command.target.c_str(), command.enabled);
             break;
     }
 
@@ -219,7 +226,7 @@ void OximetryHttpController::execute(Command &command) {
 bool OximetryHttpController::publish_snapshot() {
     LargeTextBuffer next;
     next.reserve(AC_WEB_OXIMETRY_SENSORS_JSON_RESERVE);
-    if (!build_sensor_json(next, *oximetry_)) return false;
+    if (!build_sensor_json(next, *hub_, *sensor_, *peripheral_)) return false;
 
     if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return false;
     snapshot_json_.swap(next);

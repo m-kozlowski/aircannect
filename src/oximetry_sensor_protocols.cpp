@@ -1,30 +1,57 @@
-#include "oximetry_sensor_protocols.h"
+#include "ble_sensor_protocols.h"
+
+#include "oximetry_codec.h"
 
 namespace aircannect {
 
-#if AC_OXIMETRY_BLE_ENABLED
-bool sensor_matches_supported_device(const NimBLEAdvertisedDevice *dev) {
-    if (!dev) return false;
+void BleSensorProtocolEngine::set_sample_callback(SampleCallback callback,
+                                                   void *context) {
+    sample_callback_ = callback;
+    sample_context_ = context;
+}
 
-    const std::string name = dev->getName();
-    bool oxyii_mfg = false;
-    for (uint8_t i = 0; i < dev->getManufacturerDataCount(); ++i) {
-        const std::string data = dev->getManufacturerData(i);
+void BleSensorProtocolEngine::emit_sample(uint16_t spo2_raw,
+                                          uint16_t pulse_raw,
+                                          bool invalid,
+                                          bool contact_known,
+                                          bool contact_present) {
+    if (!sample_callback_) return;
+
+    sample_callback_(sample_context_, spo2_raw, pulse_raw, invalid,
+                     contact_known, contact_present);
+}
+
+#if AC_OXIMETRY_BLE_ENABLED
+std::atomic<BleSensorProtocolEngine *> BleSensorProtocolEngine::active_ =
+    nullptr;
+
+bool BleSensorProtocolEngine::matches(
+    const NimBLEAdvertisedDevice *device) const {
+    if (!device) return false;
+
+    const std::string name = device->getName();
+    bool oxyii_manufacturer = false;
+    for (uint8_t i = 0; i < device->getManufacturerDataCount(); ++i) {
+        const std::string data = device->getManufacturerData(i);
         if (data.size() < 2) continue;
+
         const uint16_t company =
             static_cast<uint8_t>(data[0]) |
             (static_cast<uint16_t>(static_cast<uint8_t>(data[1])) << 8);
         if (company == 0x036f || company == 0xf34e) {
-            oxyii_mfg = true;
+            oxyii_manufacturer = true;
             break;
         }
     }
 
-    return oxyii_mfg ||
-           dev->isAdvertisingService(NimBLEUUID(PLX_SERVICE_UUID)) ||
-           dev->isAdvertisingService(NimBLEUUID(NONIN_SERVICE_UUID)) ||
-           dev->isAdvertisingService(NimBLEUUID(VIATOM_SERVICE_UUID)) ||
-           dev->isAdvertisingService(NimBLEUUID(OXYII_SERVICE_UUID)) ||
+    return oxyii_manufacturer ||
+           device->isAdvertisingService(NimBLEUUID("1822")) ||
+           device->isAdvertisingService(NimBLEUUID(
+               "46A970E0-0D5F-11E2-8B5E-0002A5D5C51B")) ||
+           device->isAdvertisingService(NimBLEUUID(
+               "14839AC4-7D7E-415C-9A42-167340CF2339")) ||
+           device->isAdvertisingService(NimBLEUUID(
+               "E8FB0001-A14B-98F9-831B-4E2941D01248")) ||
            name.rfind("Nonin", 0) == 0 ||
            name.rfind("O2 ", 0) == 0 ||
            name.rfind("O2Ring", 0) == 0 ||
@@ -43,27 +70,82 @@ bool sensor_matches_supported_device(const NimBLEAdvertisedDevice *dev) {
            name.rfind("Oxylink", 0) == 0;
 }
 
-bool sensor_subscribe_supported_device(NimBLEClient *client) {
-    return sensor_subscribe_plx(client) ||
-           sensor_subscribe_nonin(client) ||
-           sensor_subscribe_viatom(client) ||
-           sensor_subscribe_oxyii(client);
-}
+bool BleSensorProtocolEngine::subscribe(NimBLEClient *client) {
+    reset();
+    if (!client) return false;
 
-void sensor_protocols_on_connected() {
-    sensor_viatom_on_connected();
-    sensor_oxyii_on_connected();
-}
+    client_ = client;
+    active_.store(this, std::memory_order_release);
+    if (subscribe_plx()) {
+        active_protocol_ = ActiveProtocol::Plx;
+        return true;
+    }
+    if (subscribe_nonin()) {
+        active_protocol_ = ActiveProtocol::Nonin;
+        return true;
+    }
+    if (subscribe_viatom()) {
+        active_protocol_ = ActiveProtocol::Viatom;
+        return true;
+    }
+    if (subscribe_oxyii()) {
+        active_protocol_ = ActiveProtocol::Oxyii;
+        return true;
+    }
 
-void sensor_protocols_reset() {
-    sensor_viatom_reset();
-    sensor_oxyii_reset();
-}
-
-void sensor_protocols_poll(uint32_t now_ms) {
-    sensor_viatom_poll(now_ms);
-    sensor_oxyii_poll(now_ms);
+    reset();
+    return false;
 }
 #endif
+
+void BleSensorProtocolEngine::on_connected() {
+#if AC_OXIMETRY_BLE_ENABLED
+    switch (active_protocol_) {
+        case ActiveProtocol::Viatom:
+            viatom_on_connected();
+            break;
+        case ActiveProtocol::Oxyii:
+            oxyii_on_connected();
+            break;
+        case ActiveProtocol::None:
+        case ActiveProtocol::Plx:
+        case ActiveProtocol::Nonin:
+            break;
+    }
+#endif
+}
+
+void BleSensorProtocolEngine::reset() {
+#if AC_OXIMETRY_BLE_ENABLED
+    viatom_reset();
+    oxyii_reset();
+    client_ = nullptr;
+    BleSensorProtocolEngine *expected = this;
+    (void)active_.compare_exchange_strong(
+        expected, nullptr, std::memory_order_acq_rel);
+#endif
+    active_protocol_ = ActiveProtocol::None;
+}
+
+void BleSensorProtocolEngine::poll(uint32_t now_ms) {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (!client_ || !client_->isConnected()) return;
+
+    switch (active_protocol_) {
+        case ActiveProtocol::Viatom:
+            viatom_poll(now_ms);
+            break;
+        case ActiveProtocol::Oxyii:
+            oxyii_poll(now_ms);
+            break;
+        case ActiveProtocol::None:
+        case ActiveProtocol::Plx:
+        case ActiveProtocol::Nonin:
+            break;
+    }
+#else
+    (void)now_ms;
+#endif
+}
 
 }  // namespace aircannect
