@@ -40,6 +40,8 @@ const char *report_catalog_state_name(NightCatalogRefreshState state) {
     switch (state) {
         case NightCatalogRefreshState::Scanning: return "scanning";
         case NightCatalogRefreshState::ReadingEdf: return "reading_edf";
+        case NightCatalogRefreshState::ReadingMetadata:
+            return "reading_metadata";
         case NightCatalogRefreshState::ReadingFallback:
             return "reading_fallback";
         case NightCatalogRefreshState::ReadingStr: return "reading_str";

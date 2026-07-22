@@ -17,6 +17,7 @@ enum class NightCatalogRefreshState : uint8_t {
     Idle,
     Scanning,
     ReadingEdf,
+    ReadingMetadata,
     ReadingFallback,
     ReadingStr,
     Building,

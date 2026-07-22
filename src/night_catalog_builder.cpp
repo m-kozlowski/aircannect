@@ -289,7 +289,11 @@ uint64_t hash_text(uint64_t hash, const char *text, size_t len) {
 }
 
 uint64_t source_file_identity(const NightCatalogSourceFileInput &file) {
-    if (file.identity != 0) return file.identity;
+    if (file.identity != 0) {
+        return file.provenance_identity != 0
+            ? hash_u64(file.identity, file.provenance_identity)
+            : file.identity;
+    }
 
     const char *path = file.path ? file.path : "";
     uint64_t hash = FNV_OFFSET;
@@ -321,6 +325,9 @@ uint64_t source_file_identity(const NightCatalogSourceFileInput &file) {
         hash = hash_u32(hash, static_cast<uint16_t>(layout.scale.digital_max));
         hash = hash_float(hash, layout.scale.scale);
         hash = hash_float(hash, layout.scale.offset);
+    }
+    if (file.provenance_identity != 0) {
+        hash = hash_u64(hash, file.provenance_identity);
     }
     return hash == 0 ? 1 : hash;
 }

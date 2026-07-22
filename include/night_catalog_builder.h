@@ -32,6 +32,7 @@ struct NightCatalogSourceFileInput {
 
     const EdfReportSignalLayout *signal_layouts = nullptr;
     size_t signal_layout_count = 0;
+    uint64_t provenance_identity = 0;
 };
 
 struct NightCatalogEdfSessionInput {
@@ -41,6 +42,11 @@ struct NightCatalogEdfSessionInput {
     NightCatalogTimeRange display_window;
     const NightCatalogSourceFileInput *files = nullptr;
     size_t file_count = 0;
+
+    SleepDayId raw_sleep_day;
+    NightCatalogTimeRange raw_segment_window;
+    NightCatalogTimeRange raw_therapy_window;
+    bool has_clock_provenance = false;
 };
 
 struct NightCatalogStrInput {

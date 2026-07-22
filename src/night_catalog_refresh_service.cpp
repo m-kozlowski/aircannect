@@ -10,6 +10,7 @@
 #include "edf_file_inventory.h"
 #include "edf_report_catalog.h"
 #include "edf_report_session.h"
+#include "edf_session_metadata.h"
 #include "edf_str_file_layout.h"
 #include "night_catalog_clock.h"
 #include "night_str_record.h"
@@ -25,6 +26,13 @@ namespace {
 
 constexpr size_t EDF_HEADER_READ_MAX = 8192;
 constexpr size_t SOURCE_READ_BUFFER_BYTES = 64 * 1024;
+constexpr uint8_t DATALOG_SCAN_ROOT = 0;
+constexpr uint8_t SESSION_METADATA_SCAN_ROOT = 1;
+constexpr uint8_t STR_SCAN_ROOT = 2;
+constexpr uint8_t FALLBACK_SCAN_ROOT = 3;
+constexpr int64_t MS_PER_MINUTE = 60LL * 1000LL;
+constexpr int64_t MS_PER_DAY = 24LL * 60LL * MS_PER_MINUTE;
+constexpr int64_t LOCAL_NOON_MS = 12LL * 60LL * MS_PER_MINUTE;
 
 void *allocate_large(size_t count, size_t size) {
 #ifdef ARDUINO
@@ -68,6 +76,18 @@ bool path_is_report_edf(const char *path) {
     EdfInventoryEntry inventory;
     return path && edf_inventory_describe_path(path, inventory) &&
            edf_report_file_kind_supported(inventory.kind);
+}
+
+bool path_is_session_metadata(const char *path) {
+    if (!path) return false;
+
+    const size_t root_length = strlen(EDF_SESSION_METADATA_ROOT);
+    const size_t path_length = strlen(path);
+    constexpr size_t suffix_length = 4;
+    return path_length == root_length + 1 + 8 + 1 + 15 + suffix_length &&
+           memcmp(path, EDF_SESSION_METADATA_ROOT, root_length) == 0 &&
+           path[root_length] == '/' && path[root_length + 9] == '/' &&
+           strcmp(path + path_length - suffix_length, ".bin") == 0;
 }
 
 bool path_is_fallback_artifact(const char *path) {
@@ -151,9 +171,9 @@ void file_signal_masks(const EdfReportSessionDescriptor &session,
     }
 }
 
-bool resolve_session_clock(EdfReportSessionDescriptor &session,
-                           const NightCatalogClockContext &clock,
-                           SleepDayId sleep_day) {
+bool resolve_legacy_session_clock(EdfReportSessionDescriptor &session,
+                                  const NightCatalogClockContext &clock,
+                                  SleepDayId sleep_day) {
     bool resolved = false;
     for (size_t i = 0; i < AC_EDF_REPORT_SESSION_FILE_MAX; ++i) {
         EdfReportSessionFileDescriptor &file = session.files[i];
@@ -183,10 +203,74 @@ bool resolve_session_clock(EdfReportSessionDescriptor &session,
                session.earliest_header_start_ms;
 }
 
+bool local_time_with_offset(int64_t local_ms,
+                            int32_t offset_minutes,
+                            int64_t &utc_ms) {
+    if (local_ms <= 0 || offset_minutes < -24 * 60 ||
+        offset_minutes > 24 * 60) {
+        return false;
+    }
+
+    const int64_t offset_ms =
+        static_cast<int64_t>(offset_minutes) * MS_PER_MINUTE;
+    if (offset_ms > 0 && local_ms < INT64_MIN + offset_ms) return false;
+    if (offset_ms < 0 && local_ms > INT64_MAX + offset_ms) return false;
+
+    utc_ms = local_ms - offset_ms;
+    return true;
+}
+
+bool resolve_provenance_session_clock(
+    EdfReportSessionDescriptor &session,
+    const EdfSessionMetadata &metadata) {
+    bool resolved = false;
+    for (size_t i = 0; i < AC_EDF_REPORT_SESSION_FILE_MAX; ++i) {
+        EdfReportSessionFileDescriptor &file = session.files[i];
+        if (file.kind == EdfInventoryFileKind::Unknown || !file.path[0] ||
+            file.local_header_start_ms <= 0 ||
+            file.local_header_end_ms < file.local_header_start_ms) {
+            continue;
+        }
+
+        if (!local_time_with_offset(file.local_header_start_ms,
+                                    metadata.timezone_offset_minutes,
+                                    file.header_start_ms) ||
+            !local_time_with_offset(file.local_header_end_ms,
+                                    metadata.timezone_offset_minutes,
+                                    file.header_end_ms)) {
+            return false;
+        }
+        resolved = true;
+    }
+
+    if (!resolved) return false;
+    edf_report_session_refresh_bounds(session);
+    return session.earliest_header_start_ms > 0 &&
+           session.latest_header_end_ms >= session.earliest_header_start_ms;
+}
+
+bool provenance_day_boundary(SleepDayId sleep_day,
+                             int32_t offset_minutes,
+                             uint16_t minute_from_noon,
+                             int64_t &utc_ms) {
+    if (!sleep_day.valid() || minute_from_noon > 1440) return false;
+
+    const int64_t local_ms =
+        static_cast<int64_t>(sleep_day.epoch_days()) * MS_PER_DAY +
+        LOCAL_NOON_MS +
+        static_cast<int64_t>(minute_from_noon) * MS_PER_MINUTE;
+    return local_time_with_offset(local_ms, offset_minutes, utc_ms);
+}
+
 struct ParsedEdfLayouts {
     char path[AC_EDF_REPORT_PATH_MAX] = {};
     uint32_t layout_offset = 0;
     uint16_t layout_count = 0;
+};
+
+struct ParsedSessionMetadata {
+    EdfSessionMetadata metadata;
+    uint64_t identity = 0;
 };
 
 }  // namespace
@@ -197,6 +281,8 @@ struct NightCatalogRefreshRuntime {
         WaitScan,
         SelectEdf,
         WaitEdf,
+        SelectMetadata,
+        WaitMetadata,
         SelectFallback,
         WaitFallback,
         SubmitStr,
@@ -227,6 +313,11 @@ struct NightCatalogRefreshRuntime {
         edf_signal_layouts = nullptr;
         edf_signal_layout_capacity = 0;
         edf_signal_layout_count = 0;
+
+        destroy_large_array(session_metadata, session_metadata_capacity);
+        session_metadata = nullptr;
+        session_metadata_capacity = 0;
+        session_metadata_count = 0;
 
         destroy_large_array(str_records, str_record_capacity);
         str_records = nullptr;
@@ -280,6 +371,9 @@ struct NightCatalogRefreshRuntime {
     EdfReportSignalLayout *edf_signal_layouts = nullptr;
     size_t edf_signal_layout_capacity = 0;
     size_t edf_signal_layout_count = 0;
+    ParsedSessionMetadata *session_metadata = nullptr;
+    size_t session_metadata_capacity = 0;
+    size_t session_metadata_count = 0;
     NightCatalogStrInput *str_records = nullptr;
     size_t str_record_capacity = 0;
     size_t str_record_count = 0;
@@ -377,6 +471,7 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
 
     StorageScanRoot roots[] = {
         {"/DATALOG", true},
+        {EDF_SESSION_METADATA_ROOT, true},
         {"/STR.edf", false},
         {REPORT_FALLBACK_ARTIFACT_ROOT, false},
     };
@@ -404,19 +499,24 @@ namespace {
 bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
                           NightCatalogRefreshStatus &status) {
     size_t report_file_count = 0;
+    size_t metadata_file_count = 0;
     size_t fallback_file_count = 0;
     StorageScanEntryView entry;
     for (size_t i = 0; i < runtime.scan->size(); ++i) {
         if (!runtime.scan->entry(i, entry) || entry.directory) continue;
 
-        if (entry.root_index == 0 && path_is_report_edf(entry.path)) {
+        if (entry.root_index == DATALOG_SCAN_ROOT &&
+            path_is_report_edf(entry.path)) {
             ++report_file_count;
-        } else if (entry.root_index == 1 &&
+        } else if (entry.root_index == SESSION_METADATA_SCAN_ROOT &&
+                   path_is_session_metadata(entry.path)) {
+            ++metadata_file_count;
+        } else if (entry.root_index == STR_SCAN_ROOT &&
                    strcmp(entry.path, "/STR.edf") == 0) {
             runtime.str_file_found = true;
             runtime.str_file_size = entry.size;
             runtime.str_file_modified = entry.modified;
-        } else if (entry.root_index == 2 &&
+        } else if (entry.root_index == FALLBACK_SCAN_ROOT &&
                    path_is_fallback_artifact(entry.path)) {
             ++fallback_file_count;
         }
@@ -441,6 +541,10 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
         report_file_count * AC_EDF_REPORT_FILE_SIGNAL_MAX;
     runtime.edf_signal_layouts = allocate_large_array<EdfReportSignalLayout>(
         runtime.edf_signal_layout_capacity);
+
+    runtime.session_metadata_capacity = metadata_file_count;
+    runtime.session_metadata =
+        allocate_large_array<ParsedSessionMetadata>(metadata_file_count);
 
     const size_t maximum_fallback_files = std::min(
         std::numeric_limits<size_t>::max() /
@@ -467,6 +571,7 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
          !runtime.edf_signal_layouts)) {
         return false;
     }
+    if (metadata_file_count > 0 && !runtime.session_metadata) return false;
     if (fallback_file_count > 0 &&
         (!runtime.fallback_records || !runtime.fallback_sessions ||
          !runtime.fallback_sections)) {
@@ -480,7 +585,7 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
     }
 
     status.files_seen = static_cast<uint32_t>(std::min(
-        report_file_count + fallback_file_count,
+        report_file_count + metadata_file_count + fallback_file_count,
         static_cast<size_t>(UINT32_MAX)));
     return true;
 }
@@ -492,7 +597,8 @@ bool submit_next_edf(NightCatalogRefreshRuntime &runtime,
     while (runtime.scan_index < runtime.scan->size()) {
         const size_t index = runtime.scan_index;
         if (!runtime.scan->entry(index, entry) || entry.directory ||
-            entry.root_index != 0 || !path_is_report_edf(entry.path)) {
+            entry.root_index != DATALOG_SCAN_ROOT ||
+            !path_is_report_edf(entry.path)) {
             ++runtime.scan_index;
             continue;
         }
@@ -540,8 +646,8 @@ bool submit_next_edf(NightCatalogRefreshRuntime &runtime,
         runtime.edf_session_count,
         static_cast<size_t>(UINT32_MAX)));
     runtime.scan_index = 0;
-    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectFallback;
-    status.state = NightCatalogRefreshState::ReadingFallback;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectMetadata;
+    status.state = NightCatalogRefreshState::ReadingMetadata;
     status.current_path[0] = '\0';
     return true;
 }
@@ -644,6 +750,139 @@ bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
     return true;
 }
 
+void skip_current_metadata(NightCatalogRefreshRuntime &runtime,
+                           NightCatalogRefreshStatus &status,
+                           const char *warning) {
+    ++status.files_skipped;
+    ++runtime.scan_index;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectMetadata;
+    runtime.current_path[0] = '\0';
+    runtime.current_size = 0;
+    runtime.current_modified = 0;
+    status.current_path[0] = '\0';
+    set_warning(status, warning);
+}
+
+bool submit_next_metadata(NightCatalogRefreshRuntime &runtime,
+                          StorageReadPort &read_port,
+                          NightCatalogRefreshStatus &status) {
+    StorageScanEntryView entry;
+    while (runtime.scan_index < runtime.scan->size()) {
+        if (!runtime.scan->entry(runtime.scan_index, entry) ||
+            entry.directory ||
+            entry.root_index != SESSION_METADATA_SCAN_ROOT ||
+            !path_is_session_metadata(entry.path)) {
+            ++runtime.scan_index;
+            continue;
+        }
+        if (entry.size != EdfSessionMetadataCodec::RecordBytes ||
+            strlen(entry.path) >= sizeof(runtime.current_path)) {
+            skip_current_metadata(runtime,
+                                  status,
+                                  "night_catalog_metadata_size_invalid");
+            continue;
+        }
+
+        StorageReadCommand command;
+        command.path = entry.path;
+        command.length = EdfSessionMetadataCodec::RecordBytes;
+        command.lane = StorageReadLane::Report;
+        command.generation = status.generation;
+
+        const OperationSubmission submission =
+            read_port.request_read(command);
+        if (submission.admission == OperationAdmission::Busy) return false;
+        if (!submission.accepted()) {
+            skip_current_metadata(runtime,
+                                  status,
+                                  "night_catalog_metadata_read_rejected");
+            continue;
+        }
+
+        runtime.read_ticket = submission.ticket;
+        copy_cstr(runtime.current_path,
+                  sizeof(runtime.current_path),
+                  entry.path);
+        runtime.current_size = entry.size;
+        runtime.current_modified = entry.modified;
+        copy_cstr(status.current_path,
+                  sizeof(status.current_path),
+                  entry.path);
+        runtime.phase = NightCatalogRefreshRuntime::Phase::WaitMetadata;
+        return true;
+    }
+
+    runtime.scan_index = 0;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectFallback;
+    status.state = NightCatalogRefreshState::ReadingFallback;
+    status.current_path[0] = '\0';
+    return true;
+}
+
+bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
+                          StorageReadPort &read_port,
+                          NightCatalogRefreshStatus &status) {
+    StorageReadCompletion completion;
+    if (!read_port.take_completion(runtime.read_ticket, completion)) {
+        return false;
+    }
+    runtime.read_ticket = {};
+
+    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+        !completion.prepared.valid() ||
+        completion.prepared.length != EdfSessionMetadataCodec::RecordBytes) {
+        if (completion.prepared.valid()) {
+            read_port.release_prepared(completion.prepared);
+        }
+        skip_current_metadata(runtime,
+                              status,
+                              "night_catalog_metadata_read_failed");
+        return true;
+    }
+
+    const size_t expected = completion.prepared.length;
+    const size_t read = read_port.read_prepared(completion.prepared,
+                                                0,
+                                                runtime.read_buffer,
+                                                expected);
+    read_port.release_prepared(completion.prepared);
+    if (read != expected ||
+        runtime.session_metadata_count >=
+            runtime.session_metadata_capacity) {
+        skip_current_metadata(runtime,
+                              status,
+                              "night_catalog_metadata_read_short");
+        return true;
+    }
+
+    ParsedSessionMetadata &parsed =
+        runtime.session_metadata[runtime.session_metadata_count];
+    parsed.identity = EdfSessionMetadataCodec::identity(runtime.read_buffer,
+                                                        read);
+    if (parsed.identity == 0 ||
+        !EdfSessionMetadataCodec::decode(runtime.read_buffer,
+                                         read,
+                                         parsed.metadata) ||
+        !edf_session_metadata_path_matches(runtime.current_path,
+                                           parsed.metadata)) {
+        parsed = {};
+        skip_current_metadata(runtime,
+                              status,
+                              "night_catalog_metadata_invalid");
+        return true;
+    }
+
+    ++runtime.session_metadata_count;
+    ++status.files_indexed;
+    ++runtime.scan_index;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectMetadata;
+    runtime.current_path[0] = '\0';
+    runtime.current_size = 0;
+    runtime.current_modified = 0;
+    status.current_path[0] = '\0';
+    return true;
+}
+
 void skip_current_fallback(NightCatalogRefreshRuntime &runtime,
                            NightCatalogRefreshStatus &status,
                            const char *warning) {
@@ -663,7 +902,7 @@ bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
     StorageScanEntryView entry;
     while (runtime.scan_index < runtime.scan->size()) {
         if (!runtime.scan->entry(runtime.scan_index, entry) ||
-            entry.directory || entry.root_index != 2 ||
+            entry.directory || entry.root_index != FALLBACK_SCAN_ROOT ||
             !path_is_fallback_artifact(entry.path)) {
             ++runtime.scan_index;
             continue;
@@ -1008,6 +1247,59 @@ bool finish_str_read(NightCatalogRefreshRuntime &runtime,
     return true;
 }
 
+const ParsedSessionMetadata *find_session_metadata(
+    const NightCatalogRefreshRuntime &runtime,
+    const EdfReportSessionDescriptor &session) {
+    for (size_t i = 0; i < runtime.session_metadata_count; ++i) {
+        const ParsedSessionMetadata &candidate = runtime.session_metadata[i];
+        if (strcmp(candidate.metadata.datalog_sleep_day,
+                   session.sleep_day) == 0 &&
+            strcmp(candidate.metadata.session_stamp,
+                   session.session_stamp) == 0) {
+            return &candidate;
+        }
+    }
+    return nullptr;
+}
+
+bool metadata_raw_time(const EdfSessionMetadata &metadata,
+                       int64_t canonical_ms,
+                       int64_t &raw_ms) {
+    const int64_t correction = metadata.externally_corrected
+        ? metadata.device_minus_utc_ms
+        : 0;
+    if (correction > 0 && canonical_ms > INT64_MAX - correction) {
+        return false;
+    }
+    if (correction < 0 && canonical_ms < INT64_MIN - correction) {
+        return false;
+    }
+    raw_ms = canonical_ms + correction;
+    return true;
+}
+
+void normalize_edf_day_boundaries(NightCatalogEdfSessionInput *sessions,
+                                  size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        int64_t day_start_ms = sessions[i].day_start_ms;
+        int64_t day_end_ms = sessions[i].day_end_ms;
+        for (size_t j = 0; j < count; ++j) {
+            if (sessions[j].sleep_day != sessions[i].sleep_day) continue;
+            day_start_ms = std::min(
+                day_start_ms,
+                std::min(sessions[j].day_start_ms,
+                         sessions[j].display_window.start_ms));
+            day_end_ms = std::max(
+                day_end_ms,
+                std::max(sessions[j].day_end_ms,
+                         sessions[j].display_window.end_ms));
+        }
+
+        sessions[i].day_start_ms = day_start_ms;
+        sessions[i].day_end_ms = day_end_ms;
+    }
+}
+
 bool build_catalog(NightCatalogRefreshRuntime &runtime,
                    std::shared_ptr<const NightCatalog> &catalog,
                    const char *&error) {
@@ -1058,9 +1350,19 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
 
     for (size_t i = 0; i < session_count; ++i) {
         EdfReportSessionDescriptor session = runtime.edf_sessions[i];
+        const ParsedSessionMetadata *provenance =
+            find_session_metadata(runtime, session);
         SleepDayId sleep_day;
-        if (!SleepDayId::from_yyyymmdd(session.sleep_day, sleep_day) ||
-            !resolve_session_clock(session, clock, sleep_day)) {
+        const bool provenance_clock = provenance != nullptr;
+        const bool clock_resolved = provenance_clock
+            ? resolve_provenance_session_clock(session,
+                                               provenance->metadata)
+            : (SleepDayId::from_yyyymmdd(session.sleep_day, sleep_day) &&
+               resolve_legacy_session_clock(session, clock, sleep_day));
+        if (provenance_clock) {
+            sleep_day = provenance->metadata.canonical_sleep_day;
+        }
+        if (!clock_resolved || !sleep_day.valid()) {
             destroy_large_array(sessions, session_count);
             destroy_large_array(files, file_capacity);
             error = "night_catalog_timezone_unresolved";
@@ -1069,10 +1371,22 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
 
         NightCatalogEdfSessionInput &out = sessions[output_sessions++];
         out.sleep_day = sleep_day;
-        if (!night_catalog_resolve_local_minute(
-                &clock, sleep_day, 0, out.day_start_ms) ||
-            !night_catalog_resolve_local_minute(
-                &clock, sleep_day, 1440, out.day_end_ms)) {
+        const bool boundaries_resolved = provenance_clock
+            ? (provenance_day_boundary(
+                   sleep_day,
+                   provenance->metadata.timezone_offset_minutes,
+                   0,
+                   out.day_start_ms) &&
+               provenance_day_boundary(
+                   sleep_day,
+                   provenance->metadata.timezone_offset_minutes,
+                   1440,
+                   out.day_end_ms))
+            : (night_catalog_resolve_local_minute(
+                   &clock, sleep_day, 0, out.day_start_ms) &&
+               night_catalog_resolve_local_minute(
+                   &clock, sleep_day, 1440, out.day_end_ms));
+        if (!boundaries_resolved) {
             destroy_large_array(sessions, session_count);
             destroy_large_array(files, file_capacity);
             error = "night_catalog_day_boundary_unresolved";
@@ -1081,6 +1395,32 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
 
         out.display_window = {session.earliest_header_start_ms,
                               session.latest_header_end_ms};
+        if (provenance_clock) {
+            int64_t raw_segment_end_ms = 0;
+            if (!metadata_raw_time(provenance->metadata,
+                                   out.display_window.end_ms,
+                                   raw_segment_end_ms)) {
+                destroy_large_array(sessions, session_count);
+                destroy_large_array(files, file_capacity);
+                error = "night_catalog_metadata_clock_invalid";
+                return false;
+            }
+
+            out.raw_sleep_day = provenance->metadata.raw_sleep_day;
+            out.raw_segment_window = {
+                provenance->metadata.raw_segment_start_ms,
+                provenance->metadata.finalized
+                    ? provenance->metadata.raw_segment_end_ms
+                    : raw_segment_end_ms,
+            };
+            if (provenance->metadata.finalized) {
+                out.raw_therapy_window = {
+                    provenance->metadata.raw_therapy_start_ms,
+                    provenance->metadata.raw_therapy_end_ms,
+                };
+            }
+            out.has_clock_provenance = true;
+        }
         out.files = files + output_files;
         for (size_t slot = 0;
              slot < AC_EDF_REPORT_SESSION_FILE_MAX;
@@ -1116,6 +1456,9 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             file.record_size = source.record_size;
             file.record_duration_ms = source.record_duration_ms;
             file.complete_records = source.complete_records;
+            file.provenance_identity = provenance_clock
+                ? provenance->identity
+                : 0;
             const ParsedEdfLayouts *parsed = find_layouts(stored_source.path);
             if (!parsed ||
                 parsed->layout_offset > runtime.edf_signal_layout_count ||
@@ -1133,6 +1476,8 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             ++out.file_count;
         }
     }
+
+    normalize_edf_day_boundaries(sessions, output_sessions);
 
     NightCatalogBuildInput input;
     input.edf_sessions = sessions;
@@ -1203,6 +1548,15 @@ bool NightCatalogRefreshService::poll() {
 
         case NightCatalogRefreshRuntime::Phase::WaitEdf:
             if (!finish_edf_read(*runtime_, *read_port_, status_)) {
+                return false;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::SelectMetadata:
+            return submit_next_metadata(*runtime_, *read_port_, status_);
+
+        case NightCatalogRefreshRuntime::Phase::WaitMetadata:
+            if (!finish_metadata_read(*runtime_, *read_port_, status_)) {
                 return false;
             }
             return true;
