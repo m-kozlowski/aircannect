@@ -142,6 +142,19 @@ const char *report_signal_store_name(ReportSignalId id) {
     return "";
 }
 
+uint32_t report_signal_bit(ReportSignalId signal) {
+    const uint8_t index = static_cast<uint8_t>(signal);
+    if (index >= static_cast<uint8_t>(ReportSignalId::Count) || index >= 32) {
+        return 0;
+    }
+    return 1u << index;
+}
+
+uint32_t report_signal_mask_all() {
+    const uint8_t count = static_cast<uint8_t>(ReportSignalId::Count);
+    return count >= 32 ? UINT32_MAX : (1u << count) - 1u;
+}
+
 bool report_signal_required_for_result(const ReportSignalDef &signal) {
     return (signal.flags & REPORT_SIGNAL_REQUIRED) != 0;
 }

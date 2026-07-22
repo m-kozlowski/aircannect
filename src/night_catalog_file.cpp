@@ -25,7 +25,7 @@ constexpr uint8_t FILE_MAGIC[8] = {
 
 constexpr size_t RECORD_BYTES = 112;
 constexpr size_t RANGE_BYTES = 16;
-constexpr size_t FILE_BYTES = 80;
+constexpr size_t FILE_BYTES = 88;
 constexpr size_t COVERAGE_BYTES = 24;
 
 constexpr uint8_t SOURCE_FLAGS = NIGHT_CATALOG_SOURCE_EDF |
@@ -92,6 +92,8 @@ bool metrics_valid(const NightCatalogMetrics &metrics) {
 
 bool file_span_valid(const NightCatalogSourceFile &file) {
     return file.identity != 0 && file.record_size != 0 &&
+           (file.kind == NightCatalogFileKind::Str ||
+            file.record_start_ms > 0) &&
            file.data_offset <= file.file_size &&
            file.data_size <= file.file_size - file.data_offset;
 }
@@ -350,6 +352,7 @@ void encode_file(uint8_t *out, const NightCatalogSourceFile &file) {
     put_le32(out + 68, file.record_size);
     put_le32(out + 72, file.record_duration_ms);
     put_le32(out + 76, file.complete_records);
+    put_le64(out + 80, static_cast<uint64_t>(file.record_start_ms));
 }
 
 bool decode_file(const uint8_t *in, NightCatalogSourceFile &file) {
@@ -381,6 +384,7 @@ bool decode_file(const uint8_t *in, NightCatalogSourceFile &file) {
     file.record_size = get_le32(in + 68);
     file.record_duration_ms = get_le32(in + 72);
     file.complete_records = get_le32(in + 76);
+    file.record_start_ms = static_cast<int64_t>(get_le64(in + 80));
     return true;
 }
 

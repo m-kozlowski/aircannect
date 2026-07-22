@@ -288,6 +288,7 @@ uint64_t source_file_identity(const NightCatalogSourceFileInput &file) {
     hash = hash_i64(hash, file.last_write_ms);
     hash = hash_u64(hash, file.data_offset);
     hash = hash_u64(hash, file.data_size);
+    hash = hash_i64(hash, file.record_start_ms);
     hash = hash_u32(hash, file.header_size);
     hash = hash_u32(hash, file.record_size);
     hash = hash_u32(hash, file.record_duration_ms);
@@ -642,6 +643,7 @@ uint64_t calculate_revision(const NightCatalog &catalog,
         hash = hash_i64(hash, file.last_write_ms);
         hash = hash_u64(hash, file.data_offset);
         hash = hash_u64(hash, file.data_size);
+        hash = hash_i64(hash, file.record_start_ms);
         hash = hash_u32(hash, file.header_size);
         hash = hash_u32(hash, file.record_size);
         hash = hash_u32(hash, file.record_duration_ms);
@@ -904,6 +906,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             file.data_offset = source_file.source.data_offset;
             file.data_size = source_file.source.data_size;
             file.identity = source_file.source.identity;
+            file.record_start_ms = source_file.source.record_start_ms;
             file.header_size = source_file.source.header_size;
             file.record_size = source_file.source.record_size;
             file.record_duration_ms =

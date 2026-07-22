@@ -90,6 +90,7 @@ struct NightCatalogSourceFile {
     uint64_t data_offset = 0;
     uint64_t data_size = 0;
     uint64_t identity = 0;
+    int64_t record_start_ms = 0;
 
     uint32_t header_size = 0;
     uint32_t record_size = 0;

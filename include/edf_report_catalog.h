@@ -101,7 +101,6 @@ struct EdfReportSessionDescriptor {
 bool edf_report_file_kind_supported(EdfInventoryFileKind kind);
 uint32_t edf_report_file_kind_mask(EdfInventoryFileKind kind);
 size_t edf_report_session_file_slot(EdfInventoryFileKind kind);
-uint32_t edf_report_signal_bit(ReportSignalId signal);
 
 EdfReportFileStatus edf_report_describe_file(
     const char *path,

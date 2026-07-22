@@ -128,7 +128,7 @@ void file_signal_masks(const EdfReportSessionDescriptor &session,
         const EdfReportSignalMappingDef &mapping = mappings[i];
         if (mapping.kind != kind) continue;
 
-        const uint32_t bit = edf_report_signal_bit(mapping.signal);
+        const uint32_t bit = report_signal_bit(mapping.signal);
         if (mapping.primary && (session.primary_signal_mask & bit) != 0) {
             primary_mask |= bit;
         }
@@ -816,6 +816,7 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             file.data_size =
                 static_cast<uint64_t>(source.complete_records) *
                 source.record_size;
+            file.record_start_ms = source.header_start_ms;
             file.header_size = source.header_size;
             file.record_size = source.record_size;
             file.record_duration_ms = source.record_duration_ms;

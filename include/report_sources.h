@@ -27,6 +27,7 @@ enum class ReportSignalId : uint8_t {
     RespiratoryRate,
     IeRatio,
     FlowLimitation,
+    Count,
 };
 
 enum ReportSourcePurpose : uint16_t {
@@ -62,6 +63,8 @@ const ReportSignalDef *report_signal_defs(size_t &count);
 const ReportSourceDef *report_source_def(ReportSourceId id);
 const char *report_source_spool_type(ReportSourceId id);
 const char *report_signal_store_name(ReportSignalId id);
+uint32_t report_signal_bit(ReportSignalId signal);
+uint32_t report_signal_mask_all();
 bool report_signal_required_for_result(const ReportSignalDef &signal);
 bool report_source_is_sampled(const ReportSourceDef &source);
 
