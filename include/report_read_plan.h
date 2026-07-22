@@ -10,14 +10,6 @@
 
 namespace aircannect {
 
-enum ReportEventSourceFlag : uint8_t {
-    REPORT_EVENT_SCORED = 1u << 0,
-    REPORT_EVENT_CSR = 1u << 1,
-};
-
-static constexpr uint8_t REPORT_EVENT_ALL =
-    REPORT_EVENT_SCORED | REPORT_EVENT_CSR;
-
 enum class ReportReadQuality : uint8_t {
     Primary,
     Fallback,
