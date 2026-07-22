@@ -6,16 +6,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#include "as11_device_service.h"
-#include "config_service.h"
+#include "app_config.h"
 #include "fixed_queue.h"
 #include "large_text_buffer.h"
 #include "management_console.h"
-#include "ota_manager.h"
-#include "oximetry_manager.h"
 #include "sink_manager.h"
-#include "time_sync_service.h"
-#include "wifi_manager.h"
 
 class AsyncWebServerRequest;
 class AsyncEventSourceClient;
@@ -25,6 +20,7 @@ class AsyncWebServer;
 namespace aircannect {
 
 class HttpRouteModule;
+class StatusHttpController;
 
 enum WebCommandKind : uint8_t {
     WebCommandConsoleLine,
@@ -46,7 +42,6 @@ struct WebUiMemoryStatus {
     WebUiBufferMemoryStatus status;
     WebUiBufferMemoryStatus stream;
     WebUiBufferMemoryStatus console;
-    WebUiBufferMemoryStatus config;
     WebUiBufferMemoryStatus live;
     size_t console_log_length = 0;
     size_t sse_clients = 0;
@@ -59,20 +54,17 @@ public:
     using PollCheckpoint = void (*)(const char *section);
 
     // lifecycle
-    bool begin(StreamBroker &stream,
-               As11DeviceService &device,
-               WifiManager &wifi_manager,
-               ConfigService &config_service,
-               TimeSyncService &time_sync_service,
-               OtaManager &ota_manager,
+    bool begin(StatusHttpController &status,
+               StreamBroker &stream,
                SinkManager &sink_manager,
-               OximetryManager &oximetry_manager,
                ConsoleContext &console_ctx,
+               const AppConfigData &config,
                HttpRouteModule *const *route_modules,
                size_t route_module_count,
                uint16_t port = 80);
     void stop();
     void poll(PollCheckpoint checkpoint = nullptr);
+    void apply_auth_config(const AppConfigData &config);
 
     // inbound device events
     void handle_event(const RpcEvent &event);
@@ -86,8 +78,6 @@ private:
     void register_routes(HttpRouteModule *const *route_modules,
                          size_t route_module_count);
     void reserve_cached_json();
-    void build_status_json(LargeTextBuffer &json,
-                           PollCheckpoint checkpoint = nullptr) const;
     void send_live_view_state(AsyncWebServerRequest *request);
     void build_stream_json(LargeTextBuffer &json) const;
     void reserve_console_log();
@@ -104,7 +94,6 @@ private:
     void mark_snapshots_dirty(uint16_t mask);
     void request_sse_push();
     void publish_snapshots(bool force,
-                           bool realtime_active = false,
                            PollCheckpoint checkpoint = nullptr);
 
     // Deferred command queue
@@ -136,6 +125,7 @@ private:
                            bool queued,
                            const char *result = "queued") const;
     bool request_allowed_cached(AsyncWebServerRequest *request) const;
+    void publish_pending_auth_config();
 
     // client tracking
     struct SseClientRef {
@@ -153,21 +143,15 @@ private:
     // snapshot masks
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
     static constexpr uint16_t SNAPSHOT_STREAM = 1u << 1;
-    static constexpr uint16_t SNAPSHOT_CONFIG = 1u << 3;
     static constexpr uint16_t SNAPSHOT_ALL =
-        SNAPSHOT_STATUS | SNAPSHOT_STREAM | SNAPSHOT_CONFIG;
+        SNAPSHOT_STATUS | SNAPSHOT_STREAM;
     static constexpr uint16_t SNAPSHOT_PERIODIC =
         SNAPSHOT_STATUS | SNAPSHOT_STREAM;
 
     // subsystem owners
+    StatusHttpController *status_ = nullptr;
     StreamBroker *stream_ = nullptr;
-    As11DeviceService *device_ = nullptr;
-    WifiManager *wifi_manager_ = nullptr;
-    ConfigService *config_service_ = nullptr;
-    TimeSyncService *time_sync_service_ = nullptr;
-    OtaManager *ota_manager_ = nullptr;
     SinkManager *sink_manager_ = nullptr;
-    OximetryManager *oximetry_manager_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     // console and command queue
@@ -207,6 +191,8 @@ private:
     // cached JSON snapshots
     LargeTextBuffer cached_status_json_;
     LargeTextBuffer cached_stream_json_;
+    LargeTextBuffer next_status_json_;
+    LargeTextBuffer next_stream_json_;
     LargeTextBuffer live_json_;
 
     // cached auth config
@@ -214,10 +200,14 @@ private:
     String cached_http_user_;
     String cached_http_password_;
     String cached_auth_whitelist_;
+    bool pending_http_auth_required_ = true;
+    String pending_http_user_;
+    String pending_http_password_;
+    String pending_auth_whitelist_;
+    bool auth_config_pending_ = false;
 
     // snapshot state
-    uint32_t observed_device_revision_ = 0;
-    uint32_t observed_config_revision_ = 0;
+    uint32_t observed_status_revision_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;

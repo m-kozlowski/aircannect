@@ -2,31 +2,20 @@
 
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
-#include <WiFi.h>
-#include <algorithm>
-#include <memory>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <string_view>
-#include <time.h>
 #include <utility>
 
 #include "auth_utils.h"
-#include "as11_rpc.h"
 #include "board.h"
 #include "debug_log.h"
 #include "http_route_module.h"
 #include "http_request_utils.h"
 #include "json_util.h"
 #include "memory_manager.h"
-#include "session_manager.h"
 #include "sink_manager.h"
-#include "storage_manager.h"
-#include "system_status_snapshot.h"
+#include "status_http_controller.h"
 #include "string_util.h"
 #include "string_print.h"
-#include "version.h"
 #include "web_ui_html.h"
 
 namespace aircannect {
@@ -57,43 +46,9 @@ uint32_t fnv1a32_string(const String &text) {
     return hash ? hash : 1u;
 }
 
-bool append_le32(ReportSpoolBuffer &out, uint32_t value) {
-    size_t offset = 0;
-    uint8_t *dst = out.append_uninitialized(4, offset);
-    if (!dst) return false;
-    dst[0] = static_cast<uint8_t>(value & 0xFFu);
-    dst[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
-    dst[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
-    dst[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
-    return true;
-}
-
 bool json_get_string(JsonDocument &doc, const char *key, String &out) {
     if (!doc[key].is<const char *>()) return false;
     out = doc[key].as<const char *>();
-    return true;
-}
-
-bool motor_hours(std::string_view iso_duration,
-                 char *out,
-                 size_t out_size) {
-    if (!out || out_size == 0) return false;
-    out[0] = 0;
-    if (iso_duration.size() < 4 || iso_duration.substr(0, 2) != "PT") {
-        return false;
-    }
-    size_t start = 2;
-    const size_t end = iso_duration.find('S', start);
-    if (end == std::string_view::npos || end == start) return false;
-    uint64_t seconds = 0;
-    for (size_t i = start; i < end; ++i) {
-        const char c = iso_duration[i];
-        if (c < '0' || c > '9') return false;
-        seconds = seconds * 10 + static_cast<unsigned>(c - '0');
-    }
-    const unsigned long hours =
-        static_cast<unsigned long>((seconds + 1800) / 3600);
-    snprintf(out, out_size, "%lu", hours);
     return true;
 }
 
@@ -103,15 +58,6 @@ const char *stream_command_name(StreamCommandType type) {
         case StreamCommandType::Stop: return "stop";
         case StreamCommandType::None:
         default: return "none";
-    }
-}
-
-const char *oximetry_source_name(OximetrySource source) {
-    switch (source) {
-        case OximetrySource::None: return "none";
-        case OximetrySource::Udp: return "udp";
-        case OximetrySource::Ble: return "ble";
-        default: return "unknown";
     }
 }
 
@@ -144,29 +90,19 @@ void append_live_series(JsonOut &json,
 
 }  // namespace
 
-bool WebUI::begin(StreamBroker &stream,
-                  As11DeviceService &device,
-                  WifiManager &wifi_manager,
-                  ConfigService &config_service,
-                  TimeSyncService &time_sync_service,
-                  OtaManager &ota_manager,
+bool WebUI::begin(StatusHttpController &status,
+                  StreamBroker &stream,
                   SinkManager &sink_manager,
-                  OximetryManager &oximetry_manager,
                   ConsoleContext &console_ctx,
+                  const AppConfigData &config,
                   HttpRouteModule *const *route_modules,
                   size_t route_module_count,
                   uint16_t port) {
     if (started_) return true;
     stop();
+    status_ = &status;
     stream_ = &stream;
-    device_ = &device;
-    wifi_manager_ = &wifi_manager;
-    config_service_ = &config_service;
-    observed_config_revision_ = config_service.revision();
-    time_sync_service_ = &time_sync_service;
-    ota_manager_ = &ota_manager;
     sink_manager_ = &sink_manager;
-    oximetry_manager_ = &oximetry_manager;
     console_ctx_ = &console_ctx;
 
     if (!command_mutex_) {
@@ -188,6 +124,7 @@ bool WebUI::begin(StreamBroker &stream,
         return false;
     }
     reserve_cached_json();
+    apply_auth_config(config);
 
     server_ = new AsyncWebServer(port);
     if (!server_) {
@@ -224,6 +161,8 @@ bool WebUI::begin(StreamBroker &stream,
 void WebUI::reserve_cached_json() {
     cached_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     cached_stream_json_.reserve(AC_WEB_STREAM_JSON_RESERVE);
+    next_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
+    next_stream_json_.reserve(AC_WEB_STREAM_JSON_RESERVE);
     live_json_.reserve(4096);
 }
 
@@ -330,30 +269,21 @@ void WebUI::stop() {
     }
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
-    observed_device_revision_ = 0;
-    observed_config_revision_ = 0;
+    observed_status_revision_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
+    status_ = nullptr;
     stream_ = nullptr;
     started_ = false;
 }
 
 void WebUI::poll(PollCheckpoint checkpoint) {
     if (!started_) return;
-    const bool realtime_active =
-        stream_ &&
-        (stream_->activity_active(millis(), AC_WIFI_ROAM_STREAM_QUIET_MS) ||
-         (device_ && device_->state().therapy_state() ==
-                         As11TherapyState::Running));
-    if (device_ && observed_device_revision_ != device_->revision()) {
-        observed_device_revision_ = device_->revision();
+    publish_pending_auth_config();
+
+    if (status_ && observed_status_revision_ != status_->revision()) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
-    }
-    if (config_service_ &&
-        observed_config_revision_ != config_service_->revision()) {
-        observed_config_revision_ = config_service_->revision();
-        mark_snapshots_dirty(SNAPSHOT_ALL);
     }
 
     if (web_console_.storage_output_pending()) {
@@ -368,7 +298,7 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (checkpoint) checkpoint("web_ui.sse_limits");
     poll_live_stream();
     if (checkpoint) checkpoint("web_ui.live");
-    publish_snapshots(false, realtime_active, checkpoint);
+    publish_snapshots(false, checkpoint);
     if (checkpoint) checkpoint("web_ui.snapshots");
 
     if (!events_ || events_->count() == 0) return;
@@ -428,6 +358,29 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         enforce_sse_limits();
         if (checkpoint) checkpoint("web_ui.sse_backpressure");
     }
+}
+
+void WebUI::apply_auth_config(const AppConfigData &config) {
+    pending_http_auth_required_ = network_auth_required(config);
+    pending_http_user_ = config.http_user;
+    pending_http_password_ = config.http_password;
+    pending_auth_whitelist_ = config.auth_whitelist;
+    auth_config_pending_ = true;
+    publish_pending_auth_config();
+}
+
+void WebUI::publish_pending_auth_config() {
+    if (!auth_config_pending_ || !cache_mutex_ ||
+        xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
+        return;
+    }
+
+    cached_http_auth_required_ = pending_http_auth_required_;
+    cached_http_user_ = pending_http_user_;
+    cached_http_password_ = pending_http_password_;
+    cached_auth_whitelist_ = pending_auth_whitelist_;
+    auth_config_pending_ = false;
+    xSemaphoreGive(cache_mutex_);
 }
 
 void WebUI::handle_sse_connect(AsyncEventSourceClient *client) {
@@ -688,7 +641,6 @@ void WebUI::send_live_batch(uint32_t now_ms) {
 
 void WebUI::handle_event(const RpcEvent &event) {
     if (event.kind == RpcEventKind::BootNotification) {
-        mark_snapshots_dirty(SNAPSHOT_STATUS);
         if (events_ &&
             send_sse_to_clients("{}", "device_boot", millis(),
                                 true) == SseSendResult::Failed) {
@@ -1034,104 +986,6 @@ void WebUI::drain_commands() {
     }
 }
 
-void WebUI::build_status_json(LargeTextBuffer &json,
-                              PollCheckpoint checkpoint) const {
-    const SystemStatusSnapshot snap = collect_system_status({
-        *device_,
-        *wifi_manager_,
-        config_service_->data(),
-        *time_sync_service_,
-        *ota_manager_,
-        *oximetry_manager_,
-    }, checkpoint);
-    const MemoryStatus &mem = snap.memory;
-    const StorageStatus &storage = snap.storage;
-    const WifiStatusSnapshot &wifi = snap.wifi;
-    const As11StatusSnapshot &as11 = snap.as11;
-    const OximetryRuntimeStatus &oxi = snap.oximetry;
-    const TimeStatusSnapshot &time = snap.time;
-
-    json = "{";
-    json_add_string(json, "version", snap.version, false);
-    json_add_string(json, "built", snap.built);
-    json_add_string(json, "hostname",
-                    config_service_->data().hostname.c_str());
-    json_add_int(json, "uptime", snap.uptime_s);
-    json_add_int(json, "heap", static_cast<long>(mem.heap_free));
-    json_add_bool(json, "psram_available", mem.psram_available);
-    json_add_int(json, "psram_free", static_cast<long>(mem.psram_free));
-    json_add_string(json, "storage_state",
-                    Storage::state_name(storage.state));
-    json_add_uint64(json, "storage_total", storage.total_bytes);
-    json_add_uint64(json, "storage_used", storage.used_bytes);
-    json_add_string_view(json, "wifi_state", wifi.state);
-    json_add_string_view(json, "wifi_ssid", wifi.ssid);
-    json_add_string(json, "wifi_ip", wifi.ip);
-    json_add_int(json, "wifi_rssi", wifi.rssi);
-    json_add_int(json, "wifi_channel", wifi.channel);
-    json_add_string(json, "wifi_bssid", wifi.bssid);
-    json_add_int(json, "wifi_profile", wifi.active_profile);
-    json_add_bool(json, "wifi_roam", wifi.roaming_enabled);
-    json_add_bool(json, "update_checking", snap.update.checking);
-    json_add_bool(json, "update_available", snap.update.available);
-    json_add_string(json, "update_version", snap.update.version);
-    json_add_string_view(json, "device_name", as11.product_name);
-    json_add_string_view(json, "serial", as11.serial_number);
-    json_add_string_view(json, "software_id", as11.software_identifier);
-    json_add_string(json, "therapy",
-                    As11DeviceState::therapy_state_name(as11.therapy_state));
-    json_add_string(json, "therapy_pending",
-                    As11DeviceState::therapy_target_name(
-                        as11.pending_therapy_target));
-    json_add_string_view(json, "profile", as11.active_therapy_profile);
-    char hours[16];
-    motor_hours(as11.motor_run_meter, hours, sizeof(hours));
-    json_add_string(json, "motor_hours", hours);
-    json += ",\"oximetry\":{";
-    json_add_bool(json, "enabled", oxi.enabled, false);
-    json_add_string(json, "source", oximetry_source_name(oxi.source));
-    json_add_string(json, "source_detail", oxi.source_detail);
-    json_add_bool(json, "source_present", oxi.source_present);
-    json_add_bool(json, "source_fresh", oxi.source_fresh);
-    json_add_bool(json, "valid", oxi.reading.valid);
-    json_add_bool(json, "contact_known", oxi.reading.contact_known);
-    json_add_bool(json, "contact_present", oxi.reading.contact_present);
-    if (oxi.reading.valid) {
-        json_add_int(json, "spo2", oxi.reading.spo2);
-        json_add_int(json, "pulse_bpm", oxi.reading.pulse_bpm);
-    } else {
-        json += ",\"spo2\":null,\"pulse_bpm\":null";
-    }
-    json_add_int(json, "source_age_ms", oxi.last_source_age_ms);
-    json_add_string(json, "advertise_mode",
-                    oximetry_advertise_mode_name(oxi.advertise_mode));
-    json_add_bool(json, "manual_advertising_requested",
-                  oxi.manual_advertising_requested);
-    json_add_bool(json, "ble_available", oxi.ble_available);
-    json_add_bool(json, "advertising", oxi.advertising);
-    json_add_bool(json, "connected", oxi.connected);
-    json_add_bool(json, "subscribed", oxi.subscribed);
-    json_add_bool(json, "pairing_active", oxi.pairing_active);
-    json_add_int(json, "pairing_left_ms", oxi.pairing_left_ms);
-    json_add_string(json, "ble_name", oxi.ble_name);
-    json_add_string(json, "ble_peer", oxi.ble_peer);
-    json += '}';
-    json_add_string_view(json, "device_datetime", as11.device_datetime);
-    if (as11.clock_valid) {
-        json_add_int(json, "device_datetime_age_ms",
-                     snap.now_ms - as11.clock_sample_ms);
-    } else {
-        json += ",\"device_datetime_age_ms\":null";
-    }
-    json_add_bool(json, "resmed_time_sync_enabled",
-                  time.resmed_time_sync_enabled);
-    json_add_bool(json, "ntp_synced", time.ntp_synced);
-    json_add_bool(json, "esp_time_valid", time.esp_time_valid);
-    json_add_string_view(json, "esp_time_source", time.esp_time_source);
-    json_add_string(json, "esp_datetime", time.esp_datetime);
-    json += '}';
-}
-
 void WebUI::build_stream_json(LargeTextBuffer &json) const {
     const StreamBroker &stream = *stream_;
     const LiveChartRuntimeStatus &live = sink_manager_->live_chart_status();
@@ -1191,52 +1045,54 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void WebUI::publish_snapshots(bool force,
-                              bool realtime_active,
-                              PollCheckpoint checkpoint) {
+void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     const uint32_t now = millis();
-    if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
     const bool periodic_due =
         static_cast<int32_t>(now - last_snapshot_ms_) >=
         static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
+
     uint16_t rebuild_mask = snapshots_dirty_mask_;
     if (force || !snapshots_ready_) {
         rebuild_mask = SNAPSHOT_ALL;
     } else if (periodic_due) {
         rebuild_mask |= SNAPSHOT_PERIODIC;
     }
+    if (!rebuild_mask) return;
 
-    if (!force && snapshots_ready_ && realtime_active) {
-        rebuild_mask &= SNAPSHOT_STATUS | SNAPSHOT_STREAM;
+    next_status_json_.clear();
+    next_stream_json_.clear();
+    uint16_t completed_mask = 0;
+
+    if (rebuild_mask & SNAPSHOT_STATUS) {
+        uint32_t revision = observed_status_revision_;
+        if (status_ && status_->copy_snapshot(next_status_json_, revision)) {
+            observed_status_revision_ = revision;
+            completed_mask |= SNAPSHOT_STATUS;
+        }
+        if (checkpoint) checkpoint("web_ui.snapshots.status_copy");
     }
-
-    if (!rebuild_mask) {
-        xSemaphoreGive(cache_mutex_);
+    if (rebuild_mask & SNAPSHOT_STREAM) {
+        build_stream_json(next_stream_json_);
+        if (!next_stream_json_.overflowed()) {
+            completed_mask |= SNAPSHOT_STREAM;
+        }
+        if (checkpoint) checkpoint("web_ui.snapshots.stream");
+    }
+    if (!completed_mask || !cache_mutex_ ||
+        xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         return;
     }
 
-    if (rebuild_mask & SNAPSHOT_STATUS) {
-        build_status_json(cached_status_json_, checkpoint);
-        if (checkpoint) checkpoint("web_ui.snapshots.status");
+    if (completed_mask & SNAPSHOT_STATUS) {
+        cached_status_json_.swap(next_status_json_);
     }
-    if (rebuild_mask & SNAPSHOT_STREAM) {
-        build_stream_json(cached_stream_json_);
-        if (checkpoint) checkpoint("web_ui.snapshots.stream");
-    }
-    if (rebuild_mask & SNAPSHOT_CONFIG) {
-        if (checkpoint) checkpoint("web_ui.snapshots.config");
-    }
-    if (rebuild_mask & SNAPSHOT_CONFIG) {
-        cached_http_auth_required_ =
-            network_auth_required(config_service_->data());
-        cached_http_user_ = config_service_->data().http_user;
-        cached_http_password_ = config_service_->data().http_password;
-        cached_auth_whitelist_ = config_service_->data().auth_whitelist;
+    if (completed_mask & SNAPSHOT_STREAM) {
+        cached_stream_json_.swap(next_stream_json_);
     }
 
-    snapshots_ready_ = true;
-    snapshots_dirty_mask_ &= ~rebuild_mask;
-    if (force || periodic_due || (rebuild_mask & SNAPSHOT_PERIODIC)) {
+    snapshots_dirty_mask_ &= ~completed_mask;
+    snapshots_ready_ = snapshots_dirty_mask_ == 0;
+    if (force || periodic_due || (completed_mask & SNAPSHOT_PERIODIC)) {
         last_snapshot_ms_ = now;
     }
     xSemaphoreGive(cache_mutex_);
@@ -1278,11 +1134,6 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
             200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
         response->addHeader("Content-Encoding", "gzip");
         request->send(response);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/status"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        send_cached(request, cached_status_json_);
     });
 
     server_->on(AsyncURIMatcher::exact("/api/stream"), HTTP_GET,

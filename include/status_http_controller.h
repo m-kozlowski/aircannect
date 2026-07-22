@@ -1,0 +1,60 @@
+#pragma once
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <stdint.h>
+
+#include "http_route_module.h"
+#include "large_text_buffer.h"
+
+class AsyncWebServerRequest;
+
+namespace aircannect {
+
+class As11DeviceService;
+class ConfigService;
+class OtaManager;
+class OximetryManager;
+class TimeSyncService;
+class WifiManager;
+
+class StatusHttpController final : public HttpRouteModule {
+public:
+    using PollCheckpoint = void (*)(const char *section);
+
+    bool begin(As11DeviceService &device,
+               WifiManager &wifi,
+               ConfigService &config,
+               TimeSyncService &time_sync,
+               OtaManager &ota,
+               OximetryManager &oximetry);
+    void register_routes(AsyncWebServer &server) override;
+    void poll(PollCheckpoint checkpoint = nullptr);
+
+    uint32_t revision() const { return revision_; }
+    bool copy_snapshot(LargeTextBuffer &out, uint32_t &revision) const;
+
+private:
+    bool publish_snapshot(PollCheckpoint checkpoint = nullptr);
+    void send_snapshot(AsyncWebServerRequest *request) const;
+
+    As11DeviceService *device_ = nullptr;
+    WifiManager *wifi_ = nullptr;
+    ConfigService *config_ = nullptr;
+    TimeSyncService *time_sync_ = nullptr;
+    OtaManager *ota_ = nullptr;
+    OximetryManager *oximetry_ = nullptr;
+
+    StaticSemaphore_t cache_mutex_storage_ = {};
+    SemaphoreHandle_t cache_mutex_ = nullptr;
+    LargeTextBuffer snapshot_json_;
+    LargeTextBuffer build_json_;
+
+    uint32_t observed_device_revision_ = 0;
+    uint32_t observed_config_revision_ = 0;
+    uint32_t last_snapshot_ms_ = 0;
+    uint32_t revision_ = 0;
+    bool snapshot_dirty_ = true;
+};
+
+}  // namespace aircannect

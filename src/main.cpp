@@ -38,6 +38,7 @@
 #include "storage_http_controller.h"
 #include "storage_manager.h"
 #include "storage_service.h"
+#include "status_http_controller.h"
 #include "stream_broker.h"
 #if AC_STACK_PROFILE_ENABLED
 #include "stack_profiler.h"
@@ -85,6 +86,7 @@ static ConfigHttpController config_http_controller;
 static DeviceHttpController device_http_controller;
 static OximetryHttpController oximetry_http_controller;
 static WifiHttpController wifi_http_controller;
+static StatusHttpController status_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
@@ -94,6 +96,7 @@ static HttpRouteModule *web_route_modules[] = {
     &device_http_controller,
     &oximetry_http_controller,
     &wifi_http_controller,
+    &status_http_controller,
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
@@ -383,6 +386,10 @@ static void apply_config_runtime_effects(void *,
     if (dirty & (AC_CONFIG_DIRTY_SMB_SYNC |
                  AC_CONFIG_DIRTY_SLEEPHQ_SYNC)) {
         export_config_due_ms = 0;
+    }
+    if (dirty & (AC_CONFIG_DIRTY_HTTP_AUTH |
+                 AC_CONFIG_DIRTY_AUTH_WHITELIST)) {
+        web_ui.apply_auth_config(config);
     }
 
     if (reconnect_wifi) wifi_manager.reconnect();
@@ -724,9 +731,15 @@ void setup() {
     config_service.set_runtime_effects(apply_config_runtime_effects, nullptr);
     config_service.activate_runtime_effects(false);
 
-    web_ui.begin(stream_broker, as11_device_service, wifi_manager,
-                 config_service, time_sync_service, ota_manager,
-                 sink_manager, oximetry_manager, console_ctx,
+    if (!status_http_controller.begin(as11_device_service, wifi_manager,
+                                      config_service, time_sync_service,
+                                      ota_manager, oximetry_manager)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] status HTTP controller failed to start\n");
+    }
+
+    web_ui.begin(status_http_controller, stream_broker, sink_manager,
+                 console_ctx, config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
 }
@@ -883,6 +896,9 @@ void loop() {
     drain_can_rx_after("export_coordinator");
 
     // Web, TCP, and console frontends
+    status_http_controller.poll(drain_can_rx_after);
+    drain_can_rx_after("status_http");
+
     web_ui.poll(drain_can_rx_after);
     drain_can_rx_after("web_ui");
 

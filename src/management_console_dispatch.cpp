@@ -102,7 +102,6 @@ void print_web_memory_detail(Print &out, WebUI *web_ui) {
     print_web_buffer_memory(out, "status", web.status, total_capacity);
     print_web_buffer_memory(out, "stream", web.stream, total_capacity);
     print_web_buffer_memory(out, "console", web.console, total_capacity);
-    print_web_buffer_memory(out, "config", web.config, total_capacity);
     print_web_buffer_memory(out, "live", web.live, total_capacity);
     out.print("[MEM web] buffer_cap_total=");
     out.print(static_cast<unsigned long>(total_capacity));
