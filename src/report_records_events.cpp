@@ -1,6 +1,7 @@
 #include "report_records.h"
 
 #include "report_records_internal.h"
+#include "report_sources.h"
 
 #include <limits.h>
 
@@ -17,6 +18,22 @@ using report_records_detail::valid_timestamp;
 
 size_t report_event_record_wire_size() {
     return EVENT_RECORD_WIRE_SIZE;
+}
+
+uint8_t report_event_source_mask(const ReportEventRecord &event) {
+    switch (static_cast<ReportEventCode>(event.code)) {
+        case ReportEventCode::Hypopnea:
+        case ReportEventCode::CentralApnea:
+        case ReportEventCode::ObstructiveApnea:
+        case ReportEventCode::UnclassifiedApnea:
+        case ReportEventCode::Arousal:
+            return REPORT_EVENT_SCORED;
+
+        case ReportEventCode::Csr:
+            return REPORT_EVENT_CSR;
+    }
+
+    return 0;
 }
 
 bool report_event_overlaps_window(const ReportEventRecord &event,

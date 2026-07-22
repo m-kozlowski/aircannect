@@ -53,6 +53,8 @@ size_t report_series_v2_uniform_wire_size(uint32_t sample_count,
 size_t report_series_v2_explicit_wire_size(uint32_t sample_count);
 size_t report_event_record_wire_size();
 
+uint8_t report_event_source_mask(const ReportEventRecord &event);
+
 bool report_append_event_record(ReportSpoolBuffer &out,
                                 const ReportEventRecord &event);
 bool report_event_overlaps_window(const ReportEventRecord &event,
@@ -84,6 +86,16 @@ bool report_series_payload_v2_uniform_view(
     size_t len,
     uint32_t record_count,
     ReportSeriesV2UniformView &view);
+size_t report_series_payload_v2_uniform_slice_size(
+    const ReportSeriesV2UniformView &view,
+    uint32_t first_sample,
+    uint32_t sample_count);
+bool report_write_series_payload_v2_uniform_slice(
+    const ReportSeriesV2UniformView &view,
+    uint32_t first_sample,
+    uint32_t sample_count,
+    uint8_t *out,
+    size_t out_size);
 bool report_for_each_series_sample(uint32_t payload_schema,
                                    int64_t chunk_start_ms,
                                    const uint8_t *data,

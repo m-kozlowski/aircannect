@@ -62,20 +62,6 @@ bool fallback_kind(ReportReadOperationKind kind) {
            kind == ReportReadOperationKind::FallbackEvents;
 }
 
-uint8_t event_source_mask(const ReportEventRecord &event) {
-    switch (static_cast<ReportEventCode>(event.code)) {
-        case ReportEventCode::Hypopnea:
-        case ReportEventCode::CentralApnea:
-        case ReportEventCode::ObstructiveApnea:
-        case ReportEventCode::UnclassifiedApnea:
-        case ReportEventCode::Arousal:
-            return REPORT_EVENT_SCORED;
-        case ReportEventCode::Csr:
-            return REPORT_EVENT_CSR;
-    }
-    return 0;
-}
-
 }  // namespace
 
 bool ReportExecutorStatus::active() const {
@@ -630,7 +616,7 @@ bool ReportExecutor::decode_fallback_operation() {
                        ReportExecutorError::DecodeFailed);
                 return false;
             }
-            const uint8_t source_mask = event_source_mask(event);
+            const uint8_t source_mask = report_event_source_mask(event);
             if (source_mask == 0) {
                 finish(ReportExecutorState::Failed,
                        ReportExecutorError::DecodeFailed);
