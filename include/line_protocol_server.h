@@ -5,11 +5,18 @@
 #include <WiFiServer.h>
 #include <algorithm>
 #include <stdint.h>
+#include <utility>
 
 #include "board.h"
 #include "fixed_queue.h"
 
 namespace aircannect {
+
+inline void release_line_string(String &value) {
+    // Moving into a disposable owner releases capacity retained by Arduino String.
+    String released(std::move(value));
+    (void)released;
+}
 
 struct LineOutputPumpResult {
     bool fatal_error = false;
@@ -45,13 +52,13 @@ protected:
         if (!current.length()) {
             String next;
             if (!queue.pop(next)) return result;
-            current = next;
+            current = std::move(next);
             if (append_lf) current += '\n';
             pos = 0;
         }
 
         if (pos >= current.length()) {
-            current = "";
+            release_line_string(current);
             pos = 0;
             result.completed = true;
             return result;
@@ -69,7 +76,7 @@ protected:
 
         pos += result.written;
         if (pos >= current.length()) {
-            current = "";
+            release_line_string(current);
             pos = 0;
             result.completed = true;
         }
