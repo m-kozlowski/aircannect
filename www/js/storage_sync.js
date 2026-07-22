@@ -497,6 +497,14 @@
         encodeURIComponent(id), {cache: "no-store"});
     }
 
+    async function storageCancelUploadSession(id) {
+      if (!id) return;
+      try {
+        await storageUploadRequest("/api/storage/upload/cancel?id=" +
+          encodeURIComponent(id), {method: "POST"});
+      } catch (_) {}
+    }
+
     async function storageWaitForUpload(id, predicate) {
       for (;;) {
         if (storageUploadCancelRequested) throw new Error("upload_cancelled");
@@ -504,6 +512,10 @@
         try {
           status = await storageUploadStatus(id);
         } catch (error) {
+          if (error.status === 503 && error.message === "status_busy") {
+            await storageDelay(100);
+            continue;
+          }
           if (Number(error.status) > 0) throw error;
           await storageDelay(1000);
           continue;
@@ -543,7 +555,8 @@
         });
       } catch (error) {
         if (error.status !== 409 ||
-            !["paused", "chunk_pending"].includes(error.message)) {
+            !["paused", "chunk_pending", "service_busy"].includes(
+              error.message)) {
           throw error;
         }
         return false;
@@ -558,10 +571,12 @@
       const destinationName = settings.filename || file.name;
       let conflict = settings.conflict || "fail";
       for (;;) {
-        const session = await storageStartUpload(
-          file, directory, conflict, destinationName);
-        storageUploadCurrentId = Number(session.id) || 0;
+        let session = null;
         try {
+          session = await storageStartUpload(
+            file, directory, conflict, destinationName);
+          storageUploadCurrentId = Number(session.id) || 0;
+
           let status = await storageWaitForUpload(session.id, (current) =>
             current.state === "ready" || current.state === "done");
           let committed = Number(status.committed_bytes) || 0;
@@ -603,7 +618,10 @@
           storageUploadCurrentId = 0;
           return true;
         } catch (error) {
+          const failedId = session ? Number(session.id) || 0 : 0;
+          await storageCancelUploadSession(failedId);
           storageUploadCurrentId = 0;
+
           if (error.message === "destination_exists" && conflict === "fail") {
             if (settings.confirmReplace !== false &&
                 window.confirm(file.name + " already exists. Replace it?")) {
@@ -657,10 +675,7 @@
       const button = document.getElementById("storageUploadCancelBtn");
       if (button) button.disabled = true;
       try {
-        if (id) {
-          await storageUploadRequest("/api/storage/upload/cancel?id=" +
-            encodeURIComponent(id), {method: "POST"});
-        }
+        await storageCancelUploadSession(id);
       } catch (_) {
       } finally {
         if (button) button.disabled = false;

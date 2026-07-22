@@ -21,7 +21,7 @@ namespace {
 
 static constexpr const char *UPLOAD_DIR = "/aircannect/.uploads";
 static constexpr size_t WRITE_STEP_BYTES = 4096;
-static constexpr uint32_t ACTIVE_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+static constexpr uint32_t CLIENT_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 
 bool normalize_sha256(const std::string &value, char out[65]) {
     out[0] = '\0';
@@ -115,6 +115,7 @@ StorageUploadService::~StorageUploadService() {
     }
     release_maintenance_locked();
     if (lock_) vSemaphoreDelete(lock_);
+    if (status_mutex_) vSemaphoreDelete(status_mutex_);
 }
 
 bool StorageUploadService::begin(
@@ -127,7 +128,10 @@ bool StorageUploadService::begin(
     claim_maintenance_ = claim_maintenance;
     release_maintenance_ = release_maintenance;
     if (!lock_) lock_ = xSemaphoreCreateMutex();
-    if (!lock_) return false;
+    if (!status_mutex_) {
+        status_mutex_ = xSemaphoreCreateMutexStatic(&status_mutex_storage_);
+    }
+    if (!lock_ || !status_mutex_) return false;
 
     if (!job_) {
         void *memory = Memory::alloc_large(sizeof(Job), false);
@@ -150,7 +154,7 @@ void StorageUploadService::set_paused(bool paused) {
 }
 
 bool StorageUploadService::ready() const {
-    return lock_ && job_ && atomic_write_port_ &&
+    return lock_ && status_mutex_ && job_ && atomic_write_port_ &&
            task_available_.load(std::memory_order_acquire);
 }
 
@@ -161,6 +165,15 @@ bool StorageUploadService::lock(uint32_t timeout_ms) const {
 
 void StorageUploadService::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
+}
+
+bool StorageUploadService::status_lock(uint32_t timeout_ms) const {
+    return status_mutex_ &&
+           xSemaphoreTake(status_mutex_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void StorageUploadService::status_unlock() const {
+    if (status_mutex_) xSemaphoreGive(status_mutex_);
 }
 
 void StorageUploadService::wake() const {
@@ -185,6 +198,45 @@ void StorageUploadService::release_maintenance_locked() {
     if (!maintenance_claimed_) return;
     if (release_maintenance_) release_maintenance_();
     maintenance_claimed_ = false;
+}
+
+void StorageUploadService::publish_status_locked() {
+    if (!job_ || !status_mutex_ ||
+        xSemaphoreTake(status_mutex_, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+
+    status_snapshot_ = job_->status;
+    status_snapshot_valid_ = status_snapshot_.id != 0;
+    status_unlock();
+}
+
+void StorageUploadService::queue_publication_notice_locked() {
+    if (!status_mutex_ ||
+        xSemaphoreTake(status_mutex_, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+
+    copy_cstr(publication_notice_path_, sizeof(publication_notice_path_),
+              job_->status.path);
+    publication_notice_pending_ = publication_notice_path_[0] != '\0';
+    status_unlock();
+}
+
+bool StorageUploadService::take_published_path(char *path,
+                                               size_t path_size) {
+    if (!path || path_size == 0) return false;
+    path[0] = '\0';
+    if (!status_lock()) return false;
+
+    const bool available = publication_notice_pending_;
+    if (available) {
+        copy_cstr(path, path_size, publication_notice_path_);
+        publication_notice_path_[0] = '\0';
+        publication_notice_pending_ = false;
+    }
+    status_unlock();
+    return available;
 }
 
 StorageUploadStartResult StorageUploadService::start(
@@ -222,6 +274,7 @@ StorageUploadStartResult StorageUploadService::start(
     job_->last_activity_ms = millis();
     copy_cstr(job_->expected_sha256, sizeof(job_->expected_sha256),
               expected_sha256);
+    publish_status_locked();
 
     result.admission = OperationAdmission::Accepted;
     result.id = id;
@@ -288,18 +341,19 @@ StorageUploadChunkResult StorageUploadService::submit(
     return result;
 }
 
-bool StorageUploadService::status(uint32_t id,
-                                  StorageUploadStatus &status_out) const {
+StorageUploadStatusRead StorageUploadService::status(
+    uint32_t id, StorageUploadStatus &status_out) const {
     status_out = {};
-    if (!job_ || !lock()) return false;
-    if (id != 0 && job_->status.id != id) {
-        unlock();
-        return false;
+    if (!status_lock()) return StorageUploadStatusRead::Busy;
+    if (!status_snapshot_valid_ ||
+        (id != 0 && status_snapshot_.id != id)) {
+        status_unlock();
+        return StorageUploadStatusRead::NotFound;
     }
 
-    status_out = job_->status;
-    unlock();
-    return true;
+    status_out = status_snapshot_;
+    status_unlock();
+    return StorageUploadStatusRead::Found;
 }
 
 bool StorageUploadService::cancel(uint32_t id) {
@@ -380,7 +434,7 @@ bool StorageUploadService::pause_locked(const char *&error) {
     }
 
     job_->resume_state = job_->status.state;
-    job_->status.state = StorageUploadState::Paused;
+    set_state_locked(StorageUploadState::Paused);
     return true;
 }
 
@@ -403,7 +457,7 @@ bool StorageUploadService::resume_locked(const char *&error) {
         (void)job_->output.setBufferSize(4096);
     }
 
-    job_->status.state = job_->resume_state;
+    set_state_locked(job_->resume_state);
     job_->resume_state = StorageUploadState::Idle;
     return true;
 }
@@ -544,6 +598,7 @@ bool StorageUploadService::poll_publication_locked(const char *&error) {
         return false;
     }
 
+    queue_publication_notice_locked();
     finish_locked(StorageUploadState::Done);
     return true;
 }
@@ -582,6 +637,7 @@ bool StorageUploadService::cleanup_abandoned_step_locked() {
 void StorageUploadService::set_state_locked(StorageUploadState state) {
     job_->status.state = state;
     job_->status.error[0] = '\0';
+    publish_status_locked();
 }
 
 void StorageUploadService::finish_locked(StorageUploadState state,
@@ -593,6 +649,7 @@ void StorageUploadService::finish_locked(StorageUploadState state,
     copy_cstr(job_->status.error, sizeof(job_->status.error), error);
     job_->last_activity_ms = millis();
     release_maintenance_locked();
+    publish_status_locked();
 
     if (state == StorageUploadState::Error && error) {
         Log::logf(CAT_STORAGE, LOG_WARN,
@@ -639,11 +696,20 @@ bool StorageUploadService::step() {
     if (!ready() || !lock(50)) return false;
 
     if (!job_->status.active()) {
+        if (!cleanup_pending_ || !claim_maintenance_locked()) {
+            unlock();
+            return false;
+        }
         const bool cleaned = cleanup_abandoned_step_locked();
+        release_maintenance_locked();
         unlock();
         return cleaned;
     }
     if (job_->cancel_requested) {
+        if (!claim_maintenance_locked()) {
+            unlock();
+            return false;
+        }
         cancel_locked();
         unlock();
         return true;
@@ -652,6 +718,15 @@ bool StorageUploadService::step() {
     const bool paused = paused_.load(std::memory_order_acquire);
     const char *pause_error = nullptr;
     if (paused && job_->status.state != StorageUploadState::Publishing) {
+        if (job_->status.state == StorageUploadState::Paused) {
+            release_maintenance_locked();
+            unlock();
+            return false;
+        }
+        if (!claim_maintenance_locked()) {
+            unlock();
+            return false;
+        }
         if (job_->status.state != StorageUploadState::Paused) {
             if (!pause_locked(pause_error)) {
                 finish_locked(StorageUploadState::Error,
@@ -676,18 +751,27 @@ bool StorageUploadService::step() {
             return true;
         }
     }
-    if (!claim_maintenance_locked()) {
-        unlock();
-        return false;
-    }
 
     const uint32_t now_ms = millis();
-    if (!paused && job_->status.state == StorageUploadState::Ready &&
-        static_cast<int32_t>(now_ms - job_->last_activity_ms) >=
-            static_cast<int32_t>(ACTIVE_IDLE_TIMEOUT_MS)) {
+    if (job_->status.state == StorageUploadState::Ready) {
+        release_maintenance_locked();
+        if (static_cast<int32_t>(now_ms - job_->last_activity_ms) <
+            static_cast<int32_t>(CLIENT_IDLE_TIMEOUT_MS)) {
+            unlock();
+            return false;
+        }
+        if (!claim_maintenance_locked()) {
+            unlock();
+            return false;
+        }
         cancel_locked();
         unlock();
         return true;
+    }
+
+    if (!claim_maintenance_locked()) {
+        unlock();
+        return false;
     }
 
     const char *error = nullptr;
@@ -718,6 +802,13 @@ bool StorageUploadService::step() {
         finish_locked(StorageUploadState::Error,
                       error ? error : "upload_failed");
     }
+
+    const bool retain_maintenance =
+        job_->status.state == StorageUploadState::Writing ||
+        (job_->status.state == StorageUploadState::Publishing &&
+         job_->publication_ticket.valid());
+    if (!retain_maintenance) release_maintenance_locked();
+
     unlock();
     return worked;
 }

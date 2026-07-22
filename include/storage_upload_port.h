@@ -94,6 +94,12 @@ struct StorageUploadStatus {
     }
 };
 
+enum class StorageUploadStatusRead : uint8_t {
+    Found,
+    NotFound,
+    Busy,
+};
+
 const char *storage_upload_state_name(StorageUploadState state);
 
 class StorageUploadPort {
@@ -104,7 +110,8 @@ public:
         const StorageUploadStartCommand &command) = 0;
     virtual StorageUploadChunkResult submit(
         const StorageUploadChunkCommand &command) = 0;
-    virtual bool status(uint32_t id, StorageUploadStatus &status_out) const = 0;
+    virtual StorageUploadStatusRead status(
+        uint32_t id, StorageUploadStatus &status_out) const = 0;
     virtual bool cancel(uint32_t id) = 0;
 };
 

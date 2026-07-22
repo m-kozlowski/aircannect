@@ -42,6 +42,7 @@ public:
 
     bool request_refresh(bool foreground = true);
     bool request_remove(const char *path);
+    void notify_file_published(const char *path);
     void publish_activity(const ActivitySnapshot &activity);
 
     ResmedFirmwareRepositoryStatus status() const;
@@ -60,6 +61,7 @@ private:
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
     uint32_t next_generation();
+    void request_refresh_locked(bool foreground);
 
     void poll_completion();
     void start_pending_operation();
@@ -78,6 +80,8 @@ private:
     ActivitySnapshot activity_;
     bool refresh_requested_ = true;
     bool foreground_refresh_ = false;
+    uint32_t refresh_generation_ = 1;
+    uint32_t active_refresh_generation_ = 0;
     bool remove_requested_ = false;
     char remove_path_[AC_STORAGE_PATH_MAX] = {};
 

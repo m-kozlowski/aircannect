@@ -1279,14 +1279,19 @@
         clearTimeout(resmedRepositoryPollTimer);
         resmedRepositoryPollTimer = null;
       }
+      if (refresh) resmedRepositoryPollDelayMs = 500;
 
       try {
         const data = await fetchResmedRepository(!!refresh);
         renderResmedRepository(data);
         if (data.refresh_pending ||
             ["idle", "preparing", "scanning", "removing"].includes(data.state)) {
+          const delay = resmedRepositoryPollDelayMs;
+          resmedRepositoryPollDelayMs = Math.min(5000, delay * 2);
           resmedRepositoryPollTimer = setTimeout(
-            () => loadResmedRepository(false), 500);
+            () => loadResmedRepository(false), delay);
+        } else {
+          resmedRepositoryPollDelayMs = 500;
         }
       } catch (error) {
         msg("resmedRepositoryMsg", error.message, false, true);

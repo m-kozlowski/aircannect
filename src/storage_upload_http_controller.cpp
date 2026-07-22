@@ -423,7 +423,19 @@ void StorageUploadHttpController::send_status(
     }
 
     StorageUploadStatus status;
-    if (!upload_port_ || !upload_port_->status(id, status)) {
+    if (!upload_port_) {
+        request->send(503, "application/json",
+                      upload_error_json("upload_unavailable"));
+        return;
+    }
+
+    const StorageUploadStatusRead read = upload_port_->status(id, status);
+    if (read == StorageUploadStatusRead::Busy) {
+        request->send(503, "application/json",
+                      upload_error_json("status_busy"));
+        return;
+    }
+    if (read == StorageUploadStatusRead::NotFound) {
         request->send(404, "application/json",
                       upload_error_json("upload_not_found"));
         return;

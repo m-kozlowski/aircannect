@@ -362,6 +362,13 @@ static void publish_runtime_network() {
     export_task.publish_network(runtime_network);
 }
 
+static void poll_storage_upload_publication() {
+    char path[AC_STORAGE_PATH_MAX] = {};
+    if (StorageService::take_uploaded_path(path, sizeof(path))) {
+        resmed_firmware_repository.notify_file_published(path);
+    }
+}
+
 static void publish_export_config(uint32_t now_ms) {
     if (export_config_due_ms != 0 &&
         static_cast<int32_t>(now_ms - export_config_due_ms) < 0) {
@@ -1125,6 +1132,7 @@ void loop() {
     export_coordinator.poll(report_activity, storage_activity, now_ms);
     drain_can_rx_after("export_coordinator");
 
+    poll_storage_upload_publication();
     resmed_firmware_repository.poll();
     drain_can_rx_after("resmed_firmware_repository");
 

@@ -201,6 +201,7 @@ StorageBrowserPort &browser_port();
 
 // Bounded inbound file uploads
 StorageUploadPort &upload_port();
+bool take_uploaded_path(char *path, size_t path_size);
 
 // Background storage maintenance
 StorageScanPort &scan_port();

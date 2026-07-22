@@ -2489,6 +2489,10 @@ StorageUploadPort &upload_port() {
     return upload_service;
 }
 
+bool take_uploaded_path(char *path, size_t path_size) {
+    return upload_service.take_published_path(path, path_size);
+}
+
 StorageArchivePort &archive_port() {
     return archive_service;
 }
@@ -2562,8 +2566,9 @@ void publish_activity(const ActivitySnapshot &activity) {
 StorageServiceStatus status() {
     StorageServiceStatus out = stats;
     StorageUploadStatus upload;
-    const bool upload_active = upload_service.status(0, upload) &&
-                               upload.active();
+    const bool upload_active =
+        upload_service.status(0, upload) == StorageUploadStatusRead::Found &&
+        upload.active();
     if (lock_queue()) {
         refresh_read_status_locked();
         out = stats;

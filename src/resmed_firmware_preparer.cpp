@@ -472,7 +472,13 @@ bool ResmedFirmwarePreparer::wait_for_upload(
     while (!should_abort() &&
            !deadline_reached(started_ms, UploadWaitTimeoutMs)) {
         StorageUploadStatus status;
-        if (!upload_port_->status(upload_id, status)) {
+        const StorageUploadStatusRead read =
+            upload_port_->status(upload_id, status);
+        if (read == StorageUploadStatusRead::Busy) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+        if (read == StorageUploadStatusRead::NotFound) {
             copy_cstr(error, error_size, "upload_status_failed");
             return false;
         }

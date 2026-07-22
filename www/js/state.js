@@ -49,6 +49,7 @@
       bps: 0,
     };
     let resmedRepositoryPollTimer = null;
+    let resmedRepositoryPollDelayMs = 500;
     let resmedDirectUploadBusy = false;
     const LIVE_FAST_POINTS = 6000;
     const LIVE_MEDIUM_POINTS = 3000;

@@ -51,13 +51,20 @@ uint32_t ResmedFirmwareRepository::next_generation() {
     return generation_;
 }
 
-bool ResmedFirmwareRepository::request_refresh(bool foreground) {
-    if (!lock()) return false;
+void ResmedFirmwareRepository::request_refresh_locked(bool foreground) {
+    refresh_generation_++;
+    if (refresh_generation_ == 0) refresh_generation_++;
 
     refresh_requested_ = true;
     foreground_refresh_ = foreground_refresh_ || foreground;
     retry_at_ms_ = 0;
     status_.refresh_pending = true;
+}
+
+bool ResmedFirmwareRepository::request_refresh(bool foreground) {
+    if (!lock()) return false;
+
+    request_refresh_locked(foreground);
     unlock();
     return true;
 }
@@ -75,6 +82,10 @@ bool ResmedFirmwareRepository::direct_repository_file(
 
     const char *filename = path + prefix_length + 1;
     return filename[0] != '\0' && strchr(filename, '/') == nullptr;
+}
+
+void ResmedFirmwareRepository::notify_file_published(const char *path) {
+    if (direct_repository_file(path)) (void)request_refresh(false);
 }
 
 bool ResmedFirmwareRepository::request_remove(const char *path) {
@@ -134,12 +145,14 @@ void ResmedFirmwareRepository::publish_status(
 void ResmedFirmwareRepository::fail_action(const char *error) {
     action_ = Action::None;
     ticket_ = {};
+    active_refresh_generation_ = 0;
     directory_ready_ = false;
 
     const char *reason = error && error[0] ? error : "repository_failed";
     if (lock(50)) {
         retry_at_ms_ = millis() + RetryDelayMs;
         status_.state = ResmedFirmwareRepositoryState::Error;
+        status_.refresh_pending = refresh_requested_;
         copy_cstr(status_.error, sizeof(status_.error), reason);
         unlock();
     }
@@ -180,14 +193,16 @@ void ResmedFirmwareRepository::poll_completion() {
             return;
         }
         snapshot_ = next;
-        refresh_requested_ = false;
-        foreground_refresh_ = false;
+        refresh_requested_ =
+            refresh_generation_ != active_refresh_generation_;
+        if (!refresh_requested_) foreground_refresh_ = false;
+        active_refresh_generation_ = 0;
         retry_at_ms_ = 0;
         status_.state = ResmedFirmwareRepositoryState::Ready;
         status_.revision = next->revision();
         status_.entries = next->size();
         status_.truncated = next->truncated();
-        status_.refresh_pending = false;
+        status_.refresh_pending = refresh_requested_;
         status_.error[0] = '\0';
         unlock();
         return;
@@ -214,9 +229,7 @@ void ResmedFirmwareRepository::poll_completion() {
         if (lock(50)) {
             remove_requested_ = false;
             remove_path_[0] = '\0';
-            refresh_requested_ = true;
-            foreground_refresh_ = true;
-            retry_at_ms_ = 0;
+            request_refresh_locked(true);
             unlock();
         }
         publish_status(ResmedFirmwareRepositoryState::Idle);
@@ -227,6 +240,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
     bool refresh_requested = false;
     bool foreground_refresh = false;
     bool remove_requested = false;
+    uint32_t refresh_generation = 0;
     char remove_path[AC_STORAGE_PATH_MAX] = {};
     ActivitySnapshot activity;
     uint32_t retry_at_ms = 0;
@@ -234,6 +248,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
     refresh_requested = refresh_requested_;
     foreground_refresh = foreground_refresh_;
     remove_requested = remove_requested_;
+    refresh_generation = refresh_generation_;
     copy_cstr(remove_path, sizeof(remove_path), remove_path_);
     activity = activity_;
     retry_at_ms = retry_at_ms_;
@@ -300,6 +315,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
     if (submitted.accepted()) {
         ticket_ = submitted.ticket;
         action_ = Action::Scan;
+        active_refresh_generation_ = refresh_generation;
         publish_status(ResmedFirmwareRepositoryState::Scanning);
     } else if (submitted.admission == OperationAdmission::Rejected) {
         fail_action("repository_scan_rejected");
