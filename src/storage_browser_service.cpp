@@ -57,7 +57,8 @@ class StorageDirectoryListing {
 public:
     ~StorageDirectoryListing();
 
-    void begin();
+    bool begin();
+    bool available() const { return lock_ != nullptr; }
     StorageListingRead read(
         const char *path,
         bool refresh,
@@ -126,7 +127,8 @@ class StorageDownloadProducer {
 public:
     ~StorageDownloadProducer();
 
-    void begin();
+    bool begin();
+    bool available() const { return lock_ != nullptr; }
     bool active_or_busy() const;
     StorageDownloadPrepareState prepare(
         const char *path,
@@ -184,8 +186,9 @@ StorageDirectoryListing::~StorageDirectoryListing() {
     if (lock_) vSemaphoreDelete(lock_);
 }
 
-void StorageDirectoryListing::begin() {
+bool StorageDirectoryListing::begin() {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
+    return lock_ != nullptr;
 }
 
 bool StorageDirectoryListing::lock(uint32_t timeout_ms) const {
@@ -201,8 +204,9 @@ StorageDownloadProducer::~StorageDownloadProducer() {
     if (lock_) vSemaphoreDelete(lock_);
 }
 
-void StorageDownloadProducer::begin() {
+bool StorageDownloadProducer::begin() {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
+    return lock_ != nullptr;
 }
 
 bool StorageDownloadProducer::lock(uint32_t timeout_ms) const {
@@ -974,9 +978,9 @@ bool StorageBrowserService::ensure_owners() {
         download_ = new (memory) StorageDownloadProducer();
     }
 
-    listing_->begin();
-    download_->begin();
-    return true;
+    const bool listing_ready = listing_->begin();
+    const bool download_ready = download_->begin();
+    return listing_ready && download_ready;
 }
 
 bool StorageBrowserService::begin(WakeCallback wake) {
@@ -996,7 +1000,8 @@ void StorageBrowserService::set_task_available(bool available) {
 }
 
 bool StorageBrowserService::ready() const {
-    return task_available_ && listing_ && download_;
+    return task_available_ && listing_ && listing_->available() &&
+           download_ && download_->available();
 }
 
 void StorageBrowserService::wake() const {

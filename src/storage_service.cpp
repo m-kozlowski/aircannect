@@ -233,8 +233,17 @@ size_t file_log_burst = 0;
 size_t foreground_turn = 0;
 std::atomic<bool> mount_retry_requested{false};
 std::atomic<bool> capacity_update_allowed{true};
+bool storage_resources_ready = false;
+uint32_t storage_resource_retry_at_ms = 0;
+uint8_t storage_resource_retry_attempt = 0;
+uint32_t mount_retry_at_ms = 0;
+uint8_t mount_retry_attempt = 0;
 
 static constexpr size_t AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY = 512;
+static constexpr uint32_t STORAGE_RESOURCE_RETRY_MIN_MS = 1000;
+static constexpr uint32_t STORAGE_RESOURCE_RETRY_MAX_MS = 30000;
+static constexpr uint32_t STORAGE_MOUNT_RETRY_MIN_MS = 5000;
+static constexpr uint32_t STORAGE_MOUNT_RETRY_MAX_MS = 60000;
 StorageDiagnosticStatus diagnostic;
 uint8_t *diagnostic_payload = nullptr;
 size_t diagnostic_payload_length = 0;
@@ -276,6 +285,25 @@ void release_delete_maintenance() {
 
 constexpr size_t max_size(size_t a, size_t b) {
     return a > b ? a : b;
+}
+
+bool deadline_due(uint32_t now_ms, uint32_t deadline_ms) {
+    return deadline_ms == 0 ||
+           static_cast<int32_t>(now_ms - deadline_ms) >= 0;
+}
+
+uint32_t retry_delay(uint8_t attempt,
+                     uint32_t minimum_ms,
+                     uint32_t maximum_ms) {
+    uint32_t delay_ms = minimum_ms;
+    for (uint8_t i = 0; i < attempt && delay_ms < maximum_ms; ++i) {
+        delay_ms = std::min(delay_ms * 2u, maximum_ms);
+    }
+    return delay_ms;
+}
+
+void advance_retry(uint8_t &attempt) {
+    if (attempt < 8) ++attempt;
 }
 
 static constexpr size_t AC_EDF_STORAGE_NUMERIC_VALUE_MAX = max_size(
@@ -777,92 +805,268 @@ void clear_slot(JobSlot &slot) {
     slot.numeric_valid = numeric_valid;
 }
 
-void free_slot_storage() {
-    Memory::free(slots);
-    Memory::free(slot_bytes);
-    Memory::free(slot_numeric_values);
-    Memory::free(slot_numeric_present);
-    Memory::free(slot_numeric_valid);
-    slots = nullptr;
-    slot_bytes = nullptr;
-    slot_numeric_values = nullptr;
-    slot_numeric_present = nullptr;
-    slot_numeric_valid = nullptr;
-}
-
 bool slot_storage_available() {
     return slots && slot_bytes && slot_numeric_values &&
            slot_numeric_present && slot_numeric_valid;
 }
 
-void bind_slot_storage(size_t index) {
-    slots[index].bytes = slot_bytes + index * AC_EDF_STORAGE_SLOT_BYTES;
-    slots[index].numeric_values =
-        slot_numeric_values + index * AC_EDF_STORAGE_NUMERIC_VALUE_MAX;
-    slots[index].numeric_present =
-        slot_numeric_present + index * AC_EDF_STORAGE_NUMERIC_BIT_BYTES;
-    slots[index].numeric_valid =
-        slot_numeric_valid + index * AC_EDF_STORAGE_NUMERIC_BIT_BYTES;
+void free_slot_storage(JobSlot *candidate_slots,
+                       uint8_t *candidate_bytes,
+                       float *candidate_numeric_values,
+                       uint8_t *candidate_numeric_present,
+                       uint8_t *candidate_numeric_valid) {
+    Memory::free(candidate_slots);
+    Memory::free(candidate_bytes);
+    Memory::free(candidate_numeric_values);
+    Memory::free(candidate_numeric_present);
+    Memory::free(candidate_numeric_valid);
+}
+
+void bind_slot_storage(JobSlot *candidate_slots,
+                       uint8_t *candidate_bytes,
+                       float *candidate_numeric_values,
+                       uint8_t *candidate_numeric_present,
+                       uint8_t *candidate_numeric_valid,
+                       size_t index) {
+    JobSlot &slot = candidate_slots[index];
+    slot.bytes = candidate_bytes + index * AC_EDF_STORAGE_SLOT_BYTES;
+    slot.numeric_values =
+        candidate_numeric_values +
+        index * AC_EDF_STORAGE_NUMERIC_VALUE_MAX;
+    slot.numeric_present =
+        candidate_numeric_present +
+        index * AC_EDF_STORAGE_NUMERIC_BIT_BYTES;
+    slot.numeric_valid =
+        candidate_numeric_valid +
+        index * AC_EDF_STORAGE_NUMERIC_BIT_BYTES;
 }
 
 bool allocate_slots() {
     if (slot_storage_available()) return true;
-    slots = static_cast<JobSlot *>(Memory::calloc_large(
+
+    JobSlot *candidate_slots = static_cast<JobSlot *>(Memory::calloc_large(
         AC_EDF_STORAGE_QUEUE_CAPACITY, sizeof(JobSlot), false));
-    slot_bytes = static_cast<uint8_t *>(Memory::alloc_large(
+    uint8_t *candidate_bytes = static_cast<uint8_t *>(Memory::alloc_large(
         AC_EDF_STORAGE_SLOT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY, false));
-    slot_numeric_values = static_cast<float *>(Memory::alloc_large(
-        AC_EDF_STORAGE_NUMERIC_VALUE_MAX * AC_EDF_STORAGE_QUEUE_CAPACITY *
-            sizeof(float),
-        false));
-    slot_numeric_present = static_cast<uint8_t *>(Memory::alloc_large(
-        AC_EDF_STORAGE_NUMERIC_BIT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY,
-        false));
-    slot_numeric_valid = static_cast<uint8_t *>(Memory::alloc_large(
-        AC_EDF_STORAGE_NUMERIC_BIT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY,
-        false));
-    if (!slot_storage_available()) {
-        if (!slots) {
+    float *candidate_numeric_values = static_cast<float *>(
+        Memory::alloc_large(AC_EDF_STORAGE_NUMERIC_VALUE_MAX *
+                                AC_EDF_STORAGE_QUEUE_CAPACITY * sizeof(float),
+                            false));
+    uint8_t *candidate_numeric_present = static_cast<uint8_t *>(
+        Memory::alloc_large(AC_EDF_STORAGE_NUMERIC_BIT_BYTES *
+                                AC_EDF_STORAGE_QUEUE_CAPACITY,
+                            false));
+    uint8_t *candidate_numeric_valid = static_cast<uint8_t *>(
+        Memory::alloc_large(
+            AC_EDF_STORAGE_NUMERIC_BIT_BYTES *
+                AC_EDF_STORAGE_QUEUE_CAPACITY,
+            false));
+    const bool complete = candidate_slots && candidate_bytes &&
+                          candidate_numeric_values &&
+                          candidate_numeric_present &&
+                          candidate_numeric_valid;
+    if (!complete) {
+        if (!candidate_slots) {
             log_alloc_failed("queue_slots",
                              AC_EDF_STORAGE_QUEUE_CAPACITY * sizeof(JobSlot));
         }
-        if (!slot_bytes) {
+        if (!candidate_bytes) {
             log_alloc_failed(
                 "queue_payloads",
                 AC_EDF_STORAGE_SLOT_BYTES * AC_EDF_STORAGE_QUEUE_CAPACITY);
         }
-        if (!slot_numeric_values) {
+        if (!candidate_numeric_values) {
             log_alloc_failed("queue_numeric_values",
                              AC_EDF_STORAGE_NUMERIC_VALUE_MAX *
                                  AC_EDF_STORAGE_QUEUE_CAPACITY *
                                  sizeof(float));
         }
-        if (!slot_numeric_present) {
+        if (!candidate_numeric_present) {
             log_alloc_failed("queue_numeric_present",
                              AC_EDF_STORAGE_NUMERIC_BIT_BYTES *
                                  AC_EDF_STORAGE_QUEUE_CAPACITY);
         }
-        if (!slot_numeric_valid) {
+        if (!candidate_numeric_valid) {
             log_alloc_failed("queue_numeric_valid",
                              AC_EDF_STORAGE_NUMERIC_BIT_BYTES *
                                  AC_EDF_STORAGE_QUEUE_CAPACITY);
         }
-        free_slot_storage();
-        set_error("allocation_failed");
-        stats.available = false;
+        free_slot_storage(candidate_slots,
+                          candidate_bytes,
+                          candidate_numeric_values,
+                          candidate_numeric_present,
+                          candidate_numeric_valid);
+        set_error("edf_queue_allocation_failed");
         return false;
     }
+
     for (size_t i = 0; i < AC_EDF_STORAGE_QUEUE_CAPACITY; ++i) {
-        bind_slot_storage(i);
-        clear_slot(slots[i]);
+        bind_slot_storage(candidate_slots,
+                          candidate_bytes,
+                          candidate_numeric_values,
+                          candidate_numeric_present,
+                          candidate_numeric_valid,
+                          i);
     }
+
+    if (!lock_queue(50)) {
+        free_slot_storage(candidate_slots,
+                          candidate_bytes,
+                          candidate_numeric_values,
+                          candidate_numeric_present,
+                          candidate_numeric_valid);
+        return false;
+    }
+
+    if (slot_storage_available()) {
+        unlock_queue();
+        free_slot_storage(candidate_slots,
+                          candidate_bytes,
+                          candidate_numeric_values,
+                          candidate_numeric_present,
+                          candidate_numeric_valid);
+        return true;
+    }
+
+    slots = candidate_slots;
+    slot_bytes = candidate_bytes;
+    slot_numeric_values = candidate_numeric_values;
+    slot_numeric_present = candidate_numeric_present;
+    slot_numeric_valid = candidate_numeric_valid;
     stats.using_psram = Memory::psram_available();
     stats.edf_capacity = AC_EDF_STORAGE_QUEUE_CAPACITY;
+    if (strcmp(stats.last_error, "edf_queue_allocation_failed") == 0) {
+        stats.last_error[0] = '\0';
+    }
+    unlock_queue();
+    return true;
+}
+
+bool allocate_diagnostic_payload() {
+    if (diagnostic_payload) {
+        diagnostic.available = true;
+        return true;
+    }
+
+    diagnostic_payload = static_cast<uint8_t *>(
+        Memory::alloc_large(AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY, false));
+    diagnostic.available = diagnostic_payload != nullptr;
+    if (!diagnostic.available) {
+        diagnostic.state = StorageDiagnosticState::Failed;
+        copy_cstr(diagnostic.error, sizeof(diagnostic.error),
+                  "allocation_failed");
+        return false;
+    }
+
+    if (strcmp(diagnostic.error, "allocation_failed") == 0) {
+        diagnostic.state = StorageDiagnosticState::Idle;
+        diagnostic.error[0] = '\0';
+    }
+    return true;
+}
+
+bool initialize_storage_resources() {
+    bool ready = allocate_slots();
+    if (!allocate_diagnostic_payload()) ready = false;
+#if AC_FILE_LOG_ENABLED
+    if (!file_log_sink.begin(wake_service_task)) ready = false;
+#endif
+    if (!browser_service.begin(wake_service_task)) ready = false;
+    if (!archive_service.begin(wake_service_task,
+                               claim_archive_maintenance,
+                               release_archive_maintenance)) {
+        ready = false;
+    }
+    if (!delete_service.begin(wake_service_task,
+                              claim_delete_maintenance,
+                              release_delete_maintenance)) {
+        ready = false;
+    }
+    if (!path_service.begin(wake_service_task)) ready = false;
+    if (!atomic_write_service.begin(wake_service_task)) ready = false;
+    if (!scan_service.begin(wake_service_task,
+                            claim_scan_maintenance,
+                            release_scan_maintenance)) {
+        ready = false;
+    }
+    if (!stream_service.begin(wake_service_task)) ready = false;
+    return ready;
+}
+
+void set_storage_task_available(bool available) {
+    browser_service.set_task_available(available);
+    archive_service.set_task_available(available);
+    delete_service.set_task_available(available);
+    path_service.set_task_available(available);
+    atomic_write_service.set_task_available(available);
+    scan_service.set_task_available(available);
+    stream_service.set_task_available(available);
+}
+
+bool process_storage_resource_recovery(uint32_t now_ms) {
+    if (storage_resources_ready ||
+        !deadline_due(now_ms, storage_resource_retry_at_ms)) {
+        return false;
+    }
+
+    storage_resources_ready = initialize_storage_resources();
+    if (storage_resources_ready) {
+        storage_resource_retry_at_ms = 0;
+        storage_resource_retry_attempt = 0;
+        Log::logf(CAT_STORAGE, LOG_INFO,
+                  "storage service resources recovered\n");
+        return true;
+    }
+
+    storage_resource_retry_at_ms =
+        now_ms + retry_delay(storage_resource_retry_attempt,
+                             STORAGE_RESOURCE_RETRY_MIN_MS,
+                             STORAGE_RESOURCE_RETRY_MAX_MS);
+    advance_retry(storage_resource_retry_attempt);
+    return true;
+}
+
+bool process_mount_recovery(uint32_t now_ms) {
+    const bool manual_retry = mount_retry_requested.exchange(false);
+    const StorageStatus storage = Storage::status();
+    if (storage.mounted) {
+        mount_retry_at_ms = 0;
+        mount_retry_attempt = 0;
+        return false;
+    }
+
+    const bool automatic_retry =
+        storage.configured && storage.state == StorageState::NotPresent;
+    if (!manual_retry && !automatic_retry) {
+        mount_retry_at_ms = 0;
+        mount_retry_attempt = 0;
+        return false;
+    }
+
+    if (!manual_retry && !deadline_due(now_ms, mount_retry_at_ms)) {
+        return false;
+    }
+
+    if (Storage::retry_mount()) {
+        mount_retry_at_ms = 0;
+        mount_retry_attempt = 0;
+        cleanup_str_backup_artifacts();
+        return true;
+    }
+
+    mount_retry_at_ms =
+        now_ms + retry_delay(mount_retry_attempt,
+                             STORAGE_MOUNT_RETRY_MIN_MS,
+                             STORAGE_MOUNT_RETRY_MAX_MS);
+    advance_retry(mount_retry_attempt);
     return true;
 }
 
 bool push_slot(const JobSlot &job) {
-    if (!slots || queued >= AC_EDF_STORAGE_QUEUE_CAPACITY) return false;
+    if (!slot_storage_available() ||
+        queued >= AC_EDF_STORAGE_QUEUE_CAPACITY) {
+        return false;
+    }
     uint8_t *bytes = slots[tail].bytes;
     float *numeric_values = slots[tail].numeric_values;
     uint8_t *numeric_present = slots[tail].numeric_present;
@@ -2010,64 +2214,69 @@ void task_entry(void *) {
     stats.task_started = true;
 
     for (;;) {
-        bool have_job = false;
-        size_t slot_index = SIZE_MAX;
-        if (lock_queue(50)) {
-            if (slots && queued > 0 && !processing_job) {
-                slot_index = head;
-                head = (head + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-                queued--;
-                stats.edf_queued = queued;
-                processing_job = true;
-                have_job = true;
-            }
-            unlock_queue();
-        }
-
         bool did_work = false;
-        if (have_job) {
-            process_job(slots[slot_index]);
-            if (lock_queue(50)) {
-                clear_slot(slots[slot_index]);
-                processing_job = false;
-                unlock_queue();
-            } else {
-                processing_job = false;
-            }
+        const uint32_t now_ms = millis();
+        if (process_mount_recovery(now_ms) ||
+            process_storage_resource_recovery(now_ms)) {
             did_work = true;
-            file_log_burst = 0;
         } else {
-            const bool foreground_due =
-                file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
-            const bool tail_read_active = file_log_tail_read_active();
+            bool have_job = false;
+            size_t slot_index = SIZE_MAX;
+            const bool storage_mounted = Storage::mounted();
+            if (lock_queue(50)) {
+                if (storage_mounted && slot_storage_available() &&
+                    queued > 0 && !processing_job) {
+                    slot_index = head;
+                    head = (head + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
+                    queued--;
+                    stats.edf_queued = queued;
+                    processing_job = true;
+                    have_job = true;
+                }
+                unlock_queue();
+            }
 
-            if (mount_retry_requested.exchange(false)) {
-                (void)Storage::retry_mount();
-                did_work = true;
-            } else if (!foreground_due && !tail_read_active &&
-                       file_log_sink.step()) {
-                did_work = true;
-                file_log_burst++;
-            } else if (process_foreground_step()) {
+            if (have_job) {
+                process_job(slots[slot_index]);
+                if (lock_queue(50)) {
+                    clear_slot(slots[slot_index]);
+                    processing_job = false;
+                    unlock_queue();
+                } else {
+                    processing_job = false;
+                }
                 did_work = true;
                 file_log_burst = 0;
-            } else if (process_diagnostic_step()) {
-                did_work = true;
-            } else if (atomic_write_service.step(
-                           StorageAtomicWriteLane::Maintenance)) {
-                did_work = true;
-            } else if (scan_service.step()) {
-                did_work = true;
-            } else if (archive_service.step()) {
-                did_work = true;
-            } else if (delete_service.step()) {
-                did_work = true;
-            } else if (foreground_due && !tail_read_active &&
-                       file_log_sink.step()) {
-                did_work = true;
-                file_log_burst++;
-            } else if (Storage::poll(capacity_update_allowed.load())) {
-                did_work = true;
+            } else {
+                const bool foreground_due =
+                    file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
+                const bool tail_read_active = file_log_tail_read_active();
+
+                if (!foreground_due && !tail_read_active &&
+                    file_log_sink.step()) {
+                    did_work = true;
+                    file_log_burst++;
+                } else if (process_foreground_step()) {
+                    did_work = true;
+                    file_log_burst = 0;
+                } else if (process_diagnostic_step()) {
+                    did_work = true;
+                } else if (atomic_write_service.step(
+                               StorageAtomicWriteLane::Maintenance)) {
+                    did_work = true;
+                } else if (scan_service.step()) {
+                    did_work = true;
+                } else if (archive_service.step()) {
+                    did_work = true;
+                } else if (delete_service.step()) {
+                    did_work = true;
+                } else if (foreground_due && !tail_read_active &&
+                           file_log_sink.step()) {
+                    did_work = true;
+                    file_log_burst++;
+                } else if (Storage::poll(capacity_update_allowed.load())) {
+                    did_work = true;
+                }
             }
         }
 
@@ -2083,13 +2292,19 @@ void task_entry(void *) {
 
 bool enqueue(JobSlot &job) {
     if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
+    if (!stats.available) return false;
     if (!lock_queue()) {
         stats.queue_drops++;
         set_error("queue_lock_failed");
         log_worker_failure(LOG_WARN, "queue_lock_failed", job.path);
         return false;
     }
+    if (!slot_storage_available()) {
+        stats.unavailable_drops++;
+        unlock_queue();
+        return false;
+    }
+
     const bool ok = push_slot(job);
     unlock_queue();
     if (!ok) {
@@ -2109,13 +2324,19 @@ bool enqueue_rendered_slot(Prepare prepare,
                            Render render,
                            const char *render_error) {
     if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
+    if (!stats.available) return false;
     if (!lock_queue()) {
         stats.queue_drops++;
         set_error("queue_lock_failed");
         log_worker_failure(LOG_WARN, "queue_lock_failed");
         return false;
     }
+    if (!slot_storage_available()) {
+        stats.unavailable_drops++;
+        unlock_queue();
+        return false;
+    }
+
     if (free_slots() == 0) {
         unlock_queue();
         stats.queue_drops++;
@@ -2154,37 +2375,24 @@ bool enqueue_rendered_slot(Prepare prepare,
 void begin() {
     if (stats.initialized) return;
     if (!queue_lock) queue_lock = xSemaphoreCreateMutex();
-    if (!queue_lock || !allocate_slots()) {
+    if (!queue_lock) {
         stats.available = false;
         return;
     }
 
-    if (!diagnostic_payload) {
-        diagnostic_payload = static_cast<uint8_t *>(
-            Memory::alloc_large(AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY,
-                                false));
-    }
-    diagnostic.available = diagnostic_payload != nullptr;
-    if (!diagnostic.available) {
-        diagnostic.state = StorageDiagnosticState::Failed;
-        copy_cstr(diagnostic.error, sizeof(diagnostic.error),
-                  "allocation_failed");
-    }
+    storage_resources_ready = initialize_storage_resources();
+    storage_resource_retry_attempt = 0;
+    storage_resource_retry_at_ms =
+        storage_resources_ready
+            ? 0
+            : millis() + STORAGE_RESOURCE_RETRY_MIN_MS;
 
-    (void)file_log_sink.begin(wake_service_task);
-    (void)browser_service.begin(wake_service_task);
-    (void)archive_service.begin(wake_service_task,
-                                claim_archive_maintenance,
-                                release_archive_maintenance);
-    (void)delete_service.begin(wake_service_task,
-                               claim_delete_maintenance,
-                               release_delete_maintenance);
-    (void)path_service.begin(wake_service_task);
-    (void)atomic_write_service.begin(wake_service_task);
-    (void)scan_service.begin(wake_service_task,
-                             claim_scan_maintenance,
-                             release_scan_maintenance);
-    (void)stream_service.begin(wake_service_task);
+    const StorageStatus storage = Storage::status();
+    mount_retry_attempt = 0;
+    mount_retry_at_ms =
+        storage.configured && storage.state == StorageState::NotPresent
+            ? millis() + STORAGE_MOUNT_RETRY_MIN_MS
+            : 0;
 
     if (!task) {
         const BaseType_t created =
@@ -2195,13 +2403,7 @@ void begin() {
         if (created != pdPASS || !task) {
             stats.available = false;
             diagnostic.available = false;
-            browser_service.set_task_available(false);
-            archive_service.set_task_available(false);
-            delete_service.set_task_available(false);
-            path_service.set_task_available(false);
-            atomic_write_service.set_task_available(false);
-            scan_service.set_task_available(false);
-            stream_service.set_task_available(false);
+            set_storage_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
                       "storage worker task create failed\n");
@@ -2211,20 +2413,16 @@ void begin() {
     stats.initialized = true;
     stats.available = true;
     stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
-    browser_service.set_task_available(true);
-    archive_service.set_task_available(true);
-    delete_service.set_task_available(true);
-    path_service.set_task_available(true);
-    atomic_write_service.set_task_available(true);
-    scan_service.set_task_available(true);
-    stream_service.set_task_available(true);
+    set_storage_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
-              "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
-              static_cast<unsigned>(AC_EDF_STORAGE_QUEUE_CAPACITY),
+              "service ready edf_q=%u read_q=%u slot=%u psram=%s "
+              "resources=%s\n",
+              static_cast<unsigned>(stats.edf_capacity),
               static_cast<unsigned>(AC_STORAGE_PREPARED_READ_CAPACITY),
               static_cast<unsigned>(AC_EDF_STORAGE_SLOT_BYTES),
-              stats.using_psram ? "yes" : "no");
+              stats.using_psram ? "yes" : "no",
+              storage_resources_ready ? "ready" : "recovering");
 }
 
 bool request_mount_retry() {
@@ -2248,7 +2446,7 @@ bool enqueue_edf_open_numeric(const char *path,
     const size_t header_size = edf_header_size(schema);
     if (header_size > AC_EDF_STORAGE_SLOT_BYTES) return false;
     if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
+    if (!stats.available) return false;
     const StoredFileKind kind = stored_kind(schema.kind);
     const EdfStorageOpenHandle reserved = reserve_open_handle(kind);
     if (!reserved.valid()) return false;
@@ -2291,7 +2489,7 @@ bool enqueue_edf_open_annotation(const char *path,
     if (handle) *handle = {};
     if (!valid_path(path)) return false;
     if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
+    if (!stats.available) return false;
     const StoredFileKind stored = stored_kind(kind);
     const EdfStorageOpenHandle reserved = reserve_open_handle(stored);
     if (!reserved.valid()) return false;
@@ -2316,13 +2514,19 @@ bool enqueue_edf_open_annotation(const char *path,
 bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
                                 const EdfCompletedRecordView &record) {
     if (!stats.initialized) begin();
-    if (!stats.available || !slots) return false;
+    if (!stats.available) return false;
     if (!lock_queue()) {
         stats.queue_drops++;
         set_error("queue_lock_failed");
         log_worker_failure(LOG_WARN, "queue_lock_failed");
         return false;
     }
+    if (!slot_storage_available()) {
+        stats.unavailable_drops++;
+        unlock_queue();
+        return false;
+    }
+
     if (free_slots() == 0) {
         unlock_queue();
         stats.queue_drops++;

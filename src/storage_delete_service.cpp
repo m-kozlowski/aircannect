@@ -61,12 +61,10 @@ bool StorageDeleteService::begin(
     WakeCallback wake,
     ClaimMaintenanceCallback claim_maintenance,
     ReleaseMaintenanceCallback release_maintenance) {
-    if (lock_) return ready();
-
     wake_ = wake;
     claim_maintenance_ = claim_maintenance;
     release_maintenance_ = release_maintenance;
-    lock_ = xSemaphoreCreateMutex();
+    if (!lock_) lock_ = xSemaphoreCreateMutex();
     if (!lock_ || !published_status_.begin(status_) || !allocate_owners()) {
         Log::logf(CAT_STORAGE, LOG_ERROR,
                   "[DELETE] service unavailable\n");
@@ -94,26 +92,30 @@ bool StorageDeleteService::ready() const {
 }
 
 bool StorageDeleteService::allocate_owners() {
-    path_bytes_capacity_ = DELETE_PATH_BYTES_CAPACITY;
-    path_bytes_ = static_cast<char *>(
-        Memory::alloc_large(path_bytes_capacity_, true));
     if (!path_bytes_) {
-        log_delete_alloc_failed("paths", path_bytes_capacity_);
-        path_bytes_capacity_ = 0;
-        return false;
+        path_bytes_capacity_ = DELETE_PATH_BYTES_CAPACITY;
+        path_bytes_ = static_cast<char *>(
+            Memory::alloc_large(path_bytes_capacity_, true));
+        if (!path_bytes_) {
+            log_delete_alloc_failed("paths", path_bytes_capacity_);
+            path_bytes_capacity_ = 0;
+            return false;
+        }
     }
 
-    walk_capacity_ = DELETE_MAX_DEPTH;
-    walk_stack_ = static_cast<WalkFrame *>(
-        Memory::alloc_large(sizeof(WalkFrame) * walk_capacity_, true));
     if (!walk_stack_) {
-        log_delete_alloc_failed("walk_stack",
-                                sizeof(WalkFrame) * walk_capacity_);
-        walk_capacity_ = 0;
-        return false;
-    }
-    for (size_t i = 0; i < walk_capacity_; ++i) {
-        new (&walk_stack_[i]) WalkFrame();
+        walk_capacity_ = DELETE_MAX_DEPTH;
+        walk_stack_ = static_cast<WalkFrame *>(
+            Memory::alloc_large(sizeof(WalkFrame) * walk_capacity_, true));
+        if (!walk_stack_) {
+            log_delete_alloc_failed("walk_stack",
+                                    sizeof(WalkFrame) * walk_capacity_);
+            walk_capacity_ = 0;
+            return false;
+        }
+        for (size_t i = 0; i < walk_capacity_; ++i) {
+            new (&walk_stack_[i]) WalkFrame();
+        }
     }
     return true;
 }

@@ -123,23 +123,15 @@ StorageAtomicWriteService::~StorageAtomicWriteService() {
 }
 
 bool StorageAtomicWriteService::begin(WakeCallback wake) {
-    if (lock_) return job_ != nullptr;
-
     wake_ = wake;
-    lock_ = xSemaphoreCreateMutex();
-    void *memory = Memory::alloc_large(sizeof(Job), false);
-    if (memory) job_ = new (memory) Job();
-    if (lock_ && job_) return true;
+    if (!lock_) lock_ = xSemaphoreCreateMutex();
+    if (!lock_) return false;
 
-    if (job_) {
-        job_->~Job();
-        Memory::free(job_);
-        job_ = nullptr;
+    if (!job_) {
+        void *memory = Memory::alloc_large(sizeof(Job), false);
+        if (memory) job_ = new (memory) Job();
     }
-    if (lock_) {
-        vSemaphoreDelete(lock_);
-        lock_ = nullptr;
-    }
+    if (job_) return true;
 
     Log::logf(CAT_STORAGE, LOG_ERROR,
               "atomic write service unavailable\n");

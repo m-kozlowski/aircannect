@@ -219,12 +219,10 @@ StorageArchiveService::~StorageArchiveService() {
 bool StorageArchiveService::begin(
     WakeCallback wake, ClaimMaintenanceCallback claim_maintenance,
     ReleaseMaintenanceCallback release_maintenance) {
-    if (lock_) return true;
-
     wake_ = wake;
     claim_maintenance_ = claim_maintenance;
     release_maintenance_ = release_maintenance;
-    lock_ = xSemaphoreCreateMutex();
+    if (!lock_) lock_ = xSemaphoreCreateMutex();
     if (!lock_ || !published_status_.begin(status_)) {
         Log::logf(CAT_STORAGE, LOG_ERROR,
                   "[ARCHIVE] service unavailable\n");
