@@ -256,6 +256,27 @@ StoragePathCompletion StoragePathService::execute_move_replacing(const JobSlot &
     return completion;
 }
 
+StoragePathCompletion StoragePathService::execute_remove(
+    const JobSlot &job) const {
+    StoragePathCompletion completion;
+    completion.ticket = job.ticket;
+
+    Storage::Guard guard;
+    if (!Storage::exists(job.source)) {
+        completion.outcome = OperationOutcome::succeeded();
+        return completion;
+    }
+    if (!Storage::remove(job.source)) {
+        completion.outcome = OperationOutcome::failed();
+        copy_cstr(completion.error, sizeof(completion.error),
+                  "remove_failed");
+        return completion;
+    }
+
+    completion.outcome = OperationOutcome::succeeded();
+    return completion;
+}
+
 StoragePathCompletion StoragePathService::execute(const JobSlot &job) const {
     if (!Storage::mounted()) {
         StoragePathCompletion completion;
@@ -267,6 +288,9 @@ StoragePathCompletion StoragePathService::execute(const JobSlot &job) const {
     }
     if (job.operation == StoragePathOperation::MoveReplacing) {
         return execute_move_replacing(job);
+    }
+    if (job.operation == StoragePathOperation::Remove) {
+        return execute_remove(job);
     }
     return execute_stat(job);
 }

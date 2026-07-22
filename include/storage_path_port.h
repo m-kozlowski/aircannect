@@ -11,6 +11,7 @@ namespace aircannect {
 enum class StoragePathOperation : uint8_t {
     Stat,
     MoveReplacing,
+    Remove,
 };
 
 struct StoragePathCommand {
@@ -25,6 +26,9 @@ struct StoragePathCommand {
         }
         if (operation == StoragePathOperation::Stat) {
             return destination.empty();
+        }
+        if (operation == StoragePathOperation::Remove) {
+            return destination.empty() && source != "/";
         }
         return storage_user_path_valid(destination.c_str()) &&
                source != destination && source != "/" &&
