@@ -31,6 +31,7 @@
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "storage_manager.h"
+#include "storage_http_controller.h"
 #include "storage_service.h"
 #include "stream_broker.h"
 #if AC_STACK_PROFILE_ENABLED
@@ -71,8 +72,10 @@ static OximetryManager oximetry_manager;
 static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
+static StorageHttpController storage_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
+    &storage_http_controller,
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
@@ -247,6 +250,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
     StorageService::publish_activity(storage_activity);
     report_task.publish_activity(storage_activity);
     export_task.publish_activity(storage_activity);
+    storage_http_controller.publish_activity(storage_activity);
 }
 
 static void publish_export_network() {
@@ -584,6 +588,18 @@ void setup() {
     export_coordinator.begin(export_task);
     console_ctx.export_coordinator = &export_coordinator;
 
+    const bool storage_http_started = storage_http_controller.begin(
+        StorageService::read_port(),
+        StorageService::browser_port(),
+        StorageService::archive_port(),
+        StorageService::delete_port(),
+        StorageService::status_port(),
+        export_coordinator);
+    if (!storage_http_started) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] storage HTTP controller failed to start\n");
+    }
+
     apply_storage_provisioning(config_service,
                                wifi_manager,
                                StorageService::read_port(),
@@ -667,11 +683,6 @@ void setup() {
                  wifi_manager, tcp_bridge, config_service,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
-                 StorageService::read_port(),
-                 StorageService::browser_port(),
-                 StorageService::archive_port(),
-                 StorageService::delete_port(),
-                 export_coordinator,
                  console_ctx,
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
@@ -806,6 +817,7 @@ void loop() {
     const bool storage_ota_active =
         esp_ota_install_active || resmed_ota_manager.transport_active();
     const bool therapy_active =
+        session_manager.status().state == SessionState::Active ||
         as11_device_service.state().therapy_state() ==
             As11TherapyState::Running;
 

@@ -124,6 +124,14 @@ struct StorageServiceStatus {
     EdfStorageOpenFileStatus files[AC_EDF_STORAGE_FILE_COUNT];
 };
 
+class StorageStatusPort {
+public:
+    virtual ~StorageStatusPort() = default;
+
+    virtual bool mounted() const = 0;
+    virtual StorageServiceStatus status() const = 0;
+};
+
 struct StorageFileLogStatus {
     bool available = false;
     bool enabled = false;
@@ -220,6 +228,7 @@ StorageFileLogStatus file_log_status();
 void publish_activity(const ActivitySnapshot &activity);
 
 // Status
+StorageStatusPort &status_port();
 StorageServiceStatus status();
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes();

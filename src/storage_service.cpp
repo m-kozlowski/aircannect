@@ -210,7 +210,16 @@ public:
     }
 };
 
+class ServiceStatusPort final : public StorageStatusPort {
+public:
+    bool mounted() const override { return Storage::mounted(); }
+    StorageServiceStatus status() const override {
+        return StorageService::status();
+    }
+};
+
 ServiceReadPort service_read_port;
+ServiceStatusPort service_status_port;
 std::atomic<MaintenanceOwner> maintenance_owner{MaintenanceOwner::None};
 StorageBrowserService browser_service;
 StorageArchiveService archive_service;
@@ -2416,6 +2425,10 @@ bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
 
 StorageReadPort &read_port() {
     return service_read_port;
+}
+
+StorageStatusPort &status_port() {
+    return service_status_port;
 }
 
 StorageStreamPort &stream_port() {

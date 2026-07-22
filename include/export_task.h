@@ -30,6 +30,9 @@ struct ExportTaskStatus {
     bool busy = false;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
+    char smb_endpoint[AC_SMB_EXPORT_ENDPOINT_MAX] = {};
+    char sleephq_team_id[AC_SLEEPHQ_ID_MAX] = {};
+    char sleephq_device_id[AC_SLEEPHQ_ID_MAX] = {};
     StorageSyncStatus smb;
     StorageSyncRuntimeStatus smb_runtime;
     SleepHqSyncStatus sleephq;

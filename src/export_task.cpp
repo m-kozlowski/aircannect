@@ -8,6 +8,7 @@
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "storage_export_plan.h"
+#include "string_util.h"
 
 namespace aircannect {
 
@@ -364,8 +365,17 @@ void ExportTask::publish_status() {
     if (!runtime_) return;
 
     bool command_pending = false;
+    char smb_endpoint[AC_SMB_EXPORT_ENDPOINT_MAX] = {};
+    char sleephq_team_id[AC_SLEEPHQ_ID_MAX] = {};
+    char sleephq_device_id[AC_SLEEPHQ_ID_MAX] = {};
     if (lock_inputs()) {
         command_pending = inputs_.command.kind != CommandKind::None;
+        copy_cstr(smb_endpoint, sizeof(smb_endpoint),
+                  inputs_.config.smb.endpoint);
+        copy_cstr(sleephq_team_id, sizeof(sleephq_team_id),
+                  inputs_.config.sleephq.team_id);
+        copy_cstr(sleephq_device_id, sizeof(sleephq_device_id),
+                  inputs_.config.sleephq.device_id);
         unlock_inputs();
     }
     if (!status_lock_ ||
@@ -378,6 +388,13 @@ void ExportTask::publish_status() {
     status_.network_ready = network_ready_;
     status_.runtime_blocked = runtime_blocked_;
     status_.command_pending = command_pending;
+    copy_cstr(status_.smb_endpoint, sizeof(status_.smb_endpoint),
+              smb_endpoint);
+    copy_cstr(status_.sleephq_team_id, sizeof(status_.sleephq_team_id),
+              sleephq_team_id);
+    copy_cstr(status_.sleephq_device_id,
+              sizeof(status_.sleephq_device_id),
+              sleephq_device_id);
     status_.smb = runtime_->smb.status();
     status_.smb_runtime = runtime_->smb.runtime_status();
     status_.sleephq = runtime_->sleephq.status();

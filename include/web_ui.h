@@ -18,10 +18,6 @@
 #include "rpc_request_port.h"
 #include "session_manager.h"
 #include "sink_manager.h"
-#include "storage_archive_port.h"
-#include "storage_browser_port.h"
-#include "storage_delete_port.h"
-#include "storage_read_port.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
 #include "wifi_manager.h"
@@ -33,7 +29,6 @@ class AsyncWebServer;
 
 namespace aircannect {
 
-class ExportCoordinator;
 class HttpRouteModule;
 
 enum WebCommandKind : uint8_t {
@@ -100,11 +95,6 @@ public:
                SessionManager &session_manager,
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
-               StorageReadPort &storage_read,
-               StorageBrowserPort &storage_browser,
-               StorageArchivePort &storage_archive,
-               StorageDeletePort &storage_delete,
-               ExportCoordinator &export_coordinator,
                ConsoleContext &console_ctx,
                HttpRouteModule *const *route_modules,
                size_t route_module_count,
@@ -127,20 +117,6 @@ private:
     void build_status_json(LargeTextBuffer &json,
                            PollCheckpoint checkpoint = nullptr) const;
     void build_oximetry_sensors_json(LargeTextBuffer &json) const;
-    void send_storage_list(AsyncWebServerRequest *request) const;
-    void send_storage_download(AsyncWebServerRequest *request) const;
-    void send_file_log_tail(AsyncWebServerRequest *request, size_t lines);
-    void send_storage_archive_start(AsyncWebServerRequest *request) const;
-    void send_storage_archive_status(AsyncWebServerRequest *request) const;
-    void send_storage_archive_download(AsyncWebServerRequest *request) const;
-    void send_storage_delete_start(AsyncWebServerRequest *request) const;
-    void send_storage_delete_status(AsyncWebServerRequest *request) const;
-    void send_storage_sync_start(AsyncWebServerRequest *request) const;
-    void send_storage_sync_verify(AsyncWebServerRequest *request) const;
-    void send_storage_sync_status(AsyncWebServerRequest *request) const;
-    void send_sleephq_sync_start(AsyncWebServerRequest *request) const;
-    void send_sleephq_sync_check(AsyncWebServerRequest *request) const;
-    void send_sleephq_sync_status(AsyncWebServerRequest *request) const;
     void send_live_view_state(AsyncWebServerRequest *request);
     void build_stream_json(LargeTextBuffer &json) const;
     void build_config_json(LargeTextBuffer &json,
@@ -258,11 +234,6 @@ private:
     SessionManager *session_manager_ = nullptr;
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
-    StorageReadPort *storage_read_ = nullptr;
-    StorageBrowserPort *storage_browser_ = nullptr;
-    StorageArchivePort *storage_archive_ = nullptr;
-    StorageDeletePort *storage_delete_ = nullptr;
-    ExportCoordinator *export_coordinator_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     // console and command queue
@@ -283,12 +254,10 @@ private:
     StaticSemaphore_t cache_mutex_storage_ = {};
     StaticSemaphore_t sse_mutex_storage_ = {};
     StaticSemaphore_t live_view_mutex_storage_ = {};
-    StaticSemaphore_t storage_job_mutex_storage_ = {};
     SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;
     SemaphoreHandle_t live_view_mutex_ = nullptr;
-    SemaphoreHandle_t storage_job_mutex_ = nullptr;
 
     // HTTP/SSE server
     AsyncWebServer *server_ = nullptr;
