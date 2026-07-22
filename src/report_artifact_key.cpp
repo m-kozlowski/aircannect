@@ -1,5 +1,9 @@
 #include "report_artifact_key.h"
 
+#include <limits.h>
+
+#include "report_range_tile.h"
+
 namespace aircannect {
 
 namespace {
@@ -46,7 +50,10 @@ bool ReportArtifactKey::valid() const {
         case ReportArtifactKind::Overview:
             return range_start_ms == 0 && range_end_ms == 0;
         case ReportArtifactKind::RangeTile:
-            return range_start_ms > 0 && range_end_ms > range_start_ms;
+            return range_start_ms > 0 &&
+                   range_start_ms % REPORT_RANGE_TILE_MS == 0 &&
+                   range_start_ms <= INT64_MAX - REPORT_RANGE_TILE_MS &&
+                   range_end_ms == range_start_ms + REPORT_RANGE_TILE_MS;
     }
     return false;
 }

@@ -23,7 +23,7 @@ void ReportEngine::begin(StorageReadPort &read_port,
     read_port_ = &read_port;
     assembler_ = &assembler;
     executor_.begin(read_port);
-    artifact_store_.begin(write_port);
+    artifact_store_.begin(read_port, write_port);
 }
 
 void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) {

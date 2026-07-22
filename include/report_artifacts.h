@@ -92,9 +92,11 @@ struct ReportArtifactBundle {
     ReportArtifactKey key;
     std::shared_ptr<const LargeByteBuffer> result;
     std::shared_ptr<const LargeByteBuffer> overview;
+    std::shared_ptr<const LargeByteBuffer> range_tile;
     std::shared_ptr<const LargeByteBuffer> manifest;
     uint32_t result_crc32 = 0;
     uint32_t overview_crc32 = 0;
+    uint32_t range_tile_crc32 = 0;
 
     bool valid() const;
 };
@@ -117,11 +119,15 @@ public:
     static constexpr uint16_t Version = 1;
     static constexpr size_t HeaderBytes = 72;
     static constexpr size_t TileBytes = 24;
+    static constexpr size_t MaxTiles = 128;
 
     static std::shared_ptr<const LargeByteBuffer> encode(
         const ReportArtifactBundle &bundle,
         const ReportRangeTileArtifact *tiles = nullptr,
         size_t tile_count = 0);
+    static std::shared_ptr<const LargeByteBuffer> add_tile(
+        const ReportArtifactManifestView &manifest,
+        const ReportRangeTileArtifact &tile);
     static bool decode(const uint8_t *bytes,
                        size_t length,
                        ReportArtifactManifestView &view);

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "crc32.h"
+#include "report_range_tile.h"
 
 namespace aircannect {
 namespace {
@@ -108,8 +109,11 @@ bool valid_result_session_ranges(const ReportResultArtifactData &data) {
 }
 
 bool valid_tile(const ReportRangeTileArtifact &tile) {
-    return tile.end_ms > tile.start_ms && tile.size > 0 &&
-           tile.size <= UINT32_MAX;
+    return tile.start_ms > 0 &&
+           tile.start_ms % REPORT_RANGE_TILE_MS == 0 &&
+           tile.start_ms <= INT64_MAX - REPORT_RANGE_TILE_MS &&
+           tile.end_ms == tile.start_ms + REPORT_RANGE_TILE_MS &&
+           tile.size > 0 && tile.size <= UINT32_MAX;
 }
 
 bool tile_follows(const ReportRangeTileArtifact &previous,
@@ -217,6 +221,11 @@ bool ReportArtifactManifestView::tile(
 }
 
 bool ReportArtifactBundle::valid() const {
+    if (!key.valid()) return false;
+    if (key.kind == ReportArtifactKind::RangeTile) {
+        return range_tile && range_tile->size() > 0 &&
+               range_tile->size() <= UINT32_MAX;
+    }
     return key_is_result(key) && result && result->size() > 0 && overview &&
            overview->size() > 0 && manifest && manifest->size() > 0;
 }
@@ -362,7 +371,7 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
     size_t tile_count) {
     if (!key_is_result(bundle.key) || !bundle.result || !bundle.overview ||
         bundle.result->size() == 0 || bundle.overview->size() == 0 ||
-        tile_count > UINT16_MAX || (tile_count > 0 && !tiles)) {
+        tile_count > MaxTiles || (tile_count > 0 && !tiles)) {
         return {};
     }
 
@@ -412,6 +421,87 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
     return LargeByteBuffer::freeze(std::move(output));
 }
 
+std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
+    const ReportArtifactManifestView &manifest,
+    const ReportRangeTileArtifact &tile) {
+    if (!key_is_result(manifest.key) || manifest.result_size == 0 ||
+        manifest.overview_size == 0 || !valid_tile(tile)) {
+        return {};
+    }
+
+    size_t insertion = manifest.tile_count;
+    bool replacing = false;
+    for (size_t i = 0; i < manifest.tile_count; ++i) {
+        ReportRangeTileArtifact existing;
+        if (!manifest.tile(i, existing)) return {};
+        if (existing.start_ms == tile.start_ms &&
+            existing.end_ms == tile.end_ms) {
+            insertion = i;
+            replacing = true;
+            break;
+        }
+        if (tile.start_ms < existing.start_ms ||
+            (tile.start_ms == existing.start_ms &&
+             tile.end_ms < existing.end_ms)) {
+            insertion = i;
+            break;
+        }
+    }
+
+    const size_t tile_count = manifest.tile_count + (replacing ? 0 : 1);
+    if (tile_count > MaxTiles) return {};
+
+    size_t body_bytes = 0;
+    size_t total_bytes = 0;
+    if (!multiply_size(tile_count, TileBytes, body_bytes) ||
+        !add_size(HeaderBytes, body_bytes, total_bytes) ||
+        total_bytes > UINT32_MAX) {
+        return {};
+    }
+
+    std::unique_ptr<LargeByteBuffer> output =
+        LargeByteBuffer::allocate(total_bytes);
+    if (!output) return {};
+
+    uint8_t *bytes = output->data();
+    memset(bytes, 0, total_bytes);
+    put_u32(bytes, MANIFEST_MAGIC);
+    put_u16(bytes + 4, Version);
+    put_u16(bytes + 6, HeaderBytes);
+    put_u32(bytes + 8, static_cast<uint32_t>(total_bytes));
+    put_i32(bytes + 12, manifest.key.sleep_day.epoch_days());
+    put_u64(bytes + 16, manifest.key.source_revision.value());
+    put_u64(bytes + 24, manifest.result_size);
+    put_u64(bytes + 32, manifest.overview_size);
+    put_u32(bytes + 40, manifest.result_crc32);
+    put_u32(bytes + 44, manifest.overview_crc32);
+    put_u16(bytes + 48, static_cast<uint16_t>(tile_count));
+
+    uint8_t *body = bytes + HeaderBytes;
+    size_t source_index = 0;
+    for (size_t output_index = 0; output_index < tile_count; ++output_index) {
+        ReportRangeTileArtifact value;
+        if (output_index == insertion) {
+            value = tile;
+            if (replacing) ++source_index;
+        } else if (!manifest.tile(source_index++, value)) {
+            return {};
+        }
+
+        uint8_t *record = body + output_index * TileBytes;
+        put_i64(record, value.start_ms);
+        put_i64(record + 8, value.end_ms);
+        put_u32(record + 16, static_cast<uint32_t>(value.size));
+        put_u32(record + 20, value.crc32);
+    }
+
+    put_u32(bytes + MANIFEST_BODY_CRC_OFFSET,
+            crc32_ieee(body, body_bytes));
+    put_u32(bytes + MANIFEST_HEADER_CRC_OFFSET,
+            crc32_ieee(bytes, MANIFEST_HEADER_CRC_OFFSET));
+    return LargeByteBuffer::freeze(std::move(output));
+}
+
 bool ReportArtifactManifestCodec::decode(
     const uint8_t *bytes,
     size_t length,
@@ -429,6 +519,7 @@ bool ReportArtifactManifestCodec::decode(
     size_t body_bytes = 0;
     size_t expected = 0;
     if (!multiply_size(tile_count, TileBytes, body_bytes) ||
+        tile_count > MaxTiles ||
         !add_size(HeaderBytes, body_bytes, expected) || expected != length ||
         crc32_ieee(bytes + HeaderBytes, body_bytes) !=
             get_u32(bytes + MANIFEST_BODY_CRC_OFFSET)) {
