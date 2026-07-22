@@ -83,26 +83,7 @@ static uint32_t edf_report_catalog_seen_sessions_ended = 0;
 static bool edf_report_catalog_post_session_pending = false;
 static uint32_t edf_report_catalog_refresh_due_ms = 0;
 static uint32_t edf_report_catalog_timezone_revision = 0;
-
-class FileLogBackgroundJob : public BackgroundJob {
-public:
-    const char *name() const override { return "filelog"; }
-
-    JobStep step() override {
-        return Log::service_filelog(true) ? JobStep::Working : JobStep::Idle;
-    }
-
-    bool run_when_gate_closed(const char *reason) const override {
-        return !reason || strcmp(reason, "disabled") != 0;
-    }
-
-    JobStep step_when_gate_closed(const char *reason) override {
-        (void)reason;
-        return Log::service_filelog(false) ? JobStep::Working : JobStep::Idle;
-    }
-};
-
-static FileLogBackgroundJob file_log_job;
+static ActivitySnapshot storage_activity;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
@@ -161,11 +142,36 @@ static void poll_stack_profiler(uint32_t now_ms) {
     };
     stack_profiler.poll(now_ms, samples, sizeof(samples) / sizeof(samples[0]));
 }
+
 #else
 static void poll_stack_profiler(uint32_t now_ms) {
     (void)now_ms;
 }
 #endif
+
+static void publish_storage_activity(bool foreground_report_demand,
+                                     bool realtime_stream_active,
+                                     bool export_active,
+                                     bool ota_install_active,
+                                     bool therapy_active) {
+    const bool changed =
+        storage_activity.foreground_report_demand != foreground_report_demand ||
+        storage_activity.realtime_stream_active != realtime_stream_active ||
+        storage_activity.export_active != export_active ||
+        storage_activity.ota_install_active != ota_install_active ||
+        storage_activity.therapy_active != therapy_active;
+    if (!changed) return;
+
+    storage_activity.foreground_report_demand = foreground_report_demand;
+    storage_activity.realtime_stream_active = realtime_stream_active;
+    storage_activity.export_active = export_active;
+    storage_activity.ota_install_active = ota_install_active;
+    storage_activity.therapy_active = therapy_active;
+    storage_activity.generation++;
+    if (storage_activity.generation == 0) storage_activity.generation++;
+
+    StorageService::publish_activity(storage_activity);
+}
 
 static void sync_network_services() {
     const bool should_run_tcp =
@@ -461,7 +467,6 @@ void setup() {
         sleephq_sync_job->begin(app_config.data());
     }
 
-    bg_worker.add_job(&file_log_job);
     bg_worker.add_job(&storage_browser_job);
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
@@ -609,14 +614,28 @@ void loop() {
 
     drain_can_rx_after("export_coordinator");
 
-    // Background worker gate snapshot
-    bg_worker.publish_gate(
-        report_manager.foreground_busy(),
-        rpc_arbiter.as11_state().status_valid(),
-        rpc_arbiter.stream_activity_active(),
-        resmed_ota_manager.transport_active(),
-        ota_manager.active(),
-        rpc_arbiter.as11_state().therapy_state() == As11TherapyState::Running);
+    // Activity snapshots
+    const bool foreground_report_active = report_manager.foreground_busy();
+    const bool realtime_stream_active = rpc_arbiter.stream_activity_active();
+    const bool export_active = export_coordinator.endpoint_work_active();
+    const bool esp_ota_install_active = ota_manager.active();
+    const bool storage_ota_active =
+        esp_ota_install_active || resmed_ota_manager.transport_active();
+    const bool therapy_active =
+        rpc_arbiter.as11_state().therapy_state() == As11TherapyState::Running;
+
+    publish_storage_activity(foreground_report_active,
+                             realtime_stream_active,
+                             export_active,
+                             storage_ota_active,
+                             therapy_active);
+
+    bg_worker.publish_gate(foreground_report_active,
+                           rpc_arbiter.as11_state().status_valid(),
+                           realtime_stream_active,
+                           resmed_ota_manager.transport_active(),
+                           esp_ota_install_active,
+                           therapy_active);
 
     drain_can_rx_after("bgworker_gate");
 

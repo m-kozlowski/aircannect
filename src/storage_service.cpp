@@ -20,6 +20,7 @@
 #include "fixed_queue.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
+#include "storage_file_log_sink.h"
 #include "storage_path.h"
 #include "string_util.h"
 
@@ -183,6 +184,8 @@ public:
 };
 
 ServiceReadPort service_read_port;
+StorageFileLogSink file_log_sink;
+size_t file_log_burst = 0;
 
 constexpr size_t max_size(size_t a, size_t b) {
     return a > b ? a : b;
@@ -1675,6 +1678,13 @@ bool process_read_step() {
     return true;
 }
 
+bool read_work_pending() {
+    if (!lock_queue()) return true;
+    const bool pending = read_job_count > 0;
+    unlock_queue();
+    return pending;
+}
+
 void process_job(JobSlot &job) {
     switch (job.type) {
         case JobType::Open:
@@ -1731,8 +1741,20 @@ void task_entry(void *) {
                 processing_job = false;
             }
             did_work = true;
+            file_log_burst = 0;
         } else {
-            did_work = process_read_step();
+            const bool read_pending = read_work_pending();
+            if (read_pending &&
+                file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET) {
+                did_work = process_read_step();
+                file_log_burst = 0;
+            } else if (file_log_sink.step()) {
+                did_work = true;
+                file_log_burst++;
+            } else {
+                did_work = process_read_step();
+                if (did_work) file_log_burst = 0;
+            }
         }
 
         if (did_work) {
@@ -1818,7 +1840,7 @@ bool enqueue_rendered_slot(Prepare prepare,
 void begin() {
     if (stats.initialized) return;
     if (!queue_lock) queue_lock = xSemaphoreCreateMutex();
-    if (!queue_lock || !allocate_slots()) {
+    if (!queue_lock || !allocate_slots() || !file_log_sink.begin()) {
         stats.available = false;
         return;
     }
@@ -2042,6 +2064,30 @@ bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
 
 StorageReadPort &read_port() {
     return service_read_port;
+}
+
+bool configure_file_log(bool enabled) {
+    if (!file_log_sink.begin()) return false;
+    file_log_sink.set_enabled(enabled);
+    if (stats.initialized) wake_service_task();
+    return true;
+}
+
+bool enqueue_file_log_line(const char *line, size_t length) {
+    if (!file_log_sink.begin()) return false;
+    const bool accepted = file_log_sink.enqueue(line, length);
+    if (accepted && stats.initialized) wake_service_task();
+    return accepted;
+}
+
+StorageFileLogStatus file_log_status() {
+    return file_log_sink.status();
+}
+
+void publish_activity(const ActivitySnapshot &activity) {
+    file_log_sink.set_rotation_allowed(!activity.therapy_active &&
+                                       !activity.ota_install_active);
+    wake_service_task();
 }
 
 StorageServiceStatus status() {

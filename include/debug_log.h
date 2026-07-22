@@ -63,7 +63,6 @@ void configure_syslog(bool enabled,
                       const String &hostname);
 void configure_filelog(bool enabled);
 void poll(bool network_available);
-bool service_filelog(bool allow_rotation);
 bool syslog_enabled();
 String syslog_host();
 uint16_t syslog_port();

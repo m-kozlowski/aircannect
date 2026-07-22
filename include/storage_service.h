@@ -6,6 +6,7 @@
 
 #include "board.h"
 #include "edf_file_writer.h"
+#include "runtime_snapshots.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -116,6 +117,18 @@ struct StorageServiceStatus {
     EdfStorageOpenFileStatus files[AC_EDF_STORAGE_FILE_COUNT];
 };
 
+struct StorageFileLogStatus {
+    bool available = false;
+    bool enabled = false;
+    bool open = false;
+    size_t queue_capacity = 0;
+    size_t queued = 0;
+    uint64_t bytes = 0;
+    uint32_t written = 0;
+    uint32_t drops = 0;
+    uint32_t errors = 0;
+};
+
 namespace StorageService {
 
 // lifecycle
@@ -149,6 +162,14 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
 
 // Prepared bounded reads
 StorageReadPort &read_port();
+
+// File logging
+bool configure_file_log(bool enabled);
+bool enqueue_file_log_line(const char *line, size_t length);
+StorageFileLogStatus file_log_status();
+
+// Runtime facts used by storage-owned scheduling policy
+void publish_activity(const ActivitySnapshot &activity);
 
 // Status
 StorageServiceStatus status();

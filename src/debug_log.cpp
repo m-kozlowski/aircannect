@@ -14,6 +14,7 @@
 #include "fixed_queue.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
+#include "storage_service.h"
 #include "string_util.h"
 
 using aircannect::FixedQueue;
@@ -27,8 +28,6 @@ log_level_t levels[CAT_COUNT];
 WiFiUDP syslog_udp;
 StaticSemaphore_t log_mutex_storage;
 SemaphoreHandle_t log_mutex = nullptr;
-StaticSemaphore_t file_log_sink_mutex_storage;
-SemaphoreHandle_t file_log_sink_mutex = nullptr;
 
 struct LogRecord {
     log_cat_t cat = CAT_GENERAL;
@@ -42,23 +41,17 @@ static constexpr size_t FILE_LOG_LINE_MAX =
     FILE_LOG_TIMESTAMP_BYTES + 1 + AC_LOG_LINE_MAX + 2;
 
 using SyslogQueue = FixedQueue<LogRecord, AC_SYSLOG_QUEUE_DEPTH>;
-using FileLogQueue = FixedQueue<LogRecord, AC_FILE_LOG_QUEUE_DEPTH>;
 
 SyslogQueue *syslog_queue = nullptr;
-FileLogQueue *file_log_queue = nullptr;
 Log::Stats log_stats;
 IPAddress syslog_ip;
 String syslog_host_text;
 uint16_t syslog_port_value = AC_SYSLOG_PORT;
 bool syslog_enabled_value = false;
 bool file_log_enabled_value = false;
-bool file_log_dir_ready = false;
-File file_log_file;
-bool file_log_file_open = false;
-uint64_t file_log_size = 0;
-uint32_t file_log_last_flush_ms = 0;
-bool file_log_rotation_pending = false;
 char syslog_hostname[64] = "aircannect";
+
+void format_file_log_timestamp(int64_t epoch_ms, char *out, size_t out_size);
 
 int syslog_severity(log_level_t level) {
     switch (level) {
@@ -207,52 +200,37 @@ void enqueue_syslog_record(const LogRecord &record) {
     }
 }
 
-bool ensure_file_log_queue() {
-#if AC_FILE_LOG_ENABLED
-    if (file_log_queue) return true;
-    void *memory = aircannect::Memory::alloc_large(sizeof(FileLogQueue));
-    if (!memory) {
-        log_stats.file_errors++;
-        return false;
-    }
-    file_log_queue = new (memory) FileLogQueue();
-    return true;
-#else
-    return false;
-#endif
-}
-
-void release_file_log_queue() {
-#if AC_FILE_LOG_ENABLED
-    if (!file_log_queue) return;
-    file_log_queue->~FileLogQueue();
-    aircannect::Memory::free(file_log_queue);
-    file_log_queue = nullptr;
-#endif
-}
-
-bool ensure_file_log_dir() {
-#if AC_FILE_LOG_ENABLED
-    if (file_log_dir_ready) return true;
-    if (!aircannect::Storage::mounted()) return false;
-    if (!aircannect::Storage::ensure_dir("/aircannect") ||
-        !aircannect::Storage::ensure_dir(AC_FILE_LOG_DIR)) {
-        log_stats.file_errors++;
-        return false;
-    }
-    file_log_dir_ready = true;
-    return true;
-#else
-    return false;
-#endif
-}
-
 void enqueue_file_log_record(const LogRecord &record) {
 #if AC_FILE_LOG_ENABLED
     if (!file_log_enabled_value) return;
-    if (!file_log_queue) return;
-    if (file_log_queue->push(record)) {
+
+    char timestamp[FILE_LOG_TIMESTAMP_BYTES + 1] = {};
+    format_file_log_timestamp(record.epoch_ms, timestamp, sizeof(timestamp));
+
+    char line[FILE_LOG_LINE_MAX] = {};
+    const int line_length = snprintf(line,
+                                     sizeof(line),
+                                     "%s %s\n",
+                                     timestamp,
+                                     record.text);
+    if (line_length <= 0) {
+        log_stats.file_errors++;
+        return;
+    }
+
+    const size_t write_length =
+        line_length < static_cast<int>(sizeof(line))
+            ? static_cast<size_t>(line_length)
+            : sizeof(line) - 1;
+    if (line_length >= static_cast<int>(sizeof(line))) {
+        log_stats.truncated++;
+    }
+
+    if (aircannect::StorageService::enqueue_file_log_line(line,
+                                                          write_length)) {
         log_stats.file_enqueued++;
+    } else {
+        log_stats.file_drops++;
     }
 #else
     (void)record;
@@ -286,18 +264,6 @@ void lock_log() {
 void unlock_log() {
     if (log_mutex) {
         xSemaphoreGive(log_mutex);
-    }
-}
-
-void lock_file_log_sink() {
-    if (file_log_sink_mutex) {
-        xSemaphoreTake(file_log_sink_mutex, portMAX_DELAY);
-    }
-}
-
-void unlock_file_log_sink() {
-    if (file_log_sink_mutex) {
-        xSemaphoreGive(file_log_sink_mutex);
     }
 }
 
@@ -349,246 +315,6 @@ void format_file_log_timestamp(int64_t epoch_ms, char *out, size_t out_size) {
              static_cast<long>(millis_part));
 }
 
-bool format_file_log_archive_path(uint8_t index, char *out, size_t out_size) {
-    if (!out || out_size == 0 || index == 0) return false;
-    const int len = snprintf(out, out_size, "%s.%u", AC_FILE_LOG_PATH,
-                             static_cast<unsigned>(index));
-    return len > 0 && len < static_cast<int>(out_size);
-}
-
-void close_file_log_locked(bool flush) {
-#if AC_FILE_LOG_ENABLED
-    if (!file_log_file_open) return;
-    Storage::Guard guard;
-    if (flush) file_log_file.flush();
-    file_log_file.close();
-    file_log_file_open = false;
-    file_log_last_flush_ms = 0;
-#else
-    (void)flush;
-#endif
-}
-
-bool rotate_file_log_locked() {
-#if AC_FILE_LOG_ENABLED
-    close_file_log_locked(true);
-    if (!ensure_file_log_dir()) return false;
-
-    char src[AC_STORAGE_WRITE_PATH_MAX + 8] = {};
-    char dst[AC_STORAGE_WRITE_PATH_MAX + 8] = {};
-    if (AC_FILE_LOG_ARCHIVES > 0 &&
-        format_file_log_archive_path(AC_FILE_LOG_ARCHIVES,
-                                     dst,
-                                     sizeof(dst))) {
-        if (!Storage::remove(dst)) return false;
-    }
-    for (int i = static_cast<int>(AC_FILE_LOG_ARCHIVES); i >= 2; --i) {
-        if (!format_file_log_archive_path(static_cast<uint8_t>(i - 1),
-                                          src,
-                                          sizeof(src)) ||
-            !format_file_log_archive_path(static_cast<uint8_t>(i),
-                                          dst,
-                                          sizeof(dst))) {
-            return false;
-        }
-        if (!Storage::exists(src)) continue;
-        if (!Storage::remove(dst) || !Storage::rename(src, dst)) return false;
-    }
-    if (Storage::exists(AC_FILE_LOG_PATH)) {
-        if (AC_FILE_LOG_ARCHIVES == 0) {
-            if (!Storage::remove(AC_FILE_LOG_PATH)) return false;
-        } else {
-            if (!format_file_log_archive_path(1, dst, sizeof(dst))) {
-                return false;
-            }
-            if (!Storage::remove(dst) ||
-                !Storage::rename(AC_FILE_LOG_PATH, dst)) {
-                return false;
-            }
-        }
-    }
-    file_log_size = 0;
-    file_log_rotation_pending = false;
-    return true;
-#else
-    return false;
-#endif
-}
-
-bool open_file_log_locked(bool allow_rotation, size_t next_write_len) {
-#if AC_FILE_LOG_ENABLED
-    if (file_log_file_open) return true;
-    if (!ensure_file_log_dir()) return false;
-
-    if (allow_rotation &&
-        (file_log_rotation_pending ||
-         (AC_FILE_LOG_ROTATE_BYTES > 0 &&
-          Storage::exists(AC_FILE_LOG_PATH)))) {
-        File existing = Storage::open(AC_FILE_LOG_PATH, "r");
-        uint64_t existing_size = 0;
-        if (existing) {
-            Storage::Guard guard;
-            existing_size = existing.size();
-            existing.close();
-        }
-        if (file_log_rotation_pending ||
-            existing_size + next_write_len > AC_FILE_LOG_ROTATE_BYTES) {
-            if (!rotate_file_log_locked()) return false;
-        } else {
-            file_log_size = existing_size;
-        }
-    }
-
-    file_log_file = Storage::open(AC_FILE_LOG_PATH, FILE_APPEND);
-    if (!file_log_file) return false;
-    file_log_file_open = true;
-    {
-        Storage::Guard guard;
-        file_log_size = file_log_file.size();
-    }
-    file_log_last_flush_ms = millis();
-    return true;
-#else
-    (void)allow_rotation;
-    (void)next_write_len;
-    return false;
-#endif
-}
-
-bool write_file_log_line_locked(const char *line,
-                                size_t len,
-                                bool allow_rotation) {
-#if AC_FILE_LOG_ENABLED
-    if (!line || len == 0) return true;
-    if (AC_FILE_LOG_ROTATE_BYTES > 0 &&
-        file_log_size + len > AC_FILE_LOG_ROTATE_BYTES) {
-        if (allow_rotation) {
-            if (!rotate_file_log_locked()) return false;
-        } else {
-            file_log_rotation_pending = true;
-        }
-    } else if (allow_rotation && file_log_rotation_pending) {
-        if (!rotate_file_log_locked()) return false;
-    }
-
-    if (!open_file_log_locked(allow_rotation, len)) return false;
-    Storage::Guard guard;
-    const size_t written =
-        file_log_file.write(reinterpret_cast<const uint8_t *>(line), len);
-    if (written != len) return false;
-    file_log_size += written;
-    const uint32_t now = millis();
-    if (static_cast<int32_t>(now - file_log_last_flush_ms) >=
-        static_cast<int32_t>(AC_FILE_LOG_FLUSH_MS)) {
-        file_log_file.flush();
-        file_log_last_flush_ms = now;
-    }
-    return true;
-#else
-    (void)line;
-    (void)len;
-    (void)allow_rotation;
-    return false;
-#endif
-}
-
-bool service_file_log(bool allow_rotation) {
-#if AC_FILE_LOG_ENABLED
-    if (!file_log_enabled_value) {
-        lock_file_log_sink();
-        close_file_log_locked(true);
-        unlock_file_log_sink();
-        return false;
-    }
-
-    if (!Storage::mounted()) {
-        lock_file_log_sink();
-        close_file_log_locked(false);
-        file_log_dir_ready = false;
-        file_log_size = 0;
-        unlock_file_log_sink();
-        return false;
-    }
-
-    bool did_work = false;
-    const size_t max_records =
-        allow_rotation ? AC_FILE_LOG_DRAIN_BUDGET : 1;
-    for (size_t i = 0; i < max_records; ++i) {
-        LogRecord record;
-        lock_log();
-        const bool have_record = file_log_enabled_value &&
-                                 file_log_queue &&
-                                 file_log_queue->pop(record);
-        unlock_log();
-        if (!have_record) break;
-
-        char timestamp[FILE_LOG_TIMESTAMP_BYTES + 1] = {};
-        format_file_log_timestamp(record.epoch_ms,
-                                  timestamp,
-                                  sizeof(timestamp));
-        char line[FILE_LOG_LINE_MAX] = {};
-        const int line_len = snprintf(line,
-                                      sizeof(line),
-                                      "%s %s\n",
-                                      timestamp,
-                                      record.text);
-        if (line_len <= 0) {
-            log_stats.file_errors++;
-            did_work = true;
-            continue;
-        }
-        const size_t write_len =
-            line_len < static_cast<int>(sizeof(line))
-                ? static_cast<size_t>(line_len)
-                : sizeof(line) - 1;
-        if (line_len >= static_cast<int>(sizeof(line))) {
-            log_stats.truncated++;
-        }
-
-        lock_file_log_sink();
-        const bool written =
-            write_file_log_line_locked(line, write_len, allow_rotation);
-        unlock_file_log_sink();
-        if (written) {
-            log_stats.file_dequeued++;
-            did_work = true;
-            continue;
-        }
-
-        log_stats.file_errors++;
-        lock_log();
-        if (!file_log_queue) {
-            log_stats.file_drops++;
-        } else {
-            file_log_queue->push_front(record);
-        }
-        unlock_log();
-        break;
-    }
-
-    if (!did_work) {
-        lock_file_log_sink();
-        if (allow_rotation && file_log_rotation_pending) {
-            did_work = rotate_file_log_locked();
-            if (!did_work) log_stats.file_errors++;
-        } else if (file_log_file_open &&
-                   static_cast<int32_t>(millis() - file_log_last_flush_ms) >=
-                       static_cast<int32_t>(AC_FILE_LOG_FLUSH_MS)) {
-            Storage::Guard guard;
-            file_log_file.flush();
-            file_log_last_flush_ms = millis();
-            did_work = true;
-        }
-        unlock_file_log_sink();
-    }
-
-    return did_work;
-#else
-    (void)allow_rotation;
-    return false;
-#endif
-}
-
 }  // namespace
 
 namespace Log {
@@ -596,10 +322,6 @@ namespace Log {
 void init() {
     if (!log_mutex) {
         log_mutex = xSemaphoreCreateMutexStatic(&log_mutex_storage);
-    }
-    if (!file_log_sink_mutex) {
-        file_log_sink_mutex =
-            xSemaphoreCreateMutexStatic(&file_log_sink_mutex_storage);
     }
     for (int i = 0; i < CAT_COUNT; ++i) levels[i] = LOG_INFO;
 }
@@ -778,14 +500,12 @@ void configure_filelog(bool enabled) {
     lock_log();
     file_log_enabled_value = false;
     if (!enabled) {
-        release_file_log_queue();
+        (void)aircannect::StorageService::configure_file_log(false);
         unlock_log();
-        lock_file_log_sink();
-        close_file_log_locked(true);
-        unlock_file_log_sink();
         return;
     }
-    if (ensure_file_log_queue()) {
+
+    if (aircannect::StorageService::configure_file_log(true)) {
         file_log_enabled_value = true;
     }
     unlock_log();
@@ -807,10 +527,6 @@ void poll(bool network_available) {
         if (!have_record) return;
         send_syslog_record(record);
     }
-}
-
-bool service_filelog(bool allow_rotation) {
-    return service_file_log(allow_rotation);
 }
 
 bool syslog_enabled() {
@@ -849,24 +565,18 @@ const char *filelog_path() {
 }
 
 size_t filelog_queue_depth() {
-    lock_log();
-    const size_t out = file_log_queue ? file_log_queue->count() : 0;
-    unlock_log();
-    return out;
+    return aircannect::StorageService::file_log_status().queued;
 }
 
 bool print_filelog_tail(Print &out, size_t lines) {
 #if AC_FILE_LOG_ENABLED
     if (lines == 0) lines = 1;
-    lock_file_log_sink();
-    if (file_log_file_open) {
-        file_log_file.flush();
-    }
+
+    // Temporary Phase 2 adapter. The async tail query moves into
+    // StorageService with storage browser reads.
+    Storage::Guard guard;
     File file = Storage::open(AC_FILE_LOG_PATH, FILE_READ);
-    if (!file) {
-        unlock_file_log_sink();
-        return false;
-    }
+    if (!file) return false;
 
     uint8_t buffer[AC_FILE_LOG_TAIL_READ_CHUNK];
     const uint64_t size = file.size();
@@ -880,13 +590,11 @@ bool print_filelog_tail(Print &out, size_t lines) {
         offset -= want;
         if (!file.seek(static_cast<uint32_t>(offset))) {
             file.close();
-            unlock_file_log_sink();
             return false;
         }
         const int got = file.read(buffer, want);
         if (got <= 0) {
             file.close();
-            unlock_file_log_sink();
             return false;
         }
         for (int i = got - 1; i >= 0; --i) {
@@ -901,7 +609,6 @@ bool print_filelog_tail(Print &out, size_t lines) {
 
     if (!file.seek(static_cast<uint32_t>(offset))) {
         file.close();
-        unlock_file_log_sink();
         return false;
     }
     while (file.available()) {
@@ -910,7 +617,6 @@ bool print_filelog_tail(Print &out, size_t lines) {
         out.write(buffer, static_cast<size_t>(got));
     }
     file.close();
-    unlock_file_log_sink();
     return true;
 #else
     (void)out;
@@ -923,8 +629,12 @@ Stats stats() {
     lock_log();
     Stats out = log_stats;
     if (syslog_queue) out.syslog_drops += syslog_queue->dropped();
-    if (file_log_queue) out.file_drops += file_log_queue->dropped();
     unlock_log();
+
+    const aircannect::StorageFileLogStatus file_log =
+        aircannect::StorageService::file_log_status();
+    out.file_dequeued = file_log.written;
+    out.file_errors += file_log.errors;
     return out;
 }
 
