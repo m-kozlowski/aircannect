@@ -118,6 +118,7 @@ const char *StorageSyncEngine::work_phase_name(WorkPhase phase) {
         case WorkPhase::Idle: return "idle";
         case WorkPhase::LoadMetadata: return "load_metadata";
         case WorkPhase::LoadInventory: return "load_inventory";
+        case WorkPhase::ResolveHost: return "resolve_host";
         case WorkPhase::Connect: return "connect";
         case WorkPhase::VerifyLatestStart: return "verify_latest_start";
         case WorkPhase::VerifyLatestFile: return "verify_latest_file";
@@ -189,6 +190,7 @@ void StorageSyncEngine::reset_run_locked(bool keep_status) {
     metadata_file_.reset();
     release_upload_buffer_locked();
     smb_.abort_connection();
+    smb_configured_ = false;
     clear_current_file_locked();
     phase_ = WorkPhase::Idle;
     endpoint_hash_ = 0;
@@ -696,7 +698,7 @@ ExportStep StorageSyncEngine::step_load_inventory_locked() {
         return ExportStep::Idle;
     }
 
-    phase_ = WorkPhase::Connect;
+    phase_ = WorkPhase::ResolveHost;
     return ExportStep::Working;
 }
 
@@ -1224,6 +1226,7 @@ void StorageSyncEngine::finish_run_locked() {
     export_inventory_.reset();
     inventory_requested_ = false;
     release_upload_buffer_locked();
+    smb_configured_ = false;
     state_io_.reset();
     state_batch_.clear();
     pending_state_path_[0] = '\0';
@@ -1362,6 +1365,7 @@ void StorageSyncEngine::fail_locked(const char *error) {
     inventory_requested_ = false;
     close_latest_verify_locked();
     smb_.abort_connection();
+    smb_configured_ = false;
     release_upload_buffer_locked();
     state_io_.reset();
     state_batch_.clear();
@@ -1741,6 +1745,7 @@ bool StorageSyncEngine::phase_has_blocking_io(WorkPhase phase) {
         case WorkPhase::Idle:
         case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
+        case WorkPhase::ResolveHost:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
@@ -1760,13 +1765,7 @@ void StorageSyncEngine::execute_blocking_phase(WorkPhase phase,
 
     switch (phase) {
         case WorkPhase::Connect: {
-            if (!smb_.configure(config_.endpoint,
-                                config_.user,
-                                config_.password,
-                                result.error,
-                                sizeof(result.error),
-                                &operation) ||
-                !smb_.connect(result.error,
+            if (!smb_.connect(result.error,
                               sizeof(result.error),
                               &operation)) {
                 return;
@@ -1872,6 +1871,7 @@ void StorageSyncEngine::execute_blocking_phase(WorkPhase phase,
         case WorkPhase::Idle:
         case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
+        case WorkPhase::ResolveHost:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
@@ -1997,6 +1997,7 @@ ExportStep StorageSyncEngine::publish_blocking_phase_locked(
         case WorkPhase::Idle:
         case WorkPhase::LoadMetadata:
         case WorkPhase::LoadInventory:
+        case WorkPhase::ResolveHost:
         case WorkPhase::VerifyLatestStart:
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
@@ -2023,6 +2024,9 @@ ExportStep StorageSyncEngine::step_work_phase_locked() {
 
         case WorkPhase::LoadInventory:
             return step_load_inventory_locked();
+
+        case WorkPhase::ResolveHost:
+            return step_resolve_host_locked();
 
         case WorkPhase::Connect:
         case WorkPhase::VerifyLatestRemote:
@@ -2057,6 +2061,35 @@ ExportStep StorageSyncEngine::step_work_phase_locked() {
             return step_write_done_marker_locked();
     }
     return ExportStep::Idle;
+}
+
+ExportStep StorageSyncEngine::step_resolve_host_locked() {
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    if (!smb_configured_) {
+        if (!smb_.configure(config_.endpoint,
+                            config_.user,
+                            config_.password,
+                            error,
+                            sizeof(error),
+                            nullptr)) {
+            fail_locked(error[0] ? error : "smb_configure_failed");
+            return ExportStep::Idle;
+        }
+        smb_configured_ = true;
+    }
+
+    const StorageSmbHostResult result = smb_.resolve_host(error,
+                                                          sizeof(error));
+    if (result == StorageSmbHostResult::Waiting) {
+        return ExportStep::Waiting;
+    }
+    if (result == StorageSmbHostResult::Error) {
+        fail_locked(error[0] ? error : "dns_lookup_failed");
+        return ExportStep::Idle;
+    }
+
+    phase_ = WorkPhase::Connect;
+    return ExportStep::Working;
 }
 
 ExportStep StorageSyncEngine::step() {

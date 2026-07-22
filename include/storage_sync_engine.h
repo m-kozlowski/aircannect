@@ -143,6 +143,7 @@ private:
         Idle,
         LoadMetadata,
         LoadInventory,
+        ResolveHost,
         Connect,
         VerifyLatestStart,
         VerifyLatestFile,
@@ -232,6 +233,7 @@ private:
     void queue_retry_locked(uint32_t now_ms);
     bool cancel_scheduled_reconcile_locked();
     ExportStep step_work_phase_locked();
+    ExportStep step_resolve_host_locked();
     static bool phase_has_blocking_io(WorkPhase phase);
     void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
     ExportStep publish_blocking_phase_locked(
@@ -309,6 +311,7 @@ private:
     uint32_t next_config_generation_ = 1;
     WorkPhase phase_ = WorkPhase::Idle;
     StorageSmbClient smb_;
+    bool smb_configured_ = false;
     std::atomic<bool> network_available_{false};
     std::atomic<bool> runtime_blocked_{false};
     std::atomic<bool> abort_requested_{false};

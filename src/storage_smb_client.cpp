@@ -13,6 +13,10 @@
 #include <netinet/tcp.h>
 #include <new>
 
+#include <lwip/dns.h>
+#include <lwip/ip_addr.h>
+#include <lwip/tcpip.h>
+
 #include "debug_log.h"
 #include "string_util.h"
 
@@ -28,6 +32,25 @@ static constexpr int SMB_COMMAND_TIMEOUT_SECONDS = 15;
 static constexpr int SMB_POLL_INTERVAL_MS = 100;
 static constexpr uint32_t SMB_EVENT_LOOP_TIMEOUT_MS =
     SMB_COMMAND_TIMEOUT_SECONDS * 1000UL;
+
+class LwipCoreGuard {
+public:
+#ifdef CONFIG_LWIP_TCPIP_CORE_LOCKING
+    LwipCoreGuard()
+        : locked_(!sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)) {
+        if (locked_) LOCK_TCPIP_CORE();
+    }
+
+    ~LwipCoreGuard() {
+        if (locked_) UNLOCK_TCPIP_CORE();
+    }
+
+private:
+    bool locked_ = false;
+#else
+    LwipCoreGuard() = default;
+#endif
+};
 
 struct SmbAsyncCbData {
     bool finished = false;
@@ -237,6 +260,44 @@ bool valid_endpoint_char(char c) {
     return u >= 0x20 && u < 0x7F && c != '\\';
 }
 
+bool split_server_authority(const char *server,
+                            char *host,
+                            size_t host_size,
+                            const char **port_suffix) {
+    if (!server || !server[0] || !host || host_size == 0 || !port_suffix) {
+        return false;
+    }
+
+    *port_suffix = "";
+    const char *host_start = server;
+    size_t host_len = strlen(server);
+
+    if (server[0] == '[') {
+        const char *closing = strchr(server + 1, ']');
+        if (!closing) return false;
+
+        host_start = server + 1;
+        host_len = static_cast<size_t>(closing - host_start);
+        if (closing[1] != '\0') {
+            if (closing[1] != ':' || closing[2] == '\0') return false;
+            *port_suffix = closing + 1;
+        }
+    } else {
+        const char *first_colon = strchr(server, ':');
+        const char *last_colon = strrchr(server, ':');
+        if (first_colon && first_colon == last_colon) {
+            if (first_colon == server || first_colon[1] == '\0') return false;
+            host_len = static_cast<size_t>(first_colon - server);
+            *port_suffix = first_colon;
+        }
+    }
+
+    if (host_len == 0 || host_len >= host_size) return false;
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
+    return true;
+}
+
 bool append_path_segment(char *path,
                          size_t path_size,
                          const char *segment,
@@ -252,6 +313,18 @@ bool append_path_segment(char *path,
 }
 
 }  // namespace
+
+struct StorageSmbDnsCallback {
+    static void complete(const char *,
+                         const ip_addr_t *address,
+                         void *context) {
+        StorageSmbClient *client =
+            static_cast<StorageSmbClient *>(context);
+        if (!client) return;
+        client->publish_host_resolution(address,
+                                        address ? ERR_OK : ERR_TIMEOUT);
+    }
+};
 
 StorageSmbClient::~StorageSmbClient() {
     disconnect();
@@ -389,8 +462,162 @@ bool StorageSmbClient::configure(const char *endpoint,
     if (!parse_endpoint(endpoint, error_out, error_out_size)) return false;
     copy_cstr(user_, sizeof(user_), user);
     copy_cstr(password_, sizeof(password_), password);
+
+    const HostResolutionState state = static_cast<HostResolutionState>(
+        host_resolution_state_.load(std::memory_order_acquire));
+    if (state != HostResolutionState::Pending) reset_host_resolution();
+
     set_error(error_out, error_out_size, "");
     return true;
+}
+
+void StorageSmbClient::publish_host_resolution(const void *address,
+                                               int error) {
+    const ip_addr_t *ip = static_cast<const ip_addr_t *>(address);
+    char raw_address[IPADDR_STRLEN_MAX] = {};
+    if (!ip || !ipaddr_ntoa_r(ip, raw_address, sizeof(raw_address))) {
+        resolved_address_[0] = '\0';
+        host_resolution_error_ = error ? error : ERR_VAL;
+        host_resolution_state_.store(
+            static_cast<uint8_t>(HostResolutionState::Error),
+            std::memory_order_release);
+        return;
+    }
+
+    if (IP_IS_V6(ip)) {
+        const int written = snprintf(resolved_address_,
+                                     sizeof(resolved_address_),
+                                     "[%s]",
+                                     raw_address);
+        if (written <= 0 ||
+            static_cast<size_t>(written) >= sizeof(resolved_address_)) {
+            resolved_address_[0] = '\0';
+            host_resolution_error_ = ERR_BUF;
+            host_resolution_state_.store(
+                static_cast<uint8_t>(HostResolutionState::Error),
+                std::memory_order_release);
+            return;
+        }
+    } else {
+        copy_cstr(resolved_address_, sizeof(resolved_address_), raw_address);
+    }
+
+    host_resolution_error_ = ERR_OK;
+    host_resolution_state_.store(
+        static_cast<uint8_t>(HostResolutionState::Ready),
+        std::memory_order_release);
+}
+
+void StorageSmbClient::reset_host_resolution() {
+    resolving_server_[0] = '\0';
+    resolved_address_[0] = '\0';
+    resolved_server_[0] = '\0';
+    host_resolution_started_ms_ = 0;
+    host_resolution_error_ = ERR_OK;
+    host_resolution_state_.store(
+        static_cast<uint8_t>(HostResolutionState::Idle),
+        std::memory_order_release);
+}
+
+StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
+                                                    size_t error_out_size) {
+    if (!server_[0]) {
+        set_error(error_out, error_out_size, "not_configured");
+        return StorageSmbHostResult::Error;
+    }
+
+    HostResolutionState state = static_cast<HostResolutionState>(
+        host_resolution_state_.load(std::memory_order_acquire));
+    if (state == HostResolutionState::Pending) {
+        return StorageSmbHostResult::Waiting;
+    }
+
+    if (state != HostResolutionState::Idle &&
+        strcmp(resolving_server_, server_) != 0) {
+        reset_host_resolution();
+        state = HostResolutionState::Idle;
+    }
+
+    if (state == HostResolutionState::Error) {
+        char error[AC_STORAGE_ERROR_MAX] = {};
+        snprintf(error,
+                 sizeof(error),
+                 "dns_lookup_failed:%d",
+                 host_resolution_error_);
+        set_error(error_out, error_out_size, error);
+        return StorageSmbHostResult::Error;
+    }
+
+    if (state == HostResolutionState::Ready) {
+        char host[AC_STORAGE_SMB_ENDPOINT_HOST_MAX] = {};
+        const char *port_suffix = "";
+        if (!split_server_authority(server_,
+                                    host,
+                                    sizeof(host),
+                                    &port_suffix)) {
+            set_error(error_out, error_out_size, "bad_smb_host");
+            return StorageSmbHostResult::Error;
+        }
+
+        const int written = snprintf(resolved_server_,
+                                     sizeof(resolved_server_),
+                                     "%s%s",
+                                     resolved_address_,
+                                     port_suffix);
+        if (written <= 0 ||
+            static_cast<size_t>(written) >= sizeof(resolved_server_)) {
+            set_error(error_out, error_out_size, "resolved_host_too_long");
+            return StorageSmbHostResult::Error;
+        }
+
+        Log::logf(CAT_STORAGE,
+                  LOG_INFO,
+                  "[SMB] resolved host=%s address=%s ms=%lu\n",
+                  host,
+                  resolved_address_,
+                  static_cast<unsigned long>(
+                      millis() - host_resolution_started_ms_));
+        set_error(error_out, error_out_size, "");
+        return StorageSmbHostResult::Ready;
+    }
+
+    char host[AC_STORAGE_SMB_ENDPOINT_HOST_MAX] = {};
+    const char *port_suffix = "";
+    if (!split_server_authority(server_,
+                                host,
+                                sizeof(host),
+                                &port_suffix)) {
+        set_error(error_out, error_out_size, "bad_smb_host");
+        return StorageSmbHostResult::Error;
+    }
+
+    copy_cstr(resolving_server_, sizeof(resolving_server_), server_);
+    host_resolution_started_ms_ = millis();
+    host_resolution_state_.store(
+        static_cast<uint8_t>(HostResolutionState::Pending),
+        std::memory_order_release);
+    Log::logf(CAT_STORAGE, LOG_INFO, "[SMB] resolving host=%s\n", host);
+
+    ip_addr_t address = {};
+    err_t rc = ERR_OK;
+    {
+        LwipCoreGuard guard;
+        rc = dns_gethostbyname_addrtype(
+            host,
+            &address,
+            StorageSmbDnsCallback::complete,
+            this,
+            LWIP_DNS_ADDRTYPE_IPV4_IPV6);
+    }
+
+    if (rc == ERR_OK) {
+        publish_host_resolution(&address, ERR_OK);
+        return resolve_host(error_out, error_out_size);
+    }
+    if (rc == ERR_INPROGRESS) return StorageSmbHostResult::Waiting;
+
+    publish_host_resolution(nullptr, rc);
+    return resolve_host(error_out, error_out_size);
 }
 
 void StorageSmbClient::configure_socket_options() {
@@ -429,6 +656,10 @@ bool StorageSmbClient::connect(
         set_error(error_out, error_out_size, "not_configured");
         return false;
     }
+    if (!resolved_server_[0]) {
+        set_error(error_out, error_out_size, "host_not_resolved");
+        return false;
+    }
 
     ctx_ = smb2_init_context();
     if (!ctx_) {
@@ -447,7 +678,7 @@ bool StorageSmbClient::connect(
 
     Log::logf(CAT_STORAGE, LOG_INFO,
               "[SMB] connecting //%s/%s\n", server_, share_);
-    const int rc = smb_connect_share_ev(ctx_, server_, share_, nullptr,
+    const int rc = smb_connect_share_ev(ctx_, resolved_server_, share_, nullptr,
                                         operation);
     if (rc != 0) {
         char error[AC_STORAGE_ERROR_MAX] = {};
