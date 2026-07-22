@@ -27,6 +27,7 @@
 #include "report_prefetch_job.h"
 #include "resmed_ota_manager.h"
 #include "rpc_arbiter.h"
+#include "rpc_quiesce_coordinator.h"
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
@@ -52,7 +53,9 @@ using namespace aircannect;
 static CanDriver can_driver;
 static EventBroker event_broker;
 static StreamBroker stream_broker;
-static RpcArbiter rpc_arbiter(can_driver, event_broker, stream_broker);
+static RpcArbiter rpc_arbiter(can_driver, stream_broker);
+static RpcQuiesceCoordinator rpc_quiesce_coordinator(
+    rpc_arbiter, event_broker, stream_broker);
 static As11DeviceService as11_device_service;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
@@ -85,6 +88,7 @@ static uint32_t edf_report_catalog_seen_sessions_ended = 0;
 static bool edf_report_catalog_post_session_pending = false;
 static uint32_t edf_report_catalog_refresh_due_ms = 0;
 static uint32_t edf_report_catalog_timezone_revision = 0;
+static uint32_t rpc_transport_generation_seen = 0;
 static ActivitySnapshot storage_activity;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
@@ -135,6 +139,35 @@ static void note_as11_device_event(void *context,
 static void note_as11_settings_history(void *context, uint32_t now_ms) {
     (void)now_ms;
     static_cast<As11SettingsManager *>(context)->note_history_change();
+}
+
+static void route_event_notification(void *context,
+                                     const char *payload,
+                                     size_t payload_len,
+                                     uint32_t now_ms) {
+    EventBroker *events = static_cast<EventBroker *>(context);
+    if (!events) return;
+
+    As11EventFrame frame;
+    (void)events->publish_notification(payload, payload_len, now_ms, frame);
+}
+
+static void route_stream_notification(void *context,
+                                      const char *payload,
+                                      size_t payload_len,
+                                      uint32_t now_ms) {
+    StreamBroker *stream = static_cast<StreamBroker *>(context);
+    if (!stream) return;
+    (void)stream->publish_stream_data(payload, payload_len, now_ms);
+}
+
+static void sync_rpc_transport_generation(uint32_t now_ms) {
+    const uint32_t generation = rpc_arbiter.transport_generation();
+    if (generation == rpc_transport_generation_seen) return;
+
+    event_broker.transport_reset(rpc_arbiter, now_ms);
+    stream_broker.transport_reset(rpc_arbiter, now_ms);
+    rpc_transport_generation_seen = generation;
 }
 
 #if AC_STACK_PROFILE_ENABLED
@@ -431,6 +464,11 @@ void setup() {
                                           &as11_device_service);
     event_broker.set_settings_history_observer(
         note_as11_settings_history, &as11_settings_manager);
+    rpc_arbiter.set_event_notification_observer(route_event_notification,
+                                                &event_broker);
+    rpc_arbiter.set_stream_notification_observer(route_stream_notification,
+                                                 &stream_broker);
+    rpc_transport_generation_seen = rpc_arbiter.transport_generation();
 
     sink_manager.begin(stream_broker, as11_device_service.state(),
                        session_manager);
@@ -536,7 +574,7 @@ void loop() {
     // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =
         ota_manager.as11_quiesce_required();
-    rpc_arbiter.set_esp_ota_quiesce(esp_ota_quiesce_requested);
+    rpc_quiesce_coordinator.update(esp_ota_quiesce_requested, now_ms);
 
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
@@ -545,6 +583,7 @@ void loop() {
         tcp_bridge.raw_client_connected());
 
     rpc_arbiter.poll();
+    sync_rpc_transport_generation(now_ms);
     stream_broker.poll(rpc_arbiter, now_ms);
     event_broker.poll(rpc_arbiter, now_ms,
                       resmed_ota_transport_active);
@@ -557,9 +596,9 @@ void loop() {
 
     ota_manager.poll_http_upload_prepare(
         esp_ota_quiesce_requested &&
-            rpc_arbiter.esp_ota_quiesce_complete(),
+            rpc_quiesce_coordinator.complete(),
         esp_ota_quiesce_requested &&
-            rpc_arbiter.esp_ota_quiesce_timed_out());
+            rpc_quiesce_coordinator.timed_out(now_ms));
 
     drain_can_rx_after("arbiter_ota_prepare");
 
@@ -635,7 +674,7 @@ void loop() {
     // ESP/Arduino OTA
     const bool esp_reboot_allowed =
         !ota_manager.status().reboot_pending ||
-        rpc_arbiter.esp_ota_reboot_allowed();
+        rpc_quiesce_coordinator.reboot_allowed(now_ms);
 
     const bool arduino_ota_poll_allowed =
         as11_device_service.state().therapy_state() !=

@@ -5,6 +5,7 @@
 #include "as11_device_state.h"
 #include "board.h"
 #include "debug_log.h"
+#include "event_broker.h"
 
 namespace aircannect {
 namespace ConsoleFormat {

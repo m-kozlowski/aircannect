@@ -11,6 +11,9 @@
 #include "wifi_manager.h"
 
 namespace aircannect {
+
+class EventBroker;
+
 namespace ConsoleFormat {
 
 void print_can_status(Print &out, const CanDriver &can_driver);

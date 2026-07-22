@@ -8,7 +8,6 @@
 #include "board.h"
 #include "can_datagram.h"
 #include "can_driver.h"
-#include "event_broker.h"
 #include "fixed_queue.h"
 #include "rpc_request_port.h"
 #include "stream_broker.h"
@@ -28,6 +27,10 @@ enum class RpcEventKind {
 using RpcPayloadRef = std::shared_ptr<const std::string>;
 struct RpcEvent;
 using RpcEventObserver = void (*)(void *context, const RpcEvent &event);
+using RpcNotificationObserver = void (*)(void *context,
+                                         const char *payload,
+                                         size_t payload_len,
+                                         uint32_t now_ms);
 
 inline RpcPayloadRef make_rpc_payload_ref(std::string payload) {
     return std::make_shared<const std::string>(std::move(payload));
@@ -87,9 +90,7 @@ struct RpcRuntimeStatus {
 
 class RpcArbiter final : public RpcRequestPort {
 public:
-    RpcArbiter(CanDriver &can,
-               EventBroker &event_broker,
-               StreamBroker &stream_broker);
+    RpcArbiter(CanDriver &can, StreamBroker &stream_broker);
 
     // Lifecycle and CAN pump
     bool reserve_reassembly_buffers();
@@ -122,6 +123,10 @@ public:
                                    void *context);
 
     void set_raw_rpc_events_enabled(bool enabled);
+    void set_event_notification_observer(RpcNotificationObserver observer,
+                                         void *context);
+    void set_stream_notification_observer(RpcNotificationObserver observer,
+                                          void *context);
 
     // Device maintenance
     void reset_stats();
@@ -130,15 +135,16 @@ public:
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
     bool background_backpressure_active() const;
-    void set_esp_ota_quiesce(bool requested);
-    bool esp_ota_quiesce_complete() const;
-    bool esp_ota_quiesce_timed_out() const;
-    bool esp_ota_reboot_allowed() const;
+    void set_quiesce_mode(bool requested);
+    bool quiesce_idle() const;
 
     // Status snapshots
     const RpcArbiterStats &stats() const { return stats_; }
     RpcRuntimeStatus runtime_status() const;
     const CanDriver &can_driver() const { return can_; }
+    uint32_t transport_generation() const {
+        return transport_generation_;
+    }
 
 private:
     // Request and payload types
@@ -265,16 +271,16 @@ private:
     void note_can_rx_pressure(uint32_t now);
     void note_request_success(RpcSource source, uint32_t now);
     void note_request_timeout(RpcSource source, uint32_t now);
-    bool request_allowed_during_esp_ota_quiesce(
-        const QueuedRequest &request) const;
+    bool request_allowed_during_quiesce(const QueuedRequest &request) const;
 
     void dispatch_next_request();
     void check_pending_timeout();
     void process_deferred_payloads(size_t budget);
 
     // Payload handling
-    bool handle_event_notification(const char *payload, size_t payload_len);
+    void handle_event_notification(const char *payload, size_t payload_len);
     void handle_stream_notification(const char *payload, size_t payload_len);
+    void note_transport_reset();
     void handle_frame(const RawCanFrame &frame);
     void enqueue_deferred_payload(DeferredPayload::Kind kind,
                                   const char *payload,
@@ -346,16 +352,18 @@ private:
     uint32_t last_boot_notification_ms_ = 0;
     std::string last_boot_notification_;
 
-    // Notification and subscription owners
-    EventBroker &event_;
+    // Notification routing
     StreamBroker &stream_;
+    RpcNotificationObserver event_notification_observer_ = nullptr;
+    void *event_notification_context_ = nullptr;
+    RpcNotificationObserver stream_notification_observer_ = nullptr;
+    void *stream_notification_context_ = nullptr;
+    uint32_t transport_generation_ = 1;
 
-    // Backpressure and OTA quiesce
+    // Backpressure and transport admission
     bool raw_rpc_events_enabled_ = false;
-    bool esp_ota_quiesce_requested_ = false;
-    bool esp_ota_quiesce_timeout_logged_ = false;
+    bool quiesce_mode_ = false;
 
-    uint32_t esp_ota_quiesce_deadline_ms_ = 0;
     uint8_t consecutive_scheduler_timeouts_ = 0;
     uint32_t background_backoff_until_ms_ = 0;
     uint32_t background_rx_pressure_until_ms_ = 0;

@@ -75,10 +75,8 @@ bool current_epoch_ms(int64_t &epoch_ms) {
 
 }  // namespace
 
-RpcArbiter::RpcArbiter(CanDriver &can,
-                       EventBroker &event_broker,
-                       StreamBroker &stream_broker)
-    : can_(can), event_(event_broker), stream_(stream_broker) {
+RpcArbiter::RpcArbiter(CanDriver &can, StreamBroker &stream_broker)
+    : can_(can), stream_(stream_broker) {
     stats_started_ms_ = millis();
 }
 
@@ -139,26 +137,6 @@ void RpcArbiter::poll() {
     can_.poll();
     const uint32_t now = millis();
     note_can_rx_pressure(now);
-    if (esp_ota_quiesce_requested_ &&
-        esp_ota_quiesce_deadline_ms_ &&
-        !esp_ota_quiesce_complete() &&
-        !esp_ota_quiesce_timeout_logged_ &&
-        static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0) {
-        esp_ota_quiesce_timeout_logged_ = true;
-        const EventBrokerStatus event_status = event_.status();
-        Log::logf(CAT_OTA, LOG_WARN,
-                  "AS11 quiesce timed out stream=%u event=%u pending=%u "
-                  "retry=%u queue=%u tx_q=%u event_active=%u "
-                  "event_pending=%u\n",
-                  stream_.quiesced() ? 1u : 0u,
-                  event_.quiesced() ? 1u : 0u,
-                  pending_.active ? 1u : 0u,
-                  dispatch_retry_active_ ? 1u : 0u,
-                  static_cast<unsigned>(requests_.count()),
-                  static_cast<unsigned>(can_.tx_queue_depth()),
-                  event_status.subscription_active ? 1u : 0u,
-                  event_status.subscribe_pending ? 1u : 0u);
-    }
 
     DatagramFeedResult rpc_timeout = rpc_rx_.poll(now);
     if (rpc_timeout.status == DatagramStatus::Error) {
@@ -213,9 +191,9 @@ void RpcArbiter::process_deferred_payloads(size_t budget) {
 }
 
 bool RpcArbiter::submit_raw_payload(const std::string &payload, RpcSource source) {
-    if (esp_ota_quiesce_requested_) {
+    if (quiesce_mode_) {
         push_event(RpcEventKind::Info,
-                   "raw RPC rejected while ESP OTA quiesce is active");
+                   "raw RPC rejected while transport quiesce is active");
         return false;
     }
     if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
@@ -376,11 +354,10 @@ bool RpcArbiter::take_completion(OperationTicket ticket,
 
 bool RpcArbiter::enqueue_request(QueuedRequest &request) {
     const uint32_t now = millis();
-    const bool ota_quiesce_control =
-        esp_ota_quiesce_requested_ &&
-        request_allowed_during_esp_ota_quiesce(request);
+    const bool quiesce_control =
+        quiesce_mode_ && request_allowed_during_quiesce(request);
     if (scheduler_source(request.source) && background_backoff_active(now) &&
-        !ota_quiesce_control) {
+        !quiesce_control) {
         return false;
     }
 
@@ -443,6 +420,20 @@ void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
     raw_rpc_events_enabled_ = enabled;
 }
 
+void RpcArbiter::set_event_notification_observer(
+    RpcNotificationObserver observer,
+    void *context) {
+    event_notification_observer_ = observer;
+    event_notification_context_ = observer ? context : nullptr;
+}
+
+void RpcArbiter::set_stream_notification_observer(
+    RpcNotificationObserver observer,
+    void *context) {
+    stream_notification_observer_ = observer;
+    stream_notification_context_ = observer ? context : nullptr;
+}
+
 void RpcArbiter::reset_stats() {
     stats_ = {};
     can_.reset_stats();
@@ -482,51 +473,20 @@ bool RpcArbiter::recover_can(const char *reason) {
     log_rx_.reset();
     deferred_payloads_.clear();
     cancel_all_requests(reason ? reason : "can_recovery");
-    const uint32_t now = millis();
-    stream_.transport_reset(*this, now);
-    event_.transport_reset(*this, now);
+    note_transport_reset();
     return can_.recover_or_restart(reason);
 }
 
-void RpcArbiter::set_esp_ota_quiesce(bool requested) {
-    const uint32_t now = millis();
-    if (requested == esp_ota_quiesce_requested_) return;
+void RpcArbiter::set_quiesce_mode(bool requested) {
+    if (requested == quiesce_mode_) return;
 
-    esp_ota_quiesce_requested_ = requested;
-    esp_ota_quiesce_timeout_logged_ = false;
-    if (!requested) {
-        esp_ota_quiesce_deadline_ms_ = 0;
-        stream_.clear_quiesce();
-        event_.clear_quiesce(now);
-        return;
-    }
-
-    Log::logf(CAT_OTA, LOG_INFO,
-              "quiescing AS11 push traffic before ESP OTA\n");
-    cancel_all_requests("esp_ota");
-    stream_.request_quiesce(now);
-    event_.request_quiesce(now);
-    esp_ota_quiesce_deadline_ms_ =
-        now + AC_ESP_OTA_QUIESCE_TIMEOUT_MS;
+    quiesce_mode_ = requested;
+    if (requested) cancel_all_requests("rpc_quiesce");
 }
 
-bool RpcArbiter::esp_ota_quiesce_complete() const {
-    if (!esp_ota_quiesce_requested_) return true;
-    return stream_.quiesced() && event_.quiesced() &&
-           !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
+bool RpcArbiter::quiesce_idle() const {
+    return !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
            can_.tx_queue_depth() == 0;
-}
-
-bool RpcArbiter::esp_ota_quiesce_timed_out() const {
-    if (!esp_ota_quiesce_requested_ || !esp_ota_quiesce_deadline_ms_) {
-        return false;
-    }
-    const uint32_t now = millis();
-    return static_cast<int32_t>(now - esp_ota_quiesce_deadline_ms_) >= 0;
-}
-
-bool RpcArbiter::esp_ota_reboot_allowed() const {
-    return esp_ota_quiesce_complete() || esp_ota_quiesce_timed_out();
 }
 
 void RpcArbiter::cancel_requests_from_source(RpcSource source,
@@ -580,9 +540,9 @@ void RpcArbiter::note_can_rx_pressure(uint32_t now) {
     }
 }
 
-bool RpcArbiter::request_allowed_during_esp_ota_quiesce(
+bool RpcArbiter::request_allowed_during_quiesce(
     const QueuedRequest &request) const {
-    if (!esp_ota_quiesce_requested_) return true;
+    if (!quiesce_mode_) return true;
     return request.admission == RpcRequestAdmission::QuiesceControl;
 }
 
@@ -933,9 +893,8 @@ void RpcArbiter::dispatch_next_request() {
         return;
     }
 
-    if (esp_ota_quiesce_requested_ &&
-        !request_allowed_during_esp_ota_quiesce(request)) {
-        cancel_queued_request(request, "esp_ota");
+    if (quiesce_mode_ && !request_allowed_during_quiesce(request)) {
+        cancel_queued_request(request, "rpc_quiesce");
         if (from_retry) {
             dispatch_retry_ = {};
             dispatch_retry_active_ = false;
@@ -1062,10 +1021,10 @@ void RpcArbiter::check_pending_timeout() {
         push_event(RpcEventKind::Info, buf);
     }
     stats_.request_timeouts++;
-    const bool ota_quiesce_control =
-        esp_ota_quiesce_requested_ &&
+    const bool quiesce_control =
+        quiesce_mode_ &&
         pending_.admission == RpcRequestAdmission::QuiesceControl;
-    if (!ota_quiesce_control) {
+    if (!quiesce_control) {
         note_request_timeout(pending_.source, now);
     }
     complete_request(pending_.id, pending_.generation,
@@ -1075,18 +1034,23 @@ void RpcArbiter::check_pending_timeout() {
     pending_ = {};
 }
 
-bool RpcArbiter::handle_event_notification(const char *payload,
+void RpcArbiter::handle_event_notification(const char *payload,
                                            size_t payload_len) {
-    const uint32_t now = millis();
-    As11EventFrame event_frame;
-    const EventPublishResult event_result =
-        event_.publish_notification(payload, payload_len, now, event_frame);
-    return event_result.accepted;
+    if (!event_notification_observer_) return;
+    event_notification_observer_(event_notification_context_, payload,
+                                 payload_len, millis());
 }
 
 void RpcArbiter::handle_stream_notification(const char *payload,
                                             size_t payload_len) {
-    (void)stream_.publish_stream_data(payload, payload_len, millis());
+    if (!stream_notification_observer_) return;
+    stream_notification_observer_(stream_notification_context_, payload,
+                                  payload_len, millis());
+}
+
+void RpcArbiter::note_transport_reset() {
+    transport_generation_++;
+    if (transport_generation_ == 0) transport_generation_++;
 }
 
 void RpcArbiter::enqueue_deferred_payload(DeferredPayload::Kind kind,
@@ -1146,8 +1110,7 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
         last_boot_notification_ms_ = millis();
         deferred_payloads_.clear();
         cancel_all_requests("device_boot");
-        event_.transport_reset(*this, now);
-        stream_.transport_reset(*this, now);
+        note_transport_reset();
         push_event(RpcEventKind::BootNotification, last_boot_notification_);
     }
 }
