@@ -292,7 +292,7 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
             return false;
         }
 
-        const size_t signal = static_cast<size_t>(mapping->layout.signal);
+        const size_t signal = static_cast<size_t>(mapping->series.signal);
         if (signal >= SIGNAL_COUNT) {
             failure_reason_ = "report_plot_signal_invalid";
             runtime_->clear();
@@ -302,7 +302,7 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
         SeriesState &state = runtime_->series[signal];
         state.active = true;
         state.max_interval_ms = std::max(
-            state.max_interval_ms, mapping->layout.sample_interval_ms);
+            state.max_interval_ms, mapping->series.sample_interval_ms);
     }
 
     const uint64_t span = static_cast<uint64_t>(end_ms - start_ms);
