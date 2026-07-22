@@ -8,14 +8,15 @@
 #include <stdint.h>
 #include <string>
 
-#include "as11_device_service.h"
 #include "board.h"
 #include "crc32.h"
 #include "large_byte_buffer.h"
-#include "rpc_arbiter.h"
+#include "rpc_request_port.h"
 #include "storage_atomic_write_port.h"
 
 namespace aircannect {
+
+class As11DeviceService;
 
 enum class ResmedOtaPhase {
     Idle,
@@ -53,7 +54,7 @@ struct ResmedOtaStatus {
 
 class ResmedOtaManager {
 public:
-    void begin(RpcArbiter &arbiter,
+    void begin(RpcRequestPort &rpc,
                As11DeviceService &device,
                StorageAtomicWritePort &storage_write_port);
     void poll();
@@ -103,7 +104,8 @@ private:
     bool queue_request(const char *method,
                        const std::string &params,
                        uint32_t timeout_ms);
-    void handle_event(const RpcEvent &event);
+    void poll_rpc_completion();
+    void cancel_rpc_request();
     void handle_response(const std::string &payload);
 
     void finish_pending_block();
@@ -134,7 +136,7 @@ private:
     bool lock(uint32_t timeout_ms) const;
     void unlock() const;
 
-    RpcArbiter *arbiter_ = nullptr;
+    RpcRequestPort *rpc_ = nullptr;
     As11DeviceService *device_ = nullptr;
     StorageAtomicWritePort *storage_write_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
@@ -142,6 +144,8 @@ private:
     // RPC upload state
     ResmedOtaStatus status_;
     WaitingFor waiting_for_ = WaitingFor::None;
+    OperationTicket rpc_ticket_;
+    uint32_t rpc_generation_ = 0;
     String pending_block_hex_;
     size_t pending_block_offset_ = 0;
     size_t pending_block_bytes_ = 0;

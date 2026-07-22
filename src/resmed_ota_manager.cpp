@@ -8,6 +8,7 @@
 
 #include <ArduinoJson.h>
 
+#include "as11_device_service.h"
 #include "as11_rpc.h"
 #include "crc32.h"
 #include "debug_log.h"
@@ -207,10 +208,10 @@ ResmedOtaManager::ScopedLock::~ScopedLock() {
     if (locked_) manager_.unlock();
 }
 
-void ResmedOtaManager::begin(RpcArbiter &arbiter,
+void ResmedOtaManager::begin(RpcRequestPort &rpc,
                              As11DeviceService &device,
                              StorageAtomicWritePort &storage_write_port) {
-    arbiter_ = &arbiter;
+    rpc_ = &rpc;
     device_ = &device;
     storage_write_port_ = &storage_write_port;
     if (!mutex_) mutex_ = xSemaphoreCreateRecursiveMutex();
@@ -220,11 +221,9 @@ void ResmedOtaManager::begin(RpcArbiter &arbiter,
 void ResmedOtaManager::poll() {
     ScopedLock lock(*this, 0);
     if (!lock) return;
-    if (!arbiter_) return;
-    RpcEvent event;
-    while (arbiter_->next_source_event(RpcSource::ResmedOta, event)) {
-        handle_event(event);
-    }
+    if (!rpc_) return;
+
+    poll_rpc_completion();
 
     poll_staged_publication();
     pump_staged_upload();
@@ -243,7 +242,7 @@ bool ResmedOtaManager::begin_upload(size_t total_size,
                                     const String &filename) {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
-    if (!arbiter_) {
+    if (!rpc_) {
         set_error("not_initialized");
         return false;
     }
@@ -290,7 +289,7 @@ bool ResmedOtaManager::begin_upload(size_t total_size,
 bool ResmedOtaManager::submit_block(size_t offset, const String &hex_data) {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
-    if (!arbiter_) return false;
+    if (!rpc_) return false;
     if (waiting_for_ != WaitingFor::None) {
         set_error("busy");
         return false;
@@ -458,7 +457,7 @@ bool ResmedOtaManager::begin_staged_upload(size_t input_size,
                                            const String &magic_hex) {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
-    if (!arbiter_) {
+    if (!rpc_) {
         set_error("not_initialized");
         return false;
     }
@@ -675,10 +674,9 @@ bool ResmedOtaManager::start_staged_transfer() {
 void ResmedOtaManager::abort(const char *reason) {
     ScopedLock lock(*this, 1000);
     if (!lock) return;
+
     const char *why = reason ? reason : "aborted";
-    if (arbiter_) {
-        arbiter_->cancel_requests_from_source(RpcSource::ResmedOta, why);
-    }
+    cancel_rpc_request();
     set_error(why);
 }
 
@@ -743,34 +741,65 @@ const char *ResmedOtaManager::phase_name() const {
 bool ResmedOtaManager::queue_request(const char *method,
                                      const std::string &params,
                                      uint32_t timeout_ms) {
-    if (!arbiter_ || !method) return false;
-    waiting_for_ = WaitingFor::None;
+    if (!rpc_ || !method || rpc_ticket_.valid()) return false;
+
+    WaitingFor waiting_for = WaitingFor::None;
     if (!strcmp(method, "InitiateUpgrade")) {
-        waiting_for_ = WaitingFor::Initiate;
+        waiting_for = WaitingFor::Initiate;
     } else if (!strcmp(method, "UpgradeDataBlock")) {
-        waiting_for_ = WaitingFor::Block;
+        waiting_for = WaitingFor::Block;
     } else if (!strcmp(method, "CheckUpgradeFile")) {
-        waiting_for_ = WaitingFor::Check;
+        waiting_for = WaitingFor::Check;
     } else if (!strcmp(method, "ApplyUpgrade") ||
                !strcmp(method, "ApplyAuthenticatedUpgrade")) {
-        waiting_for_ = WaitingFor::Apply;
+        waiting_for = WaitingFor::Apply;
     }
-    status_.waiting = waiting_for_ != WaitingFor::None;
-    const bool ok = arbiter_->send_request(method, params, RpcSource::ResmedOta,
-                                           timeout_ms);
-    if (!ok) {
-        waiting_for_ = WaitingFor::None;
-        status_.waiting = false;
-    }
-    return ok;
+    if (waiting_for == WaitingFor::None) return false;
+
+    rpc_generation_++;
+    if (rpc_generation_ == 0) rpc_generation_++;
+
+    RpcRequestCommand command;
+    command.method = method;
+    command.params_json = params;
+    command.source = RpcSource::ResmedOta;
+    command.timeout_ms = timeout_ms;
+    command.generation = rpc_generation_;
+
+    const OperationSubmission submission = rpc_->request(command);
+    if (!submission.accepted()) return false;
+
+    rpc_ticket_ = submission.ticket;
+    waiting_for_ = waiting_for;
+    status_.waiting = true;
+    return true;
 }
 
-void ResmedOtaManager::handle_event(const RpcEvent &event) {
-    if (event.kind != RpcEventKind::RpcResponse) {
-        set_error(event.payload_c_str());
+void ResmedOtaManager::poll_rpc_completion() {
+    if (!rpc_ticket_.valid()) return;
+
+    RpcRequestCompletion completion;
+    if (!rpc_->take_completion(rpc_ticket_, completion)) return;
+
+    rpc_ticket_ = {};
+    if (completion.cause == RpcCompletionCause::Response) {
+        handle_response(completion.payload);
         return;
     }
-    handle_response(event.payload_text());
+
+    const char *reason = completion.reason.empty()
+        ? "rpc_request_failed"
+        : completion.reason.c_str();
+    set_error(reason);
+}
+
+void ResmedOtaManager::cancel_rpc_request() {
+    if (!rpc_ || !rpc_ticket_.valid()) return;
+
+    (void)rpc_->cancel(rpc_ticket_);
+    RpcRequestCompletion completion;
+    (void)rpc_->take_completion(rpc_ticket_, completion);
+    rpc_ticket_ = {};
 }
 
 void ResmedOtaManager::handle_response(const std::string &payload) {
@@ -913,6 +942,7 @@ bool ResmedOtaManager::finish_hash() {
 }
 
 void ResmedOtaManager::clear_session() {
+    cancel_rpc_request();
     release_staged_resources();
     pending_block_hex_ = "";
     pending_block_offset_ = 0;
@@ -1159,7 +1189,7 @@ bool ResmedOtaManager::guard_device_idle_for_upgrade() {
 
 bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
     if (reason) *reason = "therapy_state_unknown";
-    if (!arbiter_ || !device_) return false;
+    if (!rpc_ || !device_) return false;
 
     const As11DeviceState &as11 = device_->state();
     if (as11.therapy_command_pending()) {
@@ -1179,7 +1209,7 @@ bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
         case As11TherapyState::Unknown:
         default:
             device_->request_healthcheck(
-                *arbiter_, RpcSource::ResmedOta, millis());
+                *rpc_, RpcSource::ResmedOta, millis());
             if (reason) {
                 *reason = "therapy_state_refreshing";
             }
