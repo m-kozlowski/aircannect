@@ -1,11 +1,11 @@
 #include "report_daily_metrics.h"
 
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "edf_bytes.h"
 #include "edf_file_writer.h"
+#include "edf_str_record_reader.h"
 #include "edf_str_signal_table.h"
 
 #if defined(ARDUINO)
@@ -18,63 +18,11 @@
 namespace aircannect {
 namespace {
 
-constexpr int16_t STR_MISSING_DIGITAL = -1;
-
-bool parse_float_field(const char *text, float &out) {
-    if (!text || !text[0]) return false;
-    char *end = nullptr;
-    const float value = strtof(text, &end);
-    if (end == text || !isfinite(value)) return false;
-    out = value;
-    return true;
-}
-
-bool decode_physical_sample(const EdfSignalSpec &spec,
-                            int16_t digital,
-                            float &out) {
-    if (digital == STR_MISSING_DIGITAL) return false;
-    if (digital < spec.digital_min_value ||
-        digital > spec.digital_max_value) {
-        return false;
-    }
-
-    float physical_min = 0.0f;
-    float physical_max = 0.0f;
-    if (!parse_float_field(spec.physical_min, physical_min) ||
-        !parse_float_field(spec.physical_max, physical_max)) {
-        return false;
-    }
-
-    const float digital_span =
-        static_cast<float>(spec.digital_max_value - spec.digital_min_value);
-    if (digital_span == 0.0f) return false;
-    const float physical_span = physical_max - physical_min;
-    out = physical_min +
-          (static_cast<float>(digital - spec.digital_min_value) *
-           physical_span) /
-              digital_span;
-    return isfinite(out);
-}
-
 bool read_str_label_value(const uint8_t *record,
                           size_t len,
                           const char *label,
                           float &out) {
-    if (!record || !label || len < edf_str_record_size()) return false;
-    for (size_t i = 0; i < AC_EDF_STR_SOURCE_FIELD_COUNT; ++i) {
-        const EdfStrSignalDescriptor *descriptor =
-            edf_str_signal_descriptor(i);
-        if (!descriptor || !descriptor->spec.label ||
-            strcmp(descriptor->spec.label, label) != 0) {
-            continue;
-        }
-
-        const size_t offset = edf_str_signal_sample_offset(i);
-        if (offset >= AC_EDF_STR_SAMPLES_PER_RECORD) return false;
-        const int16_t digital = edf_read_i16_le_sample(record, offset);
-        return decode_physical_sample(descriptor->spec, digital, out);
-    }
-    return false;
+    return edf_str_record_read_physical(record, len, label, 0, out);
 }
 
 bool summary_scaled_value(const ReportSummaryRecord &record,
