@@ -38,6 +38,12 @@ struct EdfSessionMetadata {
     bool finalized = false;
 };
 
+struct EdfSessionMetadataFileInfo {
+    uint16_t version = 0;
+    uint16_t header_bytes = 0;
+    uint32_t total_bytes = 0;
+};
+
 class EdfSessionMetadataCodec {
 public:
     static constexpr uint16_t Version = 1;
@@ -45,6 +51,9 @@ public:
 
     static std::shared_ptr<const LargeByteBuffer> encode(
         const EdfSessionMetadata &metadata);
+    static bool inspect(const uint8_t *bytes,
+                        size_t length,
+                        EdfSessionMetadataFileInfo &info);
     static bool decode(const uint8_t *bytes,
                        size_t length,
                        EdfSessionMetadata &metadata);

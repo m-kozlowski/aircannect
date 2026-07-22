@@ -310,14 +310,36 @@ std::shared_ptr<const LargeByteBuffer> EdfSessionMetadataCodec::encode(
     return LargeByteBuffer::freeze(std::move(buffer));
 }
 
-bool EdfSessionMetadataCodec::decode(const uint8_t *bytes,
-                                     size_t length,
-                                     EdfSessionMetadata &metadata) {
+bool EdfSessionMetadataCodec::inspect(
+    const uint8_t *bytes,
+    size_t length,
+    EdfSessionMetadataFileInfo &info) {
+    info = {};
     if (!bytes || length < 16 || memcmp(bytes, FILE_MAGIC, 8) != 0) {
         return false;
     }
 
-    switch (get_le16(bytes + 8)) {
+    EdfSessionMetadataFileInfo parsed;
+    parsed.version = get_le16(bytes + 8);
+    parsed.header_bytes = get_le16(bytes + 10);
+    parsed.total_bytes = get_le32(bytes + 12);
+    if (parsed.version == 0 || parsed.header_bytes < 16 ||
+        parsed.header_bytes > parsed.total_bytes ||
+        parsed.total_bytes != length) {
+        return false;
+    }
+
+    info = parsed;
+    return true;
+}
+
+bool EdfSessionMetadataCodec::decode(const uint8_t *bytes,
+                                     size_t length,
+                                     EdfSessionMetadata &metadata) {
+    EdfSessionMetadataFileInfo info;
+    if (!inspect(bytes, length, info)) return false;
+
+    switch (info.version) {
         case 1: return decode_v1(bytes, length, metadata);
         default: return false;
     }

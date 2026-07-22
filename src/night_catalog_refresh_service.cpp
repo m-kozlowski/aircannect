@@ -78,16 +78,53 @@ bool path_is_report_edf(const char *path) {
            edf_report_file_kind_supported(inventory.kind);
 }
 
-bool path_is_session_metadata(const char *path) {
+bool parse_session_metadata_path(const char *path,
+                                 SleepDayId &sleep_day,
+                                 char (&sleep_day_text)[9],
+                                 char (&session_stamp)[16]) {
+    sleep_day = {};
+    sleep_day_text[0] = '\0';
+    session_stamp[0] = '\0';
     if (!path) return false;
 
     const size_t root_length = strlen(EDF_SESSION_METADATA_ROOT);
     const size_t path_length = strlen(path);
     constexpr size_t suffix_length = 4;
-    return path_length == root_length + 1 + 8 + 1 + 15 + suffix_length &&
-           memcmp(path, EDF_SESSION_METADATA_ROOT, root_length) == 0 &&
-           path[root_length] == '/' && path[root_length + 9] == '/' &&
-           strcmp(path + path_length - suffix_length, ".bin") == 0;
+    if (path_length != root_length + 1 + 8 + 1 + 15 + suffix_length ||
+        memcmp(path, EDF_SESSION_METADATA_ROOT, root_length) != 0 ||
+        path[root_length] != '/' || path[root_length + 9] != '/' ||
+        strcmp(path + path_length - suffix_length, ".bin") != 0) {
+        return false;
+    }
+
+    const char *day = path + root_length + 1;
+    const char *stamp = day + 9;
+    for (size_t i = 0; i < 8; ++i) {
+        if (day[i] < '0' || day[i] > '9' ||
+            stamp[i] < '0' || stamp[i] > '9') {
+            return false;
+        }
+    }
+    if (stamp[8] != '_') return false;
+    for (size_t i = 9; i < 15; ++i) {
+        if (stamp[i] < '0' || stamp[i] > '9') return false;
+    }
+
+    memcpy(sleep_day_text, day, 8);
+    sleep_day_text[8] = '\0';
+    memcpy(session_stamp, stamp, 15);
+    session_stamp[15] = '\0';
+    return SleepDayId::from_yyyymmdd(sleep_day_text, sleep_day);
+}
+
+bool path_is_session_metadata(const char *path) {
+    SleepDayId sleep_day;
+    char sleep_day_text[9] = {};
+    char session_stamp[16] = {};
+    return parse_session_metadata_path(path,
+                                       sleep_day,
+                                       sleep_day_text,
+                                       session_stamp);
 }
 
 bool path_is_fallback_artifact(const char *path) {
@@ -270,7 +307,11 @@ struct ParsedEdfLayouts {
 
 struct ParsedSessionMetadata {
     EdfSessionMetadata metadata;
+    SleepDayId datalog_sleep_day;
+    char datalog_sleep_day_text[9] = {};
+    char session_stamp[16] = {};
     uint64_t identity = 0;
+    bool decoded = false;
 };
 
 }  // namespace
@@ -775,7 +816,7 @@ bool submit_next_metadata(NightCatalogRefreshRuntime &runtime,
             ++runtime.scan_index;
             continue;
         }
-        if (entry.size != EdfSessionMetadataCodec::RecordBytes ||
+        if (entry.size < 16 || entry.size > SOURCE_READ_BUFFER_BYTES ||
             strlen(entry.path) >= sizeof(runtime.current_path)) {
             skip_current_metadata(runtime,
                                   status,
@@ -785,7 +826,7 @@ bool submit_next_metadata(NightCatalogRefreshRuntime &runtime,
 
         StorageReadCommand command;
         command.path = entry.path;
-        command.length = EdfSessionMetadataCodec::RecordBytes;
+        command.length = static_cast<size_t>(entry.size);
         command.lane = StorageReadLane::Report;
         command.generation = status.generation;
 
@@ -830,7 +871,7 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
 
     if (completion.outcome.disposition != OperationDisposition::Succeeded ||
         !completion.prepared.valid() ||
-        completion.prepared.length != EdfSessionMetadataCodec::RecordBytes) {
+        completion.prepared.length != runtime.current_size) {
         if (completion.prepared.valid()) {
             read_port.release_prepared(completion.prepared);
         }
@@ -857,19 +898,49 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
 
     ParsedSessionMetadata &parsed =
         runtime.session_metadata[runtime.session_metadata_count];
+    if (!parse_session_metadata_path(runtime.current_path,
+                                     parsed.datalog_sleep_day,
+                                     parsed.datalog_sleep_day_text,
+                                     parsed.session_stamp)) {
+        parsed = {};
+        skip_current_metadata(runtime,
+                              status,
+                              "night_catalog_metadata_path_invalid");
+        return true;
+    }
+
+    EdfSessionMetadataFileInfo info;
     parsed.identity = EdfSessionMetadataCodec::identity(runtime.read_buffer,
                                                         read);
     if (parsed.identity == 0 ||
-        !EdfSessionMetadataCodec::decode(runtime.read_buffer,
-                                         read,
-                                         parsed.metadata) ||
-        !edf_session_metadata_path_matches(runtime.current_path,
-                                           parsed.metadata)) {
+        !EdfSessionMetadataCodec::inspect(runtime.read_buffer, read, info)) {
         parsed = {};
         skip_current_metadata(runtime,
                               status,
                               "night_catalog_metadata_invalid");
         return true;
+    }
+
+    if (EdfSessionMetadataCodec::decode(runtime.read_buffer,
+                                        read,
+                                        parsed.metadata)) {
+        if (!edf_session_metadata_path_matches(runtime.current_path,
+                                               parsed.metadata)) {
+            parsed = {};
+            skip_current_metadata(runtime,
+                                  status,
+                                  "night_catalog_metadata_path_mismatch");
+            return true;
+        }
+        parsed.decoded = true;
+    } else if (info.version <= EdfSessionMetadataCodec::Version) {
+        parsed = {};
+        skip_current_metadata(runtime,
+                              status,
+                              "night_catalog_metadata_invalid");
+        return true;
+    } else {
+        set_warning(status, "night_catalog_metadata_schema_newer");
     }
 
     ++runtime.session_metadata_count;
@@ -1252,10 +1323,8 @@ const ParsedSessionMetadata *find_session_metadata(
     const EdfReportSessionDescriptor &session) {
     for (size_t i = 0; i < runtime.session_metadata_count; ++i) {
         const ParsedSessionMetadata &candidate = runtime.session_metadata[i];
-        if (strcmp(candidate.metadata.datalog_sleep_day,
-                   session.sleep_day) == 0 &&
-            strcmp(candidate.metadata.session_stamp,
-                   session.session_stamp) == 0) {
+        if (strcmp(candidate.datalog_sleep_day_text, session.sleep_day) == 0 &&
+            strcmp(candidate.session_stamp, session.session_stamp) == 0) {
             return &candidate;
         }
     }
@@ -1325,15 +1394,9 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
         return false;
     }
 
-    NightCatalogClockContext clock;
-    clock.summary_records = runtime.summary
-        ? runtime.summary->records()
-        : nullptr;
-    clock.summary_record_count = runtime.summary
-        ? runtime.summary->size()
-        : 0;
-    clock.current_offset_valid = runtime.current_offset_valid;
-    clock.current_offset_minutes = runtime.current_offset_minutes;
+    NightCatalogClockContext edf_clock;
+    edf_clock.current_offset_valid = runtime.current_offset_valid;
+    edf_clock.current_offset_minutes = runtime.current_offset_minutes;
 
     size_t output_sessions = 0;
     size_t output_files = 0;
@@ -1353,12 +1416,17 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
         const ParsedSessionMetadata *provenance =
             find_session_metadata(runtime, session);
         SleepDayId sleep_day;
-        const bool provenance_clock = provenance != nullptr;
+        const bool provenance_clock = provenance && provenance->decoded;
+        if (provenance) {
+            sleep_day = provenance->datalog_sleep_day;
+        } else {
+            (void)SleepDayId::from_yyyymmdd(session.sleep_day, sleep_day);
+        }
+
         const bool clock_resolved = provenance_clock
             ? resolve_provenance_session_clock(session,
                                                provenance->metadata)
-            : (SleepDayId::from_yyyymmdd(session.sleep_day, sleep_day) &&
-               resolve_legacy_session_clock(session, clock, sleep_day));
+            : resolve_legacy_session_clock(session, edf_clock, sleep_day);
         if (provenance_clock) {
             sleep_day = provenance->metadata.canonical_sleep_day;
         }
@@ -1383,9 +1451,9 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
                    1440,
                    out.day_end_ms))
             : (night_catalog_resolve_local_minute(
-                   &clock, sleep_day, 0, out.day_start_ms) &&
+                   &edf_clock, sleep_day, 0, out.day_start_ms) &&
                night_catalog_resolve_local_minute(
-                   &clock, sleep_day, 1440, out.day_end_ms));
+                   &edf_clock, sleep_day, 1440, out.day_end_ms));
         if (!boundaries_resolved) {
             destroy_large_array(sessions, session_count);
             destroy_large_array(files, file_capacity);
@@ -1456,7 +1524,7 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
             file.record_size = source.record_size;
             file.record_duration_ms = source.record_duration_ms;
             file.complete_records = source.complete_records;
-            file.provenance_identity = provenance_clock
+            file.provenance_identity = provenance
                 ? provenance->identity
                 : 0;
             const ParsedEdfLayouts *parsed = find_layouts(stored_source.path);
