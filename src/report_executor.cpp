@@ -94,16 +94,16 @@ OperationAdmission ReportExecutor::start(
     sink_ = &sink;
     generation_ = generation;
     operation_count_ = plan_->operation_count();
+    if (operation_count_ == 0) {
+        finish(ReportExecutorState::Complete, ReportExecutorError::None);
+        return OperationAdmission::Accepted;
+    }
 
     size_t record_capacity = 0;
     size_t decoder_capacity = 0;
     if (!validate_plan(record_capacity, decoder_capacity)) {
         finish(ReportExecutorState::Failed, ReportExecutorError::InvalidPlan);
         return OperationAdmission::Rejected;
-    }
-    if (operation_count_ == 0) {
-        finish(ReportExecutorState::Complete, ReportExecutorError::None);
-        return OperationAdmission::Accepted;
     }
     if (!allocate_scratch(record_capacity, decoder_capacity)) {
         finish(ReportExecutorState::Failed,
