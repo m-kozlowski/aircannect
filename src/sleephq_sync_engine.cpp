@@ -190,6 +190,24 @@ const char *sleephq_sync_state_name(SleepHqSyncState state) {
     return "unknown";
 }
 
+void SleepHqSyncEngine::BlockingResult::reset() {
+    operation_generation = 0;
+    ok = false;
+    performed = false;
+    has_more = false;
+    retryable = false;
+    remote_date_exists = false;
+    count = 0;
+    team_id = 0;
+    machine_id = 0;
+    import = SleepHqImportInfo();
+    upload = SleepHqUploadResult();
+    remote_files.clear();
+    content_hash[0] = '\0';
+    serial[0] = '\0';
+    error[0] = '\0';
+}
+
 bool SleepHqSyncEngine::lock(uint32_t timeout_ms) const {
     return lock_ && xSemaphoreTake(lock_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
@@ -2853,7 +2871,7 @@ ExportStep SleepHqSyncEngine::step() {
         return ExportStep::Idle;
     }
     if (status_.pending && phase_ == WorkPhase::Idle) {
-        if (StorageService::status().maintenance_active) {
+        if (StorageService::maintenance_active()) {
             unlock();
             return ExportStep::Waiting;
         }
@@ -2877,11 +2895,12 @@ ExportStep SleepHqSyncEngine::step() {
     const uint32_t operation_generation = operation_generation_.load();
     unlock();
 
-    BlockingResult blocking_result;
-    execute_blocking_phase(phase, blocking_result);
-    blocking_result.operation_generation = operation_generation;
+    blocking_result_.reset();
+    execute_blocking_phase(phase, blocking_result_);
+    blocking_result_.operation_generation = operation_generation;
 
     if (!lock_ || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) {
+        blocking_result_.reset();
         current_file_.close(false);
         client_.disconnect();
         Log::logf(CAT_SLEEPHQ,
@@ -2891,7 +2910,8 @@ ExportStep SleepHqSyncEngine::step() {
         return ExportStep::Idle;
     }
     const ExportStep result =
-        publish_blocking_phase_locked(phase, blocking_result);
+        publish_blocking_phase_locked(phase, blocking_result_);
+    blocking_result_.reset();
     unlock();
     return result;
 }

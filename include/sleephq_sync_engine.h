@@ -184,6 +184,8 @@ private:
     };
 
     struct BlockingResult {
+        void reset();
+
         uint32_t operation_generation = 0;
         bool ok = false;
         bool performed = false;
@@ -332,6 +334,10 @@ private:
     RunKind pending_run_kind_ = RunKind::Check;
     RunKind current_run_kind_ = RunKind::Check;
     SleepHqClient client_;
+
+    // The engine is part of the export task's PSRAM-backed runtime.
+    BlockingResult blocking_result_;
+
     std::atomic<bool> network_available_{false};
     std::atomic<bool> runtime_blocked_{false};
     std::atomic<bool> abort_requested_{false};

@@ -2589,6 +2589,10 @@ StorageServiceStatus status() {
     return out;
 }
 
+bool maintenance_active() {
+    return maintenance_owner.load() != MaintenanceOwner::None;
+}
+
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes() {
     return task ? uxTaskGetStackHighWaterMark(task) : 0;

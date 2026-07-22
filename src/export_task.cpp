@@ -15,6 +15,7 @@ namespace aircannect {
 struct ExportTask::Runtime {
     StorageSyncEngine smb;
     SleepHqSyncEngine sleephq;
+    PublishedInputs input_snapshot;
 };
 
 bool ExportTask::begin(const ExportEndpointConfig &config,
@@ -460,7 +461,7 @@ void ExportTask::task_entry(void *context) {
 
 void ExportTask::run() {
     for (;;) {
-        PublishedInputs inputs;
+        PublishedInputs &inputs = runtime_->input_snapshot;
         if (!copy_inputs(inputs)) {
             ulTaskNotifyTake(pdTRUE,
                              pdMS_TO_TICKS(AC_EXPORT_TASK_BUSY_RECHECK_MS));
@@ -475,10 +476,20 @@ void ExportTask::run() {
         publish_status();
 
         uint32_t delay_ms = AC_EXPORT_TASK_IDLE_TICK_MS;
-        const ExportTaskStatus current = status();
+        const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
+
+        const SleepHqSyncRuntimeStatus sleephq =
+            runtime_->sleephq.runtime_status();
+
+        const bool busy = smb.state == StorageSyncState::Working ||
+                          smb.pending ||
+                          sleephq.state == SleepHqSyncState::Working ||
+                          sleephq.pending ||
+                          inputs.command.kind != CommandKind::None;
+
         if (result == ExportStep::Working) {
             delay_ms = AC_EXPORT_TASK_WORK_TICK_MS;
-        } else if (result == ExportStep::Waiting || current.busy ||
+        } else if (result == ExportStep::Waiting || busy ||
                    (inputs.network.ipv4_ready && !network_ready_)) {
             delay_ms = AC_EXPORT_TASK_BUSY_RECHECK_MS;
         }

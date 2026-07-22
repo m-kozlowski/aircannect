@@ -223,6 +223,7 @@ void publish_activity(const ActivitySnapshot &activity);
 // Status
 StorageStatusPort &status_port();
 StorageServiceStatus status();
+bool maintenance_active();
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes();
 #endif
