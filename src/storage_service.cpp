@@ -1650,6 +1650,7 @@ void finish_read_job(size_t index,
     StorageReadCompletion completion;
     completion.ticket = job.ticket;
     completion.outcome = outcome;
+    copy_cstr(completion.error, sizeof(completion.error), error ? error : "");
     const bool abandoned = job.abandon_requested;
 
     PreparedReadSlot *prepared_slot = nullptr;
@@ -1664,6 +1665,9 @@ void finish_read_job(size_t index,
         if (!prepared_slot) {
             completion.outcome = OperationOutcome::failed();
             error = "prepared_read_slots_full";
+            copy_cstr(completion.error,
+                      sizeof(completion.error),
+                      error);
         } else {
             prepared_slot->used = true;
             prepared_slot->handle =

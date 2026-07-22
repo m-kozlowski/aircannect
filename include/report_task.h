@@ -16,6 +16,7 @@ enum class ReportTaskState : uint8_t {
     Idle,
     RefreshingCatalog,
     Queued,
+    LookingUp,
     Building,
     Publishing,
 };
@@ -61,6 +62,8 @@ public:
 
     ReportTaskStatus status() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
+    bool artifact_availability(const ReportArtifactKey &artifact,
+                               ReportArtifactAvailability &availability) const;
     std::shared_ptr<const ReportArtifactBundle> take_published();
 
 private:

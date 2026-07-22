@@ -11,6 +11,12 @@ namespace {
 constexpr uint32_t PLAN_RETRY_DELAY_MS = 50;
 constexpr uint8_t PLAN_RETRY_LIMIT = 2;
 
+StorageReadLane lookup_lane(ReportRequestPriority priority) {
+    return priority == ReportRequestPriority::Foreground
+        ? StorageReadLane::Foreground
+        : StorageReadLane::Report;
+}
+
 }  // namespace
 
 ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
@@ -22,6 +28,7 @@ void ReportEngine::begin(StorageReadPort &read_port,
                          ReportArtifactAssembler &assembler) {
     read_port_ = &read_port;
     assembler_ = &assembler;
+    lookup_.begin(read_port);
     executor_.begin(read_port);
     artifact_store_.begin(read_port, write_port);
 }
@@ -33,12 +40,23 @@ void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) 
         const NightCatalogRecord *published_night =
             catalog_ ? catalog_->find(published_->key.sleep_day) : nullptr;
         if (!published_night ||
-            published_night->source_revision != published_->key.source_revision) {
+            published_night->source_revision !=
+                published_->key.source_revision) {
             published_.reset();
         }
     }
 
-    if (!active_ || !catalog_) return;
+    if (available_.request.valid()) {
+        const NightCatalogRecord *available_night =
+            catalog_ ? catalog_->find(available_.request.sleep_day) : nullptr;
+        if (!available_night ||
+            available_night->source_revision !=
+                available_.request.source_revision) {
+            available_ = {};
+        }
+    }
+
+    if (phase_ == ActivePhase::Idle || !catalog_) return;
 
     const NightCatalogRecord *night =
         catalog_->find(active_request_.artifact.sleep_day);
@@ -55,7 +73,8 @@ ReportRequestEnqueueResult ReportEngine::request(
     const ReportArtifactKey canonical = build_key(artifact);
     if (!canonical.valid() || generation == 0) return {};
 
-    if (active_ && same_build(active_request_.artifact, canonical)) {
+    if (phase_ != ActivePhase::Idle &&
+        same_build(active_request_.artifact, canonical)) {
         if (active_request_.artifact == canonical &&
             active_request_.ticket.generation == generation) {
             return {ReportRequestEnqueueStatus::AlreadyQueued,
@@ -69,7 +88,8 @@ ReportRequestEnqueueResult ReportEngine::request(
 
 size_t ReportEngine::cancel_generation(uint32_t generation) {
     size_t cancelled = queue_.cancel_generation(generation);
-    if (active_ && active_request_.ticket.generation == generation) {
+    if (phase_ != ActivePhase::Idle &&
+        active_request_.ticket.generation == generation) {
         cancel_active_work();
         ++cancelled;
     }
@@ -78,11 +98,15 @@ size_t ReportEngine::cancel_generation(uint32_t generation) {
 
 void ReportEngine::clear() {
     queue_.clear();
-    if (active_) {
+    if (phase_ != ActivePhase::Idle) {
         cancel_active_work();
-        if (assembler_ && !publishing_) assembler_->discard_build();
+        if (assembler_ && phase_ == ActivePhase::Executing) {
+            assembler_->discard_build();
+        }
     }
+
     reset_active();
+    available_ = {};
     published_.reset();
     last_completion_ = {};
 }
@@ -91,24 +115,37 @@ bool ReportEngine::poll(uint32_t now_ms, size_t record_budget) {
     if (!read_port_ || !assembler_) return false;
 
     bool worked = false;
-    if (!active_) {
+    if (phase_ == ActivePhase::Idle) {
         if (queue_.size() == 0) return false;
         if (!catalog_) return false;
         worked = start_next(now_ms);
     }
+    if (phase_ == ActivePhase::Idle) return worked;
 
-    if (!active_) return worked;
+    switch (phase_) {
+        case ActivePhase::LookingUp:
+            worked = lookup_.poll() || worked;
+            if (lookup_.status().terminal()) {
+                worked = finish_lookup(now_ms) || worked;
+            }
+            break;
 
-    if (publishing_) {
-        worked = artifact_store_.poll() || worked;
-        if (artifact_store_.status().terminal()) {
-            worked = finish_publication() || worked;
-        }
-    } else {
-        worked = executor_.poll(record_budget) || worked;
-        if (executor_.status().terminal()) {
-            worked = finish_execution(now_ms) || worked;
-        }
+        case ActivePhase::Executing:
+            worked = executor_.poll(record_budget) || worked;
+            if (executor_.status().terminal()) {
+                worked = finish_execution(now_ms) || worked;
+            }
+            break;
+
+        case ActivePhase::Publishing:
+            worked = artifact_store_.poll() || worked;
+            if (artifact_store_.status().terminal()) {
+                worked = finish_publication(now_ms) || worked;
+            }
+            break;
+
+        case ActivePhase::Idle:
+            break;
     }
     return worked;
 }
@@ -117,24 +154,40 @@ ReportEngineStatus ReportEngine::status() const {
     ReportEngineStatus out;
     out.queued = queue_.size();
     out.active_request = active_request_;
+    out.lookup = lookup_.status();
     out.executor = executor_.status();
     out.store = artifact_store_.status();
     out.last_completion = last_completion_;
 
-    if (active_ && publishing_) {
-        out.state = ReportEngineState::Publishing;
-    } else if (active_) {
-        out.state = ReportEngineState::Executing;
-    } else if (queue_.size() > 0 && !catalog_) {
-        out.state = ReportEngineState::WaitingForCatalog;
-    } else if (queue_.size() > 0) {
-        out.state = ReportEngineState::Queued;
+    switch (phase_) {
+        case ActivePhase::LookingUp:
+            out.state = ReportEngineState::LookingUp;
+            break;
+        case ActivePhase::Executing:
+            out.state = ReportEngineState::Executing;
+            break;
+        case ActivePhase::Publishing:
+            out.state = ReportEngineState::Publishing;
+            break;
+        case ActivePhase::Idle:
+            if (queue_.size() > 0 && !catalog_) {
+                out.state = ReportEngineState::WaitingForCatalog;
+            } else if (queue_.size() > 0) {
+                out.state = ReportEngineState::Queued;
+            }
+            break;
     }
     return out;
 }
 
 std::shared_ptr<const ReportArtifactBundle> ReportEngine::take_published() {
     return std::move(published_);
+}
+
+ReportArtifactAvailability ReportEngine::take_available() {
+    ReportArtifactAvailability out = available_;
+    available_ = {};
+    return out;
 }
 
 ReportArtifactKey ReportEngine::build_key(
@@ -153,16 +206,120 @@ bool ReportEngine::start_next(uint32_t now_ms) {
     ReportArtifactRequest request;
     const ReportRequestSelection selected = queue_.take_next(now_ms, request);
     if (selected != ReportRequestSelection::Ready) return false;
-    return start_request(request, now_ms);
+    return start_request(request);
 }
 
-bool ReportEngine::start_request(ReportArtifactRequest request,
-                                 uint32_t now_ms) {
+bool ReportEngine::start_request(ReportArtifactRequest request) {
     active_request_ = request;
-    active_ = true;
+    active_availability_ = {};
+    active_availability_.request = request.artifact;
+
+    const OperationAdmission admitted = lookup_.start(
+        request.artifact,
+        request.ticket.generation,
+        lookup_lane(request.priority));
+    if (admitted != OperationAdmission::Accepted) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::Ready,
+                        ReportExecutorError::None,
+                        "report_artifact_lookup_rejected");
+        return true;
+    }
+
+    phase_ = ActivePhase::LookingUp;
+    return true;
+}
+
+bool ReportEngine::finish_lookup(uint32_t now_ms) {
+    const ReportArtifactLookupStatus lookup_status = lookup_.status();
+    switch (lookup_status.state) {
+        case ReportArtifactLookupState::Ready:
+            active_availability_ = lookup_.availability();
+            if (!active_availability_.requested_ready()) {
+                complete_active(OperationOutcome::failed(),
+                                ReportPlanStatus::Ready,
+                                ReportExecutorError::None,
+                                "report_artifact_lookup_missing");
+                return true;
+            }
+
+            available_ = active_availability_;
+            complete_active(OperationOutcome::succeeded(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
+            return true;
+
+        case ReportArtifactLookupState::MissingManifest: {
+            lookup_.reset();
+            active_availability_ = {};
+            active_availability_.request = active_request_.artifact;
+            build_tile_after_pair_ =
+                active_request_.artifact.kind ==
+                ReportArtifactKind::RangeTile;
+            const ReportArtifactKey artifact = build_tile_after_pair_
+                ? ReportArtifactKey::result(
+                      active_request_.artifact.sleep_day,
+                      active_request_.artifact.source_revision)
+                : active_request_.artifact;
+            return start_build(artifact, now_ms);
+        }
+
+        case ReportArtifactLookupState::MissingArtifact:
+            active_availability_ = lookup_.availability();
+            lookup_.reset();
+            if (!active_availability_.pair_ready() ||
+                active_request_.artifact.kind !=
+                    ReportArtifactKind::RangeTile) {
+                complete_active(OperationOutcome::failed(),
+                                ReportPlanStatus::Ready,
+                                ReportExecutorError::None,
+                                "report_artifact_manifest_invalid");
+                return true;
+            }
+            return start_build(active_request_.artifact, now_ms);
+
+        case ReportArtifactLookupState::Cancelled:
+            complete_active(OperationOutcome::cancelled(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None);
+            return true;
+
+        case ReportArtifactLookupState::Failed:
+            if (retry_active(now_ms, PLAN_RETRY_DELAY_MS)) return true;
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            lookup_status.error[0]
+                                ? lookup_status.error
+                                : "report_artifact_lookup_failed");
+            return true;
+
+        case ReportArtifactLookupState::Idle:
+        case ReportArtifactLookupState::SubmitManifest:
+        case ReportArtifactLookupState::WaitManifest:
+            return false;
+    }
+    return false;
+}
+
+bool ReportEngine::start_build(const ReportArtifactKey &artifact,
+                               uint32_t now_ms) {
+    if (!artifact.valid() ||
+        artifact.sleep_day != active_request_.artifact.sleep_day ||
+        artifact.source_revision !=
+            active_request_.artifact.source_revision) {
+        complete_active(OperationOutcome::failed(),
+                        ReportPlanStatus::InvalidRequest,
+                        ReportExecutorError::None,
+                        "report_artifact_build_key_invalid");
+        return true;
+    }
+
+    build_request_ = active_request_;
+    build_request_.artifact = artifact;
 
     ReportPlanRequest plan_request;
-    plan_request.artifact = request.artifact;
+    plan_request.artifact = artifact;
     plan_request.signal_mask = report_signal_mask_all();
     plan_request.event_mask = REPORT_EVENT_ALL;
 
@@ -180,7 +337,7 @@ bool ReportEngine::start_request(ReportArtifactRequest request,
     }
 
     active_plan_ = std::move(planned.plan);
-    if (!assembler_->begin_build(active_request_, *active_plan_)) {
+    if (!assembler_->begin_build(build_request_, *active_plan_)) {
         assembler_->discard_build();
         complete_active(OperationOutcome::failed(),
                         ReportPlanStatus::Ready,
@@ -204,6 +361,7 @@ bool ReportEngine::start_request(ReportArtifactRequest request,
         return true;
     }
 
+    phase_ = ActivePhase::Executing;
     if (executor_.status().terminal()) return finish_execution(now_ms);
     return true;
 }
@@ -239,7 +397,7 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
 
         executor_.reset();
         active_plan_.reset();
-        publishing_ = true;
+        phase_ = ActivePhase::Publishing;
         return true;
     }
 
@@ -262,16 +420,40 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
     return true;
 }
 
-bool ReportEngine::finish_publication() {
+bool ReportEngine::finish_publication(uint32_t now_ms) {
     const ReportArtifactStoreStatus store_status = artifact_store_.status();
     if (store_status.state == ReportArtifactStoreState::Ready) {
-        published_ = artifact_store_.published();
-        const bool valid = published_ && published_->valid();
-        complete_active(valid ? OperationOutcome::succeeded()
-                              : OperationOutcome::failed(),
+        std::shared_ptr<const ReportArtifactBundle> bundle =
+            artifact_store_.published();
+        if (!bundle || !bundle->valid() ||
+            !active_availability_.merge(*bundle)) {
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            "report_artifact_publish_missing");
+            return true;
+        }
+
+        if (build_tile_after_pair_ &&
+            bundle->key.kind == ReportArtifactKind::Result) {
+            artifact_store_.reset();
+            build_tile_after_pair_ = false;
+            return start_build(active_request_.artifact, now_ms);
+        }
+
+        if (!active_availability_.requested_ready()) {
+            complete_active(OperationOutcome::failed(),
+                            ReportPlanStatus::Ready,
+                            ReportExecutorError::None,
+                            "report_artifact_publish_incomplete");
+            return true;
+        }
+
+        published_ = std::move(bundle);
+        available_ = active_availability_;
+        complete_active(OperationOutcome::succeeded(),
                         ReportPlanStatus::Ready,
-                        ReportExecutorError::None,
-                        valid ? nullptr : "report_artifact_publish_missing");
+                        ReportExecutorError::None);
         return true;
     }
 
@@ -301,11 +483,18 @@ bool ReportEngine::retry_active(uint32_t now_ms, uint32_t delay_ms) {
 }
 
 void ReportEngine::cancel_active_work() {
-    if (!active_) return;
-    if (publishing_) {
-        artifact_store_.cancel();
-    } else {
-        executor_.cancel();
+    switch (phase_) {
+        case ActivePhase::LookingUp:
+            lookup_.cancel();
+            break;
+        case ActivePhase::Executing:
+            executor_.cancel();
+            break;
+        case ActivePhase::Publishing:
+            artifact_store_.cancel();
+            break;
+        case ActivePhase::Idle:
+            break;
     }
 }
 
@@ -324,12 +513,15 @@ void ReportEngine::complete_active(OperationOutcome outcome,
 }
 
 void ReportEngine::reset_active() {
+    lookup_.reset();
     executor_.reset();
     artifact_store_.reset();
     active_plan_.reset();
     active_request_ = {};
-    active_ = false;
-    publishing_ = false;
+    build_request_ = {};
+    active_availability_ = {};
+    phase_ = ActivePhase::Idle;
+    build_tile_after_pair_ = false;
 }
 
 }  // namespace aircannect

@@ -22,6 +22,7 @@ namespace {
 constexpr uint32_t CATALOG_STORE_GENERATION = 1;
 constexpr uint32_t CATALOG_STORE_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
+constexpr size_t ARTIFACT_AVAILABILITY_CAPACITY = 8;
 
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
@@ -177,6 +178,75 @@ struct ReportTask::Runtime {
         unlock();
     }
 
+    bool find_availability(const ReportArtifactKey &artifact,
+                           ReportArtifactAvailability &out) {
+        out = {};
+        if (!artifact.valid() || !lock(20)) return false;
+
+        const NightCatalogRecord *night = published_catalog
+            ? published_catalog->find(artifact.sleep_day)
+            : nullptr;
+        if (!night || night->source_revision != artifact.source_revision) {
+            unlock();
+            return false;
+        }
+
+        size_t found = ARTIFACT_AVAILABILITY_CAPACITY;
+        uint64_t newest = 0;
+        for (size_t i = 0; i < ARTIFACT_AVAILABILITY_CAPACITY; ++i) {
+            const ReportArtifactAvailability &candidate =
+                availability_slots[i];
+            if (!candidate.pair_ready() ||
+                candidate.request.sleep_day != artifact.sleep_day ||
+                candidate.request.source_revision !=
+                    artifact.source_revision) {
+                continue;
+            }
+
+            const bool matches =
+                artifact.kind != ReportArtifactKind::RangeTile ||
+                (candidate.range_tile.valid() &&
+                 candidate.range_tile.key == artifact);
+            if (matches && (found == ARTIFACT_AVAILABILITY_CAPACITY ||
+                            availability_age[i] > newest)) {
+                found = i;
+                newest = availability_age[i];
+            }
+        }
+
+        if (found == ARTIFACT_AVAILABILITY_CAPACITY) {
+            unlock();
+            return false;
+        }
+
+        out = availability_slots[found];
+        out.request = artifact;
+        availability_age[found] = ++availability_clock;
+        unlock();
+        return out.requested_ready();
+    }
+
+    void store_availability_locked(
+        const ReportArtifactAvailability &availability) {
+        size_t target = ARTIFACT_AVAILABILITY_CAPACITY;
+        size_t oldest = 0;
+        for (size_t i = 0; i < ARTIFACT_AVAILABILITY_CAPACITY; ++i) {
+            if (availability_slots[i].request == availability.request) {
+                target = i;
+                break;
+            }
+            if (!availability_slots[i].request.valid()) {
+                target = i;
+                break;
+            }
+            if (availability_age[i] < availability_age[oldest]) oldest = i;
+        }
+        if (target == ARTIFACT_AVAILABILITY_CAPACITY) target = oldest;
+
+        availability_slots[target] = availability;
+        availability_age[target] = ++availability_clock;
+    }
+
     void publish_status() {
         size_t queued = 0;
         uint32_t drops = 0;
@@ -210,6 +280,9 @@ struct ReportTask::Runtime {
             switch (next.engine.state) {
                 case ReportEngineState::Publishing:
                     next.state = ReportTaskState::Publishing;
+                    break;
+                case ReportEngineState::LookingUp:
+                    next.state = ReportTaskState::LookingUp;
                     break;
                 case ReportEngineState::Executing:
                     next.state = ReportTaskState::Building;
@@ -248,6 +321,11 @@ struct ReportTask::Runtime {
     std::shared_ptr<const NightCatalog> pending_catalog_save;
     std::shared_ptr<const ReportArtifactBundle> published;
     std::shared_ptr<const ReportArtifactBundle> pending_published;
+    ReportArtifactAvailability availability_slots[
+        ARTIFACT_AVAILABILITY_CAPACITY] = {};
+    uint64_t availability_age[ARTIFACT_AVAILABILITY_CAPACITY] = {};
+    uint64_t availability_clock = 0;
+    ReportArtifactAvailability pending_availability;
     uint32_t catalog_generation = 0;
 
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
@@ -395,6 +473,16 @@ std::shared_ptr<const NightCatalog> ReportTask::catalog_snapshot() const {
     std::shared_ptr<const NightCatalog> out = runtime_->published_catalog;
     runtime_->unlock();
     return out;
+}
+
+bool ReportTask::artifact_availability(
+    const ReportArtifactKey &artifact,
+    ReportArtifactAvailability &availability) const {
+    if (!runtime_) {
+        availability = {};
+        return false;
+    }
+    return runtime_->find_availability(artifact, availability);
 }
 
 std::shared_ptr<const ReportArtifactBundle> ReportTask::take_published() {
@@ -574,6 +662,19 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     }
 
     worked = runtime.engine.poll(now_ms, record_budget) || worked;
+
+    ReportArtifactAvailability availability =
+        runtime.engine.take_available();
+    if (availability.requested_ready()) {
+        runtime.pending_availability = availability;
+    }
+    if (runtime.pending_availability.requested_ready() && runtime.lock()) {
+        runtime.store_availability_locked(runtime.pending_availability);
+        runtime.pending_availability = {};
+        runtime.unlock();
+        worked = true;
+    }
+
     std::shared_ptr<const ReportArtifactBundle> published =
         runtime.engine.take_published();
     if (published) runtime.pending_published = std::move(published);
@@ -608,6 +709,7 @@ void ReportTask::run() {
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
         } else if (current.state == ReportTaskState::LoadingCatalog ||
                    current.state == ReportTaskState::RefreshingCatalog ||
+                   current.state == ReportTaskState::LookingUp ||
                    current.state == ReportTaskState::Building ||
                    current.state == ReportTaskState::Publishing) {
             ulTaskNotifyTake(pdTRUE,

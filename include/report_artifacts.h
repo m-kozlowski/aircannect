@@ -88,6 +88,15 @@ struct ReportArtifactManifestView {
     bool tile(size_t index, ReportRangeTileArtifact &tile) const;
 };
 
+struct ReportArtifactDescriptor {
+    ReportArtifactKey key;
+    uint64_t size = 0;
+    uint32_t crc32 = 0;
+
+    bool valid() const;
+    bool path(char *out, size_t out_size) const;
+};
+
 struct ReportArtifactBundle {
     ReportArtifactKey key;
     std::shared_ptr<const LargeByteBuffer> result;
@@ -99,6 +108,21 @@ struct ReportArtifactBundle {
     uint32_t range_tile_crc32 = 0;
 
     bool valid() const;
+};
+
+struct ReportArtifactAvailability {
+    ReportArtifactKey request;
+    ReportArtifactDescriptor result;
+    ReportArtifactDescriptor overview;
+    ReportArtifactDescriptor range_tile;
+
+    bool pair_ready() const;
+    bool requested_ready() const;
+    bool descriptor(const ReportArtifactKey &key,
+                    ReportArtifactDescriptor &out) const;
+    bool load(const ReportArtifactManifestView &manifest,
+              const ReportArtifactKey &requested);
+    bool merge(const ReportArtifactBundle &bundle);
 };
 
 class ReportResultArtifactCodec {
@@ -120,6 +144,7 @@ public:
     static constexpr size_t HeaderBytes = 72;
     static constexpr size_t TileBytes = 24;
     static constexpr size_t MaxTiles = 128;
+    static constexpr size_t MaxBytes = HeaderBytes + MaxTiles * TileBytes;
 
     static std::shared_ptr<const LargeByteBuffer> encode(
         const ReportArtifactBundle &bundle,

@@ -7,11 +7,6 @@
 namespace aircannect {
 namespace {
 
-constexpr size_t MANIFEST_MAX_BYTES =
-    ReportArtifactManifestCodec::HeaderBytes +
-    ReportArtifactManifestCodec::MaxTiles *
-        ReportArtifactManifestCodec::TileBytes;
-
 bool publishing_state(ReportArtifactStoreState state) {
     return state == ReportArtifactStoreState::LoadingManifest ||
            state == ReportArtifactStoreState::PublishingResult ||
@@ -103,7 +98,7 @@ bool ReportArtifactStoreService::submit_manifest_read() {
 
     StorageReadCommand command;
     command.path = path;
-    command.length = MANIFEST_MAX_BYTES;
+    command.length = ReportArtifactManifestCodec::MaxBytes;
     command.lane = read_lane(lane_);
     command.generation = generation_;
 
@@ -133,7 +128,7 @@ bool ReportArtifactStoreService::finish_manifest_read() {
         !completion.prepared.valid() ||
         completion.prepared.length <
             ReportArtifactManifestCodec::HeaderBytes ||
-        completion.prepared.length > MANIFEST_MAX_BYTES) {
+        completion.prepared.length > ReportArtifactManifestCodec::MaxBytes) {
         if (completion.prepared.valid()) {
             read_port_->release_prepared(completion.prepared);
         }

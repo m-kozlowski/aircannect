@@ -4,8 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "report_executor.h"
+#include "report_artifact_lookup_service.h"
 #include "report_artifact_store_service.h"
+#include "report_executor.h"
 #include "report_planner.h"
 #include "report_request_queue.h"
 
@@ -15,6 +16,7 @@ enum class ReportEngineState : uint8_t {
     Idle,
     Queued,
     WaitingForCatalog,
+    LookingUp,
     Executing,
     Publishing,
 };
@@ -33,6 +35,7 @@ struct ReportEngineStatus {
     ReportEngineState state = ReportEngineState::Idle;
     size_t queued = 0;
     ReportArtifactRequest active_request;
+    ReportArtifactLookupStatus lookup;
     ReportExecutorStatus executor;
     ReportArtifactStoreStatus store;
     ReportEngineCompletion last_completion;
@@ -71,16 +74,26 @@ public:
     bool poll(uint32_t now_ms, size_t record_budget = 1);
     ReportEngineStatus status() const;
     std::shared_ptr<const ReportArtifactBundle> take_published();
+    ReportArtifactAvailability take_available();
 
 private:
+    enum class ActivePhase : uint8_t {
+        Idle,
+        LookingUp,
+        Executing,
+        Publishing,
+    };
+
     static ReportArtifactKey build_key(const ReportArtifactKey &artifact);
     static bool same_build(const ReportArtifactKey &lhs,
                            const ReportArtifactKey &rhs);
 
     bool start_next(uint32_t now_ms);
-    bool start_request(ReportArtifactRequest request, uint32_t now_ms);
+    bool start_request(ReportArtifactRequest request);
+    bool finish_lookup(uint32_t now_ms);
+    bool start_build(const ReportArtifactKey &artifact, uint32_t now_ms);
     bool finish_execution(uint32_t now_ms);
-    bool finish_publication();
+    bool finish_publication(uint32_t now_ms);
     bool retry_active(uint32_t now_ms, uint32_t delay_ms);
     void cancel_active_work();
     void complete_active(OperationOutcome outcome,
@@ -90,6 +103,7 @@ private:
     void reset_active();
 
     ReportRequestQueue queue_;
+    ReportArtifactLookupService lookup_;
     ReportExecutor executor_;
     ReportArtifactStoreService artifact_store_;
     StorageReadPort *read_port_ = nullptr;
@@ -97,10 +111,13 @@ private:
     std::shared_ptr<const NightCatalog> catalog_;
     std::shared_ptr<const ReportReadPlan> active_plan_;
     ReportArtifactRequest active_request_;
+    ReportArtifactRequest build_request_;
     ReportEngineCompletion last_completion_;
+    ReportArtifactAvailability active_availability_;
+    ReportArtifactAvailability available_;
     std::shared_ptr<const ReportArtifactBundle> published_;
-    bool active_ = false;
-    bool publishing_ = false;
+    ActivePhase phase_ = ActivePhase::Idle;
+    bool build_tile_after_pair_ = false;
 };
 
 }  // namespace aircannect

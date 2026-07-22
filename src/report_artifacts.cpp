@@ -230,6 +230,137 @@ bool ReportArtifactBundle::valid() const {
            overview->size() > 0 && manifest && manifest->size() > 0;
 }
 
+bool ReportArtifactDescriptor::valid() const {
+    return key.valid() && size > 0 && size <= UINT32_MAX;
+}
+
+bool ReportArtifactDescriptor::path(char *out, size_t out_size) const {
+    if (!valid()) return false;
+
+    switch (key.kind) {
+        case ReportArtifactKind::Result:
+            return report_artifact_result_path(key, out, out_size);
+        case ReportArtifactKind::Overview:
+            return report_artifact_overview_path(key, out, out_size);
+        case ReportArtifactKind::RangeTile:
+            return report_artifact_tile_path(key, out, out_size);
+    }
+    return false;
+}
+
+bool ReportArtifactAvailability::pair_ready() const {
+    return result.valid() && overview.valid() &&
+           result.key.kind == ReportArtifactKind::Result &&
+           overview.key.kind == ReportArtifactKind::Overview &&
+           result.key.sleep_day == request.sleep_day &&
+           result.key.source_revision == request.source_revision &&
+           overview.key.sleep_day == request.sleep_day &&
+           overview.key.source_revision == request.source_revision;
+}
+
+bool ReportArtifactAvailability::requested_ready() const {
+    if (!request.valid() || !pair_ready()) return false;
+    if (request.kind != ReportArtifactKind::RangeTile) return true;
+    return range_tile.valid() && range_tile.key == request;
+}
+
+bool ReportArtifactAvailability::descriptor(
+    const ReportArtifactKey &key,
+    ReportArtifactDescriptor &out) const {
+    out = {};
+    if (!key.valid() || !pair_ready() ||
+        key.sleep_day != request.sleep_day ||
+        key.source_revision != request.source_revision) {
+        return false;
+    }
+
+    switch (key.kind) {
+        case ReportArtifactKind::Result:
+            out = result;
+            return true;
+        case ReportArtifactKind::Overview:
+            out = overview;
+            return true;
+        case ReportArtifactKind::RangeTile:
+            if (range_tile.key != key || !range_tile.valid()) return false;
+            out = range_tile;
+            return true;
+    }
+    return false;
+}
+
+bool ReportArtifactAvailability::load(
+    const ReportArtifactManifestView &manifest,
+    const ReportArtifactKey &requested) {
+    *this = {};
+    if (!requested.valid() || !key_is_result(manifest.key) ||
+        manifest.key.sleep_day != requested.sleep_day ||
+        manifest.key.source_revision != requested.source_revision) {
+        return false;
+    }
+
+    request = requested;
+    result.key = manifest.key;
+    result.size = manifest.result_size;
+    result.crc32 = manifest.result_crc32;
+    overview.key = ReportArtifactKey::overview(
+        manifest.key.sleep_day, manifest.key.source_revision);
+    overview.size = manifest.overview_size;
+    overview.crc32 = manifest.overview_crc32;
+    if (!pair_ready()) {
+        *this = {};
+        return false;
+    }
+
+    if (requested.kind != ReportArtifactKind::RangeTile) return true;
+    for (size_t i = 0; i < manifest.tile_count; ++i) {
+        ReportRangeTileArtifact tile;
+        if (!manifest.tile(i, tile)) {
+            *this = {};
+            return false;
+        }
+        if (tile.start_ms != requested.range_start_ms ||
+            tile.end_ms != requested.range_end_ms) {
+            continue;
+        }
+
+        range_tile.key = requested;
+        range_tile.size = tile.size;
+        range_tile.crc32 = tile.crc32;
+        break;
+    }
+    return true;
+}
+
+bool ReportArtifactAvailability::merge(
+    const ReportArtifactBundle &bundle) {
+    if (!request.valid() || !bundle.valid() ||
+        bundle.key.sleep_day != request.sleep_day ||
+        bundle.key.source_revision != request.source_revision) {
+        return false;
+    }
+
+    if (bundle.key.kind == ReportArtifactKind::Result) {
+        result.key = bundle.key;
+        result.size = bundle.result->size();
+        result.crc32 = bundle.result_crc32;
+        overview.key = ReportArtifactKey::overview(
+            bundle.key.sleep_day, bundle.key.source_revision);
+        overview.size = bundle.overview->size();
+        overview.crc32 = bundle.overview_crc32;
+        return pair_ready();
+    }
+    if (bundle.key.kind != ReportArtifactKind::RangeTile ||
+        bundle.key != request) {
+        return false;
+    }
+
+    range_tile.key = bundle.key;
+    range_tile.size = bundle.range_tile->size();
+    range_tile.crc32 = bundle.range_tile_crc32;
+    return range_tile.valid();
+}
+
 std::shared_ptr<const LargeByteBuffer> ReportResultArtifactCodec::encode(
     const ReportResultArtifactData &data) {
     if (!key_is_result(data.key) || data.day_end_ms <= data.day_start_ms ||

@@ -5,6 +5,7 @@
 #include <string>
 
 #include "operation_outcome.h"
+#include "storage_path.h"
 
 namespace aircannect {
 
@@ -52,6 +53,7 @@ struct StorageReadCompletion {
     OperationTicket ticket;
     OperationOutcome outcome;
     StoragePreparedRead prepared;
+    char error[AC_STORAGE_ERROR_MAX] = {};
 };
 
 class StorageReadPort {
