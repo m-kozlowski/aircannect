@@ -22,55 +22,6 @@ int64_t plot_bucket_ms_for_interval(int64_t target_bucket_ms,
 
 }  // namespace
 
-bool bin_put_u16(ReportSpoolBuffer &b, uint16_t v) {
-    const uint8_t x[2] = {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8)};
-    return b.append(x, sizeof(x));
-}
-
-bool bin_put_u8(ReportSpoolBuffer &b, uint8_t v) {
-    return b.append(&v, sizeof(v));
-}
-
-bool bin_put_u32(ReportSpoolBuffer &b, uint32_t v) {
-    const uint8_t x[4] = {
-        static_cast<uint8_t>(v),
-        static_cast<uint8_t>(v >> 8),
-        static_cast<uint8_t>(v >> 16),
-        static_cast<uint8_t>(v >> 24),
-    };
-    return b.append(x, sizeof(x));
-}
-
-bool bin_put_i16(ReportSpoolBuffer &b, int16_t v) {
-    return bin_put_u16(b, static_cast<uint16_t>(v));
-}
-
-bool bin_put_i32(ReportSpoolBuffer &b, int32_t v) {
-    return bin_put_u32(b, static_cast<uint32_t>(v));
-}
-
-bool bin_put_i64(ReportSpoolBuffer &b, int64_t v) {
-    const uint64_t u = static_cast<uint64_t>(v);
-    return bin_put_u32(b, static_cast<uint32_t>(u)) &&
-           bin_put_u32(b, static_cast<uint32_t>(u >> 32));
-}
-
-uint16_t read_u16_le(const uint8_t *p) {
-    return static_cast<uint16_t>(p[0]) |
-           (static_cast<uint16_t>(p[1]) << 8);
-}
-
-uint32_t read_u32_le(const uint8_t *p) {
-    return static_cast<uint32_t>(p[0]) |
-           (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) |
-           (static_cast<uint32_t>(p[3]) << 24);
-}
-
-int32_t read_i32_le(const uint8_t *p) {
-    return static_cast<int32_t>(read_u32_le(p));
-}
-
 int64_t plot_gap_threshold_ms(uint32_t interval_ms) {
     if (interval_ms == 0) return PLOT_UNKNOWN_INTERVAL_GAP_MS;
 

@@ -1,4 +1,4 @@
-#include "report_plot_payload.h"
+#include "report_plot_encoder.h"
 
 #include <algorithm>
 #include <limits.h>
