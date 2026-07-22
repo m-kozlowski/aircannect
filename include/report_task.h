@@ -10,6 +10,7 @@
 #include "report_engine.h"
 #include "report_summary_acquisition.h"
 #include "runtime_snapshots.h"
+#include "storage_delete_port.h"
 
 namespace aircannect {
 
@@ -58,7 +59,8 @@ public:
     bool begin(StorageReadPort &read_port,
                StorageAtomicWritePort &write_port,
                StorageScanPort &scan_port,
-               ReportSpoolPort &spool_port);
+               ReportSpoolPort &spool_port,
+               StorageDeletePort &delete_port);
 
     OperationAdmission request_artifact(
         const ReportArtifactKey &artifact,

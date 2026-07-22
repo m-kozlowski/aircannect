@@ -821,7 +821,8 @@ void setup() {
     if (!report_task.begin(StorageService::read_port(),
                            StorageService::atomic_write_port(),
                            StorageService::scan_port(),
-                           report_spool_service)) {
+                           report_spool_service,
+                           StorageService::delete_port())) {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }

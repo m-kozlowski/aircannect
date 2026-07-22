@@ -24,7 +24,11 @@ namespace {
 constexpr uint32_t CATALOG_STORE_GENERATION = 1;
 constexpr uint32_t CATALOG_STORE_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
+constexpr uint32_t LEGACY_CACHE_DELETE_RETRY_MS = 30000;
 constexpr size_t IDLE_QUEUE_LOOKAHEAD = 2;
+
+constexpr char LEGACY_CACHE_PARENT[] = "/aircannect/report";
+constexpr const char *LEGACY_CACHE_NAMES[] = {"v3", "v4", "v5"};
 
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
@@ -336,6 +340,33 @@ struct ReportTask::Runtime {
         return true;
     }
 
+    bool schedule_legacy_cache_cleanup(uint32_t now_ms) {
+        if (!legacy_cleanup_pending || !delete_port || !catalog ||
+            idle_cursor < catalog->size() ||
+            !deadline_due(now_ms, legacy_cleanup_retry_at_ms)) {
+            return false;
+        }
+
+        const ReportEngineStatus engine_status = engine.status();
+        if (engine_status.state != ReportEngineState::Idle ||
+            engine_status.queued != 0) {
+            return false;
+        }
+
+        const bool accepted = delete_port->start_selected(
+            LEGACY_CACHE_PARENT,
+            LEGACY_CACHE_NAMES,
+            sizeof(LEGACY_CACHE_NAMES) / sizeof(LEGACY_CACHE_NAMES[0]));
+        if (accepted) {
+            legacy_cleanup_pending = false;
+            legacy_cleanup_retry_at_ms = 0;
+        } else {
+            legacy_cleanup_retry_at_ms =
+                now_ms + LEGACY_CACHE_DELETE_RETRY_MS;
+        }
+        return true;
+    }
+
     void publish_status() {
         size_t queued = 0;
         uint32_t drops = 0;
@@ -424,6 +455,7 @@ struct ReportTask::Runtime {
     NightCatalogRefreshService catalog_refresh;
     NightCatalogStoreService catalog_store;
     ReportArtifactIndexRefreshService artifact_index_refresh;
+    StorageDeletePort *delete_port = nullptr;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
     size_t command_count = 0;
@@ -440,6 +472,8 @@ struct ReportTask::Runtime {
     uint32_t catalog_generation = 0;
     size_t idle_cursor = 0;
     uint32_t idle_generation = 0x80000000u;
+    uint32_t legacy_cleanup_retry_at_ms = 0;
+    bool legacy_cleanup_pending = true;
 
     ActivitySnapshot activity;
     ActivitySnapshot pending_activity;
@@ -493,7 +527,8 @@ ReportTask::~ReportTask() {
 bool ReportTask::begin(StorageReadPort &read_port,
                        StorageAtomicWritePort &write_port,
                        StorageScanPort &scan_port,
-                       ReportSpoolPort &spool_port) {
+                       ReportSpoolPort &spool_port,
+                       StorageDeletePort &delete_port) {
     if (runtime_) return runtime_->initialized;
 
 #ifdef ARDUINO
@@ -518,6 +553,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->catalog_store.begin(read_port, write_port);
     runtime_->artifact_index_refresh.begin(scan_port, read_port);
     runtime_->summary_acquisition.begin(spool_port);
+    runtime_->delete_port = &delete_port;
     runtime_->engine.begin(read_port,
                            write_port,
                            spool_port,
@@ -934,6 +970,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.pending_catalog_save;
     if (catalog_stable && !runtime.background_suspended) {
         worked = runtime.schedule_catalog_work() || worked;
+        worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
     }
 
     worked = runtime.engine.poll(now_ms, record_budget) || worked;

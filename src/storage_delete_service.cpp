@@ -479,7 +479,12 @@ bool StorageDeleteService::finish_done_locked() {
     release_maintenance_locked();
     status_.state = StorageDeleteState::Done;
     touch_status_locked();
-    Log::logf(CAT_STORAGE, LOG_INFO,
+
+    const log_level_t level =
+        status_.files_deleted > 0 || status_.dirs_deleted > 0
+            ? LOG_INFO
+            : LOG_DEBUG;
+    Log::logf(CAT_STORAGE, level,
               "[DELETE] done roots=%u files=%u dirs=%u\n",
               static_cast<unsigned>(status_.roots),
               static_cast<unsigned>(status_.files_deleted),
