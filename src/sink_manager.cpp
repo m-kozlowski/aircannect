@@ -95,9 +95,12 @@ bool append_frame_signal(const StreamFrameData &frame,
 
 }  // namespace
 
-void SinkManager::begin(RpcArbiter &arbiter, SessionManager &session) {
+void SinkManager::begin(RpcArbiter &arbiter,
+                        const As11DeviceState &device_state,
+                        SessionManager &session) {
     if (initialized_) return;
     arbiter_ = &arbiter;
+    device_state_ = &device_state;
     session_ = &session;
     initialized_ = true;
 }
@@ -135,8 +138,10 @@ void SinkManager::mark_live_chart_sent() {
 }
 
 bool SinkManager::live_chart_should_run() const {
-    if (!live_chart_.enabled || !arbiter_ || !session_) return false;
-    if (arbiter_->as11_state().therapy_state() == As11TherapyState::Running) {
+    if (!live_chart_.enabled || !arbiter_ || !device_state_ || !session_) {
+        return false;
+    }
+    if (device_state_->therapy_state() == As11TherapyState::Running) {
         return true;
     }
     return session_->status().state == SessionState::Active;

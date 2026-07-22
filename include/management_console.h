@@ -4,6 +4,7 @@
 #include <string>
 
 #include "app_config.h"
+#include "as11_device_service.h"
 #include "as11_settings_manager.h"
 #include "edf_recorder_manager.h"
 #include "ota_manager.h"
@@ -28,6 +29,7 @@ class WebUI;
 
 struct ConsoleContext {
     RpcArbiter &arbiter;
+    As11DeviceService &device;
     As11SettingsManager &settings_manager;
     TcpBridge &tcp_bridge;
     WifiManager &wifi_manager;
@@ -100,9 +102,11 @@ private:
     void handle_raw_command(Print &out, String rest, ConsoleContext &ctx);
 
     void handle_stream(Print &out, String rest, RpcArbiter &arbiter);
-    void handle_as11(Print &out, String rest, RpcArbiter &arbiter);
-    void handle_therapy(Print &out, String rest, RpcArbiter &arbiter);
-    void handle_time(Print &out, String rest, RpcArbiter &arbiter,
+    void handle_as11(Print &out, String rest, RpcArbiter &arbiter,
+                     As11DeviceService &device);
+    void handle_therapy(Print &out, String rest, RpcArbiter &arbiter,
+                        As11DeviceService &device);
+    void handle_time(Print &out, String rest, As11DeviceService &device,
                      TimeSyncService &time_sync_service);
     void handle_ota(Print &out, String rest, OtaManager &ota_manager,
                     ResmedOtaManager &resmed_ota_manager);

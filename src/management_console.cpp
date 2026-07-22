@@ -373,7 +373,6 @@ bool ManagementConsole::event_has_output(const RpcEvent &event) {
         case RpcEventKind::RpcNotification:
         case RpcEventKind::DebugLog:
         case RpcEventKind::InternalSettingsStateInvalidated:
-        case RpcEventKind::InternalDeviceStateUpdated:
             return false;
     }
     return false;
@@ -491,8 +490,6 @@ void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
         case RpcEventKind::DebugLog:
             break;
         case RpcEventKind::InternalSettingsStateInvalidated:
-            break;
-        case RpcEventKind::InternalDeviceStateUpdated:
             break;
         case RpcEventKind::BootNotification:
             out.print("[CAN] ");
@@ -616,19 +613,17 @@ void ManagementConsole::handle_stream(Print &out, String rest,
 }
 
 void ManagementConsole::handle_as11(Print &out, String rest,
-                                    RpcArbiter &arbiter) {
+                                    RpcArbiter &arbiter,
+                                    As11DeviceService &device) {
     rest.trim();
     if (!rest.length() || rest == "status") {
-        ConsoleFormat::print_as11_status(out, arbiter.as11_state());
+        ConsoleFormat::print_as11_status(out, device.state());
         return;
     }
 
     if (rest == "poll" || rest == "refresh") {
-        if (arbiter.request_as11_healthcheck()) {
-            out.println("[AS11] healthcheck queued");
-        } else {
-            out.println("[AS11] healthcheck queue full");
-        }
+        device.request_healthcheck(arbiter, RpcSource::Console, millis());
+        out.println("[AS11] healthcheck scheduled");
         return;
     }
 
@@ -641,16 +636,18 @@ void ManagementConsole::handle_as11(Print &out, String rest,
 }
 
 void ManagementConsole::handle_therapy(Print &out, String rest,
-                                       RpcArbiter &arbiter) {
+                                       RpcArbiter &arbiter,
+                                       As11DeviceService &device) {
     rest.trim();
     rest.toLowerCase();
     if (!rest.length() || rest == "status") {
-        ConsoleFormat::print_as11_status(out, arbiter.as11_state());
+        ConsoleFormat::print_as11_status(out, device.state());
         return;
     }
 
     if (rest == "start" || rest == "on" || rest == "run") {
-        if (arbiter.send_request("EnterTherapy", "", RpcSource::Console)) {
+        if (device.request_therapy(arbiter, As11TherapyTarget::Running,
+                                   RpcSource::Console, millis()).accepted()) {
             out.println("[THERAPY] EnterTherapy queued");
         } else {
             out.println("[THERAPY] EnterTherapy queue failed");
@@ -659,7 +656,8 @@ void ManagementConsole::handle_therapy(Print &out, String rest,
     }
 
     if (rest == "stop" || rest == "off" || rest == "standby") {
-        if (arbiter.send_request("EnterStandby", "", RpcSource::Console)) {
+        if (device.request_therapy(arbiter, As11TherapyTarget::Standby,
+                                   RpcSource::Console, millis()).accepted()) {
             out.println("[THERAPY] EnterStandby queued");
         } else {
             out.println("[THERAPY] EnterStandby queue failed");
@@ -671,7 +669,7 @@ void ManagementConsole::handle_therapy(Print &out, String rest,
 }
 
 void ManagementConsole::handle_time(Print &out, String rest,
-                                    RpcArbiter &arbiter,
+                                    As11DeviceService &device,
                                     TimeSyncService &time_sync_service) {
     rest.trim();
     rest.toLowerCase();
@@ -699,7 +697,7 @@ void ManagementConsole::handle_time(Print &out, String rest,
         out.print(" resmed_push=");
         out.print(time_sync_service.resmed_time_sync_enabled() ? "on" : "off");
         out.print(" resmed_offset_ms=");
-        const As11DeviceState &as11 = arbiter.as11_state();
+        const As11DeviceState &as11 = device.state();
         if (as11.clock_offset_valid()) {
             out.print(as11.clock_offset_ms());
         } else {
@@ -711,7 +709,8 @@ void ManagementConsole::handle_time(Print &out, String rest,
     }
 
     if (rest == "get") {
-        arbiter.send_request("GetDateTime", "", RpcSource::Console);
+        (void)time_sync_service.request_pull_resmed_to_esp(
+            RpcSource::Console);
         return;
     }
 

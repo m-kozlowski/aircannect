@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string>
 
+#include "as11_device_state.h"
 #include "as11_event_frame.h"
 #include "edf_numeric_file_layout.h"
 #include "edf_series.h"
@@ -148,7 +149,9 @@ struct EdfRecorderStatus {
 class EdfRecorderManager {
 public:
     // lifecycle
-    void begin(RpcArbiter &arbiter, SessionManager &session);
+    void begin(RpcArbiter &arbiter,
+               const As11DeviceState &device_state,
+               SessionManager &session);
     void poll(uint32_t now_ms);
 
     // control/status
@@ -311,6 +314,7 @@ private:
 
     // subsystem owners
     RpcArbiter *arbiter_ = nullptr;
+    const As11DeviceState *device_state_ = nullptr;
     SessionManager *session_ = nullptr;
 
     // session cursors

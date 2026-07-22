@@ -84,10 +84,10 @@ ReportRuntimeService::ReportRuntimeService(
       prefetch_(prefetch),
       edf_catalog_(edf_catalog) {}
 
-void ReportRuntimeService::poll(RpcArbiter &arbiter) {
+void ReportRuntimeService::poll(RpcArbiter &arbiter,
+                                bool therapy_running) {
     const bool realtime_active =
-        arbiter.stream_realtime_active() ||
-        arbiter.as11_state().therapy_state() == As11TherapyState::Running;
+        arbiter.stream_realtime_active() || therapy_running;
 
     // Foreground service points
     if (drain_source_events(arbiter)) return;
@@ -486,8 +486,8 @@ bool ReportRuntimeService::cancel_cache_fetch() {
     return true;
 }
 
-void ReportManager::poll(RpcArbiter &arbiter) {
-    runtime_service_.poll(arbiter);
+void ReportManager::poll(RpcArbiter &arbiter, bool therapy_running) {
+    runtime_service_.poll(arbiter, therapy_running);
 }
 
 bool ReportManager::handle_event(const RpcEvent &event) {

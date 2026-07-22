@@ -1051,7 +1051,7 @@ void ManagementConsole::handle_status_command(Print &out,
         return;
     }
     ConsoleFormat::print_rpc_status(out, ctx.arbiter);
-    ConsoleFormat::print_as11_status(out, ctx.arbiter.as11_state());
+    ConsoleFormat::print_as11_status(out, ctx.device.state());
     ConsoleFormat::print_session_status(out, ctx.session_manager.status());
     ConsoleFormat::print_sink_status(out, ctx.sink_manager);
     print_edf_recorder_status(out, ctx.edf_recorder_manager);
@@ -1611,13 +1611,13 @@ void ManagementConsole::handle_sleephq_command(Print &out,
 void ManagementConsole::handle_as11_command(Print &out,
                                             String rest,
                                             ConsoleContext &ctx) {
-    handle_as11(out, rest, ctx.arbiter);
+    handle_as11(out, rest, ctx.arbiter, ctx.device);
 }
 
 void ManagementConsole::handle_therapy_command(Print &out,
                                                String rest,
                                                ConsoleContext &ctx) {
-    handle_therapy(out, rest, ctx.arbiter);
+    handle_therapy(out, rest, ctx.arbiter, ctx.device);
 }
 
 void ManagementConsole::handle_config_command(Print &out,
@@ -1710,7 +1710,7 @@ void ManagementConsole::handle_version_command(Print &out,
 void ManagementConsole::handle_time_command(Print &out,
                                             String rest,
                                             ConsoleContext &ctx) {
-    handle_time(out, rest, ctx.arbiter, ctx.time_sync_service);
+    handle_time(out, rest, ctx.device, ctx.time_sync_service);
 }
 
 void ManagementConsole::handle_get_command(Print &out,
@@ -1770,7 +1770,7 @@ void ManagementConsole::handle_set_command(Print &out,
         setting_body += "}";
 
         const As11SettingsState &settings = ctx.settings_manager.state();
-        const As11DeviceState &as11 = ctx.arbiter.as11_state();
+        const As11DeviceState &as11 = ctx.device.state();
         int mode = settings.mode_index();
         if (mode < 0) {
             mode = as11_mode_index_from_value(as11.active_therapy_profile());

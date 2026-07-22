@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
-#include <time.h>
 
 #include "as11_rpc.h"
 #include "debug_log.h"
@@ -72,40 +71,6 @@ bool current_epoch_ms(int64_t &epoch_ms) {
     epoch_ms = static_cast<int64_t>(tv.tv_sec) * 1000 +
                static_cast<int64_t>(tv.tv_usec / 1000);
     return true;
-}
-
-std::string format_utc_ms(int64_t epoch_ms) {
-    if (epoch_ms < 1609459200000LL) return "";
-    const time_t epoch = static_cast<time_t>(epoch_ms / 1000);
-    struct tm utc = {};
-    gmtime_r(&epoch, &utc);
-    char base[25];
-    if (strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &utc) == 0) {
-        return "";
-    }
-    char out[29];
-    snprintf(out, sizeof(out), "%s.%03dZ", base,
-             static_cast<int>(epoch_ms % 1000));
-    return std::string(out);
-}
-
-bool event_suggests_identity_refresh(const std::string &event) {
-    return event == "PowerUp" ||
-           event == "SettingsReset" ||
-           event == "ResetToDefaultsComplete" ||
-           event == "RpcEraseData";
-}
-
-bool event_suggests_status_refresh(const std::string &event) {
-    return event == "TherapyStarted" ||
-           event == "StandbyStarted" ||
-           event == "MaskfitStarted" ||
-           event == "TestDriveStarted" ||
-           event == "CalibrationStarted";
-}
-
-bool event_suggests_motor_refresh(const std::string &event) {
-    return event == "StandbyStarted" || event == "CooldownStopped";
 }
 
 }  // namespace
@@ -212,7 +177,6 @@ void RpcArbiter::poll() {
     check_pending_timeout();
     poll_stream_subscription();
     poll_event_subscription();
-    poll_as11_healthcheck();
     dispatch_next_request();
 
     // Dispatch may enqueue CAN frames after RX-driven work above. Poll again so
@@ -330,16 +294,6 @@ bool RpcArbiter::send_request_with_id(const std::string &method,
     const bool queued = enqueue_request(request);
     id = queued ? request.id : 0;
     return queued;
-}
-
-bool RpcArbiter::send_set_datetime_now(RpcSource source,
-                                       uint32_t timeout_ms) {
-    QueuedRequest request;
-    request.method = "SetDateTime";
-    request.source = source;
-    request.timeout_ms = timeout_ms ? timeout_ms : AC_RPC_DEFAULT_TIMEOUT_MS;
-    request.set_datetime_now = true;
-    return enqueue_request(request);
 }
 
 OperationSubmission RpcArbiter::request(const RpcRequestCommand &command) {
@@ -621,9 +575,6 @@ bool RpcArbiter::recover_can(const char *reason) {
     const uint32_t now = millis();
     stream_.mark_reattach(now);
     event_.mark_reattach(now);
-    if (as11_state_.therapy_command_pending()) {
-        as11_state_.clear_pending_therapy_command("can_recovery", now);
-    }
     return can_.recover_or_restart(reason);
 }
 
@@ -737,52 +688,6 @@ bool RpcArbiter::request_allowed_during_esp_ota_quiesce(
     return false;
 }
 
-RpcArbiter::DateTimePrepareResult RpcArbiter::prepare_set_datetime_request(
-    QueuedRequest &request, uint32_t now) {
-    int64_t now_epoch_ms = 0;
-    if (!current_epoch_ms(now_epoch_ms)) {
-        return DateTimePrepareResult::InvalidClock;
-    }
-
-    const int64_t max_future_ms = 2000;
-    const bool target_missing =
-        request.set_datetime_target_epoch_ms < 1609459200000LL;
-    const bool target_missed =
-        request.set_datetime_target_epoch_ms <= now_epoch_ms;
-    const bool target_from_old_clock =
-        request.set_datetime_target_epoch_ms - now_epoch_ms > max_future_ms;
-    if (target_missing || target_missed || target_from_old_clock) {
-        int64_t target_epoch_ms = ((now_epoch_ms / 1000) + 1) * 1000;
-        const int64_t remaining_ms = target_epoch_ms - now_epoch_ms;
-        if (remaining_ms <=
-            static_cast<int64_t>(AC_RPC_SET_DATETIME_APPLY_LEAD_MS +
-                                 AC_RPC_SET_DATETIME_TARGET_MARGIN_MS)) {
-            target_epoch_ms += 1000;
-        }
-        request.set_datetime_target_epoch_ms = target_epoch_ms;
-    }
-
-    const int64_t fire_epoch_ms =
-        request.set_datetime_target_epoch_ms -
-        static_cast<int64_t>(AC_RPC_SET_DATETIME_APPLY_LEAD_MS);
-    if (now_epoch_ms < fire_epoch_ms) {
-        const uint32_t wait_ms = static_cast<uint32_t>(
-            std::min<int64_t>(fire_epoch_ms - now_epoch_ms, 1000));
-        dispatch_retry_ = request;
-        dispatch_retry_active_ = true;
-        if (!dispatch_retry_deadline_ms_) {
-            dispatch_retry_deadline_ms_ = now + wait_ms + request.timeout_ms;
-        }
-        next_dispatch_retry_ms_ = now + wait_ms;
-        return DateTimePrepareResult::Deferred;
-    }
-
-    const std::string utc = format_utc_ms(request.set_datetime_target_epoch_ms);
-    if (utc.empty()) return DateTimePrepareResult::InvalidClock;
-    request.params_json = build_set_datetime_params(utc);
-    return DateTimePrepareResult::Ready;
-}
-
 void RpcArbiter::note_request_success(RpcSource source, uint32_t now) {
     (void)now;
     (void)source;
@@ -801,68 +706,10 @@ void RpcArbiter::note_request_timeout(RpcSource source, uint32_t now) {
     }
     background_backoff_until_ms_ = now + AC_RPC_BACKGROUND_BACKOFF_MS;
     stats_.background_backoffs++;
-    if (next_as11_identity_poll_ms_) {
-        next_as11_identity_poll_ms_ = background_backoff_until_ms_;
-    }
-    next_as11_status_poll_ms_ =
-        background_backoff_until_ms_ + AC_RPC_DEFAULT_TIMEOUT_MS;
-    if (next_as11_motor_poll_ms_) {
-        next_as11_motor_poll_ms_ =
-            background_backoff_until_ms_ + (AC_RPC_DEFAULT_TIMEOUT_MS * 2);
-    }
-    next_as11_timezone_poll_ms_ =
-        background_backoff_until_ms_ + (AC_RPC_DEFAULT_TIMEOUT_MS * 3);
-    next_as11_clock_poll_ms_ =
-        background_backoff_until_ms_ + (AC_RPC_DEFAULT_TIMEOUT_MS * 4);
     Log::logf(CAT_RPC, LOG_WARN,
               "background polling paused for %lu ms after %u timeouts\n",
               static_cast<unsigned long>(AC_RPC_BACKGROUND_BACKOFF_MS),
               static_cast<unsigned>(consecutive_scheduler_timeouts_));
-}
-
-void RpcArbiter::schedule_as11_identity_refresh(uint32_t now,
-                                                uint32_t delay_ms) {
-    const uint32_t due_ms = now + delay_ms;
-    if (!next_as11_identity_poll_ms_ ||
-        static_cast<int32_t>(due_ms - next_as11_identity_poll_ms_) < 0) {
-        next_as11_identity_poll_ms_ = due_ms;
-    }
-}
-
-void RpcArbiter::schedule_as11_status_refresh(uint32_t now,
-                                              uint32_t delay_ms) {
-    const uint32_t due_ms = now + delay_ms;
-    if (!next_as11_status_poll_ms_ ||
-        static_cast<int32_t>(due_ms - next_as11_status_poll_ms_) < 0) {
-        next_as11_status_poll_ms_ = due_ms;
-    }
-}
-
-void RpcArbiter::schedule_as11_motor_refresh(uint32_t now,
-                                             uint32_t delay_ms) {
-    const uint32_t due_ms = now + delay_ms;
-    if (!next_as11_motor_poll_ms_ ||
-        static_cast<int32_t>(due_ms - next_as11_motor_poll_ms_) < 0) {
-        next_as11_motor_poll_ms_ = due_ms;
-    }
-}
-
-void RpcArbiter::schedule_as11_timezone_refresh(uint32_t now,
-                                                uint32_t delay_ms) {
-    const uint32_t due_ms = now + delay_ms;
-    if (!next_as11_timezone_poll_ms_ ||
-        static_cast<int32_t>(due_ms - next_as11_timezone_poll_ms_) < 0) {
-        next_as11_timezone_poll_ms_ = due_ms;
-    }
-}
-
-void RpcArbiter::update_as11_motor_refresh_after_state(uint32_t now) {
-    if (as11_state_.therapy_state() == As11TherapyState::Running) {
-        if (!next_as11_motor_poll_ms_) {
-            next_as11_motor_poll_ms_ =
-                now + AC_AS11_MOTOR_RUNTIME_POLL_INTERVAL_MS;
-        }
-    }
 }
 
 void RpcArbiter::push_event(RpcEventKind kind,
@@ -1007,7 +854,6 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
     if (pending_.event_command != EventCommandType::None) {
         event_.mark_command_cancelled(millis());
     }
-    as11_state_.mark_therapy_command_timeout(pending_.method, millis());
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::cancelled(),
                      RpcCompletionCause::Cancelled, nullptr,
@@ -1238,25 +1084,6 @@ void RpcArbiter::dispatch_next_request() {
         }
     }
 
-    if (request.set_datetime_now) {
-        const DateTimePrepareResult result =
-            prepare_set_datetime_request(request, now);
-        if (result == DateTimePrepareResult::Deferred) {
-            return;
-        }
-        if (result == DateTimePrepareResult::InvalidClock) {
-            cancel_queued_request(request, "datetime_clock_invalid",
-                                  RpcCompletionCause::DispatchFailure);
-            if (from_retry) {
-                dispatch_retry_ = {};
-                dispatch_retry_active_ = false;
-                dispatch_retry_deadline_ms_ = 0;
-                next_dispatch_retry_ms_ = 0;
-            }
-            return;
-        }
-    }
-
     const std::string payload = build_rpc_request(request.method,
                                                   request.params_json,
                                                   request.id);
@@ -1314,12 +1141,10 @@ void RpcArbiter::dispatch_next_request() {
     pending_.event_command = request.event_command;
     pending_.generation = request.generation;
     pending_.deadline_ms = millis() + request.timeout_ms;
-    pending_.dispatch_epoch_ms = 0;
-    (void)current_epoch_ms(pending_.dispatch_epoch_ms);
+    pending_.dispatch_utc_ms = 0;
+    (void)current_epoch_ms(pending_.dispatch_utc_ms);
     last_integrated_tx_ms_ = millis();
     stats_.dispatched_requests++;
-    as11_state_.mark_therapy_command_sent(request.method,
-                                          last_integrated_tx_ms_);
 
     Log::logf(CAT_RPC, LOG_DEBUG, "dispatched id=%lu method=%s src=%s\n",
               static_cast<unsigned long>(request.id),
@@ -1367,7 +1192,6 @@ void RpcArbiter::check_pending_timeout() {
     if (pending_.event_command != EventCommandType::None) {
         event_.mark_command_timeout(now);
     }
-    as11_state_.mark_therapy_command_timeout(pending_.method, now);
 
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::failed(), RpcCompletionCause::Timeout,
@@ -1426,139 +1250,14 @@ void RpcArbiter::poll_stream_subscription() {
     }
 }
 
-void RpcArbiter::poll_as11_healthcheck() {
-    const uint32_t now = millis();
-    as11_state_.poll(now);
-
-    if (esp_ota_quiesce_requested_) return;
-    if (background_polls_suspended_) return;
-    if (background_backoff_active(now)) return;
-
-    if (!as11_healthcheck_initialized_) {
-        as11_healthcheck_initialized_ = true;
-        schedule_as11_identity_refresh(now,
-                                       AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);
-        schedule_as11_status_refresh(now,
-                                     AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);
-        schedule_as11_motor_refresh(now,
-                                    AC_AS11_INITIAL_STATUS_POLL_DELAY_MS +
-                                    AC_RPC_MIN_TX_INTERVAL_MS);
-        schedule_as11_timezone_refresh(now,
-                                       AC_AS11_INITIAL_STATUS_POLL_DELAY_MS +
-                                       (AC_RPC_MIN_TX_INTERVAL_MS * 2));
-        next_as11_clock_poll_ms_ = now + AC_AS11_INITIAL_STATUS_POLL_DELAY_MS +
-            AC_RPC_DEFAULT_TIMEOUT_MS;
-        return;
-    }
-
-    if (pending_.active || dispatch_retry_active_ || !requests_.empty()) {
-        return;
-    }
-
-    if (next_as11_identity_poll_ms_ &&
-        static_cast<int32_t>(now - next_as11_identity_poll_ms_) >= 0) {
-        QueuedRequest request;
-        request.method = "Get";
-        request.params_json = as11_identity_get_params_json();
-        request.source = RpcSource::Scheduler;
-        if (enqueue_request(request)) {
-            next_as11_identity_poll_ms_ = 0;
-        } else {
-            next_as11_identity_poll_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
-        }
-        return;
-    }
-
-    if (next_as11_status_poll_ms_ &&
-        static_cast<int32_t>(now - next_as11_status_poll_ms_) >= 0) {
-        QueuedRequest request;
-        request.method = "Get";
-        request.params_json = as11_runtime_get_params_json();
-        request.source = RpcSource::Scheduler;
-        if (enqueue_request(request)) {
-            next_as11_status_poll_ms_ = now +
-                (as11_state_.therapy_command_pending()
-                     ? AC_AS11_THERAPY_STATUS_POLL_INTERVAL_MS
-                     : AC_AS11_STATUS_POLL_INTERVAL_MS);
-        } else {
-            next_as11_status_poll_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
-        }
-        return;
-    }
-
-    if (next_as11_motor_poll_ms_ &&
-        static_cast<int32_t>(now - next_as11_motor_poll_ms_) >= 0) {
-        QueuedRequest request;
-        request.method = "Get";
-        request.params_json = as11_motor_runtime_get_params_json();
-        request.source = RpcSource::Scheduler;
-        if (enqueue_request(request)) {
-            next_as11_motor_poll_ms_ =
-                as11_state_.therapy_state() == As11TherapyState::Running
-                    ? now + AC_AS11_MOTOR_RUNTIME_POLL_INTERVAL_MS
-                    : 0;
-        } else {
-            next_as11_motor_poll_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
-        }
-        return;
-    }
-
-    if (next_as11_timezone_poll_ms_ &&
-        static_cast<int32_t>(now - next_as11_timezone_poll_ms_) >= 0) {
-        QueuedRequest request;
-        request.method = "Get";
-        request.params_json = as11_timezone_get_params_json();
-        request.source = RpcSource::Scheduler;
-        if (enqueue_request(request)) {
-            next_as11_timezone_poll_ms_ =
-                now + AC_AS11_TIMEZONE_POLL_INTERVAL_MS;
-        } else {
-            next_as11_timezone_poll_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
-        }
-        return;
-    }
-
-    if (next_as11_clock_poll_ms_ &&
-        static_cast<int32_t>(now - next_as11_clock_poll_ms_) >= 0) {
-        QueuedRequest request;
-        request.method = "GetDateTime";
-        request.source = RpcSource::Scheduler;
-        if (enqueue_request(request)) {
-            next_as11_clock_poll_ms_ =
-                now + AC_AS11_CLOCK_POLL_INTERVAL_MS;
-        } else {
-            next_as11_clock_poll_ms_ = now + AC_RPC_DEFAULT_TIMEOUT_MS;
-        }
-    }
-}
-
 void RpcArbiter::handle_matched_response(const std::string &payload) {
     if (pending_.generation != 0) return;
 
     const uint32_t now = millis();
     const bool is_error = json_member_present(payload, "error");
-    const bool therapy_method =
-        As11DeviceState::is_therapy_command_method(pending_.method);
-    bool get_had_pending_therapy = false;
 
     if (!is_error) {
-        if (pending_.method == "Get") {
-            get_had_pending_therapy = as11_state_.therapy_command_pending();
-            const As11TherapyState before_get_state =
-                as11_state_.therapy_state();
-            as11_state_.apply_status_get_response(payload, now);
-            if (before_get_state == As11TherapyState::Running &&
-                as11_state_.therapy_state() == As11TherapyState::Standby) {
-                schedule_as11_motor_refresh(
-                    now, AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
-            }
-            update_as11_motor_refresh_after_state(now);
-        } else if (pending_.method == "GetDateTime") {
-            int64_t response_epoch_ms = 0;
-            (void)current_epoch_ms(response_epoch_ms);
-            as11_state_.apply_datetime_response(
-                payload, now, pending_.dispatch_epoch_ms, response_epoch_ms);
-        } else if (pending_.event_command != EventCommandType::None) {
+        if (pending_.event_command != EventCommandType::None) {
             uint32_t subscription_id = 0;
             const bool subscribed =
                 event_.accept_subscribe_response(payload, subscription_id);
@@ -1579,70 +1278,11 @@ void RpcArbiter::handle_matched_response(const std::string &payload) {
     } else if (pending_.event_command != EventCommandType::None) {
         event_.mark_subscribe_response(true, 0, now);
     }
-    as11_state_.mark_therapy_command_response(pending_.method,
-                                              is_error,
-                                              now);
-    if (!is_error && therapy_method) {
-        schedule_as11_status_refresh(now,
-                                     AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
-    } else if (!is_error && pending_.method == "Get" &&
-               get_had_pending_therapy) {
-        if (as11_state_.therapy_command_pending()) {
-            schedule_as11_status_refresh(
-                now, AC_AS11_THERAPY_STATUS_POLL_INTERVAL_MS);
-        } else {
-            next_as11_status_poll_ms_ =
-                now + AC_AS11_STATUS_POLL_INTERVAL_MS;
-        }
-    }
     if (pending_.stream_command != StreamCommandType::None) {
         stream_.mark_command_response(pending_.stream_command,
                                       is_error, payload, now);
         if (is_error) stats_.stream_command_errors++;
     }
-}
-
-bool RpcArbiter::request_as11_healthcheck() {
-    QueuedRequest identity;
-    identity.method = "Get";
-    identity.params_json = as11_identity_get_params_json();
-    identity.source = RpcSource::Scheduler;
-    if (!enqueue_request(identity)) return false;
-
-    QueuedRequest status;
-    status.method = "Get";
-    status.params_json = as11_runtime_get_params_json();
-    status.source = RpcSource::Scheduler;
-    if (!enqueue_request(status)) return false;
-
-    QueuedRequest motor;
-    motor.method = "Get";
-    motor.params_json = as11_motor_runtime_get_params_json();
-    motor.source = RpcSource::Scheduler;
-    if (!enqueue_request(motor)) return false;
-
-    QueuedRequest timezone;
-    timezone.method = "Get";
-    timezone.params_json = as11_timezone_get_params_json();
-    timezone.source = RpcSource::Scheduler;
-    if (!enqueue_request(timezone)) return false;
-
-    QueuedRequest clock;
-    clock.method = "GetDateTime";
-    clock.source = RpcSource::Scheduler;
-    if (!enqueue_request(clock)) return false;
-
-    const uint32_t now = millis();
-    as11_healthcheck_initialized_ = true;
-    next_as11_identity_poll_ms_ = 0;
-    next_as11_status_poll_ms_ = now + AC_AS11_STATUS_POLL_INTERVAL_MS;
-    next_as11_motor_poll_ms_ =
-        as11_state_.therapy_state() == As11TherapyState::Running
-            ? now + AC_AS11_MOTOR_RUNTIME_POLL_INTERVAL_MS
-            : 0;
-    next_as11_timezone_poll_ms_ = now + AC_AS11_TIMEZONE_POLL_INTERVAL_MS;
-    next_as11_clock_poll_ms_ = now + AC_AS11_CLOCK_POLL_INTERVAL_MS;
-    return true;
 }
 
 bool RpcArbiter::handle_event_notification(const char *payload,
@@ -1652,34 +1292,9 @@ bool RpcArbiter::handle_event_notification(const char *payload,
     const EventPublishResult event_result =
         event_.publish_notification(payload, payload_len, now, event_frame);
     if (!event_result.accepted) return false;
-    push_event(RpcEventKind::InternalDeviceStateUpdated, "",
-               RpcSource::Scheduler);
-
-    const As11TherapyState before_state = as11_state_.therapy_state();
-    const bool activity_updated =
-        as11_state_.apply_activity_event_frame(event_frame, now);
     if (event_result.settings_history_change) {
         push_event(RpcEventKind::InternalSettingsStateInvalidated, "",
                    RpcSource::Scheduler);
-    }
-    const std::string event = as11_state_.last_activity_event();
-    if (activity_updated && event_suggests_identity_refresh(event)) {
-        schedule_as11_identity_refresh(
-            now, AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
-        schedule_as11_status_refresh(now, AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
-        schedule_as11_motor_refresh(now, AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
-        schedule_as11_timezone_refresh(
-            now, AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
-    }
-    if (activity_updated &&
-        (as11_state_.therapy_state() != before_state ||
-         event_suggests_status_refresh(event))) {
-        stats_.activity_state_events++;
-        schedule_as11_status_refresh(now, AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
-    }
-    if (activity_updated && event_suggests_motor_refresh(event) &&
-        as11_state_.therapy_state() != As11TherapyState::Running) {
-        schedule_as11_motor_refresh(now, AC_AS11_THERAPY_STATUS_POLL_DELAY_MS);
     }
     return true;
 }
@@ -1752,17 +1367,7 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
         last_boot_notification_ms_ = millis();
         deferred_payloads_.clear();
         cancel_all_requests("device_boot");
-        as11_state_.reset();
         event_.mark_reattach(now);
-        as11_healthcheck_initialized_ = true;
-        schedule_as11_identity_refresh(now,
-                                       AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);
-        schedule_as11_status_refresh(now, AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);
-        schedule_as11_motor_refresh(now, AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);
-        schedule_as11_timezone_refresh(now,
-                                       AC_AS11_INITIAL_STATUS_POLL_DELAY_MS);
-        next_as11_clock_poll_ms_ = now + AC_AS11_INITIAL_STATUS_POLL_DELAY_MS +
-            AC_RPC_DEFAULT_TIMEOUT_MS;
         if (stream_.desired_active()) stream_.mark_reattach(now);
         push_event(RpcEventKind::BootNotification, last_boot_notification_);
     }
@@ -1854,7 +1459,7 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                                    : OperationOutcome::succeeded(),
                     RpcCompletionCause::Response, &owned_payload, "",
                     response_error, request_completions_,
-                    pending_.dispatch_epoch_ms, response_epoch_ms);
+                    pending_.dispatch_utc_ms, response_epoch_ms);
                 note_request_success(response_source, millis());
                 pending_ = {};
                 if (addressed_request) break;

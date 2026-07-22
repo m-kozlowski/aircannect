@@ -3,8 +3,8 @@
 #include <stdint.h>
 
 #include "app_config.h"
+#include "as11_device_state.h"
 #include "report_manager.h"
-#include "rpc_arbiter.h"
 #include "sleephq_sync_job.h"
 #include "storage_sync_job.h"
 
@@ -20,10 +20,11 @@ public:
                SleepHqSyncJob *sleephq_sync);
 
     // scheduling policy
-    void poll(RpcArbiter &arbiter,
-              ReportManager &report,
+    void poll(ReportManager &report,
               const AppConfigData &config,
               bool network_connected,
+              bool stream_activity_active,
+              As11TherapyState therapy_state,
               bool resmed_ota_active,
               bool esp_ota_active,
               uint32_t now_ms);
@@ -68,20 +69,21 @@ private:
     bool export_network_ready(bool network_connected, uint32_t now_ms);
 
     // post-therapy sequence
-    void poll_post_therapy(RpcArbiter &arbiter,
-                           ReportManager &report,
+    void poll_post_therapy(ReportManager &report,
+                           bool stream_activity_active,
+                           As11TherapyState therapy_state,
                            bool storage_sync_active,
                            uint32_t now_ms);
     void reset_post_therapy_after_running();
     void arm_post_therapy_after_stop(uint32_t now_ms);
-    void maybe_refresh_summary(RpcArbiter &arbiter,
-                               ReportManager &report,
+    void maybe_refresh_summary(ReportManager &report,
+                               bool stream_activity_active,
                                uint32_t now_ms);
-    void maybe_queue_storage_sync(RpcArbiter &arbiter,
-                                  ReportManager &report,
+    void maybe_queue_storage_sync(ReportManager &report,
+                                  bool stream_activity_active,
                                   uint32_t now_ms);
-    void maybe_queue_post_therapy_sleephq(RpcArbiter &arbiter,
-                                          ReportManager &report,
+    void maybe_queue_post_therapy_sleephq(ReportManager &report,
+                                          bool stream_activity_active,
                                           bool storage_sync_active,
                                           uint32_t now_ms);
     void queue_post_therapy_storage_sync(uint32_t now_ms);
@@ -91,9 +93,10 @@ private:
     void maybe_queue_sleephq_startup_check(bool network_connected,
                                            bool storage_sync_active,
                                            SleepHqSyncRuntimeStatus status);
-    void poll_sleephq_idle_backfill(RpcArbiter &arbiter,
-                                    ReportManager &report,
+    void poll_sleephq_idle_backfill(ReportManager &report,
                                     bool network_connected,
+                                    bool stream_activity_active,
+                                    As11TherapyState therapy_state,
                                     bool storage_sync_active,
                                     SleepHqSyncRuntimeStatus status,
                                     uint32_t now_ms);

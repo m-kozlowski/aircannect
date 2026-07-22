@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <string>
 
+#include "as11_device_service.h"
 #include "board.h"
 #include "crc32.h"
 #include "large_byte_buffer.h"
@@ -52,7 +53,9 @@ struct ResmedOtaStatus {
 
 class ResmedOtaManager {
 public:
-    void begin(RpcArbiter &arbiter, StorageAtomicWritePort &storage_write_port);
+    void begin(RpcArbiter &arbiter,
+               As11DeviceService &device,
+               StorageAtomicWritePort &storage_write_port);
     void poll();
 
     bool begin_upload(size_t total_size,
@@ -132,6 +135,7 @@ private:
     void unlock() const;
 
     RpcArbiter *arbiter_ = nullptr;
+    As11DeviceService *device_ = nullptr;
     StorageAtomicWritePort *storage_write_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
 

@@ -185,7 +185,6 @@ bool As11DeviceService::apply_activity_event_frame(
 
     if (state_.therapy_state() != before_state ||
         event_suggests_status_refresh(event)) {
-        activity_state_events_++;
         schedule_query(QueryKind::Runtime,
                        now_ms + AC_AS11_THERAPY_STATUS_POLL_DELAY_MS,
                        RpcSource::Scheduler);

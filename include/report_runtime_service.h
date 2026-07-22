@@ -39,7 +39,7 @@ public:
                          ReportPrefetchService &prefetch,
                          ReportEdfCatalogContext &edf_catalog);
 
-    void poll(RpcArbiter &arbiter);
+    void poll(RpcArbiter &arbiter, bool therapy_running);
     bool handle_event(const RpcEvent &event);
 
     bool busy() const;

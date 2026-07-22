@@ -270,13 +270,13 @@ int request_profile_mode_arg(AsyncWebServerRequest *request) {
         std::string(request->arg(arg_name).c_str()));
 }
 
-int active_settings_mode(const RpcArbiter *arbiter,
+int active_settings_mode(const As11DeviceState *device_state,
                          const As11SettingsManager *settings_manager) {
-    if (!arbiter || !settings_manager) return -1;
+    if (!device_state || !settings_manager) return -1;
     int mode = settings_manager->state().mode_index();
     if (mode < 0) {
         mode = as11_mode_index_from_value(
-            arbiter->as11_state().active_therapy_profile());
+            device_state->active_therapy_profile());
     }
     return mode;
 }
@@ -611,16 +611,15 @@ struct PendingPreparedReadRef {
 
 bool therapy_request_idle(AsyncWebServerRequest *request,
                           const SessionManager *session_manager,
-                          const RpcArbiter *arbiter) {
+                          const As11DeviceState *device_state) {
     if (session_manager &&
         session_manager->status().state == SessionState::Active) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"therapy_active\"}");
         return false;
     }
-    if (arbiter &&
-        arbiter->as11_state().therapy_state() ==
-            As11TherapyState::Running) {
+    if (device_state &&
+        device_state->therapy_state() == As11TherapyState::Running) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"therapy_active\"}");
         return false;
@@ -630,8 +629,8 @@ bool therapy_request_idle(AsyncWebServerRequest *request,
 
 bool storage_heavy_request_available(AsyncWebServerRequest *request,
                                      const SessionManager *session_manager,
-                                     const RpcArbiter *arbiter) {
-    if (!therapy_request_idle(request, session_manager, arbiter)) {
+                                     const As11DeviceState *device_state) {
+    if (!therapy_request_idle(request, session_manager, device_state)) {
         return false;
     }
     if (!Storage::mounted()) {
@@ -651,8 +650,8 @@ bool storage_heavy_request_available(AsyncWebServerRequest *request,
 
 bool storage_read_request_available(AsyncWebServerRequest *request,
                                     const SessionManager *session_manager,
-                                    const RpcArbiter *arbiter) {
-    if (!therapy_request_idle(request, session_manager, arbiter)) {
+                                    const As11DeviceState *device_state) {
+    if (!therapy_request_idle(request, session_manager, device_state)) {
         return false;
     }
     if (!Storage::mounted()) {
@@ -995,6 +994,7 @@ void build_resmed_ota_json(JsonOut &json, const ResmedOtaManager &ota) {
 }  // namespace
 
 bool WebUI::begin(RpcArbiter &arbiter,
+                  As11DeviceService &device,
                   As11SettingsManager &settings_manager,
                   WifiManager &wifi_manager,
                   TcpBridge &tcp_bridge,
@@ -1018,6 +1018,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     if (started_) return true;
     stop();
     arbiter_ = &arbiter;
+    device_ = &device;
     settings_manager_ = &settings_manager;
     wifi_manager_ = &wifi_manager;
     tcp_bridge_ = &tcp_bridge;
@@ -1216,6 +1217,7 @@ void WebUI::stop() {
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     observed_settings_refresh_pending_ = false;
     observed_settings_revision_ = 0;
+    observed_device_revision_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
@@ -1228,7 +1230,12 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     const bool realtime_active =
         arbiter_ &&
         (arbiter_->stream_activity_active() ||
-         arbiter_->as11_state().therapy_state() == As11TherapyState::Running);
+         (device_ && device_->state().therapy_state() ==
+                         As11TherapyState::Running));
+    if (device_ && observed_device_revision_ != device_->revision()) {
+        observed_device_revision_ = device_->revision();
+        mark_snapshots_dirty(SNAPSHOT_STATUS | SNAPSHOT_SETTINGS);
+    }
     if (settings_manager_ &&
         (observed_settings_refresh_pending_ !=
              settings_manager_->refresh_pending() ||
@@ -1576,8 +1583,6 @@ void WebUI::handle_event(const RpcEvent &event) {
         }
     } else if (event.kind == RpcEventKind::InternalSettingsStateInvalidated) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
-    } else if (event.kind == RpcEventKind::InternalDeviceStateUpdated) {
-        mark_snapshots_dirty(SNAPSHOT_STATUS);
     }
 
     if (!ManagementConsole::event_has_output(event)) return;
@@ -1772,7 +1777,8 @@ void WebUI::send_cached_settings(AsyncWebServerRequest *request,
 
     const int active_mode =
         requested_mode < 0
-            ? active_settings_mode(arbiter_, settings_manager_)
+            ? active_settings_mode(device_ ? &device_->state() : nullptr,
+                                   settings_manager_)
             : -1;
     const bool explicit_mode_mismatch =
         requested_mode >= 0 &&
@@ -2150,7 +2156,7 @@ void WebUI::drain_commands() {
 void WebUI::build_status_json(LargeTextBuffer &json,
                               PollCheckpoint checkpoint) const {
     const SystemStatusSnapshot snap = collect_system_status({
-        *arbiter_,
+        *device_,
         *wifi_manager_,
         *app_config_,
         *time_sync_service_,
@@ -2575,7 +2581,9 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"bad_path\"}");
         return;
     }
-    if (!storage_read_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_read_request_available(
+            request, session_manager_,
+            device_ ? &device_->state() : nullptr)) {
         return;
     }
 
@@ -2688,7 +2696,9 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"download_unavailable\"}");
         return;
     }
-    if (!storage_read_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_read_request_available(
+            request, session_manager_,
+            device_ ? &device_->state() : nullptr)) {
         return;
     }
     if (!storage_delete_available(request, storage_delete_)) {
@@ -2880,9 +2890,9 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
         }
         StorageJobGate gate(request, storage_job_mutex_);
         if (!gate.locked()) return;
-        if (!storage_heavy_request_available(request,
-                                             session_manager_,
-                                             arbiter_)) {
+        if (!storage_heavy_request_available(
+                request, session_manager_,
+                device_ ? &device_->state() : nullptr)) {
             return;
         }
         if (!storage_jobs_available(request,
@@ -2932,7 +2942,9 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
     }
     StorageJobGate gate(request, storage_job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_heavy_request_available(
+            request, session_manager_,
+            device_ ? &device_->state() : nullptr)) {
         return;
     }
     if (!storage_jobs_available(request,
@@ -3032,7 +3044,9 @@ void WebUI::send_storage_archive_download(AsyncWebServerRequest *request) const 
     }
     StorageJobGate gate(request, storage_job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_read_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_read_request_available(
+            request, session_manager_,
+            device_ ? &device_->state() : nullptr)) {
         return;
     }
     if (!storage_delete_available(request, storage_delete_)) {
@@ -3118,7 +3132,9 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
     }
     StorageJobGate gate(request, storage_job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_heavy_request_available(
+            request, session_manager_,
+            device_ ? &device_->state() : nullptr)) {
         return;
     }
     if (!storage_jobs_available(request,
@@ -3208,7 +3224,9 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
     }
     StorageJobGate gate(request, storage_job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_heavy_request_available(
+            request, session_manager_,
+            device_ ? &device_->state() : nullptr)) {
         return;
     }
     if (!storage_jobs_available(request,
@@ -3235,7 +3253,9 @@ void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
     }
     StorageJobGate gate(request, storage_job_mutex_);
     if (!gate.locked()) return;
-    if (!storage_heavy_request_available(request, session_manager_, arbiter_)) {
+    if (!storage_heavy_request_available(
+            request, session_manager_,
+            device_ ? &device_->state() : nullptr)) {
         return;
     }
     if (!storage_jobs_available(request,
@@ -3579,7 +3599,7 @@ void WebUI::build_settings_json(LargeTextBuffer &json,
                                 int requested_mode,
                                 bool refresh_queued) const {
     const As11SettingsState &state = settings_manager_->state();
-    const As11DeviceState &as11 = arbiter_->as11_state();
+    const As11DeviceState &as11 = device_->state();
     int active_mode = state.mode_index();
     if (active_mode < 0) {
         active_mode = as11_mode_index_from_value(
@@ -3790,7 +3810,8 @@ void WebUI::publish_snapshots(bool force,
         int published_settings_mode = requested_mode;
         if (published_settings_mode < 0) {
             published_settings_mode =
-                active_settings_mode(arbiter_, settings_manager_);
+                active_settings_mode(device_ ? &device_->state() : nullptr,
+                                     settings_manager_);
         }
 
         build_settings_json(cached_settings_json_,
@@ -3936,7 +3957,7 @@ void WebUI::execute_time_action(const std::string &action) {
 
 void WebUI::execute_settings_update(const std::string &body) {
     const As11SettingsState &state = settings_manager_->state();
-    const As11DeviceState &as11 = arbiter_->as11_state();
+    const As11DeviceState &as11 = device_->state();
     int mode = state.mode_index();
     if (mode < 0) {
         mode = as11_mode_index_from_value(as11.active_therapy_profile());
@@ -3951,11 +3972,15 @@ void WebUI::execute_settings_update(const std::string &body) {
 }
 
 void WebUI::execute_therapy_action(const std::string &action) {
-    const char *method = nullptr;
-    if (action == "start") method = "EnterTherapy";
-    if (action == "stop" || action == "standby") method = "EnterStandby";
-    if (!method) return;
-    arbiter_->send_request(method, "", RpcSource::HttpApi);
+    As11TherapyTarget target = As11TherapyTarget::None;
+    if (action == "start") target = As11TherapyTarget::Running;
+    if (action == "stop" || action == "standby") {
+        target = As11TherapyTarget::Standby;
+    }
+    if (target == As11TherapyTarget::None) return;
+
+    (void)device_->request_therapy(*arbiter_, target, RpcSource::HttpApi,
+                                   millis());
     mark_snapshots_dirty(SNAPSHOT_STATUS);
 }
 

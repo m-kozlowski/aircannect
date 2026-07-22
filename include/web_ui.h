@@ -7,6 +7,7 @@
 #include <freertos/semphr.h>
 
 #include "app_config.h"
+#include "as11_device_service.h"
 #include "as11_settings_manager.h"
 #include "fixed_queue.h"
 #include "large_text_buffer.h"
@@ -90,6 +91,7 @@ public:
 
     // lifecycle
     bool begin(RpcArbiter &arbiter,
+               As11DeviceService &device,
                As11SettingsManager &settings_manager,
                WifiManager &wifi_manager,
                TcpBridge &tcp_bridge,
@@ -251,6 +253,7 @@ private:
 
     // subsystem owners
     RpcArbiter *arbiter_ = nullptr;
+    As11DeviceService *device_ = nullptr;
     As11SettingsManager *settings_manager_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
     TcpBridge *tcp_bridge_ = nullptr;
@@ -328,6 +331,7 @@ private:
     int requested_settings_mode_ = -1;
     bool observed_settings_refresh_pending_ = false;
     uint32_t observed_settings_revision_ = 0;
+    uint32_t observed_device_revision_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;

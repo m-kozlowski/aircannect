@@ -86,7 +86,7 @@ SystemStatusSnapshot collect_system_status(
     out.update = sources.ota_manager.update_notification();
     if (checkpoint) checkpoint("web_ui.snapshots.status.ota");
 
-    const As11DeviceState &as11 = sources.arbiter.as11_state();
+    const As11DeviceState &as11 = sources.device.state();
     out.as11.product_name = as11.product_name();
     out.as11.serial_number = as11.serial_number();
     out.as11.software_identifier = as11.software_identifier();

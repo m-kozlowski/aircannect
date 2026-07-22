@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <string>
 
-#include "as11_device_state.h"
 #include "board.h"
 #include "can_datagram.h"
 #include "can_driver.h"
@@ -23,7 +22,6 @@ enum class RpcEventKind {
     DebugLog,
     BootNotification,
     InternalSettingsStateInvalidated,
-    InternalDeviceStateUpdated,
     FramingError,
     Info,
 };
@@ -85,8 +83,6 @@ struct RpcArbiterStats {
     uint32_t stream_parse_errors = 0;
     uint32_t stream_pool_exhaustions = 0;
     uint32_t stream_truncated_frames = 0;
-
-    uint32_t activity_state_events = 0;
 };
 
 struct RpcRuntimeStatus {
@@ -124,9 +120,6 @@ public:
                               RpcSource source,
                               uint32_t timeout_ms,
                               uint32_t &id);
-    bool send_set_datetime_now(RpcSource source,
-                               uint32_t timeout_ms = 0);
-
     OperationSubmission request(const RpcRequestCommand &command) override;
     bool cancel(OperationTicket ticket) override;
     bool take_completion(OperationTicket ticket,
@@ -171,7 +164,6 @@ public:
     // Device maintenance
     void reset_stats();
 
-    bool request_as11_healthcheck();
     bool recover_can(const char *reason);
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
@@ -188,7 +180,6 @@ public:
     const CanDriver &can_driver() const { return can_; }
     const EventBroker &event_broker() const { return event_; }
     const StreamBroker &stream_broker() const { return stream_; }
-    const As11DeviceState &as11_state() const { return as11_state_; }
 
 private:
     // Request and payload types
@@ -196,7 +187,7 @@ private:
         bool active = false;
         uint32_t id = 0;
         uint32_t deadline_ms = 0;
-        int64_t dispatch_epoch_ms = 0;
+        int64_t dispatch_utc_ms = 0;
         RpcSource source = RpcSource::Internal;
         std::string method;
         StreamCommandType stream_command = StreamCommandType::None;
@@ -210,18 +201,10 @@ private:
         RpcSource source = RpcSource::Internal;
         std::string method;
         std::string params_json;
-        bool set_datetime_now = false;
-        int64_t set_datetime_target_epoch_ms = 0;
         StreamCommandType stream_command = StreamCommandType::None;
         EventCommandType event_command = EventCommandType::None;
         uint32_t generation = 0;
         RpcDispatchWindow dispatch_window;
-    };
-
-    enum class DateTimePrepareResult : uint8_t {
-        Ready,
-        Deferred,
-        InvalidClock,
     };
 
     struct RawPassthroughRequest {
@@ -327,21 +310,11 @@ private:
     void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_esp_ota_quiesce(
         const QueuedRequest &request) const;
-    DateTimePrepareResult prepare_set_datetime_request(QueuedRequest &request,
-                                                       uint32_t now);
-
-    // AS11 polling
-    void schedule_as11_identity_refresh(uint32_t now, uint32_t delay_ms);
-    void schedule_as11_status_refresh(uint32_t now, uint32_t delay_ms);
-    void schedule_as11_motor_refresh(uint32_t now, uint32_t delay_ms);
-    void schedule_as11_timezone_refresh(uint32_t now, uint32_t delay_ms);
-    void update_as11_motor_refresh_after_state(uint32_t now);
 
     void dispatch_next_request();
     void check_pending_timeout();
     void poll_event_subscription();
     void poll_stream_subscription();
-    void poll_as11_healthcheck();
     void process_deferred_payloads(size_t budget);
 
     // Payload handling
@@ -420,19 +393,9 @@ private:
     uint32_t last_boot_notification_ms_ = 0;
     std::string last_boot_notification_;
 
-    // Owned brokers and device state
+    // Owned brokers
     EventBroker event_;
     StreamBroker stream_;
-    As11DeviceState as11_state_;
-
-    bool as11_healthcheck_initialized_ = false;
-
-    // Background AS11 polls
-    uint32_t next_as11_identity_poll_ms_ = 0;
-    uint32_t next_as11_status_poll_ms_ = 0;
-    uint32_t next_as11_motor_poll_ms_ = 0;
-    uint32_t next_as11_timezone_poll_ms_ = 0;
-    uint32_t next_as11_clock_poll_ms_ = 0;
 
     // Backpressure and OTA quiesce
     bool background_polls_suspended_ = false;

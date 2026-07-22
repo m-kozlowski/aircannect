@@ -210,8 +210,6 @@ void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     out.print(event_stats.notifications);
     out.print(" event_truncated=");
     out.print(event_stats.truncated_notifications);
-    out.print(" activity_state_events=");
-    out.print(stats.activity_state_events);
 }
 
 void print_as11_status(Print &out, const As11DeviceState &state) {

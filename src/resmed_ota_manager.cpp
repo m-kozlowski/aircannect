@@ -208,8 +208,10 @@ ResmedOtaManager::ScopedLock::~ScopedLock() {
 }
 
 void ResmedOtaManager::begin(RpcArbiter &arbiter,
+                             As11DeviceService &device,
                              StorageAtomicWritePort &storage_write_port) {
     arbiter_ = &arbiter;
+    device_ = &device;
     storage_write_port_ = &storage_write_port;
     if (!mutex_) mutex_ = xSemaphoreCreateRecursiveMutex();
     mbedtls_sha256_init(&sha_ctx_);
@@ -1009,7 +1011,7 @@ bool ResmedOtaManager::configure_staged_input(size_t input_size,
     uint32_t preset_desc3 = 0;
     bool have_preset = false;
     if (extract_descriptor_version(
-            arbiter_->as11_state().software_identifier(),
+            device_->state().software_identifier(),
             staging_descriptor_version_,
             sizeof(staging_descriptor_version_))) {
         have_preset =
@@ -1157,9 +1159,9 @@ bool ResmedOtaManager::guard_device_idle_for_upgrade() {
 
 bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
     if (reason) *reason = "therapy_state_unknown";
-    if (!arbiter_) return false;
+    if (!arbiter_ || !device_) return false;
 
-    const As11DeviceState &as11 = arbiter_->as11_state();
+    const As11DeviceState &as11 = device_->state();
     if (as11.therapy_command_pending()) {
         if (reason) *reason = "therapy_transition_pending";
         return false;
@@ -1176,12 +1178,10 @@ bool ResmedOtaManager::device_idle_for_upgrade(const char **reason) const {
             return false;
         case As11TherapyState::Unknown:
         default:
+            device_->request_healthcheck(
+                *arbiter_, RpcSource::ResmedOta, millis());
             if (reason) {
-                *reason = arbiter_->request_as11_healthcheck()
-                              ? "therapy_state_refreshing"
-                              : "therapy_state_unknown";
-            } else {
-                arbiter_->request_as11_healthcheck();
+                *reason = "therapy_state_refreshing";
             }
             return false;
     }

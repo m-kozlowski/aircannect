@@ -5,7 +5,7 @@
 #include <string_view>
 
 #include "app_config.h"
-#include "as11_device_state.h"
+#include "as11_device_service.h"
 #include "board.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
@@ -72,7 +72,7 @@ struct SystemStatusSnapshot {
 };
 
 struct SystemStatusSources {
-    const RpcArbiter &arbiter;
+    const As11DeviceService &device;
     const WifiManager &wifi_manager;
     const AppConfig &app_config;
     const TimeSyncService &time_sync_service;

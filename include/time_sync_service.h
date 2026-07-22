@@ -5,7 +5,8 @@
 #include <string>
 
 #include "app_config.h"
-#include "rpc_arbiter.h"
+#include "as11_device_service.h"
+#include "rpc_request_port.h"
 #include "wifi_manager.h"
 
 namespace aircannect {
@@ -20,7 +21,8 @@ class TimeSyncService {
 public:
     void begin(AppConfig &app_config,
                WifiManager &wifi_manager,
-               RpcArbiter &arbiter);
+               RpcRequestPort &rpc,
+               As11DeviceService &device);
     void poll();
 
     void force_ntp_sync();
@@ -60,7 +62,8 @@ private:
 
     AppConfig *app_config_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;
-    RpcArbiter *arbiter_ = nullptr;
+    RpcRequestPort *rpc_ = nullptr;
+    As11DeviceService *device_ = nullptr;
     String applied_timezone_;
     uint32_t timezone_revision_ = 0;
 

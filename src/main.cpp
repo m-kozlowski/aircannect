@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "as11_device_service.h"
 #include "as11_settings_manager.h"
 #include "background_worker.h"
 #include "board.h"
@@ -48,6 +49,7 @@ using namespace aircannect;
 
 static CanDriver can_driver;
 static RpcArbiter rpc_arbiter(can_driver);
+static As11DeviceService as11_device_service;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
 static WifiManager wifi_manager;
@@ -84,6 +86,7 @@ static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
     rpc_arbiter,
+    as11_device_service,
     as11_settings_manager,
     tcp_bridge,
     wifi_manager,
@@ -114,6 +117,13 @@ static void note_session_stream_frame(void *context,
                                       const StreamFrameData &frame,
                                       uint32_t now_ms) {
     static_cast<SessionManager *>(context)->note_stream_frame(frame, now_ms);
+}
+
+static void note_as11_device_event(void *context,
+                                   const As11EventFrame &frame,
+                                   uint32_t now_ms) {
+    static_cast<As11DeviceService *>(context)->apply_activity_event_frame(
+        frame, now_ms);
 }
 
 #if AC_STACK_PROFILE_ENABLED
@@ -238,6 +248,7 @@ static void drain_rpc_events() {
                 rpc_arbiter, RpcSource::Scheduler, millis());
         }
         if (event.kind == RpcEventKind::BootNotification) {
+            as11_device_service.device_reset(rpc_arbiter, millis());
             as11_settings_manager.device_reset(rpc_arbiter);
         }
 
@@ -255,7 +266,7 @@ static void drain_rpc_events() {
 
 static bool main_loop_drain_timing_active() {
     return session_manager.status().state == SessionState::Active ||
-           rpc_arbiter.as11_state().therapy_state() ==
+           as11_device_service.state().therapy_state() ==
                As11TherapyState::Running;
 }
 
@@ -409,10 +420,14 @@ void setup() {
 
     rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
                                           &session_manager);
+    (void)rpc_arbiter.add_event_frame_observer(note_as11_device_event,
+                                               &as11_device_service);
 
-    sink_manager.begin(rpc_arbiter, session_manager);
+    sink_manager.begin(rpc_arbiter, as11_device_service.state(),
+                       session_manager);
 
-    edf_recorder_manager.begin(rpc_arbiter, session_manager);
+    edf_recorder_manager.begin(rpc_arbiter, as11_device_service.state(),
+                               session_manager);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
 
     edf_report_catalog_job.begin();
@@ -420,9 +435,10 @@ void setup() {
 
     oximetry_manager.begin(app_config);
     report_manager.begin();
-    resmed_ota_manager.begin(rpc_arbiter,
+    resmed_ota_manager.begin(rpc_arbiter, as11_device_service,
                              StorageService::atomic_write_port());
-    time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
+    time_sync_service.begin(app_config, wifi_manager, rpc_arbiter,
+                            as11_device_service);
     if (edf_report_catalog_job.set_posix_timezone(
             app_config.data().timezone.c_str())) {
         edf_report_catalog_timezone_revision =
@@ -451,7 +467,7 @@ void setup() {
 
     sync_network_services();
 
-    web_ui.begin(rpc_arbiter, as11_settings_manager,
+    web_ui.begin(rpc_arbiter, as11_device_service, as11_settings_manager,
                  wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
@@ -519,6 +535,9 @@ void loop() {
         tcp_bridge.raw_client_connected());
 
     rpc_arbiter.poll();
+    as11_device_service.poll(
+        rpc_arbiter, millis(),
+        esp_ota_quiesce_requested || resmed_ota_transport_active);
     as11_settings_manager.poll(
         rpc_arbiter, millis(),
         esp_ota_quiesce_requested || resmed_ota_transport_active);
@@ -532,7 +551,10 @@ void loop() {
     drain_can_rx_after("arbiter_ota_prepare");
 
     // Reports and ResMed OTA
-    report_manager.poll(rpc_arbiter);
+    report_manager.poll(
+        rpc_arbiter,
+        as11_device_service.state().therapy_state() ==
+            As11TherapyState::Running);
     drain_can_rx_after("report");
 
     resmed_ota_manager.poll();
@@ -545,12 +567,12 @@ void loop() {
     // Session and EDF capture
     const uint32_t now_ms = millis();
 
-    session_manager.poll(rpc_arbiter.as11_state(), now_ms);
+    session_manager.poll(as11_device_service.state(), now_ms);
     edf_recorder_manager.poll(now_ms);
 
-    if (rpc_arbiter.as11_state().timezone_offset_valid()) {
+    if (as11_device_service.state().timezone_offset_valid()) {
         (void)edf_report_catalog_job.set_timezone_offset_minutes(
-            rpc_arbiter.as11_state().timezone_offset_minutes());
+            as11_device_service.state().timezone_offset_minutes());
     }
 
     poll_edf_report_catalog_refresh(now_ms);
@@ -575,7 +597,7 @@ void loop() {
     // Log and time services
     const bool storage_capacity_update_allowed =
         !rpc_arbiter.stream_activity_active() &&
-        rpc_arbiter.as11_state().therapy_state() !=
+        as11_device_service.state().therapy_state() !=
             As11TherapyState::Running;
 
     Log::poll(wifi_manager.sta_ipv4_online());
@@ -601,7 +623,7 @@ void loop() {
         rpc_arbiter.esp_ota_reboot_allowed();
 
     const bool arduino_ota_poll_allowed =
-        rpc_arbiter.as11_state().therapy_state() !=
+        as11_device_service.state().therapy_state() !=
             As11TherapyState::Running;
     const bool update_check_allowed =
         arduino_ota_poll_allowed &&
@@ -623,10 +645,11 @@ void loop() {
     drain_can_rx_after("storage_poll");
 
     export_coordinator.poll(
-        rpc_arbiter,
         report_manager,
         app_config.data(),
         wifi_manager.sta_ipv4_online(),
+        rpc_arbiter.stream_activity_active(),
+        as11_device_service.state().therapy_state(),
         resmed_ota_manager.transport_active(),
         ota_manager.active(),
         now_ms);
@@ -641,7 +664,8 @@ void loop() {
     const bool storage_ota_active =
         esp_ota_install_active || resmed_ota_manager.transport_active();
     const bool therapy_active =
-        rpc_arbiter.as11_state().therapy_state() == As11TherapyState::Running;
+        as11_device_service.state().therapy_state() ==
+            As11TherapyState::Running;
 
     publish_storage_activity(foreground_report_active,
                              realtime_stream_active,
@@ -650,7 +674,7 @@ void loop() {
                              therapy_active);
 
     bg_worker.publish_gate(foreground_report_active,
-                           rpc_arbiter.as11_state().status_valid(),
+                           as11_device_service.state().status_valid(),
                            realtime_stream_active,
                            resmed_ota_manager.transport_active(),
                            esp_ota_install_active,

@@ -139,9 +139,11 @@ bool edf_event_record_is_mask_event(const As11EventFrame &frame,
 }  // namespace
 
 void EdfRecorderManager::begin(RpcArbiter &arbiter,
+                               const As11DeviceState &device_state,
                                SessionManager &session) {
     if (initialized_) return;
     arbiter_ = &arbiter;
+    device_state_ = &device_state;
     session_ = &session;
     // EdfRecorderManager is a program-lifetime singleton; these observer hooks
     // intentionally stay registered until reboot.
@@ -162,7 +164,7 @@ void EdfRecorderManager::begin(RpcArbiter &arbiter,
 }
 
 void EdfRecorderManager::poll(uint32_t now_ms) {
-    if (!initialized_ || !arbiter_ || !session_) return;
+    if (!initialized_ || !arbiter_ || !device_state_ || !session_) return;
     note_str_get_timeouts(now_ms);
     dispatch_session_edges(now_ms);
 
@@ -726,7 +728,7 @@ bool EdfRecorderManager::build_recording_id(const EdfLocalDateTime &start,
                                             char *dst,
                                             size_t dst_size) const {
     if (!arbiter_) return false;
-    const As11DeviceState &state = arbiter_->as11_state();
+    const As11DeviceState &state = *device_state_;
     if (state.serial_number().empty() || !state.platform_id_valid() ||
         !state.variant_id_valid()) {
         return false;
@@ -1201,7 +1203,7 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
 
 bool EdfRecorderManager::as11_timezone_ready() const {
     if (!arbiter_) return true;
-    return arbiter_->as11_state().timezone_offset_valid();
+    return device_state_ && device_state_->timezone_offset_valid();
 }
 
 bool EdfRecorderManager::parse_session_local_time(
@@ -1212,7 +1214,7 @@ bool EdfRecorderManager::parse_session_local_time(
     int64_t epoch_ms = 0;
     if (!edf_parse_utc_ms(text, epoch_ms)) return false;
     if (arbiter_) {
-        const As11DeviceState &state = arbiter_->as11_state();
+        const As11DeviceState &state = *device_state_;
         if (state.timezone_offset_valid()) {
             return edf_epoch_ms_to_local_datetime(
                 epoch_ms, state.timezone_offset_minutes(), out);

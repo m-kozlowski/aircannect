@@ -54,10 +54,12 @@ time_t utc_fields_to_epoch(int year,
 
 void TimeSyncService::begin(AppConfig &app_config,
                             WifiManager &wifi_manager,
-                            RpcArbiter &arbiter) {
+                            RpcRequestPort &rpc,
+                            As11DeviceService &device) {
     app_config_ = &app_config;
     wifi_manager_ = &wifi_manager;
-    arbiter_ = &arbiter;
+    rpc_ = &rpc;
+    device_ = &device;
     apply_timezone();
     last_status_ = "starting";
     Log::logf(CAT_GENERAL, LOG_INFO,
@@ -66,7 +68,7 @@ void TimeSyncService::begin(AppConfig &app_config,
 }
 
 void TimeSyncService::poll() {
-    if (!app_config_ || !wifi_manager_ || !arbiter_) return;
+    if (!app_config_ || !wifi_manager_ || !rpc_ || !device_) return;
 
     apply_timezone();
     const uint32_t now_ms = millis();
@@ -83,7 +85,7 @@ void TimeSyncService::force_ntp_sync() {
 }
 
 bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
-    if (!arbiter_ || !esp_clock_valid()) {
+    if (!rpc_ || !device_ || !esp_clock_valid()) {
         last_status_ = "esp_clock_not_valid";
         return false;
     }
@@ -94,7 +96,17 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
         return false;
     }
 
-    const bool queued = arbiter_->send_set_datetime_now(source);
+    struct timeval tv = {};
+    if (gettimeofday(&tv, nullptr) != 0) {
+        last_status_ = "esp_clock_not_valid";
+        return false;
+    }
+    const uint32_t now_ms = millis();
+    const int64_t utc_ms = static_cast<int64_t>(tv.tv_sec) * 1000 +
+                           static_cast<int64_t>(tv.tv_usec / 1000);
+
+    const bool queued = device_->request_set_datetime_now(
+        *rpc_, source, now_ms, utc_ms).accepted();
     if (queued) {
         resmed_push_readback_pending_ = true;
         resmed_push_readback_awaiting_response_ = false;
@@ -111,11 +123,13 @@ bool TimeSyncService::request_push_esp_to_resmed(RpcSource source) {
 }
 
 bool TimeSyncService::request_pull_resmed_to_esp(RpcSource source) {
-    if (!arbiter_) return false;
-    const bool queued = arbiter_->send_request("GetDateTime", "", source);
+    if (!rpc_ || !device_) return false;
+
+    const uint32_t now_ms = millis();
+    const bool queued = device_->request_clock_read(*rpc_, source, now_ms);
     if (queued) {
         if (source != RpcSource::Scheduler) manual_resmed_pull_pending_ = true;
-        last_resmed_pull_attempt_ms_ = millis();
+        last_resmed_pull_attempt_ms_ = now_ms;
         last_status_ = "resmed_to_esp_requested";
     } else {
         last_status_ = "resmed_to_esp_queue_full";
@@ -247,7 +261,7 @@ bool TimeSyncService::resmed_pull_due(uint32_t now_ms) const {
 }
 
 void TimeSyncService::poll_resmed_pull(uint32_t now_ms) {
-    const As11DeviceState &state = arbiter_->as11_state();
+    const As11DeviceState &state = device_->state();
     if (state.clock_valid() &&
         state.clock_sample_ms() != observed_clock_sample_ms_) {
         observed_clock_sample_ms_ = state.clock_sample_ms();
@@ -325,8 +339,8 @@ void TimeSyncService::poll_resmed_push(uint32_t now_ms) {
 }
 
 bool TimeSyncService::therapy_running() const {
-    return arbiter_ &&
-           arbiter_->as11_state().therapy_state() ==
+    return device_ &&
+           device_->state().therapy_state() ==
                As11TherapyState::Running;
 }
 
