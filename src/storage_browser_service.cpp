@@ -14,7 +14,7 @@
 #include "runtime_clock.h"
 #include "storage_directory.h"
 #include "storage_directory_order.h"
-#include "storage_manager.h"
+#include "storage_internal.h"
 #include "string_util.h"
 
 namespace aircannect {

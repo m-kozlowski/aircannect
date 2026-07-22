@@ -7,7 +7,7 @@
 #include "board.h"
 #include "fixed_queue.h"
 #include "memory_manager.h"
-#include "storage_manager.h"
+#include "storage_internal.h"
 
 namespace aircannect {
 namespace {

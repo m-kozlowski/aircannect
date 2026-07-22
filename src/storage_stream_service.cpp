@@ -11,7 +11,7 @@
 #include "memory_manager.h"
 #include "prepared_byte_transfer.h"
 #include "runtime_clock.h"
-#include "storage_manager.h"
+#include "storage_internal.h"
 #include "string_util.h"
 
 namespace aircannect {

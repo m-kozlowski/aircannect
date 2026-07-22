@@ -8,7 +8,7 @@
 #include "crc32.h"
 #include "debug_log.h"
 #include "memory_manager.h"
-#include "storage_manager.h"
+#include "storage_internal.h"
 #include "string_util.h"
 
 namespace aircannect {

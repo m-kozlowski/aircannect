@@ -24,7 +24,7 @@
 #include "storage_browser_service.h"
 #include "storage_delete_service.h"
 #include "storage_file_log_sink.h"
-#include "storage_manager.h"
+#include "storage_internal.h"
 #include "storage_path.h"
 #include "storage_path_service.h"
 #include "storage_scan_service.h"

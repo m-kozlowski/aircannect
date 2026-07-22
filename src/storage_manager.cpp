@@ -1,4 +1,4 @@
-#include "storage_manager.h"
+#include "storage_internal.h"
 
 #include <string.h>
 
@@ -235,18 +235,12 @@ void update_capacity_if_due(uint32_t now_ms) {
 
 }  // namespace
 
-void lock() {
+Guard::Guard() {
     SemaphoreHandle_t m = sd_mutex();
     if (m) xSemaphoreTakeRecursive(m, portMAX_DELAY);
 }
 
-bool try_lock(uint32_t timeout_ms) {
-    SemaphoreHandle_t m = sd_mutex();
-    if (!m) return true;
-    return xSemaphoreTakeRecursive(m, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-}
-
-void unlock() {
+Guard::~Guard() {
     SemaphoreHandle_t m = sd_mutex();
     if (m) xSemaphoreGiveRecursive(m);
 }
