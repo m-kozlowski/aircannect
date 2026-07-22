@@ -625,6 +625,20 @@ void ReportTask::publish_activity(const ActivitySnapshot &activity) {
     runtime_->publish_activity(activity);
 }
 
+ReportTaskControlSnapshot ReportTask::control_snapshot() const {
+    if (!runtime_ || !runtime_->lock(20)) return {};
+
+    const ReportTaskControlSnapshot out{
+        runtime_->status.state,
+        runtime_->status.catalog_generation,
+        runtime_->status.foreground_active,
+        runtime_->status.background_active,
+    };
+
+    runtime_->unlock();
+    return out;
+}
+
 ReportTaskStatus ReportTask::status() const {
     if (!runtime_ || !runtime_->lock(20)) return {};
     const ReportTaskStatus out = runtime_->status;
@@ -1047,15 +1061,15 @@ void ReportTask::run() {
     runtime_->publish_status();
     for (;;) {
         const bool worked = step(millis(), 1);
-        const ReportTaskStatus current = status();
+        const ReportTaskState state = control_snapshot().state;
         if (worked) {
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
-        } else if (current.state == ReportTaskState::LoadingCatalog ||
-                   current.state == ReportTaskState::RefreshingCatalog ||
-                   current.state == ReportTaskState::Queued ||
-                   current.state == ReportTaskState::LookingUp ||
-                   current.state == ReportTaskState::Building ||
-                   current.state == ReportTaskState::Publishing) {
+        } else if (state == ReportTaskState::LoadingCatalog ||
+                   state == ReportTaskState::RefreshingCatalog ||
+                   state == ReportTaskState::Queued ||
+                   state == ReportTaskState::LookingUp ||
+                   state == ReportTaskState::Building ||
+                   state == ReportTaskState::Publishing) {
             ulTaskNotifyTake(pdTRUE,
                              pdMS_TO_TICKS(AC_REPORT_TASK_WAIT_TICK_MS));
         } else {

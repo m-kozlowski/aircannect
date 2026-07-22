@@ -45,6 +45,13 @@ struct ReportTaskStatus {
     ReportEngineStatus engine;
 };
 
+struct ReportTaskControlSnapshot {
+    ReportTaskState state = ReportTaskState::Stopped;
+    uint32_t catalog_generation = 0;
+    bool foreground_active = false;
+    bool background_active = false;
+};
+
 // Owns report state and runs it on one low-priority task. Public methods only
 // enqueue commands or read immutable snapshots; they never execute report work
 // on the caller's task.
@@ -72,6 +79,7 @@ public:
         uint32_t generation);
     void publish_activity(const ActivitySnapshot &activity);
 
+    ReportTaskControlSnapshot control_snapshot() const;
     ReportTaskStatus status() const;
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     bool artifact_availability(const ReportArtifactKey &artifact,

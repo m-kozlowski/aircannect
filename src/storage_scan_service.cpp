@@ -426,7 +426,12 @@ void StorageScanService::close_directories_locked() {
 void StorageScanService::clear_job_locked() {
     if (!job_) return;
     close_directories_locked();
-    *job_ = Job();
+
+    // Reconstruct in place: assigning Job() materializes the 5 KiB walk
+    // state on the storage task stack.
+    job_->~Job();
+    new (job_) Job();
+
     release_maintenance_locked();
 }
 

@@ -505,7 +505,8 @@ static void apply_config_runtime_effects(void *,
 }
 
 static uint32_t next_report_catalog_generation() {
-    const uint32_t published = report_task.status().catalog_generation;
+    const uint32_t published =
+        report_task.control_snapshot().catalog_generation;
     if (report_catalog_request_generation < published) {
         report_catalog_request_generation = published;
     }
@@ -1013,7 +1014,8 @@ void loop() {
     const bool arduino_ota_poll_allowed =
         as11_device_service.state().therapy_state() !=
             As11TherapyState::Running;
-    const ReportTaskStatus report_status = report_task.status();
+    const ReportTaskControlSnapshot report_status =
+        report_task.control_snapshot();
     const bool update_check_allowed =
         arduino_ota_poll_allowed &&
         !export_coordinator.endpoint_work_active() &&
