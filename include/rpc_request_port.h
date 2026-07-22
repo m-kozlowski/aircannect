@@ -30,12 +30,18 @@ struct RpcDispatchWindow {
     }
 };
 
+enum class RpcRequestAdmission : uint8_t {
+    Normal,
+    QuiesceControl,
+};
+
 struct RpcRequestCommand {
     std::string method;
     std::string params_json;
     RpcSource source = RpcSource::Internal;
     uint32_t timeout_ms = 0;
     uint32_t generation = 0;
+    RpcRequestAdmission admission = RpcRequestAdmission::Normal;
     RpcDispatchWindow dispatch_window;
 
     bool valid() const {

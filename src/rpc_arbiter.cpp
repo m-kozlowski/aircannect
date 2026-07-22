@@ -75,7 +75,10 @@ bool current_epoch_ms(int64_t &epoch_ms) {
 
 }  // namespace
 
-RpcArbiter::RpcArbiter(CanDriver &can) : can_(can) {
+RpcArbiter::RpcArbiter(CanDriver &can,
+                       EventBroker &event_broker,
+                       StreamBroker &stream_broker)
+    : can_(can), event_(event_broker), stream_(stream_broker) {
     stats_started_ms_ = millis();
 }
 
@@ -175,8 +178,6 @@ void RpcArbiter::poll() {
     process_deferred_payloads(AC_RPC_PAYLOAD_DRAIN_BUDGET);
 
     check_pending_timeout();
-    poll_stream_subscription();
-    poll_event_subscription();
     dispatch_next_request();
 
     // Dispatch may enqueue CAN frames after RX-driven work above. Poll again so
@@ -308,6 +309,7 @@ OperationSubmission RpcArbiter::request(const RpcRequestCommand &command) {
     request.source = command.source;
     request.timeout_ms = command.timeout_ms;
     request.generation = command.generation;
+    request.admission = command.admission;
     request.dispatch_window = command.dispatch_window;
     if (!enqueue_request(request)) return OperationSubmission::busy();
 
@@ -573,13 +575,9 @@ bool RpcArbiter::recover_can(const char *reason) {
     deferred_payloads_.clear();
     cancel_all_requests(reason ? reason : "can_recovery");
     const uint32_t now = millis();
-    stream_.mark_reattach(now);
-    event_.mark_reattach(now);
+    stream_.transport_reset(*this, now);
+    event_.transport_reset(*this, now);
     return can_.recover_or_restart(reason);
-}
-
-void RpcArbiter::set_background_polls_suspended(bool suspended) {
-    background_polls_suspended_ = suspended;
 }
 
 void RpcArbiter::set_esp_ota_quiesce(bool requested) {
@@ -677,15 +675,7 @@ void RpcArbiter::note_can_rx_pressure(uint32_t now) {
 bool RpcArbiter::request_allowed_during_esp_ota_quiesce(
     const QueuedRequest &request) const {
     if (!esp_ota_quiesce_requested_) return true;
-    if (request.method == "StartStream" &&
-        request.stream_command == StreamCommandType::Stop) {
-        return true;
-    }
-    if (request.method == "SubscribeEvent" &&
-        request.event_command == EventCommandType::Quiesce) {
-        return true;
-    }
-    return false;
+    return request.admission == RpcRequestAdmission::QuiesceControl;
 }
 
 void RpcArbiter::note_request_success(RpcSource source, uint32_t now) {
@@ -848,12 +838,6 @@ void RpcArbiter::cancel_pending_request(const char *reason) {
                  reason ? reason : "unknown");
         push_event(RpcEventKind::Info, buf);
     }
-    if (pending_.stream_command != StreamCommandType::None) {
-        stream_.mark_command_timeout(millis());
-    }
-    if (pending_.event_command != EventCommandType::None) {
-        event_.mark_command_cancelled(millis());
-    }
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::cancelled(),
                      RpcCompletionCause::Cancelled, nullptr,
@@ -886,12 +870,6 @@ void RpcArbiter::cancel_queued_request(const QueuedRequest &request,
                  source_name(request.source),
                  reason ? reason : "unknown");
         push_event(RpcEventKind::Info, buf);
-    }
-    if (request.stream_command != StreamCommandType::None) {
-        stream_.mark_command_timeout(millis());
-    }
-    if (request.event_command != EventCommandType::None) {
-        event_.mark_command_cancelled(millis());
     }
     const OperationOutcome outcome =
         cause == RpcCompletionCause::Cancelled
@@ -1137,8 +1115,7 @@ void RpcArbiter::dispatch_next_request() {
     pending_.id = request.id;
     pending_.source = request.source;
     pending_.method = request.method;
-    pending_.stream_command = request.stream_command;
-    pending_.event_command = request.event_command;
+    pending_.admission = request.admission;
     pending_.generation = request.generation;
     pending_.deadline_ms = millis() + request.timeout_ms;
     pending_.dispatch_utc_ms = 0;
@@ -1179,110 +1156,15 @@ void RpcArbiter::check_pending_timeout() {
     stats_.request_timeouts++;
     const bool ota_quiesce_control =
         esp_ota_quiesce_requested_ &&
-        ((pending_.method == "StartStream" &&
-          pending_.stream_command == StreamCommandType::Stop) ||
-         (pending_.method == "SubscribeEvent" &&
-          pending_.event_command == EventCommandType::Quiesce));
+        pending_.admission == RpcRequestAdmission::QuiesceControl;
     if (!ota_quiesce_control) {
         note_request_timeout(pending_.source, now);
     }
-    if (pending_.stream_command != StreamCommandType::None) {
-        stream_.mark_command_timeout(now);
-    }
-    if (pending_.event_command != EventCommandType::None) {
-        event_.mark_command_timeout(now);
-    }
-
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::failed(), RpcCompletionCause::Timeout,
                      nullptr, "timeout", false, request_completions_);
 
     pending_ = {};
-}
-
-void RpcArbiter::poll_event_subscription() {
-    const uint32_t now = millis();
-    if (background_polls_suspended_ && !esp_ota_quiesce_requested_) return;
-    if (background_backoff_active(now) && !esp_ota_quiesce_requested_) return;
-    EventCommand command = event_.next_command(now);
-    if (command.type == EventCommandType::None) return;
-    if (pending_.active || dispatch_retry_active_ || !requests_.empty()) {
-        return;
-    }
-
-    QueuedRequest request;
-    request.method = "SubscribeEvent";
-    request.params_json = command.params_json;
-    request.source = RpcSource::Scheduler;
-    request.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
-    request.event_command = command.type;
-    if (enqueue_request(request)) {
-        event_.mark_command_queued(command.type, command.params_json, now);
-    } else {
-        event_.mark_command_deferred(now);
-    }
-}
-
-void RpcArbiter::poll_stream_subscription() {
-    const uint32_t now = millis();
-    StreamCommand command =
-        stream_.next_command(now, AC_STREAM_RESYNC_INTERVAL_MS);
-    if (command.type == StreamCommandType::None) return;
-
-    QueuedRequest request;
-    request.method = "StartStream";
-    request.params_json = command.params_json;
-    request.source = RpcSource::Internal;
-    request.timeout_ms = AC_RPC_STREAM_TIMEOUT_MS;
-    request.stream_command = command.type;
-
-    if (!enqueue_request(request)) {
-        stream_.mark_command_deferred(now);
-        stats_.stream_command_deferred++;
-        return;
-    }
-
-    stream_.mark_command_queued(command.type, now);
-    if (command.type == StreamCommandType::Start) {
-        stats_.stream_start_requests++;
-    } else if (command.type == StreamCommandType::Stop) {
-        stats_.stream_stop_requests++;
-    }
-}
-
-void RpcArbiter::handle_matched_response(const std::string &payload) {
-    if (pending_.generation != 0) return;
-
-    const uint32_t now = millis();
-    const bool is_error = json_member_present(payload, "error");
-
-    if (!is_error) {
-        if (pending_.event_command != EventCommandType::None) {
-            uint32_t subscription_id = 0;
-            const bool subscribed =
-                event_.accept_subscribe_response(payload, subscription_id);
-            event_.mark_subscribe_response(!subscribed, subscription_id, now);
-            if (subscribed &&
-                pending_.event_command == EventCommandType::Quiesce) {
-                Log::logf(CAT_RPC, LOG_INFO,
-                          "AS11 event subscription quiesced\n");
-            } else if (subscribed) {
-                Log::logf(CAT_RPC, LOG_INFO,
-                          "subscribed to events id=%lu\n",
-                          static_cast<unsigned long>(subscription_id));
-            } else {
-                Log::logf(CAT_RPC, LOG_WARN,
-                          "event subscription rejected\n");
-            }
-        }
-    } else if (pending_.event_command != EventCommandType::None) {
-        event_.mark_subscribe_response(true, 0, now);
-    }
-    if (pending_.stream_command != StreamCommandType::None) {
-        stream_.mark_command_response(pending_.stream_command,
-                                      is_error, payload, now);
-        if (is_error) stats_.stream_command_errors++;
-    }
 }
 
 bool RpcArbiter::handle_event_notification(const char *payload,
@@ -1367,8 +1249,8 @@ void RpcArbiter::handle_frame(const RawCanFrame &frame) {
         last_boot_notification_ms_ = millis();
         deferred_payloads_.clear();
         cancel_all_requests("device_boot");
-        event_.mark_reattach(now);
-        if (stream_.desired_active()) stream_.mark_reattach(now);
+        event_.transport_reset(*this, now);
+        stream_.transport_reset(*this, now);
         push_event(RpcEventKind::BootNotification, last_boot_notification_);
     }
 }
@@ -1448,7 +1330,6 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                     Log::log_payload(CAT_RPC, LOG_DEBUG, prefix,
                                      owned_payload);
                 }
-                handle_matched_response(owned_payload);
                 const bool response_error =
                     json_member_present(owned_payload, "error");
                 int64_t response_epoch_ms = 0;

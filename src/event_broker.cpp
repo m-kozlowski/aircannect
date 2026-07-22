@@ -5,6 +5,9 @@
 
 #include "board_can.h"
 #include "data_id_csv.h"
+#ifdef ARDUINO
+#include "debug_log.h"
+#endif
 
 namespace aircannect {
 namespace {
@@ -238,6 +241,49 @@ bool settings_history_change_notification(const As11EventFrame &frame) {
 }
 
 }  // namespace
+
+void EventBroker::poll(RpcRequestPort &rpc,
+                       uint32_t now_ms,
+                       bool background_suspended) {
+    RpcRequestCompletion completion;
+    if (command_ticket_.valid() &&
+        rpc.take_completion(command_ticket_, completion)) {
+        command_ticket_ = {};
+        complete_command(completion, now_ms);
+        command_type_ = EventCommandType::None;
+    }
+
+    if (command_ticket_.valid()) return;
+    if (background_suspended && !quiesce_requested_) return;
+
+    EventCommand command = next_command(now_ms);
+    if (command.type == EventCommandType::None) return;
+
+    RpcRequestCommand request;
+    request.method = "SubscribeEvent";
+    request.params_json = command.params_json;
+    request.source = RpcSource::Scheduler;
+    request.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
+    request.generation = next_request_generation();
+    if (command.type == EventCommandType::Quiesce) {
+        request.admission = RpcRequestAdmission::QuiesceControl;
+    }
+
+    const OperationSubmission submitted = rpc.request(request);
+    if (!submitted.accepted()) {
+        mark_command_deferred(now_ms);
+        return;
+    }
+
+    command_ticket_ = submitted.ticket;
+    command_type_ = command.type;
+    mark_command_queued(command.type, command.params_json, now_ms);
+}
+
+void EventBroker::transport_reset(RpcRequestPort &rpc, uint32_t now_ms) {
+    release_command_ticket(rpc);
+    mark_reattach(now_ms);
+}
 
 EventCommand EventBroker::next_command(uint32_t now_ms) {
     EventCommand command;
@@ -557,6 +603,51 @@ bool EventBroker::add_frame_observer(EventFrameObserver observer,
 
 void EventBroker::reset_counters() {
     stats_ = {};
+}
+
+void EventBroker::complete_command(
+    const RpcRequestCompletion &completion,
+    uint32_t now_ms) {
+    if (completion.cause != RpcCompletionCause::Response) {
+        mark_command_cancelled(now_ms);
+        if (quiesce_requested_) request_quiesce(now_ms);
+        return;
+    }
+
+    uint32_t subscription_id = 0;
+    const bool accepted = !completion.response_error &&
+                          accept_subscribe_response(completion.payload,
+                                                    subscription_id);
+    mark_subscribe_response(!accepted, subscription_id, now_ms);
+
+#ifdef ARDUINO
+    if (!accepted) {
+        Log::logf(CAT_RPC, LOG_WARN, "event subscription rejected\n");
+    } else if (command_type_ == EventCommandType::Quiesce) {
+        Log::logf(CAT_RPC, LOG_INFO,
+                  "AS11 event subscription quiesced\n");
+    } else {
+        Log::logf(CAT_RPC, LOG_INFO,
+                  "subscribed to events id=%lu\n",
+                  static_cast<unsigned long>(subscription_id));
+    }
+#endif
+}
+
+uint32_t EventBroker::next_request_generation() {
+    request_generation_++;
+    if (request_generation_ == 0) request_generation_++;
+    return request_generation_;
+}
+
+void EventBroker::release_command_ticket(RpcRequestPort &rpc) {
+    if (!command_ticket_.valid()) return;
+
+    (void)rpc.cancel(command_ticket_);
+    RpcRequestCompletion completion;
+    (void)rpc.take_completion(command_ticket_, completion);
+    command_ticket_ = {};
+    command_type_ = EventCommandType::None;
 }
 
 EventBrokerStatus EventBroker::status() const {

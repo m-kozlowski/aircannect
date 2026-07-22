@@ -14,7 +14,7 @@
 #include "debug_log.h"
 #include "edf_report_catalog_job.h"
 #include "edf_recorder_manager.h"
-#include "storage_service.h"
+#include "event_broker.h"
 #include "export_coordinator.h"
 #include "management_console.h"
 #include "memory_manager.h"
@@ -32,7 +32,9 @@
 #include "sleephq_sync_job.h"
 #include "storage_diagnostic_job.h"
 #include "storage_manager.h"
+#include "storage_service.h"
 #include "storage_sync_job.h"
+#include "stream_broker.h"
 #if AC_STACK_PROFILE_ENABLED
 #include "stack_profiler.h"
 #endif
@@ -48,7 +50,9 @@
 using namespace aircannect;
 
 static CanDriver can_driver;
-static RpcArbiter rpc_arbiter(can_driver);
+static EventBroker event_broker;
+static StreamBroker stream_broker;
+static RpcArbiter rpc_arbiter(can_driver, event_broker, stream_broker);
 static As11DeviceService as11_device_service;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
@@ -528,13 +532,14 @@ void loop() {
 
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
-    rpc_arbiter.set_background_polls_suspended(
-        resmed_ota_transport_active);
 
     rpc_arbiter.set_raw_rpc_events_enabled(
         tcp_bridge.raw_client_connected());
 
     rpc_arbiter.poll();
+    stream_broker.poll(rpc_arbiter, millis());
+    event_broker.poll(rpc_arbiter, millis(),
+                      resmed_ota_transport_active);
     as11_device_service.poll(
         rpc_arbiter, millis(),
         esp_ota_quiesce_requested || resmed_ota_transport_active);

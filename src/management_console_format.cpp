@@ -177,9 +177,9 @@ void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     out.print(" stream_stop_pending=");
     out.print(stream.pending_stop() ? "yes" : "no");
     out.print(" stream_starts=");
-    out.print(stats.stream_start_requests);
+    out.print(stream.start_requests());
     out.print(" stream_stops=");
-    out.print(stats.stream_stop_requests);
+    out.print(stream.stop_requests());
     out.print(" stream_notifications=");
     out.print(stats.stream_notifications);
     out.print(" stream_fanout_drops=");
@@ -187,9 +187,9 @@ void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     out.print(" stream_rejects=");
     out.print(stats.stream_consumer_rejects);
     out.print(" stream_deferred=");
-    out.print(stats.stream_command_deferred);
+    out.print(stream.command_deferred());
     out.print(" stream_errors=");
-    out.print(stats.stream_command_errors);
+    out.print(stream.command_errors());
     out.print(" stream_parse_errors=");
     out.print(stats.stream_parse_errors);
     out.print(" stream_pool_exhaustions=");

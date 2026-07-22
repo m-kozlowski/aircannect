@@ -3446,10 +3446,10 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
                  static_cast<long>(live.attach_failures));
     json_add_string(json, "web_live_error", live.last_error);
     json_add_int(json, "stream_id", stream.last_stream_id());
-    json_add_int(json, "start_requests", stats.stream_start_requests);
-    json_add_int(json, "stop_requests", stats.stream_stop_requests);
-    json_add_int(json, "command_deferred", stats.stream_command_deferred);
-    json_add_int(json, "command_errors", stats.stream_command_errors);
+    json_add_int(json, "start_requests", stream.start_requests());
+    json_add_int(json, "stop_requests", stream.stop_requests());
+    json_add_int(json, "command_deferred", stream.command_deferred());
+    json_add_int(json, "command_errors", stream.command_errors());
     if (stream.last_notification_ms()) {
         json_add_int(json, "last_age_ms",
                      millis() - stream.last_notification_ms());

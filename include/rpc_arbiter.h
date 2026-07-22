@@ -73,13 +73,9 @@ struct RpcArbiterStats {
 
     uint32_t event_drops = 0;
 
-    uint32_t stream_start_requests = 0;
-    uint32_t stream_stop_requests = 0;
     uint32_t stream_notifications = 0;
     uint32_t stream_fanout_drops = 0;
     uint32_t stream_consumer_rejects = 0;
-    uint32_t stream_command_deferred = 0;
-    uint32_t stream_command_errors = 0;
     uint32_t stream_parse_errors = 0;
     uint32_t stream_pool_exhaustions = 0;
     uint32_t stream_truncated_frames = 0;
@@ -101,7 +97,9 @@ struct RpcRuntimeStatus {
 
 class RpcArbiter final : public RpcRequestPort {
 public:
-    explicit RpcArbiter(CanDriver &can);
+    RpcArbiter(CanDriver &can,
+               EventBroker &event_broker,
+               StreamBroker &stream_broker);
 
     // Lifecycle and CAN pump
     bool reserve_reassembly_buffers();
@@ -167,7 +165,6 @@ public:
     bool recover_can(const char *reason);
 
     void cancel_requests_from_source(RpcSource source, const char *reason);
-    void set_background_polls_suspended(bool suspended);
     bool background_backpressure_active() const;
     void set_esp_ota_quiesce(bool requested);
     bool esp_ota_quiesce_complete() const;
@@ -190,8 +187,7 @@ private:
         int64_t dispatch_utc_ms = 0;
         RpcSource source = RpcSource::Internal;
         std::string method;
-        StreamCommandType stream_command = StreamCommandType::None;
-        EventCommandType event_command = EventCommandType::None;
+        RpcRequestAdmission admission = RpcRequestAdmission::Normal;
         uint32_t generation = 0;
     };
 
@@ -201,9 +197,8 @@ private:
         RpcSource source = RpcSource::Internal;
         std::string method;
         std::string params_json;
-        StreamCommandType stream_command = StreamCommandType::None;
-        EventCommandType event_command = EventCommandType::None;
         uint32_t generation = 0;
+        RpcRequestAdmission admission = RpcRequestAdmission::Normal;
         RpcDispatchWindow dispatch_window;
     };
 
@@ -313,12 +308,9 @@ private:
 
     void dispatch_next_request();
     void check_pending_timeout();
-    void poll_event_subscription();
-    void poll_stream_subscription();
     void process_deferred_payloads(size_t budget);
 
     // Payload handling
-    void handle_matched_response(const std::string &payload);
     bool handle_event_notification(const char *payload, size_t payload_len);
     void handle_stream_notification(const char *payload, size_t payload_len);
     uint8_t source_id(RpcSource source) const;
@@ -393,12 +385,11 @@ private:
     uint32_t last_boot_notification_ms_ = 0;
     std::string last_boot_notification_;
 
-    // Owned brokers
-    EventBroker event_;
-    StreamBroker stream_;
+    // Notification and subscription owners
+    EventBroker &event_;
+    StreamBroker &stream_;
 
     // Backpressure and OTA quiesce
-    bool background_polls_suspended_ = false;
     bool raw_rpc_events_enabled_ = false;
     bool esp_ota_quiesce_requested_ = false;
     bool esp_ota_quiesce_timeout_logged_ = false;

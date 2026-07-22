@@ -17,6 +17,47 @@ static constexpr DataIdCsvLimits STREAM_DATA_ID_LIMITS = {
 
 }  // namespace
 
+void StreamBroker::poll(RpcRequestPort &rpc, uint32_t now_ms) {
+    RpcRequestCompletion completion;
+    if (command_ticket_.valid() &&
+        rpc.take_completion(command_ticket_, completion)) {
+        command_ticket_ = {};
+        complete_command(completion, now_ms);
+        command_type_ = StreamCommandType::None;
+    }
+
+    if (command_ticket_.valid()) return;
+
+    StreamCommand command = next_command(now_ms,
+                                         AC_STREAM_RESYNC_INTERVAL_MS);
+    if (command.type == StreamCommandType::None) return;
+
+    RpcRequestCommand request;
+    request.method = "StartStream";
+    request.params_json = command.params_json;
+    request.source = RpcSource::Internal;
+    request.timeout_ms = AC_RPC_STREAM_TIMEOUT_MS;
+    request.generation = next_request_generation();
+    if (quiesce_requested_ && command.type == StreamCommandType::Stop) {
+        request.admission = RpcRequestAdmission::QuiesceControl;
+    }
+
+    const OperationSubmission submitted = rpc.request(request);
+    if (!submitted.accepted()) {
+        mark_command_deferred(now_ms);
+        return;
+    }
+
+    command_ticket_ = submitted.ticket;
+    command_type_ = command.type;
+    mark_command_queued(command.type, now_ms);
+}
+
+void StreamBroker::transport_reset(RpcRequestPort &rpc, uint32_t now_ms) {
+    release_command_ticket(rpc);
+    mark_reattach(now_ms);
+}
+
 StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
                                           uint8_t source) {
     StreamAcquireResult result;
@@ -208,12 +249,19 @@ StreamCommand StreamBroker::next_command(uint32_t now_ms,
 void StreamBroker::mark_command_queued(StreamCommandType type,
                                        uint32_t now_ms) {
     if (type == StreamCommandType::None) return;
+
+    if (type == StreamCommandType::Start) {
+        start_requests_++;
+    } else if (type == StreamCommandType::Stop) {
+        stop_requests_++;
+    }
     pending_ = type;
     last_command_ms_ = now_ms;
     last_owned_activity_ms_ = now_ms;
 }
 
 void StreamBroker::mark_command_deferred(uint32_t now_ms) {
+    command_deferred_++;
     last_command_ms_ = now_ms;
     last_owned_activity_ms_ = now_ms;
 }
@@ -232,6 +280,7 @@ void StreamBroker::mark_command_response(StreamCommandType type,
     pending_ = StreamCommandType::None;
     last_command_ms_ = now_ms;
     last_owned_activity_ms_ = now_ms;
+    if (is_error) command_errors_++;
 
     if (is_error && quiesce_requested_ && type == StreamCommandType::Stop) {
         quiesced_ = false;
@@ -433,9 +482,42 @@ void StreamBroker::reset_counters() {
     parse_errors_ = 0;
     pool_exhaustions_ = 0;
     truncated_frames_ = 0;
+    start_requests_ = 0;
+    stop_requests_ = 0;
+    command_deferred_ = 0;
+    command_errors_ = 0;
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         consumers_[i].queue_drops = 0;
     }
+}
+
+void StreamBroker::complete_command(
+    const RpcRequestCompletion &completion,
+    uint32_t now_ms) {
+    if (completion.cause == RpcCompletionCause::Response) {
+        mark_command_response(command_type_, completion.response_error,
+                              completion.payload, now_ms);
+        return;
+    }
+
+    mark_command_timeout(now_ms);
+    if (quiesce_requested_) request_quiesce(now_ms);
+}
+
+uint32_t StreamBroker::next_request_generation() {
+    request_generation_++;
+    if (request_generation_ == 0) request_generation_++;
+    return request_generation_;
+}
+
+void StreamBroker::release_command_ticket(RpcRequestPort &rpc) {
+    if (!command_ticket_.valid()) return;
+
+    (void)rpc.cancel(command_ticket_);
+    RpcRequestCompletion completion;
+    (void)rpc.take_completion(command_ticket_, completion);
+    command_ticket_ = {};
+    command_type_ = StreamCommandType::None;
 }
 
 bool StreamBroker::parse_subscription(const std::string &params_json,

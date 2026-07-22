@@ -5,6 +5,7 @@
 #include <string>
 
 #include "as11_event_frame.h"
+#include "rpc_request_port.h"
 
 namespace aircannect {
 
@@ -76,6 +77,11 @@ using EventFrameObserver = void (*)(void *context,
 
 class EventBroker {
 public:
+    void poll(RpcRequestPort &rpc,
+              uint32_t now_ms,
+              bool background_suspended = false);
+    void transport_reset(RpcRequestPort &rpc, uint32_t now_ms);
+
     EventCommand next_command(uint32_t now_ms);
 
     void mark_command_queued(EventCommandType type,
@@ -131,6 +137,10 @@ private:
     void mark_desired_params_dirty();
     int find_free_slot() const;
     void note_subscription_gap(bool was_active);
+    void complete_command(const RpcRequestCompletion &completion,
+                          uint32_t now_ms);
+    uint32_t next_request_generation();
+    void release_command_ticket(RpcRequestPort &rpc);
 
     bool subscription_active_ = false;
     bool subscribe_pending_ = false;
@@ -150,6 +160,10 @@ private:
 
     bool desired_params_dirty_ = true;
     bool desired_params_valid_ = false;
+
+    OperationTicket command_ticket_;
+    EventCommandType command_type_ = EventCommandType::None;
+    uint32_t request_generation_ = 0;
 
     Consumer consumers_[AC_EVENT_CONSUMERS_MAX];
     EventBrokerStats stats_ = {};

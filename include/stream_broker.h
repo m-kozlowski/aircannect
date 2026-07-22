@@ -6,6 +6,7 @@
 
 #include "board.h"
 #include "fixed_queue.h"
+#include "rpc_request_port.h"
 #include "stream_frame.h"
 
 namespace aircannect {
@@ -58,6 +59,9 @@ using StreamFrameObserver = void (*)(void *context,
 
 class StreamBroker {
 public:
+    void poll(RpcRequestPort &rpc, uint32_t now_ms);
+    void transport_reset(RpcRequestPort &rpc, uint32_t now_ms);
+
     StreamAcquireResult acquire(const std::string &params_json,
                                 uint8_t source = 0);
     StreamAcquireResult update(StreamConsumerHandle handle,
@@ -123,6 +127,10 @@ public:
     uint32_t parse_errors() const { return parse_errors_; }
     uint32_t pool_exhaustions() const { return pool_exhaustions_; }
     uint32_t truncated_frames() const { return truncated_frames_; }
+    uint32_t start_requests() const { return start_requests_; }
+    uint32_t stop_requests() const { return stop_requests_; }
+    uint32_t command_deferred() const { return command_deferred_; }
+    uint32_t command_errors() const { return command_errors_; }
     size_t frame_pool_capacity() const { return frame_pool_.capacity(); }
     size_t frame_pool_free() const { return frame_pool_.free_count(); }
     size_t frame_pool_in_use() const { return frame_pool_.in_use_count(); }
@@ -167,6 +175,10 @@ private:
     int find_free_slot() const;
     void clear_error();
     bool ensure_frame_pool();
+    void complete_command(const RpcRequestCompletion &completion,
+                          uint32_t now_ms);
+    uint32_t next_request_generation();
+    void release_command_ticket(RpcRequestPort &rpc);
 
     static bool parse_subscription(const std::string &params_json,
                                    Subscription &subscription);
@@ -210,6 +222,14 @@ private:
     uint32_t parse_errors_ = 0;
     uint32_t pool_exhaustions_ = 0;
     uint32_t truncated_frames_ = 0;
+    uint32_t start_requests_ = 0;
+    uint32_t stop_requests_ = 0;
+    uint32_t command_deferred_ = 0;
+    uint32_t command_errors_ = 0;
+
+    OperationTicket command_ticket_;
+    StreamCommandType command_type_ = StreamCommandType::None;
+    uint32_t request_generation_ = 0;
 
     StreamFrameObserver frame_observer_ = nullptr;
     void *frame_observer_context_ = nullptr;
