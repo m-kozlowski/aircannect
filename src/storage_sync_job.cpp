@@ -8,7 +8,7 @@
 
 #include "crc32.h"
 #include "debug_log.h"
-#include "edf_storage_worker.h"
+#include "storage_service.h"
 #include "memory_manager.h"
 #include "runtime_clock.h"
 #include "storage_directory.h"
@@ -1349,8 +1349,8 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
         return false;
     }
     status_.network_available = network_available_.load();
-    const EdfStorageWorkerStatus edf = EdfStorageWorker::status();
-    if (edf.busy || edf.queued > 0 || edf.open_file_count > 0) {
+    const StorageServiceStatus edf = StorageService::status();
+    if (edf.busy || edf.edf_queued > 0 || edf.open_file_count > 0) {
         result = JobStep::Waiting;
         return false;
     }

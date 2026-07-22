@@ -6,7 +6,7 @@
 #include <stdio.h>
 
 #include "debug_log.h"
-#include "edf_storage_worker.h"
+#include "storage_service.h"
 
 namespace aircannect {
 namespace {

@@ -19,7 +19,7 @@
 #include "background_worker.h"
 #include "board.h"
 #include "debug_log.h"
-#include "edf_storage_worker.h"
+#include "storage_service.h"
 #include "export_coordinator.h"
 #include "json_util.h"
 #include "memory_manager.h"
@@ -590,8 +590,8 @@ bool storage_heavy_request_available(AsyncWebServerRequest *request,
                       "{\"ok\":false,\"error\":\"storage_unavailable\"}");
         return false;
     }
-    const EdfStorageWorkerStatus edf_storage = EdfStorageWorker::status();
-    if (edf_storage.busy || edf_storage.queued > 0 ||
+    const StorageServiceStatus edf_storage = StorageService::status();
+    if (edf_storage.busy || edf_storage.edf_queued > 0 ||
         edf_storage.open_file_count > 0) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");

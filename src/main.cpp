@@ -12,7 +12,7 @@
 #include "debug_log.h"
 #include "edf_report_catalog_job.h"
 #include "edf_recorder_manager.h"
-#include "edf_storage_worker.h"
+#include "storage_service.h"
 #include "export_coordinator.h"
 #include "management_console.h"
 #include "memory_manager.h"
@@ -156,7 +156,7 @@ static void poll_stack_profiler(uint32_t now_ms) {
          bg_worker.stack_high_water_bytes()},
         {StackProfileTask::EdfStorage,
          true,
-         EdfStorageWorker::stack_high_water_bytes()},
+         StorageService::stack_high_water_bytes()},
         {StackProfileTask::OximetrySensor, oxi_stack != 0, oxi_stack},
     };
     stack_profiler.poll(now_ms, samples, sizeof(samples) / sizeof(samples[0]));
@@ -211,9 +211,10 @@ static void poll_edf_report_catalog_refresh(uint32_t now_ms) {
         return;
     }
 
-    const EdfStorageWorkerStatus storage =
+    const StorageServiceStatus storage =
         edf_recorder_manager.storage_status();
-    if (storage.busy || storage.queued > 0 || storage.open_file_count > 0) {
+    if (storage.busy || storage.edf_queued > 0 ||
+        storage.open_file_count > 0) {
         edf_report_catalog_refresh_due_ms = now_ms + 1000;
         return;
     }
@@ -351,7 +352,7 @@ void setup() {
 
     // Persistent storage
     Storage::begin();
-    EdfStorageWorker::begin();
+    StorageService::begin();
 
     const StorageStatus storage = Storage::status();
 

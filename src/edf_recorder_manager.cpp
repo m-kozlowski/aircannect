@@ -11,7 +11,7 @@
 #include "edf_identification.h"
 #include "edf_numeric_file_layout.h"
 #include "edf_storage_catalog.h"
-#include "edf_storage_worker.h"
+#include "storage_service.h"
 #include "edf_stream_signal_table.h"
 #include "edf_str_settings.h"
 #include "edf_time.h"
@@ -237,8 +237,8 @@ EdfRecorderStatus EdfRecorderManager::status() const {
     return snapshot;
 }
 
-EdfStorageWorkerStatus EdfRecorderManager::storage_status() const {
-    return EdfStorageWorker::status();
+StorageServiceStatus EdfRecorderManager::storage_status() const {
+    return StorageService::status();
 }
 
 bool EdfRecorderManager::handle_recording_gate_frame(
@@ -709,7 +709,8 @@ bool EdfRecorderManager::open_session_annotation_files_at(
                                                        sizeof(status_.csl_path),
                                                        csl_open_handle_);
     if (!csl_open) {
-        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Eve);
+        (void)StorageService::enqueue_edf_close_annotation(
+            EdfAnnotationKind::Eve);
         eve_open_handle_ = {};
         status_.file_open_failures++;
         return false;
@@ -751,8 +752,8 @@ bool EdfRecorderManager::enqueue_numeric_file_open(
         return false;
     }
 
-    if (!EdfStorageWorker::enqueue_open_numeric(path, schema, info,
-                                                &handle)) {
+    if (!StorageService::enqueue_edf_open_numeric(path, schema, info,
+                                                  &handle)) {
         char error[80] = {};
         snprintf(error, sizeof(error), "open_queue_%s",
                  file_kind_name(schema.kind));
@@ -966,7 +967,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(
                                        sizeof(status_.pld_path),
                                        pld_schema_.open_handle)) {
             if (brp_schema_.open) {
-                (void)EdfStorageWorker::enqueue_close_numeric(
+                (void)StorageService::enqueue_edf_close_numeric(
                     EdfFileKind::Brp);
                 brp_schema_.open = false;
             }
@@ -983,12 +984,12 @@ bool EdfRecorderManager::ensure_numeric_files_open(
                                        sizeof(status_.sa2_path),
                                        sa2_schema_.open_handle)) {
             if (brp_schema_.open) {
-                (void)EdfStorageWorker::enqueue_close_numeric(
+                (void)StorageService::enqueue_edf_close_numeric(
                     EdfFileKind::Brp);
                 brp_schema_.open = false;
             }
             if (pld_schema_.open) {
-                (void)EdfStorageWorker::enqueue_close_numeric(
+                (void)StorageService::enqueue_edf_close_numeric(
                     EdfFileKind::Pld);
                 pld_schema_.open = false;
             }
@@ -1031,8 +1032,8 @@ bool EdfRecorderManager::enqueue_annotation_file_open(
         return false;
     }
 
-    if (!EdfStorageWorker::enqueue_open_annotation(path, kind, info,
-                                                   &handle)) {
+    if (!StorageService::enqueue_edf_open_annotation(path, kind, info,
+                                                     &handle)) {
         char error[80] = {};
         snprintf(error, sizeof(error), "open_queue_%s",
                  annotation_kind_name(kind));
@@ -1047,17 +1048,19 @@ void EdfRecorderManager::close_session_files() {
         return;
     }
     if (brp_schema_.open) {
-        (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Brp);
+        (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Brp);
     }
     if (pld_schema_.open) {
-        (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Pld);
+        (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Pld);
     }
     if (sa2_schema_.open) {
-        (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Sa2);
+        (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Sa2);
     }
     if (files_open_) {
-        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Eve);
-        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Csl);
+        (void)StorageService::enqueue_edf_close_annotation(
+            EdfAnnotationKind::Eve);
+        (void)StorageService::enqueue_edf_close_annotation(
+            EdfAnnotationKind::Csl);
     }
     numeric_files_open_ = false;
     files_open_ = false;
@@ -1077,9 +1080,9 @@ void EdfRecorderManager::sync_annotation_open_status() {
     EdfStorageOpenResult eve;
     EdfStorageOpenResult csl;
     const bool eve_known =
-        EdfStorageWorker::open_result(eve_open_handle_, eve);
+        StorageService::edf_open_result(eve_open_handle_, eve);
     const bool csl_known =
-        EdfStorageWorker::open_result(csl_open_handle_, csl);
+        StorageService::edf_open_result(csl_open_handle_, csl);
 
     if (eve_known && csl_known &&
         eve.complete && csl.complete &&
@@ -1099,8 +1102,8 @@ void EdfRecorderManager::sync_annotation_open_status() {
         !eve_known || !csl_known ||
         (eve.complete && !eve.success) ||
         (csl.complete && !csl.success);
-    const EdfStorageWorkerStatus storage = EdfStorageWorker::status();
-    if (failed || (storage.queued == 0 && !storage.busy)) {
+    const StorageServiceStatus storage = StorageService::status();
+    if (failed || (storage.edf_queued == 0 && !storage.busy)) {
         status_.file_open_failures++;
         if (eve_known && eve.complete && !eve.success) {
             set_error(open_result_error(eve, "annotation_open_failed"));
@@ -1110,8 +1113,10 @@ void EdfRecorderManager::sync_annotation_open_status() {
             set_error(storage.last_error[0] ? storage.last_error
                                             : "annotation_open_failed");
         }
-        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Eve);
-        (void)EdfStorageWorker::enqueue_close_annotation(EdfAnnotationKind::Csl);
+        (void)StorageService::enqueue_edf_close_annotation(
+            EdfAnnotationKind::Eve);
+        (void)StorageService::enqueue_edf_close_annotation(
+            EdfAnnotationKind::Csl);
         files_open_ = false;
         annotation_open_synced_ = true;
         eve_open_handle_ = {};
@@ -1128,13 +1133,13 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     EdfStorageOpenResult sa2;
     const bool brp_known =
         !brp_schema_.open ||
-        EdfStorageWorker::open_result(brp_schema_.open_handle, brp);
+        StorageService::edf_open_result(brp_schema_.open_handle, brp);
     const bool pld_known =
         !pld_schema_.open ||
-        EdfStorageWorker::open_result(pld_schema_.open_handle, pld);
+        StorageService::edf_open_result(pld_schema_.open_handle, pld);
     const bool sa2_known =
         !sa2_schema_.open ||
-        EdfStorageWorker::open_result(sa2_schema_.open_handle, sa2);
+        StorageService::edf_open_result(sa2_schema_.open_handle, sa2);
 
     const bool brp_ready =
         !brp_schema_.open || (brp.complete && brp.success && brp.open);
@@ -1149,8 +1154,8 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         (sa2_schema_.open && sa2.complete && !sa2.success);
 
     if (!brp_ready || !pld_ready || !sa2_ready) {
-        const EdfStorageWorkerStatus storage = EdfStorageWorker::status();
-        if (!failed && (storage.queued > 0 || storage.busy)) return false;
+        const StorageServiceStatus storage = StorageService::status();
+        if (!failed && (storage.edf_queued > 0 || storage.busy)) return false;
 
         status_.file_open_failures++;
         if (brp_schema_.open && brp.complete && !brp.success) {
@@ -1164,13 +1169,13 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
                                             : "numeric_open_failed");
         }
         if (brp_schema_.open) {
-            (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Brp);
+            (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Brp);
         }
         if (pld_schema_.open) {
-            (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Pld);
+            (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Pld);
         }
         if (sa2_schema_.open) {
-            (void)EdfStorageWorker::enqueue_close_numeric(EdfFileKind::Sa2);
+            (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Sa2);
         }
         numeric_files_open_ = false;
         numeric_open_synced_ = true;
@@ -1452,7 +1457,7 @@ void EdfRecorderManager::handle_identification_response(
         set_error("identification_json_failed");
         return;
     }
-    if (!EdfStorageWorker::enqueue_identification_files(json)) {
+    if (!StorageService::enqueue_edf_identification_files(json)) {
         status_.identification_failures++;
         set_error("identification_queue_failed");
         return;
@@ -1571,7 +1576,7 @@ bool EdfRecorderManager::write_str_day_record() {
     EdfStrRecordView record;
     record.digital_samples = str_.samples();
     record.sample_count = str_.sample_count();
-    if (!EdfStorageWorker::enqueue_str_record(path, info, record)) {
+    if (!StorageService::enqueue_edf_str_record(path, info, record)) {
         status_.str_enqueue_failures++;
         set_error("str_queue_failed");
         return false;
@@ -1897,8 +1902,8 @@ void EdfRecorderManager::handle_completed_record(
             break;
     }
     if (numeric_files_open_ && state && state->open) {
-        if (!EdfStorageWorker::enqueue_numeric_record(state->layout.schema,
-                                                      record)) {
+        if (!StorageService::enqueue_edf_numeric_record(state->layout.schema,
+                                                        record)) {
             status_.record_enqueue_failures++;
             set_error("record_queue_failed");
         }
@@ -1924,7 +1929,7 @@ bool EdfRecorderManager::enqueue_event_annotation(
         set_error(result.error);
         return false;
     }
-    if (!EdfStorageWorker::enqueue_annotation_record(kind, annotation)) {
+    if (!StorageService::enqueue_edf_annotation_record(kind, annotation)) {
         status_.annotation_enqueue_failures++;
         set_error("event_queue_failed");
         return false;

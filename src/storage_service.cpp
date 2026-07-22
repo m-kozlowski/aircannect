@@ -1,5 +1,6 @@
-#include "edf_storage_worker.h"
+#include "storage_service.h"
 
+#include <algorithm>
 #include <Arduino.h>
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
@@ -16,12 +17,14 @@
 #include "edf_storage_open_plan.h"
 #include "edf_str_file_layout.h"
 #include "edf_str_record_merge.h"
+#include "fixed_queue.h"
 #include "memory_manager.h"
 #include "storage_manager.h"
+#include "storage_path.h"
 #include "string_util.h"
 
 namespace aircannect {
-namespace EdfStorageWorker {
+namespace StorageService {
 namespace {
 
 enum class JobType : uint8_t {
@@ -45,7 +48,7 @@ struct JobSlot {
     JobType type = JobType::Record;
     StoredFileKind kind = StoredFileKind::Brp;
     uint32_t request_id = 0;
-    char path[sizeof(EdfStorageWorkerStatus::last_path)] = {};
+    char path[sizeof(StorageServiceStatus::last_path)] = {};
     char patient_id[AC_EDF_STORAGE_PATIENT_ID_MAX] = {};
     char recording_id[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
     char start_date[9] = {};
@@ -75,7 +78,7 @@ struct OpenFile {
     uint32_t record_count = 0;
     size_t record_size = 0;
     bool resumed = false;
-    char path[sizeof(EdfStorageWorkerStatus::last_path)] = {};
+    char path[sizeof(StorageServiceStatus::last_path)] = {};
 };
 
 struct OpenRequestResult {
@@ -85,13 +88,37 @@ struct OpenRequestResult {
     bool resumed = false;
     uint32_t request_id = 0;
     uint32_t record_count = 0;
-    char path[sizeof(EdfStorageWorkerStatus::last_path)] = {};
-    char error[sizeof(EdfStorageWorkerStatus::last_error)] = {};
+    char path[sizeof(StorageServiceStatus::last_path)] = {};
+    char error[sizeof(StorageServiceStatus::last_error)] = {};
 };
+
+struct ReadJob {
+    bool used = false;
+    bool started = false;
+    bool cancel_requested = false;
+    OperationTicket ticket;
+    StorageReadLane lane = StorageReadLane::Report;
+    uint64_t sequence = 0;
+    uint64_t offset = 0;
+    size_t requested_length = 0;
+    size_t target_length = 0;
+    size_t bytes_read = 0;
+    uint8_t *bytes = nullptr;
+    char path[AC_STORAGE_PATH_MAX] = {};
+};
+
+struct PreparedReadSlot {
+    bool used = false;
+    StoragePreparedRead handle;
+    uint8_t *bytes = nullptr;
+};
+
+using ReadCompletionQueue =
+    FixedQueue<StorageReadCompletion, AC_STORAGE_PREPARED_READ_CAPACITY>;
 
 void close_file(OpenFile &state);
 
-EdfStorageWorkerStatus stats;
+StorageServiceStatus stats;
 SemaphoreHandle_t queue_lock = nullptr;
 TaskHandle_t task = nullptr;
 JobSlot *slots = nullptr;
@@ -106,6 +133,56 @@ OpenFile open_files[AC_EDF_STORAGE_FILE_COUNT];
 OpenRequestResult open_results[AC_EDF_STORAGE_FILE_COUNT];
 uint32_t next_open_request_id = 0;
 bool processing_job = false;
+
+ReadJob read_jobs[AC_STORAGE_PREPARED_READ_CAPACITY];
+PreparedReadSlot prepared_reads[AC_STORAGE_PREPARED_READ_CAPACITY];
+ReadCompletionQueue read_completions;
+File active_read_file;
+size_t active_read_index = SIZE_MAX;
+size_t read_job_count = 0;
+size_t prepared_read_count = 0;
+uint32_t next_read_ticket_id = 0;
+uint32_t next_prepared_read_id = 0;
+uint64_t next_read_sequence = 0;
+bool processing_read = false;
+
+OperationSubmission submit_prepared_read(const StorageReadCommand &command);
+bool cancel_prepared_read(OperationTicket ticket);
+bool pop_read_completion(StorageReadCompletion &completion);
+size_t copy_prepared_read(StoragePreparedRead prepared,
+                          size_t offset,
+                          uint8_t *buffer,
+                          size_t capacity);
+void free_prepared_read(StoragePreparedRead prepared);
+
+class ServiceReadPort final : public StorageReadPort {
+public:
+    OperationSubmission request_read(
+        const StorageReadCommand &command) override {
+        return submit_prepared_read(command);
+    }
+
+    bool cancel(OperationTicket ticket) override {
+        return cancel_prepared_read(ticket);
+    }
+
+    bool next_completion(StorageReadCompletion &completion) override {
+        return pop_read_completion(completion);
+    }
+
+    size_t read_prepared(StoragePreparedRead prepared,
+                         size_t offset,
+                         uint8_t *buffer,
+                         size_t capacity) const override {
+        return copy_prepared_read(prepared, offset, buffer, capacity);
+    }
+
+    void release_prepared(StoragePreparedRead prepared) override {
+        free_prepared_read(prepared);
+    }
+};
+
+ServiceReadPort service_read_port;
 
 constexpr size_t max_size(size_t a, size_t b) {
     return a > b ? a : b;
@@ -260,7 +337,7 @@ size_t open_header_size(const JobSlot &job) {
 bool valid_path(const char *path) {
     if (!path || path[0] != '/') return false;
     const size_t len = strlen(path);
-    return len > 1 && len < sizeof(EdfStorageWorkerStatus::last_path);
+    return len > 1 && len < sizeof(StorageServiceStatus::last_path);
 }
 
 bool lock_queue(uint32_t timeout_ms = 10) {
@@ -270,6 +347,185 @@ bool lock_queue(uint32_t timeout_ms = 10) {
 
 void unlock_queue() {
     if (queue_lock) xSemaphoreGive(queue_lock);
+}
+
+void wake_service_task() {
+    if (task) xTaskNotifyGive(task);
+}
+
+uint8_t read_lane_priority(StorageReadLane lane) {
+    switch (lane) {
+        case StorageReadLane::Foreground: return 0;
+        case StorageReadLane::Report: return 1;
+        case StorageReadLane::Export: return 2;
+        case StorageReadLane::Maintenance:
+        default:
+            return 3;
+    }
+}
+
+void refresh_read_status_locked() {
+    stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
+    stats.read_queued = read_job_count;
+    stats.prepared_reads = prepared_read_count;
+}
+
+ReadJob *find_read_job_locked(OperationTicket ticket) {
+    for (ReadJob &job : read_jobs) {
+        if (job.used && job.ticket == ticket) return &job;
+    }
+    return nullptr;
+}
+
+PreparedReadSlot *find_prepared_read_locked(StoragePreparedRead prepared) {
+    if (!prepared.valid()) return nullptr;
+    for (PreparedReadSlot &slot : prepared_reads) {
+        if (slot.used && slot.handle.id == prepared.id) return &slot;
+    }
+    return nullptr;
+}
+
+size_t select_read_job_locked() {
+    size_t selected = SIZE_MAX;
+    uint8_t selected_priority = UINT8_MAX;
+    uint64_t selected_sequence = UINT64_MAX;
+
+    for (size_t i = 0; i < AC_STORAGE_PREPARED_READ_CAPACITY; ++i) {
+        const ReadJob &job = read_jobs[i];
+        if (!job.used) continue;
+
+        if (job.cancel_requested) return i;
+
+        const uint8_t priority = read_lane_priority(job.lane);
+        if (selected == SIZE_MAX || priority < selected_priority ||
+            (priority == selected_priority &&
+             job.sequence < selected_sequence)) {
+            selected = i;
+            selected_priority = priority;
+            selected_sequence = job.sequence;
+        }
+    }
+    return selected;
+}
+
+OperationTicket next_read_ticket_locked(uint32_t generation) {
+    next_read_ticket_id++;
+    if (next_read_ticket_id == 0) next_read_ticket_id++;
+    return {next_read_ticket_id, generation};
+}
+
+StoragePreparedRead next_prepared_handle_locked(size_t length) {
+    next_prepared_read_id++;
+    if (next_prepared_read_id == 0) next_prepared_read_id++;
+    return {next_prepared_read_id, length};
+}
+
+OperationSubmission submit_prepared_read(const StorageReadCommand &command) {
+    if (!command.valid() || command.path.size() >= AC_STORAGE_PATH_MAX ||
+        command.offset > UINT32_MAX ||
+        command.length > AC_STORAGE_PREPARED_READ_MAX_BYTES) {
+        return OperationSubmission::rejected();
+    }
+
+    if (!stats.initialized) begin();
+    if (!stats.available || !lock_queue()) return OperationSubmission::busy();
+
+    const size_t completion_count = read_completions.count();
+    if (read_job_count + completion_count >=
+            AC_STORAGE_PREPARED_READ_CAPACITY ||
+        read_job_count + prepared_read_count >=
+            AC_STORAGE_PREPARED_READ_CAPACITY) {
+        unlock_queue();
+        return OperationSubmission::busy();
+    }
+
+    ReadJob *free_job = nullptr;
+    for (ReadJob &job : read_jobs) {
+        if (!job.used) {
+            free_job = &job;
+            break;
+        }
+    }
+    if (!free_job) {
+        unlock_queue();
+        return OperationSubmission::busy();
+    }
+
+    const OperationTicket ticket =
+        next_read_ticket_locked(command.generation);
+    *free_job = {};
+    free_job->used = true;
+    free_job->ticket = ticket;
+    free_job->lane = command.lane;
+    free_job->sequence = ++next_read_sequence;
+    free_job->offset = command.offset;
+    free_job->requested_length = command.length;
+    copy_cstr(free_job->path, sizeof(free_job->path), command.path.c_str());
+    read_job_count++;
+    refresh_read_status_locked();
+    unlock_queue();
+
+    wake_service_task();
+    return OperationSubmission::accepted(ticket);
+}
+
+bool cancel_prepared_read(OperationTicket ticket) {
+    if (!ticket.valid() || !lock_queue()) return false;
+
+    ReadJob *job = find_read_job_locked(ticket);
+    if (!job) {
+        unlock_queue();
+        return false;
+    }
+    job->cancel_requested = true;
+    unlock_queue();
+
+    wake_service_task();
+    return true;
+}
+
+bool pop_read_completion(StorageReadCompletion &completion) {
+    if (!lock_queue()) return false;
+    const bool available = read_completions.pop(completion);
+    unlock_queue();
+    return available;
+}
+
+size_t copy_prepared_read(StoragePreparedRead prepared,
+                          size_t offset,
+                          uint8_t *buffer,
+                          size_t capacity) {
+    if (!buffer || capacity == 0 || !lock_queue()) return 0;
+
+    const PreparedReadSlot *slot = find_prepared_read_locked(prepared);
+    if (!slot || offset >= slot->handle.length) {
+        unlock_queue();
+        return 0;
+    }
+
+    const size_t length =
+        std::min(capacity, slot->handle.length - offset);
+    memcpy(buffer, slot->bytes + offset, length);
+    unlock_queue();
+    return length;
+}
+
+void free_prepared_read(StoragePreparedRead prepared) {
+    if (!prepared.valid() || !lock_queue()) return;
+
+    PreparedReadSlot *slot = find_prepared_read_locked(prepared);
+    if (!slot) {
+        unlock_queue();
+        return;
+    }
+
+    uint8_t *bytes = slot->bytes;
+    *slot = {};
+    if (prepared_read_count > 0) prepared_read_count--;
+    refresh_read_status_locked();
+    unlock_queue();
+
+    Memory::free(bytes);
 }
 
 EdfStorageOpenHandle reserve_open_handle(StoredFileKind kind) {
@@ -443,7 +699,7 @@ bool allocate_slots() {
         clear_slot(slots[i]);
     }
     stats.using_psram = Memory::psram_available();
-    stats.capacity = AC_EDF_STORAGE_QUEUE_CAPACITY;
+    stats.edf_capacity = AC_EDF_STORAGE_QUEUE_CAPACITY;
     return true;
 }
 
@@ -460,13 +716,13 @@ bool push_slot(const JobSlot &job) {
     slots[tail].numeric_valid = numeric_valid;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
-    stats.queued = queued;
+    stats.edf_queued = queued;
     return true;
 }
 
 bool ensure_parent_dirs(const char *path) {
     if (!valid_path(path)) return false;
-    char dir[sizeof(EdfStorageWorkerStatus::last_path)] = {};
+    char dir[sizeof(StorageServiceStatus::last_path)] = {};
     copy_cstr(dir, sizeof(dir), path);
     char *last_slash = strrchr(dir, '/');
     if (!last_slash) return false;
@@ -1222,6 +1478,203 @@ bool process_close(const JobSlot &job) {
     return true;
 }
 
+void close_active_read_file() {
+    if (active_read_file) {
+        Storage::Guard guard;
+        active_read_file.close();
+    }
+    active_read_index = SIZE_MAX;
+}
+
+void finish_read_job(size_t index,
+                     OperationOutcome outcome,
+                     const char *error = nullptr) {
+    if (index >= AC_STORAGE_PREPARED_READ_CAPACITY) return;
+    if (active_read_index == index) close_active_read_file();
+
+    uint8_t *bytes_to_free = nullptr;
+    if (!lock_queue(50)) {
+        set_error("read_finish_lock_failed");
+        return;
+    }
+
+    ReadJob &job = read_jobs[index];
+    if (!job.used) {
+        unlock_queue();
+        return;
+    }
+
+    StorageReadCompletion completion;
+    completion.ticket = job.ticket;
+    completion.outcome = outcome;
+
+    PreparedReadSlot *prepared_slot = nullptr;
+    if (outcome.disposition == OperationDisposition::Succeeded) {
+        for (PreparedReadSlot &slot : prepared_reads) {
+            if (!slot.used) {
+                prepared_slot = &slot;
+                break;
+            }
+        }
+        if (!prepared_slot) {
+            completion.outcome = OperationOutcome::failed();
+            error = "prepared_read_slots_full";
+        } else {
+            prepared_slot->used = true;
+            prepared_slot->handle =
+                next_prepared_handle_locked(job.bytes_read);
+            prepared_slot->bytes = job.bytes;
+            completion.prepared = prepared_slot->handle;
+            job.bytes = nullptr;
+            prepared_read_count++;
+        }
+    }
+
+    bytes_to_free = job.bytes;
+    job.bytes = nullptr;
+    job = {};
+    if (read_job_count > 0) read_job_count--;
+
+    if (!read_completions.push(completion)) {
+        if (prepared_slot) {
+            bytes_to_free = prepared_slot->bytes;
+            *prepared_slot = {};
+            if (prepared_read_count > 0) prepared_read_count--;
+        }
+        set_error("read_completion_queue_full");
+    } else if (completion.outcome.disposition ==
+               OperationDisposition::Succeeded) {
+        stats.read_jobs++;
+        stats.bytes_read += completion.prepared.length;
+        stats.last_error[0] = 0;
+    } else if (completion.outcome.disposition ==
+               OperationDisposition::Cancelled) {
+        stats.read_cancellations++;
+    } else {
+        stats.read_errors++;
+        set_error(error ? error : "read_failed");
+    }
+
+    processing_read = read_job_count > 0;
+    refresh_read_status_locked();
+    unlock_queue();
+
+    Memory::free(bytes_to_free);
+}
+
+bool open_read_job(size_t index, const char *&error) {
+    if (index >= AC_STORAGE_PREPARED_READ_CAPACITY) {
+        error = "read_index_invalid";
+        return false;
+    }
+
+    ReadJob &job = read_jobs[index];
+    if (!job.used) {
+        error = "read_job_missing";
+        return false;
+    }
+
+    if (active_read_index != index) {
+        close_active_read_file();
+
+        Storage::Guard guard;
+        active_read_file = Storage::open(job.path, "r");
+        if (!active_read_file || active_read_file.isDirectory()) {
+            if (active_read_file) active_read_file.close();
+            error = "read_open_failed";
+            return false;
+        }
+        active_read_index = index;
+    }
+
+    if (!job.started) {
+        size_t file_size = 0;
+        {
+            Storage::Guard guard;
+            file_size = active_read_file.size();
+        }
+        if (job.offset >= file_size) {
+            error = "read_offset_out_of_range";
+            return false;
+        }
+
+        const size_t available = file_size - static_cast<size_t>(job.offset);
+        job.target_length = std::min(job.requested_length, available);
+        job.bytes = static_cast<uint8_t *>(
+            Memory::alloc_large(job.target_length, false));
+        if (!job.bytes) {
+            error = "read_allocation_failed";
+            return false;
+        }
+        job.started = true;
+    }
+
+    Storage::Guard guard;
+    const uint64_t position = job.offset + job.bytes_read;
+    if (position > UINT32_MAX ||
+        !active_read_file.seek(static_cast<uint32_t>(position))) {
+        error = "read_seek_failed";
+        return false;
+    }
+    return true;
+}
+
+bool process_read_step() {
+    if (!lock_queue(50)) return false;
+    const size_t index = select_read_job_locked();
+    if (index == SIZE_MAX) {
+        processing_read = false;
+        unlock_queue();
+        close_active_read_file();
+        return false;
+    }
+    processing_read = true;
+    const bool cancelled = read_jobs[index].cancel_requested;
+    unlock_queue();
+
+    if (cancelled) {
+        finish_read_job(index, OperationOutcome::cancelled());
+        return true;
+    }
+
+    const char *error = nullptr;
+    if (!Storage::mounted()) {
+        finish_read_job(index,
+                        OperationOutcome::failed(),
+                        "storage_not_mounted");
+        return true;
+    }
+    if (!open_read_job(index, error)) {
+        finish_read_job(index, OperationOutcome::failed(), error);
+        return true;
+    }
+
+    ReadJob &job = read_jobs[index];
+    const size_t remaining = job.target_length - job.bytes_read;
+    const size_t requested = std::min(remaining, AC_STORAGE_READ_STEP_BYTES);
+    size_t received = 0;
+    {
+        Storage::Guard guard;
+        const int read = active_read_file.read(job.bytes + job.bytes_read,
+                                               requested);
+        if (read > 0) received = static_cast<size_t>(read);
+    }
+    if (received == 0) {
+        finish_read_job(index,
+                        OperationOutcome::failed(),
+                        "read_short_file");
+        return true;
+    }
+
+    job.bytes_read += received;
+    stats.last_activity_ms = millis();
+    copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
+    if (job.bytes_read == job.target_length) {
+        finish_read_job(index, OperationOutcome::succeeded());
+    }
+    return true;
+}
+
 void process_job(JobSlot &job) {
     switch (job.type) {
         case JobType::Open:
@@ -1249,7 +1702,9 @@ void process_job(JobSlot &job) {
 }
 
 void task_entry(void *) {
+    cleanup_str_backup_artifacts();
     stats.task_started = true;
+
     for (;;) {
         bool have_job = false;
         size_t slot_index = SIZE_MAX;
@@ -1258,12 +1713,14 @@ void task_entry(void *) {
                 slot_index = head;
                 head = (head + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
                 queued--;
-                stats.queued = queued;
+                stats.edf_queued = queued;
                 processing_job = true;
                 have_job = true;
             }
             unlock_queue();
         }
+
+        bool did_work = false;
         if (have_job) {
             process_job(slots[slot_index]);
             if (lock_queue(50)) {
@@ -1273,9 +1730,17 @@ void task_entry(void *) {
             } else {
                 processing_job = false;
             }
-            vTaskDelay(pdMS_TO_TICKS(AC_EDF_STORAGE_WORK_TICK_MS));
+            did_work = true;
         } else {
-            vTaskDelay(pdMS_TO_TICKS(AC_EDF_STORAGE_IDLE_TICK_MS));
+            did_work = process_read_step();
+        }
+
+        if (did_work) {
+            vTaskDelay(pdMS_TO_TICKS(AC_STORAGE_SERVICE_WORK_TICK_MS));
+        } else {
+            ulTaskNotifyTake(pdTRUE,
+                             pdMS_TO_TICKS(
+                                 AC_STORAGE_SERVICE_IDLE_TICK_MS));
         }
     }
 }
@@ -1299,6 +1764,7 @@ bool enqueue(JobSlot &job) {
     }
     stats.bytes_enqueued += job.len;
     stats.last_activity_ms = millis();
+    wake_service_task();
     return true;
 }
 
@@ -1338,11 +1804,12 @@ bool enqueue_rendered_slot(Prepare prepare,
     job.len = written;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
-    stats.queued = queued;
+    stats.edf_queued = queued;
     unlock_queue();
 
     stats.bytes_enqueued += written;
     stats.last_activity_ms = millis();
+    wake_service_task();
     return true;
 }
 
@@ -1357,10 +1824,10 @@ void begin() {
     }
     if (!task) {
         const BaseType_t created =
-            xTaskCreatePinnedToCore(task_entry, "ac_edf_storage",
-                                    AC_EDF_STORAGE_TASK_STACK, nullptr,
-                                    AC_EDF_STORAGE_TASK_PRIO, &task,
-                                    AC_EDF_STORAGE_TASK_CORE);
+            xTaskCreatePinnedToCore(task_entry, "ac_storage",
+                                    AC_STORAGE_SERVICE_TASK_STACK, nullptr,
+                                    AC_STORAGE_SERVICE_TASK_PRIO, &task,
+                                    AC_STORAGE_SERVICE_TASK_CORE);
         if (created != pdPASS || !task) {
             stats.available = false;
             set_error("task_create_failed");
@@ -1371,18 +1838,20 @@ void begin() {
     }
     stats.initialized = true;
     stats.available = true;
-    cleanup_str_backup_artifacts();
-    Log::logf(CAT_EDF, LOG_DEBUG,
-              "storage worker ready q=%u slot=%u psram=%s\n",
+    stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
+
+    Log::logf(CAT_STORAGE, LOG_DEBUG,
+              "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
               static_cast<unsigned>(AC_EDF_STORAGE_QUEUE_CAPACITY),
+              static_cast<unsigned>(AC_STORAGE_PREPARED_READ_CAPACITY),
               static_cast<unsigned>(AC_EDF_STORAGE_SLOT_BYTES),
               stats.using_psram ? "yes" : "no");
 }
 
-bool enqueue_open_numeric(const char *path,
-                          const EdfFileSchema &schema,
-                          const EdfHeaderInfo &info,
-                          EdfStorageOpenHandle *handle) {
+bool enqueue_edf_open_numeric(const char *path,
+                              const EdfFileSchema &schema,
+                              const EdfHeaderInfo &info,
+                              EdfStorageOpenHandle *handle) {
     if (handle) *handle = {};
     if (!valid_path(path) || schema.signal_count == 0) return false;
     const size_t header_size = edf_header_size(schema);
@@ -1424,10 +1893,10 @@ bool enqueue_open_numeric(const char *path,
     return true;
 }
 
-bool enqueue_open_annotation(const char *path,
-                             EdfAnnotationKind kind,
-                             const EdfHeaderInfo &info,
-                             EdfStorageOpenHandle *handle) {
+bool enqueue_edf_open_annotation(const char *path,
+                                 EdfAnnotationKind kind,
+                                 const EdfHeaderInfo &info,
+                                 EdfStorageOpenHandle *handle) {
     if (handle) *handle = {};
     if (!valid_path(path)) return false;
     if (!stats.initialized) begin();
@@ -1453,8 +1922,8 @@ bool enqueue_open_annotation(const char *path,
     return true;
 }
 
-bool enqueue_numeric_record(const EdfFileSchema &schema,
-                            const EdfCompletedRecordView &record) {
+bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
+                                const EdfCompletedRecordView &record) {
     if (!stats.initialized) begin();
     if (!stats.available || !slots) return false;
     if (!lock_queue()) {
@@ -1484,16 +1953,17 @@ bool enqueue_numeric_record(const EdfFileSchema &schema,
     const size_t queued_len = job.len;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
-    stats.queued = queued;
+    stats.edf_queued = queued;
     unlock_queue();
 
     stats.bytes_enqueued += queued_len;
     stats.last_activity_ms = millis();
+    wake_service_task();
     return true;
 }
 
-bool enqueue_annotation_record(EdfAnnotationKind kind,
-                               const EdfAnnotationRecord &record) {
+bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
+                                   const EdfAnnotationRecord &record) {
     if (edf_annotation_record_size() > AC_EDF_STORAGE_SLOT_BYTES) return false;
     return enqueue_rendered_slot(
         [&](JobSlot &job) {
@@ -1509,9 +1979,9 @@ bool enqueue_annotation_record(EdfAnnotationKind kind,
         "annotation_render_failed");
 }
 
-bool enqueue_str_record(const char *path,
-                        const EdfHeaderInfo &info,
-                        const EdfStrRecordView &record) {
+bool enqueue_edf_str_record(const char *path,
+                            const EdfHeaderInfo &info,
+                            const EdfStrRecordView &record) {
     if (!valid_path(path) || edf_str_record_size() > AC_EDF_STORAGE_SLOT_BYTES) {
         return false;
     }
@@ -1537,7 +2007,7 @@ bool enqueue_str_record(const char *path,
         "str_render_failed");
 }
 
-bool enqueue_identification_files(const std::string &json) {
+bool enqueue_edf_identification_files(const std::string &json) {
     if (json.empty() || json.size() > AC_EDF_STORAGE_SLOT_BYTES) {
         return false;
     }
@@ -1556,29 +2026,34 @@ bool enqueue_identification_files(const std::string &json) {
         "identification_render_failed");
 }
 
-bool enqueue_close_numeric(EdfFileKind kind) {
+bool enqueue_edf_close_numeric(EdfFileKind kind) {
     JobSlot job;
     job.type = JobType::Close;
     job.kind = stored_kind(kind);
     return enqueue(job);
 }
 
-bool enqueue_close_annotation(EdfAnnotationKind kind) {
+bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
     JobSlot job;
     job.type = JobType::Close;
     job.kind = stored_kind(kind);
     return enqueue(job);
 }
 
-EdfStorageWorkerStatus status() {
-    EdfStorageWorkerStatus out = stats;
+StorageReadPort &read_port() {
+    return service_read_port;
+}
+
+StorageServiceStatus status() {
+    StorageServiceStatus out = stats;
     if (lock_queue()) {
+        refresh_read_status_locked();
         out = stats;
-        out.queued = queued;
-        out.busy = processing_job;
+        out.edf_queued = queued;
+        out.busy = processing_job || processing_read;
         unlock_queue();
     } else {
-        out.busy = processing_job;
+        out.busy = processing_job || processing_read;
     }
 #if AC_STACK_PROFILE_ENABLED
     if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
@@ -1592,8 +2067,8 @@ uint32_t stack_high_water_bytes() {
 }
 #endif
 
-bool open_result(const EdfStorageOpenHandle &handle,
-                 EdfStorageOpenResult &result) {
+bool edf_open_result(const EdfStorageOpenHandle &handle,
+                     EdfStorageOpenResult &result) {
     result = {};
     if (!handle.valid()) return false;
     const size_t index = edf_storage_file_index(handle.file);
@@ -1627,5 +2102,5 @@ bool open_result(const EdfStorageOpenHandle &handle,
     return true;
 }
 
-}  // namespace EdfStorageWorker
+}  // namespace StorageService
 }  // namespace aircannect

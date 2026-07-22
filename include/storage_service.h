@@ -6,6 +6,7 @@
 
 #include "board.h"
 #include "edf_file_writer.h"
+#include "storage_read_port.h"
 
 namespace aircannect {
 
@@ -15,11 +16,15 @@ namespace aircannect {
 static constexpr size_t AC_EDF_STORAGE_QUEUE_CAPACITY = 12;
 static constexpr size_t AC_EDF_STORAGE_SLOT_BYTES = 6144;
 
-static constexpr uint32_t AC_EDF_STORAGE_TASK_STACK = 6144;
-static constexpr uint8_t AC_EDF_STORAGE_TASK_PRIO = 1;
-static constexpr uint8_t AC_EDF_STORAGE_TASK_CORE = 0;
-static constexpr uint32_t AC_EDF_STORAGE_IDLE_TICK_MS = 1000;
-static constexpr uint32_t AC_EDF_STORAGE_WORK_TICK_MS = 5;
+static constexpr uint32_t AC_STORAGE_SERVICE_TASK_STACK = 6144;
+static constexpr uint8_t AC_STORAGE_SERVICE_TASK_PRIO = 1;
+static constexpr uint8_t AC_STORAGE_SERVICE_TASK_CORE = 0;
+static constexpr uint32_t AC_STORAGE_SERVICE_IDLE_TICK_MS = 1000;
+static constexpr uint32_t AC_STORAGE_SERVICE_WORK_TICK_MS = 5;
+
+static constexpr size_t AC_STORAGE_PREPARED_READ_CAPACITY = 4;
+static constexpr size_t AC_STORAGE_PREPARED_READ_MAX_BYTES = 512 * 1024;
+static constexpr size_t AC_STORAGE_READ_STEP_BYTES = 4096;
 
 static constexpr size_t AC_EDF_STORAGE_PATIENT_ID_MAX = 80;
 static constexpr size_t AC_EDF_STORAGE_RECORDING_ID_MAX = 96;
@@ -67,15 +72,18 @@ struct EdfStorageOpenResult {
     char error[96] = {};
 };
 
-struct EdfStorageWorkerStatus {
+struct StorageServiceStatus {
     bool initialized = false;
     bool available = false;
     bool task_started = false;
     bool using_psram = false;
     bool busy = false;
 
-    size_t capacity = 0;
-    size_t queued = 0;
+    size_t edf_capacity = 0;
+    size_t edf_queued = 0;
+    size_t read_capacity = 0;
+    size_t read_queued = 0;
+    size_t prepared_reads = 0;
     uint8_t open_file_count = 0;
 
     uint32_t open_jobs = 0;
@@ -90,12 +98,16 @@ struct EdfStorageWorkerStatus {
     uint32_t write_errors = 0;
     uint32_t patch_errors = 0;
     uint32_t unavailable_drops = 0;
+    uint32_t read_jobs = 0;
+    uint32_t read_errors = 0;
+    uint32_t read_cancellations = 0;
 
 #if AC_STACK_PROFILE_ENABLED
     uint32_t stack_high_water_words = 0;
 #endif
     uint64_t bytes_enqueued = 0;
     uint64_t bytes_written = 0;
+    uint64_t bytes_read = 0;
     uint32_t last_activity_ms = 0;
 
     char last_path[80] = {};
@@ -104,42 +116,45 @@ struct EdfStorageWorkerStatus {
     EdfStorageOpenFileStatus files[AC_EDF_STORAGE_FILE_COUNT];
 };
 
-namespace EdfStorageWorker {
+namespace StorageService {
 
 // lifecycle
 void begin();
 
-// file opens
-bool enqueue_open_numeric(const char *path,
-                          const EdfFileSchema &schema,
-                          const EdfHeaderInfo &info,
-                          EdfStorageOpenHandle *handle = nullptr);
-bool enqueue_open_annotation(const char *path,
-                             EdfAnnotationKind kind,
-                             const EdfHeaderInfo &info,
-                             EdfStorageOpenHandle *handle = nullptr);
+// EDF file opens
+bool enqueue_edf_open_numeric(const char *path,
+                              const EdfFileSchema &schema,
+                              const EdfHeaderInfo &info,
+                              EdfStorageOpenHandle *handle = nullptr);
+bool enqueue_edf_open_annotation(const char *path,
+                                 EdfAnnotationKind kind,
+                                 const EdfHeaderInfo &info,
+                                 EdfStorageOpenHandle *handle = nullptr);
 
-// record writes
-bool enqueue_numeric_record(const EdfFileSchema &schema,
-                            const EdfCompletedRecordView &record);
-bool enqueue_annotation_record(EdfAnnotationKind kind,
-                               const EdfAnnotationRecord &record);
-bool enqueue_str_record(const char *path,
-                        const EdfHeaderInfo &info,
-                        const EdfStrRecordView &record);
+// EDF record writes
+bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
+                                const EdfCompletedRecordView &record);
+bool enqueue_edf_annotation_record(EdfAnnotationKind kind,
+                                   const EdfAnnotationRecord &record);
+bool enqueue_edf_str_record(const char *path,
+                            const EdfHeaderInfo &info,
+                            const EdfStrRecordView &record);
 
-// metadata/close jobs
-bool enqueue_identification_files(const std::string &json);
-bool enqueue_close_numeric(EdfFileKind kind);
-bool enqueue_close_annotation(EdfAnnotationKind kind);
+// EDF metadata and closes
+bool enqueue_edf_identification_files(const std::string &json);
+bool enqueue_edf_close_numeric(EdfFileKind kind);
+bool enqueue_edf_close_annotation(EdfAnnotationKind kind);
+bool edf_open_result(const EdfStorageOpenHandle &handle,
+                     EdfStorageOpenResult &result);
 
-// status/results
-EdfStorageWorkerStatus status();
+// Prepared bounded reads
+StorageReadPort &read_port();
+
+// Status
+StorageServiceStatus status();
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes();
 #endif
-bool open_result(const EdfStorageOpenHandle &handle,
-                 EdfStorageOpenResult &result);
 
-}  // namespace EdfStorageWorker
+}  // namespace StorageService
 }  // namespace aircannect

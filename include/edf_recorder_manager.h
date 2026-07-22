@@ -9,7 +9,7 @@
 #include "edf_series.h"
 #include "edf_storage_catalog.h"
 #include "edf_str_session.h"
-#include "edf_storage_worker.h"
+#include "storage_service.h"
 #include "edf_stream_assembler.h"
 #include "fixed_queue.h"
 #include "rpc_arbiter.h"
@@ -155,7 +155,7 @@ public:
     void set_enabled(bool enabled);
     bool enabled() const { return status_.enabled; }
     EdfRecorderStatus status() const;
-    EdfStorageWorkerStatus storage_status() const;
+    StorageServiceStatus storage_status() const;
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
     }

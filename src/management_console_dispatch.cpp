@@ -458,11 +458,11 @@ void print_edf_recorder_status(Print &out,
     out.print(static_cast<unsigned long>(status.file_open_failures));
     out.print(" attach_failures=");
     out.print(static_cast<unsigned long>(status.attach_failures));
-    const EdfStorageWorkerStatus storage = manager.storage_status();
+    const StorageServiceStatus storage = manager.storage_status();
     out.print(" storage_q=");
-    out.print(static_cast<unsigned>(storage.queued));
+    out.print(static_cast<unsigned>(storage.edf_queued));
     out.print('/');
-    out.print(static_cast<unsigned>(storage.capacity));
+    out.print(static_cast<unsigned>(storage.edf_capacity));
     out.print(" storage_busy=");
     out.print(storage.busy ? "yes" : "no");
     out.print(" storage_open=");
