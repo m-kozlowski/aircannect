@@ -541,9 +541,9 @@ static uint32_t next_report_catalog_generation() {
 }
 
 static void poll_report_catalog_refresh(uint32_t now_ms) {
-    const EdfRecorderStatus recorder = edf_recorder_manager.status();
-    if (recorder.sessions_ended != report_catalog_seen_sessions_ended) {
-        report_catalog_seen_sessions_ended = recorder.sessions_ended;
+    const uint32_t sessions_ended = edf_recorder_manager.sessions_ended();
+    if (sessions_ended != report_catalog_seen_sessions_ended) {
+        report_catalog_seen_sessions_ended = sessions_ended;
         report_catalog_refresh_pending = true;
         report_catalog_refresh_due_ms = now_ms + 5000;
     }
@@ -560,8 +560,10 @@ static void poll_report_catalog_refresh(uint32_t now_ms) {
         return;
     }
 
-    const StorageServiceStatus storage = edf_recorder_manager.storage_status();
-    if (storage.busy || storage.edf_queued > 0 ||
+    const StorageWorkloadSnapshot storage =
+        StorageService::workload_snapshot();
+
+    if (!storage.valid || storage.busy || storage.edf_queued > 0 ||
         storage.open_file_count > 0) {
         report_catalog_refresh_due_ms = now_ms + 1000;
         return;

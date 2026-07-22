@@ -214,8 +214,8 @@ public:
 class ServiceStatusPort final : public StorageStatusPort {
 public:
     bool mounted() const override { return Storage::mounted(); }
-    StorageServiceStatus status() const override {
-        return StorageService::status();
+    StorageWorkloadSnapshot workload_snapshot() const override {
+        return StorageService::workload_snapshot();
     }
 };
 
@@ -2563,38 +2563,9 @@ void publish_activity(const ActivitySnapshot &activity) {
     wake_service_task();
 }
 
-StorageServiceStatus status() {
-    StorageServiceStatus out = stats;
-    StorageUploadStatus upload;
-    const bool upload_active =
-        upload_service.status(0, upload) == StorageUploadStatusRead::Found &&
-        upload.active();
-    if (lock_queue()) {
-        refresh_read_status_locked();
-        out = stats;
-        out.edf_queued = queued;
-        out.busy = processing_job || processing_read ||
-                   upload_active ||
-                   diagnostic.state == StorageDiagnosticState::Queued ||
-                   diagnostic.state == StorageDiagnosticState::Writing;
-        unlock_queue();
-    } else {
-        out.busy = processing_job || processing_read;
-    }
-    out.maintenance_active =
-        maintenance_owner.load() != MaintenanceOwner::None;
-#if AC_STACK_PROFILE_ENABLED
-    if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
-#endif
-    return out;
-}
-
 StorageWorkloadSnapshot workload_snapshot() {
     StorageWorkloadSnapshot out;
-    StorageUploadStatus upload;
-    const bool upload_active =
-        upload_service.status(0, upload) == StorageUploadStatusRead::Found &&
-        upload.active();
+    const bool upload_active = upload_service.active();
 
     if (!lock_queue()) return out;
 
@@ -2608,6 +2579,31 @@ StorageWorkloadSnapshot workload_snapshot() {
         maintenance_owner.load() != MaintenanceOwner::None;
     out.edf_queued = queued;
     out.open_file_count = stats.open_file_count;
+    unlock_queue();
+    return out;
+}
+
+StorageEdfStatusSnapshot edf_status_snapshot() {
+    StorageEdfStatusSnapshot out;
+    const bool upload_active = upload_service.active();
+
+    if (!lock_queue()) return out;
+
+    refresh_read_status_locked();
+    out.busy = processing_job || processing_read || upload_active ||
+               diagnostic.state == StorageDiagnosticState::Queued ||
+               diagnostic.state == StorageDiagnosticState::Writing;
+    out.capacity = stats.edf_capacity;
+    out.queued = queued;
+    out.open_file_count = stats.open_file_count;
+    out.records_written = stats.records_written;
+    out.identification_jobs = stats.identification_jobs;
+    out.queue_drops = stats.queue_drops;
+    out.patch_errors = stats.patch_errors;
+#if AC_STACK_PROFILE_ENABLED
+    if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
+#endif
+    copy_cstr(out.last_error, sizeof(out.last_error), stats.last_error);
     unlock_queue();
     return out;
 }

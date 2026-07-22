@@ -184,8 +184,10 @@ bool storage_heavy_request_available(AsyncWebServerRequest *request,
         return false;
     }
 
-    const StorageServiceStatus status = status_port->status();
-    if (status.busy || status.edf_queued > 0 || status.open_file_count > 0) {
+    const StorageWorkloadSnapshot storage =
+        status_port->workload_snapshot();
+    if (!storage.valid || storage.busy || storage.edf_queued > 0 ||
+        storage.open_file_count > 0) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;

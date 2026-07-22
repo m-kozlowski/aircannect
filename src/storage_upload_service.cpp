@@ -356,6 +356,14 @@ StorageUploadStatusRead StorageUploadService::status(
     return StorageUploadStatusRead::Found;
 }
 
+bool StorageUploadService::active() const {
+    if (!status_lock()) return true;
+
+    const bool out = status_snapshot_valid_ && status_snapshot_.active();
+    status_unlock();
+    return out;
+}
+
 bool StorageUploadService::cancel(uint32_t id) {
     if (id == 0 || !job_ || !lock(50)) return false;
     if (job_->status.id != id || !job_->status.active()) {

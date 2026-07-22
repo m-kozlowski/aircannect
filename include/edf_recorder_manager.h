@@ -170,8 +170,8 @@ public:
 
     // control/status
     void set_enabled(bool enabled);
-    EdfRecorderStatus status() const;
-    StorageServiceStatus storage_status() const;
+    const EdfRecorderStatus &status() const;
+    uint32_t sessions_ended() const { return status_.sessions_ended; }
     const EdfStreamAssemblerStatus &assembler_status() const {
         return assembler_.status();
     }
@@ -391,7 +391,7 @@ private:
 
     // owned subsystems/status
     EdfStrSessionAccumulator str_;
-    EdfRecorderStatus status_;
+    mutable EdfRecorderStatus status_;
     EdfStreamAssembler assembler_;
 
     StreamFrameRef pending_stream_frame_;

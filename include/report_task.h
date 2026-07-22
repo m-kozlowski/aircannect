@@ -54,6 +54,39 @@ struct ReportTaskControlSnapshot {
     bool background_active = false;
 };
 
+struct ReportTaskDiagnosticSnapshot {
+    bool task_started = false;
+    ReportTaskState state = ReportTaskState::Stopped;
+    size_t commands_queued = 0;
+    size_t catalog_nights = 0;
+    uint32_t command_drops = 0;
+    uint32_t command_failures = 0;
+    uint32_t catalog_generation = 0;
+    bool foreground_active = false;
+    bool background_active = false;
+    bool background_suspended = false;
+
+    ReportEngineState engine_state = ReportEngineState::Idle;
+    size_t engine_queued = 0;
+    char engine_error[AC_STORAGE_ERROR_MAX] = {};
+
+    ReportFallbackAcquisitionState fallback_state =
+        ReportFallbackAcquisitionState::Idle;
+    ReportSourceId fallback_source = ReportSourceId::Summary;
+    uint32_t fallback_sources_total = 0;
+    uint32_t fallback_sources_completed = 0;
+    uint32_t fallback_sections_added = 0;
+    uint32_t fallback_unavailable_added = 0;
+    char fallback_error[AC_STORAGE_ERROR_MAX] = {};
+
+    NightCatalogRefreshState catalog_state =
+        NightCatalogRefreshState::Idle;
+    uint32_t catalog_files_seen = 0;
+    uint32_t catalog_files_indexed = 0;
+    uint32_t catalog_sessions = 0;
+    char catalog_error[AC_STORAGE_ERROR_MAX] = {};
+};
+
 struct ReportArtifactFailureStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
     uint32_t retry_after_ms = 0;
@@ -89,7 +122,10 @@ public:
     void publish_activity(const ActivitySnapshot &activity);
 
     ReportTaskControlSnapshot control_snapshot() const;
+    ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
+#ifndef ARDUINO
     ReportTaskStatus status() const;
+#endif
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     bool artifact_availability(const ReportArtifactKey &artifact,
                                ReportArtifactAvailability &availability) const;

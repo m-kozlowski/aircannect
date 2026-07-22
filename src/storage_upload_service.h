@@ -32,6 +32,7 @@ public:
         const StorageUploadChunkCommand &command) override;
     StorageUploadStatusRead status(
         uint32_t id, StorageUploadStatus &status_out) const override;
+    bool active() const;
     bool cancel(uint32_t id) override;
 
 private:

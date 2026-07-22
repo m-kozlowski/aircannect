@@ -270,22 +270,17 @@ void EdfRecorderManager::set_enabled(bool enabled) {
     }
 }
 
-EdfRecorderStatus EdfRecorderManager::status() const {
-    EdfRecorderStatus snapshot = status_;
-    snapshot.annotation_files_open = files_open_;
-    snapshot.numeric_files_open = numeric_files_open_;
-    snapshot.recording_gate_is_open = recording_gate_open_;
-    snapshot.recording_gate_is_closed = recording_gate_closed_;
-    snapshot.recording_gate_recovery_is_pending =
+const EdfRecorderStatus &EdfRecorderManager::status() const {
+    status_.annotation_files_open = files_open_;
+    status_.numeric_files_open = numeric_files_open_;
+    status_.recording_gate_is_open = recording_gate_open_;
+    status_.recording_gate_is_closed = recording_gate_closed_;
+    status_.recording_gate_recovery_is_pending =
         recording_gate_recovery_pending_;
-    snapshot.annotation_open_is_pending = annotation_open_pending_;
-    snapshot.event_coverage_session_gap_count =
+    status_.annotation_open_is_pending = annotation_open_pending_;
+    status_.event_coverage_session_gap_count =
         event_coverage_session_gaps();
-    return snapshot;
-}
-
-StorageServiceStatus EdfRecorderManager::storage_status() const {
-    return StorageService::status();
+    return status_;
 }
 
 bool EdfRecorderManager::handle_recording_gate_frame(
@@ -829,6 +824,9 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
     pending_mask_event_start_time_[0] = 0;
     numeric_open_frame_buffer_.clear();
     status_.sessions_ended++;
+    status_.event_coverage_session_gap_count =
+        event_coverage_session_gaps();
+
     const uint32_t enqueue_failures =
         status_.record_enqueue_failures +
         status_.annotation_enqueue_failures +

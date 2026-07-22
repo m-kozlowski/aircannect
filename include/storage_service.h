@@ -135,12 +135,27 @@ struct StorageWorkloadSnapshot {
     uint8_t open_file_count = 0;
 };
 
+struct StorageEdfStatusSnapshot {
+    bool busy = true;
+    size_t capacity = 0;
+    size_t queued = 0;
+    uint8_t open_file_count = 0;
+    uint32_t records_written = 0;
+    uint32_t identification_jobs = 0;
+    uint32_t queue_drops = 0;
+    uint32_t patch_errors = 0;
+#if AC_STACK_PROFILE_ENABLED
+    uint32_t stack_high_water_words = 0;
+#endif
+    char last_error[AC_STORAGE_ERROR_MAX] = {};
+};
+
 class StorageStatusPort {
 public:
     virtual ~StorageStatusPort() = default;
 
     virtual bool mounted() const = 0;
-    virtual StorageServiceStatus status() const = 0;
+    virtual StorageWorkloadSnapshot workload_snapshot() const = 0;
 };
 
 enum class StorageDiagnosticState : uint8_t {
@@ -231,8 +246,8 @@ void publish_activity(const ActivitySnapshot &activity);
 
 // Status
 StorageStatusPort &status_port();
-StorageServiceStatus status();
 StorageWorkloadSnapshot workload_snapshot();
+StorageEdfStatusSnapshot edf_status_snapshot();
 #if AC_STACK_PROFILE_ENABLED
 uint32_t stack_high_water_bytes();
 #endif

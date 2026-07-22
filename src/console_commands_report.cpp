@@ -74,7 +74,7 @@ const char *report_fallback_state_name(
 }
 
 void print_report_status(Print &out, const ReportTask &task) {
-    const ReportTaskStatus status = task.status();
+    const ReportTaskDiagnosticSnapshot status = task.diagnostic_snapshot();
 
     out.print("[REPORT] state=");
     out.print(report_task_state_name(status.state));
@@ -92,9 +92,9 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.println(static_cast<unsigned long>(status.command_failures));
 
     out.print("[REPORT] engine=");
-    out.print(report_engine_state_name(status.engine.state));
+    out.print(report_engine_state_name(status.engine_state));
     out.print(" queued=");
-    out.print(static_cast<unsigned long>(status.engine.queued));
+    out.print(static_cast<unsigned long>(status.engine_queued));
     out.print(" foreground=");
     out.print(status.foreground_active ? "yes" : "no");
     out.print(" background=");
@@ -102,44 +102,39 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.print(" suspended=");
     out.print(status.background_suspended ? "yes" : "no");
     out.print(" last_error=");
-    out.println(status.engine.last_completion.error[0]
-                    ? status.engine.last_completion.error
-                    : "--");
+    out.println(status.engine_error[0] ? status.engine_error : "--");
 
-    const ReportFallbackAcquisitionStatus &fallback =
-        status.engine.fallback;
     const ReportSourceDef *fallback_source =
-        report_source_def(fallback.source);
+        report_source_def(status.fallback_source);
     out.print("[REPORT] fallback=");
-    out.print(report_fallback_state_name(fallback.state));
+    out.print(report_fallback_state_name(status.fallback_state));
     out.print(" source=");
     out.print(fallback_source && fallback_source->spool_type
                   ? fallback_source->spool_type
                   : "--");
     out.print(" sources=");
-    out.print(static_cast<unsigned long>(fallback.sources_completed));
+    out.print(static_cast<unsigned long>(
+        status.fallback_sources_completed));
     out.print('/');
-    out.print(static_cast<unsigned long>(fallback.sources_total));
+    out.print(static_cast<unsigned long>(status.fallback_sources_total));
     out.print(" sections=");
-    out.print(static_cast<unsigned long>(fallback.sections_added));
+    out.print(static_cast<unsigned long>(status.fallback_sections_added));
     out.print(" unavailable=");
-    out.print(static_cast<unsigned long>(fallback.unavailable_added));
+    out.print(static_cast<unsigned long>(
+        status.fallback_unavailable_added));
     out.print(" error=");
-    out.println(fallback.error[0] ? fallback.error : "--");
+    out.println(status.fallback_error[0] ? status.fallback_error : "--");
 
     out.print("[REPORT] catalog=");
-    out.print(report_catalog_state_name(status.catalog_refresh.state));
+    out.print(report_catalog_state_name(status.catalog_state));
     out.print(" files=");
-    out.print(static_cast<unsigned long>(
-        status.catalog_refresh.files_indexed));
+    out.print(static_cast<unsigned long>(status.catalog_files_indexed));
     out.print('/');
-    out.print(static_cast<unsigned long>(status.catalog_refresh.files_seen));
+    out.print(static_cast<unsigned long>(status.catalog_files_seen));
     out.print(" sessions=");
-    out.print(static_cast<unsigned long>(status.catalog_refresh.sessions));
+    out.print(static_cast<unsigned long>(status.catalog_sessions));
     out.print(" error=");
-    out.println(status.catalog_refresh.error[0]
-                    ? status.catalog_refresh.error
-                    : "--");
+    out.println(status.catalog_error[0] ? status.catalog_error : "--");
 }
 
 uint32_t report_night_duration(const NightCatalog &catalog,

@@ -552,7 +552,8 @@ struct ReportTask::Runtime {
             unlock();
         }
 
-        ReportTaskStatus next;
+        ReportTaskStatus &next = status_scratch;
+        next = {};
         next.initialized = initialized;
         next.task_started = task_started;
         next.commands_queued = queued;
@@ -674,6 +675,7 @@ struct ReportTask::Runtime {
 
     bool initialized = false;
     bool task_started = false;
+    ReportTaskStatus status_scratch;
     ReportTaskStatus status;
 
 #ifdef ARDUINO
@@ -839,12 +841,58 @@ ReportTaskControlSnapshot ReportTask::control_snapshot() const {
     return out;
 }
 
+ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
+    if (!runtime_ || !runtime_->lock(20)) return {};
+
+    const ReportTaskStatus &status = runtime_->status;
+    const ReportEngineStatus &engine = status.engine;
+    const ReportFallbackAcquisitionStatus &fallback = engine.fallback;
+    const NightCatalogRefreshStatus &catalog = status.catalog_refresh;
+
+    ReportTaskDiagnosticSnapshot out;
+    out.task_started = status.task_started;
+    out.state = status.state;
+    out.commands_queued = status.commands_queued;
+    out.catalog_nights = status.catalog_nights;
+    out.command_drops = status.command_drops;
+    out.command_failures = status.command_failures;
+    out.catalog_generation = status.catalog_generation;
+    out.foreground_active = status.foreground_active;
+    out.background_active = status.background_active;
+    out.background_suspended = status.background_suspended;
+
+    out.engine_state = engine.state;
+    out.engine_queued = engine.queued;
+    copy_cstr(out.engine_error, sizeof(out.engine_error),
+              engine.last_completion.error);
+
+    out.fallback_state = fallback.state;
+    out.fallback_source = fallback.source;
+    out.fallback_sources_total = fallback.sources_total;
+    out.fallback_sources_completed = fallback.sources_completed;
+    out.fallback_sections_added = fallback.sections_added;
+    out.fallback_unavailable_added = fallback.unavailable_added;
+    copy_cstr(out.fallback_error, sizeof(out.fallback_error),
+              fallback.error);
+
+    out.catalog_state = catalog.state;
+    out.catalog_files_seen = catalog.files_seen;
+    out.catalog_files_indexed = catalog.files_indexed;
+    out.catalog_sessions = catalog.sessions;
+    copy_cstr(out.catalog_error, sizeof(out.catalog_error), catalog.error);
+
+    runtime_->unlock();
+    return out;
+}
+
+#ifndef ARDUINO
 ReportTaskStatus ReportTask::status() const {
     if (!runtime_ || !runtime_->lock(20)) return {};
     const ReportTaskStatus out = runtime_->status;
     runtime_->unlock();
     return out;
 }
+#endif
 
 std::shared_ptr<const NightCatalog> ReportTask::catalog_snapshot() const {
     if (!runtime_ || !runtime_->lock(20)) return {};
