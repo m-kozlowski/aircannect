@@ -1,18 +1,15 @@
 #pragma once
 
-#include <Arduino.h>
 #include <memory>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "background_worker.h"
 #include "prepared_byte_ring.h"
 #include "storage_path.h"
 
 namespace aircannect {
 
 class StorageDirectoryListing;
-class StorageDownloadProducer;
 
 struct StorageDirectoryEntryView {
     const char *name = nullptr;
@@ -74,47 +71,35 @@ struct StorageDownloadPrepareStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
 };
 
-class StorageBrowserJob : public BackgroundJob {
+class StorageBrowserPort {
 public:
-    // lifecycle and background service
-    ~StorageBrowserJob();
-    void begin();
-    const char *name() const override { return "storage_browser"; }
-    JobStep step() override;
-    bool run_when_gate_closed(const char *reason) const override;
-    bool drain_before_regular_jobs() const override { return true; }
-    void on_preempt() override;
+    virtual ~StorageBrowserPort() = default;
 
     // immutable directory snapshots
-    StorageListingRead listing(
+    virtual StorageListingRead listing(
         const char *path,
         bool refresh,
         std::shared_ptr<const StorageDirectorySnapshot> &snapshot_out,
         char *error_out = nullptr,
-        size_t error_out_size = 0);
+        size_t error_out_size = 0) = 0;
 
     // prepared plain-file downloads
-    StorageDownloadPrepareState prepare_download(
+    virtual StorageDownloadPrepareState prepare_download(
         const char *path,
-        StorageDownloadPrepareStatus &status_out);
-    bool begin_download(uint32_t id,
-                        std::shared_ptr<StoragePreparedDownload> &download_out,
-                        char *filename_out,
-                        size_t filename_out_size,
-                        uint64_t &size_out,
-                        char *error_out = nullptr,
-                        size_t error_out_size = 0);
-    PreparedByteRead read_download(StoragePreparedDownload &download,
-                                   uint8_t *buffer,
-                                   size_t max_length,
-                                   size_t offset);
-    void finish_download(StoragePreparedDownload &download);
-
-private:
-    bool ensure_owners();
-
-    StorageDirectoryListing *listing_ = nullptr;
-    StorageDownloadProducer *download_ = nullptr;
+        StorageDownloadPrepareStatus &status_out) = 0;
+    virtual bool begin_download(
+        uint32_t id,
+        std::shared_ptr<StoragePreparedDownload> &download_out,
+        char *filename_out,
+        size_t filename_out_size,
+        uint64_t &size_out,
+        char *error_out = nullptr,
+        size_t error_out_size = 0) = 0;
+    virtual PreparedByteRead read_download(StoragePreparedDownload &download,
+                                           uint8_t *buffer,
+                                           size_t max_length,
+                                           size_t offset) = 0;
+    virtual void finish_download(StoragePreparedDownload &download) = 0;
 };
 
 }  // namespace aircannect

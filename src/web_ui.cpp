@@ -552,11 +552,11 @@ struct ArchiveDownloadRef {
 };
 
 struct StorageDownloadRef {
-    StorageBrowserJob *job = nullptr;
+    StorageBrowserPort *port = nullptr;
     std::shared_ptr<StoragePreparedDownload> download;
 
     ~StorageDownloadRef() {
-        if (job && download) job->finish_download(*download);
+        if (port && download) port->finish_download(*download);
     }
 };
 
@@ -956,7 +956,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
                   ReportManager &report_manager,
-                  StorageBrowserJob &storage_browser_job,
+                  StorageBrowserPort &storage_browser,
                   StorageArchiveJob &storage_archive_job,
                   StorageDeleteJob &storage_delete_job,
                   ExportCoordinator &export_coordinator,
@@ -977,7 +977,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
     report_manager_ = &report_manager;
-    storage_browser_job_ = &storage_browser_job;
+    storage_browser_ = &storage_browser;
     storage_archive_job_ = &storage_archive_job;
     storage_delete_job_ = &storage_delete_job;
     export_coordinator_ = &export_coordinator;
@@ -2486,7 +2486,7 @@ void WebUI::send_report_plot(AsyncWebServerRequest *request) const {
 void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
     if (BackgroundWorker *w = background_worker()) w->note_activity();
 
-    if (!storage_browser_job_) {
+    if (!storage_browser_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"list_unavailable\"}");
         return;
@@ -2519,7 +2519,7 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
     const bool refresh = request_bool_arg_default(request, "refresh", false);
     std::shared_ptr<const StorageDirectorySnapshot> snapshot;
     char error[AC_STORAGE_ERROR_MAX] = {};
-    const StorageListingRead read = storage_browser_job_->listing(
+    const StorageListingRead read = storage_browser_->listing(
         path.c_str(), refresh, snapshot, error, sizeof(error));
     if (read == StorageListingRead::Preparing) {
         char body[80] = {};
@@ -2620,7 +2620,7 @@ void WebUI::send_storage_list(AsyncWebServerRequest *request) const {
 void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     if (BackgroundWorker *w = background_worker()) w->note_activity();
 
-    if (!storage_browser_job_) {
+    if (!storage_browser_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"download_unavailable\"}");
         return;
@@ -2647,7 +2647,7 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
 
         StorageDownloadPrepareStatus status;
         const StorageDownloadPrepareState state =
-            storage_browser_job_->prepare_download(path.c_str(), status);
+            storage_browser_->prepare_download(path.c_str(), status);
         if (state == StorageDownloadPrepareState::Busy ||
             state == StorageDownloadPrepareState::Error) {
             const int code = state == StorageDownloadPrepareState::Busy
@@ -2696,12 +2696,12 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
     }
-    ref->job = storage_browser_job_;
+    ref->port = storage_browser_;
 
     char filename[AC_STORAGE_NAME_MAX] = {};
     char error[AC_STORAGE_ERROR_MAX] = {};
     uint64_t file_size = 0;
-    if (!storage_browser_job_->begin_download(
+    if (!storage_browser_->begin_download(
             static_cast<uint32_t>(id_arg),
             ref->download,
             filename,
@@ -2726,8 +2726,8 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
         "application/octet-stream",
         static_cast<size_t>(file_size),
         [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
-            if (!buffer || !ref || !ref->job || !ref->download) return 0;
-            const PreparedByteRead read = ref->job->read_download(
+            if (!buffer || !ref || !ref->port || !ref->download) return 0;
+            const PreparedByteRead read = ref->port->read_download(
                 *ref->download, buffer, max_len, offset);
             if (read.state == PreparedByteReadState::Retry) {
                 return RESPONSE_TRY_AGAIN;

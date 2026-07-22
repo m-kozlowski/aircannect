@@ -29,7 +29,6 @@
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
 #include "storage_archive_job.h"
-#include "storage_browser_job.h"
 #include "storage_delete_job.h"
 #include "storage_diagnostic_job.h"
 #include "storage_manager.h"
@@ -66,7 +65,6 @@ static EdfReportCatalogJob edf_report_catalog_job;
 static OximetryManager oximetry_manager;
 static ReportManager report_manager;
 static BackgroundWorker bg_worker;
-static StorageBrowserJob storage_browser_job;
 static StorageArchiveJob storage_archive_job;
 static StorageDeleteJob storage_delete_job;
 static StorageDiagnosticJob storage_diagnostic_job;
@@ -445,7 +443,7 @@ void setup() {
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
                  report_manager,
-                 storage_browser_job,
+                 StorageService::browser_port(),
                  storage_archive_job,
                  storage_delete_job,
                  export_coordinator,
@@ -454,7 +452,6 @@ void setup() {
                  console_ctx);
 
     // Background jobs
-    storage_browser_job.begin();
     storage_archive_job.begin();
     storage_delete_job.begin();
     storage_diagnostic_job.begin();
@@ -467,7 +464,6 @@ void setup() {
         sleephq_sync_job->begin(app_config.data());
     }
 
-    bg_worker.add_job(&storage_browser_job);
     bg_worker.add_job(&storage_archive_job);
     bg_worker.add_job(&storage_delete_job);
     bg_worker.add_job(&storage_diagnostic_job);

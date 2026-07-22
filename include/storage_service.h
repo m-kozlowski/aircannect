@@ -7,6 +7,7 @@
 #include "board.h"
 #include "edf_file_writer.h"
 #include "runtime_snapshots.h"
+#include "storage_browser_port.h"
 #include "storage_read_port.h"
 
 namespace aircannect {
@@ -162,6 +163,9 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
 
 // Prepared bounded reads
 StorageReadPort &read_port();
+
+// Foreground storage browsing and downloads
+StorageBrowserPort &browser_port();
 
 // File logging
 bool configure_file_log(bool enabled);

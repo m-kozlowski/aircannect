@@ -19,8 +19,9 @@
 #include "edf_str_record_merge.h"
 #include "fixed_queue.h"
 #include "memory_manager.h"
-#include "storage_manager.h"
+#include "storage_browser_service.h"
 #include "storage_file_log_sink.h"
+#include "storage_manager.h"
 #include "storage_path.h"
 #include "string_util.h"
 
@@ -184,8 +185,10 @@ public:
 };
 
 ServiceReadPort service_read_port;
+StorageBrowserService browser_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
+bool browser_turn = true;
 
 constexpr size_t max_size(size_t a, size_t b) {
     return a > b ? a : b;
@@ -1678,11 +1681,32 @@ bool process_read_step() {
     return true;
 }
 
-bool read_work_pending() {
-    if (!lock_queue()) return true;
-    const bool pending = read_job_count > 0;
-    unlock_queue();
-    return pending;
+bool process_browser_step() {
+    return browser_service.step() == StorageBrowserStep::Working;
+}
+
+bool process_foreground_step() {
+    if (browser_turn) {
+        if (process_browser_step()) {
+            browser_turn = false;
+            return true;
+        }
+        if (process_read_step()) {
+            browser_turn = true;
+            return true;
+        }
+        return false;
+    }
+
+    if (process_read_step()) {
+        browser_turn = true;
+        return true;
+    }
+    if (process_browser_step()) {
+        browser_turn = false;
+        return true;
+    }
+    return false;
 }
 
 void process_job(JobSlot &job) {
@@ -1743,17 +1767,17 @@ void task_entry(void *) {
             did_work = true;
             file_log_burst = 0;
         } else {
-            const bool read_pending = read_work_pending();
-            if (read_pending &&
-                file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET) {
-                did_work = process_read_step();
-                file_log_burst = 0;
-            } else if (file_log_sink.step()) {
+            const bool foreground_due =
+                file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
+            if (!foreground_due && file_log_sink.step()) {
                 did_work = true;
                 file_log_burst++;
-            } else {
-                did_work = process_read_step();
-                if (did_work) file_log_burst = 0;
+            } else if (process_foreground_step()) {
+                did_work = true;
+                file_log_burst = 0;
+            } else if (foreground_due && file_log_sink.step()) {
+                did_work = true;
+                file_log_burst++;
             }
         }
 
@@ -1840,10 +1864,14 @@ bool enqueue_rendered_slot(Prepare prepare,
 void begin() {
     if (stats.initialized) return;
     if (!queue_lock) queue_lock = xSemaphoreCreateMutex();
-    if (!queue_lock || !allocate_slots() || !file_log_sink.begin()) {
+    if (!queue_lock || !allocate_slots()) {
         stats.available = false;
         return;
     }
+
+    (void)file_log_sink.begin();
+    (void)browser_service.begin(wake_service_task);
+
     if (!task) {
         const BaseType_t created =
             xTaskCreatePinnedToCore(task_entry, "ac_storage",
@@ -1852,6 +1880,7 @@ void begin() {
                                     AC_STORAGE_SERVICE_TASK_CORE);
         if (created != pdPASS || !task) {
             stats.available = false;
+            browser_service.set_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
                       "storage worker task create failed\n");
@@ -1861,6 +1890,7 @@ void begin() {
     stats.initialized = true;
     stats.available = true;
     stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
+    browser_service.set_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
               "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
@@ -2064,6 +2094,10 @@ bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
 
 StorageReadPort &read_port() {
     return service_read_port;
+}
+
+StorageBrowserPort &browser_port() {
+    return browser_service;
 }
 
 bool configure_file_log(bool enabled) {

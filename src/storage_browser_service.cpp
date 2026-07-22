@@ -1,4 +1,4 @@
-#include "storage_browser_job.h"
+#include "storage_browser_service.h"
 
 #include <algorithm>
 #include <new>
@@ -28,10 +28,6 @@ static constexpr size_t DOWNLOAD_RING_BYTES = 256 * 1024;
 static constexpr size_t DOWNLOAD_READ_BYTES = 16 * 1024;
 static constexpr size_t DOWNLOAD_READY_BYTES = 32 * 1024;
 static constexpr uint32_t DOWNLOAD_ATTACH_TIMEOUT_MS = 60 * 1000;
-
-void wake_background_worker() {
-    if (BackgroundWorker *worker = background_worker()) worker->wake();
-}
 
 }  // namespace
 
@@ -68,8 +64,8 @@ public:
         std::shared_ptr<const StorageDirectorySnapshot> &snapshot_out,
         char *error_out,
         size_t error_out_size);
-    JobStep step();
-    void on_preempt();
+    StorageBrowserStep step();
+    void shutdown();
 
 private:
     enum class Phase : uint8_t {
@@ -87,8 +83,8 @@ private:
                              uint64_t modified);
     bool reserve_entries_locked(size_t needed);
     bool reserve_names_locked(size_t needed);
-    JobStep step_locked();
-    JobStep sort_step_locked();
+    StorageBrowserStep step_locked();
+    StorageBrowserStep sort_step_locked();
     void publish_locked();
     void fail_locked(const char *error);
     void close_dir_locked();
@@ -147,8 +143,8 @@ public:
                           size_t max_length,
                           size_t offset);
     void finish(StoragePreparedDownload &download);
-    JobStep step();
-    void on_preempt();
+    StorageBrowserStep step();
+    void shutdown();
 
 private:
     bool lock(uint32_t timeout_ms = 20) const;
@@ -184,7 +180,7 @@ bool StorageDirectorySnapshot::entry(size_t index,
 }
 
 StorageDirectoryListing::~StorageDirectoryListing() {
-    on_preempt();
+    shutdown();
     if (lock_) vSemaphoreDelete(lock_);
 }
 
@@ -201,7 +197,7 @@ void StorageDirectoryListing::unlock() const {
 }
 
 StorageDownloadProducer::~StorageDownloadProducer() {
-    on_preempt();
+    shutdown();
     if (lock_) vSemaphoreDelete(lock_);
 }
 
@@ -263,7 +259,6 @@ StorageListingRead StorageDirectoryListing::read(
 
     if (active_same || pending_same || refresh) {
         unlock();
-        wake_background_worker();
         return StorageListingRead::Preparing;
     }
 
@@ -286,8 +281,6 @@ StorageListingRead StorageDirectoryListing::read(
     error_path_[0] = 0;
     error_[0] = 0;
     unlock();
-
-    wake_background_worker();
     return StorageListingRead::Preparing;
 }
 
@@ -470,13 +463,13 @@ void StorageDirectoryListing::publish_locked() {
     clear_build_locked();
 }
 
-JobStep StorageDirectoryListing::sort_step_locked() {
-    if (!build_) return JobStep::Idle;
+StorageBrowserStep StorageDirectoryListing::sort_step_locked() {
+    if (!build_) return StorageBrowserStep::Idle;
 
     const size_t count = build_->entry_count_;
     if (count < 2) {
         publish_locked();
-        return JobStep::Working;
+        return StorageBrowserStep::Working;
     }
 
     const uint32_t started_ms = millis();
@@ -497,7 +490,7 @@ JobStep StorageDirectoryListing::sort_step_locked() {
                 Memory::free(build_->sort_entries_);
                 build_->sort_entries_ = nullptr;
                 publish_locked();
-                return JobStep::Working;
+                return StorageBrowserStep::Working;
             }
         }
 
@@ -546,10 +539,10 @@ JobStep StorageDirectoryListing::sort_step_locked() {
             }
         }
     }
-    return JobStep::Working;
+    return StorageBrowserStep::Working;
 }
 
-JobStep StorageDirectoryListing::step_locked() {
+StorageBrowserStep StorageDirectoryListing::step_locked() {
     if (pending_ &&
         (!build_ ||
          strcmp(build_->path(), pending_path_) != 0)) {
@@ -557,16 +550,16 @@ JobStep StorageDirectoryListing::step_locked() {
     } else if (!build_) {
         (void)start_pending_locked();
     }
-    if (!build_) return JobStep::Idle;
+    if (!build_) return StorageBrowserStep::Idle;
 
     if (phase_ == Phase::Sorting) {
         return sort_step_locked();
     }
     if (!Storage::mounted()) {
         fail_locked("storage_unavailable");
-        return JobStep::Idle;
+        return StorageBrowserStep::Idle;
     }
-    if (!ensure_dir_open_locked()) return JobStep::Idle;
+    if (!ensure_dir_open_locked()) return StorageBrowserStep::Idle;
 
     const uint32_t started_ms = millis();
     while (build_ &&
@@ -577,7 +570,7 @@ JobStep StorageDirectoryListing::step_locked() {
             close_dir_locked();
             if (build_->entry_count_ < 2) {
                 publish_locked();
-                return JobStep::Working;
+                return StorageBrowserStep::Working;
             }
 
             build_->sort_entries_ =
@@ -588,7 +581,7 @@ JobStep StorageDirectoryListing::step_locked() {
                         false));
             if (!build_->sort_entries_) {
                 fail_locked("sort_alloc");
-                return JobStep::Idle;
+                return StorageBrowserStep::Idle;
             }
 
             phase_ = Phase::Sorting;
@@ -596,7 +589,7 @@ JobStep StorageDirectoryListing::step_locked() {
             sort_left_ = 0;
             sort_source_is_entries_ = true;
             sort_merge_active_ = false;
-            return JobStep::Working;
+            return StorageBrowserStep::Working;
         }
         scanned_++;
 
@@ -617,10 +610,10 @@ JobStep StorageDirectoryListing::step_locked() {
                                  child.size,
                                  modified)) {
             fail_locked("snapshot_alloc");
-            return JobStep::Idle;
+            return StorageBrowserStep::Idle;
         }
     }
-    return JobStep::Working;
+    return StorageBrowserStep::Working;
 }
 
 StorageDownloadPrepareState StorageDownloadProducer::prepare(
@@ -664,7 +657,6 @@ StorageDownloadPrepareState StorageDownloadProducer::prepare(
         status_out.state = ready ? StorageDownloadPrepareState::Ready
                                  : StorageDownloadPrepareState::Preparing;
         unlock();
-        wake_background_worker();
         return status_out.state;
     }
 
@@ -686,8 +678,6 @@ StorageDownloadPrepareState StorageDownloadProducer::prepare(
     active_ = download;
     status_out.id = download->id;
     unlock();
-
-    wake_background_worker();
     return status_out.state;
 }
 
@@ -724,8 +714,6 @@ bool StorageDownloadProducer::attach(
     size_out = active_->size;
     download_out = active_;
     unlock();
-
-    wake_background_worker();
     return true;
 }
 
@@ -737,13 +725,11 @@ PreparedByteRead StorageDownloadProducer::read(
     PreparedByteRead result = download.transfer.read(
         buffer, max_length, offset, nonzero_millis(millis()));
 
-    if (result.bytes > 0) wake_background_worker();
     return result;
 }
 
 void StorageDownloadProducer::finish(StoragePreparedDownload &download) {
     download.transfer.finish(download.transfer.consumed() == download.size);
-    wake_background_worker();
 }
 
 void StorageDownloadProducer::close_file(StoragePreparedDownload &download) {
@@ -769,23 +755,23 @@ void StorageDownloadProducer::retire_locked(StoragePreparedDownload &download,
     active_.reset();
 }
 
-JobStep StorageDownloadProducer::step() {
-    if (!lock(20)) return JobStep::Waiting;
+StorageBrowserStep StorageDownloadProducer::step() {
+    if (!lock(20)) return StorageBrowserStep::Waiting;
     std::shared_ptr<StoragePreparedDownload> download = active_;
     if (!download) {
         unlock();
-        return JobStep::Idle;
+        return StorageBrowserStep::Idle;
     }
 
     if (download->transfer.cancel_requested()) {
         unlock();
         close_file(*download);
-        if (!lock(20)) return JobStep::Waiting;
+        if (!lock(20)) return StorageBrowserStep::Waiting;
         if (active_.get() == download.get()) {
             retire_locked(*download, false);
         }
         unlock();
-        return JobStep::Idle;
+        return StorageBrowserStep::Idle;
     }
 
     if (download->transfer.producer_done()) {
@@ -798,7 +784,7 @@ JobStep StorageDownloadProducer::step() {
         if (attach_expired) {
             retire_locked(*download, !download->error[0]);
             unlock();
-            return JobStep::Idle;
+            return StorageBrowserStep::Idle;
         }
 
         const bool complete = download->transfer.consumed() == download->size;
@@ -806,7 +792,7 @@ JobStep StorageDownloadProducer::step() {
             (complete || download->error[0]);
         if (retire) retire_locked(*download, complete);
         unlock();
-        return JobStep::Waiting;
+        return StorageBrowserStep::Waiting;
     }
 
     if (!download->metadata_ready && !download->opening) {
@@ -856,7 +842,8 @@ JobStep StorageDownloadProducer::step() {
         unlock();
 
         if (download->transfer.producer_done()) close_file(*download);
-        return failed ? JobStep::Idle : JobStep::Working;
+        return failed ? StorageBrowserStep::Idle
+                      : StorageBrowserStep::Working;
     }
 
     const uint32_t now_ms = nonzero_millis(millis());
@@ -864,7 +851,7 @@ JobStep StorageDownloadProducer::step() {
             now_ms, download->ready_ms + DOWNLOAD_ATTACH_TIMEOUT_MS)) {
         download->transfer.request_cancel();
         unlock();
-        return JobStep::Working;
+        return StorageBrowserStep::Working;
     }
     if (download->transfer.consumer_attached() &&
         !download->transfer.consumer_closed() &&
@@ -874,14 +861,14 @@ JobStep StorageDownloadProducer::step() {
                 DOWNLOAD_ATTACH_TIMEOUT_MS)) {
         download->transfer.request_cancel();
         unlock();
-        return JobStep::Working;
+        return StorageBrowserStep::Working;
     }
 
     size_t span_length = 0;
     uint8_t *span = download->transfer.write_span(span_length);
     if (!span || span_length == 0) {
         unlock();
-        return JobStep::Waiting;
+        return StorageBrowserStep::Waiting;
     }
     span_length = std::min(span_length, DOWNLOAD_READ_BYTES);
     const uint64_t remaining = download->size - download->produced;
@@ -899,13 +886,13 @@ JobStep StorageDownloadProducer::step() {
         fail_locked(*download, "read_failed");
         unlock();
         close_file(*download);
-        return JobStep::Idle;
+        return StorageBrowserStep::Idle;
     }
     if (!download->transfer.commit_write(bytes_read)) {
         fail_locked(*download, "ring_commit");
         unlock();
         close_file(*download);
-        return JobStep::Idle;
+        return StorageBrowserStep::Idle;
     }
 
     download->produced += bytes_read;
@@ -916,19 +903,19 @@ JobStep StorageDownloadProducer::step() {
     unlock();
 
     if (done) close_file(*download);
-    return JobStep::Working;
+    return StorageBrowserStep::Working;
 }
 
-JobStep StorageDirectoryListing::step() {
+StorageBrowserStep StorageDirectoryListing::step() {
     begin();
-    if (!lock(20)) return JobStep::Waiting;
+    if (!lock(20)) return StorageBrowserStep::Waiting;
 
-    const JobStep result = step_locked();
+    const StorageBrowserStep result = step_locked();
     unlock();
     return result;
 }
 
-void StorageDirectoryListing::on_preempt() {
+void StorageDirectoryListing::shutdown() {
     begin();
     if (!lock(20)) return;
 
@@ -945,7 +932,7 @@ bool StorageDownloadProducer::active_or_busy() const {
     return result;
 }
 
-void StorageDownloadProducer::on_preempt() {
+void StorageDownloadProducer::shutdown() {
     begin();
     if (!lock(20)) return;
 
@@ -968,7 +955,7 @@ void StorageDownloadProducer::on_preempt() {
     unlock();
 }
 
-StorageBrowserJob::~StorageBrowserJob() {
+StorageBrowserService::~StorageBrowserService() {
     if (download_) {
         download_->~StorageDownloadProducer();
         Memory::free(download_);
@@ -979,7 +966,7 @@ StorageBrowserJob::~StorageBrowserJob() {
     }
 }
 
-bool StorageBrowserJob::ensure_owners() {
+bool StorageBrowserService::ensure_owners() {
     if (!listing_) {
         void *memory = Memory::alloc_large(sizeof(StorageDirectoryListing),
                                            false);
@@ -998,48 +985,71 @@ bool StorageBrowserJob::ensure_owners() {
     return true;
 }
 
-void StorageBrowserJob::begin() {
+bool StorageBrowserService::begin(WakeCallback wake) {
+    if (wake) wake_ = wake;
+
     if (!ensure_owners()) {
         Log::logf(CAT_STORAGE,
                   LOG_ERROR,
                   "browser owner allocation failed\n");
+        return false;
     }
+    return true;
 }
 
-bool StorageBrowserJob::run_when_gate_closed(const char *reason) const {
-    return reason && strcmp(reason, "web_grace") == 0;
+void StorageBrowserService::set_task_available(bool available) {
+    task_available_ = available;
 }
 
-StorageListingRead StorageBrowserJob::listing(
+bool StorageBrowserService::ready() const {
+    return task_available_ && listing_ && download_;
+}
+
+void StorageBrowserService::wake() const {
+    if (wake_) wake_();
+}
+
+StorageListingRead StorageBrowserService::listing(
     const char *path,
     bool refresh,
     std::shared_ptr<const StorageDirectorySnapshot> &snapshot_out,
     char *error_out,
     size_t error_out_size) {
-    if (!ensure_owners()) {
-        copy_cstr(error_out, error_out_size, "owner_alloc");
+    if (!ready()) {
+        copy_cstr(error_out, error_out_size, "service_unavailable");
         return StorageListingRead::Error;
     }
-    return listing_->read(path,
-                          refresh,
-                          snapshot_out,
-                          error_out,
-                          error_out_size);
+
+    const StorageListingRead result = listing_->read(path,
+                                                     refresh,
+                                                     snapshot_out,
+                                                     error_out,
+                                                     error_out_size);
+
+    if (result == StorageListingRead::Preparing) wake();
+    return result;
 }
 
-StorageDownloadPrepareState StorageBrowserJob::prepare_download(
+StorageDownloadPrepareState StorageBrowserService::prepare_download(
     const char *path,
     StorageDownloadPrepareStatus &status_out) {
-    if (!ensure_owners()) {
+    if (!ready()) {
         status_out = StorageDownloadPrepareStatus();
         status_out.state = StorageDownloadPrepareState::Error;
-        copy_cstr(status_out.error, sizeof(status_out.error), "owner_alloc");
+        copy_cstr(status_out.error,
+                  sizeof(status_out.error),
+                  "service_unavailable");
         return status_out.state;
     }
-    return download_->prepare(path, status_out);
+
+    const StorageDownloadPrepareState result =
+        download_->prepare(path, status_out);
+
+    if (result == StorageDownloadPrepareState::Preparing) wake();
+    return result;
 }
 
-bool StorageBrowserJob::begin_download(
+bool StorageBrowserService::begin_download(
     uint32_t id,
     std::shared_ptr<StoragePreparedDownload> &download_out,
     char *filename_out,
@@ -1047,40 +1057,60 @@ bool StorageBrowserJob::begin_download(
     uint64_t &size_out,
     char *error_out,
     size_t error_out_size) {
-    if (!ensure_owners()) {
-        copy_cstr(error_out, error_out_size, "owner_alloc");
+    if (!ready()) {
+        copy_cstr(error_out, error_out_size, "service_unavailable");
         return false;
     }
-    return download_->attach(id,
-                             download_out,
-                             filename_out,
-                             filename_out_size,
-                             size_out,
-                             error_out,
-                             error_out_size);
+
+    const bool attached = download_->attach(id,
+                                            download_out,
+                                            filename_out,
+                                            filename_out_size,
+                                            size_out,
+                                            error_out,
+                                            error_out_size);
+
+    if (attached) wake();
+    return attached;
 }
 
-PreparedByteRead StorageBrowserJob::read_download(
+PreparedByteRead StorageBrowserService::read_download(
     StoragePreparedDownload &download,
     uint8_t *buffer,
     size_t max_length,
     size_t offset) {
-    if (!download_) return PreparedByteRead();
-    return download_->read(download, buffer, max_length, offset);
+    if (!ready()) return PreparedByteRead();
+
+    const PreparedByteRead result =
+        download_->read(download, buffer, max_length, offset);
+
+    if (result.bytes > 0) wake();
+    return result;
 }
 
-void StorageBrowserJob::finish_download(StoragePreparedDownload &download) {
-    if (download_) download_->finish(download);
+void StorageBrowserService::finish_download(
+    StoragePreparedDownload &download) {
+    if (!ready()) return;
+
+    download_->finish(download);
+    wake();
 }
 
-JobStep StorageBrowserJob::step() {
-    if (!ensure_owners()) return JobStep::Idle;
-    return download_->active_or_busy() ? download_->step() : listing_->step();
-}
+StorageBrowserStep StorageBrowserService::step() {
+    if (!ready()) return StorageBrowserStep::Idle;
 
-void StorageBrowserJob::on_preempt() {
-    if (listing_) listing_->on_preempt();
-    if (download_) download_->on_preempt();
+    StorageBrowserStep download_step = StorageBrowserStep::Idle;
+    if (download_->active_or_busy()) download_step = download_->step();
+    if (download_step == StorageBrowserStep::Working) return download_step;
+
+    const StorageBrowserStep listing_step = listing_->step();
+    if (listing_step == StorageBrowserStep::Working) return listing_step;
+
+    if (download_step == StorageBrowserStep::Waiting ||
+        listing_step == StorageBrowserStep::Waiting) {
+        return StorageBrowserStep::Waiting;
+    }
+    return StorageBrowserStep::Idle;
 }
 
 }  // namespace aircannect
