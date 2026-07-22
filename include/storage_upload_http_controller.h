@@ -12,8 +12,6 @@ class AsyncWebServerRequest;
 
 namespace aircannect {
 
-class StorageArchivePort;
-class StorageDeletePort;
 class StorageStatusPort;
 class StorageUploadPort;
 
@@ -21,8 +19,6 @@ class StorageUploadPort;
 class StorageUploadHttpController final : public HttpRouteModule {
 public:
     bool begin(StorageUploadPort &upload_port,
-               StorageArchivePort &archive_port,
-               StorageDeletePort &delete_port,
                StorageStatusPort &status_port);
     void register_routes(AsyncWebServer &server) override;
 
@@ -46,8 +42,6 @@ private:
     void clear_capability(uint32_t id = 0);
 
     StorageUploadPort *upload_port_ = nullptr;
-    StorageArchivePort *archive_port_ = nullptr;
-    StorageDeletePort *delete_port_ = nullptr;
     StorageStatusPort *status_port_ = nullptr;
 
     mutable StaticSemaphore_t capability_mutex_storage_ = {};

@@ -789,8 +789,6 @@ void setup() {
     const bool storage_upload_http_started =
         storage_upload_http_controller.begin(
             StorageService::upload_port(),
-            StorageService::archive_port(),
-            StorageService::delete_port(),
             StorageService::status_port());
     if (!storage_upload_http_started) {
         Log::logf(CAT_GENERAL, LOG_ERROR,

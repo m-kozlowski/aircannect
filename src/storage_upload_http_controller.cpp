@@ -16,8 +16,6 @@
 #include "http_request_utils.h"
 #include "json_util.h"
 #include "large_byte_buffer.h"
-#include "storage_archive_port.h"
-#include "storage_delete_port.h"
 #include "storage_path.h"
 #include "storage_service.h"
 #include "storage_upload_port.h"
@@ -134,12 +132,8 @@ String upload_error_json(const char *error, uint64_t committed_bytes = 0) {
 }  // namespace
 
 bool StorageUploadHttpController::begin(StorageUploadPort &upload_port,
-                                        StorageArchivePort &archive_port,
-                                        StorageDeletePort &delete_port,
                                         StorageStatusPort &status_port) {
     upload_port_ = &upload_port;
-    archive_port_ = &archive_port;
-    delete_port_ = &delete_port;
     status_port_ = &status_port;
 
     if (!capability_mutex_) {
@@ -204,17 +198,6 @@ void StorageUploadHttpController::send_start(
         http_discard_request_body(request);
         request->send(503, "application/json",
                       upload_error_json("storage_unavailable"));
-        return;
-    }
-
-    const StorageServiceStatus storage = status_port_->status();
-    if (storage.busy || storage.edf_queued > 0 ||
-        storage.open_file_count > 0 ||
-        (archive_port_ && archive_port_->active()) ||
-        (delete_port_ && delete_port_->active())) {
-        http_discard_request_body(request);
-        request->send(409, "application/json",
-                      upload_error_json("storage_busy"));
         return;
     }
 
