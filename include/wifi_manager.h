@@ -154,6 +154,7 @@ private:
     bool start_softap(bool with_sta);
     void stop_softap(const char *reason);
     void stop_wifi();
+    void prepare_sta_radio(bool keep_softap, bool reset_existing_sta);
     void apply_country_code();
     void handle_connected();
     void handle_associated_without_ip();
@@ -169,10 +170,10 @@ private:
     void apply_sta_phy_config();
 
     // candidate selection
-    bool begin_unpinned_profile(size_t index, bool keep_softap,
-                                const char *reason);
-    bool begin_scan_candidate(size_t candidate_index, bool keep_softap,
-                              bool roaming);
+    bool begin_profile_association(size_t profile_index,
+                                   const ScanCandidate *candidate,
+                                   bool keep_softap, bool roaming,
+                                   const char *reason);
     bool sta_has_ipv4() const;
     void mark_ip_failed_for_current();
     bool candidate_ip_failed(uint8_t profile_index, const uint8_t *bssid,

@@ -289,18 +289,8 @@ bool WifiManager::start_profile(size_t index, bool keep_softap) {
     WifiProfile &profile = profiles_[index];
     if (!profile.ssid.length()) return false;
 
-    const bool with_softap =
-        softap_mode_ == SoftApMode::Forced || keep_softap ||
-        softap_running_;
-    if (with_softap && !softap_running_) {
-        start_softap(true);
-    } else if (!with_softap && softap_running_) {
-        stop_softap("sta_connect_without_ap");
-    }
-    WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
-    apply_country_code();
-    apply_sta_phy_config();
-    WiFi.setHostname(hostname_.c_str());
+    prepare_sta_radio(keep_softap, false);
+
     mode_state_ = WifiModeState::StaConnecting;
     management_reachable_ = softap_running_;
     sta_ipv4_online_ = false;
@@ -333,7 +323,8 @@ bool WifiManager::start_profile(size_t index, bool keep_softap) {
                   profile.ssid.c_str());
     }
 
-    return begin_unpinned_profile(index, keep_softap, "scan_unavailable");
+    return begin_profile_association(index, nullptr, keep_softap, false,
+                                     "scan_unavailable");
 }
 
 bool WifiManager::start_next_profile(size_t start_index, bool keep_softap) {
@@ -431,6 +422,34 @@ void WifiManager::stop_wifi() {
     last_disconnect_reason_ = 0;
     last_disconnect_reason = 0;
     mode_state_ = WifiModeState::Off;
+}
+
+void WifiManager::prepare_sta_radio(bool keep_softap,
+                                    bool reset_existing_sta) {
+    const bool with_softap =
+        softap_mode_ == SoftApMode::Forced || keep_softap ||
+        softap_running_;
+
+    if (reset_existing_sta) {
+        if (with_softap) {
+            const wifi_mode_t mode = WiFi.getMode();
+            if (mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA) {
+                WiFi.disconnect(true);
+            }
+            if (!softap_running_) start_softap(true);
+        } else {
+            stop_wifi();
+        }
+    } else if (with_softap && !softap_running_) {
+        start_softap(true);
+    } else if (!with_softap && softap_running_) {
+        stop_softap("sta_connect_without_ap");
+    }
+
+    WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
+    apply_country_code();
+    apply_sta_phy_config();
+    WiFi.setHostname(hostname_.c_str());
 }
 
 bool WifiManager::configure_sta(const String &ssid, const String &password) {
@@ -953,106 +972,60 @@ void WifiManager::handle_connected() {
     apply_softap_mode();
 }
 
-bool WifiManager::begin_unpinned_profile(size_t index, bool keep_softap,
-                                         const char *reason) {
-    if (index >= profile_count_) return false;
-    WifiProfile &profile = profiles_[index];
+bool WifiManager::begin_profile_association(
+    size_t profile_index, const ScanCandidate *candidate, bool keep_softap,
+    bool roaming, const char *reason) {
+    if (profile_index >= profile_count_) return false;
+    if (candidate && candidate->profile_index != profile_index) return false;
+
+    WifiProfile &profile = profiles_[profile_index];
     if (!profile.ssid.length()) return false;
 
-    const bool with_softap =
-        softap_mode_ == SoftApMode::Forced || keep_softap ||
-        softap_running_;
-    if (with_softap && !softap_running_) {
-        start_softap(true);
-    } else if (!with_softap && softap_running_) {
-        stop_softap("sta_connect_without_ap");
-    }
-    WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
-    apply_country_code();
-    apply_sta_phy_config();
-    WiFi.setHostname(hostname_.c_str());
+    prepare_sta_radio(keep_softap, candidate != nullptr);
+
     mode_state_ = WifiModeState::StaConnecting;
     management_reachable_ = softap_running_;
     sta_ipv4_online_ = false;
     softap_retry_deadline_ms_ = 0;
-    roam_connect_pending_ = false;
-    ap_select_keep_softap_ = false;
-    active_profile_index_ = static_cast<int8_t>(index);
-    sta_ssid_ = profile.ssid;
-    sta_pass_ = profile.password;
-    connect_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
-    ipv4_deadline_ms_ = 0;
-    pmf_retry_attempted_ = false;
-    last_disconnect_reason_ = 0;
-    last_disconnect_reason = 0;
-    stats_.connect_attempts++;
-
-    Log::logf(CAT_WIFI, LOG_INFO,
-              "connecting to profile %u SSID=%s BSSID=auto reason=%s\n",
-              static_cast<unsigned>(index), profile.ssid.c_str(),
-              reason ? reason : "direct");
-    if (!profile.password.length()) {
-        WiFi.begin(profile.ssid.c_str());
-    } else {
-        WiFi.begin(profile.ssid.c_str(), profile.password.c_str());
-    }
-    return true;
-}
-
-bool WifiManager::begin_scan_candidate(size_t candidate_index,
-                                       bool keep_softap,
-                                       bool roaming) {
-    if (candidate_index >= scan_candidate_count_) return false;
-    const ScanCandidate candidate = scan_candidates_[candidate_index];
-    if (candidate.profile_index >= profile_count_) return false;
-    WifiProfile &profile = profiles_[candidate.profile_index];
-    if (!profile.ssid.length()) return false;
-
-    const bool with_softap =
-        softap_mode_ == SoftApMode::Forced || keep_softap ||
-        softap_running_;
-    if (with_softap) {
-        if (WiFi.getMode() == WIFI_MODE_STA ||
-            WiFi.getMode() == WIFI_MODE_APSTA) {
-            WiFi.disconnect(true);
-        }
-        if (!softap_running_) start_softap(true);
-    } else {
-        stop_wifi();
-    }
-    WiFi.mode(with_softap ? WIFI_AP_STA : WIFI_STA);
-    apply_country_code();
-    apply_sta_phy_config();
-    WiFi.setHostname(hostname_.c_str());
-    mode_state_ = WifiModeState::StaConnecting;
-    management_reachable_ = softap_running_;
-    sta_ipv4_online_ = false;
-    active_profile_index_ = static_cast<int8_t>(candidate.profile_index);
-    sta_ssid_ = profile.ssid;
-    sta_pass_ = profile.password;
-    connect_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
-    ipv4_deadline_ms_ = 0;
-    pmf_retry_attempted_ = false;
-    last_disconnect_reason_ = 0;
-    last_disconnect_reason = 0;
-    stats_.connect_attempts++;
     roam_connect_pending_ = roaming;
     ap_select_keep_softap_ = false;
+    active_profile_index_ = static_cast<int8_t>(profile_index);
+    sta_ssid_ = profile.ssid;
+    sta_pass_ = profile.password;
+    connect_deadline_ms_ = millis() + AC_WIFI_CONNECT_TIMEOUT_MS;
+    ipv4_deadline_ms_ = 0;
+    pmf_retry_attempted_ = false;
+    last_disconnect_reason_ = 0;
+    last_disconnect_reason = 0;
+    stats_.connect_attempts++;
+
+    if (!candidate) {
+        Log::logf(CAT_WIFI, LOG_INFO,
+                  "connecting to profile %u SSID=%s BSSID=auto reason=%s\n",
+                  static_cast<unsigned>(profile_index), profile.ssid.c_str(),
+                  reason ? reason : "direct");
+        if (!profile.password.length()) {
+            WiFi.begin(profile.ssid.c_str());
+        } else {
+            WiFi.begin(profile.ssid.c_str(), profile.password.c_str());
+        }
+        return true;
+    }
 
     char bssid_text[AC_WIFI_BSSID_TEXT_MAX];
-    format_bssid(bssid_text, sizeof(bssid_text), candidate.bssid);
+    format_bssid(bssid_text, sizeof(bssid_text), candidate->bssid);
     Log::logf(CAT_WIFI, LOG_INFO,
               "%s SSID=%s profile=%u BSSID=%s ch=%u rssi=%d\n",
               roaming ? "roaming within" : "connecting to",
               profile.ssid.c_str(),
-              static_cast<unsigned>(candidate.profile_index), bssid_text,
-              static_cast<unsigned>(candidate.channel),
-              static_cast<int>(candidate.rssi));
+              static_cast<unsigned>(profile_index), bssid_text,
+              static_cast<unsigned>(candidate->channel),
+              static_cast<int>(candidate->rssi));
     const char *password = profile.password.length()
                                ? profile.password.c_str()
                                : nullptr;
-    WiFi.begin(profile.ssid.c_str(), password, candidate.channel,
-               candidate.bssid);
+    WiFi.begin(profile.ssid.c_str(), password, candidate->channel,
+               candidate->bssid);
     return true;
 }
 
@@ -1099,8 +1072,9 @@ void WifiManager::handle_ap_select_scan() {
                   "connect\n",
                   sta_ssid_.c_str());
         if (active_profile_index_ >= 0) {
-            begin_unpinned_profile(static_cast<size_t>(active_profile_index_),
-                                   ap_select_keep_softap_, "scan_timeout");
+            begin_profile_association(
+                static_cast<size_t>(active_profile_index_), nullptr,
+                ap_select_keep_softap_, false, "scan_timeout");
         }
         return;
     }
@@ -1120,15 +1094,17 @@ void WifiManager::handle_ap_select_scan() {
                   "AP selection scan failed for SSID=%s; using unpinned "
                   "connect\n",
                   sta_ssid_.c_str());
-        begin_unpinned_profile(static_cast<size_t>(active_profile),
-                               keep_softap, "scan_failed");
+        begin_profile_association(static_cast<size_t>(active_profile), nullptr,
+                                  keep_softap, false, "scan_failed");
         return;
     }
 
     collect_scan_candidates(result, active_profile);
     WiFi.scanDelete();
     if (scan_candidate_count_ > 0) {
-        begin_scan_candidate(0, keep_softap, false);
+        const ScanCandidate candidate = scan_candidates_[0];
+        begin_profile_association(candidate.profile_index, &candidate,
+                                  keep_softap, false, nullptr);
         return;
     }
 
@@ -1154,8 +1130,8 @@ void WifiManager::handle_ap_select_scan() {
               "AP selection found no candidate for SSID=%s; using unpinned "
               "connect\n",
               sta_ssid_.c_str());
-    begin_unpinned_profile(static_cast<size_t>(active_profile),
-                           keep_softap, "no_scan_candidate");
+    begin_profile_association(static_cast<size_t>(active_profile), nullptr,
+                              keep_softap, false, "no_scan_candidate");
 }
 
 void WifiManager::maybe_start_roam_scan() {
@@ -1241,7 +1217,11 @@ void WifiManager::collect_scan_candidates(int16_t scan_count,
 }
 
 bool WifiManager::start_scan_candidate(size_t candidate_index) {
-    return begin_scan_candidate(candidate_index, softap_running_, true);
+    if (candidate_index >= scan_candidate_count_) return false;
+
+    const ScanCandidate candidate = scan_candidates_[candidate_index];
+    return begin_profile_association(candidate.profile_index, &candidate,
+                                     softap_running_, true, nullptr);
 }
 
 void WifiManager::handle_roam_scan() {
