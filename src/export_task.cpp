@@ -205,6 +205,9 @@ bool ExportTask::queue_command(CommandKind kind, const char *day) {
     }
 
     unlock_inputs();
+    if (kind != CommandKind::SmbScheduledReconcile) {
+        runtime_->smb.cancel_scheduled_reconcile();
+    }
     wake();
     return true;
 }
@@ -221,8 +224,19 @@ bool ExportTask::request_smb_verify() {
     return queue_command(CommandKind::SmbVerify);
 }
 
+bool ExportTask::request_smb_scheduled_reconcile() {
+    return queue_command(CommandKind::SmbScheduledReconcile);
+}
+
 bool ExportTask::request_smb_post_therapy() {
     return queue_command(CommandKind::SmbPostTherapy);
+}
+
+void ExportTask::cancel_smb_scheduled_reconcile() {
+    if (!runtime_) return;
+
+    runtime_->smb.cancel_scheduled_reconcile();
+    wake();
 }
 
 bool ExportTask::request_sleephq_check() {
@@ -336,7 +350,11 @@ bool ExportTask::apply_command(const Command &command) {
             break;
         case CommandKind::SmbVerify:
             configured = smb.enabled && smb.configured;
-            accepted = runtime_->smb.request_verify_recent();
+            accepted = runtime_->smb.request_manual_reconcile();
+            break;
+        case CommandKind::SmbScheduledReconcile:
+            configured = smb.enabled && smb.configured;
+            accepted = runtime_->smb.request_scheduled_reconcile();
             break;
         case CommandKind::SmbPostTherapy:
             configured = smb.enabled && smb.configured;
@@ -460,7 +478,6 @@ void ExportTask::publish_status() {
               sleephq_device_id);
     smb.sync = runtime_->smb.status();
     control.smb = runtime_->smb.runtime_status();
-    control.smb_config_generation = smb.sync.config_generation;
     sleephq.sync = runtime_->sleephq.status();
     control.sleephq = runtime_->sleephq.runtime_status();
     control.active = control.smb.state == StorageSyncState::Working ||

@@ -95,6 +95,10 @@ struct StorageSyncRuntimeStatus {
     bool enabled = false;
     bool configured = false;
     bool network_available = false;
+    bool scheduled_reconcile = false;
+    uint32_t config_generation = 0;
+    uint32_t completed_sequence = 0;
+    uint64_t last_reconcile_epoch = 0;
 
     bool active() const {
         return state == StorageSyncState::Working ||
@@ -125,8 +129,10 @@ public:
     // sync requests
     bool request_manual_sync();
     bool request_startup_check();
-    bool request_verify_recent();
+    bool request_manual_reconcile();
+    bool request_scheduled_reconcile();
     bool request_post_therapy_sync();
+    void cancel_scheduled_reconcile();
 
     // status
     StorageSyncStatus status() const;
@@ -166,7 +172,8 @@ private:
         PostTherapy,
         StartupCheck,
         StartupSync,
-        VerifyRecent,
+        ManualReconcile,
+        ScheduledReconcile,
         Retry,
     };
 
@@ -214,6 +221,7 @@ private:
     static const char *run_kind_reason(RunKind kind);
     static bool run_kind_is_verify(RunKind kind);
     static bool run_kind_is_reconcile(RunKind kind);
+    static bool run_kind_is_scheduled_reconcile(RunKind kind);
     bool request_sync_with_kind(RunKind kind, const char *label);
 
     // run scheduling
@@ -222,7 +230,7 @@ private:
     void reset_run_locked(bool keep_status);
     bool prepare_step_locked(uint32_t now_ms, ExportStep &result);
     void queue_retry_locked(uint32_t now_ms);
-    void queue_reconcile_if_due_locked(uint32_t now_ms);
+    bool cancel_scheduled_reconcile_locked();
     ExportStep step_work_phase_locked();
     static bool phase_has_blocking_io(WorkPhase phase);
     void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
@@ -310,10 +318,16 @@ private:
     std::atomic<bool> runtime_pending_{false};
     std::atomic<bool> runtime_enabled_{false};
     std::atomic<bool> runtime_configured_{false};
+    std::atomic<bool> runtime_scheduled_reconcile_{false};
+    std::atomic<uint32_t> runtime_config_generation_{0};
+    std::atomic<uint32_t> runtime_completed_sequence_{0};
+    std::atomic<uint64_t> runtime_last_reconcile_epoch_{0};
     std::atomic<uint32_t> idle_defer_until_ms_{0};
     std::atomic<bool> post_therapy_requested_{false};
+    std::atomic<bool> cancel_scheduled_reconcile_requested_{false};
     RunKind pending_run_kind_ = RunKind::Manual;
     RunKind current_run_kind_ = RunKind::Manual;
+    uint32_t completed_sequence_ = 0;
     bool sync_after_verify_ = false;
 
     // active run

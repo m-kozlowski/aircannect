@@ -55,6 +55,8 @@ private:
 
     struct StartupCheckState {
         uint32_t smb_requested_generation = 0;
+        uint32_t smb_completed_generation = 0;
+        uint32_t smb_request_completed_sequence = 0;
         uint32_t sleephq_requested_generation = 0;
         uint32_t sleephq_completed_generation = 0;
         bool idle_grace_complete = false;
@@ -67,7 +69,15 @@ private:
         uint32_t due_ms = 0;
     };
 
+    struct FullReconcileState {
+        uint32_t config_generation = 0;
+        uint32_t idle_due_ms = 0;
+        bool queued = false;
+    };
+
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
+    static bool external_request_allowed(
+        const ExportTaskControlSnapshot &status);
     ExportTaskControlSnapshot control_snapshot() const;
 
     // post-therapy sequence
@@ -94,12 +104,13 @@ private:
 
     // startup and idle backfill
     bool startup_idle_work_allowed(uint32_t now_ms);
+    void observe_smb_startup_check(StorageSyncRuntimeStatus status);
     void maybe_queue_smb_startup_check(
         bool network_connected,
         StorageSyncRuntimeStatus status,
-        uint32_t config_generation,
         SleepHqSyncRuntimeStatus sleephq);
     void maybe_queue_sleephq_startup_check(bool network_connected,
+                                           bool smb_startup_complete,
                                            bool storage_sync_active,
                                            SleepHqSyncRuntimeStatus status);
     void poll_sleephq_idle_backfill(const ExportReportActivity &report,
@@ -111,6 +122,19 @@ private:
                                     uint32_t now_ms);
     void clear_idle_backfill();
 
+    // full SMB reconcile
+    void maybe_preempt_full_reconcile(
+        const ExportReportActivity &report,
+        const ActivitySnapshot &activity,
+        const ExportTaskControlSnapshot &task_status);
+    void poll_full_reconcile(const ExportReportActivity &report,
+                             const ActivitySnapshot &activity,
+                             const ExportTaskControlSnapshot &task_status,
+                             uint32_t now_ms);
+    bool full_reconcile_prerequisites_complete(
+        const ExportTaskControlSnapshot &task_status) const;
+    void reset_full_reconcile();
+
     // export task command/status port
     ExportTask *task_ = nullptr;
 
@@ -118,6 +142,7 @@ private:
     PostTherapyState post_therapy_;
     StartupCheckState startup_check_;
     IdleBackfillState idle_backfill_;
+    FullReconcileState full_reconcile_;
 };
 
 }  // namespace aircannect

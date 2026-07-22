@@ -2,6 +2,7 @@
 
 #include "board_report.h"
 #include "debug_log.h"
+#include "storage_export_plan.h"
 
 namespace aircannect {
 
@@ -9,6 +10,14 @@ uint32_t ExportCoordinator::due_after(uint32_t now_ms, uint32_t delay_ms) {
     uint32_t due = now_ms + delay_ms;
     if (due == 0) due = 1;
     return due;
+}
+
+bool ExportCoordinator::external_request_allowed(
+    const ExportTaskControlSnapshot &status) {
+    if (status.command_pending) return false;
+    if (!status.busy) return true;
+
+    return status.smb.scheduled_reconcile && !status.sleephq.active();
 }
 
 void ExportCoordinator::begin(ExportTask &task) {
@@ -43,35 +52,49 @@ bool ExportCoordinator::endpoint_work_active() const {
 bool ExportCoordinator::request_smb_sync() {
     if (!task_) return false;
     const ExportTaskControlSnapshot current = control_snapshot();
-    if (current.busy || !task_->request_smb_sync()) return false;
+    if (!external_request_allowed(current) || !task_->request_smb_sync()) {
+        return false;
+    }
 
-    startup_check_.smb_requested_generation =
-        current.smb_config_generation;
+    if (startup_check_.smb_completed_generation !=
+        current.smb.config_generation) {
+        startup_check_.smb_requested_generation =
+            current.smb.config_generation;
+        startup_check_.smb_request_completed_sequence =
+            current.smb.completed_sequence;
+    }
     return true;
 }
 
 bool ExportCoordinator::request_smb_verify() {
     if (!task_) return false;
     const ExportTaskControlSnapshot current = control_snapshot();
-    if (current.busy || !task_->request_smb_verify()) return false;
+    if (!external_request_allowed(current) || !task_->request_smb_verify()) {
+        return false;
+    }
 
-    startup_check_.smb_requested_generation =
-        current.smb_config_generation;
+    if (startup_check_.smb_completed_generation !=
+        current.smb.config_generation) {
+        startup_check_.smb_requested_generation =
+            current.smb.config_generation;
+        startup_check_.smb_request_completed_sequence =
+            current.smb.completed_sequence;
+    }
     return true;
 }
 
 bool ExportCoordinator::request_sleephq_sync() {
-    if (!task_ || control_snapshot().busy) return false;
+    if (!task_ || !external_request_allowed(control_snapshot())) return false;
     return task_->request_sleephq_sync();
 }
 
 bool ExportCoordinator::request_sleephq_sync_day(const char *day) {
-    if (!task_ || control_snapshot().busy) return false;
+    if (!task_ || !external_request_allowed(control_snapshot())) return false;
     return task_->request_sleephq_sync_day(day);
 }
 
 bool ExportCoordinator::request_sleephq_check() {
-    if (!task_ || control_snapshot().busy) return false;
+    if (!task_ || !external_request_allowed(control_snapshot())) return false;
     return task_->request_sleephq_check();
 }
 
@@ -85,11 +108,15 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
     const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq;
     const bool storage_active = storage.active();
 
+    observe_smb_startup_check(storage);
+
     poll_post_therapy(report,
                       activity.realtime_stream_active,
                       activity.therapy_active,
                       storage_active,
                       now_ms);
+
+    maybe_preempt_full_reconcile(report, activity, task_status);
 
     if (sleephq.state == SleepHqSyncState::Working) {
         task_->defer_smb_until(
@@ -104,9 +131,14 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
     if (startup_idle) {
         maybe_queue_smb_startup_check(task_status.network_ready,
                                       storage,
-                                      task_status.smb_config_generation,
                                       sleephq);
+        const bool smb_startup_complete =
+            !storage.enabled || !storage.configured ||
+            startup_check_.smb_completed_generation ==
+                storage.config_generation;
+
         maybe_queue_sleephq_startup_check(task_status.network_ready,
+                                          smb_startup_complete,
                                           storage_active,
                                           sleephq);
     }
@@ -117,6 +149,8 @@ void ExportCoordinator::poll(const ExportReportActivity &report,
                                storage_active,
                                sleephq,
                                now_ms);
+
+    poll_full_reconcile(report, activity, task_status, now_ms);
 }
 
 void ExportCoordinator::poll_post_therapy(
@@ -389,33 +423,69 @@ bool ExportCoordinator::startup_idle_work_allowed(uint32_t now_ms) {
     return true;
 }
 
+void ExportCoordinator::observe_smb_startup_check(
+    StorageSyncRuntimeStatus status) {
+    if (!status.enabled || !status.configured ||
+        status.config_generation == 0) {
+        startup_check_.smb_requested_generation = 0;
+        startup_check_.smb_completed_generation = 0;
+        startup_check_.smb_request_completed_sequence = 0;
+        return;
+    }
+    if (startup_check_.smb_requested_generation !=
+        status.config_generation) {
+        startup_check_.smb_completed_generation = 0;
+        return;
+    }
+    if (status.state != StorageSyncState::Idle || status.pending ||
+        status.completed_sequence ==
+            startup_check_.smb_request_completed_sequence) {
+        return;
+    }
+
+    startup_check_.smb_completed_generation = status.config_generation;
+}
+
 void ExportCoordinator::maybe_queue_smb_startup_check(
     bool network_connected,
     StorageSyncRuntimeStatus status,
-    uint32_t config_generation,
     SleepHqSyncRuntimeStatus sleephq) {
     if (!task_ || !network_connected) return;
-    if (!status.enabled || !status.configured || config_generation == 0) {
+    if (!status.enabled || !status.configured ||
+        status.config_generation == 0) {
         startup_check_.smb_requested_generation = 0;
+        startup_check_.smb_completed_generation = 0;
+        startup_check_.smb_request_completed_sequence = 0;
+        return;
+    }
+    if (startup_check_.smb_completed_generation ==
+        status.config_generation) {
         return;
     }
     if (startup_check_.smb_requested_generation ==
-            config_generation ||
+            status.config_generation ||
         status.pending || status.state == StorageSyncState::Working ||
         sleephq.pending || sleephq.state == SleepHqSyncState::Working) {
         return;
     }
 
     if (task_->request_smb_startup_check()) {
-        startup_check_.smb_requested_generation = config_generation;
+        startup_check_.smb_requested_generation =
+            status.config_generation;
+        startup_check_.smb_request_completed_sequence =
+            status.completed_sequence;
     }
 }
 
 void ExportCoordinator::maybe_queue_sleephq_startup_check(
     bool network_connected,
+    bool smb_startup_complete,
     bool storage_sync_active,
     SleepHqSyncRuntimeStatus status) {
-    if (!task_ || !network_connected || storage_sync_active) return;
+    if (!task_ || !network_connected || !smb_startup_complete ||
+        storage_sync_active) {
+        return;
+    }
     if (!status.configured || status.config_generation == 0) {
         startup_check_.sleephq_requested_generation = 0;
         startup_check_.sleephq_completed_generation = 0;
@@ -493,6 +563,134 @@ void ExportCoordinator::clear_idle_backfill() {
     idle_backfill_.armed_generation = 0;
     idle_backfill_.pending = false;
     idle_backfill_.due_ms = 0;
+}
+
+void ExportCoordinator::maybe_preempt_full_reconcile(
+    const ExportReportActivity &report,
+    const ActivitySnapshot &activity,
+    const ExportTaskControlSnapshot &task_status) {
+    if (!task_ || !task_status.smb.scheduled_reconcile) return;
+
+    const bool smb_startup_pending =
+        task_status.smb.enabled && task_status.smb.configured &&
+        startup_check_.smb_completed_generation !=
+            task_status.smb.config_generation;
+    const bool post_therapy_pending =
+        post_therapy_.report_settle_due_ms != 0 ||
+        post_therapy_.storage_pending || post_therapy_.sleephq_pending;
+    const bool priority_work =
+        !task_status.network_ready || report.foreground_active ||
+        report.background_active || activity.therapy_active ||
+        activity.realtime_stream_active || activity.ota_install_active ||
+        smb_startup_pending || post_therapy_pending ||
+        idle_backfill_.pending || task_status.sleephq.active();
+    if (!priority_work) return;
+
+    full_reconcile_.idle_due_ms = 0;
+    task_->cancel_smb_scheduled_reconcile();
+}
+
+bool ExportCoordinator::full_reconcile_prerequisites_complete(
+    const ExportTaskControlSnapshot &task_status) const {
+    if (!task_status.network_ready || task_status.command_pending ||
+        !task_status.smb.enabled || !task_status.smb.configured ||
+        task_status.smb.state != StorageSyncState::Idle ||
+        task_status.smb.pending || task_status.sleephq.active()) {
+        return false;
+    }
+    if (startup_check_.smb_completed_generation !=
+        task_status.smb.config_generation) {
+        return false;
+    }
+    if (post_therapy_.report_settle_due_ms != 0 ||
+        post_therapy_.storage_pending || post_therapy_.sleephq_pending ||
+        idle_backfill_.pending) {
+        return false;
+    }
+
+    const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq;
+    if (!sleephq.configured) return true;
+    const bool check_succeeded =
+        startup_check_.sleephq_completed_generation ==
+        sleephq.config_generation;
+    const bool check_attempted =
+        startup_check_.sleephq_requested_generation ==
+        sleephq.config_generation;
+    if (!check_succeeded && !check_attempted) {
+        return false;
+    }
+    if (sleephq.state == SleepHqSyncState::Pending ||
+        sleephq.state == SleepHqSyncState::Working || sleephq.pending) {
+        return false;
+    }
+    if (check_succeeded &&
+        idle_backfill_.queued_generation != sleephq.config_generation) {
+        return false;
+    }
+    return true;
+}
+
+void ExportCoordinator::poll_full_reconcile(
+    const ExportReportActivity &report,
+    const ActivitySnapshot &activity,
+    const ExportTaskControlSnapshot &task_status,
+    uint32_t now_ms) {
+    if (!task_) return;
+
+    if (full_reconcile_.config_generation !=
+        task_status.smb.config_generation) {
+        reset_full_reconcile();
+        full_reconcile_.config_generation =
+            task_status.smb.config_generation;
+    }
+
+    if (full_reconcile_.queued) {
+        if (task_status.smb.scheduled_reconcile) {
+            return;
+        }
+        if (task_status.command_pending || task_status.smb.active()) {
+            return;
+        }
+
+        reset_full_reconcile();
+        full_reconcile_.config_generation =
+            task_status.smb.config_generation;
+    }
+
+    const uint64_t now_epoch = storage_export_current_epoch_seconds_or_zero();
+    const uint64_t last_reconcile = task_status.smb.last_reconcile_epoch;
+    const bool due =
+        now_epoch != 0 &&
+        (last_reconcile == 0 ||
+         now_epoch >= last_reconcile +
+             AC_EXPORT_FULL_RECONCILE_INTERVAL_SECONDS);
+    const bool runtime_idle =
+        !report.foreground_active && !report.background_active &&
+        !activity.therapy_active && !activity.realtime_stream_active &&
+        !activity.ota_install_active;
+    if (!due || !runtime_idle ||
+        !full_reconcile_prerequisites_complete(task_status)) {
+        full_reconcile_.idle_due_ms = 0;
+        return;
+    }
+
+    if (full_reconcile_.idle_due_ms == 0) {
+        full_reconcile_.idle_due_ms = due_after(
+            now_ms, AC_EXPORT_FULL_RECONCILE_IDLE_GRACE_MS);
+        return;
+    }
+    if (static_cast<int32_t>(now_ms - full_reconcile_.idle_due_ms) < 0) {
+        return;
+    }
+
+    if (task_->request_smb_scheduled_reconcile()) {
+        full_reconcile_.queued = true;
+        full_reconcile_.idle_due_ms = 0;
+    }
+}
+
+void ExportCoordinator::reset_full_reconcile() {
+    full_reconcile_ = FullReconcileState();
 }
 
 }  // namespace aircannect

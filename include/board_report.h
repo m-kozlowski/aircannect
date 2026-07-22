@@ -28,6 +28,11 @@ static constexpr uint32_t AC_EXPORT_TASK_BUSY_RECHECK_MS = 250;
 static constexpr uint32_t AC_EXPORT_TASK_WORK_TICK_MS = 20;
 static constexpr uint32_t AC_EXPORT_TASK_IDLE_TICK_MS = 10000;
 static constexpr uint32_t AC_EXPORT_ACTIVITY_GRACE_MS = 3000;
+static constexpr uint32_t AC_EXPORT_FULL_RECONCILE_IDLE_GRACE_MS =
+    5UL * 60UL * 1000UL;
+static constexpr uint64_t AC_EXPORT_FULL_RECONCILE_INTERVAL_SECONDS =
+    24ULL * 60ULL * 60ULL;
+
 // Automatic report prebuild and export startup checks stay out of the first
 // boot window while CAN/RPC discovery, Wi-Fi, and time synchronization settle.
 // Durable report bootstrap and explicit user requests are not delayed.

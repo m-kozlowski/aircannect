@@ -30,7 +30,6 @@ struct ExportTaskControlSnapshot {
     bool busy = false;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
-    uint32_t smb_config_generation = 0;
     StorageSyncRuntimeStatus smb;
     SleepHqSyncRuntimeStatus sleephq;
 #if AC_STACK_PROFILE_ENABLED
@@ -76,7 +75,9 @@ public:
     bool request_smb_sync();
     bool request_smb_startup_check();
     bool request_smb_verify();
+    bool request_smb_scheduled_reconcile();
     bool request_smb_post_therapy();
+    void cancel_smb_scheduled_reconcile();
     bool request_sleephq_check();
     bool request_sleephq_startup_check();
     bool request_sleephq_sync();
@@ -98,6 +99,7 @@ private:
         SmbSync,
         SmbStartupCheck,
         SmbVerify,
+        SmbScheduledReconcile,
         SmbPostTherapy,
         SleepHqCheck,
         SleepHqStartupCheck,

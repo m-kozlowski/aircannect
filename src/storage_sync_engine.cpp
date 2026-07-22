@@ -22,9 +22,8 @@ static constexpr const char *SYNC_METADATA_FILE = "meta.state";
 static constexpr size_t SYNC_METADATA_MAX_BYTES = 511;
 static constexpr const char *SYNC_REASON_STARTUP_CHECK = "startup_check";
 static constexpr const char *SYNC_REASON_STARTUP_SYNC = "startup_sync";
-static constexpr const char *SYNC_REASON_VERIFY_RECENT = "verify_recent";
-static constexpr uint64_t SYNC_RECONCILE_INTERVAL_SECONDS =
-    24ULL * 60ULL * 60ULL;
+static constexpr const char *SYNC_REASON_MANUAL_RECONCILE = "manual_reconcile";
+static constexpr const char *SYNC_REASON_FULL_RECONCILE = "full_reconcile";
 const uint32_t SYNC_RETRY_BACKOFF_MS[] = {
     15UL * 60UL * 1000UL,
     60UL * 60UL * 1000UL,
@@ -99,6 +98,15 @@ void StorageSyncEngine::publish_runtime_locked() {
     runtime_pending_.store(status_.pending);
     runtime_enabled_.store(status_.enabled);
     runtime_configured_.store(status_.configured);
+    const RunKind visible_kind = status_.state == StorageSyncState::Working
+        ? current_run_kind_ : pending_run_kind_;
+    runtime_scheduled_reconcile_.store(
+        run_kind_is_scheduled_reconcile(visible_kind) &&
+        (status_.state == StorageSyncState::Working || status_.pending ||
+         status_.state == StorageSyncState::Error));
+    runtime_config_generation_.store(status_.config_generation);
+    runtime_completed_sequence_.store(completed_sequence_);
+    runtime_last_reconcile_epoch_.store(status_.last_reconcile_epoch);
 }
 
 bool StorageSyncEngine::snapshot_configured(const SmbExportConfig &config) {
@@ -137,7 +145,8 @@ const char *StorageSyncEngine::run_kind_reason(RunKind kind) {
         case RunKind::PostTherapy: return "post_therapy";
         case RunKind::StartupCheck: return SYNC_REASON_STARTUP_CHECK;
         case RunKind::StartupSync: return SYNC_REASON_STARTUP_SYNC;
-        case RunKind::VerifyRecent: return SYNC_REASON_VERIFY_RECENT;
+        case RunKind::ManualReconcile: return SYNC_REASON_MANUAL_RECONCILE;
+        case RunKind::ScheduledReconcile: return SYNC_REASON_FULL_RECONCILE;
         case RunKind::Retry: return "retry";
     }
     return "manual";
@@ -145,11 +154,17 @@ const char *StorageSyncEngine::run_kind_reason(RunKind kind) {
 
 bool StorageSyncEngine::run_kind_is_verify(RunKind kind) {
     return kind == RunKind::StartupCheck ||
-           kind == RunKind::VerifyRecent;
+           kind == RunKind::ManualReconcile ||
+           kind == RunKind::ScheduledReconcile;
 }
 
 bool StorageSyncEngine::run_kind_is_reconcile(RunKind kind) {
-    return kind == RunKind::VerifyRecent;
+    return kind == RunKind::ManualReconcile ||
+           kind == RunKind::ScheduledReconcile;
+}
+
+bool StorageSyncEngine::run_kind_is_scheduled_reconcile(RunKind kind) {
+    return kind == RunKind::ScheduledReconcile;
 }
 
 bool StorageSyncEngine::config_matches_locked(
@@ -455,9 +470,12 @@ void StorageSyncEngine::apply_config_locked(const SmbExportConfig &config) {
         status_.bytes_uploaded = 0;
         status_.started_ms = 0;
         status_.last_run_verify = false;
+        status_.last_run_reconcile = false;
+        completed_sequence_ = 0;
     }
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
+    cancel_scheduled_reconcile_requested_.store(false);
     Log::logf(CAT_STORAGE,
               LOG_DEBUG,
               "[SYNC] config enabled=%u configured=%u\n",
@@ -727,8 +745,21 @@ bool StorageSyncEngine::request_startup_check() {
     return request_sync_with_kind(RunKind::StartupCheck, "startup_check");
 }
 
-bool StorageSyncEngine::request_verify_recent() {
-    return request_sync_with_kind(RunKind::VerifyRecent, "verify_recent");
+bool StorageSyncEngine::request_manual_reconcile() {
+    return request_sync_with_kind(RunKind::ManualReconcile,
+                                  SYNC_REASON_MANUAL_RECONCILE);
+}
+
+bool StorageSyncEngine::request_scheduled_reconcile() {
+    return request_sync_with_kind(RunKind::ScheduledReconcile,
+                                  SYNC_REASON_FULL_RECONCILE);
+}
+
+void StorageSyncEngine::cancel_scheduled_reconcile() {
+    if (!runtime_scheduled_reconcile_.load()) return;
+
+    cancel_scheduled_reconcile_requested_.store(true);
+    request_operation_abort();
 }
 
 bool StorageSyncEngine::queue_post_therapy_locked(uint32_t now_ms) {
@@ -1269,6 +1300,9 @@ void StorageSyncEngine::finish_run_locked() {
                   static_cast<unsigned>(status_.files_failed),
                   static_cast<unsigned long long>(status_.bytes_uploaded));
     }
+    completed_sequence_++;
+    if (completed_sequence_ == 0) completed_sequence_++;
+
     if (!queue_result_metadata_save_locked()) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
@@ -1415,39 +1449,40 @@ void StorageSyncEngine::queue_retry_locked(uint32_t now_ms) {
     publish_runtime_locked();
 }
 
-void StorageSyncEngine::queue_reconcile_if_due_locked(uint32_t now_ms) {
-    if (status_.state != StorageSyncState::Idle ||
-        !status_.enabled ||
-        !status_.configured ||
-        !network_available_.load()) {
-        return;
-    }
-    const uint64_t now_epoch = storage_export_current_epoch_seconds_or_zero();
-    const bool due =
-        now_epoch != 0 &&
-        (status_.last_reconcile_epoch == 0 ||
-         now_epoch >= status_.last_reconcile_epoch +
-             SYNC_RECONCILE_INTERVAL_SECONDS);
-    if (!due) return;
+bool StorageSyncEngine::cancel_scheduled_reconcile_locked() {
+    if (!cancel_scheduled_reconcile_requested_.exchange(false)) return false;
 
-    status_.pending = true;
-    status_.state = StorageSyncState::Pending;
-    pending_run_kind_ = RunKind::VerifyRecent;
-    copy_cstr(status_.pending_reason,
-              sizeof(status_.pending_reason),
-              run_kind_reason(pending_run_kind_));
-    status_.updated_ms = now_ms;
+    const bool current =
+        status_.state == StorageSyncState::Working &&
+        run_kind_is_scheduled_reconcile(current_run_kind_);
+    const bool pending =
+        run_kind_is_scheduled_reconcile(pending_run_kind_) &&
+        (status_.pending || status_.state == StorageSyncState::Error);
+    if (!current && !pending) return false;
+
+    reset_run_locked(false);
+    status_.state = status_.enabled && status_.configured
+        ? StorageSyncState::Idle : StorageSyncState::Disabled;
+    status_.pending = false;
+    status_.pending_reason[0] = '\0';
+    status_.last_error[0] = '\0';
+    status_.updated_ms = nonzero_millis(millis());
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
     publish_runtime_locked();
+
     Log::logf(CAT_STORAGE,
-              LOG_INFO,
-              "[SYNC] queued reason=%s last_reconcile=%llu\n",
-              status_.pending_reason,
-              static_cast<unsigned long long>(
-                  status_.last_reconcile_epoch));
+              LOG_DEBUG,
+              "[SYNC] scheduled reconcile cancelled for priority work\n");
+    return true;
 }
 
 bool StorageSyncEngine::prepare_step_locked(uint32_t now_ms, ExportStep &result) {
     apply_pending_config_locked();
+    if (cancel_scheduled_reconcile_locked()) {
+        result = ExportStep::Idle;
+        return false;
+    }
     if (!service_result_metadata_save_locked(result)) return false;
 
     const uint32_t defer_until = idle_defer_until_ms_.load();
@@ -1458,7 +1493,6 @@ bool StorageSyncEngine::prepare_step_locked(uint32_t now_ms, ExportStep &result)
         return false;
     }
     queue_retry_locked(now_ms);
-    queue_reconcile_if_due_locked(now_ms);
     queue_deferred_post_therapy_locked(now_ms);
 
     if (abort_requested_.load() &&
@@ -2091,6 +2125,10 @@ StorageSyncRuntimeStatus StorageSyncEngine::runtime_status() const {
     out.enabled = runtime_enabled_.load();
     out.configured = runtime_configured_.load();
     out.network_available = network_available_.load();
+    out.scheduled_reconcile = runtime_scheduled_reconcile_.load();
+    out.config_generation = runtime_config_generation_.load();
+    out.completed_sequence = runtime_completed_sequence_.load();
+    out.last_reconcile_epoch = runtime_last_reconcile_epoch_.load();
     return out;
 }
 
