@@ -45,7 +45,8 @@ private:
     void fail_locked(StorageByteStream &stream, const char *error);
     void close_input_locked(StorageByteStream &stream);
     void retire_locked(size_t index, StorageStreamState state);
-    size_t select_stream_locked();
+    bool step_stream_locked(size_t index);
+    bool step_lane_locked(StorageStreamLane lane);
 
     static constexpr size_t STREAM_CAPACITY = 2;
 

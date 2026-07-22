@@ -669,6 +669,7 @@ bool StorageArchiveService::step() {
     } else if (status_.state == StorageArchiveState::Downloading) {
         worked = download_step_locked();
     }
+    release_maintenance_locked();
     unlock();
     return worked;
 }

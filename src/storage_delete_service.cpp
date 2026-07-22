@@ -378,6 +378,7 @@ bool StorageDeleteService::step() {
 
     while (status_.state == StorageDeleteState::Deleting) {
         if (!delete_next_locked()) {
+            release_maintenance_locked();
             unlock();
             return true;
         }
@@ -386,6 +387,7 @@ bool StorageDeleteService::step() {
             break;
         }
     }
+    release_maintenance_locked();
     unlock();
     return true;
 }

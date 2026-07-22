@@ -81,8 +81,9 @@ void StorageScanService::set_task_available(bool available) {
 }
 
 void StorageScanService::set_paused(bool paused) {
-    paused_.store(paused, std::memory_order_release);
-    if (!paused) wake();
+    const bool changed =
+        paused_.exchange(paused, std::memory_order_acq_rel) != paused;
+    if (changed) wake();
 }
 
 bool StorageScanService::ready() const {
@@ -449,10 +450,16 @@ void StorageScanService::finish_locked(OperationOutcome outcome,
 }
 
 bool StorageScanService::step() {
-    if (!ready() || paused_.load(std::memory_order_acquire) || !lock()) {
-        return false;
+    if (!ready() || !lock()) return false;
+
+    if (paused_.load(std::memory_order_acquire)) {
+        const bool released = maintenance_claimed_;
+        release_maintenance_locked();
+        unlock();
+        return released;
     }
     if (!job_->active) {
+        release_maintenance_locked();
         unlock();
         return false;
     }
@@ -489,6 +496,7 @@ bool StorageScanService::step() {
              static_cast<uint32_t>(millis() - started_ms) <
                  SCAN_STEP_BUDGET_MS);
 
+    release_maintenance_locked();
     unlock();
     return worked;
 }

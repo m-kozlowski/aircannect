@@ -10,20 +10,39 @@ enum class BackgroundOperationStop : uint8_t {
     Deadline,
 };
 
+enum class BackgroundOperationTimeoutPolicy : uint8_t {
+    TotalDuration,
+    NoProgress,
+};
+
 using BackgroundOperationAbortCallback = bool (*)(void *ctx);
 
 struct BackgroundOperationControl {
     uint32_t started_ms = 0;
+    uint32_t last_progress_ms = 0;
     uint32_t timeout_ms = 0;
+    bool progress_observed = false;
+    BackgroundOperationTimeoutPolicy timeout_policy =
+        BackgroundOperationTimeoutPolicy::TotalDuration;
     BackgroundOperationAbortCallback should_abort = nullptr;
     void *ctx = nullptr;
+
+    void note_progress(uint32_t now_ms) {
+        last_progress_ms = now_ms;
+        progress_observed = true;
+    }
 
     BackgroundOperationStop stop_reason(uint32_t now_ms) const {
         if (should_abort && should_abort(ctx)) {
             return BackgroundOperationStop::Aborted;
         }
+        const uint32_t timeout_start =
+            timeout_policy == BackgroundOperationTimeoutPolicy::NoProgress &&
+                    progress_observed
+                ? last_progress_ms
+                : started_ms;
         if (timeout_ms != 0 &&
-            static_cast<uint32_t>(now_ms - started_ms) >= timeout_ms) {
+            static_cast<uint32_t>(now_ms - timeout_start) >= timeout_ms) {
             return BackgroundOperationStop::Deadline;
         }
         return BackgroundOperationStop::None;

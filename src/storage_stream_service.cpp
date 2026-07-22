@@ -130,13 +130,19 @@ bool StorageStreamService::request_stream(
     }
 
     size_t free_index = SIZE_MAX;
+    size_t export_streams = 0;
     for (size_t i = 0; i < STREAM_CAPACITY; ++i) {
+        if (streams_[i] && streams_[i]->lane == StorageStreamLane::Export) {
+            export_streams++;
+        }
         if (!streams_[i]) {
             free_index = i;
-            break;
         }
     }
-    if (free_index == SIZE_MAX) {
+    const bool export_slot_reserved =
+        command.lane == StorageStreamLane::Export &&
+        export_streams >= STREAM_CAPACITY - 1;
+    if (free_index == SIZE_MAX || export_slot_reserved) {
         unlock();
         copy_cstr(error_out, error_out_size, "stream_slots_full");
         return false;
@@ -352,31 +358,13 @@ void StorageStreamService::retire_locked(size_t index,
     streams_[index].reset();
 }
 
-size_t StorageStreamService::select_stream_locked() {
-    for (size_t offset = 0; offset < STREAM_CAPACITY; ++offset) {
-        const size_t index = (next_stream_ + offset) % STREAM_CAPACITY;
-        if (!streams_[index]) continue;
-
-        next_stream_ = (index + 1) % STREAM_CAPACITY;
-        return index;
-    }
-    return SIZE_MAX;
-}
-
-bool StorageStreamService::step() {
-    if (!ready() || !lock(20)) return false;
-
-    const size_t index = select_stream_locked();
-    if (index == SIZE_MAX) {
-        unlock();
-        return false;
-    }
+bool StorageStreamService::step_stream_locked(size_t index) {
+    if (index >= STREAM_CAPACITY || !streams_[index]) return false;
 
     StorageByteStream &stream = *streams_[index];
     const uint32_t now_ms = nonzero_millis(millis());
     if (stream.transfer.cancel_requested()) {
         retire_locked(index, StorageStreamState::Cancelled);
-        unlock();
         return true;
     }
 
@@ -387,10 +375,8 @@ bool StorageStreamService::step() {
             now_ms, stream.ready_ms + STREAM_CONSUMER_TIMEOUT_MS);
         if (stream.transfer.consumer_closed() || expired) {
             retire_locked(index, StorageStreamState::Error);
-            unlock();
             return true;
         }
-        unlock();
         return false;
     }
 
@@ -398,26 +384,20 @@ bool StorageStreamService::step() {
         stream.metadata_ready &&
         !stream.transfer.consumer_attached() &&
         millis_deadline_reached(
-            now_ms,
-            stream.ready_ms + STREAM_CONSUMER_TIMEOUT_MS);
+            now_ms, stream.ready_ms + STREAM_CONSUMER_TIMEOUT_MS);
     if (attach_expired) {
         retire_locked(index, StorageStreamState::Cancelled);
-        unlock();
         return true;
     }
 
     if (stream.transfer.producer_done()) {
-        const bool complete =
-            stream.transfer.consumed() == stream.size;
+        const bool complete = stream.transfer.consumed() == stream.size;
         if (stream.transfer.consumer_closed()) {
-            retire_locked(
-                index,
-                complete ? StorageStreamState::Ready
-                         : StorageStreamState::Cancelled);
-            unlock();
+            retire_locked(index,
+                          complete ? StorageStreamState::Ready
+                                   : StorageStreamState::Cancelled);
             return true;
         }
-        unlock();
         return false;
     }
 
@@ -430,11 +410,29 @@ bool StorageStreamService::step() {
                 STREAM_CONSUMER_TIMEOUT_MS);
     if (inactive) {
         retire_locked(index, StorageStreamState::Cancelled);
-        unlock();
         return true;
     }
 
-    const bool worked = produce_locked(stream);
+    return produce_locked(stream);
+}
+
+bool StorageStreamService::step_lane_locked(StorageStreamLane lane) {
+    const size_t start_index = next_stream_;
+    for (size_t offset = 0; offset < STREAM_CAPACITY; ++offset) {
+        const size_t index = (start_index + offset) % STREAM_CAPACITY;
+        if (!streams_[index] || streams_[index]->lane != lane) continue;
+
+        next_stream_ = (index + 1) % STREAM_CAPACITY;
+        if (step_stream_locked(index)) return true;
+    }
+    return false;
+}
+
+bool StorageStreamService::step() {
+    if (!ready() || !lock(20)) return false;
+
+    const bool worked = step_lane_locked(StorageStreamLane::Foreground) ||
+                        step_lane_locked(StorageStreamLane::Export);
     unlock();
     return worked;
 }

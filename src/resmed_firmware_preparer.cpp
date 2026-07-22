@@ -18,7 +18,7 @@
 namespace aircannect {
 namespace {
 
-constexpr uint32_t PrepareTimeoutMs = 5UL * 60UL * 1000UL;
+constexpr uint32_t PrepareNoProgressTimeoutMs = 5UL * 60UL * 1000UL;
 constexpr uint32_t UploadWaitTimeoutMs = 2UL * 60UL * 1000UL;
 constexpr uint32_t CleanupWaitTimeoutMs = 5000;
 
@@ -281,10 +281,12 @@ bool ResmedFirmwarePreparer::inspect_source(
     reader.configure(*stream_port_, command);
     BackgroundOperationControl operation;
     operation.started_ms = millis();
-    operation.timeout_ms = PrepareTimeoutMs;
+    operation.timeout_ms = PrepareNoProgressTimeoutMs;
+    operation.timeout_policy = BackgroundOperationTimeoutPolicy::NoProgress;
     operation.should_abort = operation_should_abort;
     operation.ctx = this;
     if (!reader.open(operation, error, error_size)) return false;
+    operation.note_progress(millis());
 
     const uint64_t input_size = reader.size();
     if (input_size == 0 || input_size > AC_RESMED_OTA_MAX_FILE_BYTES) {
@@ -320,6 +322,7 @@ bool ResmedFirmwarePreparer::inspect_source(
             reader.close(false);
             return false;
         }
+        operation.note_progress(millis());
 
         offset += wanted;
         publish_state(ResmedFirmwarePrepareState::Inspecting,
@@ -386,13 +389,15 @@ bool ResmedFirmwarePreparer::convert_raw(
     reader.configure(*stream_port_, command);
     BackgroundOperationControl operation;
     operation.started_ms = millis();
-    operation.timeout_ms = PrepareTimeoutMs;
+    operation.timeout_ms = PrepareNoProgressTimeoutMs;
+    operation.timeout_policy = BackgroundOperationTimeoutPolicy::NoProgress;
     operation.should_abort = operation_should_abort;
     operation.ctx = this;
     if (!reader.open(operation, error, error_size)) {
         (void)upload_port_->cancel(upload_id);
         return false;
     }
+    operation.note_progress(millis());
 
     std::unique_ptr<LargeByteBuffer> scratch =
         LargeByteBuffer::allocate(AC_RESMED_PREPARE_CHUNK_BYTES);
@@ -415,6 +420,7 @@ bool ResmedFirmwarePreparer::convert_raw(
             (void)upload_port_->cancel(upload_id);
             return false;
         }
+        operation.note_progress(millis());
 
         const uint64_t chunk_end = input_offset + wanted;
         const uint64_t copy_start = std::max(input_offset,
@@ -433,6 +439,7 @@ bool ResmedFirmwarePreparer::convert_raw(
                 return false;
             }
             output_offset += length;
+            operation.note_progress(millis());
             publish_state(ResmedFirmwarePrepareState::Converting,
                           info.prepared_size, output_offset, info.target);
         }
