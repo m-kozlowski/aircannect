@@ -10,7 +10,6 @@
 #include "fixed_queue.h"
 #include "large_text_buffer.h"
 #include "management_console.h"
-#include "sink_manager.h"
 
 class AsyncWebServerRequest;
 class AsyncEventSourceClient;
@@ -20,6 +19,7 @@ class AsyncWebServer;
 namespace aircannect {
 
 class HttpRouteModule;
+class LiveHttpController;
 class StatusHttpController;
 
 enum WebCommandKind : uint8_t {
@@ -55,8 +55,7 @@ public:
 
     // lifecycle
     bool begin(StatusHttpController &status,
-               StreamBroker &stream,
-               SinkManager &sink_manager,
+               LiveHttpController &live,
                ConsoleContext &console_ctx,
                const AppConfigData &config,
                HttpRouteModule *const *route_modules,
@@ -78,8 +77,6 @@ private:
     void register_routes(HttpRouteModule *const *route_modules,
                          size_t route_module_count);
     void reserve_cached_json();
-    void send_live_view_state(AsyncWebServerRequest *request);
-    void build_stream_json(LargeTextBuffer &json) const;
     void reserve_console_log();
     void append_console_log(const String &text);
     void clear_console_log();
@@ -112,15 +109,11 @@ private:
     SseSendResult send_sse_to_clients(const char *payload, const char *event,
                                       uint32_t id, bool status_heartbeat);
 
-    // Dashboard live stream sink
-    void poll_live_stream();
-    void send_live_batch(uint32_t now_ms);
-    bool live_view_requested(uint32_t now_ms);
+    // Dashboard live stream transport
+    void poll_live_transport(size_t healthy_clients);
 
     // Response helpers
     String queued_json(const char *result = "queued") const;
-    void send_cached(AsyncWebServerRequest *request,
-                     const LargeTextBuffer &json) const;
     void send_queue_result(AsyncWebServerRequest *request,
                            bool queued,
                            const char *result = "queued") const;
@@ -134,24 +127,14 @@ private:
         uint32_t last_status_ms = 0;
     };
 
-    // live view leases
-    struct LiveViewLease {
-        uint32_t client_hash = 0;
-        uint32_t expires_ms = 0;
-    };
-
     // snapshot masks
     static constexpr uint16_t SNAPSHOT_STATUS = 1u << 0;
-    static constexpr uint16_t SNAPSHOT_STREAM = 1u << 1;
-    static constexpr uint16_t SNAPSHOT_ALL =
-        SNAPSHOT_STATUS | SNAPSHOT_STREAM;
-    static constexpr uint16_t SNAPSHOT_PERIODIC =
-        SNAPSHOT_STATUS | SNAPSHOT_STREAM;
+    static constexpr uint16_t SNAPSHOT_ALL = SNAPSHOT_STATUS;
+    static constexpr uint16_t SNAPSHOT_PERIODIC = SNAPSHOT_STATUS;
 
     // subsystem owners
     StatusHttpController *status_ = nullptr;
-    StreamBroker *stream_ = nullptr;
-    SinkManager *sink_manager_ = nullptr;
+    LiveHttpController *live_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     // console and command queue
@@ -171,11 +154,9 @@ private:
     StaticSemaphore_t command_mutex_storage_ = {};
     StaticSemaphore_t cache_mutex_storage_ = {};
     StaticSemaphore_t sse_mutex_storage_ = {};
-    StaticSemaphore_t live_view_mutex_storage_ = {};
     SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
     SemaphoreHandle_t sse_mutex_ = nullptr;
-    SemaphoreHandle_t live_view_mutex_ = nullptr;
 
     // HTTP/SSE server
     AsyncWebServer *server_ = nullptr;
@@ -183,17 +164,9 @@ private:
     SseClientRef sse_clients_[AC_WEB_SSE_CLIENTS_MAX + 1];
     bool sse_enforce_needed_ = false;
 
-    // dashboard live stream
-    uint32_t live_last_send_ms_ = 0;
-    uint32_t live_seq_ = 0;
-    LiveViewLease live_view_leases_[AC_WEB_SSE_CLIENTS_MAX + 1];
-
     // cached JSON snapshots
     LargeTextBuffer cached_status_json_;
-    LargeTextBuffer cached_stream_json_;
     LargeTextBuffer next_status_json_;
-    LargeTextBuffer next_stream_json_;
-    LargeTextBuffer live_json_;
 
     // cached auth config
     bool cached_http_auth_required_ = true;
@@ -208,6 +181,7 @@ private:
 
     // snapshot state
     uint32_t observed_status_revision_ = 0;
+    uint32_t observed_live_generation_ = 0;
     bool snapshots_ready_ = false;
     uint16_t snapshots_dirty_mask_ = SNAPSHOT_ALL;
     uint32_t last_snapshot_ms_ = 0;

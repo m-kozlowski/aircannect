@@ -11,8 +11,8 @@
 #include "http_route_module.h"
 #include "http_request_utils.h"
 #include "json_util.h"
+#include "live_http_controller.h"
 #include "memory_manager.h"
-#include "sink_manager.h"
 #include "status_http_controller.h"
 #include "string_util.h"
 #include "string_print.h"
@@ -21,8 +21,6 @@
 namespace aircannect {
 
 namespace {
-
-static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
 
 const char *web_command_name(uint8_t kind) {
     switch (kind) {
@@ -37,62 +35,16 @@ size_t json_escaped_capacity(size_t raw_len, size_t overhead = 128) {
     return overhead + raw_len * 6;
 }
 
-uint32_t fnv1a32_string(const String &text) {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < text.length(); ++i) {
-        hash ^= static_cast<uint8_t>(text[i]);
-        hash *= 16777619u;
-    }
-    return hash ? hash : 1u;
-}
-
 bool json_get_string(JsonDocument &doc, const char *key, String &out) {
     if (!doc[key].is<const char *>()) return false;
     out = doc[key].as<const char *>();
     return true;
 }
 
-const char *stream_command_name(StreamCommandType type) {
-    switch (type) {
-        case StreamCommandType::Start: return "start";
-        case StreamCommandType::Stop: return "stop";
-        case StreamCommandType::None:
-        default: return "none";
-    }
-}
-
-template <typename JsonOut>
-void append_json_float_value(JsonOut &json, float value) {
-    append_json_float(json, value);
-}
-
-template <typename JsonOut>
-void append_live_series(JsonOut &json,
-                        const char *key,
-                        const LiveChartSeriesBatch &series,
-                        bool comma = true) {
-    if (comma) json += ',';
-    json += '"';
-    json += key;
-    json += "\":[";
-    const size_t count =
-        series.count <= series.capacity ? series.count : series.capacity;
-    for (size_t i = 0; series.values && series.valid && i < count; ++i) {
-        if (i) json += ',';
-        if (!series.valid[i]) {
-            json += "null";
-        } else {
-            append_json_float_value(json, series.values[i]);
-        }
-    }
-    json += ']';
-}
-
 }  // namespace
 
 bool WebUI::begin(StatusHttpController &status,
-                  StreamBroker &stream,
-                  SinkManager &sink_manager,
+                  LiveHttpController &live,
                   ConsoleContext &console_ctx,
                   const AppConfigData &config,
                   HttpRouteModule *const *route_modules,
@@ -101,8 +53,7 @@ bool WebUI::begin(StatusHttpController &status,
     if (started_) return true;
     stop();
     status_ = &status;
-    stream_ = &stream;
-    sink_manager_ = &sink_manager;
+    live_ = &live;
     console_ctx_ = &console_ctx;
 
     if (!command_mutex_) {
@@ -114,12 +65,7 @@ bool WebUI::begin(StatusHttpController &status,
     if (!sse_mutex_) {
         sse_mutex_ = xSemaphoreCreateMutexStatic(&sse_mutex_storage_);
     }
-    if (!live_view_mutex_) {
-        live_view_mutex_ =
-            xSemaphoreCreateMutexStatic(&live_view_mutex_storage_);
-    }
-    if (!command_mutex_ || !cache_mutex_ || !sse_mutex_ ||
-        !live_view_mutex_) {
+    if (!command_mutex_ || !cache_mutex_ || !sse_mutex_) {
         stop();
         return false;
     }
@@ -160,10 +106,7 @@ bool WebUI::begin(StatusHttpController &status,
 
 void WebUI::reserve_cached_json() {
     cached_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
-    cached_stream_json_.reserve(AC_WEB_STREAM_JSON_RESERVE);
     next_status_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
-    next_stream_json_.reserve(AC_WEB_STREAM_JSON_RESERVE);
-    live_json_.reserve(4096);
 }
 
 WebUiMemoryStatus WebUI::memory_status() {
@@ -196,22 +139,28 @@ WebUiMemoryStatus WebUI::memory_status() {
     } else {
         out.sse_clients = events_ ? events_->count() : 0;
     }
+    if (live_) {
+        const LiveHttpMemoryStatus live = live_->memory_status();
+        out.stream.length = live.stream_length;
+        out.stream.capacity = live.stream_capacity;
+        out.live.length = live.live_length;
+        out.live.capacity = live.live_capacity;
+    }
+
     if (!cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
         return out;
     }
     out.status = capture(cached_status_json_);
-    out.stream = capture(cached_stream_json_);
     out.console.length = console_log_length_;
     out.console.capacity = console_log_capacity_;
-    out.live = capture(live_json_);
     out.console_log_length = console_log_length_;
     xSemaphoreGive(cache_mutex_);
     return out;
 }
 
 void WebUI::stop() {
-    if (sink_manager_) sink_manager_->set_live_chart_enabled(false);
+    if (live_) live_->stop();
     web_console_.cancel_pending_storage();
     if (events_) {
         events_->close();
@@ -243,18 +192,7 @@ void WebUI::stop() {
         for (SseClientRef &ref : sse_clients_) ref = {};
     }
 
-    if (live_view_mutex_) {
-        if (xSemaphoreTake(live_view_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
-            for (LiveViewLease &lease : live_view_leases_) lease = {};
-            xSemaphoreGive(live_view_mutex_);
-        }
-    } else {
-        for (LiveViewLease &lease : live_view_leases_) lease = {};
-    }
-
     sse_enforce_needed_ = false;
-    live_last_send_ms_ = 0;
-    live_json_ = "";
     Memory::free(console_log_);
     console_log_ = nullptr;
     console_log_capacity_ = 0;
@@ -263,18 +201,15 @@ void WebUI::stop() {
     console_log_write_pos_ = 0;
     console_sse_pos_ = 0;
     console_sse_reset_pending_ = false;
-    if (sink_manager_) {
-        sink_manager_->set_live_chart_enabled(false);
-        sink_manager_->clear_live_chart_batch();
-    }
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
     observed_status_revision_ = 0;
+    observed_live_generation_ = 0;
     last_snapshot_ms_ = 0;
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
     status_ = nullptr;
-    stream_ = nullptr;
+    live_ = nullptr;
     started_ = false;
 }
 
@@ -296,7 +231,7 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (checkpoint) checkpoint("web_ui.commands");
     enforce_sse_limits();
     if (checkpoint) checkpoint("web_ui.sse_limits");
-    poll_live_stream();
+    poll_live_transport(healthy_sse_client_count());
     if (checkpoint) checkpoint("web_ui.live");
     publish_snapshots(false, checkpoint);
     if (checkpoint) checkpoint("web_ui.snapshots");
@@ -322,8 +257,12 @@ void WebUI::poll(PollCheckpoint checkpoint) {
                             true) == SseSendResult::Failed) {
         sse_backpressure = true;
     }
-    if (send_sse_to_clients(cached_stream_json_.c_str(), "stream", event_id,
-                            false) == SseSendResult::Failed) {
+    const char *stream_payload = nullptr;
+    size_t stream_length = 0;
+    if (live_ && live_->stream_payload(stream_payload, stream_length) &&
+        stream_length &&
+        send_sse_to_clients(stream_payload, "stream", event_id, false) ==
+            SseSendResult::Failed) {
         sse_backpressure = true;
     }
     if (console_sse_seq_ != console_seq_) {
@@ -554,89 +493,26 @@ WebUI::SseSendResult WebUI::send_sse_to_clients(const char *payload,
     return result;
 }
 
-void WebUI::poll_live_stream() {
-    const size_t clients = healthy_sse_client_count();
-    const bool live_needed = live_view_requested(millis()) && clients > 0;
-    if (sink_manager_) sink_manager_->set_live_chart_enabled(live_needed);
-    if (!live_needed) {
-        if (sink_manager_) sink_manager_->clear_live_chart_batch();
-        live_last_send_ms_ = 0;
-        return;
-    }
-    send_live_batch(millis());
-}
+void WebUI::poll_live_transport(size_t healthy_clients) {
+    if (!live_) return;
 
-bool WebUI::live_view_requested(uint32_t now_ms) {
-    if (!live_view_mutex_) return false;
-    bool active = false;
-    if (xSemaphoreTake(live_view_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
-        return false;
-    }
-    for (LiveViewLease &lease : live_view_leases_) {
-        if (!lease.client_hash) continue;
-        if (static_cast<int32_t>(now_ms - lease.expires_ms) >= 0) {
-            lease = {};
-            continue;
-        }
-        active = true;
-    }
-    xSemaphoreGive(live_view_mutex_);
-    return active;
-}
+    const uint32_t now_ms = millis();
+    live_->poll(healthy_clients, now_ms);
 
-void WebUI::send_live_batch(uint32_t now_ms) {
-    if (!events_ || !sink_manager_) return;
-    const LiveChartRuntimeStatus &live = sink_manager_->live_chart_status();
-    const bool has_samples =
-        live.pressure.count || live.flow.count || live.leak.count ||
-        live.inspiratory_pressure.count ||
-        live.expiratory_pressure.count ||
-        live.spo2.count || live.pulse.count;
-    const bool interval_due =
-        static_cast<int32_t>(now_ms - live_last_send_ms_) >=
-        static_cast<int32_t>(AC_WEB_LIVE_PUSH_INTERVAL_MS);
-    const bool heartbeat_due =
-        static_cast<int32_t>(now_ms - live_last_send_ms_) >=
-        static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
-    if (has_samples && !interval_due) return;
-    if (!has_samples && !live.state_dirty && !heartbeat_due) return;
-    if (healthy_sse_client_count() == 0) {
-        sink_manager_->clear_live_chart_batch();
+    const char *payload = nullptr;
+    size_t length = 0;
+    uint32_t generation = observed_live_generation_;
+    if (!live_->live_payload(payload, length, generation) || !length ||
+        generation == observed_live_generation_) {
         return;
     }
 
-    live_json_ = "{";
-    json_add_int(live_json_, "seq", static_cast<long>(++live_seq_), false);
-    json_add_bool(live_json_, "active", live.desired);
-    json_add_bool(live_json_, "attached", live.attached);
-    json_add_int(live_json_, "frames", static_cast<long>(live.frames));
-    json_add_int(live_json_, "drops", static_cast<long>(live.drops));
-    json_add_int(live_json_, "attach_failures",
-                 static_cast<long>(live.attach_failures));
-    if (live.last_frame_ms) {
-        json_add_int(live_json_, "last_age_ms", now_ms - live.last_frame_ms);
-    } else {
-        live_json_ += ",\"last_age_ms\":null";
-    }
-    json_add_string(live_json_, "last_error", live.last_error);
-    live_json_ += ",\"samples\":{";
-    append_live_series(live_json_, "pressure", live.pressure, false);
-    append_live_series(live_json_, "flow", live.flow);
-    append_live_series(live_json_, "leak", live.leak);
-    append_live_series(live_json_, "inspiratory_pressure",
-                       live.inspiratory_pressure);
-    append_live_series(live_json_, "expiratory_pressure",
-                       live.expiratory_pressure);
-    append_live_series(live_json_, "spo2", live.spo2);
-    append_live_series(live_json_, "pulse", live.pulse);
-    live_json_ += "}}";
-
-    if (send_sse_to_clients(live_json_.c_str(), "live", now_ms,
-                            false) == SseSendResult::Failed) {
+    observed_live_generation_ = generation;
+    if (events_ &&
+        send_sse_to_clients(payload, "live", now_ms, false) ==
+            SseSendResult::Failed) {
         sse_enforce_needed_ = true;
     }
-    live_last_send_ms_ = now_ms;
-    sink_manager_->mark_live_chart_sent();
 }
 
 void WebUI::handle_event(const RpcEvent &event) {
@@ -830,84 +706,6 @@ String WebUI::queued_json(const char *result) const {
     return json;
 }
 
-void WebUI::send_cached(AsyncWebServerRequest *request,
-                        const LargeTextBuffer &json) const {
-    if (!cache_mutex_ ||
-        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"cache busy\"}");
-        return;
-    }
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
-        xSemaphoreGive(cache_mutex_);
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response alloc\"}");
-        return;
-    }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    xSemaphoreGive(cache_mutex_);
-    request->send(response);
-}
-
-void WebUI::send_live_view_state(AsyncWebServerRequest *request) {
-    bool active = false;
-    if (request->hasArg("active")) {
-        parse_bool_yesno(request->arg("active"), active);
-    } else if (request->hasArg("enabled")) {
-        parse_bool_yesno(request->arg("enabled"), active);
-    }
-    const uint32_t client_hash =
-        request->hasArg("id") ? fnv1a32_string(request->arg("id")) : 1u;
-    const uint32_t now_ms = millis();
-    if (live_view_mutex_ &&
-        xSemaphoreTake(live_view_mutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-        LiveViewLease *empty = nullptr;
-        LiveViewLease *oldest = nullptr;
-        for (LiveViewLease &lease : live_view_leases_) {
-            if (lease.client_hash == client_hash) {
-                if (active) {
-                    lease.expires_ms = now_ms + WEB_LIVE_VIEW_LEASE_MS;
-                } else {
-                    lease = {};
-                }
-                xSemaphoreGive(live_view_mutex_);
-                request->send(200, "application/json",
-                              active ? "{\"ok\":true,\"active\":true}"
-                                     : "{\"ok\":true,\"active\":false}");
-                return;
-            }
-            if (!lease.client_hash) {
-                if (!empty) empty = &lease;
-                continue;
-            }
-            if (static_cast<int32_t>(now_ms - lease.expires_ms) >= 0) {
-                lease = {};
-                if (!empty) empty = &lease;
-                continue;
-            }
-            if (!oldest ||
-                static_cast<int32_t>(lease.expires_ms -
-                                     oldest->expires_ms) < 0) {
-                oldest = &lease;
-            }
-        }
-        if (active) {
-            LiveViewLease *slot = empty ? empty : oldest;
-            if (slot) {
-                slot->client_hash = client_hash;
-                slot->expires_ms = now_ms + WEB_LIVE_VIEW_LEASE_MS;
-            }
-        }
-        xSemaphoreGive(live_view_mutex_);
-    }
-    request->send(200, "application/json",
-                  active ? "{\"ok\":true,\"active\":true}"
-                         : "{\"ok\":true,\"active\":false}");
-}
-
 void WebUI::send_queue_result(AsyncWebServerRequest *request,
                               bool queued,
                               const char *result) const {
@@ -986,65 +784,6 @@ void WebUI::drain_commands() {
     }
 }
 
-void WebUI::build_stream_json(LargeTextBuffer &json) const {
-    const StreamBroker &stream = *stream_;
-    const LiveChartRuntimeStatus &live = sink_manager_->live_chart_status();
-
-    json = "{";
-    json_add_bool(json, "desired", stream.desired_active(), false);
-    json_add_bool(json, "subscribed", stream.actual_active());
-    json_add_bool(json, "pending_start", stream.pending_start());
-    json_add_bool(json, "pending_stop", stream.pending_stop());
-    json_add_bool(json, "error", stream.error());
-    json_add_string(json, "error_command",
-                    stream_command_name(stream.error_command()));
-    json_add_int(json, "consumers", stream.consumer_count());
-    json_add_int(json, "published_payloads", stream.published_payloads());
-    json_add_int(json, "fanout_targets", stream.fanout_targets());
-    json_add_int(json, "fanout_drops", stream.total_queue_drops());
-    json_add_int(json, "frame_pool_used", stream.frame_pool_in_use());
-    json_add_int(json, "frame_pool_capacity", stream.frame_pool_capacity());
-    json_add_int(json, "parse_errors", stream.parse_errors());
-    json_add_int(json, "pool_exhaustions", stream.pool_exhaustions());
-    json_add_int(json, "truncated_frames", stream.truncated_frames());
-    json_add_bool(json, "web_live_attached", live.attached);
-    json_add_int(json, "web_live_handle", live.handle);
-    json_add_int(json, "web_live_frames", static_cast<long>(live.frames));
-    json_add_int(json, "web_live_drops", static_cast<long>(live.drops));
-    json_add_int(json, "web_live_attach_failures",
-                 static_cast<long>(live.attach_failures));
-    json_add_string(json, "web_live_error", live.last_error);
-    json_add_int(json, "stream_id", stream.last_stream_id());
-    json_add_int(json, "start_requests", stream.start_requests());
-    json_add_int(json, "stop_requests", stream.stop_requests());
-    json_add_int(json, "command_deferred", stream.command_deferred());
-    json_add_int(json, "command_errors", stream.command_errors());
-    if (stream.last_notification_ms()) {
-        json_add_int(json, "last_age_ms",
-                     millis() - stream.last_notification_ms());
-    } else {
-        json += ",\"last_age_ms\":null";
-    }
-    json_add_string(json, "start_time", stream.last_start_time().c_str());
-    json_add_string(json, "params", stream.params_json().c_str());
-    json += ",\"consumer_slots\":[";
-    bool first_consumer = true;
-    for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
-        StreamConsumerHandle handle = static_cast<StreamConsumerHandle>(i);
-        if (!stream.consumer_active(handle)) continue;
-        if (!first_consumer) json += ',';
-        first_consumer = false;
-        json += "{";
-        json_add_bool(json, "active", true, false);
-        json_add_int(json, "source",
-                     static_cast<unsigned>(stream.consumer_source(handle)));
-        json_add_int(json, "queued", stream.consumer_queue_count(handle));
-        json_add_int(json, "drops", stream.consumer_queue_drops(handle));
-        json += '}';
-    }
-    json += "]}";
-}
-
 void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     const uint32_t now = millis();
     const bool periodic_due =
@@ -1060,7 +799,6 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     if (!rebuild_mask) return;
 
     next_status_json_.clear();
-    next_stream_json_.clear();
     uint16_t completed_mask = 0;
 
     if (rebuild_mask & SNAPSHOT_STATUS) {
@@ -1071,13 +809,6 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
         }
         if (checkpoint) checkpoint("web_ui.snapshots.status_copy");
     }
-    if (rebuild_mask & SNAPSHOT_STREAM) {
-        build_stream_json(next_stream_json_);
-        if (!next_stream_json_.overflowed()) {
-            completed_mask |= SNAPSHOT_STREAM;
-        }
-        if (checkpoint) checkpoint("web_ui.snapshots.stream");
-    }
     if (!completed_mask || !cache_mutex_ ||
         xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
         return;
@@ -1086,10 +817,6 @@ void WebUI::publish_snapshots(bool force, PollCheckpoint checkpoint) {
     if (completed_mask & SNAPSHOT_STATUS) {
         cached_status_json_.swap(next_status_json_);
     }
-    if (completed_mask & SNAPSHOT_STREAM) {
-        cached_stream_json_.swap(next_stream_json_);
-    }
-
     snapshots_dirty_mask_ &= ~completed_mask;
     snapshots_ready_ = snapshots_dirty_mask_ == 0;
     if (force || periodic_due || (completed_mask & SNAPSHOT_PERIODIC)) {
@@ -1134,16 +861,6 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
             200, "text/html", HTML_PAGE_GZ, HTML_PAGE_GZ_SIZE);
         response->addHeader("Content-Encoding", "gzip");
         request->send(response);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/stream"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        send_cached(request, cached_stream_json_);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/live/view"), HTTP_POST,
-                [this](AsyncWebServerRequest *request) {
-        send_live_view_state(request);
     });
 
     // Web console and file log

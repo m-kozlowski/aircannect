@@ -19,6 +19,7 @@
 #include "export_endpoint_config.h"
 #include "export_task.h"
 #include "http_route_module.h"
+#include "live_http_controller.h"
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
@@ -87,6 +88,7 @@ static DeviceHttpController device_http_controller;
 static OximetryHttpController oximetry_http_controller;
 static WifiHttpController wifi_http_controller;
 static StatusHttpController status_http_controller;
+static LiveHttpController live_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
@@ -97,6 +99,7 @@ static HttpRouteModule *web_route_modules[] = {
     &oximetry_http_controller,
     &wifi_http_controller,
     &status_http_controller,
+    &live_http_controller,
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
@@ -737,9 +740,13 @@ void setup() {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] status HTTP controller failed to start\n");
     }
+    if (!live_http_controller.begin(stream_broker, sink_manager)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] live HTTP controller failed to start\n");
+    }
 
-    web_ui.begin(status_http_controller, stream_broker, sink_manager,
-                 console_ctx, config_service.data(),
+    web_ui.begin(status_http_controller, live_http_controller, console_ctx,
+                 config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
 }
