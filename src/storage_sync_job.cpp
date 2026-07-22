@@ -65,9 +65,11 @@ const char *storage_sync_state_name(StorageSyncState state) {
 
 void StorageSyncJob::begin(const AppConfigData &config,
                            StorageScanPort &scan_port,
-                           StorageReadPort &read_port) {
+                           StorageReadPort &read_port,
+                           StorageStreamPort &stream_port) {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
     inventory_loader_.begin(scan_port, read_port);
+    stream_port_ = &stream_port;
     configure(config);
 }
 
@@ -1015,6 +1017,13 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     }
     current_file_.size = item.info.size;
     current_file_.mtime = item.info.mtime;
+    if (!stream_port_) {
+        fail_locked("stream_port_unavailable");
+        return false;
+    }
+    current_file_.local.configure(*stream_port_, path,
+                                  current_file_.size,
+                                  current_file_.mtime);
 
     if (!item.state_path[0]) {
         fail_locked("state_path_failed");
@@ -1053,12 +1062,8 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     return true;
 }
 
-void StorageSyncJob::close_local_locked() {
-    if (current_file_.local_open) {
-        Storage::Guard guard;
-        current_file_.local.close();
-        current_file_.local_open = false;
-    }
+void StorageSyncJob::close_local_locked(bool complete) {
+    current_file_.local.close(complete);
 }
 
 void StorageSyncJob::clear_current_file_locked() {
@@ -1402,18 +1407,6 @@ JobStep StorageSyncJob::step_verify_latest_invalidate_locked(
     return JobStep::Working;
 }
 
-JobStep StorageSyncJob::step_open_local_locked() {
-    Storage::Guard guard;
-    current_file_.local = Storage::open(current_file_.path, "r");
-    if (!current_file_.local || current_file_.local.isDirectory()) {
-        fail_locked("local_open_failed");
-        return JobStep::Idle;
-    }
-    current_file_.local_open = true;
-    phase_ = WorkPhase::OpenRemote;
-    return JobStep::Working;
-}
-
 JobStep StorageSyncJob::step_mark_state_locked() {
     const StorageLocalNodeInfo info = storage_stat_local_node(current_file_.path);
     if (!info.exists || info.is_dir ||
@@ -1444,6 +1437,7 @@ bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
         case WorkPhase::VerifyLatestRemote:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::EnsureRemoteDir:
+        case WorkPhase::OpenLocal:
         case WorkPhase::OpenRemote:
         case WorkPhase::UploadChunk:
         case WorkPhase::CloseRemote:
@@ -1456,7 +1450,6 @@ bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
-        case WorkPhase::OpenLocal:
         case WorkPhase::MarkState:
             return false;
     }
@@ -1529,6 +1522,12 @@ void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
                                       &operation);
             return;
 
+        case WorkPhase::OpenLocal:
+            result.ok = current_file_.local.open(operation,
+                                                  result.error,
+                                                  sizeof(result.error));
+            return;
+
         case WorkPhase::OpenRemote:
             result.ok = smb_.open_writer(current_file_.remote_path,
                                          result.error,
@@ -1544,25 +1543,21 @@ void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
                 to_read = static_cast<size_t>(remaining);
             }
 
-            size_t read = 0;
-            {
-                Storage::Guard guard;
-                read = current_file_.local.read(upload_buffer_, to_read);
-            }
-            if (read != to_read) {
-                copy_cstr(result.error,
-                          sizeof(result.error),
-                          "local_read_short");
+            if (!current_file_.local.read_exact(upload_buffer_,
+                                                to_read,
+                                                operation,
+                                                result.error,
+                                                sizeof(result.error))) {
                 return;
             }
 
             result.transferred = smb_.write(upload_buffer_,
-                                            read,
+                                            to_read,
                                             result.error,
                                             sizeof(result.error),
                                             &operation);
             result.ok = result.transferred >= 0 &&
-                        static_cast<size_t>(result.transferred) == read;
+                        static_cast<size_t>(result.transferred) == to_read;
             return;
         }
 
@@ -1583,7 +1578,6 @@ void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
-        case WorkPhase::OpenLocal:
         case WorkPhase::MarkState:
             copy_cstr(result.error,
                       sizeof(result.error),
@@ -1672,6 +1666,10 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
             phase_ = WorkPhase::OpenLocal;
             return JobStep::Working;
 
+        case WorkPhase::OpenLocal:
+            phase_ = WorkPhase::OpenRemote;
+            return JobStep::Working;
+
         case WorkPhase::OpenRemote:
             current_file_.offset = 0;
             phase_ = current_file_.size == 0
@@ -1691,7 +1689,7 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
             return JobStep::Working;
 
         case WorkPhase::CloseRemote:
-            close_local_locked();
+            close_local_locked(true);
             phase_ = WorkPhase::MarkState;
             return JobStep::Working;
 
@@ -1705,7 +1703,6 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
         case WorkPhase::VerifyLatestFile:
         case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
-        case WorkPhase::OpenLocal:
         case WorkPhase::MarkState:
             fail_locked("invalid_blocking_phase");
             return JobStep::Idle;
@@ -1727,6 +1724,7 @@ JobStep StorageSyncJob::step_work_phase_locked() {
         case WorkPhase::VerifyLatestRemote:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::EnsureRemoteDir:
+        case WorkPhase::OpenLocal:
         case WorkPhase::OpenRemote:
         case WorkPhase::UploadChunk:
         case WorkPhase::CloseRemote:
@@ -1744,9 +1742,6 @@ JobStep StorageSyncJob::step_work_phase_locked() {
 
         case WorkPhase::NextFile:
             return next_file_locked() ? JobStep::Working : JobStep::Idle;
-
-        case WorkPhase::OpenLocal:
-            return step_open_local_locked();
 
         case WorkPhase::MarkState:
             return step_mark_state_locked();

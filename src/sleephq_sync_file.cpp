@@ -5,8 +5,6 @@
 
 #include "debug_log.h"
 #include "memory_manager.h"
-#include "storage_export_state.h"
-#include "storage_manager.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -26,21 +24,29 @@ void digest_to_hex(const uint8_t digest[16],
 
 }  // namespace
 
-bool SleepHqSyncFile::UploadReader::read(uint8_t *out, size_t length,
+bool SleepHqSyncFile::UploadReader::open() {
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    return file_.reader_.open(operation_, error, sizeof(error));
+}
+
+bool SleepHqSyncFile::UploadReader::read(uint8_t *out,
+                                         size_t length,
                                          size_t &read) {
     read = 0;
-    if (!out || abort_requested_.load() || !file_.local_open_) return false;
+    if (!out) return false;
 
-    Storage::Guard guard;
-    read = file_.local_.read(out, length);
-    return read == length;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    if (!file_.reader_.read_exact(out, length, operation_,
+                                  error, sizeof(error))) {
+        return false;
+    }
+    read = length;
+    return true;
 }
 
 bool SleepHqSyncFile::UploadReader::rewind() {
-    if (!file_.local_open_) return false;
-
-    Storage::Guard guard;
-    return file_.local_.seek(0);
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    return file_.reader_.restart(operation_, error, sizeof(error));
 }
 
 bool SleepHqSyncFile::UploadReader::read_callback(void *ctx, uint8_t *out,
@@ -58,7 +64,9 @@ SleepHqSyncFile::~SleepHqSyncFile() {
     close();
 }
 
-void SleepHqSyncFile::configure(const char *path, const char *sleep_path,
+void SleepHqSyncFile::configure(StorageStreamPort &stream_port,
+                                const char *path,
+                                const char *sleep_path,
                                 const char *name, const char *state_path,
                                 uint64_t size, uint64_t mtime,
                                 StorageExportStateWriteMode state_write_mode,
@@ -73,6 +81,7 @@ void SleepHqSyncFile::configure(const char *path, const char *sleep_path,
     state_.mtime = mtime;
     state_.state_write_mode = state_write_mode;
     state_.attach_by_hash = attach_by_hash;
+    reader_.configure(stream_port, path, size, mtime);
 }
 
 void SleepHqSyncFile::reset() {
@@ -84,39 +93,26 @@ void SleepHqSyncFile::set_content_hash(const char *content_hash) {
     copy_cstr(state_.content_hash, sizeof(state_.content_hash), content_hash);
 }
 
-bool SleepHqSyncFile::open_candidate(File &out) const {
-    Storage::Guard guard;
-    out = Storage::open(state_.path, "r");
-    if (out && !out.isDirectory()) return true;
-
-    if (out) out.close();
-    return false;
+bool SleepHqSyncFile::open(
+    const BackgroundOperationControl &operation,
+    char *error_out,
+    size_t error_out_size) {
+    return reader_.open(operation, error_out, error_out_size);
 }
 
-void SleepHqSyncFile::adopt(File &file) {
-    close();
-    local_ = file;
-    file = File();
-    local_open_ = true;
+void SleepHqSyncFile::close(bool complete) {
+    reader_.close(complete);
 }
 
-void SleepHqSyncFile::close() {
-    if (!local_open_) return;
-
-    Storage::Guard guard;
-    local_.close();
-    local_open_ = false;
-}
-
-bool SleepHqSyncFile::matches_snapshot() const {
-    const StorageLocalNodeInfo info = storage_stat_local_node(state_.path);
-    return info.exists && !info.is_dir && info.size == state_.size &&
-           info.mtime == state_.mtime;
-}
-
-bool SleepHqSyncFile::compute_content_hash(char *out, size_t out_size) {
-    if (!out || out_size < AC_SLEEPHQ_CONTENT_HASH_MAX || !local_open_ ||
-        !state_.name[0]) {
+bool SleepHqSyncFile::compute_content_hash(
+    char *out,
+    size_t out_size,
+    const BackgroundOperationControl &operation,
+    char *error_out,
+    size_t error_out_size) {
+    if (!out || out_size < AC_SLEEPHQ_CONTENT_HASH_MAX ||
+        !reader_.open() || !state_.name[0]) {
+        copy_cstr(error_out, error_out_size, "hash_not_ready");
         return false;
     }
 
@@ -133,32 +129,27 @@ bool SleepHqSyncFile::compute_content_hash(char *out, size_t out_size) {
     esp_rom_md5_init(&md5);
     uint64_t read_total = 0;
     bool ok = true;
-    {
-        Storage::Guard guard;
-        ok = local_.seek(0);
-    }
 
     while (ok && read_total < state_.size) {
         const uint64_t remaining = state_.size - read_total;
         const size_t wanted = remaining > HASH_BUFFER_BYTES
             ? HASH_BUFFER_BYTES
             : static_cast<size_t>(remaining);
-        size_t read = 0;
-        {
-            Storage::Guard guard;
-            read = local_.read(buffer, wanted);
-        }
-        if (read != wanted) {
+        if (!reader_.read_exact(buffer, wanted, operation,
+                                error_out, error_out_size)) {
             ok = false;
             break;
         }
 
-        esp_rom_md5_update(&md5, buffer, read);
-        read_total += read;
+        esp_rom_md5_update(&md5, buffer, wanted);
+        read_total += wanted;
         taskYIELD();
     }
     Memory::free(buffer);
-    if (!ok) return false;
+    if (!ok) {
+        close(false);
+        return false;
+    }
 
     esp_rom_md5_update(&md5,
                        reinterpret_cast<const uint8_t *>(state_.name),
@@ -166,12 +157,8 @@ bool SleepHqSyncFile::compute_content_hash(char *out, size_t out_size) {
     uint8_t digest[16];
     esp_rom_md5_final(digest, &md5);
     digest_to_hex(digest, out);
-
-    {
-        Storage::Guard guard;
-        ok = local_.seek(0);
-    }
-    return ok;
+    close(true);
+    return true;
 }
 
 }  // namespace aircannect

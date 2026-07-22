@@ -1,13 +1,13 @@
 #pragma once
 
-#include <FS.h>
-#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 
+#include "background_operation_control.h"
 #include "sleephq_protocol.h"
 #include "storage_export_plan.h"
 #include "storage_path.h"
+#include "storage_stream_reader.h"
 
 namespace aircannect {
 
@@ -28,9 +28,11 @@ class SleepHqSyncFile {
 public:
     class UploadReader {
     public:
-        UploadReader(SleepHqSyncFile &file, std::atomic<bool> &abort_requested)
-            : file_(file), abort_requested_(abort_requested) {}
+        UploadReader(SleepHqSyncFile &file,
+                     const BackgroundOperationControl &operation)
+            : file_(file), operation_(operation) {}
 
+        bool open();
         bool read(uint8_t *out, size_t length, size_t &read);
         bool rewind();
 
@@ -39,7 +41,7 @@ public:
 
     private:
         SleepHqSyncFile &file_;
-        std::atomic<bool> &abort_requested_;
+        const BackgroundOperationControl &operation_;
     };
 
     SleepHqSyncFile() = default;
@@ -47,7 +49,8 @@ public:
     SleepHqSyncFile(const SleepHqSyncFile &) = delete;
     SleepHqSyncFile &operator=(const SleepHqSyncFile &) = delete;
 
-    void configure(const char *path,
+    void configure(StorageStreamPort &stream_port,
+                   const char *path,
                    const char *sleep_path,
                    const char *name,
                    const char *state_path,
@@ -62,16 +65,19 @@ public:
     void set_content_hash(const char *content_hash);
     void set_attach_by_hash(bool attach) { state_.attach_by_hash = attach; }
 
-    bool open_candidate(File &out) const;
-    void adopt(File &file);
-    void close();
-    bool matches_snapshot() const;
-    bool compute_content_hash(char *out, size_t out_size);
+    bool open(const BackgroundOperationControl &operation,
+              char *error_out,
+              size_t error_out_size);
+    void close(bool complete = false);
+    bool compute_content_hash(char *out,
+                              size_t out_size,
+                              const BackgroundOperationControl &operation,
+                              char *error_out,
+                              size_t error_out_size);
 
 private:
     SleepHqSyncFileState state_;
-    File local_;
-    bool local_open_ = false;
+    StorageStreamReader reader_;
 };
 
 }  // namespace aircannect

@@ -244,9 +244,11 @@ bool SleepHqSyncJob::parse_inflight_phase(const char *text,
 
 void SleepHqSyncJob::begin(const AppConfigData &config,
                            StorageScanPort &scan_port,
-                           StorageReadPort &read_port) {
+                           StorageReadPort &read_port,
+                           StorageStreamPort &stream_port) {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
     inventory_loader_.begin(scan_port, read_port);
+    stream_port_ = &stream_port;
     refresh_config(config, millis());
 }
 
@@ -528,7 +530,7 @@ JobStep SleepHqSyncJob::step_load_inventory_locked() {
         return JobStep::Idle;
     }
 
-    phase_ = WorkPhase::FindRemoteMachine;
+    phase_ = WorkPhase::ReadIdentification;
     return JobStep::Working;
 }
 
@@ -1102,7 +1104,12 @@ bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
         return true;
     }
 
-    current_file_.configure(path,
+    if (!stream_port_) {
+        fail_locked("stream_port_unavailable");
+        return false;
+    }
+    current_file_.configure(*stream_port_,
+                            path,
                             sleep_path,
                             name,
                             item.state_path,
@@ -1465,47 +1472,51 @@ bool SleepHqSyncJob::remote_machine_list_cb(void *ctx,
     return true;
 }
 
-bool SleepHqSyncJob::read_local_machine_serial_locked(char *out,
-                                                      size_t out_size,
-                                                      char *error,
-                                                      size_t error_size) {
+bool SleepHqSyncJob::read_local_machine_serial(
+    char *out,
+    size_t out_size,
+    const BackgroundOperationControl &operation,
+    char *error,
+    size_t error_size) {
     if (!out || out_size == 0) {
         copy_cstr(error, error_size, "bad_serial_buffer");
         return false;
     }
     out[0] = '\0';
-    const StorageLocalNodeInfo info =
-        storage_stat_local_node(SLEEPHQ_IDENTIFICATION_PATH);
-    if (!info.exists) return true;
-    if (info.is_dir || info.size == 0 ||
-        info.size > SLEEPHQ_IDENTIFICATION_JSON_MAX) {
+    if (!export_inventory_ || !stream_port_) {
+        copy_cstr(error, error_size, "identification_inventory_missing");
+        return false;
+    }
+
+    StorageExportInventoryEntryView entry;
+    if (!export_inventory_->find_file(SLEEPHQ_IDENTIFICATION_PATH, entry)) {
+        return true;
+    }
+    if (!entry.info.exists || entry.info.is_dir || entry.info.size == 0 ||
+        entry.info.size > SLEEPHQ_IDENTIFICATION_JSON_MAX) {
         copy_cstr(error, error_size, "identification_invalid");
         return false;
     }
 
-    const size_t size = static_cast<size_t>(info.size);
+    const size_t size = static_cast<size_t>(entry.info.size);
     char *json = static_cast<char *>(Memory::alloc_large(size + 1, false));
     if (!json) {
         copy_cstr(error, error_size, "identification_alloc");
         return false;
     }
 
-    bool ok = true;
-    {
-        Storage::Guard guard;
-        File file = Storage::open(SLEEPHQ_IDENTIFICATION_PATH, "r");
-        if (!file || file.isDirectory()) {
-            ok = false;
-        } else {
-            const size_t read = file.read(reinterpret_cast<uint8_t *>(json),
-                                          size);
-            file.close();
-            ok = read == size;
-        }
-    }
+    StorageStreamReader reader;
+    reader.configure(*stream_port_, SLEEPHQ_IDENTIFICATION_PATH,
+                     entry.info.size, entry.info.mtime);
+    const bool ok = reader.open(operation, error, error_size) &&
+        reader.read_exact(reinterpret_cast<uint8_t *>(json), size,
+                          operation, error, error_size);
+    reader.close(ok);
     if (!ok) {
         Memory::free(json);
-        copy_cstr(error, error_size, "identification_read");
+        if (!error[0]) {
+            copy_cstr(error, error_size, "identification_read");
+        }
         return false;
     }
     json[size] = '\0';
@@ -1543,23 +1554,7 @@ bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
     remote_serial_[0] = '\0';
     remote_date_count_ = 0;
 
-    char serial[AC_SLEEPHQ_SERIAL_MAX] = {};
-    if (!read_local_machine_serial_locked(serial, sizeof(serial),
-                                          error, error_size)) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "remote reconcile disabled: %s\n",
-                  error && error[0] ? error : "identification_failed");
-        error[0] = '\0';
-        return true;
-    }
-    if (!serial[0]) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "remote reconcile disabled: identification serial missing\n");
-        return true;
-    }
-
-    copy_cstr(remote_serial_, sizeof(remote_serial_), serial);
-    remote_reconcile_enabled_ = true;
+    copy_cstr(error, error_size, "");
     return true;
 }
 
@@ -1734,6 +1729,7 @@ JobStep SleepHqSyncJob::step_mark_state_locked(char *error,
 bool SleepHqSyncJob::phase_has_blocking_io(WorkPhase phase) {
     switch (phase) {
         case WorkPhase::Connect:
+        case WorkPhase::ReadIdentification:
         case WorkPhase::FindRemoteMachine:
         case WorkPhase::ResolveDatalogDay:
         case WorkPhase::CreateImport:
@@ -1763,6 +1759,15 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
         operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
 
     switch (phase) {
+        case WorkPhase::ReadIdentification:
+            result.ok = read_local_machine_serial(
+                result.serial,
+                sizeof(result.serial),
+                operation,
+                result.error,
+                sizeof(result.error));
+            return;
+
         case WorkPhase::Connect: {
             if (!client_.configure(client_config_from_snapshot(config_))) {
                 copy_cstr(result.error,
@@ -1866,11 +1871,15 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::OpenLocal: {
-            result.ok = current_file_.open_candidate(result.local);
+            result.ok = current_file_.open(operation,
+                                           result.error,
+                                           sizeof(result.error));
             if (!result.ok) {
-                copy_cstr(result.error,
-                          sizeof(result.error),
-                          "local_open_failed");
+                if (!result.error[0]) {
+                    copy_cstr(result.error,
+                              sizeof(result.error),
+                              "local_open_failed");
+                }
             }
             return;
         }
@@ -1878,9 +1887,16 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
         case WorkPhase::HashLocalFile:
             result.ok = current_file_.compute_content_hash(
                 result.content_hash,
-                sizeof(result.content_hash));
+                sizeof(result.content_hash),
+                operation,
+                result.error,
+                sizeof(result.error));
             if (!result.ok) {
-                copy_cstr(result.error, sizeof(result.error), "hash_failed");
+                if (!result.error[0]) {
+                    copy_cstr(result.error,
+                              sizeof(result.error),
+                              "hash_failed");
+                }
             }
             return;
 
@@ -1903,17 +1919,11 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
             return;
 
         case WorkPhase::UploadFile: {
-            if (!current_file_.matches_snapshot()) {
-                copy_cstr(result.error,
-                          sizeof(result.error),
-                          "local_changed");
-                return;
-            }
-
             const SleepHqSyncFileState &file = current_file_.state();
             SleepHqSyncFile::UploadReader upload_reader(current_file_,
-                                                         abort_requested_);
+                                                         operation);
             bool attached = false;
+            bool stream_ready = false;
             operation.timeout_ms = sleep_hq_upload_timeout_ms(file.size);
             operation.started_ms = millis();
 
@@ -1925,15 +1935,18 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
                 attach.content_hash = file.content_hash;
                 if (client_.attach_file(attach, result.upload, &operation)) {
                     attached = true;
-                } else if (!upload_reader.rewind()) {
-                    copy_cstr(result.error,
-                              sizeof(result.error),
-                              client_.last_error());
-                    return;
                 }
             }
 
             if (!attached) {
+                stream_ready = upload_reader.open();
+                if (!stream_ready) {
+                    copy_cstr(result.error,
+                              sizeof(result.error),
+                              "local_stream_open_failed");
+                    return;
+                }
+
                 SleepHqUploadRequest request;
                 request.import_id = status_.import_id;
                 request.name = file.name;
@@ -2000,7 +2013,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
     WorkPhase phase,
     BlockingResult &result) {
     if (status_.state != SleepHqSyncState::Working || phase_ != phase) {
-        if (result.local) result.local.close();
+        current_file_.close(false);
         client_.disconnect();
         return JobStep::Idle;
     }
@@ -2012,14 +2025,26 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
         pending_config_valid_ ||
         runtime_blocked_.load() ||
         !network_available_.load()) {
-        if (result.local) result.local.close();
+        current_file_.close(false);
         fail_locked("preempted");
         apply_pending_config_locked();
         return status_.pending ? JobStep::Waiting : JobStep::Idle;
     }
 
     if (!result.ok) {
-        if (result.local) result.local.close();
+        current_file_.close(false);
+        if (phase == WorkPhase::ReadIdentification) {
+            Log::logf(CAT_SLEEPHQ,
+                      LOG_WARN,
+                      "remote reconcile disabled: %s\n",
+                      result.error[0]
+                          ? result.error
+                          : "identification_failed");
+            remote_reconcile_enabled_ = false;
+            remote_serial_[0] = '\0';
+            phase_ = WorkPhase::FindRemoteMachine;
+            return JobStep::Working;
+        }
         if (phase == WorkPhase::FindRemoteMachine && result.retryable) {
             Log::logf(CAT_SLEEPHQ,
                       LOG_WARN,
@@ -2074,6 +2099,21 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
     }
 
     switch (phase) {
+        case WorkPhase::ReadIdentification:
+            if (!result.serial[0]) {
+                Log::logf(
+                    CAT_SLEEPHQ,
+                    LOG_WARN,
+                    "remote reconcile disabled: identification serial missing\n");
+                remote_reconcile_enabled_ = false;
+            } else {
+                copy_cstr(remote_serial_, sizeof(remote_serial_),
+                          result.serial);
+                remote_reconcile_enabled_ = true;
+            }
+            phase_ = WorkPhase::FindRemoteMachine;
+            return JobStep::Working;
+
         case WorkPhase::Connect: {
             status_.team_id = result.team_id;
             if (current_run_kind_ == RunKind::Check) {
@@ -2166,7 +2206,6 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
             return JobStep::Working;
 
         case WorkPhase::OpenLocal:
-            current_file_.adopt(result.local);
             phase_ = WorkPhase::ResolveRemoteFile;
             return JobStep::Working;
 
@@ -2199,7 +2238,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
             return JobStep::Working;
 
         case WorkPhase::UploadFile:
-            current_file_.close();
+            current_file_.close(true);
             if (!add_staged_locked(result.upload)) {
                 fail_locked("staged_alloc");
                 return JobStep::Idle;
@@ -2297,6 +2336,7 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
             return step_load_inventory_locked();
 
         case WorkPhase::Connect:
+        case WorkPhase::ReadIdentification:
         case WorkPhase::FindRemoteMachine:
         case WorkPhase::ResolveDatalogDay:
         case WorkPhase::CreateImport:
@@ -2364,7 +2404,7 @@ JobStep SleepHqSyncJob::step() {
     blocking_result.operation_generation = operation_generation;
 
     if (!lock_ || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) {
-        if (blocking_result.local) blocking_result.local.close();
+        current_file_.close(false);
         client_.disconnect();
         Log::logf(CAT_SLEEPHQ,
                   LOG_ERROR,

@@ -89,7 +89,8 @@ public:
     // lifecycle
     void begin(const AppConfigData &config,
                StorageScanPort &scan_port,
-               StorageReadPort &read_port);
+               StorageReadPort &read_port,
+               StorageStreamPort &stream_port);
 
     // background worker
     const char *name() const override { return "sleephq_sync"; }
@@ -117,6 +118,7 @@ private:
         Idle,
         Connect,
         LoadInventory,
+        ReadIdentification,
         FindRemoteMachine,
         NextFile,
         ResolveDatalogDay,
@@ -186,8 +188,8 @@ private:
         SleepHqImportInfo import;
         SleepHqUploadResult upload;
         SleepHqRemoteFileCache remote_files;
-        File local;
         char content_hash[AC_SLEEPHQ_CONTENT_HASH_MAX] = {};
+        char serial[AC_SLEEPHQ_SERIAL_MAX] = {};
         char error[AC_SLEEPHQ_ERROR_MAX] = {};
     };
 
@@ -271,10 +273,12 @@ private:
     bool force_remote_missing_datalog_day_locked(const char *day,
                                                  bool local_complete,
                                                  bool &force_export);
-    bool read_local_machine_serial_locked(char *out,
-                                          size_t out_size,
-                                          char *error,
-                                          size_t error_size);
+    bool read_local_machine_serial(
+        char *out,
+        size_t out_size,
+        const BackgroundOperationControl &operation,
+        char *error,
+        size_t error_size);
     bool prepare_remote_reconcile_locked(char *error, size_t error_size);
     void note_remote_machine_missing_locked();
 
@@ -327,6 +331,7 @@ private:
 
     // active export/import
     StorageExportInventoryLoader inventory_loader_;
+    StorageStreamPort *stream_port_ = nullptr;
     std::shared_ptr<const StorageExportInventory> export_inventory_;
     StorageExportPlanner export_planner_;
     bool import_batch_active_ = false;

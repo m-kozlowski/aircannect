@@ -14,6 +14,7 @@
 #include "storage_path_port.h"
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
+#include "storage_stream_port.h"
 
 namespace aircannect {
 
@@ -169,6 +170,9 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
 
 // Prepared bounded reads
 StorageReadPort &read_port();
+
+// Sequential storage-owned byte streams
+StorageStreamPort &stream_port();
 
 // File metadata and path mutations
 StoragePathPort &path_port();

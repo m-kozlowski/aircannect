@@ -28,6 +28,7 @@
 #include "storage_path.h"
 #include "storage_path_service.h"
 #include "storage_scan_service.h"
+#include "storage_stream_service.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -217,9 +218,10 @@ StorageDeleteService delete_service;
 StoragePathService path_service;
 StorageAtomicWriteService atomic_write_service;
 StorageScanService scan_service;
+StorageStreamService stream_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
-bool browser_turn = true;
+size_t foreground_turn = 0;
 
 bool claim_maintenance(MaintenanceOwner owner) {
     MaintenanceOwner expected = MaintenanceOwner::None;
@@ -1898,31 +1900,29 @@ bool process_browser_step() {
     return browser_service.step() == StorageBrowserStep::Working;
 }
 
+bool process_stream_step() {
+    return stream_service.step();
+}
+
 bool process_foreground_step() {
     if (atomic_write_service.step(StorageAtomicWriteLane::Foreground)) {
         return true;
     }
     if (path_service.step()) return true;
 
-    if (browser_turn) {
-        if (process_browser_step()) {
-            browser_turn = false;
-            return true;
-        }
-        if (process_read_step()) {
-            browser_turn = true;
-            return true;
-        }
-        return false;
-    }
+    for (size_t attempt = 0; attempt < 3; ++attempt) {
+        const size_t current = foreground_turn;
+        foreground_turn = (foreground_turn + 1) % 3;
 
-    if (process_read_step()) {
-        browser_turn = true;
-        return true;
-    }
-    if (process_browser_step()) {
-        browser_turn = false;
-        return true;
+        bool worked = false;
+        if (current == 0) {
+            worked = process_browser_step();
+        } else if (current == 1) {
+            worked = process_read_step();
+        } else {
+            worked = process_stream_step();
+        }
+        if (worked) return true;
     }
     return false;
 }
@@ -2112,6 +2112,7 @@ void begin() {
     (void)scan_service.begin(wake_service_task,
                              claim_scan_maintenance,
                              release_scan_maintenance);
+    (void)stream_service.begin(wake_service_task);
 
     if (!task) {
         const BaseType_t created =
@@ -2127,6 +2128,7 @@ void begin() {
             path_service.set_task_available(false);
             atomic_write_service.set_task_available(false);
             scan_service.set_task_available(false);
+            stream_service.set_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
                       "storage worker task create failed\n");
@@ -2142,6 +2144,7 @@ void begin() {
     path_service.set_task_available(true);
     atomic_write_service.set_task_available(true);
     scan_service.set_task_available(true);
+    stream_service.set_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
               "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
@@ -2345,6 +2348,10 @@ bool enqueue_edf_close_annotation(EdfAnnotationKind kind) {
 
 StorageReadPort &read_port() {
     return service_read_port;
+}
+
+StorageStreamPort &stream_port() {
+    return stream_service;
 }
 
 StoragePathPort &path_port() {

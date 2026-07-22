@@ -1,10 +1,10 @@
 #pragma once
 
 #include <Arduino.h>
-#include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <atomic>
+#include <memory>
 #include <stdint.h>
 
 #include "app_config.h"
@@ -15,6 +15,7 @@
 #include "storage_export_state.h"
 #include "storage_path.h"
 #include "storage_smb_client.h"
+#include "storage_stream_reader.h"
 
 namespace aircannect {
 
@@ -106,7 +107,8 @@ public:
     // lifecycle
     void begin(const AppConfigData &config,
                StorageScanPort &scan_port,
-               StorageReadPort &read_port);
+               StorageReadPort &read_port,
+               StorageStreamPort &stream_port);
 
     // background worker
     const char *name() const override { return "storage_sync"; }
@@ -181,8 +183,7 @@ private:
         uint64_t offset = 0;
         StateWriteMode state_write_mode = StateWriteMode::Append;
         bool local_state_complete = false;
-        bool local_open = false;
-        File local;
+        StorageStreamReader local;
     };
 
     struct LatestVerify {
@@ -241,7 +242,6 @@ private:
         const StorageSmbRemoteStat &remote);
     JobStep step_verify_latest_invalidate_locked(char *error_out,
                                                  size_t error_out_size);
-    JobStep step_open_local_locked();
     JobStep step_mark_state_locked();
 
     // endpoint/state metadata
@@ -292,7 +292,7 @@ private:
     BackgroundOperationControl operation_control() const;
     void request_operation_abort();
     static bool operation_abort_cb(void *ctx);
-    void close_local_locked();
+    void close_local_locked(bool complete = false);
     void clear_current_file_locked();
     void publish_runtime_locked();
 
@@ -323,6 +323,7 @@ private:
 
     // active run
     StorageExportInventoryLoader inventory_loader_;
+    StorageStreamPort *stream_port_ = nullptr;
     std::shared_ptr<const StorageExportInventory> export_inventory_;
     StorageExportPlanner export_planner_;
     CurrentFile current_file_;

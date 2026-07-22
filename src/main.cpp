@@ -459,13 +459,15 @@ void setup() {
     if (storage_sync_job) {
         storage_sync_job->begin(app_config.data(),
                                 StorageService::scan_port(),
-                                StorageService::read_port());
+                                StorageService::read_port(),
+                                StorageService::stream_port());
     }
 
     if (sleephq_sync_job) {
         sleephq_sync_job->begin(app_config.data(),
                                StorageService::scan_port(),
-                               StorageService::read_port());
+                               StorageService::read_port(),
+                               StorageService::stream_port());
     }
 
     bg_worker.add_job(&storage_diagnostic_job);
