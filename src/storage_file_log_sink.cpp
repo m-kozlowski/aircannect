@@ -75,7 +75,7 @@ bool StorageFileLogSink::configure(bool enabled) {
     desired_enabled_ = enabled;
     if (!enabled && queue_) {
         queue_->clear();
-        written_sequence_ = accepted_sequence_;
+        written_sequence_.store(accepted_sequence_, std::memory_order_release);
     }
     update_queue_status_locked();
     unlock();
@@ -298,10 +298,11 @@ bool StorageFileLogSink::write_line(const Line &line) {
     if (written != line.length) return false;
 
     file_size_ += written;
+    written_sequence_.store(line.sequence, std::memory_order_release);
+
     if (lock()) {
         status_.written++;
         status_.bytes = file_size_;
-        written_sequence_ = line.sequence;
         unlock();
     }
     return true;
@@ -345,10 +346,10 @@ uint32_t StorageFileLogSink::capture_tail_fence() const {
 
 bool StorageFileLogSink::prepare_tail_read(uint32_t fence_sequence) {
 #if AC_FILE_LOG_ENABLED
-    if (!lock()) return false;
+    const uint32_t written_sequence =
+        written_sequence_.load(std::memory_order_acquire);
     const bool fence_reached =
-        static_cast<int32_t>(written_sequence_ - fence_sequence) >= 0;
-    unlock();
+        static_cast<int32_t>(written_sequence - fence_sequence) >= 0;
     if (!fence_reached) return false;
 
     if (file_) close_file(true);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -52,7 +54,7 @@ private:
     bool rotation_allowed_ = true;
     uint32_t next_sequence_ = 1;
     uint32_t accepted_sequence_ = 0;
-    uint32_t written_sequence_ = 0;
+    std::atomic<uint32_t> written_sequence_{0};
     FileLogSinkStatus status_;
 
     File file_;
