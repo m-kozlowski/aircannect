@@ -136,7 +136,7 @@ std::shared_ptr<const LargeByteBuffer> StorageExportStateBatch::build_file(
     size_t line_length = 0;
     for (size_t i = 0; i < inventory.source_size(); ++i) {
         StorageExportInventoryEntryView entry;
-        if (!inventory.entry(i, entry)) return {};
+        if (!inventory.entry(i, entry)) continue;
         if (!entry_uses_state_path(entry, inventory.state_dir(), state_path)) {
             continue;
         }
@@ -179,7 +179,7 @@ std::shared_ptr<const LargeByteBuffer> StorageExportStateBatch::build_file(
     size_t offset = 0;
     for (size_t i = 0; i < inventory.source_size(); ++i) {
         StorageExportInventoryEntryView entry;
-        if (!inventory.entry(i, entry)) return {};
+        if (!inventory.entry(i, entry)) continue;
         if (!entry_uses_state_path(entry, inventory.state_dir(), state_path)) {
             continue;
         }

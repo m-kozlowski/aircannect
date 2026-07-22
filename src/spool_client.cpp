@@ -11,6 +11,7 @@
 #include "debug_log.h"
 #include "memory_manager.h"
 #include "board_report.h"
+#include "runtime_clock.h"
 
 namespace aircannect {
 namespace {
@@ -224,10 +225,10 @@ bool SpoolClient::active() const {
 }
 
 void SpoolClient::poll(bool background_backpressure_active) {
+    poll_rpc_completion();
+
     const uint32_t now = millis();
     update_status(now);
-
-    poll_rpc_completion();
 
     switch (state_) {
         case State::Idle:
@@ -273,8 +274,10 @@ void SpoolClient::poll(bool background_backpressure_active) {
         case State::WaitPull:
             return;
         case State::WaitFragments:
-            if (now - state_started_ms_ >
-                AC_SPOOL_CLIENT_FRAGMENT_TIMEOUT_MS) {
+            if (millis_elapsed_at_least(
+                    now,
+                    state_started_ms_,
+                    AC_SPOOL_CLIENT_FRAGMENT_TIMEOUT_MS)) {
                 retry_current_round("fragment_timeout");
             }
             return;

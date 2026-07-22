@@ -5,6 +5,7 @@
 #include <string>
 
 #include "operation_outcome.h"
+#include "prepared_byte_ring.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -68,10 +69,10 @@ public:
         OperationTicket ticket,
         StorageReadCompletion &completion) = 0;
 
-    virtual size_t read_prepared(StoragePreparedRead prepared,
-                                 size_t offset,
-                                 uint8_t *buffer,
-                                 size_t capacity) const = 0;
+    virtual PreparedByteRead read_prepared(StoragePreparedRead prepared,
+                                           size_t offset,
+                                           uint8_t *buffer,
+                                           size_t capacity) const = 0;
     virtual void release_prepared(StoragePreparedRead prepared) = 0;
 };
 

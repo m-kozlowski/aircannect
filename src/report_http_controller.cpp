@@ -107,6 +107,34 @@ void send_preparing(AsyncWebServerRequest *request) {
     request->send(response);
 }
 
+void send_artifact_failure(
+    AsyncWebServerRequest *request,
+    const ReportArtifactFailureStatus &failure) {
+    if (!request || !failure.valid()) return;
+
+    char body[160] = {};
+    snprintf(body,
+             sizeof(body),
+             "{\"ok\":false,\"state\":\"failed\",\"error\":\"%s\"}",
+             failure.error);
+    AsyncWebServerResponse *response = request->beginResponse(
+        503, "application/json", body);
+    if (!response) {
+        request->send(503, "application/json", body);
+        return;
+    }
+
+    char retry_after[12] = {};
+    snprintf(retry_after,
+             sizeof(retry_after),
+             "%lu",
+             static_cast<unsigned long>(
+                 (failure.retry_after_ms + 999) / 1000));
+    response->addHeader("Cache-Control", "no-store");
+    response->addHeader("Retry-After", retry_after);
+    request->send(response);
+}
+
 bool parse_sleep_day(AsyncWebServerRequest *request, SleepDayId &sleep_day) {
     sleep_day = {};
     if (!request || !request->hasArg("night")) return false;
@@ -562,6 +590,12 @@ void ReportHttpController::send_result(
         sleep_day, night->source_revision);
     ReportArtifactAvailability availability;
     if (!report_task_->artifact_availability(key, availability)) {
+        ReportArtifactFailureStatus failure;
+        if (report_task_->artifact_failure(key, failure)) {
+            send_artifact_failure(request, failure);
+            return;
+        }
+
         const OperationAdmission admitted = report_task_->request_artifact(
             key, ReportRequestPriority::Foreground, next_generation());
         if (admitted == OperationAdmission::Accepted) {
@@ -639,6 +673,12 @@ void ReportHttpController::send_plot(
 
     ReportArtifactAvailability availability;
     if (!report_task_->artifact_availability(key, availability)) {
+        ReportArtifactFailureStatus failure;
+        if (report_task_->artifact_failure(key, failure)) {
+            send_artifact_failure(request, failure);
+            return;
+        }
+
         const OperationAdmission admitted = report_task_->request_artifact(
             key, ReportRequestPriority::Foreground, next_generation());
         if (admitted == OperationAdmission::Accepted) {

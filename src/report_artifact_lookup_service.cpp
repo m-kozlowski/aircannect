@@ -78,44 +78,48 @@ bool ReportArtifactLookupService::submit_manifest() {
 }
 
 bool ReportArtifactLookupService::finish_manifest() {
-    StorageReadCompletion completion;
-    if (!read_port_->take_completion(ticket_, completion)) return false;
-    ticket_ = {};
+    if (!prepared_.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port_->take_completion(ticket_, completion)) return false;
+        ticket_ = {};
 
-    if (completion.outcome.disposition == OperationDisposition::Cancelled) {
-        if (completion.prepared.valid()) {
-            read_port_->release_prepared(completion.prepared);
+        if (completion.outcome.disposition == OperationDisposition::Cancelled) {
+            if (completion.prepared.valid()) {
+                read_port_->release_prepared(completion.prepared);
+            }
+            finish(ReportArtifactLookupState::Cancelled, nullptr);
+            return true;
         }
-        finish(ReportArtifactLookupState::Cancelled, nullptr);
-        return true;
-    }
-    if (completion.outcome.disposition != OperationDisposition::Succeeded) {
-        if (completion.prepared.valid()) {
-            read_port_->release_prepared(completion.prepared);
+        if (completion.outcome.disposition != OperationDisposition::Succeeded) {
+            if (completion.prepared.valid()) {
+                read_port_->release_prepared(completion.prepared);
+            }
+            if (strcmp(completion.error, "read_open_failed") == 0) {
+                finish(ReportArtifactLookupState::MissingManifest,
+                       "report_artifact_manifest_missing");
+            } else {
+                finish(ReportArtifactLookupState::Failed,
+                       completion.error[0]
+                           ? completion.error
+                           : "report_artifact_manifest_read_failed");
+            }
+            return true;
         }
-        if (strcmp(completion.error, "read_open_failed") == 0) {
+        if (!completion.prepared.valid() ||
+            completion.prepared.length <
+                ReportArtifactManifestCodec::HeaderBytes ||
+            completion.prepared.length > ReportArtifactManifestCodec::MaxBytes) {
+            if (completion.prepared.valid()) {
+                read_port_->release_prepared(completion.prepared);
+            }
             finish(ReportArtifactLookupState::MissingManifest,
-                   "report_artifact_manifest_missing");
-        } else {
-            finish(ReportArtifactLookupState::Failed,
-                   completion.error[0]
-                       ? completion.error
-                       : "report_artifact_manifest_read_failed");
+                   "report_artifact_manifest_invalid");
+            return true;
         }
-        return true;
-    }
-    if (!completion.prepared.valid() ||
-        completion.prepared.length < ReportArtifactManifestCodec::HeaderBytes ||
-        completion.prepared.length > ReportArtifactManifestCodec::MaxBytes) {
-        if (completion.prepared.valid()) {
-            read_port_->release_prepared(completion.prepared);
-        }
-        finish(ReportArtifactLookupState::MissingManifest,
-               "report_artifact_manifest_invalid");
-        return true;
+
+        prepared_ = completion.prepared;
     }
 
-    prepared_ = completion.prepared;
     std::unique_ptr<LargeByteBuffer> bytes =
         LargeByteBuffer::allocate(prepared_.length);
     if (!bytes) {
@@ -124,10 +128,13 @@ bool ReportArtifactLookupService::finish_manifest() {
         return true;
     }
 
-    const size_t copied = read_port_->read_prepared(
+    const PreparedByteRead read = read_port_->read_prepared(
         prepared_, 0, bytes->data(), bytes->size());
+    if (read.state == PreparedByteReadState::Retry) return false;
+
     release_prepared();
-    if (copied != bytes->size()) {
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != bytes->size()) {
         finish(ReportArtifactLookupState::Failed,
                "report_artifact_manifest_short_read");
         return true;

@@ -52,6 +52,13 @@ struct ReportTaskControlSnapshot {
     bool background_active = false;
 };
 
+struct ReportArtifactFailureStatus {
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    uint32_t retry_after_ms = 0;
+
+    bool valid() const { return error[0] != '\0'; }
+};
+
 // Owns report state and runs it on one low-priority task. Public methods only
 // enqueue commands or read immutable snapshots; they never execute report work
 // on the caller's task.
@@ -84,6 +91,8 @@ public:
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     bool artifact_availability(const ReportArtifactKey &artifact,
                                ReportArtifactAvailability &availability) const;
+    bool artifact_failure(const ReportArtifactKey &artifact,
+                          ReportArtifactFailureStatus &failure) const;
 
 private:
     struct Runtime;

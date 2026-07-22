@@ -269,7 +269,15 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
                                   int64_t start_ms,
                                   int64_t end_ms,
                                   size_t bucket_budget) {
-    if (!runtime_ || end_ms <= start_ms || bucket_budget == 0) return false;
+    failure_reason_ = nullptr;
+    if (!runtime_) {
+        failure_reason_ = "report_plot_runtime_unavailable";
+        return false;
+    }
+    if (end_ms <= start_ms || bucket_budget == 0) {
+        failure_reason_ = "report_plot_window_invalid";
+        return false;
+    }
 
     runtime_->clear();
     runtime_->plan = &plan;
@@ -279,12 +287,14 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
     for (size_t i = 0; i < plan.mapping_count(); ++i) {
         const ReportReadMapping *mapping = plan.mapping(i);
         if (!mapping) {
+            failure_reason_ = "report_plot_mapping_invalid";
             runtime_->clear();
             return false;
         }
 
         const size_t signal = static_cast<size_t>(mapping->layout.signal);
         if (signal >= SIGNAL_COUNT) {
+            failure_reason_ = "report_plot_signal_invalid";
             runtime_->clear();
             return false;
         }
@@ -311,6 +321,7 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
         if (state.cell_count == 0 || state.cell_count > bucket_budget ||
             total_cells > std::numeric_limits<size_t>::max() -
                               state.cell_count) {
+            failure_reason_ = "report_plot_bucket_layout_invalid";
             runtime_->clear();
             return false;
         }
@@ -321,6 +332,7 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
         runtime_->cell_storage = static_cast<EnvelopeCell *>(
             allocate_large(total_cells, sizeof(EnvelopeCell)));
         if (!runtime_->cell_storage) {
+            failure_reason_ = "report_plot_cells_allocation_failed";
             runtime_->clear();
             return false;
         }
@@ -342,24 +354,40 @@ bool ReportPlotAccumulator::accept_series(
     uint16_t session_index,
     const ReportSeriesDescriptor &series,
     const ReportSeriesSample &sample) {
-    if (!runtime_ || !runtime_->active || !runtime_->plan ||
-        session_index >= runtime_->plan->session_count()) {
+    if (!runtime_ || !runtime_->active || !runtime_->plan) {
+        failure_reason_ = "report_plot_series_context_invalid";
+        return false;
+    }
+    if (session_index >= runtime_->plan->session_count()) {
+        failure_reason_ = "report_plot_series_session_invalid";
         return false;
     }
 
     const size_t signal = static_cast<size_t>(series.signal);
-    if (signal >= SIGNAL_COUNT) return false;
+    if (signal >= SIGNAL_COUNT) {
+        failure_reason_ = "report_plot_series_signal_invalid";
+        return false;
+    }
 
     SeriesState &state = runtime_->series[signal];
-    if (!state.active || !state.cells || state.bucket_ms <= 0 ||
-        sample.timestamp_ms < runtime_->plot_start_ms ||
+    if (!state.active || !state.cells || state.bucket_ms <= 0) {
+        failure_reason_ = "report_plot_series_not_initialized";
+        return false;
+    }
+    if (sample.timestamp_ms < runtime_->plot_start_ms ||
         sample.timestamp_ms >= runtime_->plot_end_ms) {
+        failure_reason_ = "report_plot_sample_outside_plot";
         return false;
     }
 
     const ReportReadSession *session = runtime_->plan->session(session_index);
-    if (!session || sample.timestamp_ms < session->output_window.start_ms ||
+    if (!session) {
+        failure_reason_ = "report_plot_session_missing";
+        return false;
+    }
+    if (sample.timestamp_ms < session->output_window.start_ms ||
         sample.timestamp_ms >= session->output_window.end_ms) {
+        failure_reason_ = "report_plot_sample_outside_session";
         return false;
     }
 
@@ -367,7 +395,10 @@ bool ReportPlotAccumulator::accept_series(
         sample.timestamp_ms - runtime_->plot_start_ms);
     const size_t bucket = static_cast<size_t>(
         delta / static_cast<uint64_t>(state.bucket_ms));
-    if (bucket >= state.cell_count) return false;
+    if (bucket >= state.cell_count) {
+        failure_reason_ = "report_plot_bucket_out_of_range";
+        return false;
+    }
 
     const int32_t value = scaled_plot_value(series, sample.value_milli);
     EnvelopeCell &cell = state.cells[bucket];
@@ -393,25 +424,38 @@ bool ReportPlotAccumulator::accept_series(
 bool ReportPlotAccumulator::accept_event(
     uint16_t session_index,
     const ReportEventRecord &event) {
-    if (!runtime_ || !runtime_->active || !runtime_->plan ||
-        session_index >= runtime_->plan->session_count()) {
+    if (!runtime_ || !runtime_->active || !runtime_->plan) {
+        failure_reason_ = "report_plot_event_context_invalid";
+        return false;
+    }
+    if (session_index >= runtime_->plan->session_count()) {
+        failure_reason_ = "report_plot_event_session_invalid";
         return false;
     }
 
     const ReportReadSession *session = runtime_->plan->session(session_index);
-    if (!session || !report_event_overlaps_window(
-                        event,
-                        session->output_window.start_ms,
-                        session->output_window.end_ms) ||
+    if (!session) {
+        failure_reason_ = "report_plot_event_session_missing";
+        return false;
+    }
+    if (!report_event_overlaps_window(
+            event,
+            session->output_window.start_ms,
+            session->output_window.end_ms) ||
         !report_event_overlaps_window(
             event, runtime_->plot_start_ms, runtime_->plot_end_ms)) {
+        failure_reason_ = "report_plot_event_outside_window";
         return false;
     }
 
     EventSlot slot;
     slot.event = event;
-    return runtime_->event_slots.append(
-        reinterpret_cast<const uint8_t *>(&slot), sizeof(slot));
+    if (!runtime_->event_slots.append(
+            reinterpret_cast<const uint8_t *>(&slot), sizeof(slot))) {
+        failure_reason_ = "report_plot_event_allocation_failed";
+        return false;
+    }
+    return true;
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
@@ -419,6 +463,7 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
     summary = {};
     if (!runtime_ || !runtime_->active || !runtime_->plan ||
         (runtime_->event_slots.size() % sizeof(EventSlot)) != 0) {
+        failure_reason_ = "report_plot_finish_state_invalid";
         return {};
     }
 
@@ -434,13 +479,17 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
         !bin_put_u16(plot, PLOT_BIN_VERSION) ||
         !bin_put_u16(plot, 0) ||
         !bin_put_i64(plot, runtime_->plot_start_ms)) {
+        failure_reason_ = "report_plot_output_allocation_failed";
         return {};
     }
 
     size_t event_count_offset = 0;
     uint8_t *event_count_bytes =
         plot.append_uninitialized(sizeof(uint32_t), event_count_offset);
-    if (!event_count_bytes) return {};
+    if (!event_count_bytes) {
+        failure_reason_ = "report_plot_output_allocation_failed";
+        return {};
+    }
     memset(event_count_bytes, 0, sizeof(uint32_t));
 
     uint32_t unique_events = 0;
@@ -451,6 +500,7 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
                        summary.events,
                        unique_events) ||
         !append_series(plot, runtime_->series)) {
+        failure_reason_ = "report_plot_encode_failed";
         return {};
     }
 
@@ -467,7 +517,9 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
     summary.leak_sum_milli = runtime_->leak_sum_milli;
     summary.pressure_samples = runtime_->pressure_samples;
     summary.leak_samples = runtime_->leak_samples;
-    return freeze_copy(plot);
+    std::shared_ptr<const LargeByteBuffer> frozen = freeze_copy(plot);
+    if (!frozen) failure_reason_ = "report_plot_output_allocation_failed";
+    return frozen;
 }
 
 void ReportPlotAccumulator::clear() {

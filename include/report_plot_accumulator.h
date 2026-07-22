@@ -40,10 +40,12 @@ public:
     std::shared_ptr<const LargeByteBuffer> finish(
         ReportPlotAccumulatorSummary &summary);
     void clear();
+    const char *failure_reason() const { return failure_reason_; }
 
 private:
     struct Runtime;
     Runtime *runtime_ = nullptr;
+    const char *failure_reason_ = nullptr;
 };
 
 }  // namespace aircannect

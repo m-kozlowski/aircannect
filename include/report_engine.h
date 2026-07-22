@@ -55,6 +55,7 @@ public:
     virtual bool finish_build() = 0;
     virtual void discard_build() = 0;
     virtual std::shared_ptr<const ReportArtifactBundle> take_completed() = 0;
+    virtual const char *failure_reason() const { return nullptr; }
 };
 
 class ReportEngine {

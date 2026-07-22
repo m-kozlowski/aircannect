@@ -27,10 +27,12 @@ public:
     void discard_build() override;
 
     std::shared_ptr<const ReportArtifactBundle> take_completed() override;
+    const char *failure_reason() const override { return failure_reason_; }
 
 private:
     struct Runtime;
     Runtime *runtime_ = nullptr;
+    const char *failure_reason_ = nullptr;
 };
 
 }  // namespace aircannect

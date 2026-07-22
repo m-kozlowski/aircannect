@@ -650,10 +650,7 @@ bool ResmedOtaManager::open_prepared_stream() {
     }
 
     StorageStreamStatus stream_status;
-    if (!stream_port_->status(*prepared_stream_, stream_status)) {
-        set_error("prepared_stream_status_failed");
-        return false;
-    }
+    if (!stream_port_->status(*prepared_stream_, stream_status)) return false;
     if (stream_status.state == StorageStreamState::Error ||
         stream_status.state == StorageStreamState::Cancelled) {
         set_error(stream_status.error[0]

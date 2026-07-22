@@ -423,20 +423,19 @@ bool StorageExportInventoryLoader::parse_state_bytes() {
             prepared_.length - prepared_offset_ < sizeof(bytes)
                 ? prepared_.length - prepared_offset_
                 : sizeof(bytes);
-        const size_t read = read_port_->read_prepared(prepared_,
-                                                      prepared_offset_,
-                                                      bytes,
-                                                      wanted);
-        if (read == 0) {
+        const PreparedByteRead read = read_port_->read_prepared(
+            prepared_, prepared_offset_, bytes, wanted);
+        if (read.state == PreparedByteReadState::Retry) return false;
+        if (read.state != PreparedByteReadState::Data) {
             read_port_->release_prepared(prepared_);
             prepared_ = {};
             phase_ = Phase::SelectStateFile;
             return true;
         }
-        prepared_offset_ += read;
-        budget = read < budget ? budget - read : 0;
+        prepared_offset_ += read.bytes;
+        budget = read.bytes < budget ? budget - read.bytes : 0;
 
-        for (size_t i = 0; i < read; ++i) {
+        for (size_t i = 0; i < read.bytes; ++i) {
             const char ch = static_cast<char>(bytes[i]);
             if (ch == '\n') {
                 parse_state_line();

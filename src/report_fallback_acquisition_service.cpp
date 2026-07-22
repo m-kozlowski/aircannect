@@ -166,9 +166,11 @@ void ReportFallbackAcquisitionService::reset() {
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
     preserve_payload_ = nullptr;
+    preserve_prepared_ = {};
     read_ticket_ = {};
     spool_ticket_ = {};
     write_ticket_ = {};
+    source_stop_requested_ = false;
     generation_ = 0;
     read_lane_ = StorageReadLane::Report;
     write_lane_ = StorageAtomicWriteLane::Maintenance;
@@ -368,30 +370,42 @@ bool ReportFallbackAcquisitionService::select_preserved_section() {
 }
 
 bool ReportFallbackAcquisitionService::finish_preserved_read() {
-    StorageReadCompletion completion;
-    if (!read_port_->take_completion(read_ticket_, completion)) return false;
+    if (!preserve_prepared_.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port_->take_completion(read_ticket_, completion)) {
+            return false;
+        }
 
-    read_ticket_ = {};
-    const bool succeeded =
-        completion.outcome.disposition == OperationDisposition::Succeeded &&
-        completion.prepared.valid() && preserve_section_ &&
-        completion.prepared.length == preserve_section_->data_size;
-    const size_t copied = succeeded
-        ? read_port_->read_prepared(completion.prepared,
-                                    0,
-                                    preserve_payload_,
-                                    preserve_section_->data_size)
-        : 0;
-    if (completion.prepared.valid()) {
-        read_port_->release_prepared(completion.prepared);
+        read_ticket_ = {};
+        const bool succeeded =
+            completion.outcome.disposition ==
+                OperationDisposition::Succeeded &&
+            completion.prepared.valid() && preserve_section_ &&
+            completion.prepared.length == preserve_section_->data_size;
+        if (!succeeded) {
+            if (completion.prepared.valid()) {
+                read_port_->release_prepared(completion.prepared);
+            }
+            fail(completion.error[0]
+                     ? completion.error
+                     : "fallback_preserved_read_failed");
+            return true;
+        }
+
+        preserve_prepared_ = completion.prepared;
     }
 
-    if (!succeeded || copied != preserve_section_->data_size ||
+    const PreparedByteRead read = read_port_->read_prepared(
+        preserve_prepared_, 0, preserve_payload_, preserve_section_->data_size);
+    if (read.state == PreparedByteReadState::Retry) return false;
+
+    read_port_->release_prepared(preserve_prepared_);
+    preserve_prepared_ = {};
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != preserve_section_->data_size ||
         !builder_.commit_reserved_section(
             true, preserve_section_->data_crc32)) {
-        fail(completion.error[0]
-                 ? completion.error
-                 : "fallback_preserved_read_failed");
+        fail("fallback_preserved_read_failed");
         return true;
     }
 
@@ -431,6 +445,10 @@ bool ReportFallbackAcquisitionService::poll_fetch() {
         status_.state = ReportFallbackAcquisitionState::Publishing;
         return true;
     }
+    if (source_stop_requested_) {
+        (void)spool_port_->cancel(spool_ticket_);
+        return finish_current_fetch();
+    }
     if (!spool_ticket_.valid() && !submit_current_fetch()) return false;
     if (status_.state != ReportFallbackAcquisitionState::Fetching) {
         return true;
@@ -464,6 +482,11 @@ bool ReportFallbackAcquisitionService::consume_fetch_round() {
 
     const bool parsed = parse_round(round.result);
     round.clear();
+    if (parsed && status_.state == ReportFallbackAcquisitionState::Fetching &&
+        current_sampled_target_complete()) {
+        source_stop_requested_ = true;
+        (void)spool_port_->cancel(spool_ticket_);
+    }
     return parsed || status_.state != ReportFallbackAcquisitionState::Fetching;
 }
 
@@ -474,9 +497,12 @@ bool ReportFallbackAcquisitionService::finish_current_fetch() {
     }
 
     spool_ticket_ = {};
-    if (completion.outcome.disposition !=
-            OperationDisposition::Succeeded ||
-        completion.result.truncated) {
+    const bool stopped_after_coverage =
+        source_stop_requested_ && current_sampled_target_complete();
+    source_stop_requested_ = false;
+    if (!stopped_after_coverage &&
+        (completion.outcome.disposition != OperationDisposition::Succeeded ||
+         completion.result.truncated)) {
         fail(completion.error[0]
                  ? completion.error
                  : "fallback_spool_fetch_failed");
@@ -484,21 +510,57 @@ bool ReportFallbackAcquisitionService::finish_current_fetch() {
         return true;
     }
 
-    const ReportSourceDef *source =
-        report_source_def(targets_[target_index_].source);
+    completion.clear();
+    return complete_current_source();
+}
+
+bool ReportFallbackAcquisitionService::current_sampled_target_complete() const {
+    if (target_index_ >= target_count_) return false;
+
+    const ReportSourceId source_id = targets_[target_index_].source;
+    const ReportSourceDef *source = report_source_def(source_id);
+    if (!source || !report_source_is_sampled(*source)) return false;
+
+    size_t signal_count = 0;
+    const ReportSignalDef *signals = report_signal_defs(signal_count);
+    if (!signals) return false;
+
+    bool targeted = false;
+    for (size_t session_index = 0;
+         session_index < session_count_;
+         ++session_index) {
+        for (size_t signal_index = 0;
+             signal_index < signal_count;
+             ++signal_index) {
+            const ReportSignalDef &signal = signals[signal_index];
+            if (!signal_targeted(session_index, signal.id, source_id)) {
+                continue;
+            }
+
+            targeted = true;
+            if (!series_session_complete(session_index,
+                                         source_id,
+                                         signal.id)) {
+                return false;
+            }
+        }
+    }
+    return targeted;
+}
+
+bool ReportFallbackAcquisitionService::complete_current_source() {
+    if (target_index_ >= target_count_) return false;
+
+    const ReportSourceId source_id = targets_[target_index_].source;
+    const ReportSourceDef *source = report_source_def(source_id);
     if (!source) {
         fail("fallback_source_invalid");
-        completion.clear();
         return true;
     }
 
-    const bool finalized =
-        targets_[target_index_].source ==
-                ReportSourceId::RespiratoryEvents
-            ? append_event_sections()
-            : report_source_is_sampled(*source) &&
-                  append_unavailable_sections();
-    completion.clear();
+    const bool finalized = source_id == ReportSourceId::RespiratoryEvents
+        ? append_event_sections()
+        : report_source_is_sampled(*source) && append_unavailable_sections();
     if (!finalized) return true;
 
     status_.sources_completed++;
@@ -1151,6 +1213,10 @@ void ReportFallbackAcquisitionService::abandon_operations() {
     if (spool_port_ && spool_ticket_.valid()) {
         (void)spool_port_->cancel(spool_ticket_);
     }
+    if (read_port_ && preserve_prepared_.valid()) {
+        read_port_->release_prepared(preserve_prepared_);
+        preserve_prepared_ = {};
+    }
     builder_.discard_reserved_section();
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
@@ -1189,6 +1255,7 @@ void ReportFallbackAcquisitionService::finish(
     preserve_file_ = nullptr;
     preserve_section_ = nullptr;
     preserve_payload_ = nullptr;
+    preserve_prepared_ = {};
     read_ticket_ = {};
     spool_ticket_ = {};
     write_ticket_ = {};

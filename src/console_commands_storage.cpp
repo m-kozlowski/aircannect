@@ -377,17 +377,18 @@ void StorageConsoleCommands::poll_pending(Print &out,
     if (!tail->prepared.valid()) return;
 
     uint8_t buffer[AC_FILE_LOG_TAIL_READ_CHUNK];
-    const size_t received = storage_read_.read_prepared(
+    const PreparedByteRead read = storage_read_.read_prepared(
         tail->prepared, tail->offset, buffer, sizeof(buffer));
-    if (!received) {
+    if (read.state == PreparedByteReadState::Retry) return;
+    if (read.state != PreparedByteReadState::Data) {
         storage_read_.release_prepared(tail->prepared);
         tail->prepared = {};
         tail->offset = 0;
         return;
     }
 
-    out.write(buffer, received);
-    tail->offset += received;
+    out.write(buffer, read.bytes);
+    tail->offset += read.bytes;
     if (tail->offset >= tail->prepared.length) {
         storage_read_.release_prepared(tail->prepared);
         tail->prepared = {};

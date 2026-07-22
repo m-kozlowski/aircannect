@@ -102,28 +102,36 @@ bool ReportArtifactStoreService::submit_manifest_read() {
 }
 
 bool ReportArtifactStoreService::finish_manifest_read() {
-    if (!read_port_ || !read_ticket_.valid() || !bundle_) {
+    if (!read_port_ ||
+        (!read_ticket_.valid() && !prepared_.valid()) || !bundle_) {
         fail("report_artifact_store_not_ready");
         return true;
     }
 
-    StorageReadCompletion completion;
-    if (!read_port_->take_completion(read_ticket_, completion)) return false;
-    read_ticket_ = {};
-
-    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
-        !completion.prepared.valid() ||
-        completion.prepared.length <
-            ReportArtifactManifestCodec::HeaderBytes ||
-        completion.prepared.length > ReportArtifactManifestCodec::MaxBytes) {
-        if (completion.prepared.valid()) {
-            read_port_->release_prepared(completion.prepared);
+    if (!prepared_.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port_->take_completion(read_ticket_, completion)) {
+            return false;
         }
-        fail("report_artifact_manifest_read_failed");
-        return true;
+        read_ticket_ = {};
+
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid() ||
+            completion.prepared.length <
+                ReportArtifactManifestCodec::HeaderBytes ||
+            completion.prepared.length >
+                ReportArtifactManifestCodec::MaxBytes) {
+            if (completion.prepared.valid()) {
+                read_port_->release_prepared(completion.prepared);
+            }
+            fail("report_artifact_manifest_read_failed");
+            return true;
+        }
+
+        prepared_ = completion.prepared;
     }
 
-    prepared_ = completion.prepared;
     std::unique_ptr<LargeByteBuffer> bytes =
         LargeByteBuffer::allocate(prepared_.length);
     if (!bytes) {
@@ -131,11 +139,14 @@ bool ReportArtifactStoreService::finish_manifest_read() {
         return true;
     }
 
-    const size_t copied = read_port_->read_prepared(
+    const PreparedByteRead read = read_port_->read_prepared(
         prepared_, 0, bytes->data(), bytes->size());
+    if (read.state == PreparedByteReadState::Retry) return false;
+
     read_port_->release_prepared(prepared_);
     prepared_ = {};
-    if (copied != bytes->size()) {
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != bytes->size()) {
         fail("report_artifact_manifest_short_read");
         return true;
     }

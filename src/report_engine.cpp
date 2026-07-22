@@ -37,6 +37,62 @@ bool catalog_contains_fallback(const NightCatalog &catalog,
     return false;
 }
 
+const char *plan_status_error(ReportPlanStatus status) {
+    switch (status) {
+        case ReportPlanStatus::InvalidRequest:
+            return "report_plan_invalid_request";
+        case ReportPlanStatus::NightMissing:
+            return "report_plan_night_missing";
+        case ReportPlanStatus::StaleRevision:
+            return "report_plan_revision_stale";
+        case ReportPlanStatus::InvalidCatalog:
+            return "report_plan_catalog_invalid";
+        case ReportPlanStatus::AllocationFailed:
+            return "report_plan_allocation_failed";
+        case ReportPlanStatus::Ready:
+        default:
+            return nullptr;
+    }
+}
+
+const char *executor_error_name(ReportExecutorError error) {
+    switch (error) {
+        case ReportExecutorError::InvalidArgument:
+            return "report_executor_invalid_argument";
+        case ReportExecutorError::InvalidPlan:
+            return "report_executor_invalid_plan";
+        case ReportExecutorError::AllocationFailed:
+            return "report_executor_allocation_failed";
+        case ReportExecutorError::StorageRejected:
+            return "report_executor_storage_rejected";
+        case ReportExecutorError::StorageFailed:
+            return "report_executor_storage_failed";
+        case ReportExecutorError::StorageShortRead:
+            return "report_executor_storage_short_read";
+        case ReportExecutorError::DecodeFailed:
+            return "report_executor_decode_failed";
+        case ReportExecutorError::SinkRejected:
+            return "report_executor_sink_rejected";
+        case ReportExecutorError::None:
+        default:
+            return nullptr;
+    }
+}
+
+const char *completion_error(OperationOutcome outcome,
+                             ReportPlanStatus plan_status,
+                             ReportExecutorError executor_error,
+                             const char *explicit_error) {
+    if (explicit_error && explicit_error[0]) return explicit_error;
+    if (outcome.disposition != OperationDisposition::Failed) return "";
+
+    const char *executor = executor_error_name(executor_error);
+    if (executor) return executor;
+
+    const char *plan = plan_status_error(plan_status);
+    return plan ? plan : "report_engine_failed";
+}
+
 }  // namespace
 
 ReportEngine::ReportEngine(ReportArtifactRequest *queue_slots,
@@ -483,10 +539,13 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
     }
 
     if (!assembler_->begin_build(build_request_, *active_plan_)) {
+        const char *reason = assembler_->failure_reason();
         assembler_->discard_build();
+
         complete_active(OperationOutcome::failed(),
                         ReportPlanStatus::Ready,
-                        ReportExecutorError::SinkRejected);
+                        ReportExecutorError::SinkRejected,
+                        reason ? reason : "report_artifact_begin_failed");
         return true;
     }
 
@@ -553,11 +612,14 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
         std::shared_ptr<const ReportArtifactBundle> bundle =
             finished ? assembler_->take_completed() : nullptr;
         if (!finished || !bundle || !bundle->valid()) {
+            const char *reason = assembler_->failure_reason();
             assembler_->discard_build();
+
             complete_active(OperationOutcome::failed(),
                             ReportPlanStatus::Ready,
                             ReportExecutorError::SinkRejected,
-                            "report_artifact_assembly_failed");
+                            reason ? reason
+                                   : "report_artifact_assembly_failed");
             return true;
         }
 
@@ -579,7 +641,12 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
         return true;
     }
 
+    const char *sink_reason =
+        executor_status.error == ReportExecutorError::SinkRejected
+            ? assembler_->failure_reason()
+            : nullptr;
     assembler_->discard_build();
+
     if (executor_status.state == ReportExecutorState::Cancelled) {
         complete_active(OperationOutcome::cancelled(),
                         ReportPlanStatus::Ready,
@@ -594,7 +661,8 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
 
     complete_active(OperationOutcome::failed(),
                     ReportPlanStatus::Ready,
-                    executor_status.error);
+                    executor_status.error,
+                    sink_reason);
     return true;
 }
 
@@ -693,7 +761,10 @@ void ReportEngine::complete_active(OperationOutcome outcome,
     last_completion_.executor_error = executor_error;
     copy_cstr(last_completion_.error,
               sizeof(last_completion_.error),
-              error ? error : "");
+              completion_error(outcome,
+                               plan_status,
+                               executor_error,
+                               error));
     reset_active();
 }
 

@@ -113,6 +113,8 @@ private:
     bool submit_current_fetch();
     bool consume_fetch_round();
     bool finish_current_fetch();
+    bool current_sampled_target_complete() const;
+    bool complete_current_source();
     bool parse_round(ReportSpoolResult &result);
     bool accept_series_chunk(const ReportParsedChunk &chunk);
     bool accept_event_chunk(const ReportParsedChunk &chunk);
@@ -179,10 +181,12 @@ private:
     const NightCatalogFallbackFile *preserve_file_ = nullptr;
     const NightCatalogFallbackSection *preserve_section_ = nullptr;
     uint8_t *preserve_payload_ = nullptr;
+    StoragePreparedRead preserve_prepared_;
 
     OperationTicket read_ticket_;
     OperationTicket spool_ticket_;
     OperationTicket write_ticket_;
+    bool source_stop_requested_ = false;
     uint32_t generation_ = 0;
     StorageReadLane read_lane_ = StorageReadLane::Report;
     StorageAtomicWriteLane write_lane_ =

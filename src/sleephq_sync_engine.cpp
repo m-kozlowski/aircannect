@@ -289,6 +289,7 @@ void SleepHqSyncEngine::apply_config_locked(const SleepHqExportConfig &config) {
     export_inventory_.reset();
     inventory_requested_ = false;
     state_io_.reset();
+    rebuild_marker_file_.reset();
     state_batch_.clear();
     reset_inflight_reader_locked();
     retry_due_ms_ = 0;
@@ -656,6 +657,7 @@ bool SleepHqSyncEngine::begin_remote_missing_datalog_day_locked(
     pending_state_path_[0] = '\0';
     pending_state_bytes_.reset();
     state_io_.reset();
+    rebuild_marker_file_.reset();
     phase_ = WorkPhase::ReadRebuildMarker;
     return true;
 }
@@ -702,7 +704,9 @@ bool SleepHqSyncEngine::resolve_remote_missing_datalog_day_locked(
 }
 
 ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
-    const StorageFileClientResult io_result = state_io_.poll();
+    const StorageFileClientResult io_result = rebuild_marker_file_.ready()
+        ? StorageFileClientResult::Ready
+        : state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
         return ExportStep::Waiting;
     }
@@ -717,14 +721,23 @@ ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
                                        : "storage_read_failed");
         state_io_.reset();
     } else if (io_result == StorageFileClientResult::Ready) {
-        StoragePreparedFile marker = state_io_.take_file();
-        if (marker.exists() && marker.size() != 0 &&
-            marker.size() <= SLEEPHQ_REBUILD_MARKER_MAX_BYTES) {
+        if (!rebuild_marker_file_.ready()) {
+            rebuild_marker_file_ = state_io_.take_file();
+        }
+        if (rebuild_marker_file_.exists() &&
+            rebuild_marker_file_.size() != 0 &&
+            rebuild_marker_file_.size() <=
+                SLEEPHQ_REBUILD_MARKER_MAX_BYTES) {
             char raw[SLEEPHQ_REBUILD_MARKER_MAX_BYTES + 1] = {};
-            const size_t read = marker.read(
-                0, reinterpret_cast<uint8_t *>(raw), marker.size());
-            if (read == marker.size()) {
-                raw[read] = '\0';
+            const PreparedByteRead read = rebuild_marker_file_.read(
+                0, reinterpret_cast<uint8_t *>(raw),
+                rebuild_marker_file_.size());
+            if (read.state == PreparedByteReadState::Retry) {
+                return ExportStep::Waiting;
+            }
+            if (read.state == PreparedByteReadState::Data &&
+                read.bytes == rebuild_marker_file_.size()) {
+                raw[read.bytes] = '\0';
                 char *newline = strpbrk(raw, "\r\n");
                 if (newline) *newline = '\0';
                 if (parse_uint64_text(raw, marker_epoch)) {
@@ -737,6 +750,7 @@ ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
                 }
             }
         }
+        rebuild_marker_file_.reset();
     } else {
         if (!build_datalog_rebuild_marker_path_locked(
                 pending_remote_day_, pending_state_path_,
@@ -777,6 +791,7 @@ void SleepHqSyncEngine::reset_run_locked(bool keep_status) {
     clear_remote_dates_locked();
     state_batch_.clear();
     state_io_.reset();
+    rebuild_marker_file_.reset();
     reset_inflight_reader_locked();
     phase_ = WorkPhase::Idle;
     import_batch_active_ = false;
@@ -1514,11 +1529,17 @@ ExportStep SleepHqSyncEngine::step_load_inflight_locked() {
         const size_t remaining = inflight_file_.size() - inflight_read_offset_;
         const size_t wanted = remaining < sizeof(bytes) ? remaining
                                                        : sizeof(bytes);
-        const size_t read = inflight_file_.read(inflight_read_offset_,
-                                                bytes, wanted);
-        if (read != wanted) inflight_parse_failed_ = true;
+        const PreparedByteRead read = inflight_file_.read(
+            inflight_read_offset_, bytes, wanted);
+        if (read.state == PreparedByteReadState::Retry) {
+            return ExportStep::Waiting;
+        }
+        if (read.state != PreparedByteReadState::Data ||
+            read.bytes != wanted) {
+            inflight_parse_failed_ = true;
+        }
 
-        for (size_t i = 0; i < read && !inflight_parse_failed_; ++i) {
+        for (size_t i = 0; i < read.bytes && !inflight_parse_failed_; ++i) {
             const char ch = static_cast<char>(bytes[i]);
             if (ch == '\n') {
                 inflight_line_[inflight_line_length_] = '\0';
@@ -1532,7 +1553,7 @@ ExportStep SleepHqSyncEngine::step_load_inflight_locked() {
                 inflight_parse_failed_ = true;
             }
         }
-        inflight_read_offset_ += read;
+        inflight_read_offset_ += read.bytes;
         if (!inflight_parse_failed_ &&
             inflight_read_offset_ < inflight_file_.size()) {
             return ExportStep::Working;

@@ -172,10 +172,10 @@ bool cancel_prepared_read(OperationTicket ticket);
 bool abandon_prepared_read(OperationTicket ticket);
 bool take_read_completion(OperationTicket ticket,
                           StorageReadCompletion &completion);
-size_t copy_prepared_read(StoragePreparedRead prepared,
-                          size_t offset,
-                          uint8_t *buffer,
-                          size_t capacity);
+PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
+                                    size_t offset,
+                                    uint8_t *buffer,
+                                    size_t capacity);
 void free_prepared_read(StoragePreparedRead prepared);
 
 class ServiceReadPort final : public StorageReadPort {
@@ -199,10 +199,10 @@ public:
         return take_read_completion(ticket, completion);
     }
 
-    size_t read_prepared(StoragePreparedRead prepared,
-                         size_t offset,
-                         uint8_t *buffer,
-                         size_t capacity) const override {
+    PreparedByteRead read_prepared(StoragePreparedRead prepared,
+                                   size_t offset,
+                                   uint8_t *buffer,
+                                   size_t capacity) const override {
         return copy_prepared_read(prepared, offset, buffer, capacity);
     }
 
@@ -701,23 +701,29 @@ bool take_read_completion(OperationTicket ticket,
     return true;
 }
 
-size_t copy_prepared_read(StoragePreparedRead prepared,
-                          size_t offset,
-                          uint8_t *buffer,
-                          size_t capacity) {
-    if (!buffer || capacity == 0 || !lock_queue()) return 0;
+PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
+                                    size_t offset,
+                                    uint8_t *buffer,
+                                    size_t capacity) {
+    PreparedByteRead result;
+    if (!prepared.valid() || !buffer || capacity == 0) return result;
+
+    if (!lock_queue()) {
+        result.state = PreparedByteReadState::Retry;
+        return result;
+    }
 
     const PreparedReadSlot *slot = find_prepared_read_locked(prepared);
     if (!slot || offset >= slot->handle.length) {
         unlock_queue();
-        return 0;
+        return result;
     }
 
-    const size_t length =
-        std::min(capacity, slot->handle.length - offset);
-    memcpy(buffer, slot->bytes + offset, length);
+    result.state = PreparedByteReadState::Data;
+    result.bytes = std::min(capacity, slot->handle.length - offset);
+    memcpy(buffer, slot->bytes + offset, result.bytes);
     unlock_queue();
-    return length;
+    return result;
 }
 
 void free_prepared_read(StoragePreparedRead prepared) {
@@ -1681,7 +1687,6 @@ void finish_read_job(size_t index,
     completion.outcome = outcome;
     copy_cstr(completion.error, sizeof(completion.error), error ? error : "");
     const bool abandoned = job.abandon_requested;
-
     PreparedReadSlot *prepared_slot = nullptr;
     if (!abandoned &&
         outcome.disposition == OperationDisposition::Succeeded) {
@@ -1870,9 +1875,8 @@ bool process_read_step() {
     const bool file_log_tail =
         job.mode == StorageReadMode::TailLines &&
         strcmp(job.path, AC_FILE_LOG_PATH) == 0;
-    if (!job.started && file_log_tail &&
-        !file_log_sink.prepare_tail_read()) {
-        return false;
+    if (!job.started && file_log_tail) {
+        if (!file_log_sink.prepare_tail_read()) return false;
     }
 
     const char *error = nullptr;

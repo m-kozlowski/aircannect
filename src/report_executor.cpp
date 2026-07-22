@@ -452,16 +452,16 @@ bool ReportExecutor::decode_record() {
 
     const size_t prepared_offset =
         static_cast<size_t>(record_index_) * file->record_size;
-    const size_t read = read_port_->read_prepared(prepared_,
-                                                  prepared_offset,
-                                                  record_buffer_,
-                                                  file->record_size);
-    if (read != file->record_size) {
+    const PreparedByteRead read = read_port_->read_prepared(
+        prepared_, prepared_offset, record_buffer_, file->record_size);
+    if (read.state == PreparedByteReadState::Retry) return false;
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != file->record_size) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::StorageShortRead);
         return false;
     }
-    if (!add_u64(stats_.bytes_read, read)) {
+    if (!add_u64(stats_.bytes_read, read.bytes)) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::DecodeFailed);
         return false;
@@ -560,17 +560,17 @@ bool ReportExecutor::decode_fallback_operation() {
         return false;
     }
 
-    const size_t read = read_port_->read_prepared(prepared_,
-                                                  0,
-                                                  record_buffer_,
-                                                  operation->length);
-    if (read != operation->length) {
+    const PreparedByteRead read = read_port_->read_prepared(
+        prepared_, 0, record_buffer_, operation->length);
+    if (read.state == PreparedByteReadState::Retry) return false;
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != operation->length) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::StorageShortRead);
         return false;
     }
-    if (!add_u64(stats_.bytes_read, read) ||
-        crc32_ieee(record_buffer_, read) != section->data_crc32) {
+    if (!add_u64(stats_.bytes_read, read.bytes) ||
+        crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::DecodeFailed);
         return false;
@@ -593,7 +593,7 @@ bool ReportExecutor::decode_fallback_operation() {
         if (!report_for_each_series_sample(section->payload_schema,
                                            section->coverage.start_ms,
                                            record_buffer_,
-                                           read,
+                                           read.bytes,
                                            section->record_count,
                                            emit_series,
                                            this)) {
@@ -611,7 +611,8 @@ bool ReportExecutor::decode_fallback_operation() {
     } else {
         for (size_t i = 0; i < section->record_count; ++i) {
             ReportEventRecord event;
-            if (!report_read_event_record(record_buffer_, read, i, event)) {
+            if (!report_read_event_record(record_buffer_, read.bytes, i,
+                                          event)) {
                 finish(ReportExecutorState::Failed,
                        ReportExecutorError::DecodeFailed);
                 return false;

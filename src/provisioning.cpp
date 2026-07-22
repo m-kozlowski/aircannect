@@ -263,11 +263,15 @@ bool parse_config_file(StorageReadPort &port,
     size_t offset = 0;
 
     while (offset < prepared.length) {
-        const size_t received = port.read_prepared(
+        const PreparedByteRead read = port.read_prepared(
             prepared, offset, bytes, sizeof(bytes));
-        if (received == 0) return false;
+        if (read.state == PreparedByteReadState::Retry) {
+            delay(1);
+            continue;
+        }
+        if (read.state != PreparedByteReadState::Data) return false;
 
-        for (size_t i = 0; i < received; ++i) {
+        for (size_t i = 0; i < read.bytes; ++i) {
             const char value = static_cast<char>(bytes[i]);
             if (value == '\n') {
                 apply_config_line(config_service, state, counts, line,
@@ -284,7 +288,7 @@ bool parse_config_file(StorageReadPort &port,
             }
             line += value;
         }
-        offset += received;
+        offset += read.bytes;
     }
     if (line.length() > 0 || too_long) {
         apply_config_line(config_service, state, counts, line, too_long);

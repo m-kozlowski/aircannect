@@ -69,6 +69,9 @@ public:
         std::shared_ptr<StorageByteStream> &stream_out,
         char *error_out = nullptr,
         size_t error_out_size = 0) = 0;
+
+    // False means that a status snapshot is temporarily unavailable. Stream
+    // failures are reported through StorageStreamState::Error or Cancelled.
     virtual bool status(const StorageByteStream &stream,
                         StorageStreamStatus &status_out) const = 0;
     virtual bool attach(StorageByteStream &stream) = 0;

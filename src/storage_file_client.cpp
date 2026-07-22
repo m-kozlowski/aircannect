@@ -41,10 +41,10 @@ void StoragePreparedFile::move_from(StoragePreparedFile &other) {
     other.exists_ = false;
 }
 
-size_t StoragePreparedFile::read(size_t offset,
-                                 uint8_t *buffer,
-                                 size_t capacity) const {
-    if (!port_ || !prepared_.valid() || !buffer || capacity == 0) return 0;
+PreparedByteRead StoragePreparedFile::read(size_t offset,
+                                           uint8_t *buffer,
+                                           size_t capacity) const {
+    if (!port_ || !prepared_.valid() || !buffer || capacity == 0) return {};
     return port_->read_prepared(prepared_, offset, buffer, capacity);
 }
 

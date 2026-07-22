@@ -24,8 +24,10 @@ struct NightCatalogStoreRuntime {
     Phase phase = Phase::Idle;
     OperationTicket read_ticket;
     OperationTicket write_ticket;
+    StoragePreparedRead prepared;
     NightCatalogFileInfo file_info;
     uint8_t header[NightCatalogFileCodec::HeaderBytes] = {};
+    std::unique_ptr<LargeByteBuffer> body;
     std::shared_ptr<const LargeByteBuffer> encoded;
     std::shared_ptr<const NightCatalog> saving;
 };
@@ -59,11 +61,16 @@ void NightCatalogStoreService::reset_operation() {
     if (write_port_ && runtime_->write_ticket.valid()) {
         (void)write_port_->abandon(runtime_->write_ticket);
     }
+    if (read_port_ && runtime_->prepared.valid()) {
+        read_port_->release_prepared(runtime_->prepared);
+    }
 
     runtime_->read_ticket = {};
     runtime_->write_ticket = {};
+    runtime_->prepared = {};
     runtime_->file_info = {};
     memset(runtime_->header, 0, sizeof(runtime_->header));
+    runtime_->body.reset();
     runtime_->encoded.reset();
     runtime_->saving.reset();
 }
@@ -131,16 +138,16 @@ OperationAdmission NightCatalogStoreService::request_save(
 
 namespace {
 
-bool read_exact(StorageReadPort &read_port,
-                StoragePreparedRead prepared,
-                uint8_t *out,
-                size_t expected) {
+PreparedByteRead read_exact(StorageReadPort &read_port,
+                            StoragePreparedRead prepared,
+                            uint8_t *out,
+                            size_t expected) {
     if (!prepared.valid() || prepared.length != expected ||
         (expected > 0 && !out)) {
-        return false;
+        return {};
     }
-    return expected == 0 ||
-           read_port.read_prepared(prepared, 0, out, expected) == expected;
+    if (expected == 0) return {};
+    return read_port.read_prepared(prepared, 0, out, expected);
 }
 
 }  // namespace
@@ -155,27 +162,38 @@ bool NightCatalogStoreService::poll() {
             return false;
 
         case NightCatalogStoreRuntime::Phase::WaitHeader: {
-            StorageReadCompletion completion;
-            if (!read_port_->take_completion(runtime_->read_ticket,
-                                              completion)) {
-                return false;
-            }
-            runtime_->read_ticket = {};
+            if (!runtime_->prepared.valid()) {
+                StorageReadCompletion completion;
+                if (!read_port_->take_completion(runtime_->read_ticket,
+                                                  completion)) {
+                    return false;
+                }
+                runtime_->read_ticket = {};
 
-            const bool read =
-                completion.outcome.disposition ==
-                    OperationDisposition::Succeeded &&
-                read_exact(*read_port_,
-                           completion.prepared,
-                           runtime_->header,
-                           sizeof(runtime_->header));
-            if (completion.prepared.valid()) {
-                read_port_->release_prepared(completion.prepared);
+                if (completion.outcome.disposition !=
+                        OperationDisposition::Succeeded ||
+                    !completion.prepared.valid()) {
+                    if (completion.prepared.valid()) {
+                        read_port_->release_prepared(completion.prepared);
+                    }
+                    fail("night_catalog_load_header_invalid");
+                    return true;
+                }
+                runtime_->prepared = completion.prepared;
             }
-            if (!read || !NightCatalogFileCodec::inspect(
-                             runtime_->header,
-                             sizeof(runtime_->header),
-                             runtime_->file_info)) {
+
+            const PreparedByteRead read = read_exact(
+                *read_port_, runtime_->prepared, runtime_->header,
+                sizeof(runtime_->header));
+            if (read.state == PreparedByteReadState::Retry) return false;
+
+            read_port_->release_prepared(runtime_->prepared);
+            runtime_->prepared = {};
+            if (read.state != PreparedByteReadState::Data ||
+                read.bytes != sizeof(runtime_->header) ||
+                !NightCatalogFileCodec::inspect(runtime_->header,
+                                                sizeof(runtime_->header),
+                                                runtime_->file_info)) {
                 fail("night_catalog_load_header_invalid");
                 return true;
             }
@@ -227,42 +245,55 @@ bool NightCatalogStoreService::poll() {
         }
 
         case NightCatalogStoreRuntime::Phase::WaitBody: {
-            StorageReadCompletion completion;
-            if (!read_port_->take_completion(runtime_->read_ticket,
-                                              completion)) {
-                return false;
-            }
-            runtime_->read_ticket = {};
-
-            if (completion.outcome.disposition !=
-                    OperationDisposition::Succeeded ||
-                !completion.prepared.valid() ||
-                completion.prepared.length !=
-                    runtime_->file_info.body_bytes) {
-                if (completion.prepared.valid()) {
-                    read_port_->release_prepared(completion.prepared);
+            if (!runtime_->prepared.valid()) {
+                StorageReadCompletion completion;
+                if (!read_port_->take_completion(runtime_->read_ticket,
+                                                  completion)) {
+                    return false;
                 }
-                fail("night_catalog_load_body_failed");
-                return true;
+                runtime_->read_ticket = {};
+
+                if (completion.outcome.disposition !=
+                        OperationDisposition::Succeeded ||
+                    !completion.prepared.valid() ||
+                    completion.prepared.length !=
+                        runtime_->file_info.body_bytes) {
+                    if (completion.prepared.valid()) {
+                        read_port_->release_prepared(completion.prepared);
+                    }
+                    fail("night_catalog_load_body_failed");
+                    return true;
+                }
+                runtime_->prepared = completion.prepared;
             }
 
-            std::unique_ptr<LargeByteBuffer> body =
-                LargeByteBuffer::allocate(runtime_->file_info.body_bytes);
-            if (!body || !read_exact(*read_port_,
-                                     completion.prepared,
-                                     body->data(),
-                                     body->size())) {
-                read_port_->release_prepared(completion.prepared);
+            if (!runtime_->body) {
+                runtime_->body = LargeByteBuffer::allocate(
+                    runtime_->file_info.body_bytes);
+            }
+            if (!runtime_->body) {
                 fail("night_catalog_load_body_short");
                 return true;
             }
-            read_port_->release_prepared(completion.prepared);
+
+            const PreparedByteRead read = read_exact(
+                *read_port_, runtime_->prepared, runtime_->body->data(),
+                runtime_->body->size());
+            if (read.state == PreparedByteReadState::Retry) return false;
+
+            read_port_->release_prepared(runtime_->prepared);
+            runtime_->prepared = {};
+            if (read.state != PreparedByteReadState::Data ||
+                read.bytes != runtime_->body->size()) {
+                fail("night_catalog_load_body_short");
+                return true;
+            }
 
             std::shared_ptr<const NightCatalog> catalog =
                 NightCatalogFileCodec::decode(runtime_->header,
                                               sizeof(runtime_->header),
-                                              body->data(),
-                                              body->size());
+                                              runtime_->body->data(),
+                                              runtime_->body->size());
             if (!catalog) {
                 fail("night_catalog_load_decode_failed");
                 return true;

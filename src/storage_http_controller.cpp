@@ -154,7 +154,13 @@ struct PendingPreparedReadRef {
         }
 
         if (!prepared.valid() || offset >= prepared.length) return 0;
-        return port->read_prepared(prepared, offset, buffer, capacity);
+
+        const PreparedByteRead read =
+            port->read_prepared(prepared, offset, buffer, capacity);
+        if (read.state == PreparedByteReadState::Retry) {
+            return RESPONSE_TRY_AGAIN;
+        }
+        return read.bytes;
     }
 };
 

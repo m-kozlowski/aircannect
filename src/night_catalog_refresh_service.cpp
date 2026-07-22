@@ -715,32 +715,37 @@ void skip_current_edf(NightCatalogRefreshRuntime &runtime,
 bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
                      StorageReadPort &read_port,
                      NightCatalogRefreshStatus &status) {
-    StorageReadCompletion completion;
-    if (!read_port.take_completion(runtime.read_ticket, completion)) {
-        return false;
-    }
-    runtime.read_ticket = {};
-
-    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
-        !completion.prepared.valid() ||
-        completion.prepared.length > SOURCE_READ_BUFFER_BYTES) {
-        if (completion.prepared.valid()) {
-            read_port.release_prepared(completion.prepared);
+    if (!runtime.prepared.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port.take_completion(runtime.read_ticket, completion)) {
+            return false;
         }
-        skip_current_edf(runtime,
-                         status,
-                         "night_catalog_edf_read_failed");
-        return true;
+        runtime.read_ticket = {};
+
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid() ||
+            completion.prepared.length > SOURCE_READ_BUFFER_BYTES) {
+            if (completion.prepared.valid()) {
+                read_port.release_prepared(completion.prepared);
+            }
+            skip_current_edf(runtime,
+                             status,
+                             "night_catalog_edf_read_failed");
+            return true;
+        }
+        runtime.prepared = completion.prepared;
     }
 
-    const size_t expected = completion.prepared.length;
-    const size_t read = read_port.read_prepared(
-        completion.prepared,
-        0,
-        runtime.read_buffer,
-        expected);
-    read_port.release_prepared(completion.prepared);
-    if (read != expected) {
+    const size_t expected = runtime.prepared.length;
+    const PreparedByteRead read = read_port.read_prepared(
+        runtime.prepared, 0, runtime.read_buffer, expected);
+    if (read.state == PreparedByteReadState::Retry) return false;
+
+    read_port.release_prepared(runtime.prepared);
+    runtime.prepared = {};
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != expected) {
         skip_current_edf(runtime,
                          status,
                          "night_catalog_edf_read_short");
@@ -751,7 +756,7 @@ bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
     const EdfReportFileStatus file_status = edf_report_describe_file(
         runtime.current_path,
         runtime.read_buffer,
-        read,
+        read.bytes,
         runtime.current_size,
         static_cast<time_t>(runtime.current_modified),
         0,
@@ -863,31 +868,37 @@ bool submit_next_metadata(NightCatalogRefreshRuntime &runtime,
 bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
                           StorageReadPort &read_port,
                           NightCatalogRefreshStatus &status) {
-    StorageReadCompletion completion;
-    if (!read_port.take_completion(runtime.read_ticket, completion)) {
-        return false;
-    }
-    runtime.read_ticket = {};
-
-    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
-        !completion.prepared.valid() ||
-        completion.prepared.length != runtime.current_size) {
-        if (completion.prepared.valid()) {
-            read_port.release_prepared(completion.prepared);
+    if (!runtime.prepared.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port.take_completion(runtime.read_ticket, completion)) {
+            return false;
         }
-        skip_current_metadata(runtime,
-                              status,
-                              "night_catalog_metadata_read_failed");
-        return true;
+        runtime.read_ticket = {};
+
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid() ||
+            completion.prepared.length != runtime.current_size) {
+            if (completion.prepared.valid()) {
+                read_port.release_prepared(completion.prepared);
+            }
+            skip_current_metadata(runtime,
+                                  status,
+                                  "night_catalog_metadata_read_failed");
+            return true;
+        }
+        runtime.prepared = completion.prepared;
     }
 
-    const size_t expected = completion.prepared.length;
-    const size_t read = read_port.read_prepared(completion.prepared,
-                                                0,
-                                                runtime.read_buffer,
-                                                expected);
-    read_port.release_prepared(completion.prepared);
-    if (read != expected ||
+    const size_t expected = runtime.prepared.length;
+    const PreparedByteRead read = read_port.read_prepared(
+        runtime.prepared, 0, runtime.read_buffer, expected);
+    if (read.state == PreparedByteReadState::Retry) return false;
+
+    read_port.release_prepared(runtime.prepared);
+    runtime.prepared = {};
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != expected ||
         runtime.session_metadata_count >=
             runtime.session_metadata_capacity) {
         skip_current_metadata(runtime,
@@ -911,9 +922,11 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
 
     EdfSessionMetadataFileInfo info;
     parsed.identity = EdfSessionMetadataCodec::identity(runtime.read_buffer,
-                                                        read);
+                                                        read.bytes);
     if (parsed.identity == 0 ||
-        !EdfSessionMetadataCodec::inspect(runtime.read_buffer, read, info)) {
+        !EdfSessionMetadataCodec::inspect(runtime.read_buffer,
+                                          read.bytes,
+                                          info)) {
         parsed = {};
         skip_current_metadata(runtime,
                               status,
@@ -922,7 +935,7 @@ bool finish_metadata_read(NightCatalogRefreshRuntime &runtime,
     }
 
     if (EdfSessionMetadataCodec::decode(runtime.read_buffer,
-                                        read,
+                                        read.bytes,
                                         parsed.metadata)) {
         if (!edf_session_metadata_path_matches(runtime.current_path,
                                                parsed.metadata)) {
@@ -1030,31 +1043,37 @@ bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
 bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
                           StorageReadPort &read_port,
                           NightCatalogRefreshStatus &status) {
-    StorageReadCompletion completion;
-    if (!read_port.take_completion(runtime.read_ticket, completion)) {
-        return false;
-    }
-    runtime.read_ticket = {};
-
-    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
-        !completion.prepared.valid() ||
-        completion.prepared.length > SOURCE_READ_BUFFER_BYTES) {
-        if (completion.prepared.valid()) {
-            read_port.release_prepared(completion.prepared);
+    if (!runtime.prepared.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port.take_completion(runtime.read_ticket, completion)) {
+            return false;
         }
-        skip_current_fallback(runtime,
-                              status,
-                              "night_catalog_fallback_read_failed");
-        return true;
+        runtime.read_ticket = {};
+
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid() ||
+            completion.prepared.length > SOURCE_READ_BUFFER_BYTES) {
+            if (completion.prepared.valid()) {
+                read_port.release_prepared(completion.prepared);
+            }
+            skip_current_fallback(runtime,
+                                  status,
+                                  "night_catalog_fallback_read_failed");
+            return true;
+        }
+        runtime.prepared = completion.prepared;
     }
 
-    const size_t expected = completion.prepared.length;
-    const size_t read = read_port.read_prepared(completion.prepared,
-                                                0,
-                                                runtime.read_buffer,
-                                                expected);
-    read_port.release_prepared(completion.prepared);
-    if (read != expected) {
+    const size_t expected = runtime.prepared.length;
+    const PreparedByteRead read = read_port.read_prepared(
+        runtime.prepared, 0, runtime.read_buffer, expected);
+    if (read.state == PreparedByteReadState::Retry) return false;
+
+    read_port.release_prepared(runtime.prepared);
+    runtime.prepared = {};
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != expected) {
         skip_current_fallback(runtime,
                               status,
                               "night_catalog_fallback_read_short");
@@ -1067,11 +1086,11 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
     StorageScanEntryView scan_entry;
     const bool metadata_valid =
         ReportFallbackArtifactCodec::inspect_header(
-            runtime.read_buffer, read, info) &&
+            runtime.read_buffer, read.bytes, info) &&
         info.total_bytes == runtime.current_size &&
-        info.metadata_bytes <= read &&
+        info.metadata_bytes <= read.bytes &&
         ReportFallbackArtifactCodec::decode_metadata(
-            runtime.read_buffer, read, view) &&
+            runtime.read_buffer, read.bytes, view) &&
         report_fallback_artifact_path(info.sleep_day,
                                       expected_path,
                                       sizeof(expected_path)) &&
@@ -1263,29 +1282,36 @@ bool submit_str_chunk(NightCatalogRefreshRuntime &runtime,
 bool finish_str_read(NightCatalogRefreshRuntime &runtime,
                      StorageReadPort &read_port,
                      NightCatalogRefreshStatus &status) {
-    StorageReadCompletion completion;
-    if (!read_port.take_completion(runtime.read_ticket, completion)) {
-        return false;
-    }
-    runtime.read_ticket = {};
-
     const size_t record_size = edf_str_record_size();
     const size_t expected = runtime.str_chunk_records * record_size;
-    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
-        !completion.prepared.valid() || completion.prepared.length != expected) {
-        if (completion.prepared.valid()) {
-            read_port.release_prepared(completion.prepared);
+    if (!runtime.prepared.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port.take_completion(runtime.read_ticket, completion)) {
+            return false;
         }
-        skip_str(runtime, status, "night_catalog_str_read_failed");
-        return true;
+        runtime.read_ticket = {};
+
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid() ||
+            completion.prepared.length != expected) {
+            if (completion.prepared.valid()) {
+                read_port.release_prepared(completion.prepared);
+            }
+            skip_str(runtime, status, "night_catalog_str_read_failed");
+            return true;
+        }
+        runtime.prepared = completion.prepared;
     }
 
-    const size_t read = read_port.read_prepared(completion.prepared,
-                                                0,
-                                                runtime.read_buffer,
-                                                expected);
-    read_port.release_prepared(completion.prepared);
-    if (read != expected) {
+    const PreparedByteRead read = read_port.read_prepared(
+        runtime.prepared, 0, runtime.read_buffer, expected);
+    if (read.state == PreparedByteReadState::Retry) return false;
+
+    read_port.release_prepared(runtime.prepared);
+    runtime.prepared = {};
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != expected) {
         skip_str(runtime, status, "night_catalog_str_read_short");
         return true;
     }

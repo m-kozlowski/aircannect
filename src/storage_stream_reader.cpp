@@ -125,9 +125,8 @@ bool StorageStreamReader::open(
     while (operation_running(operation, error_out, error_out_size)) {
         StorageStreamStatus status;
         if (!port_->status(*stream_, status)) {
-            close(false);
-            copy_cstr(error_out, error_out_size, "stream_status_failed");
-            return false;
+            storage_wait_tick();
+            continue;
         }
         if (status.state == StorageStreamState::Ready) {
             if (!port_->attach(*stream_)) {

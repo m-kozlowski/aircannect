@@ -8,6 +8,7 @@
 #include "night_catalog_builder.h"
 #include "report_fallback_artifact.h"
 #include "report_night_artifact_builder.h"
+#include "string_util.h"
 
 #ifdef ARDUINO
 #include <Arduino.h>
@@ -27,6 +28,7 @@ constexpr uint32_t CATALOG_STORE_GENERATION = 1;
 constexpr uint32_t CATALOG_STORE_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
 constexpr uint32_t LEGACY_CACHE_DELETE_RETRY_MS = 30000;
+constexpr uint32_t ARTIFACT_FAILURE_RETRY_MS = 30000;
 constexpr size_t IDLE_QUEUE_LOOKAHEAD = 2;
 
 constexpr char LEGACY_CACHE_PARENT[] = "/aircannect/report";
@@ -54,6 +56,14 @@ struct PendingCatalogRefresh {
 
     bool valid() const { return generation != 0; }
     void clear() { *this = {}; }
+};
+
+struct ReportArtifactFailureEntry {
+    ReportArtifactKey artifact;
+    char error[AC_STORAGE_ERROR_MAX] = {};
+    uint32_t retry_at_ms = 0;
+
+    bool valid() const { return artifact.valid() && error[0] != '\0'; }
 };
 
 enum class CatalogStorePurpose : uint8_t {
@@ -160,8 +170,18 @@ struct ReportTask::Runtime {
             return false;
         }
 
-        command = commands[0];
-        for (size_t i = 1; i < command_count; ++i) {
+        size_t selected = 0;
+        for (size_t i = 0; i < command_count; ++i) {
+            if (commands[i].kind == ReportTaskCommandKind::Artifact &&
+                commands[i].priority ==
+                    ReportRequestPriority::Foreground) {
+                selected = i;
+                break;
+            }
+        }
+
+        command = commands[selected];
+        for (size_t i = selected + 1; i < command_count; ++i) {
             commands[i - 1] = commands[i];
         }
         commands[--command_count] = {};
@@ -176,6 +196,56 @@ struct ReportTask::Runtime {
         activity_pending = true;
         unlock();
         wake();
+    }
+
+    bool defer_active_catalog_refresh() {
+        if (!catalog_refresh.active() || refresh_generation == 0) {
+            return false;
+        }
+
+        if (!pending_refresh.valid()) {
+            pending_refresh.generation = refresh_generation;
+            pending_refresh.current_offset_valid = refresh_offset_valid;
+            pending_refresh.current_offset_minutes = refresh_offset_minutes;
+            pending_refresh.summary_attempted = true;
+        }
+
+        catalog_refresh.cancel();
+        refresh_generation = 0;
+        catalog_refresh_retry_at_ms = 0;
+        return true;
+    }
+
+    bool preempt_background_for_foreground() {
+        if (!engine.status().foreground_active) return false;
+
+        bool worked = engine.cancel_background() > 0;
+
+        if (summary_acquisition.active()) {
+            summary_acquisition.cancel();
+            worked = true;
+        }
+
+        worked = defer_active_catalog_refresh() || worked;
+
+        if (artifact_index_refresh.active()) {
+            artifact_index_refresh.cancel();
+            artifact_index_refresh_generation = 0;
+            artifact_index_refresh_pending = true;
+            worked = true;
+        }
+
+        if (catalog_store.active() &&
+            store_purpose == CatalogStorePurpose::Save) {
+            catalog_store.cancel();
+            store_purpose = CatalogStorePurpose::None;
+            worked = true;
+        }
+        return worked;
+    }
+
+    bool background_work_blocked() const {
+        return background_suspended || engine.status().foreground_active;
     }
 
     bool apply_pending_activity() {
@@ -194,6 +264,7 @@ struct ReportTask::Runtime {
         activity = next;
         background_suspended =
             activity.therapy_active || activity.realtime_stream_active ||
+            activity.foreground_report_demand ||
             activity.ota_install_active || activity.export_active;
         if (!background_suspended || was_suspended) return true;
 
@@ -204,15 +275,7 @@ struct ReportTask::Runtime {
             summary_acquisition.cancel();
         }
 
-        if (catalog_refresh.active() && refresh_generation != 0) {
-            pending_refresh.generation = refresh_generation;
-            pending_refresh.current_offset_valid = refresh_offset_valid;
-            pending_refresh.current_offset_minutes = refresh_offset_minutes;
-            pending_refresh.summary_attempted = true;
-            catalog_refresh.cancel();
-            refresh_generation = 0;
-            catalog_refresh_retry_at_ms = 0;
-        }
+        (void)defer_active_catalog_refresh();
 
         if (artifact_index_refresh.active()) {
             artifact_index_refresh.cancel();
@@ -246,6 +309,27 @@ struct ReportTask::Runtime {
         return found;
     }
 
+    bool find_failure(const ReportArtifactKey &artifact,
+                      ReportArtifactFailureStatus &out) const {
+        out = {};
+        if (!artifact.valid() || !lock(20)) return false;
+
+        for (const ReportArtifactFailureEntry &entry : artifact_failures) {
+            if (!entry.valid() || entry.artifact != artifact ||
+                deadline_due(last_step_ms, entry.retry_at_ms)) {
+                continue;
+            }
+
+            copy_cstr(out.error, sizeof(out.error), entry.error);
+            out.retry_after_ms = entry.retry_at_ms - last_step_ms;
+            unlock();
+            return true;
+        }
+
+        unlock();
+        return false;
+    }
+
     bool publish_artifact_index(
         std::shared_ptr<const ReportArtifactIndex> next) {
         if (!next || !lock(20)) return false;
@@ -270,6 +354,82 @@ struct ReportTask::Runtime {
         return publish_artifact_index(std::move(updated));
     }
 
+    void observe_engine_completion(uint32_t now_ms) {
+        const ReportEngineCompletion completion =
+            engine.status().last_completion;
+        if (!completion.valid() ||
+            completion.request.ticket == observed_engine_completion) {
+            return;
+        }
+        if (!lock(20)) return;
+
+        observed_engine_completion = completion.request.ticket;
+        if (completion.outcome.disposition ==
+            OperationDisposition::Succeeded) {
+            clear_artifact_failure_locked(completion.request.artifact);
+            unlock();
+            return;
+        }
+        if (completion.outcome.disposition != OperationDisposition::Failed ||
+            completion.request.priority !=
+                ReportRequestPriority::Foreground) {
+            unlock();
+            return;
+        }
+
+        remember_artifact_failure_locked(
+            completion.request.artifact,
+            completion.error[0] ? completion.error : "report_build_failed",
+            now_ms);
+        unlock();
+    }
+
+    void remember_artifact_failure_locked(const ReportArtifactKey &artifact,
+                                          const char *error,
+                                          uint32_t now_ms) {
+        if (!artifact.valid() || !error || !error[0]) return;
+
+        size_t selected = AC_REPORT_TASK_BUILD_CAPACITY;
+        for (size_t i = 0; i < AC_REPORT_TASK_BUILD_CAPACITY; ++i) {
+            if (artifact_failures[i].valid() &&
+                artifact_failures[i].artifact == artifact) {
+                selected = i;
+                break;
+            }
+            if (selected == AC_REPORT_TASK_BUILD_CAPACITY &&
+                !artifact_failures[i].valid()) {
+                selected = i;
+            }
+        }
+        if (selected == AC_REPORT_TASK_BUILD_CAPACITY) {
+            selected = artifact_failure_cursor;
+            artifact_failure_cursor =
+                (artifact_failure_cursor + 1) %
+                AC_REPORT_TASK_BUILD_CAPACITY;
+        }
+
+        ReportArtifactFailureEntry &entry = artifact_failures[selected];
+        entry.artifact = artifact;
+        copy_cstr(entry.error, sizeof(entry.error), error);
+        entry.retry_at_ms = now_ms + ARTIFACT_FAILURE_RETRY_MS;
+    }
+
+    void clear_artifact_failure_locked(const ReportArtifactKey &artifact) {
+        for (ReportArtifactFailureEntry &entry : artifact_failures) {
+            if (entry.valid() && entry.artifact == artifact) entry = {};
+        }
+    }
+
+    void clear_artifact_failures() {
+        if (!lock(20)) return;
+
+        for (ReportArtifactFailureEntry &entry : artifact_failures) {
+            entry = {};
+        }
+        artifact_failure_cursor = 0;
+        unlock();
+    }
+
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
                         uint32_t generation) {
         if (artifact_index_refresh.active()) {
@@ -281,6 +441,7 @@ struct ReportTask::Runtime {
         catalog = std::move(next);
         catalog_generation = generation;
         engine.publish_catalog(catalog);
+        clear_artifact_failures();
 
         if (!summary_acquisition.snapshot()) {
             summary_acquisition.seed(
@@ -477,6 +638,11 @@ struct ReportTask::Runtime {
     size_t command_count = 0;
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
+    ReportArtifactFailureEntry
+        artifact_failures[AC_REPORT_TASK_BUILD_CAPACITY] = {};
+    size_t artifact_failure_cursor = 0;
+    OperationTicket observed_engine_completion;
+    uint32_t last_step_ms = 0;
     PendingCatalogRefresh pending_refresh;
     uint32_t refresh_generation = 0;
     uint32_t catalog_refresh_retry_at_ms = 0;
@@ -703,9 +869,24 @@ bool ReportTask::artifact_availability(
     return runtime_->find_availability(artifact, availability);
 }
 
+bool ReportTask::artifact_failure(
+    const ReportArtifactKey &artifact,
+    ReportArtifactFailureStatus &failure) const {
+    if (!runtime_) {
+        failure = {};
+        return false;
+    }
+    return runtime_->find_failure(artifact, failure);
+}
+
 bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     if (!runtime_ || !runtime_->initialized) return false;
     Runtime &runtime = *runtime_;
+    if (runtime.lock(20)) {
+        runtime.last_step_ms = now_ms;
+        runtime.unlock();
+    }
+
     bool worked = runtime.apply_pending_activity();
     const bool startup_idle_work_allowed =
         runtime.startup_idle_work_allowed(now_ms);
@@ -734,6 +915,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 if (queued.status == ReportRequestEnqueueStatus::Full ||
                     queued.status == ReportRequestEnqueueStatus::Invalid) {
                     runtime.command_failures++;
+                } else if (command.priority ==
+                           ReportRequestPriority::Foreground) {
+                    worked =
+                        runtime.preempt_background_for_foreground() || worked;
                 }
                 break;
             }
@@ -751,6 +936,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
         }
     }
+
+    const bool background_work_blocked =
+        runtime.background_work_blocked();
 
     if (runtime.summary_acquisition.active()) {
         worked = runtime.summary_acquisition.poll() || worked;
@@ -806,7 +994,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.background_suspended &&
+    if (!background_work_blocked &&
         runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         deadline_due(now_ms, runtime.catalog_store_retry_at_ms)) {
@@ -906,7 +1094,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.background_suspended &&
+    if (!background_work_blocked &&
         runtime.artifact_index_refresh_pending && runtime.catalog &&
         !runtime.artifact_index_refresh.active() &&
         runtime.artifact_index_refresh_generation == 0 &&
@@ -968,7 +1156,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
     }
 
-    if (!runtime.background_suspended && startup_idle_work_allowed &&
+    if (!background_work_blocked && startup_idle_work_allowed &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -989,7 +1177,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.background_suspended && startup_idle_work_allowed &&
+    if (!background_work_blocked && startup_idle_work_allowed &&
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -1029,7 +1217,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (!runtime.background_suspended &&
+    if (!background_work_blocked &&
         !runtime.catalog_load_pending &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         runtime.pending_catalog_save &&
@@ -1060,7 +1248,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.artifact_index_refresh.active() &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save;
-    if (catalog_stable && !runtime.background_suspended &&
+    if (catalog_stable && !background_work_blocked &&
         startup_idle_work_allowed) {
         worked = runtime.schedule_catalog_work() || worked;
         worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
@@ -1076,6 +1264,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
         worked = true;
     }
+
+    runtime.observe_engine_completion(now_ms);
 
     runtime.publish_status();
     return worked;

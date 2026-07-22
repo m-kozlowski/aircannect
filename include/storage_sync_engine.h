@@ -339,6 +339,7 @@ private:
     // durable result metadata
     char pending_metadata_path_[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
     std::shared_ptr<const LargeByteBuffer> pending_metadata_bytes_;
+    StoragePreparedFile metadata_file_;
     bool metadata_loaded_ = false;
     bool metadata_save_pending_ = false;
 

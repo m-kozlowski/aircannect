@@ -395,6 +395,7 @@ private:
     char state_dir_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
     char pending_state_path_[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
     std::shared_ptr<const LargeByteBuffer> pending_state_bytes_;
+    StoragePreparedFile rebuild_marker_file_;
     StoragePreparedFile inflight_file_;
     size_t inflight_read_offset_ = 0;
     size_t inflight_line_length_ = 0;

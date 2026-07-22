@@ -22,8 +22,11 @@ public:
     StoragePreparedFile &operator=(StoragePreparedFile &&other) noexcept;
 
     bool exists() const { return exists_; }
+    bool ready() const { return port_ != nullptr; }
     size_t size() const { return prepared_.length; }
-    size_t read(size_t offset, uint8_t *buffer, size_t capacity) const;
+    PreparedByteRead read(size_t offset,
+                          uint8_t *buffer,
+                          size_t capacity) const;
     void reset();
 
 private:

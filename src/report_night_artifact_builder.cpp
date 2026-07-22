@@ -224,13 +224,18 @@ ReportNightArtifactBuilder::~ReportNightArtifactBuilder() {
 bool ReportNightArtifactBuilder::begin_build(
     const ReportArtifactRequest &request,
     const ReportReadPlan &plan) {
-    if (!runtime_) return false;
+    failure_reason_ = nullptr;
+    if (!runtime_) {
+        failure_reason_ = "report_builder_runtime_unavailable";
+        return false;
+    }
 
     runtime_->clear_work();
     runtime_->completed.reset();
     if (!request.ticket.valid() || request.artifact != plan.key() ||
         (request.artifact.kind != ReportArtifactKind::Result &&
          !valid_tile_key(request.artifact))) {
+        failure_reason_ = "report_builder_request_invalid";
         return false;
     }
 
@@ -243,6 +248,7 @@ bool ReportNightArtifactBuilder::begin_build(
                 allocate_large(plan.session_count(),
                                sizeof(NightCatalogTimeRange)));
             if (!runtime_->session_ranges) {
+                failure_reason_ = "report_builder_sessions_allocation_failed";
                 runtime_->clear_work();
                 return false;
             }
@@ -251,6 +257,7 @@ bool ReportNightArtifactBuilder::begin_build(
             for (size_t i = 0; i < plan.session_count(); ++i) {
                 const ReportReadSession *session = plan.session(i);
                 if (!session || !session->output_window.valid()) {
+                    failure_reason_ = "report_builder_session_invalid";
                     runtime_->clear_work();
                     return false;
                 }
@@ -277,6 +284,7 @@ bool ReportNightArtifactBuilder::begin_build(
                               runtime_->plot_start_ms,
                               runtime_->plot_end_ms,
                               bucket_budget)) {
+        failure_reason_ = runtime_->plot.failure_reason();
         runtime_->clear_work();
         return false;
     }
@@ -289,24 +297,44 @@ bool ReportNightArtifactBuilder::accept_series(
     uint16_t session_index,
     const ReportSeriesDescriptor &series,
     const ReportSeriesSample &sample) {
-    return runtime_ && runtime_->active &&
-           runtime_->plot.accept_series(session_index, series, sample);
+    if (!runtime_ || !runtime_->active) {
+        failure_reason_ = "report_builder_series_context_invalid";
+        return false;
+    }
+    if (!runtime_->plot.accept_series(session_index, series, sample)) {
+        failure_reason_ = runtime_->plot.failure_reason();
+        return false;
+    }
+    return true;
 }
 
 bool ReportNightArtifactBuilder::accept_event(
     uint16_t session_index,
     const ReportEventRecord &event) {
-    return runtime_ && runtime_->active &&
-           runtime_->plot.accept_event(session_index, event);
+    if (!runtime_ || !runtime_->active) {
+        failure_reason_ = "report_builder_event_context_invalid";
+        return false;
+    }
+    if (!runtime_->plot.accept_event(session_index, event)) {
+        failure_reason_ = runtime_->plot.failure_reason();
+        return false;
+    }
+    return true;
 }
 
 bool ReportNightArtifactBuilder::finish_build() {
-    if (!runtime_ || !runtime_->active || !runtime_->plan) return false;
+    if (!runtime_ || !runtime_->active || !runtime_->plan) {
+        failure_reason_ = "report_builder_finish_state_invalid";
+        return false;
+    }
 
     ReportPlotAccumulatorSummary plot_summary;
     std::shared_ptr<const LargeByteBuffer> plot =
         runtime_->plot.finish(plot_summary);
-    if (!plot) return false;
+    if (!plot) {
+        failure_reason_ = runtime_->plot.failure_reason();
+        return false;
+    }
 
     std::shared_ptr<ReportArtifactBundle> bundle =
         std::make_shared<ReportArtifactBundle>();
@@ -362,19 +390,29 @@ bool ReportNightArtifactBuilder::finish_build() {
 
         bundle->result = ReportResultArtifactCodec::encode(result);
         bundle->overview = std::move(plot);
-        if (!bundle->result || !bundle->overview) return false;
+        if (!bundle->result || !bundle->overview) {
+            failure_reason_ = "report_builder_result_encode_failed";
+            return false;
+        }
 
         bundle->result_crc32 = crc32_ieee(
             bundle->result->data(), bundle->result->size());
         bundle->overview_crc32 = crc32_ieee(
             bundle->overview->data(), bundle->overview->size());
         bundle->manifest = ReportArtifactManifestCodec::encode(*bundle);
-        if (!bundle->manifest) return false;
+        if (!bundle->manifest) {
+            failure_reason_ = "report_builder_manifest_encode_failed";
+            return false;
+        }
     }
 
-    if (!bundle->valid()) return false;
+    if (!bundle->valid()) {
+        failure_reason_ = "report_builder_bundle_invalid";
+        return false;
+    }
     runtime_->completed = std::move(bundle);
     runtime_->clear_work();
+    failure_reason_ = nullptr;
     return true;
 }
 

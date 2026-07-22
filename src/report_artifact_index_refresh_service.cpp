@@ -120,6 +120,7 @@ struct ReportArtifactIndexRefreshRuntime {
     Phase phase = Phase::Idle;
     OperationTicket scan_ticket;
     OperationTicket read_ticket;
+    StoragePreparedRead prepared;
     std::shared_ptr<const StorageScanSnapshot> scan;
     std::shared_ptr<const NightCatalog> catalog;
 
@@ -281,31 +282,36 @@ bool submit_next_manifest(ReportArtifactIndexRefreshRuntime &runtime,
 bool finish_manifest_read(ReportArtifactIndexRefreshRuntime &runtime,
                           StorageReadPort &read_port,
                           ReportArtifactIndexRefreshStatus &status) {
-    StorageReadCompletion completion;
-    if (!read_port.take_completion(runtime.read_ticket, completion)) {
-        return false;
-    }
-    runtime.read_ticket = {};
-
-    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
-        !completion.prepared.valid() ||
-        completion.prepared.length != runtime.current_size) {
-        if (completion.prepared.valid()) {
-            read_port.release_prepared(completion.prepared);
+    if (!runtime.prepared.valid()) {
+        StorageReadCompletion completion;
+        if (!read_port.take_completion(runtime.read_ticket, completion)) {
+            return false;
         }
-        skip_manifest(runtime,
-                      status,
-                      "report_artifact_manifest_read_failed");
-        return true;
+        runtime.read_ticket = {};
+
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid() ||
+            completion.prepared.length != runtime.current_size) {
+            if (completion.prepared.valid()) {
+                read_port.release_prepared(completion.prepared);
+            }
+            skip_manifest(runtime,
+                          status,
+                          "report_artifact_manifest_read_failed");
+            return true;
+        }
+        runtime.prepared = completion.prepared;
     }
 
-    const size_t read = read_port.read_prepared(
-        completion.prepared,
-        0,
-        runtime.read_buffer,
-        runtime.current_size);
-    read_port.release_prepared(completion.prepared);
-    if (read != runtime.current_size) {
+    const PreparedByteRead read = read_port.read_prepared(
+        runtime.prepared, 0, runtime.read_buffer, runtime.current_size);
+    if (read.state == PreparedByteReadState::Retry) return false;
+
+    read_port.release_prepared(runtime.prepared);
+    runtime.prepared = {};
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != runtime.current_size) {
         skip_manifest(runtime,
                       status,
                       "report_artifact_manifest_read_short");
@@ -317,7 +323,7 @@ bool finish_manifest_read(ReportArtifactIndexRefreshRuntime &runtime,
     const NightCatalogRecord *night = nullptr;
     const bool valid = manifest_path_day(runtime.current_path, path_day) &&
         ReportArtifactManifestCodec::decode(
-            runtime.read_buffer, read, manifest) &&
+            runtime.read_buffer, read.bytes, manifest) &&
         manifest.key.sleep_day == path_day && runtime.catalog &&
         (night = runtime.catalog->find(path_day)) != nullptr &&
         night->source_revision == manifest.key.source_revision &&
@@ -394,8 +400,12 @@ void ReportArtifactIndexRefreshService::reset_transient() {
     if (read_port_ && runtime_->read_ticket.valid()) {
         (void)read_port_->abandon(runtime_->read_ticket);
     }
+    if (read_port_ && runtime_->prepared.valid()) {
+        read_port_->release_prepared(runtime_->prepared);
+    }
     runtime_->scan_ticket = {};
     runtime_->read_ticket = {};
+    runtime_->prepared = {};
     runtime_->clear();
 }
 

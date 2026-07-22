@@ -171,6 +171,7 @@ void StorageSyncEngine::reset_run_locked(bool keep_status) {
     state_batch_.clear();
     state_io_.reset();
     metadata_io_.reset();
+    metadata_file_.reset();
     release_upload_buffer_locked();
     smb_.abort_connection();
     clear_current_file_locked();
@@ -412,6 +413,7 @@ void StorageSyncEngine::apply_config_locked(const SmbExportConfig &config) {
     endpoint_hash_ = 0;
     state_dir_[0] = '\0';
     clear_result_metadata_locked();
+    metadata_file_.reset();
     metadata_loaded_ = false;
     if (status_.configured) {
         if (!build_endpoint_state_dir_locked(config_,
@@ -546,7 +548,9 @@ bool StorageSyncEngine::begin_run_locked() {
 }
 
 ExportStep StorageSyncEngine::step_load_metadata_locked() {
-    const StorageFileClientResult io_result = metadata_io_.poll();
+    const StorageFileClientResult io_result = metadata_file_.ready()
+        ? StorageFileClientResult::Ready
+        : metadata_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
         return ExportStep::Waiting;
     }
@@ -559,17 +563,31 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
                   metadata_io_.error()[0] ? metadata_io_.error()
                                           : "storage_read_failed");
         metadata_io_.reset();
+        metadata_file_.reset();
         metadata_loaded_ = true;
         phase_ = WorkPhase::LoadInventory;
         return ExportStep::Working;
     }
     if (io_result == StorageFileClientResult::Ready) {
-        StoragePreparedFile file = metadata_io_.take_file();
+        if (!metadata_file_.ready()) {
+            metadata_file_ = metadata_io_.take_file();
+        }
+
         char buffer[SYNC_METADATA_MAX_BYTES + 1] = {};
-        const size_t read = file.read(0,
-                                      reinterpret_cast<uint8_t *>(buffer),
-                                      sizeof(buffer) - 1);
-        if (file.exists() && read != file.size()) {
+        size_t bytes_read = 0;
+        bool read_complete = !metadata_file_.exists();
+        if (metadata_file_.exists()) {
+            const PreparedByteRead read = metadata_file_.read(
+                0, reinterpret_cast<uint8_t *>(buffer), sizeof(buffer) - 1);
+            if (read.state == PreparedByteReadState::Retry) {
+                return ExportStep::Waiting;
+            }
+            read_complete = read.state == PreparedByteReadState::Data &&
+                read.bytes == metadata_file_.size();
+            bytes_read = read.bytes;
+        }
+
+        if (!read_complete) {
             Log::logf(CAT_STORAGE,
                       LOG_WARN,
                       "[SYNC] metadata load ignored path=%s/%s "
@@ -577,10 +595,11 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
                       state_dir_[0] ? state_dir_ : "--",
                       SYNC_METADATA_FILE);
         } else {
-            buffer[read] = '\0';
+            buffer[bytes_read] = '\0';
             parse_result_metadata_locked(buffer);
         }
 
+        metadata_file_.reset();
         metadata_loaded_ = true;
         phase_ = WorkPhase::LoadInventory;
         return ExportStep::Working;

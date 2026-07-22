@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "management_console_utils.h"
+#include "report_sources.h"
 #include "report_task.h"
 
 namespace aircannect {
@@ -53,6 +54,25 @@ const char *report_catalog_state_name(NightCatalogRefreshState state) {
     }
 }
 
+const char *report_fallback_state_name(
+    ReportFallbackAcquisitionState state) {
+    switch (state) {
+        case ReportFallbackAcquisitionState::Preserving:
+            return "preserving";
+        case ReportFallbackAcquisitionState::Fetching: return "fetching";
+        case ReportFallbackAcquisitionState::Publishing:
+            return "publishing";
+        case ReportFallbackAcquisitionState::Cancelling:
+            return "cancelling";
+        case ReportFallbackAcquisitionState::Ready: return "ready";
+        case ReportFallbackAcquisitionState::Failed: return "failed";
+        case ReportFallbackAcquisitionState::Cancelled:
+            return "cancelled";
+        case ReportFallbackAcquisitionState::Idle:
+        default: return "idle";
+    }
+}
+
 void print_report_status(Print &out, const ReportTask &task) {
     const ReportTaskStatus status = task.status();
 
@@ -85,6 +105,27 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.println(status.engine.last_completion.error[0]
                     ? status.engine.last_completion.error
                     : "--");
+
+    const ReportFallbackAcquisitionStatus &fallback =
+        status.engine.fallback;
+    const ReportSourceDef *fallback_source =
+        report_source_def(fallback.source);
+    out.print("[REPORT] fallback=");
+    out.print(report_fallback_state_name(fallback.state));
+    out.print(" source=");
+    out.print(fallback_source && fallback_source->spool_type
+                  ? fallback_source->spool_type
+                  : "--");
+    out.print(" sources=");
+    out.print(static_cast<unsigned long>(fallback.sources_completed));
+    out.print('/');
+    out.print(static_cast<unsigned long>(fallback.sources_total));
+    out.print(" sections=");
+    out.print(static_cast<unsigned long>(fallback.sections_added));
+    out.print(" unavailable=");
+    out.print(static_cast<unsigned long>(fallback.unavailable_added));
+    out.print(" error=");
+    out.println(fallback.error[0] ? fallback.error : "--");
 
     out.print("[REPORT] catalog=");
     out.print(report_catalog_state_name(status.catalog_refresh.state));
