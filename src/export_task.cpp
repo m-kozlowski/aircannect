@@ -93,6 +93,14 @@ void ExportTask::publish_config(const ExportEndpointConfig &config) {
 }
 
 void ExportTask::publish_activity(const ActivitySnapshot &activity) {
+    const bool blocked = runtime_blocked(activity);
+    if (blocked && runtime_) {
+        // The export task may be inside blocking network I/O. Its operation
+        // controls must observe the gate before the task can process inputs.
+        runtime_->smb.set_runtime_blocked(true);
+        runtime_->sleephq.set_runtime_blocked(true);
+    }
+
     if (!lock_inputs()) return;
 
     const bool changed =
