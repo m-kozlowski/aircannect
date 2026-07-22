@@ -16,9 +16,12 @@ namespace ConsoleFormat {
 void print_can_status(Print &out, const CanDriver &can_driver);
 void print_can_stats(Print &out, const CanDriver &can_driver);
 void print_rpc_status(Print &out, const RpcArbiter &arbiter);
-void print_rpc_stats(Print &out, const RpcArbiter &arbiter);
+void print_rpc_stats(Print &out,
+                     const RpcArbiter &arbiter,
+                     const EventBroker &events,
+                     const StreamBroker &stream);
 void print_as11_status(Print &out, const As11DeviceState &state);
-void print_stream_status(Print &out, const RpcArbiter &arbiter);
+void print_stream_status(Print &out, const StreamBroker &stream);
 void print_log_status(Print &out);
 void print_log_stats(Print &out);
 void print_memory_status(Print &out, const MemoryStatus &status);

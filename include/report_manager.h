@@ -52,7 +52,9 @@ public:
     // Lifecycle and device events
     void begin();
     void set_edf_report_catalog(EdfReportCatalogJob *catalog);
-    void poll(RpcArbiter &arbiter, bool therapy_running);
+    void poll(RpcArbiter &arbiter,
+              bool therapy_running,
+              bool stream_realtime_active);
     bool handle_event(const RpcEvent &event);
 
     // Summary and night index

@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 #include "as11_device_state.h"
-#include "rpc_arbiter.h"
 #include "session_manager.h"
+#include "stream_broker.h"
 #include "stream_frame.h"
 
 namespace aircannect {
@@ -40,7 +40,7 @@ struct LiveChartRuntimeStatus {
 
 class SinkManager {
 public:
-    void begin(RpcArbiter &arbiter,
+    void begin(StreamBroker &stream,
                const As11DeviceState &device_state,
                SessionManager &session);
     void poll();
@@ -62,7 +62,7 @@ private:
     void drain_live_chart_stream(uint32_t now_ms);
     void set_live_error(const char *error);
 
-    RpcArbiter *arbiter_ = nullptr;
+    StreamBroker *stream_ = nullptr;
     const As11DeviceState *device_state_ = nullptr;
     SessionManager *session_ = nullptr;
     LiveChartRuntimeStatus live_chart_;

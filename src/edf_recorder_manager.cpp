@@ -138,20 +138,24 @@ bool edf_event_record_is_mask_event(const As11EventFrame &frame,
 
 }  // namespace
 
-void EdfRecorderManager::begin(RpcArbiter &arbiter,
+void EdfRecorderManager::begin(RpcArbiter &rpc,
+                               EventBroker &events,
+                               StreamBroker &stream,
                                const As11DeviceState &device_state,
                                SessionManager &session) {
     if (initialized_) return;
-    arbiter_ = &arbiter;
+    rpc_ = &rpc;
+    events_ = &events;
+    stream_ = &stream;
     device_state_ = &device_state;
     session_ = &session;
     // EdfRecorderManager is a program-lifetime singleton; these observer hooks
     // intentionally stay registered until reboot.
     status_.rpc_observer_registered =
-        arbiter_->set_source_event_observer(RpcSource::EdfRecorder,
-                                            rpc_event_observer, this);
+        rpc_->set_source_event_observer(RpcSource::EdfRecorder,
+                                        rpc_event_observer, this);
     status_.event_observer_registered =
-        arbiter_->add_event_frame_observer(event_frame_observer, this);
+        events_->add_frame_observer(event_frame_observer, this);
     if (!status_.rpc_observer_registered) {
         set_error("rpc_observer_register_failed");
     }
@@ -164,7 +168,10 @@ void EdfRecorderManager::begin(RpcArbiter &arbiter,
 }
 
 void EdfRecorderManager::poll(uint32_t now_ms) {
-    if (!initialized_ || !arbiter_ || !device_state_ || !session_) return;
+    if (!initialized_ || !rpc_ || !events_ || !stream_ || !device_state_ ||
+        !session_) {
+        return;
+    }
     note_str_get_timeouts(now_ms);
     dispatch_session_edges(now_ms);
 
@@ -727,7 +734,7 @@ bool EdfRecorderManager::open_session_annotation_files_at(
 bool EdfRecorderManager::build_recording_id(const EdfLocalDateTime &start,
                                             char *dst,
                                             size_t dst_size) const {
-    if (!arbiter_) return false;
+    if (!device_state_) return false;
     const As11DeviceState &state = *device_state_;
     if (state.serial_number().empty() || !state.platform_id_valid() ||
         !state.variant_id_valid()) {
@@ -778,8 +785,8 @@ void EdfRecorderManager::reset_numeric_schemas() {
 
 bool EdfRecorderManager::build_numeric_schemas() {
     reset_numeric_schemas();
-    const char *accepted = arbiter_
-                               ? arbiter_->stream_accepted_data_ids_csv().c_str()
+    const char *accepted = stream_
+                               ? stream_->accepted_data_ids_csv().c_str()
                                : "";
     if (!edf_build_numeric_file_layout(EdfFileKind::Brp,
                                        accepted,
@@ -802,16 +809,16 @@ bool EdfRecorderManager::build_numeric_schemas() {
 }
 
 bool EdfRecorderManager::numeric_stream_ready() const {
-    if (!arbiter_ || status_.stream_handle == STREAM_CONSUMER_INVALID) {
+    if (!stream_ || status_.stream_handle == STREAM_CONSUMER_INVALID) {
         return false;
     }
-    if (!arbiter_->stream_consumer_active(status_.stream_handle)) {
+    if (!stream_->consumer_active(status_.stream_handle)) {
         return false;
     }
-    if (!arbiter_->stream_actual_active()) {
+    if (!stream_->actual_active()) {
         return false;
     }
-    return arbiter_->stream_accepted_data_ids_cover(DEFAULT_EDF_STREAM_IDS);
+    return stream_->accepted_data_ids_cover(DEFAULT_EDF_STREAM_IDS);
 }
 
 bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
@@ -826,16 +833,15 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
     if (!recording_gate_open_ || !status_.recording_start_time[0]) {
         if (!recording_gate_recovery_pending_) {
             StreamFrameRef discarded;
-            while (arbiter_->next_stream_frame(status_.stream_handle,
-                                               discarded)) {
+            while (stream_->next_frame(status_.stream_handle, discarded)) {
             }
             pending_stream_frame_.reset();
             return false;
         }
 
         if (!pending_stream_frame_ &&
-            !arbiter_->next_stream_frame(status_.stream_handle,
-                                         pending_stream_frame_)) {
+            !stream_->next_frame(status_.stream_handle,
+                                 pending_stream_frame_)) {
             return false;
         }
         if (!pending_stream_frame_) return false;
@@ -866,8 +872,8 @@ bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
     }
 
     if (!pending_stream_frame_) {
-        if (!arbiter_->next_stream_frame(status_.stream_handle,
-                                         pending_stream_frame_)) {
+        if (!stream_->next_frame(status_.stream_handle,
+                                 pending_stream_frame_)) {
             return false;
         }
     }
@@ -1010,7 +1016,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(
                   "numeric files open start=%s accepted=%s brp=%u "
                   "pld=%u sa2=%u\n",
                   numeric_start_time ? numeric_start_time : "--",
-                  arbiter_->stream_accepted_data_ids_csv().c_str(),
+                  stream_->accepted_data_ids_csv().c_str(),
                   static_cast<unsigned>(
                       brp_schema_.layout.schema.source_signal_count),
                   static_cast<unsigned>(
@@ -1202,8 +1208,7 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
 }
 
 bool EdfRecorderManager::as11_timezone_ready() const {
-    if (!arbiter_) return true;
-    return device_state_ && device_state_->timezone_offset_valid();
+    return !device_state_ || device_state_->timezone_offset_valid();
 }
 
 bool EdfRecorderManager::parse_session_local_time(
@@ -1213,7 +1218,7 @@ bool EdfRecorderManager::parse_session_local_time(
 
     int64_t epoch_ms = 0;
     if (!edf_parse_utc_ms(text, epoch_ms)) return false;
-    if (arbiter_) {
+    if (device_state_) {
         const As11DeviceState &state = *device_state_;
         if (state.timezone_offset_valid()) {
             return edf_epoch_ms_to_local_datetime(
@@ -1277,17 +1282,17 @@ bool EdfRecorderManager::begin_str_session_at(const EdfLocalDateTime &start,
 }
 
 bool EdfRecorderManager::request_str_settings(uint32_t now_ms) {
-    if (!arbiter_ || str_settings_rpc_.active) return false;
+    if (!rpc_ || str_settings_rpc_.active) return false;
 
     const std::string names = edf_str_setting_get_names();
     if (names.empty()) return false;
 
     uint32_t id = 0;
-    if (!arbiter_->send_request_with_id("Get",
-                                        build_get_params(names),
-                                        RpcSource::EdfRecorder,
-                                        AC_EDF_STR_SETTINGS_TIMEOUT_MS,
-                                        id)) {
+    if (!rpc_->send_request_with_id("Get",
+                                    build_get_params(names),
+                                    RpcSource::EdfRecorder,
+                                    AC_EDF_STR_SETTINGS_TIMEOUT_MS,
+                                    id)) {
         set_error("str_settings_queue_failed");
         return false;
     }
@@ -1297,17 +1302,17 @@ bool EdfRecorderManager::request_str_settings(uint32_t now_ms) {
 }
 
 bool EdfRecorderManager::request_str_summary(uint32_t now_ms) {
-    if (!arbiter_ || str_summary_rpc_.active) return false;
+    if (!rpc_ || str_summary_rpc_.active) return false;
 
     const std::string names = edf_str_summary_get_names();
     if (names.empty()) return false;
 
     uint32_t id = 0;
-    if (!arbiter_->send_request_with_id("Get",
-                                        build_get_params(names),
-                                        RpcSource::EdfRecorder,
-                                        AC_EDF_STR_SUMMARY_TIMEOUT_MS,
-                                        id)) {
+    if (!rpc_->send_request_with_id("Get",
+                                    build_get_params(names),
+                                    RpcSource::EdfRecorder,
+                                    AC_EDF_STR_SUMMARY_TIMEOUT_MS,
+                                    id)) {
         set_error("str_summary_queue_failed");
         return false;
     }
@@ -1317,10 +1322,10 @@ bool EdfRecorderManager::request_str_summary(uint32_t now_ms) {
 }
 
 bool EdfRecorderManager::request_identification(uint32_t now_ms) {
-    if (!arbiter_ || identification_rpc_.active) return false;
+    if (!rpc_ || identification_rpc_.active) return false;
 
     uint32_t id = 0;
-    if (!arbiter_->send_request_with_id(
+    if (!rpc_->send_request_with_id(
             "Get",
             build_get_params("IdentificationProfiles"),
             RpcSource::EdfRecorder,
@@ -1590,20 +1595,19 @@ bool EdfRecorderManager::write_str_day_record() {
 }
 
 void EdfRecorderManager::attach_events() {
-    if (!arbiter_) {
+    if (!events_) {
         status_.event_attached = false;
         status_.event_handle = EVENT_CONSUMER_INVALID;
         return;
     }
     if (status_.event_handle != EVENT_CONSUMER_INVALID &&
-        arbiter_->event_consumer_active(status_.event_handle)) {
+        events_->consumer_active(status_.event_handle)) {
         status_.event_attached =
             status_.event_handle != EVENT_CONSUMER_INVALID;
         return;
     }
 
-    EventAcquireResult result =
-        arbiter_->acquire_events(EDF_CAPTURE_EVENT_IDS);
+    EventAcquireResult result = events_->acquire(EDF_CAPTURE_EVENT_IDS);
     if (result.status == EventAcquireStatus::Acquired ||
         result.status == EventAcquireStatus::AlreadyActive) {
         status_.event_handle = result.handle;
@@ -1617,12 +1621,12 @@ void EdfRecorderManager::attach_events() {
 }
 
 void EdfRecorderManager::release_events() {
-    if (!arbiter_ || status_.event_handle == EVENT_CONSUMER_INVALID) {
+    if (!events_ || status_.event_handle == EVENT_CONSUMER_INVALID) {
         status_.event_attached = false;
         status_.event_handle = EVENT_CONSUMER_INVALID;
         return;
     }
-    arbiter_->release_events(status_.event_handle);
+    events_->release(status_.event_handle);
     status_.event_handle = EVENT_CONSUMER_INVALID;
     status_.event_attached = false;
 }
@@ -1637,7 +1641,7 @@ uint32_t EdfRecorderManager::event_coverage_session_gaps() const {
 }
 
 void EdfRecorderManager::snapshot_event_coverage() {
-    if (!arbiter_) {
+    if (!events_) {
         session_event_subscription_generation_ = 0;
         session_event_coverage_gap_count_ = 0;
         status_.event_subscription_generation = 0;
@@ -1646,7 +1650,7 @@ void EdfRecorderManager::snapshot_event_coverage() {
         return;
     }
 
-    const EventBrokerStatus event = arbiter_->event_broker().status();
+    const EventBrokerStatus event = events_->status();
     session_event_subscription_generation_ = event.subscription_generation;
     session_event_coverage_gap_count_ = event.coverage_gap_count;
     status_.event_subscription_generation = event.subscription_generation;
@@ -1656,9 +1660,9 @@ void EdfRecorderManager::snapshot_event_coverage() {
 }
 
 void EdfRecorderManager::update_event_coverage() {
-    if (!status_.active || !arbiter_) return;
+    if (!status_.active || !events_) return;
 
-    const EventBrokerStatus event = arbiter_->event_broker().status();
+    const EventBrokerStatus event = events_->status();
     status_.event_subscription_generation = event.subscription_generation;
     status_.event_coverage_gap_count = event.coverage_gap_count;
 
@@ -1672,7 +1676,7 @@ void EdfRecorderManager::update_event_coverage() {
 
 void EdfRecorderManager::attach_stream(uint32_t now_ms) {
     if (status_.stream_handle != STREAM_CONSUMER_INVALID &&
-        arbiter_->stream_consumer_active(status_.stream_handle)) {
+        stream_->consumer_active(status_.stream_handle)) {
         status_.stream_attached = true;
         return;
     }
@@ -1688,7 +1692,7 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
                                                    40,
                                                    200);
     StreamAcquireResult result =
-        arbiter_->acquire_stream(params, RpcSource::EdfRecorder);
+        stream_->acquire(params, RpcSource::EdfRecorder);
     if (result.status == StreamAcquireStatus::Acquired ||
         result.status == StreamAcquireStatus::AlreadyActive) {
         status_.stream_handle = result.handle;
@@ -1703,10 +1707,10 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
 }
 
 void EdfRecorderManager::release_stream() {
-    if (!arbiter_) return;
+    if (!stream_) return;
     if (status_.stream_handle != STREAM_CONSUMER_INVALID &&
-        arbiter_->stream_consumer_active(status_.stream_handle)) {
-        arbiter_->release_stream(status_.stream_handle);
+        stream_->consumer_active(status_.stream_handle)) {
+        stream_->release(status_.stream_handle);
     }
     status_.stream_handle = STREAM_CONSUMER_INVALID;
     status_.stream_attached = false;
@@ -1717,13 +1721,13 @@ void EdfRecorderManager::release_stream() {
 
 void EdfRecorderManager::update_stream_queue_drops() {
     if (status_.stream_handle == STREAM_CONSUMER_INVALID ||
-        !arbiter_->stream_consumer_active(status_.stream_handle)) {
+        !stream_->consumer_active(status_.stream_handle)) {
         status_.stream_attached = false;
         return;
     }
 
     const uint32_t queue_drops =
-        arbiter_->stream_consumer_queue_drops(status_.stream_handle);
+        stream_->consumer_queue_drops(status_.stream_handle);
     if (queue_drops < last_queue_drops_) {
         last_queue_drops_ = queue_drops;
     } else if (queue_drops != last_queue_drops_) {
@@ -1735,7 +1739,7 @@ void EdfRecorderManager::update_stream_queue_drops() {
 
 void EdfRecorderManager::buffer_numeric_open_stream(uint32_t now_ms) {
     if (status_.stream_handle == STREAM_CONSUMER_INVALID ||
-        !arbiter_->stream_consumer_active(status_.stream_handle)) {
+        !stream_->consumer_active(status_.stream_handle)) {
         status_.stream_attached = false;
         return;
     }
@@ -1744,7 +1748,7 @@ void EdfRecorderManager::buffer_numeric_open_stream(uint32_t now_ms) {
 
     for (size_t i = 0; i < AC_EDF_NUMERIC_OPEN_FRAME_BUFFER_DEPTH; ++i) {
         StreamFrameRef frame;
-        if (!arbiter_->next_stream_frame(status_.stream_handle, frame)) {
+        if (!stream_->next_frame(status_.stream_handle, frame)) {
             break;
         }
         if (!frame) continue;
@@ -1760,7 +1764,7 @@ void EdfRecorderManager::buffer_numeric_open_stream(uint32_t now_ms) {
 
 void EdfRecorderManager::drain_stream(uint32_t now_ms) {
     if (status_.stream_handle == STREAM_CONSUMER_INVALID ||
-        !arbiter_->stream_consumer_active(status_.stream_handle)) {
+        !stream_->consumer_active(status_.stream_handle)) {
         status_.stream_attached = false;
         return;
     }
@@ -1772,7 +1776,7 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
         if (frame) {
             pending_stream_frame_.reset();
         } else if (numeric_open_frame_buffer_.pop(frame)) {
-        } else if (!arbiter_->next_stream_frame(status_.stream_handle, frame)) {
+        } else if (!stream_->next_frame(status_.stream_handle, frame)) {
             break;
         }
         if (!frame) continue;

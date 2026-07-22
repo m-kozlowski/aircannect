@@ -90,6 +90,8 @@ static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
     rpc_arbiter,
+    event_broker,
+    stream_broker,
     as11_device_service,
     as11_settings_manager,
     tcp_bridge,
@@ -209,10 +211,10 @@ static void sync_network_services() {
         } else if (telnet_console.port() !=
                    app_config.data().telnet_console_port) {
             telnet_console.restart(app_config.data().telnet_console_port,
-                                   &rpc_arbiter);
+                                   &stream_broker);
         }
     } else if (telnet_console.started()) {
-        telnet_console.stop(&rpc_arbiter);
+        telnet_console.stop(&stream_broker);
     }
 }
 
@@ -422,16 +424,16 @@ void setup() {
     // Device/session/report managers
     session_manager.begin();
 
-    rpc_arbiter.set_stream_frame_observer(note_session_stream_frame,
-                                          &session_manager);
-    (void)rpc_arbiter.add_event_frame_observer(note_as11_device_event,
-                                               &as11_device_service);
+    stream_broker.set_frame_observer(note_session_stream_frame,
+                                     &session_manager);
+    (void)event_broker.add_frame_observer(note_as11_device_event,
+                                          &as11_device_service);
 
-    sink_manager.begin(rpc_arbiter, as11_device_service.state(),
+    sink_manager.begin(stream_broker, as11_device_service.state(),
                        session_manager);
 
-    edf_recorder_manager.begin(rpc_arbiter, as11_device_service.state(),
-                               session_manager);
+    edf_recorder_manager.begin(rpc_arbiter, event_broker, stream_broker,
+                               as11_device_service.state(), session_manager);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
 
     edf_report_catalog_job.begin();
@@ -471,7 +473,8 @@ void setup() {
 
     sync_network_services();
 
-    web_ui.begin(rpc_arbiter, as11_device_service, as11_settings_manager,
+    web_ui.begin(rpc_arbiter, stream_broker, as11_device_service,
+                 as11_settings_manager,
                  wifi_manager, tcp_bridge, app_config,
                  time_sync_service, ota_manager, resmed_ota_manager,
                  session_manager, sink_manager, oximetry_manager,
@@ -525,6 +528,8 @@ void setup() {
 }
 
 void loop() {
+    const uint32_t now_ms = millis();
+
     // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =
         ota_manager.as11_quiesce_required();
@@ -537,14 +542,14 @@ void loop() {
         tcp_bridge.raw_client_connected());
 
     rpc_arbiter.poll();
-    stream_broker.poll(rpc_arbiter, millis());
-    event_broker.poll(rpc_arbiter, millis(),
+    stream_broker.poll(rpc_arbiter, now_ms);
+    event_broker.poll(rpc_arbiter, now_ms,
                       resmed_ota_transport_active);
     as11_device_service.poll(
-        rpc_arbiter, millis(),
+        rpc_arbiter, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
     as11_settings_manager.poll(
-        rpc_arbiter, millis(),
+        rpc_arbiter, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
 
     ota_manager.poll_http_upload_prepare(
@@ -559,7 +564,8 @@ void loop() {
     report_manager.poll(
         rpc_arbiter,
         as11_device_service.state().therapy_state() ==
-            As11TherapyState::Running);
+            As11TherapyState::Running,
+        stream_broker.realtime_active());
     drain_can_rx_after("report");
 
     resmed_ota_manager.poll();
@@ -570,8 +576,6 @@ void loop() {
     drain_can_rx_after("rpc_events_pre_state");
 
     // Session and EDF capture
-    const uint32_t now_ms = millis();
-
     session_manager.poll(as11_device_service.state(), now_ms);
     edf_recorder_manager.poll(now_ms);
 
@@ -589,7 +593,10 @@ void loop() {
     drain_can_rx_after("oximetry");
 
     // Wi-Fi and network services
-    wifi_manager.set_roaming_suspended(rpc_arbiter.stream_activity_active() ||
+    const bool stream_activity_active = stream_broker.activity_active(
+        now_ms, AC_WIFI_ROAM_STREAM_QUIET_MS);
+
+    wifi_manager.set_roaming_suspended(stream_activity_active ||
                                        ota_manager.active() ||
                                        resmed_ota_transport_active);
 
@@ -601,7 +608,7 @@ void loop() {
 
     // Log and time services
     const bool storage_capacity_update_allowed =
-        !rpc_arbiter.stream_activity_active() &&
+        !stream_activity_active &&
         as11_device_service.state().therapy_state() !=
             As11TherapyState::Running;
 
@@ -653,7 +660,7 @@ void loop() {
         report_manager,
         app_config.data(),
         wifi_manager.sta_ipv4_online(),
-        rpc_arbiter.stream_activity_active(),
+        stream_activity_active,
         as11_device_service.state().therapy_state(),
         resmed_ota_manager.transport_active(),
         ota_manager.active(),
@@ -663,7 +670,6 @@ void loop() {
 
     // Activity snapshots
     const bool foreground_report_active = report_manager.foreground_busy();
-    const bool realtime_stream_active = rpc_arbiter.stream_activity_active();
     const bool export_active = export_coordinator.endpoint_work_active();
     const bool esp_ota_install_active = ota_manager.active();
     const bool storage_ota_active =
@@ -673,14 +679,14 @@ void loop() {
             As11TherapyState::Running;
 
     publish_storage_activity(foreground_report_active,
-                             realtime_stream_active,
+                             stream_activity_active,
                              export_active,
                              storage_ota_active,
                              therapy_active);
 
     bg_worker.publish_gate(foreground_report_active,
                            as11_device_service.state().status_valid(),
-                           realtime_stream_active,
+                           stream_activity_active,
                            resmed_ota_manager.transport_active(),
                            esp_ota_install_active,
                            therapy_active);

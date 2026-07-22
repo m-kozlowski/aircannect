@@ -443,98 +443,9 @@ void RpcArbiter::set_raw_rpc_events_enabled(bool enabled) {
     raw_rpc_events_enabled_ = enabled;
 }
 
-bool RpcArbiter::add_event_frame_observer(EventFrameObserver observer,
-                                          void *context) {
-    return event_.add_frame_observer(observer, context);
-}
-
-EventAcquireResult RpcArbiter::acquire_events(const char *data_ids_csv) {
-    return event_.acquire(data_ids_csv);
-}
-
-void RpcArbiter::release_events(EventConsumerHandle handle) {
-    event_.release(handle);
-}
-
-bool RpcArbiter::event_consumer_active(EventConsumerHandle handle) const {
-    return event_.consumer_active(handle);
-}
-
-StreamAcquireResult RpcArbiter::acquire_stream(const std::string &params_json,
-                                               RpcSource source) {
-    StreamAcquireResult result = stream_.acquire(params_json, source_id(source));
-    if (result.status == StreamAcquireStatus::Incompatible ||
-        result.status == StreamAcquireStatus::Full ||
-        result.status == StreamAcquireStatus::Rejected) {
-        stats_.stream_consumer_rejects++;
-    }
-    return result;
-}
-
-StreamAcquireResult RpcArbiter::update_stream(StreamConsumerHandle handle,
-                                              const std::string &params_json) {
-    StreamAcquireResult result = stream_.update(handle, params_json);
-    if (result.status == StreamAcquireStatus::Incompatible ||
-        result.status == StreamAcquireStatus::Busy ||
-        result.status == StreamAcquireStatus::Rejected) {
-        stats_.stream_consumer_rejects++;
-    }
-    return result;
-}
-
-void RpcArbiter::release_stream(StreamConsumerHandle handle) {
-    stream_.release(handle);
-}
-
-bool RpcArbiter::stream_consumer_active(StreamConsumerHandle handle) const {
-    return stream_.consumer_active(handle);
-}
-
-uint32_t RpcArbiter::stream_consumer_queue_drops(
-    StreamConsumerHandle handle) const {
-    return stream_.consumer_queue_drops(handle);
-}
-
-bool RpcArbiter::stream_activity_active() const {
-    if (stream_realtime_active()) return true;
-    return stream_.last_owned_activity_ms() &&
-           millis() - stream_.last_owned_activity_ms() <
-               AC_WIFI_ROAM_STREAM_QUIET_MS;
-}
-
-bool RpcArbiter::stream_realtime_active() const {
-    return stream_.desired_active() || stream_.actual_active() ||
-           stream_.pending();
-}
-
-bool RpcArbiter::stream_actual_active() const {
-    return stream_.actual_active();
-}
-
-bool RpcArbiter::stream_accepted_data_ids_cover(
-    const char *data_ids_csv) const {
-    return stream_.accepted_data_ids_cover(data_ids_csv);
-}
-
-const std::string &RpcArbiter::stream_accepted_data_ids_csv() const {
-    return stream_.accepted_data_ids_csv();
-}
-
-void RpcArbiter::set_stream_frame_observer(StreamFrameObserver observer,
-                                           void *context) {
-    stream_.set_frame_observer(observer, context);
-}
-
-bool RpcArbiter::next_stream_frame(StreamConsumerHandle handle,
-                                   StreamFrameRef &frame) {
-    return stream_.next_frame(handle, frame);
-}
-
 void RpcArbiter::reset_stats() {
     stats_ = {};
     can_.reset_stats();
-    event_.reset_counters();
-    stream_.reset_counters();
     consecutive_scheduler_timeouts_ = 0;
     background_backoff_until_ms_ = 0;
     background_rx_pressure_until_ms_ = 0;
@@ -558,9 +469,6 @@ RpcRuntimeStatus RpcArbiter::runtime_status() const {
         : 0;
     out.background_backoff_ms =
         std::max(timeout_backoff_ms, rx_pressure_backoff_ms);
-    const EventBrokerStatus event_status = event_.status();
-    out.event_subscription_active = event_status.subscription_active;
-    out.event_subscription_id = event_status.subscription_id;
     out.boot_notifications = boot_notifications_seen_;
     if (!last_boot_notification_.empty()) {
         out.last_boot_notification_age_ms = now - last_boot_notification_ms_;
@@ -1183,13 +1091,7 @@ bool RpcArbiter::handle_event_notification(const char *payload,
 
 void RpcArbiter::handle_stream_notification(const char *payload,
                                             size_t payload_len) {
-    stats_.stream_notifications++;
-    StreamPublishResult result =
-        stream_.publish_stream_data(payload, payload_len, millis());
-    stats_.stream_fanout_drops += result.drops;
-    if (result.parse_error) stats_.stream_parse_errors++;
-    if (result.pool_exhausted) stats_.stream_pool_exhaustions++;
-    if (result.values_truncated) stats_.stream_truncated_frames++;
+    (void)stream_.publish_stream_data(payload, payload_len, millis());
 }
 
 void RpcArbiter::enqueue_deferred_payload(DeferredPayload::Kind kind,
@@ -1439,10 +1341,6 @@ const char *RpcArbiter::source_name(RpcSource source) const {
         case RpcSource::EdfRecorder: return "edf_recorder";
         default: return "?";
     }
-}
-
-uint8_t RpcArbiter::source_id(RpcSource source) const {
-    return static_cast<uint8_t>(source);
 }
 
 }  // namespace aircannect

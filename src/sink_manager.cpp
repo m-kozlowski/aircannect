@@ -95,18 +95,18 @@ bool append_frame_signal(const StreamFrameData &frame,
 
 }  // namespace
 
-void SinkManager::begin(RpcArbiter &arbiter,
+void SinkManager::begin(StreamBroker &stream,
                         const As11DeviceState &device_state,
                         SessionManager &session) {
     if (initialized_) return;
-    arbiter_ = &arbiter;
+    stream_ = &stream;
     device_state_ = &device_state;
     session_ = &session;
     initialized_ = true;
 }
 
 void SinkManager::poll() {
-    if (!initialized_ || !arbiter_ || !session_) return;
+    if (!initialized_ || !stream_ || !session_) return;
     const uint32_t now = millis();
 
     poll_live_chart(now);
@@ -138,7 +138,7 @@ void SinkManager::mark_live_chart_sent() {
 }
 
 bool SinkManager::live_chart_should_run() const {
-    if (!live_chart_.enabled || !arbiter_ || !device_state_ || !session_) {
+    if (!live_chart_.enabled || !stream_ || !device_state_ || !session_) {
         return false;
     }
     if (device_state_->therapy_state() == As11TherapyState::Running) {
@@ -200,7 +200,7 @@ void SinkManager::release_live_chart_batches() {
 
 void SinkManager::attach_live_chart_stream(uint32_t now_ms) {
     if (live_chart_.handle != STREAM_CONSUMER_INVALID &&
-        arbiter_->stream_consumer_active(live_chart_.handle)) {
+        stream_->consumer_active(live_chart_.handle)) {
         if (!live_chart_.attached) {
             live_chart_.attached = true;
             live_chart_.state_dirty = true;
@@ -218,7 +218,7 @@ void SinkManager::attach_live_chart_stream(uint32_t now_ms) {
     const std::string params =
         build_stream_params(LIVE_CHART_STREAM_IDS, 40, 200);
     StreamAcquireResult result =
-        arbiter_->acquire_stream(params, RpcSource::Sink);
+        stream_->acquire(params, RpcSource::Sink);
     if (result.status == StreamAcquireStatus::Acquired ||
         result.status == StreamAcquireStatus::AlreadyActive) {
         live_chart_.handle = result.handle;
@@ -235,10 +235,10 @@ void SinkManager::attach_live_chart_stream(uint32_t now_ms) {
 }
 
 void SinkManager::release_live_chart_stream() {
-    if (!arbiter_) return;
+    if (!stream_) return;
     if (live_chart_.handle != STREAM_CONSUMER_INVALID &&
-        arbiter_->stream_consumer_active(live_chart_.handle)) {
-        arbiter_->release_stream(live_chart_.handle);
+        stream_->consumer_active(live_chart_.handle)) {
+        stream_->release(live_chart_.handle);
     }
     const bool was_attached =
         live_chart_.handle != STREAM_CONSUMER_INVALID || live_chart_.attached;
@@ -250,14 +250,14 @@ void SinkManager::release_live_chart_stream() {
 
 void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
     if (live_chart_.handle == STREAM_CONSUMER_INVALID ||
-        !arbiter_->stream_consumer_active(live_chart_.handle)) {
+        !stream_->consumer_active(live_chart_.handle)) {
         if (live_chart_.attached) live_chart_.state_dirty = true;
         live_chart_.attached = false;
         return;
     }
 
     const uint32_t queue_drops =
-        arbiter_->stream_consumer_queue_drops(live_chart_.handle);
+        stream_->consumer_queue_drops(live_chart_.handle);
     if (queue_drops < last_live_queue_drops_) {
         last_live_queue_drops_ = queue_drops;
     } else if (queue_drops != last_live_queue_drops_) {
@@ -268,7 +268,7 @@ void SinkManager::drain_live_chart_stream(uint32_t now_ms) {
 
     for (size_t i = 0; i < AC_WEB_LIVE_FRAME_BUDGET; ++i) {
         StreamFrameRef frame;
-        if (!arbiter_->next_stream_frame(live_chart_.handle, frame)) break;
+        if (!stream_->next_frame(live_chart_.handle, frame)) break;
         if (!frame) continue;
 
         append_frame_signal(*frame, StreamSignalId::MaskPressure,

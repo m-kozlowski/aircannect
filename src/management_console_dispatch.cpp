@@ -127,7 +127,7 @@ bool report_store_integrity_allowed(const ConsoleContext &ctx,
         reason = "therapy_active";
         return false;
     }
-    if (ctx.arbiter.stream_activity_active()) {
+    if (ctx.stream.activity_active(millis(), AC_WIFI_ROAM_STREAM_QUIET_MS)) {
         reason = "stream_active";
         return false;
     }
@@ -136,7 +136,7 @@ bool report_store_integrity_allowed(const ConsoleContext &ctx,
 }
 
 void print_owned_memory_detail(Print &out, ConsoleContext &ctx) {
-    const StreamBroker &stream = ctx.arbiter.stream_broker();
+    const StreamBroker &stream = ctx.stream;
     const size_t frame_pool_slots = stream.frame_pool_capacity();
     const size_t frame_pool_bytes =
         frame_pool_slots * sizeof(StreamFrameData) +
@@ -1065,6 +1065,8 @@ void ManagementConsole::handle_stats_command(Print &out,
     to_lower_inplace(rest);
     if (rest == "reset") {
         ctx.arbiter.reset_stats();
+        ctx.events.reset_counters();
+        ctx.stream.reset_counters();
         out.println("[STATS] reset");
         return;
     }
@@ -1072,7 +1074,7 @@ void ManagementConsole::handle_stats_command(Print &out,
         print_unknown_command(out, "STATS", "stats, stats reset");
         return;
     }
-    ConsoleFormat::print_rpc_stats(out, ctx.arbiter);
+    ConsoleFormat::print_rpc_stats(out, ctx.arbiter, ctx.events, ctx.stream);
     ConsoleFormat::print_tcp_stats(out, ctx.tcp_bridge);
     ConsoleFormat::print_log_stats(out);
     ConsoleFormat::print_memory_status(out, Memory::status());
@@ -1810,7 +1812,7 @@ void ManagementConsole::handle_set_command(Print &out,
 void ManagementConsole::handle_stream_command(Print &out,
                                               String rest,
                                               ConsoleContext &ctx) {
-    handle_stream(out, rest, ctx.arbiter);
+    handle_stream(out, rest, ctx.stream);
 }
 
 void ManagementConsole::handle_rpc_command(Print &out,

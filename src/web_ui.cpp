@@ -994,6 +994,7 @@ void build_resmed_ota_json(JsonOut &json, const ResmedOtaManager &ota) {
 }  // namespace
 
 bool WebUI::begin(RpcArbiter &arbiter,
+                  StreamBroker &stream,
                   As11DeviceService &device,
                   As11SettingsManager &settings_manager,
                   WifiManager &wifi_manager,
@@ -1018,6 +1019,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     if (started_) return true;
     stop();
     arbiter_ = &arbiter;
+    stream_ = &stream;
     device_ = &device;
     settings_manager_ = &settings_manager;
     wifi_manager_ = &wifi_manager;
@@ -1222,14 +1224,15 @@ void WebUI::stop() {
     last_sse_push_ms_ = 0;
     sse_push_requested_ = false;
     report_manager_ = nullptr;
+    stream_ = nullptr;
     started_ = false;
 }
 
 void WebUI::poll(PollCheckpoint checkpoint) {
     if (!started_) return;
     const bool realtime_active =
-        arbiter_ &&
-        (arbiter_->stream_activity_active() ||
+        stream_ &&
+        (stream_->activity_active(millis(), AC_WIFI_ROAM_STREAM_QUIET_MS) ||
          (device_ && device_->state().therapy_state() ==
                          As11TherapyState::Running));
     if (device_ && observed_device_revision_ != device_->revision()) {
@@ -3416,8 +3419,7 @@ void WebUI::send_sleephq_sync_status(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::build_stream_json(LargeTextBuffer &json) const {
-    const StreamBroker &stream = arbiter_->stream_broker();
-    const RpcArbiterStats &stats = arbiter_->stats();
+    const StreamBroker &stream = *stream_;
     const LiveChartRuntimeStatus &live = sink_manager_->live_chart_status();
 
     json = "{";
@@ -3429,7 +3431,6 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
     json_add_string(json, "error_command",
                     stream_command_name(stream.error_command()));
     json_add_int(json, "consumers", stream.consumer_count());
-    json_add_int(json, "notifications", stats.stream_notifications);
     json_add_int(json, "published_payloads", stream.published_payloads());
     json_add_int(json, "fanout_targets", stream.fanout_targets());
     json_add_int(json, "fanout_drops", stream.total_queue_drops());
@@ -3467,7 +3468,8 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
         first_consumer = false;
         json += "{";
         json_add_bool(json, "active", true, false);
-        json_add_int(json, "source", stream.consumer_source(handle));
+        json_add_int(json, "source",
+                     static_cast<unsigned>(stream.consumer_source(handle)));
         json_add_int(json, "queued", stream.consumer_queue_count(handle));
         json_add_int(json, "drops", stream.consumer_queue_drops(handle));
         json += '}';

@@ -59,7 +59,7 @@ void StreamBroker::transport_reset(RpcRequestPort &rpc, uint32_t now_ms) {
 }
 
 StreamAcquireResult StreamBroker::acquire(const std::string &params_json,
-                                          uint8_t source) {
+                                          RpcSource source) {
     StreamAcquireResult result;
     if (params_json.empty()) return result;
     Subscription requested;
@@ -457,9 +457,15 @@ uint32_t StreamBroker::consumer_queue_drops(StreamConsumerHandle handle) const {
     return consumers_[handle].queue_drops;
 }
 
-uint8_t StreamBroker::consumer_source(StreamConsumerHandle handle) const {
-    if (!consumer_active(handle)) return 0;
+RpcSource StreamBroker::consumer_source(StreamConsumerHandle handle) const {
+    if (!consumer_active(handle)) return RpcSource::Internal;
     return consumers_[handle].source;
+}
+
+bool StreamBroker::activity_active(uint32_t now_ms, uint32_t quiet_ms) const {
+    if (realtime_active()) return true;
+    return last_owned_activity_ms_ &&
+           now_ms - last_owned_activity_ms_ < quiet_ms;
 }
 
 bool StreamBroker::accepted_data_id(const char *data_id) const {

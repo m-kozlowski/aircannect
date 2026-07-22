@@ -72,13 +72,6 @@ struct RpcArbiterStats {
     uint32_t background_backoffs = 0;
 
     uint32_t event_drops = 0;
-
-    uint32_t stream_notifications = 0;
-    uint32_t stream_fanout_drops = 0;
-    uint32_t stream_consumer_rejects = 0;
-    uint32_t stream_parse_errors = 0;
-    uint32_t stream_pool_exhaustions = 0;
-    uint32_t stream_truncated_frames = 0;
 };
 
 struct RpcRuntimeStatus {
@@ -88,8 +81,6 @@ struct RpcRuntimeStatus {
     uint32_t pending_request_id = 0;
     uint32_t dispatch_retry_id = 0;
     uint32_t background_backoff_ms = 0;
-    bool event_subscription_active = false;
-    uint32_t event_subscription_id = 0;
     uint32_t boot_notifications = 0;
     uint32_t last_boot_notification_age_ms = 0;
     std::string last_boot_notification;
@@ -133,32 +124,6 @@ public:
 
     void set_raw_rpc_events_enabled(bool enabled);
 
-    bool add_event_frame_observer(EventFrameObserver observer,
-                                  void *context);
-
-    // Event subscriptions
-    EventAcquireResult acquire_events(const char *data_ids_csv);
-    void release_events(EventConsumerHandle handle);
-    bool event_consumer_active(EventConsumerHandle handle) const;
-
-    // Stream subscriptions
-    StreamAcquireResult acquire_stream(const std::string &params_json,
-                                       RpcSource source);
-    StreamAcquireResult update_stream(StreamConsumerHandle handle,
-                                      const std::string &params_json);
-    void release_stream(StreamConsumerHandle handle);
-    bool stream_consumer_active(StreamConsumerHandle handle) const;
-    uint32_t stream_consumer_queue_drops(StreamConsumerHandle handle) const;
-    bool stream_activity_active() const;
-    bool stream_realtime_active() const;
-    bool stream_actual_active() const;
-    bool stream_accepted_data_ids_cover(const char *data_ids_csv) const;
-    const std::string &stream_accepted_data_ids_csv() const;
-    void set_stream_frame_observer(StreamFrameObserver observer,
-                                   void *context);
-    bool next_stream_frame(StreamConsumerHandle handle,
-                           StreamFrameRef &frame);
-
     // Device maintenance
     void reset_stats();
 
@@ -175,8 +140,6 @@ public:
     const RpcArbiterStats &stats() const { return stats_; }
     RpcRuntimeStatus runtime_status() const;
     const CanDriver &can_driver() const { return can_; }
-    const EventBroker &event_broker() const { return event_; }
-    const StreamBroker &stream_broker() const { return stream_; }
 
 private:
     // Request and payload types
@@ -313,7 +276,6 @@ private:
     // Payload handling
     bool handle_event_notification(const char *payload, size_t payload_len);
     void handle_stream_notification(const char *payload, size_t payload_len);
-    uint8_t source_id(RpcSource source) const;
     void handle_frame(const RawCanFrame &frame);
     void enqueue_deferred_payload(DeferredPayload::Kind kind,
                                   const char *payload,

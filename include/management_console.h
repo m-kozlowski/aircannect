@@ -29,6 +29,8 @@ class WebUI;
 
 struct ConsoleContext {
     RpcArbiter &arbiter;
+    EventBroker &events;
+    StreamBroker &stream;
     As11DeviceService &device;
     As11SettingsManager &settings_manager;
     TcpBridge &tcp_bridge;
@@ -54,7 +56,7 @@ struct ConsoleContext {
 class ManagementConsole {
 public:
     void begin(Print &out);
-    void stop(RpcArbiter &arbiter);
+    void stop(StreamBroker &stream);
     void poll(Stream &input, Print &out, ConsoleContext &ctx);
     void poll_pending(Print &out);
     void cancel_pending_storage();
@@ -101,7 +103,7 @@ private:
     void handle_rpc_command(Print &out, String rest, ConsoleContext &ctx);
     void handle_raw_command(Print &out, String rest, ConsoleContext &ctx);
 
-    void handle_stream(Print &out, String rest, RpcArbiter &arbiter);
+    void handle_stream(Print &out, String rest, StreamBroker &stream);
     void handle_as11(Print &out, String rest, RpcArbiter &arbiter,
                      As11DeviceService &device);
     void handle_therapy(Print &out, String rest, RpcArbiter &arbiter,

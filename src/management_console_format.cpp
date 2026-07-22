@@ -101,12 +101,15 @@ void print_rpc_status(Print &out, const RpcArbiter &arbiter) {
     out.println(runtime.last_boot_notification.c_str());
 }
 
-void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
+void print_rpc_stats(Print &out,
+                     const RpcArbiter &arbiter,
+                     const EventBroker &events,
+                     const StreamBroker &stream) {
     const RpcRuntimeStatus runtime = arbiter.runtime_status();
     const RpcArbiterStats &stats = arbiter.stats();
-    const EventBrokerStats &event_stats = arbiter.event_broker().stats();
+    const EventBrokerStatus event_status = events.status();
+    const EventBrokerStats &event_stats = events.stats();
     const CanDriverStats &can_stats = arbiter.can_driver().stats();
-    const StreamBroker &stream = arbiter.stream_broker();
     const uint32_t can_rx_fps =
         (can_stats.rx_frames * 1000UL) / runtime.stats_elapsed_ms;
     const uint32_t rpc_dps =
@@ -180,30 +183,28 @@ void print_rpc_stats(Print &out, const RpcArbiter &arbiter) {
     out.print(stream.start_requests());
     out.print(" stream_stops=");
     out.print(stream.stop_requests());
-    out.print(" stream_notifications=");
-    out.print(stats.stream_notifications);
+    out.print(" stream_payloads=");
+    out.print(stream.published_payloads());
     out.print(" stream_fanout_drops=");
-    out.print(stats.stream_fanout_drops);
-    out.print(" stream_rejects=");
-    out.print(stats.stream_consumer_rejects);
+    out.print(stream.total_queue_drops());
     out.print(" stream_deferred=");
     out.print(stream.command_deferred());
     out.print(" stream_errors=");
     out.print(stream.command_errors());
     out.print(" stream_parse_errors=");
-    out.print(stats.stream_parse_errors);
+    out.print(stream.parse_errors());
     out.print(" stream_pool_exhaustions=");
-    out.print(stats.stream_pool_exhaustions);
+    out.print(stream.pool_exhaustions());
     out.print(" stream_truncated_frames=");
-    out.print(stats.stream_truncated_frames);
+    out.print(stream.truncated_frames());
     out.print(" stream_frame_pool=");
     out.print(stream.frame_pool_in_use());
     out.print("/");
     out.print(stream.frame_pool_capacity());
     out.print(" event_subscribed=");
-    out.print(runtime.event_subscription_active ? "yes" : "no");
+    out.print(event_status.subscription_active ? "yes" : "no");
     out.print(" event_subscription_id=");
-    out.print(runtime.event_subscription_id);
+    out.print(event_status.subscription_id);
     out.print(" event_subscribe_errors=");
     out.print(event_stats.subscribe_errors);
     out.print(" event_notifications=");
@@ -274,10 +275,7 @@ void print_as11_status(Print &out, const As11DeviceState &state) {
     out.println();
 }
 
-void print_stream_status(Print &out, const RpcArbiter &arbiter) {
-    const RpcArbiterStats &stats = arbiter.stats();
-    const StreamBroker &stream = arbiter.stream_broker();
-
+void print_stream_status(Print &out, const StreamBroker &stream) {
     out.print("[STREAM] consumers=");
     out.print(stream.consumer_count());
     out.print(" subscribed=");
@@ -288,8 +286,8 @@ void print_stream_status(Print &out, const RpcArbiter &arbiter) {
     out.print(stream.pending_stop() ? "yes" : "no");
     out.print(" error=");
     out.print(stream.error() ? "yes" : "no");
-    out.print(" notifications=");
-    out.print(stats.stream_notifications);
+    out.print(" payloads=");
+    out.print(stream.published_payloads());
     if (stream.last_notification_ms()) {
         out.print(" last_age_ms=");
         out.print(millis() - stream.last_notification_ms());
@@ -326,7 +324,7 @@ void print_stream_status(Print &out, const RpcArbiter &arbiter) {
         out.print("[STREAM consumer ");
         out.print(i);
         out.print("] source=");
-        out.print(stream.consumer_source(handle));
+        out.print(static_cast<unsigned>(stream.consumer_source(handle)));
         out.print(" q=");
         out.print(stream.consumer_queue_count(handle));
         out.print(" drops=");

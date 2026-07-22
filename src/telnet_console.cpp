@@ -11,21 +11,21 @@ bool TelnetConsole::begin(uint16_t port) {
     return begin_line_server(port, "TELNET");
 }
 
-bool TelnetConsole::restart(uint16_t port, RpcArbiter *arbiter) {
-    stop(arbiter);
+bool TelnetConsole::restart(uint16_t port, StreamBroker *stream) {
+    stop(stream);
     return begin(port);
 }
 
-void TelnetConsole::stop(RpcArbiter *arbiter) {
+void TelnetConsole::stop(StreamBroker *stream) {
     for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
-        disconnect_slot(i, arbiter);
+        disconnect_slot(i, stream);
     }
     stop_line_server();
 }
 
 void TelnetConsole::poll(ConsoleContext &ctx) {
     if (!started()) return;
-    accept_clients(ctx.app_config, ctx.arbiter);
+    accept_clients(ctx.app_config, ctx.stream);
 
     for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
         Slot &slot = slots_[i];
@@ -40,7 +40,7 @@ void TelnetConsole::poll(ConsoleContext &ctx) {
         if (capture.text().length()) queue_text(i, capture.text());
     }
 
-    pump_outputs(ctx.arbiter);
+    pump_outputs(ctx.stream);
     poll_inputs(ctx);
 }
 
@@ -69,13 +69,13 @@ int TelnetConsole::connected_count() {
 }
 
 void TelnetConsole::accept_clients(const AppConfig &app_config,
-                                   RpcArbiter &arbiter) {
+                                   StreamBroker &stream) {
     WiFiClient incoming = accept_line_client();
     if (!incoming) return;
 
     for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
         if (slots_[i].client && slots_[i].client.connected()) continue;
-        disconnect_slot(i, &arbiter);
+        disconnect_slot(i, &stream);
         slots_[i].client = incoming;
         stats_.accepted_clients++;
         Log::logf(CAT_TCP, LOG_INFO, "[TELNET %u] connected from %s\n",
@@ -90,10 +90,10 @@ void TelnetConsole::accept_clients(const AppConfig &app_config,
     incoming.stop();
 }
 
-void TelnetConsole::disconnect_slot(size_t idx, RpcArbiter *arbiter) {
+void TelnetConsole::disconnect_slot(size_t idx, StreamBroker *stream) {
     if (idx >= AC_MAX_TELNET_CLIENTS) return;
     Slot &slot = slots_[idx];
-    if (arbiter) slot.console.stop(*arbiter);
+    if (stream) slot.console.stop(*stream);
     if (slot.client) slot.client.stop();
     slot.output_queue.clear();
     slot.output_current = "";
@@ -149,7 +149,7 @@ void TelnetConsole::queue_console_begin(size_t idx) {
     if (capture.text().length()) queue_text(idx, capture.text());
 }
 
-void TelnetConsole::pump_outputs(RpcArbiter &arbiter) {
+void TelnetConsole::pump_outputs(StreamBroker &stream) {
     for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
         Slot &slot = slots_[i];
         if (!slot.client || !slot.client.connected()) continue;
@@ -159,7 +159,7 @@ void TelnetConsole::pump_outputs(RpcArbiter &arbiter) {
             slot.output_pos, i, "TELNET", false);
         if (result.fatal_error) {
             stats_.disconnected_clients++;
-            disconnect_slot(i, &arbiter);
+            disconnect_slot(i, &stream);
         }
     }
 }
@@ -172,7 +172,7 @@ void TelnetConsole::poll_inputs(ConsoleContext &ctx) {
             Log::logf(CAT_TCP, LOG_INFO, "[TELNET %u] disconnected\n",
                       static_cast<unsigned>(i));
             stats_.disconnected_clients++;
-            disconnect_slot(i, &ctx.arbiter);
+            disconnect_slot(i, &ctx.stream);
             continue;
         }
 

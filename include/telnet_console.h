@@ -37,8 +37,8 @@ class TelnetConsole : private LineProtocolServerBase {
 public:
     bool begin(uint16_t port = AC_TELNET_CONSOLE_PORT);
     bool restart(uint16_t port = AC_TELNET_CONSOLE_PORT,
-                 RpcArbiter *arbiter = nullptr);
-    void stop(RpcArbiter *arbiter = nullptr);
+                 StreamBroker *stream = nullptr);
+    void stop(StreamBroker *stream = nullptr);
     void poll(ConsoleContext &ctx);
 
     void handle_event(const RpcEvent &event);
@@ -69,14 +69,14 @@ private:
         bool last_cr = false;
     };
 
-    void accept_clients(const AppConfig &app_config, RpcArbiter &arbiter);
-    void disconnect_slot(size_t idx, RpcArbiter *arbiter = nullptr);
+    void accept_clients(const AppConfig &app_config, StreamBroker &stream);
+    void disconnect_slot(size_t idx, StreamBroker *stream = nullptr);
     void authenticate_slot(size_t idx, const AppConfig &app_config);
 
     void queue_text(size_t idx, const String &text);
     void queue_prompt(size_t idx);
     void queue_console_begin(size_t idx);
-    void pump_outputs(RpcArbiter &arbiter);
+    void pump_outputs(StreamBroker &stream);
 
     void poll_inputs(ConsoleContext &ctx);
     void process_input_char(size_t idx,

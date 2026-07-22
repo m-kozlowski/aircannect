@@ -63,7 +63,7 @@ public:
     void transport_reset(RpcRequestPort &rpc, uint32_t now_ms);
 
     StreamAcquireResult acquire(const std::string &params_json,
-                                uint8_t source = 0);
+                                RpcSource source = RpcSource::Internal);
     StreamAcquireResult update(StreamConsumerHandle handle,
                                const std::string &params_json);
     void release(StreamConsumerHandle handle);
@@ -80,6 +80,10 @@ public:
     bool desired_active() const {
         return consumer_count() > 0 || external_active_;
     }
+    bool realtime_active() const {
+        return desired_active() || actual_active_ || pending();
+    }
+    bool activity_active(uint32_t now_ms, uint32_t quiet_ms) const;
     bool actual_active() const { return actual_active_; }
     bool external_active() const { return external_active_; }
     bool pending() const { return pending_ != StreamCommandType::None; }
@@ -119,7 +123,7 @@ public:
     bool next_frame(StreamConsumerHandle handle, StreamFrameRef &frame);
     size_t consumer_queue_count(StreamConsumerHandle handle) const;
     uint32_t consumer_queue_drops(StreamConsumerHandle handle) const;
-    uint8_t consumer_source(StreamConsumerHandle handle) const;
+    RpcSource consumer_source(StreamConsumerHandle handle) const;
 
     uint32_t published_payloads() const { return published_payloads_; }
     uint32_t fanout_targets() const { return fanout_targets_; }
@@ -166,7 +170,7 @@ private:
 
     struct Consumer {
         bool active = false;
-        uint8_t source = 0;
+        RpcSource source = RpcSource::Internal;
         Subscription subscription;
         FixedQueue<StreamFrameRef, AC_STREAM_CONSUMER_QUEUE_DEPTH> queue;
         uint32_t queue_drops = 0;

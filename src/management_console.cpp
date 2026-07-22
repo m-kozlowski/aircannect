@@ -378,9 +378,9 @@ bool ManagementConsole::event_has_output(const RpcEvent &event) {
     return false;
 }
 
-void ManagementConsole::stop(RpcArbiter &arbiter) {
-    if (arbiter.stream_consumer_active(stream_handle_)) {
-        arbiter.release_stream(stream_handle_);
+void ManagementConsole::stop(StreamBroker &stream) {
+    if (stream.consumer_active(stream_handle_)) {
+        stream.release(stream_handle_);
     }
     stream_handle_ = STREAM_CONSUMER_INVALID;
     cancel_pending_storage();
@@ -507,32 +507,32 @@ void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
 }
 
 void ManagementConsole::handle_stream(Print &out, String rest,
-                                      RpcArbiter &arbiter) {
+                                      StreamBroker &stream) {
     rest.trim();
 
     if (!rest.length() || rest == "status") {
-        ConsoleFormat::print_stream_status(out, arbiter);
+        ConsoleFormat::print_stream_status(out, stream);
         return;
     }
 
     if (rest == "stop") {
-        if (arbiter.stream_consumer_active(stream_handle_)) {
-            arbiter.release_stream(stream_handle_);
+        if (stream.consumer_active(stream_handle_)) {
+            stream.release(stream_handle_);
             stream_handle_ = STREAM_CONSUMER_INVALID;
             out.println("[STREAM] released console subscription");
         } else {
             out.println("[STREAM] no console subscription active");
         }
-        ConsoleFormat::print_stream_status(out, arbiter);
+        ConsoleFormat::print_stream_status(out, stream);
         return;
     }
 
     if (rest.startsWith("{")) {
         StreamAcquireResult result;
-        if (arbiter.stream_consumer_active(stream_handle_)) {
-            result = arbiter.update_stream(stream_handle_, to_std(rest));
+        if (stream.consumer_active(stream_handle_)) {
+            result = stream.update(stream_handle_, to_std(rest));
         } else {
-            result = arbiter.acquire_stream(to_std(rest), RpcSource::Console);
+            result = stream.acquire(to_std(rest), RpcSource::Console);
         }
         if (result.handle >= 0) stream_handle_ = result.handle;
         if (result.status == StreamAcquireStatus::Incompatible) {
@@ -546,7 +546,7 @@ void ManagementConsole::handle_stream(Print &out, String rest,
         } else {
             out.println("[STREAM] console subscription active");
         }
-        ConsoleFormat::print_stream_status(out, arbiter);
+        ConsoleFormat::print_stream_status(out, stream);
         return;
     }
 
@@ -581,10 +581,10 @@ void ManagementConsole::handle_stream(Print &out, String rest,
 
     std::string params = build_stream_params(ids, sample_ms, report_ms);
     StreamAcquireResult result;
-    if (arbiter.stream_consumer_active(stream_handle_)) {
-        result = arbiter.update_stream(stream_handle_, params);
+    if (stream.consumer_active(stream_handle_)) {
+        result = stream.update(stream_handle_, params);
     } else {
-        result = arbiter.acquire_stream(params, RpcSource::Console);
+        result = stream.acquire(params, RpcSource::Console);
     }
     if (result.handle >= 0) stream_handle_ = result.handle;
 
@@ -609,7 +609,7 @@ void ManagementConsole::handle_stream(Print &out, String rest,
             out.println("[STREAM] request rejected");
             break;
     }
-    ConsoleFormat::print_stream_status(out, arbiter);
+    ConsoleFormat::print_stream_status(out, stream);
 }
 
 void ManagementConsole::handle_as11(Print &out, String rest,

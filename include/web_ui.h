@@ -91,6 +91,7 @@ public:
 
     // lifecycle
     bool begin(RpcArbiter &arbiter,
+               StreamBroker &stream,
                As11DeviceService &device,
                As11SettingsManager &settings_manager,
                WifiManager &wifi_manager,
@@ -253,6 +254,7 @@ private:
 
     // subsystem owners
     RpcArbiter *arbiter_ = nullptr;
+    StreamBroker *stream_ = nullptr;
     As11DeviceService *device_ = nullptr;
     As11SettingsManager *settings_manager_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;

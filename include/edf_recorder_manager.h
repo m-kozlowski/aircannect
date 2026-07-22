@@ -10,11 +10,13 @@
 #include "edf_series.h"
 #include "edf_storage_catalog.h"
 #include "edf_str_session.h"
-#include "storage_service.h"
 #include "edf_stream_assembler.h"
+#include "event_broker.h"
 #include "fixed_queue.h"
 #include "rpc_arbiter.h"
 #include "session_manager.h"
+#include "storage_service.h"
+#include "stream_broker.h"
 #include "stream_frame.h"
 
 namespace aircannect {
@@ -149,7 +151,9 @@ struct EdfRecorderStatus {
 class EdfRecorderManager {
 public:
     // lifecycle
-    void begin(RpcArbiter &arbiter,
+    void begin(RpcArbiter &rpc,
+               EventBroker &events,
+               StreamBroker &stream,
                const As11DeviceState &device_state,
                SessionManager &session);
     void poll(uint32_t now_ms);
@@ -313,7 +317,9 @@ private:
     void set_error(const char *error);
 
     // subsystem owners
-    RpcArbiter *arbiter_ = nullptr;
+    RpcArbiter *rpc_ = nullptr;
+    EventBroker *events_ = nullptr;
+    StreamBroker *stream_ = nullptr;
     const As11DeviceState *device_state_ = nullptr;
     SessionManager *session_ = nullptr;
 
