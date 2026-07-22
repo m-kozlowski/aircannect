@@ -70,6 +70,7 @@ public:
 
     size_t size() const { return count_; }
     size_t capacity() const { return capacity_; }
+    bool contains(ReportRequestPriority priority) const;
 
 private:
     static bool same_artifact_identity(const ReportArtifactKey &lhs,

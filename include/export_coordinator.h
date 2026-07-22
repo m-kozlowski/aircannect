@@ -4,11 +4,15 @@
 
 #include "app_config.h"
 #include "as11_device_state.h"
-#include "report_manager.h"
 #include "sleephq_sync_job.h"
 #include "storage_sync_job.h"
 
 namespace aircannect {
+
+struct ExportReportActivity {
+    bool foreground_active = false;
+    bool background_active = false;
+};
 
 // Owns policy that spans export endpoints. The endpoint jobs own their
 // protocols and durable state; this coordinator owns when they may run and in
@@ -20,7 +24,7 @@ public:
                SleepHqSyncJob *sleephq_sync);
 
     // scheduling policy
-    void poll(ReportManager &report,
+    void poll(const ExportReportActivity &report,
               const AppConfigData &config,
               bool network_connected,
               bool stream_activity_active,
@@ -40,7 +44,7 @@ public:
 private:
     struct PostTherapyState {
         As11TherapyState last_state = As11TherapyState::Unknown;
-        uint32_t summary_refresh_due_ms = 0;
+        uint32_t report_settle_due_ms = 0;
         bool storage_pending = false;
         bool storage_grace_armed = false;
         uint32_t storage_due_ms = 0;
@@ -69,23 +73,24 @@ private:
     bool export_network_ready(bool network_connected, uint32_t now_ms);
 
     // post-therapy sequence
-    void poll_post_therapy(ReportManager &report,
+    void poll_post_therapy(const ExportReportActivity &report,
                            bool stream_activity_active,
                            As11TherapyState therapy_state,
                            bool storage_sync_active,
                            uint32_t now_ms);
     void reset_post_therapy_after_running();
     void arm_post_therapy_after_stop(uint32_t now_ms);
-    void maybe_refresh_summary(ReportManager &report,
-                               bool stream_activity_active,
-                               uint32_t now_ms);
-    void maybe_queue_storage_sync(ReportManager &report,
+    void maybe_finish_report_settle(const ExportReportActivity &report,
+                                    bool stream_activity_active,
+                                    uint32_t now_ms);
+    void maybe_queue_storage_sync(const ExportReportActivity &report,
                                   bool stream_activity_active,
                                   uint32_t now_ms);
-    void maybe_queue_post_therapy_sleephq(ReportManager &report,
-                                          bool stream_activity_active,
-                                          bool storage_sync_active,
-                                          uint32_t now_ms);
+    void maybe_queue_post_therapy_sleephq(
+        const ExportReportActivity &report,
+        bool stream_activity_active,
+        bool storage_sync_active,
+        uint32_t now_ms);
     void queue_post_therapy_storage_sync(uint32_t now_ms);
     void clear_post_therapy_sleephq();
 
@@ -93,7 +98,7 @@ private:
     void maybe_queue_sleephq_startup_check(bool network_connected,
                                            bool storage_sync_active,
                                            SleepHqSyncRuntimeStatus status);
-    void poll_sleephq_idle_backfill(ReportManager &report,
+    void poll_sleephq_idle_backfill(const ExportReportActivity &report,
                                     bool network_connected,
                                     bool stream_activity_active,
                                     As11TherapyState therapy_state,

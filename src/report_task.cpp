@@ -305,9 +305,18 @@ struct ReportTask::Runtime {
     void publish_status() {
         size_t queued = 0;
         uint32_t drops = 0;
+        bool foreground_command = false;
         if (lock()) {
             queued = command_count;
             drops = command_drops;
+            for (size_t i = 0; i < command_count; ++i) {
+                if (commands[i].kind == ReportTaskCommandKind::Artifact &&
+                    commands[i].priority ==
+                        ReportRequestPriority::Foreground) {
+                    foreground_command = true;
+                    break;
+                }
+            }
             unlock();
         }
 
@@ -324,6 +333,8 @@ struct ReportTask::Runtime {
         next.catalog_store = catalog_store.status();
         next.artifact_index_refresh = artifact_index_refresh.status();
         next.engine = engine.status();
+        next.foreground_active =
+            foreground_command || next.engine.foreground_active;
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
@@ -361,6 +372,10 @@ struct ReportTask::Runtime {
                     break;
             }
         }
+        next.background_active =
+            queued > 0 ||
+            (next.state != ReportTaskState::Stopped &&
+             next.state != ReportTaskState::Idle);
 
         if (!lock()) return;
         status = next;

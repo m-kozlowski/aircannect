@@ -173,4 +173,11 @@ void ReportRequestQueue::clear() {
     while (count_ > 0) erase(count_ - 1);
 }
 
+bool ReportRequestQueue::contains(ReportRequestPriority priority) const {
+    for (size_t i = 0; i < count_; ++i) {
+        if (slots_[i].priority == priority) return true;
+    }
+    return false;
+}
+
 }  // namespace aircannect

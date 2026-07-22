@@ -33,6 +33,8 @@ struct ReportTaskStatus {
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
     uint32_t catalog_generation = 0;
+    bool foreground_active = false;
+    bool background_active = false;
     ReportSummaryAcquisitionStatus summary_acquisition;
     NightCatalogRefreshStatus catalog_refresh;
     NightCatalogStoreStatus catalog_store;

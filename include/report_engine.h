@@ -36,6 +36,7 @@ struct ReportEngineCompletion {
 struct ReportEngineStatus {
     ReportEngineState state = ReportEngineState::Idle;
     size_t queued = 0;
+    bool foreground_active = false;
     ReportArtifactRequest active_request;
     ReportArtifactLookupStatus lookup;
     ReportFallbackAcquisitionStatus fallback;

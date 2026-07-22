@@ -264,6 +264,10 @@ ReportEngineStatus ReportEngine::status() const {
     ReportEngineStatus out;
     out.queued = queue_.size();
     out.active_request = active_request_;
+    out.foreground_active =
+        queue_.contains(ReportRequestPriority::Foreground) ||
+        (phase_ != ActivePhase::Idle &&
+         active_request_.priority == ReportRequestPriority::Foreground);
     out.lookup = lookup_.status();
     out.fallback = fallback_acquisition_.status();
     out.executor = executor_.status();

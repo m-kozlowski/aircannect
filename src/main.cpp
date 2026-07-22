@@ -734,8 +734,14 @@ void loop() {
     Storage::poll(storage_capacity_update_allowed);
     drain_can_rx_after("storage_poll");
 
+    const ExportReportActivity report_activity{
+        report_manager.foreground_busy(),
+        report_manager.background_work_active() ||
+            edf_report_catalog_post_session_pending,
+    };
+
     export_coordinator.poll(
-        report_manager,
+        report_activity,
         app_config.data(),
         wifi_manager.sta_ipv4_online(),
         stream_activity_active,
