@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -86,6 +87,7 @@ public:
     bool request_sleephq_post_therapy();
 
     // copied status
+    bool endpoint_work_claimed() const;
     ExportTaskControlSnapshot control_snapshot() const;
     ExportSmbStatusSnapshot smb_status() const;
     ExportSleepHqStatusSnapshot sleephq_status() const;
@@ -150,6 +152,7 @@ private:
     bool runtime_blocked(const ActivitySnapshot &activity) const;
 
     // status publication
+    void publish_work_claim();
     void publish_status();
 
     Runtime *runtime_ = nullptr;
@@ -170,6 +173,7 @@ private:
     bool runtime_blocked_ = true;
     bool next_idle_endpoint_smb_ = true;
     uint32_t next_command_sequence_ = 1;
+    std::atomic<bool> endpoint_work_claimed_{false};
 };
 
 }  // namespace aircannect

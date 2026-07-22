@@ -21,7 +21,6 @@ static constexpr uint32_t SMB_OPERATION_TIMEOUT_MS = 20UL * 1000UL;
 static constexpr const char *SYNC_METADATA_FILE = "meta.state";
 static constexpr size_t SYNC_METADATA_MAX_BYTES = 511;
 static constexpr const char *SYNC_REASON_STARTUP_CHECK = "startup_check";
-static constexpr const char *SYNC_REASON_STARTUP_SYNC = "startup_sync";
 static constexpr const char *SYNC_REASON_MANUAL_RECONCILE = "manual_reconcile";
 static constexpr const char *SYNC_REASON_FULL_RECONCILE = "full_reconcile";
 const uint32_t SYNC_RETRY_BACKOFF_MS[] = {
@@ -121,11 +120,6 @@ const char *StorageSyncEngine::work_phase_name(WorkPhase phase) {
         case WorkPhase::ResolveHost: return "resolve_host";
         case WorkPhase::Connect: return "connect";
         case WorkPhase::EnsureBaseDir: return "ensure_base_dir";
-        case WorkPhase::VerifyLatestStart: return "verify_latest_start";
-        case WorkPhase::VerifyLatestFile: return "verify_latest_file";
-        case WorkPhase::VerifyLatestRemote: return "verify_latest_remote";
-        case WorkPhase::VerifyLatestInvalidate:
-            return "verify_latest_invalidate";
         case WorkPhase::NextFile: return "next_file";
         case WorkPhase::ResolveRemoteFile: return "resolve_remote_file";
         case WorkPhase::EnsureRemoteDir: return "ensure_remote_dir";
@@ -147,7 +141,6 @@ const char *StorageSyncEngine::run_kind_reason(RunKind kind) {
         case RunKind::Manual: return "manual";
         case RunKind::PostTherapy: return "post_therapy";
         case RunKind::StartupCheck: return SYNC_REASON_STARTUP_CHECK;
-        case RunKind::StartupSync: return SYNC_REASON_STARTUP_SYNC;
         case RunKind::ManualReconcile: return SYNC_REASON_MANUAL_RECONCILE;
         case RunKind::ScheduledReconcile: return SYNC_REASON_FULL_RECONCILE;
         case RunKind::Retry: return "retry";
@@ -182,7 +175,6 @@ bool StorageSyncEngine::config_matches_locked(
 
 void StorageSyncEngine::reset_run_locked(bool keep_status) {
     close_local_locked();
-    close_latest_verify_locked();
     inventory_loader_.reset();
     export_inventory_.reset();
     export_planner_.reset();
@@ -198,7 +190,6 @@ void StorageSyncEngine::reset_run_locked(bool keep_status) {
     endpoint_hash_ = 0;
     state_dir_[0] = '\0';
     current_run_kind_ = RunKind::Manual;
-    sync_after_verify_ = false;
     ensured_remote_dir_[0] = '\0';
     pending_run_kind_ = RunKind::Manual;
     abort_requested_.store(false);
@@ -254,6 +245,7 @@ void StorageSyncEngine::clear_result_metadata_locked() {
 void StorageSyncEngine::parse_result_metadata_locked(char *buffer) {
     if (!buffer) return;
 
+    StorageSyncResultStatus loaded;
     char *line = buffer;
     while (line && *line) {
         char *next = strchr(line, '\n');
@@ -269,42 +261,65 @@ void StorageSyncEngine::parse_result_metadata_locked(char *buffer) {
             const char *key = line;
             const char *value = eq + 1;
             if (strcmp(key, "last_sync_epoch") == 0) {
-                (void)parse_uint64_text(value, status_.last_sync_epoch);
+                (void)parse_uint64_text(value, loaded.last_sync_epoch);
             } else if (strcmp(key, "last_sync_files_seen") == 0) {
                 (void)parse_uint32_text(value,
-                                        status_.last_sync_files_seen);
+                                        loaded.last_sync_files_seen);
             } else if (strcmp(key, "last_sync_files_uploaded") == 0) {
                 (void)parse_uint32_text(value,
-                                        status_.last_sync_files_uploaded);
+                                        loaded.last_sync_files_uploaded);
             } else if (strcmp(key, "last_sync_files_skipped") == 0) {
                 (void)parse_uint32_text(value,
-                                        status_.last_sync_files_skipped);
+                                        loaded.last_sync_files_skipped);
             } else if (strcmp(key, "last_sync_files_failed") == 0) {
                 (void)parse_uint32_text(value,
-                                        status_.last_sync_files_failed);
+                                        loaded.last_sync_files_failed);
             } else if (strcmp(key, "last_sync_bytes_uploaded") == 0) {
                 (void)parse_uint64_text(value,
-                                        status_.last_sync_bytes_uploaded);
+                                        loaded.last_sync_bytes_uploaded);
             } else if (strcmp(key, "last_verify_epoch") == 0) {
-                (void)parse_uint64_text(value, status_.last_verify_epoch);
+                (void)parse_uint64_text(value, loaded.last_verify_epoch);
             } else if (strcmp(key, "last_verify_files_seen") == 0) {
                 (void)parse_uint32_text(value,
-                                        status_.last_verify_files_seen);
+                                        loaded.last_verify_files_seen);
             } else if (strcmp(key, "last_reconcile_epoch") == 0) {
-                (void)parse_uint64_text(value,
-                                        status_.last_reconcile_epoch);
+                (void)parse_uint64_text(value, loaded.last_reconcile_epoch);
             } else if (strcmp(key, "last_reconcile_files_seen") == 0) {
                 (void)parse_uint32_text(
-                    value, status_.last_reconcile_files_seen);
+                    value, loaded.last_reconcile_files_seen);
             } else if (strcmp(key, "last_failure_epoch") == 0) {
-                (void)parse_uint64_text(value, status_.last_failure_epoch);
+                (void)parse_uint64_text(value, loaded.last_failure_epoch);
             } else if (strcmp(key, "last_failure_error") == 0) {
-                copy_cstr(status_.last_failure_error,
-                          sizeof(status_.last_failure_error),
+                copy_cstr(loaded.last_failure_error,
+                          sizeof(loaded.last_failure_error),
                           value);
             }
         }
         line = next;
+    }
+
+    if (loaded.last_sync_epoch > status_.last_sync_epoch) {
+        status_.last_sync_epoch = loaded.last_sync_epoch;
+        status_.last_sync_files_seen = loaded.last_sync_files_seen;
+        status_.last_sync_files_uploaded = loaded.last_sync_files_uploaded;
+        status_.last_sync_files_skipped = loaded.last_sync_files_skipped;
+        status_.last_sync_files_failed = loaded.last_sync_files_failed;
+        status_.last_sync_bytes_uploaded = loaded.last_sync_bytes_uploaded;
+    }
+    if (loaded.last_verify_epoch > status_.last_verify_epoch) {
+        status_.last_verify_epoch = loaded.last_verify_epoch;
+        status_.last_verify_files_seen = loaded.last_verify_files_seen;
+    }
+    if (loaded.last_reconcile_epoch > status_.last_reconcile_epoch) {
+        status_.last_reconcile_epoch = loaded.last_reconcile_epoch;
+        status_.last_reconcile_files_seen =
+            loaded.last_reconcile_files_seen;
+    }
+    if (loaded.last_failure_epoch > status_.last_failure_epoch) {
+        status_.last_failure_epoch = loaded.last_failure_epoch;
+        copy_cstr(status_.last_failure_error,
+                  sizeof(status_.last_failure_error),
+                  loaded.last_failure_error);
     }
 }
 
@@ -559,8 +574,10 @@ bool StorageSyncEngine::begin_run_locked() {
         fail_locked("state_path_too_long");
         return false;
     }
-    phase_ = metadata_loaded_ ? WorkPhase::LoadInventory
-                              : WorkPhase::LoadMetadata;
+    phase_ = current_run_kind_ == RunKind::StartupCheck
+        ? WorkPhase::ResolveHost
+        : metadata_loaded_ ? WorkPhase::LoadInventory
+                           : WorkPhase::LoadMetadata;
     Log::logf(CAT_STORAGE,
               LOG_INFO,
               "[SYNC] started reason=%s endpoint=%s\n",
@@ -867,125 +884,6 @@ void StorageSyncEngine::request_operation_abort() {
     }
 }
 
-void StorageSyncEngine::close_latest_verify_locked() {
-    latest_verify_ = LatestVerify();
-}
-
-bool StorageSyncEngine::begin_latest_verify_locked(char *error_out,
-                                                size_t error_out_size) {
-    close_latest_verify_locked();
-    if (!export_inventory_) {
-        copy_cstr(error_out, error_out_size, "export_inventory_missing");
-        return false;
-    }
-
-    const char *latest_day = export_inventory_->latest_datalog_day();
-    if (!latest_day || !latest_day[0]) {
-        phase_ = WorkPhase::Finish;
-        return true;
-    }
-
-    const int written = snprintf(latest_verify_.day_path,
-                                 sizeof(latest_verify_.day_path),
-                                 "/DATALOG/%s",
-                                 latest_day);
-    if (written <= 0 ||
-        static_cast<size_t>(written) >= sizeof(latest_verify_.day_path)) {
-        copy_cstr(error_out, error_out_size, "latest_day_path_too_long");
-        return false;
-    }
-    if (!build_state_path_locked(latest_verify_.day_path,
-                                 latest_verify_.state_path,
-                                 sizeof(latest_verify_.state_path))) {
-        copy_cstr(error_out, error_out_size, "state_path_failed");
-        return false;
-    }
-
-    latest_verify_.active = true;
-    phase_ = WorkPhase::VerifyLatestFile;
-    return true;
-}
-
-bool StorageSyncEngine::latest_verify_file_step_locked(char *error_out,
-                                                    size_t error_out_size) {
-    if (!latest_verify_.active || !export_inventory_) {
-        phase_ = WorkPhase::Finish;
-        return true;
-    }
-
-    size_t budget = 32;
-    while (latest_verify_.source_index < export_inventory_->source_size() &&
-           budget-- > 0) {
-        StorageExportInventoryEntryView entry;
-        const size_t index = latest_verify_.source_index++;
-        char day[9] = {};
-        if (!export_inventory_->entry(index, entry) ||
-            !storage_export_datalog_day_from_descendant(entry.path,
-                                                        day,
-                                                        sizeof(day)) ||
-            strcmp(day, export_inventory_->latest_datalog_day()) != 0) {
-            continue;
-        }
-
-        status_.files_seen++;
-        status_.updated_ms = nonzero_millis(millis());
-        if (!entry.local_state_complete) {
-            sync_after_verify_ = true;
-            continue;
-        }
-
-        copy_cstr(latest_verify_.current_path,
-                  sizeof(latest_verify_.current_path),
-                  entry.path);
-        latest_verify_.current_size = entry.info.size;
-        if (!smb_.make_remote_path(entry.path,
-                                   latest_verify_.remote_path,
-                                   sizeof(latest_verify_.remote_path))) {
-            copy_cstr(error_out, error_out_size, "remote_path_failed");
-            return false;
-        }
-
-        phase_ = WorkPhase::VerifyLatestRemote;
-        return true;
-    }
-
-    if (latest_verify_.source_index >= export_inventory_->source_size()) {
-        latest_verify_.active = false;
-        phase_ = latest_verify_.invalidate_state
-            ? WorkPhase::VerifyLatestInvalidate
-            : WorkPhase::Finish;
-    }
-    return true;
-}
-
-ExportStep StorageSyncEngine::publish_verify_latest_remote_locked(
-    const StorageSmbRemoteStat &remote) {
-    if (!remote.exists || remote.directory ||
-        remote.size != latest_verify_.current_size) {
-        sync_after_verify_ = true;
-        latest_verify_.invalidate_state = true;
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[SYNC] latest cache mismatch local=%s remote=%s "
-                  "exists=%u dir=%u remote_size=%llu local_size=%llu\n",
-                  latest_verify_.current_path,
-                  latest_verify_.remote_path,
-                  remote.exists ? 1u : 0u,
-                  remote.directory ? 1u : 0u,
-                  static_cast<unsigned long long>(remote.size),
-                  static_cast<unsigned long long>(
-                      latest_verify_.current_size));
-    } else {
-        status_.files_skipped++;
-    }
-
-    latest_verify_.current_path[0] = '\0';
-    latest_verify_.remote_path[0] = '\0';
-    latest_verify_.current_size = 0;
-    phase_ = WorkPhase::VerifyLatestFile;
-    return ExportStep::Working;
-}
-
 bool StorageSyncEngine::next_file_locked() {
     const StorageWorkloadSnapshot storage =
         StorageService::workload_snapshot();
@@ -1224,7 +1122,6 @@ void StorageSyncEngine::clear_current_file_locked() {
 }
 
 void StorageSyncEngine::finish_run_locked() {
-    close_latest_verify_locked();
     export_planner_.reset();
     inventory_loader_.reset();
     export_inventory_.reset();
@@ -1243,19 +1140,10 @@ void StorageSyncEngine::finish_run_locked() {
     const bool current_run_verify = run_kind_is_verify(current_run_kind_);
     const bool current_run_reconcile =
         run_kind_is_reconcile(current_run_kind_);
-    const bool queue_sync =
-        current_run_verify && !current_run_reconcile && sync_after_verify_;
-    status_.state = queue_sync ? StorageSyncState::Pending
-                               : StorageSyncState::Idle;
-    status_.pending = queue_sync;
-    if (queue_sync) {
-        pending_run_kind_ = RunKind::StartupSync;
-        copy_cstr(status_.pending_reason, sizeof(status_.pending_reason),
-                  run_kind_reason(pending_run_kind_));
-    } else {
-        pending_run_kind_ = RunKind::Manual;
-        status_.pending_reason[0] = '\0';
-    }
+    status_.state = StorageSyncState::Idle;
+    status_.pending = false;
+    pending_run_kind_ = RunKind::Manual;
+    status_.pending_reason[0] = '\0';
     status_.last_error[0] = '\0';
     status_.updated_ms = nonzero_millis(millis());
     retry_due_ms_ = 0;
@@ -1276,15 +1164,21 @@ void StorageSyncEngine::finish_run_locked() {
             status_.last_sync_files_failed = status_.files_failed;
             status_.last_sync_bytes_uploaded = status_.bytes_uploaded;
         }
-        Log::logf(CAT_STORAGE,
-                  queue_sync ? LOG_WARN : LOG_INFO,
-                  "[SYNC] verify ok endpoint=%s files=%u remote_ok=%u "
-                  "uploaded=%u followup=%s\n",
-                  config_.endpoint,
-                  static_cast<unsigned>(status_.files_seen),
-                  static_cast<unsigned>(status_.files_skipped),
-                  static_cast<unsigned>(status_.files_uploaded),
-                  queue_sync ? "sync" : "none");
+        if (current_run_kind_ == RunKind::StartupCheck) {
+            Log::logf(CAT_STORAGE,
+                      LOG_INFO,
+                      "[SYNC] startup check ok endpoint=%s\n",
+                      config_.endpoint);
+        } else {
+            Log::logf(CAT_STORAGE,
+                      LOG_INFO,
+                      "[SYNC] verify ok endpoint=%s files=%u remote_ok=%u "
+                      "uploaded=%u\n",
+                      config_.endpoint,
+                      static_cast<unsigned>(status_.files_seen),
+                      static_cast<unsigned>(status_.files_skipped),
+                      static_cast<unsigned>(status_.files_uploaded));
+        }
     } else {
         status_.last_sync_epoch = storage_export_current_epoch_seconds_or_zero();
         status_.last_sync_files_seen = status_.files_seen;
@@ -1310,7 +1204,9 @@ void StorageSyncEngine::finish_run_locked() {
     completed_sequence_++;
     if (completed_sequence_ == 0) completed_sequence_++;
 
-    if (!queue_result_metadata_save_locked()) {
+    const bool persist_result = current_run_kind_ != RunKind::StartupCheck ||
+                                metadata_loaded_;
+    if (persist_result && !queue_result_metadata_save_locked()) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
                   "[SYNC] metadata save queue failed path=%s/%s\n",
@@ -1318,7 +1214,6 @@ void StorageSyncEngine::finish_run_locked() {
                   SYNC_METADATA_FILE);
     }
     current_run_kind_ = RunKind::Manual;
-    sync_after_verify_ = false;
     queue_deferred_post_therapy_locked(status_.updated_ms);
     publish_runtime_locked();
 }
@@ -1367,7 +1262,6 @@ void StorageSyncEngine::fail_locked(const char *error) {
     inventory_loader_.reset();
     export_inventory_.reset();
     inventory_requested_ = false;
-    close_latest_verify_locked();
     smb_.abort_connection();
     smb_configured_ = false;
     release_upload_buffer_locked();
@@ -1422,7 +1316,9 @@ void StorageSyncEngine::fail_locked(const char *error) {
               static_cast<unsigned>(status_.files_skipped),
               static_cast<unsigned>(status_.files_failed),
               static_cast<unsigned long long>(status_.bytes_uploaded));
-    if (!queue_result_metadata_save_locked()) {
+    const bool persist_failure = failed_kind != RunKind::StartupCheck ||
+                                 metadata_loaded_;
+    if (persist_failure && !queue_result_metadata_save_locked()) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
                   "[SYNC] metadata save queue failed after error "
@@ -1529,17 +1425,21 @@ bool StorageSyncEngine::prepare_step_locked(uint32_t now_ms, ExportStep &result)
         return false;
     }
     status_.network_available = network_available_.load();
-    const StorageWorkloadSnapshot storage =
-        StorageService::workload_snapshot();
-    if (!storage.valid || storage.busy || storage.edf_queued > 0 ||
-        storage.open_file_count > 0) {
-        result = ExportStep::Waiting;
-        return false;
-    }
-    if (status_.state != StorageSyncState::Working &&
-        storage.maintenance_active) {
-        result = ExportStep::Waiting;
-        return false;
+    const RunKind run_kind = status_.state == StorageSyncState::Working
+        ? current_run_kind_ : pending_run_kind_;
+    if (run_kind != RunKind::StartupCheck) {
+        const StorageWorkloadSnapshot storage =
+            StorageService::workload_snapshot();
+        if (!storage.valid || storage.busy || storage.edf_queued > 0 ||
+            storage.open_file_count > 0) {
+            result = ExportStep::Waiting;
+            return false;
+        }
+        if (status_.state != StorageSyncState::Working &&
+            storage.maintenance_active) {
+            result = ExportStep::Waiting;
+            return false;
+        }
     }
     if (status_.state != StorageSyncState::Working &&
         !begin_run_locked()) {
@@ -1547,59 +1447,6 @@ bool StorageSyncEngine::prepare_step_locked(uint32_t now_ms, ExportStep &result)
         return false;
     }
     return true;
-}
-
-ExportStep StorageSyncEngine::step_verify_latest_start_locked(
-    char *error_out,
-    size_t error_out_size) {
-    if (!begin_latest_verify_locked(error_out, error_out_size)) {
-        fail_locked(error_out[0] ? error_out : "latest_verify_start_failed");
-        return ExportStep::Idle;
-    }
-    return ExportStep::Working;
-}
-
-ExportStep StorageSyncEngine::step_verify_latest_file_locked(
-    char *error_out,
-    size_t error_out_size) {
-    if (!latest_verify_file_step_locked(error_out, error_out_size)) {
-        fail_locked(error_out[0] ? error_out : "latest_verify_failed");
-        return ExportStep::Idle;
-    }
-    return ExportStep::Working;
-}
-
-ExportStep StorageSyncEngine::step_verify_latest_invalidate_locked() {
-    const StorageFileClientResult io_result = state_io_.poll();
-    if (io_result == StorageFileClientResult::Waiting) {
-        return ExportStep::Waiting;
-    }
-    if (io_result == StorageFileClientResult::Error) {
-        fail_locked(state_io_.error()[0] ? state_io_.error()
-                                         : "state_invalidate_failed");
-        return ExportStep::Idle;
-    }
-    if (io_result == StorageFileClientResult::Ready) {
-        state_io_.reset();
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[SYNC] invalidated latest state path=%s\n",
-                  latest_verify_.state_path);
-        close_latest_verify_locked();
-        phase_ = WorkPhase::Finish;
-        return ExportStep::Working;
-    }
-
-    const OperationAdmission admission = state_io_.request_remove(
-        latest_verify_.state_path,
-        next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
-    if (admission != OperationAdmission::Accepted) {
-        fail_locked("state_invalidate_rejected");
-        return ExportStep::Idle;
-    }
-
-    return ExportStep::Waiting;
 }
 
 ExportStep StorageSyncEngine::step_validate_local_locked() {
@@ -1745,10 +1592,6 @@ bool StorageSyncEngine::phase_has_local_io(WorkPhase phase) {
         case WorkPhase::ResolveHost:
         case WorkPhase::Connect:
         case WorkPhase::EnsureBaseDir:
-        case WorkPhase::VerifyLatestStart:
-        case WorkPhase::VerifyLatestFile:
-        case WorkPhase::VerifyLatestRemote:
-        case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::EnsureRemoteDir:
@@ -1803,10 +1646,6 @@ void StorageSyncEngine::execute_local_io_phase(WorkPhase phase,
         case WorkPhase::ResolveHost:
         case WorkPhase::Connect:
         case WorkPhase::EnsureBaseDir:
-        case WorkPhase::VerifyLatestStart:
-        case WorkPhase::VerifyLatestFile:
-        case WorkPhase::VerifyLatestRemote:
-        case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::EnsureRemoteDir:
@@ -1865,10 +1704,6 @@ ExportStep StorageSyncEngine::publish_local_io_phase_locked(
         case WorkPhase::ResolveHost:
         case WorkPhase::Connect:
         case WorkPhase::EnsureBaseDir:
-        case WorkPhase::VerifyLatestStart:
-        case WorkPhase::VerifyLatestFile:
-        case WorkPhase::VerifyLatestRemote:
-        case WorkPhase::VerifyLatestInvalidate:
         case WorkPhase::NextFile:
         case WorkPhase::ResolveRemoteFile:
         case WorkPhase::EnsureRemoteDir:
@@ -1905,30 +1740,8 @@ ExportStep StorageSyncEngine::step_ensure_base_dir_locked(
         return ExportStep::Idle;
     }
 
-    phase_ = WorkPhase::VerifyLatestStart;
+    phase_ = WorkPhase::Finish;
     return ExportStep::Working;
-}
-
-ExportStep StorageSyncEngine::step_verify_latest_remote_locked(
-    char *error_out,
-    size_t error_out_size) {
-    StorageSmbRemoteStat remote;
-    BackgroundOperationControl operation = operation_control();
-    const StorageSmbOperationResult result = smb_.step_stat(
-        latest_verify_.remote_path,
-        remote,
-        error_out,
-        error_out_size,
-        &operation);
-    if (result == StorageSmbOperationResult::Waiting) {
-        return ExportStep::Working;
-    }
-    if (result == StorageSmbOperationResult::Error) {
-        fail_locked(error_out[0] ? error_out : "remote_stat_failed");
-        return ExportStep::Idle;
-    }
-
-    return publish_verify_latest_remote_locked(remote);
 }
 
 ExportStep StorageSyncEngine::step_resolve_remote_file_locked(
@@ -2118,9 +1931,6 @@ ExportStep StorageSyncEngine::step_work_phase_locked() {
         case WorkPhase::EnsureBaseDir:
             return step_ensure_base_dir_locked(error, sizeof(error));
 
-        case WorkPhase::VerifyLatestRemote:
-            return step_verify_latest_remote_locked(error, sizeof(error));
-
         case WorkPhase::ResolveRemoteFile:
             return step_resolve_remote_file_locked(error, sizeof(error));
 
@@ -2142,15 +1952,6 @@ ExportStep StorageSyncEngine::step_work_phase_locked() {
         case WorkPhase::OpenLocal:
         case WorkPhase::ReadLocalChunk:
             return ExportStep::Waiting;
-
-        case WorkPhase::VerifyLatestStart:
-            return step_verify_latest_start_locked(error, sizeof(error));
-
-        case WorkPhase::VerifyLatestFile:
-            return step_verify_latest_file_locked(error, sizeof(error));
-
-        case WorkPhase::VerifyLatestInvalidate:
-            return step_verify_latest_invalidate_locked();
 
         case WorkPhase::NextFile:
             return next_file_locked() ? ExportStep::Working : ExportStep::Idle;

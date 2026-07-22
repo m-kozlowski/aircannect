@@ -146,10 +146,6 @@ private:
         ResolveHost,
         Connect,
         EnsureBaseDir,
-        VerifyLatestStart,
-        VerifyLatestFile,
-        VerifyLatestRemote,
-        VerifyLatestInvalidate,
         NextFile,
         ResolveRemoteFile,
         EnsureRemoteDir,
@@ -174,7 +170,6 @@ private:
         Manual,
         PostTherapy,
         StartupCheck,
-        StartupSync,
         ManualReconcile,
         ScheduledReconcile,
         Retry,
@@ -192,17 +187,6 @@ private:
         bool batch_state = false;
         FileCompletion completion = FileCompletion::None;
         StorageStreamReader local;
-    };
-
-    struct LatestVerify {
-        char day_path[AC_STORAGE_PATH_MAX] = {};
-        char state_path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
-        char current_path[AC_STORAGE_PATH_MAX] = {};
-        char remote_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
-        uint64_t current_size = 0;
-        size_t source_index = 0;
-        bool active = false;
-        bool invalidate_state = false;
     };
 
     struct LocalIoResult {
@@ -245,15 +229,6 @@ private:
     // SMB connection and transfer phases
     ExportStep step_ensure_base_dir_locked(char *error_out,
                                            size_t error_out_size);
-    ExportStep step_verify_latest_start_locked(char *error_out,
-                                               size_t error_out_size);
-    ExportStep step_verify_latest_file_locked(char *error_out,
-                                              size_t error_out_size);
-    ExportStep step_verify_latest_remote_locked(char *error_out,
-                                                size_t error_out_size);
-    ExportStep publish_verify_latest_remote_locked(
-        const StorageSmbRemoteStat &remote);
-    ExportStep step_verify_latest_invalidate_locked();
     ExportStep step_resolve_remote_file_locked(char *error_out,
                                                size_t error_out_size);
     ExportStep step_ensure_remote_dir_locked(char *error_out,
@@ -284,11 +259,6 @@ private:
     void parse_result_metadata_locked(char *buffer);
     bool queue_result_metadata_save_locked();
     bool service_result_metadata_save_locked(ExportStep &result);
-    void close_latest_verify_locked();
-    bool begin_latest_verify_locked(char *error_out, size_t error_out_size);
-    bool latest_verify_file_step_locked(char *error_out,
-                                        size_t error_out_size);
-
     // export planning
     bool begin_export_planner_locked(char *error_out,
                                      size_t error_out_size);
@@ -348,8 +318,6 @@ private:
     RunKind pending_run_kind_ = RunKind::Manual;
     RunKind current_run_kind_ = RunKind::Manual;
     uint32_t completed_sequence_ = 0;
-    bool sync_after_verify_ = false;
-
     // active run
     StorageExportInventoryLoader inventory_loader_;
     StorageStreamPort *stream_port_ = nullptr;
@@ -359,7 +327,6 @@ private:
     StorageFileClient state_io_;
     StorageFileClient metadata_io_;
     CurrentFile current_file_;
-    LatestVerify latest_verify_;
     uint8_t *upload_buffer_ = nullptr;
     size_t upload_buffer_size_ = 0;
     size_t upload_chunk_size_ = 0;

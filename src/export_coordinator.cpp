@@ -46,9 +46,12 @@ ExportSleepHqStatusSnapshot ExportCoordinator::sleephq_snapshot() const {
 }
 
 bool ExportCoordinator::endpoint_work_claimed() const {
-    const ExportTaskControlSnapshot status = control_snapshot();
-    return status.active ||
-        (status.busy && status.network_ready && !status.runtime_blocked);
+    if (!task_) return false;
+    if (task_->endpoint_work_claimed()) return true;
+
+    return startup_check_.smb_requested_generation != 0 &&
+           startup_check_.smb_completed_generation !=
+               startup_check_.smb_requested_generation;
 }
 
 bool ExportCoordinator::request_smb_sync() {
@@ -437,6 +440,10 @@ void ExportCoordinator::observe_smb_startup_check(
     if (startup_check_.smb_requested_generation !=
         status.config_generation) {
         startup_check_.smb_completed_generation = 0;
+        return;
+    }
+    if (status.state == StorageSyncState::Error && !status.pending) {
+        startup_check_.smb_completed_generation = status.config_generation;
         return;
     }
     if (status.state != StorageSyncState::Idle || status.pending ||

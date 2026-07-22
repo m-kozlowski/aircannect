@@ -204,6 +204,7 @@ bool ExportTask::queue_command(CommandKind kind, const char *day) {
                  sizeof(runtime_->inputs.command.day), "%s", day);
     }
 
+    endpoint_work_claimed_.store(true);
     unlock_inputs();
     if (kind != CommandKind::SmbScheduledReconcile) {
         runtime_->smb.cancel_scheduled_reconcile();
@@ -436,6 +437,27 @@ ExportStep ExportTask::step_endpoint() {
     return result;
 }
 
+void ExportTask::publish_work_claim() {
+    if (!runtime_ || !lock_inputs(0)) return;
+
+    const bool command_pending =
+        runtime_->inputs.command.kind != CommandKind::None;
+    unlock_inputs();
+
+    const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
+    const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
+    const bool active = smb.state == StorageSyncState::Working ||
+                        sleephq.state == SleepHqSyncState::Working;
+    const bool pending = smb.pending ||
+                         smb.state == StorageSyncState::Pending ||
+                         sleephq.pending ||
+                         sleephq.state == SleepHqSyncState::Pending;
+    const bool ready_pending =
+        (pending || command_pending) && network_ready_ && !runtime_blocked_;
+
+    endpoint_work_claimed_.store(active || ready_pending);
+}
+
 void ExportTask::publish_status() {
     if (!runtime_) return;
 
@@ -489,6 +511,10 @@ void ExportTask::publish_status() {
 #endif
 
     xSemaphoreGive(status_lock_);
+}
+
+bool ExportTask::endpoint_work_claimed() const {
+    return endpoint_work_claimed_.load();
 }
 
 ExportTaskControlSnapshot ExportTask::control_snapshot() const {
@@ -556,6 +582,7 @@ void ExportTask::run() {
         (void)apply_command(inputs.command);
 
         const ExportStep result = step_endpoint();
+        publish_work_claim();
         publish_status();
 
         uint32_t delay_ms = AC_EXPORT_TASK_IDLE_TICK_MS;
