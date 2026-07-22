@@ -75,6 +75,7 @@ public:
     // endpoint commands
     bool request_smb_sync();
     bool request_smb_startup_check();
+    bool request_smb_idle_backfill();
     bool request_smb_verify();
     bool request_smb_scheduled_reconcile();
     bool request_smb_post_therapy();
@@ -100,6 +101,7 @@ private:
         None,
         SmbSync,
         SmbStartupCheck,
+        SmbIdleBackfill,
         SmbVerify,
         SmbScheduledReconcile,
         SmbPostTherapy,

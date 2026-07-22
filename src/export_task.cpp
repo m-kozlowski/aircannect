@@ -221,6 +221,10 @@ bool ExportTask::request_smb_startup_check() {
     return queue_command(CommandKind::SmbStartupCheck);
 }
 
+bool ExportTask::request_smb_idle_backfill() {
+    return queue_command(CommandKind::SmbIdleBackfill);
+}
+
 bool ExportTask::request_smb_verify() {
     return queue_command(CommandKind::SmbVerify);
 }
@@ -348,6 +352,10 @@ bool ExportTask::apply_command(const Command &command) {
         case CommandKind::SmbStartupCheck:
             configured = smb.enabled && smb.configured;
             accepted = runtime_->smb.request_startup_check();
+            break;
+        case CommandKind::SmbIdleBackfill:
+            configured = smb.enabled && smb.configured;
+            accepted = runtime_->smb.request_idle_backfill();
             break;
         case CommandKind::SmbVerify:
             configured = smb.enabled && smb.configured;

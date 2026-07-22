@@ -21,6 +21,7 @@ static constexpr uint32_t SMB_OPERATION_TIMEOUT_MS = 20UL * 1000UL;
 static constexpr const char *SYNC_METADATA_FILE = "meta.state";
 static constexpr size_t SYNC_METADATA_MAX_BYTES = 511;
 static constexpr const char *SYNC_REASON_STARTUP_CHECK = "startup_check";
+static constexpr const char *SYNC_REASON_IDLE_BACKFILL = "idle_backfill";
 static constexpr const char *SYNC_REASON_MANUAL_RECONCILE = "manual_reconcile";
 static constexpr const char *SYNC_REASON_FULL_RECONCILE = "full_reconcile";
 const uint32_t SYNC_RETRY_BACKOFF_MS[] = {
@@ -142,6 +143,7 @@ const char *StorageSyncEngine::run_kind_reason(RunKind kind) {
         case RunKind::Manual: return "manual";
         case RunKind::PostTherapy: return "post_therapy";
         case RunKind::StartupCheck: return SYNC_REASON_STARTUP_CHECK;
+        case RunKind::IdleBackfill: return SYNC_REASON_IDLE_BACKFILL;
         case RunKind::ManualReconcile: return SYNC_REASON_MANUAL_RECONCILE;
         case RunKind::ScheduledReconcile: return SYNC_REASON_FULL_RECONCILE;
         case RunKind::Retry: return "retry";
@@ -579,10 +581,13 @@ bool StorageSyncEngine::begin_run_locked() {
         fail_locked("state_path_too_long");
         return false;
     }
-    phase_ = current_run_kind_ == RunKind::StartupCheck
-        ? WorkPhase::ResolveHost
-        : metadata_loaded_ ? WorkPhase::LoadInventory
-                           : WorkPhase::LoadMetadata;
+    if (!metadata_loaded_) {
+        phase_ = WorkPhase::LoadMetadata;
+    } else {
+        phase_ = current_run_kind_ == RunKind::StartupCheck
+            ? WorkPhase::ResolveHost
+            : WorkPhase::LoadInventory;
+    }
     Log::logf(CAT_STORAGE,
               LOG_INFO,
               "[SYNC] started reason=%s endpoint=%s\n",
@@ -608,8 +613,7 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
                                           : "storage_read_failed");
         metadata_io_.reset();
         metadata_file_.reset();
-        metadata_loaded_ = true;
-        phase_ = WorkPhase::LoadInventory;
+        finish_metadata_load_locked();
         return ExportStep::Working;
     }
     if (io_result == StorageFileClientResult::Ready) {
@@ -644,8 +648,7 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
         }
 
         metadata_file_.reset();
-        metadata_loaded_ = true;
-        phase_ = WorkPhase::LoadInventory;
+        finish_metadata_load_locked();
         return ExportStep::Working;
     }
 
@@ -659,8 +662,7 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
                   "[SYNC] metadata load ignored error=path_too_long\n");
-        metadata_loaded_ = true;
-        phase_ = WorkPhase::LoadInventory;
+        finish_metadata_load_locked();
         return ExportStep::Working;
     }
 
@@ -675,12 +677,18 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
                   "[SYNC] metadata load ignored path=%s "
                   "error=storage_read_rejected\n",
                   path);
-        metadata_loaded_ = true;
-        phase_ = WorkPhase::LoadInventory;
+        finish_metadata_load_locked();
         return ExportStep::Working;
     }
 
     return ExportStep::Waiting;
+}
+
+void StorageSyncEngine::finish_metadata_load_locked() {
+    metadata_loaded_ = true;
+    phase_ = current_run_kind_ == RunKind::StartupCheck
+        ? WorkPhase::ResolveHost
+        : WorkPhase::LoadInventory;
 }
 
 ExportStep StorageSyncEngine::step_load_inventory_locked() {
@@ -862,6 +870,11 @@ bool StorageSyncEngine::request_manual_sync() {
 
 bool StorageSyncEngine::request_startup_check() {
     return request_sync_with_kind(RunKind::StartupCheck, "startup_check");
+}
+
+bool StorageSyncEngine::request_idle_backfill() {
+    return request_sync_with_kind(RunKind::IdleBackfill,
+                                  SYNC_REASON_IDLE_BACKFILL);
 }
 
 bool StorageSyncEngine::request_manual_reconcile() {

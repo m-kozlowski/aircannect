@@ -62,10 +62,9 @@ private:
         bool idle_grace_complete = false;
     };
 
-    struct IdleBackfillState {
-        uint32_t queued_generation = 0;
-        uint32_t armed_generation = 0;
-        bool pending = false;
+    struct StartupBackfillState {
+        uint32_t smb_queued_generation = 0;
+        uint32_t sleephq_queued_generation = 0;
         uint32_t due_ms = 0;
     };
 
@@ -113,14 +112,13 @@ private:
                                            bool smb_startup_complete,
                                            bool storage_sync_active,
                                            SleepHqSyncRuntimeStatus status);
-    void poll_sleephq_idle_backfill(const ExportReportActivity &report,
-                                    bool network_connected,
-                                    bool stream_activity_active,
-                                    bool therapy_active,
-                                    bool storage_sync_active,
-                                    SleepHqSyncRuntimeStatus status,
-                                    uint32_t now_ms);
-    void clear_idle_backfill();
+    void poll_startup_backfill(
+        const ExportReportActivity &report,
+        const ActivitySnapshot &activity,
+        const ExportTaskControlSnapshot &task_status,
+        uint32_t now_ms);
+    bool startup_backfill_pending(
+        const ExportTaskControlSnapshot &task_status) const;
 
     // full SMB reconcile
     void maybe_preempt_full_reconcile(
@@ -141,7 +139,7 @@ private:
     // coordinator state
     PostTherapyState post_therapy_;
     StartupCheckState startup_check_;
-    IdleBackfillState idle_backfill_;
+    StartupBackfillState startup_backfill_;
     FullReconcileState full_reconcile_;
 };
 

@@ -129,6 +129,7 @@ public:
     // sync requests
     bool request_manual_sync();
     bool request_startup_check();
+    bool request_idle_backfill();
     bool request_manual_reconcile();
     bool request_scheduled_reconcile();
     bool request_post_therapy_sync();
@@ -171,6 +172,7 @@ private:
         Manual,
         PostTherapy,
         StartupCheck,
+        IdleBackfill,
         ManualReconcile,
         ScheduledReconcile,
         Retry,
@@ -252,6 +254,7 @@ private:
                                          uint32_t *hash_out = nullptr) const;
     bool begin_run_locked();
     ExportStep step_load_metadata_locked();
+    void finish_metadata_load_locked();
     ExportStep step_load_inventory_locked();
     ExportStep step_load_datalog_day_locked();
     void finish_run_locked();
