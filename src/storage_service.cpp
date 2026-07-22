@@ -16,8 +16,7 @@
 #include "edf_file_resume.h"
 #include "edf_identification.h"
 #include "edf_storage_open_plan.h"
-#include "edf_str_file_layout.h"
-#include "edf_str_record_merge.h"
+#include "edf_str_storage_writer.h"
 #include "memory_manager.h"
 #include "storage_archive_service.h"
 #include "storage_atomic_write_service.h"
@@ -332,14 +331,28 @@ bool build_child_path(const char *parent,
     return written > 0 && static_cast<size_t>(written) < dst_size;
 }
 
-bool str_backup_artifact_name(const char *name) {
+bool legacy_str_backup_artifact_name(const char *name) {
     if (!name || strncmp(name, "STR-", 4) != 0) return false;
     const size_t len = strlen(name);
     return len > 8 && strcmp(name + len - 4, ".bak") == 0;
 }
 
-void cleanup_str_backup_artifacts() {
+void recover_str_storage_artifacts() {
     if (!Storage::mounted()) return;
+
+    bool recovered = false;
+    const char *recovery_error = nullptr;
+    if (!edf_str_storage_recover("/STR.edf", recovered, recovery_error)) {
+        Log::logf(CAT_EDF,
+                  LOG_ERROR,
+                  "STR replacement recovery failed error=%s\n",
+                  recovery_error ? recovery_error : "unknown");
+    } else if (recovered) {
+        Log::logf(CAT_EDF,
+                  LOG_WARN,
+                  "recovered interrupted STR replacement\n");
+    }
+
     uint32_t removed = 0;
     File root = Storage::open("/", "r");
     if (!root || !root.isDirectory()) {
@@ -354,7 +367,7 @@ void cleanup_str_backup_artifacts() {
         char path[64] = {};
         const bool remove =
             !is_dir &&
-            str_backup_artifact_name(name) &&
+            legacy_str_backup_artifact_name(name) &&
             build_child_path("/", name, path, sizeof(path));
         child.close();
         if (remove && Storage::remove(path)) removed++;
@@ -1050,7 +1063,7 @@ bool process_mount_recovery(uint32_t now_ms) {
     if (Storage::retry_mount()) {
         mount_retry_at_ms = 0;
         mount_retry_attempt = 0;
-        cleanup_str_backup_artifacts();
+        recover_str_storage_artifacts();
         return true;
     }
 
@@ -1246,75 +1259,6 @@ bool write_open_header(OpenFile &state, const JobSlot &job) {
         return state.file.write(job.bytes, job.len) == job.len;
     }
     return write_header(state, job);
-}
-
-bool render_str_header_bytes(const JobSlot &job,
-                             uint8_t *header,
-                             size_t header_size) {
-    if (!header || header_size != edf_str_header_size()) return false;
-    EdfHeaderInfo info;
-    info.patient_id = job.patient_id;
-    info.recording_id = job.recording_id;
-    info.start_date = job.start_date;
-    info.start_time = job.start_time;
-    info.record_count = job.record_count;
-    size_t written = 0;
-    return edf_render_str_header(info, header, header_size, written) &&
-           written == header_size;
-}
-
-bool write_str_header(File &file, const JobSlot &job) {
-    const size_t header_size = edf_str_header_size();
-    uint8_t *header = static_cast<uint8_t *>(
-        Memory::alloc_large(header_size, false));
-    if (!header) {
-        log_alloc_failed("str_header", header_size);
-        return false;
-    }
-
-    bool ok = false;
-    if (render_str_header_bytes(job, header, header_size)) {
-        ok = file.write(header, header_size) == header_size;
-    }
-    Memory::free(header);
-    return ok;
-}
-
-bool read_str_header(File &file, uint8_t *header, size_t header_size) {
-    return header && header_size == edf_str_header_size() &&
-           file.seek(0) &&
-           file.read(header, header_size) == header_size;
-}
-
-bool patch_str_record_count(File &file, uint32_t record_count) {
-    char field[AC_EDF_HEADER_RECORD_COUNT_WIDTH] = {};
-    if (!edf_str_format_record_count_field(record_count,
-                                           field,
-                                           sizeof(field))) {
-        return false;
-    }
-    if (!file.seek(AC_EDF_HEADER_RECORD_COUNT_OFFSET)) return false;
-    return file.write(reinterpret_cast<const uint8_t *>(field),
-                      sizeof(field)) == sizeof(field);
-}
-
-bool find_str_record_match(File &file,
-                           uint32_t record_count,
-                           int16_t date_sample,
-                           EdfStrRecordMatch &match) {
-    match = {};
-    uint8_t raw[2] = {};
-    for (uint32_t i = 0; i < record_count; ++i) {
-        const size_t pos = edf_str_record_offset(i);
-        if (!file.seek(pos)) return false;
-        if (file.read(raw, sizeof(raw)) != sizeof(raw)) return false;
-        if (edf_str_record_date_sample(raw, sizeof(raw)) == date_sample) {
-            match.found = true;
-            match.index = i;
-            return true;
-        }
-    }
-    return true;
 }
 
 void close_file(OpenFile &state) {
@@ -1578,191 +1522,45 @@ bool process_str_record(const JobSlot &job) {
         return false;
     }
 
-    const bool existed = Storage::exists(job.path);
-    File file = Storage::open(job.path, existed ? "r+" : "w+");
-    if (!file) {
-        stats.open_errors++;
-        set_error("str_open_failed");
-        return false;
-    }
+    EdfStrStorageWriteRequest request;
+    request.path = job.path;
+    request.header.patient_id = job.patient_id;
+    request.header.recording_id = job.recording_id;
+    request.header.start_date = job.start_date;
+    request.header.start_time = job.start_time;
+    request.header.record_count = 0;
+    request.record = job.bytes;
+    request.record_size = job.len;
 
-    uint32_t record_count = 0;
-    const size_t initial_size = file.size();
-    if (!existed || initial_size < edf_str_header_size()) {
-        if (!write_str_header(file, job)) {
-            file.close();
-            stats.write_errors++;
-            set_error("str_header_write_failed");
-            return false;
-        }
-        file.flush();
-    } else {
-        EdfStrFileLayout layout;
-        if (!edf_str_file_layout_from_size(initial_size, layout)) {
-            file.close();
-            stats.write_errors++;
-            set_error("str_partial_tail");
-            return false;
-        }
-        record_count = layout.record_count;
-
-        const size_t header_size = edf_str_header_size();
-        uint8_t *actual_header = static_cast<uint8_t *>(
-            Memory::alloc_large(header_size, false));
-        uint8_t *expected_header = static_cast<uint8_t *>(
-            Memory::alloc_large(header_size, false));
-        if (!actual_header) log_alloc_failed("str_actual_header", header_size);
-        if (!expected_header) {
-            log_alloc_failed("str_expected_header", header_size);
-        }
-        const bool headers_available =
-            actual_header && expected_header &&
-            read_str_header(file, actual_header, header_size) &&
-            render_str_header_bytes(job, expected_header, header_size);
-        const bool schema_matches =
-            headers_available &&
-            edf_str_header_schema_matches(actual_header,
-                                          expected_header,
-                                          header_size);
-        uint32_t header_record_count = 0;
-        const bool header_count_valid =
-            headers_available &&
-            edf_resume_parse_record_count_field(actual_header,
-                                                header_size,
-                                                header_record_count);
-        Memory::free(actual_header);
-        Memory::free(expected_header);
-
-        if (!headers_available) {
-            file.close();
-            stats.write_errors++;
-            set_error("str_header_read_failed");
-            return false;
-        }
-
-        if (!schema_matches) {
-            file.close();
-            if (!Storage::remove(job.path)) {
-                stats.write_errors++;
-                set_error("str_replace_failed");
-                return false;
-            }
-            Log::logf(CAT_EDF, LOG_WARN,
-                      "discarded incompatible STR root file path=%s\n",
-                      job.path);
-
-            file = Storage::open(job.path, "w+");
-            if (!file) {
-                stats.open_errors++;
-                set_error("str_reopen_failed");
-                return false;
-            }
-            record_count = 0;
-            if (!write_str_header(file, job)) {
-                file.close();
-                stats.write_errors++;
-                set_error("str_header_write_failed");
-                return false;
-            }
-            file.flush();
-        } else if (!header_count_valid ||
-                   header_record_count != record_count) {
-            if (!patch_str_record_count(file, record_count)) {
-                file.close();
-                stats.patch_errors++;
-                set_error("str_count_patch_failed");
-                return false;
-            }
-            file.flush();
-        }
-    }
-
-    const int16_t date_sample = edf_str_record_date_sample(job.bytes,
-                                                           job.len);
-    if (!edf_str_date_sample_valid(date_sample)) {
-        file.close();
-        stats.write_errors++;
-        set_error("str_bad_date");
-        return false;
-    }
-
-    EdfStrRecordMatch match;
-    if (!find_str_record_match(file, record_count, date_sample, match)) {
-        file.close();
-        stats.write_errors++;
-        set_error("str_scan_failed");
-        return false;
-    }
-
-    EdfStrRecordLocation location;
-    if (!edf_str_resolve_record_location(record_count, match, location)) {
-        file.close();
-        stats.write_errors++;
-        set_error("str_location_failed");
-        return false;
-    }
-
-    const uint8_t *record_bytes = job.bytes;
-    uint8_t merged_record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
-    if (match.found) {
-        const size_t existing_offset = edf_str_record_offset(match.index);
-        uint8_t existing_record[AC_EDF_STR_SAMPLES_PER_RECORD * 2] = {};
-        if (!file.seek(existing_offset) ||
-            file.read(existing_record, sizeof(existing_record)) !=
-                sizeof(existing_record)) {
-            file.close();
-            stats.write_errors++;
-            set_error("str_existing_read_failed");
-            return false;
-        }
-        memcpy(merged_record, job.bytes, sizeof(merged_record));
-        const EdfStrRecordMergeStatus merge_status =
-            edf_str_merge_existing_record(existing_record,
-                                          sizeof(existing_record),
-                                          merged_record,
-                                          sizeof(merged_record));
-        if (merge_status != EdfStrRecordMergeStatus::Ok) {
-            file.close();
-            stats.write_errors++;
-            char error[sizeof(stats.last_error)] = {};
-            snprintf(error,
-                     sizeof(error),
-                     "str_merge_%s",
-                     edf_str_record_merge_status_name(merge_status));
-            set_error(error);
-            return false;
-        }
-        record_bytes = merged_record;
-    }
-
-    if (!file.seek(location.offset)) {
-        file.close();
-        stats.write_errors++;
-        set_error("str_seek_failed");
-        return false;
-    }
-    const size_t written = file.write(record_bytes, job.len);
-    if (written != job.len) {
-        file.close();
-        stats.write_errors++;
-        set_error("str_short_write");
-        return false;
-    }
-    file.flush();
-    if (location.appending) {
-        record_count++;
-        if (!patch_str_record_count(file, record_count)) {
-            file.close();
+    EdfStrStorageWriteResult result;
+    if (!edf_str_storage_write(request, result)) {
+        if (result.error_kind == EdfStrStorageErrorKind::Allocation) {
+            log_alloc_failed(result.error ? result.error : "str_write", 0);
+        } else if (result.error_kind == EdfStrStorageErrorKind::Open) {
+            stats.open_errors++;
+        } else if (result.error_kind == EdfStrStorageErrorKind::Publish) {
             stats.patch_errors++;
-            set_error("str_patch_failed");
-            return false;
+        } else {
+            stats.write_errors++;
         }
-        file.flush();
+        set_error(result.error ? result.error : "str_write_failed");
+        return false;
     }
-    file.close();
+
+    if (result.timeline_rewritten) {
+        Log::logf(CAT_EDF,
+                  result.retention_applied ? LOG_INFO : LOG_WARN,
+                  "STR timeline rewritten records=%lu fillers=%lu "
+                  "merged=%lu discarded=%lu retention=%u\n",
+                  static_cast<unsigned long>(result.record_count),
+                  static_cast<unsigned long>(result.filler_records),
+                  static_cast<unsigned long>(result.merged_records),
+                  static_cast<unsigned long>(result.discarded_records),
+                  result.retention_applied ? 1u : 0u);
+    }
 
     stats.records_written++;
-    stats.bytes_written += written;
+    stats.bytes_written += result.bytes_written;
     stats.record_jobs++;
     stats.last_activity_ms = millis();
     copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
@@ -2210,7 +2008,7 @@ void process_job(JobSlot &job) {
 }
 
 void task_entry(void *) {
-    cleanup_str_backup_artifacts();
+    recover_str_storage_artifacts();
     stats.task_started = true;
 
     for (;;) {
