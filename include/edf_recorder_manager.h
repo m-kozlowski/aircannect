@@ -13,7 +13,7 @@
 #include "edf_stream_assembler.h"
 #include "event_broker.h"
 #include "fixed_queue.h"
-#include "rpc_arbiter.h"
+#include "rpc_request_port.h"
 #include "session_manager.h"
 #include "storage_service.h"
 #include "stream_broker.h"
@@ -33,7 +33,6 @@ struct EdfRecorderStatus {
     bool stream_attached = false;
     bool annotation_files_open = false;
     bool numeric_files_open = false;
-    bool rpc_observer_registered = false;
     bool event_observer_registered = false;
     bool event_attached = false;
     bool event_coverage_uncertain = false;
@@ -151,8 +150,9 @@ struct EdfRecorderStatus {
 class EdfRecorderManager {
 public:
     // lifecycle
-    void begin(RpcArbiter &rpc,
-               EventBroker &events,
+    explicit EdfRecorderManager(RpcRequestPort &rpc) : rpc_(rpc) {}
+
+    void begin(EventBroker &events,
                StreamBroker &stream,
                const As11DeviceState &device_state,
                SessionManager &session);
@@ -178,37 +178,24 @@ private:
     };
 
     struct PendingRpc {
-        bool active = false;
-        uint32_t request_id = 0;
-        uint32_t request_ms = 0;
+        bool active() const { return ticket.valid(); }
 
-        void mark(uint32_t id, uint32_t now_ms) {
-            active = true;
-            request_id = id;
-            request_ms = now_ms;
+        uint32_t next_generation() {
+            generation++;
+            if (generation == 0) generation++;
+            return generation;
         }
 
-        void clear() {
-            active = false;
-            request_id = 0;
-            request_ms = 0;
-        }
+        void mark(OperationTicket next_ticket) { ticket = next_ticket; }
+        void clear() { ticket = {}; }
 
-        bool matches(uint32_t id) const {
-            return active && request_id == id;
-        }
-
-        bool timed_out(uint32_t now_ms, uint32_t timeout_ms) const {
-            return active &&
-                   static_cast<int32_t>(now_ms - request_ms) >=
-                       static_cast<int32_t>(timeout_ms + 1000);
-        }
+        OperationTicket ticket;
+        uint32_t generation = 0;
     };
 
     static void event_frame_observer(void *context,
                                      const As11EventFrame &frame,
                                      uint32_t now_ms);
-    static void rpc_event_observer(void *context, const RpcEvent &event);
     static void record_observer(void *context,
                                 const EdfCompletedRecordView &record);
 
@@ -273,14 +260,17 @@ private:
                             uint32_t now_ms,
                             const char *recording_end_time = nullptr);
     bool finish_str_session_at(const EdfLocalDateTime &end,
-                               uint32_t now_ms,
                                bool request_summary);
-    bool request_str_settings(uint32_t now_ms);
-    bool request_str_summary(uint32_t now_ms);
-    bool request_identification(uint32_t now_ms);
-    void note_str_get_timeouts(uint32_t now_ms);
+    bool request_str_settings();
+    bool request_str_summary();
+    bool request_identification();
+    void poll_rpc_completions();
+    void poll_str_settings_completion();
+    void poll_str_summary_completion();
+    void poll_identification_completion();
+    void cancel_pending_rpc(PendingRpc &pending);
+    void cancel_session_rpc_requests();
     bool flush_pending_str_record(const char *reason);
-    void handle_rpc_event(const RpcEvent &event);
     void handle_str_settings_response(const std::string &payload);
     void handle_str_summary_response(const std::string &payload);
     void handle_identification_response(const std::string &payload);
@@ -317,7 +307,7 @@ private:
     void set_error(const char *error);
 
     // subsystem owners
-    RpcArbiter *rpc_ = nullptr;
+    RpcRequestPort &rpc_;
     EventBroker *events_ = nullptr;
     StreamBroker *stream_ = nullptr;
     const As11DeviceState *device_state_ = nullptr;

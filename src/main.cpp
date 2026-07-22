@@ -69,7 +69,7 @@ static OtaManager ota_manager;
 static ResmedOtaManager resmed_ota_manager;
 static SessionManager session_manager;
 static SinkManager sink_manager;
-static EdfRecorderManager edf_recorder_manager;
+static EdfRecorderManager edf_recorder_manager(rpc_arbiter);
 static EdfReportCatalogJob edf_report_catalog_job;
 static OximetryManager oximetry_manager;
 static ReportManager report_manager(rpc_arbiter);
@@ -503,7 +503,7 @@ void setup() {
     sink_manager.begin(stream_broker, as11_device_service.state(),
                        session_manager);
 
-    edf_recorder_manager.begin(rpc_arbiter, event_broker, stream_broker,
+    edf_recorder_manager.begin(event_broker, stream_broker,
                                as11_device_service.state(), session_manager);
     edf_recorder_manager.set_enabled(app_config.data().edf_capture_enabled);
 

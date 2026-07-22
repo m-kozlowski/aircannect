@@ -343,8 +343,6 @@ void print_edf_recorder_status(Print &out,
     out.print(status.stream_attached ? "attached" : "idle");
     out.print(" files=");
     out.print(status.files_open() ? "open" : "closed");
-    out.print(" rpc_observer=");
-    out.print(status.rpc_observer_registered ? "yes" : "no");
     out.print(" event_observer=");
     out.print(status.event_observer_registered ? "yes" : "no");
     out.print(" event_subscription=");

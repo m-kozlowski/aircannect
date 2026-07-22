@@ -25,7 +25,6 @@ enum class RpcEventKind {
 
 using RpcPayloadRef = std::shared_ptr<const std::string>;
 struct RpcEvent;
-using RpcEventObserver = void (*)(void *context, const RpcEvent &event);
 using RpcNotificationObserver = void (*)(void *context,
                                          const char *payload,
                                          size_t payload_len,
@@ -103,11 +102,6 @@ public:
                       const std::string &params_json,
                       RpcSource source,
                       uint32_t timeout_ms = 0);
-    bool send_request_with_id(const std::string &method,
-                              const std::string &params_json,
-                              RpcSource source,
-                              uint32_t timeout_ms,
-                              uint32_t &id);
     OperationSubmission request(const RpcRequestCommand &command) override;
     bool cancel(OperationTicket ticket) override;
     bool take_completion(OperationTicket ticket,
@@ -115,10 +109,6 @@ public:
 
     // Event routing
     bool next_event(RpcEvent &event);
-
-    bool set_source_event_observer(RpcSource source,
-                                   RpcEventObserver observer,
-                                   void *context);
 
     void set_raw_rpc_forwarding_enabled(bool enabled);
     void set_event_notification_observer(RpcNotificationObserver observer,
@@ -214,17 +204,6 @@ private:
                     RpcPayloadRef payload,
                     RpcSource source = RpcSource::Internal,
                     uint32_t id = 0);
-    void push_source_event(RpcSource target,
-                           RpcEventKind kind,
-                           const std::string &payload,
-                           RpcSource source = RpcSource::Internal,
-                           uint32_t id = 0);
-    void push_source_event(RpcSource target,
-                           RpcEventKind kind,
-                           RpcPayloadRef payload,
-                           RpcSource source = RpcSource::Internal,
-                           uint32_t id = 0);
-
     bool enqueue_request(QueuedRequest &request);
     bool enqueue_payload_frames(const std::string &payload, RpcSource source);
     static bool enqueue_datagram_frame(void *context,
@@ -284,29 +263,13 @@ private:
     std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
 
-    // Source-specific event routes
-    struct SourceEventRoute {
-        RpcSource source = RpcSource::Internal;
-        RpcEventObserver observer = nullptr;
-        void *observer_context = nullptr;
-    };
-
-    SourceEventRoute *source_event_route(RpcSource source);
-    const SourceEventRoute *source_event_route(RpcSource source) const;
-    bool dispatch_source_event(const SourceEventRoute &route,
-                               const RpcEvent &event);
-
-    // CAN/RPC queues and routes
+    // CAN/RPC queues
     CanDriver &can_;
     DatagramRx rpc_rx_{AC_STREAM_FRAME_RAW_MAX};
     DatagramRx log_rx_;
     FixedQueue<DeferredPayload, AC_RPC_PAYLOAD_QUEUE_DEPTH>
         deferred_payloads_;
     FixedQueue<RpcEvent, AC_RPC_EVENT_QUEUE_DEPTH> events_;
-    SourceEventRoute source_event_routes_[1] = {
-        {RpcSource::EdfRecorder, nullptr, nullptr},
-    };
-
     FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> requests_;
     RequestCompletionQueue request_completions_;
     PendingRequest pending_;
