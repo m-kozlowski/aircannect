@@ -354,6 +354,7 @@ OperationSubmission RpcArbiter::request(const RpcRequestCommand &command) {
     request.source = command.source;
     request.timeout_ms = command.timeout_ms;
     request.generation = command.generation;
+    request.dispatch_window = command.dispatch_window;
     if (!enqueue_request(request)) return OperationSubmission::busy();
 
     request_completion_reservations_++;
@@ -1062,7 +1063,9 @@ void RpcArbiter::complete_request(uint32_t id,
                                   const std::string *payload,
                                   const char *reason,
                                   bool response_error,
-                                  RequestCompletionQueue &completions) {
+                                  RequestCompletionQueue &completions,
+                                  int64_t dispatch_utc_ms,
+                                  int64_t response_utc_ms) {
     if (!generation) return;
 
     RpcRequestCompletion completion;
@@ -1072,6 +1075,8 @@ void RpcArbiter::complete_request(uint32_t id,
     if (payload) completion.payload = *payload;
     completion.reason = reason ? reason : "";
     completion.response_error = response_error;
+    completion.dispatch_utc_ms = dispatch_utc_ms;
+    completion.response_utc_ms = response_utc_ms;
     if (!completions.push(std::move(completion))) {
         Log::logf(CAT_RPC, LOG_ERROR,
                   "RPC completion queue invariant violated id=%lu\n",
@@ -1206,6 +1211,31 @@ void RpcArbiter::dispatch_next_request() {
             next_dispatch_retry_ms_ = 0;
         }
         return;
+    }
+
+    if (request.dispatch_window.enabled) {
+        if (static_cast<int32_t>(
+                now - request.dispatch_window.not_before_ms) < 0) {
+            dispatch_retry_ = request;
+            dispatch_retry_active_ = true;
+            dispatch_retry_deadline_ms_ =
+                request.dispatch_window.deadline_ms;
+            next_dispatch_retry_ms_ =
+                request.dispatch_window.not_before_ms;
+            return;
+        }
+        if (static_cast<int32_t>(
+                now - request.dispatch_window.deadline_ms) > 0) {
+            cancel_queued_request(request, "dispatch_window_expired",
+                                  RpcCompletionCause::DispatchFailure);
+            if (from_retry) {
+                dispatch_retry_ = {};
+                dispatch_retry_active_ = false;
+                dispatch_retry_deadline_ms_ = 0;
+                next_dispatch_retry_ms_ = 0;
+            }
+            return;
+        }
     }
 
     if (request.set_datetime_now) {
@@ -1816,12 +1846,15 @@ void RpcArbiter::handle_rpc_payload(const char *payload, size_t payload_len) {
                 handle_matched_response(owned_payload);
                 const bool response_error =
                     json_member_present(owned_payload, "error");
+                int64_t response_epoch_ms = 0;
+                (void)current_epoch_ms(response_epoch_ms);
                 complete_request(
                     pending_.id, pending_.generation,
                     response_error ? OperationOutcome::failed()
                                    : OperationOutcome::succeeded(),
                     RpcCompletionCause::Response, &owned_payload, "",
-                    response_error, request_completions_);
+                    response_error, request_completions_,
+                    pending_.dispatch_epoch_ms, response_epoch_ms);
                 note_request_success(response_source, millis());
                 pending_ = {};
                 if (addressed_request) break;

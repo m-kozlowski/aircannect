@@ -19,15 +19,28 @@ enum class RpcSource : uint8_t {
     EdfRecorder,
 };
 
+struct RpcDispatchWindow {
+    bool enabled = false;
+    uint32_t not_before_ms = 0;
+    uint32_t deadline_ms = 0;
+
+    bool valid() const {
+        return !enabled ||
+               static_cast<int32_t>(deadline_ms - not_before_ms) >= 0;
+    }
+};
+
 struct RpcRequestCommand {
     std::string method;
     std::string params_json;
     RpcSource source = RpcSource::Internal;
     uint32_t timeout_ms = 0;
     uint32_t generation = 0;
+    RpcDispatchWindow dispatch_window;
 
     bool valid() const {
-        return !method.empty() && timeout_ms != 0 && generation != 0;
+        return !method.empty() && timeout_ms != 0 && generation != 0 &&
+               dispatch_window.valid();
     }
 };
 
@@ -45,6 +58,8 @@ struct RpcRequestCompletion {
     std::string payload;
     std::string reason;
     bool response_error = false;
+    int64_t dispatch_utc_ms = 0;
+    int64_t response_utc_ms = 0;
 };
 
 class RpcRequestPort {

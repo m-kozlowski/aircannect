@@ -215,6 +215,7 @@ private:
         StreamCommandType stream_command = StreamCommandType::None;
         EventCommandType event_command = EventCommandType::None;
         uint32_t generation = 0;
+        RpcDispatchWindow dispatch_window;
     };
 
     enum class DateTimePrepareResult : uint8_t {
@@ -298,7 +299,9 @@ private:
                                  const std::string *payload,
                                  const char *reason,
                                  bool response_error,
-                                 RequestCompletionQueue &completions);
+                                 RequestCompletionQueue &completions,
+                                 int64_t dispatch_utc_ms = 0,
+                                 int64_t response_utc_ms = 0);
 
     void expire_raw_passthrough(uint32_t now);
     void remember_raw_passthrough(uint32_t id,
