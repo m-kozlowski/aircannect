@@ -23,6 +23,7 @@ constexpr uint32_t CATALOG_STORE_GENERATION = 1;
 constexpr uint32_t CATALOG_STORE_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
 constexpr size_t ARTIFACT_AVAILABILITY_CAPACITY = 8;
+constexpr size_t IDLE_QUEUE_LOOKAHEAD = 2;
 
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
@@ -247,6 +248,49 @@ struct ReportTask::Runtime {
         availability_age[target] = ++availability_clock;
     }
 
+    void accept_catalog(std::shared_ptr<const NightCatalog> next,
+                        uint32_t generation) {
+        catalog = std::move(next);
+        catalog_generation = generation;
+        engine.publish_catalog(catalog);
+
+        idle_cursor = 0;
+        idle_generation = (idle_generation + 1) | 0x80000000u;
+
+        if (!lock()) return;
+        published_catalog = catalog;
+        unlock();
+    }
+
+    bool schedule_catalog_work() {
+        if (!catalog || idle_cursor >= catalog->size()) return false;
+        if (engine.status().queued >= IDLE_QUEUE_LOOKAHEAD) return false;
+
+        const NightCatalogRecord *night = catalog->record(idle_cursor);
+        if (!night || !night->sleep_day.valid() ||
+            !night->source_revision.valid()) {
+            idle_cursor++;
+            command_failures++;
+            return true;
+        }
+
+        const ReportRequestPriority priority = idle_cursor == 0
+            ? ReportRequestPriority::Reconcile
+            : ReportRequestPriority::Idle;
+        const ReportRequestEnqueueResult queued = engine.request(
+            ReportArtifactKey::result(
+                night->sleep_day, night->source_revision),
+            priority,
+            idle_generation);
+        if (queued.status == ReportRequestEnqueueStatus::Full) return false;
+
+        idle_cursor++;
+        if (queued.status == ReportRequestEnqueueStatus::Invalid) {
+            command_failures++;
+        }
+        return true;
+    }
+
     void publish_status() {
         size_t queued = 0;
         uint32_t drops = 0;
@@ -327,6 +371,8 @@ struct ReportTask::Runtime {
     uint64_t availability_clock = 0;
     ReportArtifactAvailability pending_availability;
     uint32_t catalog_generation = 0;
+    size_t idle_cursor = 0;
+    uint32_t idle_generation = 0x80000000u;
 
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
     bool catalog_load_pending = true;
@@ -551,13 +597,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             if (completed == CatalogStorePurpose::Load) {
                 runtime.catalog_load_pending = false;
                 if (store_status.state == NightCatalogStoreState::Ready) {
-                    runtime.catalog = runtime.catalog_store.snapshot();
-                    runtime.catalog_generation = store_status.generation;
-                    runtime.engine.publish_catalog(runtime.catalog);
-                    if (runtime.lock()) {
-                        runtime.published_catalog = runtime.catalog;
-                        runtime.unlock();
-                    }
+                    publish_catalog(runtime.catalog_store.snapshot(),
+                                    store_status.generation);
                 }
             } else if (store_status.state == NightCatalogStoreState::Ready) {
                 runtime.pending_catalog_save.reset();
@@ -601,14 +642,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         if (refresh_status.state == NightCatalogRefreshState::Ready ||
             refresh_status.state == NightCatalogRefreshState::Error) {
             if (refresh_status.state == NightCatalogRefreshState::Ready) {
-                runtime.catalog = runtime.catalog_refresh.snapshot();
-                runtime.catalog_generation = runtime.refresh_generation;
-                runtime.engine.publish_catalog(runtime.catalog);
+                publish_catalog(runtime.catalog_refresh.snapshot(),
+                                runtime.refresh_generation);
                 runtime.pending_catalog_save = runtime.catalog;
-                if (runtime.lock()) {
-                    runtime.published_catalog = runtime.catalog;
-                    runtime.unlock();
-                }
                 runtime.catalog_store_retry_at_ms = 0;
                 runtime.catalog_store_retry_attempt = 0;
             } else {
@@ -661,6 +697,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
+    const bool catalog_stable =
+        !runtime.catalog_load_pending &&
+        !runtime.catalog_refresh.active() &&
+        runtime.refresh_generation == 0 &&
+        !runtime.pending_refresh.valid() &&
+        runtime.store_purpose == CatalogStorePurpose::None &&
+        !runtime.pending_catalog_save;
+    if (catalog_stable) {
+        worked = runtime.schedule_catalog_work() || worked;
+    }
+
     worked = runtime.engine.poll(now_ms, record_budget) || worked;
 
     ReportArtifactAvailability availability =
@@ -688,6 +735,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     return worked;
 }
 
+void ReportTask::publish_catalog(
+    std::shared_ptr<const NightCatalog> catalog,
+    uint32_t generation) {
+    if (!runtime_ || !catalog || generation == 0) return;
+    runtime_->accept_catalog(std::move(catalog), generation);
+}
+
 void ReportTask::task_entry(void *context) {
     ReportTask *self = static_cast<ReportTask *>(context);
     if (self) self->run();
@@ -709,6 +763,7 @@ void ReportTask::run() {
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
         } else if (current.state == ReportTaskState::LoadingCatalog ||
                    current.state == ReportTaskState::RefreshingCatalog ||
+                   current.state == ReportTaskState::Queued ||
                    current.state == ReportTaskState::LookingUp ||
                    current.state == ReportTaskState::Building ||
                    current.state == ReportTaskState::Publishing) {

@@ -73,6 +73,8 @@ private:
     static void task_entry(void *context);
     void run();
     bool step(uint32_t now_ms, size_t record_budget);
+    void publish_catalog(std::shared_ptr<const NightCatalog> catalog,
+                         uint32_t generation);
 
     Runtime *runtime_ = nullptr;
 };
