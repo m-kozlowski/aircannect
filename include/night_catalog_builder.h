@@ -123,10 +123,27 @@ struct NightCatalogBuildInput {
     size_t fallback_record_count = 0;
 };
 
+enum class NightCatalogBuildFailure : uint8_t {
+    None,
+    InvalidInput,
+    AllocationFailed,
+    InvariantViolation,
+};
+
+struct NightCatalogBuildStatus {
+    NightCatalogBuildFailure failure = NightCatalogBuildFailure::None;
+    const char *detail = "";
+
+    bool retryable() const {
+        return failure == NightCatalogBuildFailure::AllocationFailed;
+    }
+};
+
 class NightCatalogBuilder {
 public:
     static std::shared_ptr<const NightCatalog> build(
-        const NightCatalogBuildInput &input);
+        const NightCatalogBuildInput &input,
+        NightCatalogBuildStatus *status = nullptr);
     static std::shared_ptr<const NightCatalog> replace_fallback(
         const NightCatalog &catalog,
         const char *path,

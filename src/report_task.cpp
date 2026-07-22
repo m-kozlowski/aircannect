@@ -1023,7 +1023,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_store_retry_attempt = 0;
                 runtime.catalog_refresh_retry_at_ms = 0;
                 runtime.catalog_refresh_retry_attempt = 0;
-            } else {
+            } else if (refresh_status.retryable) {
                 if (!runtime.pending_refresh.valid()) {
                     runtime.pending_refresh.generation =
                         runtime.refresh_generation;
@@ -1038,6 +1038,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                                  runtime.catalog_refresh_retry_attempt);
                 advance_background_retry(
                     runtime.catalog_refresh_retry_attempt);
+                runtime.command_failures++;
+            } else {
+                runtime.catalog_refresh_retry_at_ms = 0;
+                runtime.catalog_refresh_retry_attempt = 0;
                 runtime.command_failures++;
             }
             runtime.refresh_generation = 0;

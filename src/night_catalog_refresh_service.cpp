@@ -483,12 +483,13 @@ void NightCatalogRefreshService::reset_transient() {
     runtime_->clear_summary();
 }
 
-void NightCatalogRefreshService::fail(const char *error) {
+void NightCatalogRefreshService::fail(const char *error, bool retryable) {
     if (!runtime_) return;
 
     reset_transient();
     runtime_->phase = NightCatalogRefreshRuntime::Phase::Error;
     status_.state = NightCatalogRefreshState::Error;
+    status_.retryable = retryable;
     status_.current_path[0] = '\0';
     copy_cstr(status_.error,
               sizeof(status_.error),
@@ -1397,7 +1398,10 @@ void normalize_edf_day_boundaries(NightCatalogEdfSessionInput *sessions,
 
 bool build_catalog(NightCatalogRefreshRuntime &runtime,
                    std::shared_ptr<const NightCatalog> &catalog,
-                   const char *&error) {
+                   const char *&error,
+                   bool &retryable) {
+    retryable = false;
+
     const size_t session_count = runtime.edf_session_count;
     if (session_count >
         std::numeric_limits<size_t>::max() /
@@ -1417,6 +1421,7 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
         destroy_large_array(sessions, session_count);
         destroy_large_array(files, file_capacity);
         error = "night_catalog_build_alloc_failed";
+        retryable = true;
         return false;
     }
 
@@ -1586,12 +1591,16 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
         : 0;
     input.fallback_records = runtime.fallback_records;
     input.fallback_record_count = runtime.fallback_record_count;
-    catalog = NightCatalogBuilder::build(input);
+    NightCatalogBuildStatus build_status;
+    catalog = NightCatalogBuilder::build(input, &build_status);
 
     destroy_large_array(sessions, session_count);
     destroy_large_array(files, file_capacity);
     if (!catalog) {
-        error = "night_catalog_build_failed";
+        error = build_status.detail[0]
+            ? build_status.detail
+            : "night_catalog_build_failed";
+        retryable = build_status.retryable();
         return false;
     }
     return true;
@@ -1621,13 +1630,14 @@ bool NightCatalogRefreshService::poll() {
                 !completion.snapshot ||
                 completion.snapshot->generation() != status_.generation) {
                 fail(completion.error[0] ? completion.error
-                                         : "night_catalog_scan_failed");
+                                         : "night_catalog_scan_failed",
+                     true);
                 return true;
             }
 
             runtime_->scan = std::move(completion.snapshot);
             if (!prepare_scan_sources(*runtime_, status_)) {
-                fail("night_catalog_source_alloc_failed");
+                fail("night_catalog_source_alloc_failed", true);
                 return true;
             }
             runtime_->phase = NightCatalogRefreshRuntime::Phase::SelectEdf;
@@ -1683,8 +1693,9 @@ bool NightCatalogRefreshService::poll() {
 
         case NightCatalogRefreshRuntime::Phase::Build: {
             std::shared_ptr<const NightCatalog> catalog;
-            if (!build_catalog(*runtime_, catalog, error)) {
-                fail(error);
+            bool retryable = false;
+            if (!build_catalog(*runtime_, catalog, error, retryable)) {
+                fail(error, retryable);
                 return true;
             }
 
@@ -1695,6 +1706,7 @@ bool NightCatalogRefreshService::poll() {
                 static_cast<size_t>(UINT32_MAX)));
             status_.current_path[0] = '\0';
             status_.error[0] = '\0';
+            status_.retryable = false;
             reset_transient();
             runtime_->phase = NightCatalogRefreshRuntime::Phase::Ready;
             return true;
@@ -1711,6 +1723,7 @@ void NightCatalogRefreshService::cancel() {
                                  : NightCatalogRefreshRuntime::Phase::Idle;
     status_.state = published_ ? NightCatalogRefreshState::Ready
                                : NightCatalogRefreshState::Idle;
+    status_.retryable = false;
     status_.current_path[0] = '\0';
     status_.error[0] = '\0';
 }

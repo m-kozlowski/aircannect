@@ -33,6 +33,7 @@ struct NightCatalogRefreshStatus {
     uint32_t files_skipped = 0;
     uint32_t sessions = 0;
     uint32_t str_records = 0;
+    bool retryable = false;
     char current_path[AC_STORAGE_PATH_MAX] = {};
     char warning[AC_STORAGE_ERROR_MAX] = {};
     char error[AC_STORAGE_ERROR_MAX] = {};
@@ -67,7 +68,7 @@ public:
 
 private:
     void reset_transient();
-    void fail(const char *error);
+    void fail(const char *error, bool retryable = false);
 
     StorageScanPort *scan_port_ = nullptr;
     StorageReadPort *read_port_ = nullptr;
