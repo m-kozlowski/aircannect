@@ -8,6 +8,7 @@
 #include "edf_file_writer.h"
 #include "runtime_snapshots.h"
 #include "storage_archive_port.h"
+#include "storage_atomic_write_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_path_port.h"
@@ -170,6 +171,9 @@ StorageReadPort &read_port();
 
 // File metadata and path mutations
 StoragePathPort &path_port();
+
+// Atomic immutable file publication
+StorageAtomicWritePort &atomic_write_port();
 
 // Foreground storage browsing and downloads
 StorageBrowserPort &browser_port();

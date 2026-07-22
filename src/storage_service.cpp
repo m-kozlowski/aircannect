@@ -20,6 +20,7 @@
 #include "edf_str_record_merge.h"
 #include "memory_manager.h"
 #include "storage_archive_service.h"
+#include "storage_atomic_write_service.h"
 #include "storage_browser_service.h"
 #include "storage_delete_service.h"
 #include "storage_file_log_sink.h"
@@ -212,6 +213,7 @@ StorageBrowserService browser_service;
 StorageArchiveService archive_service;
 StorageDeleteService delete_service;
 StoragePathService path_service;
+StorageAtomicWriteService atomic_write_service;
 StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 bool browser_turn = true;
@@ -1886,6 +1888,9 @@ bool process_browser_step() {
 }
 
 bool process_foreground_step() {
+    if (atomic_write_service.step(StorageAtomicWriteLane::Foreground)) {
+        return true;
+    }
     if (path_service.step()) return true;
 
     if (browser_turn) {
@@ -1979,6 +1984,9 @@ void task_entry(void *) {
             } else if (process_foreground_step()) {
                 did_work = true;
                 file_log_burst = 0;
+            } else if (atomic_write_service.step(
+                           StorageAtomicWriteLane::Maintenance)) {
+                did_work = true;
             } else if (archive_service.step()) {
                 did_work = true;
             } else if (delete_service.step()) {
@@ -2087,6 +2095,7 @@ void begin() {
                                claim_delete_maintenance,
                                release_delete_maintenance);
     (void)path_service.begin(wake_service_task);
+    (void)atomic_write_service.begin(wake_service_task);
 
     if (!task) {
         const BaseType_t created =
@@ -2100,6 +2109,7 @@ void begin() {
             archive_service.set_task_available(false);
             delete_service.set_task_available(false);
             path_service.set_task_available(false);
+            atomic_write_service.set_task_available(false);
             set_error("task_create_failed");
             Log::logf(CAT_EDF, LOG_ERROR,
                       "storage worker task create failed\n");
@@ -2113,6 +2123,7 @@ void begin() {
     archive_service.set_task_available(true);
     delete_service.set_task_available(true);
     path_service.set_task_available(true);
+    atomic_write_service.set_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
               "service ready edf_q=%u read_q=%u slot=%u psram=%s\n",
@@ -2320,6 +2331,10 @@ StorageReadPort &read_port() {
 
 StoragePathPort &path_port() {
     return path_service;
+}
+
+StorageAtomicWritePort &atomic_write_port() {
+    return atomic_write_service;
 }
 
 StorageBrowserPort &browser_port() {
