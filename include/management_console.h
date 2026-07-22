@@ -13,6 +13,7 @@
 #include "session_manager.h"
 #include "sink_manager.h"
 #include "sleephq_sync_job.h"
+#include "storage_read_port.h"
 #include "storage_sync_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
@@ -38,6 +39,7 @@ struct ConsoleContext {
     EdfRecorderManager &edf_recorder_manager;
     OximetryManager &oximetry_manager;
     ReportManager &report_manager;
+    StorageReadPort &storage_read_port;
     StorageDiagnosticJob *storage_diagnostic_job = nullptr;
     StorageSyncJob *storage_sync_job = nullptr;
     SleepHqSyncJob *sleephq_sync_job = nullptr;
@@ -50,6 +52,12 @@ public:
     void begin(Print &out);
     void stop(RpcArbiter &arbiter);
     void poll(Stream &input, Print &out, ConsoleContext &ctx);
+    void poll_pending(Print &out);
+    void cancel_pending_storage();
+    bool storage_output_pending() const {
+        return file_log_tail_ticket_.valid() ||
+               file_log_tail_prepared_.valid();
+    }
     void execute_line(String line, Print &out, ConsoleContext &ctx);
 
     void handle_event(Print &out, const RpcEvent &event);
@@ -101,7 +109,10 @@ private:
     void handle_sink(Print &out, String rest, SinkManager &sink_manager);
     void handle_oximetry(Print &out, String rest,
                          OximetryManager &oximetry_manager);
-    void handle_log(Print &out, String rest, AppConfig &app_config);
+    void handle_log(Print &out,
+                    String rest,
+                    AppConfig &app_config,
+                    StorageReadPort &storage_read_port);
     void handle_wifi(Print &out, String rest, WifiManager &wifi_manager,
                      TcpBridge &tcp_bridge, const AppConfig &app_config);
     void handle_config(Print &out, String rest, AppConfig &app_config,
@@ -122,6 +133,12 @@ private:
 
     String line_;
     StreamConsumerHandle stream_handle_ = STREAM_CONSUMER_INVALID;
+
+    StorageReadPort *storage_read_port_ = nullptr;
+    OperationTicket file_log_tail_ticket_;
+    StoragePreparedRead file_log_tail_prepared_;
+    size_t file_log_tail_offset_ = 0;
+    uint32_t file_log_tail_generation_ = 0;
 };
 
 }  // namespace aircannect

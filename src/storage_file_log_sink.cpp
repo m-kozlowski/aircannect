@@ -322,6 +322,20 @@ bool StorageFileLogSink::apply_enabled_state() {
     return true;
 }
 
+bool StorageFileLogSink::prepare_tail_read() {
+#if AC_FILE_LOG_ENABLED
+    if (!lock()) return false;
+    const bool queue_empty = !queue_ || queue_->empty();
+    unlock();
+    if (!queue_empty) return false;
+
+    if (file_) close_file(true);
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool StorageFileLogSink::step() {
 #if AC_FILE_LOG_ENABLED
     if (apply_enabled_state()) return true;

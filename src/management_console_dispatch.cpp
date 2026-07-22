@@ -1661,7 +1661,7 @@ void ManagementConsole::handle_resmed_ota_command(Print &out,
 void ManagementConsole::handle_log_command(Print &out,
                                            String rest,
                                            ConsoleContext &ctx) {
-    handle_log(out, rest, ctx.app_config);
+    handle_log(out, rest, ctx.app_config, ctx.storage_read_port);
 }
 
 void ManagementConsole::handle_restart_command(Print &out,

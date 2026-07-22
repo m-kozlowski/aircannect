@@ -106,13 +106,16 @@ struct ReadJob {
     bool used = false;
     bool started = false;
     bool cancel_requested = false;
+    bool abandon_requested = false;
     OperationTicket ticket;
+    StorageReadMode mode = StorageReadMode::Range;
     StorageReadLane lane = StorageReadLane::Report;
     uint64_t sequence = 0;
     uint64_t offset = 0;
     size_t requested_length = 0;
     size_t target_length = 0;
     size_t bytes_read = 0;
+    size_t tail_lines = 0;
     uint8_t *bytes = nullptr;
     char path[AC_STORAGE_PATH_MAX] = {};
 };
@@ -160,6 +163,7 @@ bool processing_read = false;
 
 OperationSubmission submit_prepared_read(const StorageReadCommand &command);
 bool cancel_prepared_read(OperationTicket ticket);
+bool abandon_prepared_read(OperationTicket ticket);
 bool take_read_completion(OperationTicket ticket,
                           StorageReadCompletion &completion);
 size_t copy_prepared_read(StoragePreparedRead prepared,
@@ -177,6 +181,10 @@ public:
 
     bool cancel(OperationTicket ticket) override {
         return cancel_prepared_read(ticket);
+    }
+
+    bool abandon(OperationTicket ticket) override {
+        return abandon_prepared_read(ticket);
     }
 
     bool take_completion(
@@ -528,10 +536,12 @@ OperationSubmission submit_prepared_read(const StorageReadCommand &command) {
     *free_job = {};
     free_job->used = true;
     free_job->ticket = ticket;
+    free_job->mode = command.mode;
     free_job->lane = command.lane;
     free_job->sequence = ++next_read_sequence;
     free_job->offset = command.offset;
     free_job->requested_length = command.length;
+    free_job->tail_lines = command.tail_lines;
     copy_cstr(free_job->path, sizeof(free_job->path), command.path.c_str());
     read_job_count++;
     refresh_read_status_locked();
@@ -553,6 +563,41 @@ bool cancel_prepared_read(OperationTicket ticket) {
     unlock_queue();
 
     wake_service_task();
+    return true;
+}
+
+bool abandon_prepared_read(OperationTicket ticket) {
+    if (!ticket.valid() || !lock_queue()) return false;
+
+    ReadJob *job = find_read_job_locked(ticket);
+    if (job) {
+        job->cancel_requested = true;
+        job->abandon_requested = true;
+        unlock_queue();
+        wake_service_task();
+        return true;
+    }
+
+    ReadCompletionSlot *completion =
+        find_read_completion_locked(ticket);
+    if (!completion) {
+        unlock_queue();
+        return false;
+    }
+
+    uint8_t *bytes = nullptr;
+    PreparedReadSlot *prepared =
+        find_prepared_read_locked(completion->completion.prepared);
+    if (prepared) {
+        bytes = prepared->bytes;
+        *prepared = {};
+        if (prepared_read_count > 0) prepared_read_count--;
+    }
+    *completion = {};
+    refresh_read_status_locked();
+    unlock_queue();
+
+    Memory::free(bytes);
     return true;
 }
 
@@ -1588,9 +1633,11 @@ void finish_read_job(size_t index,
     StorageReadCompletion completion;
     completion.ticket = job.ticket;
     completion.outcome = outcome;
+    const bool abandoned = job.abandon_requested;
 
     PreparedReadSlot *prepared_slot = nullptr;
-    if (outcome.disposition == OperationDisposition::Succeeded) {
+    if (!abandoned &&
+        outcome.disposition == OperationDisposition::Succeeded) {
         for (PreparedReadSlot &slot : prepared_reads) {
             if (!slot.used) {
                 prepared_slot = &slot;
@@ -1616,21 +1663,25 @@ void finish_read_job(size_t index,
     job = {};
     if (read_job_count > 0) read_job_count--;
 
-    ReadCompletionSlot *completion_slot =
-        find_free_read_completion_locked();
-    if (!completion_slot) {
+    ReadCompletionSlot *completion_slot = nullptr;
+    if (!abandoned) {
+        completion_slot = find_free_read_completion_locked();
+    }
+    if (!abandoned && !completion_slot) {
         if (prepared_slot) {
             bytes_to_free = prepared_slot->bytes;
             *prepared_slot = {};
             if (prepared_read_count > 0) prepared_read_count--;
         }
         set_error("read_completion_queue_full");
-    } else {
+    } else if (completion_slot) {
         completion_slot->used = true;
         completion_slot->completion = completion;
     }
 
-    if (completion_slot &&
+    if (abandoned) {
+        stats.read_cancellations++;
+    } else if (completion_slot &&
         completion.outcome.disposition == OperationDisposition::Succeeded) {
         stats.read_jobs++;
         stats.bytes_read += completion.prepared.length;
@@ -1682,21 +1733,33 @@ bool open_read_job(size_t index, const char *&error) {
             Storage::Guard guard;
             file_size = active_read_file.size();
         }
-        if (job.offset >= file_size) {
-            error = "read_offset_out_of_range";
-            return false;
+
+        if (job.mode == StorageReadMode::TailLines) {
+            job.target_length = std::min(job.requested_length, file_size);
+            job.offset = file_size - job.target_length;
+        } else {
+            if (job.offset >= file_size) {
+                error = "read_offset_out_of_range";
+                return false;
+            }
+
+            const size_t available =
+                file_size - static_cast<size_t>(job.offset);
+            job.target_length = std::min(job.requested_length, available);
         }
 
-        const size_t available = file_size - static_cast<size_t>(job.offset);
-        job.target_length = std::min(job.requested_length, available);
-        job.bytes = static_cast<uint8_t *>(
-            Memory::alloc_large(job.target_length, false));
-        if (!job.bytes) {
-            error = "read_allocation_failed";
-            return false;
+        if (job.target_length > 0) {
+            job.bytes = static_cast<uint8_t *>(
+                Memory::alloc_large(job.target_length, false));
+            if (!job.bytes) {
+                error = "read_allocation_failed";
+                return false;
+            }
         }
         job.started = true;
     }
+
+    if (job.target_length == 0) return true;
 
     Storage::Guard guard;
     const uint64_t position = job.offset + job.bytes_read;
@@ -1706,6 +1769,35 @@ bool open_read_job(size_t index, const char *&error) {
         return false;
     }
     return true;
+}
+
+void trim_read_to_tail_lines(ReadJob &job) {
+    if (job.mode != StorageReadMode::TailLines || !job.bytes ||
+        job.bytes_read == 0) {
+        return;
+    }
+
+    size_t suffix_lines = job.bytes[job.bytes_read - 1] == '\n' ? 0 : 1;
+    size_t start = 0;
+    for (size_t i = job.bytes_read; i > 0; --i) {
+        if (job.bytes[i - 1] != '\n') continue;
+
+        if (suffix_lines >= job.tail_lines) {
+            start = i;
+            break;
+        }
+        suffix_lines++;
+    }
+
+    if (start == 0 && job.offset > 0) {
+        while (start < job.bytes_read && job.bytes[start] != '\n') start++;
+        if (start < job.bytes_read) start++;
+    }
+    if (start == 0) return;
+
+    job.bytes_read -= start;
+    memmove(job.bytes, job.bytes + start, job.bytes_read);
+    job.target_length = job.bytes_read;
 }
 
 bool process_read_step() {
@@ -1726,6 +1818,15 @@ bool process_read_step() {
         return true;
     }
 
+    ReadJob &job = read_jobs[index];
+    const bool file_log_tail =
+        job.mode == StorageReadMode::TailLines &&
+        strcmp(job.path, AC_FILE_LOG_PATH) == 0;
+    if (!job.started && file_log_tail &&
+        !file_log_sink.prepare_tail_read()) {
+        return false;
+    }
+
     const char *error = nullptr;
     if (!Storage::mounted()) {
         finish_read_job(index,
@@ -1738,7 +1839,11 @@ bool process_read_step() {
         return true;
     }
 
-    ReadJob &job = read_jobs[index];
+    if (job.target_length == 0) {
+        finish_read_job(index, OperationOutcome::succeeded());
+        return true;
+    }
+
     const size_t remaining = job.target_length - job.bytes_read;
     const size_t requested = std::min(remaining, AC_STORAGE_READ_STEP_BYTES);
     size_t received = 0;
@@ -1759,9 +1864,18 @@ bool process_read_step() {
     stats.last_activity_ms = millis();
     copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
     if (job.bytes_read == job.target_length) {
+        trim_read_to_tail_lines(job);
         finish_read_job(index, OperationOutcome::succeeded());
     }
     return true;
+}
+
+bool file_log_tail_read_active() {
+    if (active_read_index >= AC_STORAGE_PREPARED_READ_CAPACITY) return false;
+
+    const ReadJob &job = read_jobs[active_read_index];
+    return job.used && job.mode == StorageReadMode::TailLines &&
+           strcmp(job.path, AC_FILE_LOG_PATH) == 0;
 }
 
 bool process_browser_step() {
@@ -1852,7 +1966,9 @@ void task_entry(void *) {
         } else {
             const bool foreground_due =
                 file_log_burst >= AC_FILE_LOG_DRAIN_BUDGET;
-            if (!foreground_due && file_log_sink.step()) {
+            const bool tail_read_active = file_log_tail_read_active();
+            if (!foreground_due && !tail_read_active &&
+                file_log_sink.step()) {
                 did_work = true;
                 file_log_burst++;
             } else if (process_foreground_step()) {
@@ -1862,7 +1978,8 @@ void task_entry(void *) {
                 did_work = true;
             } else if (delete_service.step()) {
                 did_work = true;
-            } else if (foreground_due && file_log_sink.step()) {
+            } else if (foreground_due && !tail_read_active &&
+                       file_log_sink.step()) {
                 did_work = true;
                 file_log_burst++;
             }

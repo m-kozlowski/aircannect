@@ -21,6 +21,7 @@
 #include "storage_archive_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
+#include "storage_read_port.h"
 #include "storage_sync_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
@@ -99,6 +100,7 @@ public:
                SinkManager &sink_manager,
                OximetryManager &oximetry_manager,
                ReportManager &report_manager,
+               StorageReadPort &storage_read,
                StorageBrowserPort &storage_browser,
                StorageArchivePort &storage_archive,
                StorageDeletePort &storage_delete,
@@ -130,6 +132,7 @@ private:
     void send_report_result(AsyncWebServerRequest *request) const;
     void send_storage_list(AsyncWebServerRequest *request) const;
     void send_storage_download(AsyncWebServerRequest *request) const;
+    void send_file_log_tail(AsyncWebServerRequest *request, size_t lines);
     void send_storage_archive_start(AsyncWebServerRequest *request) const;
     void send_storage_archive_status(AsyncWebServerRequest *request) const;
     void send_storage_archive_download(AsyncWebServerRequest *request) const;
@@ -257,6 +260,7 @@ private:
     SinkManager *sink_manager_ = nullptr;
     OximetryManager *oximetry_manager_ = nullptr;
     ReportManager *report_manager_ = nullptr;
+    StorageReadPort *storage_read_ = nullptr;
     StorageBrowserPort *storage_browser_ = nullptr;
     StorageArchivePort *storage_archive_ = nullptr;
     StorageDeletePort *storage_delete_ = nullptr;

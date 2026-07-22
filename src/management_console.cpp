@@ -11,6 +11,7 @@
 #include "edf_stream_signal_table.h"
 #include "management_console_format.h"
 #include "management_console_utils.h"
+#include "storage_service.h"
 
 namespace aircannect {
 
@@ -384,10 +385,13 @@ void ManagementConsole::stop(RpcArbiter &arbiter) {
         arbiter.release_stream(stream_handle_);
     }
     stream_handle_ = STREAM_CONSUMER_INVALID;
+    cancel_pending_storage();
     line_ = "";
 }
 
 void ManagementConsole::poll(Stream &input, Print &out, ConsoleContext &ctx) {
+    poll_pending(out);
+
     while (input.available()) {
         char c = static_cast<char>(input.read());
         if (c == '\r' || c == '\n') {
@@ -401,6 +405,74 @@ void ManagementConsole::poll(Stream &input, Print &out, ConsoleContext &ctx) {
             line_ += c;
         }
     }
+}
+
+void ManagementConsole::poll_pending(Print &out) {
+    if (!storage_read_port_) return;
+
+    if (file_log_tail_ticket_.valid()) {
+        StorageReadCompletion completion;
+        if (!storage_read_port_->take_completion(file_log_tail_ticket_,
+                                                 completion)) {
+            return;
+        }
+
+        file_log_tail_ticket_ = {};
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid()) {
+            out.println("[LOG] file log unavailable");
+            storage_read_port_ = nullptr;
+            return;
+        }
+        file_log_tail_prepared_ = completion.prepared;
+        file_log_tail_offset_ = 0;
+        if (file_log_tail_prepared_.length == 0) {
+            out.println("[LOG] file log empty");
+            storage_read_port_->release_prepared(file_log_tail_prepared_);
+            file_log_tail_prepared_ = {};
+            storage_read_port_ = nullptr;
+            return;
+        }
+    }
+
+    if (!file_log_tail_prepared_.valid()) return;
+
+    uint8_t buffer[AC_FILE_LOG_TAIL_READ_CHUNK];
+    const size_t received = storage_read_port_->read_prepared(
+        file_log_tail_prepared_, file_log_tail_offset_, buffer, sizeof(buffer));
+    if (received == 0) {
+        storage_read_port_->release_prepared(file_log_tail_prepared_);
+        file_log_tail_prepared_ = {};
+        file_log_tail_offset_ = 0;
+        storage_read_port_ = nullptr;
+        return;
+    }
+
+    out.write(buffer, received);
+    file_log_tail_offset_ += received;
+    if (file_log_tail_offset_ >= file_log_tail_prepared_.length) {
+        storage_read_port_->release_prepared(file_log_tail_prepared_);
+        file_log_tail_prepared_ = {};
+        file_log_tail_offset_ = 0;
+        storage_read_port_ = nullptr;
+    }
+}
+
+void ManagementConsole::cancel_pending_storage() {
+    if (!storage_read_port_) return;
+
+    if (file_log_tail_ticket_.valid()) {
+        (void)storage_read_port_->abandon(file_log_tail_ticket_);
+    }
+    if (file_log_tail_prepared_.valid()) {
+        storage_read_port_->release_prepared(file_log_tail_prepared_);
+    }
+
+    storage_read_port_ = nullptr;
+    file_log_tail_ticket_ = {};
+    file_log_tail_prepared_ = {};
+    file_log_tail_offset_ = 0;
 }
 
 void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
@@ -1117,7 +1189,8 @@ void ManagementConsole::handle_oximetry(
 
 void ManagementConsole::handle_log(Print &out,
                                    String rest,
-                                   AppConfig &app_config) {
+                                   AppConfig &app_config,
+                                   StorageReadPort &storage_read_port) {
     rest.trim();
     if (!rest.length() || rest == "status") {
         ConsoleFormat::print_log_status(out);
@@ -1231,9 +1304,37 @@ void ManagementConsole::handle_log(Print &out,
             }
             lines = static_cast<size_t>(parsed);
         }
-        if (!Log::print_filelog_tail(out, lines)) {
+        if (!Log::filelog_enabled()) {
             out.println("[LOG] file log unavailable");
+            return;
         }
+        if (file_log_tail_ticket_.valid() ||
+            file_log_tail_prepared_.valid()) {
+            out.println("[LOG] tail already pending");
+            return;
+        }
+
+        file_log_tail_generation_++;
+        if (file_log_tail_generation_ == 0) file_log_tail_generation_++;
+
+        StorageReadCommand command;
+        command.path = AC_FILE_LOG_PATH;
+        command.mode = StorageReadMode::TailLines;
+        command.length = AC_STORAGE_PREPARED_READ_MAX_BYTES;
+        command.tail_lines = lines;
+        command.lane = StorageReadLane::Foreground;
+        command.generation = file_log_tail_generation_;
+
+        const OperationSubmission submission =
+            storage_read_port.request_read(command);
+        if (!submission.accepted()) {
+            out.println("[LOG] file log busy");
+            return;
+        }
+
+        storage_read_port_ = &storage_read_port;
+        file_log_tail_ticket_ = submission.ticket;
+        out.println("[LOG] tail queued");
         return;
     }
 

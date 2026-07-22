@@ -18,6 +18,7 @@ public:
     void set_rotation_allowed(bool allowed);
     bool enqueue(const char *line, size_t length);
 
+    bool prepare_tail_read();
     bool step();
     StorageFileLogStatus status() const;
 

@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
+#include <algorithm>
 #include <memory>
 #include <stdio.h>
 #include <stdlib.h>
@@ -560,6 +561,54 @@ struct StorageDownloadRef {
     }
 };
 
+struct PendingPreparedReadRef {
+    StorageReadPort *port = nullptr;
+    OperationTicket ticket;
+    StoragePreparedRead prepared;
+    bool failed = false;
+
+    ~PendingPreparedReadRef() {
+        if (port && ticket.valid()) (void)port->abandon(ticket);
+        if (port && prepared.valid()) port->release_prepared(prepared);
+    }
+
+    size_t fill(uint8_t *buffer, size_t capacity, size_t offset) {
+        if (!port || !buffer || capacity == 0) return 0;
+
+        if (ticket.valid()) {
+            StorageReadCompletion completion;
+            if (!port->take_completion(ticket, completion)) {
+                return RESPONSE_TRY_AGAIN;
+            }
+
+            ticket = {};
+            if (completion.outcome.disposition !=
+                    OperationDisposition::Succeeded ||
+                !completion.prepared.valid()) {
+                if (completion.prepared.valid()) {
+                    port->release_prepared(completion.prepared);
+                }
+                failed = true;
+            } else {
+                prepared = completion.prepared;
+            }
+        }
+
+        if (failed) {
+            static constexpr char MESSAGE[] = "file log unavailable\n";
+            const size_t length = sizeof(MESSAGE) - 1;
+            if (offset >= length) return 0;
+
+            const size_t count = std::min(capacity, length - offset);
+            memcpy(buffer, MESSAGE + offset, count);
+            return count;
+        }
+
+        if (!prepared.valid() || offset >= prepared.length) return 0;
+        return port->read_prepared(prepared, offset, buffer, capacity);
+    }
+};
+
 bool therapy_request_idle(AsyncWebServerRequest *request,
                           const SessionManager *session_manager,
                           const RpcArbiter *arbiter) {
@@ -956,6 +1005,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
                   SinkManager &sink_manager,
                   OximetryManager &oximetry_manager,
                   ReportManager &report_manager,
+                  StorageReadPort &storage_read,
                   StorageBrowserPort &storage_browser,
                   StorageArchivePort &storage_archive,
                   StorageDeletePort &storage_delete,
@@ -977,6 +1027,7 @@ bool WebUI::begin(RpcArbiter &arbiter,
     sink_manager_ = &sink_manager;
     oximetry_manager_ = &oximetry_manager;
     report_manager_ = &report_manager;
+    storage_read_ = &storage_read;
     storage_browser_ = &storage_browser;
     storage_archive_ = &storage_archive;
     storage_delete_ = &storage_delete;
@@ -1104,6 +1155,7 @@ WebUiMemoryStatus WebUI::memory_status() {
 
 void WebUI::stop() {
     if (sink_manager_) sink_manager_->set_live_chart_enabled(false);
+    web_console_.cancel_pending_storage();
     if (events_) {
         events_->close();
     }
@@ -1177,6 +1229,12 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (arbiter_ && observed_settings_refresh_pending_ !=
                         arbiter_->as11_settings_refresh_pending()) {
         mark_snapshots_dirty(SNAPSHOT_SETTINGS);
+    }
+
+    if (web_console_.storage_output_pending()) {
+        StringPrint capture(AC_FILE_LOG_TAIL_READ_CHUNK);
+        web_console_.poll_pending(capture);
+        if (capture.text().length()) append_console_log(capture.text());
     }
 
     drain_commands();
@@ -2746,6 +2804,53 @@ void WebUI::send_storage_download(AsyncWebServerRequest *request) const {
     response->addHeader("Content-Disposition", disposition);
     response->addHeader("Cache-Control", "no-store");
     response->addHeader("Accept-Ranges", "none");
+    request->send(response);
+}
+
+void WebUI::send_file_log_tail(AsyncWebServerRequest *request, size_t lines) {
+    if (!request || !storage_read_ || !Log::filelog_enabled()) {
+        if (request) {
+            request->send(404, "text/plain", "file log unavailable\n");
+        }
+        return;
+    }
+
+    StorageReadCommand command;
+    command.path = AC_FILE_LOG_PATH;
+    command.mode = StorageReadMode::TailLines;
+    command.length = AC_STORAGE_PREPARED_READ_MAX_BYTES;
+    command.tail_lines = lines;
+    command.lane = StorageReadLane::Foreground;
+    command.generation = 1;
+
+    const OperationSubmission submission =
+        storage_read_->request_read(command);
+    if (!submission.accepted()) {
+        request->send(503, "text/plain", "file log busy\n");
+        return;
+    }
+
+    std::shared_ptr<PendingPreparedReadRef> ref =
+        std::make_shared<PendingPreparedReadRef>();
+    if (!ref) {
+        (void)storage_read_->abandon(submission.ticket);
+        request->send(503, "text/plain", "response alloc\n");
+        return;
+    }
+    ref->port = storage_read_;
+    ref->ticket = submission.ticket;
+
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+        "text/plain",
+        [ref](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
+            return ref->fill(buffer, capacity, offset);
+        });
+    if (!response) {
+        request->send(503, "text/plain", "response alloc\n");
+        return;
+    }
+
+    response->addHeader("Cache-Control", "no-store");
     request->send(response);
 }
 
@@ -4327,7 +4432,7 @@ void WebUI::register_routes() {
 
     server_->on(
         AsyncURIMatcher::exact("/api/log/current"), HTTP_GET,
-        [](AsyncWebServerRequest *request) {
+        [this](AsyncWebServerRequest *request) {
             size_t lines = AC_FILE_LOG_TAIL_DEFAULT_LINES;
 
             if (!request_size_arg_limited(request,
@@ -4344,28 +4449,7 @@ void WebUI::register_routes() {
                 return;
             }
 
-            const char *path = Log::filelog_path();
-
-            if (!Log::filelog_enabled() || !path || !path[0] ||
-                !Storage::exists(path)) {
-                request->send(404, "text/plain",
-                              "file log unavailable\n");
-                return;
-            }
-
-            AsyncResponseStream *response =
-                request->beginResponseStream("text/plain");
-
-            if (!response) {
-                request->send(503, "text/plain", "response alloc\n");
-                return;
-            }
-
-            if (!Log::print_filelog_tail(*response, lines)) {
-                response->print("file log unavailable\n");
-            }
-
-            request->send(response);
+            send_file_log_tail(request, lines);
         });
 
     // Configuration

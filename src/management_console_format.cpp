@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "as11_device_state.h"
+#include "board.h"
 #include "debug_log.h"
 
 namespace aircannect {
@@ -366,8 +367,7 @@ void print_log_status(Print &out) {
     out.print("[FILELOG] enabled=");
     out.print(Log::filelog_enabled() ? "yes" : "no");
     out.print(" path=");
-    const char *path = Log::filelog_path();
-    out.print(path && path[0] ? path : "--");
+    out.print(AC_FILE_LOG_PATH);
     out.print(" queued=");
     out.print(Log::filelog_queue_depth());
     out.print(" drops=");

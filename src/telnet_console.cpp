@@ -26,6 +26,20 @@ void TelnetConsole::stop(RpcArbiter *arbiter) {
 void TelnetConsole::poll(ConsoleContext &ctx) {
     if (!started()) return;
     accept_clients(ctx.app_config, ctx.arbiter);
+
+    for (size_t i = 0; i < AC_MAX_TELNET_CLIENTS; ++i) {
+        Slot &slot = slots_[i];
+        if (!slot.client || !slot.client.connected() ||
+            slot.auth_state != AuthState::Authenticated ||
+            !slot.console.storage_output_pending()) {
+            continue;
+        }
+
+        StringPrint capture(AC_FILE_LOG_TAIL_READ_CHUNK, "\r\n");
+        slot.console.poll_pending(capture);
+        if (capture.text().length()) queue_text(i, capture.text());
+    }
+
     pump_outputs(ctx.arbiter);
     poll_inputs(ctx);
 }

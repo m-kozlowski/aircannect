@@ -15,16 +15,27 @@ enum class StorageReadLane : uint8_t {
     Maintenance,
 };
 
+enum class StorageReadMode : uint8_t {
+    Range,
+    TailLines,
+};
+
 struct StorageReadCommand {
     std::string path;
+    StorageReadMode mode = StorageReadMode::Range;
     uint64_t offset = 0;
     size_t length = 0;
+    size_t tail_lines = 0;
     StorageReadLane lane = StorageReadLane::Report;
     uint32_t generation = 0;
 
     bool valid() const {
-        return !path.empty() && path.front() == '/' && length != 0 &&
-               generation != 0;
+        if (path.empty() || path.front() != '/' || length == 0 ||
+            generation == 0) {
+            return false;
+        }
+        return mode == StorageReadMode::Range ||
+               (mode == StorageReadMode::TailLines && tail_lines != 0);
     }
 };
 
@@ -48,6 +59,7 @@ public:
     virtual OperationSubmission request_read(
         const StorageReadCommand &command) = 0;
     virtual bool cancel(OperationTicket ticket) = 0;
+    virtual bool abandon(OperationTicket ticket) = 0;
     virtual bool take_completion(
         OperationTicket ticket,
         StorageReadCompletion &completion) = 0;
