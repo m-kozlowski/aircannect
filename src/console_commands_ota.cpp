@@ -277,7 +277,7 @@ void handle_resmed_ota(Print &out,
             if (!snapshot->entry(i, entry)) continue;
 
             out.print("  ");
-            out.print(resmed_firmware_kind_name(entry.kind));
+            out.print(resmed_firmware_name_hint_name(entry.name_hint));
             out.print(" size=");
             out.print(static_cast<unsigned long>(entry.size));
             out.print(" modified=");

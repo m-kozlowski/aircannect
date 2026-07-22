@@ -11,7 +11,7 @@ namespace aircannect {
 static constexpr const char *AC_RESMED_FIRMWARE_REPOSITORY_PATH =
     "/aircannect/resmed-firmware";
 
-enum class ResmedFirmwareKind : uint8_t {
+enum class ResmedFirmwareNameHint : uint8_t {
     Abc,
     Raw,
     Unsupported,
@@ -20,13 +20,14 @@ enum class ResmedFirmwareKind : uint8_t {
 struct ResmedFirmwareEntryView {
     const char *path = nullptr;
     const char *filename = nullptr;
-    ResmedFirmwareKind kind = ResmedFirmwareKind::Unsupported;
+    ResmedFirmwareNameHint name_hint = ResmedFirmwareNameHint::Unsupported;
     uint64_t size = 0;
     uint64_t modified = 0;
 };
 
-const char *resmed_firmware_kind_name(ResmedFirmwareKind kind);
-ResmedFirmwareKind resmed_firmware_kind_for_filename(const char *filename);
+const char *resmed_firmware_name_hint_name(ResmedFirmwareNameHint hint);
+ResmedFirmwareNameHint resmed_firmware_name_hint_for_filename(
+    const char *filename);
 
 class ResmedFirmwareCatalogSnapshot {
 public:
@@ -50,7 +51,8 @@ private:
         uint64_t modified = 0;
         uint32_t path_offset = 0;
         uint32_t filename_offset = 0;
-        ResmedFirmwareKind kind = ResmedFirmwareKind::Unsupported;
+        ResmedFirmwareNameHint name_hint =
+            ResmedFirmwareNameHint::Unsupported;
     };
 
     Entry *entries_ = nullptr;

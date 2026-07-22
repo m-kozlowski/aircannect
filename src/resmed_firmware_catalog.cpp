@@ -55,24 +55,25 @@ const char *path_filename(const char *path) {
 
 }  // namespace
 
-const char *resmed_firmware_kind_name(ResmedFirmwareKind kind) {
-    switch (kind) {
-        case ResmedFirmwareKind::Abc: return "abc";
-        case ResmedFirmwareKind::Raw: return "raw";
-        case ResmedFirmwareKind::Unsupported: return "unsupported";
+const char *resmed_firmware_name_hint_name(ResmedFirmwareNameHint hint) {
+    switch (hint) {
+        case ResmedFirmwareNameHint::Abc: return "abc";
+        case ResmedFirmwareNameHint::Raw: return "raw";
+        case ResmedFirmwareNameHint::Unsupported: return "unsupported";
     }
     return "unsupported";
 }
 
-ResmedFirmwareKind resmed_firmware_kind_for_filename(const char *filename) {
+ResmedFirmwareNameHint resmed_firmware_name_hint_for_filename(
+    const char *filename) {
     if (ends_with_case_insensitive(filename, ".abc")) {
-        return ResmedFirmwareKind::Abc;
+        return ResmedFirmwareNameHint::Abc;
     }
     if (ends_with_case_insensitive(filename, ".bin") ||
         ends_with_case_insensitive(filename, ".img")) {
-        return ResmedFirmwareKind::Raw;
+        return ResmedFirmwareNameHint::Raw;
     }
-    return ResmedFirmwareKind::Unsupported;
+    return ResmedFirmwareNameHint::Unsupported;
 }
 
 ResmedFirmwareCatalogSnapshot::~ResmedFirmwareCatalogSnapshot() {
@@ -138,7 +139,7 @@ ResmedFirmwareCatalogSnapshot::build(const StorageScanSnapshot &scan,
         entry.path_offset = static_cast<uint32_t>(path_offset);
         entry.filename_offset = static_cast<uint32_t>(
             path_offset + (filename - source.path));
-        entry.kind = resmed_firmware_kind_for_filename(filename);
+        entry.name_hint = resmed_firmware_name_hint_for_filename(filename);
         path_offset += length;
     }
 
@@ -176,7 +177,7 @@ bool ResmedFirmwareCatalogSnapshot::entry(
 
     out.path = paths_ + entry.path_offset;
     out.filename = paths_ + entry.filename_offset;
-    out.kind = entry.kind;
+    out.name_hint = entry.name_hint;
     out.size = entry.size;
     out.modified = entry.modified;
     return true;

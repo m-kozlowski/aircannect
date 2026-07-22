@@ -131,8 +131,8 @@ void ResmedFirmwareHttpController::send_catalog(
         json += '{';
         json_add_string(json, "path", entry.path, false);
         json_add_string(json, "name", entry.filename);
-        json_add_string(json, "kind",
-                        resmed_firmware_kind_name(entry.kind));
+        json_add_string(json, "kind_hint",
+                        resmed_firmware_name_hint_name(entry.name_hint));
         json_add_uint64(json, "size", entry.size);
         json_add_uint64(json, "modified", entry.modified);
         json += '}';

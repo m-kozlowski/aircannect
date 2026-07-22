@@ -1202,8 +1202,8 @@
         row.className = "storage-entry";
 
         const marker = document.createElement("span");
-        marker.textContent = entry.kind === "abc" ? "ABC" :
-          entry.kind === "raw" ? "RAW" : "?";
+        marker.textContent = entry.kind_hint === "abc" ? "ABC" :
+          entry.kind_hint === "raw" ? "RAW" : "?";
         marker.className = "storage-meta";
 
         const details = document.createElement("div");
