@@ -12,6 +12,47 @@ enum class OperationDisposition : uint8_t {
     Cancelled,
 };
 
+struct OperationTicket {
+    uint32_t id = 0;
+    uint32_t generation = 0;
+
+    constexpr bool valid() const { return id != 0; }
+
+    friend constexpr bool operator==(OperationTicket lhs,
+                                     OperationTicket rhs) {
+        return lhs.id == rhs.id && lhs.generation == rhs.generation;
+    }
+    friend constexpr bool operator!=(OperationTicket lhs,
+                                     OperationTicket rhs) {
+        return !(lhs == rhs);
+    }
+};
+
+enum class OperationAdmission : uint8_t {
+    Accepted,
+    Busy,
+    Rejected,
+};
+
+struct OperationSubmission {
+    OperationAdmission admission = OperationAdmission::Rejected;
+    OperationTicket ticket;
+
+    static constexpr OperationSubmission accepted(OperationTicket ticket) {
+        return {OperationAdmission::Accepted, ticket};
+    }
+    static constexpr OperationSubmission busy() {
+        return {OperationAdmission::Busy, {}};
+    }
+    static constexpr OperationSubmission rejected() {
+        return {OperationAdmission::Rejected, {}};
+    }
+
+    constexpr bool accepted() const {
+        return admission == OperationAdmission::Accepted && ticket.valid();
+    }
+};
+
 struct OperationOutcome {
     OperationDisposition disposition = OperationDisposition::Failed;
     uint32_t retry_after_ms = 0;
