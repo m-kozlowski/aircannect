@@ -52,7 +52,6 @@ enum WebCommandKind : uint8_t {
     WebCommandResmedOtaCheck,
     WebCommandResmedOtaApply,
     WebCommandResmedOtaAbort,
-    WebCommandResmedOtaStartStaged,
 };
 
 struct WebCommand {

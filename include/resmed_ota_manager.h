@@ -1,22 +1,25 @@
 #pragma once
 
 #include <Arduino.h>
-#include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <mbedtls/sha256.h>
+#include <memory>
 #include <stdint.h>
 #include <string>
 
 #include "board.h"
 #include "crc32.h"
+#include "large_byte_buffer.h"
 #include "rpc_arbiter.h"
+#include "storage_atomic_write_port.h"
 
 namespace aircannect {
 
 enum class ResmedOtaPhase {
     Idle,
     Staging,
+    Publishing,
     Staged,
     Initiating,
     Ready,
@@ -49,7 +52,7 @@ struct ResmedOtaStatus {
 
 class ResmedOtaManager {
 public:
-    void begin(RpcArbiter &arbiter);
+    void begin(RpcArbiter &arbiter, StorageAtomicWritePort &storage_write_port);
     void poll();
 
     bool begin_upload(size_t total_size,
@@ -67,7 +70,6 @@ public:
                              const uint8_t *data,
                              size_t len);
     bool finish_staged_upload();
-    bool start_staged_upload();
     void abort(const char *reason);
 
     bool active() const;
@@ -102,10 +104,13 @@ private:
     void handle_response(const std::string &payload);
 
     void finish_pending_block();
+    void poll_staged_publication();
+    bool request_staged_publication();
+    bool start_staged_transfer();
     void pump_staged_upload();
     bool finish_hash();
     void clear_session();
-    void close_staging_files();
+    void release_staged_resources();
     void set_error(const char *error);
     void set_error(const String &error);
     void update_progress();
@@ -114,19 +119,23 @@ private:
                                 const String &filename,
                                 const String &magic_hex);
     bool write_staging_header();
-    bool write_staging_bytes(const uint8_t *data, size_t len);
+    bool write_staging_bytes(size_t output_offset,
+                             const uint8_t *data,
+                             size_t len);
     bool write_raw_payload_slice(size_t input_offset,
                                  const uint8_t *data,
                                  size_t len);
     bool finalize_raw_abc();
-    bool enough_storage(size_t output_size) const;
     bool guard_device_idle_for_upgrade();
     bool device_idle_for_upgrade(const char **reason) const;
     bool lock(uint32_t timeout_ms) const;
     void unlock() const;
 
     RpcArbiter *arbiter_ = nullptr;
+    StorageAtomicWritePort *storage_write_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
+
+    // RPC upload state
     ResmedOtaStatus status_;
     WaitingFor waiting_for_ = WaitingFor::None;
     String pending_block_hex_;
@@ -137,8 +146,12 @@ private:
     uint32_t last_activity_ms_ = 0;
     mbedtls_sha256_context sha_ctx_;
 
-    File staging_file_;
-    File staged_read_file_;
+    // Browser input, durable publication, and automatic AS11 transfer
+    std::unique_ptr<LargeByteBuffer> staging_buffer_;
+    std::shared_ptr<const LargeByteBuffer> staged_image_;
+    OperationTicket staging_publish_ticket_;
+    uint32_t staging_generation_ = 0;
+    uint32_t staging_publish_retry_at_ms_ = 0;
     bool staging_passthrough_abc_ = false;
     bool staged_transfer_active_ = false;
     bool staged_check_requested_ = false;

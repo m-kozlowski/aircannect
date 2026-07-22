@@ -96,11 +96,8 @@ static constexpr uint32_t AC_RESMED_OTA_VERIFY_TIMEOUT_MS = 120000;
 static constexpr uint32_t AC_RESMED_OTA_IDLE_TIMEOUT_MS = 300000;
 static constexpr size_t AC_RESMED_OTA_MAX_BLOCK_BYTES = 500;
 static constexpr size_t AC_RESMED_OTA_MAX_FILE_BYTES = 4UL * 1024UL * 1024UL;
-static constexpr const char *AC_RESMED_OTA_STORAGE_DIR = "/aircannect";
 static constexpr const char *AC_RESMED_OTA_STAGED_PATH =
     "/aircannect/resmed-ota.abc";
-static constexpr const char *AC_RESMED_OTA_STAGED_TMP_PATH =
-    "/aircannect/resmed-ota.abc.tmp";
 static constexpr uint64_t AC_RESMED_OTA_STORAGE_MARGIN_BYTES =
     1024ULL * 1024ULL;
 static constexpr const char *AC_RESMED_OTA_CONFIRM = "APPLY_RESMED_OTA";

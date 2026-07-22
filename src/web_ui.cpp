@@ -108,7 +108,6 @@ const char *web_command_name(uint8_t kind) {
         case WebCommandResmedOtaCheck: return "resmed_ota_check";
         case WebCommandResmedOtaApply: return "resmed_ota_apply";
         case WebCommandResmedOtaAbort: return "resmed_ota_abort";
-        case WebCommandResmedOtaStartStaged: return "resmed_ota_start_staged";
         default: return "unknown";
     }
 }
@@ -3844,7 +3843,6 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandResmedOtaCheck:
         case WebCommandResmedOtaApply:
         case WebCommandResmedOtaAbort:
-        case WebCommandResmedOtaStartStaged:
             execute_resmed_ota_command(command);
             break;
         default:
@@ -4032,12 +4030,6 @@ void WebUI::execute_resmed_ota_command(const WebCommand &command) {
         mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
         return;
     }
-    if (command.kind == WebCommandResmedOtaStartStaged) {
-        resmed_ota_manager_->start_staged_upload();
-        mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
-        return;
-    }
-
     JsonDocument doc;
     if (deserializeJson(doc, command.body.c_str())) return;
     if (command.kind == WebCommandResmedOtaInit) {
@@ -4677,11 +4669,6 @@ void WebUI::register_routes() {
             const ResmedOtaStatus status = resmed_ota_manager_->status();
             bool ok = status.phase == ResmedOtaPhase::Staging &&
                       resmed_ota_manager_->finish_staged_upload();
-
-            if (ok && !enqueue_simple_command(WebCommandResmedOtaStartStaged)) {
-                resmed_ota_manager_->abort("web_queue_full");
-                ok = false;
-            }
 
             mark_snapshots_dirty(SNAPSHOT_RESMED_OTA);
 

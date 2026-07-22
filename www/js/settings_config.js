@@ -1030,6 +1030,7 @@
     function resmedOtaStatusText(data) {
       const target = data.target && data.target !== "ABC" ? " " + data.target : "";
       if (data.phase === "staging") return "Preparing image" + target;
+      if (data.phase === "publishing") return "Saving image" + target;
       if (data.phase === "staged") return "Image prepared" + target;
       if (data.phase === "initiating") return "Starting device upload" + target;
       if (data.phase === "ready" || data.phase === "uploading") {

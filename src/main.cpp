@@ -409,7 +409,8 @@ void setup() {
 
     oximetry_manager.begin(app_config);
     report_manager.begin();
-    resmed_ota_manager.begin(rpc_arbiter);
+    resmed_ota_manager.begin(rpc_arbiter,
+                             StorageService::atomic_write_port());
     time_sync_service.begin(app_config, wifi_manager, rpc_arbiter);
     if (edf_report_catalog_job.set_posix_timezone(
             app_config.data().timezone.c_str())) {

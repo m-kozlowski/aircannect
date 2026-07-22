@@ -4,13 +4,13 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include <utility>
 
 #include <ArduinoJson.h>
 
 #include "as11_rpc.h"
 #include "crc32.h"
 #include "debug_log.h"
-#include "storage_manager.h"
 
 namespace aircannect {
 namespace {
@@ -27,6 +27,7 @@ static constexpr size_t AS11_APCX_SIZE = 0x001E0000;
 static constexpr uint32_t AS11_CONF_FLASH_START = 0x08020000;
 static constexpr uint32_t AS11_APPL_FLASH_START = 0x08040000;
 static constexpr const char *ABC_COMPONENT_0005 = "PacificFG";
+static constexpr uint32_t STORAGE_PUBLISH_RETRY_MS = 50;
 
 struct RawTargetSpec {
     const char *code = nullptr;
@@ -82,10 +83,6 @@ void put_le32(uint8_t *out, size_t offset, uint32_t value) {
     out[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
     out[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
     out[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
-}
-
-bool file_write_exact(File &file, const uint8_t *data, size_t len) {
-    return file && file.write(data, len) == len;
 }
 
 bool starts_with_abc_magic(const String &magic_hex) {
@@ -210,8 +207,10 @@ ResmedOtaManager::ScopedLock::~ScopedLock() {
     if (locked_) manager_.unlock();
 }
 
-void ResmedOtaManager::begin(RpcArbiter &arbiter) {
+void ResmedOtaManager::begin(RpcArbiter &arbiter,
+                             StorageAtomicWritePort &storage_write_port) {
     arbiter_ = &arbiter;
+    storage_write_port_ = &storage_write_port;
     if (!mutex_) mutex_ = xSemaphoreCreateRecursiveMutex();
     mbedtls_sha256_init(&sha_ctx_);
 }
@@ -224,6 +223,8 @@ void ResmedOtaManager::poll() {
     while (arbiter_->next_source_event(RpcSource::ResmedOta, event)) {
         handle_event(event);
     }
+
+    poll_staged_publication();
     pump_staged_upload();
     if ((status_.phase == ResmedOtaPhase::Staging ||
          status_.phase == ResmedOtaPhase::Ready ||
@@ -468,27 +469,26 @@ bool ResmedOtaManager::begin_staged_upload(size_t input_size,
         set_error("bad_size");
         return false;
     }
-    if (!Storage::mounted()) {
-        set_error("storage_unavailable");
+    if (!storage_write_port_) {
+        set_error("storage_not_initialized");
         return false;
     }
 
     clear_session();
     if (!configure_staged_input(input_size, filename, magic_hex)) return false;
-    if (!enough_storage(staging_output_size_)) {
-        set_error("not_enough_storage");
+
+    staging_buffer_ = LargeByteBuffer::allocate(staging_output_size_);
+    if (!staging_buffer_) {
+        set_error("stage_alloc_failed");
         return false;
     }
-    if (!Storage::ensure_dir(AC_RESMED_OTA_STORAGE_DIR)) {
-        set_error("storage_dir_failed");
+    if (!staging_passthrough_abc_ && !write_staging_header()) {
+        set_error("stage_header_failed");
         return false;
     }
-    Storage::remove(AC_RESMED_OTA_STAGED_TMP_PATH);
-    staging_file_ = Storage::open(AC_RESMED_OTA_STAGED_TMP_PATH, "w");
-    if (!staging_file_) {
-        set_error("stage_open_failed");
-        return false;
-    }
+
+    staging_generation_++;
+    if (staging_generation_ == 0) staging_generation_++;
 
     status_.phase = ResmedOtaPhase::Staging;
     status_.total_size = input_size;
@@ -498,11 +498,6 @@ bool ResmedOtaManager::begin_staged_upload(size_t input_size,
     status_.last_result = "staging";
     update_progress();
     last_activity_ms_ = millis();
-
-    if (!staging_passthrough_abc_ && !write_staging_header()) {
-        set_error("stage_header_failed");
-        return false;
-    }
 
     Log::logf(CAT_OTA, LOG_INFO,
               "[RESMED] staging input=%s target=%s size=%u file=%s\n",
@@ -516,7 +511,7 @@ bool ResmedOtaManager::write_staged_upload(size_t offset,
                                            size_t len) {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
-    if (status_.phase != ResmedOtaPhase::Staging || !staging_file_) {
+    if (status_.phase != ResmedOtaPhase::Staging || !staging_buffer_) {
         return false;
     }
     if (!data && len) return false;
@@ -529,7 +524,7 @@ bool ResmedOtaManager::write_staged_upload(size_t offset,
     if (len == 0) return true;
 
     const bool ok = staging_passthrough_abc_
-                        ? write_staging_bytes(data, len)
+                        ? write_staging_bytes(offset, data, len)
                         : write_raw_payload_slice(offset, data, len);
     if (!ok) {
         set_error("stage_write_failed");
@@ -545,7 +540,7 @@ bool ResmedOtaManager::write_staged_upload(size_t offset,
 bool ResmedOtaManager::finish_staged_upload() {
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
-    if (status_.phase != ResmedOtaPhase::Staging || !staging_file_) {
+    if (status_.phase != ResmedOtaPhase::Staging || !staging_buffer_) {
         set_error("stage_not_active");
         return false;
     }
@@ -557,61 +552,118 @@ bool ResmedOtaManager::finish_staged_upload() {
         set_error("stage_finalize_failed");
         return false;
     }
-    staging_file_.flush();
-    staging_file_.close();
 
-    Storage::remove(AC_RESMED_OTA_STAGED_PATH);
-    if (!Storage::rename(AC_RESMED_OTA_STAGED_TMP_PATH,
-                         AC_RESMED_OTA_STAGED_PATH)) {
-        set_error("stage_rename_failed");
+    staged_image_ = LargeByteBuffer::freeze(std::move(staging_buffer_));
+    if (!staged_image_) {
+        set_error("stage_freeze_failed");
         return false;
     }
 
-    status_.phase = ResmedOtaPhase::Staged;
+    status_.phase = ResmedOtaPhase::Publishing;
     status_.total_size = staging_output_size_;
     status_.uploaded_bytes = 0;
     status_.progress_percent = 0;
     status_.staged_path = AC_RESMED_OTA_STAGED_PATH;
+    status_.last_result = "publishing";
+    last_activity_ms_ = millis();
+
+    return request_staged_publication();
+}
+
+bool ResmedOtaManager::request_staged_publication() {
+    if (staging_publish_ticket_.valid()) return true;
+    if (!storage_write_port_ || !staged_image_) {
+        set_error("stage_publish_state_invalid");
+        return false;
+    }
+
+    StorageAtomicWriteCommand command;
+    command.path = AC_RESMED_OTA_STAGED_PATH;
+    command.bytes = staged_image_;
+    command.free_reserve_bytes = AC_RESMED_OTA_STORAGE_MARGIN_BYTES;
+    command.lane = StorageAtomicWriteLane::Foreground;
+    command.generation = staging_generation_;
+
+    const OperationSubmission submission =
+        storage_write_port_->request_write(command);
+    if (submission.accepted()) {
+        staging_publish_ticket_ = submission.ticket;
+        staging_publish_retry_at_ms_ = 0;
+        return true;
+    }
+    if (submission.admission == OperationAdmission::Busy) {
+        staging_publish_retry_at_ms_ = millis() + STORAGE_PUBLISH_RETRY_MS;
+        return true;
+    }
+
+    set_error("stage_publish_rejected");
+    return false;
+}
+
+void ResmedOtaManager::poll_staged_publication() {
+    if (status_.phase != ResmedOtaPhase::Publishing) {
+        if (storage_write_port_ && staging_publish_ticket_.valid() &&
+            storage_write_port_->abandon(staging_publish_ticket_)) {
+            staging_publish_ticket_ = {};
+        }
+        return;
+    }
+
+    if (!staging_publish_ticket_.valid()) {
+        if (staging_publish_retry_at_ms_ != 0 &&
+            static_cast<int32_t>(millis() - staging_publish_retry_at_ms_) < 0) {
+            return;
+        }
+
+        (void)request_staged_publication();
+        return;
+    }
+
+    StorageAtomicWriteCompletion completion;
+    if (!storage_write_port_->take_completion(staging_publish_ticket_,
+                                              completion)) {
+        return;
+    }
+    staging_publish_ticket_ = {};
+
+    if (completion.outcome.disposition !=
+        OperationDisposition::Succeeded) {
+        set_error(completion.error[0] ? completion.error
+                                      : "stage_publish_failed");
+        return;
+    }
+
+    status_.phase = ResmedOtaPhase::Staged;
     status_.last_result = "staged";
     last_activity_ms_ = millis();
+
     Log::logf(CAT_OTA, LOG_INFO,
               "[RESMED] staged %s size=%u path=%s\n",
               status_.target.c_str(),
               static_cast<unsigned>(staging_output_size_),
               status_.staged_path.c_str());
-    return true;
+
+    (void)start_staged_transfer();
 }
 
-bool ResmedOtaManager::start_staged_upload() {
-    ScopedLock lock(*this, 1000);
-    if (!lock) return false;
-    if (status_.phase != ResmedOtaPhase::Staged) {
+bool ResmedOtaManager::start_staged_transfer() {
+    if (status_.phase != ResmedOtaPhase::Staged || !staged_image_) {
         set_error("not_staged");
         return false;
     }
+
     const String filename = status_.filename;
     const String input_type = status_.input_type;
     const String target = status_.target;
-    const size_t staged_size = status_.total_size;
-    File file = Storage::open(AC_RESMED_OTA_STAGED_PATH, "r");
-    if (!file) {
-        set_error("stage_read_failed");
-        return false;
-    }
-    if (staged_size == 0 || file.size() != staged_size) {
-        file.close();
-        set_error("stage_size_mismatch");
-        return false;
-    }
+    const std::shared_ptr<const LargeByteBuffer> image = staged_image_;
+
     status_.phase = ResmedOtaPhase::Idle;
-    if (!begin_upload(staged_size, "", filename)) {
-        file.close();
-        return false;
-    }
+    if (!begin_upload(image->size(), "", filename)) return false;
+
     status_.input_type = input_type;
     status_.target = target;
     status_.staged_path = AC_RESMED_OTA_STAGED_PATH;
-    staged_read_file_ = file;
+    staged_image_ = image;
     staged_transfer_active_ = true;
     staged_check_requested_ = false;
     staged_auto_apply_ = true;
@@ -631,7 +683,9 @@ void ResmedOtaManager::abort(const char *reason) {
 bool ResmedOtaManager::active() const {
     ScopedLock lock(*this, 50);
     if (!lock) return true;
-    return status_.phase == ResmedOtaPhase::Staging ||
+    return staging_publish_ticket_.valid() ||
+           status_.phase == ResmedOtaPhase::Staging ||
+           status_.phase == ResmedOtaPhase::Publishing ||
            status_.phase == ResmedOtaPhase::Staged ||
            status_.phase == ResmedOtaPhase::Initiating ||
            status_.phase == ResmedOtaPhase::Ready ||
@@ -646,7 +700,9 @@ bool ResmedOtaManager::transport_active() const {
     ScopedLock lock(*this, 50);
     if (!lock) return true;
     return waiting_for_ != WaitingFor::None ||
+           staging_publish_ticket_.valid() ||
            status_.phase == ResmedOtaPhase::Staging ||
+           status_.phase == ResmedOtaPhase::Publishing ||
            status_.phase == ResmedOtaPhase::Initiating ||
            status_.phase == ResmedOtaPhase::Ready ||
            status_.phase == ResmedOtaPhase::Uploading ||
@@ -667,6 +723,7 @@ const char *ResmedOtaManager::phase_name() const {
     switch (status_.phase) {
         case ResmedOtaPhase::Idle: return "idle";
         case ResmedOtaPhase::Staging: return "staging";
+        case ResmedOtaPhase::Publishing: return "publishing";
         case ResmedOtaPhase::Staged: return "staged";
         case ResmedOtaPhase::Initiating: return "initiating";
         case ResmedOtaPhase::Ready: return "ready";
@@ -794,7 +851,7 @@ void ResmedOtaManager::pump_staged_upload() {
     if (status_.phase == ResmedOtaPhase::Verified ||
         status_.phase == ResmedOtaPhase::Complete ||
         status_.phase == ResmedOtaPhase::Error) {
-        if (staged_read_file_) staged_read_file_.close();
+        staged_image_.reset();
         staged_transfer_active_ = false;
         return;
     }
@@ -802,7 +859,7 @@ void ResmedOtaManager::pump_staged_upload() {
     if (status_.phase == ResmedOtaPhase::Uploaded) {
         if (!staged_check_requested_) {
             staged_check_requested_ = true;
-            if (staged_read_file_) staged_read_file_.close();
+            staged_image_.reset();
             request_check();
         }
         return;
@@ -812,8 +869,8 @@ void ResmedOtaManager::pump_staged_upload() {
         status_.phase != ResmedOtaPhase::Uploading) {
         return;
     }
-    if (!staged_read_file_) {
-        set_error("stage_read_closed");
+    if (!staged_image_) {
+        set_error("stage_buffer_missing");
         return;
     }
 
@@ -822,13 +879,13 @@ void ResmedOtaManager::pump_staged_upload() {
         status_.total_size > offset ? status_.total_size - offset : 0;
     if (remaining == 0) return;
 
-    uint8_t bytes[AC_RESMED_OTA_MAX_BLOCK_BYTES];
     const size_t want = std::min(status_.xfer_block_size, remaining);
-    const int got = staged_read_file_.read(bytes, want);
-    if (got <= 0 || static_cast<size_t>(got) != want) {
-        set_error("stage_read_failed");
+    if (offset > staged_image_->size() ||
+        want > staged_image_->size() - offset) {
+        set_error("stage_buffer_range_invalid");
         return;
     }
+    const uint8_t *bytes = staged_image_->data() + offset;
 
     static const char *digits = "0123456789ABCDEF";
     String hex;
@@ -854,7 +911,7 @@ bool ResmedOtaManager::finish_hash() {
 }
 
 void ResmedOtaManager::clear_session() {
-    close_staging_files();
+    release_staged_resources();
     pending_block_hex_ = "";
     pending_block_offset_ = 0;
     pending_block_bytes_ = 0;
@@ -880,18 +937,23 @@ void ResmedOtaManager::clear_session() {
     staging_descriptor_version_[0] = 0;
 }
 
-void ResmedOtaManager::close_staging_files() {
-    if (staging_file_) staging_file_.close();
-    if (staged_read_file_) staged_read_file_.close();
+void ResmedOtaManager::release_staged_resources() {
+    if (storage_write_port_ && staging_publish_ticket_.valid()) {
+        if (storage_write_port_->abandon(staging_publish_ticket_)) {
+            staging_publish_ticket_ = {};
+        }
+    }
+
+    staging_publish_retry_at_ms_ = 0;
+    staging_buffer_.reset();
+    staged_image_.reset();
     staged_transfer_active_ = false;
     staged_check_requested_ = false;
     staged_auto_apply_ = false;
 }
 
 void ResmedOtaManager::set_error(const char *error) {
-    const bool was_staging = status_.phase == ResmedOtaPhase::Staging;
-    close_staging_files();
-    if (was_staging) Storage::remove(AC_RESMED_OTA_STAGED_TMP_PATH);
+    release_staged_resources();
     status_.phase = ResmedOtaPhase::Error;
     status_.waiting = false;
     status_.last_error = error ? error : "error";
@@ -998,23 +1060,34 @@ bool ResmedOtaManager::write_staging_header() {
     put_le32(segment, 0, static_cast<uint32_t>(staging_payload_size_));
     put_le32(segment, 4, staging_flash_start_);
 
-    if (!file_write_exact(staging_file_, primary, sizeof(primary))) {
+    if (!write_staging_bytes(0, primary, sizeof(primary))) {
         return false;
     }
-    if (!file_write_exact(staging_file_, descriptor, sizeof(descriptor))) {
+    if (!write_staging_bytes(ABC_PRIMARY_SIZE, descriptor,
+                             sizeof(descriptor))) {
         return false;
     }
-    if (!file_write_exact(staging_file_, segment, sizeof(segment))) {
+    if (!write_staging_bytes(ABC_PAYLOAD_OFFSET_0005, segment,
+                             sizeof(segment))) {
         return false;
     }
+
     staging_rest_crc_ =
         crc32_ieee_update_state(staging_rest_crc_, segment, sizeof(segment));
     return true;
 }
 
-bool ResmedOtaManager::write_staging_bytes(const uint8_t *data, size_t len) {
+bool ResmedOtaManager::write_staging_bytes(size_t output_offset,
+                                           const uint8_t *data,
+                                           size_t len) {
     if (!len) return true;
-    return file_write_exact(staging_file_, data, len);
+    if (!staging_buffer_ || !data || output_offset > staging_buffer_->size() ||
+        len > staging_buffer_->size() - output_offset) {
+        return false;
+    }
+
+    memcpy(staging_buffer_->data() + output_offset, data, len);
+    return true;
 }
 
 bool ResmedOtaManager::write_raw_payload_slice(size_t input_offset,
@@ -1032,8 +1105,12 @@ bool ResmedOtaManager::write_raw_payload_slice(size_t input_offset,
     const size_t data_offset = copy_start - chunk_start;
     const size_t copy_len = copy_end - copy_start;
     const uint8_t *payload = data + data_offset;
+    const size_t output_offset = ABC_PAYLOAD_OFFSET_0005 +
+                                 ABC_SEGMENT_ENTRY_SIZE +
+                                 (copy_start - source_start);
 
-    if (!file_write_exact(staging_file_, payload, copy_len)) return false;
+    if (!write_staging_bytes(output_offset, payload, copy_len)) return false;
+
     staging_rest_crc_ =
         crc32_ieee_update_state(staging_rest_crc_, payload, copy_len);
     staging_payload_written_ += copy_len;
@@ -1067,19 +1144,8 @@ bool ResmedOtaManager::finalize_raw_abc() {
     put_le32(descriptor, 0x4C,
              crc32_ieee(crc_input, sizeof(crc_input)));
 
-    if (!staging_file_.seek(ABC_PRIMARY_SIZE)) return false;
-    if (!file_write_exact(staging_file_, descriptor, sizeof(descriptor))) {
-        return false;
-    }
-    return staging_file_.seek(staging_output_size_);
-}
-
-bool ResmedOtaManager::enough_storage(size_t output_size) const {
-    const StorageStatus storage = Storage::status();
-    if (!storage.mounted) return false;
-    if (storage.free_bytes < output_size) return false;
-    return storage.free_bytes - output_size >=
-           AC_RESMED_OTA_STORAGE_MARGIN_BYTES;
+    return write_staging_bytes(ABC_PRIMARY_SIZE, descriptor,
+                               sizeof(descriptor));
 }
 
 bool ResmedOtaManager::guard_device_idle_for_upgrade() {
