@@ -61,6 +61,17 @@ const char *therapy_method(As11TherapyTarget target) {
     }
 }
 
+const char *reset_params(As11ResetMode mode) {
+    switch (mode) {
+        case As11ResetMode::Fast: return "{\"type\":\"Fast\"}";
+        case As11ResetMode::PowerLoss:
+            return "{\"type\":\"TriggerPowerLoss\"}";
+        case As11ResetMode::Watchdog:
+            return "{\"type\":\"TriggerWatchdog\"}";
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 bool As11DeviceService::request_healthcheck(RpcRequestPort &rpc,
@@ -117,6 +128,28 @@ OperationSubmission As11DeviceService::request_therapy(
     therapy_method_ = method;
     state_.mark_therapy_command_sent(therapy_method_, now_ms);
     note_change();
+    return submitted;
+}
+
+OperationSubmission As11DeviceService::request_reset(
+    RpcRequestPort &rpc,
+    As11ResetMode mode,
+    RpcSource source) {
+    const char *params = reset_params(mode);
+    if (!params) return OperationSubmission::rejected();
+    if (reset_ticket_.valid()) return OperationSubmission::busy();
+
+    RpcRequestCommand command;
+    command.method = "ResetDevice";
+    command.params_json = params;
+    command.source = source;
+    command.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
+    command.generation = next_generation();
+
+    const OperationSubmission submitted = rpc.request(command);
+    if (!submitted.accepted()) return submitted;
+
+    reset_ticket_ = submitted.ticket;
     return submitted;
 }
 
@@ -204,6 +237,7 @@ bool As11DeviceService::apply_activity_event_frame(
 void As11DeviceService::device_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     cancel_ticket(rpc, query_ticket_);
     cancel_ticket(rpc, therapy_ticket_);
+    cancel_ticket(rpc, reset_ticket_);
     cancel_ticket(rpc, clock_write_ticket_);
 
     active_query_kind_ = QueryKind::None;
@@ -232,6 +266,11 @@ void As11DeviceService::poll(RpcRequestPort &rpc,
         therapy_ticket_ = {};
         complete_therapy(completion, now_ms);
         therapy_method_.clear();
+    }
+
+    if (reset_ticket_.valid() &&
+        rpc.take_completion(reset_ticket_, completion)) {
+        reset_ticket_ = {};
     }
 
     if (clock_write_ticket_.valid() &&

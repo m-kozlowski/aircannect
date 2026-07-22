@@ -142,6 +142,8 @@ static StreamConsoleCommands stream_console_commands(stream_broker);
 static NetworkConsoleCommands network_console_commands(wifi_manager,
                                                        tcp_bridge);
 static CoreDiagnosticsConsoleCommands core_console_commands;
+static SystemConsoleCommands system_console_commands(
+    firmware_installer, rpc_transport, as11_device_service);
 static StorageConsoleCommands storage_console_commands(
     config_service, StorageService::read_port());
 static RuntimeConsoleCommands runtime_console_commands(session_manager,
@@ -170,6 +172,7 @@ static ConsoleCommandGroup *console_command_groups[] = {
     &stream_console_commands,
     &network_console_commands,
     &core_console_commands,
+    &system_console_commands,
     &storage_console_commands,
     &runtime_console_commands,
     &edf_console_commands,

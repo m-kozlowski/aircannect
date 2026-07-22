@@ -8,6 +8,12 @@
 
 namespace aircannect {
 
+enum class As11ResetMode : uint8_t {
+    Fast,
+    PowerLoss,
+    Watchdog,
+};
+
 class As11DeviceService {
 public:
     const As11DeviceState &state() const { return state_; }
@@ -22,6 +28,9 @@ public:
                                         As11TherapyTarget target,
                                         RpcSource source,
                                         uint32_t now_ms);
+    OperationSubmission request_reset(RpcRequestPort &rpc,
+                                      As11ResetMode mode,
+                                      RpcSource source);
     OperationSubmission request_set_datetime_now(RpcRequestPort &rpc,
                                                   RpcSource source,
                                                   uint32_t now_ms,
@@ -92,6 +101,7 @@ private:
     OperationTicket therapy_ticket_;
     std::string therapy_method_;
 
+    OperationTicket reset_ticket_;
     OperationTicket clock_write_ticket_;
 
     uint32_t next_generation_ = 0;

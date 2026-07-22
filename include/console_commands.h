@@ -133,6 +133,23 @@ public:
     void print_memory_detail(Print &out) override;
 };
 
+class SystemConsoleCommands final : public ConsoleCommandGroup {
+public:
+    SystemConsoleCommands(FirmwareInstaller &installer,
+                          RpcRequestPort &rpc,
+                          As11DeviceService &device);
+
+    bool execute(const String &command,
+                 const String &rest,
+                 Print &out,
+                 ConsoleCommandSession &session) override;
+
+private:
+    FirmwareInstaller &installer_;
+    RpcRequestPort &rpc_;
+    As11DeviceService &device_;
+};
+
 class RuntimeConsoleCommands final : public ConsoleCommandGroup {
 public:
     RuntimeConsoleCommands(SessionManager &session, SinkManager &sink);

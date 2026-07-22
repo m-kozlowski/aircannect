@@ -407,8 +407,7 @@ bool OtaConsoleCommands::execute(const String &command,
                                  Print &out,
                                  ConsoleCommandSession &session) {
     (void)session;
-    if (command != "ota" && command != "resmed-ota" &&
-        command != "restart") {
+    if (command != "ota" && command != "resmed-ota") {
         return false;
     }
 
@@ -422,16 +421,6 @@ bool OtaConsoleCommands::execute(const String &command,
     if (command == "resmed-ota") {
         handle_resmed_ota(out, rest, resmed_preparer_, resmed_ota_,
                           resmed_repository_);
-        return true;
-    }
-    if (command == "restart") {
-        trim_inplace(rest);
-        if (rest.length()) {
-            print_unknown_command(out, "SYSTEM", "restart");
-        } else {
-            installer_.schedule_reboot(500);
-            out.println("[SYSTEM] restart scheduled");
-        }
         return true;
     }
     return false;

@@ -16,7 +16,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  stats             counters for CAN, RPC, network, logs, storage");
         out.println("  memory            heap and PSRAM status");
         out.println("  version           AirCANnect firmware version");
-        out.println("  restart           restart the ESP");
+        out.println("  restart           restart AirCANnect or the AS11");
         out.println("  can               CAN controller recovery helpers");
         out.println("  config            persistent app configuration");
         out.println("  wifi              Wi-Fi profiles, scan, and reconnect");
@@ -265,7 +265,12 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "restart") {
         out.println("[HELP restart]");
-        out.println("  restart                   schedule an ESP restart");
+        out.println("  restart                   restart AirCANnect");
+        out.println("  restart ac                restart AirCANnect");
+        out.println("  restart fg                fast-reset the AS11");
+        out.println("  restart fg fast           fast-reset the AS11");
+        out.println("  restart fg power          simulate AS11 power loss");
+        out.println("  restart fg wd             trigger AS11 watchdog reset");
         return;
     }
 
@@ -284,7 +289,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  stats reset               clear counters");
         out.println("  memory                    heap and PSRAM status");
         out.println("  version                   firmware version and build date");
-        out.println("  restart                   restart the ESP");
+        out.println("  restart [ac|fg MODE]      restart AirCANnect or AS11");
         out.println("  can restart               restart CAN controller");
         return;
     }
