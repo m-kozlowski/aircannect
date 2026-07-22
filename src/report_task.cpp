@@ -67,7 +67,7 @@ bool same_artifact_identity(const ReportArtifactKey &lhs,
            lhs.range_end_ms == rhs.range_end_ms;
 }
 
-uint32_t next_store_retry_delay(uint8_t attempt) {
+uint32_t next_background_retry_delay(uint8_t attempt) {
     uint32_t delay_ms = CATALOG_STORE_RETRY_MIN_MS;
     for (uint8_t i = 0; i < attempt && delay_ms < CATALOG_STORE_RETRY_MAX_MS;
          ++i) {
@@ -76,7 +76,7 @@ uint32_t next_store_retry_delay(uint8_t attempt) {
     return delay_ms;
 }
 
-void advance_store_retry(uint8_t &attempt) {
+void advance_background_retry(uint8_t &attempt) {
     if (attempt < 5) ++attempt;
 }
 
@@ -209,6 +209,7 @@ struct ReportTask::Runtime {
             pending_refresh.summary_attempted = true;
             catalog_refresh.cancel();
             refresh_generation = 0;
+            catalog_refresh_retry_at_ms = 0;
         }
 
         if (artifact_index_refresh.active()) {
@@ -463,6 +464,8 @@ struct ReportTask::Runtime {
     uint32_t command_failures = 0;
     PendingCatalogRefresh pending_refresh;
     uint32_t refresh_generation = 0;
+    uint32_t catalog_refresh_retry_at_ms = 0;
+    uint8_t catalog_refresh_retry_attempt = 0;
 
     std::shared_ptr<const NightCatalog> catalog;
     std::shared_ptr<const NightCatalog> published_catalog;
@@ -681,6 +684,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_refresh.current_offset_minutes =
                     command.current_offset_minutes;
                 runtime.pending_refresh.summary_attempted = false;
+                runtime.catalog_refresh_retry_at_ms = 0;
+                runtime.catalog_refresh_retry_attempt = 0;
                 break;
 
         }
@@ -731,9 +736,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.catalog_store_retry_attempt = 0;
             } else {
                 runtime.catalog_store_retry_at_ms =
-                    now_ms + next_store_retry_delay(
+                    now_ms + next_background_retry_delay(
                                  runtime.catalog_store_retry_attempt);
-                advance_store_retry(runtime.catalog_store_retry_attempt);
+                advance_background_retry(
+                    runtime.catalog_store_retry_attempt);
             }
             worked = true;
         }
@@ -773,7 +779,23 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.pending_catalog_save = runtime.catalog;
                 runtime.catalog_store_retry_at_ms = 0;
                 runtime.catalog_store_retry_attempt = 0;
+                runtime.catalog_refresh_retry_at_ms = 0;
+                runtime.catalog_refresh_retry_attempt = 0;
             } else {
+                if (!runtime.pending_refresh.valid()) {
+                    runtime.pending_refresh.generation =
+                        runtime.refresh_generation;
+                    runtime.pending_refresh.current_offset_valid =
+                        runtime.refresh_offset_valid;
+                    runtime.pending_refresh.current_offset_minutes =
+                        runtime.refresh_offset_minutes;
+                    runtime.pending_refresh.summary_attempted = true;
+                }
+                runtime.catalog_refresh_retry_at_ms =
+                    now_ms + next_background_retry_delay(
+                                 runtime.catalog_refresh_retry_attempt);
+                advance_background_retry(
+                    runtime.catalog_refresh_retry_attempt);
                 runtime.command_failures++;
             }
             runtime.refresh_generation = 0;
@@ -812,9 +834,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 runtime.artifact_index_loaded = true;
                 runtime.artifact_index_refresh_pending = true;
                 runtime.artifact_index_retry_at_ms =
-                    now_ms + next_store_retry_delay(
+                    now_ms + next_background_retry_delay(
                                  runtime.artifact_index_retry_attempt);
-                advance_store_retry(runtime.artifact_index_retry_attempt);
+                advance_background_retry(
+                    runtime.artifact_index_retry_attempt);
                 runtime.command_failures++;
             }
             runtime.artifact_index_refresh_generation = 0;
@@ -913,7 +936,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.engine.catalog_update_required() &&
         runtime.pending_refresh.valid() &&
         runtime.pending_refresh.summary_attempted &&
-        !runtime.summary_acquisition.active()) {
+        !runtime.summary_acquisition.active() &&
+        deadline_due(now_ms, runtime.catalog_refresh_retry_at_ms)) {
         const std::shared_ptr<const NightCatalogSummarySnapshot> summary =
             runtime.summary_acquisition.snapshot();
         const OperationAdmission admitted =
@@ -929,10 +953,17 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             runtime.refresh_offset_minutes =
                 runtime.pending_refresh.current_offset_minutes;
             runtime.pending_refresh.clear();
+            runtime.catalog_refresh_retry_at_ms = 0;
             worked = true;
-        } else if (admitted == OperationAdmission::Rejected) {
-            runtime.pending_refresh.clear();
-            runtime.command_failures++;
+        } else {
+            runtime.catalog_refresh_retry_at_ms =
+                now_ms + next_background_retry_delay(
+                             runtime.catalog_refresh_retry_attempt);
+            advance_background_retry(
+                runtime.catalog_refresh_retry_attempt);
+            if (admitted == OperationAdmission::Rejected) {
+                runtime.command_failures++;
+            }
             worked = true;
         }
     }
@@ -950,9 +981,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             worked = true;
         } else if (admitted == OperationAdmission::Rejected) {
             runtime.catalog_store_retry_at_ms =
-                now_ms + next_store_retry_delay(
+                now_ms + next_background_retry_delay(
                              runtime.catalog_store_retry_attempt);
-            advance_store_retry(runtime.catalog_store_retry_attempt);
+            advance_background_retry(runtime.catalog_store_retry_attempt);
             worked = true;
         }
     }
