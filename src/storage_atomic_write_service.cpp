@@ -167,6 +167,35 @@ OperationTicket StorageAtomicWriteService::next_ticket_locked(uint32_t generatio
     return {next_ticket_id_, generation};
 }
 
+uint64_t StorageAtomicWriteService::encode_ticket(OperationTicket ticket) {
+    return static_cast<uint64_t>(ticket.generation) << 32 | ticket.id;
+}
+
+OperationTicket StorageAtomicWriteService::decode_ticket(uint64_t encoded) {
+    return {
+        static_cast<uint32_t>(encoded),
+        static_cast<uint32_t>(encoded >> 32),
+    };
+}
+
+bool StorageAtomicWriteService::apply_abandon_request_locked() {
+    const uint64_t encoded =
+        abandon_request_.exchange(0, std::memory_order_acq_rel);
+    if (encoded == 0) return false;
+
+    const OperationTicket ticket = decode_ticket(encoded);
+    if (job_->active && job_->ticket == ticket) {
+        job_->abandoned = true;
+        return true;
+    }
+    if (completion_ready_ && completion_.ticket == ticket) {
+        completion_ready_ = false;
+        completion_ = {};
+        return true;
+    }
+    return false;
+}
+
 OperationSubmission StorageAtomicWriteService::request_write(
     const StorageAtomicWriteCommand &command) {
     if (!command.valid() || command.path.size() >= AC_STORAGE_PATH_MAX ||
@@ -177,6 +206,7 @@ OperationSubmission StorageAtomicWriteService::request_write(
         return OperationSubmission::rejected();
     }
     if (!ready() || !lock()) return OperationSubmission::busy();
+    (void)apply_abandon_request_locked();
     if (job_->active || completion_ready_) {
         unlock();
         return OperationSubmission::busy();
@@ -203,28 +233,27 @@ OperationSubmission StorageAtomicWriteService::request_write(
 }
 
 bool StorageAtomicWriteService::abandon(OperationTicket ticket) {
-    if (!ticket.valid() || !lock(50)) return false;
+    if (!ticket.valid() || !ready()) return false;
 
-    if (job_->active && job_->ticket == ticket) {
-        job_->abandoned = true;
-        unlock();
-        wake();
-        return true;
-    }
-    if (completion_ready_ && completion_.ticket == ticket) {
-        completion_ready_ = false;
-        completion_ = {};
-        unlock();
-        return true;
+    const uint64_t requested = encode_ticket(ticket);
+    uint64_t expected = 0;
+    if (!abandon_request_.compare_exchange_strong(
+            expected,
+            requested,
+            std::memory_order_release,
+            std::memory_order_acquire) &&
+        expected != requested) {
+        return false;
     }
 
-    unlock();
-    return false;
+    wake();
+    return true;
 }
 
 bool StorageAtomicWriteService::take_completion(OperationTicket ticket,
                                                 StorageAtomicWriteCompletion &completion) {
     if (!ticket.valid() || !lock()) return false;
+    (void)apply_abandon_request_locked();
     if (!completion_ready_ || completion_.ticket != ticket) {
         unlock();
         return false;
@@ -497,6 +526,8 @@ void StorageAtomicWriteService::fail_locked(const char *error) {
 bool StorageAtomicWriteService::step(StorageAtomicWriteLane lane) {
     if (!ready() || !lock(50)) return false;
 
+    const bool abandoned = apply_abandon_request_locked();
+
     if (lane == StorageAtomicWriteLane::Foreground && recovery_needed_ &&
         recovery_attempt_requested_) {
         recovery_attempt_requested_ = false;
@@ -518,7 +549,7 @@ bool StorageAtomicWriteService::step(StorageAtomicWriteLane lane) {
 
     if (!job_->active || job_->lane != lane) {
         unlock();
-        return false;
+        return abandoned;
     }
 
     if (job_->abandoned) {

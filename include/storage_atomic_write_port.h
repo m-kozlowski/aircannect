@@ -53,6 +53,8 @@ public:
     virtual ~StorageAtomicWritePort() = default;
 
     virtual OperationSubmission request_write(const StorageAtomicWriteCommand &command) = 0;
+    // Acceptance transfers cancellation to the storage owner. The caller may
+    // release the ticket without waiting for in-progress filesystem I/O.
     virtual bool abandon(OperationTicket ticket) = 0;
     virtual bool take_completion(OperationTicket ticket, StorageAtomicWriteCompletion &completion) = 0;
 };

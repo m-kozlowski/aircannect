@@ -69,7 +69,10 @@ private:
     void finish_locked(OperationOutcome outcome, const char *error = nullptr);
     void close_output_locked();
     void clear_job_locked();
+    bool apply_abandon_request_locked();
     OperationTicket next_ticket_locked(uint32_t generation);
+    static uint64_t encode_ticket(OperationTicket ticket);
+    static OperationTicket decode_ticket(uint64_t encoded);
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     WakeCallback wake_ = nullptr;
@@ -79,6 +82,9 @@ private:
     bool recovery_attempt_requested_ = true;
     Job *job_ = nullptr;
 
+    // One write/completion exists globally, so one cross-task cancellation
+    // request is sufficient and avoids waiting on the filesystem mutex.
+    std::atomic<uint64_t> abandon_request_{0};
     bool completion_ready_ = false;
     StorageAtomicWriteCompletion completion_;
     uint32_t next_ticket_id_ = 0;
