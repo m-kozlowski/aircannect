@@ -13,6 +13,7 @@
 #include "edf_str_file_layout.h"
 #include "night_catalog_clock.h"
 #include "night_str_record.h"
+#include "report_fallback_artifact.h"
 #include "string_util.h"
 
 #ifdef ARDUINO
@@ -67,6 +68,17 @@ bool path_is_report_edf(const char *path) {
     EdfInventoryEntry inventory;
     return path && edf_inventory_describe_path(path, inventory) &&
            edf_report_file_kind_supported(inventory.kind);
+}
+
+bool path_is_fallback_artifact(const char *path) {
+    if (!path) return false;
+
+    const size_t root_length = strlen(REPORT_FALLBACK_ARTIFACT_ROOT);
+    const size_t path_length = strlen(path);
+    return path_length == root_length + 1 + 8 + 4 &&
+           memcmp(path, REPORT_FALLBACK_ARTIFACT_ROOT, root_length) == 0 &&
+           path[root_length] == '/' &&
+           strcmp(path + path_length - 4, ".bin") == 0;
 }
 
 bool same_exact_session(const EdfReportSessionDescriptor &session,
@@ -185,6 +197,8 @@ struct NightCatalogRefreshRuntime {
         WaitScan,
         SelectEdf,
         WaitEdf,
+        SelectFallback,
+        WaitFallback,
         SubmitStr,
         WaitStr,
         Build,
@@ -220,6 +234,21 @@ struct NightCatalogRefreshRuntime {
         str_records = nullptr;
         str_record_capacity = 0;
         str_record_count = 0;
+
+        destroy_large_array(fallback_records, fallback_record_capacity);
+        fallback_records = nullptr;
+        fallback_record_capacity = 0;
+        fallback_record_count = 0;
+
+        destroy_large_array(fallback_sessions, fallback_session_capacity);
+        fallback_sessions = nullptr;
+        fallback_session_capacity = 0;
+        fallback_session_count = 0;
+
+        destroy_large_array(fallback_sections, fallback_section_capacity);
+        fallback_sections = nullptr;
+        fallback_section_capacity = 0;
+        fallback_section_count = 0;
 
         scan_index = 0;
         current_path[0] = '\0';
@@ -267,6 +296,15 @@ struct NightCatalogRefreshRuntime {
     NightCatalogStrInput *str_records = nullptr;
     size_t str_record_capacity = 0;
     size_t str_record_count = 0;
+    NightCatalogFallbackInput *fallback_records = nullptr;
+    size_t fallback_record_capacity = 0;
+    size_t fallback_record_count = 0;
+    NightCatalogTimeRange *fallback_sessions = nullptr;
+    size_t fallback_session_capacity = 0;
+    size_t fallback_session_count = 0;
+    NightCatalogFallbackSectionInput *fallback_sections = nullptr;
+    size_t fallback_section_capacity = 0;
+    size_t fallback_section_count = 0;
 
     uint8_t *read_buffer = nullptr;
     size_t scan_index = 0;
@@ -398,6 +436,7 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     StorageScanRoot roots[] = {
         {"/DATALOG", true},
         {"/STR.edf", false},
+        {REPORT_FALLBACK_ARTIFACT_ROOT, false},
     };
     StorageScanCommand command;
     command.roots = roots;
@@ -423,6 +462,7 @@ namespace {
 bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
                           NightCatalogRefreshStatus &status) {
     size_t report_file_count = 0;
+    size_t fallback_file_count = 0;
     StorageScanEntryView entry;
     for (size_t i = 0; i < runtime.scan->size(); ++i) {
         if (!runtime.scan->entry(i, entry) || entry.directory) continue;
@@ -434,6 +474,9 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
             runtime.str_file_found = true;
             runtime.str_file_size = entry.size;
             runtime.str_file_modified = entry.modified;
+        } else if (entry.root_index == 2 &&
+                   path_is_fallback_artifact(entry.path)) {
+            ++fallback_file_count;
         }
     }
 
@@ -456,9 +499,35 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
         report_file_count * AC_EDF_REPORT_FILE_SIGNAL_MAX;
     runtime.edf_signal_layouts = allocate_large_array<EdfReportSignalLayout>(
         runtime.edf_signal_layout_capacity);
+
+    const size_t maximum_fallback_files = std::min(
+        std::numeric_limits<size_t>::max() /
+            ReportFallbackArtifactCodec::MaxSessions,
+        std::numeric_limits<size_t>::max() /
+            ReportFallbackArtifactCodec::MaxSections);
+    if (fallback_file_count > maximum_fallback_files) return false;
+
+    runtime.fallback_record_capacity = fallback_file_count;
+    runtime.fallback_records =
+        allocate_large_array<NightCatalogFallbackInput>(fallback_file_count);
+    runtime.fallback_session_capacity =
+        fallback_file_count * ReportFallbackArtifactCodec::MaxSessions;
+    runtime.fallback_sessions = allocate_large_array<NightCatalogTimeRange>(
+        runtime.fallback_session_capacity);
+    runtime.fallback_section_capacity =
+        fallback_file_count * ReportFallbackArtifactCodec::MaxSections;
+    runtime.fallback_sections =
+        allocate_large_array<NightCatalogFallbackSectionInput>(
+            runtime.fallback_section_capacity);
+
     if (report_file_count > 0 &&
         (!runtime.edf_sessions || !runtime.parsed_edf_files ||
          !runtime.edf_signal_layouts)) {
+        return false;
+    }
+    if (fallback_file_count > 0 &&
+        (!runtime.fallback_records || !runtime.fallback_sessions ||
+         !runtime.fallback_sections)) {
         return false;
     }
 
@@ -469,7 +538,7 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
     }
 
     status.files_seen = static_cast<uint32_t>(std::min(
-        report_file_count,
+        report_file_count + fallback_file_count,
         static_cast<size_t>(UINT32_MAX)));
     return true;
 }
@@ -528,8 +597,9 @@ bool submit_next_edf(NightCatalogRefreshRuntime &runtime,
     status.sessions = static_cast<uint32_t>(std::min(
         runtime.edf_session_count,
         static_cast<size_t>(UINT32_MAX)));
-    runtime.phase = NightCatalogRefreshRuntime::Phase::SubmitStr;
-    status.state = NightCatalogRefreshState::ReadingStr;
+    runtime.scan_index = 0;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectFallback;
+    status.state = NightCatalogRefreshState::ReadingFallback;
     status.current_path[0] = '\0';
     return true;
 }
@@ -628,6 +698,213 @@ bool finish_edf_read(NightCatalogRefreshRuntime &runtime,
 
     ++runtime.scan_index;
     runtime.phase = NightCatalogRefreshRuntime::Phase::SelectEdf;
+    status.current_path[0] = '\0';
+    return true;
+}
+
+void skip_current_fallback(NightCatalogRefreshRuntime &runtime,
+                           NightCatalogRefreshStatus &status,
+                           const char *warning) {
+    ++status.files_skipped;
+    ++runtime.scan_index;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectFallback;
+    runtime.current_path[0] = '\0';
+    runtime.current_size = 0;
+    runtime.current_modified = 0;
+    status.current_path[0] = '\0';
+    set_warning(status, warning);
+}
+
+bool submit_next_fallback(NightCatalogRefreshRuntime &runtime,
+                          StorageReadPort &read_port,
+                          NightCatalogRefreshStatus &status) {
+    StorageScanEntryView entry;
+    while (runtime.scan_index < runtime.scan->size()) {
+        if (!runtime.scan->entry(runtime.scan_index, entry) ||
+            entry.directory || entry.root_index != 2 ||
+            !path_is_fallback_artifact(entry.path)) {
+            ++runtime.scan_index;
+            continue;
+        }
+        if (entry.size < ReportFallbackArtifactCodec::HeaderBytes ||
+            entry.size > ReportFallbackArtifactCodec::MaxFileBytes ||
+            entry.size > SIZE_MAX ||
+            strlen(entry.path) >= sizeof(runtime.current_path)) {
+            skip_current_fallback(
+                runtime,
+                status,
+                "night_catalog_fallback_size_invalid");
+            continue;
+        }
+
+        StorageReadCommand command;
+        command.path = entry.path;
+        command.length = static_cast<size_t>(std::min<uint64_t>(
+            entry.size,
+            ReportFallbackArtifactCodec::MaxMetadataBytes));
+        command.lane = StorageReadLane::Report;
+        command.generation = status.generation;
+
+        const OperationSubmission submission =
+            read_port.request_read(command);
+        if (submission.admission == OperationAdmission::Busy) return false;
+        if (!submission.accepted()) {
+            skip_current_fallback(
+                runtime,
+                status,
+                "night_catalog_fallback_read_rejected");
+            continue;
+        }
+
+        runtime.read_ticket = submission.ticket;
+        copy_cstr(runtime.current_path,
+                  sizeof(runtime.current_path),
+                  entry.path);
+        runtime.current_size = entry.size;
+        runtime.current_modified = entry.modified;
+        copy_cstr(status.current_path,
+                  sizeof(status.current_path),
+                  entry.path);
+        runtime.phase = NightCatalogRefreshRuntime::Phase::WaitFallback;
+        return true;
+    }
+
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SubmitStr;
+    status.state = NightCatalogRefreshState::ReadingStr;
+    status.current_path[0] = '\0';
+    return true;
+}
+
+bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
+                          StorageReadPort &read_port,
+                          NightCatalogRefreshStatus &status) {
+    StorageReadCompletion completion;
+    if (!read_port.take_completion(runtime.read_ticket, completion)) {
+        return false;
+    }
+    runtime.read_ticket = {};
+
+    if (completion.outcome.disposition != OperationDisposition::Succeeded ||
+        !completion.prepared.valid() ||
+        completion.prepared.length > SOURCE_READ_BUFFER_BYTES) {
+        if (completion.prepared.valid()) {
+            read_port.release_prepared(completion.prepared);
+        }
+        skip_current_fallback(runtime,
+                              status,
+                              "night_catalog_fallback_read_failed");
+        return true;
+    }
+
+    const size_t expected = completion.prepared.length;
+    const size_t read = read_port.read_prepared(completion.prepared,
+                                                0,
+                                                runtime.read_buffer,
+                                                expected);
+    read_port.release_prepared(completion.prepared);
+    if (read != expected) {
+        skip_current_fallback(runtime,
+                              status,
+                              "night_catalog_fallback_read_short");
+        return true;
+    }
+
+    ReportFallbackArtifactInfo info;
+    ReportFallbackArtifactView view;
+    char expected_path[AC_STORAGE_PATH_MAX] = {};
+    StorageScanEntryView scan_entry;
+    const bool metadata_valid =
+        ReportFallbackArtifactCodec::inspect_header(
+            runtime.read_buffer, read, info) &&
+        info.total_bytes == runtime.current_size &&
+        info.metadata_bytes <= read &&
+        ReportFallbackArtifactCodec::decode_metadata(
+            runtime.read_buffer, read, view) &&
+        report_fallback_artifact_path(info.sleep_day,
+                                      expected_path,
+                                      sizeof(expected_path)) &&
+        strcmp(expected_path, runtime.current_path) == 0 &&
+        runtime.scan->entry(runtime.scan_index, scan_entry) &&
+        strcmp(scan_entry.path, runtime.current_path) == 0;
+    if (!metadata_valid ||
+        runtime.fallback_record_count >=
+            runtime.fallback_record_capacity ||
+        runtime.fallback_session_count >
+            runtime.fallback_session_capacity ||
+        runtime.fallback_section_count >
+            runtime.fallback_section_capacity ||
+        info.session_count > runtime.fallback_session_capacity -
+                                 runtime.fallback_session_count ||
+        info.section_count > runtime.fallback_section_capacity -
+                                 runtime.fallback_section_count) {
+        skip_current_fallback(runtime,
+                              status,
+                              "night_catalog_fallback_invalid");
+        return true;
+    }
+
+    NightCatalogFallbackInput &out =
+        runtime.fallback_records[runtime.fallback_record_count];
+    out.sleep_day = info.sleep_day;
+    out.day_start_ms = info.day_start_ms;
+    out.day_end_ms = info.day_end_ms;
+    const size_t session_offset = runtime.fallback_session_count;
+    const size_t section_offset = runtime.fallback_section_count;
+    out.sessions = runtime.fallback_sessions +
+        session_offset;
+    out.session_count = info.session_count;
+    out.path = scan_entry.path;
+    out.file_size = runtime.current_size;
+    out.last_write_ms =
+        static_cast<int64_t>(runtime.current_modified) * 1000LL;
+    out.identity = info.content_identity;
+    out.metadata_bytes = static_cast<uint32_t>(info.metadata_bytes);
+    out.sections = runtime.fallback_sections +
+        section_offset;
+    out.section_count = info.section_count;
+
+    for (size_t i = 0; i < info.session_count; ++i) {
+        NightCatalogTimeRange &session =
+            runtime.fallback_sessions[session_offset + i];
+        if (!view.session(i, session)) {
+            skip_current_fallback(runtime,
+                                  status,
+                                  "night_catalog_fallback_session_invalid");
+            return true;
+        }
+    }
+    for (size_t i = 0; i < info.section_count; ++i) {
+        ReportFallbackSection source;
+        if (!view.section(i, source)) {
+            skip_current_fallback(runtime,
+                                  status,
+                                  "night_catalog_fallback_section_invalid");
+            return true;
+        }
+
+        NightCatalogFallbackSectionInput &section =
+            runtime.fallback_sections[section_offset + i];
+        section.kind = source.kind;
+        section.source = source.source;
+        section.signal = source.signal;
+        section.event_mask = source.event_mask;
+        section.payload_schema = source.payload_schema;
+        section.record_count = source.record_count;
+        section.coverage = source.coverage;
+        section.data_offset = source.data_offset;
+        section.data_size = source.data_size;
+        section.data_crc32 = source.data_crc32;
+    }
+
+    runtime.fallback_session_count += info.session_count;
+    runtime.fallback_section_count += info.section_count;
+    ++runtime.fallback_record_count;
+    ++status.files_indexed;
+    ++runtime.scan_index;
+    runtime.phase = NightCatalogRefreshRuntime::Phase::SelectFallback;
+    runtime.current_path[0] = '\0';
+    runtime.current_size = 0;
+    runtime.current_modified = 0;
     status.current_path[0] = '\0';
     return true;
 }
@@ -917,6 +1194,8 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
     input.str_record_count = runtime.str_record_count;
     input.summary_records = runtime.summary_records;
     input.summary_record_count = runtime.summary_record_count;
+    input.fallback_records = runtime.fallback_records;
+    input.fallback_record_count = runtime.fallback_record_count;
     input.resolve_local_minute = night_catalog_resolve_local_minute;
     input.clock_context = &clock;
     catalog = NightCatalogBuilder::build(input);
@@ -973,6 +1252,15 @@ bool NightCatalogRefreshService::poll() {
 
         case NightCatalogRefreshRuntime::Phase::WaitEdf:
             if (!finish_edf_read(*runtime_, *read_port_, status_)) {
+                return false;
+            }
+            return true;
+
+        case NightCatalogRefreshRuntime::Phase::SelectFallback:
+            return submit_next_fallback(*runtime_, *read_port_, status_);
+
+        case NightCatalogRefreshRuntime::Phase::WaitFallback:
+            if (!finish_fallback_read(*runtime_, *read_port_, status_)) {
                 return false;
             }
             return true;

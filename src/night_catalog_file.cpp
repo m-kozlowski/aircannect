@@ -7,6 +7,7 @@
 
 #include "crc32.h"
 #include "little_endian.h"
+#include "report_records.h"
 #include "storage_path.h"
 
 namespace aircannect {
@@ -20,18 +21,21 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'N', 'C', 'A', 'T', '0', '6',
+    'A', 'C', 'N', 'C', 'A', 'T', '0', '7',
 };
 
-constexpr size_t RECORD_BYTES = 112;
+constexpr size_t RECORD_BYTES = 120;
 constexpr size_t RANGE_BYTES = 16;
 constexpr size_t FILE_BYTES = 96;
 constexpr size_t COVERAGE_BYTES = 24;
 constexpr size_t SIGNAL_LAYOUT_BYTES = 32;
+constexpr size_t FALLBACK_FILE_BYTES = 48;
+constexpr size_t FALLBACK_SECTION_BYTES = 48;
 
 constexpr uint8_t SOURCE_FLAGS = NIGHT_CATALOG_SOURCE_EDF |
                                  NIGHT_CATALOG_SOURCE_STR |
-                                 NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK;
+                                 NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK |
+                                 NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
 constexpr uint16_t METRIC_FLAGS =
     (1u << static_cast<uint8_t>(NightCatalogMetric::Count)) - 1u;
 
@@ -42,6 +46,8 @@ struct CatalogLayout {
     uint32_t files = 0;
     uint32_t coverage = 0;
     uint32_t signal_layouts = 0;
+    uint32_t fallback_files = 0;
+    uint32_t fallback_sections = 0;
     uint32_t path_bytes = 0;
     size_t body_bytes = 0;
 };
@@ -115,6 +121,45 @@ bool signal_layout_valid(const NightCatalogSourceFile &file,
            std::isfinite(layout.scale.offset) && layout.scale.scale > 0.0f;
 }
 
+bool fallback_section_valid(const NightCatalogRecord &record,
+                            const NightCatalogFallbackFile &file,
+                            const NightCatalogFallbackSection &section) {
+    if (!section.coverage.valid() ||
+        section.coverage.start_ms < record.day_start_ms ||
+        section.coverage.end_ms > record.day_end_ms ||
+        section.data_offset < file.metadata_bytes ||
+        section.data_offset > file.file_size ||
+        section.data_size > file.file_size - section.data_offset) {
+        return false;
+    }
+
+    if (section.kind == ReportFallbackSectionKind::Series) {
+        const ReportSourceDef *source = report_source_def(section.source);
+        return source && report_source_is_sampled(*source) &&
+               report_signal_bit(section.signal) != 0 &&
+               section.event_mask == 0 && section.record_count > 0 &&
+               section.data_size > 0 &&
+               section.payload_schema ==
+                   REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
+    }
+    if (section.kind == ReportFallbackSectionKind::Events) {
+        const bool event_source =
+            section.source == ReportSourceId::UsageEvents ||
+            section.source == ReportSourceId::RespiratoryEvents;
+        const size_t record_bytes = report_event_record_wire_size();
+        if (section.record_count > SIZE_MAX / record_bytes) return false;
+
+        return event_source && section.signal == ReportSignalId::Count &&
+               section.event_mask != 0 &&
+               (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&
+               section.payload_schema ==
+                   REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
+               static_cast<size_t>(section.record_count) * record_bytes ==
+                   section.data_size;
+    }
+    return false;
+}
+
 bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
     if (catalog.size() > UINT32_MAX) return false;
     layout.records = static_cast<uint32_t>(catalog.size());
@@ -124,6 +169,8 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
     uint32_t expected_file = 0;
     uint32_t expected_coverage = 0;
     uint32_t expected_signal_layout = 0;
+    uint32_t expected_fallback_file = 0;
+    uint32_t expected_fallback_section = 0;
     uint32_t expected_path = 0;
     SleepDayId previous_day;
 
@@ -264,6 +311,72 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
             return false;
         }
         if (!add_u32(expected_file, file_count)) return false;
+
+        size_t fallback_file_count = 0;
+        const NightCatalogFallbackFile *fallback_files =
+            catalog.fallback_files(*record, fallback_file_count);
+        if (record->fallback_file_offset != expected_fallback_file ||
+            fallback_file_count != record->fallback_file_count ||
+            fallback_file_count > 1 ||
+            (fallback_file_count > 0 && !fallback_files)) {
+            return false;
+        }
+
+        for (size_t file_index = 0;
+             file_index < fallback_file_count;
+             ++file_index) {
+            const NightCatalogFallbackFile &file =
+                fallback_files[file_index];
+            if (file.path_offset != expected_path ||
+                file.path_length == 0 || file.identity == 0 ||
+                file.metadata_bytes == 0 ||
+                file.metadata_bytes > file.file_size ||
+                file.section_offset != expected_fallback_section ||
+                file.section_count == 0) {
+                return false;
+            }
+
+            const char *path = catalog.path(file);
+            if (!path || path[file.path_length] != '\0' ||
+                memchr(path, '\0', file.path_length) != nullptr ||
+                !storage_user_path_valid(path) ||
+                !add_u32(expected_path,
+                         static_cast<size_t>(file.path_length) + 1)) {
+                return false;
+            }
+
+            size_t section_count = 0;
+            const NightCatalogFallbackSection *sections =
+                catalog.fallback_sections(file, section_count);
+            if (section_count != file.section_count || !sections) {
+                return false;
+            }
+
+            uint64_t expected_data_offset = file.metadata_bytes;
+            for (size_t section_index = 0;
+                 section_index < section_count;
+                 ++section_index) {
+                const NightCatalogFallbackSection &section =
+                    sections[section_index];
+                if (!fallback_section_valid(*record, file, section) ||
+                    section.data_offset != expected_data_offset) {
+                    return false;
+                }
+                expected_data_offset += section.data_size;
+            }
+            if (expected_data_offset != file.file_size ||
+                !add_u32(expected_fallback_section, section_count)) {
+                return false;
+            }
+        }
+
+        const bool has_fallback = fallback_file_count > 0;
+        if (has_fallback !=
+            ((record->source_flags &
+              NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK) != 0) ||
+            !add_u32(expected_fallback_file, fallback_file_count)) {
+            return false;
+        }
     }
 
     layout.sessions = expected_session;
@@ -271,6 +384,8 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
     layout.files = expected_file;
     layout.coverage = expected_coverage;
     layout.signal_layouts = expected_signal_layout;
+    layout.fallback_files = expected_fallback_file;
+    layout.fallback_sections = expected_fallback_section;
     layout.path_bytes = expected_path;
 
     size_t body_bytes = 0;
@@ -282,6 +397,12 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
         !add_size(body_bytes,
                   layout.signal_layouts,
                   SIGNAL_LAYOUT_BYTES) ||
+        !add_size(body_bytes,
+                  layout.fallback_files,
+                  FALLBACK_FILE_BYTES) ||
+        !add_size(body_bytes,
+                  layout.fallback_sections,
+                  FALLBACK_SECTION_BYTES) ||
         !add_size(body_bytes, layout.path_bytes, 1) ||
         body_bytes >
             NightCatalogFileCodec::MaximumFileBytes -
@@ -362,6 +483,8 @@ void encode_record(uint8_t *out, const NightCatalogRecord &record) {
     put_le32(out + 52, record.file_count);
     put_le64(out + 56, record.summary_identity);
     encode_metrics(out + 64, record.metrics);
+    put_le32(out + 108, record.fallback_file_offset);
+    put_le32(out + 112, record.fallback_file_count);
 }
 
 bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
@@ -374,8 +497,10 @@ bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
     const uint32_t session_count = get_le32(in + 36);
     const uint32_t mask_count = get_le32(in + 44);
     const uint32_t file_count = get_le32(in + 52);
+    const uint32_t fallback_file_count = get_le32(in + 112);
     if (session_count > UINT16_MAX || mask_count > UINT16_MAX ||
-        file_count > UINT16_MAX) {
+        file_count > UINT16_MAX || fallback_file_count > UINT16_MAX ||
+        get_le32(in + 116) != 0) {
         return false;
     }
 
@@ -390,6 +515,9 @@ bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
     record.mask_window_count = static_cast<uint16_t>(mask_count);
     record.file_offset = get_le32(in + 48);
     record.file_count = static_cast<uint16_t>(file_count);
+    record.fallback_file_offset = get_le32(in + 108);
+    record.fallback_file_count =
+        static_cast<uint16_t>(fallback_file_count);
     record.summary_identity = get_le64(in + 56);
     decode_metrics(in + 64, record.metrics);
     return true;
@@ -511,6 +639,72 @@ bool decode_signal_layout(const uint8_t *in,
     return true;
 }
 
+void encode_fallback_file(uint8_t *out,
+                          const NightCatalogFallbackFile &file) {
+    put_le32(out, file.path_offset);
+    put_le32(out + 4, file.path_length);
+    put_le32(out + 8, file.section_offset);
+    put_le32(out + 12, file.section_count);
+    put_le64(out + 16, file.file_size);
+    put_le64(out + 24, static_cast<uint64_t>(file.last_write_ms));
+    put_le64(out + 32, file.identity);
+    put_le32(out + 40, file.metadata_bytes);
+}
+
+bool decode_fallback_file(const uint8_t *in,
+                          NightCatalogFallbackFile &file) {
+    const uint32_t path_length = get_le32(in + 4);
+    const uint32_t section_count = get_le32(in + 12);
+    if (path_length == 0 || path_length > UINT16_MAX ||
+        section_count == 0 || section_count > UINT16_MAX ||
+        get_le32(in + 44) != 0) {
+        return false;
+    }
+
+    file.path_offset = get_le32(in);
+    file.path_length = static_cast<uint16_t>(path_length);
+    file.section_offset = get_le32(in + 8);
+    file.section_count = static_cast<uint16_t>(section_count);
+    file.file_size = get_le64(in + 16);
+    file.last_write_ms = static_cast<int64_t>(get_le64(in + 24));
+    file.identity = get_le64(in + 32);
+    file.metadata_bytes = get_le32(in + 40);
+    return true;
+}
+
+void encode_fallback_section(
+    uint8_t *out,
+    const NightCatalogFallbackSection &section) {
+    out[0] = static_cast<uint8_t>(section.kind);
+    out[1] = static_cast<uint8_t>(section.source);
+    out[2] = static_cast<uint8_t>(section.signal);
+    out[3] = section.event_mask;
+    put_le32(out + 4, section.payload_schema);
+    put_le32(out + 8, section.record_count);
+    encode_range(out + 16, section.coverage);
+    put_le64(out + 32, section.data_offset);
+    put_le32(out + 40, section.data_size);
+    put_le32(out + 44, section.data_crc32);
+}
+
+bool decode_fallback_section(
+    const uint8_t *in,
+    NightCatalogFallbackSection &section) {
+    if (get_le32(in + 12) != 0) return false;
+
+    section.kind = static_cast<ReportFallbackSectionKind>(in[0]);
+    section.source = static_cast<ReportSourceId>(in[1]);
+    section.signal = static_cast<ReportSignalId>(in[2]);
+    section.event_mask = in[3];
+    section.payload_schema = get_le32(in + 4);
+    section.record_count = get_le32(in + 8);
+    section.coverage = decode_range(in + 16);
+    section.data_offset = get_le64(in + 32);
+    section.data_size = get_le32(in + 40);
+    section.data_crc32 = get_le32(in + 44);
+    return true;
+}
+
 bool parse_header(const uint8_t *header,
                   size_t header_length,
                   NightCatalogFileInfo &info,
@@ -526,18 +720,23 @@ bool parse_header(const uint8_t *header,
         get_le16(header + 16) != FILE_BYTES ||
         get_le16(header + 18) != COVERAGE_BYTES ||
         get_le16(header + 20) != SIGNAL_LAYOUT_BYTES ||
-        get_le16(header + 22) != 0 || get_le32(header + 52) != 0 ||
-        crc32_ieee(header, 68) != get_le32(header + 68)) {
+        get_le16(header + 22) != FALLBACK_FILE_BYTES ||
+        get_le16(header + 24) != FALLBACK_SECTION_BYTES ||
+        get_le16(header + 26) != 0 || get_le32(header + 64) != 0 ||
+        get_le32(header + 80) != 0 ||
+        crc32_ieee(header, 84) != get_le32(header + 84)) {
         return false;
     }
 
-    info.record_count = get_le32(header + 24);
-    info.session_count = get_le32(header + 28);
-    info.mask_window_count = get_le32(header + 32);
-    info.file_count = get_le32(header + 36);
-    info.coverage_count = get_le32(header + 40);
-    info.signal_layout_count = get_le32(header + 44);
-    info.path_bytes = get_le32(header + 48);
+    info.record_count = get_le32(header + 28);
+    info.session_count = get_le32(header + 32);
+    info.mask_window_count = get_le32(header + 36);
+    info.file_count = get_le32(header + 40);
+    info.coverage_count = get_le32(header + 44);
+    info.signal_layout_count = get_le32(header + 48);
+    info.fallback_file_count = get_le32(header + 52);
+    info.fallback_section_count = get_le32(header + 56);
+    info.path_bytes = get_le32(header + 60);
 
     size_t body_bytes = 0;
     if (!add_size(body_bytes, info.record_count, RECORD_BYTES) ||
@@ -548,8 +747,14 @@ bool parse_header(const uint8_t *header,
         !add_size(body_bytes,
                   info.signal_layout_count,
                   SIGNAL_LAYOUT_BYTES) ||
+        !add_size(body_bytes,
+                  info.fallback_file_count,
+                  FALLBACK_FILE_BYTES) ||
+        !add_size(body_bytes,
+                  info.fallback_section_count,
+                  FALLBACK_SECTION_BYTES) ||
         !add_size(body_bytes, info.path_bytes, 1) ||
-        get_le64(header + 56) != body_bytes ||
+        get_le64(header + 68) != body_bytes ||
         body_bytes > NightCatalogFileCodec::MaximumFileBytes -
                          NightCatalogFileCodec::HeaderBytes) {
         return false;
@@ -557,7 +762,7 @@ bool parse_header(const uint8_t *header,
 
     info.body_bytes = body_bytes;
     info.total_bytes = NightCatalogFileCodec::HeaderBytes + body_bytes;
-    body_crc = get_le32(header + 64);
+    body_crc = get_le32(header + 76);
     return true;
 }
 
@@ -588,14 +793,20 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
     uint8_t *coverage = files + layout.files * FILE_BYTES;
     uint8_t *signal_layouts =
         coverage + layout.coverage * COVERAGE_BYTES;
-    uint8_t *paths = signal_layouts +
+    uint8_t *fallback_files = signal_layouts +
         layout.signal_layouts * SIGNAL_LAYOUT_BYTES;
+    uint8_t *fallback_sections = fallback_files +
+        layout.fallback_files * FALLBACK_FILE_BYTES;
+    uint8_t *paths = fallback_sections +
+        layout.fallback_sections * FALLBACK_SECTION_BYTES;
 
     size_t next_session = 0;
     size_t next_mask = 0;
     size_t next_file = 0;
     size_t next_coverage = 0;
     size_t next_signal_layout = 0;
+    size_t next_fallback_file = 0;
+    size_t next_fallback_section = 0;
     size_t next_path = 0;
     for (size_t i = 0; i < catalog.size(); ++i) {
         const NightCatalogRecord &record = *catalog.record(i);
@@ -647,11 +858,39 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
             memcpy(paths + next_path, path, file.path_length + 1);
             next_path += file.path_length + 1;
         }
+
+        size_t fallback_file_count = 0;
+        const NightCatalogFallbackFile *record_fallback_files =
+            catalog.fallback_files(record, fallback_file_count);
+        for (size_t j = 0; j < fallback_file_count; ++j) {
+            const NightCatalogFallbackFile &file =
+                record_fallback_files[j];
+            encode_fallback_file(
+                fallback_files +
+                    next_fallback_file++ * FALLBACK_FILE_BYTES,
+                file);
+
+            size_t section_count = 0;
+            const NightCatalogFallbackSection *file_sections =
+                catalog.fallback_sections(file, section_count);
+            for (size_t k = 0; k < section_count; ++k) {
+                encode_fallback_section(
+                    fallback_sections +
+                        next_fallback_section++ * FALLBACK_SECTION_BYTES,
+                    file_sections[k]);
+            }
+
+            const char *path = catalog.path(file);
+            memcpy(paths + next_path, path, file.path_length + 1);
+            next_path += file.path_length + 1;
+        }
     }
 
     if (next_session != layout.sessions || next_mask != layout.masks ||
         next_file != layout.files || next_coverage != layout.coverage ||
         next_signal_layout != layout.signal_layouts ||
+        next_fallback_file != layout.fallback_files ||
+        next_fallback_section != layout.fallback_sections ||
         next_path != layout.path_bytes) {
         return {};
     }
@@ -664,17 +903,21 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
     put_le16(header + 16, FILE_BYTES);
     put_le16(header + 18, COVERAGE_BYTES);
     put_le16(header + 20, SIGNAL_LAYOUT_BYTES);
-    put_le32(header + 24, layout.records);
-    put_le32(header + 28, layout.sessions);
-    put_le32(header + 32, layout.masks);
-    put_le32(header + 36, layout.files);
-    put_le32(header + 40, layout.coverage);
-    put_le32(header + 44, layout.signal_layouts);
-    put_le32(header + 48, layout.path_bytes);
-    put_le64(header + 56, layout.body_bytes);
-    put_le32(header + 64,
+    put_le16(header + 22, FALLBACK_FILE_BYTES);
+    put_le16(header + 24, FALLBACK_SECTION_BYTES);
+    put_le32(header + 28, layout.records);
+    put_le32(header + 32, layout.sessions);
+    put_le32(header + 36, layout.masks);
+    put_le32(header + 40, layout.files);
+    put_le32(header + 44, layout.coverage);
+    put_le32(header + 48, layout.signal_layouts);
+    put_le32(header + 52, layout.fallback_files);
+    put_le32(header + 56, layout.fallback_sections);
+    put_le32(header + 60, layout.path_bytes);
+    put_le64(header + 68, layout.body_bytes);
+    put_le32(header + 76,
              crc32_ieee(header + HeaderBytes, layout.body_bytes));
-    put_le32(header + 68, crc32_ieee(header, 68));
+    put_le32(header + 84, crc32_ieee(header, 84));
     return LargeByteBuffer::freeze(std::move(output));
 }
 
@@ -702,6 +945,8 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
                                        info.file_count,
                                        info.coverage_count,
                                        info.signal_layout_count,
+                                       info.fallback_file_count,
+                                       info.fallback_section_count,
                                        info.path_bytes)) {
         return {};
     }
@@ -713,8 +958,12 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
     const uint8_t *coverage = files + info.file_count * FILE_BYTES;
     const uint8_t *signal_layouts =
         coverage + info.coverage_count * COVERAGE_BYTES;
-    const uint8_t *paths = signal_layouts +
+    const uint8_t *fallback_files = signal_layouts +
         info.signal_layout_count * SIGNAL_LAYOUT_BYTES;
+    const uint8_t *fallback_sections = fallback_files +
+        info.fallback_file_count * FALLBACK_FILE_BYTES;
+    const uint8_t *paths = fallback_sections +
+        info.fallback_section_count * FALLBACK_SECTION_BYTES;
 
     for (size_t i = 0; i < info.record_count; ++i) {
         if (!decode_record(records + i * RECORD_BYTES,
@@ -743,6 +992,20 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
             return {};
         }
     }
+    for (size_t i = 0; i < info.fallback_file_count; ++i) {
+        if (!decode_fallback_file(
+                fallback_files + i * FALLBACK_FILE_BYTES,
+                catalog->fallback_files_[i])) {
+            return {};
+        }
+    }
+    for (size_t i = 0; i < info.fallback_section_count; ++i) {
+        if (!decode_fallback_section(
+                fallback_sections + i * FALLBACK_SECTION_BYTES,
+                catalog->fallback_sections_[i])) {
+            return {};
+        }
+    }
     if (info.path_bytes > 0) {
         memcpy(catalog->paths_, paths, info.path_bytes);
     }
@@ -755,6 +1018,8 @@ std::shared_ptr<const NightCatalog> NightCatalogFileCodec::decode(
         decoded_layout.files != info.file_count ||
         decoded_layout.coverage != info.coverage_count ||
         decoded_layout.signal_layouts != info.signal_layout_count ||
+        decoded_layout.fallback_files != info.fallback_file_count ||
+        decoded_layout.fallback_sections != info.fallback_section_count ||
         decoded_layout.path_bytes != info.path_bytes) {
         return {};
     }

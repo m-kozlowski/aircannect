@@ -50,6 +50,11 @@ enum ReportEventSourceFlag : uint8_t {
 static constexpr uint8_t REPORT_EVENT_ALL =
     REPORT_EVENT_SCORED | REPORT_EVENT_CSR;
 
+enum class ReportFallbackSectionKind : uint8_t {
+    Series = 1,
+    Events = 2,
+};
+
 struct ReportSourceDef {
     ReportSourceId id;
     const char *spool_type;

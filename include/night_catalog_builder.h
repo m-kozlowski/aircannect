@@ -60,6 +60,34 @@ struct NightCatalogSummaryInput {
     uint64_t identity = 0;
 };
 
+struct NightCatalogFallbackSectionInput {
+    ReportFallbackSectionKind kind = ReportFallbackSectionKind::Series;
+    ReportSourceId source = ReportSourceId::Summary;
+    ReportSignalId signal = ReportSignalId::Count;
+    uint8_t event_mask = 0;
+    uint32_t payload_schema = 0;
+    uint32_t record_count = 0;
+    NightCatalogTimeRange coverage;
+    uint64_t data_offset = 0;
+    uint32_t data_size = 0;
+    uint32_t data_crc32 = 0;
+};
+
+struct NightCatalogFallbackInput {
+    SleepDayId sleep_day;
+    int64_t day_start_ms = 0;
+    int64_t day_end_ms = 0;
+    const NightCatalogTimeRange *sessions = nullptr;
+    size_t session_count = 0;
+    const char *path = nullptr;
+    uint64_t file_size = 0;
+    int64_t last_write_ms = 0;
+    uint64_t identity = 0;
+    uint32_t metadata_bytes = 0;
+    const NightCatalogFallbackSectionInput *sections = nullptr;
+    size_t section_count = 0;
+};
+
 using NightCatalogLocalMinuteResolver = bool (*)(void *context,
                                                  SleepDayId sleep_day,
                                                  uint16_t minute_from_noon,
@@ -72,6 +100,8 @@ struct NightCatalogBuildInput {
     size_t str_record_count = 0;
     const NightCatalogSummaryInput *summary_records = nullptr;
     size_t summary_record_count = 0;
+    const NightCatalogFallbackInput *fallback_records = nullptr;
+    size_t fallback_record_count = 0;
     NightCatalogLocalMinuteResolver resolve_local_minute = nullptr;
     void *clock_context = nullptr;
 };

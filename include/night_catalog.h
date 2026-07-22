@@ -44,6 +44,7 @@ enum NightCatalogSourceFlag : uint8_t {
     NIGHT_CATALOG_SOURCE_EDF = 1u << 0,
     NIGHT_CATALOG_SOURCE_STR = 1u << 1,
     NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK = 1u << 2,
+    NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK = 1u << 3,
 };
 
 struct NightCatalogTimeRange {
@@ -101,6 +102,30 @@ struct NightCatalogSourceFile {
     uint32_t complete_records = 0;
 };
 
+struct NightCatalogFallbackSection {
+    ReportFallbackSectionKind kind = ReportFallbackSectionKind::Series;
+    ReportSourceId source = ReportSourceId::Summary;
+    ReportSignalId signal = ReportSignalId::Count;
+    uint8_t event_mask = 0;
+    uint32_t payload_schema = 0;
+    uint32_t record_count = 0;
+    NightCatalogTimeRange coverage;
+    uint64_t data_offset = 0;
+    uint32_t data_size = 0;
+    uint32_t data_crc32 = 0;
+};
+
+struct NightCatalogFallbackFile {
+    uint32_t path_offset = 0;
+    uint16_t path_length = 0;
+    uint32_t section_offset = 0;
+    uint16_t section_count = 0;
+    uint64_t file_size = 0;
+    int64_t last_write_ms = 0;
+    uint64_t identity = 0;
+    uint32_t metadata_bytes = 0;
+};
+
 struct NightCatalogRecord {
     SleepDayId sleep_day;
     SourceRevision source_revision;
@@ -113,6 +138,8 @@ struct NightCatalogRecord {
     uint16_t mask_window_count = 0;
     uint32_t file_offset = 0;
     uint16_t file_count = 0;
+    uint32_t fallback_file_offset = 0;
+    uint16_t fallback_file_count = 0;
 
     uint8_t source_flags = 0;
     uint64_t summary_identity = 0;
@@ -148,6 +175,13 @@ public:
         const NightCatalogSourceFile &file,
         size_t &count) const;
     const char *path(const NightCatalogSourceFile &file) const;
+    const NightCatalogFallbackFile *fallback_files(
+        const NightCatalogRecord &record,
+        size_t &count) const;
+    const NightCatalogFallbackSection *fallback_sections(
+        const NightCatalogFallbackFile &file,
+        size_t &count) const;
+    const char *path(const NightCatalogFallbackFile &file) const;
 
 private:
     NightCatalog() = default;
@@ -158,6 +192,8 @@ private:
                   size_t file_count,
                   size_t coverage_count,
                   size_t signal_layout_count,
+                  size_t fallback_file_count,
+                  size_t fallback_section_count,
                   size_t path_bytes);
 
     uint8_t *storage_ = nullptr;
@@ -168,6 +204,8 @@ private:
     NightCatalogSourceFile *files_ = nullptr;
     NightCatalogSourceCoverage *coverage_ = nullptr;
     EdfReportSignalLayout *signal_layouts_ = nullptr;
+    NightCatalogFallbackFile *fallback_files_ = nullptr;
+    NightCatalogFallbackSection *fallback_sections_ = nullptr;
     char *paths_ = nullptr;
     size_t record_count_ = 0;
     size_t session_count_ = 0;
@@ -175,6 +213,8 @@ private:
     size_t file_count_ = 0;
     size_t coverage_count_ = 0;
     size_t signal_layout_count_ = 0;
+    size_t fallback_file_count_ = 0;
+    size_t fallback_section_count_ = 0;
     size_t path_bytes_ = 0;
 
     friend class NightCatalogBuilder;

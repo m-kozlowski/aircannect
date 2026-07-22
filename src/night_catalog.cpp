@@ -90,6 +90,8 @@ bool NightCatalog::allocate(size_t record_count,
                             size_t file_count,
                             size_t coverage_count,
                             size_t signal_layout_count,
+                            size_t fallback_file_count,
+                            size_t fallback_section_count,
                             size_t path_bytes) {
     size_t total = 0;
     size_t records_offset = 0;
@@ -98,6 +100,8 @@ bool NightCatalog::allocate(size_t record_count,
     size_t files_offset = 0;
     size_t coverage_offset = 0;
     size_t signal_layouts_offset = 0;
+    size_t fallback_files_offset = 0;
+    size_t fallback_sections_offset = 0;
     size_t paths_offset = 0;
 
     if (!reserve_array(total,
@@ -130,6 +134,16 @@ bool NightCatalog::allocate(size_t record_count,
                        sizeof(EdfReportSignalLayout),
                        alignof(EdfReportSignalLayout),
                        signal_layouts_offset) ||
+        !reserve_array(total,
+                       fallback_file_count,
+                       sizeof(NightCatalogFallbackFile),
+                       alignof(NightCatalogFallbackFile),
+                       fallback_files_offset) ||
+        !reserve_array(total,
+                       fallback_section_count,
+                       sizeof(NightCatalogFallbackSection),
+                       alignof(NightCatalogFallbackSection),
+                       fallback_sections_offset) ||
         !reserve_array(total,
                        path_bytes,
                        sizeof(char),
@@ -164,6 +178,14 @@ bool NightCatalog::allocate(size_t record_count,
         ? reinterpret_cast<EdfReportSignalLayout *>(storage_ +
                                                     signal_layouts_offset)
         : nullptr;
+    fallback_files_ = fallback_file_count > 0
+        ? reinterpret_cast<NightCatalogFallbackFile *>(
+              storage_ + fallback_files_offset)
+        : nullptr;
+    fallback_sections_ = fallback_section_count > 0
+        ? reinterpret_cast<NightCatalogFallbackSection *>(
+              storage_ + fallback_sections_offset)
+        : nullptr;
     paths_ = path_bytes > 0
         ? reinterpret_cast<char *>(storage_ + paths_offset)
         : nullptr;
@@ -174,6 +196,8 @@ bool NightCatalog::allocate(size_t record_count,
     file_count_ = file_count;
     coverage_count_ = coverage_count;
     signal_layout_count_ = signal_layout_count;
+    fallback_file_count_ = fallback_file_count;
+    fallback_section_count_ = fallback_section_count;
     path_bytes_ = path_bytes;
 
     static_assert(std::is_trivially_destructible<NightCatalogRecord>::value,
@@ -190,6 +214,12 @@ bool NightCatalog::allocate(size_t record_count,
     static_assert(
         std::is_trivially_destructible<EdfReportSignalLayout>::value,
         "catalog signal layouts must remain trivially destructible");
+    static_assert(
+        std::is_trivially_destructible<NightCatalogFallbackFile>::value,
+        "catalog fallback files must remain trivially destructible");
+    static_assert(
+        std::is_trivially_destructible<NightCatalogFallbackSection>::value,
+        "catalog fallback sections must remain trivially destructible");
 
     for (size_t i = 0; i < record_count_; ++i) {
         new (&records_[i]) NightCatalogRecord();
@@ -208,6 +238,12 @@ bool NightCatalog::allocate(size_t record_count,
     }
     for (size_t i = 0; i < signal_layout_count_; ++i) {
         new (&signal_layouts_[i]) EdfReportSignalLayout();
+    }
+    for (size_t i = 0; i < fallback_file_count_; ++i) {
+        new (&fallback_files_[i]) NightCatalogFallbackFile();
+    }
+    for (size_t i = 0; i < fallback_section_count_; ++i) {
+        new (&fallback_sections_[i]) NightCatalogFallbackSection();
     }
     return true;
 }
@@ -293,6 +329,43 @@ const EdfReportSignalLayout *NightCatalog::signal_layouts(
 }
 
 const char *NightCatalog::path(const NightCatalogSourceFile &file) const {
+    if (file.path_length == 0 || file.path_offset >= path_bytes_ ||
+        file.path_length >= path_bytes_ - file.path_offset) {
+        return nullptr;
+    }
+    return paths_ + file.path_offset;
+}
+
+const NightCatalogFallbackFile *NightCatalog::fallback_files(
+    const NightCatalogRecord &record,
+    size_t &count) const {
+    count = record.fallback_file_count;
+    if (record.fallback_file_offset > fallback_file_count_ ||
+        count > fallback_file_count_ - record.fallback_file_offset) {
+        count = 0;
+        return nullptr;
+    }
+    return count > 0
+        ? fallback_files_ + record.fallback_file_offset
+        : nullptr;
+}
+
+const NightCatalogFallbackSection *NightCatalog::fallback_sections(
+    const NightCatalogFallbackFile &file,
+    size_t &count) const {
+    count = file.section_count;
+    if (file.section_offset > fallback_section_count_ ||
+        count > fallback_section_count_ - file.section_offset) {
+        count = 0;
+        return nullptr;
+    }
+    return count > 0
+        ? fallback_sections_ + file.section_offset
+        : nullptr;
+}
+
+const char *NightCatalog::path(
+    const NightCatalogFallbackFile &file) const {
     if (file.path_length == 0 || file.path_offset >= path_bytes_ ||
         file.path_length >= path_bytes_ - file.path_offset) {
         return nullptr;
