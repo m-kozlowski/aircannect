@@ -14,9 +14,9 @@
 #include "management_console_format.h"
 #include "management_console_utils.h"
 #include "memory_manager.h"
-#include "storage_diagnostic_job.h"
 #include "storage_export_plan.h"
 #include "storage_manager.h"
+#include "storage_service.h"
 #include "string_util.h"
 #include "tls_memory.h"
 #include "version.h"
@@ -873,12 +873,7 @@ void ManagementConsole::handle_storage_command(Print &out,
         return;
     }
     if (rest_lower == "write-test status") {
-        if (!ctx.storage_diagnostic_job) {
-            out.println("[STORAGE_TEST] unavailable");
-            return;
-        }
-        print_storage_test_status(out,
-                                  ctx.storage_diagnostic_job->status());
+        print_storage_test_status(out, StorageService::diagnostic_status());
         return;
     }
     if (rest_lower == "write-test" || rest_lower.startsWith("write-test ")) {
@@ -893,17 +888,14 @@ void ManagementConsole::handle_storage_command(Print &out,
             if (parse_console_arg(args, pos, parsed)) text = parsed;
         }
         text += '\n';
-        StorageDiagnosticJob *job = ctx.storage_diagnostic_job;
-        const bool queued = job && job->request_append(
+        const bool queued = StorageService::request_diagnostic_append(
             path.c_str(),
             reinterpret_cast<const uint8_t *>(text.c_str()),
             text.length());
 
         out.print("[STORAGE_TEST] ");
         out.println(queued ? "queued" : "rejected");
-        if (job) {
-            print_storage_test_status(out, job->status());
-        }
+        print_storage_test_status(out, StorageService::diagnostic_status());
         return;
     }
     print_unknown_command(out, "STORAGE",

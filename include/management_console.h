@@ -24,7 +24,6 @@
 namespace aircannect {
 
 class ExportCoordinator;
-class StorageDiagnosticJob;
 class WebUI;
 
 struct ConsoleContext {
@@ -49,7 +48,6 @@ struct ConsoleContext {
     OximetryManager &oximetry_manager;
     ReportTask &report_task;
     StorageReadPort &storage_read_port;
-    StorageDiagnosticJob *storage_diagnostic_job = nullptr;
     ExportCoordinator *export_coordinator = nullptr;
     WebUI *web_ui = nullptr;
 };

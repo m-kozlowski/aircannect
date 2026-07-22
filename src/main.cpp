@@ -30,7 +30,6 @@
 #include "rpc_quiesce_coordinator.h"
 #include "session_manager.h"
 #include "sink_manager.h"
-#include "storage_diagnostic_job.h"
 #include "storage_manager.h"
 #include "storage_service.h"
 #include "stream_broker.h"
@@ -73,7 +72,6 @@ static ReportSpoolService report_spool_service(rpc_transport);
 static ReportTask report_task;
 static ReportHttpController report_http_controller;
 static BackgroundWorker bg_worker;
-static StorageDiagnosticJob storage_diagnostic_job;
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
 #if AC_STACK_PROFILE_ENABLED
@@ -113,7 +111,6 @@ static ConsoleContext console_ctx{
     oximetry_manager,
     report_task,
     StorageService::read_port(),
-    &storage_diagnostic_job,
     nullptr,
     &web_ui,
 };
@@ -624,10 +621,7 @@ void setup() {
                  export_coordinator,
                  console_ctx);
 
-    // Background jobs
-    storage_diagnostic_job.begin();
-
-    bg_worker.add_job(&storage_diagnostic_job);
+    // Legacy worker retained until its remaining runtime shell is removed.
     bg_worker.begin();
 }
 

@@ -223,6 +223,11 @@ StorageFileLogSink file_log_sink;
 size_t file_log_burst = 0;
 size_t foreground_turn = 0;
 
+static constexpr size_t AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY = 512;
+StorageDiagnosticStatus diagnostic;
+uint8_t *diagnostic_payload = nullptr;
+size_t diagnostic_payload_length = 0;
+
 bool claim_maintenance(MaintenanceOwner owner) {
     MaintenanceOwner expected = MaintenanceOwner::None;
     return maintenance_owner.compare_exchange_strong(expected, owner);
@@ -1931,6 +1936,50 @@ bool process_foreground_step() {
     return false;
 }
 
+bool process_diagnostic_step() {
+    if (!lock_queue(20)) return false;
+    if (diagnostic.state != StorageDiagnosticState::Queued) {
+        unlock_queue();
+        return false;
+    }
+
+    diagnostic.state = StorageDiagnosticState::Writing;
+    const size_t payload_length = diagnostic_payload_length;
+    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
+    copy_cstr(path, sizeof(path), diagnostic.path);
+    unlock_queue();
+
+    size_t written = 0;
+    bool opened = false;
+    {
+        Storage::Guard guard;
+        File file = Storage::open(path, "a");
+        opened = static_cast<bool>(file);
+        if (opened) {
+            written = file.write(diagnostic_payload, payload_length);
+            file.close();
+        }
+    }
+
+    if (queue_lock && xSemaphoreTake(queue_lock, portMAX_DELAY) == pdTRUE) {
+        diagnostic.bytes = written;
+        if (!opened) {
+            diagnostic.state = StorageDiagnosticState::Failed;
+            copy_cstr(diagnostic.error, sizeof(diagnostic.error),
+                      "open_failed");
+        } else if (written != payload_length) {
+            diagnostic.state = StorageDiagnosticState::Failed;
+            copy_cstr(diagnostic.error, sizeof(diagnostic.error),
+                      "short_write");
+        } else {
+            diagnostic.state = StorageDiagnosticState::Complete;
+            diagnostic.error[0] = '\0';
+        }
+        unlock_queue();
+    }
+    return true;
+}
+
 void process_job(JobSlot &job) {
     switch (job.type) {
         case JobType::Open:
@@ -1999,6 +2048,8 @@ void task_entry(void *) {
             } else if (process_foreground_step()) {
                 did_work = true;
                 file_log_burst = 0;
+            } else if (process_diagnostic_step()) {
+                did_work = true;
             } else if (atomic_write_service.step(
                            StorageAtomicWriteLane::Maintenance)) {
                 did_work = true;
@@ -2103,6 +2154,18 @@ void begin() {
         return;
     }
 
+    if (!diagnostic_payload) {
+        diagnostic_payload = static_cast<uint8_t *>(
+            Memory::alloc_large(AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY,
+                                false));
+    }
+    diagnostic.available = diagnostic_payload != nullptr;
+    if (!diagnostic.available) {
+        diagnostic.state = StorageDiagnosticState::Failed;
+        copy_cstr(diagnostic.error, sizeof(diagnostic.error),
+                  "allocation_failed");
+    }
+
     (void)file_log_sink.begin();
     (void)browser_service.begin(wake_service_task);
     (void)archive_service.begin(wake_service_task,
@@ -2126,6 +2189,7 @@ void begin() {
                                     AC_STORAGE_SERVICE_TASK_CORE);
         if (created != pdPASS || !task) {
             stats.available = false;
+            diagnostic.available = false;
             browser_service.set_task_available(false);
             archive_service.set_task_available(false);
             delete_service.set_task_available(false);
@@ -2382,6 +2446,44 @@ StorageDeletePort &delete_port() {
     return delete_service;
 }
 
+bool request_diagnostic_append(const char *path,
+                               const uint8_t *data,
+                               size_t length) {
+    if (!path || path[0] != '/' || !data || length == 0 ||
+        length > AC_STORAGE_DIAGNOSTIC_PAYLOAD_CAPACITY ||
+        strlen(path) >= AC_STORAGE_WRITE_PATH_MAX) {
+        return false;
+    }
+    if (!stats.initialized) begin();
+    if (!lock_queue(20)) return false;
+
+    const bool busy = diagnostic.state == StorageDiagnosticState::Queued ||
+                      diagnostic.state == StorageDiagnosticState::Writing;
+    if (!stats.available || !diagnostic.available || busy) {
+        unlock_queue();
+        return false;
+    }
+
+    copy_cstr(diagnostic.path, sizeof(diagnostic.path), path);
+    memcpy(diagnostic_payload, data, length);
+    diagnostic_payload_length = length;
+    diagnostic.bytes = length;
+    diagnostic.error[0] = '\0';
+    diagnostic.state = StorageDiagnosticState::Queued;
+    unlock_queue();
+
+    wake_service_task();
+    return true;
+}
+
+StorageDiagnosticStatus diagnostic_status() {
+    StorageDiagnosticStatus out;
+    if (!lock_queue(20)) return out;
+    out = diagnostic;
+    unlock_queue();
+    return out;
+}
+
 bool configure_file_log(bool enabled) {
     if (!file_log_sink.begin()) return false;
     file_log_sink.set_enabled(enabled);
@@ -2420,7 +2522,9 @@ StorageServiceStatus status() {
         refresh_read_status_locked();
         out = stats;
         out.edf_queued = queued;
-        out.busy = processing_job || processing_read;
+        out.busy = processing_job || processing_read ||
+                   diagnostic.state == StorageDiagnosticState::Queued ||
+                   diagnostic.state == StorageDiagnosticState::Writing;
         unlock_queue();
     } else {
         out.busy = processing_job || processing_read;
@@ -2475,4 +2579,16 @@ bool edf_open_result(const EdfStorageOpenHandle &handle,
 }
 
 }  // namespace StorageService
+
+const char *storage_diagnostic_state_name(StorageDiagnosticState state) {
+    switch (state) {
+        case StorageDiagnosticState::Queued: return "queued";
+        case StorageDiagnosticState::Writing: return "writing";
+        case StorageDiagnosticState::Complete: return "complete";
+        case StorageDiagnosticState::Failed: return "failed";
+        case StorageDiagnosticState::Idle:
+        default: return "idle";
+    }
+}
+
 }  // namespace aircannect
