@@ -15,8 +15,7 @@ struct ReportSpoolFetchCommand {
     uint32_t generation = 0;
 
     bool valid() const {
-        return source != ReportSourceId::Summary && from_ms > 0 &&
-               generation != 0;
+        return from_ms > 0 && generation != 0;
     }
 };
 

@@ -166,13 +166,18 @@ bool ReportSpoolService::poll(bool transport_backpressure_active,
         SpoolClientRequest request;
         request.spool_type = source->spool_type;
         request.from_dt = std::move(from_dt);
-        request.max_size = AC_REPORT_CACHE_SPOOL_ROUND_BYTES;
+        const bool complete_payload =
+            command.source == ReportSourceId::Summary;
+
+        request.max_size = complete_payload
+            ? AC_REPORT_SUMMARY_SPOOL_ROUND_BYTES
+            : AC_REPORT_CACHE_SPOOL_ROUND_BYTES;
         request.fragment_max = AC_REPORT_SPOOL_FRAGMENT_MAX_BYTES;
         request.max_notifications =
             AC_REPORT_SPOOL_MAX_NOTIFICATIONS_PER_PULL;
-        request.max_rounds = 128;
+        request.max_rounds = complete_payload ? 64 : 128;
         request.pace_on_backpressure = true;
-        request.stream_rounds = true;
+        request.stream_rounds = !complete_payload;
         if (!runtime_.begin(request)) {
             publish_completion(ticket,
                                OperationOutcome::failed(),

@@ -45,6 +45,7 @@ struct PendingCatalogRefresh {
     uint32_t generation = 0;
     bool current_offset_valid = false;
     int32_t current_offset_minutes = 0;
+    bool summary_attempted = false;
 
     bool valid() const { return generation != 0; }
     void clear() { *this = {}; }
@@ -240,6 +241,11 @@ struct ReportTask::Runtime {
         catalog_generation = generation;
         engine.publish_catalog(catalog);
 
+        if (!summary_acquisition.snapshot()) {
+            summary_acquisition.seed(
+                NightCatalogSummarySnapshot::from_catalog(*catalog));
+        }
+
         if (artifact_index) {
             std::shared_ptr<const ReportArtifactIndex> reconciled =
                 ReportArtifactIndexBuilder::reconcile(
@@ -313,6 +319,7 @@ struct ReportTask::Runtime {
         next.command_drops = drops;
         next.command_failures = command_failures;
         next.catalog_generation = catalog_generation;
+        next.summary_acquisition = summary_acquisition.status();
         next.catalog_refresh = catalog_refresh.status();
         next.catalog_store = catalog_store.status();
         next.artifact_index_refresh = artifact_index_refresh.status();
@@ -327,7 +334,8 @@ struct ReportTask::Runtime {
                    (artifact_index_refresh.active() ||
                     artifact_index_refresh_pending)) {
             next.state = ReportTaskState::IndexingArtifacts;
-        } else if (catalog_refresh.active() || pending_refresh.valid() ||
+        } else if (summary_acquisition.active() ||
+                   catalog_refresh.active() || pending_refresh.valid() ||
                    refresh_generation != 0 ||
                    engine.catalog_update_required()) {
             next.state = ReportTaskState::RefreshingCatalog;
@@ -362,6 +370,7 @@ struct ReportTask::Runtime {
     ReportArtifactRequest build_slots[AC_REPORT_TASK_BUILD_CAPACITY] = {};
     ReportEngine engine;
     ReportNightArtifactBuilder builder;
+    ReportSummaryAcquisition summary_acquisition;
     NightCatalogRefreshService catalog_refresh;
     NightCatalogStoreService catalog_store;
     ReportArtifactIndexRefreshService artifact_index_refresh;
@@ -452,6 +461,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->catalog_refresh.begin(scan_port, read_port);
     runtime_->catalog_store.begin(read_port, write_port);
     runtime_->artifact_index_refresh.begin(scan_port, read_port);
+    runtime_->summary_acquisition.begin(spool_port);
     runtime_->engine.begin(read_port,
                            write_port,
                            spool_port,
@@ -594,6 +604,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     command.current_offset_valid;
                 runtime.pending_refresh.current_offset_minutes =
                     command.current_offset_minutes;
+                runtime.pending_refresh.summary_attempted = false;
                 break;
 
             case ReportTaskCommandKind::CancelGeneration:
@@ -605,7 +616,31 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                     runtime.catalog_refresh.cancel();
                     runtime.refresh_generation = 0;
                 }
+                if (runtime.summary_acquisition.status().generation ==
+                    command.generation) {
+                    runtime.summary_acquisition.cancel();
+                }
                 break;
+        }
+    }
+
+    if (runtime.summary_acquisition.active()) {
+        worked = runtime.summary_acquisition.poll() || worked;
+    }
+
+    if (runtime.pending_refresh.valid() &&
+        !runtime.pending_refresh.summary_attempted) {
+        const ReportSummaryAcquisitionStatus summary_status =
+            runtime.summary_acquisition.status();
+        if (!runtime.summary_acquisition.active() &&
+            summary_status.generation ==
+                runtime.pending_refresh.generation &&
+            (summary_status.state ==
+                 ReportSummaryAcquisitionState::Ready ||
+             summary_status.state ==
+                 ReportSummaryAcquisitionState::Error)) {
+            runtime.pending_refresh.summary_attempted = true;
+            worked = true;
         }
     }
 
@@ -790,11 +825,34 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.catalog_load_pending &&
         runtime.store_purpose != CatalogStorePurpose::Load &&
         !runtime.engine.catalog_update_required() &&
-        runtime.pending_refresh.valid()) {
+        runtime.pending_refresh.valid() &&
+        !runtime.pending_refresh.summary_attempted &&
+        !runtime.summary_acquisition.active()) {
+        const OperationAdmission admitted =
+            runtime.summary_acquisition.request(
+                runtime.pending_refresh.generation);
+        if (admitted == OperationAdmission::Accepted) {
+            worked = true;
+        } else if (admitted == OperationAdmission::Rejected) {
+            runtime.pending_refresh.summary_attempted = true;
+            runtime.command_failures++;
+            worked = true;
+        }
+    }
+
+    if (!runtime.catalog_refresh.active() &&
+        runtime.refresh_generation == 0 &&
+        !runtime.catalog_load_pending &&
+        runtime.store_purpose != CatalogStorePurpose::Load &&
+        !runtime.engine.catalog_update_required() &&
+        runtime.pending_refresh.valid() &&
+        runtime.pending_refresh.summary_attempted &&
+        !runtime.summary_acquisition.active()) {
+        const std::shared_ptr<const NightCatalogSummarySnapshot> summary =
+            runtime.summary_acquisition.snapshot();
         const OperationAdmission admitted =
             runtime.catalog_refresh.request_refresh(
-                nullptr,
-                0,
+                summary,
                 runtime.pending_refresh.current_offset_valid,
                 runtime.pending_refresh.current_offset_minutes,
                 runtime.pending_refresh.generation);
@@ -833,6 +891,7 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.pending_refresh.valid() &&
+        !runtime.summary_acquisition.active() &&
         !runtime.engine.catalog_update_required() &&
         runtime.artifact_index_loaded &&
         !runtime.artifact_index_refresh.active() &&

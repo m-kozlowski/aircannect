@@ -6,6 +6,7 @@
 
 #include "night_catalog.h"
 #include "night_catalog_builder.h"
+#include "night_catalog_summary_snapshot.h"
 #include "operation_outcome.h"
 #include "storage_read_port.h"
 #include "storage_scan_port.h"
@@ -50,8 +51,7 @@ public:
     void begin(StorageScanPort &scan_port, StorageReadPort &read_port);
 
     OperationAdmission request_refresh(
-        const NightCatalogSummaryInput *summary_records,
-        size_t summary_record_count,
+        std::shared_ptr<const NightCatalogSummarySnapshot> summary,
         bool current_offset_valid,
         int32_t current_offset_minutes,
         uint32_t generation);

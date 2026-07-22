@@ -208,8 +208,6 @@ struct NightCatalogRefreshRuntime {
 
     ~NightCatalogRefreshRuntime() {
         clear_sources();
-        destroy_large_array(summary_records, summary_record_capacity);
-        destroy_large_array(summary_sessions, summary_session_capacity);
         free_large(read_buffer);
     }
 
@@ -262,14 +260,7 @@ struct NightCatalogRefreshRuntime {
     }
 
     void clear_summary() {
-        destroy_large_array(summary_records, summary_record_capacity);
-        summary_records = nullptr;
-        summary_record_capacity = 0;
-        summary_record_count = 0;
-
-        destroy_large_array(summary_sessions, summary_session_capacity);
-        summary_sessions = nullptr;
-        summary_session_capacity = 0;
+        summary.reset();
     }
 
     Phase phase = Phase::Idle;
@@ -278,11 +269,7 @@ struct NightCatalogRefreshRuntime {
     StoragePreparedRead prepared;
     std::shared_ptr<const StorageScanSnapshot> scan;
 
-    NightCatalogSummaryInput *summary_records = nullptr;
-    size_t summary_record_capacity = 0;
-    size_t summary_record_count = 0;
-    NightCatalogTimeRange *summary_sessions = nullptr;
-    size_t summary_session_capacity = 0;
+    std::shared_ptr<const NightCatalogSummarySnapshot> summary;
 
     EdfReportSessionDescriptor *edf_sessions = nullptr;
     size_t edf_session_capacity = 0;
@@ -374,62 +361,17 @@ void NightCatalogRefreshService::fail(const char *error) {
 }
 
 OperationAdmission NightCatalogRefreshService::request_refresh(
-    const NightCatalogSummaryInput *summary_records,
-    size_t summary_record_count,
+    std::shared_ptr<const NightCatalogSummarySnapshot> summary,
     bool current_offset_valid,
     int32_t current_offset_minutes,
     uint32_t generation) {
     if (!runtime_ || !scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
-    if (generation == 0 ||
-        (summary_record_count > 0 && !summary_records)) {
-        return OperationAdmission::Rejected;
-    }
+    if (generation == 0) return OperationAdmission::Rejected;
 
     reset_transient();
-
-    size_t summary_session_count = 0;
-    for (size_t i = 0; i < summary_record_count; ++i) {
-        if (!summary_records[i].sleep_day.valid() ||
-            summary_records[i].day_end_ms <=
-                summary_records[i].day_start_ms ||
-            summary_records[i].identity == 0 ||
-            (summary_records[i].session_count > 0 &&
-             !summary_records[i].sessions) ||
-            summary_session_count >
-                std::numeric_limits<size_t>::max() -
-                    summary_records[i].session_count) {
-            return OperationAdmission::Rejected;
-        }
-        summary_session_count += summary_records[i].session_count;
-    }
-
-    runtime_->summary_records =
-        allocate_large_array<NightCatalogSummaryInput>(summary_record_count);
-    runtime_->summary_record_capacity = summary_record_count;
-    runtime_->summary_sessions =
-        allocate_large_array<NightCatalogTimeRange>(summary_session_count);
-    runtime_->summary_session_capacity = summary_session_count;
-    if ((summary_record_count > 0 && !runtime_->summary_records) ||
-        (summary_session_count > 0 && !runtime_->summary_sessions)) {
-        reset_transient();
-        return OperationAdmission::Busy;
-    }
-
-    size_t next_session = 0;
-    for (size_t i = 0; i < summary_record_count; ++i) {
-        runtime_->summary_records[i] = summary_records[i];
-        runtime_->summary_records[i].sessions =
-            summary_records[i].session_count > 0
-                ? runtime_->summary_sessions + next_session
-                : nullptr;
-        for (size_t j = 0; j < summary_records[i].session_count; ++j) {
-            runtime_->summary_sessions[next_session++] =
-                summary_records[i].sessions[j];
-        }
-    }
-    runtime_->summary_record_count = summary_record_count;
+    runtime_->summary = std::move(summary);
     runtime_->current_offset_valid = current_offset_valid;
     runtime_->current_offset_minutes = current_offset_minutes;
 
@@ -1092,8 +1034,12 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
     }
 
     NightCatalogClockContext clock;
-    clock.summary_records = runtime.summary_records;
-    clock.summary_record_count = runtime.summary_record_count;
+    clock.summary_records = runtime.summary
+        ? runtime.summary->records()
+        : nullptr;
+    clock.summary_record_count = runtime.summary
+        ? runtime.summary->size()
+        : 0;
     clock.current_offset_valid = runtime.current_offset_valid;
     clock.current_offset_minutes = runtime.current_offset_minutes;
 
@@ -1193,8 +1139,12 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
     input.edf_session_count = output_sessions;
     input.str_records = runtime.str_records;
     input.str_record_count = runtime.str_record_count;
-    input.summary_records = runtime.summary_records;
-    input.summary_record_count = runtime.summary_record_count;
+    input.summary_records = runtime.summary
+        ? runtime.summary->records()
+        : nullptr;
+    input.summary_record_count = runtime.summary
+        ? runtime.summary->size()
+        : 0;
     input.fallback_records = runtime.fallback_records;
     input.fallback_record_count = runtime.fallback_record_count;
     input.resolve_local_minute = night_catalog_resolve_local_minute;

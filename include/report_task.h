@@ -8,6 +8,7 @@
 #include "night_catalog_store_service.h"
 #include "report_artifact_index_refresh_service.h"
 #include "report_engine.h"
+#include "report_summary_acquisition.h"
 
 namespace aircannect {
 
@@ -32,6 +33,7 @@ struct ReportTaskStatus {
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
     uint32_t catalog_generation = 0;
+    ReportSummaryAcquisitionStatus summary_acquisition;
     NightCatalogRefreshStatus catalog_refresh;
     NightCatalogStoreStatus catalog_store;
     ReportArtifactIndexRefreshStatus artifact_index_refresh;
