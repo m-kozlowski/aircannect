@@ -4,6 +4,7 @@
 #include <string>
 
 #include "as11_event_frame.h"
+#include "as11_therapy_state.h"
 
 namespace aircannect {
 
@@ -14,19 +15,6 @@ const char *as11_timezone_get_params_json();
 bool as11_parse_event_subscription_response(const std::string &payload,
                                             bool require_activity_selectors,
                                             uint32_t &subscription_id);
-
-enum class As11TherapyState {
-    Unknown,
-    Standby,
-    Running,
-    Other,
-};
-
-enum class As11TherapyTarget {
-    None,
-    Standby,
-    Running,
-};
 
 class As11DeviceState {
 public:
