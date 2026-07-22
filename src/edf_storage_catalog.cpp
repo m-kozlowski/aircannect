@@ -157,28 +157,6 @@ const char *edf_annotation_file_tag(EdfAnnotationKind kind) {
     }
 }
 
-bool edf_parse_as11_local_datetime(const char *text,
-                                   EdfLocalDateTime &out) {
-    if (!text || !*text) return false;
-    EdfLocalDateTime dt;
-    int consumed = 0;
-    if (sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d%n",
-               &dt.year, &dt.month, &dt.day,
-               &dt.hour, &dt.minute, &dt.second, &consumed) != 6) {
-        return false;
-    }
-    const char *p = text + consumed;
-    if (*p == '.') {
-        p++;
-        while (*p >= '0' && *p <= '9') p++;
-    }
-    if (*p == 'Z') p++;
-    if (*p != 0) return false;
-    if (!valid_date_time(dt)) return false;
-    out = dt;
-    return true;
-}
-
 bool edf_epoch_ms_to_local_datetime(int64_t epoch_ms,
                                     int32_t timezone_offset_minutes,
                                     EdfLocalDateTime &out) {

@@ -20,7 +20,6 @@ struct EdfLocalDateTime {
 const char *edf_file_tag(EdfFileKind kind);
 const char *edf_annotation_file_tag(EdfAnnotationKind kind);
 
-bool edf_parse_as11_local_datetime(const char *text, EdfLocalDateTime &out);
 bool edf_epoch_ms_to_local_datetime(int64_t epoch_ms,
                                     int32_t timezone_offset_minutes,
                                     EdfLocalDateTime &out);

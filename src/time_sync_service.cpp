@@ -416,12 +416,6 @@ bool TimeSyncService::parse_resmed_datetime_ms(
     return true;
 }
 
-std::string TimeSyncService::format_utc(int64_t epoch_ms) const {
-    char full[29];
-    if (!format_utc(epoch_ms, full, sizeof(full))) return "";
-    return std::string(full);
-}
-
 bool TimeSyncService::format_utc(int64_t epoch_ms,
                                  char *out,
                                  size_t size) const {

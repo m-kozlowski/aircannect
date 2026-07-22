@@ -57,7 +57,6 @@ private:
     bool parse_resmed_datetime_ms(const std::string &utc_datetime,
                                   int64_t &epoch_ms) const;
     bool format_utc(int64_t epoch_ms, char *out, size_t size) const;
-    std::string format_utc(int64_t epoch_ms) const;
 
     const AppConfigData *app_config_ = nullptr;
     WifiManager *wifi_manager_ = nullptr;

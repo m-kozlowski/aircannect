@@ -211,11 +211,6 @@ const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
     return REPORT_SIGNAL_MAP;
 }
 
-const char *edf_report_signal_mapping_label(
-    const EdfReportSignalMappingDef &mapping) {
-    return mapping.label ? mapping.label : "";
-}
-
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out) {
@@ -223,43 +218,13 @@ bool edf_report_signal_mapping(EdfInventoryFileKind kind,
     if (!label || !label[0]) return false;
     for (const EdfReportSignalMappingDef &row : REPORT_SIGNAL_MAP) {
         if (row.kind != kind) continue;
-        const char *row_label = edf_report_signal_mapping_label(row);
+        const char *row_label = row.label ? row.label : "";
         if (!row_label[0] || strcmp(row_label, label) != 0) continue;
         out.signal = row.signal;
         out.source = row.source;
         out.sample_interval_ms = row.sample_interval_ms;
         out.primary = row.primary;
         return true;
-    }
-    return false;
-}
-
-bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
-                                         ReportSignalId signal,
-                                         bool require_primary,
-                                         uint32_t &signal_index,
-                                         EdfReportSignalMapping &mapping) {
-    signal_index = 0;
-    mapping = EdfReportSignalMapping();
-    if (file.status != EdfReportFileStatus::Ok) return false;
-    const size_t pass_count = require_primary ? 1 : 2;
-    for (size_t pass = 0; pass < pass_count; ++pass) {
-        const bool want_primary = pass == 0;
-        for (uint32_t i = 0; i < file.signal_count; ++i) {
-            EdfReportSignalMapping candidate;
-            if (!edf_report_signal_mapping(file.inventory.kind,
-                                           file.signals[i].label,
-                                           candidate)) {
-                continue;
-            }
-            if (candidate.signal != signal ||
-                candidate.primary != want_primary) {
-                continue;
-            }
-            signal_index = i;
-            mapping = candidate;
-            return true;
-        }
     }
     return false;
 }

@@ -123,16 +123,9 @@ EdfReportFileStatus edf_report_describe_file(
 
 const EdfReportSignalMappingDef *edf_report_signal_mapping_defs(
     size_t &count);
-const char *edf_report_signal_mapping_label(
-    const EdfReportSignalMappingDef &mapping);
 bool edf_report_signal_mapping(EdfInventoryFileKind kind,
                                const char *label,
                                EdfReportSignalMapping &out);
-bool edf_report_file_find_signal_mapping(const EdfReportFileDescriptor &file,
-                                         ReportSignalId signal,
-                                         bool require_primary,
-                                         uint32_t &signal_index,
-                                         EdfReportSignalMapping &mapping);
 bool edf_report_file_signal_layouts(const EdfReportFileDescriptor &file,
                                     EdfReportSignalLayout *layouts,
                                     size_t capacity,
