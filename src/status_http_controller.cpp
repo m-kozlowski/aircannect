@@ -1,23 +1,13 @@
 #include "status_http_controller.h"
 
-#include <Arduino.h>
 #include <ESPAsyncWebServer.h>
 #include <stdio.h>
 #include <string_view>
 
-#include "as11_device_service.h"
 #include "board.h"
-#include "config_service.h"
-#include "firmware_installer.h"
 #include "json_util.h"
-#include "oximetry_hub.h"
-#include "plx_peripheral.h"
 #include "storage_manager.h"
 #include "system_status_snapshot.h"
-#include "time_sync_service.h"
-#include "udp_oximeter_source.h"
-#include "update_checker.h"
-#include "wifi_manager.h"
 
 namespace aircannect {
 namespace {
@@ -58,27 +48,8 @@ const char *oximetry_source_name(OximetrySource source) {
 }
 
 bool build_status_json(LargeTextBuffer &json,
-                       const As11DeviceService &device,
-                       const WifiManager &wifi_manager,
-                       const ConfigService &config,
-                       const TimeSyncService &time_sync,
-                       const FirmwareInstaller &installer,
-                       const UpdateChecker &update_checker,
-                       const OximetryHub &oximetry_hub,
-                       const UdpOximeterSource &oximetry_udp,
-                       const PlxPeripheral &plx_peripheral,
-                       StatusHttpController::PollCheckpoint checkpoint) {
-    const SystemStatusSnapshot snap = collect_system_status({
-        device,
-        wifi_manager,
-        config.data(),
-        time_sync,
-        installer,
-        update_checker,
-        oximetry_hub,
-        oximetry_udp,
-        plx_peripheral,
-    }, checkpoint);
+                       const SystemStatusSnapshot &snap,
+                       const char *hostname) {
     const MemoryStatus &mem = snap.memory;
     const StorageStatus &storage = snap.storage;
     const WifiStatusSnapshot &wifi = snap.wifi;
@@ -89,7 +60,7 @@ bool build_status_json(LargeTextBuffer &json,
     json = "{";
     json_add_string(json, "version", snap.version, false);
     json_add_string(json, "built", snap.built);
-    json_add_string(json, "hostname", config.data().hostname.c_str());
+    json_add_string(json, "hostname", hostname ? hostname : "");
     json_add_int(json, "uptime", snap.uptime_s);
     json_add_int(json, "heap", static_cast<long>(mem.heap_free));
     json_add_bool(json, "psram_available", mem.psram_available);
@@ -172,27 +143,7 @@ bool build_status_json(LargeTextBuffer &json,
 
 }  // namespace
 
-bool StatusHttpController::begin(As11DeviceService &device,
-                                 WifiManager &wifi,
-                                 ConfigService &config,
-                                 TimeSyncService &time_sync,
-                                 FirmwareInstaller &installer,
-                                 UpdateChecker &update_checker,
-                                 OximetryHub &oximetry_hub,
-                                 UdpOximeterSource &oximetry_udp,
-                                 PlxPeripheral &plx_peripheral) {
-    device_ = &device;
-    wifi_ = &wifi;
-    config_ = &config;
-    time_sync_ = &time_sync;
-    installer_ = &installer;
-    update_checker_ = &update_checker;
-    oximetry_hub_ = &oximetry_hub;
-    oximetry_udp_ = &oximetry_udp;
-    plx_peripheral_ = &plx_peripheral;
-    observed_device_revision_ = device.revision();
-    observed_config_revision_ = config.revision();
-
+bool StatusHttpController::begin() {
     if (!cache_mutex_) {
         cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
     }
@@ -200,7 +151,7 @@ bool StatusHttpController::begin(As11DeviceService &device,
 
     snapshot_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
     build_json_.reserve(AC_WEB_STATUS_JSON_RESERVE);
-    return publish_snapshot();
+    return true;
 }
 
 void StatusHttpController::register_routes(AsyncWebServer &server) {
@@ -210,29 +161,19 @@ void StatusHttpController::register_routes(AsyncWebServer &server) {
     });
 }
 
-void StatusHttpController::poll(PollCheckpoint checkpoint) {
-    if (!device_ || !wifi_ || !config_ || !time_sync_ || !installer_ ||
-        !update_checker_ || !oximetry_hub_ || !oximetry_udp_ ||
-        !plx_peripheral_) {
-        return;
+bool StatusHttpController::refresh_due(uint32_t device_revision,
+                                       uint32_t config_revision,
+                                       uint32_t now_ms) const {
+    if (!cache_mutex_ || !snapshot_ready_) return cache_mutex_ != nullptr;
+    if (observed_device_revision_ != device_revision ||
+        observed_config_revision_ != config_revision) {
+        return true;
     }
 
-    if (observed_device_revision_ != device_->revision()) {
-        observed_device_revision_ = device_->revision();
-        snapshot_dirty_ = true;
-    }
-    if (observed_config_revision_ != config_->revision()) {
-        observed_config_revision_ = config_->revision();
-        snapshot_dirty_ = true;
-    }
-
-    const uint32_t now_ms = millis();
     const bool periodic_due =
         static_cast<int32_t>(now_ms - last_snapshot_ms_) >=
         static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
-    if (snapshot_dirty_ || periodic_due) {
-        (void)publish_snapshot(checkpoint);
-    }
+    return periodic_due;
 }
 
 bool StatusHttpController::copy_snapshot(LargeTextBuffer &out,
@@ -249,19 +190,22 @@ bool StatusHttpController::copy_snapshot(LargeTextBuffer &out,
     return copied;
 }
 
-bool StatusHttpController::publish_snapshot(PollCheckpoint checkpoint) {
+bool StatusHttpController::publish_snapshot(
+    const SystemStatusSnapshot &snapshot,
+    const char *hostname,
+    uint32_t device_revision,
+    uint32_t config_revision) {
     build_json_.clear();
-    if (!build_status_json(build_json_, *device_, *wifi_, *config_,
-                           *time_sync_, *installer_, *update_checker_,
-                           *oximetry_hub_, *oximetry_udp_,
-                           *plx_peripheral_, checkpoint)) {
+    if (!build_status_json(build_json_, snapshot, hostname)) {
         return false;
     }
 
     if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return false;
     snapshot_json_.swap(build_json_);
-    last_snapshot_ms_ = millis();
-    snapshot_dirty_ = false;
+    observed_device_revision_ = device_revision;
+    observed_config_revision_ = config_revision;
+    last_snapshot_ms_ = snapshot.now_ms;
+    snapshot_ready_ = true;
     revision_++;
     if (revision_ == 0) revision_ = 1;
     xSemaphoreGive(cache_mutex_);

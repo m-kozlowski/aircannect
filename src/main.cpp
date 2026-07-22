@@ -611,6 +611,34 @@ static void drain_can_rx_after(const char *section) {
     last_checkpoint_ms = millis();
 }
 
+static void refresh_status_http_snapshot(uint32_t now_ms) {
+    const uint32_t device_revision = as11_device_service.revision();
+    const uint32_t config_revision = config_service.revision();
+    if (!status_http_controller.refresh_due(device_revision,
+                                            config_revision,
+                                            now_ms)) {
+        return;
+    }
+
+    const AppConfigData &config = config_service.data();
+    const SystemStatusSnapshot snapshot = collect_system_status(
+        {
+            as11_device_service,
+            wifi_manager,
+            config,
+            time_sync_service,
+            firmware_installer,
+            update_checker,
+            oximetry_hub,
+            oximetry_udp_source,
+            plx_peripheral,
+        },
+        drain_can_rx_after);
+
+    (void)status_http_controller.publish_snapshot(
+        snapshot, config.hostname.c_str(), device_revision, config_revision);
+}
+
 void setup() {
     // Serial bootstrap
     Serial.begin(AC_SERIAL_BAUD);
@@ -856,14 +884,12 @@ void setup() {
     config_service.set_runtime_effects(apply_config_runtime_effects, nullptr);
     config_service.activate_runtime_effects(false);
 
-    if (!status_http_controller.begin(as11_device_service, wifi_manager,
-                                      config_service, time_sync_service,
-                                      firmware_installer, update_checker,
-                                      oximetry_hub, oximetry_udp_source,
-                                      plx_peripheral)) {
+    if (!status_http_controller.begin()) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] status HTTP controller failed to start\n");
     }
+    refresh_status_http_snapshot(millis());
+
     if (!live_http_controller.begin(stream_broker, sink_manager)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] live HTTP controller failed to start\n");
@@ -1025,7 +1051,7 @@ void loop() {
     drain_can_rx_after("export_coordinator");
 
     // Web, TCP, and console frontends
-    status_http_controller.poll(drain_can_rx_after);
+    refresh_status_http_snapshot(now_ms);
     drain_can_rx_after("status_http");
 
     web_ui.poll(drain_can_rx_after);
