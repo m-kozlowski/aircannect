@@ -13,7 +13,6 @@
 #include <utility>
 
 #include "auth_utils.h"
-#include "app_config_registry.h"
 #include "as11_rpc.h"
 #include "board.h"
 #include "debug_log.h"
@@ -34,42 +33,18 @@ namespace aircannect {
 
 namespace {
 
-static constexpr size_t WEB_JSON_RESERVE_SMALL = 512;
-static constexpr size_t WEB_JSON_RESERVE_MEDIUM = 1024;
-static constexpr size_t WEB_CONFIG_FULL_JSON_RESERVE = 2304;
-static constexpr size_t WEB_CONFIG_SCHEMA_JSON_RESERVE = 12 * 1024;
-static constexpr size_t WEB_CONFIG_SYNC_JSON_RESERVE = 640;
-static constexpr size_t WEB_CONFIG_SMALL_JSON_RESERVE = 384;
 static constexpr uint32_t WEB_LIVE_VIEW_LEASE_MS = 12000;
 
 const char *web_command_name(uint8_t kind) {
     switch (kind) {
         case WebCommandConsoleLine: return "console_line";
         case WebCommandConsoleClear: return "console_clear";
-        case WebCommandConfigUpdate: return "config_update";
         case WebCommandWifiUpdate: return "wifi_update";
         case WebCommandTimeAction: return "time_action";
         case WebCommandTherapyAction: return "therapy_action";
         case WebCommandOximetryAction: return "oximetry_action";
         default: return "unknown";
     }
-}
-
-bool web_config_section_known(const char *section) {
-    if (!section || !section[0] || strcmp(section, "all") == 0) return true;
-    size_t count = 0;
-    const AppConfigFieldDescriptor *fields = app_config_fields(count);
-    for (size_t i = 0; i < count; ++i) {
-        if (strcmp(section, app_config_group_id(fields[i].group)) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool web_config_section_includes(const char *section, AppConfigGroup group) {
-    return !section || !section[0] || strcmp(section, "all") == 0 ||
-           strcmp(section, app_config_group_id(group)) == 0;
 }
 
 size_t json_escaped_capacity(size_t raw_len, size_t overhead = 128) {
@@ -84,102 +59,6 @@ uint32_t fnv1a32_string(const String &text) {
         hash *= 16777619u;
     }
     return hash ? hash : 1u;
-}
-
-size_t web_config_json_reserve(const char *section) {
-    if (!section || !section[0] || strcmp(section, "all") == 0) {
-        return 4096;
-    }
-    if (strcmp(section, "access") == 0 ||
-        strcmp(section, "logging") == 0) {
-        return 2048;
-    }
-    if (strcmp(section, "smb") == 0 ||
-        strcmp(section, "sleephq") == 0) {
-        return WEB_CONFIG_SYNC_JSON_RESERVE;
-    }
-    return WEB_CONFIG_SMALL_JSON_RESERVE;
-}
-
-const char *web_config_field_type_name(AppConfigFieldType type) {
-    switch (type) {
-        case AppConfigFieldType::Bool: return "bool";
-        case AppConfigFieldType::UInt16: return "number";
-        case AppConfigFieldType::String: return "text";
-        case AppConfigFieldType::Secret: return "password";
-        case AppConfigFieldType::Enum:
-        case AppConfigFieldType::LogLevel:
-            return "enum";
-    }
-    return "text";
-}
-
-bool web_config_value_text(JsonVariantConst value,
-                           const AppConfigFieldDescriptor &field,
-                           String &out) {
-    out = "";
-    switch (field.type) {
-        case AppConfigFieldType::Bool:
-            if (value.is<bool>()) {
-                out = value.as<bool>() ? "1" : "0";
-                return true;
-            }
-            if (value.is<const char *>()) {
-                out = value.as<const char *>();
-                return true;
-            }
-            return false;
-
-        case AppConfigFieldType::UInt16:
-            if (value.is<int>()) {
-                const int parsed = value.as<int>();
-                if (parsed < 0 || parsed > 65535) return false;
-                out = String(parsed);
-                return true;
-            }
-            if (value.is<const char *>()) {
-                out = value.as<const char *>();
-                return true;
-            }
-            return false;
-
-        case AppConfigFieldType::String:
-        case AppConfigFieldType::Secret:
-        case AppConfigFieldType::Enum:
-        case AppConfigFieldType::LogLevel:
-            if (!value.is<const char *>()) return false;
-            out = value.as<const char *>();
-            return true;
-    }
-    return false;
-}
-
-static constexpr AppConfigEnumValue WEB_LOG_LEVEL_VALUES[] = {
-    {"ERROR", "Error"},
-    {"WARN", "Warn"},
-    {"INFO", "Info"},
-    {"DEBUG", "Debug"},
-};
-
-void append_config_schema_enum(LargeTextBuffer &json,
-                               const AppConfigFieldDescriptor &field) {
-    const AppConfigEnumValue *values = field.enum_values;
-    size_t count = field.enum_value_count;
-    if (field.type == AppConfigFieldType::LogLevel) {
-        values = WEB_LOG_LEVEL_VALUES;
-        count = sizeof(WEB_LOG_LEVEL_VALUES) / sizeof(WEB_LOG_LEVEL_VALUES[0]);
-    }
-    if (!values || !count) return;
-
-    json += ",\"enum\":[";
-    for (size_t i = 0; i < count; ++i) {
-        if (i) json += ',';
-        json += "{";
-        json_add_string(json, "value", values[i].value, false);
-        json_add_string(json, "label", values[i].label);
-        json += "}";
-    }
-    json += "]";
 }
 
 bool append_le32(ReportSpoolBuffer &out, uint32_t value) {
@@ -1064,79 +943,6 @@ void WebUI::send_cached(AsyncWebServerRequest *request,
     request->send(response);
 }
 
-void WebUI::send_config_json(AsyncWebServerRequest *request,
-                             const char *section) const {
-    if (!web_config_section_known(section)) {
-        request->send(404, "application/json",
-                      "{\"ok\":false,\"error\":\"unknown_section\"}");
-        return;
-    }
-
-    LargeTextBuffer json;
-    if (!json.reserve(web_config_json_reserve(section))) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"config_alloc\"}");
-        return;
-    }
-    build_config_json(json, section);
-    if (json.overflowed()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"config_overflow\"}");
-        return;
-    }
-
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response_alloc\"}");
-        return;
-    }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    request->send(response);
-}
-
-void WebUI::send_config_schema_json(AsyncWebServerRequest *request) const {
-    LargeTextBuffer json;
-    if (!json.reserve(WEB_CONFIG_SCHEMA_JSON_RESERVE)) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"schema_alloc\"}");
-        return;
-    }
-    build_config_schema_json(json);
-    if (json.overflowed()) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"schema_overflow\"}");
-        return;
-    }
-
-    AsyncResponseStream *response =
-        request->beginResponseStream("application/json");
-    if (!response) {
-        request->send(503, "application/json",
-                      "{\"ok\":false,\"error\":\"response_alloc\"}");
-        return;
-    }
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    request->send(response);
-}
-
-void WebUI::send_config_update(AsyncWebServerRequest *request) {
-    JsonDocument doc;
-    std::string body;
-    if (!http_parse_json_body(request, doc, body)) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"bad json\"}");
-        return;
-    }
-    WebCommand queued;
-    queued.kind = WebCommandConfigUpdate;
-    queued.body = std::move(body);
-    send_queue_result(request, enqueue_command(std::move(queued)));
-}
-
 void WebUI::send_live_view_state(AsyncWebServerRequest *request) {
     bool active = false;
     if (request->hasArg("active")) {
@@ -1472,102 +1278,6 @@ void WebUI::build_stream_json(LargeTextBuffer &json) const {
     json += "]}";
 }
 
-void WebUI::build_config_json(LargeTextBuffer &json,
-                              const char *section) const {
-    const AppConfigData &cfg = config_service_->data();
-    json = "{";
-    bool comma = false;
-
-    size_t count = 0;
-    const AppConfigFieldDescriptor *fields = app_config_fields(count);
-    for (size_t i = 0; i < count; ++i) {
-        const AppConfigFieldDescriptor &field = fields[i];
-        if (!web_config_section_includes(section, field.group)) continue;
-
-        String value;
-        if (!app_config_field_get_raw_value(cfg, field, value)) continue;
-
-        if (app_config_field_is_secret(field)) {
-            char set_key[40];
-            snprintf(set_key, sizeof(set_key), "%s_set", field.key);
-            json_add_bool(json, set_key, value.length() > 0, comma);
-            comma = true;
-            json_add_string(json, field.key, "");
-            comma = true;
-            continue;
-        }
-
-        switch (field.type) {
-            case AppConfigFieldType::Bool:
-                json_add_bool(json, field.key, value == "1", comma);
-                comma = true;
-                break;
-            case AppConfigFieldType::UInt16:
-                json_add_int(json, field.key, strtol(value.c_str(), nullptr,
-                                                     10), comma);
-                comma = true;
-                break;
-            case AppConfigFieldType::String:
-            case AppConfigFieldType::Enum:
-            case AppConfigFieldType::LogLevel:
-                json_add_string(json, field.key, value.c_str(), comma);
-                comma = true;
-                break;
-            case AppConfigFieldType::Secret:
-                break;
-        }
-    }
-    json += '}';
-}
-
-void WebUI::build_config_schema_json(LargeTextBuffer &json) const {
-    json = "{\"groups\":[";
-
-    size_t count = 0;
-    const AppConfigFieldDescriptor *fields = app_config_fields(count);
-    AppConfigGroup current_group = AppConfigGroup::Device;
-    bool group_open = false;
-    bool first_group = true;
-    bool first_field = true;
-
-    for (size_t i = 0; i < count; ++i) {
-        const AppConfigFieldDescriptor &field = fields[i];
-        if (!group_open || field.group != current_group) {
-            if (group_open) json += "]}";
-            if (!first_group) json += ',';
-            first_group = false;
-            current_group = field.group;
-            json += "{";
-            json_add_string(json, "id", app_config_group_id(current_group),
-                            false);
-            json_add_string(json, "label",
-                            app_config_group_label(current_group));
-            json += ",\"fields\":[";
-            group_open = true;
-            first_field = true;
-        }
-
-        if (!first_field) json += ',';
-        first_field = false;
-        json += "{";
-        json_add_string(json, "key", field.key, false);
-        json_add_string(json, "label", field.label);
-        json_add_string(json, "type",
-                        web_config_field_type_name(field.type));
-        json_add_bool(json, "secret", app_config_field_is_secret(field));
-        json_add_bool(json, "provisionable",
-                      (field.flags & AC_CONFIG_FIELD_PROVISIONABLE) != 0);
-        if (field.help && field.help[0]) {
-            json_add_string(json, "help", field.help);
-        }
-        append_config_schema_enum(json, field);
-        json += "}";
-    }
-
-    if (group_open) json += "]}";
-    json += "]}";
-}
-
 void WebUI::build_wifi_json(LargeTextBuffer &json) const {
     json = "{";
     json_add_string(json, "state", wifi_manager_->state_name(), false);
@@ -1659,9 +1369,6 @@ void WebUI::execute_command(WebCommand &command) {
         case WebCommandConsoleClear:
             clear_console_log();
             break;
-        case WebCommandConfigUpdate:
-            execute_config_update(command.body);
-            break;
         case WebCommandWifiUpdate:
             execute_wifi_update(command.body);
             break;
@@ -1692,49 +1399,6 @@ void WebUI::execute_console_line(const std::string &line) {
     entry += "\n";
     entry += capture.text();
     append_console_log(entry);
-}
-
-void WebUI::execute_config_update(const std::string &body) {
-    JsonDocument doc;
-    if (deserializeJson(doc, body.c_str())) return;
-
-    JsonObjectConst root = doc.as<JsonObjectConst>();
-    if (root.isNull() || !config_service_->begin_transaction()) return;
-
-    for (JsonPairConst pair : root) {
-        const char *key = pair.key().c_str();
-        const AppConfigFieldDescriptor *field = app_config_find_field(key);
-        if (!field) {
-            Log::logf(CAT_CONFIG, LOG_WARN,
-                      "rejected web config key=%s reason=unknown\n",
-                      key ? key : "<null>");
-            continue;
-        }
-
-        String value;
-        if (!web_config_value_text(pair.value(), *field, value)) {
-            Log::logf(CAT_CONFIG, LOG_WARN,
-                      "rejected web config key=%s reason=bad_type\n",
-                      field->key);
-            continue;
-        }
-
-        const ConfigFieldUpdate update =
-            config_service_->set_transaction_value(field->key, value, true);
-        if (!update.accepted()) {
-            Log::logf(CAT_CONFIG, LOG_WARN,
-                      "rejected web config key=%s reason=invalid_value\n",
-                      field->key);
-        }
-    }
-
-    const ConfigTransactionResult result =
-        config_service_->commit_transaction();
-    if (!result.persisted) {
-        Log::logf(CAT_GENERAL, LOG_WARN,
-                  "[WEB] failed to persist one or more config values\n");
-    }
-    if (result.changed_fields) mark_snapshots_dirty(SNAPSHOT_ALL);
 }
 
 void WebUI::execute_wifi_update(const std::string &body) {
@@ -1931,49 +1595,6 @@ void WebUI::register_routes(HttpRouteModule *const *route_modules,
             send_queue_result(request,
                               enqueue_simple_command(WebCommandConsoleClear));
         });
-
-    // Configuration
-    server_->on(AsyncURIMatcher::exact("/api/config"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        send_config_json(request);
-    });
-
-    server_->on(AsyncURIMatcher::exact("/api/config/schema"), HTTP_GET,
-                [this](AsyncWebServerRequest *request) {
-        send_config_schema_json(request);
-    });
-
-    server_->on(
-        AsyncURIMatcher::exact("/api/config"), HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            send_config_update(request);
-        },
-        nullptr, http_request_body_handler);
-
-    const auto register_config_section =
-        [this](const char *path, const char *section) {
-            server_->on(AsyncURIMatcher::exact(path), HTTP_GET,
-                        [this, section](AsyncWebServerRequest *request) {
-                send_config_json(request, section);
-            });
-
-            server_->on(
-                AsyncURIMatcher::exact(path), HTTP_POST,
-                [this](AsyncWebServerRequest *request) {
-                    send_config_update(request);
-                },
-                nullptr, http_request_body_handler);
-        };
-
-    register_config_section("/api/config/device", "device");
-    register_config_section("/api/config/network", "network");
-    register_config_section("/api/config/access", "access");
-    register_config_section("/api/config/ota", "ota");
-    register_config_section("/api/config/logging", "logging");
-    register_config_section("/api/config/time", "time");
-    register_config_section("/api/config/oximetry", "oximetry");
-    register_config_section("/api/config/smb", "smb");
-    register_config_section("/api/config/sleephq", "sleephq");
 
     server_->on(
         AsyncURIMatcher::exact("/api/time"), HTTP_POST,

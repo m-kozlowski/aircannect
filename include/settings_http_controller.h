@@ -6,9 +6,9 @@
 #include <stdint.h>
 #include <string>
 
-#include "fixed_queue.h"
 #include "http_route_module.h"
 #include "large_text_buffer.h"
+#include "main_loop_inbox.h"
 
 class AsyncWebServerRequest;
 
@@ -56,11 +56,9 @@ private:
     As11DeviceService *device_ = nullptr;
     As11SettingsManager *settings_ = nullptr;
 
-    FixedQueue<Command, CommandQueueDepth> command_queue_;
-    StaticSemaphore_t command_mutex_storage_ = {};
     StaticSemaphore_t cache_mutex_storage_ = {};
-    SemaphoreHandle_t command_mutex_ = nullptr;
     SemaphoreHandle_t cache_mutex_ = nullptr;
+    MainLoopInbox<Command, CommandQueueDepth> commands_;
 
     LargeTextBuffer catalog_json_;
     LargeTextBuffer settings_json_;

@@ -9,6 +9,7 @@
 #include "as11_settings_manager.h"
 #include "board.h"
 #include "can_driver.h"
+#include "config_http_controller.h"
 #include "config_service.h"
 #include "debug_log.h"
 #include "edf_recorder_manager.h"
@@ -77,11 +78,13 @@ static ReportHttpController report_http_controller;
 static StorageHttpController storage_http_controller;
 static OtaHttpController ota_http_controller;
 static SettingsHttpController settings_http_controller;
+static ConfigHttpController config_http_controller;
 static HttpRouteModule *web_route_modules[] = {
     &report_http_controller,
     &storage_http_controller,
     &ota_http_controller,
     &settings_http_controller,
+    &config_http_controller,
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
@@ -659,6 +662,10 @@ void setup() {
                             as11_device_service);
     report_catalog_timezone_revision = time_sync_service.timezone_revision();
     ota_manager.begin(config_service.data());
+    if (!config_http_controller.begin(config_service)) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] config HTTP controller failed to start\n");
+    }
     if (!ota_http_controller.begin(ota_manager, resmed_ota_manager)) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] OTA HTTP controller failed to start\n");
@@ -730,6 +737,7 @@ void loop() {
     as11_settings_manager.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
+    config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();
 

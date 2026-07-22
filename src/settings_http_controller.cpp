@@ -238,14 +238,10 @@ bool SettingsHttpController::begin(RpcRequestPort &rpc,
     device_ = &device;
     settings_ = &settings;
 
-    if (!command_mutex_) {
-        command_mutex_ =
-            xSemaphoreCreateMutexStatic(&command_mutex_storage_);
-    }
     if (!cache_mutex_) {
         cache_mutex_ = xSemaphoreCreateMutexStatic(&cache_mutex_storage_);
     }
-    if (!command_mutex_ || !cache_mutex_) return false;
+    if (!commands_.begin() || !cache_mutex_) return false;
 
     catalog_json_.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
     build_catalog_json(catalog_json_);
@@ -303,12 +299,7 @@ void SettingsHttpController::poll() {
 }
 
 bool SettingsHttpController::enqueue(Command &&command) {
-    if (!command_mutex_ || xSemaphoreTake(command_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    const bool queued = command_queue_.push(std::move(command));
-    xSemaphoreGive(command_mutex_);
+    const bool queued = commands_.push(std::move(command));
     if (!queued) {
         Log::logf(CAT_CONFIG, LOG_WARN,
                   "HTTP settings command queue full\n");
@@ -319,10 +310,7 @@ bool SettingsHttpController::enqueue(Command &&command) {
 void SettingsHttpController::drain_commands() {
     for (size_t i = 0; i < CommandsPerPoll; ++i) {
         Command command;
-        if (xSemaphoreTake(command_mutex_, 0) != pdTRUE) return;
-        const bool present = command_queue_.pop(command);
-        xSemaphoreGive(command_mutex_);
-        if (!present) break;
+        if (!commands_.pop(command)) break;
 
         execute(command);
     }

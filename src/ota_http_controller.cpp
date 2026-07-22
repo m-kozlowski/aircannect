@@ -208,11 +208,7 @@ bool OtaHttpController::begin(OtaManager &esp_ota,
     esp_ota_ = &esp_ota;
     resmed_ota_ = &resmed_ota;
 
-    if (!command_mutex_) {
-        command_mutex_ =
-            xSemaphoreCreateMutexStatic(&command_mutex_storage_);
-    }
-    return command_mutex_ != nullptr;
+    return commands_.begin();
 }
 
 void OtaHttpController::register_routes(AsyncWebServer &server) {
@@ -493,26 +489,18 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
 }
 
 void OtaHttpController::poll() {
-    if (!command_mutex_ || !resmed_ota_) return;
+    if (!resmed_ota_) return;
 
     for (size_t i = 0; i < CommandsPerPoll; ++i) {
         Command command;
-        if (xSemaphoreTake(command_mutex_, 0) != pdTRUE) return;
-        const bool present = command_queue_.pop(command);
-        xSemaphoreGive(command_mutex_);
-        if (!present) break;
+        if (!commands_.pop(command)) break;
 
         execute(command);
     }
 }
 
 bool OtaHttpController::enqueue(Command &&command) {
-    if (!command_mutex_ || xSemaphoreTake(command_mutex_, 0) != pdTRUE) {
-        return false;
-    }
-
-    const bool queued = command_queue_.push(std::move(command));
-    xSemaphoreGive(command_mutex_);
+    const bool queued = commands_.push(std::move(command));
     if (!queued) {
         Log::logf(CAT_OTA, LOG_WARN, "HTTP OTA command queue full\n");
     }

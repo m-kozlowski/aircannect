@@ -32,7 +32,6 @@ class HttpRouteModule;
 enum WebCommandKind : uint8_t {
     WebCommandConsoleLine,
     WebCommandConsoleClear,
-    WebCommandConfigUpdate,
     WebCommandWifiUpdate,
     WebCommandTimeAction,
     WebCommandTherapyAction,
@@ -105,13 +104,6 @@ private:
     void build_oximetry_sensors_json(LargeTextBuffer &json) const;
     void send_live_view_state(AsyncWebServerRequest *request);
     void build_stream_json(LargeTextBuffer &json) const;
-    void build_config_json(LargeTextBuffer &json,
-                           const char *section = nullptr) const;
-    void build_config_schema_json(LargeTextBuffer &json) const;
-    void send_config_json(AsyncWebServerRequest *request,
-                          const char *section = nullptr) const;
-    void send_config_schema_json(AsyncWebServerRequest *request) const;
-    void send_config_update(AsyncWebServerRequest *request);
     void build_wifi_json(LargeTextBuffer &json) const;
     void reserve_console_log();
     void append_console_log(const String &text);
@@ -136,7 +128,6 @@ private:
     void drain_commands();
     void execute_command(WebCommand &command);
     void execute_console_line(const std::string &line);
-    void execute_config_update(const std::string &body);
     void execute_wifi_update(const std::string &body);
     void execute_time_action(const std::string &action);
     void execute_therapy_action(const std::string &action);
