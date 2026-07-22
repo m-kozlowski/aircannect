@@ -11,7 +11,9 @@
 
 #ifdef ARDUINO
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
@@ -518,6 +520,7 @@ struct ReportTask::Runtime {
 #ifdef ARDUINO
     mutable SemaphoreHandle_t mutex = nullptr;
     TaskHandle_t task = nullptr;
+    bool task_stack_external = false;
 #endif
 };
 
@@ -526,7 +529,11 @@ ReportTask::~ReportTask() {
 
 #ifdef ARDUINO
     if (runtime_->task) {
-        vTaskDelete(runtime_->task);
+        if (runtime_->task_stack_external) {
+            vTaskDeleteWithCaps(runtime_->task);
+        } else {
+            vTaskDelete(runtime_->task);
+        }
         runtime_->task = nullptr;
     }
     if (runtime_->mutex) {
@@ -579,14 +586,33 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->publish_status();
 
 #ifdef ARDUINO
-    const BaseType_t created = xTaskCreatePinnedToCore(
-        task_entry,
-        "ac_report",
-        AC_REPORT_TASK_STACK,
-        this,
-        AC_REPORT_TASK_PRIO,
-        &runtime_->task,
-        AC_REPORT_TASK_CORE);
+    BaseType_t created = pdFAIL;
+    if (Memory::psram_available()) {
+        created = xTaskCreatePinnedToCoreWithCaps(
+            task_entry,
+            "ac_report",
+            AC_REPORT_TASK_STACK,
+            this,
+            AC_REPORT_TASK_PRIO,
+            &runtime_->task,
+            AC_REPORT_TASK_CORE,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        runtime_->task_stack_external =
+            created == pdPASS && runtime_->task != nullptr;
+    }
+
+    if (!runtime_->task_stack_external) {
+        runtime_->task = nullptr;
+        created = xTaskCreatePinnedToCore(
+            task_entry,
+            "ac_report",
+            AC_REPORT_TASK_STACK,
+            this,
+            AC_REPORT_TASK_PRIO,
+            &runtime_->task,
+            AC_REPORT_TASK_CORE);
+    }
+
     if (created != pdPASS || !runtime_->task) {
         runtime_->initialized = false;
         runtime_->publish_status();
