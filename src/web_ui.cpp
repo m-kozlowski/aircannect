@@ -13,6 +13,7 @@
 #include "json_util.h"
 #include "live_http_controller.h"
 #include "memory_manager.h"
+#include "rpc_transport_ports.h"
 #include "status_http_controller.h"
 #include "string_util.h"
 #include "string_print.h"
@@ -45,7 +46,7 @@ bool json_get_string(JsonDocument &doc, const char *key, String &out) {
 
 bool WebUI::begin(StatusHttpController &status,
                   LiveHttpController &live,
-                  ConsoleContext &console_ctx,
+                  ConsoleCommandRouter &console_router,
                   const AppConfigData &config,
                   HttpRouteModule *const *route_modules,
                   size_t route_module_count,
@@ -54,7 +55,7 @@ bool WebUI::begin(StatusHttpController &status,
     stop();
     status_ = &status;
     live_ = &live;
-    console_ctx_ = &console_ctx;
+    console_router_ = &console_router;
 
     if (!command_mutex_) {
         command_mutex_ = xSemaphoreCreateMutexStatic(&command_mutex_storage_);
@@ -161,7 +162,7 @@ WebUiMemoryStatus WebUI::memory_status() {
 
 void WebUI::stop() {
     if (live_) live_->stop();
-    web_console_.cancel_pending_storage();
+    if (console_router_) web_console_.stop(*console_router_);
     if (events_) {
         events_->close();
     }
@@ -210,6 +211,7 @@ void WebUI::stop() {
     sse_push_requested_ = false;
     status_ = nullptr;
     live_ = nullptr;
+    console_router_ = nullptr;
     started_ = false;
 }
 
@@ -221,9 +223,9 @@ void WebUI::poll(PollCheckpoint checkpoint) {
         mark_snapshots_dirty(SNAPSHOT_STATUS);
     }
 
-    if (web_console_.storage_output_pending()) {
+    if (console_router_ && web_console_.pending_output(*console_router_)) {
         StringPrint capture(AC_FILE_LOG_TAIL_READ_CHUNK);
-        web_console_.poll_pending(capture);
+        web_console_.poll_pending(capture, *console_router_);
         if (capture.text().length()) append_console_log(capture.text());
     }
 
@@ -842,10 +844,10 @@ void WebUI::execute_console_line(const std::string &line) {
     String command(line.c_str());
     command.trim();
     if (!command.length()) return;
-    if (!console_ctx_) return;
+    if (!console_router_) return;
 
     StringPrint capture(AC_WEB_CONSOLE_COMMAND_OUTPUT_MAX);
-    web_console_.execute_line(command, capture, *console_ctx_);
+    web_console_.execute_line(command, capture, *console_router_);
     String entry = "> ";
     entry += command;
     entry += "\n";

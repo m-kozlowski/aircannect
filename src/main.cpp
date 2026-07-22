@@ -11,6 +11,8 @@
 #include "can_driver.h"
 #include "config_http_controller.h"
 #include "config_service.h"
+#include "console_command_router.h"
+#include "console_commands.h"
 #include "debug_log.h"
 #include "device_http_controller.h"
 #include "edf_recorder_manager.h"
@@ -103,6 +105,43 @@ static HttpRouteModule *web_route_modules[] = {
 };
 static ExportTask export_task;
 static ExportCoordinator export_coordinator;
+static As11ConsoleCommands as11_console_commands(
+    rpc_transport, rpc_transport, rpc_transport, can_driver, event_broker,
+    stream_broker, as11_device_service, as11_settings_manager,
+    time_sync_service);
+static NetworkConsoleCommands network_console_commands(wifi_manager,
+                                                       tcp_bridge);
+static CoreDiagnosticsConsoleCommands core_console_commands;
+static StorageConsoleCommands storage_console_commands(
+    config_service, StorageService::read_port());
+static RuntimeConsoleCommands runtime_console_commands(session_manager,
+                                                       sink_manager);
+static EdfConsoleCommands edf_console_commands(edf_recorder_manager,
+                                               config_service);
+static OximetryConsoleCommands oximetry_console_commands(oximetry_manager,
+                                                         config_service);
+static ReportConsoleCommands report_console_commands(report_task);
+static ExportConsoleCommands export_console_commands(export_coordinator);
+static ConfigConsoleCommands config_console_commands(config_service,
+                                                     wifi_manager);
+static OtaConsoleCommands ota_console_commands(ota_manager,
+                                               resmed_ota_manager);
+static WebDiagnosticsConsoleCommands web_console_commands(web_ui);
+static ConsoleCommandGroup *console_command_groups[] = {
+    &as11_console_commands,
+    &network_console_commands,
+    &core_console_commands,
+    &storage_console_commands,
+    &runtime_console_commands,
+    &edf_console_commands,
+    &oximetry_console_commands,
+    &report_console_commands,
+    &export_console_commands,
+    &config_console_commands,
+    &ota_console_commands,
+    &web_console_commands,
+};
+static ConsoleCommandRouter console_router;
 #if AC_STACK_PROFILE_ENABLED
 static StackProfiler stack_profiler;
 #endif
@@ -119,31 +158,6 @@ static bool export_network_published = false;
 static uint32_t export_config_due_ms = 0;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
-static ConsoleContext console_ctx{
-    rpc_transport,
-    rpc_transport,
-    rpc_transport,
-    can_driver,
-    event_broker,
-    stream_broker,
-    as11_device_service,
-    as11_settings_manager,
-    tcp_bridge,
-    wifi_manager,
-    config_service,
-    time_sync_service,
-    ota_manager,
-    resmed_ota_manager,
-    session_manager,
-    sink_manager,
-    edf_recorder_manager,
-    oximetry_manager,
-    report_task,
-    StorageService::read_port(),
-    nullptr,
-    &web_ui,
-};
-
 static bool is_rpc_event(RpcEventKind kind) {
     return kind == RpcEventKind::RpcResponse ||
            kind == RpcEventKind::RpcNotification ||
@@ -343,10 +357,10 @@ static void sync_network_services() {
         } else if (telnet_console.port() !=
                    config_service.data().telnet_console_port) {
             telnet_console.restart(config_service.data().telnet_console_port,
-                                   &stream_broker);
+                                   console_router);
         }
     } else if (telnet_console.started()) {
-        telnet_console.stop(&stream_broker);
+        telnet_console.stop(console_router);
     }
 }
 
@@ -594,6 +608,13 @@ void setup() {
     }
 
     // Management console
+    if (!console_router.begin(
+            console_command_groups,
+            sizeof(console_command_groups) /
+                sizeof(console_command_groups[0]))) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] management CLI router failed to start\n");
+    }
     serial_management_console.begin(Serial);
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] management CLI ready\n");
 
@@ -614,7 +635,6 @@ void setup() {
     }
 
     export_coordinator.begin(export_task);
-    console_ctx.export_coordinator = &export_coordinator;
 
     const bool storage_http_started = storage_http_controller.begin(
         StorageService::read_port(),
@@ -745,7 +765,7 @@ void setup() {
                   "[INIT] live HTTP controller failed to start\n");
     }
 
-    web_ui.begin(status_http_controller, live_http_controller, console_ctx,
+    web_ui.begin(status_http_controller, live_http_controller, console_router,
                  config_service.data(),
                  web_route_modules,
                  sizeof(web_route_modules) / sizeof(web_route_modules[0]));
@@ -910,8 +930,8 @@ void loop() {
     drain_can_rx_after("web_ui");
 
     tcp_bridge.poll(rpc_transport);
-    telnet_console.poll(console_ctx);
-    serial_management_console.poll(Serial, Serial, console_ctx);
+    telnet_console.poll(config_service.data(), console_router);
+    serial_management_console.poll(Serial, Serial, console_router);
 
     drain_can_rx_after("frontends");
 

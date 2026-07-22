@@ -1,148 +1,32 @@
 #pragma once
 
 #include <Arduino.h>
-#include <string>
 
-#include "as11_device_service.h"
-#include "as11_settings_manager.h"
-#include "can_driver.h"
-#include "config_service.h"
-#include "edf_recorder_manager.h"
-#include "ota_manager.h"
-#include "oximetry_manager.h"
-#include "report_task.h"
-#include "resmed_ota_manager.h"
-#include "rpc_request_port.h"
-#include "rpc_transport_ports.h"
-#include "session_manager.h"
-#include "sink_manager.h"
-#include "storage_read_port.h"
-#include "tcp_bridge.h"
-#include "time_sync_service.h"
-#include "wifi_manager.h"
+#include "console_command_router.h"
 
 namespace aircannect {
 
-class ExportCoordinator;
-class WebUI;
-
-struct ConsoleContext {
-    RpcRequestPort &rpc;
-    RpcPassthroughPort &rpc_passthrough;
-    RpcDiagnosticsPort &rpc_diagnostics;
-    CanDriver &can;
-    EventBroker &events;
-    StreamBroker &stream;
-    As11DeviceService &device;
-    As11SettingsManager &settings_manager;
-    TcpBridge &tcp_bridge;
-    WifiManager &wifi_manager;
-    ConfigService &config_service;
-
-    TimeSyncService &time_sync_service;
-    OtaManager &ota_manager;
-    ResmedOtaManager &resmed_ota_manager;
-    SessionManager &session_manager;
-    SinkManager &sink_manager;
-    EdfRecorderManager &edf_recorder_manager;
-    OximetryManager &oximetry_manager;
-    ReportTask &report_task;
-    StorageReadPort &storage_read_port;
-    ExportCoordinator *export_coordinator = nullptr;
-    WebUI *web_ui = nullptr;
-};
+struct RpcEvent;
 
 class ManagementConsole {
 public:
     void begin(Print &out);
-    void stop(StreamBroker &stream);
-    void poll(Stream &input, Print &out, ConsoleContext &ctx);
-    void poll_pending(Print &out);
-    void cancel_pending_storage();
-    bool storage_output_pending() const {
-        return file_log_tail_ticket_.valid() ||
-               file_log_tail_prepared_.valid();
+    void stop(ConsoleCommandRouter &router);
+    void poll(Stream &input, Print &out, ConsoleCommandRouter &router);
+    void poll_pending(Print &out, ConsoleCommandRouter &router);
+    void cancel_pending(ConsoleCommandRouter &router);
+    bool pending_output(const ConsoleCommandRouter &router) const {
+        return router.pending_output(session_);
     }
-    void execute_line(String line, Print &out, ConsoleContext &ctx);
+    void execute_line(String line, Print &out, ConsoleCommandRouter &router);
 
     void handle_event(Print &out, const RpcEvent &event);
     void print_help(Print &out, const String &topic = "");
     static bool event_has_output(const RpcEvent &event);
 
 private:
-    void handle_help_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_status_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_stats_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_memory_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_session_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_sink_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_edf_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_oximetry_command(Print &out, String rest,
-                                 ConsoleContext &ctx);
-    void handle_report_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_storage_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_smb_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_sleephq_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_as11_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_therapy_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_config_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_wifi_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_tcp_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_ota_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_resmed_ota_command(Print &out, String rest,
-                                   ConsoleContext &ctx);
-    void handle_log_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_restart_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_can_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_version_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_time_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_get_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_set_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_stream_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_rpc_command(Print &out, String rest, ConsoleContext &ctx);
-    void handle_raw_command(Print &out, String rest, ConsoleContext &ctx);
-
-    void handle_stream(Print &out, String rest, StreamBroker &stream);
-    void handle_as11(Print &out, String rest, RpcRequestPort &rpc,
-                     RpcPassthroughPort &rpc_passthrough,
-                     As11DeviceService &device);
-    void handle_therapy(Print &out, String rest, RpcRequestPort &rpc,
-                        As11DeviceService &device);
-    void handle_time(Print &out, String rest, As11DeviceService &device,
-                     TimeSyncService &time_sync_service);
-    void handle_ota(Print &out, String rest, OtaManager &ota_manager,
-                    ResmedOtaManager &resmed_ota_manager);
-    void handle_resmed_ota(Print &out, String rest,
-                           ResmedOtaManager &resmed_ota_manager);
-    void handle_sink(Print &out, String rest, SinkManager &sink_manager);
-    void handle_oximetry(Print &out,
-                         String rest,
-                         OximetryManager &oximetry_manager,
-                         ConfigService &config_service);
-    void handle_log(Print &out,
-                    String rest,
-                    ConfigService &config_service,
-                    StorageReadPort &storage_read_port);
-    void handle_wifi(Print &out, String rest, WifiManager &wifi_manager);
-    void handle_config(Print &out,
-                       String rest,
-                       ConfigService &config_service,
-                       WifiManager &wifi_manager);
-    bool handle_config_key(Print &out,
-                           String rest,
-                           ConfigService &config_service);
-
-    void print_oximetry_status(Print &out,
-                               const OximetryManager &oximetry_manager) const;
-
     String line_;
-    StreamConsumerHandle stream_handle_ = STREAM_CONSUMER_INVALID;
-
-    StorageReadPort *storage_read_port_ = nullptr;
-    OperationTicket file_log_tail_ticket_;
-    StoragePreparedRead file_log_tail_prepared_;
-    size_t file_log_tail_offset_ = 0;
-    uint32_t file_log_tail_generation_ = 0;
+    ConsoleCommandSession session_;
 };
 
 }  // namespace aircannect

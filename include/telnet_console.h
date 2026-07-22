@@ -10,14 +10,6 @@
 #include "fixed_queue.h"
 #include "line_protocol_server.h"
 #include "management_console.h"
-#include "ota_manager.h"
-#include "resmed_ota_manager.h"
-#include "rpc_transport_ports.h"
-#include "session_manager.h"
-#include "sink_manager.h"
-#include "tcp_bridge.h"
-#include "time_sync_service.h"
-#include "wifi_manager.h"
 
 namespace aircannect {
 
@@ -36,10 +28,9 @@ struct TelnetConsoleStats {
 class TelnetConsole : private LineProtocolServerBase {
 public:
     bool begin(uint16_t port = AC_TELNET_CONSOLE_PORT);
-    bool restart(uint16_t port = AC_TELNET_CONSOLE_PORT,
-                 StreamBroker *stream = nullptr);
-    void stop(StreamBroker *stream = nullptr);
-    void poll(ConsoleContext &ctx);
+    bool restart(uint16_t port, ConsoleCommandRouter &router);
+    void stop(ConsoleCommandRouter &router);
+    void poll(const AppConfigData &config, ConsoleCommandRouter &router);
 
     void handle_event(const RpcEvent &event);
 
@@ -69,23 +60,24 @@ private:
         bool last_cr = false;
     };
 
-    void accept_clients(const AppConfigData &app_config,
-                        StreamBroker &stream);
-    void disconnect_slot(size_t idx, StreamBroker *stream = nullptr);
+    void accept_clients(const AppConfigData &config,
+                        ConsoleCommandRouter &router);
+    void disconnect_slot(size_t idx, ConsoleCommandRouter &router);
     void authenticate_slot(size_t idx, const AppConfigData &app_config);
 
     void queue_text(size_t idx, const String &text);
     void queue_prompt(size_t idx);
     void queue_console_begin(size_t idx);
-    void pump_outputs(StreamBroker &stream);
+    void pump_outputs(ConsoleCommandRouter &router);
 
-    void poll_inputs(ConsoleContext &ctx);
+    void poll_inputs(const AppConfigData &config,
+                     ConsoleCommandRouter &router);
     void process_input_char(size_t idx,
                             char c,
-                            ConsoleContext &ctx);
+                            const AppConfigData &config,
+                            ConsoleCommandRouter &router);
     void process_auth_line(size_t idx, const AppConfigData &app_config);
-    void execute_slot_line(size_t idx,
-                           ConsoleContext &ctx);
+    void execute_slot_line(size_t idx, ConsoleCommandRouter &router);
 
     Slot slots_[AC_MAX_TELNET_CLIENTS];
     TelnetConsoleStats stats_ = {};

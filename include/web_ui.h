@@ -56,7 +56,7 @@ public:
     // lifecycle
     bool begin(StatusHttpController &status,
                LiveHttpController &live,
-               ConsoleContext &console_ctx,
+               ConsoleCommandRouter &console_router,
                const AppConfigData &config,
                HttpRouteModule *const *route_modules,
                size_t route_module_count,
@@ -135,7 +135,7 @@ private:
     // subsystem owners
     StatusHttpController *status_ = nullptr;
     LiveHttpController *live_ = nullptr;
-    ConsoleContext *console_ctx_ = nullptr;
+    ConsoleCommandRouter *console_router_ = nullptr;
 
     // console and command queue
     ManagementConsole web_console_;
