@@ -659,6 +659,11 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         worked = true;
         switch (command.kind) {
             case ReportTaskCommandKind::Artifact: {
+                if (runtime.background_suspended &&
+                    command.priority != ReportRequestPriority::Foreground) {
+                    break;
+                }
+
                 ReportArtifactAvailability available;
                 if (runtime.artifact_index &&
                     runtime.artifact_index->availability(
