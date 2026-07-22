@@ -8,7 +8,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/poll.h>
-#include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <new>
@@ -483,23 +482,26 @@ StorageSmbOperationResult StorageSmbClient::resolve_host(
     return resolve_host(error_out, error_out_size);
 }
 
-void StorageSmbClient::configure_socket_options() {
-    const int fd = smb2_get_fd(ctx_);
-    if (fd < 0) return;
+bool StorageSmbClient::configure_socket_options(
+    int fd, char *error_out, size_t error_out_size) {
+    if (fd < 0) {
+        set_error(error_out, error_out_size, "socket_unavailable");
+        return false;
+    }
 
-    const timeval tv = {SMB_COMMAND_TIMEOUT_SECONDS, 0};
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
+    const int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || (!(flags & O_NONBLOCK) &&
+                      fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)) {
+        set_error(error_out, error_out_size, "socket_nonblocking_failed");
         Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[SMB] setsockopt(SO_SNDTIMEO) errno=%d\n",
+                  LOG_ERROR,
+                  "[SMB] failed to configure nonblocking socket fd=%d "
+                  "errno=%d\n",
+                  fd,
                   errno);
+        return false;
     }
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
-                  "[SMB] setsockopt(SO_RCVTIMEO) errno=%d\n",
-                  errno);
-    }
+    if (configured_socket_ == fd) return true;
 
     const int one = 1;
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
@@ -508,6 +510,9 @@ void StorageSmbClient::configure_socket_options() {
                   "[SMB] setsockopt(TCP_NODELAY) errno=%d\n",
                   errno);
     }
+
+    configured_socket_ = fd;
+    return true;
 }
 
 bool StorageSmbClient::begin_operation(OperationKind kind,
@@ -570,6 +575,10 @@ StorageSmbOperationResult StorageSmbClient::poll_operation(
     const int fd = smb2_get_fd(ctx_);
     if (fd < 0) {
         set_error(error_out, error_out_size, "socket_unavailable");
+        abort_connection();
+        return StorageSmbOperationResult::Error;
+    }
+    if (!configure_socket_options(fd, error_out, error_out_size)) {
         abort_connection();
         return StorageSmbOperationResult::Error;
     }
@@ -679,7 +688,6 @@ StorageSmbOperationResult StorageSmbClient::step_connect(
     }
 
     connected_ = true;
-    configure_socket_options();
     set_error(error_out, error_out_size, "");
     return StorageSmbOperationResult::Ready;
 }
@@ -1201,6 +1209,7 @@ void StorageSmbClient::abort_connection() {
         write_size_ = 0;
         write_offset_ = 0;
         write_chunk_size_ = 0;
+        configured_socket_ = -1;
         return;
     }
     if (writer_) {
@@ -1222,6 +1231,7 @@ void StorageSmbClient::abort_connection() {
     write_size_ = 0;
     write_offset_ = 0;
     write_chunk_size_ = 0;
+    configured_socket_ = -1;
 }
 
 }  // namespace aircannect

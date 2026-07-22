@@ -151,7 +151,7 @@ private:
                        size_t error_out_size,
                        const char *operation,
                        int status_hint = 0) const;
-    void configure_socket_options();
+    bool configure_socket_options(int fd, char *error_out, size_t error_out_size);
 
     char server_[AC_STORAGE_SMB_ENDPOINT_HOST_MAX] = {};
     char share_[AC_STORAGE_SMB_SHARE_MAX] = {};
@@ -172,6 +172,7 @@ private:
     struct smb2fh *closing_writer_ = nullptr;
     StorageSmbPendingOperation *operation_ = nullptr;
     OperationKind operation_kind_ = OperationKind::None;
+    int configured_socket_ = -1;
     bool connected_ = false;
 
     char ensure_target_[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
