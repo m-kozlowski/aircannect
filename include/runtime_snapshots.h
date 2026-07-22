@@ -37,7 +37,7 @@ struct DeviceSnapshot {
     bool ready = false;
     As11TherapyState therapy_state = As11TherapyState::Unknown;
     bool clock_valid = false;
-    int32_t clock_offset_ms = 0;
+    int64_t clock_offset_ms = 0;
     int32_t timezone_offset_minutes = 0;
     uint32_t generation = 0;
 };

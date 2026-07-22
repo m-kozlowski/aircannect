@@ -86,15 +86,19 @@ void EdfStreamAssembler::set_record_observer(EdfRecordObserver observer,
     record_observer_context_ = context;
 }
 
-bool EdfStreamAssembler::start_session(const char *device_start_time) {
+bool EdfStreamAssembler::start_session(
+    const char *device_start_time,
+    const As11ClockTransform &clock_transform) {
     if (!allocate_buffers()) return false;
     reset();
     status_.active = true;
+    clock_transform_ = clock_transform;
     declared_start_epoch_ms_ = 0;
     initial_epoch_rebase_allowed_ = false;
     if (device_start_time && *device_start_time) {
         int64_t start_ms = 0;
-        if (edf_parse_utc_ms(device_start_time, start_ms)) {
+        if (edf_parse_as11_utc_ms(device_start_time, clock_transform_,
+                                  start_ms)) {
             declared_start_epoch_ms_ = start_ms;
             status_.session_start_epoch_ms =
                 edf_floor_epoch_ms_to_second(start_ms);
@@ -818,7 +822,7 @@ EdfStreamAssembler::SeriesBuffer EdfStreamAssembler::series(EdfSeriesId id) {
 
 bool EdfStreamAssembler::parse_frame_start_ms(const StreamFrameData &frame,
                                               int64_t &start_ms) {
-    return edf_parse_utc_ms(frame.start_time, start_ms);
+    return edf_parse_as11_utc_ms(frame.start_time, clock_transform_, start_ms);
 }
 
 bool EdfStreamAssembler::ensure_session_epoch(int64_t frame_start_ms) {

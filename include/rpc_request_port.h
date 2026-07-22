@@ -66,6 +66,8 @@ struct RpcRequestCompletion {
     bool response_error = false;
     int64_t dispatch_utc_ms = 0;
     int64_t response_utc_ms = 0;
+    uint32_t dispatch_ms = 0;
+    uint32_t response_ms = 0;
 };
 
 class RpcRequestPort {

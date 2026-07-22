@@ -24,6 +24,7 @@ bool edf_event_record_is_csr(const As11EventRecord &record) {
 
 bool edf_build_event_annotation(EdfAnnotationKind kind,
                                 const As11EventRecord &record,
+                                const As11ClockTransform &clock_transform,
                                 int64_t session_start_epoch_ms,
                                 EdfAnnotationRecord &annotation,
                                 EdfEventAnnotationResult &result) {
@@ -38,15 +39,16 @@ bool edf_build_event_annotation(EdfAnnotationKind kind,
         return false;
     }
 
-    int64_t event_ms = 0;
+    int64_t event_epoch_ms = 0;
     if (session_start_epoch_ms <= 0 ||
-        !edf_parse_utc_ms(record.report_time.c_str(), event_ms)) {
+        !edf_parse_as11_utc_ms(record.report_time.c_str(), clock_transform,
+                              event_epoch_ms)) {
         set_result(result, EdfEventAnnotationStatus::TimeError,
                    "event_time_failed");
         return false;
     }
 
-    int64_t onset_ms = event_ms - session_start_epoch_ms;
+    int64_t onset_ms = event_epoch_ms - session_start_epoch_ms;
     if (onset_ms < 0) onset_ms = 0;
 
     int32_t duration_ms = 0;

@@ -17,17 +17,24 @@ namespace {
 
 static constexpr uint32_t AC_SESSION_RECENT_ACTIVITY_START_MS = 10000;
 
-bool recent_therapy_start_activity(const As11DeviceState &as11,
-                                   uint32_t now_ms) {
-    const uint32_t event_ms = as11.last_activity_event_ms();
+bool recent_therapy_transition(const As11DeviceState &as11,
+                               As11TherapyState expected_state,
+                               uint32_t now_ms) {
+    const uint32_t event_ms = as11.last_therapy_transition_ms();
     if (event_ms == 0) return false;
     const int32_t age_ms = static_cast<int32_t>(now_ms - event_ms);
     if (age_ms < 0 ||
         age_ms > static_cast<int32_t>(AC_SESSION_RECENT_ACTIVITY_START_MS)) {
         return false;
     }
-    const std::string &event = as11.last_activity_event();
-    return event == "TherapyStarted" || event == "TherapyStart";
+    const std::string &event = as11.last_therapy_transition_event();
+    if (expected_state == As11TherapyState::Running) {
+        return event == "TherapyStarted" || event == "TherapyStart";
+    }
+    if (expected_state == As11TherapyState::Standby) {
+        return event == "StandbyStarted" || event == "TherapyStop";
+    }
+    return false;
 }
 
 }  // namespace
@@ -47,7 +54,8 @@ void SessionManager::poll(const As11DeviceState &as11, uint32_t now_ms) {
         if (status_.state != SessionState::Active) {
             const bool recovered_active_start =
                 previous_therapy_state != As11TherapyState::Standby &&
-                !recent_therapy_start_activity(as11, now_ms);
+                !recent_therapy_transition(as11, As11TherapyState::Running,
+                                           now_ms);
             start_session(as11, now_ms, "rop_running",
                           recovered_active_start);
         }
@@ -104,9 +112,14 @@ void SessionManager::start_session(const As11DeviceState &as11,
     status_.end_count = end_count;
     status_.started_ms = now_ms;
     status_.recovered_active_start = recovered_active_start;
+    const std::string &transition_time =
+        as11.last_therapy_transition_report_time();
+    const bool transition_is_current =
+        recent_therapy_transition(as11, As11TherapyState::Running, now_ms) &&
+        !transition_time.empty();
     copy_time(status_.start_device_time,
               sizeof(status_.start_device_time),
-              as11.device_datetime());
+              transition_is_current ? transition_time : as11.device_datetime());
     AC_SESSION_LOG(
         CAT_STREAM, LOG_INFO,
         "[THERAPY] started time=%s\n",
@@ -127,10 +140,16 @@ void SessionManager::end_session(const As11DeviceState &as11,
     status_.therapy_state = as11.therapy_state();
     status_.ended_ms = now_ms;
     status_.end_count++;
+    const std::string &transition_time =
+        as11.last_therapy_transition_report_time();
+    const bool transition_is_current =
+        recent_therapy_transition(as11, As11TherapyState::Standby, now_ms) &&
+        !transition_time.empty();
     copy_time(status_.end_device_time,
               sizeof(status_.end_device_time),
-              as11.device_datetime());
-    if (session_utc_timestamp_later(status_.last_stream_start_time,
+              transition_is_current ? transition_time : as11.device_datetime());
+    if (!transition_is_current &&
+        session_utc_timestamp_later(status_.last_stream_start_time,
                                     status_.end_device_time)) {
         copy_cstr(status_.end_device_time,
                   sizeof(status_.end_device_time),

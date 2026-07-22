@@ -5,6 +5,7 @@
 #include <string>
 
 #include "app_config.h"
+#include "as11_clock.h"
 #include "as11_device_service.h"
 #include "rpc_request_port.h"
 #include "wifi_manager.h"
@@ -36,6 +37,8 @@ public:
     }
     bool esp_clock_valid() const;
     const char *esp_clock_source_name() const;
+    As11ClockTransform as11_clock_transform() const;
+    bool refresh_as11_clock_reference();
     uint32_t timezone_revision() const { return timezone_revision_; }
     const char *last_status() const { return last_status_.c_str(); }
     bool utc_now_iso(char *out, size_t size) const;
@@ -68,6 +71,7 @@ private:
     bool ntp_started_ = false;
     bool ntp_synced_ = false;
     bool ntp_reported_ = false;
+    uint32_t ntp_synced_ms_ = 0;
 
     bool manual_resmed_pull_pending_ = false;
     bool resmed_push_readback_pending_ = false;

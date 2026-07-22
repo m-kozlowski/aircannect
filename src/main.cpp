@@ -836,7 +836,8 @@ void setup() {
                        session_manager);
 
     edf_recorder_manager.begin(event_broker, stream_broker,
-                               as11_device_service.state(), session_manager);
+                               as11_device_service.state(), session_manager,
+                               time_sync_service);
     edf_recorder_manager.set_enabled(
         config_service.data().edf_capture_enabled);
 

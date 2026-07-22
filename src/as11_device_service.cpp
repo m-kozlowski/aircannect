@@ -365,7 +365,8 @@ void As11DeviceService::complete_query(
     if (active_query_kind_ == QueryKind::Clock) {
         applied = state_.apply_datetime_response(
             completion.payload, now_ms, completion.dispatch_utc_ms,
-            completion.response_utc_ms);
+            completion.response_utc_ms, completion.dispatch_ms,
+            completion.response_ms);
     } else {
         applied = state_.apply_status_get_response(completion.payload, now_ms);
     }

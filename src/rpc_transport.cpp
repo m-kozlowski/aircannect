@@ -610,15 +610,17 @@ void RpcTransport::cancel_queued_request(const QueuedRequest &request,
 }
 
 void RpcTransport::complete_request(uint32_t id,
-                                  uint32_t generation,
-                                  OperationOutcome outcome,
-                                  RpcCompletionCause cause,
-                                  const std::string *payload,
-                                  const char *reason,
-                                  bool response_error,
-                                  RequestCompletionQueue &completions,
-                                  int64_t dispatch_utc_ms,
-                                  int64_t response_utc_ms) {
+                                    uint32_t generation,
+                                    OperationOutcome outcome,
+                                    RpcCompletionCause cause,
+                                    const std::string *payload,
+                                    const char *reason,
+                                    bool response_error,
+                                    RequestCompletionQueue &completions,
+                                    int64_t dispatch_utc_ms,
+                                    int64_t response_utc_ms,
+                                    uint32_t dispatch_ms,
+                                    uint32_t response_ms) {
     if (!generation) return;
 
     RpcRequestCompletion completion;
@@ -630,6 +632,8 @@ void RpcTransport::complete_request(uint32_t id,
     completion.response_error = response_error;
     completion.dispatch_utc_ms = dispatch_utc_ms;
     completion.response_utc_ms = response_utc_ms;
+    completion.dispatch_ms = dispatch_ms;
+    completion.response_ms = response_ms;
     if (!completions.push(std::move(completion))) {
         Log::logf(CAT_RPC, LOG_ERROR,
                   "RPC completion queue invariant violated id=%lu\n",
@@ -816,10 +820,11 @@ void RpcTransport::dispatch_next_request() {
     pending_.method = request.method;
     pending_.admission = request.admission;
     pending_.generation = request.generation;
-    pending_.deadline_ms = millis() + request.timeout_ms;
+    pending_.dispatch_ms = millis();
+    pending_.deadline_ms = pending_.dispatch_ms + request.timeout_ms;
     pending_.dispatch_utc_ms = 0;
     (void)current_epoch_ms(pending_.dispatch_utc_ms);
-    last_integrated_tx_ms_ = millis();
+    last_integrated_tx_ms_ = pending_.dispatch_ms;
     stats_.dispatched_requests++;
 
     Log::logf(CAT_RPC, LOG_DEBUG, "dispatched id=%lu method=%s src=%s\n",
@@ -1026,6 +1031,7 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                 }
                 const bool response_error =
                     json_member_present(owned_payload, "error");
+                const uint32_t response_ms = millis();
                 int64_t response_epoch_ms = 0;
                 (void)current_epoch_ms(response_epoch_ms);
                 complete_request(
@@ -1034,8 +1040,9 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                                    : OperationOutcome::succeeded(),
                     RpcCompletionCause::Response, &owned_payload, "",
                     response_error, request_completions_,
-                    pending_.dispatch_utc_ms, response_epoch_ms);
-                note_request_success(response_source, millis());
+                    pending_.dispatch_utc_ms, response_epoch_ms,
+                    pending_.dispatch_ms, response_ms);
+                note_request_success(response_source, response_ms);
                 pending_ = {};
                 if (addressed_request) break;
                 if (!emit_matched_response(response_source)) break;
