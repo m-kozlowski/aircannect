@@ -26,6 +26,14 @@ extern "C" {
 }
 
 namespace aircannect {
+
+struct StorageSmbAsyncResult {
+    bool finished = false;
+    bool orphaned = false;
+    int status = 0;
+    void *result = nullptr;
+};
+
 namespace {
 
 static constexpr int SMB_COMMAND_TIMEOUT_SECONDS = 15;
@@ -52,18 +60,12 @@ private:
 #endif
 };
 
-struct SmbAsyncCbData {
-    bool finished = false;
-    bool orphaned = false;
-    int status = 0;
-    void *result = nullptr;
-};
-
 void smb_generic_cb(struct smb2_context *,
                     int status,
                     void *command_data,
                     void *private_data) {
-    SmbAsyncCbData *cb = static_cast<SmbAsyncCbData *>(private_data);
+    StorageSmbAsyncResult *cb =
+        static_cast<StorageSmbAsyncResult *>(private_data);
     if (!cb) return;
     cb->status = status;
     cb->result = command_data;
@@ -76,11 +78,11 @@ void feed_task() {
     vTaskDelay(1);
 }
 
-SmbAsyncCbData *smb_alloc_cb() {
-    return new (std::nothrow) SmbAsyncCbData();
+StorageSmbAsyncResult *smb_alloc_cb() {
+    return new (std::nothrow) StorageSmbAsyncResult();
 }
 
-int smb_finish_cb(SmbAsyncCbData *cb, int loop_rc,
+int smb_finish_cb(StorageSmbAsyncResult *cb, int loop_rc,
                   void **result_out = nullptr) {
     if (!cb) return -ENOMEM;
     if (loop_rc < 0) {
@@ -95,7 +97,7 @@ int smb_finish_cb(SmbAsyncCbData *cb, int loop_rc,
 
 int smb_run_event_loop(
     struct smb2_context *ctx,
-    SmbAsyncCbData *cb,
+    StorageSmbAsyncResult *cb,
     const BackgroundOperationControl *operation) {
     if (!cb) return -ENOMEM;
     const uint32_t started_ms = millis();
@@ -141,7 +143,7 @@ int smb_submit_ev(struct smb2_context *ctx,
                   Submit submit,
                   void **result_out = nullptr,
                   const BackgroundOperationControl *operation = nullptr) {
-    SmbAsyncCbData *cb = smb_alloc_cb();
+    StorageSmbAsyncResult *cb = smb_alloc_cb();
     if (!cb) return -ENOMEM;
     const int rc = submit(cb);
     if (rc < 0) {
@@ -152,21 +154,10 @@ int smb_submit_ev(struct smb2_context *ctx,
                          result_out);
 }
 
-int smb_connect_share_ev(struct smb2_context *ctx,
-                         const char *server,
-                         const char *share,
-                         const char *user,
-                         const BackgroundOperationControl *operation) {
-    return smb_submit_ev(ctx, [ctx, server, share, user](SmbAsyncCbData *cb) {
-        return smb2_connect_share_async(ctx, server, share, user,
-                                        smb_generic_cb, cb);
-    }, nullptr, operation);
-}
-
 int smb_disconnect_share_ev(
     struct smb2_context *ctx,
     const BackgroundOperationControl *operation) {
-    return smb_submit_ev(ctx, [ctx](SmbAsyncCbData *cb) {
+    return smb_submit_ev(ctx, [ctx](StorageSmbAsyncResult *cb) {
         return smb2_disconnect_share_async(ctx, smb_generic_cb, cb);
     }, nullptr, operation);
 }
@@ -175,7 +166,7 @@ int smb_stat_ev(struct smb2_context *ctx,
                 const char *path,
                 smb2_stat_64 *st,
                 const BackgroundOperationControl *operation) {
-    return smb_submit_ev(ctx, [ctx, path, st](SmbAsyncCbData *cb) {
+    return smb_submit_ev(ctx, [ctx, path, st](StorageSmbAsyncResult *cb) {
         return smb2_stat_async(ctx, path, st, smb_generic_cb, cb);
     }, nullptr, operation);
 }
@@ -183,7 +174,7 @@ int smb_stat_ev(struct smb2_context *ctx,
 int smb_mkdir_ev(struct smb2_context *ctx,
                  const char *path,
                  const BackgroundOperationControl *operation) {
-    return smb_submit_ev(ctx, [ctx, path](SmbAsyncCbData *cb) {
+    return smb_submit_ev(ctx, [ctx, path](StorageSmbAsyncResult *cb) {
         return smb2_mkdir_async(ctx, path, smb_generic_cb, cb);
     }, nullptr, operation);
 }
@@ -194,7 +185,7 @@ struct smb2fh *smb_open_ev(struct smb2_context *ctx,
                            const BackgroundOperationControl *operation) {
     void *result = nullptr;
     const int status = smb_submit_ev(
-        ctx, [ctx, path, flags](SmbAsyncCbData *cb) {
+        ctx, [ctx, path, flags](StorageSmbAsyncResult *cb) {
             return smb2_open_async(ctx, path, flags, smb_generic_cb, cb);
         }, &result, operation);
     if (status < 0) return nullptr;
@@ -204,7 +195,7 @@ struct smb2fh *smb_open_ev(struct smb2_context *ctx,
 int smb_close_ev(struct smb2_context *ctx,
                  struct smb2fh *fh,
                  const BackgroundOperationControl *operation) {
-    return smb_submit_ev(ctx, [ctx, fh](SmbAsyncCbData *cb) {
+    return smb_submit_ev(ctx, [ctx, fh](StorageSmbAsyncResult *cb) {
         return smb2_close_async(ctx, fh, smb_generic_cb, cb);
     }, nullptr, operation);
 }
@@ -212,7 +203,7 @@ int smb_close_ev(struct smb2_context *ctx,
 bool smb_queue_close_for_destroy(struct smb2_context *ctx, struct smb2fh *fh) {
     // destroy_context invokes queued PDU callbacks with SHUTDOWN; queue close
     // first so libsmb2's close_cb frees the file handle without a network wait.
-    SmbAsyncCbData *cb = smb_alloc_cb();
+    StorageSmbAsyncResult *cb = smb_alloc_cb();
     if (!cb) return false;
     cb->orphaned = true;
     const int rc = smb2_close_async(ctx, fh, smb_generic_cb, cb);
@@ -229,7 +220,7 @@ int smb_write_ev(struct smb2_context *ctx,
                  const uint8_t *data,
                  uint32_t len,
                  const BackgroundOperationControl *operation) {
-    return smb_submit_ev(ctx, [ctx, fh, data, len](SmbAsyncCbData *cb) {
+    return smb_submit_ev(ctx, [ctx, fh, data, len](StorageSmbAsyncResult *cb) {
         return smb2_write_async(ctx, fh, data, len, smb_generic_cb, cb);
     }, nullptr, operation);
 }
@@ -519,17 +510,18 @@ void StorageSmbClient::reset_host_resolution() {
         std::memory_order_release);
 }
 
-StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
-                                                    size_t error_out_size) {
+StorageSmbOperationResult StorageSmbClient::resolve_host(
+    char *error_out,
+    size_t error_out_size) {
     if (!server_[0]) {
         set_error(error_out, error_out_size, "not_configured");
-        return StorageSmbHostResult::Error;
+        return StorageSmbOperationResult::Error;
     }
 
     HostResolutionState state = static_cast<HostResolutionState>(
         host_resolution_state_.load(std::memory_order_acquire));
     if (state == HostResolutionState::Pending) {
-        return StorageSmbHostResult::Waiting;
+        return StorageSmbOperationResult::Waiting;
     }
 
     if (state != HostResolutionState::Idle &&
@@ -545,7 +537,7 @@ StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
                  "dns_lookup_failed:%d",
                  host_resolution_error_);
         set_error(error_out, error_out_size, error);
-        return StorageSmbHostResult::Error;
+        return StorageSmbOperationResult::Error;
     }
 
     if (state == HostResolutionState::Ready) {
@@ -556,7 +548,7 @@ StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
                                     sizeof(host),
                                     &port_suffix)) {
             set_error(error_out, error_out_size, "bad_smb_host");
-            return StorageSmbHostResult::Error;
+            return StorageSmbOperationResult::Error;
         }
 
         const int written = snprintf(resolved_server_,
@@ -567,7 +559,7 @@ StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
         if (written <= 0 ||
             static_cast<size_t>(written) >= sizeof(resolved_server_)) {
             set_error(error_out, error_out_size, "resolved_host_too_long");
-            return StorageSmbHostResult::Error;
+            return StorageSmbOperationResult::Error;
         }
 
         Log::logf(CAT_STORAGE,
@@ -578,7 +570,7 @@ StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
                   static_cast<unsigned long>(
                       millis() - host_resolution_started_ms_));
         set_error(error_out, error_out_size, "");
-        return StorageSmbHostResult::Ready;
+        return StorageSmbOperationResult::Ready;
     }
 
     char host[AC_STORAGE_SMB_ENDPOINT_HOST_MAX] = {};
@@ -588,7 +580,7 @@ StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
                                 sizeof(host),
                                 &port_suffix)) {
         set_error(error_out, error_out_size, "bad_smb_host");
-        return StorageSmbHostResult::Error;
+        return StorageSmbOperationResult::Error;
     }
 
     copy_cstr(resolving_server_, sizeof(resolving_server_), server_);
@@ -614,7 +606,7 @@ StorageSmbHostResult StorageSmbClient::resolve_host(char *error_out,
         publish_host_resolution(&address, ERR_OK);
         return resolve_host(error_out, error_out_size);
     }
-    if (rc == ERR_INPROGRESS) return StorageSmbHostResult::Waiting;
+    if (rc == ERR_INPROGRESS) return StorageSmbOperationResult::Waiting;
 
     publish_host_resolution(nullptr, rc);
     return resolve_host(error_out, error_out_size);
@@ -647,58 +639,146 @@ void StorageSmbClient::configure_socket_options() {
     }
 }
 
-bool StorageSmbClient::connect(
+StorageSmbOperationResult StorageSmbClient::finish_connect(
     char *error_out,
     size_t error_out_size,
-    const BackgroundOperationControl *operation) {
-    if (connected_) return true;
-    if (!server_[0] || !share_[0]) {
-        set_error(error_out, error_out_size, "not_configured");
-        return false;
+    int service_status) {
+    if (!connect_result_) {
+        set_error(error_out, error_out_size, "connect_state_missing");
+        return StorageSmbOperationResult::Error;
     }
-    if (!resolved_server_[0]) {
-        set_error(error_out, error_out_size, "host_not_resolved");
-        return false;
+    if (!connect_result_->finished && service_status >= 0) {
+        return StorageSmbOperationResult::Waiting;
     }
 
-    ctx_ = smb2_init_context();
-    if (!ctx_) {
-        set_error(error_out, error_out_size, "smb_context_alloc");
-        Log::logf(CAT_STORAGE, LOG_ERROR,
-                  "[SMB] context allocation failed\n");
-        return false;
-    }
+    const int status = connect_result_->finished
+        ? connect_result_->status : service_status;
+    StorageSmbAsyncResult *completed = connect_result_;
+    connect_result_ = nullptr;
+    connect_started_ms_ = 0;
 
-    smb2_set_timeout(ctx_, SMB_COMMAND_TIMEOUT_SECONDS);
-    smb2_set_security_mode(ctx_, SMB2_NEGOTIATE_SIGNING_ENABLED);
-    if (user_[0]) {
-        smb2_set_user(ctx_, user_);
-        smb2_set_password(ctx_, password_);
-    }
-
-    Log::logf(CAT_STORAGE, LOG_INFO,
-              "[SMB] connecting //%s/%s\n", server_, share_);
-    const int rc = smb_connect_share_ev(ctx_, resolved_server_, share_, nullptr,
-                                        operation);
-    if (rc != 0) {
+    if (status != 0) {
         char error[AC_STORAGE_ERROR_MAX] = {};
-        set_smb_error(error, sizeof(error), "connect", rc);
+        set_smb_error(error, sizeof(error), "connect", status);
         set_error(error_out, error_out_size, error);
         Log::logf(CAT_STORAGE, LOG_WARN,
                   "[SMB] connect failed error=%s\n", error);
         smb2_destroy_context(ctx_);
         ctx_ = nullptr;
-        return false;
+        delete completed;
+        return StorageSmbOperationResult::Error;
     }
 
+    delete completed;
     connected_ = true;
     configure_socket_options();
     set_error(error_out, error_out_size, "");
-    return true;
+    return StorageSmbOperationResult::Ready;
+}
+
+StorageSmbOperationResult StorageSmbClient::step_connect(
+    char *error_out,
+    size_t error_out_size,
+    const BackgroundOperationControl *operation) {
+    if (connected_) return StorageSmbOperationResult::Ready;
+    if (!server_[0] || !share_[0]) {
+        set_error(error_out, error_out_size, "not_configured");
+        return StorageSmbOperationResult::Error;
+    }
+    if (!resolved_server_[0]) {
+        set_error(error_out, error_out_size, "host_not_resolved");
+        return StorageSmbOperationResult::Error;
+    }
+
+    if (!connect_result_) {
+        ctx_ = smb2_init_context();
+        if (!ctx_) {
+            set_error(error_out, error_out_size, "smb_context_alloc");
+            Log::logf(CAT_STORAGE, LOG_ERROR,
+                      "[SMB] context allocation failed\n");
+            return StorageSmbOperationResult::Error;
+        }
+
+        smb2_set_timeout(ctx_, SMB_COMMAND_TIMEOUT_SECONDS);
+        smb2_set_security_mode(ctx_, SMB2_NEGOTIATE_SIGNING_ENABLED);
+        if (user_[0]) {
+            smb2_set_user(ctx_, user_);
+            smb2_set_password(ctx_, password_);
+        }
+
+        connect_result_ = smb_alloc_cb();
+        if (!connect_result_) {
+            set_error(error_out, error_out_size, "smb_callback_alloc");
+            smb2_destroy_context(ctx_);
+            ctx_ = nullptr;
+            return StorageSmbOperationResult::Error;
+        }
+
+        Log::logf(CAT_STORAGE, LOG_INFO,
+                  "[SMB] connecting //%s/%s\n", server_, share_);
+
+        connect_started_ms_ = millis();
+        const int rc = smb2_connect_share_async(
+            ctx_, resolved_server_, share_, nullptr,
+            smb_generic_cb, connect_result_);
+        if (rc < 0) return finish_connect(error_out, error_out_size, rc);
+    }
+
+    if (operation) {
+        const BackgroundOperationStop reason =
+            operation->stop_reason(millis());
+        if (reason == BackgroundOperationStop::Aborted) {
+            set_error(error_out, error_out_size, "preempted");
+            abort_connection();
+            return StorageSmbOperationResult::Error;
+        }
+        if (reason == BackgroundOperationStop::Deadline) {
+            set_error(error_out, error_out_size, "operation_timeout");
+            abort_connection();
+            return StorageSmbOperationResult::Error;
+        }
+    }
+
+    if (static_cast<uint32_t>(millis() - connect_started_ms_) >=
+        SMB_EVENT_LOOP_TIMEOUT_MS) {
+        set_error(error_out, error_out_size, "operation_timeout");
+        abort_connection();
+        return StorageSmbOperationResult::Error;
+    }
+
+    if (connect_result_->finished) {
+        return finish_connect(error_out, error_out_size);
+    }
+
+    const int fd = smb2_get_fd(ctx_);
+    if (fd < 0) return finish_connect(error_out, error_out_size, -EIO);
+
+    pollfd pfd = {};
+    pfd.fd = fd;
+    pfd.events = smb2_which_events(ctx_);
+    const int rc = poll(&pfd, 1, 0);
+    if (rc < 0) {
+        return finish_connect(error_out, error_out_size,
+                              errno ? -errno : -EIO);
+    }
+    if (pfd.revents) {
+        // A reachable server can keep the socket ready throughout the SMB
+        // handshake. Service one event per export tick so core 0 can run idle.
+        const int service_status = smb2_service(ctx_, pfd.revents);
+        if (service_status < 0 || connect_result_->finished) {
+            return finish_connect(error_out, error_out_size, service_status);
+        }
+    }
+
+    return StorageSmbOperationResult::Waiting;
 }
 
 void StorageSmbClient::disconnect(
     const BackgroundOperationControl *operation) {
+    if (connect_result_) {
+        abort_connection();
+        return;
+    }
     if (!ctx_) {
         connected_ = false;
         writer_ = nullptr;
@@ -930,6 +1010,9 @@ bool StorageSmbClient::close_writer(
 
 void StorageSmbClient::abort_connection() {
     if (!ctx_) {
+        delete connect_result_;
+        connect_result_ = nullptr;
+        connect_started_ms_ = 0;
         connected_ = false;
         writer_ = nullptr;
         return;
@@ -946,6 +1029,9 @@ void StorageSmbClient::abort_connection() {
     connected_ = false;
     smb2_destroy_context(ctx_);
     ctx_ = nullptr;
+    delete connect_result_;
+    connect_result_ = nullptr;
+    connect_started_ms_ = 0;
 }
 
 }  // namespace aircannect

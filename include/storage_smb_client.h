@@ -12,6 +12,8 @@ struct smb2fh;
 
 namespace aircannect {
 
+struct StorageSmbAsyncResult;
+
 static constexpr size_t AC_STORAGE_SMB_REMOTE_PATH_MAX = 256;
 static constexpr size_t AC_STORAGE_SMB_ENDPOINT_HOST_MAX = 96;
 static constexpr size_t AC_STORAGE_SMB_SHARE_MAX = 64;
@@ -25,7 +27,7 @@ struct StorageSmbRemoteStat {
     uint64_t size = 0;
 };
 
-enum class StorageSmbHostResult : uint8_t {
+enum class StorageSmbOperationResult : uint8_t {
     Waiting,
     Ready,
     Error,
@@ -43,11 +45,12 @@ public:
                    size_t error_out_size = 0,
                    const BackgroundOperationControl *operation = nullptr);
 
-    StorageSmbHostResult resolve_host(char *error_out = nullptr,
-                                      size_t error_out_size = 0);
-    bool connect(char *error_out = nullptr,
-                 size_t error_out_size = 0,
-                 const BackgroundOperationControl *operation = nullptr);
+    StorageSmbOperationResult resolve_host(char *error_out = nullptr,
+                                           size_t error_out_size = 0);
+    StorageSmbOperationResult step_connect(
+        char *error_out = nullptr,
+        size_t error_out_size = 0,
+        const BackgroundOperationControl *operation = nullptr);
     void disconnect(const BackgroundOperationControl *operation = nullptr);
     bool connected() const { return connected_; }
 
@@ -107,6 +110,10 @@ private:
                        size_t error_out_size,
                        const char *operation,
                        int status_hint = 0) const;
+    StorageSmbOperationResult finish_connect(
+        char *error_out,
+        size_t error_out_size,
+        int service_status = 0);
     void configure_socket_options();
 
     char server_[AC_STORAGE_SMB_ENDPOINT_HOST_MAX] = {};
@@ -125,6 +132,8 @@ private:
 
     smb2_context *ctx_ = nullptr;
     struct smb2fh *writer_ = nullptr;
+    StorageSmbAsyncResult *connect_result_ = nullptr;
+    uint32_t connect_started_ms_ = 0;
     bool connected_ = false;
 };
 

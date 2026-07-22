@@ -145,6 +145,7 @@ private:
         LoadInventory,
         ResolveHost,
         Connect,
+        EnsureBaseDir,
         VerifyLatestStart,
         VerifyLatestFile,
         VerifyLatestRemote,
@@ -234,6 +235,7 @@ private:
     bool cancel_scheduled_reconcile_locked();
     ExportStep step_work_phase_locked();
     ExportStep step_resolve_host_locked();
+    ExportStep step_connect_locked();
     static bool phase_has_blocking_io(WorkPhase phase);
     void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
     ExportStep publish_blocking_phase_locked(
