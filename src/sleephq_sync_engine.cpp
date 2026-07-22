@@ -1,4 +1,4 @@
-#include "sleephq_sync_job.h"
+#include "sleephq_sync_engine.h"
 
 #include <new>
 #include <stdio.h>
@@ -18,7 +18,6 @@
 namespace aircannect {
 namespace {
 
-static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
 static constexpr uint32_t SLEEPHQ_IMPORT_POLL_INTERVAL_MS = 2000;
 // SleepHQ import processing is asynchronous server-side work. Per-day EDF
 // imports can stay in "unpacking" briefly after upload completes, but a long
@@ -191,15 +190,15 @@ const char *sleephq_sync_state_name(SleepHqSyncState state) {
     return "unknown";
 }
 
-bool SleepHqSyncJob::lock(uint32_t timeout_ms) const {
+bool SleepHqSyncEngine::lock(uint32_t timeout_ms) const {
     return lock_ && xSemaphoreTake(lock_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
-void SleepHqSyncJob::unlock() const {
+void SleepHqSyncEngine::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
 }
 
-void SleepHqSyncJob::publish_runtime_locked() {
+void SleepHqSyncEngine::publish_runtime_locked() {
     const uint32_t generation = status_.config_generation;
     runtime_state_.store(static_cast<uint8_t>(status_.state));
     runtime_pending_.store(status_.pending);
@@ -212,31 +211,12 @@ void SleepHqSyncJob::publish_runtime_locked() {
             : 0);
 }
 
-void SleepHqSyncJob::copy_string(char *dst,
-                                 size_t dst_size,
-                                 const String &src) {
-    copy_cstr(dst, dst_size, src.c_str());
-}
-
-SleepHqSyncJob::ConfigSnapshot SleepHqSyncJob::make_config_snapshot(
-    const AppConfigData &config) {
-    ConfigSnapshot out;
-    copy_string(out.client_id, sizeof(out.client_id),
-                config.sleephq_client_id);
-    copy_string(out.client_secret, sizeof(out.client_secret),
-                config.sleephq_client_secret);
-    copy_string(out.team_id, sizeof(out.team_id), config.sleephq_team_id);
-    copy_string(out.device_id, sizeof(out.device_id),
-                config.sleephq_device_id);
-    return out;
-}
-
-bool SleepHqSyncJob::snapshot_configured(const ConfigSnapshot &config) {
+bool SleepHqSyncEngine::snapshot_configured(const SleepHqExportConfig &config) {
     return config.client_id[0] && config.client_secret[0];
 }
 
-SleepHqConfig SleepHqSyncJob::client_config_from_snapshot(
-    const ConfigSnapshot &config) {
+SleepHqConfig SleepHqSyncEngine::client_config_from_snapshot(
+    const SleepHqExportConfig &config) {
     SleepHqConfig out;
     copy_cstr(out.client_id, sizeof(out.client_id), config.client_id);
     copy_cstr(out.client_secret, sizeof(out.client_secret),
@@ -246,7 +226,7 @@ SleepHqConfig SleepHqSyncJob::client_config_from_snapshot(
     return out;
 }
 
-const char *SleepHqSyncJob::inflight_phase_name(InflightPhase phase) {
+const char *SleepHqSyncEngine::inflight_phase_name(InflightPhase phase) {
     switch (phase) {
         case InflightPhase::Uploading: return "uploading";
         case InflightPhase::Processing: return "processing";
@@ -255,7 +235,7 @@ const char *SleepHqSyncJob::inflight_phase_name(InflightPhase phase) {
     return "none";
 }
 
-bool SleepHqSyncJob::parse_inflight_phase(const char *text,
+bool SleepHqSyncEngine::parse_inflight_phase(const char *text,
                                           InflightPhase &out) {
     if (!text) return false;
     if (strcmp(text, "uploading") == 0) {
@@ -273,7 +253,7 @@ bool SleepHqSyncJob::parse_inflight_phase(const char *text,
     return false;
 }
 
-void SleepHqSyncJob::begin(const AppConfigData &config,
+void SleepHqSyncEngine::begin(const SleepHqExportConfig &config,
                            StorageScanPort &scan_port,
                            StorageReadPort &read_port,
                            StorageStreamPort &stream_port,
@@ -283,12 +263,12 @@ void SleepHqSyncJob::begin(const AppConfigData &config,
     inventory_loader_.begin(scan_port, read_port);
     state_io_.begin(read_port, write_port, path_port);
     stream_port_ = &stream_port;
-    refresh_config(config, millis());
+    configure(config);
 }
 
-bool SleepHqSyncJob::config_matches_locked(
-    const ConfigSnapshot &config) const {
-    const ConfigSnapshot &active =
+bool SleepHqSyncEngine::config_matches_locked(
+    const SleepHqExportConfig &config) const {
+    const SleepHqExportConfig &active =
         pending_config_valid_ ? pending_config_ : config_;
     return strcmp(active.client_id, config.client_id) == 0 &&
            strcmp(active.client_secret, config.client_secret) == 0 &&
@@ -296,7 +276,7 @@ bool SleepHqSyncJob::config_matches_locked(
            strcmp(active.device_id, config.device_id) == 0;
 }
 
-void SleepHqSyncJob::apply_config_locked(const ConfigSnapshot &config) {
+void SleepHqSyncEngine::apply_config_locked(const SleepHqExportConfig &config) {
     config_ = config;
     status_.config_generation++;
     status_.configured = snapshot_configured(config_);
@@ -319,12 +299,12 @@ void SleepHqSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     publish_runtime_locked();
 }
 
-void SleepHqSyncJob::apply_pending_config_locked() {
+void SleepHqSyncEngine::apply_pending_config_locked() {
     if (!pending_config_valid_) return;
 
-    const ConfigSnapshot pending = pending_config_;
+    const SleepHqExportConfig pending = pending_config_;
     pending_config_valid_ = false;
-    pending_config_ = ConfigSnapshot();
+    pending_config_ = SleepHqExportConfig();
 
     if (status_.state == SleepHqSyncState::Working) {
         fail_locked("preempted");
@@ -332,49 +312,36 @@ void SleepHqSyncJob::apply_pending_config_locked() {
     apply_config_locked(pending);
 }
 
-void SleepHqSyncJob::refresh_config(const AppConfigData &config,
-                                    uint32_t now_ms) {
-    if (last_config_check_ms_ != 0 &&
-        static_cast<uint32_t>(now_ms - last_config_check_ms_) <
-            CONFIG_REFRESH_INTERVAL_MS) {
-        return;
-    }
-    const ConfigSnapshot snapshot = make_config_snapshot(config);
-    if (!lock(0)) return;
-    last_config_check_ms_ = now_ms == 0 ? 1 : now_ms;
-    if (!config_matches_locked(snapshot)) {
+void SleepHqSyncEngine::configure(const SleepHqExportConfig &config) {
+    if (!lock(50)) return;
+
+    if (!config_matches_locked(config)) {
         if (status_.state == SleepHqSyncState::Working) {
-            pending_config_ = snapshot;
+            pending_config_ = config;
             pending_config_valid_ = true;
             request_operation_abort();
         } else {
-            apply_config_locked(snapshot);
+            apply_config_locked(config);
         }
     }
     unlock();
 }
 
-void SleepHqSyncJob::set_network_available(bool available) {
+void SleepHqSyncEngine::set_network_available(bool available) {
     const bool was_available = network_available_.exchange(available);
     if (was_available && !available) request_operation_abort();
     if (!lock(0)) return;
     status_.network_available = available;
     publish_runtime_locked();
     unlock();
-    if (available && !was_available) {
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
-    }
 }
 
-void SleepHqSyncJob::set_runtime_blocked(bool blocked) {
+void SleepHqSyncEngine::set_runtime_blocked(bool blocked) {
     const bool was_blocked = runtime_blocked_.exchange(blocked);
     if (!was_blocked && blocked) request_operation_abort();
-    if (was_blocked && !blocked) {
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
-    }
 }
 
-bool SleepHqSyncJob::request_locked(RunKind kind,
+bool SleepHqSyncEngine::request_locked(RunKind kind,
                                     const char *reason,
                                     const char *datalog_day) {
     if (!status_.configured) {
@@ -402,18 +369,15 @@ bool SleepHqSyncJob::request_locked(RunKind kind,
     return true;
 }
 
-bool SleepHqSyncJob::request_check(const char *reason) {
+bool SleepHqSyncEngine::request_check(const char *reason) {
     if (!lock(0)) return false;
     const bool queued = request_locked(RunKind::Check, reason);
     publish_runtime_locked();
     unlock();
-    if (queued) {
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
-    }
     return queued;
 }
 
-bool SleepHqSyncJob::request_sync(const char *reason) {
+bool SleepHqSyncEngine::request_sync(const char *reason) {
     if (!lock(0)) return false;
     const bool queued = request_locked(RunKind::Sync, reason);
     publish_runtime_locked();
@@ -421,12 +385,11 @@ bool SleepHqSyncJob::request_sync(const char *reason) {
     if (queued) {
         Log::logf(CAT_SLEEPHQ, LOG_INFO, "sync queued reason=%s\n",
                   reason && *reason ? reason : "manual");
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
     return queued;
 }
 
-bool SleepHqSyncJob::request_sync_day(const char *day, const char *reason) {
+bool SleepHqSyncEngine::request_sync_day(const char *day, const char *reason) {
     if (!day || !storage_export_is_datalog_day_name(day)) return false;
     if (!lock(0)) return false;
     const bool queued = request_locked(RunKind::Sync, reason, day);
@@ -437,12 +400,11 @@ bool SleepHqSyncJob::request_sync_day(const char *day, const char *reason) {
                   "sync queued reason=%s day=%s\n",
                   reason && *reason ? reason : "manual_day",
                   day);
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
     return queued;
 }
 
-bool SleepHqSyncJob::request_post_therapy_sync() {
+bool SleepHqSyncEngine::request_post_therapy_sync() {
     if (!lock(0)) return false;
     const bool queued = request_locked(RunKind::PostTherapySync,
                                        "post_therapy");
@@ -451,12 +413,11 @@ bool SleepHqSyncJob::request_post_therapy_sync() {
     if (queued) {
         Log::logf(CAT_SLEEPHQ, LOG_INFO,
                   "sync queued reason=post_therapy scope=latest_day\n");
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
     }
     return queued;
 }
 
-bool SleepHqSyncJob::build_endpoint_state_dir_locked(uint32_t team_id,
+bool SleepHqSyncEngine::build_endpoint_state_dir_locked(uint32_t team_id,
                                                      char *out,
                                                      size_t out_size) const {
     if (!out || out_size == 0 || !team_id || !config_.client_id[0]) {
@@ -476,7 +437,7 @@ bool SleepHqSyncJob::build_endpoint_state_dir_locked(uint32_t team_id,
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
-bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
+bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
     if (!status_.configured) {
         status_.state = SleepHqSyncState::Disabled;
         status_.pending = false;
@@ -529,15 +490,15 @@ bool SleepHqSyncJob::begin_run_locked(uint32_t now_ms) {
     return true;
 }
 
-JobStep SleepHqSyncJob::step_load_inventory_locked() {
+ExportStep SleepHqSyncEngine::step_load_inventory_locked() {
     if (!inventory_requested_) {
         const uint32_t generation = next_inventory_generation_;
         const OperationAdmission admission =
             inventory_loader_.request(state_dir_, generation);
-        if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+        if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
         if (admission != OperationAdmission::Accepted) {
             fail_locked("export_inventory_rejected");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
 
         next_inventory_generation_++;
@@ -549,33 +510,33 @@ JobStep SleepHqSyncJob::step_load_inventory_locked() {
     const StorageExportInventoryLoadResult result =
         inventory_loader_.poll(error, sizeof(error));
     if (result == StorageExportInventoryLoadResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (result == StorageExportInventoryLoadResult::Error) {
         fail_locked(error[0] ? error : "export_inventory_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     export_inventory_ = inventory_loader_.snapshot();
     if (!export_inventory_) {
         fail_locked("export_inventory_missing");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (!prepare_remote_reconcile_locked(error, sizeof(error))) {
         fail_locked(error[0] ? error : "remote_reconcile_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     phase_ = WorkPhase::ReadIdentification;
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-void SleepHqSyncJob::clear_current_file_locked() {
+void SleepHqSyncEngine::clear_current_file_locked() {
     current_file_.reset();
     status_.current_path[0] = 0;
 }
 
-void SleepHqSyncJob::clear_staged_locked() {
+void SleepHqSyncEngine::clear_staged_locked() {
     if (staged_) {
         for (size_t i = 0; i < staged_capacity_; ++i) {
             staged_[i].~StagedFile();
@@ -587,14 +548,14 @@ void SleepHqSyncJob::clear_staged_locked() {
     staged_capacity_ = 0;
 }
 
-void SleepHqSyncJob::clear_remote_files_locked() {
+void SleepHqSyncEngine::clear_remote_files_locked() {
     remote_files_.clear();
     remote_file_next_page_ = 1;
     remote_file_pages_loaded_ = 0;
     remote_file_cache_complete_ = false;
 }
 
-bool SleepHqSyncJob::reserve_remote_dates_locked(size_t needed) {
+bool SleepHqSyncEngine::reserve_remote_dates_locked(size_t needed) {
     if (needed <= remote_date_capacity_) return true;
     size_t next = remote_date_capacity_ == 0 ? 16 : remote_date_capacity_ * 2;
     while (next < needed) next *= 2;
@@ -620,7 +581,7 @@ bool SleepHqSyncJob::reserve_remote_dates_locked(size_t needed) {
     return true;
 }
 
-bool SleepHqSyncJob::cache_remote_date_locked(const char *day, bool exists) {
+bool SleepHqSyncEngine::cache_remote_date_locked(const char *day, bool exists) {
     if (!day || !day[0]) return false;
     for (size_t i = 0; i < remote_date_count_; ++i) {
         RemoteMachineDateCache &entry = remote_dates_[i];
@@ -636,7 +597,7 @@ bool SleepHqSyncJob::cache_remote_date_locked(const char *day, bool exists) {
     return true;
 }
 
-bool SleepHqSyncJob::cached_remote_date_exists_locked(const char *day,
+bool SleepHqSyncEngine::cached_remote_date_exists_locked(const char *day,
                                                       bool &exists) const {
     if (!day || !day[0]) return false;
     for (size_t i = 0; i < remote_date_count_; ++i) {
@@ -649,7 +610,7 @@ bool SleepHqSyncJob::cached_remote_date_exists_locked(const char *day,
     return false;
 }
 
-void SleepHqSyncJob::clear_remote_dates_locked() {
+void SleepHqSyncEngine::clear_remote_dates_locked() {
     if (remote_dates_) {
         for (size_t i = 0; i < remote_date_capacity_; ++i) {
             remote_dates_[i].~RemoteMachineDateCache();
@@ -667,7 +628,7 @@ void SleepHqSyncJob::clear_remote_dates_locked() {
     remote_serial_[0] = '\0';
 }
 
-bool SleepHqSyncJob::build_datalog_rebuild_marker_path_locked(
+bool SleepHqSyncEngine::build_datalog_rebuild_marker_path_locked(
     const char *day,
     char *out,
     size_t out_size) const {
@@ -680,7 +641,7 @@ bool SleepHqSyncJob::build_datalog_rebuild_marker_path_locked(
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
-bool SleepHqSyncJob::begin_remote_missing_datalog_day_locked(
+bool SleepHqSyncEngine::begin_remote_missing_datalog_day_locked(
     char *error,
     size_t error_size) {
     if (!pending_remote_day_[0]) {
@@ -699,7 +660,7 @@ bool SleepHqSyncJob::begin_remote_missing_datalog_day_locked(
     return true;
 }
 
-bool SleepHqSyncJob::resolve_remote_missing_datalog_day_locked(
+bool SleepHqSyncEngine::resolve_remote_missing_datalog_day_locked(
     bool marker_recent,
     uint64_t marker_epoch,
     char *error,
@@ -740,10 +701,10 @@ bool SleepHqSyncJob::resolve_remote_missing_datalog_day_locked(
     return true;
 }
 
-JobStep SleepHqSyncJob::step_read_rebuild_marker_locked() {
+ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
 
     bool marker_recent = false;
@@ -781,18 +742,18 @@ JobStep SleepHqSyncJob::step_read_rebuild_marker_locked() {
                 pending_remote_day_, pending_state_path_,
                 sizeof(pending_state_path_))) {
             fail_locked("rebuild_marker_path_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
 
         const OperationAdmission admission = state_io_.request_read(
             pending_state_path_, SLEEPHQ_REBUILD_MARKER_MAX_BYTES,
             next_storage_generation_locked());
-        if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+        if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
         if (admission != OperationAdmission::Accepted) {
             fail_locked("rebuild_marker_read_rejected");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
 
     pending_state_path_[0] = '\0';
@@ -800,12 +761,12 @@ JobStep SleepHqSyncJob::step_read_rebuild_marker_locked() {
     if (!resolve_remote_missing_datalog_day_locked(
             marker_recent, marker_epoch, error, sizeof(error))) {
         fail_locked(error[0] ? error : "planner_decision_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-void SleepHqSyncJob::reset_run_locked(bool keep_status) {
+void SleepHqSyncEngine::reset_run_locked(bool keep_status) {
     client_.disconnect();
     inventory_loader_.reset();
     export_inventory_.reset();
@@ -866,7 +827,7 @@ void SleepHqSyncJob::reset_run_locked(bool keep_status) {
     }
 }
 
-void SleepHqSyncJob::finish_check_locked(uint32_t team_id) {
+void SleepHqSyncEngine::finish_check_locked(uint32_t team_id) {
     status_.team_id = team_id;
     status_.last_check_epoch = storage_export_current_epoch_seconds_or_zero();
     retry_due_ms_ = 0;
@@ -881,7 +842,7 @@ void SleepHqSyncJob::finish_check_locked(uint32_t team_id) {
     publish_runtime_locked();
 }
 
-void SleepHqSyncJob::finish_sync_locked() {
+void SleepHqSyncEngine::finish_sync_locked() {
     status_.last_sync_epoch = storage_export_current_epoch_seconds_or_zero();
     status_.last_sync_files_seen = status_.files_seen;
     status_.last_sync_files_uploaded = status_.files_uploaded;
@@ -908,7 +869,7 @@ void SleepHqSyncJob::finish_sync_locked() {
     publish_runtime_locked();
 }
 
-void SleepHqSyncJob::fail_locked(const char *error) {
+void SleepHqSyncEngine::fail_locked(const char *error) {
     if (error && strcmp(error, "preempted") == 0) {
         const RunKind kind = current_run_kind_;
         char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
@@ -992,7 +953,7 @@ void SleepHqSyncJob::fail_locked(const char *error) {
     publish_runtime_locked();
 }
 
-void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
+void SleepHqSyncEngine::queue_retry_locked(uint32_t now_ms) {
     if (status_.state != SleepHqSyncState::Error ||
         retry_due_ms_ == 0 ||
         static_cast<int32_t>(now_ms - retry_due_ms_) < 0) {
@@ -1013,7 +974,7 @@ void SleepHqSyncJob::queue_retry_locked(uint32_t now_ms) {
     publish_runtime_locked();
 }
 
-bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
+bool SleepHqSyncEngine::begin_export_planner_locked(char *error_out,
                                                  size_t error_out_size) {
     if (!export_inventory_) {
         copy_cstr(error_out, error_out_size, "export_inventory_missing");
@@ -1039,13 +1000,13 @@ bool SleepHqSyncJob::begin_export_planner_locked(char *error_out,
                                  error_out_size);
 }
 
-void SleepHqSyncJob::reset_import_batch_locked() {
+void SleepHqSyncEngine::reset_import_batch_locked() {
     if (!begin_inflight_remove_locked(InflightRemoveAction::ResetBatch)) {
         fail_locked("inflight_remove_prepare_failed");
     }
 }
 
-void SleepHqSyncJob::complete_import_batch_reset_locked() {
+void SleepHqSyncEngine::complete_import_batch_reset_locked() {
     clear_current_file_locked();
     clear_staged_locked();
     state_batch_.clear();
@@ -1062,17 +1023,17 @@ void SleepHqSyncJob::complete_import_batch_reset_locked() {
     phase_ = WorkPhase::NextFile;
 }
 
-JobStep SleepHqSyncJob::finish_import_or_sync_locked() {
+ExportStep SleepHqSyncEngine::finish_import_or_sync_locked() {
     if (import_batch_active_) {
         reset_import_batch_locked();
-        return phase_ == WorkPhase::RemoveInflight ? JobStep::Waiting
-                                                   : JobStep::Idle;
+        return phase_ == WorkPhase::RemoveInflight ? ExportStep::Waiting
+                                                   : ExportStep::Idle;
     }
     finish_sync_locked();
-    return JobStep::Idle;
+    return ExportStep::Idle;
 }
 
-bool SleepHqSyncJob::next_file_locked() {
+bool SleepHqSyncEngine::next_file_locked() {
     if (runtime_blocked_.load()) {
         fail_locked("preempted");
         return false;
@@ -1134,7 +1095,7 @@ bool SleepHqSyncJob::next_file_locked() {
     return true;
 }
 
-bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
+bool SleepHqSyncEngine::plan_file_locked(const StorageExportPlannerItem &item) {
     const char *path = item.path;
     clear_current_file_locked();
     copy_cstr(status_.current_path, sizeof(status_.current_path), path);
@@ -1195,7 +1156,7 @@ bool SleepHqSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     return true;
 }
 
-bool SleepHqSyncJob::build_inflight_path_locked(char *out,
+bool SleepHqSyncEngine::build_inflight_path_locked(char *out,
                                                 size_t out_size) const {
     if (!state_dir_[0] || !out || out_size == 0) return false;
     const int written = snprintf(out, out_size, "%s/%s",
@@ -1203,7 +1164,7 @@ bool SleepHqSyncJob::build_inflight_path_locked(char *out,
     return written > 0 && static_cast<size_t>(written) < out_size;
 }
 
-bool SleepHqSyncJob::staged_contains_locked(const char *path,
+bool SleepHqSyncEngine::staged_contains_locked(const char *path,
                                             uint64_t size,
                                             uint64_t mtime) const {
     if (!path) return false;
@@ -1218,7 +1179,7 @@ bool SleepHqSyncJob::staged_contains_locked(const char *path,
     return false;
 }
 
-void SleepHqSyncJob::note_completed_datalog_day_locked(const char *day) {
+void SleepHqSyncEngine::note_completed_datalog_day_locked(const char *day) {
     pending_done_day_[0] = '\0';
     if (!day || !export_inventory_) return;
     if (!storage_export_datalog_day_finalized(
@@ -1230,14 +1191,14 @@ void SleepHqSyncJob::note_completed_datalog_day_locked(const char *day) {
     copy_cstr(pending_done_day_, sizeof(pending_done_day_), day);
 }
 
-uint32_t SleepHqSyncJob::next_storage_generation_locked() {
+uint32_t SleepHqSyncEngine::next_storage_generation_locked() {
     const uint32_t generation = next_storage_generation_;
     next_storage_generation_++;
     if (next_storage_generation_ == 0) next_storage_generation_ = 1;
     return generation;
 }
 
-bool SleepHqSyncJob::build_inflight_bytes_locked(InflightPhase phase) {
+bool SleepHqSyncEngine::build_inflight_bytes_locked(InflightPhase phase) {
     if (!status_.team_id || !status_.import_id ||
         phase == InflightPhase::None) {
         return false;
@@ -1308,7 +1269,7 @@ bool SleepHqSyncJob::build_inflight_bytes_locked(InflightPhase phase) {
     return pending_state_bytes_ != nullptr;
 }
 
-bool SleepHqSyncJob::prepare_inflight_write_locked(
+bool SleepHqSyncEngine::prepare_inflight_write_locked(
     InflightPhase phase,
     WorkPhase next_phase) {
     pending_state_path_[0] = '\0';
@@ -1325,15 +1286,15 @@ bool SleepHqSyncJob::prepare_inflight_write_locked(
     return true;
 }
 
-JobStep SleepHqSyncJob::step_write_inflight_locked() {
+ExportStep SleepHqSyncEngine::step_write_inflight_locked() {
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "inflight_write_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
@@ -1343,21 +1304,21 @@ JobStep SleepHqSyncJob::step_write_inflight_locked() {
         pending_state_bytes_.reset();
         phase_ = storage_next_phase_;
         storage_next_phase_ = WorkPhase::Idle;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const OperationAdmission admission = state_io_.request_replace(
         pending_state_path_, pending_state_bytes_,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("inflight_write_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-bool SleepHqSyncJob::begin_inflight_remove_locked(
+bool SleepHqSyncEngine::begin_inflight_remove_locked(
     InflightRemoveAction action,
     const char *failure) {
     pending_state_path_[0] = '\0';
@@ -1376,10 +1337,10 @@ bool SleepHqSyncJob::begin_inflight_remove_locked(
     return true;
 }
 
-JobStep SleepHqSyncJob::step_remove_inflight_locked() {
+ExportStep SleepHqSyncEngine::step_remove_inflight_locked() {
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         const InflightRemoveAction action = inflight_remove_action_;
@@ -1398,7 +1359,7 @@ JobStep SleepHqSyncJob::step_remove_inflight_locked() {
             fail_locked(remove_failure[0] ? remove_failure
                                           : "inflight_remove_failed");
         }
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         const InflightRemoveAction action = inflight_remove_action_;
@@ -1414,27 +1375,27 @@ JobStep SleepHqSyncJob::step_remove_inflight_locked() {
             case InflightRemoveAction::ResumeExport:
             case InflightRemoveAction::ResetBatch:
                 complete_import_batch_reset_locked();
-                return JobStep::Working;
+                return ExportStep::Working;
             case InflightRemoveAction::Fail:
                 fail_locked(failure[0] ? failure : "failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             case InflightRemoveAction::None:
                 fail_locked("inflight_remove_action_missing");
-                return JobStep::Idle;
+                return ExportStep::Idle;
         }
     }
 
     const OperationAdmission admission = state_io_.request_remove(
         pending_state_path_, next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("inflight_remove_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-void SleepHqSyncJob::reset_inflight_reader_locked() {
+void SleepHqSyncEngine::reset_inflight_reader_locked() {
     inflight_file_.reset();
     inflight_read_offset_ = 0;
     inflight_line_length_ = 0;
@@ -1443,7 +1404,7 @@ void SleepHqSyncJob::reset_inflight_reader_locked() {
     inflight_line_[0] = '\0';
 }
 
-bool SleepHqSyncJob::parse_inflight_line_locked(char *line) {
+bool SleepHqSyncEngine::parse_inflight_line_locked(char *line) {
     if (!line || !line[0]) return true;
 
     char *save = nullptr;
@@ -1525,7 +1486,7 @@ bool SleepHqSyncJob::parse_inflight_line_locked(char *line) {
     return true;
 }
 
-void SleepHqSyncJob::complete_inflight_load_locked() {
+void SleepHqSyncEngine::complete_inflight_load_locked() {
     status_.files_uploaded = staged_count_;
     status_.bytes_uploaded = 0;
     for (size_t i = 0; i < staged_count_; ++i) {
@@ -1547,7 +1508,7 @@ void SleepHqSyncJob::complete_inflight_load_locked() {
     }
 }
 
-JobStep SleepHqSyncJob::step_load_inflight_locked() {
+ExportStep SleepHqSyncEngine::step_load_inflight_locked() {
     if (inflight_file_.exists()) {
         uint8_t bytes[SLEEPHQ_INFLIGHT_READ_STEP_BYTES] = {};
         const size_t remaining = inflight_file_.size() - inflight_read_offset_;
@@ -1574,7 +1535,7 @@ JobStep SleepHqSyncJob::step_load_inflight_locked() {
         inflight_read_offset_ += read;
         if (!inflight_parse_failed_ &&
             inflight_read_offset_ < inflight_file_.size()) {
-            return JobStep::Working;
+            return ExportStep::Working;
         }
         if (!inflight_parse_failed_ && inflight_line_length_ != 0) {
             inflight_line_[inflight_line_length_] = '\0';
@@ -1585,8 +1546,8 @@ JobStep SleepHqSyncJob::step_load_inflight_locked() {
         inflight_file_.reset();
         if (!inflight_parse_failed_ && inflight_header_seen_) {
             complete_inflight_load_locked();
-            return phase_ == WorkPhase::WaitImport ? JobStep::Waiting
-                                                   : JobStep::Working;
+            return phase_ == WorkPhase::WaitImport ? ExportStep::Waiting
+                                                   : ExportStep::Working;
         }
 
         Log::logf(CAT_SLEEPHQ, LOG_WARN,
@@ -1598,50 +1559,50 @@ JobStep SleepHqSyncJob::step_load_inflight_locked() {
         if (!begin_inflight_remove_locked(
                 InflightRemoveAction::ResumeExport)) {
             fail_locked("inflight_remove_prepare_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
 
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "inflight_read_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         inflight_file_ = state_io_.take_file();
         if (!inflight_file_.exists()) {
             reset_inflight_reader_locked();
             phase_ = WorkPhase::NextFile;
-            return JobStep::Working;
+            return ExportStep::Working;
         }
         if (inflight_file_.size() == 0) {
             inflight_parse_failed_ = true;
         }
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     if (!build_inflight_path_locked(pending_state_path_,
                                     sizeof(pending_state_path_))) {
         fail_locked("inflight_path_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     const OperationAdmission admission = state_io_.request_read(
         pending_state_path_, SLEEPHQ_INFLIGHT_MAX_BYTES,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("inflight_read_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-bool SleepHqSyncJob::prepare_staged_state_locked() {
+bool SleepHqSyncEngine::prepare_staged_state_locked() {
     state_batch_.clear();
     for (size_t i = 0; i < staged_count_; ++i) {
         const StagedFile &entry = staged_[i];
@@ -1654,24 +1615,24 @@ bool SleepHqSyncJob::prepare_staged_state_locked() {
     return !state_batch_.empty();
 }
 
-JobStep SleepHqSyncJob::step_validate_staged_locked() {
+ExportStep SleepHqSyncEngine::step_validate_staged_locked() {
     if (staged_validation_index_ >= staged_count_) {
         if (!prepare_staged_state_locked()) {
             fail_locked("state_batch_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
         phase_ = WorkPhase::FlushState;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "staged_stat_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         const StorageFileInfo info = state_io_.info();
@@ -1683,27 +1644,27 @@ JobStep SleepHqSyncJob::step_validate_staged_locked() {
                     InflightRemoveAction::Fail,
                     "local_changed_after_upload")) {
                 fail_locked("inflight_remove_prepare_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
-            return JobStep::Waiting;
+            return ExportStep::Waiting;
         }
 
         staged_validation_index_++;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const StagedFile &entry = staged_[staged_validation_index_];
     const OperationAdmission admission = state_io_.request_stat(
         entry.path, next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("staged_stat_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-void SleepHqSyncJob::continue_after_state_flush_locked() {
+void SleepHqSyncEngine::continue_after_state_flush_locked() {
     if (pending_rebuild_day_[0]) {
         phase_ = WorkPhase::WriteRebuildMarker;
         return;
@@ -1717,21 +1678,21 @@ void SleepHqSyncJob::continue_after_state_flush_locked() {
     }
 }
 
-JobStep SleepHqSyncJob::step_flush_state_locked() {
+ExportStep SleepHqSyncEngine::step_flush_state_locked() {
     if (state_batch_.empty()) {
         continue_after_state_flush_locked();
-        return phase_ == WorkPhase::RemoveInflight ? JobStep::Waiting
-                                                   : JobStep::Working;
+        return phase_ == WorkPhase::RemoveInflight ? ExportStep::Waiting
+                                                   : ExportStep::Working;
     }
 
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "state_write_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
@@ -1739,39 +1700,39 @@ JobStep SleepHqSyncJob::step_flush_state_locked() {
         pending_state_path_[0] = '\0';
         pending_state_bytes_.reset();
         if (state_batch_.empty()) continue_after_state_flush_locked();
-        return phase_ == WorkPhase::RemoveInflight ? JobStep::Waiting
-                                                   : JobStep::Working;
+        return phase_ == WorkPhase::RemoveInflight ? ExportStep::Waiting
+                                                   : ExportStep::Working;
     }
 
     if (!export_inventory_) {
         fail_locked("export_inventory_missing");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     const char *state_path = state_batch_.first_state_path();
     if (!state_path || !state_path[0]) {
         fail_locked("state_path_missing");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     copy_cstr(pending_state_path_, sizeof(pending_state_path_), state_path);
     pending_state_bytes_ = state_batch_.build_file(*export_inventory_,
                                                    state_path);
     if (!pending_state_bytes_) {
         fail_locked("state_file_build_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     const OperationAdmission admission = state_io_.request_replace(
         pending_state_path_, pending_state_bytes_,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("state_write_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-bool SleepHqSyncJob::prepare_rebuild_marker_locked() {
+bool SleepHqSyncEngine::prepare_rebuild_marker_locked() {
     const uint64_t now_epoch = storage_export_current_epoch_seconds_or_zero();
     if (!pending_rebuild_day_[0] || now_epoch == 0 ||
         !build_datalog_rebuild_marker_path_locked(
@@ -1790,27 +1751,27 @@ bool SleepHqSyncJob::prepare_rebuild_marker_locked() {
     return pending_state_bytes_ != nullptr;
 }
 
-JobStep SleepHqSyncJob::step_write_rebuild_marker_locked() {
+ExportStep SleepHqSyncEngine::step_write_rebuild_marker_locked() {
     if (!pending_rebuild_day_[0]) {
         phase_ = pending_done_day_[0] ? WorkPhase::WriteDoneMarker
                                       : WorkPhase::RemoveInflight;
         if (phase_ == WorkPhase::RemoveInflight &&
             !begin_inflight_remove_locked(InflightRemoveAction::ResetBatch)) {
             fail_locked("inflight_remove_prepare_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
-        return phase_ == WorkPhase::RemoveInflight ? JobStep::Waiting
-                                                   : JobStep::Working;
+        return phase_ == WorkPhase::RemoveInflight ? ExportStep::Waiting
+                                                   : ExportStep::Working;
     }
 
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "rebuild_marker_write_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
@@ -1822,28 +1783,28 @@ JobStep SleepHqSyncJob::step_write_rebuild_marker_locked() {
         if (phase_ == WorkPhase::RemoveInflight &&
             !begin_inflight_remove_locked(InflightRemoveAction::ResetBatch)) {
             fail_locked("inflight_remove_prepare_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
-        return phase_ == WorkPhase::RemoveInflight ? JobStep::Waiting
-                                                   : JobStep::Working;
+        return phase_ == WorkPhase::RemoveInflight ? ExportStep::Waiting
+                                                   : ExportStep::Working;
     }
 
     if (!prepare_rebuild_marker_locked()) {
         fail_locked("rebuild_marker_build_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     const OperationAdmission admission = state_io_.request_replace(
         pending_state_path_, pending_state_bytes_,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("rebuild_marker_write_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-bool SleepHqSyncJob::prepare_done_marker_locked() {
+bool SleepHqSyncEngine::prepare_done_marker_locked() {
     if (!pending_done_day_[0] ||
         !storage_export_build_done_path(state_dir_, pending_done_day_,
                                         pending_state_path_,
@@ -1857,23 +1818,23 @@ bool SleepHqSyncJob::prepare_done_marker_locked() {
     return pending_state_bytes_ != nullptr;
 }
 
-JobStep SleepHqSyncJob::step_write_done_marker_locked() {
+ExportStep SleepHqSyncEngine::step_write_done_marker_locked() {
     if (!pending_done_day_[0]) {
         if (!begin_inflight_remove_locked(InflightRemoveAction::ResetBatch)) {
             fail_locked("inflight_remove_prepare_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
 
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "done_marker_write_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
@@ -1884,27 +1845,27 @@ JobStep SleepHqSyncJob::step_write_done_marker_locked() {
         pending_state_bytes_.reset();
         if (!begin_inflight_remove_locked(InflightRemoveAction::ResetBatch)) {
             fail_locked("inflight_remove_prepare_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
 
     if (!prepare_done_marker_locked()) {
         fail_locked("done_marker_build_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     const OperationAdmission admission = state_io_.request_replace(
         pending_state_path_, pending_state_bytes_,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("done_marker_write_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-bool SleepHqSyncJob::reserve_staged_locked(size_t needed) {
+bool SleepHqSyncEngine::reserve_staged_locked(size_t needed) {
     if (needed <= staged_capacity_) return true;
     size_t next = staged_capacity_ == 0 ? 8 : staged_capacity_ * 2;
     while (next < needed) next *= 2;
@@ -1925,7 +1886,7 @@ bool SleepHqSyncJob::reserve_staged_locked(size_t needed) {
     return true;
 }
 
-bool SleepHqSyncJob::add_staged_locked(const SleepHqUploadResult &upload) {
+bool SleepHqSyncEngine::add_staged_locked(const SleepHqUploadResult &upload) {
     if (!reserve_staged_locked(staged_count_ + 1)) return false;
 
     const SleepHqSyncFileState &file = current_file_.state();
@@ -1940,7 +1901,7 @@ bool SleepHqSyncJob::add_staged_locked(const SleepHqUploadResult &upload) {
     return true;
 }
 
-bool SleepHqSyncJob::remote_file_cache_contains_locked() const {
+bool SleepHqSyncEngine::remote_file_cache_contains_locked() const {
     const SleepHqSyncFileState &file = current_file_.state();
     if (!file.name[0] || !file.sleep_path[0] || !file.content_hash[0]) {
         return false;
@@ -1949,14 +1910,14 @@ bool SleepHqSyncJob::remote_file_cache_contains_locked() const {
                                   file.content_hash, file.size);
 }
 
-bool SleepHqSyncJob::remote_file_list_cb(void *ctx,
+bool SleepHqSyncEngine::remote_file_list_cb(void *ctx,
                                          const SleepHqRemoteFile &file) {
     SleepHqRemoteFileCache *cache =
         static_cast<SleepHqRemoteFileCache *>(ctx);
     return cache && cache->add(file);
 }
 
-bool SleepHqSyncJob::remote_machine_list_cb(void *ctx,
+bool SleepHqSyncEngine::remote_machine_list_cb(void *ctx,
                                             const SleepHqMachine &machine) {
     MachineListContext *lookup = static_cast<MachineListContext *>(ctx);
     if (!lookup || lookup->machine_id || !lookup->serial) return lookup != nullptr;
@@ -1966,7 +1927,7 @@ bool SleepHqSyncJob::remote_machine_list_cb(void *ctx,
     return true;
 }
 
-bool SleepHqSyncJob::read_local_machine_serial(
+bool SleepHqSyncEngine::read_local_machine_serial(
     char *out,
     size_t out_size,
     const BackgroundOperationControl &operation,
@@ -2030,7 +1991,7 @@ bool SleepHqSyncJob::read_local_machine_serial(
     return true;
 }
 
-void SleepHqSyncJob::note_remote_machine_missing_locked() {
+void SleepHqSyncEngine::note_remote_machine_missing_locked() {
     if (remote_reconcile_all_missing_) return;
     remote_reconcile_all_missing_ = true;
     Log::logf(CAT_SLEEPHQ, LOG_INFO,
@@ -2038,7 +1999,7 @@ void SleepHqSyncJob::note_remote_machine_missing_locked() {
               remote_serial_);
 }
 
-bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
+bool SleepHqSyncEngine::prepare_remote_reconcile_locked(char *error,
                                                      size_t error_size) {
     remote_machine_id_ = 0;
     remote_machine_next_page_ = 1;
@@ -2052,7 +2013,7 @@ bool SleepHqSyncJob::prepare_remote_reconcile_locked(char *error,
     return true;
 }
 
-bool SleepHqSyncJob::resolve_pending_datalog_day_locked(
+bool SleepHqSyncEngine::resolve_pending_datalog_day_locked(
     bool &needs_lookup,
     char *error,
     size_t error_size) {
@@ -2102,11 +2063,11 @@ bool SleepHqSyncJob::resolve_pending_datalog_day_locked(
     return true;
 }
 
-JobStep SleepHqSyncJob::begin_export_work_locked() {
+ExportStep SleepHqSyncEngine::begin_export_work_locked() {
     char planner_error[AC_SLEEPHQ_ERROR_MAX] = {};
     if (!begin_export_planner_locked(planner_error, sizeof(planner_error))) {
         fail_locked(planner_error[0] ? planner_error : "planner_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     clear_staged_locked();
     status_.import_id = 0;
@@ -2114,72 +2075,72 @@ JobStep SleepHqSyncJob::begin_export_work_locked() {
     reset_inflight_reader_locked();
     state_io_.reset();
     phase_ = WorkPhase::LoadInflight;
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-JobStep SleepHqSyncJob::step_resolve_remote_file_locked() {
+ExportStep SleepHqSyncEngine::step_resolve_remote_file_locked() {
     const SleepHqSyncFileState &file = current_file_.state();
     if (!current_file_.has_content_hash()) {
         phase_ = WorkPhase::HashLocalFile;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     if (file.attach_by_hash || remote_file_cache_contains_locked()) {
         current_file_.set_attach_by_hash(true);
         phase_ = WorkPhase::UploadFile;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     if (!remote_file_cache_complete_ &&
         remote_file_pages_loaded_ < SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
         phase_ = WorkPhase::FetchRemoteFiles;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     remote_file_cache_complete_ = true;
     phase_ = WorkPhase::UploadFile;
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-bool SleepHqSyncJob::operation_abort_cb(void *ctx) {
-    SleepHqSyncJob *job = static_cast<SleepHqSyncJob *>(ctx);
+bool SleepHqSyncEngine::operation_abort_cb(void *ctx) {
+    SleepHqSyncEngine *job = static_cast<SleepHqSyncEngine *>(ctx);
     return !job || job->abort_requested_.load() ||
            job->runtime_blocked_.load();
 }
 
-BackgroundOperationControl SleepHqSyncJob::operation_control(
+BackgroundOperationControl SleepHqSyncEngine::operation_control(
     uint32_t timeout_ms) const {
     BackgroundOperationControl operation;
     operation.started_ms = millis();
     operation.timeout_ms = timeout_ms;
-    operation.should_abort = &SleepHqSyncJob::operation_abort_cb;
-    operation.ctx = const_cast<SleepHqSyncJob *>(this);
+    operation.should_abort = &SleepHqSyncEngine::operation_abort_cb;
+    operation.ctx = const_cast<SleepHqSyncEngine *>(this);
     return operation;
 }
 
-void SleepHqSyncJob::request_operation_abort() {
+void SleepHqSyncEngine::request_operation_abort() {
     bool expected = false;
     if (abort_requested_.compare_exchange_strong(expected, true)) {
         operation_generation_.fetch_add(1);
     }
 }
 
-JobStep SleepHqSyncJob::step_wait_import_locked() {
+ExportStep SleepHqSyncEngine::step_wait_import_locked() {
     if (staged_count_ == 0) {
         phase_ = WorkPhase::Finish;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const uint32_t now = nonzero_millis(millis());
     if (import_poll_due_ms_ != 0 &&
         static_cast<int32_t>(now - import_poll_due_ms_) < 0) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     phase_ = WorkPhase::FetchImport;
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-bool SleepHqSyncJob::phase_has_blocking_io(WorkPhase phase) {
+bool SleepHqSyncEngine::phase_has_blocking_io(WorkPhase phase) {
     switch (phase) {
         case WorkPhase::Connect:
         case WorkPhase::ReadIdentification:
@@ -2213,7 +2174,7 @@ bool SleepHqSyncJob::phase_has_blocking_io(WorkPhase phase) {
     return false;
 }
 
-void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
+void SleepHqSyncEngine::execute_blocking_phase(WorkPhase phase,
                                             BlockingResult &result) {
     BackgroundOperationControl operation =
         operation_control(SLEEPHQ_API_OPERATION_TIMEOUT_MS);
@@ -2270,7 +2231,7 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
                 status_.team_id,
                 remote_machine_next_page_,
                 SLEEPHQ_REMOTE_MACHINE_PER_PAGE,
-                &SleepHqSyncJob::remote_machine_list_cb,
+                &SleepHqSyncEngine::remote_machine_list_cb,
                 &lookup,
                 result.count,
                 result.has_more,
@@ -2366,7 +2327,7 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
                 status_.team_id,
                 remote_file_next_page_,
                 SLEEPHQ_REMOTE_FILE_PER_PAGE,
-                &SleepHqSyncJob::remote_file_list_cb,
+                &SleepHqSyncEngine::remote_file_list_cb,
                 &result.remote_files,
                 result.count,
                 result.has_more,
@@ -2476,13 +2437,13 @@ void SleepHqSyncJob::execute_blocking_phase(WorkPhase phase,
     }
 }
 
-JobStep SleepHqSyncJob::publish_blocking_phase_locked(
+ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
     WorkPhase phase,
     BlockingResult &result) {
     if (status_.state != SleepHqSyncState::Working || phase_ != phase) {
         current_file_.close(false);
         client_.disconnect();
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     if (!background_operation_result_current(
@@ -2495,7 +2456,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
         current_file_.close(false);
         fail_locked("preempted");
         apply_pending_config_locked();
-        return status_.pending ? JobStep::Waiting : JobStep::Idle;
+        return status_.pending ? ExportStep::Waiting : ExportStep::Idle;
     }
 
     if (!result.ok) {
@@ -2510,7 +2471,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
             remote_reconcile_enabled_ = false;
             remote_serial_[0] = '\0';
             phase_ = WorkPhase::FindRemoteMachine;
-            return JobStep::Working;
+            return ExportStep::Working;
         }
         if (phase == WorkPhase::FindRemoteMachine && result.retryable) {
             Log::logf(CAT_SLEEPHQ,
@@ -2537,12 +2498,12 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                 fail_locked(planner_error[0]
                                 ? planner_error
                                 : "planner_decision_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             pending_remote_day_[0] = '\0';
             pending_remote_day_local_complete_ = false;
             phase_ = WorkPhase::NextFile;
-            return JobStep::Working;
+            return ExportStep::Working;
         }
 
         if (phase == WorkPhase::FetchRemoteFiles) {
@@ -2554,7 +2515,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                           : "remote_file_list_failed");
             remote_file_cache_complete_ = true;
             phase_ = WorkPhase::UploadFile;
-            return JobStep::Working;
+            return ExportStep::Working;
         }
 
         if (phase == WorkPhase::FetchImport &&
@@ -2563,12 +2524,12 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                     InflightRemoveAction::Fail,
                     result.error[0] ? result.error : "http_404")) {
                 fail_locked("inflight_remove_prepare_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
-            return JobStep::Waiting;
+            return ExportStep::Waiting;
         }
         fail_locked(result.error[0] ? result.error : "network_io_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     switch (phase) {
@@ -2585,23 +2546,23 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                 remote_reconcile_enabled_ = true;
             }
             phase_ = WorkPhase::FindRemoteMachine;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::Connect: {
             status_.team_id = result.team_id;
             if (current_run_kind_ == RunKind::Check) {
                 finish_check_locked(result.team_id);
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             if (!build_endpoint_state_dir_locked(result.team_id,
                                                  state_dir_,
                                                  sizeof(state_dir_))) {
                 fail_locked("state_path_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
 
             phase_ = WorkPhase::LoadInventory;
-            return JobStep::Working;
+            return ExportStep::Working;
         }
 
         case WorkPhase::FindRemoteMachine:
@@ -2632,13 +2593,13 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                 note_remote_machine_missing_locked();
                 return begin_export_work_locked();
             }
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::ResolveDatalogDay: {
             if (!cache_remote_date_locked(pending_remote_day_,
                                           result.remote_date_exists)) {
                 fail_locked("remote_date_cache_alloc");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
 
             char error[AC_SLEEPHQ_ERROR_MAX] = {};
@@ -2647,49 +2608,49 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                         error, sizeof(error))) {
                     fail_locked(error[0] ? error
                                          : "remote_date_decision_failed");
-                    return JobStep::Idle;
+                    return ExportStep::Idle;
                 }
                 return phase_ == WorkPhase::ReadRebuildMarker
-                    ? JobStep::Waiting
-                    : JobStep::Working;
+                    ? ExportStep::Waiting
+                    : ExportStep::Working;
             }
             if (!export_planner_.resolve_datalog_day_decision(
                     false, error, sizeof(error))) {
                 fail_locked(error[0] ? error : "planner_decision_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             pending_remote_day_[0] = '\0';
             pending_remote_day_local_complete_ = false;
             phase_ = WorkPhase::NextFile;
-            return JobStep::Working;
+            return ExportStep::Working;
         }
 
         case WorkPhase::CreateImport:
             if (!result.import.id) {
                 fail_locked("import_id_missing");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             status_.import_id = result.import.id;
             if (!prepare_inflight_write_locked(InflightPhase::Uploading,
                                                WorkPhase::OpenLocal)) {
                 fail_locked("inflight_write_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::OpenLocal:
             phase_ = WorkPhase::ResolveRemoteFile;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::HashLocalFile:
             current_file_.set_content_hash(result.content_hash);
             phase_ = WorkPhase::ResolveRemoteFile;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::FetchRemoteFiles:
             if (!remote_files_.merge_from(result.remote_files)) {
                 fail_locked("remote_file_cache_alloc");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             remote_file_pages_loaded_++;
             remote_file_next_page_++;
@@ -2707,13 +2668,13 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                       static_cast<unsigned>(remote_files_.size()),
                       remote_file_cache_complete_ ? 1U : 0U);
             phase_ = WorkPhase::ResolveRemoteFile;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::UploadFile:
             current_file_.close(true);
             if (!add_staged_locked(result.upload)) {
                 fail_locked("staged_alloc");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             status_.bytes_uploaded += result.upload.bytes;
             status_.files_uploaded++;
@@ -2721,9 +2682,9 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
             if (!prepare_inflight_write_locked(InflightPhase::Uploading,
                                                WorkPhase::NextFile)) {
                 fail_locked("inflight_write_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::ProcessImport:
             import_process_started_ms_ = nonzero_millis(millis());
@@ -2732,9 +2693,9 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
             if (!prepare_inflight_write_locked(InflightPhase::Processing,
                                                WorkPhase::WaitImport)) {
                 fail_locked("inflight_write_failed");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::FetchImport: {
             const uint32_t now = nonzero_millis(millis());
@@ -2752,7 +2713,7 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                 case SleepHqImportStatusKind::Success:
                     staged_validation_index_ = 0;
                     phase_ = WorkPhase::ValidateStaged;
-                    return JobStep::Working;
+                    return ExportStep::Working;
                 case SleepHqImportStatusKind::Failure:
                     if (!begin_inflight_remove_locked(
                             InflightRemoveAction::Fail,
@@ -2760,9 +2721,9 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                                 ? result.import.failed_reason
                                 : "import_failed")) {
                         fail_locked("inflight_remove_prepare_failed");
-                        return JobStep::Idle;
+                        return ExportStep::Idle;
                     }
-                    return JobStep::Waiting;
+                    return ExportStep::Waiting;
                 case SleepHqImportStatusKind::Unknown:
                     if (strcmp(previous_status, result.import.status) != 0) {
                         Log::logf(
@@ -2782,11 +2743,11 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
                 static_cast<uint32_t>(now - import_process_started_ms_) >=
                     SLEEPHQ_IMPORT_POLL_TIMEOUT_MS) {
                 fail_locked("import_process_timeout");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             import_poll_due_ms_ = now + SLEEPHQ_IMPORT_POLL_INTERVAL_MS;
             phase_ = WorkPhase::WaitImport;
-            return JobStep::Waiting;
+            return ExportStep::Waiting;
         }
 
         case WorkPhase::Idle:
@@ -2804,16 +2765,16 @@ JobStep SleepHqSyncJob::publish_blocking_phase_locked(
         case WorkPhase::RemoveInflight:
         case WorkPhase::Finish:
             fail_locked("invalid_blocking_phase");
-            return JobStep::Idle;
+            return ExportStep::Idle;
     }
-    return JobStep::Idle;
+    return ExportStep::Idle;
 }
 
-JobStep SleepHqSyncJob::step_work_phase_locked() {
+ExportStep SleepHqSyncEngine::step_work_phase_locked() {
     switch (phase_) {
         case WorkPhase::Idle:
             phase_ = WorkPhase::Connect;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::LoadInventory:
             return step_load_inventory_locked();
@@ -2832,9 +2793,9 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
         case WorkPhase::UploadFile:
         case WorkPhase::ProcessImport:
         case WorkPhase::FetchImport:
-            return JobStep::Waiting;
+            return ExportStep::Waiting;
         case WorkPhase::NextFile:
-            return next_file_locked() ? JobStep::Working : JobStep::Idle;
+            return next_file_locked() ? ExportStep::Working : ExportStep::Idle;
         case WorkPhase::ReadRebuildMarker:
             return step_read_rebuild_marker_locked();
         case WorkPhase::ResolveRemoteFile:
@@ -2856,11 +2817,11 @@ JobStep SleepHqSyncJob::step_work_phase_locked() {
         case WorkPhase::Finish:
             return finish_import_or_sync_locked();
     }
-    return JobStep::Idle;
+    return ExportStep::Idle;
 }
 
-JobStep SleepHqSyncJob::step() {
-    if (!lock(20)) return JobStep::Waiting;
+ExportStep SleepHqSyncEngine::step() {
+    if (!lock(20)) return ExportStep::Waiting;
     const uint32_t now = nonzero_millis(millis());
     apply_pending_config_locked();
     queue_retry_locked(now);
@@ -2868,26 +2829,26 @@ JobStep SleepHqSyncJob::step() {
         status_.state == SleepHqSyncState::Working) {
         fail_locked("preempted");
         unlock();
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (status_.pending && phase_ == WorkPhase::Idle) {
         if (StorageService::status().maintenance_active) {
             unlock();
-            return JobStep::Waiting;
+            return ExportStep::Waiting;
         }
         if (!begin_run_locked(now)) {
             unlock();
-            return status_.pending ? JobStep::Waiting : JobStep::Idle;
+            return status_.pending ? ExportStep::Waiting : ExportStep::Idle;
         }
     }
     if (status_.state != SleepHqSyncState::Working) {
         unlock();
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     const WorkPhase phase = phase_;
     if (!phase_has_blocking_io(phase)) {
-        const JobStep result = step_work_phase_locked();
+        const ExportStep result = step_work_phase_locked();
         unlock();
         return result;
     }
@@ -2906,19 +2867,15 @@ JobStep SleepHqSyncJob::step() {
                   LOG_ERROR,
                   "state publish lock unavailable phase=%u\n",
                   static_cast<unsigned>(phase));
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    const JobStep result =
+    const ExportStep result =
         publish_blocking_phase_locked(phase, blocking_result);
     unlock();
     return result;
 }
 
-void SleepHqSyncJob::on_preempt() {
-    request_operation_abort();
-}
-
-SleepHqSyncStatus SleepHqSyncJob::status() const {
+SleepHqSyncStatus SleepHqSyncEngine::status() const {
     SleepHqSyncStatus out;
     if (lock(20)) {
         out = status_;
@@ -2942,7 +2899,7 @@ SleepHqSyncStatus SleepHqSyncJob::status() const {
     return out;
 }
 
-SleepHqSyncRuntimeStatus SleepHqSyncJob::runtime_status() const {
+SleepHqSyncRuntimeStatus SleepHqSyncEngine::runtime_status() const {
     SleepHqSyncRuntimeStatus out;
     out.state = static_cast<SleepHqSyncState>(runtime_state_.load());
     out.pending = runtime_pending_.load();
@@ -2955,7 +2912,7 @@ SleepHqSyncRuntimeStatus SleepHqSyncJob::runtime_status() const {
     return out;
 }
 
-bool SleepHqSyncJob::active() const {
+bool SleepHqSyncEngine::active() const {
     return runtime_status().active();
 }
 

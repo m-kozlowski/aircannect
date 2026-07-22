@@ -7,8 +7,8 @@
 #include <memory>
 #include <stdint.h>
 
-#include "app_config.h"
-#include "background_worker.h"
+#include "export_endpoint_config.h"
+#include "export_step.h"
 #include "large_byte_buffer.h"
 #include "storage_atomic_write_port.h"
 #include "storage_export_inventory.h"
@@ -23,9 +23,6 @@
 
 namespace aircannect {
 
-static constexpr size_t AC_STORAGE_SYNC_ENDPOINT_MAX = 161;
-static constexpr size_t AC_STORAGE_SYNC_USER_MAX = 65;
-static constexpr size_t AC_STORAGE_SYNC_PASSWORD_MAX = 129;
 static constexpr size_t AC_STORAGE_SYNC_REASON_MAX = 24;
 static constexpr size_t AC_STORAGE_SYNC_STATE_PATH_MAX = AC_STORAGE_PATH_MAX;
 static constexpr size_t AC_STORAGE_SYNC_UPLOAD_CHUNK = 16 * 1024;
@@ -106,24 +103,21 @@ struct StorageSyncRuntimeStatus {
     }
 };
 
-class StorageSyncJob : public BackgroundJob {
+class StorageSyncEngine {
 public:
     // lifecycle
-    void begin(const AppConfigData &config,
+    void begin(const SmbExportConfig &config,
                StorageScanPort &scan_port,
                StorageReadPort &read_port,
                StorageStreamPort &stream_port,
                StorageAtomicWritePort &write_port,
                StoragePathPort &path_port);
 
-    // background worker
-    const char *name() const override { return "storage_sync"; }
-    JobStep step() override;
-    void on_preempt() override;
+    // export task
+    ExportStep step();
 
     // configuration/gates
-    void configure(const AppConfigData &config);
-    void refresh_config(const AppConfigData &config, uint32_t now_ms);
+    void configure(const SmbExportConfig &config);
     void set_network_available(bool available);
     void set_runtime_blocked(bool blocked);
     void defer_idle_work_until(uint32_t until_ms);
@@ -176,13 +170,6 @@ private:
         Retry,
     };
 
-    struct ConfigSnapshot {
-        bool enabled = false;
-        char endpoint[AC_STORAGE_SYNC_ENDPOINT_MAX] = {};
-        char user[AC_STORAGE_SYNC_USER_MAX] = {};
-        char password[AC_STORAGE_SYNC_PASSWORD_MAX] = {};
-    };
-
     struct CurrentFile {
         char path[AC_STORAGE_PATH_MAX] = {};
         char remote_path[AC_STORAGE_SMB_REMOTE_PATH_MAX] = {};
@@ -219,12 +206,10 @@ private:
     // locking/config
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
-    void apply_config_locked(const ConfigSnapshot &config);
+    void apply_config_locked(const SmbExportConfig &config);
     void apply_pending_config_locked();
-    bool config_matches_locked(const ConfigSnapshot &config) const;
-    static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
-    static bool snapshot_configured(const ConfigSnapshot &config);
-    static void copy_string(char *dst, size_t dst_size, const String &src);
+    bool config_matches_locked(const SmbExportConfig &config) const;
+    static bool snapshot_configured(const SmbExportConfig &config);
     static const char *work_phase_name(WorkPhase phase);
     static const char *run_kind_reason(RunKind kind);
     static bool run_kind_is_verify(RunKind kind);
@@ -235,42 +220,43 @@ private:
     bool queue_post_therapy_locked(uint32_t now_ms);
     void queue_deferred_post_therapy_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
-    bool prepare_step_locked(uint32_t now_ms, JobStep &result);
+    bool prepare_step_locked(uint32_t now_ms, ExportStep &result);
     void queue_retry_locked(uint32_t now_ms);
     void queue_reconcile_if_due_locked(uint32_t now_ms);
-    JobStep step_work_phase_locked();
+    ExportStep step_work_phase_locked();
     static bool phase_has_blocking_io(WorkPhase phase);
     void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
-    JobStep publish_blocking_phase_locked(WorkPhase phase,
-                                          const BlockingResult &result);
+    ExportStep publish_blocking_phase_locked(
+        WorkPhase phase,
+        const BlockingResult &result);
 
     // SMB connection and transfer phases
-    JobStep step_verify_latest_start_locked(char *error_out,
-                                            size_t error_out_size);
-    JobStep step_verify_latest_file_locked(char *error_out,
-                                           size_t error_out_size);
-    JobStep publish_verify_latest_remote_locked(
+    ExportStep step_verify_latest_start_locked(char *error_out,
+                                               size_t error_out_size);
+    ExportStep step_verify_latest_file_locked(char *error_out,
+                                              size_t error_out_size);
+    ExportStep publish_verify_latest_remote_locked(
         const StorageSmbRemoteStat &remote);
-    JobStep step_verify_latest_invalidate_locked();
-    JobStep step_validate_local_locked();
-    JobStep step_flush_state_locked();
-    JobStep step_write_done_marker_locked();
+    ExportStep step_verify_latest_invalidate_locked();
+    ExportStep step_validate_local_locked();
+    ExportStep step_flush_state_locked();
+    ExportStep step_write_done_marker_locked();
 
     // endpoint/state metadata
-    bool build_endpoint_state_dir_locked(const ConfigSnapshot &config,
+    bool build_endpoint_state_dir_locked(const SmbExportConfig &config,
                                          char *out,
                                          size_t out_size,
                                          uint32_t *hash_out = nullptr) const;
     bool begin_run_locked();
-    JobStep step_load_metadata_locked();
-    JobStep step_load_inventory_locked();
+    ExportStep step_load_metadata_locked();
+    ExportStep step_load_inventory_locked();
     void finish_run_locked();
     void preempt_run_locked();
     void fail_locked(const char *error);
     void clear_result_metadata_locked();
     void parse_result_metadata_locked(char *buffer);
     bool queue_result_metadata_save_locked();
-    bool service_result_metadata_save_locked(JobStep &result);
+    bool service_result_metadata_save_locked(ExportStep &result);
     void close_latest_verify_locked();
     bool begin_latest_verify_locked(char *error_out, size_t error_out_size);
     bool latest_verify_file_step_locked(char *error_out,
@@ -308,12 +294,11 @@ private:
 
     // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
-    ConfigSnapshot config_;
-    ConfigSnapshot pending_config_;
+    SmbExportConfig config_;
+    SmbExportConfig pending_config_;
     bool pending_config_valid_ = false;
     StorageSyncStatus status_;
     uint32_t next_config_generation_ = 1;
-    uint32_t last_config_check_ms_ = 0;
     WorkPhase phase_ = WorkPhase::Idle;
     StorageSmbClient smb_;
     std::atomic<bool> network_available_{false};

@@ -15,6 +15,8 @@
 #include "edf_recorder_manager.h"
 #include "event_broker.h"
 #include "export_coordinator.h"
+#include "export_endpoint_config.h"
+#include "export_task.h"
 #include "management_console.h"
 #include "memory_manager.h"
 #include "ota_manager.h"
@@ -28,11 +30,9 @@
 #include "rpc_quiesce_coordinator.h"
 #include "session_manager.h"
 #include "sink_manager.h"
-#include "sleephq_sync_job.h"
 #include "storage_diagnostic_job.h"
 #include "storage_manager.h"
 #include "storage_service.h"
-#include "storage_sync_job.h"
 #include "stream_broker.h"
 #if AC_STACK_PROFILE_ENABLED
 #include "stack_profiler.h"
@@ -74,8 +74,7 @@ static ReportTask report_task;
 static ReportHttpController report_http_controller;
 static BackgroundWorker bg_worker;
 static StorageDiagnosticJob storage_diagnostic_job;
-static StorageSyncJob *storage_sync_job = nullptr;
-static SleepHqSyncJob *sleephq_sync_job = nullptr;
+static ExportTask export_task;
 static ExportCoordinator export_coordinator;
 #if AC_STACK_PROFILE_ENABLED
 static StackProfiler stack_profiler;
@@ -87,6 +86,10 @@ static uint32_t report_catalog_timezone_revision = 0;
 static uint32_t report_catalog_request_generation = 0;
 static uint32_t rpc_transport_generation_seen = 0;
 static ActivitySnapshot storage_activity;
+static NetworkSnapshot export_network;
+static bool runtime_activity_published = false;
+static bool export_network_published = false;
+static uint32_t export_config_due_ms = 0;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MIN_INTERVAL_MS = 1000;
 static ConsoleContext console_ctx{
@@ -111,8 +114,6 @@ static ConsoleContext console_ctx{
     report_task,
     StorageService::read_port(),
     &storage_diagnostic_job,
-    nullptr,
-    nullptr,
     nullptr,
     &web_ui,
 };
@@ -227,6 +228,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                      bool ota_install_active,
                                      bool therapy_active) {
     const bool changed =
+        !runtime_activity_published ||
         storage_activity.foreground_report_demand != foreground_report_demand ||
         storage_activity.realtime_stream_active != realtime_stream_active ||
         storage_activity.export_active != export_active ||
@@ -241,9 +243,51 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_activity.therapy_active = therapy_active;
     storage_activity.generation++;
     if (storage_activity.generation == 0) storage_activity.generation++;
+    runtime_activity_published = true;
 
     StorageService::publish_activity(storage_activity);
     report_task.publish_activity(storage_activity);
+    export_task.publish_activity(storage_activity);
+}
+
+static void publish_export_network() {
+    NetworkSnapshot next;
+    const WifiModeState mode = wifi_manager.mode_state();
+
+    next.associated = mode == WifiModeState::StaConnected ||
+                      mode == WifiModeState::StaAssociated ||
+                      mode == WifiModeState::StaRoamScanning;
+    next.ipv4_ready = wifi_manager.sta_ipv4_online();
+    next.management_reachable = wifi_manager.management_reachable();
+    next.active_profile = wifi_manager.active_profile_index();
+    if (next.associated) (void)wifi_manager.copy_bssid(next.bssid);
+
+    const bool changed =
+        !export_network_published ||
+        export_network.associated != next.associated ||
+        export_network.ipv4_ready != next.ipv4_ready ||
+        export_network.management_reachable != next.management_reachable ||
+        export_network.active_profile != next.active_profile ||
+        memcmp(export_network.bssid, next.bssid,
+               sizeof(export_network.bssid)) != 0;
+    if (!changed) return;
+
+    next.generation = export_network.generation + 1;
+    if (next.generation == 0) next.generation = 1;
+    export_network = next;
+    export_network_published = true;
+    export_task.publish_network(export_network);
+}
+
+static void publish_export_config(uint32_t now_ms) {
+    if (export_config_due_ms != 0 &&
+        static_cast<int32_t>(now_ms - export_config_due_ms) < 0) {
+        return;
+    }
+
+    export_task.publish_config(make_export_endpoint_config(app_config.data()));
+    export_config_due_ms = now_ms + 1000;
+    if (export_config_due_ms == 0) export_config_due_ms = 1;
 }
 
 static void sync_network_services() {
@@ -393,26 +437,6 @@ static void drain_can_rx_after(const char *section) {
     last_checkpoint_ms = millis();
 }
 
-static StorageSyncJob *create_storage_sync_job() {
-    void *memory = Memory::alloc_large(sizeof(StorageSyncJob), false);
-    if (!memory) {
-        Log::logf(CAT_STORAGE, LOG_ERROR,
-                  "[SYNC] failed to allocate sync job in PSRAM\n");
-        return nullptr;
-    }
-    return new (memory) StorageSyncJob();
-}
-
-static SleepHqSyncJob *create_sleephq_sync_job() {
-    void *memory = Memory::alloc_large(sizeof(SleepHqSyncJob), false);
-    if (!memory) {
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "failed to allocate sync job in PSRAM\n");
-        return nullptr;
-    }
-    return new (memory) SleepHqSyncJob();
-}
-
 void setup() {
     // Serial bootstrap
     Serial.begin(AC_SERIAL_BAUD);
@@ -494,13 +518,23 @@ void setup() {
     serial_management_console.begin(Serial);
     Log::logf(CAT_GENERAL, LOG_INFO, "[INIT] management CLI ready\n");
 
-    // Export jobs
-    storage_sync_job = create_storage_sync_job();
-    sleephq_sync_job = create_sleephq_sync_job();
-    export_coordinator.begin(storage_sync_job, sleephq_sync_job);
+    // Export task
+    const ExportEndpointConfig export_config =
+        make_export_endpoint_config(app_config.data());
 
-    console_ctx.storage_sync_job = storage_sync_job;
-    console_ctx.sleephq_sync_job = sleephq_sync_job;
+    const bool export_started = export_task.begin(
+        export_config,
+        StorageService::scan_port(),
+        StorageService::read_port(),
+        StorageService::stream_port(),
+        StorageService::atomic_write_port(),
+        StorageService::path_port());
+    if (!export_started) {
+        Log::logf(CAT_GENERAL, LOG_ERROR,
+                  "[INIT] export task failed to start\n");
+    }
+
+    export_coordinator.begin(export_task);
     console_ctx.export_coordinator = &export_coordinator;
 
     apply_storage_provisioning(app_config,
@@ -588,40 +622,12 @@ void setup() {
                  StorageService::archive_port(),
                  StorageService::delete_port(),
                  export_coordinator,
-                 storage_sync_job,
-                 sleephq_sync_job,
                  console_ctx);
 
     // Background jobs
     storage_diagnostic_job.begin();
 
-    if (storage_sync_job) {
-        storage_sync_job->begin(app_config.data(),
-                                StorageService::scan_port(),
-                                StorageService::read_port(),
-                                StorageService::stream_port(),
-                                StorageService::atomic_write_port(),
-                                StorageService::path_port());
-    }
-
-    if (sleephq_sync_job) {
-        sleephq_sync_job->begin(app_config.data(),
-                               StorageService::scan_port(),
-                               StorageService::read_port(),
-                               StorageService::stream_port(),
-                               StorageService::atomic_write_port(),
-                               StorageService::path_port());
-    }
-
     bg_worker.add_job(&storage_diagnostic_job);
-    if (storage_sync_job) {
-        bg_worker.add_job(storage_sync_job);
-    }
-
-    if (sleephq_sync_job) {
-        bg_worker.add_job(sleephq_sync_job);
-    }
-
     bg_worker.begin();
 }
 
@@ -748,19 +754,6 @@ void loop() {
         report_status.background_active || report_catalog_refresh_pending,
     };
 
-    export_coordinator.poll(
-        report_activity,
-        app_config.data(),
-        wifi_manager.sta_ipv4_online(),
-        stream_activity_active,
-        as11_device_service.state().therapy_state(),
-        resmed_ota_manager.transport_active(),
-        ota_manager.active(),
-        now_ms);
-
-    drain_can_rx_after("export_coordinator");
-
-    // Activity snapshots
     const bool foreground_report_active = report_status.foreground_active;
     const bool export_active = export_coordinator.endpoint_work_active();
     const bool esp_ota_install_active = ota_manager.active();
@@ -776,6 +769,13 @@ void loop() {
                              storage_ota_active,
                              therapy_active);
 
+    publish_export_network();
+    publish_export_config(now_ms);
+
+    export_coordinator.poll(report_activity, storage_activity, now_ms);
+    drain_can_rx_after("export_coordinator");
+
+    // Legacy diagnostic worker gate
     bg_worker.publish_gate(foreground_report_active,
                            as11_device_service.state().status_valid(),
                            stream_activity_active,

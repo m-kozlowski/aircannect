@@ -16,9 +16,7 @@
 #include "rpc_transport_ports.h"
 #include "session_manager.h"
 #include "sink_manager.h"
-#include "sleephq_sync_job.h"
 #include "storage_read_port.h"
-#include "storage_sync_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
 #include "wifi_manager.h"
@@ -52,8 +50,6 @@ struct ConsoleContext {
     ReportTask &report_task;
     StorageReadPort &storage_read_port;
     StorageDiagnosticJob *storage_diagnostic_job = nullptr;
-    StorageSyncJob *storage_sync_job = nullptr;
-    SleepHqSyncJob *sleephq_sync_job = nullptr;
     ExportCoordinator *export_coordinator = nullptr;
     WebUI *web_ui = nullptr;
 };

@@ -1,4 +1,4 @@
-#include "storage_sync_job.h"
+#include "storage_sync_engine.h"
 
 #include <new>
 #include <stdio.h>
@@ -17,7 +17,6 @@
 namespace aircannect {
 namespace {
 
-static constexpr uint32_t CONFIG_REFRESH_INTERVAL_MS = 1000;
 static constexpr uint32_t SMB_OPERATION_TIMEOUT_MS = 20UL * 1000UL;
 static constexpr const char *SYNC_METADATA_FILE = "meta.state";
 static constexpr size_t SYNC_METADATA_MAX_BYTES = 511;
@@ -73,7 +72,7 @@ const char *storage_sync_state_name(StorageSyncState state) {
     return "unknown";
 }
 
-void StorageSyncJob::begin(const AppConfigData &config,
+void StorageSyncEngine::begin(const SmbExportConfig &config,
                            StorageScanPort &scan_port,
                            StorageReadPort &read_port,
                            StorageStreamPort &stream_port,
@@ -87,45 +86,26 @@ void StorageSyncJob::begin(const AppConfigData &config,
     configure(config);
 }
 
-bool StorageSyncJob::lock(uint32_t timeout_ms) const {
+bool StorageSyncEngine::lock(uint32_t timeout_ms) const {
     return lock_ && xSemaphoreTake(lock_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
-void StorageSyncJob::unlock() const {
+void StorageSyncEngine::unlock() const {
     if (lock_) xSemaphoreGive(lock_);
 }
 
-void StorageSyncJob::publish_runtime_locked() {
+void StorageSyncEngine::publish_runtime_locked() {
     runtime_state_.store(static_cast<uint8_t>(status_.state));
     runtime_pending_.store(status_.pending);
     runtime_enabled_.store(status_.enabled);
     runtime_configured_.store(status_.configured);
 }
 
-void StorageSyncJob::copy_string(char *dst, size_t dst_size,
-                                 const String &src) {
-    if (!dst || dst_size == 0) return;
-    const size_t len = src.length();
-    const size_t copy_len = len < dst_size - 1 ? len : dst_size - 1;
-    if (copy_len) memcpy(dst, src.c_str(), copy_len);
-    dst[copy_len] = '\0';
-}
-
-StorageSyncJob::ConfigSnapshot StorageSyncJob::make_config_snapshot(
-    const AppConfigData &config) {
-    ConfigSnapshot out;
-    copy_string(out.endpoint, sizeof(out.endpoint), config.smb_endpoint);
-    copy_string(out.user, sizeof(out.user), config.smb_user);
-    copy_string(out.password, sizeof(out.password), config.smb_password);
-    out.enabled = out.endpoint[0] != '\0';
-    return out;
-}
-
-bool StorageSyncJob::snapshot_configured(const ConfigSnapshot &config) {
+bool StorageSyncEngine::snapshot_configured(const SmbExportConfig &config) {
     return config.enabled && config.endpoint[0] != '\0';
 }
 
-const char *StorageSyncJob::work_phase_name(WorkPhase phase) {
+const char *StorageSyncEngine::work_phase_name(WorkPhase phase) {
     switch (phase) {
         case WorkPhase::Idle: return "idle";
         case WorkPhase::LoadMetadata: return "load_metadata";
@@ -151,7 +131,7 @@ const char *StorageSyncJob::work_phase_name(WorkPhase phase) {
     return "unknown";
 }
 
-const char *StorageSyncJob::run_kind_reason(RunKind kind) {
+const char *StorageSyncEngine::run_kind_reason(RunKind kind) {
     switch (kind) {
         case RunKind::Manual: return "manual";
         case RunKind::PostTherapy: return "post_therapy";
@@ -163,18 +143,18 @@ const char *StorageSyncJob::run_kind_reason(RunKind kind) {
     return "manual";
 }
 
-bool StorageSyncJob::run_kind_is_verify(RunKind kind) {
+bool StorageSyncEngine::run_kind_is_verify(RunKind kind) {
     return kind == RunKind::StartupCheck ||
            kind == RunKind::VerifyRecent;
 }
 
-bool StorageSyncJob::run_kind_is_reconcile(RunKind kind) {
+bool StorageSyncEngine::run_kind_is_reconcile(RunKind kind) {
     return kind == RunKind::VerifyRecent;
 }
 
-bool StorageSyncJob::config_matches_locked(
-    const ConfigSnapshot &config) const {
-    const ConfigSnapshot &active =
+bool StorageSyncEngine::config_matches_locked(
+    const SmbExportConfig &config) const {
+    const SmbExportConfig &active =
         pending_config_valid_ ? pending_config_ : config_;
     return active.enabled == config.enabled &&
            strcmp(active.endpoint, config.endpoint) == 0 &&
@@ -182,7 +162,7 @@ bool StorageSyncJob::config_matches_locked(
            strcmp(active.password, config.password) == 0;
 }
 
-void StorageSyncJob::reset_run_locked(bool keep_status) {
+void StorageSyncEngine::reset_run_locked(bool keep_status) {
     close_local_locked();
     close_latest_verify_locked();
     inventory_loader_.reset();
@@ -215,8 +195,8 @@ void StorageSyncJob::reset_run_locked(bool keep_status) {
     }
 }
 
-bool StorageSyncJob::build_endpoint_state_dir_locked(
-    const ConfigSnapshot &config,
+bool StorageSyncEngine::build_endpoint_state_dir_locked(
+    const SmbExportConfig &config,
     char *out,
     size_t out_size,
     uint32_t *hash_out) const {
@@ -236,7 +216,7 @@ bool StorageSyncJob::build_endpoint_state_dir_locked(
     return true;
 }
 
-void StorageSyncJob::clear_result_metadata_locked() {
+void StorageSyncEngine::clear_result_metadata_locked() {
     status_.last_sync_epoch = 0;
     status_.last_sync_files_seen = 0;
     status_.last_sync_files_uploaded = 0;
@@ -251,7 +231,7 @@ void StorageSyncJob::clear_result_metadata_locked() {
     status_.last_failure_error[0] = '\0';
 }
 
-void StorageSyncJob::parse_result_metadata_locked(char *buffer) {
+void StorageSyncEngine::parse_result_metadata_locked(char *buffer) {
     if (!buffer) return;
 
     char *line = buffer;
@@ -308,7 +288,7 @@ void StorageSyncJob::parse_result_metadata_locked(char *buffer) {
     }
 }
 
-bool StorageSyncJob::queue_result_metadata_save_locked() {
+bool StorageSyncEngine::queue_result_metadata_save_locked() {
     if (!state_dir_[0] || metadata_save_pending_) return false;
 
     const int path_written = snprintf(pending_metadata_path_,
@@ -367,12 +347,12 @@ bool StorageSyncJob::queue_result_metadata_save_locked() {
     return true;
 }
 
-bool StorageSyncJob::service_result_metadata_save_locked(JobStep &result) {
+bool StorageSyncEngine::service_result_metadata_save_locked(ExportStep &result) {
     if (!metadata_save_pending_) return true;
 
     const StorageFileClientResult io_result = metadata_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        result = JobStep::Waiting;
+        result = ExportStep::Waiting;
         return false;
     }
     if (io_result == StorageFileClientResult::Ready) {
@@ -401,7 +381,7 @@ bool StorageSyncJob::service_result_metadata_save_locked(JobStep &result) {
         pending_metadata_bytes_,
         next_storage_generation_locked());
     if (admission == OperationAdmission::Busy) {
-        result = JobStep::Waiting;
+        result = ExportStep::Waiting;
         return false;
     }
     if (admission != OperationAdmission::Accepted) {
@@ -415,11 +395,11 @@ bool StorageSyncJob::service_result_metadata_save_locked(JobStep &result) {
         return true;
     }
 
-    result = JobStep::Waiting;
+    result = ExportStep::Waiting;
     return false;
 }
 
-void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
+void StorageSyncEngine::apply_config_locked(const SmbExportConfig &config) {
     config_ = config;
     status_.enabled = config.enabled;
     status_.configured = snapshot_configured(config);
@@ -485,12 +465,12 @@ void StorageSyncJob::apply_config_locked(const ConfigSnapshot &config) {
     publish_runtime_locked();
 }
 
-void StorageSyncJob::apply_pending_config_locked() {
+void StorageSyncEngine::apply_pending_config_locked() {
     if (!pending_config_valid_) return;
 
-    const ConfigSnapshot pending = pending_config_;
+    const SmbExportConfig pending = pending_config_;
     pending_config_valid_ = false;
-    pending_config_ = ConfigSnapshot();
+    pending_config_ = SmbExportConfig();
 
     if (status_.state == StorageSyncState::Working) {
         preempt_run_locked();
@@ -498,7 +478,7 @@ void StorageSyncJob::apply_pending_config_locked() {
     apply_config_locked(pending);
 }
 
-void StorageSyncJob::set_network_available(bool available) {
+void StorageSyncEngine::set_network_available(bool available) {
     const bool was_available = network_available_.exchange(available);
     if (was_available && !available) request_operation_abort();
     if (was_available == available) return;
@@ -506,61 +486,32 @@ void StorageSyncJob::set_network_available(bool available) {
     status_.network_available = available;
     publish_runtime_locked();
     unlock();
-    if (available) {
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
-    }
 }
 
-void StorageSyncJob::set_runtime_blocked(bool blocked) {
+void StorageSyncEngine::set_runtime_blocked(bool blocked) {
     const bool was_blocked = runtime_blocked_.exchange(blocked);
     if (!was_blocked && blocked) request_operation_abort();
-    if (was_blocked && !blocked) {
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
-    }
 }
 
-void StorageSyncJob::defer_idle_work_until(uint32_t until_ms) {
+void StorageSyncEngine::defer_idle_work_until(uint32_t until_ms) {
     idle_defer_until_ms_.store(until_ms);
 }
 
-void StorageSyncJob::configure(const AppConfigData &config) {
-    const ConfigSnapshot snapshot = make_config_snapshot(config);
+void StorageSyncEngine::configure(const SmbExportConfig &config) {
     if (!lock(50)) return;
-    if (!config_matches_locked(snapshot)) {
+    if (!config_matches_locked(config)) {
         if (status_.state == StorageSyncState::Working) {
-            pending_config_ = snapshot;
+            pending_config_ = config;
             pending_config_valid_ = true;
             request_operation_abort();
         } else {
-            apply_config_locked(snapshot);
+            apply_config_locked(config);
         }
     }
     unlock();
 }
 
-void StorageSyncJob::refresh_config(const AppConfigData &config,
-                                    uint32_t now_ms) {
-    if (last_config_check_ms_ != 0 &&
-        static_cast<uint32_t>(now_ms - last_config_check_ms_) <
-            CONFIG_REFRESH_INTERVAL_MS) {
-        return;
-    }
-    const ConfigSnapshot snapshot = make_config_snapshot(config);
-    if (!lock(0)) return;
-    last_config_check_ms_ = now_ms == 0 ? 1 : now_ms;
-    if (!config_matches_locked(snapshot)) {
-        if (status_.state == StorageSyncState::Working) {
-            pending_config_ = snapshot;
-            pending_config_valid_ = true;
-            request_operation_abort();
-        } else {
-            apply_config_locked(snapshot);
-        }
-    }
-    unlock();
-}
-
-bool StorageSyncJob::begin_run_locked() {
+bool StorageSyncEngine::begin_run_locked() {
     const RunKind kind = pending_run_kind_;
     const char *run_reason = run_kind_reason(kind);
     reset_run_locked(false);
@@ -595,10 +546,10 @@ bool StorageSyncJob::begin_run_locked() {
     return true;
 }
 
-JobStep StorageSyncJob::step_load_metadata_locked() {
+ExportStep StorageSyncEngine::step_load_metadata_locked() {
     const StorageFileClientResult io_result = metadata_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         Log::logf(CAT_STORAGE,
@@ -611,7 +562,7 @@ JobStep StorageSyncJob::step_load_metadata_locked() {
         metadata_io_.reset();
         metadata_loaded_ = true;
         phase_ = WorkPhase::LoadInventory;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
     if (io_result == StorageFileClientResult::Ready) {
         StoragePreparedFile file = metadata_io_.take_file();
@@ -633,7 +584,7 @@ JobStep StorageSyncJob::step_load_metadata_locked() {
 
         metadata_loaded_ = true;
         phase_ = WorkPhase::LoadInventory;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     char path[AC_STORAGE_SYNC_STATE_PATH_MAX] = {};
@@ -648,14 +599,14 @@ JobStep StorageSyncJob::step_load_metadata_locked() {
                   "[SYNC] metadata load ignored error=path_too_long\n");
         metadata_loaded_ = true;
         phase_ = WorkPhase::LoadInventory;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const OperationAdmission admission = metadata_io_.request_read(
         path,
         SYNC_METADATA_MAX_BYTES,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         Log::logf(CAT_STORAGE,
                   LOG_WARN,
@@ -664,21 +615,21 @@ JobStep StorageSyncJob::step_load_metadata_locked() {
                   path);
         metadata_loaded_ = true;
         phase_ = WorkPhase::LoadInventory;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-JobStep StorageSyncJob::step_load_inventory_locked() {
+ExportStep StorageSyncEngine::step_load_inventory_locked() {
     if (!inventory_requested_) {
         const uint32_t generation = next_inventory_generation_;
         const OperationAdmission admission =
             inventory_loader_.request(state_dir_, generation);
-        if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+        if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
         if (admission != OperationAdmission::Accepted) {
             fail_locked("export_inventory_rejected");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
 
         next_inventory_generation_++;
@@ -690,30 +641,30 @@ JobStep StorageSyncJob::step_load_inventory_locked() {
     const StorageExportInventoryLoadResult result =
         inventory_loader_.poll(error, sizeof(error));
     if (result == StorageExportInventoryLoadResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (result == StorageExportInventoryLoadResult::Error) {
         fail_locked(error[0] ? error : "export_inventory_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     export_inventory_ = inventory_loader_.snapshot();
     if (!export_inventory_) {
         fail_locked("export_inventory_missing");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     char planner_error[AC_STORAGE_ERROR_MAX] = {};
     if (!begin_export_planner_locked(planner_error, sizeof(planner_error))) {
         fail_locked(planner_error[0] ? planner_error : "planner_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     phase_ = WorkPhase::Connect;
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-bool StorageSyncJob::request_sync_with_kind(RunKind kind, const char *label) {
+bool StorageSyncEngine::request_sync_with_kind(RunKind kind, const char *label) {
     if (!lock(0)) {
         Log::logf(CAT_STORAGE, LOG_WARN,
                   "[SYNC] %s request rejected reason=lock_timeout\n",
@@ -747,19 +698,18 @@ bool StorageSyncJob::request_sync_with_kind(RunKind kind, const char *label) {
     }
     publish_runtime_locked();
     unlock();
-    if (BackgroundWorker *worker = background_worker()) worker->wake();
     return true;
 }
 
-bool StorageSyncJob::request_manual_sync() {
+bool StorageSyncEngine::request_manual_sync() {
     return request_sync_with_kind(RunKind::Manual, "manual");
 }
 
-bool StorageSyncJob::request_verify_recent() {
+bool StorageSyncEngine::request_verify_recent() {
     return request_sync_with_kind(RunKind::VerifyRecent, "verify_recent");
 }
 
-bool StorageSyncJob::queue_post_therapy_locked(uint32_t now_ms) {
+bool StorageSyncEngine::queue_post_therapy_locked(uint32_t now_ms) {
     if (!status_.enabled || !status_.configured) return false;
     if (status_.state == StorageSyncState::Working) return false;
 
@@ -779,7 +729,7 @@ bool StorageSyncJob::queue_post_therapy_locked(uint32_t now_ms) {
     return true;
 }
 
-void StorageSyncJob::queue_deferred_post_therapy_locked(uint32_t now_ms) {
+void StorageSyncEngine::queue_deferred_post_therapy_locked(uint32_t now_ms) {
     if (!post_therapy_requested_.load()) return;
     if (!status_.enabled || !status_.configured) {
         post_therapy_requested_.store(false);
@@ -790,10 +740,9 @@ void StorageSyncJob::queue_deferred_post_therapy_locked(uint32_t now_ms) {
     (void)queue_post_therapy_locked(now_ms);
 }
 
-bool StorageSyncJob::request_post_therapy_sync() {
+bool StorageSyncEngine::request_post_therapy_sync() {
     if (!lock(0)) {
         post_therapy_requested_.store(true);
-        if (BackgroundWorker *worker = background_worker()) worker->wake();
         return true;
     }
     if (!status_.enabled || !status_.configured) {
@@ -812,11 +761,10 @@ bool StorageSyncJob::request_post_therapy_sync() {
         (void)queue_post_therapy_locked(nonzero_millis(millis()));
     }
     unlock();
-    if (BackgroundWorker *worker = background_worker()) worker->wake();
     return true;
 }
 
-bool StorageSyncJob::prepare_upload_buffer_locked() {
+bool StorageSyncEngine::prepare_upload_buffer_locked() {
     if (upload_buffer_) return true;
     upload_buffer_size_ = AC_STORAGE_SYNC_UPLOAD_CHUNK;
     upload_buffer_ = static_cast<uint8_t *>(
@@ -830,7 +778,7 @@ bool StorageSyncJob::prepare_upload_buffer_locked() {
     return true;
 }
 
-void StorageSyncJob::release_upload_buffer_locked() {
+void StorageSyncEngine::release_upload_buffer_locked() {
     if (upload_buffer_) {
         Memory::free(upload_buffer_);
         upload_buffer_ = nullptr;
@@ -838,33 +786,33 @@ void StorageSyncJob::release_upload_buffer_locked() {
     upload_buffer_size_ = 0;
 }
 
-bool StorageSyncJob::operation_abort_cb(void *ctx) {
-    StorageSyncJob *job = static_cast<StorageSyncJob *>(ctx);
+bool StorageSyncEngine::operation_abort_cb(void *ctx) {
+    StorageSyncEngine *job = static_cast<StorageSyncEngine *>(ctx);
     return !job || job->abort_requested_.load() ||
            job->runtime_blocked_.load();
 }
 
-BackgroundOperationControl StorageSyncJob::operation_control() const {
+BackgroundOperationControl StorageSyncEngine::operation_control() const {
     BackgroundOperationControl operation;
     operation.started_ms = millis();
     operation.timeout_ms = SMB_OPERATION_TIMEOUT_MS;
-    operation.should_abort = &StorageSyncJob::operation_abort_cb;
-    operation.ctx = const_cast<StorageSyncJob *>(this);
+    operation.should_abort = &StorageSyncEngine::operation_abort_cb;
+    operation.ctx = const_cast<StorageSyncEngine *>(this);
     return operation;
 }
 
-void StorageSyncJob::request_operation_abort() {
+void StorageSyncEngine::request_operation_abort() {
     bool expected = false;
     if (abort_requested_.compare_exchange_strong(expected, true)) {
         operation_generation_.fetch_add(1);
     }
 }
 
-void StorageSyncJob::close_latest_verify_locked() {
+void StorageSyncEngine::close_latest_verify_locked() {
     latest_verify_ = LatestVerify();
 }
 
-bool StorageSyncJob::begin_latest_verify_locked(char *error_out,
+bool StorageSyncEngine::begin_latest_verify_locked(char *error_out,
                                                 size_t error_out_size) {
     close_latest_verify_locked();
     if (!export_inventory_) {
@@ -899,7 +847,7 @@ bool StorageSyncJob::begin_latest_verify_locked(char *error_out,
     return true;
 }
 
-bool StorageSyncJob::latest_verify_file_step_locked(char *error_out,
+bool StorageSyncEngine::latest_verify_file_step_locked(char *error_out,
                                                     size_t error_out_size) {
     if (!latest_verify_.active || !export_inventory_) {
         phase_ = WorkPhase::Finish;
@@ -951,7 +899,7 @@ bool StorageSyncJob::latest_verify_file_step_locked(char *error_out,
     return true;
 }
 
-JobStep StorageSyncJob::publish_verify_latest_remote_locked(
+ExportStep StorageSyncEngine::publish_verify_latest_remote_locked(
     const StorageSmbRemoteStat &remote) {
     if (!remote.exists || remote.directory ||
         remote.size != latest_verify_.current_size) {
@@ -976,10 +924,10 @@ JobStep StorageSyncJob::publish_verify_latest_remote_locked(
     latest_verify_.remote_path[0] = '\0';
     latest_verify_.current_size = 0;
     phase_ = WorkPhase::VerifyLatestFile;
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-bool StorageSyncJob::next_file_locked() {
+bool StorageSyncEngine::next_file_locked() {
     if (!StorageService::status().available) {
         fail_locked("storage_unavailable");
         return false;
@@ -1022,7 +970,7 @@ bool StorageSyncJob::next_file_locked() {
     return true;
 }
 
-bool StorageSyncJob::begin_export_planner_locked(char *error_out,
+bool StorageSyncEngine::begin_export_planner_locked(char *error_out,
                                                  size_t error_out_size) {
     if (!export_inventory_) {
         copy_cstr(error_out, error_out_size, "export_inventory_missing");
@@ -1041,7 +989,7 @@ bool StorageSyncJob::begin_export_planner_locked(char *error_out,
                                  error_out_size);
 }
 
-bool StorageSyncJob::build_state_path_locked(const char *path,
+bool StorageSyncEngine::build_state_path_locked(const char *path,
                                              char *out,
                                              size_t out_size) const {
     if (!path || !out || out_size == 0 || !state_dir_[0]) return false;
@@ -1051,14 +999,14 @@ bool StorageSyncJob::build_state_path_locked(const char *path,
                                            out_size);
 }
 
-uint32_t StorageSyncJob::next_storage_generation_locked() {
+uint32_t StorageSyncEngine::next_storage_generation_locked() {
     const uint32_t generation = next_storage_generation_;
     next_storage_generation_++;
     if (next_storage_generation_ == 0) next_storage_generation_ = 1;
     return generation;
 }
 
-bool StorageSyncJob::queue_current_state_locked() {
+bool StorageSyncEngine::queue_current_state_locked() {
     if (current_file_.completion == FileCompletion::None ||
         !state_batch_.add(current_file_.state_path,
                           current_file_.path,
@@ -1079,14 +1027,14 @@ bool StorageSyncJob::queue_current_state_locked() {
     return true;
 }
 
-void StorageSyncJob::commit_pending_file_counts_locked() {
+void StorageSyncEngine::commit_pending_file_counts_locked() {
     status_.files_uploaded += pending_state_uploaded_;
     status_.files_skipped += pending_state_skipped_;
     pending_state_uploaded_ = 0;
     pending_state_skipped_ = 0;
 }
 
-bool StorageSyncJob::schedule_completed_datalog_day_locked(const char *day) {
+bool StorageSyncEngine::schedule_completed_datalog_day_locked(const char *day) {
     pending_done_day_[0] = '\0';
     if (run_kind_is_reconcile(current_run_kind_)) return true;
     if (!day || !day[0] || !export_inventory_) return true;
@@ -1102,7 +1050,7 @@ bool StorageSyncJob::schedule_completed_datalog_day_locked(const char *day) {
     return true;
 }
 
-bool StorageSyncJob::prepare_state_file_locked() {
+bool StorageSyncEngine::prepare_state_file_locked() {
     if (pending_state_bytes_) return pending_state_path_[0] != '\0';
     if (!export_inventory_) return false;
 
@@ -1114,7 +1062,7 @@ bool StorageSyncJob::prepare_state_file_locked() {
     return pending_state_bytes_ != nullptr;
 }
 
-bool StorageSyncJob::prepare_done_marker_locked() {
+bool StorageSyncEngine::prepare_done_marker_locked() {
     if (pending_state_bytes_) return pending_state_path_[0] != '\0';
     if (!pending_done_day_[0] ||
         !storage_export_build_done_path(state_dir_,
@@ -1130,7 +1078,7 @@ bool StorageSyncJob::prepare_done_marker_locked() {
     return pending_state_bytes_ != nullptr;
 }
 
-bool StorageSyncJob::remote_parent_dir_locked(const char *remote_path,
+bool StorageSyncEngine::remote_parent_dir_locked(const char *remote_path,
                                               char *out,
                                               size_t out_size) const {
     if (!remote_path || !out || out_size == 0) return false;
@@ -1146,7 +1094,7 @@ bool StorageSyncJob::remote_parent_dir_locked(const char *remote_path,
     return true;
 }
 
-bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
+bool StorageSyncEngine::plan_file_locked(const StorageExportPlannerItem &item) {
     const char *path = item.path;
     clear_current_file_locked();
     copy_cstr(current_file_.path, sizeof(current_file_.path), path);
@@ -1203,17 +1151,17 @@ bool StorageSyncJob::plan_file_locked(const StorageExportPlannerItem &item) {
     return true;
 }
 
-void StorageSyncJob::close_local_locked(bool complete) {
+void StorageSyncEngine::close_local_locked(bool complete) {
     current_file_.local.close(complete);
 }
 
-void StorageSyncJob::clear_current_file_locked() {
+void StorageSyncEngine::clear_current_file_locked() {
     close_local_locked();
     current_file_ = CurrentFile();
     status_.current_path[0] = '\0';
 }
 
-void StorageSyncJob::finish_run_locked() {
+void StorageSyncEngine::finish_run_locked() {
     close_latest_verify_locked();
     export_planner_.reset();
     inventory_loader_.reset();
@@ -1309,7 +1257,7 @@ void StorageSyncJob::finish_run_locked() {
     publish_runtime_locked();
 }
 
-void StorageSyncJob::preempt_run_locked() {
+void StorageSyncEngine::preempt_run_locked() {
     const RunKind kind = current_run_kind_;
     char reason[AC_STORAGE_SYNC_REASON_MAX] = {};
     copy_cstr(reason,
@@ -1335,7 +1283,7 @@ void StorageSyncJob::preempt_run_locked() {
     publish_runtime_locked();
 }
 
-void StorageSyncJob::fail_locked(const char *error) {
+void StorageSyncEngine::fail_locked(const char *error) {
     if (error && strcmp(error, "preempted") == 0) {
         preempt_run_locked();
         return;
@@ -1420,7 +1368,7 @@ void StorageSyncJob::fail_locked(const char *error) {
     publish_runtime_locked();
 }
 
-void StorageSyncJob::queue_retry_locked(uint32_t now_ms) {
+void StorageSyncEngine::queue_retry_locked(uint32_t now_ms) {
     if (status_.state != StorageSyncState::Error || retry_due_ms_ == 0 ||
         static_cast<int32_t>(now_ms - retry_due_ms_) < 0) {
         return;
@@ -1442,7 +1390,7 @@ void StorageSyncJob::queue_retry_locked(uint32_t now_ms) {
     publish_runtime_locked();
 }
 
-void StorageSyncJob::queue_reconcile_if_due_locked(uint32_t now_ms) {
+void StorageSyncEngine::queue_reconcile_if_due_locked(uint32_t now_ms) {
     if (status_.state != StorageSyncState::Idle ||
         !status_.enabled ||
         !status_.configured ||
@@ -1473,7 +1421,7 @@ void StorageSyncJob::queue_reconcile_if_due_locked(uint32_t now_ms) {
                   status_.last_reconcile_epoch));
 }
 
-bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
+bool StorageSyncEngine::prepare_step_locked(uint32_t now_ms, ExportStep &result) {
     apply_pending_config_locked();
     if (!service_result_metadata_save_locked(result)) return false;
 
@@ -1481,7 +1429,7 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
     if (defer_until != 0 &&
         static_cast<int32_t>(now_ms - defer_until) < 0 &&
         status_.state != StorageSyncState::Working) {
-        result = status_.pending ? JobStep::Waiting : JobStep::Idle;
+        result = status_.pending ? ExportStep::Waiting : ExportStep::Idle;
         return false;
     }
     queue_retry_locked(now_ms);
@@ -1491,12 +1439,12 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
     if (abort_requested_.load() &&
         status_.state == StorageSyncState::Working) {
         preempt_run_locked();
-        result = status_.pending ? JobStep::Waiting : JobStep::Idle;
+        result = status_.pending ? ExportStep::Waiting : ExportStep::Idle;
         return false;
     }
 
     if (runtime_blocked_.load()) {
-        result = status_.pending ? JobStep::Waiting : JobStep::Idle;
+        result = status_.pending ? ExportStep::Waiting : ExportStep::Idle;
         return false;
     }
 
@@ -1504,63 +1452,63 @@ bool StorageSyncJob::prepare_step_locked(uint32_t now_ms, JobStep &result) {
         status_.enabled && status_.configured &&
         (status_.pending || status_.state == StorageSyncState::Working);
     if (!ready) {
-        result = JobStep::Idle;
+        result = ExportStep::Idle;
         return false;
     }
     if (status_.pending && status_.state != StorageSyncState::Working &&
         !network_available_.load()) {
         status_.network_available = false;
-        result = JobStep::Idle;
+        result = ExportStep::Idle;
         return false;
     }
     status_.network_available = network_available_.load();
     const StorageServiceStatus edf = StorageService::status();
     if (edf.busy || edf.edf_queued > 0 || edf.open_file_count > 0) {
-        result = JobStep::Waiting;
+        result = ExportStep::Waiting;
         return false;
     }
     if (status_.state != StorageSyncState::Working &&
         edf.maintenance_active) {
-        result = JobStep::Waiting;
+        result = ExportStep::Waiting;
         return false;
     }
     if (status_.state != StorageSyncState::Working &&
         !begin_run_locked()) {
-        result = JobStep::Idle;
+        result = ExportStep::Idle;
         return false;
     }
     return true;
 }
 
-JobStep StorageSyncJob::step_verify_latest_start_locked(
+ExportStep StorageSyncEngine::step_verify_latest_start_locked(
     char *error_out,
     size_t error_out_size) {
     if (!begin_latest_verify_locked(error_out, error_out_size)) {
         fail_locked(error_out[0] ? error_out : "latest_verify_start_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-JobStep StorageSyncJob::step_verify_latest_file_locked(
+ExportStep StorageSyncEngine::step_verify_latest_file_locked(
     char *error_out,
     size_t error_out_size) {
     if (!latest_verify_file_step_locked(error_out, error_out_size)) {
         fail_locked(error_out[0] ? error_out : "latest_verify_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
-    return JobStep::Working;
+    return ExportStep::Working;
 }
 
-JobStep StorageSyncJob::step_verify_latest_invalidate_locked() {
+ExportStep StorageSyncEngine::step_verify_latest_invalidate_locked() {
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "state_invalidate_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
@@ -1570,30 +1518,30 @@ JobStep StorageSyncJob::step_verify_latest_invalidate_locked() {
                   latest_verify_.state_path);
         close_latest_verify_locked();
         phase_ = WorkPhase::Finish;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const OperationAdmission admission = state_io_.request_remove(
         latest_verify_.state_path,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("state_invalidate_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-JobStep StorageSyncJob::step_validate_local_locked() {
+ExportStep StorageSyncEngine::step_validate_local_locked() {
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "local_stat_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         const StorageFileInfo info = state_io_.info();
@@ -1602,44 +1550,44 @@ JobStep StorageSyncJob::step_validate_local_locked() {
             info.size != current_file_.size ||
             info.modified != current_file_.mtime) {
             fail_locked("local_changed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
         if (!queue_current_state_locked()) {
             fail_locked("state_batch_failed");
-            return JobStep::Idle;
+            return ExportStep::Idle;
         }
 
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const OperationAdmission admission = state_io_.request_stat(
         current_file_.path,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("local_stat_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-JobStep StorageSyncJob::step_flush_state_locked() {
+ExportStep StorageSyncEngine::step_flush_state_locked() {
     if (state_batch_.empty()) {
         commit_pending_file_counts_locked();
         phase_ = pending_done_day_[0] ? WorkPhase::WriteDoneMarker
                                       : WorkPhase::NextFile;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "state_write_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
@@ -1651,40 +1599,40 @@ JobStep StorageSyncJob::step_flush_state_locked() {
             phase_ = pending_done_day_[0] ? WorkPhase::WriteDoneMarker
                                           : WorkPhase::NextFile;
         }
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     if (!prepare_state_file_locked()) {
         fail_locked("state_file_build_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     const OperationAdmission admission = state_io_.request_replace(
         pending_state_path_,
         pending_state_bytes_,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("state_write_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-JobStep StorageSyncJob::step_write_done_marker_locked() {
+ExportStep StorageSyncEngine::step_write_done_marker_locked() {
     if (!pending_done_day_[0]) {
         phase_ = WorkPhase::NextFile;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     const StorageFileClientResult io_result = state_io_.poll();
     if (io_result == StorageFileClientResult::Waiting) {
-        return JobStep::Waiting;
+        return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
         fail_locked(state_io_.error()[0] ? state_io_.error()
                                          : "done_marker_write_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
@@ -1696,27 +1644,27 @@ JobStep StorageSyncJob::step_write_done_marker_locked() {
         pending_state_path_[0] = '\0';
         pending_state_bytes_.reset();
         phase_ = WorkPhase::NextFile;
-        return JobStep::Working;
+        return ExportStep::Working;
     }
 
     if (!prepare_done_marker_locked()) {
         fail_locked("done_marker_build_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     const OperationAdmission admission = state_io_.request_replace(
         pending_state_path_,
         pending_state_bytes_,
         next_storage_generation_locked());
-    if (admission == OperationAdmission::Busy) return JobStep::Waiting;
+    if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
         fail_locked("done_marker_write_rejected");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
-    return JobStep::Waiting;
+    return ExportStep::Waiting;
 }
 
-bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
+bool StorageSyncEngine::phase_has_blocking_io(WorkPhase phase) {
     switch (phase) {
         case WorkPhase::Connect:
         case WorkPhase::VerifyLatestRemote:
@@ -1744,7 +1692,7 @@ bool StorageSyncJob::phase_has_blocking_io(WorkPhase phase) {
     return false;
 }
 
-void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
+void StorageSyncEngine::execute_blocking_phase(WorkPhase phase,
                                             BlockingResult &result) {
     result = BlockingResult();
     BackgroundOperationControl operation = operation_control();
@@ -1877,12 +1825,12 @@ void StorageSyncJob::execute_blocking_phase(WorkPhase phase,
     }
 }
 
-JobStep StorageSyncJob::publish_blocking_phase_locked(
+ExportStep StorageSyncEngine::publish_blocking_phase_locked(
     WorkPhase phase,
     const BlockingResult &result) {
     if (status_.state != StorageSyncState::Working || phase_ != phase) {
         smb_.abort_connection();
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     if (!background_operation_result_current(
@@ -1894,12 +1842,12 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
         !network_available_.load()) {
         preempt_run_locked();
         apply_pending_config_locked();
-        return status_.pending ? JobStep::Waiting : JobStep::Idle;
+        return status_.pending ? ExportStep::Waiting : ExportStep::Idle;
     }
 
     if (!result.ok) {
         fail_locked(result.error[0] ? result.error : "network_io_failed");
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
 
     switch (phase) {
@@ -1907,14 +1855,14 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
             if (run_kind_is_verify(current_run_kind_) &&
                 !run_kind_is_reconcile(current_run_kind_)) {
                 phase_ = WorkPhase::VerifyLatestStart;
-                return JobStep::Working;
+                return ExportStep::Working;
             }
             if (!prepare_upload_buffer_locked()) {
                 fail_locked("upload_buffer_alloc");
-                return JobStep::Idle;
+                return ExportStep::Idle;
             }
             phase_ = WorkPhase::NextFile;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::VerifyLatestRemote:
             return publish_verify_latest_remote_locked(result.remote);
@@ -1930,7 +1878,7 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
                     current_file_.completion = FileCompletion::Skipped;
                     phase_ = WorkPhase::ValidateLocal;
                 }
-                return JobStep::Working;
+                return ExportStep::Working;
             }
 
             Log::logf(CAT_STORAGE,
@@ -1944,25 +1892,25 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
                       static_cast<unsigned long long>(result.remote.size),
                       static_cast<unsigned long long>(current_file_.size));
             phase_ = WorkPhase::EnsureRemoteDir;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::EnsureRemoteDir:
             copy_cstr(ensured_remote_dir_,
                       sizeof(ensured_remote_dir_),
                       current_file_.remote_dir);
             phase_ = WorkPhase::OpenLocal;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::OpenLocal:
             phase_ = WorkPhase::OpenRemote;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::OpenRemote:
             current_file_.offset = 0;
             phase_ = current_file_.size == 0
                 ? WorkPhase::CloseRemote
                 : WorkPhase::UploadChunk;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::UploadChunk:
             current_file_.offset +=
@@ -1973,17 +1921,17 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
             if (current_file_.offset >= current_file_.size) {
                 phase_ = WorkPhase::CloseRemote;
             }
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::CloseRemote:
             close_local_locked(true);
             current_file_.completion = FileCompletion::Uploaded;
             phase_ = WorkPhase::ValidateLocal;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::Finish:
             finish_run_locked();
-            return JobStep::Idle;
+            return ExportStep::Idle;
 
         case WorkPhase::Idle:
         case WorkPhase::LoadMetadata:
@@ -1996,18 +1944,18 @@ JobStep StorageSyncJob::publish_blocking_phase_locked(
         case WorkPhase::FlushState:
         case WorkPhase::WriteDoneMarker:
             fail_locked("invalid_blocking_phase");
-            return JobStep::Idle;
+            return ExportStep::Idle;
     }
-    return JobStep::Idle;
+    return ExportStep::Idle;
 }
 
-JobStep StorageSyncJob::step_work_phase_locked() {
+ExportStep StorageSyncEngine::step_work_phase_locked() {
     char error[AC_STORAGE_ERROR_MAX] = {};
     switch (phase_) {
         case WorkPhase::Idle:
             phase_ = metadata_loaded_ ? WorkPhase::LoadInventory
                                       : WorkPhase::LoadMetadata;
-            return JobStep::Working;
+            return ExportStep::Working;
 
         case WorkPhase::LoadMetadata:
             return step_load_metadata_locked();
@@ -2024,7 +1972,7 @@ JobStep StorageSyncJob::step_work_phase_locked() {
         case WorkPhase::UploadChunk:
         case WorkPhase::CloseRemote:
         case WorkPhase::Finish:
-            return JobStep::Waiting;
+            return ExportStep::Waiting;
 
         case WorkPhase::VerifyLatestStart:
             return step_verify_latest_start_locked(error, sizeof(error));
@@ -2036,7 +1984,7 @@ JobStep StorageSyncJob::step_work_phase_locked() {
             return step_verify_latest_invalidate_locked();
 
         case WorkPhase::NextFile:
-            return next_file_locked() ? JobStep::Working : JobStep::Idle;
+            return next_file_locked() ? ExportStep::Working : ExportStep::Idle;
 
         case WorkPhase::ValidateLocal:
             return step_validate_local_locked();
@@ -2047,12 +1995,12 @@ JobStep StorageSyncJob::step_work_phase_locked() {
         case WorkPhase::WriteDoneMarker:
             return step_write_done_marker_locked();
     }
-    return JobStep::Idle;
+    return ExportStep::Idle;
 }
 
-JobStep StorageSyncJob::step() {
-    if (!lock(20)) return JobStep::Waiting;
-    JobStep result = JobStep::Idle;
+ExportStep StorageSyncEngine::step() {
+    if (!lock(20)) return ExportStep::Waiting;
+    ExportStep result = ExportStep::Idle;
     if (!prepare_step_locked(nonzero_millis(millis()), result)) {
         unlock();
         return result;
@@ -2078,18 +2026,14 @@ JobStep StorageSyncJob::step() {
                   LOG_ERROR,
                   "[SYNC] state publish lock unavailable phase=%s\n",
                   work_phase_name(phase));
-        return JobStep::Idle;
+        return ExportStep::Idle;
     }
     result = publish_blocking_phase_locked(phase, blocking_result);
     unlock();
     return result;
 }
 
-void StorageSyncJob::on_preempt() {
-    request_operation_abort();
-}
-
-StorageSyncStatus StorageSyncJob::status() const {
+StorageSyncStatus StorageSyncEngine::status() const {
     StorageSyncStatus out;
     if (lock(20)) {
         out = status_;
@@ -2113,7 +2057,7 @@ StorageSyncStatus StorageSyncJob::status() const {
     return out;
 }
 
-StorageSyncRuntimeStatus StorageSyncJob::runtime_status() const {
+StorageSyncRuntimeStatus StorageSyncEngine::runtime_status() const {
     StorageSyncRuntimeStatus out;
     out.state = static_cast<StorageSyncState>(runtime_state_.load());
     out.pending = runtime_pending_.load();
@@ -2123,7 +2067,7 @@ StorageSyncRuntimeStatus StorageSyncJob::runtime_status() const {
     return out;
 }
 
-bool StorageSyncJob::active() const {
+bool StorageSyncEngine::active() const {
     return runtime_status().active();
 }
 

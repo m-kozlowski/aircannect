@@ -723,6 +723,23 @@ void WifiManager::bssid(char *out, size_t size) const {
     format_bssid(out, size, WiFi.BSSID());
 }
 
+bool WifiManager::copy_bssid(uint8_t out[6]) const {
+    if (!out) return false;
+
+    memset(out, 0, 6);
+    if (mode_state_ != WifiModeState::StaConnected &&
+        mode_state_ != WifiModeState::StaAssociated &&
+        mode_state_ != WifiModeState::StaRoamScanning) {
+        return false;
+    }
+
+    uint8_t *current = WiFi.BSSID();
+    if (!current) return false;
+
+    memcpy(out, current, 6);
+    return true;
+}
+
 uint32_t WifiManager::connect_timeout_remaining_ms() const {
     const int32_t remaining =
         static_cast<int32_t>(connect_deadline_ms_ - millis());

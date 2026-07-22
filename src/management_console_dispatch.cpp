@@ -915,13 +915,13 @@ void ManagementConsole::handle_smb_command(Print &out,
                                            ConsoleContext &ctx) {
     trim_inplace(rest);
     to_lower_inplace(rest);
-    StorageSyncJob *job = ctx.storage_sync_job;
-    if (!job) {
+    ExportCoordinator *coordinator = ctx.export_coordinator;
+    if (!coordinator) {
         out.println("[SMB] unavailable");
         return;
     }
     if (!rest.length() || rest == "status") {
-        const StorageSyncStatus status = job->status();
+        const StorageSyncStatus status = coordinator->smb_status();
         out.print("[SMB] state=");
         out.print(storage_sync_state_name(status.state));
         out.print(" configured=");
@@ -966,22 +966,12 @@ void ManagementConsole::handle_smb_command(Print &out,
         return;
     }
     if (rest == "verify" || rest == "check") {
-        ExportCoordinator *coordinator = ctx.export_coordinator;
-        if (!coordinator) {
-            out.println("[SMB] verify rejected");
-            return;
-        }
         const bool queued = coordinator->request_smb_verify();
         out.print("[SMB] verify ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
     if (rest == "sync") {
-        ExportCoordinator *coordinator = ctx.export_coordinator;
-        if (!coordinator) {
-            out.println("[SMB] sync rejected");
-            return;
-        }
         const bool queued = coordinator->request_smb_sync();
         out.print("[SMB] sync ");
         out.println(queued ? "queued" : "rejected");
@@ -995,13 +985,13 @@ void ManagementConsole::handle_sleephq_command(Print &out,
                                                ConsoleContext &ctx) {
     trim_inplace(rest);
     to_lower_inplace(rest);
-    SleepHqSyncJob *job = ctx.sleephq_sync_job;
-    if (!job) {
+    ExportCoordinator *coordinator = ctx.export_coordinator;
+    if (!coordinator) {
         out.println("[SLEEPHQ] unavailable");
         return;
     }
     if (!rest.length() || rest == "status") {
-        const SleepHqSyncStatus status = job->status();
+        const SleepHqSyncStatus status = coordinator->sleephq_status();
         out.print("[SLEEPHQ] state=");
         out.print(sleephq_sync_state_name(status.state));
         out.print(" configured=");
@@ -1046,33 +1036,18 @@ void ManagementConsole::handle_sleephq_command(Print &out,
         return;
     }
     if (rest == "check" || rest == "verify") {
-        ExportCoordinator *coordinator = ctx.export_coordinator;
-        if (!coordinator) {
-            out.println("[SLEEPHQ] check rejected");
-            return;
-        }
         const bool queued = coordinator->request_sleephq_check();
         out.print("[SLEEPHQ] check ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
     if (rest == "sync") {
-        ExportCoordinator *coordinator = ctx.export_coordinator;
-        if (!coordinator) {
-            out.println("[SLEEPHQ] sync rejected");
-            return;
-        }
         const bool queued = coordinator->request_sleephq_sync();
         out.print("[SLEEPHQ] sync ");
         out.println(queued ? "queued" : "rejected");
         return;
     }
     if (rest.startsWith("sync ")) {
-        ExportCoordinator *coordinator = ctx.export_coordinator;
-        if (!coordinator) {
-            out.println("[SLEEPHQ] sync rejected");
-            return;
-        }
         String day = rest.substring(5);
         trim_inplace(day);
         if (!storage_export_is_datalog_day_name(day.c_str())) {

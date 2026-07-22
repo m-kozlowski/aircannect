@@ -20,21 +20,24 @@ static constexpr uint32_t AC_REPORT_TASK_IDLE_TICK_MS = 1000;
 static constexpr size_t AC_REPORT_TASK_COMMAND_CAPACITY = 8;
 static constexpr size_t AC_REPORT_TASK_BUILD_CAPACITY = 8;
 
-// Background storage worker: a low-priority FreeRTOS task that prefetches
-// missing report data and builds plots while the device is idle. Pinned to
-// core 0 so its CPU-heavy work runs parallel to the main loop on core 1; the
-// SD-bus mutex serializes card access. Priority below AsyncTCP (3) and the
-// loop, so the web UI and CAN servicing always win.
+// SMB and SleepHQ share one low-priority task so their network and storage
+// phases cannot overlap. Runtime activity snapshots preempt both engines.
+static constexpr uint32_t AC_EXPORT_TASK_STACK = 8192;
+static constexpr uint8_t AC_EXPORT_TASK_PRIO = 1;
+static constexpr uint8_t AC_EXPORT_TASK_CORE = 0;
+static constexpr uint32_t AC_EXPORT_TASK_BUSY_RECHECK_MS = 250;
+static constexpr uint32_t AC_EXPORT_TASK_WORK_TICK_MS = 20;
+static constexpr uint32_t AC_EXPORT_TASK_IDLE_TICK_MS = 10000;
+static constexpr uint32_t AC_EXPORT_ACTIVITY_GRACE_MS = 3000;
+
+// Temporary diagnostic-writer worker. Removed with the final Phase 5 storage
+// diagnostic migration.
 static constexpr uint32_t AC_BG_WORKER_TASK_STACK = 8192;
 static constexpr uint8_t AC_BG_WORKER_TASK_PRIO = 1;
 static constexpr uint8_t AC_BG_WORKER_TASK_CORE = 0;
-// Re-check cadence when foreground is active (gate closed).
 static constexpr uint32_t AC_BG_WORKER_BUSY_RECHECK_MS = 250;
-// Short yield between bounded work units so the gate is re-checked often.
 static constexpr uint32_t AC_BG_WORKER_WORK_TICK_MS = 20;
-// Sleep when idle but no job has work to do.
 static constexpr uint32_t AC_BG_WORKER_IDLE_TICK_MS = 10000;
-// Defer prefetch briefly after foreground (e.g. web) activity.
 static constexpr uint32_t AC_BG_WORKER_ACTIVITY_GRACE_MS = 3000;
 // After therapy stops, AS11 may still be draining live stream/report traffic and
 // AirCANnect is closing EDF/SMB work. Let the bus settle before refreshing the
@@ -43,7 +46,7 @@ static constexpr uint32_t AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS = 30000;
 // Post-therapy SMB sync normally waits for the report refresh/backfill to go
 // idle so STR/journal/report-derived files have settled first. Do not let a
 // wedged report backfill suppress auto-sync forever; after this, queue sync
-// anyway while still respecting the background worker's stream/therapy/OTA gate.
+// anyway while still respecting export-task activity policy.
 static constexpr uint32_t AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS = 180000;
 // SleepHQ runs after report settle and SMB sync. If that serialized post-
 // therapy window never opens, drop this immediate trigger and let idle backfill

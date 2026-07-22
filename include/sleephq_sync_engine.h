@@ -7,8 +7,8 @@
 #include <memory>
 #include <stdint.h>
 
-#include "app_config.h"
-#include "background_worker.h"
+#include "export_endpoint_config.h"
+#include "export_step.h"
 #include "large_byte_buffer.h"
 #include "sleephq_client.h"
 #include "sleephq_remote_file_cache.h"
@@ -88,23 +88,21 @@ struct SleepHqSyncRuntimeStatus {
     }
 };
 
-class SleepHqSyncJob : public BackgroundJob {
+class SleepHqSyncEngine {
 public:
     // lifecycle
-    void begin(const AppConfigData &config,
+    void begin(const SleepHqExportConfig &config,
                StorageScanPort &scan_port,
                StorageReadPort &read_port,
                StorageStreamPort &stream_port,
                StorageAtomicWritePort &write_port,
                StoragePathPort &path_port);
 
-    // background worker
-    const char *name() const override { return "sleephq_sync"; }
-    JobStep step() override;
-    void on_preempt() override;
+    // export task
+    ExportStep step();
 
     // configuration/gates
-    void refresh_config(const AppConfigData &config, uint32_t now_ms);
+    void configure(const SleepHqExportConfig &config);
     void set_network_available(bool available);
     void set_runtime_blocked(bool blocked);
 
@@ -167,13 +165,6 @@ private:
         Fail,
     };
 
-    struct ConfigSnapshot {
-        char client_id[AC_SLEEPHQ_SECRET_MAX] = {};
-        char client_secret[AC_SLEEPHQ_SECRET_MAX] = {};
-        char team_id[AC_SLEEPHQ_ID_MAX] = {};
-        char device_id[AC_SLEEPHQ_ID_MAX] = {};
-    };
-
     struct StagedFile {
         char path[AC_STORAGE_PATH_MAX] = {};
         char state_path[AC_SLEEPHQ_SYNC_STATE_PATH_MAX] = {};
@@ -214,24 +205,22 @@ private:
     // locking/config
     bool lock(uint32_t timeout_ms = 20) const;
     void unlock() const;
-    static ConfigSnapshot make_config_snapshot(const AppConfigData &config);
-    static bool snapshot_configured(const ConfigSnapshot &config);
+    static bool snapshot_configured(const SleepHqExportConfig &config);
     static SleepHqConfig client_config_from_snapshot(
-        const ConfigSnapshot &config);
-    static void copy_string(char *dst, size_t dst_size, const String &src);
+        const SleepHqExportConfig &config);
     static const char *inflight_phase_name(InflightPhase phase);
     static bool parse_inflight_phase(const char *text, InflightPhase &out);
 
-    void apply_config_locked(const ConfigSnapshot &config);
+    void apply_config_locked(const SleepHqExportConfig &config);
     void apply_pending_config_locked();
-    bool config_matches_locked(const ConfigSnapshot &config) const;
+    bool config_matches_locked(const SleepHqExportConfig &config) const;
     bool request_locked(RunKind kind,
                         const char *reason,
                         const char *datalog_day = nullptr);
 
     // run lifecycle
     bool begin_run_locked(uint32_t now_ms);
-    JobStep step_load_inventory_locked();
+    ExportStep step_load_inventory_locked();
     void queue_retry_locked(uint32_t now_ms);
     void reset_run_locked(bool keep_status);
     void finish_check_locked(uint32_t team_id);
@@ -245,7 +234,7 @@ private:
                                      size_t error_out_size);
     void reset_import_batch_locked();
     void complete_import_batch_reset_locked();
-    JobStep finish_import_or_sync_locked();
+    ExportStep finish_import_or_sync_locked();
     bool next_file_locked();
     bool plan_file_locked(const StorageExportPlannerItem &item);
     bool build_endpoint_state_dir_locked(uint32_t team_id,
@@ -257,10 +246,10 @@ private:
     bool prepare_inflight_write_locked(InflightPhase phase,
                                        WorkPhase next_phase);
     bool build_inflight_bytes_locked(InflightPhase phase);
-    JobStep step_load_inflight_locked();
-    JobStep step_write_inflight_locked();
-    JobStep step_remove_inflight_locked();
-    JobStep step_validate_staged_locked();
+    ExportStep step_load_inflight_locked();
+    ExportStep step_write_inflight_locked();
+    ExportStep step_remove_inflight_locked();
+    ExportStep step_validate_staged_locked();
     bool parse_inflight_line_locked(char *line);
     void reset_inflight_reader_locked();
     void complete_inflight_load_locked();
@@ -271,9 +260,9 @@ private:
                                 uint64_t mtime) const;
     void note_completed_datalog_day_locked(const char *day);
     bool prepare_staged_state_locked();
-    JobStep step_flush_state_locked();
-    JobStep step_write_rebuild_marker_locked();
-    JobStep step_write_done_marker_locked();
+    ExportStep step_flush_state_locked();
+    ExportStep step_write_rebuild_marker_locked();
+    ExportStep step_write_done_marker_locked();
     bool prepare_rebuild_marker_locked();
     bool prepare_done_marker_locked();
     void continue_after_state_flush_locked();
@@ -301,7 +290,7 @@ private:
                                                    uint64_t marker_epoch,
                                                    char *error,
                                                    size_t error_size);
-    JobStep step_read_rebuild_marker_locked();
+    ExportStep step_read_rebuild_marker_locked();
     bool read_local_machine_serial(
         char *out,
         size_t out_size,
@@ -312,20 +301,20 @@ private:
     void note_remote_machine_missing_locked();
 
     // work phases
-    JobStep begin_export_work_locked();
+    ExportStep begin_export_work_locked();
     bool resolve_pending_datalog_day_locked(bool &needs_lookup,
                                             char *error,
                                             size_t error_size);
     BackgroundOperationControl operation_control(uint32_t timeout_ms) const;
     void request_operation_abort();
 
-    JobStep step_resolve_remote_file_locked();
-    JobStep step_wait_import_locked();
-    JobStep step_work_phase_locked();
+    ExportStep step_resolve_remote_file_locked();
+    ExportStep step_wait_import_locked();
+    ExportStep step_work_phase_locked();
     static bool phase_has_blocking_io(WorkPhase phase);
     void execute_blocking_phase(WorkPhase phase, BlockingResult &result);
-    JobStep publish_blocking_phase_locked(WorkPhase phase,
-                                          BlockingResult &result);
+    ExportStep publish_blocking_phase_locked(WorkPhase phase,
+                                             BlockingResult &result);
 
     // client callbacks
     static bool operation_abort_cb(void *ctx);
@@ -337,10 +326,9 @@ private:
     // synchronization/status
     mutable SemaphoreHandle_t lock_ = nullptr;
     SleepHqSyncStatus status_;
-    ConfigSnapshot config_;
-    ConfigSnapshot pending_config_;
+    SleepHqExportConfig config_;
+    SleepHqExportConfig pending_config_;
     bool pending_config_valid_ = false;
-    uint32_t last_config_check_ms_ = 0;
     WorkPhase phase_ = WorkPhase::Idle;
     RunKind pending_run_kind_ = RunKind::Check;
     RunKind current_run_kind_ = RunKind::Check;

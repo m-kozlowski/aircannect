@@ -19,12 +19,10 @@
 #include "rpc_request_port.h"
 #include "session_manager.h"
 #include "sink_manager.h"
-#include "sleephq_sync_job.h"
 #include "storage_archive_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_read_port.h"
-#include "storage_sync_job.h"
 #include "tcp_bridge.h"
 #include "time_sync_service.h"
 #include "wifi_manager.h"
@@ -108,8 +106,6 @@ public:
                StorageArchivePort &storage_archive,
                StorageDeletePort &storage_delete,
                ExportCoordinator &export_coordinator,
-               StorageSyncJob *storage_sync_job,
-               SleepHqSyncJob *sleephq_sync_job,
                ConsoleContext &console_ctx,
                uint16_t port = 80);
     void stop();
@@ -266,8 +262,6 @@ private:
     StorageArchivePort *storage_archive_ = nullptr;
     StorageDeletePort *storage_delete_ = nullptr;
     ExportCoordinator *export_coordinator_ = nullptr;
-    StorageSyncJob *storage_sync_job_ = nullptr;
-    SleepHqSyncJob *sleephq_sync_job_ = nullptr;
     ConsoleContext *console_ctx_ = nullptr;
 
     // console and command queue

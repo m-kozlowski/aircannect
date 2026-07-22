@@ -1,6 +1,5 @@
 #include "export_coordinator.h"
 
-#include "board_net.h"
 #include "board_report.h"
 #include "debug_log.h"
 
@@ -12,151 +11,102 @@ uint32_t ExportCoordinator::due_after(uint32_t now_ms, uint32_t delay_ms) {
     return due;
 }
 
-void ExportCoordinator::begin(StorageSyncJob *storage_sync,
-                              SleepHqSyncJob *sleephq_sync) {
-    storage_sync_ = storage_sync;
-    sleephq_sync_ = sleephq_sync;
+void ExportCoordinator::begin(ExportTask &task) {
+    task_ = &task;
+}
+
+ExportTaskStatus ExportCoordinator::status() const {
+    return task_ ? task_->status() : ExportTaskStatus();
+}
+
+StorageSyncStatus ExportCoordinator::smb_status() const {
+    return status().smb;
+}
+
+SleepHqSyncStatus ExportCoordinator::sleephq_status() const {
+    return status().sleephq;
 }
 
 bool ExportCoordinator::endpoint_work_active() const {
-    return (storage_sync_ && storage_sync_->runtime_status().active()) ||
-           (sleephq_sync_ && sleephq_sync_->runtime_status().active());
+    return status().active;
 }
 
 bool ExportCoordinator::request_smb_sync() {
-    if (!storage_sync_ ||
-        (sleephq_sync_ && sleephq_sync_->runtime_status().active())) {
-        return false;
-    }
-    return storage_sync_->request_manual_sync();
+    if (!task_ || status().busy) return false;
+    return task_->request_smb_sync();
 }
 
 bool ExportCoordinator::request_smb_verify() {
-    if (!storage_sync_ ||
-        (sleephq_sync_ && sleephq_sync_->runtime_status().active())) {
-        return false;
-    }
-    return storage_sync_->request_verify_recent();
+    if (!task_ || status().busy) return false;
+    return task_->request_smb_verify();
 }
 
 bool ExportCoordinator::request_sleephq_sync() {
-    if (!sleephq_sync_ ||
-        (storage_sync_ && storage_sync_->runtime_status().active())) {
-        return false;
-    }
-    return sleephq_sync_->request_sync("manual");
+    if (!task_ || status().busy) return false;
+    return task_->request_sleephq_sync();
 }
 
 bool ExportCoordinator::request_sleephq_sync_day(const char *day) {
-    if (!sleephq_sync_ ||
-        (storage_sync_ && storage_sync_->runtime_status().active())) {
-        return false;
-    }
-    return sleephq_sync_->request_sync_day(day, "manual_day");
+    if (!task_ || status().busy) return false;
+    return task_->request_sleephq_sync_day(day);
 }
 
 bool ExportCoordinator::request_sleephq_check() {
-    if (!sleephq_sync_ ||
-        (storage_sync_ && storage_sync_->runtime_status().active())) {
-        return false;
-    }
-    return sleephq_sync_->request_check("manual");
-}
-
-bool ExportCoordinator::export_network_ready(bool network_connected,
-                                             uint32_t now_ms) {
-    if (!network_connected) {
-        network_connected_since_ms_ = 0;
-        return false;
-    }
-    if (network_connected_since_ms_ == 0) {
-        network_connected_since_ms_ = now_ms ? now_ms : 1;
-        return false;
-    }
-    return static_cast<int32_t>(now_ms - network_connected_since_ms_) >=
-           static_cast<int32_t>(AC_EXPORT_NETWORK_SETTLE_MS);
+    if (!task_ || status().busy) return false;
+    return task_->request_sleephq_check();
 }
 
 void ExportCoordinator::poll(const ExportReportActivity &report,
-                             const AppConfigData &config,
-                             bool network_connected,
-                             bool stream_activity_active,
-                             As11TherapyState therapy_state,
-                             bool resmed_ota_active,
-                             bool esp_ota_active,
+                             const ActivitySnapshot &activity,
                              uint32_t now_ms) {
-    const bool network_ready =
-        export_network_ready(network_connected, now_ms);
+    if (!task_) return;
 
-    if (storage_sync_) {
-        storage_sync_->set_network_available(network_ready);
-        storage_sync_->refresh_config(config, now_ms);
+    const ExportTaskStatus task_status = task_->status();
+    const StorageSyncRuntimeStatus storage = task_status.smb_runtime;
+    const SleepHqSyncRuntimeStatus sleephq = task_status.sleephq_runtime;
+    const bool storage_active = storage.active();
+
+    poll_post_therapy(report,
+                      activity.realtime_stream_active,
+                      activity.therapy_active,
+                      storage_active,
+                      now_ms);
+
+    if (sleephq.state == SleepHqSyncState::Working) {
+        task_->defer_smb_until(
+            due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS));
     }
 
-    if (sleephq_sync_) {
-        sleephq_sync_->set_network_available(network_ready);
-        sleephq_sync_->refresh_config(config, now_ms);
-    }
-
-    const StorageSyncRuntimeStatus storage_runtime =
-        storage_sync_ ? storage_sync_->runtime_status()
-                      : StorageSyncRuntimeStatus();
-    const SleepHqSyncRuntimeStatus sleephq_runtime =
-        sleephq_sync_ ? sleephq_sync_->runtime_status()
-                      : SleepHqSyncRuntimeStatus();
-    const bool storage_sync_active = storage_runtime.active();
-    const bool sleephq_working =
-        sleephq_runtime.state == SleepHqSyncState::Working;
-    const bool export_runtime_blocked =
-        report.foreground_active ||
-        stream_activity_active ||
-        resmed_ota_active ||
-        esp_ota_active ||
-        therapy_state == As11TherapyState::Running;
-
-    poll_post_therapy(report, stream_activity_active, therapy_state,
-                      storage_sync_active, now_ms);
-
-    if (storage_sync_) {
-        storage_sync_->set_runtime_blocked(export_runtime_blocked);
-        if (sleephq_working) {
-            storage_sync_->defer_idle_work_until(
-                now_ms + AC_BG_WORKER_BUSY_RECHECK_MS);
-        }
-    }
-
-    if (sleephq_sync_) {
-        sleephq_sync_->set_runtime_blocked(
-            export_runtime_blocked ||
-            storage_sync_active);
-    }
-
-    maybe_queue_sleephq_startup_check(network_ready,
-                                      storage_sync_active,
-                                      sleephq_runtime);
+    maybe_queue_sleephq_startup_check(task_status.network_ready,
+                                      storage_active,
+                                      sleephq);
     poll_sleephq_idle_backfill(report,
-                               network_ready,
-                               stream_activity_active,
-                               therapy_state,
-                               storage_sync_active,
-                               sleephq_runtime,
+                               task_status.network_ready,
+                               activity.realtime_stream_active,
+                               activity.therapy_active,
+                               storage_active,
+                               sleephq,
                                now_ms);
 }
 
 void ExportCoordinator::poll_post_therapy(
     const ExportReportActivity &report,
     bool stream_activity_active,
-    As11TherapyState therapy_state,
+    bool therapy_active,
     bool storage_sync_active,
     uint32_t now_ms) {
-    if (therapy_state == As11TherapyState::Running) {
+    if (!post_therapy_.state_initialized) {
+        post_therapy_.state_initialized = true;
+        post_therapy_.last_therapy_active = therapy_active;
+    }
+
+    if (therapy_active) {
         reset_post_therapy_after_running();
-        post_therapy_.last_state = therapy_state;
+        post_therapy_.last_therapy_active = true;
         return;
     }
 
-    if (post_therapy_.last_state == As11TherapyState::Running &&
-        therapy_state != As11TherapyState::Running) {
+    if (post_therapy_.last_therapy_active) {
         arm_post_therapy_after_stop(now_ms);
     }
 
@@ -166,7 +116,7 @@ void ExportCoordinator::poll_post_therapy(
                                      stream_activity_active,
                                      storage_sync_active,
                                      now_ms);
-    post_therapy_.last_state = therapy_state;
+    post_therapy_.last_therapy_active = false;
 }
 
 void ExportCoordinator::reset_post_therapy_after_running() {
@@ -182,19 +132,14 @@ void ExportCoordinator::reset_post_therapy_after_running() {
 }
 
 void ExportCoordinator::arm_post_therapy_after_stop(uint32_t now_ms) {
-    const StorageSyncRuntimeStatus storage_runtime =
-        storage_sync_ ? storage_sync_->runtime_status()
-                      : StorageSyncRuntimeStatus();
-    const SleepHqSyncRuntimeStatus sleephq_runtime =
-        sleephq_sync_ ? sleephq_sync_->runtime_status()
-                      : SleepHqSyncRuntimeStatus();
+    const ExportTaskStatus task_status = status();
+
     post_therapy_.report_settle_due_ms =
         due_after(now_ms, AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS);
-    post_therapy_.storage_pending =
-        storage_sync_ && storage_runtime.enabled &&
-        storage_runtime.configured;
+    post_therapy_.storage_pending = task_ && task_status.smb_runtime.enabled &&
+                                    task_status.smb_runtime.configured;
     post_therapy_.sleephq_pending =
-        sleephq_sync_ && sleephq_runtime.configured;
+        task_ && task_status.sleephq_runtime.configured;
     post_therapy_.storage_grace_armed = false;
     post_therapy_.sleephq_grace_armed = false;
     post_therapy_.storage_due_ms = 0;
@@ -203,10 +148,8 @@ void ExportCoordinator::arm_post_therapy_after_stop(uint32_t now_ms) {
         due_after(now_ms, AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS);
     post_therapy_.sleephq_deadline_ms =
         due_after(now_ms, AC_SLEEPHQ_POST_THERAPY_SYNC_MAX_WAIT_MS);
-    if (storage_sync_) {
-        storage_sync_->defer_idle_work_until(
-            post_therapy_.report_settle_due_ms);
-    }
+
+    if (task_) task_->defer_smb_until(post_therapy_.report_settle_due_ms);
 }
 
 void ExportCoordinator::maybe_finish_report_settle(
@@ -219,9 +162,9 @@ void ExportCoordinator::maybe_finish_report_settle(
         return;
     }
     if (stream_activity_active || report.background_active) {
-        if (storage_sync_) {
-            storage_sync_->defer_idle_work_until(
-                due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS));
+        if (task_) {
+            task_->defer_smb_until(
+                due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS));
         }
         return;
     }
@@ -237,7 +180,7 @@ void ExportCoordinator::maybe_queue_storage_sync(
     uint32_t now_ms) {
     if (!post_therapy_.storage_pending) return;
 
-    if (!storage_sync_) {
+    if (!task_) {
         post_therapy_.storage_pending = false;
         post_therapy_.storage_due_ms = 0;
         post_therapy_.storage_deadline_ms = 0;
@@ -249,8 +192,7 @@ void ExportCoordinator::maybe_queue_storage_sync(
             static_cast<int32_t>(now_ms -
                                  post_therapy_.storage_deadline_ms) >= 0;
         if (deadline_reached) {
-            Log::logf(CAT_STORAGE,
-                      LOG_WARN,
+            Log::logf(CAT_STORAGE, LOG_WARN,
                       "[SYNC] post-therapy sync fallback after report wait\n");
             queue_post_therapy_storage_sync(now_ms);
         }
@@ -258,8 +200,8 @@ void ExportCoordinator::maybe_queue_storage_sync(
     }
     if (stream_activity_active) {
         post_therapy_.storage_due_ms = 0;
-        storage_sync_->defer_idle_work_until(
-            due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS));
+        task_->defer_smb_until(
+            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS));
         return;
     }
     if (report.background_active) {
@@ -269,12 +211,12 @@ void ExportCoordinator::maybe_queue_storage_sync(
                                  post_therapy_.storage_deadline_ms) >= 0;
         if (!deadline_reached) {
             post_therapy_.storage_due_ms = 0;
-            storage_sync_->defer_idle_work_until(
-                due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS));
+            task_->defer_smb_until(
+                due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS));
             return;
         }
-        Log::logf(CAT_STORAGE,
-                  LOG_WARN,
+
+        Log::logf(CAT_STORAGE, LOG_WARN,
                   "[SYNC] post-therapy sync fallback after report wait\n");
         queue_post_therapy_storage_sync(now_ms);
         return;
@@ -282,14 +224,14 @@ void ExportCoordinator::maybe_queue_storage_sync(
     if (!post_therapy_.storage_grace_armed) {
         post_therapy_.storage_grace_armed = true;
         post_therapy_.storage_due_ms =
-            due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
-        storage_sync_->defer_idle_work_until(post_therapy_.storage_due_ms);
+            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
+        task_->defer_smb_until(post_therapy_.storage_due_ms);
         return;
     }
     if (post_therapy_.storage_due_ms == 0) {
         post_therapy_.storage_due_ms =
-            due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
-        storage_sync_->defer_idle_work_until(post_therapy_.storage_due_ms);
+            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
+        task_->defer_smb_until(post_therapy_.storage_due_ms);
         return;
     }
     if (static_cast<int32_t>(now_ms - post_therapy_.storage_due_ms) >= 0) {
@@ -302,9 +244,8 @@ void ExportCoordinator::maybe_queue_post_therapy_sleephq(
     bool stream_activity_active,
     bool storage_sync_active,
     uint32_t now_ms) {
-    if (!post_therapy_.sleephq_pending) {
-        return;
-    }
+    if (!post_therapy_.sleephq_pending) return;
+
     const bool deadline_reached =
         post_therapy_.sleephq_deadline_ms != 0 &&
         static_cast<int32_t>(now_ms -
@@ -317,14 +258,14 @@ void ExportCoordinator::maybe_queue_post_therapy_sleephq(
         }
         return;
     }
-    if (!sleephq_sync_) {
+    if (!task_) {
         clear_post_therapy_sleephq();
         return;
     }
+
     const bool storage_blocking = post_therapy_.storage_pending ||
                                   storage_sync_active;
-    if (stream_activity_active ||
-        report.background_active ||
+    if (stream_activity_active || report.background_active ||
         storage_blocking) {
         if (deadline_reached) {
             Log::logf(CAT_SLEEPHQ, LOG_WARN,
@@ -338,44 +279,45 @@ void ExportCoordinator::maybe_queue_post_therapy_sleephq(
     if (!post_therapy_.sleephq_grace_armed) {
         post_therapy_.sleephq_grace_armed = true;
         post_therapy_.sleephq_due_ms =
-            due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
+            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
         return;
     }
     if (post_therapy_.sleephq_due_ms == 0) {
         post_therapy_.sleephq_due_ms =
-            due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
+            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
         return;
     }
-    if (static_cast<int32_t>(now_ms - post_therapy_.sleephq_due_ms) >= 0) {
-        if (sleephq_sync_->request_post_therapy_sync()) {
-            clear_post_therapy_sleephq();
-        } else {
-            if (deadline_reached) {
-                Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                          "post-therapy sync skipped after queue wait\n");
-                clear_post_therapy_sleephq();
-                return;
-            }
-            post_therapy_.sleephq_due_ms =
-                due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
-        }
+    if (static_cast<int32_t>(now_ms - post_therapy_.sleephq_due_ms) < 0) {
+        return;
+    }
+
+    if (task_->request_sleephq_post_therapy()) {
+        clear_post_therapy_sleephq();
+    } else if (deadline_reached) {
+        Log::logf(CAT_SLEEPHQ, LOG_WARN,
+                  "post-therapy sync skipped after queue wait\n");
+        clear_post_therapy_sleephq();
+    } else {
+        post_therapy_.sleephq_due_ms =
+            due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS);
     }
 }
 
 void ExportCoordinator::queue_post_therapy_storage_sync(uint32_t now_ms) {
-    if (!storage_sync_) {
+    if (!task_) {
         post_therapy_.storage_pending = false;
         post_therapy_.storage_due_ms = 0;
         post_therapy_.storage_deadline_ms = 0;
         return;
     }
-    if (storage_sync_->request_post_therapy_sync()) {
+
+    if (task_->request_smb_post_therapy()) {
         post_therapy_.storage_pending = false;
         post_therapy_.storage_due_ms = 0;
         post_therapy_.storage_deadline_ms = 0;
     } else {
         post_therapy_.storage_due_ms =
-            due_after(now_ms, AC_BG_WORKER_BUSY_RECHECK_MS);
+            due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS);
     }
 }
 
@@ -390,7 +332,7 @@ void ExportCoordinator::maybe_queue_sleephq_startup_check(
     bool network_connected,
     bool storage_sync_active,
     SleepHqSyncRuntimeStatus status) {
-    if (!sleephq_sync_ || !network_connected || storage_sync_active) return;
+    if (!task_ || !network_connected || storage_sync_active) return;
     if (!status.configured || status.config_generation == 0) {
         startup_check_.requested_generation = 0;
         startup_check_.completed_generation = 0;
@@ -405,7 +347,8 @@ void ExportCoordinator::maybe_queue_sleephq_startup_check(
         status.state == SleepHqSyncState::Working) {
         return;
     }
-    if (sleephq_sync_->request_check("startup_check")) {
+
+    if (task_->request_sleephq_startup_check()) {
         startup_check_.requested_generation = status.config_generation;
     }
 }
@@ -414,11 +357,11 @@ void ExportCoordinator::poll_sleephq_idle_backfill(
     const ExportReportActivity &report,
     bool network_connected,
     bool stream_activity_active,
-    As11TherapyState therapy_state,
+    bool therapy_active,
     bool storage_sync_active,
     SleepHqSyncRuntimeStatus status,
     uint32_t now_ms) {
-    if (!sleephq_sync_ || !network_connected) return;
+    if (!task_ || !network_connected) return;
 
     if (!status.configured || status.config_generation == 0) {
         clear_idle_backfill();
@@ -434,25 +377,23 @@ void ExportCoordinator::poll_sleephq_idle_backfill(
         idle_backfill_.due_ms = 0;
     }
 
-    if (!idle_backfill_.pending) return;
-    if (status.state != SleepHqSyncState::Idle) return;
-    if (stream_activity_active ||
-        report.foreground_active ||
-        report.background_active ||
-        storage_sync_active ||
-        therapy_state == As11TherapyState::Running) {
+    if (!idle_backfill_.pending || status.state != SleepHqSyncState::Idle) {
+        return;
+    }
+    if (stream_activity_active || report.foreground_active ||
+        report.background_active || storage_sync_active || therapy_active) {
         idle_backfill_.due_ms = 0;
         return;
     }
 
     if (idle_backfill_.due_ms == 0) {
         idle_backfill_.due_ms =
-            due_after(now_ms, AC_BG_WORKER_ACTIVITY_GRACE_MS);
+            due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS);
         return;
     }
     if (static_cast<int32_t>(now_ms - idle_backfill_.due_ms) < 0) return;
 
-    if (sleephq_sync_->request_sync("idle_backfill")) {
+    if (task_->request_sleephq_idle_backfill()) {
         idle_backfill_.queued_generation = idle_backfill_.armed_generation;
         idle_backfill_.pending = false;
         idle_backfill_.due_ms = 0;

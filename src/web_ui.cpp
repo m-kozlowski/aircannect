@@ -526,8 +526,7 @@ bool storage_read_request_available(AsyncWebServerRequest *request,
 bool storage_jobs_available(AsyncWebServerRequest *request,
                             const StorageArchivePort *archive_port,
                             const StorageDeletePort *delete_port,
-                            const StorageSyncJob *sync_job,
-                            const SleepHqSyncJob *sleephq_job) {
+                            const ExportCoordinator *exports) {
     if (archive_port && archive_port->active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
@@ -538,12 +537,7 @@ bool storage_jobs_available(AsyncWebServerRequest *request,
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
     }
-    if (sync_job && sync_job->active()) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"storage_busy\"}");
-        return false;
-    }
-    if (sleephq_job && sleephq_job->active()) {
+    if (exports && exports->endpoint_work_active()) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"storage_busy\"}");
         return false;
@@ -873,8 +867,6 @@ bool WebUI::begin(RpcRequestPort &rpc,
                   StorageArchivePort &storage_archive,
                   StorageDeletePort &storage_delete,
                   ExportCoordinator &export_coordinator,
-                  StorageSyncJob *storage_sync_job,
-                  SleepHqSyncJob *sleephq_sync_job,
                   ConsoleContext &console_ctx,
                   uint16_t port) {
     if (started_) return true;
@@ -898,8 +890,6 @@ bool WebUI::begin(RpcRequestPort &rpc,
     storage_archive_ = &storage_archive;
     storage_delete_ = &storage_delete;
     export_coordinator_ = &export_coordinator;
-    storage_sync_job_ = storage_sync_job;
-    sleephq_sync_job_ = sleephq_sync_job;
     console_ctx_ = &console_ctx;
 
     if (!command_mutex_) {
@@ -2407,8 +2397,7 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
         if (!storage_jobs_available(request,
                                     storage_archive_,
                                     storage_delete_,
-                                    storage_sync_job_,
-                                    sleephq_sync_job_)) {
+                                    export_coordinator_)) {
             return;
         }
 
@@ -2459,8 +2448,7 @@ void WebUI::send_storage_archive_start(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_,
                                 storage_delete_,
-                                storage_sync_job_,
-                                sleephq_sync_job_)) {
+                                export_coordinator_)) {
         return;
     }
 
@@ -2649,8 +2637,7 @@ void WebUI::send_storage_delete_start(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_,
                                 storage_delete_,
-                                storage_sync_job_,
-                                sleephq_sync_job_)) {
+                                export_coordinator_)) {
         return;
     }
 
@@ -2726,7 +2713,7 @@ void WebUI::send_storage_delete_status(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
-    if (!storage_sync_job_ || !export_coordinator_) {
+    if (!export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sync_unavailable\"}");
         return;
@@ -2741,7 +2728,6 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_,
                                 storage_delete_,
-                                nullptr,
                                 nullptr)) {
         return;
     }
@@ -2755,7 +2741,7 @@ void WebUI::send_storage_sync_start(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
-    if (!storage_sync_job_ || !export_coordinator_) {
+    if (!export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sync_unavailable\"}");
         return;
@@ -2770,7 +2756,6 @@ void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
     if (!storage_jobs_available(request,
                                 storage_archive_,
                                 storage_delete_,
-                                nullptr,
                                 nullptr)) {
         return;
     }
@@ -2784,12 +2769,12 @@ void WebUI::send_storage_sync_verify(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_storage_sync_status(AsyncWebServerRequest *request) const {
-    if (!storage_sync_job_) {
+    if (!export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sync_unavailable\"}");
         return;
     }
-    const StorageSyncStatus status = storage_sync_job_->status();
+    const StorageSyncStatus status = export_coordinator_->smb_status();
     LargeTextBuffer json;
     json.reserve(1536);
     json = "{";
@@ -2866,7 +2851,7 @@ void WebUI::send_storage_sync_status(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_sleephq_sync_start(AsyncWebServerRequest *request) const {
-    if (!sleephq_sync_job_ || !export_coordinator_) {
+    if (!export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
         return;
@@ -2881,7 +2866,7 @@ void WebUI::send_sleephq_sync_start(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_sleephq_sync_check(AsyncWebServerRequest *request) const {
-    if (!sleephq_sync_job_ || !export_coordinator_) {
+    if (!export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
         return;
@@ -2896,12 +2881,12 @@ void WebUI::send_sleephq_sync_check(AsyncWebServerRequest *request) const {
 }
 
 void WebUI::send_sleephq_sync_status(AsyncWebServerRequest *request) const {
-    if (!sleephq_sync_job_) {
+    if (!export_coordinator_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"sleephq_unavailable\"}");
         return;
     }
-    const SleepHqSyncStatus status = sleephq_sync_job_->status();
+    const SleepHqSyncStatus status = export_coordinator_->sleephq_status();
     LargeTextBuffer json;
     json.reserve(WEB_JSON_RESERVE_MEDIUM);
     json = "{";

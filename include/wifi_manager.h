@@ -92,6 +92,7 @@ public:
     uint32_t connect_timeout_remaining_ms() const;
     uint32_t ipv4_timeout_remaining_ms() const;
     void bssid(char *out, size_t size) const;
+    bool copy_bssid(uint8_t out[6]) const;
     size_t profile_count() const { return profile_count_; }
     const WifiProfile &profile(size_t index) const { return profiles_[index]; }
     int8_t active_profile_index() const { return active_profile_index_; }

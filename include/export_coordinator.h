@@ -2,10 +2,8 @@
 
 #include <stdint.h>
 
-#include "app_config.h"
-#include "as11_device_state.h"
-#include "sleephq_sync_job.h"
-#include "storage_sync_job.h"
+#include "export_task.h"
+#include "runtime_snapshots.h"
 
 namespace aircannect {
 
@@ -14,25 +12,22 @@ struct ExportReportActivity {
     bool background_active = false;
 };
 
-// Owns policy that spans export endpoints. The endpoint jobs own their
+// Owns policy that spans export endpoints. The endpoint engines own their
 // protocols and durable state; this coordinator owns when they may run and in
 // what order.
 class ExportCoordinator {
 public:
     // lifecycle
-    void begin(StorageSyncJob *storage_sync,
-               SleepHqSyncJob *sleephq_sync);
+    void begin(ExportTask &task);
 
     // scheduling policy
     void poll(const ExportReportActivity &report,
-              const AppConfigData &config,
-              bool network_connected,
-              bool stream_activity_active,
-              As11TherapyState therapy_state,
-              bool resmed_ota_active,
-              bool esp_ota_active,
+              const ActivitySnapshot &activity,
               uint32_t now_ms);
     bool endpoint_work_active() const;
+    ExportTaskStatus status() const;
+    StorageSyncStatus smb_status() const;
+    SleepHqSyncStatus sleephq_status() const;
 
     // external requests
     bool request_smb_sync();
@@ -43,7 +38,8 @@ public:
 
 private:
     struct PostTherapyState {
-        As11TherapyState last_state = As11TherapyState::Unknown;
+        bool state_initialized = false;
+        bool last_therapy_active = false;
         uint32_t report_settle_due_ms = 0;
         bool storage_pending = false;
         bool storage_grace_armed = false;
@@ -69,13 +65,10 @@ private:
 
     static uint32_t due_after(uint32_t now_ms, uint32_t delay_ms);
 
-    // shared gates
-    bool export_network_ready(bool network_connected, uint32_t now_ms);
-
     // post-therapy sequence
     void poll_post_therapy(const ExportReportActivity &report,
                            bool stream_activity_active,
-                           As11TherapyState therapy_state,
+                           bool therapy_active,
                            bool storage_sync_active,
                            uint32_t now_ms);
     void reset_post_therapy_after_running();
@@ -101,21 +94,19 @@ private:
     void poll_sleephq_idle_backfill(const ExportReportActivity &report,
                                     bool network_connected,
                                     bool stream_activity_active,
-                                    As11TherapyState therapy_state,
+                                    bool therapy_active,
                                     bool storage_sync_active,
                                     SleepHqSyncRuntimeStatus status,
                                     uint32_t now_ms);
     void clear_idle_backfill();
 
-    // endpoint jobs
-    StorageSyncJob *storage_sync_ = nullptr;
-    SleepHqSyncJob *sleephq_sync_ = nullptr;
+    // export task command/status port
+    ExportTask *task_ = nullptr;
 
     // coordinator state
     PostTherapyState post_therapy_;
     StartupCheckState startup_check_;
     IdleBackfillState idle_backfill_;
-    uint32_t network_connected_since_ms_ = 0;
 };
 
 }  // namespace aircannect
