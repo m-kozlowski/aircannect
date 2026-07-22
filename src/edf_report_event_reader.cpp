@@ -147,7 +147,7 @@ bool verify_record_crc(const uint8_t *record, size_t record_size) {
 }  // namespace
 
 EdfReportEventStatus edf_report_decode_annotation_record(
-    const EdfReportFileDescriptor &file,
+    const EdfReportEventSource &source,
     const uint8_t *record,
     size_t record_size,
     bool verify_crc,
@@ -155,10 +155,9 @@ EdfReportEventStatus edf_report_decode_annotation_record(
     void *context,
     EdfReportEventDecodeStats &stats,
     EdfReportEventDecodeContext *decode_context) {
-    if (file.status != EdfReportFileStatus::Ok || !record || !callback ||
-        file.header_start_ms <= 0 ||
-        (file.inventory.kind != EdfInventoryFileKind::Eve &&
-         file.inventory.kind != EdfInventoryFileKind::Csl) ||
+    if (!record || !callback || source.header_start_ms <= 0 ||
+        (source.kind != EdfInventoryFileKind::Eve &&
+         source.kind != EdfInventoryFileKind::Csl) ||
         record_size < 2) {
         return EdfReportEventStatus::InvalidArgument;
     }
@@ -206,12 +205,12 @@ EdfReportEventStatus edf_report_decode_annotation_record(
             if (label_len > 0) {
                 stats.annotations_seen++;
                 EdfAnnotationLabelId id = EdfAnnotationLabelId::Hypopnea;
-                if (edf_annotation_label_id_for_text(file.inventory.kind,
+                if (edf_annotation_label_id_for_text(source.kind,
                                                      record + label_start,
                                                      label_len,
                                                      id)) {
                     const int64_t annotation_time_ms =
-                        file.header_start_ms + onset_ms;
+                        source.header_start_ms + onset_ms;
                     if (id == EdfAnnotationLabelId::CsrStart) {
                         if (decode_context) {
                             decode_context->csr_open = true;
@@ -248,7 +247,7 @@ EdfReportEventStatus edf_report_decode_annotation_record(
                             normalized_eve_event_start_ms(
                                 annotation_time_ms,
                                 duration_ms,
-                                file.header_start_ms);
+                                source.header_start_ms);
                         uint16_t code = 0;
                         if (!event_code_for_id(id, code) ||
                             !emit_event(callback,
@@ -271,6 +270,33 @@ EdfReportEventStatus edf_report_decode_annotation_record(
         if (index < payload_size && record[index] == 0) ++index;
     }
     return EdfReportEventStatus::Ok;
+}
+
+EdfReportEventStatus edf_report_decode_annotation_record(
+    const EdfReportFileDescriptor &file,
+    const uint8_t *record,
+    size_t record_size,
+    bool verify_crc,
+    EdfReportEventCallback callback,
+    void *context,
+    EdfReportEventDecodeStats &stats,
+    EdfReportEventDecodeContext *decode_context) {
+    if (file.status != EdfReportFileStatus::Ok) {
+        return EdfReportEventStatus::InvalidArgument;
+    }
+
+    const EdfReportEventSource source{
+        file.inventory.kind,
+        file.header_start_ms,
+    };
+    return edf_report_decode_annotation_record(source,
+                                               record,
+                                               record_size,
+                                               verify_crc,
+                                               callback,
+                                               context,
+                                               stats,
+                                               decode_context);
 }
 
 }  // namespace aircannect

@@ -27,8 +27,23 @@ struct EdfReportEventDecodeContext {
     int64_t csr_start_ms = 0;
 };
 
+struct EdfReportEventSource {
+    EdfInventoryFileKind kind = EdfInventoryFileKind::Unknown;
+    int64_t header_start_ms = 0;
+};
+
 using EdfReportEventCallback =
     bool (*)(void *context, const ReportEventRecord &event);
+
+EdfReportEventStatus edf_report_decode_annotation_record(
+    const EdfReportEventSource &source,
+    const uint8_t *record,
+    size_t record_size,
+    bool verify_crc,
+    EdfReportEventCallback callback,
+    void *context,
+    EdfReportEventDecodeStats &stats,
+    EdfReportEventDecodeContext *decode_context = nullptr);
 
 EdfReportEventStatus edf_report_decode_annotation_record(
     const EdfReportFileDescriptor &file,
