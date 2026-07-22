@@ -1492,8 +1492,6 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
         : 0;
     input.fallback_records = runtime.fallback_records;
     input.fallback_record_count = runtime.fallback_record_count;
-    input.resolve_local_minute = night_catalog_resolve_local_minute;
-    input.clock_context = &clock;
     catalog = NightCatalogBuilder::build(input);
 
     destroy_large_array(sessions, session_count);

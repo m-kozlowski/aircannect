@@ -1304,6 +1304,7 @@ bool fill_sessions(const ReportPlanRequest &request,
                    const ScratchArray<SelectedSource> &selected,
                    ReportReadSession *plan_sessions,
                    size_t plan_session_count,
+                   bool fallback_acquisition_allowed,
                    uint32_t &missing_required,
                    uint32_t &missing_optional,
                    uint32_t &unavailable_signals,
@@ -1343,22 +1344,26 @@ bool fill_sessions(const ReportPlanRequest &request,
         output.missing_signal_mask =
             request.signal_mask & ~output.complete_signal_mask;
         bool catalog_valid = true;
-        for (uint8_t signal_index = 0;
-             signal_index < static_cast<uint8_t>(ReportSignalId::Count);
-             ++signal_index) {
-            const ReportSignalId signal =
-                static_cast<ReportSignalId>(signal_index);
-            const uint32_t bit = report_signal_bit(signal);
-            if ((output.missing_signal_mask & bit) == 0) continue;
+        if (!fallback_acquisition_allowed) {
+            output.unavailable_signal_mask = output.missing_signal_mask;
+        } else {
+            for (uint8_t signal_index = 0;
+                 signal_index < static_cast<uint8_t>(ReportSignalId::Count);
+                 ++signal_index) {
+                const ReportSignalId signal =
+                    static_cast<ReportSignalId>(signal_index);
+                const uint32_t bit = report_signal_bit(signal);
+                if ((output.missing_signal_mask & bit) == 0) continue;
 
-            if (fallback_signal_unavailable(catalog,
-                                            night,
-                                            signal,
-                                            window,
-                                            catalog_valid)) {
-                output.unavailable_signal_mask |= bit;
+                if (fallback_signal_unavailable(catalog,
+                                                night,
+                                                signal,
+                                                window,
+                                                catalog_valid)) {
+                    output.unavailable_signal_mask |= bit;
+                }
+                if (!catalog_valid) return false;
             }
-            if (!catalog_valid) return false;
         }
 
         output.captured_event_mask = captured_events(
@@ -1375,8 +1380,10 @@ bool fill_sessions(const ReportPlanRequest &request,
         missing_required |= output.missing_signal_mask & required_mask;
         missing_optional |= output.missing_signal_mask & ~required_mask;
         unavailable_signals |= output.unavailable_signal_mask;
-        acquirable_signals |= output.missing_signal_mask &
-                              ~output.unavailable_signal_mask;
+        if (fallback_acquisition_allowed) {
+            acquirable_signals |= output.missing_signal_mask &
+                                  ~output.unavailable_signal_mask;
+        }
         missing_events |= output.missing_event_mask;
         ++plan_session;
     }
@@ -1538,12 +1545,15 @@ ReportPlanResult ReportPlanner::build(
     plan->key_ = request.artifact;
     plan->requested_signal_mask_ = request.signal_mask;
     plan->requested_event_mask_ = request.event_mask;
+    plan->fallback_acquisition_allowed_ =
+        (night->source_flags & NIGHT_CATALOG_SOURCE_EDF) == 0;
     if (!fill_sessions(request,
                        plan->catalog(),
                        plan->night(),
                        selected,
                        plan->sessions_,
                        plan->session_count_,
+                       plan->fallback_acquisition_allowed_,
                        plan->missing_required_signal_mask_,
                        plan->missing_optional_signal_mask_,
                        plan->unavailable_signal_mask_,

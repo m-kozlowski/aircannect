@@ -458,8 +458,9 @@ bool ReportEngine::start_build(const ReportArtifactKey &artifact,
     }
 
     active_plan_ = std::move(planned.plan);
-    if (active_plan_->acquirable_signal_mask() != 0 ||
-        active_plan_->missing_event_mask() != 0) {
+    if (active_plan_->fallback_acquisition_allowed() &&
+        (active_plan_->acquirable_signal_mask() != 0 ||
+         active_plan_->missing_event_mask() != 0)) {
         const OperationAdmission admitted = fallback_acquisition_.start(
             active_plan_,
             active_request_.ticket.generation,

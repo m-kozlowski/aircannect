@@ -36,6 +36,21 @@ struct NightCatalogSourceFileInput {
 };
 
 struct NightCatalogEdfSessionInput {
+    NightCatalogEdfSessionInput() = default;
+    NightCatalogEdfSessionInput(
+        SleepDayId sleep_day_value,
+        int64_t day_start_value,
+        int64_t day_end_value,
+        NightCatalogTimeRange display_window_value,
+        const NightCatalogSourceFileInput *files_value,
+        size_t file_count_value)
+        : sleep_day(sleep_day_value),
+          day_start_ms(day_start_value),
+          day_end_ms(day_end_value),
+          display_window(display_window_value),
+          files(files_value),
+          file_count(file_count_value) {}
+
     SleepDayId sleep_day;
     int64_t day_start_ms = 0;
     int64_t day_end_ms = 0;
@@ -97,11 +112,6 @@ struct NightCatalogFallbackInput {
     size_t section_count = 0;
 };
 
-using NightCatalogLocalMinuteResolver = bool (*)(void *context,
-                                                 SleepDayId sleep_day,
-                                                 uint16_t minute_from_noon,
-                                                 int64_t &utc_ms);
-
 struct NightCatalogBuildInput {
     const NightCatalogEdfSessionInput *edf_sessions = nullptr;
     size_t edf_session_count = 0;
@@ -111,8 +121,6 @@ struct NightCatalogBuildInput {
     size_t summary_record_count = 0;
     const NightCatalogFallbackInput *fallback_records = nullptr;
     size_t fallback_record_count = 0;
-    NightCatalogLocalMinuteResolver resolve_local_minute = nullptr;
-    void *clock_context = nullptr;
 };
 
 class NightCatalogBuilder {

@@ -81,6 +81,9 @@ public:
     uint32_t acquirable_signal_mask() const {
         return acquirable_signal_mask_;
     }
+    bool fallback_acquisition_allowed() const {
+        return fallback_acquisition_allowed_;
+    }
     uint8_t requested_event_mask() const { return requested_event_mask_; }
     uint8_t missing_event_mask() const { return missing_event_mask_; }
 
@@ -130,6 +133,7 @@ private:
     uint32_t missing_optional_signal_mask_ = 0;
     uint32_t unavailable_signal_mask_ = 0;
     uint32_t acquirable_signal_mask_ = 0;
+    bool fallback_acquisition_allowed_ = false;
     uint8_t requested_event_mask_ = 0;
     uint8_t missing_event_mask_ = 0;
 

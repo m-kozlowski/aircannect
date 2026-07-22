@@ -19,6 +19,7 @@ namespace {
 
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
 constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
+constexpr int64_t SUMMARY_SESSION_EDGE_TOLERANCE_MS = 2LL * 60000LL;
 
 enum class SessionOrigin : uint8_t {
     Edf,
@@ -39,17 +40,12 @@ struct BuildNight {
     bool has_str = false;
     bool has_summary = false;
     bool has_fallback = false;
-    bool summary_boundary_used = false;
+    bool summary_metrics_valid = false;
 };
 
 struct BuildSession {
     size_t owner = 0;
     SessionOrigin origin = SessionOrigin::Edf;
-    NightCatalogTimeRange range;
-};
-
-struct BuildMaskWindow {
-    size_t owner = 0;
     NightCatalogTimeRange range;
 };
 
@@ -208,7 +204,8 @@ void set_duration_metric(NightCatalogMetrics &out,
 bool apply_metrics(NightCatalogMetrics &out,
                    const ReportDailyMetrics &input,
                    NightCatalogMetricSource source,
-                   bool fill_only) {
+                   bool fill_only,
+                   bool include_duration) {
     bool used = false;
     if (input.has_ahi) {
         set_metric(out, NightCatalogMetric::Ahi, input.ahi,
@@ -242,7 +239,7 @@ bool apply_metrics(NightCatalogMetrics &out,
         set_metric(out, NightCatalogMetric::Leak50,
                    input.leak_50_l_min, source, fill_only, used);
     }
-    if (input.has_duration_min) {
+    if (include_duration && input.has_duration_min) {
         set_duration_metric(out, input.duration_min,
                             source, fill_only, used);
     }
@@ -379,6 +376,51 @@ BuildNight *find_or_add_night(ScratchArray<BuildNight> &nights,
     return night;
 }
 
+BuildNight *find_night(ScratchArray<BuildNight> &nights,
+                       SleepDayId sleep_day) {
+    if (!sleep_day.valid()) return nullptr;
+
+    for (size_t i = 0; i < nights.size(); ++i) {
+        if (nights.data()[i].sleep_day == sleep_day) {
+            return &nights.data()[i];
+        }
+    }
+    return nullptr;
+}
+
+bool timestamps_within(int64_t lhs, int64_t rhs, int64_t tolerance_ms) {
+    if (lhs >= rhs) return lhs - rhs <= tolerance_ms;
+    return rhs - lhs <= tolerance_ms;
+}
+
+bool summary_session_matches_raw_edf(
+    const NightCatalogBuildInput &input,
+    SleepDayId raw_sleep_day,
+    const NightCatalogTimeRange &session) {
+    for (size_t i = 0; i < input.edf_session_count; ++i) {
+        const NightCatalogEdfSessionInput &edf = input.edf_sessions[i];
+        if (!edf.has_clock_provenance ||
+            edf.raw_sleep_day != raw_sleep_day) {
+            continue;
+        }
+
+        const NightCatalogTimeRange raw_window =
+            edf.raw_therapy_window.valid()
+                ? edf.raw_therapy_window
+                : edf.raw_segment_window;
+        if (raw_window.valid() &&
+            timestamps_within(session.start_ms,
+                              raw_window.start_ms,
+                              SUMMARY_SESSION_EDGE_TOLERANCE_MS) &&
+            timestamps_within(session.end_ms,
+                              raw_window.end_ms,
+                              SUMMARY_SESSION_EDGE_TOLERANCE_MS)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool set_primary_boundary(BuildNight &night,
                           int64_t start_ms,
                           int64_t end_ms) {
@@ -507,14 +549,7 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
             return false;
         }
 
-        BuildNight *night = find_or_add_night(nights, source.sleep_day);
-        if (!night || night->has_fallback ||
-            !set_primary_boundary(*night,
-                                  source.day_start_ms,
-                                  source.day_end_ms)) {
-            return false;
-        }
-
+        size_t unmatched_session_count = 0;
         NightCatalogTimeRange previous_session;
         for (size_t session_index = 0;
              session_index < source.session_count;
@@ -524,12 +559,13 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
             if (session.start_ms < source.day_start_ms ||
                 session.end_ms > source.day_end_ms ||
                 (session_index > 0 &&
-                 session.start_ms < previous_session.end_ms) ||
-                !append_session(sessions,
-                                night->owner,
-                                SessionOrigin::Fallback,
-                                session)) {
+                 session.start_ms < previous_session.end_ms)) {
                 return false;
+            }
+            if (!summary_session_matches_raw_edf(input,
+                                                 source.sleep_day,
+                                                 session)) {
+                ++unmatched_session_count;
             }
             previous_session = session;
         }
@@ -551,6 +587,36 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
             expected_offset += section.data_size;
         }
         if (expected_offset != source.file_size) return false;
+
+        BuildNight *night = find_night(nights, source.sleep_day);
+        if ((night && night->has_edf) || unmatched_session_count == 0) {
+            continue;
+        }
+        if (!night) night = find_or_add_night(nights, source.sleep_day);
+        if (!night || night->has_fallback ||
+            !set_primary_boundary(*night,
+                                  source.day_start_ms,
+                                  source.day_end_ms)) {
+            return false;
+        }
+
+        for (size_t session_index = 0;
+             session_index < source.session_count;
+             ++session_index) {
+            const NightCatalogTimeRange &session =
+                source.sessions[session_index];
+            if (summary_session_matches_raw_edf(input,
+                                                source.sleep_day,
+                                                session)) {
+                continue;
+            }
+            if (!append_session(sessions,
+                                night->owner,
+                                SessionOrigin::Fallback,
+                                session)) {
+                return false;
+            }
+        }
 
         BuildFallback *fallback = fallbacks.append();
         if (!fallback) return false;
@@ -600,12 +666,7 @@ bool ingest_edf(const NightCatalogBuildInput &input,
 
 bool ingest_str(const NightCatalogBuildInput &input,
                 ScratchArray<BuildNight> &nights,
-                ScratchArray<BuildMaskWindow> &masks,
                 ScratchArray<BuildFile> &files) {
-    if (input.str_record_count > 0 && !input.resolve_local_minute) {
-        return false;
-    }
-
     for (size_t i = 0; i < input.str_record_count; ++i) {
         const NightCatalogStrInput &source = input.str_records[i];
         if (!source.record.sleep_day.valid() || !source.path ||
@@ -614,50 +675,14 @@ bool ingest_str(const NightCatalogBuildInput &input,
             return false;
         }
 
-        BuildNight *night = find_or_add_night(nights,
-                                               source.record.sleep_day);
-        if (!night || night->has_str) return false;
-
-        int64_t day_start_ms = 0;
-        int64_t day_end_ms = 0;
-        if (!input.resolve_local_minute(input.clock_context,
-                                        night->sleep_day,
-                                        0,
-                                        day_start_ms) ||
-            !input.resolve_local_minute(input.clock_context,
-                                        night->sleep_day,
-                                        1440,
-                                        day_end_ms) ||
-            !set_primary_boundary(*night, day_start_ms, day_end_ms)) {
-            return false;
-        }
-
-        for (size_t mask_index = 0;
-             mask_index < source.record.mask_window_count;
-             ++mask_index) {
-            const NightStrMaskWindow &source_window =
-                source.record.mask_windows[mask_index];
-            BuildMaskWindow *mask = masks.append();
-            if (!mask) return false;
-
-            mask->owner = night->owner;
-            if (!input.resolve_local_minute(input.clock_context,
-                                            night->sleep_day,
-                                            source_window.on_minute,
-                                            mask->range.start_ms) ||
-                !input.resolve_local_minute(input.clock_context,
-                                            night->sleep_day,
-                                            source_window.off_minute,
-                                            mask->range.end_ms) ||
-                mask->range.end_ms < mask->range.start_ms) {
-                return false;
-            }
-        }
+        BuildNight *night = find_night(nights, source.record.sleep_day);
+        if (!night || !night->has_edf) continue;
+        if (night->has_str) return false;
 
         NightCatalogSourceFileInput file;
         file.kind = NightCatalogFileKind::Str;
         file.path = source.path;
-        file.coverage.range = {day_start_ms, day_end_ms};
+        file.coverage.range = {night->day_start_ms, night->day_end_ms};
         file.file_size = source.file_size;
         file.last_write_ms = source.last_write_ms;
         file.data_offset = source.record_offset;
@@ -678,22 +703,55 @@ bool ingest_summary(const NightCatalogBuildInput &input,
                     ScratchArray<BuildSession> &sessions) {
     for (size_t i = 0; i < input.summary_record_count; ++i) {
         const NightCatalogSummaryInput &source = input.summary_records[i];
-        BuildNight *night = find_or_add_night(nights, source.sleep_day);
-        if (!night || night->has_summary || source.identity == 0 ||
-            !valid_boundary(source.day_start_ms, source.day_end_ms)) {
+        if (!source.sleep_day.valid() || source.identity == 0 ||
+            !valid_boundary(source.day_start_ms, source.day_end_ms) ||
+            (source.session_count > 0 && !source.sessions)) {
             return false;
         }
 
-        if (!night->boundary_set) {
-            night->day_start_ms = source.day_start_ms;
-            night->day_end_ms = source.day_end_ms;
-            night->boundary_set = true;
-            night->summary_boundary_used = true;
+        size_t matched_session_count = 0;
+        NightCatalogTimeRange previous_session;
+        for (size_t session_index = 0;
+             session_index < source.session_count;
+             ++session_index) {
+            const NightCatalogTimeRange &session =
+                source.sessions[session_index];
+            if (session.start_ms < source.day_start_ms ||
+                session.end_ms > source.day_end_ms ||
+                (session_index > 0 &&
+                 session.start_ms < previous_session.end_ms)) {
+                return false;
+            }
+            if (summary_session_matches_raw_edf(input,
+                                                source.sleep_day,
+                                                session)) {
+                ++matched_session_count;
+            }
+            previous_session = session;
+        }
+
+        BuildNight *night = find_night(nights, source.sleep_day);
+        if ((night && night->has_edf) ||
+            (source.session_count > 0 &&
+             matched_session_count == source.session_count)) {
+            continue;
+        }
+        if (!night) night = find_or_add_night(nights, source.sleep_day);
+        if (!night || night->has_summary ||
+            !set_primary_boundary(*night,
+                                  source.day_start_ms,
+                                  source.day_end_ms)) {
+            return false;
         }
 
         for (size_t session_index = 0;
              session_index < source.session_count;
              ++session_index) {
+            if (summary_session_matches_raw_edf(input,
+                                                source.sleep_day,
+                                                source.sessions[session_index])) {
+                continue;
+            }
             if (!append_session(sessions,
                                 night->owner,
                                 SessionOrigin::Summary,
@@ -705,6 +763,7 @@ bool ingest_summary(const NightCatalogBuildInput &input,
         night->summary_metrics = source.metrics;
         night->summary_identity = source.identity;
         night->has_summary = true;
+        night->summary_metrics_valid = matched_session_count == 0;
     }
     return true;
 }
@@ -728,22 +787,6 @@ size_t count_unique_sessions(const BuildNight &night,
         if (!selected_session(night, session)) continue;
         if (have_previous && same_range(previous, session.range)) continue;
         previous = session.range;
-        have_previous = true;
-        ++count;
-    }
-    return count;
-}
-
-size_t count_unique_masks(const BuildNight &night,
-                          const ScratchArray<BuildMaskWindow> &masks) {
-    size_t count = 0;
-    NightCatalogTimeRange previous;
-    bool have_previous = false;
-    for (size_t i = 0; i < masks.size(); ++i) {
-        const BuildMaskWindow &mask = masks.data()[i];
-        if (mask.owner != night.owner) continue;
-        if (have_previous && same_range(previous, mask.range)) continue;
-        previous = mask.range;
         have_previous = true;
         ++count;
     }
@@ -950,7 +993,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
 
     size_t max_nights = 0;
     size_t max_sessions = 0;
-    size_t max_masks = 0;
     size_t max_files = 0;
     size_t max_fallbacks = 0;
     if (!add_count(max_nights, input.edf_session_count) ||
@@ -965,12 +1007,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
 
     for (size_t i = 0; i < input.edf_session_count; ++i) {
         if (!add_count(max_files, input.edf_sessions[i].file_count)) return {};
-    }
-    for (size_t i = 0; i < input.str_record_count; ++i) {
-        if (!add_count(max_masks,
-                       input.str_records[i].record.mask_window_count)) {
-            return {};
-        }
     }
     for (size_t i = 0; i < input.summary_record_count; ++i) {
         if (!add_count(max_sessions,
@@ -987,18 +1023,16 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
 
     ScratchArray<BuildNight> nights;
     ScratchArray<BuildSession> sessions;
-    ScratchArray<BuildMaskWindow> masks;
     ScratchArray<BuildFile> files;
     ScratchArray<BuildFallback> fallbacks;
     if (!nights.allocate(max_nights) ||
         !sessions.allocate(max_sessions) ||
-        !masks.allocate(max_masks) ||
         !files.allocate(max_files) ||
         !fallbacks.allocate(max_fallbacks) ||
         !ingest_edf(input, nights, sessions, files) ||
-        !ingest_str(input, nights, masks, files) ||
-        !ingest_fallback(input, nights, sessions, fallbacks) ||
-        !ingest_summary(input, nights, sessions)) {
+        !ingest_str(input, nights, files) ||
+        !ingest_summary(input, nights, sessions) ||
+        !ingest_fallback(input, nights, sessions, fallbacks)) {
         return {};
     }
 
@@ -1019,20 +1053,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
                       if (lhs.origin != rhs.origin) {
                           return static_cast<uint8_t>(lhs.origin) <
                                  static_cast<uint8_t>(rhs.origin);
-                      }
-                      if (lhs.range.start_ms != rhs.range.start_ms) {
-                          return lhs.range.start_ms < rhs.range.start_ms;
-                      }
-                      return lhs.range.end_ms < rhs.range.end_ms;
-                  });
-    }
-    if (masks.size() > 1) {
-        std::sort(masks.data(),
-                  masks.data() + masks.size(),
-                  [](const BuildMaskWindow &lhs,
-                     const BuildMaskWindow &rhs) {
-                      if (lhs.owner != rhs.owner) {
-                          return lhs.owner < rhs.owner;
                       }
                       if (lhs.range.start_ms != rhs.range.start_ms) {
                           return lhs.range.start_ms < rhs.range.start_ms;
@@ -1069,7 +1089,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     }
 
     size_t final_sessions = 0;
-    size_t final_masks = 0;
     size_t final_files = 0;
     size_t final_signal_layouts = 0;
     size_t final_fallback_files = 0;
@@ -1080,7 +1099,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
         if (!night.boundary_set) return {};
 
         const size_t session_count = count_unique_sessions(night, sessions);
-        const size_t mask_count = count_unique_masks(night, masks);
         const size_t file_count = count_files(night, files, final_paths);
         const size_t fallback_file_count = count_fallback_files(
             night,
@@ -1089,10 +1107,9 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             final_paths);
         if (file_count == SIZE_MAX || session_count > UINT16_MAX ||
             fallback_file_count == SIZE_MAX ||
-            mask_count > UINT16_MAX || file_count > UINT16_MAX ||
+            file_count > UINT16_MAX ||
             fallback_file_count > UINT16_MAX ||
             !add_count(final_sessions, session_count) ||
-            !add_count(final_masks, mask_count) ||
             !add_count(final_files, file_count) ||
             !add_count(final_fallback_files, fallback_file_count)) {
             return {};
@@ -1108,7 +1125,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     }
 
     if (nights.size() > UINT32_MAX || final_sessions > UINT32_MAX ||
-        final_masks > UINT32_MAX || final_files > UINT32_MAX ||
+        final_files > UINT32_MAX ||
         final_signal_layouts > UINT32_MAX ||
         final_fallback_files > UINT32_MAX ||
         final_fallback_sections > UINT32_MAX ||
@@ -1119,7 +1136,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     std::shared_ptr<NightCatalog> catalog(new (std::nothrow) NightCatalog());
     if (!catalog || !catalog->allocate(nights.size(),
                                        final_sessions,
-                                       final_masks,
+                                       0,
                                        final_files,
                                        final_files,
                                        final_signal_layouts,
@@ -1130,7 +1147,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
     }
 
     size_t next_session = 0;
-    size_t next_mask = 0;
     size_t next_file = 0;
     size_t next_signal_layout = 0;
     size_t next_fallback_file = 0;
@@ -1145,7 +1161,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
         record.day_start_ms = source.day_start_ms;
         record.day_end_ms = source.day_end_ms;
         record.session_offset = static_cast<uint32_t>(next_session);
-        record.mask_window_offset = static_cast<uint32_t>(next_mask);
+        record.mask_window_offset = 0;
         record.file_offset = static_cast<uint32_t>(next_file);
         record.fallback_file_offset =
             static_cast<uint32_t>(next_fallback_file);
@@ -1155,25 +1171,23 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             record.source_flags |= NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
         }
 
-        bool summary_used = source.summary_boundary_used ||
-                            (!source.has_edf && !source.has_fallback &&
-                             source.has_summary);
         if (source.has_str) {
             (void)apply_metrics(record.metrics,
                                 source.str_metrics,
                                 NightCatalogMetricSource::Str,
+                                false,
                                 false);
         }
-        if (source.has_summary &&
-            apply_metrics(record.metrics,
-                          source.summary_metrics,
-                          NightCatalogMetricSource::Summary,
-                          true)) {
-            summary_used = true;
-        }
-        if (summary_used) {
+        if (source.has_summary) {
             record.source_flags |= NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK;
             record.summary_identity = source.summary_identity;
+            if (source.summary_metrics_valid) {
+                (void)apply_metrics(record.metrics,
+                                    source.summary_metrics,
+                                    NightCatalogMetricSource::Summary,
+                                    false,
+                                    true);
+            }
         }
 
         NightCatalogTimeRange previous;
@@ -1187,18 +1201,6 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             previous = session.range;
             have_previous = true;
             ++record.session_count;
-        }
-
-        have_previous = false;
-        for (size_t i = 0; i < masks.size(); ++i) {
-            const BuildMaskWindow &mask = masks.data()[i];
-            if (mask.owner != source.owner) continue;
-            if (have_previous && same_range(previous, mask.range)) continue;
-
-            catalog->mask_windows_[next_mask++] = mask.range;
-            previous = mask.range;
-            have_previous = true;
-            ++record.mask_window_count;
         }
 
         for (size_t i = 0; i < files.size(); ++i) {
@@ -1304,8 +1306,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
             SourceRevision(calculate_revision(*catalog, record));
     }
 
-    if (next_session != final_sessions || next_mask != final_masks ||
-        next_file != final_files ||
+    if (next_session != final_sessions || next_file != final_files ||
         next_signal_layout != final_signal_layouts ||
         next_fallback_file != final_fallback_files ||
         next_fallback_section != final_fallback_sections ||
@@ -1335,6 +1336,7 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::replace_fallback(
     const NightCatalogRecord *source_night =
         source.find(replacement.info.sleep_day);
     if (!source_night ||
+        (source_night->source_flags & NIGHT_CATALOG_SOURCE_EDF) != 0 ||
         source_night->day_start_ms != replacement.info.day_start_ms ||
         source_night->day_end_ms != replacement.info.day_end_ms) {
         return {};

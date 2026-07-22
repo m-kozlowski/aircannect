@@ -178,6 +178,7 @@ void ReportFallbackAcquisitionService::reset() {
 
 bool ReportFallbackAcquisitionService::prepare() {
     if (!plan_->key().valid() ||
+        !plan_->fallback_acquisition_allowed() ||
         (plan_->acquirable_signal_mask() == 0 &&
          plan_->missing_event_mask() == 0)) {
         fail("fallback_acquisition_not_required");
