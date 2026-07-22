@@ -2565,12 +2565,16 @@ void publish_activity(const ActivitySnapshot &activity) {
                                   !activity.realtime_stream_active);
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
                                        !activity.ota_install_active);
+    // Report and export jobs build their own inventories through the scan
+    // service. Foreground reads already outrank bounded scan steps in the
+    // storage task, so pausing scans for either owner deadlocks that owner on
+    // its own inventory request.
     const bool scan_paused =
         activity.therapy_active || activity.realtime_stream_active ||
-        activity.foreground_report_demand || activity.export_work_claimed ||
         activity.ota_install_active;
     const bool maintenance_paused =
-        scan_paused || activity.export_work_claimed;
+        scan_paused || activity.foreground_report_demand ||
+        activity.export_work_claimed;
     const bool upload_paused = activity.therapy_active ||
                                activity.ota_install_active;
 
