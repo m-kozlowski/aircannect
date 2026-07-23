@@ -19,6 +19,16 @@ static constexpr uint32_t AC_REPORT_TASK_IDLE_TICK_MS = 1000;
 static constexpr size_t AC_REPORT_TASK_COMMAND_CAPACITY = 8;
 static constexpr size_t AC_REPORT_TASK_BUILD_CAPACITY = 8;
 
+// Ready artifact payloads are retained only as a PSRAM accelerator. Durable
+// files remain authoritative, and the reserve keeps report builds and other
+// large transient work from competing with cached bytes.
+static constexpr size_t AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY = 16;
+static constexpr size_t AC_REPORT_PAYLOAD_CACHE_MAX_BYTES = 2 * 1024 * 1024;
+static constexpr size_t AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE =
+    3 * 1024 * 1024;
+static constexpr size_t AC_REPORT_PAYLOAD_CACHE_WARM_NIGHTS = 4;
+static constexpr size_t AC_REPORT_PAYLOAD_LOAD_COPY_BYTES = 16 * 1024;
+
 // SMB and SleepHQ share one low-priority task so their network and storage
 // phases cannot overlap. Runtime activity snapshots preempt both engines.
 static constexpr uint32_t AC_EXPORT_TASK_STACK = 8192;

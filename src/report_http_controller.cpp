@@ -2,6 +2,7 @@
 
 #include <ESPAsyncWebServer.h>
 
+#include <algorithm>
 #include <memory>
 #include <new>
 #include <stdio.h>
@@ -333,6 +334,39 @@ bool send_artifact_stream(AsyncWebServerRequest *request,
     return true;
 }
 
+bool send_artifact_payload(
+    AsyncWebServerRequest *request,
+    const ReportArtifactDescriptor &artifact,
+    std::shared_ptr<const LargeByteBuffer> bytes,
+    const char *content_type) {
+    if (!request || !artifact.valid() || !bytes ||
+        bytes->size() != artifact.size) {
+        return false;
+    }
+
+    AsyncWebServerResponse *response = new (std::nothrow)
+        AsyncPreparedResponse(
+            content_type,
+            bytes->size(),
+            [bytes](uint8_t *buffer,
+                    size_t max_length,
+                    size_t offset) -> size_t {
+                if (!buffer || offset >= bytes->size()) return 0;
+
+                const size_t copied = std::min(
+                    max_length, bytes->size() - offset);
+                memcpy(buffer, bytes->data() + offset, copied);
+                return copied;
+            });
+    if (!response) return false;
+
+    char etag[REPORT_HTTP_ETAG_BYTES] = {};
+    (void)format_artifact_etag(artifact, etag, sizeof(etag));
+    add_artifact_headers(response, etag, artifact.key.source_revision);
+    request->send(response);
+    return true;
+}
+
 bool report_task_available(AsyncWebServerRequest *request,
                            const ReportTask &report_task) {
     const ReportTaskControlSnapshot status = report_task.control_snapshot();
@@ -621,8 +655,20 @@ void ReportHttpController::send_result(
         return;
     }
 
-    (void)send_artifact_stream(
-        request, *stream_port_, artifact, "application/octet-stream");
+    std::shared_ptr<const LargeByteBuffer> payload =
+        report_task_->artifact_payload(artifact);
+    if (payload && send_artifact_payload(
+                       request,
+                       artifact,
+                       std::move(payload),
+                       "application/octet-stream")) {
+        return;
+    }
+
+    if (send_artifact_stream(
+            request, *stream_port_, artifact, "application/octet-stream")) {
+        (void)report_task_->request_payload_cache(key, next_generation());
+    }
 }
 
 void ReportHttpController::send_plot(
@@ -704,8 +750,20 @@ void ReportHttpController::send_plot(
         return;
     }
 
-    (void)send_artifact_stream(
-        request, *stream_port_, artifact, "application/octet-stream");
+    std::shared_ptr<const LargeByteBuffer> payload =
+        report_task_->artifact_payload(artifact);
+    if (payload && send_artifact_payload(
+                       request,
+                       artifact,
+                       std::move(payload),
+                       "application/octet-stream")) {
+        return;
+    }
+
+    if (send_artifact_stream(
+            request, *stream_port_, artifact, "application/octet-stream")) {
+        (void)report_task_->request_payload_cache(key, next_generation());
+    }
 }
 
 uint32_t ReportHttpController::next_generation() const {

@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "board_report.h"
 #include "management_console_utils.h"
 #include "report_sources.h"
 #include "report_task.h"
@@ -33,6 +34,20 @@ const char *report_engine_state_name(ReportEngineState state) {
         case ReportEngineState::Executing: return "executing";
         case ReportEngineState::Publishing: return "publishing";
         case ReportEngineState::Idle:
+        default: return "idle";
+    }
+}
+
+const char *report_payload_load_state_name(
+    ReportArtifactPayloadLoadState state) {
+    switch (state) {
+        case ReportArtifactPayloadLoadState::Submitting: return "submitting";
+        case ReportArtifactPayloadLoadState::Waiting: return "waiting";
+        case ReportArtifactPayloadLoadState::Copying: return "copying";
+        case ReportArtifactPayloadLoadState::Ready: return "ready";
+        case ReportArtifactPayloadLoadState::Error: return "error";
+        case ReportArtifactPayloadLoadState::Cancelled: return "cancelled";
+        case ReportArtifactPayloadLoadState::Idle:
         default: return "idle";
     }
 }
@@ -104,6 +119,28 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.print(status.background_suspended ? "yes" : "no");
     out.print(" last_error=");
     out.println(status.engine_error[0] ? status.engine_error : "--");
+
+    out.print("[REPORT] payload_cache=");
+    out.print(static_cast<unsigned long>(status.payload_cache_entries));
+    out.print('/');
+    out.print(static_cast<unsigned long>(
+        AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY));
+    out.print(" bytes=");
+    out.print(static_cast<unsigned long>(status.payload_cache_bytes));
+    out.print(" hits=");
+    out.print(static_cast<unsigned long>(status.payload_cache_hits));
+    out.print(" misses=");
+    out.print(static_cast<unsigned long>(status.payload_cache_misses));
+    out.print(" evictions=");
+    out.print(static_cast<unsigned long>(status.payload_cache_evictions));
+    out.print(" load=");
+    out.print(report_payload_load_state_name(status.payload_load_state));
+    out.print(" loaded=");
+    out.print(static_cast<unsigned long>(status.payload_load_bytes));
+    out.print(" error=");
+    out.println(status.payload_load_error[0]
+                    ? status.payload_load_error
+                    : "--");
 
     const ReportSourceDef *fallback_source =
         report_source_def(status.fallback_source);

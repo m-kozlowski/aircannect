@@ -36,6 +36,7 @@ constexpr const char *LEGACY_CACHE_NAMES[] = {"v3", "v4", "v5"};
 
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
+    CacheArtifact,
     RefreshCatalog,
 };
 
@@ -105,7 +106,9 @@ bool deadline_due(uint32_t now_ms, uint32_t deadline_ms) {
 }  // namespace
 
 struct ReportTask::Runtime {
-    Runtime() : engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY) {}
+    Runtime() :
+        engine(build_slots, AC_REPORT_TASK_BUILD_CAPACITY),
+        payload_cache(AC_REPORT_PAYLOAD_CACHE_MAX_BYTES) {}
 
     bool lock(uint32_t timeout_ms = 10) const {
 #ifdef ARDUINO
@@ -134,7 +137,10 @@ struct ReportTask::Runtime {
 
         for (size_t i = 0; i < command_count; ++i) {
             ReportTaskCommand &queued = commands[i];
-            if (command.kind == ReportTaskCommandKind::Artifact &&
+            const bool artifact_command =
+                command.kind == ReportTaskCommandKind::Artifact ||
+                command.kind == ReportTaskCommandKind::CacheArtifact;
+            if (artifact_command &&
                 queued.kind == command.kind &&
                 same_artifact_identity(queued.artifact, command.artifact)) {
                 queued = command;
@@ -163,14 +169,14 @@ struct ReportTask::Runtime {
         return OperationAdmission::Accepted;
     }
 
-    bool pop(ReportTaskCommand &command) {
+    bool pop(ReportTaskCommand &command, bool cache_load_available) {
         if (!lock()) return false;
         if (command_count == 0) {
             unlock();
             return false;
         }
 
-        size_t selected = 0;
+        size_t selected = SIZE_MAX;
         for (size_t i = 0; i < command_count; ++i) {
             if (commands[i].kind == ReportTaskCommandKind::Artifact &&
                 commands[i].priority ==
@@ -178,6 +184,22 @@ struct ReportTask::Runtime {
                 selected = i;
                 break;
             }
+        }
+        if (selected == SIZE_MAX) {
+            for (size_t i = 0; i < command_count; ++i) {
+                if (commands[i].kind ==
+                        ReportTaskCommandKind::CacheArtifact &&
+                    !cache_load_available) {
+                    continue;
+                }
+
+                selected = i;
+                break;
+            }
+        }
+        if (selected == SIZE_MAX) {
+            unlock();
+            return false;
         }
 
         command = commands[selected];
@@ -220,6 +242,11 @@ struct ReportTask::Runtime {
         if (!engine.status().foreground_active) return false;
 
         bool worked = engine.cancel_background() > 0;
+
+        if (payload_loader.status().active()) {
+            payload_loader.cancel();
+            worked = true;
+        }
 
         if (summary_acquisition.active()) {
             summary_acquisition.cancel();
@@ -269,6 +296,10 @@ struct ReportTask::Runtime {
             summary_acquisition.cancel();
         }
 
+        if (payload_loader.status().active()) {
+            payload_loader.cancel();
+        }
+
         (void)defer_active_catalog_refresh();
 
         if (artifact_index_refresh.active()) {
@@ -297,6 +328,162 @@ struct ReportTask::Runtime {
             published_artifact_index->availability(artifact, out);
         unlock();
         return found;
+    }
+
+    std::shared_ptr<const LargeByteBuffer> find_payload(
+        const ReportArtifactDescriptor &artifact) {
+        if (!artifact.valid() || !lock(20)) return {};
+
+        std::shared_ptr<const LargeByteBuffer> out =
+            payload_cache.find(artifact);
+        unlock();
+        return out;
+    }
+
+    bool payload_cached(const ReportArtifactDescriptor &artifact) const {
+        if (!artifact.valid() || !lock(20)) return false;
+
+        const bool cached = payload_cache.contains(artifact);
+        unlock();
+        return cached;
+    }
+
+    bool prepare_payload_allocation(
+        const ReportArtifactDescriptor &artifact) {
+        if (!artifact.valid() || !lock(20)) return false;
+        if (!payload_cache.can_hold(artifact)) {
+            unlock();
+            return false;
+        }
+
+#ifdef ARDUINO
+        MemoryStatus memory = Memory::status();
+        while (memory.psram_available &&
+               memory.psram_free <
+                   artifact.size +
+                       AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE &&
+               payload_cache.evict_lru()) {
+            memory = Memory::status();
+        }
+        const bool available = memory.psram_available &&
+            memory.psram_free >=
+                artifact.size + AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE;
+#else
+        const bool available = true;
+#endif
+
+        unlock();
+        return available;
+    }
+
+    bool cache_payload(const ReportArtifactDescriptor &artifact,
+                       std::shared_ptr<const LargeByteBuffer> bytes) {
+        if (!artifact.valid() || !bytes || !lock(20)) return false;
+
+#ifdef ARDUINO
+        MemoryStatus memory = Memory::status();
+        while (memory.psram_available &&
+               memory.psram_free <
+                   AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE &&
+               payload_cache.evict_lru()) {
+            memory = Memory::status();
+        }
+        if (!memory.psram_available ||
+            memory.psram_free < AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE) {
+            unlock();
+            return false;
+        }
+#endif
+
+        const bool inserted = payload_cache.insert(artifact, std::move(bytes));
+        unlock();
+        return inserted;
+    }
+
+    bool cache_bundle(
+        const std::shared_ptr<const ReportArtifactBundle> &bundle) {
+        if (!bundle || !bundle->valid()) return false;
+
+        bool cached = false;
+        if (bundle->key.kind == ReportArtifactKind::Result) {
+            ReportArtifactDescriptor result;
+            result.key = ReportArtifactKey::result(
+                bundle->key.sleep_day, bundle->key.source_revision);
+            result.size = bundle->result->size();
+            result.crc32 = bundle->result_crc32;
+            cached = cache_payload(result, bundle->result) || cached;
+
+            ReportArtifactDescriptor overview;
+            overview.key = ReportArtifactKey::overview(
+                bundle->key.sleep_day, bundle->key.source_revision);
+            overview.size = bundle->overview->size();
+            overview.crc32 = bundle->overview_crc32;
+            cached = cache_payload(overview, bundle->overview) || cached;
+            return cached;
+        }
+
+        if (bundle->key.kind == ReportArtifactKind::RangeTile) {
+            ReportArtifactDescriptor tile;
+            tile.key = bundle->key;
+            tile.size = bundle->range_tile->size();
+            tile.crc32 = bundle->range_tile_crc32;
+            cached = cache_payload(tile, bundle->range_tile);
+        }
+        return cached;
+    }
+
+    OperationAdmission start_payload_load(
+        const ReportArtifactKey &artifact,
+        uint32_t generation,
+        StorageReadLane lane) {
+        if (payload_loader.status().active()) return OperationAdmission::Busy;
+
+        ReportArtifactAvailability availability;
+        if (!artifact_index ||
+            !artifact_index->availability(artifact, availability)) {
+            return OperationAdmission::Rejected;
+        }
+
+        ReportArtifactDescriptor descriptor;
+        if (!availability.descriptor(artifact, descriptor)) {
+            return OperationAdmission::Rejected;
+        }
+        if (payload_cached(descriptor)) return OperationAdmission::Accepted;
+        if (!prepare_payload_allocation(descriptor)) {
+            return OperationAdmission::Rejected;
+        }
+
+        return payload_loader.start(descriptor, generation, lane);
+    }
+
+    bool finish_payload_load(uint32_t now_ms) {
+        const ReportArtifactPayloadLoadStatus load_status =
+            payload_loader.status();
+        if (!load_status.terminal()) return false;
+
+        if (load_status.state == ReportArtifactPayloadLoadState::Ready) {
+            std::shared_ptr<const LargeByteBuffer> bytes =
+                payload_loader.take_completed();
+            if (bytes) (void)cache_payload(load_status.artifact,
+                                           std::move(bytes));
+            payload_load_failed = {};
+            payload_load_retry_at_ms = 0;
+            return true;
+        }
+
+        if (load_status.state == ReportArtifactPayloadLoadState::Error) {
+            payload_load_failed = load_status.artifact.key;
+            payload_load_retry_at_ms =
+                now_ms + ARTIFACT_FAILURE_RETRY_MS;
+        }
+        payload_loader.reset();
+        return true;
+    }
+
+    bool payload_load_suppressed(const ReportArtifactKey &artifact,
+                                 uint32_t now_ms) const {
+        return payload_load_failed == artifact &&
+               !deadline_due(now_ms, payload_load_retry_at_ms);
     }
 
     bool find_failure(const ReportArtifactKey &artifact,
@@ -433,6 +620,23 @@ struct ReportTask::Runtime {
         engine.publish_catalog(catalog);
         clear_artifact_failures();
 
+        if (payload_loader.status().active()) {
+            const ReportArtifactDescriptor loading =
+                payload_loader.status().artifact;
+            const NightCatalogRecord *loading_night =
+                catalog->find(loading.key.sleep_day);
+            if (!loading_night ||
+                loading_night->source_revision !=
+                    loading.key.source_revision) {
+                payload_loader.cancel();
+            }
+        }
+
+        if (lock(20)) {
+            payload_cache.reconcile(*catalog);
+            unlock();
+        }
+
         if (!summary_acquisition.snapshot()) {
             summary_acquisition.seed(
                 NightCatalogSummarySnapshot::from_catalog(*catalog));
@@ -458,9 +662,12 @@ struct ReportTask::Runtime {
         unlock();
     }
 
-    bool schedule_catalog_work() {
+    bool schedule_catalog_work(uint32_t now_ms) {
         if (!catalog || idle_cursor >= catalog->size()) return false;
-        if (engine.status().queued >= IDLE_QUEUE_LOOKAHEAD) return false;
+
+        const ReportEngineStatus engine_status = engine.status();
+        if (engine_status.queued >= IDLE_QUEUE_LOOKAHEAD) return false;
+        if (payload_loader.status().active()) return false;
 
         const NightCatalogRecord *night = catalog->record(idle_cursor);
         if (!night || !night->sleep_day.valid() ||
@@ -477,6 +684,30 @@ struct ReportTask::Runtime {
             night->sleep_day, night->source_revision);
         ReportArtifactAvailability available;
         if (artifact_index && artifact_index->availability(result, available)) {
+            const bool payload_warm_available =
+                engine_status.state == ReportEngineState::Idle &&
+                engine_status.queued == 0;
+            if (idle_cursor < AC_REPORT_PAYLOAD_CACHE_WARM_NIGHTS &&
+                payload_warm_available) {
+                const ReportArtifactDescriptor candidates[] = {
+                    available.result,
+                    available.overview,
+                };
+                for (const ReportArtifactDescriptor &candidate : candidates) {
+                    if (!candidate.valid() || payload_cached(candidate) ||
+                        payload_load_suppressed(candidate.key, now_ms)) {
+                        continue;
+                    }
+
+                    const OperationAdmission admitted = start_payload_load(
+                        candidate.key,
+                        idle_generation,
+                        StorageReadLane::Maintenance);
+                    if (admitted == OperationAdmission::Accepted) return true;
+                    if (admitted == OperationAdmission::Busy) return false;
+                }
+            }
+
             idle_cursor++;
             return true;
         }
@@ -538,9 +769,11 @@ struct ReportTask::Runtime {
         size_t queued = 0;
         uint32_t drops = 0;
         bool foreground_command = false;
+        ReportArtifactPayloadCacheStatus payload_cache_status;
         if (lock()) {
             queued = command_count;
             drops = command_drops;
+            payload_cache_status = payload_cache.status();
             for (size_t i = 0; i < command_count; ++i) {
                 if (commands[i].kind == ReportTaskCommandKind::Artifact &&
                     commands[i].priority ==
@@ -566,6 +799,8 @@ struct ReportTask::Runtime {
         next.catalog_refresh = catalog_refresh.status();
         next.catalog_store = catalog_store.status();
         next.artifact_index_refresh = artifact_index_refresh.status();
+        next.payload_cache = payload_cache_status;
+        next.payload_load = payload_loader.status();
         next.engine = engine.status();
         next.foreground_active =
             foreground_command || next.engine.foreground_active;
@@ -611,6 +846,7 @@ struct ReportTask::Runtime {
             static_cast<bool>(pending_catalog_save);
         next.background_active =
             queued > 0 || catalog_commit_pending ||
+            next.payload_load.active() ||
             (next.state != ReportTaskState::Stopped &&
              next.state != ReportTaskState::Idle);
 
@@ -621,6 +857,8 @@ struct ReportTask::Runtime {
 
     ReportArtifactRequest build_slots[AC_REPORT_TASK_BUILD_CAPACITY] = {};
     ReportEngine engine;
+    ReportArtifactPayloadCache payload_cache;
+    ReportArtifactPayloadLoader payload_loader;
     ReportNightArtifactBuilder builder;
     ReportSummaryAcquisition summary_acquisition;
     NightCatalogRefreshService catalog_refresh;
@@ -637,6 +875,8 @@ struct ReportTask::Runtime {
     size_t artifact_failure_cursor = 0;
     OperationTicket observed_engine_completion;
     uint32_t last_step_ms = 0;
+    ReportArtifactKey payload_load_failed;
+    uint32_t payload_load_retry_at_ms = 0;
     PendingCatalogRefresh pending_refresh;
     uint32_t refresh_generation = 0;
     uint32_t catalog_refresh_retry_at_ms = 0;
@@ -738,6 +978,7 @@ bool ReportTask::begin(StorageReadPort &read_port,
     runtime_->catalog_store.begin(read_port, write_port);
     runtime_->artifact_index_refresh.begin(scan_port, read_port);
     runtime_->summary_acquisition.begin(spool_port);
+    runtime_->payload_loader.begin(read_port);
     runtime_->delete_port = &delete_port;
     runtime_->engine.begin(read_port,
                            write_port,
@@ -805,6 +1046,22 @@ OperationAdmission ReportTask::request_artifact(
     return runtime_->enqueue(command);
 }
 
+OperationAdmission ReportTask::request_payload_cache(
+    const ReportArtifactKey &artifact,
+    uint32_t generation) {
+    if (!runtime_ || !runtime_->initialized || !artifact.valid() ||
+        generation == 0) {
+        return OperationAdmission::Rejected;
+    }
+
+    ReportTaskCommand command;
+    command.kind = ReportTaskCommandKind::CacheArtifact;
+    command.artifact = artifact;
+    command.priority = ReportRequestPriority::Foreground;
+    command.generation = generation;
+    return runtime_->enqueue(command);
+}
+
 OperationAdmission ReportTask::request_catalog_refresh(
     bool current_offset_valid,
     int32_t current_offset_minutes,
@@ -861,6 +1118,16 @@ ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
     out.background_active = status.background_active;
     out.background_suspended = status.background_suspended;
 
+    out.payload_cache_entries = status.payload_cache.entries;
+    out.payload_cache_bytes = status.payload_cache.bytes;
+    out.payload_cache_hits = status.payload_cache.hits;
+    out.payload_cache_misses = status.payload_cache.misses;
+    out.payload_cache_evictions = status.payload_cache.evictions;
+    out.payload_load_state = status.payload_load.state;
+    out.payload_load_bytes = status.payload_load.bytes_loaded;
+    copy_cstr(out.payload_load_error, sizeof(out.payload_load_error),
+              status.payload_load.error);
+
     out.engine_state = engine.state;
     out.engine_queued = engine.queued;
     copy_cstr(out.engine_error, sizeof(out.engine_error),
@@ -911,6 +1178,12 @@ bool ReportTask::artifact_availability(
     return runtime_->find_availability(artifact, availability);
 }
 
+std::shared_ptr<const LargeByteBuffer> ReportTask::artifact_payload(
+    const ReportArtifactDescriptor &artifact) const {
+    if (!runtime_) return {};
+    return runtime_->find_payload(artifact);
+}
+
 bool ReportTask::artifact_failure(
     const ReportArtifactKey &artifact,
     ReportArtifactFailureStatus &failure) const {
@@ -933,8 +1206,18 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     const bool startup_idle_work_allowed =
         runtime.startup_idle_work_allowed(now_ms);
 
+    if (runtime.payload_loader.status().active()) {
+        worked = runtime.payload_loader.poll() || worked;
+    }
+    worked = runtime.finish_payload_load(now_ms) || worked;
+
     ReportTaskCommand command;
-    if (runtime.pop(command)) {
+    const ReportEngineStatus command_engine_status = runtime.engine.status();
+    const bool cache_load_available =
+        !runtime.background_suspended &&
+        !runtime.payload_loader.status().active() &&
+        !command_engine_status.foreground_active;
+    if (runtime.pop(command, cache_load_available)) {
         worked = true;
         switch (command.kind) {
             case ReportTaskCommandKind::Artifact: {
@@ -964,6 +1247,13 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
                 break;
             }
+
+            case ReportTaskCommandKind::CacheArtifact:
+                (void)runtime.start_payload_load(
+                    command.artifact,
+                    command.generation,
+                    StorageReadLane::Report);
+                break;
 
             case ReportTaskCommandKind::RefreshCatalog:
                 runtime.pending_refresh.generation = command.generation;
@@ -1296,11 +1586,18 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.pending_catalog_save;
     if (catalog_stable && !background_work_blocked &&
         startup_idle_work_allowed) {
-        worked = runtime.schedule_catalog_work() || worked;
+        worked = runtime.schedule_catalog_work(now_ms) || worked;
         worked = runtime.schedule_legacy_cache_cleanup(now_ms) || worked;
     }
 
     worked = runtime.engine.poll(now_ms, record_budget) || worked;
+
+    std::shared_ptr<const ReportArtifactBundle> published_bundle =
+        runtime.engine.take_published_bundle();
+    if (published_bundle) {
+        (void)runtime.cache_bundle(published_bundle);
+        worked = true;
+    }
 
     ReportArtifactAvailability availability =
         runtime.engine.take_available();

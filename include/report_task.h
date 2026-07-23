@@ -6,6 +6,8 @@
 
 #include "night_catalog_refresh_service.h"
 #include "night_catalog_store_service.h"
+#include "report_artifact_payload_cache.h"
+#include "report_artifact_payload_loader.h"
 #include "report_artifact_index_refresh_service.h"
 #include "report_engine.h"
 #include "report_summary_acquisition.h"
@@ -42,6 +44,8 @@ struct ReportTaskStatus {
     NightCatalogRefreshStatus catalog_refresh;
     NightCatalogStoreStatus catalog_store;
     ReportArtifactIndexRefreshStatus artifact_index_refresh;
+    ReportArtifactPayloadCacheStatus payload_cache;
+    ReportArtifactPayloadLoadStatus payload_load;
     ReportEngineStatus engine;
 };
 
@@ -65,6 +69,16 @@ struct ReportTaskDiagnosticSnapshot {
     bool foreground_active = false;
     bool background_active = false;
     bool background_suspended = false;
+
+    size_t payload_cache_entries = 0;
+    size_t payload_cache_bytes = 0;
+    uint32_t payload_cache_hits = 0;
+    uint32_t payload_cache_misses = 0;
+    uint32_t payload_cache_evictions = 0;
+    ReportArtifactPayloadLoadState payload_load_state =
+        ReportArtifactPayloadLoadState::Idle;
+    size_t payload_load_bytes = 0;
+    char payload_load_error[AC_STORAGE_ERROR_MAX] = {};
 
     ReportEngineState engine_state = ReportEngineState::Idle;
     size_t engine_queued = 0;
@@ -115,6 +129,9 @@ public:
         const ReportArtifactKey &artifact,
         ReportRequestPriority priority,
         uint32_t generation);
+    OperationAdmission request_payload_cache(
+        const ReportArtifactKey &artifact,
+        uint32_t generation);
     OperationAdmission request_catalog_refresh(
         bool current_offset_valid,
         int32_t current_offset_minutes,
@@ -129,6 +146,8 @@ public:
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
     bool artifact_availability(const ReportArtifactKey &artifact,
                                ReportArtifactAvailability &availability) const;
+    std::shared_ptr<const LargeByteBuffer> artifact_payload(
+        const ReportArtifactDescriptor &artifact) const;
     bool artifact_failure(const ReportArtifactKey &artifact,
                           ReportArtifactFailureStatus &failure) const;
 

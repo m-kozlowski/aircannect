@@ -85,6 +85,7 @@ public:
     bool poll(uint32_t now_ms, size_t record_budget = 1);
     ReportEngineStatus status() const;
     ReportArtifactAvailability take_available();
+    std::shared_ptr<const ReportArtifactBundle> take_published_bundle();
 
 private:
     enum class ActivePhase : uint8_t {
@@ -130,6 +131,7 @@ private:
     ReportEngineCompletion last_completion_;
     ReportArtifactAvailability active_availability_;
     ReportArtifactAvailability available_;
+    std::shared_ptr<const ReportArtifactBundle> published_bundle_;
     uint64_t awaited_fallback_identity_ = 0;
     ActivePhase phase_ = ActivePhase::Idle;
     bool build_tile_after_pair_ = false;

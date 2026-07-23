@@ -124,6 +124,17 @@ void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) 
         }
     }
 
+    if (published_bundle_) {
+        const NightCatalogRecord *published_night = catalog_
+            ? catalog_->find(published_bundle_->key.sleep_day)
+            : nullptr;
+        if (!published_night ||
+            published_night->source_revision !=
+                published_bundle_->key.source_revision) {
+            published_bundle_.reset();
+        }
+    }
+
     if (phase_ == ActivePhase::Idle || !catalog_) return;
 
     const NightCatalogRecord *night =
@@ -251,6 +262,7 @@ void ReportEngine::clear() {
 
     reset_active();
     available_ = {};
+    published_bundle_.reset();
     last_completion_ = {};
 }
 
@@ -349,6 +361,11 @@ ReportArtifactAvailability ReportEngine::take_available() {
     ReportArtifactAvailability out = available_;
     available_ = {};
     return out;
+}
+
+std::shared_ptr<const ReportArtifactBundle>
+ReportEngine::take_published_bundle() {
+    return std::move(published_bundle_);
 }
 
 ReportArtifactKey ReportEngine::build_key(
@@ -679,6 +696,8 @@ bool ReportEngine::finish_publication(uint32_t now_ms) {
                             "report_artifact_publish_missing");
             return true;
         }
+
+        published_bundle_ = bundle;
 
         if (build_tile_after_pair_ &&
             bundle->key.kind == ReportArtifactKind::Result) {
