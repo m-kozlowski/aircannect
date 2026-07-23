@@ -52,6 +52,7 @@ struct EdfStreamAssemblerStatus {
     EdfSeriesAssemblyStatus brp;
     EdfSeriesAssemblyStatus pld;
     EdfSeriesAssemblyStatus sa2;
+    EdfSeriesAssemblyStatus tcv;
 
     char last_error[80] = {};
 };
@@ -87,7 +88,8 @@ public:
                        const As11ClockTransform &clock_transform);
     void set_current_records(uint32_t brp_record,
                              uint32_t pld_record,
-                             uint32_t sa2_record);
+                             uint32_t sa2_record,
+                             uint32_t tcv_record);
     void end_session();
 
     EdfFramePrepareStatus prepare_frame(const StreamFrameData &frame,
@@ -171,12 +173,15 @@ private:
     float *brp_values_ = nullptr;
     float *pld_values_ = nullptr;
     float *sa2_values_ = nullptr;
+    float *tcv_values_ = nullptr;
     uint8_t *brp_present_ = nullptr;
     uint8_t *pld_present_ = nullptr;
     uint8_t *sa2_present_ = nullptr;
+    uint8_t *tcv_present_ = nullptr;
     uint8_t *brp_valid_ = nullptr;
     uint8_t *pld_valid_ = nullptr;
     uint8_t *sa2_valid_ = nullptr;
+    uint8_t *tcv_valid_ = nullptr;
 
     EdfRecordObserver record_observer_ = nullptr;
     void *record_observer_context_ = nullptr;

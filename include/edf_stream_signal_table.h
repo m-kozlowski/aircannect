@@ -19,6 +19,7 @@ struct EdfStreamSignalDescriptor {
 };
 
 extern const char *const DEFAULT_EDF_STREAM_IDS;
+extern const char *const REQUIRED_EDF_STREAM_IDS;
 
 const EdfStreamSignalDescriptor *edf_stream_signal_descriptors(
     size_t &count);

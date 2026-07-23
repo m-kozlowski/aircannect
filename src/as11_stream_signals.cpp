@@ -45,6 +45,7 @@ const SignalAlias SIGNAL_ALIASES[] = {
     {"InspiratoryDuration", StreamSignalId::InspiratoryDuration},
     {"HeartRate", StreamSignalId::HeartRate},
     {"SpO2", StreamSignalId::SpO2},
+    {"_BYV", StreamSignalId::TriggerCycleEvent},
 };
 
 }  // namespace

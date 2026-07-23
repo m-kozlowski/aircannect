@@ -19,6 +19,7 @@ enum class EdfInventoryFileKind : uint8_t {
     Brp,
     Pld,
     Sa2,
+    Tcv,
     Eve,
     Csl,
     Str,

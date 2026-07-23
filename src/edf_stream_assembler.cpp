@@ -68,9 +68,11 @@ void EdfStreamAssembler::reset() {
         SeriesBuffer brp = series(EdfSeriesId::Brp);
         SeriesBuffer pld = series(EdfSeriesId::Pld);
         SeriesBuffer sa2 = series(EdfSeriesId::Sa2);
+        SeriesBuffer tcv = series(EdfSeriesId::Tcv);
         reset_record(brp);
         reset_record(pld);
         reset_record(sa2);
+        reset_record(tcv);
     }
 }
 
@@ -110,18 +112,23 @@ bool EdfStreamAssembler::start_session(
 
 void EdfStreamAssembler::set_current_records(uint32_t brp_record,
                                              uint32_t pld_record,
-                                             uint32_t sa2_record) {
+                                             uint32_t sa2_record,
+                                             uint32_t tcv_record) {
     if (!status_.buffers_ready) return;
     SeriesBuffer brp = series(EdfSeriesId::Brp);
     SeriesBuffer pld = series(EdfSeriesId::Pld);
     SeriesBuffer sa2 = series(EdfSeriesId::Sa2);
+    SeriesBuffer tcv = series(EdfSeriesId::Tcv);
     reset_record(brp);
     reset_record(pld);
     reset_record(sa2);
+    reset_record(tcv);
     if (brp.status) brp.status->current_record = brp_record;
     if (pld.status) pld.status->current_record = pld_record;
     if (sa2.status) sa2.status->current_record = sa2_record;
-    if (brp_record != 0 || pld_record != 0 || sa2_record != 0) {
+    if (tcv.status) tcv.status->current_record = tcv_record;
+    if (brp_record != 0 || pld_record != 0 || sa2_record != 0 ||
+        tcv_record != 0) {
         initial_epoch_rebase_allowed_ = false;
     }
 }
@@ -149,15 +156,15 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
         bool seen = false;
         uint32_t record = UINT32_MAX;
     };
-    TargetRecord targets[3];
+    TargetRecord targets[4];
 
     auto target_for_series = [&](EdfSeriesId series) -> TargetRecord & {
         switch (series) {
             case EdfSeriesId::Brp: return targets[0];
             case EdfSeriesId::Pld: return targets[1];
-            case EdfSeriesId::Sa2:
-            default:
-                return targets[2];
+            case EdfSeriesId::Sa2: return targets[2];
+            case EdfSeriesId::Tcv: return targets[3];
+            default: return targets[2];
         }
     };
 
@@ -203,8 +210,9 @@ EdfFramePrepareStatus EdfStreamAssembler::prepare_frame(
         series(EdfSeriesId::Brp),
         series(EdfSeriesId::Pld),
         series(EdfSeriesId::Sa2),
+        series(EdfSeriesId::Tcv),
     };
-    for (size_t i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < 4; ++i) {
         if (!targets[i].seen) continue;
         if (!advance_to_record(buffers[i], targets[i].record, &budget)) {
             return EdfFramePrepareStatus::Deferred;
@@ -249,6 +257,7 @@ void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
         series(EdfSeriesId::Brp),
         series(EdfSeriesId::Pld),
         series(EdfSeriesId::Sa2),
+        series(EdfSeriesId::Tcv),
     };
     for (SeriesBuffer &buffer : buffers) {
         ingest_series_frame(frame, effective_start_ms, buffer);
@@ -270,6 +279,9 @@ bool EdfStreamAssembler::allocate_buffers() {
     const size_t sa2_slots =
         series_slot_count(AC_EDF_SA2_SIGNAL_COUNT,
                           AC_EDF_SA2_SAMPLES_PER_RECORD);
+    const size_t tcv_slots =
+        series_slot_count(AC_EDF_TCV_SIGNAL_COUNT,
+                          AC_EDF_TCV_SAMPLES_PER_RECORD);
 
     brp_values_ = static_cast<float *>(alloc_large_bytes(sizeof(float) *
                                                          brp_slots));
@@ -277,22 +289,28 @@ bool EdfStreamAssembler::allocate_buffers() {
                                                          pld_slots));
     sa2_values_ = static_cast<float *>(alloc_large_bytes(sizeof(float) *
                                                          sa2_slots));
+    tcv_values_ = static_cast<float *>(alloc_large_bytes(sizeof(float) *
+                                                         tcv_slots));
     brp_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
         brp_slots)));
     pld_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
         pld_slots)));
     sa2_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
         sa2_slots)));
+    tcv_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+        tcv_slots)));
     brp_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
         brp_slots)));
     pld_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
         pld_slots)));
     sa2_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
         sa2_slots)));
+    tcv_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+        tcv_slots)));
 
-    if (!brp_values_ || !pld_values_ || !sa2_values_ || !brp_present_ ||
-        !pld_present_ || !sa2_present_ || !brp_valid_ || !pld_valid_ ||
-        !sa2_valid_) {
+    if (!brp_values_ || !pld_values_ || !sa2_values_ || !tcv_values_ ||
+        !brp_present_ || !pld_present_ || !sa2_present_ || !tcv_present_ ||
+        !brp_valid_ || !pld_valid_ || !sa2_valid_ || !tcv_valid_) {
         if (!brp_values_) {
             log_alloc_failed("brp_values", sizeof(float) * brp_slots);
         }
@@ -301,6 +319,9 @@ bool EdfStreamAssembler::allocate_buffers() {
         }
         if (!sa2_values_) {
             log_alloc_failed("sa2_values", sizeof(float) * sa2_slots);
+        }
+        if (!tcv_values_) {
+            log_alloc_failed("tcv_values", sizeof(float) * tcv_slots);
         }
         if (!brp_present_) {
             log_alloc_failed("brp_present", bitset_size(brp_slots));
@@ -311,6 +332,9 @@ bool EdfStreamAssembler::allocate_buffers() {
         if (!sa2_present_) {
             log_alloc_failed("sa2_present", bitset_size(sa2_slots));
         }
+        if (!tcv_present_) {
+            log_alloc_failed("tcv_present", bitset_size(tcv_slots));
+        }
         if (!brp_valid_) {
             log_alloc_failed("brp_valid", bitset_size(brp_slots));
         }
@@ -319,6 +343,9 @@ bool EdfStreamAssembler::allocate_buffers() {
         }
         if (!sa2_valid_) {
             log_alloc_failed("sa2_valid", bitset_size(sa2_slots));
+        }
+        if (!tcv_valid_) {
+            log_alloc_failed("tcv_valid", bitset_size(tcv_slots));
         }
         free_buffers();
         set_error("alloc_failed");
@@ -329,6 +356,7 @@ bool EdfStreamAssembler::allocate_buffers() {
     status_.brp.allocated = true;
     status_.pld.allocated = true;
     status_.sa2.allocated = true;
+    status_.tcv.allocated = true;
     reset();
     return true;
 }
@@ -337,21 +365,27 @@ void EdfStreamAssembler::free_buffers() {
     free_large_bytes(brp_values_);
     free_large_bytes(pld_values_);
     free_large_bytes(sa2_values_);
+    free_large_bytes(tcv_values_);
     free_large_bytes(brp_present_);
     free_large_bytes(pld_present_);
     free_large_bytes(sa2_present_);
+    free_large_bytes(tcv_present_);
     free_large_bytes(brp_valid_);
     free_large_bytes(pld_valid_);
     free_large_bytes(sa2_valid_);
+    free_large_bytes(tcv_valid_);
     brp_values_ = nullptr;
     pld_values_ = nullptr;
     sa2_values_ = nullptr;
+    tcv_values_ = nullptr;
     brp_present_ = nullptr;
     pld_present_ = nullptr;
     sa2_present_ = nullptr;
+    tcv_present_ = nullptr;
     brp_valid_ = nullptr;
     pld_valid_ = nullptr;
     sa2_valid_ = nullptr;
+    tcv_valid_ = nullptr;
     status_.buffers_ready = false;
 }
 
@@ -362,6 +396,7 @@ void EdfStreamAssembler::reset_session_counters() {
     status_.brp.allocated = buffers_ready;
     status_.pld.allocated = buffers_ready;
     status_.sa2.allocated = buffers_ready;
+    status_.tcv.allocated = buffers_ready;
     declared_start_epoch_ms_ = 0;
     initial_epoch_rebase_allowed_ = false;
     reset_timeline();
@@ -639,17 +674,20 @@ bool EdfStreamAssembler::initial_epoch_can_rebase() const {
     if (!initial_epoch_rebase_allowed_) return false;
     if (status_.brp.current_record != 0 ||
         status_.pld.current_record != 0 ||
-        status_.sa2.current_record != 0) {
+        status_.sa2.current_record != 0 ||
+        status_.tcv.current_record != 0) {
         return false;
     }
     if (status_.brp.records_completed != 0 ||
         status_.pld.records_completed != 0 ||
-        status_.sa2.records_completed != 0) {
+        status_.sa2.records_completed != 0 ||
+        status_.tcv.records_completed != 0) {
         return false;
     }
     return status_.brp.slots_filled == 0 &&
            status_.pld.slots_filled == 0 &&
-           status_.sa2.slots_filled == 0;
+           status_.sa2.slots_filled == 0 &&
+           status_.tcv.slots_filled == 0;
 }
 
 void EdfStreamAssembler::maybe_rebase_initial_epoch(
@@ -743,6 +781,7 @@ void EdfStreamAssembler::flush_partial_records() {
         series(EdfSeriesId::Brp),
         series(EdfSeriesId::Pld),
         series(EdfSeriesId::Sa2),
+        series(EdfSeriesId::Tcv),
     };
     for (SeriesBuffer &buffer : buffers) {
         if (!record_has_samples(buffer)) continue;
@@ -813,6 +852,13 @@ EdfStreamAssembler::SeriesBuffer EdfStreamAssembler::series(EdfSeriesId id) {
                     AC_EDF_PLD_SAMPLES_PER_RECORD, AC_EDF_PLD_SAMPLE_MS,
                     pld_values_, pld_present_, pld_valid_, &status_.pld};
         case EdfSeriesId::Sa2:
+            return {id, AC_EDF_SA2_SIGNAL_COUNT,
+                    AC_EDF_SA2_SAMPLES_PER_RECORD, AC_EDF_SA2_SAMPLE_MS,
+                    sa2_values_, sa2_present_, sa2_valid_, &status_.sa2};
+        case EdfSeriesId::Tcv:
+            return {id, AC_EDF_TCV_SIGNAL_COUNT,
+                    AC_EDF_TCV_SAMPLES_PER_RECORD, AC_EDF_TCV_SAMPLE_MS,
+                    tcv_values_, tcv_present_, tcv_valid_, &status_.tcv};
         default:
             return {id, AC_EDF_SA2_SIGNAL_COUNT,
                     AC_EDF_SA2_SAMPLES_PER_RECORD, AC_EDF_SA2_SAMPLE_MS,

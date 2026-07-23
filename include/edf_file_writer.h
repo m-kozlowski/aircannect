@@ -11,6 +11,7 @@ enum class EdfFileKind : uint8_t {
     Brp,
     Pld,
     Sa2,
+    Tcv,
 };
 
 enum class EdfAnnotationKind : uint8_t {

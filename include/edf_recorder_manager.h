@@ -77,6 +77,7 @@ struct EdfRecorderStatus {
     uint32_t brp_records = 0;
     uint32_t pld_records = 0;
     uint32_t sa2_records = 0;
+    uint32_t tcv_records = 0;
     uint32_t eve_records = 0;
     uint32_t csl_records = 0;
     uint32_t str_records = 0;
@@ -131,6 +132,7 @@ struct EdfRecorderStatus {
     char brp_path[80] = {};
     char pld_path[80] = {};
     char sa2_path[80] = {};
+    char tcv_path[80] = {};
     char eve_path[80] = {};
     char csl_path[80] = {};
     char str_path[80] = {};

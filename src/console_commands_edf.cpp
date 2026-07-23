@@ -68,6 +68,8 @@ void print_edf_recorder_status(Print &out,
     out.print('/');
     out.print(static_cast<unsigned long>(status.sa2_records));
     out.print('/');
+    out.print(static_cast<unsigned long>(status.tcv_records));
+    out.print('/');
     out.print(static_cast<unsigned long>(status.eve_records));
     out.print('/');
     out.print(static_cast<unsigned long>(status.csl_records));

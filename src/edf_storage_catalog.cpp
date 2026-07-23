@@ -134,6 +134,7 @@ bool pull_tag_allowed(const char *tag) {
            (strncmp(tag, "BRP", 3) == 0 ||
             strncmp(tag, "PLD", 3) == 0 ||
             strncmp(tag, "SA2", 3) == 0 ||
+            strncmp(tag, "TCV", 3) == 0 ||
             strncmp(tag, "EVE", 3) == 0 ||
             strncmp(tag, "CSL", 3) == 0);
 }
@@ -145,6 +146,7 @@ const char *edf_file_tag(EdfFileKind kind) {
         case EdfFileKind::Brp: return "BRP";
         case EdfFileKind::Pld: return "PLD";
         case EdfFileKind::Sa2: return "SA2";
+        case EdfFileKind::Tcv: return "TCV";
         default: return "EDF";
     }
 }

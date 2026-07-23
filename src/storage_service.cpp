@@ -48,6 +48,7 @@ enum class StoredFileKind : uint8_t {
     Brp,
     Pld,
     Sa2,
+    Tcv,
     Eve,
     Csl,
 };
@@ -320,9 +321,12 @@ void advance_retry(uint8_t &attempt) {
 }
 
 static constexpr size_t AC_EDF_STORAGE_NUMERIC_VALUE_MAX = max_size(
-    max_size(AC_EDF_BRP_SIGNAL_COUNT * AC_EDF_BRP_SAMPLES_PER_RECORD,
-             AC_EDF_PLD_SIGNAL_COUNT * AC_EDF_PLD_SAMPLES_PER_RECORD),
-    AC_EDF_SA2_SIGNAL_COUNT * AC_EDF_SA2_SAMPLES_PER_RECORD);
+    max_size(max_size(AC_EDF_BRP_SIGNAL_COUNT *
+                          AC_EDF_BRP_SAMPLES_PER_RECORD,
+                      AC_EDF_PLD_SIGNAL_COUNT *
+                          AC_EDF_PLD_SAMPLES_PER_RECORD),
+             AC_EDF_SA2_SIGNAL_COUNT * AC_EDF_SA2_SAMPLES_PER_RECORD),
+    AC_EDF_TCV_SIGNAL_COUNT * AC_EDF_TCV_SAMPLES_PER_RECORD);
 
 static constexpr size_t AC_EDF_STORAGE_NUMERIC_BIT_BYTES =
     (AC_EDF_STORAGE_NUMERIC_VALUE_MAX + 7u) / 8u;
@@ -423,6 +427,7 @@ StoredFileKind stored_kind(EdfFileKind kind) {
         case EdfFileKind::Brp: return StoredFileKind::Brp;
         case EdfFileKind::Pld: return StoredFileKind::Pld;
         case EdfFileKind::Sa2: return StoredFileKind::Sa2;
+        case EdfFileKind::Tcv: return StoredFileKind::Tcv;
         default: return StoredFileKind::Brp;
     }
 }
@@ -440,6 +445,7 @@ EdfStorageFileIndex public_file_index(StoredFileKind kind) {
         case StoredFileKind::Brp: return EdfStorageFileIndex::Brp;
         case StoredFileKind::Pld: return EdfStorageFileIndex::Pld;
         case StoredFileKind::Sa2: return EdfStorageFileIndex::Sa2;
+        case StoredFileKind::Tcv: return EdfStorageFileIndex::Tcv;
         case StoredFileKind::Eve: return EdfStorageFileIndex::Eve;
         case StoredFileKind::Csl: return EdfStorageFileIndex::Csl;
         default: return EdfStorageFileIndex::Brp;
@@ -463,6 +469,7 @@ EdfFileKind numeric_kind(StoredFileKind kind) {
     switch (kind) {
         case StoredFileKind::Pld: return EdfFileKind::Pld;
         case StoredFileKind::Sa2: return EdfFileKind::Sa2;
+        case StoredFileKind::Tcv: return EdfFileKind::Tcv;
         case StoredFileKind::Brp:
         default:
             return EdfFileKind::Brp;

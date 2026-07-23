@@ -24,6 +24,7 @@ enum class StreamSignalId : uint8_t {
     InspiratoryDuration,
     HeartRate,
     SpO2,
+    TriggerCycleEvent,
 };
 
 StreamSignalId as11_stream_signal_id_from_name(const char *name);

@@ -66,6 +66,13 @@ const EdfSignalSpec SA2_SIGNALS[] = {
      -32768, 32767, 1, 1.0f, 0.0f},
 };
 
+const EdfSignalSpec TCV_SIGNALS[] = {
+    {"TrigCycEvt.40ms", "", "0.00", "5.00", "0", "5",
+     0, 5, AC_EDF_TCV_SAMPLES_PER_RECORD, 1.0f, 0.0f},
+    {"Crc16", "", "-32768.0", "32767.00", "-32768", "32767",
+     -32768, 32767, 1, 1.0f, 0.0f},
+};
+
 const EdfSignalSpec ANNOTATION_SIGNALS[] = {
     {"EDF Annotations", "", "-32768.0", "32767.00", "-32768", "32767",
      -32768, 32767, 31},
@@ -127,6 +134,19 @@ const EdfFileSchema SA2_SCHEMA = {
     sizeof(SA2_SIGNALS) / sizeof(SA2_SIGNALS[0]),
     AC_EDF_SA2_SIGNAL_COUNT,
     AC_EDF_SA2_SAMPLES_PER_RECORD,
+    60,
+};
+
+const EdfFileSchema TCV_SCHEMA = {
+    EdfFileKind::Tcv,
+    EdfSeriesId::Tcv,
+    "TCV",
+    "EDF",
+    TCV_SIGNALS,
+    nullptr,
+    sizeof(TCV_SIGNALS) / sizeof(TCV_SIGNALS[0]),
+    AC_EDF_TCV_SIGNAL_COUNT,
+    AC_EDF_TCV_SAMPLES_PER_RECORD,
     60,
 };
 
@@ -354,6 +374,9 @@ const EdfFileSchema &edf_numeric_schema(EdfFileKind kind) {
         case EdfFileKind::Pld:
             return PLD_SCHEMA;
         case EdfFileKind::Sa2:
+            return SA2_SCHEMA;
+        case EdfFileKind::Tcv:
+            return TCV_SCHEMA;
         default:
             return SA2_SCHEMA;
     }

@@ -36,11 +36,32 @@ const EdfStreamSignalDescriptor EDF_STREAM_SIGNALS[] = {
      EdfSeriesId::Sa2, 0, AC_EDF_SA2_SAMPLE_MS},
     {"_SAO", StreamSignalId::SpO2, EdfFileKind::Sa2,
      EdfSeriesId::Sa2, 1, AC_EDF_SA2_SAMPLE_MS},
+    {"_BYV", StreamSignalId::TriggerCycleEvent, EdfFileKind::Tcv,
+     EdfSeriesId::Tcv, 0, AC_EDF_TCV_SAMPLE_MS},
 };
 
 }  // namespace
 
 const char *const DEFAULT_EDF_STREAM_IDS =
+    "_RFL,"
+    "_MKP,"
+    "_MKF,"
+    "_MKI,"
+    "_MKE,"
+    "_LKF,"
+    "_RR2,"
+    "_TD2,"
+    "_MV2,"
+    "_TGT,"
+    "_IE2,"
+    "_SNI,"
+    "_FFL,"
+    "_INT,"
+    "_HRT,"
+    "_SAO,"
+    "_BYV";
+
+const char *const REQUIRED_EDF_STREAM_IDS =
     "_RFL,"
     "_MKP,"
     "_MKF,"

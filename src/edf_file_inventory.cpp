@@ -13,6 +13,7 @@ EdfInventoryFileKind kind_from_tag(const char *tag) {
     if (strncmp(tag, "BRP", 3) == 0) return EdfInventoryFileKind::Brp;
     if (strncmp(tag, "PLD", 3) == 0) return EdfInventoryFileKind::Pld;
     if (strncmp(tag, "SA2", 3) == 0) return EdfInventoryFileKind::Sa2;
+    if (strncmp(tag, "TCV", 3) == 0) return EdfInventoryFileKind::Tcv;
     if (strncmp(tag, "EVE", 3) == 0) return EdfInventoryFileKind::Eve;
     if (strncmp(tag, "CSL", 3) == 0) return EdfInventoryFileKind::Csl;
     return EdfInventoryFileKind::Unknown;
