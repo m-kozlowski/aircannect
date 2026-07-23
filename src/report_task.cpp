@@ -794,6 +794,7 @@ struct ReportTask::Runtime {
         next.command_drops = drops;
         next.command_failures = command_failures;
         next.catalog_generation = catalog_generation;
+        next.durable_catalog_generation = durable_catalog_generation;
         next.background_suspended = background_suspended;
         next.summary_acquisition = summary_acquisition.status();
         next.catalog_refresh = catalog_refresh.status();
@@ -888,6 +889,7 @@ struct ReportTask::Runtime {
     std::shared_ptr<const ReportArtifactIndex> artifact_index;
     std::shared_ptr<const ReportArtifactIndex> published_artifact_index;
     uint32_t catalog_generation = 0;
+    uint32_t durable_catalog_generation = 0;
     size_t idle_cursor = 0;
     uint32_t idle_generation = 0x80000000u;
     uint32_t legacy_cleanup_retry_at_ms = 0;
@@ -1091,6 +1093,8 @@ ReportTaskControlSnapshot ReportTask::control_snapshot() const {
     out.task_started = runtime_->status.task_started;
     out.state = runtime_->status.state;
     out.catalog_generation = runtime_->status.catalog_generation;
+    out.durable_catalog_generation =
+        runtime_->status.durable_catalog_generation;
     out.foreground_active = runtime_->status.foreground_active;
     out.background_active = runtime_->status.background_active;
 
@@ -1114,6 +1118,7 @@ ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
     out.command_drops = status.command_drops;
     out.command_failures = status.command_failures;
     out.catalog_generation = status.catalog_generation;
+    out.durable_catalog_generation = status.durable_catalog_generation;
     out.foreground_active = status.foreground_active;
     out.background_active = status.background_active;
     out.background_suspended = status.background_suspended;
@@ -1308,10 +1313,14 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             if (completed == CatalogStorePurpose::Load) {
                 runtime.catalog_load_pending = false;
                 if (store_status.state == NightCatalogStoreState::Ready) {
+                    runtime.durable_catalog_generation =
+                        store_status.generation;
                     publish_catalog(runtime.catalog_store.snapshot(),
                                     store_status.generation);
                 }
             } else if (store_status.state == NightCatalogStoreState::Ready) {
+                runtime.durable_catalog_generation =
+                    store_status.generation;
                 runtime.pending_catalog_save.reset();
                 runtime.catalog_store_retry_at_ms = 0;
                 runtime.catalog_store_retry_attempt = 0;

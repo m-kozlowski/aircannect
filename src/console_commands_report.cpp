@@ -100,6 +100,9 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.print(static_cast<unsigned long>(status.catalog_nights));
     out.print(" generation=");
     out.print(static_cast<unsigned long>(status.catalog_generation));
+    out.print('/');
+    out.print(static_cast<unsigned long>(
+        status.durable_catalog_generation));
     out.print(" commands=");
     out.print(static_cast<unsigned long>(status.commands_queued));
     out.print(" dropped=");

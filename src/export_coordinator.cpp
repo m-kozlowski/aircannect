@@ -244,7 +244,8 @@ void ExportCoordinator::maybe_finish_report_settle(
         static_cast<int32_t>(now_ms -
                              post_therapy_.storage_deadline_ms) >= 0;
     if (stream_activity_active ||
-        (report.background_active && !storage_deadline_reached)) {
+        (report.post_therapy_settle_pending &&
+         !storage_deadline_reached)) {
         if (task_) {
             task_->defer_smb_until(
                 due_after(now_ms, AC_EXPORT_TASK_BUSY_RECHECK_MS));
@@ -295,7 +296,7 @@ void ExportCoordinator::maybe_queue_storage_sync(
             due_after(now_ms, AC_EXPORT_ACTIVITY_GRACE_MS));
         return;
     }
-    if (report.background_active) {
+    if (report.post_therapy_settle_pending) {
         const bool deadline_reached =
             post_therapy_.storage_deadline_ms != 0 &&
             static_cast<int32_t>(now_ms -
@@ -360,7 +361,8 @@ void ExportCoordinator::maybe_queue_post_therapy_sleephq(
 
     const bool storage_blocking = post_therapy_.storage_pending ||
                                   storage_sync_active;
-    if (stream_activity_active || report.background_active ||
+    if (stream_activity_active ||
+        report.post_therapy_settle_pending ||
         storage_blocking) {
         if (deadline_reached) {
             Log::logf(CAT_SLEEPHQ, LOG_WARN,

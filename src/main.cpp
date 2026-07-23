@@ -543,6 +543,12 @@ static uint32_t next_report_catalog_generation() {
     return report_catalog_request_generation;
 }
 
+static bool report_catalog_generation_reached(uint32_t completed,
+                                              uint32_t requested) {
+    if (requested == 0) return true;
+    return static_cast<int32_t>(completed - requested) >= 0;
+}
+
 static void poll_report_catalog_refresh(uint32_t now_ms) {
     const uint32_t sessions_ended = edf_recorder_manager.sessions_ended();
     if (sessions_ended != report_catalog_seen_sessions_ended) {
@@ -1114,10 +1120,15 @@ void loop() {
     drain_can_rx_after("resmed_ota_post");
 
     // Storage and exports
-    const ExportReportActivity report_activity{
-        report_status.foreground_active,
-        report_status.background_active || report_catalog_refresh_pending,
-    };
+    ExportReportActivity report_activity;
+    report_activity.foreground_active = report_status.foreground_active;
+    report_activity.background_active =
+        report_status.background_active || report_catalog_refresh_pending;
+    report_activity.post_therapy_settle_pending =
+        report_catalog_refresh_pending ||
+        !report_catalog_generation_reached(
+            report_status.durable_catalog_generation,
+            report_catalog_request_generation);
 
     const bool foreground_report_active = report_status.foreground_active;
     const bool export_work_claimed =

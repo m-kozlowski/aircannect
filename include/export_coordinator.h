@@ -10,6 +10,7 @@ namespace aircannect {
 struct ExportReportActivity {
     bool foreground_active = false;
     bool background_active = false;
+    bool post_therapy_settle_pending = false;
 };
 
 // Owns policy that spans export endpoints. The endpoint engines own their

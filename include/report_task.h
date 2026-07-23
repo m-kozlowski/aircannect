@@ -37,6 +37,7 @@ struct ReportTaskStatus {
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
     uint32_t catalog_generation = 0;
+    uint32_t durable_catalog_generation = 0;
     bool foreground_active = false;
     bool background_active = false;
     bool background_suspended = false;
@@ -54,6 +55,7 @@ struct ReportTaskControlSnapshot {
     bool task_started = false;
     ReportTaskState state = ReportTaskState::Stopped;
     uint32_t catalog_generation = 0;
+    uint32_t durable_catalog_generation = 0;
     bool foreground_active = false;
     bool background_active = false;
 };
@@ -66,6 +68,7 @@ struct ReportTaskDiagnosticSnapshot {
     uint32_t command_drops = 0;
     uint32_t command_failures = 0;
     uint32_t catalog_generation = 0;
+    uint32_t durable_catalog_generation = 0;
     bool foreground_active = false;
     bool background_active = false;
     bool background_suspended = false;
