@@ -24,8 +24,10 @@ static constexpr uint16_t SLEEPHQ_PORT = 443;
 static constexpr uint32_t SLEEPHQ_CONNECT_TIMEOUT_MS = 5000;
 static constexpr unsigned long SLEEPHQ_HANDSHAKE_TIMEOUT_SECONDS = 10;
 static constexpr uint32_t SLEEPHQ_HTTP_TIMEOUT_MS = 15000;
-static constexpr size_t SLEEPHQ_IO_CHUNK = 384;
-static constexpr size_t SLEEPHQ_UPLOAD_CHUNK = 4096;
+static constexpr size_t SLEEPHQ_READ_CHUNK = 384;
+static constexpr size_t SLEEPHQ_WRITE_CHUNK = 4096;
+static constexpr size_t SLEEPHQ_UPLOAD_CHUNK = SLEEPHQ_WRITE_CHUNK;
+static constexpr uint32_t SLEEPHQ_UPLOAD_PROGRESS_INTERVAL_MS = 60000;
 static constexpr size_t SLEEPHQ_TOKEN_RESERVE = 2048;
 static constexpr size_t SLEEPHQ_RESPONSE_BODY_INITIAL_RESERVE = 512;
 static constexpr size_t SLEEPHQ_AUTH_BODY_RESERVE = 384;
@@ -250,8 +252,8 @@ bool SleepHqClient::write_bytes(
     while (offset < len) {
         if (!operation_allows(operation)) return false;
 
-        const size_t chunk = len - offset > SLEEPHQ_IO_CHUNK
-                                 ? SLEEPHQ_IO_CHUNK
+        const size_t chunk = len - offset > SLEEPHQ_WRITE_CHUNK
+                                 ? SLEEPHQ_WRITE_CHUNK
                                  : len - offset;
         const size_t written = client_.write(
             data + offset, chunk);
@@ -398,7 +400,7 @@ bool SleepHqClient::read_response_body(size_t content_length,
                                  operation);
     }
 
-    uint8_t buf[SLEEPHQ_IO_CHUNK];
+    uint8_t buf[SLEEPHQ_READ_CHUNK];
     if (has_content_length) {
         if (buffer_body && content_length > AC_SLEEPHQ_HTTP_RESPONSE_MAX) {
             set_error("response_too_large");
@@ -445,7 +447,7 @@ bool SleepHqClient::read_chunked_body(
     void *body_ctx,
     bool buffer_body,
     const BackgroundOperationControl *operation) {
-    uint8_t buf[SLEEPHQ_IO_CHUNK];
+    uint8_t buf[SLEEPHQ_READ_CHUNK];
     char line[48];
     while (true) {
         if (!read_line(line, sizeof(line), operation)) return false;
@@ -1006,6 +1008,9 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
     md5_context_t md5;
     if (!hash_precomputed) esp_rom_md5_init(&md5);
     uint64_t sent = 0;
+    const uint32_t upload_started_ms = millis();
+    uint32_t next_progress_ms =
+        upload_started_ms + SLEEPHQ_UPLOAD_PROGRESS_INTERVAL_MS;
     bool ok = true;
     while (sent < request.size) {
         if (!operation_allows(request.operation)) {
@@ -1033,6 +1038,18 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
         }
         sent += read;
         out.bytes = sent;
+
+        const uint32_t now_ms = millis();
+        if (static_cast<int32_t>(now_ms - next_progress_ms) >= 0) {
+            Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                      "upload progress path=%s bytes=%llu/%llu "
+                      "elapsed_ms=%lu\n",
+                      request.path,
+                      static_cast<unsigned long long>(sent),
+                      static_cast<unsigned long long>(request.size),
+                      static_cast<unsigned long>(now_ms - upload_started_ms));
+            next_progress_ms = now_ms + SLEEPHQ_UPLOAD_PROGRESS_INTERVAL_MS;
+        }
         taskYIELD();
     }
     Memory::free(buffer);
@@ -1062,6 +1079,15 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
     }
     const bool response_ok = read_response(response, nullptr, nullptr,
                                            request.operation);
+    const uint32_t upload_elapsed_ms = millis() - upload_started_ms;
+    if (response_ok &&
+        upload_elapsed_ms >= SLEEPHQ_UPLOAD_PROGRESS_INTERVAL_MS) {
+        Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                  "upload complete path=%s bytes=%llu elapsed_ms=%lu\n",
+                  request.path,
+                  static_cast<unsigned long long>(out.bytes),
+                  static_cast<unsigned long>(upload_elapsed_ms));
+    }
     disconnect();
     return response_ok;
 }
