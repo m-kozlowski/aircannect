@@ -13,7 +13,6 @@ namespace {
 const char *report_task_state_name(ReportTaskState state) {
     switch (state) {
         case ReportTaskState::LoadingCatalog: return "loading_catalog";
-        case ReportTaskState::IndexingArtifacts: return "indexing_artifacts";
         case ReportTaskState::Idle: return "idle";
         case ReportTaskState::RefreshingCatalog: return "refreshing_catalog";
         case ReportTaskState::Queued: return "queued";

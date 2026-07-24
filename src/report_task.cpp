@@ -6,6 +6,7 @@
 
 #include "board_report.h"
 #include "night_catalog_builder.h"
+#include "report_artifact_index.h"
 #include "report_fallback_artifact.h"
 #include "report_night_artifact_builder.h"
 #include "string_util.h"
@@ -29,8 +30,6 @@ constexpr uint32_t CATALOG_STORE_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
 constexpr uint32_t LEGACY_CACHE_DELETE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MS = 30000;
-constexpr size_t IDLE_QUEUE_LOOKAHEAD = 2;
-
 constexpr char LEGACY_CACHE_PARENT[] = "/aircannect/report";
 constexpr const char *LEGACY_CACHE_NAMES[] = {"v3", "v4", "v5"};
 
@@ -255,13 +254,6 @@ struct ReportTask::Runtime {
 
         worked = defer_active_catalog_refresh() || worked;
 
-        if (artifact_index_refresh.active()) {
-            artifact_index_refresh.cancel();
-            artifact_index_refresh_generation = 0;
-            artifact_index_refresh_pending = true;
-            worked = true;
-        }
-
         return worked;
     }
 
@@ -301,12 +293,6 @@ struct ReportTask::Runtime {
         }
 
         (void)defer_active_catalog_refresh();
-
-        if (artifact_index_refresh.active()) {
-            artifact_index_refresh.cancel();
-            artifact_index_refresh_generation = 0;
-            artifact_index_refresh_pending = true;
-        }
 
         return true;
     }
@@ -541,15 +527,31 @@ struct ReportTask::Runtime {
         if (!lock(20)) return;
 
         observed_engine_completion = completion.request.ticket;
+        if (completion.request.priority !=
+                ReportRequestPriority::Foreground) {
+            if (completion.outcome.disposition ==
+                    OperationDisposition::Failed &&
+                catalog && idle_cursor < catalog->size()) {
+                const NightCatalogRecord *night = catalog->record(idle_cursor);
+                if (night &&
+                    night->sleep_day ==
+                        completion.request.artifact.sleep_day &&
+                    night->source_revision ==
+                        completion.request.artifact.source_revision) {
+                    idle_cursor++;
+                }
+            }
+            unlock();
+            return;
+        }
+
         if (completion.outcome.disposition ==
             OperationDisposition::Succeeded) {
             clear_artifact_failure_locked(completion.request.artifact);
             unlock();
             return;
         }
-        if (completion.outcome.disposition != OperationDisposition::Failed ||
-            completion.request.priority !=
-                ReportRequestPriority::Foreground) {
+        if (completion.outcome.disposition != OperationDisposition::Failed) {
             unlock();
             return;
         }
@@ -609,12 +611,6 @@ struct ReportTask::Runtime {
 
     void accept_catalog(std::shared_ptr<const NightCatalog> next,
                         uint32_t generation) {
-        if (artifact_index_refresh.active()) {
-            artifact_index_refresh.cancel();
-            artifact_index_refresh_generation = 0;
-            artifact_index_refresh_pending = true;
-        }
-
         catalog = std::move(next);
         catalog_generation = generation;
         engine.publish_catalog(catalog);
@@ -642,16 +638,11 @@ struct ReportTask::Runtime {
                 NightCatalogSummarySnapshot::from_catalog(*catalog));
         }
 
-        if (artifact_index) {
-            std::shared_ptr<const ReportArtifactIndex> reconciled =
-                ReportArtifactIndexBuilder::reconcile(
-                    *artifact_index, *catalog);
-            if (!publish_artifact_index(std::move(reconciled))) {
-                artifact_index_refresh_pending = true;
-                command_failures++;
-            }
-        } else {
-            artifact_index_refresh_pending = true;
+        std::shared_ptr<const ReportArtifactIndex> reconciled = artifact_index
+            ? ReportArtifactIndexBuilder::reconcile(*artifact_index, *catalog)
+            : ReportArtifactIndexBuilder::build(nullptr, 0);
+        if (!publish_artifact_index(std::move(reconciled))) {
+            command_failures++;
         }
 
         idle_cursor = 0;
@@ -666,7 +657,6 @@ struct ReportTask::Runtime {
         if (!catalog || idle_cursor >= catalog->size()) return false;
 
         const ReportEngineStatus engine_status = engine.status();
-        if (engine_status.queued >= IDLE_QUEUE_LOOKAHEAD) return false;
         if (payload_loader.status().active()) return false;
 
         const NightCatalogRecord *night = catalog->record(idle_cursor);
@@ -712,14 +702,19 @@ struct ReportTask::Runtime {
             return true;
         }
 
+        if (engine_status.state != ReportEngineState::Idle ||
+            engine_status.queued != 0) {
+            return false;
+        }
+
         const ReportRequestEnqueueResult queued = engine.request(
             result,
             priority,
             idle_generation);
         if (queued.status == ReportRequestEnqueueStatus::Full) return false;
 
-        idle_cursor++;
         if (queued.status == ReportRequestEnqueueStatus::Invalid) {
+            idle_cursor++;
             command_failures++;
         }
         return true;
@@ -799,7 +794,6 @@ struct ReportTask::Runtime {
         next.summary_acquisition = summary_acquisition.status();
         next.catalog_refresh = catalog_refresh.status();
         next.catalog_store = catalog_store.status();
-        next.artifact_index_refresh = artifact_index_refresh.status();
         next.payload_cache = payload_cache_status;
         next.payload_load = payload_loader.status();
         next.engine = engine.status();
@@ -811,10 +805,6 @@ struct ReportTask::Runtime {
         } else if (store_purpose == CatalogStorePurpose::Load ||
                    catalog_load_pending) {
             next.state = ReportTaskState::LoadingCatalog;
-        } else if (!artifact_index_loaded &&
-                   (artifact_index_refresh.active() ||
-                    artifact_index_refresh_pending)) {
-            next.state = ReportTaskState::IndexingArtifacts;
         } else if (summary_acquisition.active() ||
                    catalog_refresh.active() || pending_refresh.valid() ||
                    refresh_generation != 0 ||
@@ -864,7 +854,6 @@ struct ReportTask::Runtime {
     ReportSummaryAcquisition summary_acquisition;
     NightCatalogRefreshService catalog_refresh;
     NightCatalogStoreService catalog_store;
-    ReportArtifactIndexRefreshService artifact_index_refresh;
     StorageDeletePort *delete_port = nullptr;
 
     ReportTaskCommand commands[AC_REPORT_TASK_COMMAND_CAPACITY] = {};
@@ -903,12 +892,6 @@ struct ReportTask::Runtime {
 
     bool refresh_offset_valid = false;
     int32_t refresh_offset_minutes = 0;
-
-    bool artifact_index_loaded = false;
-    bool artifact_index_refresh_pending = false;
-    uint32_t artifact_index_refresh_generation = 0;
-    uint32_t artifact_index_retry_at_ms = 0;
-    uint8_t artifact_index_retry_attempt = 0;
 
     CatalogStorePurpose store_purpose = CatalogStorePurpose::None;
     bool catalog_load_pending = true;
@@ -978,7 +961,6 @@ bool ReportTask::begin(StorageReadPort &read_port,
 
     runtime_->catalog_refresh.begin(scan_port, read_port);
     runtime_->catalog_store.begin(read_port, write_port);
-    runtime_->artifact_index_refresh.begin(scan_port, read_port);
     runtime_->summary_acquisition.begin(spool_port);
     runtime_->payload_loader.begin(read_port);
     runtime_->delete_port = &delete_port;
@@ -1397,69 +1379,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         }
     }
 
-    if (runtime.artifact_index_refresh.active()) {
-        worked = runtime.artifact_index_refresh.poll() || worked;
-    }
-
-    if (runtime.artifact_index_refresh_generation != 0 &&
-        !runtime.artifact_index_refresh.active()) {
-        const ReportArtifactIndexRefreshStatus refresh_status =
-            runtime.artifact_index_refresh.status();
-        if (refresh_status.state ==
-                ReportArtifactIndexRefreshState::Ready ||
-            refresh_status.state ==
-                ReportArtifactIndexRefreshState::Error) {
-            if (refresh_status.state ==
-                ReportArtifactIndexRefreshState::Ready) {
-                if (!runtime.publish_artifact_index(
-                        runtime.artifact_index_refresh.snapshot())) {
-                    runtime.command_failures++;
-                    runtime.artifact_index_refresh_pending = true;
-                } else {
-                    runtime.artifact_index_loaded = true;
-                    runtime.artifact_index_retry_at_ms = 0;
-                    runtime.artifact_index_retry_attempt = 0;
-                }
-            } else {
-                if (!runtime.artifact_index) {
-                    runtime.publish_artifact_index(
-                        ReportArtifactIndexBuilder::build(nullptr, 0));
-                }
-                runtime.artifact_index_loaded = true;
-                runtime.artifact_index_refresh_pending = true;
-                runtime.artifact_index_retry_at_ms =
-                    now_ms + next_background_retry_delay(
-                                 runtime.artifact_index_retry_attempt);
-                advance_background_retry(
-                    runtime.artifact_index_retry_attempt);
-                runtime.command_failures++;
-            }
-            runtime.artifact_index_refresh_generation = 0;
-            worked = true;
-        }
-    }
-
-    if (!background_work_blocked &&
-        runtime.artifact_index_refresh_pending && runtime.catalog &&
-        !runtime.artifact_index_refresh.active() &&
-        runtime.artifact_index_refresh_generation == 0 &&
-        deadline_due(now_ms, runtime.artifact_index_retry_at_ms)) {
-        const OperationAdmission admitted =
-            runtime.artifact_index_refresh.request_refresh(
-                runtime.catalog, runtime.catalog_generation);
-        if (admitted == OperationAdmission::Accepted) {
-            runtime.artifact_index_refresh_generation =
-                runtime.catalog_generation;
-            runtime.artifact_index_refresh_pending = false;
-            worked = true;
-        } else if (admitted == OperationAdmission::Rejected) {
-            runtime.artifact_index_refresh_pending = false;
-            runtime.artifact_index_loaded = true;
-            runtime.command_failures++;
-            worked = true;
-        }
-    }
-
     if (!runtime.catalog_refresh.active() &&
         runtime.refresh_generation == 0 &&
         !runtime.catalog_load_pending &&
@@ -1589,8 +1508,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         !runtime.pending_refresh.valid() &&
         !runtime.summary_acquisition.active() &&
         !runtime.engine.catalog_update_required() &&
-        runtime.artifact_index_loaded &&
-        !runtime.artifact_index_refresh.active() &&
         runtime.store_purpose == CatalogStorePurpose::None &&
         !runtime.pending_catalog_save;
     if (catalog_stable && !background_work_blocked &&
@@ -1650,7 +1567,6 @@ void ReportTask::run() {
         if (worked) {
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
         } else if (state == ReportTaskState::LoadingCatalog ||
-                   state == ReportTaskState::IndexingArtifacts ||
                    state == ReportTaskState::RefreshingCatalog ||
                    state == ReportTaskState::Queued ||
                    state == ReportTaskState::LookingUp ||
