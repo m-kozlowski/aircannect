@@ -29,10 +29,12 @@ static constexpr size_t AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE =
 static constexpr size_t AC_REPORT_PAYLOAD_CACHE_WARM_NIGHTS = 4;
 static constexpr size_t AC_REPORT_PAYLOAD_LOAD_COPY_BYTES = 16 * 1024;
 
-// SMB and SleepHQ share one low-priority task so their network and storage
-// phases cannot overlap. Runtime activity snapshots preempt both engines.
+// SMB and SleepHQ share one background task so their network and storage
+// phases cannot overlap. It runs at idle priority: export code crosses TLS,
+// JSON, and filesystem libraries whose internal loops are not under our
+// scheduler control, so no export work may prevent IDLE0 from running.
 static constexpr uint32_t AC_EXPORT_TASK_STACK = 8192;
-static constexpr uint8_t AC_EXPORT_TASK_PRIO = 1;
+static constexpr uint8_t AC_EXPORT_TASK_PRIO = 0;
 static constexpr uint8_t AC_EXPORT_TASK_CORE = 0;
 static constexpr uint32_t AC_EXPORT_TASK_BUSY_RECHECK_MS = 250;
 static constexpr uint32_t AC_EXPORT_TASK_WORK_TICK_MS = 20;

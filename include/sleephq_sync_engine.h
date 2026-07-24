@@ -210,6 +210,7 @@ private:
     static bool snapshot_configured(const SleepHqExportConfig &config);
     static SleepHqConfig client_config_from_snapshot(
         const SleepHqExportConfig &config);
+    static const char *work_phase_name(WorkPhase phase);
     static const char *inflight_phase_name(InflightPhase phase);
     static bool parse_inflight_phase(const char *text, InflightPhase &out);
 

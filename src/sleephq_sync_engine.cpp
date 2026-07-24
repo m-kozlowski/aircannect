@@ -244,6 +244,38 @@ SleepHqConfig SleepHqSyncEngine::client_config_from_snapshot(
     return out;
 }
 
+const char *SleepHqSyncEngine::work_phase_name(WorkPhase phase) {
+    switch (phase) {
+        case WorkPhase::Idle: return "idle";
+        case WorkPhase::Connect: return "connect";
+        case WorkPhase::LoadInventory: return "load_inventory";
+        case WorkPhase::LoadDatalogDay: return "load_datalog_day";
+        case WorkPhase::ReadIdentification: return "read_identification";
+        case WorkPhase::FindRemoteMachine: return "find_remote_machine";
+        case WorkPhase::LoadInflight: return "load_inflight";
+        case WorkPhase::NextFile: return "next_file";
+        case WorkPhase::ResolveDatalogDay: return "resolve_datalog_day";
+        case WorkPhase::ReadRebuildMarker: return "read_rebuild_marker";
+        case WorkPhase::CreateImport: return "create_import";
+        case WorkPhase::OpenLocal: return "open_local";
+        case WorkPhase::HashLocalFile: return "hash_local_file";
+        case WorkPhase::ResolveRemoteFile: return "resolve_remote_file";
+        case WorkPhase::FetchRemoteFiles: return "fetch_remote_files";
+        case WorkPhase::UploadFile: return "upload_file";
+        case WorkPhase::ProcessImport: return "process_import";
+        case WorkPhase::WaitImport: return "wait_import";
+        case WorkPhase::FetchImport: return "fetch_import";
+        case WorkPhase::WriteInflight: return "write_inflight";
+        case WorkPhase::ValidateStaged: return "validate_staged";
+        case WorkPhase::FlushState: return "flush_state";
+        case WorkPhase::WriteRebuildMarker: return "write_rebuild_marker";
+        case WorkPhase::WriteDoneMarker: return "write_done_marker";
+        case WorkPhase::RemoveInflight: return "remove_inflight";
+        case WorkPhase::Finish: return "finish";
+    }
+    return "unknown";
+}
+
 const char *SleepHqSyncEngine::inflight_phase_name(InflightPhase phase) {
     switch (phase) {
         case InflightPhase::Uploading: return "uploading";
@@ -1006,14 +1038,24 @@ void SleepHqSyncEngine::finish_sync_locked() {
 void SleepHqSyncEngine::fail_locked(const char *error) {
     if (error && strcmp(error, "preempted") == 0) {
         const RunKind kind = current_run_kind_;
+        const WorkPhase interrupted_phase = phase_;
+        const uint32_t now_ms = nonzero_millis(millis());
+        const uint32_t elapsed_ms = status_.started_ms == 0
+            ? 0
+            : static_cast<uint32_t>(now_ms - status_.started_ms);
         char reason[AC_SLEEPHQ_SYNC_REASON_MAX] = {};
         char datalog_day[9] = {};
+        char current_path[AC_STORAGE_PATH_MAX] = {};
         copy_cstr(reason, sizeof(reason),
                   status_.pending_reason[0]
                       ? status_.pending_reason
                       : "preempted");
         copy_cstr(datalog_day, sizeof(datalog_day),
                   current_datalog_day_filter_);
+        copy_cstr(current_path, sizeof(current_path),
+                  current_file_.state().path[0]
+                      ? current_file_.state().path
+                      : "--");
         reset_run_locked(true);
         pending_run_kind_ = kind;
         copy_cstr(pending_datalog_day_, sizeof(pending_datalog_day_),
@@ -1027,8 +1069,12 @@ void SleepHqSyncEngine::fail_locked(const char *error) {
         status_.updated_ms = nonzero_millis(millis());
         retry_due_ms_ = 0;
         retry_attempt_ = 0;
-        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
-                  "preempted; queued reason=%s\n",
+        Log::logf(CAT_SLEEPHQ, LOG_INFO,
+                  "preempted phase=%s elapsed_ms=%lu current=%s "
+                  "queued_reason=%s\n",
+                  work_phase_name(interrupted_phase),
+                  static_cast<unsigned long>(elapsed_ms),
+                  current_path,
                   status_.pending_reason);
         publish_runtime_locked();
         return;
@@ -1066,9 +1112,9 @@ void SleepHqSyncEngine::fail_locked(const char *error) {
         retry_due_ms_ ? static_cast<uint32_t>(retry_due_ms_ -
                                               status_.updated_ms) : 0;
     Log::logf(CAT_SLEEPHQ, LOG_WARN,
-              "failed phase=%u error=%s current=%s seen=%u uploaded=%u "
+              "failed phase=%s error=%s current=%s seen=%u uploaded=%u "
               "skipped=%u bytes=%llu retry_ms=%lu attempt=%u\n",
-              static_cast<unsigned>(phase_),
+              work_phase_name(phase_),
               status_.last_error,
               current_file_.state().path[0]
                   ? current_file_.state().path
