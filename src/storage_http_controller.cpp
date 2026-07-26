@@ -15,7 +15,9 @@
 #include "debug_log.h"
 #include "http_request_utils.h"
 #include "json_util.h"
+#include "large_byte_buffer.h"
 #include "large_text_buffer.h"
+#include "runtime_clock.h"
 #include "storage_archive_port.h"
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
@@ -30,6 +32,8 @@ static constexpr size_t WEB_JSON_RESERVE_SMALL = 512;
 static constexpr size_t kStorageListDefaultLimit = 64;
 static constexpr size_t kStorageListMaxLimit = 128;
 static constexpr uint32_t kStorageListRetryMs = 750;
+static constexpr size_t kPreparedResponseCopyBytes = 4096;
+static constexpr uint32_t kArchiveResponseStartTimeoutMs = 10000;
 
 struct StorageSelectionRequest {
     JsonDocument doc;
@@ -95,9 +99,28 @@ bool append_storage_list_entry(LargeTextBuffer &json,
 struct ArchiveDownloadRef {
     StorageArchivePort *port = nullptr;
     std::shared_ptr<StorageArchiveDownload> download;
+    std::shared_ptr<const LargeByteBuffer> prefix;
 
     ~ArchiveDownloadRef() {
         if (port && download) port->finish_download(*download);
+    }
+
+    size_t fill(uint8_t *buffer, size_t capacity, size_t offset) {
+        if (!port || !download || !buffer || capacity == 0) return 0;
+
+        if (prefix && offset < prefix->size()) {
+            const size_t copied = std::min(
+                capacity, prefix->size() - offset);
+            memcpy(buffer, prefix->data() + offset, copied);
+            return copied;
+        }
+
+        const PreparedByteRead read =
+            port->read_download(*download, buffer, capacity, offset);
+        if (read.state == PreparedByteReadState::Retry) {
+            return RESPONSE_TRY_AGAIN;
+        }
+        return read.bytes;
     }
 };
 
@@ -107,27 +130,6 @@ struct StorageDownloadRef {
 
     ~StorageDownloadRef() {
         if (port && download) port->finish_download(*download);
-    }
-};
-
-struct PreparedReadRef {
-    StorageReadPort *port = nullptr;
-    StoragePreparedRead prepared;
-
-    ~PreparedReadRef() {
-        if (port && prepared.valid()) port->release_prepared(prepared);
-    }
-
-    size_t fill(uint8_t *buffer, size_t capacity, size_t offset) {
-        if (!port || !buffer || capacity == 0) return 0;
-        if (!prepared.valid() || offset >= prepared.length) return 0;
-
-        const PreparedByteRead read =
-            port->read_prepared(prepared, offset, buffer, capacity);
-        if (read.state == PreparedByteReadState::Retry) {
-            return RESPONSE_TRY_AGAIN;
-        }
-        return read.bytes;
     }
 };
 
@@ -237,11 +239,24 @@ private:
 struct StorageHttpController::PendingFileLogTail {
     StorageReadPort *port = nullptr;
     OperationTicket ticket;
+    StoragePreparedRead prepared;
+    std::unique_ptr<LargeByteBuffer> buffer;
+    size_t copied = 0;
     AsyncWebServerRequestPtr request;
 
     ~PendingFileLogTail() {
         if (port && ticket.valid()) (void)port->abandon(ticket);
+        if (port && prepared.valid()) port->release_prepared(prepared);
     }
+};
+
+struct StorageHttpController::PendingArchiveDownload {
+    std::shared_ptr<ArchiveDownloadRef> response;
+    std::unique_ptr<LargeByteBuffer> prefix;
+    AsyncWebServerRequestPtr request;
+    uint64_t archive_size = 0;
+    uint32_t deadline_ms = 0;
+    char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
 };
 
 StorageHttpController::StorageHttpController() = default;
@@ -270,6 +285,11 @@ void StorageHttpController::publish_activity(const ActivitySnapshot &activity) {
 }
 
 void StorageHttpController::poll() {
+    poll_file_log_tail();
+    poll_archive_download();
+}
+
+void StorageHttpController::poll_file_log_tail() {
     if (!job_mutex_ ||
         xSemaphoreTake(job_mutex_, 0) != pdTRUE) {
         return;
@@ -287,59 +307,183 @@ void StorageHttpController::poll() {
         return;
     }
 
-    StorageReadCompletion completion;
-    if (!storage_read_->take_completion(
-            pending_file_log_tail_->ticket, completion)) {
-        xSemaphoreGive(job_mutex_);
-        return;
+    bool failed = false;
+    if (pending_file_log_tail_->ticket.valid()) {
+        StorageReadCompletion completion;
+        if (!storage_read_->take_completion(
+                pending_file_log_tail_->ticket, completion)) {
+            xSemaphoreGive(job_mutex_);
+            return;
+        }
+
+        pending_file_log_tail_->ticket = {};
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid()) {
+            if (completion.prepared.valid()) {
+                storage_read_->release_prepared(completion.prepared);
+            }
+            failed = true;
+        } else {
+            pending_file_log_tail_->prepared = completion.prepared;
+            if (completion.prepared.length > 0) {
+                pending_file_log_tail_->buffer =
+                    LargeByteBuffer::allocate(completion.prepared.length);
+                failed = !pending_file_log_tail_->buffer;
+            }
+        }
     }
 
-    pending_file_log_tail_->ticket = {};
-    const AsyncWebServerRequestPtr pending_request =
-        pending_file_log_tail_->request;
+    PendingFileLogTail &pending = *pending_file_log_tail_;
+    if (!failed && pending.prepared.valid() &&
+        pending.prepared.length > 0) {
+        const size_t wanted = std::min(
+            kPreparedResponseCopyBytes,
+            pending.prepared.length - pending.copied);
+        const PreparedByteRead read = storage_read_->read_prepared(
+            pending.prepared,
+            pending.copied,
+            pending.buffer->data() + pending.copied,
+            wanted);
+        if (read.state == PreparedByteReadState::Retry) {
+            xSemaphoreGive(job_mutex_);
+            return;
+        }
+        if (read.state != PreparedByteReadState::Data ||
+            read.bytes == 0 || read.bytes > wanted) {
+            failed = true;
+        } else {
+            pending.copied += read.bytes;
+            if (pending.copied < pending.prepared.length) {
+                xSemaphoreGive(job_mutex_);
+                return;
+            }
+        }
+    }
+
+    std::shared_ptr<const LargeByteBuffer> payload;
+    if (!failed && pending.prepared.valid()) {
+        storage_read_->release_prepared(pending.prepared);
+        pending.prepared = {};
+        if (pending.buffer) {
+            payload = LargeByteBuffer::freeze(std::move(pending.buffer));
+            failed = !payload;
+        }
+    }
+
+    const AsyncWebServerRequestPtr pending_request = pending.request;
     pending_file_log_tail_.reset();
     xSemaphoreGive(job_mutex_);
 
     std::shared_ptr<AsyncWebServerRequest> request = pending_request.lock();
-    if (!request) {
-        if (completion.prepared.valid()) {
-            storage_read_->release_prepared(completion.prepared);
-        }
-        return;
-    }
-
-    if (completion.outcome.disposition !=
-            OperationDisposition::Succeeded ||
-        !completion.prepared.valid()) {
-        if (completion.prepared.valid()) {
-            storage_read_->release_prepared(completion.prepared);
-        }
+    if (!request) return;
+    if (failed) {
         request->send(503, "text/plain", "file log unavailable\n");
         return;
     }
 
-    std::shared_ptr<PreparedReadRef> ref =
-        std::make_shared<PreparedReadRef>();
-    if (!ref) {
-        storage_read_->release_prepared(completion.prepared);
-        request->send(503, "text/plain", "response alloc\n");
-        return;
-    }
-    ref->port = storage_read_;
-    ref->prepared = completion.prepared;
+    const size_t length = payload ? payload->size() : 0;
+    AsyncWebServerResponse *response = new (std::nothrow)
+        AsyncPreparedResponse(
+            200,
+            "text/plain",
+            length,
+            [payload](uint8_t *buffer,
+                      size_t capacity,
+                      size_t offset) -> size_t {
+                if (!payload || !buffer || offset >= payload->size()) return 0;
 
-    AsyncWebServerResponse *response = new (std::nothrow) AsyncPreparedResponse(
-        "text/plain",
-        completion.prepared.length,
-        [ref](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
-            return ref->fill(buffer, capacity, offset);
-        });
+                const size_t copied = std::min(
+                    capacity, payload->size() - offset);
+                memcpy(buffer, payload->data() + offset, copied);
+                return copied;
+            });
     if (!response) {
         request->send(503, "text/plain", "response alloc\n");
         return;
     }
 
     response->addHeader("Cache-Control", "no-store");
+    request->send(response);
+}
+
+void StorageHttpController::poll_archive_download() {
+    if (!job_mutex_ ||
+        xSemaphoreTake(job_mutex_, 0) != pdTRUE) {
+        return;
+    }
+
+    if (!pending_archive_download_) {
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    PendingArchiveDownload &pending = *pending_archive_download_;
+    if (pending.request.expired()) {
+        pending_archive_download_.reset();
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    bool failed = millis_deadline_reached(millis(), pending.deadline_ms);
+    if (!failed) {
+        const PreparedByteRead read = pending.response->port->read_download(
+            *pending.response->download,
+            pending.prefix->data(),
+            pending.prefix->size(),
+            0);
+        if (read.state == PreparedByteReadState::Retry) {
+            xSemaphoreGive(job_mutex_);
+            return;
+        }
+        if (read.state != PreparedByteReadState::Data || read.bytes == 0 ||
+            !pending.prefix->truncate(read.bytes)) {
+            failed = true;
+        } else {
+            pending.response->prefix =
+                LargeByteBuffer::freeze(std::move(pending.prefix));
+            failed = !pending.response->prefix;
+        }
+    }
+
+    const AsyncWebServerRequestPtr pending_request = pending.request;
+    std::shared_ptr<ArchiveDownloadRef> ref = std::move(pending.response);
+    const uint64_t archive_size = pending.archive_size;
+    char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
+    memcpy(filename, pending.filename, sizeof(filename));
+    pending_archive_download_.reset();
+    xSemaphoreGive(job_mutex_);
+
+    std::shared_ptr<AsyncWebServerRequest> request = pending_request.lock();
+    if (!request) return;
+    if (failed) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"archive_stream_unavailable\"}");
+        return;
+    }
+
+    AsyncWebServerResponse *response = new (std::nothrow)
+        AsyncPreparedResponse(
+            "application/zip",
+            static_cast<size_t>(archive_size),
+            [ref](uint8_t *buffer,
+                  size_t max_length,
+                  size_t offset) -> size_t {
+                return ref->fill(buffer, max_length, offset);
+            });
+    if (!response) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+
+    char disposition[128] = {};
+    snprintf(disposition, sizeof(disposition),
+             "attachment; filename=\"%s\"",
+             filename[0] ? filename : "archive.zip");
+    response->addHeader("Content-Disposition", disposition);
+    response->addHeader("Cache-Control", "no-store");
+    response->addHeader("Accept-Ranges", "none");
     request->send(response);
 }
 
@@ -874,7 +1018,8 @@ void StorageHttpController::send_storage_archive_status(AsyncWebServerRequest *r
     request->send(response);
 }
 
-void StorageHttpController::send_storage_archive_download(AsyncWebServerRequest *request) const {
+void StorageHttpController::send_storage_archive_download(
+    AsyncWebServerRequest *request) {
     if (!storage_archive_) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"archive_unavailable\"}");
@@ -889,6 +1034,11 @@ void StorageHttpController::send_storage_archive_download(AsyncWebServerRequest 
     }
     StorageJobGate gate(request, job_mutex_);
     if (!gate.locked()) return;
+    if (pending_archive_download_) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"archive_download_busy\"}");
+        return;
+    }
     if (!storage_read_request_available(
             request,
             therapy_active_.load(std::memory_order_relaxed),
@@ -931,32 +1081,33 @@ void StorageHttpController::send_storage_archive_download(AsyncWebServerRequest 
                       "{\"ok\":false,\"error\":\"archive_too_large\"}");
         return;
     }
+    if (archive_size == 0) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"archive_empty\"}");
+        return;
+    }
 
-    AsyncWebServerResponse *response = new (std::nothrow) AsyncPreparedResponse(
-        "application/zip",
-        static_cast<size_t>(archive_size),
-        [ref](uint8_t *buffer, size_t max_len, size_t offset) -> size_t {
-            if (!buffer || !ref || !ref->port || !ref->download) return 0;
-            const PreparedByteRead read = ref->port->read_download(
-                *ref->download, buffer, max_len, offset);
-            if (read.state == PreparedByteReadState::Retry) {
-                return RESPONSE_TRY_AGAIN;
-            }
-            return read.bytes;
-        });
-    if (!response) {
+    std::unique_ptr<PendingArchiveDownload> pending(
+        new (std::nothrow) PendingArchiveDownload());
+    if (!pending) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;
     }
-    char disposition[128];
-    snprintf(disposition, sizeof(disposition),
-             "attachment; filename=\"%s\"",
-             filename[0] ? filename : "archive.zip");
-    response->addHeader("Content-Disposition", disposition);
-    response->addHeader("Cache-Control", "no-store");
-    response->addHeader("Accept-Ranges", "none");
-    request->send(response);
+    pending->prefix = LargeByteBuffer::allocate(std::min(
+        kPreparedResponseCopyBytes, static_cast<size_t>(archive_size)));
+    if (!pending->prefix) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"response_alloc\"}");
+        return;
+    }
+
+    pending->response = std::move(ref);
+    pending->request = request->pause();
+    pending->archive_size = archive_size;
+    pending->deadline_ms = millis() + kArchiveResponseStartTimeoutMs;
+    memcpy(pending->filename, filename, sizeof(pending->filename));
+    pending_archive_download_ = std::move(pending);
 }
 
 void StorageHttpController::send_storage_delete_start(AsyncWebServerRequest *request) const {

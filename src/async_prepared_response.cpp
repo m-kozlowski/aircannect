@@ -52,6 +52,11 @@ void AsyncPreparedResponse::_respond(AsyncWebServerRequest *request) {
         return;
     }
 
+    if (_contentLength > 0 && !fill_pending()) {
+        fail(request);
+        return;
+    }
+
     _assembleHead(assembled_headers_, request->version());
     _state = RESPONSE_HEADERS;
     (void)_ack(request, 0, 0);
@@ -64,7 +69,10 @@ bool AsyncPreparedResponse::fill_pending() {
     const size_t remaining = _contentLength - _sentLength;
     const size_t requested = std::min(buffer_capacity_, remaining);
     const size_t filled = content_(buffer_, requested, _sentLength);
-    if (filled == RESPONSE_TRY_AGAIN) return false;
+    if (filled == RESPONSE_TRY_AGAIN) {
+        if (_sentLength == 0) source_ended_ = true;
+        return false;
+    }
     if (filled == 0 || filled > requested) {
         source_ended_ = true;
         return false;

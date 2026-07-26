@@ -7,8 +7,9 @@
 
 namespace aircannect {
 
-// Known-length response whose producer may temporarily have no bytes ready.
-// A later TCP poll retries without consuming AsyncAbstractResponse credit.
+// Known-length response whose source must have its first bytes ready before
+// HTTP starts. A streaming producer may pause only after yielding initial data;
+// a later TCP ACK or poll then resumes it without consuming response credit.
 class AsyncPreparedResponse final : public AsyncWebServerResponse {
 public:
     AsyncPreparedResponse(int status_code,

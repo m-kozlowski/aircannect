@@ -36,13 +36,16 @@ public:
     void publish_activity(const ActivitySnapshot &activity);
 
 private:
+    void poll_file_log_tail();
+    void poll_archive_download();
+
     // storage browser and maintenance
     void send_storage_list(AsyncWebServerRequest *request) const;
     void send_storage_download(AsyncWebServerRequest *request) const;
     void send_file_log_tail(AsyncWebServerRequest *request, size_t lines);
     void send_storage_archive_start(AsyncWebServerRequest *request) const;
     void send_storage_archive_status(AsyncWebServerRequest *request) const;
-    void send_storage_archive_download(AsyncWebServerRequest *request) const;
+    void send_storage_archive_download(AsyncWebServerRequest *request);
     void send_storage_delete_start(AsyncWebServerRequest *request) const;
     void send_storage_delete_status(AsyncWebServerRequest *request) const;
 
@@ -53,7 +56,9 @@ private:
     StorageStatusPort *storage_status_ = nullptr;
 
     struct PendingFileLogTail;
+    struct PendingArchiveDownload;
     std::unique_ptr<PendingFileLogTail> pending_file_log_tail_;
+    std::unique_ptr<PendingArchiveDownload> pending_archive_download_;
 
     mutable StaticSemaphore_t job_mutex_storage_ = {};
     mutable SemaphoreHandle_t job_mutex_ = nullptr;

@@ -725,7 +725,7 @@ PreparedByteRead copy_prepared_read(StoragePreparedRead prepared,
     PreparedByteRead result;
     if (!prepared.valid() || !buffer || capacity == 0) return result;
 
-    if (!lock_queue()) {
+    if (!lock_queue(0)) {
         result.state = PreparedByteReadState::Retry;
         return result;
     }
