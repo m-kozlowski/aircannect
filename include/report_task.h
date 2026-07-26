@@ -148,8 +148,12 @@ public:
                                ReportArtifactAvailability &availability) const;
     std::shared_ptr<const LargeByteBuffer> artifact_payload(
         const ReportArtifactDescriptor &artifact) const;
+    std::shared_ptr<const LargeByteBuffer> artifact_payload_if_present(
+        const ReportArtifactDescriptor &artifact) const;
     bool artifact_failure(const ReportArtifactKey &artifact,
                           ReportArtifactFailureStatus &failure) const;
+    bool try_artifact_failure(const ReportArtifactKey &artifact,
+                              ReportArtifactFailureStatus &failure) const;
 
 private:
     struct Runtime;

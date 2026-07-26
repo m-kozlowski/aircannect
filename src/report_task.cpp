@@ -237,12 +237,13 @@ struct ReportTask::Runtime {
         return true;
     }
 
-    bool preempt_background_for_foreground() {
-        if (!engine.status().foreground_active) return false;
-
+    bool preempt_background_work() {
         bool worked = engine.cancel_background() > 0;
 
-        if (payload_loader.status().active()) {
+        const ReportArtifactPayloadLoadStatus payload_status =
+            payload_loader.status();
+        if (payload_status.active() &&
+            payload_status.lane != StorageReadLane::Foreground) {
             payload_loader.cancel();
             worked = true;
         }
@@ -255,6 +256,11 @@ struct ReportTask::Runtime {
         worked = defer_active_catalog_refresh() || worked;
 
         return worked;
+    }
+
+    bool preempt_background_for_foreground() {
+        if (!engine.status().foreground_active) return false;
+        return preempt_background_work();
     }
 
     bool background_work_blocked() const {
@@ -288,7 +294,10 @@ struct ReportTask::Runtime {
             summary_acquisition.cancel();
         }
 
-        if (payload_loader.status().active()) {
+        const ReportArtifactPayloadLoadStatus payload_status =
+            payload_loader.status();
+        if (payload_status.active() &&
+            payload_status.lane != StorageReadLane::Foreground) {
             payload_loader.cancel();
         }
 
@@ -322,6 +331,16 @@ struct ReportTask::Runtime {
 
         std::shared_ptr<const LargeByteBuffer> out =
             payload_cache.find(artifact);
+        unlock();
+        return out;
+    }
+
+    std::shared_ptr<const LargeByteBuffer> find_payload_if_present(
+        const ReportArtifactDescriptor &artifact) {
+        if (!artifact.valid() || !lock(0)) return {};
+
+        std::shared_ptr<const LargeByteBuffer> out =
+            payload_cache.find_if_present(artifact);
         unlock();
         return out;
     }
@@ -450,10 +469,24 @@ struct ReportTask::Runtime {
         if (load_status.state == ReportArtifactPayloadLoadState::Ready) {
             std::shared_ptr<const LargeByteBuffer> bytes =
                 payload_loader.take_completed();
-            if (bytes) (void)cache_payload(load_status.artifact,
-                                           std::move(bytes));
-            payload_load_failed = {};
-            payload_load_retry_at_ms = 0;
+            const bool cached = bytes && cache_payload(
+                load_status.artifact, std::move(bytes));
+            if (lock(20)) {
+                if (cached) {
+                    payload_load_failed = {};
+                    payload_load_retry_at_ms = 0;
+                    clear_artifact_failure_locked(load_status.artifact.key);
+                } else {
+                    payload_load_failed = load_status.artifact.key;
+                    payload_load_retry_at_ms =
+                        now_ms + ARTIFACT_FAILURE_RETRY_MS;
+                    remember_artifact_failure_locked(
+                        load_status.artifact.key,
+                        "report_payload_cache_failed",
+                        now_ms);
+                }
+                unlock();
+            }
             return true;
         }
 
@@ -461,6 +494,15 @@ struct ReportTask::Runtime {
             payload_load_failed = load_status.artifact.key;
             payload_load_retry_at_ms =
                 now_ms + ARTIFACT_FAILURE_RETRY_MS;
+            if (lock(20)) {
+                remember_artifact_failure_locked(
+                    load_status.artifact.key,
+                    load_status.error[0]
+                        ? load_status.error
+                        : "report_payload_load_failed",
+                    now_ms);
+                unlock();
+            }
         }
         payload_loader.reset();
         return true;
@@ -473,9 +515,10 @@ struct ReportTask::Runtime {
     }
 
     bool find_failure(const ReportArtifactKey &artifact,
-                      ReportArtifactFailureStatus &out) const {
+                      ReportArtifactFailureStatus &out,
+                      uint32_t lock_timeout_ms = 20) const {
         out = {};
-        if (!artifact.valid() || !lock(20)) return false;
+        if (!artifact.valid() || !lock(lock_timeout_ms)) return false;
 
         for (const ReportArtifactFailureEntry &entry : artifact_failures) {
             if (!entry.valid() || entry.artifact != artifact ||
@@ -606,6 +649,8 @@ struct ReportTask::Runtime {
             entry = {};
         }
         artifact_failure_cursor = 0;
+        payload_load_failed = {};
+        payload_load_retry_at_ms = 0;
         unlock();
     }
 
@@ -770,9 +815,11 @@ struct ReportTask::Runtime {
             drops = command_drops;
             payload_cache_status = payload_cache.status();
             for (size_t i = 0; i < command_count; ++i) {
-                if (commands[i].kind == ReportTaskCommandKind::Artifact &&
-                    commands[i].priority ==
-                        ReportRequestPriority::Foreground) {
+                if ((commands[i].kind == ReportTaskCommandKind::Artifact &&
+                     commands[i].priority ==
+                         ReportRequestPriority::Foreground) ||
+                    commands[i].kind ==
+                        ReportTaskCommandKind::CacheArtifact) {
                     foreground_command = true;
                     break;
                 }
@@ -798,7 +845,9 @@ struct ReportTask::Runtime {
         next.payload_load = payload_loader.status();
         next.engine = engine.status();
         next.foreground_active =
-            foreground_command || next.engine.foreground_active;
+            foreground_command || next.engine.foreground_active ||
+            (next.payload_load.active() &&
+             next.payload_load.lane == StorageReadLane::Foreground);
 
         if (!initialized) {
             next.state = ReportTaskState::Stopped;
@@ -1171,6 +1220,13 @@ std::shared_ptr<const LargeByteBuffer> ReportTask::artifact_payload(
     return runtime_->find_payload(artifact);
 }
 
+std::shared_ptr<const LargeByteBuffer>
+ReportTask::artifact_payload_if_present(
+    const ReportArtifactDescriptor &artifact) const {
+    if (!runtime_) return {};
+    return runtime_->find_payload_if_present(artifact);
+}
+
 bool ReportTask::artifact_failure(
     const ReportArtifactKey &artifact,
     ReportArtifactFailureStatus &failure) const {
@@ -1179,6 +1235,16 @@ bool ReportTask::artifact_failure(
         return false;
     }
     return runtime_->find_failure(artifact, failure);
+}
+
+bool ReportTask::try_artifact_failure(
+    const ReportArtifactKey &artifact,
+    ReportArtifactFailureStatus &failure) const {
+    if (!runtime_) {
+        failure = {};
+        return false;
+    }
+    return runtime_->find_failure(artifact, failure, 0);
 }
 
 bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
@@ -1201,7 +1267,6 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
     ReportTaskCommand command;
     const ReportEngineStatus command_engine_status = runtime.engine.status();
     const bool cache_load_available =
-        !runtime.background_suspended &&
         !runtime.payload_loader.status().active() &&
         !command_engine_status.foreground_active;
     if (runtime.pop(command, cache_load_available)) {
@@ -1235,12 +1300,22 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 break;
             }
 
-            case ReportTaskCommandKind::CacheArtifact:
-                (void)runtime.start_payload_load(
+            case ReportTaskCommandKind::CacheArtifact: {
+                worked = runtime.preempt_background_work() || worked;
+                const OperationAdmission admitted = runtime.start_payload_load(
                     command.artifact,
                     command.generation,
-                    StorageReadLane::Report);
+                    StorageReadLane::Foreground);
+                if (admitted == OperationAdmission::Rejected &&
+                    runtime.lock(20)) {
+                    runtime.remember_artifact_failure_locked(
+                        command.artifact,
+                        "report_payload_load_rejected",
+                        now_ms);
+                    runtime.unlock();
+                }
                 break;
+            }
 
             case ReportTaskCommandKind::RefreshCatalog:
                 runtime.pending_refresh.generation = command.generation;

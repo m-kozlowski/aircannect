@@ -28,6 +28,8 @@ public:
     bool contains(const ReportArtifactDescriptor &artifact) const;
     std::shared_ptr<const LargeByteBuffer> find(
         const ReportArtifactDescriptor &artifact);
+    std::shared_ptr<const LargeByteBuffer> find_if_present(
+        const ReportArtifactDescriptor &artifact);
     bool insert(const ReportArtifactDescriptor &artifact,
                 std::shared_ptr<const LargeByteBuffer> bytes);
 

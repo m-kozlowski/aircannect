@@ -1,6 +1,8 @@
 #include "report_http_controller.h"
 
 #include <ESPAsyncWebServer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include <algorithm>
 #include <memory>
@@ -16,67 +18,16 @@
 #include "report_artifacts.h"
 #include "report_range_tile.h"
 #include "report_task.h"
-#include "storage_stream_port.h"
+#include "runtime_clock.h"
 
 namespace aircannect {
 namespace {
 
 static constexpr size_t REPORT_HTTP_ETAG_BYTES = 112;
+static constexpr size_t REPORT_HTTP_PENDING_CAPACITY = 4;
+static constexpr uint32_t REPORT_HTTP_PENDING_TIMEOUT_MS = 30000;
 static constexpr const char *REPORT_SOURCE_REVISION_HEADER =
     "X-Report-Source-Revision";
-
-class ReportHttpStream {
-public:
-    ReportHttpStream(StorageStreamPort &port,
-                     std::shared_ptr<StorageByteStream> stream,
-                     size_t expected_size) :
-        port_(port), stream_(std::move(stream)), expected_size_(expected_size) {}
-
-    ~ReportHttpStream() {
-        if (stream_) port_.finish(*stream_, complete_);
-    }
-
-    size_t fill(uint8_t *buffer, size_t max_length, size_t offset) {
-        if (!stream_ || !buffer || max_length == 0 ||
-            offset > expected_size_) {
-            return 0;
-        }
-
-        if (!attached_) {
-            StorageStreamStatus status;
-            if (!port_.status(*stream_, status)) return RESPONSE_TRY_AGAIN;
-            if (status.state == StorageStreamState::Preparing) {
-                return RESPONSE_TRY_AGAIN;
-            }
-            if (status.state != StorageStreamState::Ready ||
-                status.size != expected_size_) {
-                return 0;
-            }
-            if (!port_.attach(*stream_)) return RESPONSE_TRY_AGAIN;
-            attached_ = true;
-        }
-
-        const StorageStreamRead read = port_.read(
-            *stream_, buffer, max_length, offset);
-        if (read.state == StorageStreamReadState::Retry) {
-            return RESPONSE_TRY_AGAIN;
-        }
-        if (read.state != StorageStreamReadState::Data || read.bytes == 0 ||
-            read.bytes > expected_size_ - offset) {
-            return 0;
-        }
-
-        complete_ = offset + read.bytes == expected_size_;
-        return read.bytes;
-    }
-
-private:
-    StorageStreamPort &port_;
-    std::shared_ptr<StorageByteStream> stream_;
-    size_t expected_size_ = 0;
-    bool attached_ = false;
-    bool complete_ = false;
-};
 
 void send_json_error(AsyncWebServerRequest *request,
                      int status,
@@ -270,70 +221,6 @@ void send_not_modified(AsyncWebServerRequest *request,
     request->send(response);
 }
 
-bool send_artifact_stream(AsyncWebServerRequest *request,
-                          StorageStreamPort &port,
-                          const ReportArtifactDescriptor &artifact,
-                          const char *content_type) {
-    if (!artifact.valid() || artifact.size > SIZE_MAX) {
-        send_json_error(request, 500, "artifact_invalid");
-        return false;
-    }
-
-    char path[AC_STORAGE_PATH_MAX] = {};
-    if (!artifact.path(path, sizeof(path))) {
-        send_json_error(request, 500, "artifact_path_invalid");
-        return false;
-    }
-
-    StorageStreamCommand command;
-    command.path = path;
-    command.lane = StorageStreamLane::Foreground;
-    command.expected_size = artifact.size;
-    command.verification = StorageStreamVerification::Size;
-
-    std::shared_ptr<StorageByteStream> byte_stream;
-    char stream_error[AC_STORAGE_ERROR_MAX] = {};
-    if (!port.request_stream(command,
-                             byte_stream,
-                             stream_error,
-                             sizeof(stream_error))) {
-        send_json_error(request,
-                        503,
-                        stream_error[0] ? stream_error
-                                        : "artifact_stream_unavailable");
-        return false;
-    }
-
-    std::shared_ptr<ReportHttpStream> stream(
-        new (std::nothrow) ReportHttpStream(
-            port, byte_stream, static_cast<size_t>(artifact.size)));
-    if (!stream) {
-        port.finish(*byte_stream, false);
-        send_json_error(request, 503, "response_alloc");
-        return false;
-    }
-
-    AsyncWebServerResponse *response = new (std::nothrow)
-        AsyncPreparedResponse(
-            content_type,
-            static_cast<size_t>(artifact.size),
-            [stream](uint8_t *buffer,
-                     size_t max_length,
-                     size_t offset) -> size_t {
-                return stream->fill(buffer, max_length, offset);
-            });
-    if (!response) {
-        send_json_error(request, 503, "response_alloc");
-        return false;
-    }
-
-    char etag[REPORT_HTTP_ETAG_BYTES] = {};
-    (void)format_artifact_etag(artifact, etag, sizeof(etag));
-    add_artifact_headers(response, etag, artifact.key.source_revision);
-    request->send(response);
-    return true;
-}
-
 bool send_artifact_payload(
     AsyncWebServerRequest *request,
     const ReportArtifactDescriptor &artifact,
@@ -461,6 +348,23 @@ uint32_t night_duration_minutes(const NightCatalog &catalog,
 
 }  // namespace
 
+struct ReportHttpController::PendingResponses {
+    struct Entry {
+        ReportArtifactDescriptor artifact;
+        AsyncWebServerRequestPtr request;
+        uint32_t deadline_ms = 0;
+
+        bool used() const { return artifact.valid(); }
+    };
+
+    StaticSemaphore_t mutex_storage = {};
+    SemaphoreHandle_t mutex = nullptr;
+    Entry entries[REPORT_HTTP_PENDING_CAPACITY] = {};
+};
+
+ReportHttpController::ReportHttpController() = default;
+ReportHttpController::~ReportHttpController() = default;
+
 void ReportHttpController::register_routes(AsyncWebServer &server) {
     server.on(AsyncURIMatcher::exact("/api/report/summary"), HTTP_GET,
               [this](AsyncWebServerRequest *request) {
@@ -478,10 +382,118 @@ void ReportHttpController::register_routes(AsyncWebServer &server) {
     });
 }
 
-void ReportHttpController::begin(ReportTask &report_task,
-                                 StorageStreamPort &stream_port) {
+void ReportHttpController::begin(ReportTask &report_task) {
     report_task_ = &report_task;
-    stream_port_ = &stream_port;
+
+    if (!pending_) {
+        pending_.reset(new (std::nothrow) PendingResponses());
+    }
+    if (pending_ && !pending_->mutex) {
+        pending_->mutex =
+            xSemaphoreCreateMutexStatic(&pending_->mutex_storage);
+    }
+}
+
+void ReportHttpController::poll() {
+    if (!report_task_ || !pending_ || !pending_->mutex ||
+        xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
+        return;
+    }
+
+    const uint32_t now_ms = millis();
+    for (PendingResponses::Entry &entry : pending_->entries) {
+        if (!entry.used()) continue;
+
+        if (entry.request.expired()) {
+            entry = {};
+            continue;
+        }
+
+        std::shared_ptr<const LargeByteBuffer> payload =
+            report_task_->artifact_payload_if_present(entry.artifact);
+        ReportArtifactFailureStatus failure;
+        const bool failed = !payload && report_task_->try_artifact_failure(
+            entry.artifact.key, failure);
+        const bool timed_out =
+            millis_deadline_reached(now_ms, entry.deadline_ms);
+        if (!payload && !failed && !timed_out) continue;
+
+        const ReportArtifactDescriptor artifact = entry.artifact;
+        const AsyncWebServerRequestPtr pending_request = entry.request;
+        entry = {};
+        xSemaphoreGive(pending_->mutex);
+
+        std::shared_ptr<AsyncWebServerRequest> request =
+            pending_request.lock();
+        if (!request) return;
+
+        if (failed) {
+            send_artifact_failure(request.get(), failure);
+            return;
+        }
+        if (!payload) {
+            send_json_error(request.get(), 503, "artifact_payload_timeout");
+            return;
+        }
+        if (!send_artifact_payload(request.get(),
+                                   artifact,
+                                   std::move(payload),
+                                   "application/octet-stream")) {
+            send_json_error(request.get(), 503, "response_alloc");
+        }
+        return;
+    }
+
+    xSemaphoreGive(pending_->mutex);
+}
+
+void ReportHttpController::queue_artifact_response(
+    AsyncWebServerRequest *request,
+    const ReportArtifactDescriptor &artifact) {
+    if (!request || !report_task_ || !pending_ || !pending_->mutex) {
+        send_json_error(request, 503, "report_unavailable");
+        return;
+    }
+
+    ReportArtifactFailureStatus failure;
+    if (report_task_->artifact_failure(artifact.key, failure)) {
+        send_artifact_failure(request, failure);
+        return;
+    }
+
+    const OperationAdmission admitted = report_task_->request_payload_cache(
+        artifact.key, next_generation());
+    if (admitted != OperationAdmission::Accepted) {
+        if (admitted == OperationAdmission::Busy) {
+            send_preparing(request);
+        } else {
+            send_json_error(request, 503, "artifact_payload_unavailable");
+        }
+        return;
+    }
+
+    if (xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
+        send_json_error(request, 503, "report_response_busy");
+        return;
+    }
+
+    PendingResponses::Entry *free_entry = nullptr;
+    for (PendingResponses::Entry &entry : pending_->entries) {
+        if (!entry.used()) {
+            free_entry = &entry;
+            break;
+        }
+    }
+    if (!free_entry) {
+        xSemaphoreGive(pending_->mutex);
+        send_json_error(request, 503, "report_response_busy");
+        return;
+    }
+
+    free_entry->artifact = artifact;
+    free_entry->request = request->pause();
+    free_entry->deadline_ms = millis() + REPORT_HTTP_PENDING_TIMEOUT_MS;
+    xSemaphoreGive(pending_->mutex);
 }
 
 void ReportHttpController::send_summary(
@@ -596,8 +608,8 @@ void ReportHttpController::send_summary(
 }
 
 void ReportHttpController::send_result(
-    AsyncWebServerRequest *request) const {
-    if (!report_task_ || !stream_port_) {
+    AsyncWebServerRequest *request) {
+    if (!report_task_) {
         send_json_error(request, 503, "report_unavailable");
         return;
     }
@@ -665,15 +677,12 @@ void ReportHttpController::send_result(
         return;
     }
 
-    if (send_artifact_stream(
-            request, *stream_port_, artifact, "application/octet-stream")) {
-        (void)report_task_->request_payload_cache(key, next_generation());
-    }
+    queue_artifact_response(request, artifact);
 }
 
 void ReportHttpController::send_plot(
-    AsyncWebServerRequest *request) const {
-    if (!report_task_ || !stream_port_) {
+    AsyncWebServerRequest *request) {
+    if (!report_task_) {
         send_json_error(request, 503, "report_unavailable");
         return;
     }
@@ -760,10 +769,7 @@ void ReportHttpController::send_plot(
         return;
     }
 
-    if (send_artifact_stream(
-            request, *stream_port_, artifact, "application/octet-stream")) {
-        (void)report_task_->request_payload_cache(key, next_generation());
-    }
+    queue_artifact_response(request, artifact);
 }
 
 uint32_t ReportHttpController::next_generation() const {

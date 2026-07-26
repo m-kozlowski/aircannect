@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <stdint.h>
 
 #include "http_route_module.h"
@@ -11,24 +12,33 @@ class AsyncWebServerRequest;
 namespace aircannect {
 
 class ReportTask;
-class StorageStreamPort;
+struct ReportArtifactDescriptor;
 
 // Presents immutable report snapshots and artifacts over HTTP. Report policy
-// stays in ReportTask; this class only validates requests and streams bytes.
+// stays in ReportTask; this class validates requests and serves ready bytes.
 class ReportHttpController final : public HttpRouteModule {
 public:
-    void begin(ReportTask &report_task, StorageStreamPort &stream_port);
+    ReportHttpController();
+    ~ReportHttpController();
+
+    void begin(ReportTask &report_task);
+    void poll();
     void register_routes(AsyncWebServer &server) override;
 
     void send_summary(AsyncWebServerRequest *request) const;
-    void send_result(AsyncWebServerRequest *request) const;
-    void send_plot(AsyncWebServerRequest *request) const;
+    void send_result(AsyncWebServerRequest *request);
+    void send_plot(AsyncWebServerRequest *request);
 
 private:
+    void queue_artifact_response(
+        AsyncWebServerRequest *request,
+        const ReportArtifactDescriptor &artifact);
     uint32_t next_generation() const;
 
+    struct PendingResponses;
+
     ReportTask *report_task_ = nullptr;
-    StorageStreamPort *stream_port_ = nullptr;
+    std::unique_ptr<PendingResponses> pending_;
     mutable std::atomic<uint32_t> next_generation_{1};
 };
 

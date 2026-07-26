@@ -24,6 +24,7 @@ struct ReportArtifactPayloadLoadStatus {
     ReportArtifactPayloadLoadState state =
         ReportArtifactPayloadLoadState::Idle;
     ReportArtifactDescriptor artifact;
+    StorageReadLane lane = StorageReadLane::Maintenance;
     size_t bytes_loaded = 0;
     char error[AC_STORAGE_ERROR_MAX] = {};
 

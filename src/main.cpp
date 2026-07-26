@@ -888,7 +888,7 @@ void setup() {
         Log::logf(CAT_REPORT, LOG_ERROR,
                   "report task failed to start\n");
     }
-    report_http_controller.begin(report_task, StorageService::stream_port());
+    report_http_controller.begin(report_task);
 
     if (!resmed_ota_manager.begin(rpc_transport, as11_device_service,
                                   StorageService::stream_port(),
@@ -1159,6 +1159,9 @@ void loop() {
     // Web, TCP, and console frontends
     refresh_status_http_snapshot(now_ms);
     drain_can_rx_after("status_http");
+
+    report_http_controller.poll();
+    drain_can_rx_after("report_http");
 
     storage_http_controller.poll();
     drain_can_rx_after("storage_http");

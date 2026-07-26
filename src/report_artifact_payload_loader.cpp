@@ -47,6 +47,7 @@ OperationAdmission ReportArtifactPayloadLoader::start(
     lane_ = lane;
     crc_state_ = crc32_ieee_initial_state();
     status_.artifact = artifact;
+    status_.lane = lane;
     status_.state = ReportArtifactPayloadLoadState::Submitting;
     return OperationAdmission::Accepted;
 }

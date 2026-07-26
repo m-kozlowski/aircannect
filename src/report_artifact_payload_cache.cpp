@@ -96,6 +96,17 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactPayloadCache::find(
     return entries_[index].bytes;
 }
 
+std::shared_ptr<const LargeByteBuffer>
+ReportArtifactPayloadCache::find_if_present(
+    const ReportArtifactDescriptor &artifact) {
+    const size_t index = find_exact(artifact);
+    if (index == SIZE_MAX) return {};
+
+    entries_[index].last_used = next_use();
+    hits_++;
+    return entries_[index].bytes;
+}
+
 bool ReportArtifactPayloadCache::insert(
     const ReportArtifactDescriptor &artifact,
     std::shared_ptr<const LargeByteBuffer> bytes) {
