@@ -92,6 +92,7 @@ struct StorageSyncStatus
 struct StorageSyncRuntimeStatus {
     StorageSyncState state = StorageSyncState::Disabled;
     bool pending = false;
+    bool durable_state_pending = false;
     bool enabled = false;
     bool configured = false;
     bool network_available = false;
@@ -101,7 +102,7 @@ struct StorageSyncRuntimeStatus {
     uint64_t last_reconcile_epoch = 0;
 
     bool active() const {
-        return state == StorageSyncState::Working ||
+        return durable_state_pending || state == StorageSyncState::Working ||
                ((state == StorageSyncState::Pending || pending) &&
                 network_available);
     }
@@ -315,6 +316,7 @@ private:
     std::atomic<uint8_t> runtime_state_{
         static_cast<uint8_t>(StorageSyncState::Disabled)};
     std::atomic<bool> runtime_pending_{false};
+    std::atomic<bool> runtime_durable_state_pending_{false};
     std::atomic<bool> runtime_enabled_{false};
     std::atomic<bool> runtime_configured_{false};
     std::atomic<bool> runtime_scheduled_reconcile_{false};

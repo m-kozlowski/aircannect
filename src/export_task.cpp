@@ -338,6 +338,7 @@ bool ExportTask::apply_command(const Command &command) {
     const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
     const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
     if (smb.state == StorageSyncState::Working || smb.pending ||
+        smb.durable_state_pending ||
         sleephq.state == SleepHqSyncState::Working || sleephq.pending) {
         return false;
     }
@@ -430,6 +431,7 @@ ExportStep ExportTask::step_endpoint() {
     const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
     const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
 
+    if (smb.durable_state_pending) return runtime_->smb.step();
     if (smb.state == StorageSyncState::Working) return runtime_->smb.step();
     if (sleephq.state == SleepHqSyncState::Working) {
         return runtime_->sleephq.step();
@@ -454,7 +456,8 @@ void ExportTask::publish_work_claim() {
 
     const StorageSyncRuntimeStatus smb = runtime_->smb.runtime_status();
     const SleepHqSyncRuntimeStatus sleephq = runtime_->sleephq.runtime_status();
-    const bool active = smb.state == StorageSyncState::Working ||
+    const bool active = smb.durable_state_pending ||
+                        smb.state == StorageSyncState::Working ||
                         sleephq.state == SleepHqSyncState::Working;
     const bool pending = smb.pending ||
                          smb.state == StorageSyncState::Pending ||
@@ -510,7 +513,8 @@ void ExportTask::publish_status() {
     control.smb = runtime_->smb.runtime_status();
     sleephq.sync = runtime_->sleephq.status();
     control.sleephq = runtime_->sleephq.runtime_status();
-    control.active = control.smb.state == StorageSyncState::Working ||
+    control.active = control.smb.durable_state_pending ||
+                     control.smb.state == StorageSyncState::Working ||
                      control.sleephq.state == SleepHqSyncState::Working;
     control.busy = control.active || control.smb.pending ||
                    control.sleephq.pending || control.command_pending;
@@ -599,7 +603,8 @@ void ExportTask::run() {
         const SleepHqSyncRuntimeStatus sleephq =
             runtime_->sleephq.runtime_status();
 
-        const bool busy = smb.state == StorageSyncState::Working ||
+        const bool busy = smb.durable_state_pending ||
+                          smb.state == StorageSyncState::Working ||
                           smb.pending ||
                           sleephq.state == SleepHqSyncState::Working ||
                           sleephq.pending ||

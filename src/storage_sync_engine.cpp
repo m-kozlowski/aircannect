@@ -96,6 +96,7 @@ void StorageSyncEngine::unlock() const {
 void StorageSyncEngine::publish_runtime_locked() {
     runtime_state_.store(static_cast<uint8_t>(status_.state));
     runtime_pending_.store(status_.pending);
+    runtime_durable_state_pending_.store(metadata_save_pending_);
     runtime_enabled_.store(status_.enabled);
     runtime_configured_.store(status_.configured);
     const RunKind visible_kind = status_.state == StorageSyncState::Working
@@ -402,6 +403,7 @@ bool StorageSyncEngine::service_result_metadata_save_locked(ExportStep &result) 
         pending_metadata_path_[0] = '\0';
         pending_metadata_bytes_.reset();
         metadata_save_pending_ = false;
+        publish_runtime_locked();
         return true;
     }
     if (io_result == StorageFileClientResult::Error) {
@@ -415,6 +417,7 @@ bool StorageSyncEngine::service_result_metadata_save_locked(ExportStep &result) 
         pending_metadata_path_[0] = '\0';
         pending_metadata_bytes_.reset();
         metadata_save_pending_ = false;
+        publish_runtime_locked();
         return true;
     }
 
@@ -434,6 +437,7 @@ bool StorageSyncEngine::service_result_metadata_save_locked(ExportStep &result) 
         pending_metadata_path_[0] = '\0';
         pending_metadata_bytes_.reset();
         metadata_save_pending_ = false;
+        publish_runtime_locked();
         return true;
     }
 
@@ -2259,6 +2263,7 @@ StorageSyncRuntimeStatus StorageSyncEngine::runtime_status() const {
     StorageSyncRuntimeStatus out;
     out.state = static_cast<StorageSyncState>(runtime_state_.load());
     out.pending = runtime_pending_.load();
+    out.durable_state_pending = runtime_durable_state_pending_.load();
     out.enabled = runtime_enabled_.load();
     out.configured = runtime_configured_.load();
     out.network_available = network_available_.load();
