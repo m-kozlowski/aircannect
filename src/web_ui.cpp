@@ -201,6 +201,7 @@ void WebUI::stop() {
     console_log_length_ = 0;
     console_log_write_pos_ = 0;
     console_sse_pos_ = 0;
+    last_console_sse_ms_ = 0;
     console_sse_reset_pending_ = false;
     snapshots_ready_ = false;
     snapshots_dirty_mask_ = SNAPSHOT_ALL;
@@ -239,37 +240,49 @@ void WebUI::poll(PollCheckpoint checkpoint) {
     if (checkpoint) checkpoint("web_ui.snapshots");
 
     if (!events_ || events_->count() == 0) return;
-    const bool push_requested = sse_push_requested_;
-    if (!push_requested &&
-        static_cast<int32_t>(millis() - last_sse_push_ms_) <
-        static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS)) {
+
+    const uint32_t now_ms = millis();
+    const bool status_push_due =
+        sse_push_requested_ ||
+        static_cast<int32_t>(now_ms - last_sse_push_ms_) >=
+            static_cast<int32_t>(AC_WEB_SSE_PUSH_INTERVAL_MS);
+    const bool console_push_due =
+        console_sse_seq_ != console_seq_ &&
+        static_cast<int32_t>(now_ms - last_console_sse_ms_) >=
+            static_cast<int32_t>(AC_WEB_CONSOLE_PUSH_INTERVAL_MS);
+    if (!status_push_due && !console_push_due) {
         if (checkpoint) checkpoint("web_ui.sse_idle");
         return;
     }
     if (!cache_mutex_ || xSemaphoreTake(cache_mutex_, 0) != pdTRUE) {
-        sse_push_requested_ = push_requested;
         if (checkpoint) checkpoint("web_ui.sse_lock");
         return;
     }
-    last_sse_push_ms_ = millis();
-    sse_push_requested_ = false;
-    const uint32_t event_id = millis();
+
+    const uint32_t event_id = now_ms;
     bool sse_backpressure = false;
-    if (send_sse_to_clients(cached_status_json_.c_str(), "status", event_id,
-                            true) == SseSendResult::Failed) {
-        sse_backpressure = true;
+
+    if (status_push_due) {
+        last_sse_push_ms_ = now_ms;
+        sse_push_requested_ = false;
+
+        if (send_sse_to_clients(cached_status_json_.c_str(), "status",
+                                event_id, true) == SseSendResult::Failed) {
+            sse_backpressure = true;
+        }
+
+        const char *stream_payload = nullptr;
+        size_t stream_length = 0;
+        if (live_ && live_->stream_payload(stream_payload, stream_length) &&
+            stream_length &&
+            send_sse_to_clients(stream_payload, "stream", event_id, false) ==
+                SseSendResult::Failed) {
+            sse_backpressure = true;
+        }
     }
-    const char *stream_payload = nullptr;
-    size_t stream_length = 0;
-    if (live_ && live_->stream_payload(stream_payload, stream_length) &&
-        stream_length &&
-        send_sse_to_clients(stream_payload, "stream", event_id, false) ==
-            SseSendResult::Failed) {
-        sse_backpressure = true;
-    }
-    if (console_sse_seq_ != console_seq_) {
-        // Console output can be chatty during RPC activity, so it shares the
-        // same throttled SSE cadence as status/stream updates.
+
+    if (console_push_due) {
+        last_console_sse_ms_ = now_ms;
         const uint64_t begin = console_log_begin_pos();
         const uint64_t end = console_log_write_pos_;
         const bool reset = console_sse_reset_pending_ ||

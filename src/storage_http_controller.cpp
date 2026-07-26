@@ -110,49 +110,16 @@ struct StorageDownloadRef {
     }
 };
 
-struct PendingPreparedReadRef {
+struct PreparedReadRef {
     StorageReadPort *port = nullptr;
-    OperationTicket ticket;
     StoragePreparedRead prepared;
-    bool failed = false;
 
-    ~PendingPreparedReadRef() {
-        if (port && ticket.valid()) (void)port->abandon(ticket);
+    ~PreparedReadRef() {
         if (port && prepared.valid()) port->release_prepared(prepared);
     }
 
     size_t fill(uint8_t *buffer, size_t capacity, size_t offset) {
         if (!port || !buffer || capacity == 0) return 0;
-
-        if (ticket.valid()) {
-            StorageReadCompletion completion;
-            if (!port->take_completion(ticket, completion)) {
-                return RESPONSE_TRY_AGAIN;
-            }
-
-            ticket = {};
-            if (completion.outcome.disposition !=
-                    OperationDisposition::Succeeded ||
-                !completion.prepared.valid()) {
-                if (completion.prepared.valid()) {
-                    port->release_prepared(completion.prepared);
-                }
-                failed = true;
-            } else {
-                prepared = completion.prepared;
-            }
-        }
-
-        if (failed) {
-            static constexpr char MESSAGE[] = "file log unavailable\n";
-            const size_t length = sizeof(MESSAGE) - 1;
-            if (offset >= length) return 0;
-
-            const size_t count = std::min(capacity, length - offset);
-            memcpy(buffer, MESSAGE + offset, count);
-            return count;
-        }
-
         if (!prepared.valid() || offset >= prepared.length) return 0;
 
         const PreparedByteRead read =
@@ -267,6 +234,19 @@ private:
 
 }  // namespace
 
+struct StorageHttpController::PendingFileLogTail {
+    StorageReadPort *port = nullptr;
+    OperationTicket ticket;
+    AsyncWebServerRequestPtr request;
+
+    ~PendingFileLogTail() {
+        if (port && ticket.valid()) (void)port->abandon(ticket);
+    }
+};
+
+StorageHttpController::StorageHttpController() = default;
+StorageHttpController::~StorageHttpController() = default;
+
 bool StorageHttpController::begin(StorageReadPort &read_port,
                                   StorageBrowserPort &browser_port,
                                   StorageArchivePort &archive_port,
@@ -287,6 +267,80 @@ bool StorageHttpController::begin(StorageReadPort &read_port,
 void StorageHttpController::publish_activity(const ActivitySnapshot &activity) {
     therapy_active_.store(activity.therapy_active,
                           std::memory_order_relaxed);
+}
+
+void StorageHttpController::poll() {
+    if (!job_mutex_ ||
+        xSemaphoreTake(job_mutex_, 0) != pdTRUE) {
+        return;
+    }
+
+    if (!pending_file_log_tail_) {
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    if (pending_file_log_tail_->request.expired()) {
+        std::unique_ptr<PendingFileLogTail> abandoned =
+            std::move(pending_file_log_tail_);
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    StorageReadCompletion completion;
+    if (!storage_read_->take_completion(
+            pending_file_log_tail_->ticket, completion)) {
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    pending_file_log_tail_->ticket = {};
+    const AsyncWebServerRequestPtr pending_request =
+        pending_file_log_tail_->request;
+    pending_file_log_tail_.reset();
+    xSemaphoreGive(job_mutex_);
+
+    std::shared_ptr<AsyncWebServerRequest> request = pending_request.lock();
+    if (!request) {
+        if (completion.prepared.valid()) {
+            storage_read_->release_prepared(completion.prepared);
+        }
+        return;
+    }
+
+    if (completion.outcome.disposition !=
+            OperationDisposition::Succeeded ||
+        !completion.prepared.valid()) {
+        if (completion.prepared.valid()) {
+            storage_read_->release_prepared(completion.prepared);
+        }
+        request->send(503, "text/plain", "file log unavailable\n");
+        return;
+    }
+
+    std::shared_ptr<PreparedReadRef> ref =
+        std::make_shared<PreparedReadRef>();
+    if (!ref) {
+        storage_read_->release_prepared(completion.prepared);
+        request->send(503, "text/plain", "response alloc\n");
+        return;
+    }
+    ref->port = storage_read_;
+    ref->prepared = completion.prepared;
+
+    AsyncWebServerResponse *response = new (std::nothrow) AsyncPreparedResponse(
+        "text/plain",
+        completion.prepared.length,
+        [ref](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
+            return ref->fill(buffer, capacity, offset);
+        });
+    if (!response) {
+        request->send(503, "text/plain", "response alloc\n");
+        return;
+    }
+
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
 }
 
 void StorageHttpController::register_routes(AsyncWebServer &server) {
@@ -618,11 +672,18 @@ void StorageHttpController::send_storage_download(AsyncWebServerRequest *request
 }
 
 void StorageHttpController::send_file_log_tail(AsyncWebServerRequest *request,
-                                                  size_t lines) const {
+                                                size_t lines) {
     if (!request || !storage_read_ || !Log::filelog_enabled()) {
         if (request) {
             request->send(404, "text/plain", "file log unavailable\n");
         }
+        return;
+    }
+
+    StorageJobGate gate(request, job_mutex_);
+    if (!gate.locked()) return;
+    if (pending_file_log_tail_) {
+        request->send(409, "text/plain", "file log busy\n");
         return;
     }
 
@@ -641,29 +702,18 @@ void StorageHttpController::send_file_log_tail(AsyncWebServerRequest *request,
         return;
     }
 
-    std::shared_ptr<PendingPreparedReadRef> ref =
-        std::make_shared<PendingPreparedReadRef>();
-    if (!ref) {
+    std::unique_ptr<PendingFileLogTail> pending(
+        new (std::nothrow) PendingFileLogTail());
+    if (!pending) {
         (void)storage_read_->abandon(submission.ticket);
         request->send(503, "text/plain", "response alloc\n");
         return;
     }
-    ref->port = storage_read_;
-    ref->ticket = submission.ticket;
 
-    AsyncWebServerResponse *response =
-        new (std::nothrow) AsyncPreparedChunkedResponse(
-            "text/plain",
-            [ref](uint8_t *buffer, size_t capacity, size_t offset) -> size_t {
-                return ref->fill(buffer, capacity, offset);
-            });
-    if (!response) {
-        request->send(503, "text/plain", "response alloc\n");
-        return;
-    }
-
-    response->addHeader("Cache-Control", "no-store");
-    request->send(response);
+    pending->port = storage_read_;
+    pending->ticket = submission.ticket;
+    pending->request = request->pause();
+    pending_file_log_tail_ = std::move(pending);
 }
 
 void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *request) const {

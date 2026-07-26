@@ -101,6 +101,7 @@ static constexpr size_t AC_WEB_MAX_POST_BODY = 4096;
 static constexpr size_t AC_WEB_COMMAND_QUEUE_DEPTH = 12;
 static constexpr size_t AC_WEB_COMMANDS_PER_POLL = 4;
 static constexpr uint32_t AC_WEB_SSE_PUSH_INTERVAL_MS = 3000;
+static constexpr uint32_t AC_WEB_CONSOLE_PUSH_INTERVAL_MS = 100;
 static constexpr uint32_t AC_WEB_LIVE_PUSH_INTERVAL_MS = 250;
 static constexpr size_t AC_WEB_SSE_CLIENTS_MAX = 3;
 static constexpr size_t AC_WEB_SSE_CLIENT_PENDING_MAX = 3;

@@ -123,6 +123,13 @@ struct ReadJob {
     size_t target_length = 0;
     size_t bytes_read = 0;
     size_t tail_lines = 0;
+    bool tail_scan_initialized = false;
+    bool tail_suffix_initialized = false;
+    size_t tail_file_size = 0;
+    size_t tail_window_start = 0;
+    size_t tail_scan_position = 0;
+    size_t tail_suffix_lines = 0;
+    size_t tail_first_newline = SIZE_MAX;
     bool file_log_fence_captured = false;
     bool file_log_snapshot_active = false;
     uint32_t file_log_fence_sequence = 0;
@@ -697,7 +704,7 @@ bool abandon_prepared_read(OperationTicket ticket) {
 
 bool take_read_completion(OperationTicket ticket,
                           StorageReadCompletion &completion) {
-    if (!ticket.valid() || !lock_queue()) return false;
+    if (!ticket.valid() || !lock_queue(0)) return false;
 
     ReadCompletionSlot *slot = find_read_completion_locked(ticket);
     if (!slot) {
@@ -1791,15 +1798,33 @@ bool open_read_job(size_t index, const char *&error) {
         active_read_index = index;
     }
 
-    if (!job.started) {
+    if (!job.started && !job.tail_scan_initialized) {
         size_t file_size = 0;
         {
             file_size = active_read_file.size();
         }
 
         if (job.mode == StorageReadMode::TailLines) {
-            job.target_length = std::min(job.requested_length, file_size);
-            job.offset = file_size - job.target_length;
+            const size_t window_length =
+                std::min(job.requested_length, file_size);
+            job.tail_file_size = file_size;
+            job.tail_window_start = file_size - window_length;
+            job.tail_scan_position = file_size;
+            job.tail_scan_initialized = true;
+
+            if (window_length == 0) {
+                job.offset = file_size;
+                job.started = true;
+            } else {
+                const size_t scratch_length =
+                    std::min(window_length, AC_STORAGE_READ_STEP_BYTES);
+                job.bytes = static_cast<uint8_t *>(
+                    Memory::alloc_large(scratch_length, false));
+                if (!job.bytes) {
+                    error = "read_allocation_failed";
+                    return false;
+                }
+            }
         } else {
             if (job.offset > file_size ||
                 (job.offset == file_size && file_size != 0)) {
@@ -1810,19 +1835,20 @@ bool open_read_job(size_t index, const char *&error) {
             const size_t available =
                 file_size - static_cast<size_t>(job.offset);
             job.target_length = std::min(job.requested_length, available);
-        }
 
-        if (job.target_length > 0) {
-            job.bytes = static_cast<uint8_t *>(
-                Memory::alloc_large(job.target_length, false));
-            if (!job.bytes) {
-                error = "read_allocation_failed";
-                return false;
+            if (job.target_length > 0) {
+                job.bytes = static_cast<uint8_t *>(
+                    Memory::alloc_large(job.target_length, false));
+                if (!job.bytes) {
+                    error = "read_allocation_failed";
+                    return false;
+                }
             }
+            job.started = true;
         }
-        job.started = true;
     }
 
+    if (!job.started) return true;
     if (job.target_length == 0) return true;
 
     const uint64_t position = job.offset + job.bytes_read;
@@ -1834,33 +1860,85 @@ bool open_read_job(size_t index, const char *&error) {
     return true;
 }
 
-void trim_read_to_tail_lines(ReadJob &job) {
-    if (job.mode != StorageReadMode::TailLines || !job.bytes ||
-        job.bytes_read == 0) {
-        return;
+bool prepare_tail_result(ReadJob &job, size_t start, const char *&error) {
+    if (start > job.tail_file_size) {
+        error = "tail_start_invalid";
+        return false;
     }
 
-    size_t suffix_lines = job.bytes[job.bytes_read - 1] == '\n' ? 0 : 1;
-    size_t start = 0;
-    for (size_t i = job.bytes_read; i > 0; --i) {
+    const size_t result_length = job.tail_file_size - start;
+    uint8_t *result = nullptr;
+    if (result_length > 0) {
+        result = static_cast<uint8_t *>(
+            Memory::alloc_large(result_length, false));
+        if (!result) {
+            error = "read_allocation_failed";
+            return false;
+        }
+    }
+
+    Memory::free(job.bytes);
+    job.bytes = result;
+    job.offset = start;
+    job.target_length = result_length;
+    job.bytes_read = 0;
+    job.started = true;
+    return true;
+}
+
+bool scan_tail_step(ReadJob &job, const char *&error) {
+    if (!job.tail_scan_initialized || job.started || !job.bytes ||
+        job.tail_scan_position <= job.tail_window_start) {
+        error = "tail_scan_state_invalid";
+        return false;
+    }
+
+    const size_t available =
+        job.tail_scan_position - job.tail_window_start;
+    const size_t requested =
+        std::min(available, AC_STORAGE_READ_STEP_BYTES);
+    const size_t block_start = job.tail_scan_position - requested;
+
+    if (block_start > UINT32_MAX ||
+        !active_read_file.seek(static_cast<uint32_t>(block_start))) {
+        error = "read_seek_failed";
+        return false;
+    }
+
+    const int read = active_read_file.read(job.bytes, requested);
+    if (read != static_cast<int>(requested)) {
+        error = "read_short_file";
+        return false;
+    }
+
+    if (!job.tail_suffix_initialized) {
+        job.tail_suffix_lines = job.bytes[requested - 1] == '\n' ? 0 : 1;
+        job.tail_suffix_initialized = true;
+    }
+
+    for (size_t i = requested; i > 0; --i) {
         if (job.bytes[i - 1] != '\n') continue;
 
-        if (suffix_lines >= job.tail_lines) {
-            start = i;
-            break;
+        const size_t newline_position = block_start + i - 1;
+        if (newline_position < job.tail_first_newline) {
+            job.tail_first_newline = newline_position;
         }
-        suffix_lines++;
+        if (job.tail_suffix_lines >= job.tail_lines) {
+            return prepare_tail_result(job, newline_position + 1, error);
+        }
+        job.tail_suffix_lines++;
     }
 
-    if (start == 0 && job.offset > 0) {
-        while (start < job.bytes_read && job.bytes[start] != '\n') start++;
-        if (start < job.bytes_read) start++;
-    }
-    if (start == 0) return;
+    job.tail_scan_position = block_start;
+    if (job.tail_scan_position > job.tail_window_start) return true;
 
-    job.bytes_read -= start;
-    memmove(job.bytes, job.bytes + start, job.bytes_read);
-    job.target_length = job.bytes_read;
+    size_t start = job.tail_window_start;
+    if (start > 0) {
+        start = job.tail_first_newline == SIZE_MAX
+                    ? job.tail_file_size
+                    : job.tail_first_newline + 1;
+    }
+    return prepare_tail_result(job, start, error);
 }
 
 bool process_read_step() {
@@ -1913,6 +1991,13 @@ bool process_read_step() {
         return true;
     }
 
+    if (job.mode == StorageReadMode::TailLines && !job.started) {
+        if (!scan_tail_step(job, error)) {
+            finish_read_job(index, OperationOutcome::failed(), error);
+        }
+        return true;
+    }
+
     if (job.target_length == 0) {
         finish_read_job(index, OperationOutcome::succeeded());
         return true;
@@ -1937,7 +2022,6 @@ bool process_read_step() {
     stats.last_activity_ms = millis();
     copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
     if (job.bytes_read == job.target_length) {
-        trim_read_to_tail_lines(job);
         finish_read_job(index, OperationOutcome::succeeded());
     }
     return true;

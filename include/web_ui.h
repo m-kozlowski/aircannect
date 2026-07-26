@@ -147,6 +147,7 @@ private:
     uint32_t console_seq_ = 0;
     uint32_t console_sse_seq_ = 0;
     uint64_t console_sse_pos_ = 0;
+    uint32_t last_console_sse_ms_ = 0;
     bool console_sse_reset_pending_ = false;
     FixedQueue<WebCommand, AC_WEB_COMMAND_QUEUE_DEPTH> command_queue_;
 

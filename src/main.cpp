@@ -1160,6 +1160,9 @@ void loop() {
     refresh_status_http_snapshot(now_ms);
     drain_can_rx_after("status_http");
 
+    storage_http_controller.poll();
+    drain_can_rx_after("storage_http");
+
     web_ui.poll(drain_can_rx_after);
     drain_can_rx_after("web_ui");
 
