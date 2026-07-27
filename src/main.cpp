@@ -1053,10 +1053,13 @@ void loop() {
 
     // Session and EDF capture
     session_manager.poll(as11_device_service.state(), now_ms);
+    drain_can_rx_after("session");
+
     edf_recorder_manager.poll(now_ms);
+    drain_can_rx_after("edf");
 
     poll_report_catalog_refresh(now_ms);
-    drain_can_rx_after("session_edf");
+    drain_can_rx_after("report_catalog");
 
     // Live sinks and oximetry
     sink_manager.poll();

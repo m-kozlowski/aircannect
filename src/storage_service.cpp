@@ -1333,7 +1333,32 @@ bool write_recording_start(OpenFile &state) {
     return true;
 }
 
-bool process_open(const JobSlot &job) {
+bool render_numeric_open_header(JobSlot &job) {
+    if (is_annotation_kind(job.kind) || !job.bytes) return false;
+
+    EdfHeaderInfo info;
+    info.patient_id = job.patient_id;
+    info.recording_id = job.recording_id;
+    info.start_date = job.start_date;
+    info.start_time = job.start_time;
+    info.record_count = job.record_count;
+
+    size_t written = 0;
+    const size_t expected = edf_header_size(job.numeric_schema);
+    if (!edf_render_header(job.numeric_schema,
+                           info,
+                           job.bytes,
+                           AC_EDF_STORAGE_SLOT_BYTES,
+                           written) ||
+        written != expected) {
+        return false;
+    }
+
+    job.len = written;
+    return true;
+}
+
+bool process_open(JobSlot &job) {
     auto fail = [&](const char *error) {
         set_error(error);
         mark_open_result(job, false, nullptr, error);
@@ -1346,6 +1371,11 @@ bool process_open(const JobSlot &job) {
     if (!Storage::mounted()) {
         stats.unavailable_drops++;
         return fail("storage_not_mounted");
+    }
+    if (!is_annotation_kind(job.kind) &&
+        !render_numeric_open_header(job)) {
+        stats.render_errors++;
+        return fail("header_render_failed");
     }
 
     if (!ensure_parent_dirs(job.path)) {
@@ -2248,10 +2278,8 @@ bool enqueue(JobSlot &job) {
     return true;
 }
 
-template <typename Prepare, typename Render>
-bool enqueue_rendered_slot(Prepare prepare,
-                           Render render,
-                           const char *render_error) {
+template <typename Prepare>
+bool enqueue_prepared_slot(Prepare prepare, const char *prepare_error) {
     if (!stats.initialized) begin();
     if (!stats.available) return false;
     if (!lock_queue()) {
@@ -2276,27 +2304,41 @@ bool enqueue_rendered_slot(Prepare prepare,
 
     JobSlot &job = slots[tail];
     clear_slot(job);
-    prepare(job);
-
-    size_t written = 0;
-    if (!render(job, written)) {
+    if (!prepare(job)) {
         unlock_queue();
         stats.render_errors++;
-        set_error(render_error);
-        log_worker_failure(LOG_WARN, render_error, job.path);
+        set_error(prepare_error);
+        log_worker_failure(LOG_WARN, prepare_error, job.path);
         return false;
     }
 
-    job.len = written;
+    const size_t queued_len = job.len;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
     stats.edf_queued = queued;
     unlock_queue();
 
-    stats.bytes_enqueued += written;
+    stats.bytes_enqueued += queued_len;
     stats.last_activity_ms = millis();
     wake_service_task();
     return true;
+}
+
+template <typename Prepare, typename Render>
+bool enqueue_rendered_slot(Prepare prepare,
+                           Render render,
+                           const char *render_error) {
+    return enqueue_prepared_slot(
+        [&](JobSlot &job) {
+            prepare(job);
+
+            size_t written = 0;
+            if (!render(job, written)) return false;
+
+            job.len = written;
+            return true;
+        },
+        render_error);
 }
 
 }  // namespace
@@ -2380,7 +2422,7 @@ bool enqueue_edf_open_numeric(const char *path,
     const EdfStorageOpenHandle reserved = reserve_open_handle(kind);
     if (!reserved.valid()) return false;
 
-    const bool queued = enqueue_rendered_slot(
+    const bool queued = enqueue_prepared_slot(
         [&](JobSlot &job) {
             job.type = JobType::Open;
             job.kind = kind;
@@ -2396,16 +2438,10 @@ bool enqueue_edf_open_numeric(const char *path,
                       info.start_date);
             copy_cstr(job.start_time, sizeof(job.start_time),
                       info.start_time);
+            job.len = header_size;
+            return copy_numeric_schema(job, schema);
         },
-        [&](JobSlot &job, size_t &written) {
-            return edf_render_header(schema,
-                                     info,
-                                     job.bytes,
-                                     AC_EDF_STORAGE_SLOT_BYTES,
-                                     written) &&
-                   written == header_size;
-        },
-        "header_render_failed");
+        "header_schema_snapshot_failed");
     if (!queued) return false;
     if (handle) *handle = reserved;
     return true;
