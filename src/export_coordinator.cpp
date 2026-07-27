@@ -283,7 +283,7 @@ void ExportCoordinator::maybe_queue_storage_sync(
             if (!post_therapy_.storage_fallback_reported) {
                 Log::logf(
                     CAT_STORAGE, LOG_WARN,
-                    "[SYNC] post-therapy sync fallback after report wait\n");
+                    "[SMB] post-therapy sync fallback after report wait\n");
                 post_therapy_.storage_fallback_reported = true;
             }
             queue_post_therapy_storage_sync(now_ms);
@@ -311,7 +311,7 @@ void ExportCoordinator::maybe_queue_storage_sync(
         if (!post_therapy_.storage_fallback_reported) {
             Log::logf(
                 CAT_STORAGE, LOG_WARN,
-                "[SYNC] post-therapy sync fallback after report wait\n");
+                "[SMB] post-therapy sync fallback after report wait\n");
             post_therapy_.storage_fallback_reported = true;
         }
         queue_post_therapy_storage_sync(now_ms);
