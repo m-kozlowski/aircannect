@@ -30,6 +30,7 @@ constexpr uint32_t CATALOG_STORE_RETRY_MIN_MS = 1000;
 constexpr uint32_t CATALOG_STORE_RETRY_MAX_MS = 30000;
 constexpr uint32_t LEGACY_CACHE_DELETE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MS = 30000;
+constexpr uint32_t ARTIFACT_FAILURE_RETRY_MAX_MS = 15 * 60 * 1000;
 constexpr char LEGACY_CACHE_PARENT[] = "/aircannect/report";
 constexpr const char *LEGACY_CACHE_NAMES[] = {"v3", "v4", "v5"};
 
@@ -79,11 +80,12 @@ bool same_artifact_identity(const ReportArtifactKey &lhs,
            lhs.range_end_ms == rhs.range_end_ms;
 }
 
-uint32_t next_background_retry_delay(uint8_t attempt) {
-    uint32_t delay_ms = CATALOG_STORE_RETRY_MIN_MS;
-    for (uint8_t i = 0; i < attempt && delay_ms < CATALOG_STORE_RETRY_MAX_MS;
-         ++i) {
-        delay_ms = std::min(delay_ms * 2, CATALOG_STORE_RETRY_MAX_MS);
+uint32_t next_background_retry_delay(uint8_t attempt,
+                                     uint32_t minimum_ms,
+                                     uint32_t maximum_ms) {
+    uint32_t delay_ms = minimum_ms;
+    for (uint8_t i = 0; i < attempt && delay_ms < maximum_ms; ++i) {
+        delay_ms = std::min(delay_ms * 2, maximum_ms);
     }
     return delay_ms;
 }
@@ -582,6 +584,15 @@ struct ReportTask::Runtime {
                     night->source_revision ==
                         completion.request.artifact.source_revision) {
                     idle_cursor++;
+                    idle_pass_failed = true;
+                    if (idle_retry_at_ms == 0) {
+                        idle_retry_at_ms = now_ms +
+                            next_background_retry_delay(
+                                idle_retry_attempt,
+                                ARTIFACT_FAILURE_RETRY_MS,
+                                ARTIFACT_FAILURE_RETRY_MAX_MS);
+                        advance_background_retry(idle_retry_attempt);
+                    }
                 }
             }
             unlock();
@@ -691,6 +702,9 @@ struct ReportTask::Runtime {
         }
 
         idle_cursor = 0;
+        idle_retry_at_ms = 0;
+        idle_retry_attempt = 0;
+        idle_pass_failed = false;
         idle_generation = (idle_generation + 1) | 0x80000000u;
 
         if (!lock()) return;
@@ -699,7 +713,20 @@ struct ReportTask::Runtime {
     }
 
     bool schedule_catalog_work(uint32_t now_ms) {
-        if (!catalog || idle_cursor >= catalog->size()) return false;
+        if (!catalog) return false;
+        if (idle_cursor >= catalog->size()) {
+            if (!idle_pass_failed) {
+                idle_retry_at_ms = 0;
+                idle_retry_attempt = 0;
+                return false;
+            }
+            if (!deadline_due(now_ms, idle_retry_at_ms)) return false;
+
+            idle_cursor = 0;
+            idle_retry_at_ms = 0;
+            idle_pass_failed = false;
+            return true;
+        }
 
         const ReportEngineStatus engine_status = engine.status();
         if (payload_loader.status().active()) return false;
@@ -930,6 +957,9 @@ struct ReportTask::Runtime {
     uint32_t durable_catalog_generation = 0;
     size_t idle_cursor = 0;
     uint32_t idle_generation = 0x80000000u;
+    uint32_t idle_retry_at_ms = 0;
+    uint8_t idle_retry_attempt = 0;
+    bool idle_pass_failed = false;
     uint32_t legacy_cleanup_retry_at_ms = 0;
     bool legacy_cleanup_pending = true;
 
@@ -1384,7 +1414,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
             } else {
                 runtime.catalog_store_retry_at_ms =
                     now_ms + next_background_retry_delay(
-                                 runtime.catalog_store_retry_attempt);
+                                 runtime.catalog_store_retry_attempt,
+                                 CATALOG_STORE_RETRY_MIN_MS,
+                                 CATALOG_STORE_RETRY_MAX_MS);
                 advance_background_retry(
                     runtime.catalog_store_retry_attempt);
             }
@@ -1440,7 +1472,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 }
                 runtime.catalog_refresh_retry_at_ms =
                     now_ms + next_background_retry_delay(
-                                 runtime.catalog_refresh_retry_attempt);
+                                 runtime.catalog_refresh_retry_attempt,
+                                 CATALOG_STORE_RETRY_MIN_MS,
+                                 CATALOG_STORE_RETRY_MAX_MS);
                 advance_background_retry(
                     runtime.catalog_refresh_retry_attempt);
                 runtime.command_failures++;
@@ -1546,7 +1580,9 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
         } else {
             runtime.catalog_refresh_retry_at_ms =
                 now_ms + next_background_retry_delay(
-                             runtime.catalog_refresh_retry_attempt);
+                             runtime.catalog_refresh_retry_attempt,
+                             CATALOG_STORE_RETRY_MIN_MS,
+                             CATALOG_STORE_RETRY_MAX_MS);
             advance_background_retry(
                 runtime.catalog_refresh_retry_attempt);
             if (admitted == OperationAdmission::Rejected) {
