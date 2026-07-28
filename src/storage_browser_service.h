@@ -55,6 +55,7 @@ private:
     StorageDirectoryListing *listing_ = nullptr;
     StorageDownloadProducer *download_ = nullptr;
     WakeCallback wake_ = nullptr;
+    size_t step_turn_ = 0;
     bool task_available_ = false;
 };
 

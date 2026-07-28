@@ -23,6 +23,14 @@ namespace {
 static constexpr uint32_t LISTING_STEP_BUDGET_MS = 3;
 static constexpr size_t LISTING_INITIAL_ENTRY_CAPACITY = 64;
 static constexpr size_t LISTING_INITIAL_NAME_CAPACITY = 4096;
+enum class BrowserOperation : uint8_t {
+    Listing,
+    Download,
+    Count,
+};
+
+static constexpr size_t BROWSER_OPERATION_COUNT =
+    static_cast<size_t>(BrowserOperation::Count);
 
 static constexpr size_t DOWNLOAD_RING_BYTES = 256 * 1024;
 static constexpr size_t DOWNLOAD_READ_BYTES = 16 * 1024;
@@ -545,13 +553,7 @@ StorageBrowserStep StorageDirectoryListing::sort_step_locked() {
 }
 
 StorageBrowserStep StorageDirectoryListing::step_locked() {
-    if (pending_ &&
-        (!build_ ||
-         strcmp(build_->path(), pending_path_) != 0)) {
-        (void)start_pending_locked();
-    } else if (!build_) {
-        (void)start_pending_locked();
-    }
+    if (!build_) (void)start_pending_locked();
     if (!build_) return StorageBrowserStep::Idle;
 
     if (phase_ == Phase::Sorting) {
@@ -909,6 +911,7 @@ StorageBrowserStep StorageDirectoryListing::step() {
     if (!lock(20)) return StorageBrowserStep::Waiting;
 
     const StorageBrowserStep result = step_locked();
+
     unlock();
     return result;
 }
@@ -1098,18 +1101,29 @@ void StorageBrowserService::finish_download(
 StorageBrowserStep StorageBrowserService::step() {
     if (!ready()) return StorageBrowserStep::Idle;
 
-    StorageBrowserStep download_step = StorageBrowserStep::Idle;
-    if (download_->active_or_busy()) download_step = download_->step();
-    if (download_step == StorageBrowserStep::Working) return download_step;
+    StorageBrowserStep overall = StorageBrowserStep::Idle;
+    for (size_t attempt = 0; attempt < BROWSER_OPERATION_COUNT; ++attempt) {
+        const size_t current = step_turn_;
+        step_turn_ = (step_turn_ + 1) % BROWSER_OPERATION_COUNT;
 
-    const StorageBrowserStep listing_step = listing_->step();
-    if (listing_step == StorageBrowserStep::Working) return listing_step;
+        StorageBrowserStep result = StorageBrowserStep::Idle;
+        switch (static_cast<BrowserOperation>(current)) {
+            case BrowserOperation::Listing:
+                result = listing_->step();
+                break;
+            case BrowserOperation::Download:
+                if (download_->active_or_busy()) result = download_->step();
+                break;
+            case BrowserOperation::Count:
+                break;
+        }
 
-    if (download_step == StorageBrowserStep::Waiting ||
-        listing_step == StorageBrowserStep::Waiting) {
-        return StorageBrowserStep::Waiting;
+        if (result == StorageBrowserStep::Working) return result;
+        if (result == StorageBrowserStep::Waiting) {
+            overall = StorageBrowserStep::Waiting;
+        }
     }
-    return StorageBrowserStep::Idle;
+    return overall;
 }
 
 }  // namespace aircannect

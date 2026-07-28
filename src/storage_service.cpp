@@ -257,6 +257,19 @@ static constexpr uint32_t STORAGE_RESOURCE_RETRY_MIN_MS = 1000;
 static constexpr uint32_t STORAGE_RESOURCE_RETRY_MAX_MS = 30000;
 static constexpr uint32_t STORAGE_MOUNT_RETRY_MIN_MS = 5000;
 static constexpr uint32_t STORAGE_MOUNT_RETRY_MAX_MS = 60000;
+
+enum class ForegroundOperation : uint8_t {
+    AtomicWrite,
+    Path,
+    Browser,
+    Read,
+    Stream,
+    Upload,
+    Count,
+};
+
+static constexpr size_t FOREGROUND_OPERATION_COUNT =
+    static_cast<size_t>(ForegroundOperation::Count);
 StorageDiagnosticStatus diagnostic;
 uint8_t *diagnostic_payload = nullptr;
 size_t diagnostic_payload_length = 0;
@@ -2075,24 +2088,34 @@ bool process_stream_step() {
 }
 
 bool process_foreground_step() {
-    if (atomic_write_service.step(StorageAtomicWriteLane::Foreground)) {
-        return true;
-    }
-    if (path_service.step()) return true;
-
-    for (size_t attempt = 0; attempt < 4; ++attempt) {
+    for (size_t attempt = 0; attempt < FOREGROUND_OPERATION_COUNT; ++attempt) {
         const size_t current = foreground_turn;
-        foreground_turn = (foreground_turn + 1) % 4;
+        foreground_turn =
+            (foreground_turn + 1) % FOREGROUND_OPERATION_COUNT;
 
         bool worked = false;
-        if (current == 0) {
-            worked = process_browser_step();
-        } else if (current == 1) {
-            worked = process_read_step();
-        } else if (current == 2) {
-            worked = process_stream_step();
-        } else {
-            worked = upload_service.step();
+        switch (static_cast<ForegroundOperation>(current)) {
+            case ForegroundOperation::AtomicWrite:
+                worked = atomic_write_service.step(
+                    StorageAtomicWriteLane::Foreground);
+                break;
+            case ForegroundOperation::Path:
+                worked = path_service.step();
+                break;
+            case ForegroundOperation::Browser:
+                worked = process_browser_step();
+                break;
+            case ForegroundOperation::Read:
+                worked = process_read_step();
+                break;
+            case ForegroundOperation::Stream:
+                worked = process_stream_step();
+                break;
+            case ForegroundOperation::Upload:
+                worked = upload_service.step();
+                break;
+            case ForegroundOperation::Count:
+                break;
         }
         if (worked) return true;
     }
