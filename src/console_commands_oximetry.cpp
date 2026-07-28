@@ -257,7 +257,7 @@ bool OximetryConsoleCommands::execute(const String &command,
     }
     if (lower == "cpap forget" || lower == "cpap forget-bonds") {
         out.println(peripheral_.forget_bonds()
-                        ? "[OXI] CPAP BLE bonds cleared"
+                        ? "[OXI] CPAP BLE bond removal queued"
                         : "[OXI] CPAP BLE bond clear failed");
         return true;
     }

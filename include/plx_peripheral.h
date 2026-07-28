@@ -1,12 +1,14 @@
 #pragma once
 
 #include <Arduino.h>
+#include <atomic>
 #include <stdint.h>
 
 #include "board.h"
 #include "oximetry_ble_runtime.h"
 #include "oximetry_hub.h"
 #include "oximetry_status.h"
+#include "plx_pairing_policy.h"
 
 #if AC_OXIMETRY_BLE_ENABLED
 #include <NimBLEDevice.h>
@@ -35,6 +37,19 @@ public:
     PlxPeripheralStatus status(uint32_t now_ms) const;
 
 private:
+    // AirSense central identity
+    bool load_central_bond();
+    bool save_central_bond(const char *peer, uint8_t peer_type);
+    bool clear_central_bond();
+    bool central_peer_matches(const char *peer, uint8_t peer_type) const;
+    PlxCentralAdmission callback_central_admission(
+        const char *identity_peer,
+        uint8_t identity_type,
+        const char *current_peer,
+        uint8_t current_type,
+        bool bonded);
+    void update_bond_forget(uint32_t now_ms);
+
     // BLE service lifecycle
     bool ensure_ble();
     void rebuild_advertising_data();
@@ -55,7 +70,7 @@ private:
     friend class PlxBleServerCallbacks;
     friend class PlxBleMeasurementCallbacks;
     void callback_connected(uint16_t connection_handle, const char *peer,
-                            bool bonded);
+                            uint8_t peer_type, bool bonded);
     void callback_disconnected(uint16_t connection_handle, int reason);
     void callback_subscribed(uint16_t connection_handle, bool enabled);
     void callback_error(const char *text);
@@ -68,9 +83,17 @@ private:
     PlxPeripheralStatus status_;
     bool initialized_ = false;
     bool advertising_data_dirty_ = true;
+    std::atomic<bool> pairing_admission_open_{false};
     uint32_t pairing_until_ms_ = 0;
     uint32_t last_notify_ms_ = 0;
     uint32_t no_source_since_ms_ = 0;
+
+    bool central_bond_loaded_ = false;
+    char central_bond_peer_[18] = {};
+    uint8_t central_bond_peer_type_ = 0;
+    bool forget_bond_pending_ = false;
+    uint32_t forget_bond_deadline_ms_ = 0;
+    uint32_t forget_bond_retry_ms_ = 0;
 
 #if AC_OXIMETRY_BLE_ENABLED
     NimBLEServer *server_ = nullptr;
@@ -84,6 +107,7 @@ private:
     uint16_t pending_connection_handle_ = UINT16_MAX;
     bool pending_bonded_ = false;
     char pending_peer_[24] = {};
+    uint8_t pending_peer_type_ = 0;
     bool disconnect_pending_ = false;
     uint16_t pending_disconnect_handle_ = UINT16_MAX;
     int pending_disconnect_reason_ = 0;
