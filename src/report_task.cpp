@@ -1,6 +1,7 @@
 #include "report_task.h"
 
 #include <algorithm>
+#include <atomic>
 #include <new>
 #include <utility>
 
@@ -65,6 +66,11 @@ struct ReportArtifactFailureEntry {
     uint32_t retry_at_ms = 0;
 
     bool valid() const { return artifact.valid() && error[0] != '\0'; }
+};
+
+struct ReportPublishedState {
+    std::shared_ptr<const NightCatalog> catalog;
+    std::shared_ptr<const ReportArtifactIndex> artifact_index;
 };
 
 enum class CatalogStorePurpose : uint8_t {
@@ -308,23 +314,108 @@ struct ReportTask::Runtime {
         return true;
     }
 
-    bool find_availability(const ReportArtifactKey &artifact,
-                           ReportArtifactAvailability &out) {
+#ifndef ARDUINO
+    bool find_availability(
+        const ReportArtifactKey &artifact,
+        ReportArtifactAvailability &out) const {
         out = {};
-        if (!artifact.valid() || !lock(20)) return false;
+        if (!artifact.valid()) return false;
 
-        const NightCatalogRecord *night = published_catalog
-            ? published_catalog->find(artifact.sleep_day)
+        const std::shared_ptr<const ReportPublishedState> published =
+            published_state();
+        if (!published || !published->catalog) return false;
+
+        const NightCatalogRecord *night = published->catalog
+            ? published->catalog->find(artifact.sleep_day)
             : nullptr;
         if (!night || night->source_revision != artifact.source_revision) {
-            unlock();
             return false;
         }
 
-        const bool found = published_artifact_index &&
-            published_artifact_index->availability(artifact, out);
-        unlock();
-        return found;
+        return published->artifact_index &&
+            published->artifact_index->availability(artifact, out);
+    }
+#endif
+
+    ReportArtifactQuery query_artifact(SleepDayId sleep_day,
+                                        ReportArtifactKind kind,
+                                        int64_t range_start_ms,
+                                        int64_t range_end_ms) const {
+        ReportArtifactQuery out;
+        if (!sleep_day.valid()) return out;
+
+        const std::shared_ptr<const ReportPublishedState> published =
+            published_state();
+        if (!published || !published->catalog) {
+            out.state = ReportArtifactQueryState::CatalogPending;
+            return out;
+        }
+
+        const NightCatalogRecord *night =
+            published->catalog->find(sleep_day);
+        if (!night) {
+            out.state = ReportArtifactQueryState::NightMissing;
+            return out;
+        }
+
+        switch (kind) {
+            case ReportArtifactKind::Result:
+                out.artifact = ReportArtifactKey::result(
+                    sleep_day, night->source_revision);
+                break;
+            case ReportArtifactKind::Overview:
+                out.artifact = ReportArtifactKey::overview(
+                    sleep_day, night->source_revision);
+                break;
+            case ReportArtifactKind::RangeTile:
+                out.artifact = ReportArtifactKey::range_tile(
+                    sleep_day,
+                    night->source_revision,
+                    range_start_ms,
+                    range_end_ms);
+                break;
+        }
+
+        if (!out.artifact.valid()) {
+            out.state = ReportArtifactQueryState::InvalidArtifact;
+            return out;
+        }
+
+        ReportArtifactAvailability availability;
+        if (!published->artifact_index ||
+            !published->artifact_index->availability(
+                out.artifact, availability)) {
+            out.state = ReportArtifactQueryState::ArtifactMissing;
+            return out;
+        }
+        if (!availability.descriptor(out.artifact, out.descriptor)) {
+            out.state = ReportArtifactQueryState::ArtifactIndexInvalid;
+            return out;
+        }
+
+        out.state = ReportArtifactQueryState::Ready;
+        return out;
+    }
+
+    std::shared_ptr<const ReportPublishedState> published_state() const {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        return std::atomic_load_explicit(
+            &published, std::memory_order_acquire);
+#pragma GCC diagnostic pop
+    }
+
+    bool publish_state() {
+        std::shared_ptr<const ReportPublishedState> next =
+            std::make_shared<ReportPublishedState>(
+                ReportPublishedState{catalog, artifact_index});
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        std::atomic_store_explicit(
+            &published, std::move(next), std::memory_order_release);
+#pragma GCC diagnostic pop
+        return true;
     }
 
     std::shared_ptr<const LargeByteBuffer> find_payload(
@@ -540,12 +631,10 @@ struct ReportTask::Runtime {
 
     bool publish_artifact_index(
         std::shared_ptr<const ReportArtifactIndex> next) {
-        if (!next || !lock(20)) return false;
+        if (!next) return false;
 
         artifact_index = std::move(next);
-        published_artifact_index = artifact_index;
-        unlock();
-        return true;
+        return publish_state();
     }
 
     bool merge_availability(
@@ -697,8 +786,10 @@ struct ReportTask::Runtime {
         std::shared_ptr<const ReportArtifactIndex> reconciled = artifact_index
             ? ReportArtifactIndexBuilder::reconcile(*artifact_index, *catalog)
             : ReportArtifactIndexBuilder::build(nullptr, 0);
-        if (!publish_artifact_index(std::move(reconciled))) {
+        if (!reconciled) {
             command_failures++;
+        } else {
+            artifact_index = std::move(reconciled);
         }
 
         idle_cursor = 0;
@@ -707,9 +798,7 @@ struct ReportTask::Runtime {
         idle_pass_failed = false;
         idle_generation = (idle_generation + 1) | 0x80000000u;
 
-        if (!lock()) return;
-        published_catalog = catalog;
-        unlock();
+        if (!publish_state()) command_failures++;
     }
 
     bool schedule_catalog_work(uint32_t now_ms) {
@@ -949,10 +1038,9 @@ struct ReportTask::Runtime {
     uint8_t catalog_refresh_retry_attempt = 0;
 
     std::shared_ptr<const NightCatalog> catalog;
-    std::shared_ptr<const NightCatalog> published_catalog;
     std::shared_ptr<const NightCatalog> pending_catalog_save;
     std::shared_ptr<const ReportArtifactIndex> artifact_index;
-    std::shared_ptr<const ReportArtifactIndex> published_artifact_index;
+    std::shared_ptr<const ReportPublishedState> published;
     uint32_t catalog_generation = 0;
     uint32_t durable_catalog_generation = 0;
     size_t idle_cursor = 0;
@@ -1228,12 +1316,25 @@ ReportTaskStatus ReportTask::status() const {
 #endif
 
 std::shared_ptr<const NightCatalog> ReportTask::catalog_snapshot() const {
-    if (!runtime_ || !runtime_->lock(20)) return {};
-    std::shared_ptr<const NightCatalog> out = runtime_->published_catalog;
-    runtime_->unlock();
-    return out;
+    if (!runtime_) return {};
+
+    const std::shared_ptr<const ReportPublishedState> published =
+        runtime_->published_state();
+    return published ? published->catalog : nullptr;
 }
 
+ReportArtifactQuery ReportTask::query_artifact(
+    SleepDayId sleep_day,
+    ReportArtifactKind kind,
+    int64_t range_start_ms,
+    int64_t range_end_ms) const {
+    if (!runtime_ || !runtime_->initialized) return {};
+
+    return runtime_->query_artifact(
+        sleep_day, kind, range_start_ms, range_end_ms);
+}
+
+#ifndef ARDUINO
 bool ReportTask::artifact_availability(
     const ReportArtifactKey &artifact,
     ReportArtifactAvailability &availability) const {
@@ -1243,6 +1344,7 @@ bool ReportTask::artifact_availability(
     }
     return runtime_->find_availability(artifact, availability);
 }
+#endif
 
 std::shared_ptr<const LargeByteBuffer> ReportTask::artifact_payload(
     const ReportArtifactDescriptor &artifact) const {

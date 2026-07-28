@@ -101,6 +101,22 @@ struct ReportTaskDiagnosticSnapshot {
     char catalog_error[AC_STORAGE_ERROR_MAX] = {};
 };
 
+enum class ReportArtifactQueryState : uint8_t {
+    Unavailable,
+    CatalogPending,
+    NightMissing,
+    InvalidArtifact,
+    ArtifactMissing,
+    ArtifactIndexInvalid,
+    Ready,
+};
+
+struct ReportArtifactQuery {
+    ReportArtifactQueryState state = ReportArtifactQueryState::Unavailable;
+    ReportArtifactKey artifact;
+    ReportArtifactDescriptor descriptor;
+};
+
 struct ReportArtifactFailureStatus {
     char error[AC_STORAGE_ERROR_MAX] = {};
     uint32_t retry_after_ms = 0;
@@ -142,10 +158,16 @@ public:
     ReportTaskDiagnosticSnapshot diagnostic_snapshot() const;
 #ifndef ARDUINO
     ReportTaskStatus status() const;
+    bool artifact_availability(
+        const ReportArtifactKey &artifact,
+        ReportArtifactAvailability &availability) const;
 #endif
     std::shared_ptr<const NightCatalog> catalog_snapshot() const;
-    bool artifact_availability(const ReportArtifactKey &artifact,
-                               ReportArtifactAvailability &availability) const;
+    ReportArtifactQuery query_artifact(
+        SleepDayId sleep_day,
+        ReportArtifactKind kind,
+        int64_t range_start_ms = 0,
+        int64_t range_end_ms = 0) const;
     std::shared_ptr<const LargeByteBuffer> artifact_payload(
         const ReportArtifactDescriptor &artifact) const;
     std::shared_ptr<const LargeByteBuffer> artifact_payload_if_present(

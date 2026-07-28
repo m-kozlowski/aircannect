@@ -210,8 +210,7 @@ void add_artifact_headers(AsyncWebServerResponse *response,
 void send_not_modified(AsyncWebServerRequest *request,
                        const char *etag,
                        SourceRevision source_revision = {}) {
-    AsyncWebServerResponse *response = new (std::nothrow)
-        AsyncPreparedResponse(304, nullptr, 0);
+    AsyncWebServerResponse *response = request->beginResponse(304);
     if (!response) {
         request->send(304);
         return;
@@ -613,7 +612,6 @@ void ReportHttpController::send_result(
         send_json_error(request, 503, "report_unavailable");
         return;
     }
-    if (!report_task_available(request, *report_task_)) return;
 
     SleepDayId sleep_day;
     if (!parse_sleep_day(request, sleep_day)) {
@@ -621,63 +619,7 @@ void ReportHttpController::send_result(
         return;
     }
 
-    const std::shared_ptr<const NightCatalog> catalog =
-        report_task_->catalog_snapshot();
-    if (!catalog) {
-        send_preparing(request);
-        return;
-    }
-
-    const NightCatalogRecord *night = catalog->find(sleep_day);
-    if (!night) {
-        send_json_error(request, 404, "no_such_night");
-        return;
-    }
-
-    const ReportArtifactKey key = ReportArtifactKey::result(
-        sleep_day, night->source_revision);
-    ReportArtifactAvailability availability;
-    if (!report_task_->artifact_availability(key, availability)) {
-        ReportArtifactFailureStatus failure;
-        if (report_task_->artifact_failure(key, failure)) {
-            send_artifact_failure(request, failure);
-            return;
-        }
-
-        const OperationAdmission admitted = report_task_->request_artifact(
-            key, ReportRequestPriority::Foreground, next_generation());
-        if (admitted == OperationAdmission::Accepted) {
-            send_preparing(request);
-        } else {
-            send_json_error(request, 503, "report_queue_busy");
-        }
-        return;
-    }
-
-    ReportArtifactDescriptor artifact;
-    if (!availability.descriptor(key, artifact)) {
-        send_json_error(request, 500, "artifact_index_invalid");
-        return;
-    }
-
-    char etag[REPORT_HTTP_ETAG_BYTES] = {};
-    if (format_artifact_etag(artifact, etag, sizeof(etag)) &&
-        request_etag_matches(request, etag)) {
-        send_not_modified(request, etag, artifact.key.source_revision);
-        return;
-    }
-
-    std::shared_ptr<const LargeByteBuffer> payload =
-        report_task_->artifact_payload(artifact);
-    if (payload && send_artifact_payload(
-                       request,
-                       artifact,
-                       std::move(payload),
-                       "application/octet-stream")) {
-        return;
-    }
-
-    queue_artifact_response(request, artifact);
+    send_artifact(request, sleep_day, ReportArtifactKind::Result);
 }
 
 void ReportHttpController::send_plot(
@@ -686,7 +628,6 @@ void ReportHttpController::send_plot(
         send_json_error(request, 503, "report_unavailable");
         return;
     }
-    if (!report_task_available(request, *report_task_)) return;
 
     SleepDayId sleep_day;
     if (!parse_sleep_day(request, sleep_day)) {
@@ -694,50 +635,68 @@ void ReportHttpController::send_plot(
         return;
     }
 
-    const std::shared_ptr<const NightCatalog> catalog =
-        report_task_->catalog_snapshot();
-    if (!catalog) {
-        send_preparing(request);
-        return;
-    }
-
-    const NightCatalogRecord *night = catalog->find(sleep_day);
-    if (!night) {
-        send_json_error(request, 404, "no_such_night");
-        return;
-    }
-
-    ReportArtifactKey key = ReportArtifactKey::overview(
-        sleep_day, night->source_revision);
+    ReportArtifactKind kind = ReportArtifactKind::Overview;
+    int64_t range_start_ms = 0;
+    int64_t range_end_ms = 0;
     const bool range_requested =
         request->hasArg("from") || request->hasArg("to");
     if (range_requested) {
-        int64_t from_ms = 0;
-        int64_t to_ms = 0;
-        if (!parse_positive_int64(request, "from", from_ms) ||
-            !parse_positive_int64(request, "to", to_ms)) {
+        if (!parse_positive_int64(request, "from", range_start_ms) ||
+            !parse_positive_int64(request, "to", range_end_ms)) {
             send_json_error(request, 400, "bad_range");
             return;
         }
-
-        key = ReportArtifactKey::range_tile(
-            sleep_day, night->source_revision, from_ms, to_ms);
-        if (!key.valid()) {
-            send_json_error(request, 400, "range_not_one_tile");
-            return;
-        }
+        kind = ReportArtifactKind::RangeTile;
     }
 
-    ReportArtifactAvailability availability;
-    if (!report_task_->artifact_availability(key, availability)) {
+    send_artifact(
+        request, sleep_day, kind, range_start_ms, range_end_ms);
+}
+
+void ReportHttpController::send_artifact(
+    AsyncWebServerRequest *request,
+    SleepDayId sleep_day,
+    ReportArtifactKind kind,
+    int64_t range_start_ms,
+    int64_t range_end_ms) {
+    const ReportArtifactQuery query = report_task_->query_artifact(
+        sleep_day, kind, range_start_ms, range_end_ms);
+    if (query.state == ReportArtifactQueryState::Unavailable) {
+        send_json_error(request, 503, "report_unavailable");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::CatalogPending) {
+        send_preparing(request);
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::NightMissing) {
+        send_json_error(request, 404, "no_such_night");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::InvalidArtifact) {
+        send_json_error(
+            request,
+            kind == ReportArtifactKind::RangeTile ? 400 : 500,
+            kind == ReportArtifactKind::RangeTile
+                ? "range_not_one_tile"
+                : "artifact_index_invalid");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::ArtifactIndexInvalid) {
+        send_json_error(request, 500, "artifact_index_invalid");
+        return;
+    }
+    if (query.state == ReportArtifactQueryState::ArtifactMissing) {
         ReportArtifactFailureStatus failure;
-        if (report_task_->artifact_failure(key, failure)) {
+        if (report_task_->artifact_failure(query.artifact, failure)) {
             send_artifact_failure(request, failure);
             return;
         }
 
         const OperationAdmission admitted = report_task_->request_artifact(
-            key, ReportRequestPriority::Foreground, next_generation());
+            query.artifact,
+            ReportRequestPriority::Foreground,
+            next_generation());
         if (admitted == OperationAdmission::Accepted) {
             send_preparing(request);
         } else {
@@ -745,31 +704,30 @@ void ReportHttpController::send_plot(
         }
         return;
     }
-
-    ReportArtifactDescriptor artifact;
-    if (!availability.descriptor(key, artifact)) {
-        send_json_error(request, 500, "artifact_index_invalid");
+    if (query.state != ReportArtifactQueryState::Ready) {
+        send_json_error(request, 500, "artifact_query_invalid");
         return;
     }
 
     char etag[REPORT_HTTP_ETAG_BYTES] = {};
-    if (format_artifact_etag(artifact, etag, sizeof(etag)) &&
+    if (format_artifact_etag(query.descriptor, etag, sizeof(etag)) &&
         request_etag_matches(request, etag)) {
-        send_not_modified(request, etag, artifact.key.source_revision);
+        send_not_modified(
+            request, etag, query.artifact.source_revision);
         return;
     }
 
     std::shared_ptr<const LargeByteBuffer> payload =
-        report_task_->artifact_payload(artifact);
+        report_task_->artifact_payload(query.descriptor);
     if (payload && send_artifact_payload(
                        request,
-                       artifact,
+                       query.descriptor,
                        std::move(payload),
                        "application/octet-stream")) {
         return;
     }
 
-    queue_artifact_response(request, artifact);
+    queue_artifact_response(request, query.descriptor);
 }
 
 uint32_t ReportHttpController::next_generation() const {

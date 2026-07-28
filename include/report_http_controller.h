@@ -12,7 +12,9 @@ class AsyncWebServerRequest;
 namespace aircannect {
 
 class ReportTask;
+enum class ReportArtifactKind : uint8_t;
 struct ReportArtifactDescriptor;
+class SleepDayId;
 
 // Presents immutable report snapshots and artifacts over HTTP. Report policy
 // stays in ReportTask; this class validates requests and serves ready bytes.
@@ -30,6 +32,11 @@ public:
     void send_plot(AsyncWebServerRequest *request);
 
 private:
+    void send_artifact(AsyncWebServerRequest *request,
+                       SleepDayId sleep_day,
+                       ReportArtifactKind kind,
+                       int64_t range_start_ms = 0,
+                       int64_t range_end_ms = 0);
     void queue_artifact_response(
         AsyncWebServerRequest *request,
         const ReportArtifactDescriptor &artifact);
