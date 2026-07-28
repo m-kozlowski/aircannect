@@ -99,6 +99,7 @@ bool BleSensorProtocolEngine::subscribe_viatom() {
         return false;
     }
 
+    notify_characteristic_.store(read, std::memory_order_release);
     Log::logf(CAT_OXI, LOG_DEBUG, "Sensor subscribed Viatom read\n");
     return true;
 }
@@ -160,11 +161,13 @@ void BleSensorProtocolEngine::viatom_notify_callback(
     uint8_t *data,
     size_t len,
     bool is_notify) {
-    (void)characteristic;
     (void)is_notify;
     BleSensorProtocolEngine *engine =
         active_.load(std::memory_order_acquire);
-    if (engine) engine->viatom_notify(data, len);
+    if (engine) {
+        (void)engine->enqueue_notification(
+            ActiveProtocol::Viatom, characteristic, data, len);
+    }
 }
 
 void BleSensorProtocolEngine::viatom_notify(const uint8_t *data, size_t len) {

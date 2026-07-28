@@ -21,6 +21,7 @@ bool BleSensorProtocolEngine::subscribe_nonin() {
         return false;
     }
 
+    notify_characteristic_.store(continuous, std::memory_order_release);
     Log::logf(CAT_OXI, LOG_DEBUG,
               "Sensor subscribed Nonin continuous\n");
     return true;
@@ -31,11 +32,19 @@ void BleSensorProtocolEngine::nonin_notify(
     uint8_t *data,
     size_t len,
     bool is_notify) {
-    (void)characteristic;
     (void)is_notify;
     BleSensorProtocolEngine *engine =
         active_.load(std::memory_order_acquire);
-    if (!engine || !data || len < 5) return;
+    if (engine) {
+        (void)engine->enqueue_notification(
+            ActiveProtocol::Nonin, characteristic, data, len);
+    }
+}
+
+void BleSensorProtocolEngine::process_nonin_notification(
+    const uint8_t *data,
+    size_t len) {
+    if (!data || len < 5) return;
 
     const uint8_t spo2 = data[2];
     const uint16_t pulse =
@@ -49,7 +58,7 @@ void BleSensorProtocolEngine::nonin_notify(
               valid ? "valid" : "invalid",
               static_cast<unsigned>(spo2),
               static_cast<unsigned>(pulse));
-    engine->emit_sample(
+    emit_sample(
         valid ? encode_sfloat_int_value(spo2) : PLX_SFLOAT_NAN,
         valid ? encode_sfloat_int_value(pulse) : PLX_SFLOAT_NAN,
         !valid);

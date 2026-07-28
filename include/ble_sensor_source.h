@@ -117,6 +117,7 @@ private:
     bool manual_connect_requested_ = false;
     bool disconnect_requested_ = false;
     bool disconnect_hold_until_absent_ = false;
+    bool protocol_reset_pending_ = false;
     char manual_target_[18] = {};
     OximetrySensorDevice manual_target_device_;
     char connected_addr_[18] = {};

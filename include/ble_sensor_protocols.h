@@ -21,6 +21,7 @@ public:
                                     bool contact_known,
                                     bool contact_present);
 
+    bool begin();
     void set_sample_callback(SampleCallback callback, void *context);
 
 #if AC_OXIMETRY_BLE_ENABLED
@@ -28,6 +29,7 @@ public:
     bool subscribe(NimBLEClient *client);
 #endif
     void on_connected();
+    void invalidate_connection();
     void reset();
     void poll(uint32_t now_ms);
 
@@ -47,9 +49,31 @@ private:
                      bool contact_present = false);
 
 #if AC_OXIMETRY_BLE_ENABLED
+    // NimBLE host callback -> sensor worker SPSC mailbox.
+    static constexpr size_t NotificationQueueCapacity = 8;
+    static constexpr size_t NotificationMaxBytes = BLE_ATT_MTU_MAX - 3;
+
+    struct NotificationSlot {
+        uint32_t generation = 0;
+        ActiveProtocol protocol = ActiveProtocol::None;
+        NimBLERemoteCharacteristic *characteristic = nullptr;
+        uint16_t length = 0;
+        uint8_t bytes[NotificationMaxBytes] = {};
+    };
+
+    bool enqueue_notification(ActiveProtocol protocol,
+                              NimBLERemoteCharacteristic *characteristic,
+                              const uint8_t *data,
+                              size_t len);
+    void drain_notifications();
+    void process_notification(const NotificationSlot &notification);
+    void reset_fragment_assemblers();
+
     // PLX and Nonin
     bool subscribe_plx();
     bool subscribe_nonin();
+    void process_plx_notification(const uint8_t *data, size_t len);
+    void process_nonin_notification(const uint8_t *data, size_t len);
     static void plx_notify(NimBLERemoteCharacteristic *characteristic,
                            uint8_t *data,
                            size_t len,
@@ -134,6 +158,14 @@ private:
         bool is_notify);
 
     static std::atomic<BleSensorProtocolEngine *> active_;
+    std::atomic<NimBLERemoteCharacteristic *> notify_characteristic_{nullptr};
+    std::atomic<uint32_t> connection_generation_{1};
+    std::atomic<uint32_t> notification_read_sequence_{0};
+    std::atomic<uint32_t> notification_write_sequence_{0};
+    std::atomic<uint32_t> notification_fault_generation_{0};
+    std::atomic<uint32_t> notification_drops_{0};
+    NotificationSlot *notification_queue_ = nullptr;
+    uint32_t reported_notification_drops_ = 0;
     NimBLEClient *client_ = nullptr;
     ViatomState viatom_;
     OxyiiState oxyii_;

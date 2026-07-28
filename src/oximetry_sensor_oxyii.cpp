@@ -108,6 +108,7 @@ bool BleSensorProtocolEngine::subscribe_oxyii() {
         return false;
     }
 
+    notify_characteristic_.store(notify, std::memory_order_release);
     Log::logf(CAT_OXI, LOG_DEBUG, "Sensor subscribed OxyII notify\n");
     return true;
 }
@@ -198,11 +199,13 @@ void BleSensorProtocolEngine::oxyii_notify_callback(
     uint8_t *data,
     size_t len,
     bool is_notify) {
-    (void)characteristic;
     (void)is_notify;
     BleSensorProtocolEngine *engine =
         active_.load(std::memory_order_acquire);
-    if (engine) engine->oxyii_notify(data, len);
+    if (engine) {
+        (void)engine->enqueue_notification(
+            ActiveProtocol::Oxyii, characteristic, data, len);
+    }
 }
 
 void BleSensorProtocolEngine::oxyii_notify(const uint8_t *data, size_t len) {

@@ -55,10 +55,7 @@ public:
 
     void onDisconnect(NimBLEClient *client, int reason) override {
         (void)client;
-        if (owner_) {
-            owner_->protocols_.reset();
-            owner_->callback_disconnected(reason);
-        }
+        if (owner_) owner_->callback_disconnected(reason);
     }
 
     bool onConnParamsUpdateRequest(NimBLEClient *client,
@@ -89,6 +86,12 @@ private:
 };
 
 bool BleSensorSource::begin(bool enabled, const char *runtime_name) {
+    if (!protocols_.begin()) {
+        set_error("BLE sensor mailbox allocation failed");
+        configure(false, runtime_name);
+        return false;
+    }
+
     protocols_.set_sample_callback(protocol_sample_callback, this);
     load_known();
     configure(enabled, runtime_name);
@@ -803,16 +806,21 @@ void BleSensorSource::task_loop() {
 
     while (true) {
         bool enabled = false;
+        bool reset_protocols = false;
         char runtime_name[sizeof(runtime_name_)] = {};
 #if AC_OXIMETRY_BLE_ENABLED
         portENTER_CRITICAL(&mux_);
 #endif
         enabled = enabled_;
+        reset_protocols = protocol_reset_pending_;
+        protocol_reset_pending_ = false;
         strncpy(runtime_name, runtime_name_, sizeof(runtime_name) - 1);
         runtime_name[sizeof(runtime_name) - 1] = 0;
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&mux_);
 #endif
+        if (reset_protocols) protocols_.reset();
+
         if (!enabled) {
             if (client_ && client_->isConnected()) {
                 client_->disconnect();
@@ -1249,9 +1257,11 @@ void BleSensorSource::publish_sample(uint16_t spo2_raw,
 }
 
 void BleSensorSource::callback_disconnected(int reason) {
+    protocols_.invalidate_connection();
 #if AC_OXIMETRY_BLE_ENABLED
     portENTER_CRITICAL(&mux_);
 #endif
+    protocol_reset_pending_ = true;
     disconnect_pending_ = true;
     pending_disconnect_reason_ = reason;
     strncpy(pending_disconnect_addr_, connected_addr_,

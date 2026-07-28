@@ -66,12 +66,17 @@ UdpOximeterSource::ReadResult UdpOximeterSource::read_sample(
     if (packet_size <= 0) return ReadResult::Empty;
 
     const IPAddress remote_ip = udp_.remoteIP();
+    if (packet_size != static_cast<int>(AC_OXIMETRY_UDP_PACKET_SIZE)) {
+        udp_.clear();
+        status_.bad_packets++;
+        return ReadResult::Rejected;
+    }
+
     uint8_t packet[AC_OXIMETRY_UDP_PACKET_SIZE] = {};
     const int read = udp_.read(packet, sizeof(packet));
-    while (udp_.available()) udp_.read();
+    udp_.clear();
 
-    if (packet_size != static_cast<int>(AC_OXIMETRY_UDP_PACKET_SIZE) ||
-        read != static_cast<int>(AC_OXIMETRY_UDP_PACKET_SIZE) ||
+    if (read != static_cast<int>(AC_OXIMETRY_UDP_PACKET_SIZE) ||
         packet[0] != 0x55 || packet[1] != 0xab) {
         status_.bad_packets++;
         return ReadResult::Rejected;

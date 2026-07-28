@@ -17,6 +17,7 @@ bool BleSensorProtocolEngine::subscribe_plx() {
         service->getCharacteristic(NimBLEUUID("2A5F"));
     if (continuous && continuous->canNotify() &&
         continuous->subscribe(true, plx_notify)) {
+        notify_characteristic_.store(continuous, std::memory_order_release);
         Log::logf(CAT_OXI, LOG_DEBUG,
                   "Sensor subscribed PLX continuous\n");
         return true;
@@ -26,6 +27,7 @@ bool BleSensorProtocolEngine::subscribe_plx() {
         service->getCharacteristic(NimBLEUUID("2A5E"));
     if (spot && (spot->canNotify() || spot->canIndicate()) &&
         spot->subscribe(spot->canNotify(), plx_notify)) {
+        notify_characteristic_.store(spot, std::memory_order_release);
         Log::logf(CAT_OXI, LOG_DEBUG, "Sensor subscribed PLX spot\n");
         return true;
     }
@@ -38,11 +40,19 @@ void BleSensorProtocolEngine::plx_notify(
     uint8_t *data,
     size_t len,
     bool is_notify) {
-    (void)characteristic;
     (void)is_notify;
     BleSensorProtocolEngine *engine =
         active_.load(std::memory_order_acquire);
-    if (!engine || !data || len < 5) return;
+    if (engine) {
+        (void)engine->enqueue_notification(
+            ActiveProtocol::Plx, characteristic, data, len);
+    }
+}
+
+void BleSensorProtocolEngine::process_plx_notification(
+    const uint8_t *data,
+    size_t len) {
+    if (!data || len < 5) return;
 
     const uint16_t spo2_raw =
         static_cast<uint16_t>(data[1]) |
@@ -60,7 +70,7 @@ void BleSensorProtocolEngine::plx_notify(
               "Sensor PLX reading %s spo2=%d pulse=%d\n",
               valid ? "valid" : "invalid",
               static_cast<int>(spo2), static_cast<int>(pulse));
-    engine->emit_sample(spo2_raw, pulse_raw, !valid);
+    emit_sample(spo2_raw, pulse_raw, !valid);
 }
 #endif
 
