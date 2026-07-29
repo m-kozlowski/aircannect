@@ -54,6 +54,7 @@ struct RpcTransportStats {
     uint32_t request_timeouts = 0;
     uint32_t request_queue_drops = 0;
     uint32_t request_cancellations = 0;
+    uint32_t late_addressed_responses = 0;
     uint32_t request_dispatch_retries = 0;
     uint32_t background_backoffs = 0;
 

@@ -167,6 +167,8 @@ void print_rpc_stats(Print &out,
     out.print(stats.request_queue_drops);
     out.print(" request_cancellations=");
     out.print(stats.request_cancellations);
+    out.print(" late_addressed_responses=");
+    out.print(stats.late_addressed_responses);
     out.print(" request_dispatch_retries=");
     out.print(stats.request_dispatch_retries);
     out.print(" background_backoffs=");

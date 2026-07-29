@@ -41,6 +41,16 @@ bool scheduler_source(RpcSource source) {
     return source == RpcSource::Scheduler || source == RpcSource::Internal;
 }
 
+const char *completion_cause_name(RpcCompletionCause cause) {
+    switch (cause) {
+        case RpcCompletionCause::Response: return "response";
+        case RpcCompletionCause::Timeout: return "timeout";
+        case RpcCompletionCause::Cancelled: return "cancelled";
+        case RpcCompletionCause::DispatchFailure: return "dispatch_failure";
+    }
+    return "unknown";
+}
+
 bool current_epoch_ms(int64_t &epoch_ms) {
     struct timeval tv = {};
     if (gettimeofday(&tv, nullptr) != 0) return false;
@@ -567,6 +577,10 @@ void RpcTransport::cancel_pending_request(const char *reason) {
 
     stats_.request_cancellations++;
     const bool addressed_request = pending_.generation != 0;
+    if (addressed_request) {
+        remember_retired_addressed_request(
+            pending_, RpcCompletionCause::Cancelled, reason);
+    }
     if (!addressed_request && pending_.source != RpcSource::Scheduler) {
         char buf[160];
         snprintf(buf, sizeof(buf),
@@ -583,6 +597,57 @@ void RpcTransport::cancel_pending_request(const char *reason) {
                      reason ? reason : "cancelled", false,
                      request_completions_);
     pending_ = {};
+}
+
+void RpcTransport::remember_retired_addressed_request(
+    const PendingRequest &request,
+    RpcCompletionCause cause,
+    const char *reason) {
+    if (!request.active || !request.generation || !request.id) return;
+
+    RetiredAddressedRequest &retired =
+        retired_addressed_requests_[next_retired_addressed_request_];
+    retired.id = request.id;
+    retired.retired_ms = millis();
+    retired.cause = cause;
+    next_retired_addressed_request_ =
+        (next_retired_addressed_request_ + 1) %
+        RETIRED_ADDRESSED_REQUEST_MAX;
+
+    Log::logf(CAT_RPC, LOG_DEBUG,
+              "retired request id=%lu method=%s source=%s cause=%s "
+              "reason=%s\n",
+              static_cast<unsigned long>(request.id),
+              request.method.c_str(),
+              source_name(request.source),
+              completion_cause_name(cause),
+              reason ? reason : "--");
+}
+
+bool RpcTransport::consume_retired_addressed_response(uint32_t id,
+                                                       uint32_t now_ms) {
+    if (!id) return false;
+
+    for (RetiredAddressedRequest &retired : retired_addressed_requests_) {
+        if (!retired.id) continue;
+
+        const uint32_t age_ms = now_ms - retired.retired_ms;
+        if (age_ms >= RETIRED_ADDRESSED_REQUEST_TTL_MS) {
+            retired = {};
+            continue;
+        }
+        if (retired.id != id) continue;
+
+        stats_.late_addressed_responses++;
+        Log::logf(CAT_RPC, LOG_DEBUG,
+                  "late response consumed id=%lu cause=%s age_ms=%lu\n",
+                  static_cast<unsigned long>(id),
+                  completion_cause_name(retired.cause),
+                  static_cast<unsigned long>(age_ms));
+        retired = {};
+        return true;
+    }
+    return false;
 }
 
 void RpcTransport::cancel_queued_request(const QueuedRequest &request,
@@ -861,6 +926,10 @@ void RpcTransport::check_pending_timeout() {
     if (!quiesce_control) {
         note_request_timeout(pending_.source, now);
     }
+    if (addressed_request) {
+        remember_retired_addressed_request(
+            pending_, RpcCompletionCause::Timeout, "timeout");
+    }
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::failed(), RpcCompletionCause::Timeout,
                      nullptr, "timeout", false, request_completions_);
@@ -1065,6 +1134,10 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                 }
                 push_event(RpcEventKind::RpcResponse, ref_payload(),
                            passthrough_source, response_id);
+                break;
+            }
+            if (has_response_id &&
+                consume_retired_addressed_response(response_id, millis())) {
                 break;
             }
             if (pending_.active) {

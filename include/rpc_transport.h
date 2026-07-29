@@ -104,6 +104,12 @@ private:
         RpcSource source = RpcSource::Internal;
     };
 
+    struct RetiredAddressedRequest {
+        uint32_t id = 0;
+        uint32_t retired_ms = 0;
+        RpcCompletionCause cause = RpcCompletionCause::Cancelled;
+    };
+
     struct DeferredPayload {
         enum class Kind : uint8_t {
             Rpc,
@@ -129,6 +135,8 @@ private:
     };
 
     static constexpr size_t RAW_PASSTHROUGH_PENDING_MAX = 8;
+    static constexpr size_t RETIRED_ADDRESSED_REQUEST_MAX = 8;
+    static constexpr uint32_t RETIRED_ADDRESSED_REQUEST_TTL_MS = 120000;
     using RequestCompletionQueue =
         FixedQueue<RpcRequestCompletion, AC_RPC_REQUEST_QUEUE_DEPTH>;
 
@@ -154,6 +162,11 @@ private:
                                RpcCompletionCause cause =
                                    RpcCompletionCause::Cancelled);
     void cancel_all_requests(const char *reason);
+    void remember_retired_addressed_request(
+        const PendingRequest &request,
+        RpcCompletionCause cause,
+        const char *reason);
+    bool consume_retired_addressed_response(uint32_t id, uint32_t now_ms);
     static void complete_request(uint32_t id,
                                  uint32_t generation,
                                  OperationOutcome outcome,
@@ -216,6 +229,9 @@ private:
     RequestCompletionQueue request_completions_;
     PendingRequest pending_;
     RawPassthroughRequest raw_passthrough_[RAW_PASSTHROUGH_PENDING_MAX];
+    RetiredAddressedRequest
+        retired_addressed_requests_[RETIRED_ADDRESSED_REQUEST_MAX];
+    size_t next_retired_addressed_request_ = 0;
     size_t request_completion_reservations_ = 0;
 
     // Dispatch state
