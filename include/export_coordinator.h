@@ -43,15 +43,13 @@ private:
         bool state_initialized = false;
         bool last_therapy_active = false;
         uint32_t report_settle_due_ms = 0;
+        uint32_t report_settle_deadline_ms = 0;
         bool storage_pending = false;
         bool storage_grace_armed = false;
-        bool storage_fallback_reported = false;
         uint32_t storage_due_ms = 0;
-        uint32_t storage_deadline_ms = 0;
         bool sleephq_pending = false;
         bool sleephq_grace_armed = false;
         uint32_t sleephq_due_ms = 0;
-        uint32_t sleephq_deadline_ms = 0;
     };
 
     struct StartupCheckState {
@@ -91,11 +89,9 @@ private:
     void maybe_finish_report_settle(const ExportReportActivity &report,
                                     bool stream_activity_active,
                                     uint32_t now_ms);
-    void maybe_queue_storage_sync(const ExportReportActivity &report,
-                                  bool stream_activity_active,
+    void maybe_queue_storage_sync(bool stream_activity_active,
                                   uint32_t now_ms);
     void maybe_queue_post_therapy_sleephq(
-        const ExportReportActivity &report,
         bool stream_activity_active,
         bool storage_sync_active,
         uint32_t now_ms);

@@ -54,15 +54,10 @@ static constexpr uint32_t AC_RUNTIME_STARTUP_IDLE_GRACE_MS = 30000;
 // AirCANnect is closing EDF/SMB work. Let the bus settle before refreshing the
 // report summary index that triggers cache backfill.
 static constexpr uint32_t AC_REPORT_POST_THERAPY_SUMMARY_DELAY_MS = 30000;
-// Post-therapy SMB sync normally waits for the report refresh/backfill to go
-// idle so STR/journal/report-derived files have settled first. Do not let a
-// wedged report backfill suppress auto-sync forever; after this, queue sync
-// anyway while still respecting export-task activity policy.
-static constexpr uint32_t AC_REPORT_POST_THERAPY_SYNC_MAX_WAIT_MS = 180000;
-// SleepHQ runs after report settle and SMB sync. If that serialized post-
-// therapy window never opens, drop this immediate trigger and let idle backfill
-// recover later instead of keeping the post-therapy lane armed forever.
-static constexpr uint32_t AC_SLEEPHQ_POST_THERAPY_SYNC_MAX_WAIT_MS = 180000;
+// Post-therapy exports wait for report state to settle before reading the
+// newly finalized files. A stalled report refresh must not suppress either
+// endpoint indefinitely.
+static constexpr uint32_t AC_EXPORT_POST_THERAPY_SETTLE_MAX_WAIT_MS = 180000;
 // Fallback rescan: the prefetch job rescans coverage promptly when the night
 // index changes (e.g. after therapy stops), so this periodic poll is just a
 // safety net. FAIL_COOLDOWN is how long a night whose fetch failed is skipped
