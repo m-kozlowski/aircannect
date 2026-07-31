@@ -90,8 +90,9 @@ void print_edf_recorder_status(Print &out,
         status.recording_gate_bad_events || status.mask_bad_events ||
         status.record_enqueue_failures || status.annotation_enqueue_failures ||
         status.str_enqueue_failures || status.file_open_failures ||
-        status.attach_failures || storage.patch_errors ||
-        assembly.timestamp_errors || last_error;
+        status.attach_failures || status.metadata_failures ||
+        storage.patch_errors ||
+        assembly.timestamp_errors || assembly.unknown_signals || last_error;
 
     if (has_drops || has_faults) {
         out.print("[EDF health] drops=");
@@ -113,8 +114,14 @@ void print_edf_recorder_stats(Print &out,
     const StorageEdfStatusSnapshot storage =
         StorageService::edf_status_snapshot();
 
+    const auto series_total = [&assembly](
+        uint32_t EdfSeriesAssemblyStatus::*field) {
+        return assembly.brp.*field + assembly.pld.*field +
+               assembly.sa2.*field + assembly.tcv.*field;
+    };
+
     out.print("[EDF capture] frames=");
-    out.print(static_cast<unsigned long>(status.frames));
+    out.print(static_cast<unsigned long>(assembly.frames));
     out.print(" drops=");
     out.print(static_cast<unsigned long>(status.frame_drops));
     out.print(" segment_rollovers=");
@@ -135,37 +142,20 @@ void print_edf_recorder_stats(Print &out,
     out.print(" str=");
     out.println(static_cast<unsigned long>(status.str_records));
 
-    out.print("[EDF events] frames=");
-    out.print(static_cast<unsigned long>(status.event_frames));
-    out.print(" records=");
+    out.print("[EDF events] records=");
     out.print(static_cast<unsigned long>(status.event_records));
-    out.print(" respiratory=");
-    out.print(static_cast<unsigned long>(status.respiratory_events));
-    out.print(" csr=");
-    out.print(static_cast<unsigned long>(status.csr_events));
-    out.print(" generation=");
-    out.print(static_cast<unsigned long>(
-        status.event_subscription_generation));
     out.print(" gaps=");
     out.println(static_cast<unsigned long>(
         status.event_coverage_session_gaps()));
 
-    out.print("[EDF gate] zle_edges=");
-    out.print(static_cast<unsigned long>(status.recording_gate_rises));
-    out.print('/');
-    out.print(static_cast<unsigned long>(status.recording_gate_falls));
-    out.print(" recoveries=");
+    out.print("[EDF gate] recoveries=");
     out.print(static_cast<unsigned long>(status.recording_gate_recoveries));
     out.print(" recovery_pending=");
     out.print(status.recording_gate_recovery_pending() ? "yes" : "no");
     out.print(" bad=");
     out.print(static_cast<unsigned long>(status.recording_gate_bad_events));
-    out.print(" mask_events=");
-    out.print(static_cast<unsigned long>(status.mask_events));
     out.print(" mask_bad=");
     out.print(static_cast<unsigned long>(status.mask_bad_events));
-    out.print(" open_buffered=");
-    out.print(static_cast<unsigned long>(status.numeric_open_buffered_frames));
     out.print(" open_buffer_drops=");
     out.println(static_cast<unsigned long>(status.numeric_open_buffer_drops));
 
@@ -180,70 +170,45 @@ void print_edf_recorder_stats(Print &out,
     out.print(" file_open_failures=");
     out.print(static_cast<unsigned long>(status.file_open_failures));
     out.print(" attach_failures=");
-    out.println(static_cast<unsigned long>(status.attach_failures));
+    out.print(static_cast<unsigned long>(status.attach_failures));
+    out.print(" metadata_failures=");
+    out.println(static_cast<unsigned long>(status.metadata_failures));
 
-    out.print("[EDF STR] settings=");
-    out.print(static_cast<unsigned long>(status.str_setting_requests));
+    out.print("[EDF storage] queued=");
+    out.print(static_cast<unsigned>(storage.queued));
     out.print('/');
-    out.print(static_cast<unsigned long>(status.str_setting_responses));
-    out.print(" setting_values=");
-    out.print(static_cast<unsigned long>(status.str_setting_values));
-    out.print(" summary=");
-    out.print(static_cast<unsigned long>(status.str_summary_requests));
-    out.print('/');
-    out.print(static_cast<unsigned long>(status.str_summary_responses));
-    out.print(" summary_values=");
-    out.print(static_cast<unsigned long>(status.str_summary_values));
-    out.print(" missing=");
-    out.print(static_cast<unsigned long>(status.str_summary_missing));
-    out.print(" unmapped=");
-    out.println(static_cast<unsigned long>(status.str_summary_unmapped));
-
-    out.print("[EDF identification] requests=");
-    out.print(static_cast<unsigned long>(status.identification_requests));
-    out.print(" responses=");
-    out.print(static_cast<unsigned long>(status.identification_responses));
-    out.print(" writes=");
-    out.print(static_cast<unsigned long>(
-        status.identification_write_requests));
-    out.print(" failures=");
-    out.println(static_cast<unsigned long>(status.identification_failures));
-
-    out.print("[EDF storage stats] records_written=");
-    out.print(static_cast<unsigned long>(storage.records_written));
-    out.print(" identification_jobs=");
-    out.print(static_cast<unsigned long>(storage.identification_jobs));
+    out.print(static_cast<unsigned>(storage.capacity));
+    out.print(" open=");
+    out.print(static_cast<unsigned>(storage.open_file_count));
     out.print(" queue_drops=");
     out.print(static_cast<unsigned long>(storage.queue_drops));
     out.print(" patch_errors=");
     out.println(static_cast<unsigned long>(storage.patch_errors));
 
     out.print("[EDF assembly] records=");
-    out.print(static_cast<unsigned long>(assembly.records_completed));
-    out.print(" samples=");
-    out.print(static_cast<unsigned long>(assembly.samples_accepted));
+    out.print(static_cast<unsigned long>(series_total(
+        &EdfSeriesAssemblyStatus::records_completed)));
     out.print(" invalid=");
-    out.print(static_cast<unsigned long>(assembly.samples_invalid));
+    out.print(static_cast<unsigned long>(series_total(
+        &EdfSeriesAssemblyStatus::samples_invalid)));
     out.print(" missing=");
-    out.print(static_cast<unsigned long>(assembly.samples_missing));
+    out.print(static_cast<unsigned long>(series_total(
+        &EdfSeriesAssemblyStatus::samples_missing)));
     out.print(" duplicate=");
-    out.print(static_cast<unsigned long>(assembly.samples_duplicate));
+    out.print(static_cast<unsigned long>(series_total(
+        &EdfSeriesAssemblyStatus::samples_duplicate)));
     out.print(" late=");
-    out.print(static_cast<unsigned long>(assembly.samples_late));
+    out.print(static_cast<unsigned long>(series_total(
+        &EdfSeriesAssemblyStatus::samples_late)));
+    out.print(" partial=");
+    out.print(static_cast<unsigned long>(series_total(
+        &EdfSeriesAssemblyStatus::records_dropped_partial)));
     out.print(" timestamp_errors=");
     out.print(static_cast<unsigned long>(assembly.timestamp_errors));
-    out.print(" jitter_corrections=");
-    out.print(static_cast<unsigned long>(
-        assembly.timestamp_jitter_corrections));
+    out.print(" unknown_signals=");
+    out.print(static_cast<unsigned long>(assembly.unknown_signals));
     out.print(" resyncs=");
-    out.print(static_cast<unsigned long>(assembly.timestamp_resyncs));
-    out.print(" last_jitter_ms=");
-    out.println(static_cast<long>(assembly.last_timestamp_jitter_ms));
-
-    if (status.last_event_name[0]) {
-        out.print("[EDF last] event=");
-        out.println(status.last_event_name);
-    }
+    out.println(static_cast<unsigned long>(assembly.timestamp_resyncs));
 }
 
 }  // namespace

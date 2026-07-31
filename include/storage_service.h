@@ -55,13 +55,6 @@ constexpr size_t edf_storage_file_index(EdfStorageFileIndex index) {
     return static_cast<size_t>(index);
 }
 
-struct EdfStorageOpenFileStatus {
-    bool open = false;
-    bool resumed = false;
-    uint32_t record_count = 0;
-    char path[80] = {};
-};
-
 struct EdfStorageOpenHandle {
     EdfStorageFileIndex file = EdfStorageFileIndex::Count;
     uint32_t request_id = 0;
@@ -82,51 +75,6 @@ struct EdfStorageOpenResult {
     char error[96] = {};
 };
 
-struct StorageServiceStatus {
-    bool initialized = false;
-    bool available = false;
-    bool task_started = false;
-    bool using_psram = false;
-    bool busy = false;
-    bool maintenance_active = false;
-
-    size_t edf_capacity = 0;
-    size_t edf_queued = 0;
-    size_t read_capacity = 0;
-    size_t read_queued = 0;
-    size_t prepared_reads = 0;
-    uint8_t open_file_count = 0;
-
-    uint32_t open_jobs = 0;
-    uint32_t record_jobs = 0;
-    uint32_t close_jobs = 0;
-    uint32_t identification_jobs = 0;
-    uint32_t records_written = 0;
-
-    uint32_t queue_drops = 0;
-    uint32_t render_errors = 0;
-    uint32_t open_errors = 0;
-    uint32_t write_errors = 0;
-    uint32_t patch_errors = 0;
-    uint32_t unavailable_drops = 0;
-    uint32_t read_jobs = 0;
-    uint32_t read_errors = 0;
-    uint32_t read_cancellations = 0;
-
-#if AC_STACK_PROFILE_ENABLED
-    uint32_t stack_high_water_words = 0;
-#endif
-    uint64_t bytes_enqueued = 0;
-    uint64_t bytes_written = 0;
-    uint64_t bytes_read = 0;
-    uint32_t last_activity_ms = 0;
-
-    char last_path[80] = {};
-    char last_error[96] = {};
-
-    EdfStorageOpenFileStatus files[AC_EDF_STORAGE_FILE_COUNT];
-};
-
 struct StorageWorkloadSnapshot {
     bool valid = false;
     bool available = false;
@@ -141,8 +89,6 @@ struct StorageEdfStatusSnapshot {
     size_t capacity = 0;
     size_t queued = 0;
     uint8_t open_file_count = 0;
-    uint32_t records_written = 0;
-    uint32_t identification_jobs = 0;
     uint32_t queue_drops = 0;
     uint32_t patch_errors = 0;
 #if AC_STACK_PROFILE_ENABLED

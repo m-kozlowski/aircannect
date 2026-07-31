@@ -43,13 +43,9 @@ struct StatusCarryover {
     EventConsumerHandle event_handle = EVENT_CONSUMER_INVALID;
     uint32_t sessions_started = 0;
     uint32_t sessions_ended = 0;
-    uint32_t attach_attempts = 0;
     uint32_t attach_failures = 0;
-    uint32_t recording_gate_rises = 0;
-    uint32_t recording_gate_falls = 0;
     uint32_t recording_gate_recoveries = 0;
     uint32_t recording_gate_bad_events = 0;
-    uint32_t mask_events = 0;
     uint32_t mask_bad_events = 0;
 };
 
@@ -62,13 +58,9 @@ StatusCarryover preserve_status_carryover(
     out.event_handle = status.event_handle;
     out.sessions_started = status.sessions_started;
     out.sessions_ended = status.sessions_ended;
-    out.attach_attempts = status.attach_attempts;
     out.attach_failures = status.attach_failures;
-    out.recording_gate_rises = status.recording_gate_rises;
-    out.recording_gate_falls = status.recording_gate_falls;
     out.recording_gate_recoveries = status.recording_gate_recoveries;
     out.recording_gate_bad_events = status.recording_gate_bad_events;
-    out.mask_events = status.mask_events;
     out.mask_bad_events = status.mask_bad_events;
     return out;
 }
@@ -81,13 +73,9 @@ void restore_status_carryover(EdfRecorderStatus &status,
     status.event_handle = carryover.event_handle;
     status.sessions_started = carryover.sessions_started;
     status.sessions_ended = carryover.sessions_ended;
-    status.attach_attempts = carryover.attach_attempts;
     status.attach_failures = carryover.attach_failures;
-    status.recording_gate_rises = carryover.recording_gate_rises;
-    status.recording_gate_falls = carryover.recording_gate_falls;
     status.recording_gate_recoveries = carryover.recording_gate_recoveries;
     status.recording_gate_bad_events = carryover.recording_gate_bad_events;
-    status.mask_events = carryover.mask_events;
     status.mask_bad_events = carryover.mask_bad_events;
 }
 
@@ -239,7 +227,7 @@ void EdfRecorderManager::poll(uint32_t now_ms) {
     attach_stream(now_ms);
     update_stream_queue_drops();
     if (!numeric_files_open_ || !numeric_open_synced_) {
-        buffer_numeric_open_stream(now_ms);
+        buffer_numeric_open_stream();
     }
     if (!numeric_files_open_ && !open_numeric_files_from_stream(now_ms)) {
         return;
@@ -300,7 +288,6 @@ bool EdfRecorderManager::handle_recording_gate_frame(
         }
 
         if (gate_value != 0) {
-            status_.recording_gate_rises++;
             if (!status_.active && session_ &&
                 session_->status().state == SessionState::Active) {
                 start_session(session_->status(), now_ms, "zle_rise");
@@ -309,7 +296,6 @@ bool EdfRecorderManager::handle_recording_gate_frame(
                 begin_recording_gate(record.report_time.c_str(), now_ms);
             }
         } else {
-            status_.recording_gate_falls++;
             close_recording_gate(record.report_time.c_str(), now_ms);
         }
     }
@@ -325,7 +311,6 @@ bool EdfRecorderManager::handle_mask_event_frame(const As11EventFrame &frame,
         const As11EventRecord &record = frame.events[i];
         if (!edf_event_record_is_mask_event(frame, record)) continue;
         handled = true;
-        status_.mask_events++;
         if (record.name == EDF_MASK_ON_EVENT) {
             begin_mask_event(record.report_time.c_str(), now_ms);
         } else {
@@ -655,28 +640,18 @@ void EdfRecorderManager::handle_event_frame(const As11EventFrame &frame,
         handle_recording_gate_frame(frame, now_ms);
     if (!status_.active) return;
 
-    status_.event_frames++;
     status_.event_records += frame.event_count;
-    status_.last_event_ms = now_ms;
-    copy_cstr(status_.last_event_data_id,
-              sizeof(status_.last_event_data_id),
-              frame.data_id.c_str());
 
     for (size_t i = 0; i < frame.event_count; ++i) {
         const As11EventRecord &record = frame.events[i];
         if (!recording_gate_frame &&
             !edf_event_record_is_mask_event(frame, record) &&
             edf_event_frame_is_respiratory(frame)) {
-            status_.respiratory_events++;
             (void)enqueue_event_annotation(EdfAnnotationKind::Eve, record);
             if (edf_event_record_is_csr(record)) {
-                status_.csr_events++;
                 (void)enqueue_event_annotation(EdfAnnotationKind::Csl, record);
             }
         }
-        copy_cstr(status_.last_event_name,
-                  sizeof(status_.last_event_name),
-                  record.name.c_str());
     }
 }
 
@@ -753,7 +728,6 @@ void EdfRecorderManager::start_session(const SessionStatus &session,
     session_timezone_frozen_ = false;
     status_.clock_correction_applied = false;
     status_.clock_correction_ms = 0;
-    status_.clock_correction_sample_age_ms = 0;
     annotation_start_epoch_ms_ = 0;
     next_annotation_open_ms_ = now_ms;
     recording_gate_open_ = false;
@@ -833,11 +807,6 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
         status_.record_enqueue_failures +
         status_.annotation_enqueue_failures +
         status_.str_enqueue_failures;
-    const uint32_t rpc_failures =
-        status_.str_setting_timeouts +
-        status_.str_summary_timeouts +
-        status_.identification_timeouts +
-        status_.identification_failures;
     const bool had_failures =
         status_.frame_drops != 0 ||
         status_.numeric_record_drops != 0 ||
@@ -845,7 +814,7 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
         enqueue_failures != 0 ||
         status_.file_open_failures != 0 ||
         status_.event_coverage_session_gap_count != 0 ||
-        rpc_failures != 0;
+        status_.metadata_failures != 0;
     const uint32_t stream_queue_drops =
         status_.frame_drops >= status_.numeric_open_buffer_drops
             ? status_.frame_drops - status_.numeric_open_buffer_drops
@@ -855,10 +824,11 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
               "recorder session end id=%lu reason=%s frames=%lu "
               "drops=%lu queue_drops=%lu open_buffer_drops=%lu "
               "numeric_drops=%lu enqueue_failures=%lu "
-              "open_failures=%lu event_gaps=%lu rpc_failures=%lu events=%lu\n",
+              "open_failures=%lu event_gaps=%lu metadata_failures=%lu "
+              "events=%lu\n",
               static_cast<unsigned long>(status_.session_id),
               reason ? reason : "--",
-              static_cast<unsigned long>(status_.frames),
+              static_cast<unsigned long>(assembler_.status().frames),
               static_cast<unsigned long>(status_.frame_drops),
               static_cast<unsigned long>(stream_queue_drops),
               static_cast<unsigned long>(status_.numeric_open_buffer_drops),
@@ -867,7 +837,7 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
               static_cast<unsigned long>(status_.file_open_failures),
               static_cast<unsigned long>(
                   status_.event_coverage_session_gap_count),
-              static_cast<unsigned long>(rpc_failures),
+              static_cast<unsigned long>(status_.metadata_failures),
               static_cast<unsigned long>(status_.event_records));
 }
 
@@ -925,20 +895,17 @@ bool EdfRecorderManager::open_session_annotation_files_at(
     info.start_time = time;
     info.record_count = 0;
 
-    const bool eve_open = enqueue_annotation_file_open(EdfAnnotationKind::Eve,
-                                                       start, info,
-                                                       status_.eve_path,
-                                                       sizeof(status_.eve_path),
-                                                       eve_open_handle_);
+    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
+    const bool eve_open = enqueue_annotation_file_open(
+        EdfAnnotationKind::Eve, start, info, path, sizeof(path),
+        eve_open_handle_);
     if (!eve_open) {
         status_.file_open_failures++;
         return false;
     }
-    const bool csl_open = enqueue_annotation_file_open(EdfAnnotationKind::Csl,
-                                                       start, info,
-                                                       status_.csl_path,
-                                                       sizeof(status_.csl_path),
-                                                       csl_open_handle_);
+    const bool csl_open = enqueue_annotation_file_open(
+        EdfAnnotationKind::Csl, start, info, path, sizeof(path),
+        csl_open_handle_);
     if (!csl_open) {
         (void)StorageService::enqueue_edf_close_annotation(
             EdfAnnotationKind::Eve);
@@ -1174,11 +1141,11 @@ bool EdfRecorderManager::ensure_numeric_files_open(
     info.start_time = time;
     info.record_count = 0;
 
+    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     if (cold_->brp_schema.layout.enabled) {
         if (!enqueue_numeric_file_open(cold_->brp_schema.layout.schema,
                                        numeric_start, info,
-                                       status_.brp_path,
-                                       sizeof(status_.brp_path),
+                                       path, sizeof(path),
                                        cold_->brp_schema.open_handle)) {
             status_.file_open_failures++;
             next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
@@ -1189,8 +1156,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(
     if (cold_->pld_schema.layout.enabled) {
         if (!enqueue_numeric_file_open(cold_->pld_schema.layout.schema,
                                        numeric_start, info,
-                                       status_.pld_path,
-                                       sizeof(status_.pld_path),
+                                       path, sizeof(path),
                                        cold_->pld_schema.open_handle)) {
             if (cold_->brp_schema.open) {
                 (void)StorageService::enqueue_edf_close_numeric(
@@ -1206,8 +1172,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(
     if (cold_->sa2_schema.layout.enabled) {
         if (!enqueue_numeric_file_open(cold_->sa2_schema.layout.schema,
                                        numeric_start, info,
-                                       status_.sa2_path,
-                                       sizeof(status_.sa2_path),
+                                       path, sizeof(path),
                                        cold_->sa2_schema.open_handle)) {
             if (cold_->brp_schema.open) {
                 (void)StorageService::enqueue_edf_close_numeric(
@@ -1228,8 +1193,7 @@ bool EdfRecorderManager::ensure_numeric_files_open(
     if (cold_->tcv_schema.layout.enabled) {
         if (!enqueue_numeric_file_open(cold_->tcv_schema.layout.schema,
                                        numeric_start, info,
-                                       status_.tcv_path,
-                                       sizeof(status_.tcv_path),
+                                       path, sizeof(path),
                                        cold_->tcv_schema.open_handle)) {
             if (cold_->brp_schema.open) {
                 (void)StorageService::enqueue_edf_close_numeric(
@@ -1485,7 +1449,7 @@ void EdfRecorderManager::freeze_session_clock(uint32_t now_ms) {
     status_.clock_correction_applied =
         session_clock_.externally_referenced;
     status_.clock_correction_ms = session_clock_.device_minus_utc_ms;
-    status_.clock_correction_sample_age_ms =
+    const uint32_t sample_age_ms =
         session_clock_.sampled_ms != 0
             ? now_ms - session_clock_.sampled_ms
             : 0;
@@ -1496,8 +1460,7 @@ void EdfRecorderManager::freeze_session_clock(uint32_t now_ms) {
                   "sample_age_ms=%lu\n",
                   static_cast<long long>(
                       session_clock_.device_minus_utc_ms),
-                  static_cast<unsigned long>(
-                      status_.clock_correction_sample_age_ms));
+                  static_cast<unsigned long>(sample_age_ms));
         return;
     }
 
@@ -1625,12 +1588,12 @@ bool EdfRecorderManager::request_str_settings() {
 
     const OperationSubmission submission = rpc_.request(command);
     if (!submission.accepted()) {
+        status_.metadata_failures++;
         set_error("str_settings_queue_failed");
         return false;
     }
 
     str_settings_rpc_.mark(submission.ticket);
-    status_.str_setting_requests++;
     return true;
 }
 
@@ -1649,12 +1612,12 @@ bool EdfRecorderManager::request_str_summary() {
 
     const OperationSubmission submission = rpc_.request(command);
     if (!submission.accepted()) {
+        status_.metadata_failures++;
         set_error("str_summary_queue_failed");
         return false;
     }
 
     str_summary_rpc_.mark(submission.ticket);
-    status_.str_summary_requests++;
     return true;
 }
 
@@ -1670,13 +1633,12 @@ bool EdfRecorderManager::request_identification() {
 
     const OperationSubmission submission = rpc_.request(command);
     if (!submission.accepted()) {
-        status_.identification_failures++;
+        status_.metadata_failures++;
         set_error("identification_queue_failed");
         return false;
     }
 
     identification_rpc_.mark(submission.ticket);
-    status_.identification_requests++;
     return true;
 }
 
@@ -1694,13 +1656,12 @@ void EdfRecorderManager::poll_str_settings_completion() {
 
     str_settings_rpc_.clear();
     if (completion.cause == RpcCompletionCause::Response) {
-        status_.str_setting_responses++;
         handle_str_settings_response(completion.payload);
         return;
     }
 
+    status_.metadata_failures++;
     if (completion.cause == RpcCompletionCause::Timeout) {
-        status_.str_setting_timeouts++;
         set_error("str_settings_timeout");
     } else if (completion.cause == RpcCompletionCause::DispatchFailure) {
         set_error("str_settings_dispatch_failed");
@@ -1717,13 +1678,12 @@ void EdfRecorderManager::poll_str_summary_completion() {
 
     str_summary_rpc_.clear();
     if (completion.cause == RpcCompletionCause::Response) {
-        status_.str_summary_responses++;
         handle_str_summary_response(completion.payload);
         return;
     }
 
+    status_.metadata_failures++;
     if (completion.cause == RpcCompletionCause::Timeout) {
-        status_.str_summary_timeouts++;
         set_error("str_summary_timeout");
     } else if (completion.cause == RpcCompletionCause::DispatchFailure) {
         set_error("str_summary_dispatch_failed");
@@ -1745,14 +1705,12 @@ void EdfRecorderManager::poll_identification_completion() {
 
     identification_rpc_.clear();
     if (completion.cause == RpcCompletionCause::Response) {
-        status_.identification_responses++;
         handle_identification_response(completion.payload);
         return;
     }
 
-    status_.identification_failures++;
+    status_.metadata_failures++;
     if (completion.cause == RpcCompletionCause::Timeout) {
-        status_.identification_timeouts++;
         set_error("identification_timeout");
     } else if (completion.cause == RpcCompletionCause::DispatchFailure) {
         set_error("identification_dispatch_failed");
@@ -1801,13 +1759,11 @@ void EdfRecorderManager::handle_str_settings_response(
     const std::string &payload) {
     EdfStrSettingsApplyResult result;
     if (!edf_str_apply_settings_response(payload, str_, result)) {
+        status_.metadata_failures++;
         set_error(result.error);
         return;
     }
 
-    status_.str_setting_values += result.values;
-    status_.str_setting_missing += result.missing;
-    status_.str_setting_unmapped += result.unmapped;
     Log::logf(CAT_EDF, LOG_DEBUG,
               "STR settings values=%lu missing=%lu unmapped=%lu\n",
               static_cast<unsigned long>(result.values),
@@ -1824,11 +1780,9 @@ void EdfRecorderManager::handle_str_summary_response(
     const std::string &payload) {
     EdfStrSettingsApplyResult result;
     if (!edf_str_apply_summary_get_response(payload, str_, result)) {
+        status_.metadata_failures++;
         set_error(result.error);
     } else {
-        status_.str_summary_values += result.values;
-        status_.str_summary_missing += result.missing;
-        status_.str_summary_unmapped += result.unmapped;
         Log::logf(CAT_EDF, LOG_DEBUG,
                   "STR summary values=%lu missing=%lu unmapped=%lu\n",
                   static_cast<unsigned long>(result.values),
@@ -1846,17 +1800,16 @@ void EdfRecorderManager::handle_identification_response(
     const std::string &payload) {
     std::string json;
     if (!edf_build_identification_json(payload, json)) {
-        status_.identification_failures++;
+        status_.metadata_failures++;
         set_error("identification_json_failed");
         return;
     }
     if (!StorageService::enqueue_edf_identification_files(json)) {
-        status_.identification_failures++;
+        status_.metadata_failures++;
         set_error("identification_queue_failed");
         return;
     }
 
-    status_.identification_write_requests++;
     Log::logf(CAT_EDF,
               LOG_DEBUG,
               "identification bytes=%u\n",
@@ -1937,7 +1890,7 @@ bool EdfRecorderManager::finish_str_session_at(const EdfLocalDateTime &end,
 }
 
 bool EdfRecorderManager::write_str_day_record() {
-    char path[sizeof(status_.str_path)] = {};
+    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     if (!edf_str_path(path, sizeof(path))) {
         set_error("str_path_failed");
         return false;
@@ -1974,7 +1927,6 @@ bool EdfRecorderManager::write_str_day_record() {
         return false;
     }
 
-    copy_cstr(status_.str_path, sizeof(status_.str_path), path);
     status_.str_records++;
     return true;
 }
@@ -2017,20 +1969,19 @@ void EdfRecorderManager::release_events() {
 }
 
 uint32_t EdfRecorderManager::event_coverage_session_gaps() const {
-    if (status_.event_coverage_gap_count >=
-        session_event_coverage_gap_count_) {
-        return status_.event_coverage_gap_count -
-               session_event_coverage_gap_count_;
+    if (!events_) return 0;
+
+    const uint32_t gap_count = events_->status().coverage_gap_count;
+    if (gap_count >= session_event_coverage_gap_count_) {
+        return gap_count - session_event_coverage_gap_count_;
     }
-    return status_.event_coverage_gap_count;
+    return gap_count;
 }
 
 void EdfRecorderManager::snapshot_event_coverage() {
     if (!events_) {
         session_event_subscription_generation_ = 0;
         session_event_coverage_gap_count_ = 0;
-        status_.event_subscription_generation = 0;
-        status_.event_coverage_gap_count = 0;
         status_.event_coverage_uncertain = true;
         return;
     }
@@ -2038,8 +1989,6 @@ void EdfRecorderManager::snapshot_event_coverage() {
     const EventBrokerStatus event = events_->status();
     session_event_subscription_generation_ = event.subscription_generation;
     session_event_coverage_gap_count_ = event.coverage_gap_count;
-    status_.event_subscription_generation = event.subscription_generation;
-    status_.event_coverage_gap_count = event.coverage_gap_count;
     status_.event_coverage_uncertain =
         !status_.event_attached || !event.subscription_active;
 }
@@ -2048,9 +1997,6 @@ void EdfRecorderManager::update_event_coverage() {
     if (!status_.active || !events_) return;
 
     const EventBrokerStatus event = events_->status();
-    status_.event_subscription_generation = event.subscription_generation;
-    status_.event_coverage_gap_count = event.coverage_gap_count;
-
     if (!status_.event_attached || !event.subscription_active ||
         event.coverage_gap_count != session_event_coverage_gap_count_ ||
         event.subscription_generation !=
@@ -2071,7 +2017,6 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
     if (static_cast<int32_t>(now_ms - next_attach_ms_) < 0) return;
 
     next_attach_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
-    status_.attach_attempts++;
 
     const std::string params = build_stream_params(DEFAULT_EDF_STREAM_IDS,
                                                    40,
@@ -2122,7 +2067,7 @@ void EdfRecorderManager::update_stream_queue_drops() {
     }
 }
 
-void EdfRecorderManager::buffer_numeric_open_stream(uint32_t now_ms) {
+void EdfRecorderManager::buffer_numeric_open_stream() {
     if (status_.stream_handle == STREAM_CONSUMER_INVALID ||
         !stream_->consumer_active(status_.stream_handle)) {
         status_.stream_attached = false;
@@ -2142,8 +2087,6 @@ void EdfRecorderManager::buffer_numeric_open_stream(uint32_t now_ms) {
             status_.frame_drops++;
             break;
         }
-        status_.numeric_open_buffered_frames++;
-        status_.last_frame_ms = now_ms;
     }
 }
 
@@ -2194,12 +2137,9 @@ void EdfRecorderManager::drain_stream(uint32_t now_ms) {
             break;
         }
         if (prepared == EdfFramePrepareStatus::Rejected) {
-            status_.last_frame_ms = now_ms;
             continue;
         }
         assembler_.ingest_frame(*frame);
-        status_.frames++;
-        status_.last_frame_ms = now_ms;
     }
 }
 

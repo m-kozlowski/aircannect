@@ -11,11 +11,8 @@
 namespace aircannect {
 
 struct EdfSeriesAssemblyStatus {
-    bool allocated = false;
     uint32_t current_record = 0;
     uint32_t records_completed = 0;
-    uint32_t records_skipped = 0;
-    uint32_t samples_accepted = 0;
     uint32_t samples_invalid = 0;
     uint32_t samples_missing = 0;
     uint32_t samples_duplicate = 0;
@@ -33,21 +30,9 @@ struct EdfStreamAssemblerStatus {
     uint32_t timestamp_errors = 0;
     uint32_t unknown_signals = 0;
 
-    uint32_t samples_accepted = 0;
-    uint32_t samples_invalid = 0;
-    uint32_t samples_missing = 0;
-    uint32_t samples_duplicate = 0;
-    uint32_t samples_late = 0;
-
-    uint32_t records_dropped_partial = 0;
-    uint32_t records_completed = 0;
-
-    uint32_t timestamp_jitter_corrections = 0;
     uint32_t timestamp_resyncs = 0;
-    int32_t last_timestamp_jitter_ms = 0;
 
     int64_t session_start_epoch_ms = 0;
-    int64_t last_sample_epoch_ms = 0;
 
     EdfSeriesAssemblyStatus brp;
     EdfSeriesAssemblyStatus pld;
@@ -115,9 +100,7 @@ private:
         int64_t effective_start_ms = 0;
         uint32_t coverage_ms = 0;
         uint32_t tolerance_ms = 0;
-        int32_t jitter_ms = 0;
         bool eligible = false;
-        bool corrected = false;
         bool resync = false;
     };
 
@@ -150,7 +133,7 @@ private:
                                     int64_t frame_start_ms);
 
     void publish_record(const SeriesBuffer &series);
-    void publish_current_record(SeriesBuffer &series, bool skipped);
+    void publish_current_record(SeriesBuffer &series);
     bool advance_to_record(SeriesBuffer &series,
                            uint32_t new_record,
                            size_t *publish_budget = nullptr);

@@ -56,22 +56,13 @@ struct EdfRecorderStatus {
     uint32_t sessions_ended = 0;
     uint32_t segment_rollovers = 0;
 
-    // attachment diagnostics
-    uint32_t attach_attempts = 0;
+    // capture failures
     uint32_t attach_failures = 0;
-
-    // stream frames
-    uint32_t frames = 0;
     uint32_t frame_drops = 0;
 
-    // event frames
-    uint32_t event_frames = 0;
+    // captured events
     uint32_t event_records = 0;
-    uint32_t event_subscription_generation = 0;
-    uint32_t event_coverage_gap_count = 0;
     uint32_t event_coverage_session_gap_count = 0;
-    uint32_t respiratory_events = 0;
-    uint32_t csr_events = 0;
 
     // EDF records
     uint32_t brp_records = 0;
@@ -82,27 +73,8 @@ struct EdfRecorderStatus {
     uint32_t csl_records = 0;
     uint32_t str_records = 0;
 
-    // STR RPCs
-    uint32_t str_setting_requests = 0;
-    uint32_t str_setting_responses = 0;
-    uint32_t str_setting_timeouts = 0;
-    uint32_t str_setting_values = 0;
-    uint32_t str_setting_missing = 0;
-    uint32_t str_setting_unmapped = 0;
-
-    uint32_t str_summary_requests = 0;
-    uint32_t str_summary_responses = 0;
-    uint32_t str_summary_timeouts = 0;
-    uint32_t str_summary_values = 0;
-    uint32_t str_summary_missing = 0;
-    uint32_t str_summary_unmapped = 0;
-
-    // identification RPCs
-    uint32_t identification_requests = 0;
-    uint32_t identification_responses = 0;
-    uint32_t identification_timeouts = 0;
-    uint32_t identification_write_requests = 0;
-    uint32_t identification_failures = 0;
+    // metadata acquisition and publication failures
+    uint32_t metadata_failures = 0;
 
     // queue/storage failures
     uint32_t record_enqueue_failures = 0;
@@ -110,37 +82,19 @@ struct EdfRecorderStatus {
     uint32_t str_enqueue_failures = 0;
     uint32_t file_open_failures = 0;
     uint32_t numeric_record_drops = 0;
-    uint32_t numeric_open_buffered_frames = 0;
     uint32_t numeric_open_buffer_drops = 0;
 
-    // recording gate and mask events
-    uint32_t recording_gate_rises = 0;
-    uint32_t recording_gate_falls = 0;
+    // recording gate and mask faults
     uint32_t recording_gate_recoveries = 0;
     uint32_t recording_gate_bad_events = 0;
-    uint32_t mask_events = 0;
     uint32_t mask_bad_events = 0;
 
     int64_t clock_correction_ms = 0;
-    uint32_t clock_correction_sample_age_ms = 0;
 
-    // last activity
-    uint32_t last_frame_ms = 0;
-    uint32_t last_event_ms = 0;
-
-    // files and messages
-    char brp_path[80] = {};
-    char pld_path[80] = {};
-    char sa2_path[80] = {};
-    char tcv_path[80] = {};
-    char eve_path[80] = {};
-    char csl_path[80] = {};
-    char str_path[80] = {};
+    // capture boundaries and last fault
     char last_mask_event_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char recording_start_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
     char recording_end_time[AC_STREAM_FRAME_START_TIME_MAX] = {};
-    char last_event_data_id[64] = {};
-    char last_event_name[48] = {};
     char last_error[80] = {};
 
     bool files_open() const {
@@ -275,7 +229,7 @@ private:
     void close_session_files();
     void sync_annotation_open_status();
     bool sync_numeric_open_status(uint32_t now_ms);
-    void buffer_numeric_open_stream(uint32_t now_ms);
+    void buffer_numeric_open_stream();
     bool take_numeric_open_stream_frame(StreamFrameRef &frame);
     uint32_t event_coverage_session_gaps() const;
 

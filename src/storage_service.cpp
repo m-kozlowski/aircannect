@@ -61,11 +61,23 @@ enum class MaintenanceOwner : uint8_t {
     Upload,
 };
 
+struct StorageServiceState {
+    bool initialized = false;
+    bool available = false;
+
+    size_t edf_capacity = 0;
+    uint8_t open_file_count = 0;
+
+    uint32_t queue_drops = 0;
+    uint32_t patch_errors = 0;
+    char last_error[AC_STORAGE_ERROR_MAX] = {};
+};
+
 struct JobSlot {
     JobType type = JobType::Record;
     StoredFileKind kind = StoredFileKind::Brp;
     uint32_t request_id = 0;
-    char path[sizeof(StorageServiceStatus::last_path)] = {};
+    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
     char patient_id[AC_EDF_STORAGE_PATIENT_ID_MAX] = {};
     char recording_id[AC_EDF_STORAGE_RECORDING_ID_MAX] = {};
     char start_date[9] = {};
@@ -95,7 +107,7 @@ struct OpenFile {
     uint32_t record_count = 0;
     size_t record_size = 0;
     bool resumed = false;
-    char path[sizeof(StorageServiceStatus::last_path)] = {};
+    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
 };
 
 struct OpenRequestResult {
@@ -105,8 +117,8 @@ struct OpenRequestResult {
     bool resumed = false;
     uint32_t request_id = 0;
     uint32_t record_count = 0;
-    char path[sizeof(StorageServiceStatus::last_path)] = {};
-    char error[sizeof(StorageServiceStatus::last_error)] = {};
+    char path[AC_STORAGE_WRITE_PATH_MAX] = {};
+    char error[AC_STORAGE_ERROR_MAX] = {};
 };
 
 struct ReadJob {
@@ -150,7 +162,7 @@ struct ReadCompletionSlot {
 
 void close_file(OpenFile &state);
 
-StorageServiceStatus stats;
+StorageServiceState service_state;
 SemaphoreHandle_t queue_lock = nullptr;
 TaskHandle_t task = nullptr;
 JobSlot *slots = nullptr;
@@ -420,8 +432,7 @@ void recover_str_storage_artifacts() {
 }
 
 void set_error(const char *error) {
-    copy_cstr(stats.last_error, sizeof(stats.last_error), error);
-    stats.last_activity_ms = millis();
+    copy_cstr(service_state.last_error, sizeof(service_state.last_error), error);
 }
 
 void log_alloc_failed(const char *context, size_t bytes) {
@@ -476,15 +487,6 @@ size_t file_index(StoredFileKind kind) {
     return edf_storage_file_index(public_file_index(kind));
 }
 
-EdfStorageOpenFileStatus open_file_status(const OpenFile &file) {
-    EdfStorageOpenFileStatus out;
-    out.open = file.open;
-    out.resumed = file.resumed;
-    out.record_count = file.record_count;
-    copy_cstr(out.path, sizeof(out.path), file.path);
-    return out;
-}
-
 EdfFileKind numeric_kind(StoredFileKind kind) {
     switch (kind) {
         case StoredFileKind::Pld: return EdfFileKind::Pld;
@@ -508,7 +510,7 @@ size_t open_header_size(const JobSlot &job) {
 bool valid_path(const char *path) {
     if (!path || path[0] != '/') return false;
     const size_t len = strlen(path);
-    return len > 1 && len < sizeof(StorageServiceStatus::last_path);
+    return len > 1 && len < AC_STORAGE_WRITE_PATH_MAX;
 }
 
 bool lock_queue(uint32_t timeout_ms = 10) {
@@ -533,12 +535,6 @@ uint8_t read_lane_priority(StorageReadLane lane) {
         default:
             return 3;
     }
-}
-
-void refresh_read_status_locked() {
-    stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
-    stats.read_queued = read_job_count;
-    stats.prepared_reads = prepared_read_count;
 }
 
 ReadJob *find_read_job_locked(OperationTicket ticket) {
@@ -621,8 +617,8 @@ OperationSubmission submit_prepared_read(const StorageReadCommand &command) {
         return OperationSubmission::rejected();
     }
 
-    if (!stats.initialized) begin();
-    if (!stats.available || !lock_queue()) return OperationSubmission::busy();
+    if (!service_state.initialized) begin();
+    if (!service_state.available || !lock_queue()) return OperationSubmission::busy();
 
     const size_t completion_count = read_completion_count_locked();
     if (read_job_count + completion_count >=
@@ -658,7 +654,6 @@ OperationSubmission submit_prepared_read(const StorageReadCommand &command) {
     free_job->tail_lines = command.tail_lines;
     copy_cstr(free_job->path, sizeof(free_job->path), command.path.c_str());
     read_job_count++;
-    refresh_read_status_locked();
     unlock_queue();
 
     wake_service_task();
@@ -708,7 +703,6 @@ bool abandon_prepared_read(OperationTicket ticket) {
         if (prepared_read_count > 0) prepared_read_count--;
     }
     *completion = {};
-    refresh_read_status_locked();
     unlock_queue();
 
     Memory::free(bytes);
@@ -768,7 +762,6 @@ void free_prepared_read(StoragePreparedRead prepared) {
     uint8_t *bytes = slot->bytes;
     *slot = {};
     if (prepared_read_count > 0) prepared_read_count--;
-    refresh_read_status_locked();
     unlock_queue();
 
     Memory::free(bytes);
@@ -828,22 +821,12 @@ uint8_t count_open_files() {
 
 void refresh_open_file_count() {
     const uint8_t count = count_open_files();
-    EdfStorageOpenFileStatus files[AC_EDF_STORAGE_FILE_COUNT];
-    for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
-        files[i] = open_file_status(open_files[i]);
-    }
     if (lock_queue(50)) {
-        stats.open_file_count = count;
-        for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
-            stats.files[i] = files[i];
-        }
+        service_state.open_file_count = count;
         unlock_queue();
         return;
     }
-    stats.open_file_count = count;
-    for (size_t i = 0; i < AC_EDF_STORAGE_FILE_COUNT; ++i) {
-        stats.files[i] = files[i];
-    }
+    service_state.open_file_count = count;
 }
 
 size_t free_slots() {
@@ -993,10 +976,9 @@ bool allocate_slots() {
     slot_numeric_values = candidate_numeric_values;
     slot_numeric_present = candidate_numeric_present;
     slot_numeric_valid = candidate_numeric_valid;
-    stats.using_psram = Memory::psram_available();
-    stats.edf_capacity = AC_EDF_STORAGE_QUEUE_CAPACITY;
-    if (strcmp(stats.last_error, "edf_queue_allocation_failed") == 0) {
-        stats.last_error[0] = '\0';
+    service_state.edf_capacity = AC_EDF_STORAGE_QUEUE_CAPACITY;
+    if (strcmp(service_state.last_error, "edf_queue_allocation_failed") == 0) {
+        service_state.last_error[0] = '\0';
     }
     unlock_queue();
     return true;
@@ -1145,13 +1127,12 @@ bool push_slot(const JobSlot &job) {
     slots[tail].numeric_valid = numeric_valid;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
-    stats.edf_queued = queued;
     return true;
 }
 
 bool ensure_parent_dirs(const char *path) {
     if (!valid_path(path)) return false;
-    char dir[sizeof(StorageServiceStatus::last_path)] = {};
+    char dir[AC_STORAGE_WRITE_PATH_MAX] = {};
     copy_cstr(dir, sizeof(dir), path);
     char *last_slash = strrchr(dir, '/');
     if (!last_slash) return false;
@@ -1341,8 +1322,6 @@ bool write_recording_start(OpenFile &state) {
     if (state.file.write(record, written) != written) return false;
     state.record_count++;
     if (!patch_record_count(state)) return false;
-    stats.records_written++;
-    stats.bytes_written += written;
     return true;
 }
 
@@ -1382,12 +1361,10 @@ bool process_open(JobSlot &job) {
         return fail("bad_path");
     }
     if (!Storage::mounted()) {
-        stats.unavailable_drops++;
         return fail("storage_not_mounted");
     }
     if (!is_annotation_kind(job.kind) &&
         !render_numeric_open_header(job)) {
-        stats.render_errors++;
         return fail("header_render_failed");
     }
 
@@ -1401,16 +1378,13 @@ bool process_open(JobSlot &job) {
     if (try_resume_open_file(state, job)) {
         refresh_open_file_count();
         mark_open_result(job, true, &state, nullptr);
-        copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
-        stats.open_jobs++;
-        stats.last_error[0] = 0;
+        service_state.last_error[0] = 0;
         return true;
     }
 
     (void)Storage::remove(job.path);
     state.file = Storage::open(job.path, "w+");
     if (!state.file) {
-        stats.open_errors++;
         log_worker_failure(LOG_WARN, "open_failed", job.path);
         return fail("open_failed");
     }
@@ -1426,7 +1400,6 @@ bool process_open(JobSlot &job) {
     copy_cstr(state.path, sizeof(state.path), job.path);
     if (!write_open_header(state, job)) {
         state.file.close();
-        stats.write_errors++;
         log_worker_failure(LOG_WARN, "header_write_failed", job.path);
         return fail("header_write_failed");
     }
@@ -1438,29 +1411,24 @@ bool process_open(JobSlot &job) {
         state.record_size = 0;
         state.resumed = false;
         state.path[0] = 0;
-        stats.write_errors++;
         log_worker_failure(LOG_WARN, "recording_start_write_failed", job.path);
         return fail("recording_start_write_failed");
     }
     state.file.flush();
     refresh_open_file_count();
     mark_open_result(job, true, &state, nullptr);
-    copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
-    stats.open_jobs++;
-    stats.last_error[0] = 0;
+    service_state.last_error[0] = 0;
     return true;
 }
 
 bool process_record(const JobSlot &job) {
     OpenFile &state = open_files[file_index(job.kind)];
     if (!state.open || !state.file) {
-        stats.write_errors++;
         set_error("file_not_open");
         log_worker_failure(LOG_WARN, "file_not_open", job.path);
         return false;
     }
     if (state.record_size != 0 && job.len != state.record_size) {
-        stats.write_errors++;
         set_error("record_size_mismatch");
         log_worker_failure(LOG_WARN, "record_size_mismatch", job.path);
         return false;
@@ -1469,7 +1437,6 @@ bool process_record(const JobSlot &job) {
     state.file.seek(state.file.size());
     const size_t written = state.file.write(job.bytes, job.len);
     if (written != job.len) {
-        stats.write_errors++;
         set_error("short_write");
         Log::logf(CAT_EDF,
                   LOG_WARN,
@@ -1483,17 +1450,12 @@ bool process_record(const JobSlot &job) {
     state.file.flush();
     state.record_count++;
     if (!patch_record_count(state)) {
-        stats.patch_errors++;
+        service_state.patch_errors++;
         set_error("patch_failed");
         log_worker_failure(LOG_WARN, "patch_failed", state.path);
         return false;
     }
-    stats.records_written++;
-    stats.bytes_written += written;
-    stats.record_jobs++;
-    stats.last_activity_ms = millis();
-    copy_cstr(stats.last_path, sizeof(stats.last_path), state.path);
-    stats.last_error[0] = 0;
+    service_state.last_error[0] = 0;
     return true;
 }
 
@@ -1581,7 +1543,6 @@ bool process_numeric_record(JobSlot &job) {
                                    job.bytes,
                                    AC_EDF_STORAGE_SLOT_BYTES,
                                    written)) {
-        stats.render_errors++;
         set_error("render_failed");
         log_worker_failure(LOG_WARN, "render_failed");
         return false;
@@ -1596,7 +1557,6 @@ bool process_str_record(const JobSlot &job) {
         return false;
     }
     if (!Storage::mounted()) {
-        stats.unavailable_drops++;
         set_error("storage_not_mounted");
         return false;
     }
@@ -1620,12 +1580,8 @@ bool process_str_record(const JobSlot &job) {
     if (!edf_str_storage_write(request, result)) {
         if (result.error_kind == EdfStrStorageErrorKind::Allocation) {
             log_alloc_failed(result.error ? result.error : "str_write", 0);
-        } else if (result.error_kind == EdfStrStorageErrorKind::Open) {
-            stats.open_errors++;
         } else if (result.error_kind == EdfStrStorageErrorKind::Publish) {
-            stats.patch_errors++;
-        } else {
-            stats.write_errors++;
+            service_state.patch_errors++;
         }
         set_error(result.error ? result.error : "str_write_failed");
         return false;
@@ -1643,12 +1599,7 @@ bool process_str_record(const JobSlot &job) {
                   result.retention_applied ? 1u : 0u);
     }
 
-    stats.records_written++;
-    stats.bytes_written += result.bytes_written;
-    stats.record_jobs++;
-    stats.last_activity_ms = millis();
-    copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
-    stats.last_error[0] = 0;
+    service_state.last_error[0] = 0;
     return true;
 }
 
@@ -1668,7 +1619,6 @@ bool process_identification_files(const JobSlot &job) {
         return false;
     }
     if (!Storage::mounted()) {
-        stats.unavailable_drops++;
         set_error("storage_not_mounted");
         return false;
     }
@@ -1676,7 +1626,6 @@ bool process_identification_files(const JobSlot &job) {
     if (!write_file_exact(AC_EDF_IDENTIFICATION_JSON_PATH,
                           job.bytes,
                           job.len)) {
-        stats.write_errors++;
         set_error("identification_json_write_failed");
         log_worker_failure(LOG_WARN,
                            "identification_json_write_failed",
@@ -1689,7 +1638,6 @@ bool process_identification_files(const JobSlot &job) {
     if (!write_file_exact(AC_EDF_IDENTIFICATION_CRC_PATH,
                           crc_le,
                           sizeof(crc_le))) {
-        stats.write_errors++;
         set_error("identification_crc_write_failed");
         log_worker_failure(LOG_WARN,
                            "identification_crc_write_failed",
@@ -1697,13 +1645,7 @@ bool process_identification_files(const JobSlot &job) {
         return false;
     }
 
-    stats.identification_jobs++;
-    stats.bytes_written += job.len + sizeof(crc_le);
-    stats.last_activity_ms = millis();
-    copy_cstr(stats.last_path,
-              sizeof(stats.last_path),
-              AC_EDF_IDENTIFICATION_JSON_PATH);
-    stats.last_error[0] = 0;
+    service_state.last_error[0] = 0;
     return true;
 }
 
@@ -1711,9 +1653,7 @@ bool process_close(const JobSlot &job) {
     OpenFile &state = open_files[file_index(job.kind)];
     close_file(state);
     refresh_open_file_count();
-    stats.close_jobs++;
-    stats.last_activity_ms = millis();
-    stats.last_error[0] = 0;
+    service_state.last_error[0] = 0;
     return true;
 }
 
@@ -1794,24 +1734,16 @@ void finish_read_job(size_t index,
         completion_slot->completion = completion;
     }
 
-    if (abandoned) {
-        stats.read_cancellations++;
-    } else if (completion_slot &&
+    if (!abandoned && completion_slot &&
         completion.outcome.disposition == OperationDisposition::Succeeded) {
-        stats.read_jobs++;
-        stats.bytes_read += completion.prepared.length;
-        stats.last_error[0] = 0;
-    } else if (completion_slot &&
+        service_state.last_error[0] = 0;
+    } else if (!abandoned && completion_slot &&
                completion.outcome.disposition ==
-                   OperationDisposition::Cancelled) {
-        stats.read_cancellations++;
-    } else if (completion_slot) {
-        stats.read_errors++;
+                   OperationDisposition::Failed) {
         set_error(error ? error : "read_failed");
     }
 
     processing_read = read_job_count > 0;
-    refresh_read_status_locked();
     unlock_queue();
 
     Memory::free(bytes_to_free);
@@ -2062,8 +1994,6 @@ bool process_read_step() {
     }
 
     job.bytes_read += received;
-    stats.last_activity_ms = millis();
-    copy_cstr(stats.last_path, sizeof(stats.last_path), job.path);
     if (job.bytes_read == job.target_length) {
         finish_read_job(index, OperationOutcome::succeeded());
     }
@@ -2193,7 +2123,6 @@ void process_job(JobSlot &job) {
 
 void task_entry(void *) {
     recover_str_storage_artifacts();
-    stats.task_started = true;
 
     for (;;) {
         bool did_work = false;
@@ -2211,7 +2140,6 @@ void task_entry(void *) {
                     slot_index = head;
                     head = (head + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
                     queued--;
-                    stats.edf_queued = queued;
                     processing_job = true;
                     have_job = true;
                 }
@@ -2273,16 +2201,15 @@ void task_entry(void *) {
 }
 
 bool enqueue(JobSlot &job) {
-    if (!stats.initialized) begin();
-    if (!stats.available) return false;
+    if (!service_state.initialized) begin();
+    if (!service_state.available) return false;
     if (!lock_queue()) {
-        stats.queue_drops++;
+        service_state.queue_drops++;
         set_error("queue_lock_failed");
         log_worker_failure(LOG_WARN, "queue_lock_failed", job.path);
         return false;
     }
     if (!slot_storage_available()) {
-        stats.unavailable_drops++;
         unlock_queue();
         return false;
     }
@@ -2290,36 +2217,33 @@ bool enqueue(JobSlot &job) {
     const bool ok = push_slot(job);
     unlock_queue();
     if (!ok) {
-        stats.queue_drops++;
+        service_state.queue_drops++;
         set_error("queue_full");
         log_worker_failure(LOG_WARN, "queue_full", job.path);
         return false;
     }
-    stats.bytes_enqueued += job.len;
-    stats.last_activity_ms = millis();
     wake_service_task();
     return true;
 }
 
 template <typename Prepare>
 bool enqueue_prepared_slot(Prepare prepare, const char *prepare_error) {
-    if (!stats.initialized) begin();
-    if (!stats.available) return false;
+    if (!service_state.initialized) begin();
+    if (!service_state.available) return false;
     if (!lock_queue()) {
-        stats.queue_drops++;
+        service_state.queue_drops++;
         set_error("queue_lock_failed");
         log_worker_failure(LOG_WARN, "queue_lock_failed");
         return false;
     }
     if (!slot_storage_available()) {
-        stats.unavailable_drops++;
         unlock_queue();
         return false;
     }
 
     if (free_slots() == 0) {
         unlock_queue();
-        stats.queue_drops++;
+        service_state.queue_drops++;
         set_error("queue_full");
         log_worker_failure(LOG_WARN, "queue_full");
         return false;
@@ -2329,20 +2253,15 @@ bool enqueue_prepared_slot(Prepare prepare, const char *prepare_error) {
     clear_slot(job);
     if (!prepare(job)) {
         unlock_queue();
-        stats.render_errors++;
         set_error(prepare_error);
         log_worker_failure(LOG_WARN, prepare_error, job.path);
         return false;
     }
 
-    const size_t queued_len = job.len;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
-    stats.edf_queued = queued;
     unlock_queue();
 
-    stats.bytes_enqueued += queued_len;
-    stats.last_activity_ms = millis();
     wake_service_task();
     return true;
 }
@@ -2367,10 +2286,10 @@ bool enqueue_rendered_slot(Prepare prepare,
 }  // namespace
 
 void begin() {
-    if (stats.initialized) return;
+    if (service_state.initialized) return;
     if (!queue_lock) queue_lock = xSemaphoreCreateMutex();
     if (!queue_lock) {
-        stats.available = false;
+        service_state.available = false;
         return;
     }
 
@@ -2395,7 +2314,7 @@ void begin() {
                                     AC_STORAGE_SERVICE_TASK_PRIO, &task,
                                     AC_STORAGE_SERVICE_TASK_CORE);
         if (created != pdPASS || !task) {
-            stats.available = false;
+            service_state.available = false;
             diagnostic.available = false;
             set_storage_task_available(false);
             set_error("task_create_failed");
@@ -2404,23 +2323,22 @@ void begin() {
             return;
         }
     }
-    stats.initialized = true;
-    stats.available = true;
-    stats.read_capacity = AC_STORAGE_PREPARED_READ_CAPACITY;
+    service_state.initialized = true;
+    service_state.available = true;
     set_storage_task_available(true);
 
     Log::logf(CAT_STORAGE, LOG_DEBUG,
               "service ready edf_q=%u read_q=%u slot=%u psram=%s "
               "resources=%s\n",
-              static_cast<unsigned>(stats.edf_capacity),
+              static_cast<unsigned>(service_state.edf_capacity),
               static_cast<unsigned>(AC_STORAGE_PREPARED_READ_CAPACITY),
               static_cast<unsigned>(AC_EDF_STORAGE_SLOT_BYTES),
-              stats.using_psram ? "yes" : "no",
+              Memory::psram_available() ? "yes" : "no",
               storage_resources_ready ? "ready" : "recovering");
 }
 
 bool request_mount_retry() {
-    if (!stats.initialized || !stats.available) return false;
+    if (!service_state.initialized || !service_state.available) return false;
 
     bool expected = false;
     if (!mount_retry_requested.compare_exchange_strong(expected, true)) {
@@ -2439,8 +2357,8 @@ bool enqueue_edf_open_numeric(const char *path,
     if (!valid_path(path) || schema.signal_count == 0) return false;
     const size_t header_size = edf_header_size(schema);
     if (header_size > AC_EDF_STORAGE_SLOT_BYTES) return false;
-    if (!stats.initialized) begin();
-    if (!stats.available) return false;
+    if (!service_state.initialized) begin();
+    if (!service_state.available) return false;
     const StoredFileKind kind = stored_kind(schema.kind);
     const EdfStorageOpenHandle reserved = reserve_open_handle(kind);
     if (!reserved.valid()) return false;
@@ -2476,8 +2394,8 @@ bool enqueue_edf_open_annotation(const char *path,
                                  EdfStorageOpenHandle *handle) {
     if (handle) *handle = {};
     if (!valid_path(path)) return false;
-    if (!stats.initialized) begin();
-    if (!stats.available) return false;
+    if (!service_state.initialized) begin();
+    if (!service_state.available) return false;
     const StoredFileKind stored = stored_kind(kind);
     const EdfStorageOpenHandle reserved = reserve_open_handle(stored);
     if (!reserved.valid()) return false;
@@ -2501,23 +2419,22 @@ bool enqueue_edf_open_annotation(const char *path,
 
 bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
                                 const EdfCompletedRecordView &record) {
-    if (!stats.initialized) begin();
-    if (!stats.available) return false;
+    if (!service_state.initialized) begin();
+    if (!service_state.available) return false;
     if (!lock_queue()) {
-        stats.queue_drops++;
+        service_state.queue_drops++;
         set_error("queue_lock_failed");
         log_worker_failure(LOG_WARN, "queue_lock_failed");
         return false;
     }
     if (!slot_storage_available()) {
-        stats.unavailable_drops++;
         unlock_queue();
         return false;
     }
 
     if (free_slots() == 0) {
         unlock_queue();
-        stats.queue_drops++;
+        service_state.queue_drops++;
         set_error("queue_full");
         log_worker_failure(LOG_WARN, "queue_full");
         return false;
@@ -2527,20 +2444,15 @@ bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
     clear_slot(job);
     if (!prepare_numeric_record_job(job, schema, record)) {
         unlock_queue();
-        stats.render_errors++;
         set_error("record_snapshot_failed");
         log_worker_failure(LOG_WARN, "record_snapshot_failed");
         return false;
     }
 
-    const size_t queued_len = job.len;
     tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
     queued++;
-    stats.edf_queued = queued;
     unlock_queue();
 
-    stats.bytes_enqueued += queued_len;
-    stats.last_activity_ms = millis();
     wake_service_task();
     return true;
 }
@@ -2675,12 +2587,12 @@ bool request_diagnostic_append(const char *path,
         strlen(path) >= AC_STORAGE_WRITE_PATH_MAX) {
         return false;
     }
-    if (!stats.initialized) begin();
+    if (!service_state.initialized) begin();
     if (!lock_queue(20)) return false;
 
     const bool busy = diagnostic.state == StorageDiagnosticState::Queued ||
                       diagnostic.state == StorageDiagnosticState::Writing;
-    if (!stats.available || !diagnostic.available || busy) {
+    if (!service_state.available || !diagnostic.available || busy) {
         unlock_queue();
         return false;
     }
@@ -2741,16 +2653,15 @@ StorageWorkloadSnapshot workload_snapshot() {
 
     if (!lock_queue()) return out;
 
-    refresh_read_status_locked();
     out.valid = true;
-    out.available = stats.available;
+    out.available = service_state.available;
     out.busy = processing_job || processing_read || upload_active ||
                diagnostic.state == StorageDiagnosticState::Queued ||
                diagnostic.state == StorageDiagnosticState::Writing;
     out.maintenance_active =
         maintenance_owner.load() != MaintenanceOwner::None;
     out.edf_queued = queued;
-    out.open_file_count = stats.open_file_count;
+    out.open_file_count = service_state.open_file_count;
     unlock_queue();
     return out;
 }
@@ -2761,21 +2672,18 @@ StorageEdfStatusSnapshot edf_status_snapshot() {
 
     if (!lock_queue()) return out;
 
-    refresh_read_status_locked();
     out.busy = processing_job || processing_read || upload_active ||
                diagnostic.state == StorageDiagnosticState::Queued ||
                diagnostic.state == StorageDiagnosticState::Writing;
-    out.capacity = stats.edf_capacity;
+    out.capacity = service_state.edf_capacity;
     out.queued = queued;
-    out.open_file_count = stats.open_file_count;
-    out.records_written = stats.records_written;
-    out.identification_jobs = stats.identification_jobs;
-    out.queue_drops = stats.queue_drops;
-    out.patch_errors = stats.patch_errors;
+    out.open_file_count = service_state.open_file_count;
+    out.queue_drops = service_state.queue_drops;
+    out.patch_errors = service_state.patch_errors;
 #if AC_STACK_PROFILE_ENABLED
     if (task) out.stack_high_water_words = uxTaskGetStackHighWaterMark(task);
 #endif
-    copy_cstr(out.last_error, sizeof(out.last_error), stats.last_error);
+    copy_cstr(out.last_error, sizeof(out.last_error), service_state.last_error);
     unlock_queue();
     return out;
 }

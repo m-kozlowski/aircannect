@@ -353,10 +353,6 @@ bool EdfStreamAssembler::allocate_buffers() {
     }
 
     status_.buffers_ready = true;
-    status_.brp.allocated = true;
-    status_.pld.allocated = true;
-    status_.sa2.allocated = true;
-    status_.tcv.allocated = true;
     reset();
     return true;
 }
@@ -393,10 +389,6 @@ void EdfStreamAssembler::reset_session_counters() {
     const bool buffers_ready = status_.buffers_ready;
     status_ = {};
     status_.buffers_ready = buffers_ready;
-    status_.brp.allocated = buffers_ready;
-    status_.pld.allocated = buffers_ready;
-    status_.sa2.allocated = buffers_ready;
-    status_.tcv.allocated = buffers_ready;
     declared_start_epoch_ms_ = 0;
     initial_epoch_rebase_allowed_ = false;
     reset_timeline();
@@ -504,7 +496,6 @@ void EdfStreamAssembler::count_late_frame_samples(
             const uint32_t target_slot = record_ms / target_interval;
             if (target_slot >= series.samples_per_record) continue;
             series.status->samples_late++;
-            status_.samples_late++;
         }
     }
 }
@@ -638,12 +629,8 @@ bool EdfStreamAssembler::resolve_frame_timing(
     // source sample; larger jumps are treated as real gaps/resyncs.
     const int64_t jitter =
         reported_start_ms - timeline_next_frame_start_ms_;
-    if (jitter >= INT32_MIN && jitter <= INT32_MAX) {
-        timing.jitter_ms = static_cast<int32_t>(jitter);
-    }
     if (abs_i64(jitter) <= timing.tolerance_ms) {
         timing.effective_start_ms = timeline_next_frame_start_ms_;
-        timing.corrected = jitter != 0;
     } else {
         timing.resync = true;
     }
@@ -655,19 +642,14 @@ void EdfStreamAssembler::commit_frame_timing(
     const FrameTiming &timing) {
     if (!timing.eligible || timing.coverage_ms == 0) return;
 
-    if (timing.corrected) {
-        status_.timestamp_jitter_corrections++;
-        status_.last_timestamp_jitter_ms = timing.jitter_ms;
-    } else if (timing.resync) {
+    if (timing.resync) {
         status_.timestamp_resyncs++;
-        status_.last_timestamp_jitter_ms = timing.jitter_ms;
     }
 
     timeline_active_ = true;
     timeline_stream_id_ = frame.stream_id;
     timeline_next_frame_start_ms_ =
         timing.effective_start_ms + timing.coverage_ms;
-    status_.last_sample_epoch_ms = timeline_next_frame_start_ms_;
 }
 
 bool EdfStreamAssembler::initial_epoch_can_rebase() const {
@@ -745,16 +727,12 @@ void EdfStreamAssembler::publish_record(const SeriesBuffer &series) {
     record_observer_(record_observer_context_, record);
 }
 
-void EdfStreamAssembler::publish_current_record(SeriesBuffer &series,
-                                                bool skipped) {
+void EdfStreamAssembler::publish_current_record(SeriesBuffer &series) {
     if (!series.status) return;
     const uint32_t missing = count_missing_record_samples(series);
     publish_record(series);
     series.status->records_completed++;
-    status_.records_completed++;
     series.status->samples_missing += missing;
-    status_.samples_missing += missing;
-    if (skipped) series.status->records_skipped++;
 }
 
 bool EdfStreamAssembler::advance_to_record(SeriesBuffer &series,
@@ -766,8 +744,7 @@ bool EdfStreamAssembler::advance_to_record(SeriesBuffer &series,
 
     while (series.status->current_record < new_record) {
         if (publish_budget && *publish_budget == 0) return false;
-        const bool skipped = !record_has_samples(series);
-        publish_current_record(series, skipped);
+        publish_current_record(series);
         if (publish_budget) --(*publish_budget);
         reset_record(series);
         series.status->current_record++;
@@ -786,10 +763,9 @@ void EdfStreamAssembler::flush_partial_records() {
     for (SeriesBuffer &buffer : buffers) {
         if (!record_has_samples(buffer)) continue;
         if (record_tail_complete(buffer)) {
-            publish_current_record(buffer, false);
+            publish_current_record(buffer);
         } else if (buffer.status) {
             buffer.status->records_dropped_partial++;
-            status_.records_dropped_partial++;
         }
         reset_record(buffer);
     }
@@ -809,7 +785,6 @@ void EdfStreamAssembler::store_sample(SeriesBuffer &series,
 
     if (record_index < series.status->current_record) {
         series.status->samples_late++;
-        status_.samples_late++;
         return;
     }
     if (record_index != series.status->current_record) {
@@ -822,7 +797,6 @@ void EdfStreamAssembler::store_sample(SeriesBuffer &series,
     if (edf_bit_get(series.present, slot)) {
         if (count_duplicate) {
             series.status->samples_duplicate++;
-            status_.samples_duplicate++;
         }
         return;
     }
@@ -832,12 +806,8 @@ void EdfStreamAssembler::store_sample(SeriesBuffer &series,
     series.values[slot] = value;
     series.status->slots_filled++;
 
-    if (valid) {
-        series.status->samples_accepted++;
-        status_.samples_accepted++;
-    } else {
+    if (!valid) {
         series.status->samples_invalid++;
-        status_.samples_invalid++;
     }
 }
 
