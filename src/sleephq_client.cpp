@@ -153,8 +153,8 @@ bool SleepHqClient::tls_heap_available() {
         return true;
     }
     set_error("tls_heap_guard");
-    Log::logf(CAT_SLEEPHQ, LOG_WARN,
-              "TLS heap guard free=%u max_alloc=%u min_free=%u "
+    Log::logf(CAT_EXPORT, LOG_WARN,
+              "[SLEEPHQ] TLS heap guard free=%u max_alloc=%u min_free=%u "
               "min_max_alloc=%u psram_tls=%u\n",
               static_cast<unsigned>(mem.heap_free),
               static_cast<unsigned>(mem.heap_max_alloc),
@@ -192,7 +192,7 @@ bool SleepHqClient::ensure_connected(
     if (!client_.connect(SLEEPHQ_HOST, SLEEPHQ_PORT,
                          SLEEPHQ_CONNECT_TIMEOUT_MS)) {
         set_error("connect_failed");
-        Log::logf(CAT_SLEEPHQ, LOG_WARN, "connect failed\n");
+        Log::logf(CAT_EXPORT, LOG_WARN, "[SLEEPHQ] connect failed\n");
         return false;
     }
     if (!operation_allows(operation)) {
@@ -210,17 +210,17 @@ void SleepHqClient::configure_socket_options() {
 
     const timeval tv = {SLEEPHQ_HTTP_TIMEOUT_MS / 1000, 0};
     if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "setsockopt(SO_SNDTIMEO) errno=%d\n", errno);
+        Log::logf(CAT_EXPORT, LOG_WARN,
+                  "[SLEEPHQ] setsockopt(SO_SNDTIMEO) errno=%d\n", errno);
     }
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "setsockopt(SO_RCVTIMEO) errno=%d\n", errno);
+        Log::logf(CAT_EXPORT, LOG_WARN,
+                  "[SLEEPHQ] setsockopt(SO_RCVTIMEO) errno=%d\n", errno);
     }
     const int one = 1;
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "setsockopt(TCP_NODELAY) errno=%d\n", errno);
+        Log::logf(CAT_EXPORT, LOG_WARN,
+                  "[SLEEPHQ] setsockopt(TCP_NODELAY) errno=%d\n", errno);
     }
 }
 
@@ -1041,8 +1041,8 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
 
         const uint32_t now_ms = millis();
         if (static_cast<int32_t>(now_ms - next_progress_ms) >= 0) {
-            Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                      "upload progress path=%s bytes=%llu/%llu "
+            Log::logf(CAT_EXPORT, LOG_INFO,
+                      "[SLEEPHQ] upload progress path=%s bytes=%llu/%llu "
                       "elapsed_ms=%lu\n",
                       request.path,
                       static_cast<unsigned long long>(sent),
@@ -1082,8 +1082,8 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
     const uint32_t upload_elapsed_ms = millis() - upload_started_ms;
     if (response_ok &&
         upload_elapsed_ms >= SLEEPHQ_UPLOAD_PROGRESS_INTERVAL_MS) {
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "upload complete path=%s bytes=%llu elapsed_ms=%lu\n",
+        Log::logf(CAT_EXPORT, LOG_INFO,
+                  "[SLEEPHQ] upload complete path=%s bytes=%llu elapsed_ms=%lu\n",
                   request.path,
                   static_cast<unsigned long long>(out.bytes),
                   static_cast<unsigned long>(upload_elapsed_ms));

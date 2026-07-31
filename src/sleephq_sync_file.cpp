@@ -119,8 +119,8 @@ bool SleepHqSyncFile::compute_content_hash(
     uint8_t *buffer = static_cast<uint8_t *>(
         Memory::alloc_large(HASH_BUFFER_BYTES, false));
     if (!buffer) {
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "hash buffer allocation failed bytes=%u\n",
+        Log::logf(CAT_EXPORT, LOG_ERROR,
+                  "[SLEEPHQ] hash buffer allocation failed bytes=%u\n",
                   static_cast<unsigned>(HASH_BUFFER_BYTES));
         return false;
     }

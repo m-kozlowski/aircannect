@@ -407,7 +407,7 @@ bool StorageSyncEngine::service_result_metadata_save_locked(ExportStep &result) 
         return true;
     }
     if (io_result == StorageFileClientResult::Error) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] metadata save failed path=%s error=%s\n",
                   pending_metadata_path_[0] ? pending_metadata_path_ : "--",
@@ -430,7 +430,7 @@ bool StorageSyncEngine::service_result_metadata_save_locked(ExportStep &result) 
         return false;
     }
     if (admission != OperationAdmission::Accepted) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] metadata save rejected path=%s\n",
                   pending_metadata_path_[0] ? pending_metadata_path_ : "--");
@@ -465,7 +465,7 @@ void StorageSyncEngine::apply_config_locked(const SmbExportConfig &config) {
                                              state_dir_,
                                              sizeof(state_dir_),
                                              &endpoint_hash_)) {
-            Log::logf(CAT_STORAGE,
+            Log::logf(CAT_EXPORT,
                       LOG_WARN,
                       "[SMB] state dir build failed endpoint=%s\n",
                       config_.endpoint);
@@ -506,7 +506,7 @@ void StorageSyncEngine::apply_config_locked(const SmbExportConfig &config) {
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     cancel_scheduled_reconcile_requested_.store(false);
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_DEBUG,
               "[SMB] config enabled=%u configured=%u\n",
               status_.enabled ? 1u : 0u,
@@ -592,7 +592,7 @@ bool StorageSyncEngine::begin_run_locked() {
             ? WorkPhase::ResolveHost
             : WorkPhase::LoadInventory;
     }
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_INFO,
               "[SMB] started reason=%s endpoint=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
@@ -608,7 +608,7 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
         return ExportStep::Waiting;
     }
     if (io_result == StorageFileClientResult::Error) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] metadata load ignored path=%s/%s error=%s\n",
                   state_dir_[0] ? state_dir_ : "--",
@@ -640,7 +640,7 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
         }
 
         if (!read_complete) {
-            Log::logf(CAT_STORAGE,
+            Log::logf(CAT_EXPORT,
                       LOG_WARN,
                       "[SMB] metadata load ignored path=%s/%s "
                       "error=short_read\n",
@@ -663,7 +663,7 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
                                  state_dir_,
                                  SYNC_METADATA_FILE);
     if (written <= 0 || static_cast<size_t>(written) >= sizeof(path)) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] metadata load ignored error=path_too_long\n");
         finish_metadata_load_locked();
@@ -676,7 +676,7 @@ ExportStep StorageSyncEngine::step_load_metadata_locked() {
         next_storage_generation_locked());
     if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
     if (admission != OperationAdmission::Accepted) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] metadata load ignored path=%s "
                   "error=storage_read_rejected\n",
@@ -833,13 +833,13 @@ ExportStep StorageSyncEngine::step_load_datalog_day_locked() {
 
 bool StorageSyncEngine::request_sync_with_kind(RunKind kind, const char *label) {
     if (!lock(0)) {
-        Log::logf(CAT_STORAGE, LOG_WARN,
+        Log::logf(CAT_EXPORT, LOG_WARN,
                   "[SMB] %s request rejected reason=lock_timeout\n",
                   label ? label : "sync");
         return false;
     }
     if (!status_.enabled || !status_.configured) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] %s request rejected enabled=%u configured=%u\n",
                   label ? label : "sync",
@@ -857,7 +857,7 @@ bool StorageSyncEngine::request_sync_with_kind(RunKind kind, const char *label) 
         status_.updated_ms = nonzero_millis(millis());
         retry_due_ms_ = 0;
         retry_attempt_ = 0;
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_INFO,
                   "[SMB] queued reason=%s state=%s\n",
                   status_.pending_reason,
@@ -912,7 +912,7 @@ bool StorageSyncEngine::queue_post_therapy_locked(uint32_t now_ms) {
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     publish_runtime_locked();
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_INFO,
               "[SMB] queued reason=post_therapy\n");
     return true;
@@ -935,7 +935,7 @@ bool StorageSyncEngine::request_post_therapy_sync() {
         return true;
     }
     if (!status_.enabled || !status_.configured) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_INFO,
                   "[SMB] post-therapy request ignored enabled=%u "
                   "configured=%u\n",
@@ -960,7 +960,7 @@ bool StorageSyncEngine::prepare_upload_buffer_locked() {
     upload_buffer_ = static_cast<uint8_t *>(
         Memory::alloc_large(upload_buffer_size_, true));
     if (!upload_buffer_) {
-        Log::logf(CAT_STORAGE, LOG_ERROR,
+        Log::logf(CAT_EXPORT, LOG_ERROR,
                   "[SMB] upload buffer allocation failed bytes=%u\n",
                   static_cast<unsigned>(upload_buffer_size_));
         return false;
@@ -1313,12 +1313,12 @@ void StorageSyncEngine::finish_run_locked() {
             status_.last_sync_bytes_uploaded = status_.bytes_uploaded;
         }
         if (current_run_kind_ == RunKind::StartupCheck) {
-            Log::logf(CAT_STORAGE,
+            Log::logf(CAT_EXPORT,
                       LOG_INFO,
                       "[SMB] startup check ok endpoint=%s\n",
                       config_.endpoint);
         } else {
-            Log::logf(CAT_STORAGE,
+            Log::logf(CAT_EXPORT,
                       LOG_INFO,
                       "[SMB] verify ok endpoint=%s files=%u remote_ok=%u "
                       "uploaded=%u\n",
@@ -1339,7 +1339,7 @@ void StorageSyncEngine::finish_run_locked() {
             status_.last_verify_epoch = status_.last_sync_epoch;
             status_.last_verify_files_seen = status_.files_seen;
         }
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_INFO,
                   "[SMB] done seen=%u uploaded=%u skipped=%u failed=%u "
                   "bytes=%llu\n",
@@ -1355,7 +1355,7 @@ void StorageSyncEngine::finish_run_locked() {
     const bool persist_result = current_run_kind_ != RunKind::StartupCheck ||
                                 metadata_loaded_;
     if (persist_result && !queue_result_metadata_save_locked()) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] metadata save queue failed path=%s/%s\n",
                   state_dir_[0] ? state_dir_ : "--",
@@ -1385,7 +1385,7 @@ void StorageSyncEngine::preempt_run_locked() {
     status_.updated_ms = nonzero_millis(millis());
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_DEBUG,
               "[SMB] preempted; queued reason=%s\n",
               status_.pending_reason);
@@ -1450,7 +1450,7 @@ void StorageSyncEngine::fail_locked(const char *error) {
     const uint32_t retry_in_ms =
         retry_due_ms_ ? static_cast<uint32_t>(retry_due_ms_ -
                                               status_.updated_ms) : 0;
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_WARN,
               "[SMB] failed phase=%s error=%s local=%s remote=%s "
               "remote_dir=%s reason=%s retry_ms=%lu attempt=%u "
@@ -1471,7 +1471,7 @@ void StorageSyncEngine::fail_locked(const char *error) {
     const bool persist_failure = failed_kind != RunKind::StartupCheck ||
                                  metadata_loaded_;
     if (persist_failure && !queue_result_metadata_save_locked()) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] metadata save queue failed after error "
                   "path=%s/%s\n",
@@ -1527,7 +1527,7 @@ bool StorageSyncEngine::cancel_scheduled_reconcile_locked() {
     retry_attempt_ = 0;
     publish_runtime_locked();
 
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_DEBUG,
               "[SMB] scheduled reconcile cancelled for priority work\n");
     return true;
@@ -1722,7 +1722,7 @@ ExportStep StorageSyncEngine::step_write_done_marker_locked() {
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_INFO,
                   "[SMB] DATALOG day complete day=%s\n",
                   pending_done_day_);
@@ -1949,7 +1949,7 @@ ExportStep StorageSyncEngine::step_resolve_remote_file_locked(
         return ExportStep::Working;
     }
 
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_WARN,
               "[SMB] reconcile upload local=%s remote=%s "
               "exists=%u dir=%u remote_size=%llu local_size=%llu\n",
@@ -2224,7 +2224,7 @@ ExportStep StorageSyncEngine::step() {
 
     if (!lock_ || xSemaphoreTake(lock_, portMAX_DELAY) != pdTRUE) {
         smb_.abort_connection();
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_ERROR,
                   "[SMB] state publish lock unavailable phase=%s\n",
                   work_phase_name(phase));

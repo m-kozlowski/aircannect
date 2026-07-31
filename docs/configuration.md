@@ -113,11 +113,10 @@ Known BLE oximeters are stored separately and managed from the Web UI or
 | `log_ota` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | OTA log category level. |
 | `log_oxi` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Oximetry log category level. |
 | `log_storage` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Storage log category level. |
-| `log_export` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Export task log category level. |
+| `log_export` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Export coordination, SMB, and SleepHQ log category level. |
 | `log_report` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Report log category level. |
 | `log_edf` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | EDF capture/report log category level. |
 | `log_config` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | Configuration log category level. |
-| `log_sleephq` | `ERROR`, `WARN`, `INFO`, `DEBUG` | `INFO` | SleepHQ sync log category level. |
 
 The management console also has a separate convenience command for interactive
 logging changes:

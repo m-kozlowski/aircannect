@@ -29,8 +29,7 @@ enum ConfigLogCategoryIndex : int16_t {
     CONFIG_LOG_REPORT = 11,
     CONFIG_LOG_EDF = 12,
     CONFIG_LOG_CONFIG = 13,
-    CONFIG_LOG_SLEEPHQ = 14,
-    CONFIG_LOG_COUNT = 15,
+    CONFIG_LOG_COUNT = 14,
 };
 
 #if AIRCANNECT_CONFIG_REGISTRY_HAS_ARDUINO
@@ -69,9 +68,6 @@ static_assert(static_cast<int>(CONFIG_LOG_EDF) == static_cast<int>(CAT_EDF),
               "log category order drift");
 static_assert(static_cast<int>(CONFIG_LOG_CONFIG) ==
                   static_cast<int>(CAT_CONFIG),
-              "log category order drift");
-static_assert(static_cast<int>(CONFIG_LOG_SLEEPHQ) ==
-                  static_cast<int>(CAT_SLEEPHQ),
               "log category order drift");
 #endif
 
@@ -193,7 +189,6 @@ static constexpr AppConfigFieldDescriptor CONFIG_FIELDS[] = {
     AC_LOG_FIELD("log_report", 111, "Report", CONFIG_LOG_REPORT),
     AC_LOG_FIELD("log_edf", 112, "EDF", CONFIG_LOG_EDF),
     AC_LOG_FIELD("log_config", 113, "Config", CONFIG_LOG_CONFIG),
-    AC_LOG_FIELD("log_sleephq", 114, "SleepHQ", CONFIG_LOG_SLEEPHQ),
 
     {"tz", AppConfigFieldId::Timezone, AppConfigGroup::Time, 10,
      AppConfigFieldType::String, PROVISIONABLE, AC_CONFIG_DIRTY_TIMEZONE,

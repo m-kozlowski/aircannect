@@ -31,7 +31,6 @@ enum log_cat_t {
     CAT_REPORT,
     CAT_EDF,
     CAT_CONFIG,
-    CAT_SLEEPHQ,
     CAT_COUNT,
 };
 

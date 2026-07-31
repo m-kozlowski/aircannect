@@ -438,7 +438,7 @@ bool SleepHqSyncEngine::request_sync(const char *reason) {
     publish_runtime_locked();
     unlock();
     if (queued) {
-        Log::logf(CAT_SLEEPHQ, LOG_INFO, "sync queued reason=%s\n",
+        Log::logf(CAT_EXPORT, LOG_INFO, "[SLEEPHQ] sync queued reason=%s\n",
                   reason && *reason ? reason : "manual");
     }
     return queued;
@@ -451,8 +451,8 @@ bool SleepHqSyncEngine::request_sync_day(const char *day, const char *reason) {
     publish_runtime_locked();
     unlock();
     if (queued) {
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "sync queued reason=%s day=%s\n",
+        Log::logf(CAT_EXPORT, LOG_INFO,
+                  "[SLEEPHQ] sync queued reason=%s day=%s\n",
                   reason && *reason ? reason : "manual_day",
                   day);
     }
@@ -466,8 +466,8 @@ bool SleepHqSyncEngine::request_post_therapy_sync() {
     publish_runtime_locked();
     unlock();
     if (queued) {
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "sync queued reason=post_therapy scope=latest_day\n");
+        Log::logf(CAT_EXPORT, LOG_INFO,
+                  "[SLEEPHQ] sync queued reason=post_therapy scope=latest_day\n");
     }
     return queued;
 }
@@ -535,7 +535,7 @@ bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
     abort_requested_.store(false);
     phase_ = WorkPhase::Connect;
     publish_runtime_locked();
-    Log::logf(CAT_SLEEPHQ, LOG_INFO, "started reason=%s mode=%s\n",
+    Log::logf(CAT_EXPORT, LOG_INFO, "[SLEEPHQ] started reason=%s mode=%s\n",
               status_.pending_reason[0] ? status_.pending_reason : "manual",
               current_run_kind_ == RunKind::Check
                   ? "check"
@@ -710,8 +710,8 @@ bool SleepHqSyncEngine::reserve_remote_dates_locked(size_t needed) {
     RemoteMachineDateCache *items = static_cast<RemoteMachineDateCache *>(
         Memory::alloc_large(sizeof(RemoteMachineDateCache) * next, false));
     if (!items) {
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "remote date cache allocation failed entries=%u bytes=%u\n",
+        Log::logf(CAT_EXPORT, LOG_ERROR,
+                  "[SLEEPHQ] remote date cache allocation failed entries=%u bytes=%u\n",
                   static_cast<unsigned>(next),
                   static_cast<unsigned>(sizeof(RemoteMachineDateCache) *
                                         next));
@@ -821,8 +821,8 @@ bool SleepHqSyncEngine::resolve_remote_missing_datalog_day_locked(
 
     const bool force_export = !marker_recent;
     if (marker_recent) {
-        Log::logf(CAT_SLEEPHQ, LOG_DEBUG,
-                  "remote machine-date still missing day=%s serial=%s; "
+        Log::logf(CAT_EXPORT, LOG_DEBUG,
+                  "[SLEEPHQ] remote machine-date still missing day=%s serial=%s; "
                   "rebuild suppressed marker_epoch=%llu\n",
                   pending_remote_day_,
                   remote_serial_,
@@ -832,8 +832,8 @@ bool SleepHqSyncEngine::resolve_remote_missing_datalog_day_locked(
             copy_cstr(pending_rebuild_day_, sizeof(pending_rebuild_day_),
                       pending_remote_day_);
         }
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "remote machine-date missing day=%s serial=%s; "
+        Log::logf(CAT_EXPORT, LOG_INFO,
+                  "[SLEEPHQ] remote machine-date missing day=%s serial=%s; "
                   "rebuilding day\n",
                   pending_remote_day_,
                   remote_serial_);
@@ -861,8 +861,8 @@ ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
     bool marker_recent = false;
     uint64_t marker_epoch = 0;
     if (io_result == StorageFileClientResult::Error) {
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "remote rebuild marker read failed day=%s error=%s\n",
+        Log::logf(CAT_EXPORT, LOG_WARN,
+                  "[SLEEPHQ] remote rebuild marker read failed day=%s error=%s\n",
                   pending_remote_day_,
                   state_io_.error()[0] ? state_io_.error()
                                        : "storage_read_failed");
@@ -1002,7 +1002,7 @@ void SleepHqSyncEngine::finish_check_locked(uint32_t team_id) {
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
     status_.updated_ms = nonzero_millis(millis());
-    Log::logf(CAT_SLEEPHQ, LOG_INFO, "check ok team_id=%lu\n",
+    Log::logf(CAT_EXPORT, LOG_INFO, "[SLEEPHQ] check ok team_id=%lu\n",
               static_cast<unsigned long>(team_id));
     reset_run_locked(true);
     publish_runtime_locked();
@@ -1024,8 +1024,8 @@ void SleepHqSyncEngine::finish_sync_locked() {
                                        : SleepHqSyncState::Disabled;
     status_.pending_reason[0] = 0;
     status_.updated_ms = nonzero_millis(millis());
-    Log::logf(CAT_SLEEPHQ, LOG_INFO,
-              "done seen=%u uploaded=%u skipped=%u failed=%u bytes=%llu\n",
+    Log::logf(CAT_EXPORT, LOG_INFO,
+              "[SLEEPHQ] done seen=%u uploaded=%u skipped=%u failed=%u bytes=%llu\n",
               static_cast<unsigned>(status_.files_seen),
               static_cast<unsigned>(status_.files_uploaded),
               static_cast<unsigned>(status_.files_skipped),
@@ -1069,8 +1069,8 @@ void SleepHqSyncEngine::fail_locked(const char *error) {
         status_.updated_ms = nonzero_millis(millis());
         retry_due_ms_ = 0;
         retry_attempt_ = 0;
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "preempted phase=%s elapsed_ms=%lu current=%s "
+        Log::logf(CAT_EXPORT, LOG_INFO,
+                  "[SLEEPHQ] preempted phase=%s elapsed_ms=%lu current=%s "
                   "queued_reason=%s\n",
                   work_phase_name(interrupted_phase),
                   static_cast<unsigned long>(elapsed_ms),
@@ -1111,8 +1111,8 @@ void SleepHqSyncEngine::fail_locked(const char *error) {
     const uint32_t retry_in_ms =
         retry_due_ms_ ? static_cast<uint32_t>(retry_due_ms_ -
                                               status_.updated_ms) : 0;
-    Log::logf(CAT_SLEEPHQ, LOG_WARN,
-              "failed phase=%s error=%s current=%s seen=%u uploaded=%u "
+    Log::logf(CAT_EXPORT, LOG_WARN,
+              "[SLEEPHQ] failed phase=%s error=%s current=%s seen=%u uploaded=%u "
               "skipped=%u bytes=%llu retry_ms=%lu attempt=%u\n",
               work_phase_name(phase_),
               status_.last_error,
@@ -1147,8 +1147,8 @@ void SleepHqSyncEngine::queue_retry_locked(uint32_t now_ms) {
                   "retry");
     }
     status_.updated_ms = now_ms;
-    Log::logf(CAT_SLEEPHQ, LOG_INFO,
-              "retry queued reason=%s attempt=%u\n",
+    Log::logf(CAT_EXPORT, LOG_INFO,
+              "[SLEEPHQ] retry queued reason=%s attempt=%u\n",
               status_.pending_reason,
               static_cast<unsigned>(retry_attempt_));
     publish_runtime_locked();
@@ -1543,8 +1543,8 @@ ExportStep SleepHqSyncEngine::step_remove_inflight_locked() {
         copy_cstr(remove_failure, sizeof(remove_failure), state_io_.error());
         state_io_.reset();
         if (action == InflightRemoveAction::Fail && original_failure[0]) {
-            Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                      "inflight cleanup failed error=%s\n",
+            Log::logf(CAT_EXPORT, LOG_WARN,
+                      "[SLEEPHQ] inflight cleanup failed error=%s\n",
                       remove_failure[0] ? remove_failure
                                         : "storage_remove_failed");
             fail_locked(original_failure);
@@ -1686,8 +1686,8 @@ void SleepHqSyncEngine::complete_inflight_load_locked() {
         status_.bytes_uploaded += staged_[i].size;
     }
 
-    Log::logf(CAT_SLEEPHQ, LOG_INFO,
-              "resuming import=%lu phase=%s files=%u\n",
+    Log::logf(CAT_EXPORT, LOG_INFO,
+              "[SLEEPHQ] resuming import=%lu phase=%s files=%u\n",
               static_cast<unsigned long>(status_.import_id),
               inflight_phase_name(inflight_phase_),
               static_cast<unsigned>(staged_count_));
@@ -1749,8 +1749,8 @@ ExportStep SleepHqSyncEngine::step_load_inflight_locked() {
                                                    : ExportStep::Working;
         }
 
-        Log::logf(CAT_SLEEPHQ, LOG_WARN,
-                  "discarded incompatible inflight state\n");
+        Log::logf(CAT_EXPORT, LOG_WARN,
+                  "[SLEEPHQ] discarded incompatible inflight state\n");
         clear_staged_locked();
         status_.import_id = 0;
         pending_rebuild_day_[0] = '\0';
@@ -2064,8 +2064,8 @@ ExportStep SleepHqSyncEngine::step_write_done_marker_locked() {
     }
     if (io_result == StorageFileClientResult::Ready) {
         state_io_.reset();
-        Log::logf(CAT_SLEEPHQ, LOG_INFO,
-                  "DATALOG day complete day=%s\n", pending_done_day_);
+        Log::logf(CAT_EXPORT, LOG_INFO,
+                  "[SLEEPHQ] DATALOG day complete day=%s\n", pending_done_day_);
         pending_done_day_[0] = '\0';
         pending_state_path_[0] = '\0';
         pending_state_bytes_.reset();
@@ -2098,8 +2098,8 @@ bool SleepHqSyncEngine::reserve_staged_locked(size_t needed) {
     StagedFile *items = static_cast<StagedFile *>(
         Memory::alloc_large(sizeof(StagedFile) * next, false));
     if (!items) {
-        Log::logf(CAT_SLEEPHQ, LOG_ERROR,
-                  "staged allocation failed entries=%u bytes=%u\n",
+        Log::logf(CAT_EXPORT, LOG_ERROR,
+                  "[SLEEPHQ] staged allocation failed entries=%u bytes=%u\n",
                   static_cast<unsigned>(next),
                   static_cast<unsigned>(sizeof(StagedFile) * next));
         return false;
@@ -2220,8 +2220,8 @@ bool SleepHqSyncEngine::read_local_machine_serial(
 void SleepHqSyncEngine::note_remote_machine_missing_locked() {
     if (remote_reconcile_all_missing_) return;
     remote_reconcile_all_missing_ = true;
-    Log::logf(CAT_SLEEPHQ, LOG_INFO,
-              "remote machine missing serial=%s; pending DATALOG days will rebuild\n",
+    Log::logf(CAT_EXPORT, LOG_INFO,
+              "[SLEEPHQ] remote machine missing serial=%s; pending DATALOG days will rebuild\n",
               remote_serial_);
 }
 
@@ -2690,9 +2690,9 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
     if (!result.ok) {
         current_file_.close(false);
         if (phase == WorkPhase::ReadIdentification) {
-            Log::logf(CAT_SLEEPHQ,
+            Log::logf(CAT_EXPORT,
                       LOG_WARN,
-                      "remote reconcile disabled: %s\n",
+                      "[SLEEPHQ] remote reconcile disabled: %s\n",
                       result.error[0]
                           ? result.error
                           : "identification_failed");
@@ -2702,18 +2702,18 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
             return ExportStep::Working;
         }
         if (phase == WorkPhase::FindRemoteMachine && result.retryable) {
-            Log::logf(CAT_SLEEPHQ,
+            Log::logf(CAT_EXPORT,
                       LOG_WARN,
-                      "remote machine lookup skipped: %s\n",
+                      "[SLEEPHQ] remote machine lookup skipped: %s\n",
                       result.error[0] ? result.error : "machine_list_failed");
             remote_reconcile_enabled_ = false;
             return begin_export_work_locked();
         }
 
         if (phase == WorkPhase::ResolveDatalogDay && result.retryable) {
-            Log::logf(CAT_SLEEPHQ,
+            Log::logf(CAT_EXPORT,
                       LOG_DEBUG,
-                      "remote machine-date lookup skipped day=%s error=%s\n",
+                      "[SLEEPHQ] remote machine-date lookup skipped day=%s error=%s\n",
                       pending_remote_day_,
                       result.error[0]
                           ? result.error
@@ -2735,9 +2735,9 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
         }
 
         if (phase == WorkPhase::FetchRemoteFiles) {
-            Log::logf(CAT_SLEEPHQ,
+            Log::logf(CAT_EXPORT,
                       LOG_WARN,
-                      "remote file lookup failed; falling back to upload: %s\n",
+                      "[SLEEPHQ] remote file lookup failed; falling back to upload: %s\n",
                       result.error[0]
                           ? result.error
                           : "remote_file_list_failed");
@@ -2764,9 +2764,9 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
         case WorkPhase::ReadIdentification:
             if (!result.serial[0]) {
                 Log::logf(
-                    CAT_SLEEPHQ,
+                    CAT_EXPORT,
                     LOG_WARN,
-                    "remote reconcile disabled: identification serial missing\n");
+                    "[SLEEPHQ] remote reconcile disabled: identification serial missing\n");
                 remote_reconcile_enabled_ = false;
             } else {
                 copy_cstr(remote_serial_, sizeof(remote_serial_),
@@ -2808,9 +2808,9 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
             remote_machine_next_page_++;
             if (result.machine_id) {
                 remote_machine_id_ = result.machine_id;
-                Log::logf(CAT_SLEEPHQ,
+                Log::logf(CAT_EXPORT,
                           LOG_DEBUG,
-                          "remote machine matched serial=%s id=%lu\n",
+                          "[SLEEPHQ] remote machine matched serial=%s id=%lu\n",
                           remote_serial_,
                           static_cast<unsigned long>(remote_machine_id_));
                 return begin_export_work_locked();
@@ -2887,9 +2887,9 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
                     SLEEPHQ_REMOTE_FILE_PAGE_LIMIT) {
                 remote_file_cache_complete_ = true;
             }
-            Log::logf(CAT_SLEEPHQ,
+            Log::logf(CAT_EXPORT,
                       LOG_DEBUG,
-                      "remote file page loaded page=%lu count=%u total=%u "
+                      "[SLEEPHQ] remote file page loaded page=%lu count=%u total=%u "
                       "complete=%u\n",
                       static_cast<unsigned long>(remote_file_next_page_ - 1),
                       static_cast<unsigned>(result.count),
@@ -2955,9 +2955,9 @@ ExportStep SleepHqSyncEngine::publish_blocking_phase_locked(
                 case SleepHqImportStatusKind::Unknown:
                     if (strcmp(previous_status, result.import.status) != 0) {
                         Log::logf(
-                            CAT_SLEEPHQ,
+                            CAT_EXPORT,
                             LOG_WARN,
-                            "unknown import status treated as transient: %s\n",
+                            "[SLEEPHQ] unknown import status treated as transient: %s\n",
                             result.import.status[0]
                                 ? result.import.status
                                 : "<empty>");
@@ -3098,9 +3098,9 @@ ExportStep SleepHqSyncEngine::step() {
         blocking_result_.reset();
         current_file_.close(false);
         client_.disconnect();
-        Log::logf(CAT_SLEEPHQ,
+        Log::logf(CAT_EXPORT,
                   LOG_ERROR,
-                  "state publish lock unavailable phase=%u\n",
+                  "[SLEEPHQ] state publish lock unavailable phase=%u\n",
                   static_cast<unsigned>(phase));
         return ExportStep::Idle;
     }

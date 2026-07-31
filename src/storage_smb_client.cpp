@@ -432,7 +432,7 @@ StorageSmbOperationResult StorageSmbClient::resolve_host(
             return StorageSmbOperationResult::Error;
         }
 
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_INFO,
                   "[SMB] resolved host=%s address=%s ms=%lu\n",
                   host,
@@ -458,7 +458,7 @@ StorageSmbOperationResult StorageSmbClient::resolve_host(
     host_resolution_state_.store(
         static_cast<uint8_t>(HostResolutionState::Pending),
         std::memory_order_release);
-    Log::logf(CAT_STORAGE, LOG_INFO, "[SMB] resolving host=%s\n", host);
+    Log::logf(CAT_EXPORT, LOG_INFO, "[SMB] resolving host=%s\n", host);
 
     ip_addr_t address = {};
     err_t rc = ERR_OK;
@@ -493,7 +493,7 @@ bool StorageSmbClient::configure_socket_options(
     if (flags < 0 || (!(flags & O_NONBLOCK) &&
                       fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)) {
         set_error(error_out, error_out_size, "socket_nonblocking_failed");
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_ERROR,
                   "[SMB] failed to configure nonblocking socket fd=%d "
                   "errno=%d\n",
@@ -505,7 +505,7 @@ bool StorageSmbClient::configure_socket_options(
 
     const int one = 1;
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
-        Log::logf(CAT_STORAGE,
+        Log::logf(CAT_EXPORT,
                   LOG_WARN,
                   "[SMB] setsockopt(TCP_NODELAY) errno=%d\n",
                   errno);
@@ -638,7 +638,7 @@ StorageSmbOperationResult StorageSmbClient::step_connect(
         ctx_ = smb2_init_context();
         if (!ctx_) {
             set_error(error_out, error_out_size, "smb_context_alloc");
-            Log::logf(CAT_STORAGE, LOG_ERROR,
+            Log::logf(CAT_EXPORT, LOG_ERROR,
                       "[SMB] context allocation failed\n");
             return StorageSmbOperationResult::Error;
         }
@@ -657,7 +657,7 @@ StorageSmbOperationResult StorageSmbClient::step_connect(
             return StorageSmbOperationResult::Error;
         }
 
-        Log::logf(CAT_STORAGE, LOG_INFO,
+        Log::logf(CAT_EXPORT, LOG_INFO,
                   "[SMB] connecting //%s/%s\n", server_, share_);
 
         const int rc = smb2_connect_share_async(
@@ -680,7 +680,7 @@ StorageSmbOperationResult StorageSmbClient::step_connect(
         char error[AC_STORAGE_ERROR_MAX] = {};
         set_smb_error(error, sizeof(error), "connect", status);
         set_error(error_out, error_out_size, error);
-        Log::logf(CAT_STORAGE, LOG_WARN,
+        Log::logf(CAT_EXPORT, LOG_WARN,
                   "[SMB] connect failed error=%s\n", error);
         smb2_destroy_context(ctx_);
         ctx_ = nullptr;
@@ -860,7 +860,7 @@ StorageSmbOperationResult StorageSmbClient::step_mkdir(
 
     set_smb_error(error_out, error_out_size, "mkdir", status);
     clear_operation();
-    Log::logf(CAT_STORAGE,
+    Log::logf(CAT_EXPORT,
               LOG_WARN,
               "[SMB] mkdir failed path=%s error=%s\n",
               remote_path ? remote_path : "--",
@@ -1216,7 +1216,7 @@ void StorageSmbClient::abort_connection() {
         struct smb2fh *fh = writer_;
         writer_ = nullptr;
         if (!smb_queue_close_for_destroy(ctx_, fh)) {
-            Log::logf(CAT_STORAGE, LOG_WARN,
+            Log::logf(CAT_EXPORT, LOG_WARN,
                       "[SMB] failed to queue writer close before abort\n");
         }
     }

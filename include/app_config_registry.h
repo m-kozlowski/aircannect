@@ -14,7 +14,7 @@
 namespace aircannect {
 
 static constexpr const char *AC_CONFIG_SECRET_SENTINEL = "********";
-static constexpr size_t AC_CONFIG_LOG_FIELD_COUNT = 15;
+static constexpr size_t AC_CONFIG_LOG_FIELD_COUNT = 14;
 
 enum class AppConfigGroup : uint8_t {
     Device,
