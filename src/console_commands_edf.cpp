@@ -251,8 +251,4 @@ void EdfConsoleCommands::print_status(Print &out) {
     print_edf_recorder_status(out, recorder_);
 }
 
-void EdfConsoleCommands::print_stats(Print &out) {
-    print_edf_recorder_status(out, recorder_);
-}
-
 }  // namespace aircannect

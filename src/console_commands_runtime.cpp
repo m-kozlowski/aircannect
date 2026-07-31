@@ -64,11 +64,6 @@ bool CoreDiagnosticsConsoleCommands::execute(
     return false;
 }
 
-void CoreDiagnosticsConsoleCommands::print_stats(Print &out) {
-    ConsoleFormat::print_log_stats(out);
-    ConsoleFormat::print_memory_status(out, Memory::status());
-}
-
 void CoreDiagnosticsConsoleCommands::print_memory_detail(Print &out) {
     const TlsMemoryStatus tls = TlsMemory::status();
     out.print("[MEM owner] tls installed=");
@@ -194,10 +189,6 @@ bool RuntimeConsoleCommands::execute(
 void RuntimeConsoleCommands::print_status(Print &out) {
     ConsoleFormat::print_session_status(out, session_.status());
     ConsoleFormat::print_sink_status(out, sink_);
-}
-
-void RuntimeConsoleCommands::print_stats(Print &out) {
-    print_status(out);
 }
 
 WebDiagnosticsConsoleCommands::WebDiagnosticsConsoleCommands(WebUI &web_ui)

@@ -426,8 +426,4 @@ void StorageConsoleCommands::stop(ConsoleCommandSession &session) {
     if (tail) *tail = {};
 }
 
-void StorageConsoleCommands::print_stats(Print &out) {
-    ConsoleFormat::print_storage_status(out, Storage::status());
-}
-
 }  // namespace aircannect

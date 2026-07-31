@@ -238,8 +238,4 @@ bool NetworkConsoleCommands::execute(const String &command,
     return false;
 }
 
-void NetworkConsoleCommands::print_stats(Print &out) {
-    ConsoleFormat::print_tcp_status(out, tcp_);
-}
-
 }  // namespace aircannect

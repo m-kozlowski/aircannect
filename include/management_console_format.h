@@ -18,7 +18,6 @@ class EventBroker;
 namespace ConsoleFormat {
 
 void print_can_status(Print &out, const CanDriver &can_driver);
-void print_can_stats(Print &out, const CanDriver &can_driver);
 void print_rpc_status(Print &out,
                       const RpcDiagnosticsPort &rpc,
                       const CanDriver &can_driver);
@@ -30,7 +29,6 @@ void print_rpc_stats(Print &out,
 void print_as11_status(Print &out, const As11DeviceState &state);
 void print_stream_status(Print &out, const StreamBroker &stream);
 void print_log_status(Print &out);
-void print_log_stats(Print &out);
 void print_memory_status(Print &out, const MemoryStatus &status);
 void print_memory_detail_status(Print &out,
                                 const MemoryDetailStatus &status);

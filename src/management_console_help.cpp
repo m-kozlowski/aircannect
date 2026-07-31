@@ -13,7 +13,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP] AirCANnect management console");
         out.println("  help COMMAND      show detailed help for a command");
         out.println("  status            current CAN, AS11, session, and sink state");
-        out.println("  stats             counters for CAN, RPC, network, logs, storage");
+        out.println("  stats             CAN, RPC, event, and stream counters");
         out.println("  memory            heap and PSRAM status");
         out.println("  version           AirCANnect firmware version");
         out.println("  restart           restart AirCANnect or the AS11");
@@ -245,8 +245,9 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
 
     if (topic == "stats") {
         out.println("[HELP stats]");
-        out.println("  stats                     show runtime counters");
-        out.println("  stats reset               clear runtime counters");
+        out.println("  stats                     show CAN/RPC/event/stream counters");
+        out.println("  stats reset               clear those counters");
+        out.println("  use memory, storage, session, edf, oxi, tcp, or log for details");
         return;
     }
 
@@ -285,8 +286,8 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
     if (topic == "system") {
         out.println("[HELP system]");
         out.println("  status                    current high-level runtime state");
-        out.println("  stats                     runtime counters");
-        out.println("  stats reset               clear counters");
+        out.println("  stats                     CAN/RPC/event/stream counters");
+        out.println("  stats reset               clear those counters");
         out.println("  memory                    heap and PSRAM status");
         out.println("  version                   firmware version and build date");
         out.println("  restart [ac|fg MODE]      restart AirCANnect or AS11");

@@ -18,6 +18,39 @@ void print_u64(Print &out, uint64_t value) {
     out.print(buf);
 }
 
+void print_can_stats(Print &out,
+                     const CanDriver &can_driver,
+                     uint32_t rx_fps) {
+    const CanDriverStats &stats = can_driver.stats();
+
+    out.print("[CAN traffic] rx_frames=");
+    out.print(stats.rx_frames);
+    out.print(" rx_fps=");
+    out.print(rx_fps);
+    out.print(" tx_frames=");
+    out.print(stats.tx_frames);
+    out.print(" tx_q=");
+    out.print(can_driver.tx_queue_depth());
+    out.print(" tx_q_drops=");
+    out.print(stats.tx_queue_drops);
+    out.print(" tx_failures=");
+    out.println(stats.tx_failures);
+
+    out.print("[CAN recovery] recoveries=");
+    out.print(stats.recoveries);
+    out.print(" failures=");
+    out.print(stats.recovery_failures);
+    out.print(" timeouts=");
+    out.print(stats.recovery_timeouts);
+    out.print(" driver_reinstalls=");
+    out.println(stats.driver_reinstalls);
+
+    out.print("[CAN alerts] bus_errors=");
+    out.print(stats.bus_error_alerts);
+    out.print(" rx_queue_full=");
+    out.println(stats.rx_queue_full_alerts);
+}
+
 }  // namespace
 
 void print_can_status(Print &out, const CanDriver &can_driver) {
@@ -59,32 +92,6 @@ void print_can_status(Print &out, const CanDriver &can_driver) {
     out.println();
 }
 
-void print_can_stats(Print &out, const CanDriver &can_driver) {
-    const CanDriverStats &stats = can_driver.stats();
-    out.print(" can_rx_frames=");
-    out.print(stats.rx_frames);
-    out.print(" can_tx_frames=");
-    out.print(stats.tx_frames);
-    out.print(" can_tx_q=");
-    out.print(can_driver.tx_queue_depth());
-    out.print(" can_tx_q_drops=");
-    out.print(stats.tx_queue_drops);
-    out.print(" can_tx_failures=");
-    out.print(stats.tx_failures);
-    out.print(" recoveries=");
-    out.print(stats.recoveries);
-    out.print(" recovery_failures=");
-    out.print(stats.recovery_failures);
-    out.print(" recovery_timeouts=");
-    out.print(stats.recovery_timeouts);
-    out.print(" driver_reinstalls=");
-    out.print(stats.driver_reinstalls);
-    out.print(" bus_error_alerts=");
-    out.print(stats.bus_error_alerts);
-    out.print(" rx_queue_full_alerts=");
-    out.print(stats.rx_queue_full_alerts);
-}
-
 void print_rpc_status(Print &out,
                       const RpcDiagnosticsPort &rpc,
                       const CanDriver &can_driver) {
@@ -114,20 +121,26 @@ void print_rpc_stats(Print &out,
     const EventBrokerStatus event_status = events.status();
     const EventBrokerStats &event_stats = events.stats();
     const CanDriverStats &can_stats = can_driver.stats();
-    const uint32_t can_rx_fps =
-        (can_stats.rx_frames * 1000UL) / runtime.stats_elapsed_ms;
-    const uint32_t rpc_dps =
-        (stats.rpc_datagrams * 1000UL) / runtime.stats_elapsed_ms;
+    const uint32_t elapsed_ms = runtime.stats_elapsed_ms;
+    const uint32_t can_rx_fps = elapsed_ms
+        ? static_cast<uint32_t>(
+              (static_cast<uint64_t>(can_stats.rx_frames) * 1000ULL) /
+              elapsed_ms)
+        : 0;
+    const uint32_t rpc_dps = elapsed_ms
+        ? static_cast<uint32_t>(
+              (static_cast<uint64_t>(stats.rpc_datagrams) * 1000ULL) /
+              elapsed_ms)
+        : 0;
 
-    out.print("[STATS]");
-    out.print(" elapsed_ms=");
-    out.print(runtime.stats_elapsed_ms);
-    print_can_stats(out, can_driver);
-    out.print(" can_rx_fps=");
-    out.print(can_rx_fps);
-    out.print(" rpc_datagrams=");
+    out.print("[STATS] elapsed_ms=");
+    out.println(elapsed_ms);
+
+    print_can_stats(out, can_driver, can_rx_fps);
+
+    out.print("[RPC stats] datagrams=");
     out.print(stats.rpc_datagrams);
-    out.print(" rpc_dps=");
+    out.print(" dps=");
     out.print(rpc_dps);
     out.print(" responses=");
     out.print(stats.rpc_responses);
@@ -135,88 +148,95 @@ void print_rpc_stats(Print &out,
     out.print(stats.rpc_notifications);
     out.print(" unmatched=");
     out.print(stats.rpc_unmatched);
-    out.print(" rpc_framing_errors=");
-    out.print(stats.rpc_framing_errors);
-    out.print(" log_datagrams=");
+    out.print(" framing_errors=");
+    out.println(stats.rpc_framing_errors);
+
+    out.print("[RPC ingress] log_datagrams=");
     out.print(stats.log_datagrams);
     out.print(" log_framing_errors=");
     out.print(stats.log_framing_errors);
     out.print(" boot_notifications=");
-    out.print(runtime.boot_notifications);
-    out.print(" deferred_payloads=");
+    out.println(runtime.boot_notifications);
+
+    out.print("[RPC payload] deferred=");
     out.print(stats.deferred_payloads);
-    out.print(" deferred_payload_drops=");
+    out.print(" drops=");
     out.print(stats.deferred_payload_drops);
-    out.print(" deferred_payload_alloc_failures=");
-    out.print(stats.deferred_payload_alloc_failures);
-    out.print(" rpc_req_q=");
+    out.print(" alloc_failures=");
+    out.println(stats.deferred_payload_alloc_failures);
+
+    out.print("[RPC queue] requests=");
     out.print(runtime.request_queue_depth);
-    out.print(" rpc_payload_q=");
+    out.print(" payloads=");
     out.print(runtime.payload_queue_depth);
-    out.print(" rpc_pending=");
+    out.print(" pending=");
     out.print(runtime.pending_request_id);
-    out.print(" rpc_dispatch_retry=");
+    out.print(" dispatch_retry=");
     out.print(runtime.dispatch_retry_id);
-    out.print(" queued_requests=");
+    out.print(" queued=");
     out.print(stats.queued_requests);
-    out.print(" dispatched_requests=");
-    out.print(stats.dispatched_requests);
-    out.print(" request_timeouts=");
+    out.print(" dispatched=");
+    out.println(stats.dispatched_requests);
+
+    out.print("[RPC faults] timeouts=");
     out.print(stats.request_timeouts);
-    out.print(" request_q_drops=");
+    out.print(" queue_drops=");
     out.print(stats.request_queue_drops);
-    out.print(" request_cancellations=");
+    out.print(" cancellations=");
     out.print(stats.request_cancellations);
-    out.print(" late_addressed_responses=");
+    out.print(" late_responses=");
     out.print(stats.late_addressed_responses);
-    out.print(" request_dispatch_retries=");
+    out.print(" dispatch_retries=");
     out.print(stats.request_dispatch_retries);
-    out.print(" background_backoffs=");
+    out.print(" backoffs=");
     out.print(stats.background_backoffs);
-    out.print(" background_backoff_ms=");
-    out.print(runtime.background_backoff_ms);
-    out.print(" event_drops=");
-    out.print(stats.event_drops);
-    out.print(" stream_consumers=");
+    out.print(" backoff_ms=");
+    out.println(runtime.background_backoff_ms);
+
+    out.print("[STREAM state] consumers=");
     out.print(stream.consumer_count());
-    out.print(" stream_subscribed=");
+    out.print(" subscribed=");
     out.print(stream.actual_active() ? "yes" : "no");
-    out.print(" stream_start_pending=");
+    out.print(" start_pending=");
     out.print(stream.pending_start() ? "yes" : "no");
-    out.print(" stream_stop_pending=");
+    out.print(" stop_pending=");
     out.print(stream.pending_stop() ? "yes" : "no");
-    out.print(" stream_starts=");
+    out.print(" starts=");
     out.print(stream.start_requests());
-    out.print(" stream_stops=");
-    out.print(stream.stop_requests());
-    out.print(" stream_payloads=");
+    out.print(" stops=");
+    out.println(stream.stop_requests());
+
+    out.print("[STREAM data] payloads=");
     out.print(stream.published_payloads());
-    out.print(" stream_fanout_drops=");
+    out.print(" fanout_drops=");
     out.print(stream.total_queue_drops());
-    out.print(" stream_deferred=");
+    out.print(" deferred=");
     out.print(stream.command_deferred());
-    out.print(" stream_errors=");
+    out.print(" errors=");
     out.print(stream.command_errors());
-    out.print(" stream_parse_errors=");
+    out.print(" parse_errors=");
     out.print(stream.parse_errors());
-    out.print(" stream_pool_exhaustions=");
+    out.print(" pool_exhaustions=");
     out.print(stream.pool_exhaustions());
-    out.print(" stream_truncated_frames=");
+    out.print(" truncated_frames=");
     out.print(stream.truncated_frames());
-    out.print(" stream_frame_pool=");
+    out.print(" frame_pool=");
     out.print(stream.frame_pool_in_use());
     out.print("/");
-    out.print(stream.frame_pool_capacity());
-    out.print(" event_subscribed=");
+    out.println(stream.frame_pool_capacity());
+
+    out.print("[EVENT stats] subscribed=");
     out.print(event_status.subscription_active ? "yes" : "no");
-    out.print(" event_subscription_id=");
+    out.print(" subscription_id=");
     out.print(event_status.subscription_id);
-    out.print(" event_subscribe_errors=");
+    out.print(" subscribe_errors=");
     out.print(event_stats.subscribe_errors);
-    out.print(" event_notifications=");
+    out.print(" notifications=");
     out.print(event_stats.notifications);
-    out.print(" event_truncated=");
+    out.print(" truncated=");
     out.print(event_stats.truncated_notifications);
+    out.print(" queue_drops=");
+    out.println(stats.event_drops);
 }
 
 void print_as11_status(Print &out, const As11DeviceState &state) {
@@ -376,40 +396,6 @@ void print_log_status(Print &out) {
     out.print(stats.file_drops);
     out.print(" errors=");
     out.println(stats.file_errors);
-}
-
-void print_log_stats(Print &out) {
-    const Log::Stats stats = Log::stats();
-    out.print(" log_emitted=");
-    out.print(stats.emitted);
-    out.print(" log_filtered=");
-    out.print(stats.filtered);
-    out.print(" log_truncated=");
-    out.print(stats.truncated);
-    out.print(" syslog_enabled=");
-    out.print(Log::syslog_enabled() ? "yes" : "no");
-    out.print(" syslog_q=");
-    out.print(Log::syslog_queue_depth());
-    out.print(" syslog_enqueued=");
-    out.print(stats.syslog_enqueued);
-    out.print(" syslog_sent=");
-    out.print(stats.syslog_sent);
-    out.print(" syslog_drops=");
-    out.print(stats.syslog_drops);
-    out.print(" syslog_errors=");
-    out.print(stats.syslog_errors);
-    out.print(" filelog_enabled=");
-    out.print(Log::filelog_enabled() ? "yes" : "no");
-    out.print(" filelog_q=");
-    out.print(Log::filelog_queue_depth());
-    out.print(" filelog_enqueued=");
-    out.print(stats.file_enqueued);
-    out.print(" filelog_written=");
-    out.print(stats.file_dequeued);
-    out.print(" filelog_drops=");
-    out.print(stats.file_drops);
-    out.print(" filelog_errors=");
-    out.print(stats.file_errors);
 }
 
 void print_memory_status(Print &out, const MemoryStatus &mem) {

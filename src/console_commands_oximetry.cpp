@@ -385,10 +385,6 @@ void OximetryConsoleCommands::print_status(Print &out) {
     print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
 }
 
-void OximetryConsoleCommands::print_stats(Print &out) {
-    print_oximetry_status(out, hub_, udp_, sensor_, peripheral_);
-}
-
 void OximetryConsoleCommands::print_memory_detail(Print &out) {
     const BleSensorStatus status = sensor_.status();
     out.print("[MEM owner] oximetry_sensor task=");
