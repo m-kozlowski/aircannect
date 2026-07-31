@@ -177,6 +177,7 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("[HELP edf]");
         out.println("  edf                       show live EDF recorder state");
         out.println("  edf status                show live EDF recorder state");
+        out.println("  edf stats                 show detailed capture counters");
         out.println("  edf on|off                enable/disable recorder monitor");
         return;
     }
