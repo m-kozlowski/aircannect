@@ -45,17 +45,8 @@ struct EventPublishResult {
 };
 
 struct EventBrokerStats {
-    uint32_t subscribe_requests = 0;
-    uint32_t subscribe_successes = 0;
-    uint32_t subscribe_errors = 0;
-
-    uint32_t quiesce_requests = 0;
-    uint32_t quiesce_successes = 0;
-    uint32_t quiesce_errors = 0;
-
-    uint32_t coverage_gaps = 0;
+    uint32_t command_errors = 0;
     uint32_t notifications = 0;
-    uint32_t settings_history_changes = 0;
     uint32_t truncated_notifications = 0;
 };
 

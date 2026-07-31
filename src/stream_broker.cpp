@@ -337,23 +337,18 @@ void StreamBroker::mark_command_queued(StreamCommandType type,
                                        uint32_t now_ms) {
     if (type == StreamCommandType::None) return;
 
-    if (type == StreamCommandType::Start) {
-        start_requests_++;
-    } else if (type == StreamCommandType::Stop) {
-        stop_requests_++;
-    }
     pending_ = type;
     last_command_ms_ = now_ms;
     last_owned_activity_ms_ = now_ms;
 }
 
 void StreamBroker::mark_command_deferred(uint32_t now_ms) {
-    command_deferred_++;
     last_command_ms_ = now_ms;
     last_owned_activity_ms_ = now_ms;
 }
 
 void StreamBroker::mark_command_timeout(uint32_t now_ms) {
+    command_errors_++;
     pending_ = StreamCommandType::None;
     last_command_ms_ = now_ms;
     last_owned_activity_ms_ = now_ms;
@@ -516,7 +511,6 @@ StreamPublishResult StreamBroker::publish_stream_data(
         }
 
         if (consumer.queue.push(frame)) {
-            fanout_targets_++;
             result.targets++;
         } else {
             consumer.queue_drops++;
@@ -570,14 +564,10 @@ bool StreamBroker::accepted_data_ids_cover(const char *data_ids_csv) const {
 
 void StreamBroker::reset_counters() {
     published_payloads_ = 0;
-    fanout_targets_ = 0;
     total_queue_drops_ = 0;
     parse_errors_ = 0;
     pool_exhaustions_ = 0;
     truncated_frames_ = 0;
-    start_requests_ = 0;
-    stop_requests_ = 0;
-    command_deferred_ = 0;
     command_errors_ = 0;
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         consumers_[i].queue_drops = 0;

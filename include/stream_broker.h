@@ -123,14 +123,10 @@ public:
     RpcSource consumer_source(StreamConsumerHandle handle) const;
 
     uint32_t published_payloads() const { return published_payloads_; }
-    uint32_t fanout_targets() const { return fanout_targets_; }
     uint32_t total_queue_drops() const { return total_queue_drops_; }
     uint32_t parse_errors() const { return parse_errors_; }
     uint32_t pool_exhaustions() const { return pool_exhaustions_; }
     uint32_t truncated_frames() const { return truncated_frames_; }
-    uint32_t start_requests() const { return start_requests_; }
-    uint32_t stop_requests() const { return stop_requests_; }
-    uint32_t command_deferred() const { return command_deferred_; }
     uint32_t command_errors() const { return command_errors_; }
     size_t frame_pool_capacity() const { return frame_pool_.capacity(); }
     size_t frame_pool_free() const { return frame_pool_.free_count(); }
@@ -246,14 +242,10 @@ private:
     uint32_t last_command_ms_ = 0;
 
     uint32_t published_payloads_ = 0;
-    uint32_t fanout_targets_ = 0;
     uint32_t total_queue_drops_ = 0;
     uint32_t parse_errors_ = 0;
     uint32_t pool_exhaustions_ = 0;
     uint32_t truncated_frames_ = 0;
-    uint32_t start_requests_ = 0;
-    uint32_t stop_requests_ = 0;
-    uint32_t command_deferred_ = 0;
     uint32_t command_errors_ = 0;
 
     OperationTicket command_ticket_;

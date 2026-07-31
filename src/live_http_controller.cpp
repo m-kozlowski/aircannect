@@ -74,7 +74,6 @@ bool build_stream_json(LargeTextBuffer &json,
                     stream_command_name(stream.error_command()));
     json_add_int(json, "consumers", stream.consumer_count());
     json_add_int(json, "published_payloads", stream.published_payloads());
-    json_add_int(json, "fanout_targets", stream.fanout_targets());
     json_add_int(json, "fanout_drops", stream.total_queue_drops());
     json_add_int(json, "frame_pool_used", stream.frame_pool_in_use());
     json_add_int(json, "frame_pool_capacity", stream.frame_pool_capacity());
@@ -89,9 +88,6 @@ bool build_stream_json(LargeTextBuffer &json,
                  static_cast<long>(live.attach_failures));
     json_add_string(json, "web_live_error", live.last_error);
     json_add_int(json, "stream_id", stream.last_stream_id());
-    json_add_int(json, "start_requests", stream.start_requests());
-    json_add_int(json, "stop_requests", stream.stop_requests());
-    json_add_int(json, "command_deferred", stream.command_deferred());
     json_add_int(json, "command_errors", stream.command_errors());
     if (stream.last_notification_ms()) {
         json_add_int(json, "last_age_ms",

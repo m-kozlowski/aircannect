@@ -336,7 +336,6 @@ bool RpcTransport::enqueue_request(QueuedRequest &request) {
         return false;
     }
 
-    stats_.queued_requests++;
     return true;
 }
 
@@ -389,9 +388,6 @@ void RpcTransport::set_spool_notification_observer(
 void RpcTransport::reset_stats() {
     stats_ = {};
     can_.reset_stats();
-    consecutive_scheduler_timeouts_ = 0;
-    background_backoff_until_ms_ = 0;
-    background_rx_pressure_until_ms_ = 0;
     observed_rx_queue_full_alerts_ = 0;
     stats_started_ms_ = millis();
 }
@@ -976,7 +972,6 @@ void RpcTransport::enqueue_deferred_payload(DeferredPayload::Kind kind,
         stats_.deferred_payload_drops++;
         return;
     }
-    stats_.deferred_payloads++;
 }
 
 void RpcTransport::handle_frame(const RawCanFrame &frame) {
@@ -1014,7 +1009,6 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
     }
 
     if (frame.id == AC_CAN_BOOT_ID) {
-        stats_.boot_notifications++;
         boot_notifications_seen_++;
         last_boot_notification_ = format_boot_frame(frame);
         last_boot_notification_ms_ = millis();
@@ -1165,7 +1159,6 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
 }
 
 void RpcTransport::handle_debug_payload(const char *payload, size_t payload_len) {
-    stats_.log_datagrams++;
     Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11] ", payload, payload_len);
     if (raw_rpc_forwarding_enabled_) {
         push_event(RpcEventKind::DebugLog,

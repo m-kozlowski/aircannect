@@ -151,16 +151,7 @@ void print_rpc_stats(Print &out,
     out.print(" framing_errors=");
     out.println(stats.rpc_framing_errors);
 
-    out.print("[RPC ingress] log_datagrams=");
-    out.print(stats.log_datagrams);
-    out.print(" log_framing_errors=");
-    out.print(stats.log_framing_errors);
-    out.print(" boot_notifications=");
-    out.println(runtime.boot_notifications);
-
-    out.print("[RPC payload] deferred=");
-    out.print(stats.deferred_payloads);
-    out.print(" drops=");
+    out.print("[RPC payload] drops=");
     out.print(stats.deferred_payload_drops);
     out.print(" alloc_failures=");
     out.println(stats.deferred_payload_alloc_failures);
@@ -173,8 +164,6 @@ void print_rpc_stats(Print &out,
     out.print(runtime.pending_request_id);
     out.print(" dispatch_retry=");
     out.print(runtime.dispatch_retry_id);
-    out.print(" queued=");
-    out.print(stats.queued_requests);
     out.print(" dispatched=");
     out.println(stats.dispatched_requests);
 
@@ -188,6 +177,8 @@ void print_rpc_stats(Print &out,
     out.print(stats.late_addressed_responses);
     out.print(" dispatch_retries=");
     out.print(stats.request_dispatch_retries);
+    out.print(" log_framing_errors=");
+    out.print(stats.log_framing_errors);
     out.print(" backoffs=");
     out.print(stats.background_backoffs);
     out.print(" backoff_ms=");
@@ -201,17 +192,12 @@ void print_rpc_stats(Print &out,
     out.print(stream.pending_start() ? "yes" : "no");
     out.print(" stop_pending=");
     out.print(stream.pending_stop() ? "yes" : "no");
-    out.print(" starts=");
-    out.print(stream.start_requests());
-    out.print(" stops=");
-    out.println(stream.stop_requests());
+    out.println();
 
     out.print("[STREAM data] payloads=");
     out.print(stream.published_payloads());
     out.print(" fanout_drops=");
     out.print(stream.total_queue_drops());
-    out.print(" deferred=");
-    out.print(stream.command_deferred());
     out.print(" errors=");
     out.print(stream.command_errors());
     out.print(" parse_errors=");
@@ -229,8 +215,8 @@ void print_rpc_stats(Print &out,
     out.print(event_status.subscription_active ? "yes" : "no");
     out.print(" subscription_id=");
     out.print(event_status.subscription_id);
-    out.print(" subscribe_errors=");
-    out.print(event_stats.subscribe_errors);
+    out.print(" command_errors=");
+    out.print(event_stats.command_errors);
     out.print(" notifications=");
     out.print(event_stats.notifications);
     out.print(" truncated=");

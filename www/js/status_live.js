@@ -831,15 +831,13 @@
       up("streamState", state);
       up("streamConsumers", data.consumers);
       up("streamNotifications", data.notifications || 0);
-      up("streamFanout", (data.fanout_targets || 0) + " targets, " +
+      up("streamFanout", (data.consumers || 0) + " consumers, " +
         (data.fanout_drops || 0) + " drops");
       up("streamFrames", (data.frame_pool_used || 0) + "/" +
         (data.frame_pool_capacity || 0) + " used, " +
         (data.parse_errors || 0) + " parse, " +
         (data.truncated_frames || 0) + " trunc");
-      up("streamCommands", (data.start_requests || 0) + " start, " +
-        (data.stop_requests || 0) + " stop, " +
-        (data.command_errors || 0) + " errors");
+      up("streamCommands", (data.command_errors || 0) + " errors");
       up("streamLast", data.last_age_ms === null ?
         "--" : Math.round(data.last_age_ms / 1000) + " s ago");
       up("streamId", data.stream_id || "--");

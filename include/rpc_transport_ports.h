@@ -42,14 +42,10 @@ struct RpcTransportStats {
     uint32_t rpc_notifications = 0;
     uint32_t rpc_unmatched = 0;
     uint32_t rpc_framing_errors = 0;
-    uint32_t log_datagrams = 0;
     uint32_t log_framing_errors = 0;
-    uint32_t boot_notifications = 0;
-    uint32_t deferred_payloads = 0;
     uint32_t deferred_payload_drops = 0;
     uint32_t deferred_payload_alloc_failures = 0;
 
-    uint32_t queued_requests = 0;
     uint32_t dispatched_requests = 0;
     uint32_t request_timeouts = 0;
     uint32_t request_queue_drops = 0;

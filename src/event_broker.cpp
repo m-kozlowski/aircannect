@@ -332,11 +332,6 @@ void EventBroker::mark_command_queued(EventCommandType type,
     pending_quiesce_ = type == EventCommandType::Quiesce;
     pending_params_json_ = params_json;
     next_subscribe_ms_ = now_ms + retry_delay_for_command(type);
-    if (pending_quiesce_) {
-        stats_.quiesce_requests++;
-    } else {
-        stats_.subscribe_requests++;
-    }
 }
 
 void EventBroker::mark_command_deferred(uint32_t now_ms) {
@@ -352,7 +347,7 @@ void EventBroker::mark_command_timeout(uint32_t now_ms) {
     if (was_quiesce) {
         quiesced_ = false;
         next_subscribe_ms_ = now_ms + AC_AS11_EVENT_QUIESCE_RETRY_MS;
-        stats_.quiesce_errors++;
+        stats_.command_errors++;
         return;
     }
 
@@ -361,7 +356,7 @@ void EventBroker::mark_command_timeout(uint32_t now_ms) {
     subscription_id_ = 0;
     active_params_json_.clear();
     next_subscribe_ms_ = now_ms + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-    stats_.subscribe_errors++;
+    stats_.command_errors++;
 }
 
 void EventBroker::mark_command_cancelled(uint32_t now_ms) {
@@ -425,7 +420,7 @@ void EventBroker::mark_subscribe_response(bool is_error,
         if (is_error) {
             quiesced_ = false;
             next_subscribe_ms_ = now_ms + AC_AS11_EVENT_QUIESCE_RETRY_MS;
-            stats_.quiesce_errors++;
+            stats_.command_errors++;
             return;
         }
         note_subscription_gap(was_active);
@@ -435,7 +430,6 @@ void EventBroker::mark_subscribe_response(bool is_error,
         pending_params_json_.clear();
         quiesced_ = true;
         next_subscribe_ms_ = 0;
-        stats_.quiesce_successes++;
         return;
     }
 
@@ -446,7 +440,7 @@ void EventBroker::mark_subscribe_response(bool is_error,
         active_params_json_.clear();
         pending_params_json_.clear();
         next_subscribe_ms_ = now_ms + AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-        stats_.subscribe_errors++;
+        stats_.command_errors++;
         return;
     }
 
@@ -465,7 +459,6 @@ void EventBroker::mark_subscribe_response(bool is_error,
     }
     pending_params_json_.clear();
     next_subscribe_ms_ = 0;
-    stats_.subscribe_successes++;
 }
 
 void EventBroker::mark_reattach(uint32_t now_ms) {
@@ -573,7 +566,6 @@ EventPublishResult EventBroker::publish_notification(const char *payload,
     result.settings_history_change =
         settings_history_change_notification(frame);
     if (result.settings_history_change) {
-        stats_.settings_history_changes++;
         if (settings_history_observer_) {
             settings_history_observer_(settings_history_observer_context_,
                                        now_ms);
@@ -727,7 +719,6 @@ int EventBroker::find_free_slot() const {
 void EventBroker::note_subscription_gap(bool was_active) {
     if (!was_active) return;
     coverage_gap_count_++;
-    stats_.coverage_gaps++;
 }
 
 }  // namespace aircannect
