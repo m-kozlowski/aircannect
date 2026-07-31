@@ -13,18 +13,6 @@
 
 namespace aircannect {
 
-struct TelnetConsoleStats {
-    uint32_t accepted_clients = 0;
-    uint32_t disconnected_clients = 0;
-    uint32_t rejected_clients = 0;
-    uint32_t auth_successes = 0;
-    uint32_t auth_failures = 0;
-    uint32_t commands_in = 0;
-    uint32_t bytes_in = 0;
-    uint32_t overlong_lines = 0;
-    uint32_t queue_drops = 0;
-};
-
 class TelnetConsole : private LineProtocolServerBase {
 public:
     bool begin(uint16_t port = AC_TELNET_CONSOLE_PORT);
@@ -79,7 +67,6 @@ private:
     void execute_slot_line(size_t idx, ConsoleCommandRouter &router);
 
     Slot slots_[AC_MAX_TELNET_CLIENTS];
-    TelnetConsoleStats stats_ = {};
 };
 
 }  // namespace aircannect

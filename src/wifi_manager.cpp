@@ -1159,7 +1159,6 @@ void WifiManager::maybe_start_roam_scan() {
     WiFi.scanDelete();
     int16_t rc = WiFi.scanNetworks(true);
     if (rc == WIFI_SCAN_FAILED) {
-        stats_.roam_scan_failures++;
         low_rssi_count_ = 0;
         return;
     }
@@ -1230,7 +1229,6 @@ void WifiManager::handle_roam_scan() {
 
     // Scan failure recovery
     if (result == WIFI_SCAN_FAILED) {
-        stats_.roam_scan_failures++;
         low_rssi_count_ = 0;
 
         if (WiFi.status() == WL_CONNECTED) {

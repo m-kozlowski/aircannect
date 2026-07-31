@@ -37,15 +37,9 @@ enum log_cat_t {
 namespace Log {
 
 struct Stats {
-    uint32_t emitted = 0;
-    uint32_t filtered = 0;
-    uint32_t truncated = 0;
-    uint32_t syslog_enqueued = 0;
     uint32_t syslog_sent = 0;
     uint32_t syslog_drops = 0;
     uint32_t syslog_errors = 0;
-    uint32_t file_enqueued = 0;
-    uint32_t file_dequeued = 0;
     uint32_t file_drops = 0;
     uint32_t file_errors = 0;
 };

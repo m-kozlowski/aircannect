@@ -35,12 +35,6 @@ void free_executor_scratch(void *memory) {
 #endif
 }
 
-bool add_u64(uint64_t &value, uint64_t amount) {
-    if (value > UINT64_MAX - amount) return false;
-    value += amount;
-    return true;
-}
-
 bool source_kind(ReportReadOperationKind operation_kind,
                  NightCatalogFileKind file_kind,
                  EdfInventoryFileKind &out) {
@@ -161,7 +155,6 @@ void ReportExecutor::reset() {
     operation_index_ = 0;
     operation_count_ = 0;
     record_index_ = 0;
-    stats_ = {};
 }
 
 ReportExecutorStatus ReportExecutor::status() const {
@@ -171,7 +164,6 @@ ReportExecutorStatus ReportExecutor::status() const {
     out.generation = generation_;
     out.operation_index = operation_index_;
     out.operation_count = operation_count_;
-    out.stats = stats_;
     return out;
 }
 
@@ -461,12 +453,6 @@ bool ReportExecutor::decode_record() {
                ReportExecutorError::StorageShortRead);
         return false;
     }
-    if (!add_u64(stats_.bytes_read, read.bytes)) {
-        finish(ReportExecutorState::Failed,
-               ReportExecutorError::DecodeFailed);
-        return false;
-    }
-
     sink_rejected_ = false;
     callback_operation_ = operation;
     const uint32_t source_record_index =
@@ -477,7 +463,6 @@ bool ReportExecutor::decode_record() {
             plan_->mappings(*operation, mapping_count);
         for (size_t i = 0; i < mapping_count; ++i) {
             callback_mapping_ = &mappings[i];
-            EdfReportSeriesDecodeStats record_stats;
             const EdfReportSeriesStatus decode_status =
                 edf_report_decode_series_record(
                     decoders_[i],
@@ -487,14 +472,7 @@ bool ReportExecutor::decode_record() {
                     mappings[i].output_window.start_ms,
                     mappings[i].output_window.end_ms,
                     emit_series,
-                    this,
-                    record_stats);
-            if (!add_u64(stats_.samples_emitted,
-                         record_stats.samples_emitted)) {
-                finish(ReportExecutorState::Failed,
-                       ReportExecutorError::DecodeFailed);
-                return false;
-            }
+                    this);
             if (decode_status != EdfReportSeriesStatus::Ok) {
                 finish(ReportExecutorState::Failed,
                        sink_rejected_
@@ -512,7 +490,6 @@ bool ReportExecutor::decode_record() {
         }
 
         const EdfReportEventSource source{kind, file->record_start_ms};
-        EdfReportEventDecodeStats record_stats;
         EdfReportEventDecodeContext *event_context =
             operation->kind == ReportReadOperationKind::CsrEvents
                 ? &event_context_
@@ -524,13 +501,7 @@ bool ReportExecutor::decode_record() {
                                                 true,
                                                 emit_event,
                                                 this,
-                                                record_stats,
                                                 event_context);
-        if (!add_u64(stats_.events_emitted, record_stats.events_emitted)) {
-            finish(ReportExecutorState::Failed,
-                   ReportExecutorError::DecodeFailed);
-            return false;
-        }
         if (decode_status != EdfReportEventStatus::Ok) {
             finish(ReportExecutorState::Failed,
                    sink_rejected_
@@ -543,7 +514,6 @@ bool ReportExecutor::decode_record() {
     callback_mapping_ = nullptr;
     callback_operation_ = nullptr;
     ++record_index_;
-    ++stats_.records_decoded;
     if (record_index_ == operation->record_count) finish_operation();
     return true;
 }
@@ -569,15 +539,13 @@ bool ReportExecutor::decode_fallback_operation() {
                ReportExecutorError::StorageShortRead);
         return false;
     }
-    if (!add_u64(stats_.bytes_read, read.bytes) ||
-        crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
+    if (crc32_ieee(record_buffer_, read.bytes) != section->data_crc32) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::DecodeFailed);
         return false;
     }
 
     sink_rejected_ = false;
-    fallback_emit_count_ = 0;
     callback_operation_ = operation;
     if (operation->kind == ReportReadOperationKind::FallbackSeries) {
         size_t mapping_count = 0;
@@ -601,11 +569,6 @@ bool ReportExecutor::decode_fallback_operation() {
                    sink_rejected_
                        ? ReportExecutorError::SinkRejected
                        : ReportExecutorError::DecodeFailed);
-            return false;
-        }
-        if (!add_u64(stats_.samples_emitted, fallback_emit_count_)) {
-            finish(ReportExecutorState::Failed,
-                   ReportExecutorError::DecodeFailed);
             return false;
         }
     } else {
@@ -632,20 +595,10 @@ bool ReportExecutor::decode_fallback_operation() {
                 return false;
             }
         }
-        if (!add_u64(stats_.events_emitted, fallback_emit_count_)) {
-            finish(ReportExecutorState::Failed,
-                   ReportExecutorError::DecodeFailed);
-            return false;
-        }
     }
 
     callback_mapping_ = nullptr;
     callback_operation_ = nullptr;
-    if (!add_u64(stats_.records_decoded, section->record_count)) {
-        finish(ReportExecutorState::Failed,
-               ReportExecutorError::DecodeFailed);
-        return false;
-    }
     record_index_ = section->record_count;
     finish_operation();
     return true;
@@ -659,7 +612,6 @@ void ReportExecutor::finish_operation() {
 
     release_prepared();
     ++operation_index_;
-    ++stats_.operations_completed;
     record_index_ = 0;
     decoder_count_ = 0;
 
@@ -693,7 +645,6 @@ void ReportExecutor::release_run_resources() {
     event_next_record_ = 0;
     event_context_valid_ = false;
     sink_rejected_ = false;
-    fallback_emit_count_ = 0;
 }
 
 void ReportExecutor::release_prepared() {
@@ -738,10 +689,6 @@ bool ReportExecutor::emit_series(void *context,
         executor->sink_rejected_ = true;
         return false;
     }
-    if (executor->callback_operation_->kind ==
-        ReportReadOperationKind::FallbackSeries) {
-        ++executor->fallback_emit_count_;
-    }
     return true;
 }
 
@@ -763,10 +710,6 @@ bool ReportExecutor::emit_event(void *context,
             event)) {
         executor->sink_rejected_ = true;
         return false;
-    }
-    if (executor->callback_operation_->kind ==
-        ReportReadOperationKind::FallbackEvents) {
-        ++executor->fallback_emit_count_;
     }
     return true;
 }

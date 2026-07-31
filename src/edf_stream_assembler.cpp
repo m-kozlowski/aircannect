@@ -248,8 +248,11 @@ void EdfStreamAssembler::ingest_frame(const StreamFrameData &frame) {
     for (size_t i = 0; i < frame.signal_count; ++i) {
         const StreamSignalSpan &span = frame.signals[i];
         EdfSignalTarget target;
-        if (!edf_signal_target_for_stream(span.id, target)) {
-            status_.unknown_signals++;
+        if (!edf_signal_target_for_stream(span.id, target) &&
+            !status_.unmapped_signal[0]) {
+            strncpy(status_.unmapped_signal,
+                    span.name,
+                    sizeof(status_.unmapped_signal) - 1);
         }
     }
 
@@ -732,7 +735,7 @@ void EdfStreamAssembler::publish_current_record(SeriesBuffer &series) {
     const uint32_t missing = count_missing_record_samples(series);
     publish_record(series);
     series.status->records_completed++;
-    series.status->samples_missing += missing;
+    series.status->missing_slots += missing;
 }
 
 bool EdfStreamAssembler::advance_to_record(SeriesBuffer &series,
@@ -764,8 +767,6 @@ void EdfStreamAssembler::flush_partial_records() {
         if (!record_has_samples(buffer)) continue;
         if (record_tail_complete(buffer)) {
             publish_current_record(buffer);
-        } else if (buffer.status) {
-            buffer.status->records_dropped_partial++;
         }
         reset_record(buffer);
     }
@@ -805,10 +806,6 @@ void EdfStreamAssembler::store_sample(SeriesBuffer &series,
     edf_bit_set(series.valid, slot, valid);
     series.values[slot] = value;
     series.status->slots_filled++;
-
-    if (!valid) {
-        series.status->samples_invalid++;
-    }
 }
 
 EdfStreamAssembler::SeriesBuffer EdfStreamAssembler::series(EdfSeriesId id) {

@@ -72,7 +72,6 @@ void TelnetConsole::accept_clients(const AppConfigData &app_config,
         if (slots_[i].client && slots_[i].client.connected()) continue;
         disconnect_slot(i, router);
         slots_[i].client = incoming;
-        stats_.accepted_clients++;
         Log::logf(CAT_TCP, LOG_INFO, "[TELNET %u] connected from %s\n",
                   static_cast<unsigned>(i),
                   slots_[i].client.remoteIP().toString().c_str());
@@ -80,7 +79,6 @@ void TelnetConsole::accept_clients(const AppConfigData &app_config,
         return;
     }
 
-    stats_.rejected_clients++;
     incoming.println("ERR: max clients");
     incoming.stop();
 }
@@ -117,7 +115,6 @@ void TelnetConsole::authenticate_slot(size_t idx,
 
     if (network_client_allowed(app_config, slot.client.remoteIP())) {
         slot.auth_state = AuthState::Authenticated;
-        stats_.auth_successes++;
         queue_console_begin(idx);
         queue_prompt(idx);
         return;
@@ -130,9 +127,7 @@ void TelnetConsole::authenticate_slot(size_t idx,
 void TelnetConsole::queue_text(size_t idx, const String &text) {
     if (idx >= AC_MAX_TELNET_CLIENTS || !text.length()) return;
     Slot &slot = slots_[idx];
-    if (!slot.output_queue.push(text)) {
-        stats_.queue_drops++;
-    }
+    (void)slot.output_queue.push(text);
 }
 
 void TelnetConsole::queue_prompt(size_t idx) {
@@ -154,7 +149,6 @@ void TelnetConsole::pump_outputs(ConsoleCommandRouter &router) {
             slot.client, slot.output_queue, slot.output_current,
             slot.output_pos, i, "TELNET", false);
         if (result.fatal_error) {
-            stats_.disconnected_clients++;
             disconnect_slot(i, router);
         }
     }
@@ -169,7 +163,6 @@ void TelnetConsole::poll_inputs(const AppConfigData &config,
         if (!slot.client.connected()) {
             Log::logf(CAT_TCP, LOG_INFO, "[TELNET %u] disconnected\n",
                       static_cast<unsigned>(i));
-            stats_.disconnected_clients++;
             disconnect_slot(i, router);
             continue;
         }
@@ -178,7 +171,6 @@ void TelnetConsole::poll_inputs(const AppConfigData &config,
         while (budget > 0 && slot.client.available()) {
             budget--;
             char c = static_cast<char>(slot.client.read());
-            stats_.bytes_in++;
             process_input_char(i, c, config, router);
         }
     }
@@ -226,7 +218,6 @@ void TelnetConsole::process_input_char(size_t idx,
     } else if (slot.line.length() < AC_TCP_LINE_MAX) {
         slot.line += c;
     } else {
-        stats_.overlong_lines++;
         release_line_string(slot.line);
         queue_text(idx, "\r\n[CLI] line too long; dropped\r\n");
         queue_prompt(idx);
@@ -249,14 +240,12 @@ void TelnetConsole::process_auth_line(size_t idx,
     if (network_credentials_match(app_config, slot.auth_user, line)) {
         slot.auth_state = AuthState::Authenticated;
         release_line_string(slot.auth_user);
-        stats_.auth_successes++;
         queue_text(idx, "\r\n");
         queue_console_begin(idx);
         queue_prompt(idx);
         return;
     }
 
-    stats_.auth_failures++;
     slot.auth_state = AuthState::Username;
     release_line_string(slot.auth_user);
     queue_text(idx, "\r\nAuthentication failed\r\nlogin: ");
@@ -272,7 +261,6 @@ void TelnetConsole::execute_slot_line(size_t idx,
         return;
     }
 
-    stats_.commands_in++;
     StringPrint capture(4096, "\r\n");
     slot.console.execute_line(line, capture, router);
     if (capture.text().length()) queue_text(idx, capture.text());

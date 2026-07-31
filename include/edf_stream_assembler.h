@@ -13,11 +13,9 @@ namespace aircannect {
 struct EdfSeriesAssemblyStatus {
     uint32_t current_record = 0;
     uint32_t records_completed = 0;
-    uint32_t samples_invalid = 0;
-    uint32_t samples_missing = 0;
+    uint32_t missing_slots = 0;
     uint32_t samples_duplicate = 0;
     uint32_t samples_late = 0;
-    uint32_t records_dropped_partial = 0;
 
     uint16_t slots_filled = 0;
 };
@@ -28,7 +26,6 @@ struct EdfStreamAssemblerStatus {
 
     uint32_t frames = 0;
     uint32_t timestamp_errors = 0;
-    uint32_t unknown_signals = 0;
 
     uint32_t timestamp_resyncs = 0;
 
@@ -39,6 +36,7 @@ struct EdfStreamAssemblerStatus {
     EdfSeriesAssemblyStatus sa2;
     EdfSeriesAssemblyStatus tcv;
 
+    char unmapped_signal[AC_STREAM_FRAME_SIGNAL_NAME_MAX] = {};
     char last_error[80] = {};
 };
 

@@ -57,8 +57,6 @@ bool StorageFileLogSink::begin(WakeTask wake_task) {
     }
 
     if (lock()) {
-        status_.available = true;
-        status_.queue_capacity = AC_FILE_LOG_QUEUE_DEPTH;
         update_queue_status_locked();
         unlock();
     }
@@ -146,10 +144,7 @@ void StorageFileLogSink::restore_line(const Line &line) {
 }
 
 void StorageFileLogSink::update_queue_status_locked() {
-    status_.enabled = desired_enabled_;
     status_.queued = queue_ ? queue_->count() : 0;
-    status_.queue_capacity = queue_ ? queue_->capacity() : 0;
-    status_.drops = queue_ ? queue_->dropped() : 0;
 }
 
 bool StorageFileLogSink::ensure_directory() {
@@ -170,11 +165,6 @@ void StorageFileLogSink::close_file(bool flush) {
     if (flush) file_.flush();
     file_.close();
     last_flush_ms_ = 0;
-
-    if (lock()) {
-        status_.open = false;
-        unlock();
-    }
 }
 
 bool StorageFileLogSink::rotate_file() {
@@ -256,16 +246,9 @@ bool StorageFileLogSink::open_file(size_t next_write_length) {
 
     file_ = Storage::open(AC_FILE_LOG_PATH, FILE_APPEND);
     if (!file_) return false;
-    {
-        file_size_ = file_.size();
-    }
+    file_size_ = file_.size();
     last_flush_ms_ = millis();
 
-    if (lock()) {
-        status_.open = true;
-        status_.bytes = file_size_;
-        unlock();
-    }
     return true;
 }
 
@@ -290,21 +273,13 @@ bool StorageFileLogSink::write_line(const Line &line) {
 
     if (!open_file(line.length)) return false;
 
-    size_t written = 0;
-    {
-        written = file_.write(
-            reinterpret_cast<const uint8_t *>(line.bytes), line.length);
-    }
+    const size_t written = file_.write(
+        reinterpret_cast<const uint8_t *>(line.bytes), line.length);
     if (written != line.length) return false;
 
     file_size_ += written;
     written_sequence_.store(line.sequence, std::memory_order_release);
 
-    if (lock()) {
-        status_.written++;
-        status_.bytes = file_size_;
-        unlock();
-    }
     return true;
 }
 

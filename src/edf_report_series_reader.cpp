@@ -63,9 +63,7 @@ EdfReportSeriesStatus edf_report_decode_series_record(
     int64_t range_start_ms,
     int64_t range_end_ms,
     EdfReportSeriesSampleCallback callback,
-    void *context,
-    EdfReportSeriesDecodeStats &stats) {
-    stats = {};
+    void *context) {
     if (!record || !callback || range_end_ms <= range_start_ms ||
         decoder.record_duration_ms == 0 || decoder.record_size == 0 ||
         decoder.signal_header.samples_per_record == 0) {
@@ -88,12 +86,10 @@ EdfReportSeriesStatus edf_report_decode_series_record(
                         record_end_ms,
                         range_start_ms,
                         range_end_ms)) {
-        stats.samples_out_of_range = decoder.signal_header.samples_per_record;
         return EdfReportSeriesStatus::Ok;
     }
 
     for (uint32_t i = 0; i < decoder.signal_header.samples_per_record; ++i) {
-        stats.samples_seen++;
         const int64_t sample_ms =
             record_start_ms +
             (static_cast<int64_t>(i) *
@@ -101,7 +97,6 @@ EdfReportSeriesStatus edf_report_decode_series_record(
                 static_cast<int64_t>(
                     decoder.signal_header.samples_per_record);
         if (sample_ms < range_start_ms || sample_ms >= range_end_ms) {
-            stats.samples_out_of_range++;
             continue;
         }
 
@@ -114,7 +109,6 @@ EdfReportSeriesStatus edf_report_decode_series_record(
             return EdfReportSeriesStatus::RecordSizeMismatch;
         }
         if (edf_digital_sample_is_missing(decoder.signal_scale, digital)) {
-            stats.samples_missing++;
             continue;
         }
 
@@ -125,7 +119,6 @@ EdfReportSeriesStatus edf_report_decode_series_record(
         if (!callback(context, sample)) {
             return EdfReportSeriesStatus::CallbackRejected;
         }
-        stats.samples_emitted++;
     }
     return EdfReportSeriesStatus::Ok;
 }

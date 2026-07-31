@@ -6,13 +6,7 @@
 namespace aircannect {
 
 struct FileLogSinkStatus {
-    bool available = false;
-    bool enabled = false;
-    bool open = false;
-    size_t queue_capacity = 0;
     size_t queued = 0;
-    uint64_t bytes = 0;
-    uint32_t written = 0;
     uint32_t drops = 0;
     uint32_t errors = 0;
 };

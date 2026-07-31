@@ -82,10 +82,7 @@ int format_message(char *buf, size_t size, const char *fmt, va_list args) {
     if (!buf || size == 0) return 0;
     int len = vsnprintf(buf, size, fmt, args);
     if (len <= 0) return 0;
-    if (len >= static_cast<int>(size)) {
-        len = size - 1;
-        log_stats.truncated++;
-    }
+    if (len >= static_cast<int>(size)) len = size - 1;
     return len;
 }
 
@@ -145,10 +142,7 @@ int compose_line(log_cat_t cat,
         pos = append_char(buf, size, pos, ' ');
     }
 
-    if (pos >= size) {
-        log_stats.truncated++;
-        return static_cast<int>(size - 1);
-    }
+    if (pos >= size) return static_cast<int>(size - 1);
     return static_cast<int>(pos);
 }
 
@@ -195,9 +189,7 @@ void enqueue_syslog_record(const LogRecord &record) {
         log_stats.syslog_drops++;
         return;
     }
-    if (syslog_queue->push(record)) {
-        log_stats.syslog_enqueued++;
-    }
+    if (!syslog_queue->push(record)) log_stats.syslog_drops++;
 }
 
 void enqueue_file_log_record(const LogRecord &record) {
@@ -222,13 +214,7 @@ void enqueue_file_log_record(const LogRecord &record) {
         line_length < static_cast<int>(sizeof(line))
             ? static_cast<size_t>(line_length)
             : sizeof(line) - 1;
-    if (line_length >= static_cast<int>(sizeof(line))) {
-        log_stats.truncated++;
-    }
-
-    if (file_log_sink && file_log_sink->enqueue(line, write_length)) {
-        log_stats.file_enqueued++;
-    } else {
+    if (!file_log_sink || !file_log_sink->enqueue(line, write_length)) {
         log_stats.file_drops++;
     }
 #else
@@ -249,7 +235,6 @@ void dispatch_structured(log_cat_t cat,
                          const char *buf,
                          int len,
                          const char *syslog_text) {
-    log_stats.emitted++;
     serial_dispatch(buf, len);
     enqueue_log_sinks(cat, level, syslog_text);
 }
@@ -563,13 +548,12 @@ size_t filelog_queue_depth() {
 Stats stats() {
     lock_log();
     Stats out = log_stats;
-    if (syslog_queue) out.syslog_drops += syslog_queue->dropped();
+    aircannect::FileLogSinkPort *sink = file_log_sink;
     unlock_log();
 
-    aircannect::FileLogSinkPort *sink = file_log_sink;
     if (sink) {
         const aircannect::FileLogSinkStatus file_log = sink->status();
-        out.file_dequeued = file_log.written;
+        out.file_drops += file_log.drops;
         out.file_errors += file_log.errors;
     }
     return out;
@@ -579,7 +563,6 @@ void logf(log_cat_t cat, log_level_t level, const char *fmt, ...) {
     if (cat < 0 || cat >= CAT_COUNT ||
         level < LOG_ERROR || level > LOG_DEBUG ||
         level > levels[cat]) {
-        log_stats.filtered++;
         return;
     }
     char buf[AC_LOG_LINE_MAX] = {};
@@ -610,7 +593,6 @@ void log_payload(log_cat_t cat,
     if (cat < 0 || cat >= CAT_COUNT ||
         level < LOG_ERROR || level > LOG_DEBUG ||
         level > levels[cat]) {
-        log_stats.filtered++;
         return;
     }
 
@@ -624,7 +606,6 @@ void log_payload(log_cat_t cat,
                                         sizeof(header));
 
     lock_log();
-    log_stats.emitted++;
     serial_dispatch(header, header_len);
     if (payload && payload_len) {
         serial_dispatch(payload, static_cast<int>(payload_len));
@@ -645,7 +626,6 @@ void log_payload(log_cat_t cat,
         memcpy(record + prefix_len, payload, payload_room);
         record[prefix_len + payload_room] = 0;
     }
-    if (payload_len > payload_room) log_stats.truncated++;
     record[sizeof(record) - 1] = 0;
     enqueue_log_sinks(cat, level, record);
     unlock_log();

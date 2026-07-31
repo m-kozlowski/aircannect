@@ -549,8 +549,6 @@ void PlxPeripheral::notify(const OximetryHubSnapshot &source,
     if (source.source_fresh && source.reading.valid) {
         spo2 = encode_sfloat_int_value(source.reading.spo2);
         pulse = encode_sfloat_int_value(source.reading.pulse_bpm);
-    } else {
-        status_.invalid_notifications++;
     }
 
     const uint8_t payload[5] = {
@@ -560,9 +558,7 @@ void PlxPeripheral::notify(const OximetryHubSnapshot &source,
         static_cast<uint8_t>(pulse & 0xff),
         static_cast<uint8_t>((pulse >> 8) & 0xff),
     };
-    if (continuous_->notify(payload, sizeof(payload), connection_handle_)) {
-        status_.notifications++;
-    }
+    (void)continuous_->notify(payload, sizeof(payload), connection_handle_);
 #else
     (void)source;
     (void)now_ms;
@@ -637,9 +633,6 @@ void PlxPeripheral::drain_events() {
     if (error_pending) set_error(error);
     if (connect_pending) {
 #if AC_OXIMETRY_BLE_ENABLED
-        if (!status_.connected || connection_handle_ != connection_handle) {
-            status_.connections++;
-        }
         connection_handle_ = connection_handle;
 #endif
         status_.connected = true;
@@ -670,7 +663,6 @@ void PlxPeripheral::drain_events() {
         status_.connected = false;
         status_.subscribed = false;
         status_.advertising = false;
-        status_.disconnects++;
         status_.last_disconnect_reason =
             static_cast<uint32_t>(disconnect_reason);
         no_source_since_ms_ = 0;

@@ -18,19 +18,6 @@ using TcpRawRequestObserver = void (*)(void *context,
                                        size_t payload_len,
                                        uint32_t now_ms);
 
-struct TcpBridgeStats {
-    uint32_t accepted_clients = 0;
-    uint32_t disconnected_clients = 0;
-    uint32_t broadcasts = 0;
-    uint32_t lines_in = 0;
-    uint32_t bytes_in = 0;
-    uint32_t lines_out = 0;
-    uint32_t overlong_lines = 0;
-    uint32_t enqueue_failures = 0;
-    uint32_t queue_drops = 0;
-    uint32_t rejected_clients = 0;
-};
-
 struct TcpBridgeClientStatus {
     bool connected = false;
     IPAddress remote_ip;
@@ -57,7 +44,6 @@ public:
     bool raw_client_connected();
     bool started() const { return line_server_started(); }
     uint16_t port() const { return line_server_port(); }
-    const TcpBridgeStats &stats() const { return stats_; }
     size_t client_statuses(TcpBridgeClientStatus *out, size_t max);
 
 private:
@@ -78,7 +64,6 @@ private:
     TcpRawRequestObserver raw_request_observer_ = nullptr;
     void *raw_request_observer_context_ = nullptr;
 
-    TcpBridgeStats stats_ = {};
 };
 
 }  // namespace aircannect

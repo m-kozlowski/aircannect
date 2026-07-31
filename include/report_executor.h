@@ -33,21 +33,12 @@ enum class ReportExecutorError : uint8_t {
     SinkRejected,
 };
 
-struct ReportExecutorStats {
-    uint64_t bytes_read = 0;
-    uint64_t records_decoded = 0;
-    uint64_t samples_emitted = 0;
-    uint64_t events_emitted = 0;
-    size_t operations_completed = 0;
-};
-
 struct ReportExecutorStatus {
     ReportExecutorState state = ReportExecutorState::Idle;
     ReportExecutorError error = ReportExecutorError::None;
     uint32_t generation = 0;
     size_t operation_index = 0;
     size_t operation_count = 0;
-    ReportExecutorStats stats;
 
     bool active() const;
     bool terminal() const;
@@ -113,7 +104,6 @@ private:
     size_t operation_index_ = 0;
     size_t operation_count_ = 0;
     uint32_t record_index_ = 0;
-    ReportExecutorStats stats_;
 
     OperationTicket ticket_;
     StoragePreparedRead prepared_;
@@ -129,7 +119,6 @@ private:
     uint32_t event_next_record_ = 0;
     bool event_context_valid_ = false;
     bool sink_rejected_ = false;
-    uint64_t fallback_emit_count_ = 0;
     const ReportReadMapping *callback_mapping_ = nullptr;
     const ReportReadOperation *callback_operation_ = nullptr;
 };

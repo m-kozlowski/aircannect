@@ -10,10 +10,7 @@ template <typename T, size_t N>
 class FixedQueue {
 public:
     bool push(const T &value) {
-        if (full()) {
-            dropped_++;
-            return false;
-        }
+        if (full()) return false;
         items_[tail_] = value;
         tail_ = (tail_ + 1) % N;
         count_++;
@@ -21,10 +18,7 @@ public:
     }
 
     bool push(T &&value) {
-        if (full()) {
-            dropped_++;
-            return false;
-        }
+        if (full()) return false;
         items_[tail_] = std::move(value);
         tail_ = (tail_ + 1) % N;
         count_++;
@@ -32,10 +26,7 @@ public:
     }
 
     bool push_front(const T &value) {
-        if (full()) {
-            dropped_++;
-            return false;
-        }
+        if (full()) return false;
         head_ = (head_ + N - 1) % N;
         items_[head_] = value;
         count_++;
@@ -43,10 +34,7 @@ public:
     }
 
     bool push_front(T &&value) {
-        if (full()) {
-            dropped_++;
-            return false;
-        }
+        if (full()) return false;
         head_ = (head_ + N - 1) % N;
         items_[head_] = std::move(value);
         count_++;
@@ -74,8 +62,6 @@ public:
     size_t count() const { return count_; }
     size_t capacity() const { return N; }
     size_t free() const { return N - count_; }
-    unsigned long dropped() const { return dropped_; }
-    void reset_dropped() { dropped_ = 0; }
 
 private:
     static void reset_item(T &item) {
@@ -87,7 +73,6 @@ private:
     size_t head_ = 0;
     size_t tail_ = 0;
     size_t count_ = 0;
-    unsigned long dropped_ = 0;
 };
 
 }  // namespace aircannect

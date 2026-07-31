@@ -32,11 +32,7 @@ OximetryRuntimeStatus compose_oximetry_status(
         peripheral.manual_advertising_requested;
     out.pairing_active = peripheral.pairing_active;
     out.pairing_left_ms = peripheral.pairing_left_ms;
-    out.ble_connections = peripheral.connections;
-    out.ble_disconnects = peripheral.disconnects;
     out.ble_last_disconnect_reason = peripheral.last_disconnect_reason;
-    out.ble_notifications = peripheral.notifications;
-    out.ble_invalid_notifications = peripheral.invalid_notifications;
     strncpy(out.ble_name, peripheral.name, sizeof(out.ble_name) - 1);
     strncpy(out.ble_peer, peripheral.peer, sizeof(out.ble_peer) - 1);
 

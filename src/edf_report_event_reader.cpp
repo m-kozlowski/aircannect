@@ -113,8 +113,7 @@ bool emit_event(EdfReportEventCallback callback,
                 void *context,
                 int64_t start_ms,
                 int64_t duration_ms,
-                uint16_t code,
-                EdfReportEventDecodeStats &stats) {
+                uint16_t code) {
     ReportEventRecord event;
     event.start_ms = start_ms;
     event.duration_ms = duration_ms > INT32_MAX
@@ -122,9 +121,7 @@ bool emit_event(EdfReportEventCallback callback,
                             : static_cast<int32_t>(duration_ms);
     event.code = code;
     event.flags = 0;
-    if (!callback(context, event)) return false;
-    stats.events_emitted++;
-    return true;
+    return callback(context, event);
 }
 
 int64_t normalized_eve_event_start_ms(int64_t annotation_time_ms,
@@ -153,7 +150,6 @@ EdfReportEventStatus edf_report_decode_annotation_record(
     bool verify_crc,
     EdfReportEventCallback callback,
     void *context,
-    EdfReportEventDecodeStats &stats,
     EdfReportEventDecodeContext *decode_context) {
     if (!record || !callback || source.header_start_ms <= 0 ||
         (source.kind != EdfInventoryFileKind::Eve &&
@@ -203,7 +199,6 @@ EdfReportEventStatus edf_report_decode_annotation_record(
             }
             const size_t label_len = index - label_start;
             if (label_len > 0) {
-                stats.annotations_seen++;
                 EdfAnnotationLabelId id = EdfAnnotationLabelId::Hypopnea;
                 if (edf_annotation_label_id_for_text(source.kind,
                                                      record + label_start,
@@ -215,8 +210,6 @@ EdfReportEventStatus edf_report_decode_annotation_record(
                         if (decode_context) {
                             decode_context->csr_open = true;
                             decode_context->csr_start_ms = annotation_time_ms;
-                        } else {
-                            stats.unsupported_labels++;
                         }
                     } else if (id == EdfAnnotationLabelId::CsrEnd) {
                         if (decode_context && decode_context->csr_open &&
@@ -231,12 +224,9 @@ EdfReportEventStatus edf_report_decode_annotation_record(
                                     decode_context->csr_start_ms,
                                     csr_duration_ms,
                                     report_event_code_value(
-                                        ReportEventCode::Csr),
-                                    stats)) {
+                                        ReportEventCode::Csr))) {
                                 return EdfReportEventStatus::CallbackRejected;
                             }
-                        } else {
-                            stats.unsupported_labels++;
                         }
                         if (decode_context) {
                             decode_context->csr_open = false;
@@ -254,13 +244,10 @@ EdfReportEventStatus edf_report_decode_annotation_record(
                                         context,
                                         event_start_ms,
                                         duration_ms,
-                                        code,
-                                        stats)) {
+                                        code)) {
                             return EdfReportEventStatus::CallbackRejected;
                         }
                     }
-                } else {
-                    stats.unsupported_labels++;
                 }
             }
             if (index < payload_size && record[index] == TAL_ANNOTATION_SEP) {
@@ -279,7 +266,6 @@ EdfReportEventStatus edf_report_decode_annotation_record(
     bool verify_crc,
     EdfReportEventCallback callback,
     void *context,
-    EdfReportEventDecodeStats &stats,
     EdfReportEventDecodeContext *decode_context) {
     if (file.status != EdfReportFileStatus::Ok) {
         return EdfReportEventStatus::InvalidArgument;
@@ -295,7 +281,6 @@ EdfReportEventStatus edf_report_decode_annotation_record(
                                                verify_crc,
                                                callback,
                                                context,
-                                               stats,
                                                decode_context);
 }
 

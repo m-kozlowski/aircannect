@@ -31,18 +31,15 @@ void TcpBridge::poll(RpcPassthroughPort &rpc) {
 
 void TcpBridge::broadcast_rpc_payload(const RpcPayloadRef &payload) {
     if (!started() || !payload) return;
-    stats_.broadcasts++;
 
     if (!raw_client_connected()) return;
 
     for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
         if (!clients_[i] || !clients_[i].connected()) continue;
         if (!output_queues_[i].push(payload)) {
-            stats_.queue_drops++;
             Log::logf(CAT_TCP, LOG_WARN,
                       "[CLIENT %u] outbound queue full; dropping payload\n",
                       static_cast<unsigned>(i));
-        } else {
         }
     }
 }
@@ -97,14 +94,12 @@ void TcpBridge::accept_clients() {
         if (clients_[i] && clients_[i].connected()) continue;
         disconnect_slot(i);
         clients_[i] = incoming;
-        stats_.accepted_clients++;
         Log::logf(CAT_TCP, LOG_INFO, "[CLIENT %u] connected from %s\n",
                   static_cast<unsigned>(i),
                   clients_[i].remoteIP().toString().c_str());
         return;
     }
 
-    stats_.rejected_clients++;
     incoming.println("ERR: max clients");
     incoming.stop();
 }
@@ -115,13 +110,8 @@ void TcpBridge::pump_outputs() {
 
         LineOutputPumpResult result = pump_rpc_output(i);
         if (result.fatal_error) {
-            stats_.disconnected_clients++;
             disconnect_slot(i);
             continue;
-        }
-
-        if (result.completed) {
-            stats_.lines_out++;
         }
     }
 }
@@ -182,7 +172,6 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
         if (!clients_[i].connected()) {
             Log::logf(CAT_TCP, LOG_INFO, "[CLIENT %u] disconnected\n",
                       static_cast<unsigned>(i));
-            stats_.disconnected_clients++;
             disconnect_slot(i);
             continue;
         }
@@ -191,13 +180,11 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
         while (budget > 0 && clients_[i].available()) {
             budget--;
             char c = static_cast<char>(clients_[i].read());
-            stats_.bytes_in++;
             if (c == '\n') {
                 String line = std::move(lines_[i]);
                 line.trim();
                 if (!line.length()) continue;
 
-                stats_.lines_in++;
                 const std::string payload(line.c_str());
                 if (Log::get_cat_level(CAT_TCP) >= LOG_DEBUG) {
                     char prefix[32];
@@ -206,7 +193,6 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
                     Log::log_payload(CAT_TCP, LOG_DEBUG, prefix, payload);
                 }
                 if (!rpc.submit_raw_payload(payload, RpcSource::Tcp)) {
-                    stats_.enqueue_failures++;
                     Log::logf(CAT_TCP, LOG_WARN,
                               "[CLIENT %u] CAN queue rejected payload\n",
                               static_cast<unsigned>(i));
@@ -219,7 +205,6 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
                 if (lines_[i].length() < AC_TCP_LINE_MAX) {
                     lines_[i] += c;
                 } else {
-                    stats_.overlong_lines++;
                     release_line_string(lines_[i]);
                     Log::logf(CAT_TCP, LOG_WARN,
                               "[CLIENT %u] line too long; dropping partial payload\n",

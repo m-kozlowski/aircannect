@@ -684,7 +684,6 @@ bool CanDriver::controller_status(CanControllerStatus &out) const {
 
 void CanDriver::reset_stats() {
     stats_ = {};
-    tx_queue_.reset_dropped();
     last_rx_queue_full_missed_count_ = 0;
 }
 

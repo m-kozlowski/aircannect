@@ -67,11 +67,7 @@ struct PlxPeripheralStatus {
     bool manual_advertising_requested = false;
     bool pairing_active = false;
     uint32_t pairing_left_ms = 0;
-    uint32_t connections = 0;
-    uint32_t disconnects = 0;
     uint32_t last_disconnect_reason = 0;
-    uint32_t notifications = 0;
-    uint32_t invalid_notifications = 0;
     char name[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
     char peer[24] = {};
     char last_error[64] = {};
@@ -97,11 +93,7 @@ struct OximetryRuntimeStatus {
     uint32_t last_source_age_ms = 0;
     uint32_t udp_packets = 0;
     uint32_t udp_bad_packets = 0;
-    uint32_t ble_connections = 0;
-    uint32_t ble_disconnects = 0;
     uint32_t ble_last_disconnect_reason = 0;
-    uint32_t ble_notifications = 0;
-    uint32_t ble_invalid_notifications = 0;
     char ble_name[AC_OXIMETRY_BLE_NAME_MAX + 1] = {};
     char ble_peer[24] = {};
     char last_error[64] = {};

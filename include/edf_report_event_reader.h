@@ -16,12 +16,6 @@ enum class EdfReportEventStatus : uint8_t {
     CallbackRejected,
 };
 
-struct EdfReportEventDecodeStats {
-    uint32_t annotations_seen = 0;
-    uint32_t events_emitted = 0;
-    uint32_t unsupported_labels = 0;
-};
-
 struct EdfReportEventDecodeContext {
     bool csr_open = false;
     int64_t csr_start_ms = 0;
@@ -42,7 +36,6 @@ EdfReportEventStatus edf_report_decode_annotation_record(
     bool verify_crc,
     EdfReportEventCallback callback,
     void *context,
-    EdfReportEventDecodeStats &stats,
     EdfReportEventDecodeContext *decode_context = nullptr);
 
 EdfReportEventStatus edf_report_decode_annotation_record(
@@ -52,7 +45,6 @@ EdfReportEventStatus edf_report_decode_annotation_record(
     bool verify_crc,
     EdfReportEventCallback callback,
     void *context,
-    EdfReportEventDecodeStats &stats,
     EdfReportEventDecodeContext *decode_context = nullptr);
 
 }  // namespace aircannect

@@ -30,13 +30,6 @@ struct EdfReportSeriesDecoder {
     uint32_t signal_index = 0;
 };
 
-struct EdfReportSeriesDecodeStats {
-    uint32_t samples_seen = 0;
-    uint32_t samples_missing = 0;
-    uint32_t samples_out_of_range = 0;
-    uint32_t samples_emitted = 0;
-};
-
 using EdfReportSeriesSampleCallback =
     bool (*)(void *context, const ReportSeriesSample &sample);
 
@@ -56,7 +49,6 @@ EdfReportSeriesStatus edf_report_decode_series_record(
     int64_t range_start_ms,
     int64_t range_end_ms,
     EdfReportSeriesSampleCallback callback,
-    void *context,
-    EdfReportSeriesDecodeStats &stats);
+    void *context);
 
 }  // namespace aircannect

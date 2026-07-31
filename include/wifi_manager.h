@@ -33,7 +33,6 @@ struct WifiManagerStats {
     uint32_t disconnects = 0;
     uint32_t pmf_retries = 0;
     uint32_t roam_scans = 0;
-    uint32_t roam_scan_failures = 0;
     uint32_t roam_switches = 0;
     uint32_t last_roam_candidates = 0;
     uint32_t ipv4_timeouts = 0;

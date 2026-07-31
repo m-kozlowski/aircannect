@@ -92,7 +92,7 @@ void print_edf_recorder_status(Print &out,
         status.str_enqueue_failures || status.file_open_failures ||
         status.attach_failures || status.metadata_failures ||
         storage.patch_errors ||
-        assembly.timestamp_errors || assembly.unknown_signals || last_error;
+        assembly.timestamp_errors || assembly.unmapped_signal[0] || last_error;
 
     if (has_drops || has_faults) {
         out.print("[EDF health] drops=");
@@ -188,27 +188,24 @@ void print_edf_recorder_stats(Print &out,
     out.print("[EDF assembly] records=");
     out.print(static_cast<unsigned long>(series_total(
         &EdfSeriesAssemblyStatus::records_completed)));
-    out.print(" invalid=");
+    out.print(" missing_slots=");
     out.print(static_cast<unsigned long>(series_total(
-        &EdfSeriesAssemblyStatus::samples_invalid)));
-    out.print(" missing=");
-    out.print(static_cast<unsigned long>(series_total(
-        &EdfSeriesAssemblyStatus::samples_missing)));
+        &EdfSeriesAssemblyStatus::missing_slots)));
     out.print(" duplicate=");
     out.print(static_cast<unsigned long>(series_total(
         &EdfSeriesAssemblyStatus::samples_duplicate)));
     out.print(" late=");
     out.print(static_cast<unsigned long>(series_total(
         &EdfSeriesAssemblyStatus::samples_late)));
-    out.print(" partial=");
-    out.print(static_cast<unsigned long>(series_total(
-        &EdfSeriesAssemblyStatus::records_dropped_partial)));
     out.print(" timestamp_errors=");
     out.print(static_cast<unsigned long>(assembly.timestamp_errors));
-    out.print(" unknown_signals=");
-    out.print(static_cast<unsigned long>(assembly.unknown_signals));
     out.print(" resyncs=");
-    out.println(static_cast<unsigned long>(assembly.timestamp_resyncs));
+    out.print(static_cast<unsigned long>(assembly.timestamp_resyncs));
+    if (assembly.unmapped_signal[0]) {
+        out.print(" unmapped_signal=");
+        out.print(assembly.unmapped_signal);
+    }
+    out.println();
 }
 
 }  // namespace
