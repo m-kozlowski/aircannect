@@ -186,7 +186,7 @@ void As11SettingsManager::complete_refresh(
     const RpcRequestCompletion &completion,
     uint32_t now_ms) {
     bool complete_snapshot = false;
-    const bool applied = completion_succeeded(completion) &&
+    const bool applied = completion.cause == RpcCompletionCause::Response &&
         state_.apply_settings_get_response(completion.payload, now_ms,
                                            &complete_snapshot);
     const bool succeeded = applied && complete_snapshot;
@@ -199,10 +199,11 @@ void As11SettingsManager::complete_refresh(
 
     refresh_retry_pending_ = false;
     next_refresh_retry_ms_ = 0;
-    if (!refresh_again_pending_) return;
-
-    refresh_again_pending_ = false;
-    schedule_refresh(refresh_source_, now_ms, 0);
+    if (refresh_again_pending_) {
+        refresh_again_pending_ = false;
+        schedule_refresh(refresh_source_, now_ms, 0);
+        return;
+    }
 }
 
 bool As11SettingsManager::background_source(RpcSource source) {

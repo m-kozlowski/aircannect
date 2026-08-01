@@ -121,9 +121,6 @@ void build_settings_json(LargeTextBuffer &json,
         json += '{';
         json_add_string(json, "key", def.key, false);
         json_add_string(json, "value", value.c_str());
-        if (!as11_setting_writable_via_rpc(def)) {
-            json_add_bool(json, "writable", false);
-        }
         if (pending) {
             json_add_bool(json, "pending", true);
             json_add_string(json, "pending_value",
@@ -183,6 +180,9 @@ void build_catalog_json(LargeTextBuffer &json) {
         json_add_string(json, "enum_key", def.enum_key);
         json_add_string(json, "numeric_key", def.numeric_key);
 
+        json_add_string(json, "group", def.group);
+        json_add_string(json, "category", def.category);
+
         const As11SettingDef *enum_def = as11_find_setting(def.enum_key);
         const As11SettingDef *numeric_def = as11_find_setting(def.numeric_key);
         const std::string enum_rpc_name =
@@ -196,8 +196,6 @@ void build_catalog_json(LargeTextBuffer &json) {
         json_add_string(json, "numeric_rpc_name", numeric_rpc_name.c_str());
         json_add_int(json, "numeric_branch_enum_value",
                      def.numeric_branch_enum_value);
-        json_add_string(json, "group", def.group);
-        json_add_string(json, "category", def.category);
 
         json += ",\"options\":[";
         for (uint8_t option = 0; option < def.option_count; ++option) {

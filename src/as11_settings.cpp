@@ -45,6 +45,7 @@ void settings_free(void *ptr) {
 #define MODES_ASV MODE_BIT(7)
 #define MODES_ASVAUTO MODE_BIT(8)
 #define MODES_IVAPS MODE_BIT(9)
+#define MODES_PAC MODE_BIT(10)
 
 template <typename T, size_t N>
 constexpr uint8_t option_count(const T (&)[N]) {
@@ -420,7 +421,8 @@ bool setting_uses_iso_seconds(const As11SettingDef &def) {
 
 std::string normalize_value_for_def(const As11SettingDef &def,
                                     JsonVariantConst value) {
-    if (def.kind == As11SettingKind::Number && def.scale_div > 1) {
+    if (def.kind == As11SettingKind::Number &&
+        (def.scale_div > 1 || setting_uses_iso_seconds(def))) {
         double numeric = 0;
         bool parsed = false;
         if (value.is<const char *>()) {
@@ -1087,6 +1089,12 @@ const As11SettingDef *as11_find_setting(const char *key) {
 std::string as11_setting_rpc_long_name(const As11SettingDef &def) {
     if (setting_is_therapy_mode(def)) return "ActiveTherapyProfile";
 
+    if (def.source == As11SettingSource::Flat) {
+        std::string out("_");
+        out += def.key ? def.key : "";
+        return out;
+    }
+
     const char *field = setting_field_name(def);
     if (!field || !field[0]) return def.key ? def.key : "";
 
@@ -1125,11 +1133,6 @@ bool as11_setting_readable_via_rpc(const As11SettingDef &def) {
             def.source_object != nullptr && def.source_field != nullptr);
 }
 
-bool as11_setting_writable_via_rpc(const As11SettingDef &def) {
-    char key[80];
-    return setting_rpc_key(def, key, sizeof(key)) != nullptr;
-}
-
 int as11_mode_index_from_value(const std::string &value) {
     int parsed = -1;
     if (parse_int_text(value, parsed) && parsed >= 0 && parsed <= 10) {
@@ -1143,8 +1146,8 @@ int as11_mode_index_from_value(const std::string &value) {
 
 std::string as11_settings_get_params_json() {
     std::string out = "[";
-    out += "\"_MOP\",\"TherapyProfiles\",\"FeatureProfiles\"";
-    out += "]";
+    out += "\"_MOP\",\"TherapyProfiles\",\"FeatureProfiles\",\"_PHI\"";
+    out += ']';
     return out;
 }
 

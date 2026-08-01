@@ -220,13 +220,37 @@
       return parts.join("; ");
     }
 
+    function settingVisibleForDevice(setting, settingsByKey) {
+      if (setting.key === "PHT" || setting.key === "PHI") {
+        const heightUnits = settingsByKey.get("IHU");
+        if (!heightUnits || !settingAvailable(heightUnits)) return false;
+
+        const expected = setting.key === "PHI" ? "1" : "0";
+        return String(settingRawValue(heightUnits)) === expected;
+      }
+
+      if (setting.key === "IMN" || setting.key === "IMX" ||
+          setting.key === "EPI") {
+        const autoEpap = settingsByKey.get("IEU");
+        if (!autoEpap || !settingAvailable(autoEpap)) {
+          return setting.key === "EPI";
+        }
+
+        const enabled = String(settingRawValue(autoEpap)) === "1";
+        return setting.key === "EPI" ? !enabled : enabled;
+      }
+
+      return true;
+    }
+
     function settingGroupRank(group) {
       const order = {
         Therapy: 0,
         Comfort: 1,
         Circuit: 2,
-        Preferences: 3,
-        Device: 4,
+        Configuration: 3,
+        Preferences: 4,
+        Device: 5,
       };
       return Object.prototype.hasOwnProperty.call(order, group) ?
         order[group] : 100;
@@ -303,10 +327,142 @@
           available: true,
           enum_setting: enumSetting,
           numeric_setting: numericSetting,
+          _catalogIndex: Math.min(
+            Number(enumSetting._catalogIndex || 0),
+            Number(numericSetting._catalogIndex || 0)),
         }));
       });
 
       return {hiddenKeys, composites};
+    }
+
+    function settingDisplayNumber(settingsByKey, key) {
+      const setting = settingsByKey.get(key);
+      if (!setting || !settingAvailable(setting)) return null;
+
+      const value = Number(formatSettingValue(
+        setting, settingRawValue(setting)));
+      return Number.isFinite(value) ? value : null;
+    }
+
+    function settingRawNumber(settingsByKey, key) {
+      const setting = settingsByKey.get(key);
+      if (!setting || !settingAvailable(setting)) return null;
+
+      const value = Number(settingRawValue(setting));
+      return Number.isFinite(value) ? value : null;
+    }
+
+    function catalogIndexAfter(settingsByKey, key, offset) {
+      const setting = settingsByKey.get(key);
+      if (!setting) return Number.MAX_SAFE_INTEGER;
+      return Number(setting._catalogIndex || 0) + offset;
+    }
+
+    function derivedSetting(key, label, value, category, catalogIndex, unit,
+                            decimals) {
+      return {
+        key,
+        label,
+        value: String(value),
+        group: "Therapy",
+        category,
+        kind: decimals === null ? "text" : "number",
+        scale_div: 1,
+        decimals: decimals === null ? 0 : decimals,
+        unit,
+        writable: false,
+        available: true,
+        _catalogIndex: catalogIndex,
+      };
+    }
+
+    function ieRatioPercent(rate, inspiratoryTime) {
+      if (!(rate > 0) || !(inspiratoryTime > 0)) return null;
+
+      const cycle = 60 / rate;
+      const expiratoryTime = cycle - inspiratoryTime;
+      if (!(expiratoryTime > 0)) return null;
+
+      return Math.round(100 * inspiratoryTime / expiratoryTime);
+    }
+
+    function formatIeRatio(percent) {
+      if (!(percent > 0)) return "";
+
+      const ratio = percent < 100 ? 100 / percent : percent / 100;
+      const value = ratio.toFixed(1).replace(/\.0$/, "");
+      return percent < 100 ? "1:" + value : value + ":1";
+    }
+
+    function buildDerivedSettings(settings, mode) {
+      const byKey = new Map();
+      settings.forEach((setting) => byKey.set(setting.key, setting));
+
+      if (mode === 9) {
+        const heightUnit = settingRawNumber(byKey, "IHU");
+        let heightCm = null;
+        if (heightUnit === 0) {
+          heightCm = settingDisplayNumber(byKey, "PHT");
+        } else if (heightUnit === 1) {
+          const heightInches = settingDisplayNumber(byKey, "PHI");
+          if (heightInches !== null) heightCm = heightInches * 2.54;
+        }
+
+        const rate = settingDisplayNumber(byKey, "IBR");
+        const targetVa = settingDisplayNumber(byKey, "ITV");
+        const tiMin = settingDisplayNumber(byKey, "IVN");
+        const tiMax = settingDisplayNumber(byKey, "IVX");
+        const derived = [];
+
+        if (heightCm !== null && heightCm > 0 &&
+            rate !== null && rate > 0 && targetVa !== null) {
+          const deadspace = Math.pow(heightCm / 175, 2.363) * 0.12;
+          const minuteVentilation = targetVa + rate * deadspace;
+          const tidalVolume = minuteVentilation / rate * 1000;
+          const referenceWeight = heightCm < 130 ?
+            14.4 + (heightCm - 100) * 0.403 :
+            48 + (heightCm - 152.4) * 0.91;
+
+          derived.push(derivedSetting(
+            "derived_ivaps_mv", "MV", minuteVentilation,
+            "ivaps_therapy", catalogIndexAfter(byKey, "ITV", 0.1),
+            "L/min", 1));
+          derived.push(derivedSetting(
+            "derived_ivaps_vt", "Vt", tidalVolume,
+            "ivaps_therapy", catalogIndexAfter(byKey, "ITV", 0.2),
+            "mL", 0));
+          if (referenceWeight > 0) {
+            derived.push(derivedSetting(
+              "derived_ivaps_vt_per_kg", "Vt/kg",
+              tidalVolume / referenceWeight,
+              "ivaps_therapy", catalogIndexAfter(byKey, "ITV", 0.3),
+              "mL/kg", 1));
+          }
+        }
+
+        const ieMin = ieRatioPercent(rate, tiMin);
+        const ieMax = ieRatioPercent(rate, tiMax);
+        if (ieMin !== null && ieMax !== null) {
+          derived.push(derivedSetting(
+            "derived_ivaps_ie", "I:E",
+            formatIeRatio(ieMin) + "–" + formatIeRatio(ieMax),
+            "ivaps_therapy", catalogIndexAfter(byKey, "IVX", 0.1),
+            "", null));
+        }
+        return derived;
+      }
+
+      if (mode === 10) {
+        const rate = settingDisplayNumber(byKey, "PA6");
+        const inspiratoryTime = settingDisplayNumber(byKey, "PA5");
+        const ratio = ieRatioPercent(rate, inspiratoryTime);
+        return ratio === null ? [] : [derivedSetting(
+          "derived_pac_ie", "I:E", formatIeRatio(ratio),
+          "pac_therapy", catalogIndexAfter(byKey, "PA6", 0.1), "", null)];
+      }
+
+      return [];
     }
 
     async function loadSettings(refresh, poll) {
@@ -380,8 +536,17 @@
 
       const baseVisible = (data.settings || []).filter((setting) =>
         settingAvailable(setting) || setting.inferred || setting.pending);
-      const compositeState = buildCompositeSettings(baseVisible);
-      const visible = baseVisible.filter((setting) =>
+      const displayMode = settingsModeDirty && settingsProfileMode !== null ?
+        settingsProfileMode : activeMode;
+      const displaySettings = baseVisible.concat(
+        buildDerivedSettings(baseVisible, displayMode));
+      const settingsByKey = new Map();
+      displaySettings.forEach((setting) =>
+        settingsByKey.set(setting.key, setting));
+      const conditionVisible = displaySettings.filter((setting) =>
+        settingVisibleForDevice(setting, settingsByKey));
+      const compositeState = buildCompositeSettings(conditionVisible);
+      const visible = conditionVisible.filter((setting) =>
           !compositeState.hiddenKeys.has(setting.key))
         .concat(compositeState.composites)
         .sort(compareSettings);
@@ -414,7 +579,10 @@
         const shown = formatSettingValue(setting, raw);
         let control;
 
-        if (setting.kind === "enum" || setting.kind === "composite") {
+        if (!settingWritable(setting)) {
+          const unit = setting.unit ? " " + setting.unit : "";
+          control = valueSpan((shown || "--") + (shown ? unit : ""));
+        } else if (setting.kind === "enum" || setting.kind === "composite") {
           control = document.createElement("select");
           let seen = false;
           if (raw === "") {
@@ -489,23 +657,23 @@
           }
         }
 
-        control.dataset.key = setting.key;
-        control.dataset.kind = setting.kind;
-        if (setting.kind === "composite") {
-          control.dataset.enumKey = setting.enum_key;
-          control.dataset.numericKey = setting.numeric_key;
-          control.dataset.numericScaleDiv =
-            setting.numeric_setting && setting.numeric_setting.scale_div ?
-              setting.numeric_setting.scale_div : 1;
+        if (settingWritable(setting)) {
+          control.dataset.key = setting.key;
+          control.dataset.kind = setting.kind;
+          if (setting.kind === "composite") {
+            control.dataset.enumKey = setting.enum_key;
+            control.dataset.numericKey = setting.numeric_key;
+            control.dataset.numericScaleDiv =
+              setting.numeric_setting && setting.numeric_setting.scale_div ?
+                setting.numeric_setting.scale_div : 1;
+          }
+          control.dataset.orig =
+            setting.kind === "enum" || setting.kind === "bool" ?
+              (raw || "") : (control.value || "");
+          if (setting.kind === "composite") control.dataset.orig = raw || "";
+          if (!settingAvailable(setting)) control.disabled = true;
+          if (setting.pending) control.classList.add("pending");
         }
-        control.dataset.orig =
-          setting.kind === "enum" || setting.kind === "bool" ?
-            (raw || "") : (control.value || "");
-        if (setting.kind === "composite") control.dataset.orig = raw || "";
-        if (!settingAvailable(setting) || !settingWritable(setting)) {
-          control.disabled = true;
-        }
-        if (setting.pending) control.classList.add("pending");
 
         const entry = row(
           setting.label || setting.key,
