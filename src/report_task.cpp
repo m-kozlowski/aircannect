@@ -33,7 +33,7 @@ constexpr uint32_t LEGACY_CACHE_DELETE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MAX_MS = 15 * 60 * 1000;
 constexpr char LEGACY_CACHE_PARENT[] = "/aircannect/report";
-constexpr const char *LEGACY_CACHE_NAMES[] = {"v3", "v4", "v5"};
+constexpr const char *LEGACY_CACHE_NAMES[] = {"v3", "v4", "v5", "v6"};
 
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
