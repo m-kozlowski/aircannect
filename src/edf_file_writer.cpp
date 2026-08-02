@@ -67,8 +67,8 @@ const EdfSignalSpec SA2_SIGNALS[] = {
 };
 
 const EdfSignalSpec TCV_SIGNALS[] = {
-    {"TrigCycEvt.40ms", "", "0.00", "5.00", "0", "5",
-     0, 5, AC_EDF_TCV_SAMPLES_PER_RECORD, 1.0f, 0.0f},
+    {"TrigCycEvt.40ms", "", "0", "16", "0", "16",
+     0, 16, AC_EDF_TCV_SAMPLES_PER_RECORD, 1.0f, 0.0f},
     {"Crc16", "", "-32768.0", "32767.00", "-32768", "32767",
      -32768, 32767, 1, 1.0f, 0.0f},
 };
