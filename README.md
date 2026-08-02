@@ -31,7 +31,7 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
 - **Multi-profile Wi-Fi**
   - up to four STA profiles, BSSID-targeted roaming, SoftAP auto-fallback or forced always-on.
 - **ResMed OTA**
-  - flash AirSense firmware from web UI or CLI. \
+  - flash compatible AirSense 11 / AirCurve 11 firmware from web UI or CLI. \
     (Autodetects firmware format (raw or .abc container) and target memory block)
 
 
@@ -45,10 +45,10 @@ For a longer walkthrough see the [quickstart](docs/quickstart.md).
 
 ## Build profiles
 
-- `xiao-esp32s3-plus-sdmmc4` *(default)* - XIAO ESP32-S3 Plus, 4-bit microSD on the exposed non-strapping GPIOs.
-- `xiao-esp32s3-plus-sdmmc1` - same board, 1-bit SDMMC.
-- `xiao-esp32s3-plus-spisd` - same board, SPI-mode SD fallback.
-- `xiao-esp32s3-plus` - no SD; PSRAM still available for stream pool and response buffers.
+Supported release profiles require a XIAO ESP32-S3 Plus with PSRAM and microSD:
+
+- `xiao-esp32s3-plus-sdmmc4` *(default)* - 4-bit microSD on the exposed non-strapping GPIOs.
+- `xiao-esp32s3-plus-spisd` - SPI-mode SD fallback for 4-wire SD modules.
 
 <!--
 ## Related tools

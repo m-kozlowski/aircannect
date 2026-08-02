@@ -1,15 +1,16 @@
 # AirCANnect Hardware
 
-Build notes for the supported XIAO ESP32-S3 Plus reference hardware. Adapt
-to other ESP32-S3 / ESP32 boards with `build_flags` overrides if needed.
+Build notes for the supported XIAO ESP32-S3 Plus targets. AirCANnect assumes
+an ESP32-S3 with PSRAM and microSD storage.
 
 ## What you need
 
 - **Mating connector** for the AirSense 11 / AirCurve 11 power input ([see below](#airsense-11-power-and-can-connector)).
-- **XIAO ESP32-S3 Plus** (or any ESP32-S3 board with PSRAM and a few free GPIOs). PSRAM is useful for live therapy-data charts and large web responses.
+- **XIAO ESP32-S3 Plus** with PSRAM.
 - **3.3 V CAN transceiver** - SN65HVD230D-class.
 - **24 V to 3.3 V buck regulator** - the AirSense 11 power line is 24 V; the ESP32 and transceiver both run on 3.3 V.
-- **microSD card** *(optional)* - enables on-device storage, first-boot provisioning, `.abc` firmware staging, EDF capture, reports, file logging.
+- **microSD card** - provides first-boot provisioning, EDF capture, reports,
+  file logging, and the ResMed firmware repository for raw and `.abc` images.
 
 ## Bare minimum hardware diagram
 
@@ -40,8 +41,8 @@ Signal summary:
 | Transceiver `CANH` | AirSense `CAN-H` |
 | Transceiver `CANL` | AirSense `CAN-L` |
 
-Optional microSD wiring is shown in the diagram and repeated in the pin
-assignment section below. Keep SDMMC wires short, ideally under 5 cm.
+The microSD wiring is shown in the diagram and repeated in the pin assignment
+section below. Keep SDMMC wires short, ideally under 5 cm.
 
 ## AirSense 11 power-and-CAN connector
 
@@ -111,11 +112,9 @@ microSD (4-bit SDMMC)
   D3      GPIO 40
 ```
 
-Other build profiles:
+Supported storage profiles:
 
-- `xiao-esp32s3-plus-sdmmc1` - 1-bit SDMMC; only `CLK` / `CMD` / `D0` wired.
 - `xiao-esp32s3-plus-spisd` - SPI-mode SD fallback for 4-wire SD modules: `CS` GPIO 10, `SCK` GPIO 13, `MISO` GPIO 12, `MOSI` GPIO 11.
-- `xiao-esp32s3-plus` - no SD wired; PSRAM still available for stream pool and web buffers.
 
 ## Wiring tips
 

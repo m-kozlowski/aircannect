@@ -9,7 +9,7 @@ minutes. Assumes the [hardware](hardware.md) is wired up.
 pio run -e xiao-esp32s3-plus-sdmmc4 -t upload
 ```
 
-Other build profiles (1-bit SDMMC, SPI SD, no SD) are listed in
+The SPI-mode SD alternative is listed in
 [hardware.md](hardware.md#xiao-esp32-s3-plus-pin-assignments).
 
 ## 2. First boot
@@ -31,7 +31,7 @@ near the start. If you see repeated `[CAN] alert:` lines with `bus_error` or
 Two paths.
 
 **SoftAP setup**  With no stored profile the device
-brings up SoftAP `AirCANnect_XXXXXX` (password `aircannect`). Join it from
+brings up SoftAP `aircannect_XXXXXX` (password `aircannect`). Join it from
 a phone or laptop, open `http://192.168.4.1/`, log in as `admin` /
 `aircannect`, and add your home Wi-Fi from the Wi-Fi tab.
 
