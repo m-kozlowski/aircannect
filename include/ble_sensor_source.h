@@ -78,7 +78,11 @@ private:
     void store_scan_result(const char *addr, uint8_t addr_type,
                            const char *name, int rssi);
     bool pick_autoconnect_target(OximetrySensorDevice &target, uint32_t now_ms);
-    bool connect_target(const OximetrySensorDevice &target, bool manual);
+    bool ensure_client(SensorBleClientCallbacks &callbacks);
+    void release_client_services();
+    void release_client();
+    bool connect_target(const OximetrySensorDevice &target, bool manual,
+                        SensorBleClientCallbacks &callbacks);
     bool subscribe_client(void *client, const char *name);
 
     // NimBLE callback targets
@@ -109,8 +113,9 @@ private:
     uint32_t scan_generation_ = 0;
     bool known_loaded_ = false;
 
-#if AC_STACK_PROFILE_ENABLED
+#if AC_OXIMETRY_BLE_ENABLED
     TaskHandle_t task_ = nullptr;
+    bool task_stack_external_ = false;
 #endif
     bool task_started_ = false;
     bool scan_requested_ = false;
@@ -118,6 +123,7 @@ private:
     bool disconnect_requested_ = false;
     bool disconnect_hold_until_absent_ = false;
     bool protocol_reset_pending_ = false;
+    bool client_release_pending_ = false;
     char manual_target_[18] = {};
     OximetrySensorDevice manual_target_device_;
     char connected_addr_[18] = {};

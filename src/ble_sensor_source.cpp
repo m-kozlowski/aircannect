@@ -1,10 +1,13 @@
 #include "ble_sensor_source.h"
 
 #include <Preferences.h>
+#include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
 #include <string.h>
 #include <time.h>
 
 #include "debug_log.h"
+#include "memory_manager.h"
 #include "oximetry_codec.h"
 #include "string_util.h"
 
@@ -577,32 +580,34 @@ void BleSensorSource::ensure_task() {
     task_started_ = true;
     status_.task_started = true;
     portEXIT_CRITICAL(&mux_);
-#if AC_STACK_PROFILE_ENABLED
+
     TaskHandle_t task = nullptr;
-#endif
-    const BaseType_t created =
-        xTaskCreatePinnedToCore(task_entry,
-                                "oxi_sensor",
-                                AC_OXIMETRY_SENSOR_TASK_STACK,
-                                this,
-                                AC_OXIMETRY_SENSOR_TASK_PRIO,
-#if AC_STACK_PROFILE_ENABLED
-                                &task,
-#else
-                                nullptr,
-#endif
-                                0);
+    bool stack_external = false;
+    BaseType_t created = pdFAIL;
+    if (Memory::psram_available()) {
+        created = xTaskCreatePinnedToCoreWithCaps(
+            task_entry, "oxi_sensor", AC_OXIMETRY_SENSOR_TASK_STACK,
+            this, AC_OXIMETRY_SENSOR_TASK_PRIO, &task, 0,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        stack_external = created == pdPASS && task != nullptr;
+    }
+
+    if (!stack_external) {
+        task = nullptr;
+        created = xTaskCreatePinnedToCore(
+            task_entry, "oxi_sensor", AC_OXIMETRY_SENSOR_TASK_STACK,
+            this, AC_OXIMETRY_SENSOR_TASK_PRIO, &task, 0);
+    }
+
     portENTER_CRITICAL(&mux_);
     if (created == pdPASS) {
-#if AC_STACK_PROFILE_ENABLED
         task_ = task;
-#endif
+        task_stack_external_ = stack_external;
     } else {
         task_started_ = false;
         status_.task_started = false;
-#if AC_STACK_PROFILE_ENABLED
         task_ = nullptr;
-#endif
+        task_stack_external_ = false;
     }
     portEXIT_CRITICAL(&mux_);
     if (created != pdPASS) {
@@ -614,7 +619,13 @@ void BleSensorSource::ensure_task() {
 void BleSensorSource::task_entry(void *param) {
     auto *self = static_cast<BleSensorSource *>(param);
     if (self) self->task_loop();
-    vTaskDelete(nullptr);
+
+    const bool stack_external = self && self->task_stack_external_;
+    if (stack_external) {
+        vTaskDeleteWithCaps(nullptr);
+    } else {
+        vTaskDelete(nullptr);
+    }
 }
 
 void BleSensorSource::set_state(OximetrySensorState state) {
@@ -797,6 +808,42 @@ bool BleSensorSource::pick_autoconnect_target(OximetrySensorDevice &target,
     return found;
 }
 
+bool BleSensorSource::ensure_client(SensorBleClientCallbacks &callbacks) {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (client_) return true;
+
+    client_ = NimBLEDevice::createClient();
+    if (!client_) return false;
+
+    client_->setClientCallbacks(&callbacks, false);
+    client_->setConnectionParams(
+        AC_OXIMETRY_SENSOR_CONN_INTERVAL_MIN,
+        AC_OXIMETRY_SENSOR_CONN_INTERVAL_MAX,
+        AC_OXIMETRY_SENSOR_CONN_LATENCY,
+        AC_OXIMETRY_SENSOR_CONN_TIMEOUT);
+    return true;
+#else
+    (void)callbacks;
+    return false;
+#endif
+}
+
+void BleSensorSource::release_client_services() {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (!client_ || client_->isConnected()) return;
+
+    client_->deleteServices();
+#endif
+}
+
+void BleSensorSource::release_client() {
+#if AC_OXIMETRY_BLE_ENABLED
+    if (!client_) return;
+
+    if (NimBLEDevice::deleteClient(client_)) client_ = nullptr;
+#endif
+}
+
 void BleSensorSource::task_loop() {
 #if AC_OXIMETRY_BLE_ENABLED
     set_state(OximetrySensorState::Idle);
@@ -807,6 +854,7 @@ void BleSensorSource::task_loop() {
     while (true) {
         bool enabled = false;
         bool reset_protocols = false;
+        bool release_disconnected_client = false;
         char runtime_name[sizeof(runtime_name_)] = {};
 #if AC_OXIMETRY_BLE_ENABLED
         portENTER_CRITICAL(&mux_);
@@ -814,16 +862,24 @@ void BleSensorSource::task_loop() {
         enabled = enabled_;
         reset_protocols = protocol_reset_pending_;
         protocol_reset_pending_ = false;
+        release_disconnected_client = client_release_pending_;
+        client_release_pending_ = false;
         strncpy(runtime_name, runtime_name_, sizeof(runtime_name) - 1);
         runtime_name[sizeof(runtime_name) - 1] = 0;
 #if AC_OXIMETRY_BLE_ENABLED
         portEXIT_CRITICAL(&mux_);
 #endif
         if (reset_protocols) protocols_.reset();
+        if (release_disconnected_client &&
+            client_ && !client_->isConnected()) {
+            release_client_services();
+        }
 
         if (!enabled) {
             if (client_ && client_->isConnected()) {
                 client_->disconnect();
+            } else {
+                release_client();
             }
             set_state(OximetrySensorState::Off);
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -832,22 +888,6 @@ void BleSensorSource::task_loop() {
 
         if (!runtime_.ensure_started(runtime_name)) {
             set_error("BLE init failed");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-        if (!client_) {
-            client_ = NimBLEDevice::createClient();
-            if (client_) {
-                client_->setClientCallbacks(&client_callbacks, false);
-                client_->setConnectionParams(
-                    AC_OXIMETRY_SENSOR_CONN_INTERVAL_MIN,
-                    AC_OXIMETRY_SENSOR_CONN_INTERVAL_MAX,
-                    AC_OXIMETRY_SENSOR_CONN_LATENCY,
-                    AC_OXIMETRY_SENSOR_CONN_TIMEOUT);
-            }
-        }
-        if (!client_) {
-            set_error("BLE sensor client failed");
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -888,7 +928,7 @@ void BleSensorSource::task_loop() {
 #if AC_OXIMETRY_BLE_ENABLED
             portEXIT_CRITICAL(&mux_);
 #endif
-            if (client_->isConnected()) client_->disconnect();
+            if (client_ && client_->isConnected()) client_->disconnect();
             protocols_.reset();
             hold_autoconnect(holdoff_addr, millis(),
                              disconnect_hold_until_absent);
@@ -909,11 +949,11 @@ void BleSensorSource::task_loop() {
         const bool auto_scan =
             auto_allowed &&
             has_autoconnect() &&
-            !client_->isConnected() &&
+            (!client_ || !client_->isConnected()) &&
             static_cast<int32_t>(now_ms - next_auto_scan_ms) >= 0;
 
         if (!manual_scan && !manual_connect && !auto_scan) {
-            if (!client_->isConnected()) {
+            if (!client_ || !client_->isConnected()) {
                 set_state(OximetrySensorState::Idle);
             }
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -926,11 +966,13 @@ void BleSensorSource::task_loop() {
                       manual_target_device.addr,
                       static_cast<unsigned>(manual_target_device.addr_type),
                       manual_target_device.name);
-            (void)connect_target(manual_target_device, true);
+            (void)connect_target(manual_target_device, true,
+                                 client_callbacks);
             continue;
         }
 
-        if (client_->isConnected() && (manual_scan || manual_connect)) {
+        if (client_ && client_->isConnected() &&
+            (manual_scan || manual_connect)) {
             client_->disconnect();
             vTaskDelay(pdMS_TO_TICKS(200));
         }
@@ -1020,7 +1062,7 @@ void BleSensorSource::task_loop() {
         }
 
         if (have_target) {
-            (void)connect_target(target, manual_connect);
+            (void)connect_target(target, manual_connect, client_callbacks);
         } else {
             if (manual_connect) {
                 Log::logf(CAT_OXI, LOG_WARN,
@@ -1043,9 +1085,15 @@ void BleSensorSource::task_loop() {
 }
 
 bool BleSensorSource::connect_target(const OximetrySensorDevice &target,
-                                     bool manual) {
+                                     bool manual,
+                                     SensorBleClientCallbacks &callbacks) {
 #if AC_OXIMETRY_BLE_ENABLED
-    if (!client_ || !target.addr[0]) return false;
+    if (!target.addr[0]) return false;
+    if (!ensure_client(callbacks)) {
+        set_error("BLE sensor client failed");
+        return false;
+    }
+
     set_state(OximetrySensorState::Connecting);
     NimBLEDevice::getScan()->stop();
     if (client_->isConnected()) client_->disconnect();
@@ -1071,6 +1119,7 @@ bool BleSensorSource::connect_target(const OximetrySensorDevice &target,
                   "Sensor connect failed addr=%s err=%d\n",
                   target.addr,
                   client_->getLastError());
+        release_client_services();
         set_state(OximetrySensorState::Idle);
         return false;
     }
@@ -1154,6 +1203,7 @@ bool BleSensorSource::connect_target(const OximetrySensorDevice &target,
 #else
     (void)target;
     (void)manual;
+    (void)callbacks;
     return false;
 #endif
 }
@@ -1262,6 +1312,7 @@ void BleSensorSource::callback_disconnected(int reason) {
     portENTER_CRITICAL(&mux_);
 #endif
     protocol_reset_pending_ = true;
+    client_release_pending_ = true;
     disconnect_pending_ = true;
     pending_disconnect_reason_ = reason;
     strncpy(pending_disconnect_addr_, connected_addr_,
