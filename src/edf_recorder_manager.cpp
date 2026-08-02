@@ -443,7 +443,6 @@ bool EdfRecorderManager::ensure_annotation_files_open(uint32_t now_ms) {
     }
 
     annotation_open_pending_ = false;
-    status_.last_error[0] = 0;
     return true;
 }
 
@@ -807,38 +806,54 @@ void EdfRecorderManager::end_session(const SessionStatus &session,
         status_.record_enqueue_failures +
         status_.annotation_enqueue_failures +
         status_.str_enqueue_failures;
-    const bool had_failures =
-        status_.frame_drops != 0 ||
-        status_.numeric_record_drops != 0 ||
-        status_.numeric_open_buffer_drops != 0 ||
-        enqueue_failures != 0 ||
-        status_.file_open_failures != 0 ||
-        status_.event_coverage_session_gap_count != 0 ||
-        status_.metadata_failures != 0;
     const uint32_t stream_queue_drops =
         status_.frame_drops >= status_.numeric_open_buffer_drops
             ? status_.frame_drops - status_.numeric_open_buffer_drops
             : status_.frame_drops;
 
-    Log::logf(CAT_EDF, had_failures ? LOG_WARN : LOG_DEBUG,
-              "recorder session end id=%lu reason=%s frames=%lu "
-              "drops=%lu queue_drops=%lu open_buffer_drops=%lu "
-              "numeric_drops=%lu enqueue_failures=%lu "
-              "open_failures=%lu event_gaps=%lu metadata_failures=%lu "
-              "events=%lu\n",
+    Log::logf(CAT_EDF, LOG_DEBUG,
+              "recorder session end id=%lu reason=%s frames=%lu events=%lu\n",
               static_cast<unsigned long>(status_.session_id),
               reason ? reason : "--",
               static_cast<unsigned long>(assembler_.status().frames),
-              static_cast<unsigned long>(status_.frame_drops),
-              static_cast<unsigned long>(stream_queue_drops),
-              static_cast<unsigned long>(status_.numeric_open_buffer_drops),
-              static_cast<unsigned long>(status_.numeric_record_drops),
-              static_cast<unsigned long>(enqueue_failures),
-              static_cast<unsigned long>(status_.file_open_failures),
-              static_cast<unsigned long>(
-                  status_.event_coverage_session_gap_count),
-              static_cast<unsigned long>(status_.metadata_failures),
               static_cast<unsigned long>(status_.event_records));
+
+    if (status_.frame_drops || status_.numeric_open_buffer_drops ||
+        status_.numeric_record_drops || enqueue_failures) {
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "recorder data loss id=%lu queue_drops=%lu "
+                  "open_buffer_drops=%lu numeric_drops=%lu "
+                  "enqueue_failures=%lu\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  static_cast<unsigned long>(stream_queue_drops),
+                  static_cast<unsigned long>(
+                      status_.numeric_open_buffer_drops),
+                  static_cast<unsigned long>(status_.numeric_record_drops),
+                  static_cast<unsigned long>(enqueue_failures));
+    }
+    if (status_.file_open_failures) {
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "recorder open attempts failed id=%lu count=%lu "
+                  "last_error=%.64s\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  static_cast<unsigned long>(status_.file_open_failures),
+                  status_.last_error[0] ? status_.last_error : "--");
+    }
+    if (status_.event_coverage_session_gap_count) {
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "recorder event coverage gaps id=%lu count=%lu\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  static_cast<unsigned long>(
+                      status_.event_coverage_session_gap_count));
+    }
+    if (status_.metadata_failures) {
+        Log::logf(CAT_EDF, LOG_WARN,
+                  "recorder metadata failures id=%lu count=%lu "
+                  "last_error=%.64s\n",
+                  static_cast<unsigned long>(status_.session_id),
+                  static_cast<unsigned long>(status_.metadata_failures),
+                  status_.last_error[0] ? status_.last_error : "--");
+    }
 }
 
 bool EdfRecorderManager::open_session_annotation_files(
@@ -1320,14 +1335,16 @@ void EdfRecorderManager::sync_annotation_open_status() {
         return;
     }
 
-    const bool failed =
-        !eve_known || !csl_known ||
-        (eve.complete && !eve.success) ||
-        (csl.complete && !csl.success);
+    const bool completed_failure =
+        (eve_known && eve.complete && !eve.success) ||
+        (csl_known && csl.complete && !csl.success);
     const StorageWorkloadSnapshot storage =
         StorageService::workload_snapshot();
     if (!storage.valid) return;
-    if (failed || (storage.edf_queued == 0 && !storage.busy)) {
+    if (!completed_failure && (storage.edf_queued > 0 || storage.busy)) return;
+
+    if (completed_failure || !eve_known || !csl_known ||
+        !eve.complete || !csl.complete || !eve.open || !csl.open) {
         status_.file_open_failures++;
         if (eve_known && eve.complete && !eve.success) {
             set_error(open_result_error(eve, "annotation_open_failed"));
@@ -1376,18 +1393,24 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         !cold_->sa2_schema.open || (sa2.complete && sa2.success && sa2.open);
     const bool tcv_ready =
         !cold_->tcv_schema.open || (tcv.complete && tcv.success && tcv.open);
-    const bool failed =
-        !brp_known || !pld_known || !sa2_known || !tcv_known ||
-        (cold_->brp_schema.open && brp.complete && !brp.success) ||
-        (cold_->pld_schema.open && pld.complete && !pld.success) ||
-        (cold_->sa2_schema.open && sa2.complete && !sa2.success) ||
-        (cold_->tcv_schema.open && tcv.complete && !tcv.success);
+    const bool completed_failure =
+        (cold_->brp_schema.open && brp_known &&
+         brp.complete && !brp.success) ||
+        (cold_->pld_schema.open && pld_known &&
+         pld.complete && !pld.success) ||
+        (cold_->sa2_schema.open && sa2_known &&
+         sa2.complete && !sa2.success) ||
+        (cold_->tcv_schema.open && tcv_known &&
+         tcv.complete && !tcv.success);
 
     if (!brp_ready || !pld_ready || !sa2_ready || !tcv_ready) {
         const StorageWorkloadSnapshot storage =
             StorageService::workload_snapshot();
         if (!storage.valid) return false;
-        if (!failed && (storage.edf_queued > 0 || storage.busy)) return false;
+        if (!completed_failure &&
+            (storage.edf_queued > 0 || storage.busy)) {
+            return false;
+        }
 
         status_.file_open_failures++;
         if (cold_->brp_schema.open && brp.complete && !brp.success) {
@@ -2028,7 +2051,6 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
         status_.stream_handle = result.handle;
         status_.stream_attached = true;
         last_queue_drops_ = 0;
-        status_.last_error[0] = 0;
         return;
     }
 
