@@ -155,12 +155,8 @@ def release_version_key(tag: str) -> tuple[object, ...]:
 
 
 def previous_release_tag(repository: pathlib.Path, tag: str) -> str | None:
-    parent_revision = f"refs/tags/{tag}^{{commit}}^"
-    if not git_revision_exists(repository, parent_revision):
-        return None
-
     reachable = git_output(
-        repository, "tag", "--merged", parent_revision
+        repository, "tag", "--merged", f"refs/tags/{tag}^{{commit}}"
     ).splitlines()
     current_version = release_version_key(tag)
     candidates = [
