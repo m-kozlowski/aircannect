@@ -1,13 +1,10 @@
 #include "ble_sensor_source.h"
 
 #include <Preferences.h>
-#include <esp_heap_caps.h>
-#include <freertos/idf_additions.h>
 #include <string.h>
 #include <time.h>
 
 #include "debug_log.h"
-#include "memory_manager.h"
 #include "oximetry_codec.h"
 #include "string_util.h"
 
@@ -582,32 +579,17 @@ void BleSensorSource::ensure_task() {
     portEXIT_CRITICAL(&mux_);
 
     TaskHandle_t task = nullptr;
-    bool stack_external = false;
-    BaseType_t created = pdFAIL;
-    if (Memory::psram_available()) {
-        created = xTaskCreatePinnedToCoreWithCaps(
-            task_entry, "oxi_sensor", AC_OXIMETRY_SENSOR_TASK_STACK,
-            this, AC_OXIMETRY_SENSOR_TASK_PRIO, &task, 0,
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        stack_external = created == pdPASS && task != nullptr;
-    }
-
-    if (!stack_external) {
-        task = nullptr;
-        created = xTaskCreatePinnedToCore(
-            task_entry, "oxi_sensor", AC_OXIMETRY_SENSOR_TASK_STACK,
-            this, AC_OXIMETRY_SENSOR_TASK_PRIO, &task, 0);
-    }
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        task_entry, "oxi_sensor", AC_OXIMETRY_SENSOR_TASK_STACK,
+        this, AC_OXIMETRY_SENSOR_TASK_PRIO, &task, 0);
 
     portENTER_CRITICAL(&mux_);
     if (created == pdPASS) {
         task_ = task;
-        task_stack_external_ = stack_external;
     } else {
         task_started_ = false;
         status_.task_started = false;
         task_ = nullptr;
-        task_stack_external_ = false;
     }
     portEXIT_CRITICAL(&mux_);
     if (created != pdPASS) {
@@ -619,13 +601,7 @@ void BleSensorSource::ensure_task() {
 void BleSensorSource::task_entry(void *param) {
     auto *self = static_cast<BleSensorSource *>(param);
     if (self) self->task_loop();
-
-    const bool stack_external = self && self->task_stack_external_;
-    if (stack_external) {
-        vTaskDeleteWithCaps(nullptr);
-    } else {
-        vTaskDelete(nullptr);
-    }
+    vTaskDelete(nullptr);
 }
 
 void BleSensorSource::set_state(OximetrySensorState state) {

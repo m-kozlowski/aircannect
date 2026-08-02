@@ -115,7 +115,6 @@ private:
 
 #if AC_OXIMETRY_BLE_ENABLED
     TaskHandle_t task_ = nullptr;
-    bool task_stack_external_ = false;
 #endif
     bool task_started_ = false;
     bool scan_requested_ = false;
