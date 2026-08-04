@@ -56,7 +56,7 @@ private:
     bool advertising_requested(const OximetryHubSnapshot &source) const;
     void update_advertising(const OximetryHubSnapshot &source);
     void update_pairing(const OximetryHubSnapshot &source, uint32_t now_ms);
-    void start_advertising();
+    void start_advertising(bool policy_started);
     void stop_advertising();
     void disconnect_central();
     void stop_roles();
@@ -83,6 +83,7 @@ private:
     PlxPeripheralStatus status_;
     bool initialized_ = false;
     bool advertising_data_dirty_ = true;
+    bool advertising_wanted_ = false;
     std::atomic<bool> pairing_admission_open_{false};
     uint32_t pairing_until_ms_ = 0;
     uint32_t last_notify_ms_ = 0;

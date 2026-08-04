@@ -457,17 +457,23 @@ bool PlxPeripheral::advertising_requested(
 void PlxPeripheral::update_advertising(
     const OximetryHubSnapshot &source) {
     if (!status_.enabled || !status_.ble_available) {
+        advertising_wanted_ = false;
         stop_advertising();
         return;
     }
     NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
     status_.advertising = advertising && advertising->isAdvertising();
     if (status_.connected || forget_bond_pending_) {
+        advertising_wanted_ = false;
         if (forget_bond_pending_) stop_advertising();
         return;
     }
 
-    if (advertising_requested(source)) start_advertising();
+    const bool wanted = advertising_requested(source);
+    const bool policy_started = wanted && !advertising_wanted_;
+    advertising_wanted_ = wanted;
+
+    if (wanted) start_advertising(policy_started);
     else stop_advertising();
 }
 
@@ -488,7 +494,7 @@ void PlxPeripheral::update_pairing(const OximetryHubSnapshot &source,
     }
 }
 
-void PlxPeripheral::start_advertising() {
+void PlxPeripheral::start_advertising(bool policy_started) {
 #if AC_OXIMETRY_BLE_ENABLED
     if (!ensure_ble()) return;
     if (advertising_data_dirty_) rebuild_advertising_data();
@@ -504,7 +510,10 @@ void PlxPeripheral::start_advertising() {
     }
 
     status_.advertising = true;
-    Log::logf(CAT_OXI, LOG_INFO, "BLE advertising started\n");
+    Log::logf(CAT_OXI,
+              policy_started ? LOG_INFO : LOG_DEBUG,
+              "BLE advertising %s\n",
+              policy_started ? "started" : "resumed");
 #endif
 }
 
@@ -530,6 +539,7 @@ void PlxPeripheral::disconnect_central() {
 }
 
 void PlxPeripheral::stop_roles() {
+    advertising_wanted_ = false;
     stop_advertising();
     disconnect_central();
 }
