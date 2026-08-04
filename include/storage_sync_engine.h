@@ -135,6 +135,7 @@ public:
     bool request_scheduled_reconcile();
     bool request_post_therapy_sync();
     void cancel_scheduled_reconcile();
+    void cancel_post_therapy_sync();
 
     // status
     StorageSyncStatus status() const;
@@ -221,6 +222,7 @@ private:
     bool prepare_step_locked(uint32_t now_ms, ExportStep &result);
     void queue_retry_locked(uint32_t now_ms);
     bool cancel_scheduled_reconcile_locked();
+    bool cancel_post_therapy_locked();
     ExportStep step_work_phase_locked();
     ExportStep step_resolve_host_locked();
     ExportStep step_connect_locked();
@@ -326,6 +328,7 @@ private:
     std::atomic<uint32_t> idle_defer_until_ms_{0};
     std::atomic<bool> post_therapy_requested_{false};
     std::atomic<bool> cancel_scheduled_reconcile_requested_{false};
+    std::atomic<bool> cancel_post_therapy_requested_{false};
     RunKind pending_run_kind_ = RunKind::Manual;
     RunKind current_run_kind_ = RunKind::Manual;
     uint32_t completed_sequence_ = 0;

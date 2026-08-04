@@ -175,11 +175,19 @@ void ExportCoordinator::poll_post_therapy(
         post_therapy_.last_therapy_active = therapy_active;
     }
 
+    if (therapy_active && !post_therapy_.last_therapy_active) {
+        post_therapy_.cancel_pending = true;
+    }
+    if (post_therapy_.cancel_pending && task_->cancel_post_therapy()) {
+        post_therapy_.cancel_pending = false;
+    }
+
     if (therapy_active) {
         reset_post_therapy_after_running();
         post_therapy_.last_therapy_active = true;
         return;
     }
+    if (post_therapy_.cancel_pending) return;
 
     if (post_therapy_.last_therapy_active) {
         arm_post_therapy_after_stop(now_ms);

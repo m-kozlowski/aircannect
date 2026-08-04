@@ -42,6 +42,7 @@ private:
     struct PostTherapyState {
         bool state_initialized = false;
         bool last_therapy_active = false;
+        bool cancel_pending = false;
         uint32_t report_settle_due_ms = 0;
         uint32_t report_settle_deadline_ms = 0;
         bool storage_pending = false;

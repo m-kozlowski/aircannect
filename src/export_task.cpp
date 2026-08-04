@@ -268,6 +268,22 @@ bool ExportTask::request_sleephq_post_therapy() {
     return queue_command(CommandKind::SleepHqPostTherapy);
 }
 
+bool ExportTask::cancel_post_therapy() {
+    if (!runtime_ || !lock_inputs(0)) return false;
+
+    const CommandKind kind = runtime_->inputs.command.kind;
+    if (kind == CommandKind::SmbPostTherapy ||
+        kind == CommandKind::SleepHqPostTherapy) {
+        runtime_->inputs.command = Command();
+    }
+    unlock_inputs();
+
+    runtime_->smb.cancel_post_therapy_sync();
+    runtime_->sleephq.cancel_post_therapy_sync();
+    wake();
+    return true;
+}
+
 bool ExportTask::copy_inputs(PublishedInputs &out) const {
     if (!runtime_) return false;
     if (!lock_inputs()) return false;

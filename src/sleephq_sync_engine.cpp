@@ -472,6 +472,10 @@ bool SleepHqSyncEngine::request_post_therapy_sync() {
     return queued;
 }
 
+void SleepHqSyncEngine::cancel_post_therapy_sync() {
+    cancel_post_therapy_requested_.store(true);
+}
+
 bool SleepHqSyncEngine::build_endpoint_state_dir_locked(uint32_t team_id,
                                                      char *out,
                                                      size_t out_size) const {
@@ -1152,6 +1156,33 @@ void SleepHqSyncEngine::queue_retry_locked(uint32_t now_ms) {
               status_.pending_reason,
               static_cast<unsigned>(retry_attempt_));
     publish_runtime_locked();
+}
+
+bool SleepHqSyncEngine::cancel_post_therapy_locked() {
+    if (!cancel_post_therapy_requested_.exchange(false)) return false;
+
+    const bool current = status_.state == SleepHqSyncState::Working &&
+                         current_run_kind_ == RunKind::PostTherapySync;
+    const bool pending = pending_run_kind_ == RunKind::PostTherapySync &&
+                         (status_.pending ||
+                          status_.state == SleepHqSyncState::Error);
+    if (!current && !pending) return false;
+
+    reset_run_locked(false);
+    status_.state = status_.configured ? SleepHqSyncState::Idle
+                                       : SleepHqSyncState::Disabled;
+    status_.pending = false;
+    status_.pending_reason[0] = '\0';
+    status_.last_error[0] = '\0';
+    status_.updated_ms = nonzero_millis(millis());
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
+    publish_runtime_locked();
+
+    Log::logf(CAT_EXPORT,
+              LOG_INFO,
+              "[SLEEPHQ] stale post-therapy sync cancelled by new therapy\n");
+    return true;
 }
 
 bool SleepHqSyncEngine::begin_export_planner_locked(char *error_out,
@@ -3056,6 +3087,10 @@ ExportStep SleepHqSyncEngine::step() {
     if (!lock(20)) return ExportStep::Waiting;
     const uint32_t now = nonzero_millis(millis());
     apply_pending_config_locked();
+    if (cancel_post_therapy_locked()) {
+        unlock();
+        return ExportStep::Idle;
+    }
     queue_retry_locked(now);
     if (abort_requested_.load() &&
         status_.state == SleepHqSyncState::Working) {

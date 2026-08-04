@@ -506,6 +506,7 @@ void StorageSyncEngine::apply_config_locked(const SmbExportConfig &config) {
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
     cancel_scheduled_reconcile_requested_.store(false);
+    cancel_post_therapy_requested_.store(false);
     Log::logf(CAT_EXPORT,
               LOG_DEBUG,
               "[SMB] config enabled=%u configured=%u\n",
@@ -896,6 +897,11 @@ void StorageSyncEngine::cancel_scheduled_reconcile() {
 
     cancel_scheduled_reconcile_requested_.store(true);
     request_operation_abort();
+}
+
+void StorageSyncEngine::cancel_post_therapy_sync() {
+    post_therapy_requested_.store(false);
+    cancel_post_therapy_requested_.store(true);
 }
 
 bool StorageSyncEngine::queue_post_therapy_locked(uint32_t now_ms) {
@@ -1533,8 +1539,40 @@ bool StorageSyncEngine::cancel_scheduled_reconcile_locked() {
     return true;
 }
 
+bool StorageSyncEngine::cancel_post_therapy_locked() {
+    if (!cancel_post_therapy_requested_.exchange(false)) return false;
+
+    post_therapy_requested_.store(false);
+    const bool current = status_.state == StorageSyncState::Working &&
+                         current_run_kind_ == RunKind::PostTherapy;
+    const bool pending = pending_run_kind_ == RunKind::PostTherapy &&
+                         (status_.pending ||
+                          status_.state == StorageSyncState::Error);
+    if (!current && !pending) return false;
+
+    reset_run_locked(false);
+    status_.state = status_.enabled && status_.configured
+        ? StorageSyncState::Idle : StorageSyncState::Disabled;
+    status_.pending = false;
+    status_.pending_reason[0] = '\0';
+    status_.last_error[0] = '\0';
+    status_.updated_ms = nonzero_millis(millis());
+    retry_due_ms_ = 0;
+    retry_attempt_ = 0;
+    publish_runtime_locked();
+
+    Log::logf(CAT_EXPORT,
+              LOG_INFO,
+              "[SMB] stale post-therapy sync cancelled by new therapy\n");
+    return true;
+}
+
 bool StorageSyncEngine::prepare_step_locked(uint32_t now_ms, ExportStep &result) {
     apply_pending_config_locked();
+    if (cancel_post_therapy_locked()) {
+        result = ExportStep::Idle;
+        return false;
+    }
     if (cancel_scheduled_reconcile_locked()) {
         result = ExportStep::Idle;
         return false;

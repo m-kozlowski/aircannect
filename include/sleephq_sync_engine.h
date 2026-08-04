@@ -111,6 +111,7 @@ public:
     bool request_sync(const char *reason = "manual");
     bool request_sync_day(const char *day, const char *reason = "manual_day");
     bool request_post_therapy_sync();
+    void cancel_post_therapy_sync();
 
     // status
     SleepHqSyncStatus status() const;
@@ -226,6 +227,7 @@ private:
     ExportStep step_load_inventory_locked();
     ExportStep step_load_datalog_day_locked();
     void queue_retry_locked(uint32_t now_ms);
+    bool cancel_post_therapy_locked();
     void reset_run_locked(bool keep_status);
     void finish_check_locked(uint32_t team_id);
     void finish_sync_locked();
@@ -348,6 +350,7 @@ private:
     std::atomic<bool> network_available_{false};
     std::atomic<bool> runtime_blocked_{false};
     std::atomic<bool> abort_requested_{false};
+    std::atomic<bool> cancel_post_therapy_requested_{false};
     std::atomic<uint32_t> operation_generation_{1};
     std::atomic<uint8_t> runtime_state_{
         static_cast<uint8_t>(SleepHqSyncState::Disabled)};

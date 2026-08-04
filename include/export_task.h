@@ -86,6 +86,7 @@ public:
     bool request_sleephq_idle_backfill();
     bool request_sleephq_sync_day(const char *day);
     bool request_sleephq_post_therapy();
+    bool cancel_post_therapy();
 
     // copied status
     bool endpoint_work_claimed() const;
