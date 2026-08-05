@@ -349,6 +349,12 @@ void CanDriver::handle_alerts(uint32_t alerts) {
     const uint32_t visible_alerts = alerts & ~TWAI_ALERT_TX_SUCCESS;
     if (!visible_alerts) return;
 
+    if (visible_alerts == TWAI_ALERT_ARB_LOST) {
+        Log::logf(CAT_CAN, LOG_DEBUG,
+                  "arbitration lost; controller will retry frame\n");
+        return;
+    }
+
     if (visible_alerts == TWAI_ALERT_BUS_ERROR &&
         static_cast<int32_t>(millis() - last_bus_error_log_ms_) < 1000) {
         suppressed_bus_error_alerts_++;

@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "board.h"
+#include "calendar_utils.h"
 #include "file_log_sink_port.h"
 #include "fixed_queue.h"
 #include "memory_manager.h"
@@ -34,7 +35,7 @@ struct LogRecord {
     char text[AC_LOG_LINE_MAX] = {};
 };
 
-static constexpr size_t FILE_LOG_TIMESTAMP_BYTES = 23;
+static constexpr size_t FILE_LOG_TIMESTAMP_BYTES = 29;
 static constexpr size_t FILE_LOG_LINE_MAX =
     FILE_LOG_TIMESTAMP_BYTES + 1 + AC_LOG_LINE_MAX + 2;
 
@@ -282,21 +283,44 @@ void format_file_log_timestamp(int64_t epoch_ms, char *out, size_t out_size) {
     const int64_t millis_part = epoch_ms >= 0 ? epoch_ms % 1000 : 0;
     time_t seconds = static_cast<time_t>(seconds_part);
     tm local = {};
-    if (!localtime_r(&seconds, &local)) {
-        snprintf(out, out_size, "1970-01-01T00:00:00.000");
+    tm utc = {};
+    if (!localtime_r(&seconds, &local) || !gmtime_r(&seconds, &utc)) {
+        snprintf(out, out_size, "1970-01-01T00:00:00.000+00:00");
         return;
     }
 
+    const int64_t local_seconds =
+        aircannect::calendar_days_from_civil(
+            local.tm_year + 1900,
+            static_cast<unsigned>(local.tm_mon + 1),
+            static_cast<unsigned>(local.tm_mday)) * 86400 +
+        local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
+    const int64_t utc_seconds =
+        aircannect::calendar_days_from_civil(
+            utc.tm_year + 1900,
+            static_cast<unsigned>(utc.tm_mon + 1),
+            static_cast<unsigned>(utc.tm_mday)) * 86400 +
+        utc.tm_hour * 3600 + utc.tm_min * 60 + utc.tm_sec;
+    const int offset_minutes =
+        static_cast<int>((local_seconds - utc_seconds) / 60);
+    const char offset_sign = offset_minutes < 0 ? '-' : '+';
+    const int offset_abs = offset_minutes < 0
+        ? -offset_minutes
+        : offset_minutes;
+
     snprintf(out,
              out_size,
-             "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
+             "%04d-%02d-%02dT%02d:%02d:%02d.%03ld%c%02d:%02d",
              local.tm_year + 1900,
              local.tm_mon + 1,
              local.tm_mday,
              local.tm_hour,
              local.tm_min,
              local.tm_sec,
-             static_cast<long>(millis_part));
+             static_cast<long>(millis_part),
+             offset_sign,
+             offset_abs / 60,
+             offset_abs % 60);
 }
 
 }  // namespace

@@ -52,15 +52,19 @@ time_t utc_fields_to_epoch(int year,
 
 }  // namespace
 
+void TimeSyncService::initialize_timezone(const AppConfigData &app_config) {
+    app_config_ = &app_config;
+    apply_timezone();
+}
+
 void TimeSyncService::begin(const AppConfigData &app_config,
                             WifiManager &wifi_manager,
                             RpcRequestPort &rpc,
                             As11DeviceService &device) {
-    app_config_ = &app_config;
+    initialize_timezone(app_config);
     wifi_manager_ = &wifi_manager;
     rpc_ = &rpc;
     device_ = &device;
-    apply_timezone();
     last_status_ = "starting";
     Log::logf(CAT_GENERAL, LOG_INFO,
               "[TIME] NTP enabled, AS11 fallback enabled, AS11 push=%s\n",

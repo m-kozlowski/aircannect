@@ -12,7 +12,7 @@
 namespace aircannect {
 namespace {
 
-static constexpr size_t FILE_LOG_TIMESTAMP_BYTES = 23;
+static constexpr size_t FILE_LOG_TIMESTAMP_BYTES = 29;
 static constexpr size_t FILE_LOG_LINE_MAX =
     FILE_LOG_TIMESTAMP_BYTES + 1 + AC_LOG_LINE_MAX + 2;
 

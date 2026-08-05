@@ -710,6 +710,7 @@ void setup() {
               tls_mem.install_result);
 
     config_service.begin();
+    time_sync_service.initialize_timezone(config_service.data());
 
     // Boot diagnostics
     const MemoryStatus mem = Memory::status();

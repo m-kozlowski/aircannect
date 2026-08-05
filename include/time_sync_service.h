@@ -20,6 +20,7 @@ enum class EspClockSource : uint8_t {
 
 class TimeSyncService {
 public:
+    void initialize_timezone(const AppConfigData &app_config);
     void begin(const AppConfigData &app_config,
                WifiManager &wifi_manager,
                RpcRequestPort &rpc,
