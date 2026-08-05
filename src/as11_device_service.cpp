@@ -401,13 +401,14 @@ void As11DeviceService::complete_query(
     const As11TherapyState before_state = state_.therapy_state();
     const bool had_pending_therapy = state_.therapy_command_pending();
     bool applied = false;
+    const RpcPayloadView payload = rpc_payload_view(completion.payload);
     if (active_query_kind_ == QueryKind::Clock) {
         applied = state_.apply_datetime_response(
-            completion.payload, now_ms, completion.dispatch_utc_ms,
+            payload, now_ms, completion.dispatch_utc_ms,
             completion.response_utc_ms, completion.dispatch_ms,
             completion.response_ms);
     } else {
-        applied = state_.apply_status_get_response(completion.payload, now_ms);
+        applied = state_.apply_status_get_response(payload, now_ms);
     }
 
     if (!applied) {

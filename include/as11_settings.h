@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <string>
 
+#include "rpc_payload.h"
+
 namespace aircannect {
 
 enum class As11SettingKind {
@@ -113,7 +115,7 @@ public:
     As11SettingsState &operator=(const As11SettingsState &) = delete;
     ~As11SettingsState();
 
-    bool apply_settings_get_response(const std::string &payload,
+    bool apply_settings_get_response(RpcPayloadView payload,
                                      uint32_t now_ms,
                                      bool *complete_snapshot = nullptr);
     bool note_set_request(const std::string &params_json, uint32_t now_ms);

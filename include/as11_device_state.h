@@ -5,6 +5,7 @@
 
 #include "as11_event_frame.h"
 #include "as11_therapy_state.h"
+#include "rpc_payload.h"
 
 namespace aircannect {
 
@@ -19,9 +20,9 @@ public:
     void poll(uint32_t now_ms);
 
     // Incoming payloads
-    bool apply_status_get_response(const std::string &payload,
+    bool apply_status_get_response(RpcPayloadView payload,
                                    uint32_t now_ms);
-    bool apply_datetime_response(const std::string &payload,
+    bool apply_datetime_response(RpcPayloadView payload,
                                  uint32_t now_ms,
                                  int64_t request_epoch_ms = 0,
                                  int64_t response_epoch_ms = 0,

@@ -15,9 +15,12 @@
 namespace aircannect {
 
 using RpcNotificationObserver = void (*)(void *context,
-                                         const char *payload,
-                                         size_t payload_len,
+                                         RpcPayloadView payload,
                                          uint32_t now_ms);
+using RpcRetainedNotificationObserver = void (*)(
+    void *context,
+    const RpcPayloadRef &payload,
+    uint32_t now_ms);
 
 class RpcTransport final : public RpcRequestPort,
                            public RpcPassthroughPort,
@@ -52,8 +55,9 @@ public:
                                          void *context);
     void set_stream_notification_observer(RpcNotificationObserver observer,
                                           void *context);
-    void set_spool_notification_observer(RpcNotificationObserver observer,
-                                         void *context);
+    void set_spool_notification_observer(
+        RpcRetainedNotificationObserver observer,
+        void *context);
 
     // Transport maintenance
     void reset_stats() override;
@@ -117,21 +121,7 @@ private:
         };
 
         Kind kind = Kind::Rpc;
-        char *data = nullptr;
-        size_t len = 0;
-
-        DeferredPayload() = default;
-        ~DeferredPayload();
-        DeferredPayload(const DeferredPayload &) = delete;
-        DeferredPayload &operator=(const DeferredPayload &) = delete;
-        DeferredPayload(DeferredPayload &&other) noexcept;
-        DeferredPayload &operator=(DeferredPayload &&other) noexcept;
-
-        bool copy_from(Kind next_kind, const char *payload, size_t payload_len);
-        void clear();
-
-    private:
-        void move_from(DeferredPayload &other);
+        RpcPayloadRef payload;
     };
 
     static constexpr size_t RAW_PASSTHROUGH_PENDING_MAX = 8;
@@ -142,13 +132,14 @@ private:
 
     // Event queues
     void push_event(RpcEventKind kind,
-                    const std::string &payload,
-                    RpcSource source = RpcSource::Internal,
-                    uint32_t id = 0);
-    void push_event(RpcEventKind kind,
                     RpcPayloadRef payload,
                     RpcSource source = RpcSource::Internal,
                     uint32_t id = 0);
+    void push_text_event(RpcEventKind kind,
+                         const char *payload,
+                         size_t payload_len,
+                         RpcSource source = RpcSource::Internal,
+                         uint32_t id = 0);
     void report_framing_error(const char *channel, const std::string &error);
     bool enqueue_request(QueuedRequest &request);
     bool enqueue_payload_frames(const std::string &payload, RpcSource source);
@@ -171,7 +162,7 @@ private:
                                  uint32_t generation,
                                  OperationOutcome outcome,
                                  RpcCompletionCause cause,
-                                 const std::string *payload,
+                                 const RpcPayloadRef &payload,
                                  const char *reason,
                                  bool response_error,
                                  RequestCompletionQueue &completions,
@@ -203,17 +194,16 @@ private:
     void process_deferred_payloads(size_t budget);
 
     // Payload handling
-    void handle_event_notification(const char *payload, size_t payload_len);
-    void handle_stream_notification(const char *payload, size_t payload_len);
-    void handle_spool_notification(const char *payload, size_t payload_len);
+    void handle_event_notification(const RpcPayloadRef &payload);
+    void handle_stream_notification(const RpcPayloadRef &payload);
+    void handle_spool_notification(const RpcPayloadRef &payload);
     void note_transport_reset();
     void handle_frame(const RawCanFrame &frame);
     void enqueue_deferred_payload(DeferredPayload::Kind kind,
-                                  const char *payload,
-                                  size_t payload_len);
+                                  RpcPayloadView payload);
 
-    void handle_rpc_payload(const char *payload, size_t payload_len);
-    void handle_debug_payload(const char *payload, size_t payload_len);
+    void handle_rpc_payload(const RpcPayloadRef &payload);
+    void handle_debug_payload(const RpcPayloadRef &payload);
 
     std::string format_boot_frame(const RawCanFrame &frame) const;
     const char *source_name(RpcSource source) const;
@@ -255,7 +245,7 @@ private:
     void *event_notification_context_ = nullptr;
     RpcNotificationObserver stream_notification_observer_ = nullptr;
     void *stream_notification_context_ = nullptr;
-    RpcNotificationObserver spool_notification_observer_ = nullptr;
+    RpcRetainedNotificationObserver spool_notification_observer_ = nullptr;
     void *spool_notification_context_ = nullptr;
     uint32_t transport_generation_ = 1;
 

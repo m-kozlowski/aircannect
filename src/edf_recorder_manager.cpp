@@ -1679,7 +1679,7 @@ void EdfRecorderManager::poll_str_settings_completion() {
 
     str_settings_rpc_.clear();
     if (completion.cause == RpcCompletionCause::Response) {
-        handle_str_settings_response(completion.payload);
+        handle_str_settings_response(rpc_payload_view(completion.payload));
         return;
     }
 
@@ -1701,7 +1701,7 @@ void EdfRecorderManager::poll_str_summary_completion() {
 
     str_summary_rpc_.clear();
     if (completion.cause == RpcCompletionCause::Response) {
-        handle_str_summary_response(completion.payload);
+        handle_str_summary_response(rpc_payload_view(completion.payload));
         return;
     }
 
@@ -1728,7 +1728,7 @@ void EdfRecorderManager::poll_identification_completion() {
 
     identification_rpc_.clear();
     if (completion.cause == RpcCompletionCause::Response) {
-        handle_identification_response(completion.payload);
+        handle_identification_response(rpc_payload_view(completion.payload));
         return;
     }
 
@@ -1779,7 +1779,7 @@ bool EdfRecorderManager::flush_pending_str_record(const char *reason) {
 }
 
 void EdfRecorderManager::handle_str_settings_response(
-    const std::string &payload) {
+    RpcPayloadView payload) {
     EdfStrSettingsApplyResult result;
     if (!edf_str_apply_settings_response(payload, str_, result)) {
         status_.metadata_failures++;
@@ -1800,7 +1800,7 @@ void EdfRecorderManager::handle_str_settings_response(
 }
 
 void EdfRecorderManager::handle_str_summary_response(
-    const std::string &payload) {
+    RpcPayloadView payload) {
     EdfStrSettingsApplyResult result;
     if (!edf_str_apply_summary_get_response(payload, str_, result)) {
         status_.metadata_failures++;
@@ -1820,7 +1820,7 @@ void EdfRecorderManager::handle_str_summary_response(
 }
 
 void EdfRecorderManager::handle_identification_response(
-    const std::string &payload) {
+    RpcPayloadView payload) {
     std::string json;
     if (!edf_build_identification_json(payload, json)) {
         status_.metadata_failures++;

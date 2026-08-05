@@ -8,6 +8,17 @@
 #include "version.h"
 
 namespace aircannect {
+namespace {
+
+void print_rpc_payload_line(Print &out, const RpcPayloadRef &payload) {
+    const RpcPayloadView view = rpc_payload_view(payload);
+    if (!view.empty()) {
+        out.write(reinterpret_cast<const uint8_t *>(view.data()), view.size());
+    }
+    out.println();
+}
+
+}  // namespace
 
 void ManagementConsole::begin(Print &out) {
     out.println("[CLI] ready. Type 'help'.");
@@ -70,23 +81,23 @@ void ManagementConsole::handle_event(Print &out, const RpcEvent &event) {
     switch (event.kind) {
         case RpcEventKind::RpcResponse:
             out.print("[RPC response] ");
-            out.println(event.payload_c_str());
+            print_rpc_payload_line(out, event.payload);
             break;
         case RpcEventKind::RpcUnmatched:
             out.print("[RPC unmatched] ");
-            out.println(event.payload_c_str());
+            print_rpc_payload_line(out, event.payload);
             break;
         case RpcEventKind::BootNotification:
             out.print("[CAN] ");
-            out.println(event.payload_c_str());
+            print_rpc_payload_line(out, event.payload);
             break;
         case RpcEventKind::FramingError:
             out.print("[FRAMING] ");
-            out.println(event.payload_c_str());
+            print_rpc_payload_line(out, event.payload);
             break;
         case RpcEventKind::Info:
             out.print("[INFO] ");
-            out.println(event.payload_c_str());
+            print_rpc_payload_line(out, event.payload);
             break;
         case RpcEventKind::RpcNotification:
         case RpcEventKind::DebugLog:

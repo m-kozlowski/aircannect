@@ -21,24 +21,18 @@ void ReportSpoolRuntime::poll(bool transport_backpressure_active,
     pressure_.log_if_changed(rx_queue_full_alerts, client_);
 }
 
-bool ReportSpoolRuntime::enqueue_notification(const char *payload,
-                                              size_t payload_len) {
-    if (!client_.active() || !payload || payload_len == 0) return false;
-    if (notification_count_ >= AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH) {
+bool ReportSpoolRuntime::enqueue_notification(const RpcPayloadRef &payload) {
+    if (!client_.active() || !payload) return false;
+    if (notifications_.full()) {
         notification_loss_pending_ = true;
         return false;
     }
 
-    const size_t tail = (notification_head_ + notification_count_) %
-                        AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH;
-    LargeTextBuffer &notification = notifications_[tail];
-    if (!notification.append(payload, payload_len)) {
-        release_notification(tail);
+    if (!notifications_.push(payload)) {
         notification_loss_pending_ = true;
         return false;
     }
 
-    notification_count_++;
     return true;
 }
 
@@ -51,15 +45,11 @@ bool ReportSpoolRuntime::drain_notification() {
         client_.note_notification_loss("notification_queue_full");
         return true;
     }
-    if (notification_count_ == 0) return false;
+    RpcPayloadRef notification;
+    if (!notifications_.pop(notification)) return false;
 
-    LargeTextBuffer &notification = notifications_[notification_head_];
-    (void)client_.handle_spool_notification(notification.c_str(),
-                                            notification.length());
-    release_notification(notification_head_);
-    notification_head_ = (notification_head_ + 1) %
-                         AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH;
-    notification_count_--;
+    (void)client_.handle_spool_notification(
+        rpc_payload_view(notification));
     return true;
 }
 
@@ -68,22 +58,13 @@ void ReportSpoolRuntime::observe_idle(uint32_t rx_queue_full_alerts) {
 }
 
 bool ReportSpoolRuntime::notification_backpressure_active() const {
-    return notification_count_ >=
+    return notifications_.count() >=
         AC_REPORT_SPOOL_NOTIFICATION_BACKPRESSURE_WATERMARK;
 }
 
 void ReportSpoolRuntime::clear_notifications() {
-    for (size_t i = 0; i < AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH; ++i) {
-        release_notification(i);
-    }
-    notification_head_ = 0;
-    notification_count_ = 0;
+    notifications_.clear();
     notification_loss_pending_ = false;
-}
-
-void ReportSpoolRuntime::release_notification(size_t index) {
-    LargeTextBuffer empty;
-    notifications_[index].swap(empty);
 }
 
 }  // namespace aircannect

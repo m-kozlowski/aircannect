@@ -130,7 +130,7 @@ LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
     }
     if (!output_current_[idx]) return result;
 
-    const std::string &payload = *output_current_[idx];
+    const RpcPayloadView payload = rpc_payload_view(output_current_[idx]);
     const size_t payload_len = payload.size();
     const size_t total_len = payload_len + 1;
     if (output_pos_[idx] >= total_len) {
@@ -148,8 +148,8 @@ LineOutputPumpResult TcpBridge::pump_rpc_output(size_t idx) {
         chunk = remaining < AC_TCP_WRITE_CHUNK
                     ? remaining
                     : AC_TCP_WRITE_CHUNK;
-        data = reinterpret_cast<const uint8_t *>(
-            payload.data() + output_pos_[idx]);
+        data = reinterpret_cast<const uint8_t *>(payload.data()) +
+               output_pos_[idx];
     }
 
     result.written = write_line_nonblocking(client, idx, "CLIENT", data,

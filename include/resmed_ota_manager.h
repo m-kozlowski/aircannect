@@ -106,7 +106,7 @@ private:
                        uint32_t timeout_ms);
     void poll_rpc_completion();
     void cancel_rpc_request();
-    void handle_response(const std::string &payload);
+    void handle_response(RpcPayloadView payload);
 
     void poll_prepared_transfer();
     bool open_prepared_stream();

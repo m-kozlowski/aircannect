@@ -189,15 +189,13 @@ bool parse_event_duration_ms(JsonObjectConst event, int32_t &duration_ms) {
     return false;
 }
 
-bool parse_event_notification(const char *payload,
-                              size_t payload_len,
+bool parse_event_notification(RpcPayloadView payload,
                               As11EventFrame &frame) {
     frame = {};
-    if (!payload && payload_len) return false;
 
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload ? payload : "",
-                                                 payload ? payload_len : 0);
+    DeserializationError error = deserializeJson(
+        doc, payload.data() ? payload.data() : "", payload.size());
     if (error) return false;
 
     std::string method;
@@ -364,13 +362,13 @@ void EventBroker::mark_command_cancelled(uint32_t now_ms) {
 }
 
 bool EventBroker::accept_subscribe_response(
-    const std::string &payload,
+    RpcPayloadView payload,
     uint32_t &subscription_id) const {
     subscription_id = 0;
 
     JsonDocument response_doc;
-    DeserializationError response_error =
-        deserializeJson(response_doc, payload);
+    DeserializationError response_error = deserializeJson(
+        response_doc, payload.data() ? payload.data() : "", payload.size());
     if (response_error) {
         return false;
     }
@@ -544,18 +542,11 @@ bool EventBroker::consumer_active(EventConsumerHandle handle) const {
     return consumers_[handle].active;
 }
 
-EventPublishResult EventBroker::publish_notification(const std::string &payload,
-                                                     uint32_t now_ms,
-                                                     As11EventFrame &frame) {
-    return publish_notification(payload.data(), payload.size(), now_ms, frame);
-}
-
-EventPublishResult EventBroker::publish_notification(const char *payload,
-                                                     size_t payload_len,
+EventPublishResult EventBroker::publish_notification(RpcPayloadView payload,
                                                      uint32_t now_ms,
                                                      As11EventFrame &frame) {
     EventPublishResult result;
-    if (!parse_event_notification(payload, payload_len, frame)) return result;
+    if (!parse_event_notification(payload, frame)) return result;
 
     result.accepted = true;
     result.truncated = frame.truncated;
@@ -619,7 +610,8 @@ void EventBroker::complete_command(
 
     uint32_t subscription_id = 0;
     const bool accepted = !completion.response_error &&
-                          accept_subscribe_response(completion.payload,
+                          accept_subscribe_response(
+                              rpc_payload_view(completion.payload),
                                                     subscription_id);
     mark_subscribe_response(!accepted, subscription_id, now_ms);
 

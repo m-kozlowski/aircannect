@@ -82,7 +82,7 @@ public:
     void mark_command_deferred(uint32_t now_ms);
     void mark_command_timeout(uint32_t now_ms);
     void mark_command_cancelled(uint32_t now_ms);
-    bool accept_subscribe_response(const std::string &payload,
+    bool accept_subscribe_response(RpcPayloadView payload,
                                    uint32_t &subscription_id) const;
     void mark_subscribe_response(bool is_error,
                                  uint32_t subscription_id,
@@ -96,11 +96,7 @@ public:
     void release(EventConsumerHandle handle);
     bool consumer_active(EventConsumerHandle handle) const;
 
-    EventPublishResult publish_notification(const std::string &payload,
-                                            uint32_t now_ms,
-                                            As11EventFrame &frame);
-    EventPublishResult publish_notification(const char *payload,
-                                            size_t payload_len,
+    EventPublishResult publish_notification(RpcPayloadView payload,
                                             uint32_t now_ms,
                                             As11EventFrame &frame);
 

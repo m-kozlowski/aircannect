@@ -383,10 +383,11 @@ void SpoolClient::poll_rpc_completion() {
         return;
     }
 
+    const RpcPayloadView payload = rpc_payload_view(completion.payload);
     if (completed == PendingSubmit::Start) {
-        (void)handle_start_response(completion.payload);
+        (void)handle_start_response(payload);
     } else if (completed == PendingSubmit::Pull) {
-        (void)handle_pull_response(completion.payload);
+        (void)handle_pull_response(payload);
     }
 }
 
@@ -400,9 +401,10 @@ void SpoolClient::cancel_rpc_request() {
     submitted_ = PendingSubmit::None;
 }
 
-bool SpoolClient::handle_start_response(const std::string &payload) {
+bool SpoolClient::handle_start_response(RpcPayloadView payload) {
     JsonDocument doc;
-    if (deserializeJson(doc, payload.c_str())) {
+    if (deserializeJson(doc, payload.data() ? payload.data() : "",
+                        payload.size())) {
         fail("bad_start_response");
         return false;
     }
@@ -425,9 +427,10 @@ bool SpoolClient::handle_start_response(const std::string &payload) {
     return true;
 }
 
-bool SpoolClient::handle_pull_response(const std::string &payload) {
+bool SpoolClient::handle_pull_response(RpcPayloadView payload) {
     JsonDocument doc;
-    if (deserializeJson(doc, payload.c_str())) {
+    if (deserializeJson(doc, payload.data() ? payload.data() : "",
+                        payload.size())) {
         fail("bad_pull_response");
         return false;
     }
@@ -442,30 +445,29 @@ bool SpoolClient::handle_pull_response(const std::string &payload) {
     return true;
 }
 
-bool SpoolClient::handle_spool_notification(const char *payload,
-                                            size_t payload_len) {
-    if (!active() || !payload || payload_len == 0) return false;
+bool SpoolClient::handle_spool_notification(RpcPayloadView payload) {
+    if (!active() || payload.empty()) return false;
     if (state_ != State::WaitPull && state_ != State::WaitFragments) {
         return false;
     }
 
     JsonStringView method;
-    if (!json_string_view(payload, payload_len, "method", method) ||
+    if (!json_string_view(payload.data(), payload.size(), "method", method) ||
         !json_string_equals(method, "SpoolFragment")) {
         return false;
     }
 
     uint32_t spool_id = 0;
-    if (!json_uint_value(payload, payload_len, "spoolId", spool_id)) {
+    if (!json_uint_value(payload.data(), payload.size(), "spoolId", spool_id)) {
         return false;
     }
     if (!active_spool_id_ || spool_id != active_spool_id_) return false;
 
     uint32_t seq = result_.fragments;
-    json_uint_value(payload, payload_len, "seq", seq);
+    json_uint_value(payload.data(), payload.size(), "seq", seq);
 
     JsonStringView data;
-    if (!json_string_view(payload, payload_len, "data", data) ||
+    if (!json_string_view(payload.data(), payload.size(), "data", data) ||
         !append_base64_fragment(data.data, data.len, seq)) {
         retry_current_round("fragment_decode_failed");
         return true;
@@ -485,7 +487,8 @@ bool SpoolClient::handle_spool_notification(const char *payload,
     state_started_ms_ = millis();
 
     JsonStringView status_view;
-    if (!json_string_view(payload, payload_len, "status", status_view) ||
+    if (!json_string_view(payload.data(), payload.size(), "status",
+                          status_view) ||
         json_string_equals(status_view, "SPOOL_INCOMPLETE")) {
         if (request_.max_notifications > 0) {
             schedule_pull();
@@ -495,13 +498,14 @@ bool SpoolClient::handle_spool_notification(const char *payload,
 
     result_.terminal_status.assign(status_view.data, status_view.len);
     JsonStringView hash_view;
-    if (json_string_view(payload, payload_len, "spoolHash", hash_view)) {
+    if (json_string_view(payload.data(), payload.size(), "spoolHash",
+                         hash_view)) {
         result_.spool_hash.assign(hash_view.data, hash_view.len);
     } else {
         result_.spool_hash.clear();
     }
     std::string pending_next_spool_address;
-    json_object_text(payload, payload_len, "nextSpoolAddress",
+    json_object_text(payload.data(), payload.size(), "nextSpoolAddress",
                      pending_next_spool_address);
 
     if (!normalize_current_round()) {

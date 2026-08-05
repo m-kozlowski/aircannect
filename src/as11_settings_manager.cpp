@@ -186,8 +186,9 @@ void As11SettingsManager::complete_refresh(
     const RpcRequestCompletion &completion,
     uint32_t now_ms) {
     bool complete_snapshot = false;
+    const RpcPayloadView payload = rpc_payload_view(completion.payload);
     const bool applied = completion.cause == RpcCompletionCause::Response &&
-        state_.apply_settings_get_response(completion.payload, now_ms,
+        state_.apply_settings_get_response(payload, now_ms,
                                            &complete_snapshot);
     const bool succeeded = applied && complete_snapshot;
     note_change();

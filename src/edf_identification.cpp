@@ -21,12 +21,14 @@ void strip_identification_whitespace(std::string &json) {
 
 }  // namespace
 
-bool edf_build_identification_json(const std::string &get_response,
+bool edf_build_identification_json(RpcPayloadView get_response,
                                    std::string &json_out) {
     json_out.clear();
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, get_response);
+    DeserializationError err = deserializeJson(
+        doc, get_response.data() ? get_response.data() : "",
+        get_response.size());
     if (err) return false;
 
     JsonObjectConst result = doc["result"].as<JsonObjectConst>();

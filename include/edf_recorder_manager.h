@@ -2,7 +2,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string>
 
 #include "as11_clock.h"
 #include "as11_device_state.h"
@@ -253,9 +252,9 @@ private:
     void cancel_pending_rpc(PendingRpc &pending);
     void cancel_session_rpc_requests();
     bool flush_pending_str_record(const char *reason);
-    void handle_str_settings_response(const std::string &payload);
-    void handle_str_summary_response(const std::string &payload);
-    void handle_identification_response(const std::string &payload);
+    void handle_str_settings_response(RpcPayloadView payload);
+    void handle_str_summary_response(RpcPayloadView payload);
+    void handle_identification_response(RpcPayloadView payload);
     bool write_str_day_record();
 
     // device time

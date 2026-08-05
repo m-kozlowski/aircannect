@@ -497,13 +497,14 @@ std::string edf_str_summary_get_names() {
     return names;
 }
 
-bool edf_str_apply_settings_response(const std::string &payload,
+bool edf_str_apply_settings_response(RpcPayloadView payload,
                                      EdfStrSessionAccumulator &session,
                                      EdfStrSettingsApplyResult &result) {
     result = {};
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, payload);
+    DeserializationError err = deserializeJson(
+        doc, payload.data() ? payload.data() : "", payload.size());
     if (err) {
         result.error = "str_settings_json_failed";
         return false;
@@ -511,7 +512,8 @@ bool edf_str_apply_settings_response(const std::string &payload,
 
     JsonObjectConst json_result = get_value_object(doc);
     if (json_result.isNull()) {
-        result.error = json_member_present(payload, "error")
+        result.error = json_member_present(payload.data(), payload.size(),
+                                           "error")
                            ? "str_settings_rpc_error"
                            : "str_settings_missing_result";
         return false;
@@ -572,13 +574,14 @@ bool edf_str_apply_settings_response(const std::string &payload,
     return true;
 }
 
-bool edf_str_apply_summary_get_response(const std::string &payload,
+bool edf_str_apply_summary_get_response(RpcPayloadView payload,
                                         EdfStrSessionAccumulator &session,
                                         EdfStrSettingsApplyResult &result) {
     result = {};
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, payload);
+    DeserializationError err = deserializeJson(
+        doc, payload.data() ? payload.data() : "", payload.size());
     if (err) {
         result.error = "str_summary_json_failed";
         return false;
@@ -586,7 +589,8 @@ bool edf_str_apply_summary_get_response(const std::string &payload,
 
     JsonObjectConst json_result = get_value_object(doc);
     if (json_result.isNull()) {
-        result.error = json_member_present(payload, "error")
+        result.error = json_member_present(payload.data(), payload.size(),
+                                           "error")
                            ? "str_summary_rpc_error"
                            : "str_summary_missing_result";
         return false;

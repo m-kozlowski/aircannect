@@ -33,7 +33,7 @@ public:
 
     bool begin(const SpoolClientRequest &request);
     void poll(bool background_backpressure_active);
-    bool handle_spool_notification(const char *payload, size_t payload_len);
+    bool handle_spool_notification(RpcPayloadView payload);
     void note_notification_loss(const char *reason);
     void reset();
 
@@ -74,8 +74,8 @@ private:
     bool submit_pull();
     void poll_rpc_completion();
     void cancel_rpc_request();
-    bool handle_start_response(const std::string &payload);
-    bool handle_pull_response(const std::string &payload);
+    bool handle_start_response(RpcPayloadView payload);
+    bool handle_pull_response(RpcPayloadView payload);
     bool append_base64_fragment(const char *data, size_t len, uint32_t seq);
     bool ensure_round_fragment_capacity(size_t count);
     void clear_round_fragments(bool release_storage);

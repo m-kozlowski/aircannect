@@ -126,10 +126,8 @@ bool ReportSpoolService::take_completion(
     return true;
 }
 
-bool ReportSpoolService::enqueue_notification(const char *payload,
-                                              size_t payload_len) {
-    return initialized_ &&
-           runtime_.enqueue_notification(payload, payload_len);
+bool ReportSpoolService::enqueue_notification(const RpcPayloadRef &payload) {
+    return initialized_ && runtime_.enqueue_notification(payload);
 }
 
 bool ReportSpoolService::poll(bool transport_backpressure_active,

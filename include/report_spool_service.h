@@ -33,7 +33,7 @@ public:
         OperationTicket ticket,
         ReportSpoolFetchCompletion &completion) override;
 
-    bool enqueue_notification(const char *payload, size_t payload_len);
+    bool enqueue_notification(const RpcPayloadRef &payload);
     bool poll(bool transport_backpressure_active,
               uint32_t rx_queue_full_alerts);
     bool active() const;

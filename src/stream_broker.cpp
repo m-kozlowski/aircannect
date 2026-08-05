@@ -240,15 +240,14 @@ void StreamBroker::note_external_stop(uint32_t now_ms,
     }
 }
 
-void StreamBroker::observe_external_request(const char *payload,
-                                             size_t payload_len,
+void StreamBroker::observe_external_request(RpcPayloadView payload,
                                              uint32_t now_ms) {
     StreamCommandType command = StreamCommandType::None;
     std::string params_json;
     uint32_t id = 0;
     bool has_id = false;
 
-    if (!parse_external_stream_request(payload, payload_len, command,
+    if (!parse_external_stream_request(payload.data(), payload.size(), command,
                                        params_json, id, has_id)) {
         return;
     }
@@ -263,15 +262,14 @@ void StreamBroker::observe_external_request(const char *payload,
     if (has_id) remember_external_request(id, command, now_ms);
 }
 
-void StreamBroker::observe_external_response(const char *payload,
-                                              size_t payload_len,
+void StreamBroker::observe_external_response(RpcPayloadView payload,
                                               uint32_t now_ms) {
     uint32_t id = 0;
-    if (!json_extract_id(payload, payload_len, id)) return;
+    if (!json_extract_id(payload.data(), payload.size(), id)) return;
 
     const StreamCommandType command = match_external_response(id, now_ms);
     if (command != StreamCommandType::Start ||
-        !json_member_present(payload, payload_len, "error")) {
+        !json_member_present(payload.data(), payload.size(), "error")) {
         return;
     }
 
@@ -356,7 +354,7 @@ void StreamBroker::mark_command_timeout(uint32_t now_ms) {
 
 void StreamBroker::mark_command_response(StreamCommandType type,
                                          bool is_error,
-                                         const std::string &payload,
+                                         RpcPayloadView payload,
                                          uint32_t now_ms) {
     if (pending_ != type) return;
     pending_ = StreamCommandType::None;
@@ -441,22 +439,16 @@ void StreamBroker::set_frame_observer(StreamFrameObserver observer,
     frame_observer_context_ = context;
 }
 
-StreamPublishResult StreamBroker::publish_stream_data(
-    const std::string &payload,
-    uint32_t now_ms) {
-    return publish_stream_data(payload.data(), payload.size(), now_ms);
-}
-
-StreamPublishResult StreamBroker::publish_stream_data(
-    const char *payload,
-    size_t payload_len,
-    uint32_t now_ms) {
+StreamPublishResult StreamBroker::publish_stream_data(RpcPayloadView payload,
+                                                       uint32_t now_ms) {
     StreamPublishResult result;
+    const char *payload_data = payload.data();
+    const size_t payload_len = payload.size();
 
     const size_t consumers = consumer_count();
     if (consumers == 0) {
         StreamFrameMetadata metadata;
-        if (stream_parse_metadata(payload, payload_len, metadata)) {
+        if (stream_parse_metadata(payload_data, payload_len, metadata)) {
             note_stream_data(metadata.stream_id, metadata.start_time, now_ms);
         }
         return result;
@@ -479,8 +471,8 @@ StreamPublishResult StreamBroker::publish_stream_data(
     }
 
     char error[96] = {};
-    if (!stream_parse_frame(payload, payload_len, now_ms, *frame.mutable_data(),
-                            error, sizeof(error))) {
+    if (!stream_parse_frame(payload_data, payload_len, now_ms,
+                            *frame.mutable_data(), error, sizeof(error))) {
         (void)error;
         result.parse_error = true;
         parse_errors_++;
@@ -579,7 +571,7 @@ void StreamBroker::complete_command(
     uint32_t now_ms) {
     if (completion.cause == RpcCompletionCause::Response) {
         mark_command_response(command_type_, completion.response_error,
-                              completion.payload, now_ms);
+                              rpc_payload_view(completion.payload), now_ms);
         return;
     }
 
@@ -746,13 +738,13 @@ bool StreamBroker::merge_data_ids(Subscription &subscription,
                              STREAM_DATA_ID_LIMITS);
 }
 
-bool StreamBroker::parse_start_response(const std::string &payload,
+bool StreamBroker::parse_start_response(RpcPayloadView payload,
                                         Subscription &accepted,
                                         uint32_t &stream_id) {
     clear_subscription(accepted);
     stream_id = 0;
 
-    JsonCursor json(payload);
+    JsonCursor json(payload.data(), payload.size());
     if (!json.consume('{')) return false;
 
     bool saw_result = false;

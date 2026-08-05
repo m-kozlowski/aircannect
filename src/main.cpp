@@ -225,33 +225,32 @@ static void note_as11_settings_history(void *context, uint32_t now_ms) {
 }
 
 static void route_event_notification(void *context,
-                                     const char *payload,
-                                     size_t payload_len,
+                                     RpcPayloadView payload,
                                      uint32_t now_ms) {
     EventBroker *events = static_cast<EventBroker *>(context);
     if (!events) return;
 
     As11EventFrame frame;
-    (void)events->publish_notification(payload, payload_len, now_ms, frame);
+    (void)events->publish_notification(payload, now_ms, frame);
 }
 
 static void route_stream_notification(void *context,
-                                      const char *payload,
-                                      size_t payload_len,
+                                      RpcPayloadView payload,
                                       uint32_t now_ms) {
     StreamBroker *stream = static_cast<StreamBroker *>(context);
     if (!stream) return;
-    (void)stream->publish_stream_data(payload, payload_len, now_ms);
+
+    (void)stream->publish_stream_data(payload, now_ms);
 }
 
 static void route_spool_notification(void *context,
-                                     const char *payload,
-                                     size_t payload_len,
+                                     const RpcPayloadRef &payload,
                                      uint32_t now_ms) {
     (void)now_ms;
     ReportSpoolService *spool = static_cast<ReportSpoolService *>(context);
     if (!spool) return;
-    (void)spool->enqueue_notification(payload, payload_len);
+
+    (void)spool->enqueue_notification(payload);
 }
 
 static void route_tcp_raw_request(void *context,
@@ -261,7 +260,8 @@ static void route_tcp_raw_request(void *context,
     StreamBroker *stream = static_cast<StreamBroker *>(context);
     if (!stream) return;
 
-    stream->observe_external_request(payload, payload_len, now_ms);
+    stream->observe_external_request(RpcPayloadView(payload, payload_len),
+                                     now_ms);
 }
 
 static void sync_rpc_transport_generation(uint32_t now_ms) {
@@ -603,7 +603,7 @@ static void drain_rpc_events() {
         if (event.kind == RpcEventKind::RpcResponse &&
             event.source == RpcSource::Tcp && event.payload) {
             stream_broker.observe_external_response(
-                event.payload->data(), event.payload->size(), millis());
+                rpc_payload_view(event.payload), millis());
         }
 
         // Framing failures already reach Serial and persistent sinks through

@@ -283,10 +283,11 @@ void As11DeviceState::poll(uint32_t now_ms) {
     clear_pending_therapy_command("confirm_timeout", now_ms);
 }
 
-bool As11DeviceState::apply_status_get_response(const std::string &payload,
+bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
                                                 uint32_t now_ms) {
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
+    DeserializationError error = deserializeJson(
+        doc, payload.data() ? payload.data() : "", payload.size());
     if (error) return false;
 
     JsonObjectConst result = doc["result"].as<JsonObjectConst>();
@@ -346,14 +347,15 @@ bool As11DeviceState::apply_status_get_response(const std::string &payload,
 }
 
 bool As11DeviceState::apply_datetime_response(
-    const std::string &payload,
+    RpcPayloadView payload,
     uint32_t now_ms,
     int64_t request_epoch_ms,
     int64_t response_epoch_ms,
     uint32_t request_ms,
     uint32_t response_ms) {
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
+    DeserializationError error = deserializeJson(
+        doc, payload.data() ? payload.data() : "", payload.size());
     if (error) return false;
 
     std::string text;

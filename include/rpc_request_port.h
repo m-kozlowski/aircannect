@@ -4,6 +4,7 @@
 #include <string>
 
 #include "operation_outcome.h"
+#include "rpc_payload.h"
 
 namespace aircannect {
 
@@ -61,7 +62,7 @@ struct RpcRequestCompletion {
     OperationTicket ticket;
     OperationOutcome outcome;
     RpcCompletionCause cause = RpcCompletionCause::Cancelled;
-    std::string payload;
+    RpcPayloadRef payload;
     std::string reason;
     bool response_error = false;
     int64_t dispatch_utc_ms = 0;

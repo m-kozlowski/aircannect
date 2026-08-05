@@ -4,6 +4,7 @@
 #include <string>
 
 #include "edf_str_session.h"
+#include "rpc_payload.h"
 
 namespace aircannect {
 
@@ -18,10 +19,10 @@ struct EdfStrSettingsApplyResult {
 std::string edf_str_setting_get_names();
 std::string edf_str_summary_get_names();
 
-bool edf_str_apply_settings_response(const std::string &payload,
+bool edf_str_apply_settings_response(RpcPayloadView payload,
                                      EdfStrSessionAccumulator &session,
                                      EdfStrSettingsApplyResult &result);
-bool edf_str_apply_summary_get_response(const std::string &payload,
+bool edf_str_apply_summary_get_response(RpcPayloadView payload,
                                         EdfStrSessionAccumulator &session,
                                         EdfStrSettingsApplyResult &result);
 

@@ -49,9 +49,10 @@ bool valid_sha256(String value) {
     return true;
 }
 
-bool json_result_true(const std::string &json) {
+bool json_result_true(RpcPayloadView json) {
     JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, json);
+    const DeserializationError error = deserializeJson(
+        doc, json.data() ? json.data() : "", json.size());
     return !error && doc["result"].is<bool>() &&
            doc["result"].as<bool>();
 }
@@ -579,7 +580,7 @@ void ResmedOtaManager::poll_rpc_completion() {
 
     rpc_ticket_ = {};
     if (completion.cause == RpcCompletionCause::Response) {
-        handle_response(completion.payload);
+        handle_response(rpc_payload_view(completion.payload));
         return;
     }
 
@@ -597,13 +598,18 @@ void ResmedOtaManager::cancel_rpc_request() {
     rpc_ticket_ = {};
 }
 
-void ResmedOtaManager::handle_response(const std::string &payload) {
+void ResmedOtaManager::handle_response(RpcPayloadView payload) {
     if (waiting_for_ == WaitingFor::None) return;
 
-    cold_->status.last_result = payload.c_str();
+    cold_->status.last_result = "";
+    cold_->status.last_result.reserve(payload.size());
+    if (!payload.empty()) {
+        cold_->status.last_result.concat(
+            payload.data(), static_cast<unsigned int>(payload.size()));
+    }
     cold_->status.waiting = false;
     last_activity_ms_ = millis();
-    if (json_member_present(payload, "error")) {
+    if (json_member_present(payload.data(), payload.size(), "error")) {
         waiting_for_ = WaitingFor::None;
         set_error("rpc_error");
         return;
@@ -614,7 +620,8 @@ void ResmedOtaManager::handle_response(const std::string &payload) {
     switch (completed) {
         case WaitingFor::Initiate: {
             uint32_t block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
-            json_extract_uint_member(payload, "xferBlockSize", block_size);
+            json_extract_uint_member(payload.data(), payload.size(),
+                                     "xferBlockSize", block_size);
             if (block_size == 0 ||
                 block_size > AC_RESMED_OTA_MAX_BLOCK_BYTES) {
                 set_error("bad_xfer_block_size");

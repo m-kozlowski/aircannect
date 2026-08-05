@@ -2,34 +2,14 @@
 
 #include <algorithm>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 
 #include "as11_rpc.h"
 #include "debug_log.h"
-#ifdef ARDUINO
-#include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
-
-void *alloc_payload_bytes(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::alloc_large(bytes);
-#else
-    return malloc(bytes);
-#endif
-}
-
-void free_payload_bytes(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
 
 bool emit_matched_response(RpcSource source) {
     return source == RpcSource::Console ||
@@ -64,53 +44,6 @@ bool current_epoch_ms(int64_t &epoch_ms) {
 
 RpcTransport::RpcTransport(CanDriver &can) : can_(can) {
     stats_started_ms_ = millis();
-}
-
-RpcTransport::DeferredPayload::~DeferredPayload() {
-    clear();
-}
-
-RpcTransport::DeferredPayload::DeferredPayload(DeferredPayload &&other) noexcept {
-    move_from(other);
-}
-
-RpcTransport::DeferredPayload &RpcTransport::DeferredPayload::operator=(
-    DeferredPayload &&other) noexcept {
-    if (this != &other) {
-        clear();
-        move_from(other);
-    }
-    return *this;
-}
-
-bool RpcTransport::DeferredPayload::copy_from(Kind next_kind,
-                                            const char *payload,
-                                            size_t payload_len) {
-    clear();
-    kind = next_kind;
-    if (!payload || payload_len == 0) return true;
-    char *next = static_cast<char *>(alloc_payload_bytes(payload_len));
-    if (!next) return false;
-    memcpy(next, payload, payload_len);
-    data = next;
-    len = payload_len;
-    return true;
-}
-
-void RpcTransport::DeferredPayload::clear() {
-    free_payload_bytes(data);
-    data = nullptr;
-    len = 0;
-    kind = Kind::Rpc;
-}
-
-void RpcTransport::DeferredPayload::move_from(DeferredPayload &other) {
-    kind = other.kind;
-    data = other.data;
-    len = other.len;
-    other.kind = Kind::Rpc;
-    other.data = nullptr;
-    other.len = 0;
 }
 
 bool RpcTransport::reserve_reassembly_buffers() {
@@ -168,10 +101,12 @@ void RpcTransport::process_deferred_payloads(size_t budget) {
     for (size_t i = 0; i < budget; ++i) {
         DeferredPayload payload;
         if (!deferred_payloads_.pop(payload)) return;
+
+        const RpcPayloadRef payload_ref = std::move(payload.payload);
         if (payload.kind == DeferredPayload::Kind::Rpc) {
-            handle_rpc_payload(payload.data, payload.len);
+            handle_rpc_payload(payload_ref);
         } else {
-            handle_debug_payload(payload.data, payload.len);
+            handle_debug_payload(payload_ref);
         }
         drain_can_rx();
     }
@@ -179,8 +114,10 @@ void RpcTransport::process_deferred_payloads(size_t budget) {
 
 bool RpcTransport::submit_raw_payload(const std::string &payload, RpcSource source) {
     if (quiesce_mode_) {
-        push_event(RpcEventKind::Info,
-                   "raw RPC rejected while transport quiesce is active");
+        push_text_event(
+            RpcEventKind::Info,
+            "raw RPC rejected while transport quiesce is active",
+            sizeof("raw RPC rejected while transport quiesce is active") - 1);
         return false;
     }
     if (Log::get_cat_level(CAT_RPC) >= LOG_DEBUG) {
@@ -204,7 +141,9 @@ bool RpcTransport::enqueue_payload_frames(const std::string &payload,
     (void)source;
     const size_t frame_count = datagram_frame_count(payload.size());
     if (frame_count > can_.tx_queue_free()) {
-        push_event(RpcEventKind::Info, "CAN TX queue full; payload rejected");
+        push_text_event(RpcEventKind::Info,
+                        "CAN TX queue full; payload rejected",
+                        sizeof("CAN TX queue full; payload rejected") - 1);
         return false;
     }
 
@@ -221,7 +160,9 @@ bool RpcTransport::enqueue_datagram_frame(void *context,
     raw.len = frame.len;
     for (uint8_t i = 0; i < frame.len; ++i) raw.data[i] = frame.data[i];
     if (!transport->can_.enqueue_tx(raw)) {
-        transport->push_event(RpcEventKind::Info, "CAN TX enqueue failed");
+        transport->push_text_event(RpcEventKind::Info,
+                                    "CAN TX enqueue failed",
+                                    sizeof("CAN TX enqueue failed") - 1);
         return false;
     }
 
@@ -332,7 +273,9 @@ bool RpcTransport::enqueue_request(QueuedRequest &request) {
     request.id = ++next_rpc_id_;
     if (!requests_.push(request)) {
         stats_.request_queue_drops++;
-        push_event(RpcEventKind::Info, "RPC request queue full");
+        push_text_event(RpcEventKind::Info,
+                        "RPC request queue full",
+                        sizeof("RPC request queue full") - 1);
         return false;
     }
 
@@ -379,7 +322,7 @@ void RpcTransport::set_stream_notification_observer(
 }
 
 void RpcTransport::set_spool_notification_observer(
-    RpcNotificationObserver observer,
+    RpcRetainedNotificationObserver observer,
     void *context) {
     spool_notification_observer_ = observer;
     spool_notification_context_ = observer ? context : nullptr;
@@ -522,17 +465,6 @@ void RpcTransport::note_request_timeout(RpcSource source, uint32_t now) {
 }
 
 void RpcTransport::push_event(RpcEventKind kind,
-                            const std::string &payload,
-                            RpcSource source,
-                            uint32_t id) {
-    if (payload.empty()) {
-        push_event(kind, RpcPayloadRef(), source, id);
-        return;
-    }
-    push_event(kind, make_rpc_payload_ref(std::string(payload)), source, id);
-}
-
-void RpcTransport::push_event(RpcEventKind kind,
                             RpcPayloadRef payload,
                             RpcSource source,
                             uint32_t id) {
@@ -542,6 +474,19 @@ void RpcTransport::push_event(RpcEventKind kind,
     event.id = id;
     event.payload = std::move(payload);
     if (!events_.push(std::move(event))) stats_.event_drops++;
+}
+
+void RpcTransport::push_text_event(RpcEventKind kind,
+                                   const char *payload,
+                                   size_t payload_len,
+                                   RpcSource source,
+                                   uint32_t id) {
+    RpcPayloadRef owned = copy_rpc_payload(payload, payload_len);
+    if (payload_len != 0 && !owned) {
+        stats_.event_drops++;
+        return;
+    }
+    push_event(kind, std::move(owned), source, id);
 }
 
 void RpcTransport::report_framing_error(const char *channel, const std::string &error) {
@@ -564,8 +509,9 @@ void RpcTransport::report_framing_error(const char *channel, const std::string &
                   name, error.c_str());
     }
 
-    push_event(RpcEventKind::FramingError,
-               std::string("[") + name + "] " + error);
+    const std::string event_payload = std::string("[") + name + "] " + error;
+    push_text_event(RpcEventKind::FramingError,
+                    event_payload.data(), event_payload.size());
 }
 
 void RpcTransport::cancel_pending_request(const char *reason) {
@@ -585,11 +531,11 @@ void RpcTransport::cancel_pending_request(const char *reason) {
                  pending_.method.c_str(),
                  source_name(pending_.source),
                  reason ? reason : "unknown");
-        push_event(RpcEventKind::Info, buf);
+        push_text_event(RpcEventKind::Info, buf, strlen(buf));
     }
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::cancelled(),
-                     RpcCompletionCause::Cancelled, nullptr,
+                     RpcCompletionCause::Cancelled, RpcPayloadRef(),
                      reason ? reason : "cancelled", false,
                      request_completions_);
     pending_ = {};
@@ -659,13 +605,14 @@ void RpcTransport::cancel_queued_request(const QueuedRequest &request,
                  request.method.c_str(),
                  source_name(request.source),
                  reason ? reason : "unknown");
-        push_event(RpcEventKind::Info, buf);
+        push_text_event(RpcEventKind::Info, buf, strlen(buf));
     }
     const OperationOutcome outcome =
         cause == RpcCompletionCause::Cancelled
             ? OperationOutcome::cancelled()
             : OperationOutcome::failed();
-    complete_request(request.id, request.generation, outcome, cause, nullptr,
+    complete_request(request.id, request.generation, outcome, cause,
+                     RpcPayloadRef(),
                      reason ? reason : "cancelled", false,
                      request_completions_);
 }
@@ -674,7 +621,7 @@ void RpcTransport::complete_request(uint32_t id,
                                     uint32_t generation,
                                     OperationOutcome outcome,
                                     RpcCompletionCause cause,
-                                    const std::string *payload,
+                                    const RpcPayloadRef &payload,
                                     const char *reason,
                                     bool response_error,
                                     RequestCompletionQueue &completions,
@@ -688,7 +635,7 @@ void RpcTransport::complete_request(uint32_t id,
     completion.ticket = {id, generation};
     completion.outcome = outcome;
     completion.cause = cause;
-    if (payload) completion.payload = *payload;
+    completion.payload = payload;
     completion.reason = reason ? reason : "";
     completion.response_error = response_error;
     completion.dispatch_utc_ms = dispatch_utc_ms;
@@ -913,7 +860,7 @@ void RpcTransport::check_pending_timeout() {
              source_name(pending_.source));
     const bool addressed_request = pending_.generation != 0;
     if (!addressed_request && pending_.source != RpcSource::Scheduler) {
-        push_event(RpcEventKind::Info, buf);
+        push_text_event(RpcEventKind::Info, buf, strlen(buf));
     }
     stats_.request_timeouts++;
     const bool quiesce_control =
@@ -928,30 +875,28 @@ void RpcTransport::check_pending_timeout() {
     }
     complete_request(pending_.id, pending_.generation,
                      OperationOutcome::failed(), RpcCompletionCause::Timeout,
-                     nullptr, "timeout", false, request_completions_);
+                     RpcPayloadRef(), "timeout", false, request_completions_);
 
     pending_ = {};
 }
 
-void RpcTransport::handle_event_notification(const char *payload,
-                                           size_t payload_len) {
+void RpcTransport::handle_event_notification(const RpcPayloadRef &payload) {
     if (!event_notification_observer_) return;
-    event_notification_observer_(event_notification_context_, payload,
-                                 payload_len, millis());
+
+    event_notification_observer_(event_notification_context_,
+                                 rpc_payload_view(payload), millis());
 }
 
-void RpcTransport::handle_stream_notification(const char *payload,
-                                            size_t payload_len) {
+void RpcTransport::handle_stream_notification(const RpcPayloadRef &payload) {
     if (!stream_notification_observer_) return;
-    stream_notification_observer_(stream_notification_context_, payload,
-                                  payload_len, millis());
+
+    stream_notification_observer_(stream_notification_context_,
+                                  rpc_payload_view(payload), millis());
 }
 
-void RpcTransport::handle_spool_notification(const char *payload,
-                                           size_t payload_len) {
+void RpcTransport::handle_spool_notification(const RpcPayloadRef &payload) {
     if (!spool_notification_observer_) return;
-    spool_notification_observer_(spool_notification_context_, payload,
-                                 payload_len, millis());
+    spool_notification_observer_(spool_notification_context_, payload, millis());
 }
 
 void RpcTransport::note_transport_reset() {
@@ -960,10 +905,11 @@ void RpcTransport::note_transport_reset() {
 }
 
 void RpcTransport::enqueue_deferred_payload(DeferredPayload::Kind kind,
-                                          const char *payload,
-                                          size_t payload_len) {
+                                          RpcPayloadView payload) {
     DeferredPayload deferred;
-    if (!deferred.copy_from(kind, payload, payload_len)) {
+    deferred.kind = kind;
+    deferred.payload = copy_rpc_payload(payload.data(), payload.size());
+    if (!payload.empty() && !deferred.payload) {
         stats_.deferred_payload_alloc_failures++;
         stats_.deferred_payload_drops++;
         return;
@@ -982,8 +928,8 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
         DatagramFeedResult result = rpc_rx_.feed(frame.data, frame.len, now);
         if (result.status == DatagramStatus::Complete) {
             enqueue_deferred_payload(DeferredPayload::Kind::Rpc,
-                                     result.payload_data,
-                                     result.payload_len);
+                                     RpcPayloadView(result.payload_data,
+                                                    result.payload_len));
             rpc_rx_.reset();
         } else if (result.status == DatagramStatus::Error) {
             stats_.rpc_framing_errors++;
@@ -998,8 +944,8 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
         DatagramFeedResult result = log_rx_.feed(frame.data, frame.len, now);
         if (result.status == DatagramStatus::Complete) {
             enqueue_deferred_payload(DeferredPayload::Kind::DebugLog,
-                                     result.payload_data,
-                                     result.payload_len);
+                                     RpcPayloadView(result.payload_data,
+                                                    result.payload_len));
             log_rx_.reset();
         } else if (result.status == DatagramStatus::Error) {
             stats_.log_framing_errors++;
@@ -1015,19 +961,18 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
         deferred_payloads_.clear();
         cancel_all_requests("device_boot");
         note_transport_reset();
-        push_event(RpcEventKind::BootNotification, last_boot_notification_);
+        push_text_event(RpcEventKind::BootNotification,
+                        last_boot_notification_.data(),
+                        last_boot_notification_.size());
     }
 }
 
-void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
+void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload) {
     stats_.rpc_datagrams++;
-    auto make_payload_string = [&]() {
-        return payload && payload_len ? std::string(payload, payload_len)
-                                      : std::string();
-    };
+    const RpcPayloadView view = rpc_payload_view(payload);
 
     RpcEnvelope envelope;
-    (void)inspect_rpc_envelope(payload, payload_len, envelope);
+    (void)inspect_rpc_envelope(view.data(), view.size(), envelope);
 
     switch (envelope.kind) {
         case RpcPayloadKind::Notification: {
@@ -1037,43 +982,27 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
             const bool event_notification =
                 envelope.method_is("EventNotification");
             if (stream_data) {
-                handle_stream_notification(payload, payload_len);
+                handle_stream_notification(payload);
             }
             if (event_notification) {
-                handle_event_notification(payload, payload_len);
+                handle_event_notification(payload);
             }
             if (spool_fragment) {
-                handle_spool_notification(payload, payload_len);
+                handle_spool_notification(payload);
             }
             if (!stream_data && !spool_fragment) {
                 Log::log_payload(CAT_RPC, LOG_DEBUG, "[NOTIFY] ",
-                                 payload, payload_len);
+                                 view.data(), view.size());
             }
-            RpcPayloadRef payload_ref;
-            auto ref_payload = [&]() {
-                if (!payload_ref) {
-                    payload_ref = make_rpc_payload_ref(make_payload_string());
-                }
-                return payload_ref;
-            };
             if (raw_rpc_forwarding_enabled_) {
-                push_event(RpcEventKind::RpcNotification, ref_payload());
+                push_event(RpcEventKind::RpcNotification, payload);
             } else if (!stream_data && !event_notification && !spool_fragment) {
-                push_event(RpcEventKind::RpcNotification, ref_payload());
+                push_event(RpcEventKind::RpcNotification, payload);
             }
             break;
         }
         case RpcPayloadKind::Response: {
             stats_.rpc_responses++;
-            std::string owned_payload = make_payload_string();
-            RpcPayloadRef payload_ref;
-            auto ref_payload = [&]() {
-                if (!payload_ref) {
-                    payload_ref =
-                        make_rpc_payload_ref(std::move(owned_payload));
-                }
-                return payload_ref;
-            };
             const uint32_t response_id = envelope.id;
             const bool has_response_id = true;
             if (pending_.active && has_response_id &&
@@ -1090,10 +1019,10 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                              matched_method.c_str(),
                              source_name(response_source));
                     Log::log_payload(CAT_RPC, LOG_DEBUG, prefix,
-                                     owned_payload);
+                                     view.data(), view.size());
                 }
                 const bool response_error =
-                    json_member_present(owned_payload, "error");
+                    json_member_present(view.data(), view.size(), "error");
                 const uint32_t response_ms = millis();
                 int64_t response_epoch_ms = 0;
                 (void)current_epoch_ms(response_epoch_ms);
@@ -1101,7 +1030,7 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                     pending_.id, pending_.generation,
                     response_error ? OperationOutcome::failed()
                                    : OperationOutcome::succeeded(),
-                    RpcCompletionCause::Response, &owned_payload, "",
+                    RpcCompletionCause::Response, payload, "",
                     response_error, request_completions_,
                     pending_.dispatch_utc_ms, response_epoch_ms,
                     pending_.dispatch_ms, response_ms);
@@ -1109,7 +1038,7 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                 pending_ = {};
                 if (addressed_request) break;
                 if (!emit_matched_response(response_source)) break;
-                push_event(RpcEventKind::RpcResponse, ref_payload(),
+                push_event(RpcEventKind::RpcResponse, payload,
                            response_source, matched_id);
                 break;
             }
@@ -1124,9 +1053,9 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                              static_cast<unsigned long>(response_id),
                              source_name(passthrough_source));
                     Log::log_payload(CAT_RPC, LOG_DEBUG, prefix,
-                                     owned_payload);
+                                     view.data(), view.size());
                 }
-                push_event(RpcEventKind::RpcResponse, ref_payload(),
+                push_event(RpcEventKind::RpcResponse, payload,
                            passthrough_source, response_id);
                 break;
             }
@@ -1141,31 +1070,25 @@ void RpcTransport::handle_rpc_payload(const char *payload, size_t payload_len) {
                           static_cast<unsigned long>(pending_.id));
             }
             Log::log_payload(CAT_RPC, LOG_DEBUG, "[RESPONSE_UNMATCHED] ",
-                             owned_payload);
-            push_event(RpcEventKind::RpcResponse, ref_payload());
+                             view.data(), view.size());
+            push_event(RpcEventKind::RpcResponse, payload);
             break;
         }
         case RpcPayloadKind::Unknown: {
             stats_.rpc_unmatched++;
-            std::string owned_payload = make_payload_string();
             Log::log_payload(CAT_RPC, LOG_DEBUG, "[UNMATCHED] ",
-                             owned_payload);
-            RpcPayloadRef payload_ref =
-                make_rpc_payload_ref(std::move(owned_payload));
-            push_event(RpcEventKind::RpcUnmatched, payload_ref);
+                             view.data(), view.size());
+            push_event(RpcEventKind::RpcUnmatched, payload);
             break;
         }
     }
 }
 
-void RpcTransport::handle_debug_payload(const char *payload, size_t payload_len) {
-    Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11] ", payload, payload_len);
+void RpcTransport::handle_debug_payload(const RpcPayloadRef &payload) {
+    const RpcPayloadView view = rpc_payload_view(payload);
+    Log::log_payload(CAT_RPC, LOG_DEBUG, "[AS11] ", view.data(), view.size());
     if (raw_rpc_forwarding_enabled_) {
-        push_event(RpcEventKind::DebugLog,
-                   make_rpc_payload_ref(
-                       payload && payload_len
-                           ? std::string(payload, payload_len)
-                           : std::string()));
+        push_event(RpcEventKind::DebugLog, payload);
     }
 }
 

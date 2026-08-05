@@ -3,7 +3,7 @@
 #include <stddef.h>
 
 #include "board_report.h"
-#include "large_text_buffer.h"
+#include "fixed_queue.h"
 #include "report_spool_pressure_monitor.h"
 #include "report_spool_types.h"
 #include "rpc_request_port.h"
@@ -20,7 +20,7 @@ public:
     void poll(bool transport_backpressure_active,
               uint32_t rx_queue_full_alerts);
 
-    bool enqueue_notification(const char *payload, size_t payload_len);
+    bool enqueue_notification(const RpcPayloadRef &payload);
     bool drain_notification();
 
     bool active() const { return client_.active(); }
@@ -41,13 +41,11 @@ public:
 private:
     bool notification_backpressure_active() const;
     void clear_notifications();
-    void release_notification(size_t index);
 
     SpoolClient client_;
     ReportSpoolPressureMonitor pressure_;
-    LargeTextBuffer notifications_[AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH];
-    size_t notification_head_ = 0;
-    size_t notification_count_ = 0;
+    FixedQueue<RpcPayloadRef, AC_REPORT_SPOOL_NOTIFICATION_QUEUE_DEPTH>
+        notifications_;
     bool notification_loss_pending_ = false;
 };
 

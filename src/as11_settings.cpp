@@ -712,11 +712,12 @@ void As11SettingsState::release_storage() {
 }
 
 bool As11SettingsState::apply_settings_get_response(
-    const std::string &payload,
+    RpcPayloadView payload,
     uint32_t now_ms,
     bool *complete_snapshot_out) {
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, payload);
+    DeserializationError err = deserializeJson(
+        doc, payload.data() ? payload.data() : "", payload.size());
     if (err) return false;
 
     JsonObjectConst result = doc["result"].as<JsonObjectConst>();

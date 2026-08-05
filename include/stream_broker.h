@@ -63,11 +63,9 @@ public:
                                const std::string &params_json);
     void release(StreamConsumerHandle handle);
 
-    void observe_external_request(const char *payload,
-                                  size_t payload_len,
+    void observe_external_request(RpcPayloadView payload,
                                   uint32_t now_ms);
-    void observe_external_response(const char *payload,
-                                   size_t payload_len,
+    void observe_external_response(RpcPayloadView payload,
                                    uint32_t now_ms);
     void set_external_transport_connected(bool connected, uint32_t now_ms);
 
@@ -98,7 +96,7 @@ public:
     void mark_command_timeout(uint32_t now_ms);
     void mark_command_response(StreamCommandType type,
                                bool is_error,
-                               const std::string &payload,
+                               RpcPayloadView payload,
                                uint32_t now_ms);
     void mark_reattach(uint32_t now_ms);
     void request_quiesce(uint32_t now_ms);
@@ -111,10 +109,7 @@ public:
 
     void set_frame_observer(StreamFrameObserver observer, void *context);
 
-    StreamPublishResult publish_stream_data(const std::string &payload,
-                                            uint32_t now_ms);
-    StreamPublishResult publish_stream_data(const char *payload,
-                                            size_t payload_len,
+    StreamPublishResult publish_stream_data(RpcPayloadView payload,
                                             uint32_t now_ms);
 
     bool next_frame(StreamConsumerHandle handle, StreamFrameRef &frame);
@@ -212,7 +207,7 @@ private:
                             const std::string &data_id);
     static bool merge_data_ids(Subscription &subscription,
                                const Subscription &input);
-    static bool parse_start_response(const std::string &payload,
+    static bool parse_start_response(RpcPayloadView payload,
                                      Subscription &accepted,
                                      uint32_t &stream_id);
 

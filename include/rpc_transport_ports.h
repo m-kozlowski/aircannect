@@ -2,10 +2,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <memory>
 #include <string>
 
 #include "rpc_request_port.h"
+#include "rpc_payload.h"
 
 namespace aircannect {
 
@@ -19,21 +19,11 @@ enum class RpcEventKind {
     Info,
 };
 
-using RpcPayloadRef = std::shared_ptr<const std::string>;
-
-inline RpcPayloadRef make_rpc_payload_ref(std::string payload) {
-    return std::make_shared<const std::string>(std::move(payload));
-}
-
 struct RpcEvent {
     RpcEventKind kind = RpcEventKind::Info;
     RpcSource source = RpcSource::Internal;
     uint32_t id = 0;
     RpcPayloadRef payload;
-
-    const char *payload_c_str() const {
-        return payload ? payload->c_str() : "";
-    }
 };
 
 struct RpcTransportStats {
