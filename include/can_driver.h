@@ -66,6 +66,10 @@ public:
 
     size_t tx_queue_free() const;
     size_t tx_queue_depth() const;
+    bool tx_idle() const;
+    void set_ack_gap_expected(bool expected) {
+        ack_gap_expected_ = expected;
+    }
     bool controller_status(CanControllerStatus &out) const;
     const CanDriverStats &stats() const { return stats_; }
     static const char *state_name(twai_state_t state);
@@ -100,6 +104,7 @@ private:
 
     bool installed_ = false;
     bool debug_log_rx_enabled_ = true;
+    bool ack_gap_expected_ = false;
     CanDriverStats stats_ = {};
 };
 

@@ -73,6 +73,8 @@ public:
     bool background_backpressure_active() const;
     void set_as11_unavailable(bool unavailable);
     void set_quiesce_mode(bool requested) override;
+    bool send_quiesce_request(const std::string &method,
+                              const std::string &params_json) override;
     void request_debug_log_rx(bool enabled) override;
     RpcQuiesceStatus quiesce_status() const override;
 

@@ -62,11 +62,11 @@ void RpcQuiesceCoordinator::begin(uint32_t now_ms) {
     requested_ = true;
     complete_ = false;
     timed_out_ = false;
-    deadline_ms_ = now_ms + AC_ESP_OTA_QUIESCE_TIMEOUT_MS;
+    deadline_ms_ = now_ms + AC_RPC_QUIESCE_TIMEOUT_MS;
     if (deadline_ms_ == 0) deadline_ms_ = 1;
 
-    Log::logf(CAT_OTA, LOG_INFO,
-              "quiescing AS11 push traffic before ESP OTA\n");
+    Log::logf(CAT_RPC, LOG_INFO,
+              "quiescing AS11 push traffic\n");
 
     transport_.set_quiesce_mode(true);
     streams_.request_quiesce(now_ms);
@@ -94,7 +94,7 @@ void RpcQuiesceCoordinator::log_timeout() {
     const RpcQuiesceStatus transport = transport_.quiesce_status();
     const EventBrokerStatus events = events_.status();
 
-    Log::logf(CAT_OTA, LOG_WARN,
+    Log::logf(CAT_RPC, LOG_WARN,
               "AS11 quiesce timed out stream=%u event=%u pending=%u "
               "retry=%u queue=%u payload_q=%u tx_q=%u debug_rx=%u "
               "filter_pending=%u event_active=%u event_pending=%u\n",

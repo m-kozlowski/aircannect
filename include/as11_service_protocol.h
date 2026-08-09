@@ -21,6 +21,13 @@ static constexpr size_t AS11_SERVICE_V2_PAYLOAD_MAX_BYTES =
     AS11_SERVICE_PACKET_MAX_BYTES - AS11_SERVICE_PACKET_HEADER_BYTES -
     AS11_SERVICE_V2_CRC_BYTES;
 
+// Local host-transport extension. ENTER is consumed by AirCANnect and is
+// never forwarded to the AS11 service CAN IDs.
+static constexpr uint8_t AS11_SERVICE_COMMAND_ENTER = 0x01;
+static constexpr uint8_t AS11_SERVICE_COMMAND_INFO = 0x02;
+static constexpr uint8_t AS11_SERVICE_STATUS_OK = 0x00;
+static constexpr uint8_t AS11_SERVICE_STATUS_ENTRY_TIMEOUT = 0x0B;
+
 static constexpr uint8_t AS11_SERVICE_RESPONSE_BLOCK_SIZE = 128;
 static constexpr uint8_t AS11_SERVICE_RESPONSE_ST_MIN = 0;
 
@@ -55,6 +62,16 @@ As11ServicePacketError as11_service_validate_packet(
     const uint8_t *packet,
     size_t packet_size,
     As11ServicePacketHeader &header);
+
+bool as11_service_encode_packet(uint8_t protocol_version,
+                                uint8_t command,
+                                uint8_t status,
+                                uint16_t sequence,
+                                const uint8_t *payload,
+                                size_t payload_size,
+                                uint8_t *packet,
+                                size_t packet_capacity,
+                                size_t &packet_size);
 
 enum class As11IsoTpFrameType : uint8_t {
     Single = 0,

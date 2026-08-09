@@ -45,7 +45,7 @@ public:
     bool begin(uint16_t port = AC_TCP_BRIDGE_PORT);
     bool restart(uint16_t port = AC_TCP_BRIDGE_PORT);
     void stop();
-    void poll(RpcPassthroughPort &rpc);
+    void poll(RpcPassthroughPort &rpc, bool service_entry_allowed);
 
     // RPC transport
     void broadcast_rpc_payload(const RpcPayloadRef &payload);
@@ -65,9 +65,10 @@ private:
     void pump_outputs();
     LineOutputPumpResult pump_rpc_output(size_t idx);
     LineOutputPumpResult pump_service_output(size_t idx);
-    void poll_inputs(RpcPassthroughPort &rpc);
+    void poll_inputs(RpcPassthroughPort &rpc,
+                     bool service_entry_allowed);
     bool begin_service_client(size_t idx, uint32_t now_ms);
-    bool pump_service_input(size_t idx);
+    bool pump_service_input(size_t idx, bool service_entry_allowed);
     bool accept_rpc_byte(size_t idx, uint8_t value,
                          RpcPassthroughPort &rpc, uint32_t now_ms);
     void poll_service_idle(uint32_t now_ms);
@@ -90,6 +91,7 @@ private:
     size_t service_request_received_ = 0;
     std::shared_ptr<const LargeByteBuffer> service_output_;
     size_t service_output_pos_ = 0;
+    bool service_close_after_output_ = false;
     uint32_t service_last_activity_ms_ = 0;
     size_t service_owner_ = AC_MAX_TCP_CLIENTS;
 

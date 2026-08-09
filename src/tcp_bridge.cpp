@@ -34,13 +34,14 @@ void TcpBridge::stop() {
     stop_line_server();
 }
 
-void TcpBridge::poll(RpcPassthroughPort &rpc) {
+void TcpBridge::poll(RpcPassthroughPort &rpc,
+                     bool service_entry_allowed) {
     if (!started()) return;
 
     accept_clients();
     poll_service_completion();
     pump_outputs();
-    poll_inputs(rpc);
+    poll_inputs(rpc, service_entry_allowed);
     poll_service_idle(millis());
 }
 
@@ -150,7 +151,8 @@ void TcpBridge::poll_service_completion() {
     }
 
     if (!service_output_) {
-        (void)service_.take_response(service_output_);
+        (void)service_.take_response(service_output_,
+                                     service_close_after_output_);
         service_output_pos_ = 0;
     }
 }
@@ -237,6 +239,10 @@ LineOutputPumpResult TcpBridge::pump_service_output(size_t idx) {
         service_output_.reset();
         service_output_pos_ = 0;
         result.completed = true;
+        if (service_close_after_output_) {
+            service_close_after_output_ = false;
+            disconnect_slot(idx);
+        }
         return result;
     }
 
@@ -254,11 +260,16 @@ LineOutputPumpResult TcpBridge::pump_service_output(size_t idx) {
         service_output_.reset();
         service_output_pos_ = 0;
         result.completed = true;
+        if (service_close_after_output_) {
+            service_close_after_output_ = false;
+            disconnect_slot(idx);
+        }
     }
     return result;
 }
 
-void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
+void TcpBridge::poll_inputs(RpcPassthroughPort &rpc,
+                            bool service_entry_allowed) {
     for (size_t i = 0; i < AC_MAX_TCP_CLIENTS; ++i) {
         if (clients_[i].fd() < 0) {
             if (protocols_[i] != TcpBridgeClientProtocol::Unknown) {
@@ -279,7 +290,7 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
             continue;
         }
         if (protocols_[i] == TcpBridgeClientProtocol::Service) {
-            (void)pump_service_input(i);
+            (void)pump_service_input(i, service_entry_allowed);
             continue;
         }
 
@@ -294,7 +305,7 @@ void TcpBridge::poll_inputs(RpcPassthroughPort &rpc) {
                     if (!begin_service_client(i, now_ms)) break;
                     service_header_[0] = value;
                     service_header_received_ = 1;
-                    (void)pump_service_input(i);
+                    (void)pump_service_input(i, service_entry_allowed);
                     break;
                 } else {
                     protocols_[i] = TcpBridgeClientProtocol::Rpc;
@@ -325,7 +336,8 @@ bool TcpBridge::begin_service_client(size_t idx, uint32_t now_ms) {
     return true;
 }
 
-bool TcpBridge::pump_service_input(size_t idx) {
+bool TcpBridge::pump_service_input(size_t idx,
+                                   bool service_entry_allowed) {
     if (idx >= AC_MAX_TCP_CLIENTS || idx != service_owner_ ||
         service_.pending() || service_output_) {
         return false;
@@ -418,7 +430,8 @@ bool TcpBridge::pump_service_input(size_t idx) {
             std::move(service_request_);
         reset_service_request();
 
-        if (!service_.submit_request(std::move(complete), millis())) {
+        if (!service_.submit_packet(std::move(complete),
+                                    service_entry_allowed, millis())) {
             Log::logf(CAT_TCP, LOG_WARN,
                       "[CLIENT %u SERVICE] request rejected error=%s\n",
                       static_cast<unsigned>(idx),
@@ -510,6 +523,7 @@ void TcpBridge::disconnect_slot(size_t idx) {
         reset_service_request();
         service_output_.reset();
         service_output_pos_ = 0;
+        service_close_after_output_ = false;
         service_last_activity_ms_ = 0;
         service_owner_ = AC_MAX_TCP_CLIENTS;
     }

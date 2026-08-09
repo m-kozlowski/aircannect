@@ -242,9 +242,11 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
     }
 
     if (alerts & TWAI_ALERT_TX_FAILED) {
-        stats_.tx_failures++;
-        recover_or_restart("CAN TX failed");
-        return;
+        if (!ack_gap_expected_) {
+            stats_.tx_failures++;
+            recover_or_restart("CAN TX failed");
+            return;
+        }
     }
 
     twai_status_info_t status = {};
@@ -255,7 +257,7 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
 
     const bool busy_before = status.msgs_to_tx > 0 || tx_queue_.count() > 0;
     if (busy_before && !last_tx_success_ms_) last_tx_success_ms_ = now;
-    if (busy_before &&
+    if (busy_before && !ack_gap_expected_ &&
         static_cast<int32_t>(now - last_tx_success_ms_) >= 100) {
         Log::logf(CAT_CAN, LOG_WARN, "TX confirmation timeout\n");
         stats_.tx_failures++;
@@ -379,7 +381,15 @@ void CanDriver::handle_alerts(uint32_t alerts) {
     if (alerts & TWAI_ALERT_BUS_ERROR) stats_.bus_error_alerts++;
     if (alerts & TWAI_ALERT_RX_QUEUE_FULL) stats_.rx_queue_full_alerts++;
 
-    const uint32_t visible_alerts = alerts & ~TWAI_ALERT_TX_SUCCESS;
+    uint32_t visible_alerts = alerts & ~TWAI_ALERT_TX_SUCCESS;
+    if (ack_gap_expected_) {
+        visible_alerts &= ~(TWAI_ALERT_TX_FAILED |
+                            TWAI_ALERT_ERR_PASS |
+                            TWAI_ALERT_ERR_ACTIVE |
+                            TWAI_ALERT_BUS_ERROR |
+                            TWAI_ALERT_ABOVE_ERR_WARN |
+                            TWAI_ALERT_BELOW_ERR_WARN);
+    }
     if (!visible_alerts) return;
 
     if (visible_alerts == TWAI_ALERT_ARB_LOST) {
@@ -595,6 +605,8 @@ bool CanDriver::reinstall_controller() {
 }
 
 void CanDriver::clear_recovery_queues() {
+    ack_gap_expected_ = false;
+
     if (installed_) {
         (void)twai_clear_transmit_queue();
         (void)twai_clear_receive_queue();
@@ -733,6 +745,16 @@ size_t CanDriver::tx_queue_free() const {
 
 size_t CanDriver::tx_queue_depth() const {
     return tx_queue_.count();
+}
+
+bool CanDriver::tx_idle() const {
+    if (!installed_ || recovery_active_ || tx_queue_.count() != 0) {
+        return false;
+    }
+
+    twai_status_info_t status = {};
+    return twai_get_status_info(&status) == ESP_OK &&
+           status.state == TWAI_STATE_RUNNING && status.msgs_to_tx == 0;
 }
 
 const char *CanDriver::state_name(twai_state_t state) {

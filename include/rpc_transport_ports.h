@@ -96,6 +96,8 @@ public:
     virtual ~RpcQuiescePort() = default;
 
     virtual void set_quiesce_mode(bool requested) = 0;
+    virtual bool send_quiesce_request(const std::string &method,
+                                      const std::string &params_json) = 0;
     virtual void request_debug_log_rx(bool enabled) = 0;
     virtual RpcQuiesceStatus quiesce_status() const = 0;
 };

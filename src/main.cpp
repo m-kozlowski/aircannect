@@ -1000,7 +1000,10 @@ void loop() {
     // RPC and OTA ingress
     const bool esp_ota_quiesce_requested =
         firmware_installer.as11_quiesce_required();
-    rpc_quiesce_coordinator.update(esp_ota_quiesce_requested, now_ms);
+    const bool as11_service_exclusive =
+        as11_service_manager.exclusive_requested();
+    rpc_quiesce_coordinator.update(
+        esp_ota_quiesce_requested || as11_service_exclusive, now_ms);
 
     const bool resmed_ota_transport_active =
         resmed_ota_manager.transport_active();
@@ -1011,6 +1014,9 @@ void loop() {
                                                    now_ms);
 
     rpc_transport.poll();
+    as11_service_manager.poll_entry(
+        rpc_transport, rpc_quiesce_coordinator.complete(),
+        rpc_quiesce_coordinator.timed_out(), now_ms);
     as11_service_manager.poll(now_ms);
     sync_rpc_transport_generation(now_ms);
     stream_broker.poll(rpc_transport, now_ms);
@@ -1019,7 +1025,8 @@ void loop() {
                           as11_device_service.unavailable());
     as11_device_service.poll(
         rpc_transport, now_ms,
-        esp_ota_quiesce_requested || resmed_ota_transport_active);
+        esp_ota_quiesce_requested || resmed_ota_transport_active ||
+            as11_service_exclusive);
     const bool as11_unavailable = as11_device_service.unavailable();
     rpc_transport.set_as11_unavailable(as11_unavailable);
 
@@ -1028,7 +1035,7 @@ void loop() {
     as11_settings_manager.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active ||
-            as11_unavailable);
+            as11_service_exclusive || as11_unavailable);
     config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();
@@ -1038,8 +1045,10 @@ void loop() {
 
     firmware_installer.poll_prepare(
         esp_ota_quiesce_requested &&
+            !as11_service_exclusive &&
             rpc_quiesce_coordinator.complete(),
         esp_ota_quiesce_requested &&
+            !as11_service_exclusive &&
             rpc_quiesce_coordinator.timed_out());
 
     drain_can_rx_after("rpc_ota_prepare");
@@ -1108,7 +1117,7 @@ void loop() {
     Log::poll(wifi_manager.sta_ipv4_online());
     drain_can_rx_after("log");
 
-    if (!resmed_ota_transport_active) {
+    if (!resmed_ota_transport_active && !as11_service_exclusive) {
         time_sync_service.poll();
     }
 
@@ -1194,7 +1203,10 @@ void loop() {
     web_ui.poll(drain_can_rx_after);
     drain_can_rx_after("web_ui");
 
-    tcp_bridge.poll(rpc_transport);
+    const bool service_entry_allowed =
+        !esp_ota_quiesce_requested && !firmware_installer.active() &&
+        !resmed_ota_manager.active();
+    tcp_bridge.poll(rpc_transport, service_entry_allowed);
     telnet_console.poll(config_service.data(), console_router);
     serial_management_console.poll(Serial, Serial, console_router);
 

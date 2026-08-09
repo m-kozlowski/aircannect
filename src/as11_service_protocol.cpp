@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits.h>
+#include <limits>
 #include <string.h>
 
 #include "crc16.h"
@@ -32,6 +33,18 @@ uint32_t get_le32(const uint8_t *value) {
            (static_cast<uint32_t>(value[1]) << 8) |
            (static_cast<uint32_t>(value[2]) << 16) |
            (static_cast<uint32_t>(value[3]) << 24);
+}
+
+void put_le16(uint8_t *destination, uint16_t value) {
+    destination[0] = static_cast<uint8_t>(value & 0xFF);
+    destination[1] = static_cast<uint8_t>(value >> 8);
+}
+
+void put_le32(uint8_t *destination, uint32_t value) {
+    destination[0] = static_cast<uint8_t>(value & 0xFF);
+    destination[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    destination[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
+    destination[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
 }
 
 bool service_protocol_supported(uint8_t protocol_version) {
@@ -140,6 +153,56 @@ As11ServicePacketError as11_service_validate_packet(
         }
     }
     return As11ServicePacketError::None;
+}
+
+bool as11_service_encode_packet(uint8_t protocol_version,
+                                uint8_t command,
+                                uint8_t status,
+                                uint16_t sequence,
+                                const uint8_t *payload,
+                                size_t payload_size,
+                                uint8_t *packet,
+                                size_t packet_capacity,
+                                size_t &packet_size) {
+    packet_size = 0;
+
+    const size_t crc_bytes =
+        as11_service_packet_crc_bytes(protocol_version);
+    if (crc_bytes == 0 ||
+        payload_size > std::numeric_limits<uint16_t>::max() ||
+        (payload_size != 0 && !payload) || !packet) {
+        return false;
+    }
+
+    const size_t required = AS11_SERVICE_PACKET_HEADER_BYTES +
+                            payload_size + crc_bytes;
+    if (required > AS11_SERVICE_PACKET_MAX_BYTES ||
+        required > packet_capacity) {
+        return false;
+    }
+
+    packet[0] = AS11_SERVICE_PACKET_MAGIC;
+    packet[1] = protocol_version;
+    packet[2] = command;
+    packet[3] = status;
+    put_le16(packet + 4, sequence);
+    put_le16(packet + 6, static_cast<uint16_t>(payload_size));
+    if (payload_size != 0) {
+        memcpy(packet + AS11_SERVICE_PACKET_HEADER_BYTES,
+               payload, payload_size);
+    }
+
+    const size_t crc_offset =
+        AS11_SERVICE_PACKET_HEADER_BYTES + payload_size;
+    if (protocol_version == AS11_SERVICE_PROTOCOL_VERSION_V1) {
+        put_le32(packet + crc_offset, crc32_ieee(packet, crc_offset));
+    } else {
+        put_le16(packet + crc_offset,
+                 crc16_ccitt_false(packet, crc_offset));
+    }
+
+    packet_size = required;
+    return true;
 }
 
 bool as11_isotp_frame_type(const uint8_t *frame,

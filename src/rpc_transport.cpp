@@ -408,6 +408,21 @@ void RpcTransport::set_quiesce_mode(bool requested) {
     }
 }
 
+bool RpcTransport::send_quiesce_request(
+    const std::string &method,
+    const std::string &params_json) {
+    if (!quiesce_mode_ || method.empty() || !quiesce_idle()) return false;
+
+    const uint32_t id = ++next_rpc_id_;
+    const std::string payload = build_rpc_request(method, params_json, id);
+    if (!enqueue_payload_frames(payload, RpcSource::Internal)) return false;
+
+    Log::logf(CAT_RPC, LOG_DEBUG,
+              "quiesce request dispatched id=%lu method=%s\n",
+              static_cast<unsigned long>(id), method.c_str());
+    return true;
+}
+
 void RpcTransport::request_debug_log_rx(bool enabled) {
     if (enabled == debug_log_rx_requested_) return;
 
@@ -417,7 +432,7 @@ void RpcTransport::request_debug_log_rx(bool enabled) {
 
 bool RpcTransport::quiesce_idle() const {
     return !pending_.active && !dispatch_retry_active_ && requests_.empty() &&
-           deferred_payloads_.empty() && can_.tx_queue_depth() == 0;
+           deferred_payloads_.empty() && can_.tx_idle();
 }
 
 RpcQuiesceStatus RpcTransport::quiesce_status() const {
@@ -431,6 +446,10 @@ RpcQuiesceStatus RpcTransport::quiesce_status() const {
     out.request_queue_depth = requests_.count();
     out.payload_queue_depth = deferred_payloads_.count();
     out.tx_queue_depth = can_.tx_queue_depth();
+    CanControllerStatus can_status;
+    if (can_.controller_status(can_status)) {
+        out.tx_queue_depth += can_status.msgs_to_tx;
+    }
     return out;
 }
 
