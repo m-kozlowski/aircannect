@@ -77,6 +77,14 @@ const char *reset_params(As11ResetMode mode) {
 bool As11DeviceService::request_healthcheck(RpcRequestPort &rpc,
                                             RpcSource source,
                                             uint32_t now_ms) {
+    if (unavailable()) {
+        schedule_query(QueryKind::Identity, now_ms, source);
+        if (!query_ticket_.valid()) {
+            (void)submit_query(rpc, QueryKind::Identity, now_ms);
+        }
+        return true;
+    }
+
     schedule_initialized_ = true;
     schedule_query(QueryKind::Identity, now_ms, source);
     schedule_query(QueryKind::Runtime, now_ms, source);
@@ -94,6 +102,8 @@ bool As11DeviceService::request_healthcheck(RpcRequestPort &rpc,
 bool As11DeviceService::request_clock_read(RpcRequestPort &rpc,
                                            RpcSource source,
                                            uint32_t now_ms) {
+    if (unavailable()) return false;
+
     schedule_initialized_ = true;
     schedule_query(QueryKind::Clock, now_ms, source);
 
@@ -109,6 +119,8 @@ OperationSubmission As11DeviceService::request_therapy(
     As11TherapyTarget target,
     RpcSource source,
     uint32_t now_ms) {
+    if (unavailable()) return OperationSubmission::rejected();
+
     const char *method = therapy_method(target);
     if (!method) return OperationSubmission::rejected();
     if (therapy_ticket_.valid() || state_.therapy_command_pending()) {
@@ -135,6 +147,8 @@ OperationSubmission As11DeviceService::request_reset(
     RpcRequestPort &rpc,
     As11ResetMode mode,
     RpcSource source) {
+    if (unavailable()) return OperationSubmission::rejected();
+
     const char *params = reset_params(mode);
     if (!params) return OperationSubmission::rejected();
     if (reset_ticket_.valid()) return OperationSubmission::busy();
@@ -158,6 +172,7 @@ OperationSubmission As11DeviceService::request_set_datetime_now(
     RpcSource source,
     uint32_t now_ms,
     int64_t utc_ms) {
+    if (unavailable()) return OperationSubmission::rejected();
     if (clock_write_ticket_.valid()) return OperationSubmission::busy();
     if (utc_ms < ValidUtcMinMs) return OperationSubmission::rejected();
 
@@ -199,6 +214,8 @@ bool As11DeviceService::apply_activity_event_frame(
     uint32_t now_ms) {
     const As11TherapyState before_state = state_.therapy_state();
     if (!state_.apply_activity_event_frame(frame, now_ms)) return false;
+
+    note_query_response(now_ms);
 
     const std::string &event = state_.last_activity_event();
     if (event_suggests_identity_refresh(event)) {
@@ -245,6 +262,7 @@ void As11DeviceService::device_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     for (ScheduledQuery &query : queries_) query = {};
 
     state_.reset();
+    consecutive_query_timeouts_ = 0;
     schedule_initialized_ = false;
     initialize_schedule(now_ms);
     note_change();
@@ -302,6 +320,7 @@ void As11DeviceService::note_change() {
 }
 
 void As11DeviceService::initialize_schedule(uint32_t now_ms) {
+    clear_schedule();
     schedule_initialized_ = true;
     schedule_query(QueryKind::Identity,
                    now_ms + AC_AS11_INITIAL_STATUS_POLL_DELAY_MS,
@@ -321,6 +340,25 @@ void As11DeviceService::initialize_schedule(uint32_t now_ms) {
                    now_ms + AC_AS11_INITIAL_STATUS_POLL_DELAY_MS +
                        AC_RPC_DEFAULT_TIMEOUT_MS,
                    RpcSource::Scheduler);
+}
+
+void As11DeviceService::initialize_recovery_schedule(uint32_t now_ms) {
+    clear_schedule();
+    schedule_initialized_ = true;
+    schedule_query(QueryKind::Runtime, now_ms, RpcSource::Scheduler);
+    schedule_query(QueryKind::MotorRuntime,
+                   now_ms + AC_RPC_MIN_TX_INTERVAL_MS,
+                   RpcSource::Scheduler);
+    schedule_query(QueryKind::Timezone,
+                   now_ms + (AC_RPC_MIN_TX_INTERVAL_MS * 2),
+                   RpcSource::Scheduler);
+    schedule_query(QueryKind::Clock,
+                   now_ms + AC_RPC_DEFAULT_TIMEOUT_MS,
+                   RpcSource::Scheduler);
+}
+
+void As11DeviceService::clear_schedule() {
+    for (ScheduledQuery &query : queries_) query = {};
 }
 
 void As11DeviceService::schedule_query(QueryKind kind,
@@ -376,6 +414,9 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
     command.source = query.source;
     command.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     command.generation = next_generation();
+    if (unavailable()) {
+        command.admission = RpcRequestAdmission::PresenceProbe;
+    }
 
     const OperationSubmission submitted = rpc.request(command);
     if (!submitted.accepted()) {
@@ -392,7 +433,16 @@ bool As11DeviceService::submit_query(RpcRequestPort &rpc,
 void As11DeviceService::complete_query(
     const RpcRequestCompletion &completion,
     uint32_t now_ms) {
+    if (completion.cause == RpcCompletionCause::Response) {
+        note_query_response(now_ms);
+    }
+
     if (!completion_succeeded(completion)) {
+        if (completion.cause == RpcCompletionCause::Timeout) {
+            note_query_timeout(now_ms);
+            return;
+        }
+
         schedule_query(active_query_kind_, now_ms + QueryRetryMs,
                        RpcSource::Scheduler);
         return;
@@ -465,6 +515,62 @@ void As11DeviceService::complete_query(
         case QueryKind::Count:
             break;
     }
+}
+
+void As11DeviceService::note_query_response(uint32_t now_ms) {
+    consecutive_query_timeouts_ = 0;
+    const As11Availability before = state_.availability();
+    if (!state_.set_availability(As11Availability::Available, now_ms)) return;
+
+    if (before == As11Availability::Unavailable) {
+        initialize_recovery_schedule(now_ms);
+#ifdef ARDUINO
+        Log::logf(CAT_RPC, LOG_INFO,
+                  "AS11 available; background polling resumed\n");
+#endif
+    }
+    note_change();
+}
+
+void As11DeviceService::note_query_timeout(uint32_t now_ms) {
+    if (unavailable()) {
+        schedule_query(QueryKind::Identity,
+                       now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
+                       RpcSource::Scheduler);
+        return;
+    }
+
+    if (consecutive_query_timeouts_ < UINT8_MAX) {
+        consecutive_query_timeouts_++;
+    }
+    if (consecutive_query_timeouts_ >= AC_AS11_UNAVAILABLE_TIMEOUTS) {
+        enter_unavailable(now_ms);
+        return;
+    }
+
+    schedule_query(active_query_kind_, now_ms + QueryRetryMs,
+                   RpcSource::Scheduler);
+}
+
+void As11DeviceService::enter_unavailable(uint32_t now_ms) {
+    clear_schedule();
+    schedule_initialized_ = true;
+    schedule_query(QueryKind::Identity,
+                   now_ms + AC_AS11_PRESENCE_PROBE_INTERVAL_MS,
+                   RpcSource::Scheduler);
+    consecutive_query_timeouts_ = 0;
+
+    if (!state_.set_availability(As11Availability::Unavailable, now_ms)) {
+        return;
+    }
+    note_change();
+
+#ifdef ARDUINO
+    Log::logf(
+        CAT_RPC, LOG_INFO,
+        "AS11 unavailable; background polling stopped, probe_interval_ms=%lu\n",
+        static_cast<unsigned long>(AC_AS11_PRESENCE_PROBE_INTERVAL_MS));
+#endif
 }
 
 void As11DeviceService::complete_therapy(

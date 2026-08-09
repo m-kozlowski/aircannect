@@ -734,12 +734,13 @@
 
       const pending = therapyPending(data);
       const shown = therapyDisplayState(data);
+      const unavailable = data.as11_state === "unavailable";
       start.textContent = pending && shown === "running" ? "Starting" : "Therapy";
       stop.textContent = pending && shown === "standby" ? "Stopping" : "Standby";
       start.className = "btn" + (shown === "running" ? " primary" : "");
       stop.className = "btn" + (shown === "standby" ? " primary" : "");
-      start.disabled = !!pending || shown === "running";
-      stop.disabled = !!pending || shown === "standby";
+      start.disabled = unavailable || !!pending || shown === "running";
+      stop.disabled = unavailable || !!pending || shown === "standby";
     }
 
     function applyTherapyPending(action) {
@@ -775,6 +776,13 @@
     }
 
     function renderStatus(data) {
+      const previousAs11State = settingsAs11State;
+      settingsAs11State = data.as11_state || "unknown";
+      if (previousAs11State === "unavailable" &&
+          settingsAs11State !== "unavailable" && clinicalTabActive()) {
+        loadSettings(false);
+      }
+
       setPageTitle(data.hostname);
       up("ver", data.version);
       up("built", data.built);
@@ -798,7 +806,7 @@
       if (wifiPane && wifiPane.classList.contains("active")) {
         renderWifiCurrent({});
       }
-      up("productName", data.device_name || "AirSense 11");
+      up("productName", data.device_name || "ResMed device");
       up("serial", data.serial);
       up("firmware", fmtFirmware(data.software_id || data.application));
       up("profile", fmtProfile(data.profile));
@@ -813,12 +821,14 @@
 
       const badge = document.getElementById("therapyBadge");
       const pending = therapyPending(data);
-      const label = pending ?
+      const unavailable = data.as11_state === "unavailable";
+      const label = unavailable ? "Unavailable" : pending ?
         (data.therapy_pending === "running" ? "Starting" : "Stopping") :
         fmtTherapy(data.therapy);
       badge.textContent = label;
       badge.className = "badge " +
-        (pending ? "warn" : data.therapy === "running" ? "good" : "");
+        (unavailable || pending ? "warn" :
+          data.therapy === "running" ? "good" : "");
       setTherapyButtons(data);
     }
 

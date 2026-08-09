@@ -27,6 +27,8 @@
       }
 
       const active = clinicalTabActive();
+      if (data.as11_state === "unavailable") return;
+
       const refreshing = Date.now() < settingsRefreshUntil;
       const snapshotPending = !!data.snapshot_pending;
       const needsRefresh = !data.valid && !data.refresh_queued &&
@@ -504,8 +506,11 @@
         settingsRefreshUntil = 0;
       }
 
-      const refreshing = Date.now() < settingsRefreshUntil;
-      if (data.refresh_queued || refreshing) {
+      const unavailable = data.as11_state === "unavailable";
+      if (unavailable) {
+        settingsRefreshUntil = 0;
+        parts.push("Device unavailable");
+      } else if (data.refresh_queued || Date.now() < settingsRefreshUntil) {
         parts.push("Refreshing settings");
       } else if (!data.valid) {
         parts.push("Waiting for device");
@@ -552,8 +557,9 @@
         .sort(compareSettings);
       if (!visible.length) {
         root.innerHTML = '<div class="value" style="text-align:left">' +
-          (data.valid ? "No readable settings for this mode" :
-            "Waiting for AS11 settings readback") +
+          (unavailable ? "Device unavailable" :
+            data.valid ? "No readable settings for this mode" :
+              "Waiting for AS11 settings readback") +
           "</div>";
         if (save) save.disabled = true;
         return;
@@ -671,7 +677,9 @@
             setting.kind === "enum" || setting.kind === "bool" ?
               (raw || "") : (control.value || "");
           if (setting.kind === "composite") control.dataset.orig = raw || "";
-          if (!settingAvailable(setting)) control.disabled = true;
+          if (!settingAvailable(setting) || unavailable) {
+            control.disabled = true;
+          }
           if (setting.pending) control.classList.add("pending");
         }
 

@@ -117,8 +117,6 @@ static constexpr const char *AC_RESMED_OTA_CONFIRM = "APPLY_RESMED_OTA";
 static constexpr uint32_t AC_RPC_MIN_TX_INTERVAL_MS = 20;
 static constexpr uint32_t AC_RPC_SET_DATETIME_APPLY_LEAD_MS = 10;
 static constexpr uint32_t AC_RPC_SET_DATETIME_TARGET_MARGIN_MS = 40;
-static constexpr uint8_t AC_RPC_BACKGROUND_TIMEOUTS_BEFORE_BACKOFF = 2;
-static constexpr uint32_t AC_RPC_BACKGROUND_BACKOFF_MS = 120000;
 static constexpr uint32_t AC_RPC_BACKGROUND_RX_PRESSURE_BACKOFF_MS = 500;
 static constexpr uint32_t AC_STREAM_RESYNC_INTERVAL_MS = 2000;
 
@@ -129,6 +127,8 @@ static constexpr uint32_t AC_AS11_THERAPY_STATUS_POLL_INTERVAL_MS = 3000;
 static constexpr uint32_t AC_AS11_MOTOR_RUNTIME_POLL_INTERVAL_MS = 900000;
 static constexpr uint32_t AC_AS11_TIMEZONE_POLL_INTERVAL_MS = 300000;
 static constexpr uint32_t AC_AS11_CLOCK_POLL_INTERVAL_MS = 60000;
+static constexpr uint8_t AC_AS11_UNAVAILABLE_TIMEOUTS = 2;
+static constexpr uint32_t AC_AS11_PRESENCE_PROBE_INTERVAL_MS = 60000;
 static constexpr uint32_t AC_AS11_THERAPY_CONFIRM_TIMEOUT_MS = 15000;
 static constexpr uint32_t AC_AS11_EVENT_SUBSCRIBE_DELAY_MS = 1000;
 static constexpr uint32_t AC_AS11_EVENT_SUBSCRIBE_RETRY_MS = 30000;

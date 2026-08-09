@@ -609,6 +609,7 @@ static void drain_rpc_events() {
     while (rpc_transport.next_event(event)) {
         if (event.kind == RpcEventKind::BootNotification) {
             as11_device_service.device_reset(rpc_transport, millis());
+            rpc_transport.set_as11_unavailable(false);
             as11_settings_manager.device_reset(rpc_transport);
         }
 
@@ -1014,15 +1015,20 @@ void loop() {
     sync_rpc_transport_generation(now_ms);
     stream_broker.poll(rpc_transport, now_ms);
     event_broker.poll(rpc_transport, now_ms,
-                      resmed_ota_transport_active);
+                      resmed_ota_transport_active ||
+                          as11_device_service.unavailable());
     as11_device_service.poll(
         rpc_transport, now_ms,
         esp_ota_quiesce_requested || resmed_ota_transport_active);
+    const bool as11_unavailable = as11_device_service.unavailable();
+    rpc_transport.set_as11_unavailable(as11_unavailable);
+
     resmed_firmware_preparer.publish_device_identifier(
         as11_device_service.state().software_identifier().c_str());
     as11_settings_manager.poll(
         rpc_transport, now_ms,
-        esp_ota_quiesce_requested || resmed_ota_transport_active);
+        esp_ota_quiesce_requested || resmed_ota_transport_active ||
+            as11_unavailable);
     config_http_controller.poll();
     settings_http_controller.poll();
     ota_http_controller.poll();

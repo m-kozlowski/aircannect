@@ -274,6 +274,30 @@ void As11DeviceState::reset() {
     *this = As11DeviceState{};
 }
 
+bool As11DeviceState::set_availability(As11Availability availability,
+                                       uint32_t now_ms) {
+    if (availability_ == availability) return false;
+
+    availability_ = availability;
+    if (availability == As11Availability::Unavailable) {
+        therapy_state_ = As11TherapyState::Unknown;
+        if (therapy_command_pending()) {
+            clear_pending_therapy_command("device_unavailable", now_ms);
+        }
+    }
+    return true;
+}
+
+const char *As11DeviceState::availability_name(
+    As11Availability availability) {
+    switch (availability) {
+        case As11Availability::Available: return "available";
+        case As11Availability::Unavailable: return "unavailable";
+        case As11Availability::Unknown:
+        default: return "unknown";
+    }
+}
+
 void As11DeviceState::poll(uint32_t now_ms) {
     if (pending_therapy_target_ == As11TherapyTarget::None) return;
     if (static_cast<int32_t>(now_ms - pending_therapy_since_ms_) <

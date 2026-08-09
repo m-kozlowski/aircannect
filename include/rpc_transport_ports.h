@@ -42,7 +42,6 @@ struct RpcTransportStats {
     uint32_t request_cancellations = 0;
     uint32_t late_addressed_responses = 0;
     uint32_t request_dispatch_retries = 0;
-    uint32_t background_backoffs = 0;
 
     uint32_t event_drops = 0;
 };
@@ -53,7 +52,7 @@ struct RpcTransportStatus {
     size_t payload_queue_depth = 0;
     uint32_t pending_request_id = 0;
     uint32_t dispatch_retry_id = 0;
-    uint32_t background_backoff_ms = 0;
+    uint32_t rx_pressure_backoff_ms = 0;
     uint32_t boot_notifications = 0;
     uint32_t last_boot_notification_age_ms = 0;
     std::string last_boot_notification;

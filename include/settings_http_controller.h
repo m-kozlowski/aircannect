@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string>
 
+#include "as11_device_state.h"
 #include "http_route_module.h"
 #include "large_text_buffer.h"
 #include "main_loop_inbox.h"
@@ -67,6 +68,7 @@ private:
     uint32_t request_generation_ = 1;
     uint32_t observed_settings_revision_ = UINT32_MAX;
     uint32_t observed_device_revision_ = UINT32_MAX;
+    As11Availability cached_device_availability_ = As11Availability::Unknown;
     bool observed_refresh_pending_ = false;
     bool cached_refresh_pending_ = false;
     bool snapshot_pending_ = true;

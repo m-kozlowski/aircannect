@@ -42,6 +42,9 @@ void DeviceHttpController::register_routes(AsyncWebServer &server) {
 void DeviceHttpController::poll() {
     if (!rpc_ || !device_ || !time_sync_) return;
 
+    as11_unavailable_.store(device_->unavailable(),
+                            std::memory_order_release);
+
     for (size_t i = 0; i < CommandsPerPoll; ++i) {
         Command command;
         if (!commands_.pop(command)) break;
@@ -111,6 +114,15 @@ void DeviceHttpController::send_time_action(
         return;
     }
 
+    const bool requires_as11 = command.kind == CommandKind::TimePush ||
+                               command.kind == CommandKind::TimePull;
+    if (requires_as11 &&
+        as11_unavailable_.load(std::memory_order_acquire)) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"as11_unavailable\"}");
+        return;
+    }
+
     const bool queued = enqueue(command);
     request->send(queued ? 202 : 503, "application/json",
                   queued ? "{\"ok\":true,\"result\":\"queued\"}"
@@ -137,6 +149,12 @@ void DeviceHttpController::send_therapy_action(
     } else {
         request->send(400, "application/json",
                       "{\"ok\":false,\"error\":\"unknown_action\"}");
+        return;
+    }
+
+    if (as11_unavailable_.load(std::memory_order_acquire)) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"as11_unavailable\"}");
         return;
     }
 

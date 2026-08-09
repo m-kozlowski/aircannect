@@ -33,6 +33,7 @@ struct RpcDispatchWindow {
 
 enum class RpcRequestAdmission : uint8_t {
     Normal,
+    PresenceProbe,
     QuiesceControl,
 };
 

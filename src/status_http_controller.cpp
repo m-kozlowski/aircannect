@@ -80,6 +80,8 @@ bool build_status_json(LargeTextBuffer &json,
     json_add_bool(json, "update_checking", snap.update.checking);
     json_add_bool(json, "update_available", snap.update.available);
     json_add_string(json, "update_version", snap.update.version);
+    json_add_string(json, "as11_state",
+                    As11DeviceState::availability_name(as11.availability));
     json_add_string_view(json, "device_name", as11.product_name);
     json_add_string_view(json, "serial", as11.serial_number);
     json_add_string_view(json, "software_id", as11.software_identifier);

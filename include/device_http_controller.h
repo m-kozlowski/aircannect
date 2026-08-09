@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -48,6 +49,7 @@ private:
     As11DeviceService *device_ = nullptr;
     TimeSyncService *time_sync_ = nullptr;
     MainLoopInbox<Command, CommandQueueDepth> commands_;
+    std::atomic<bool> as11_unavailable_{false};
 };
 
 }  // namespace aircannect

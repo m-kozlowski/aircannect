@@ -179,10 +179,8 @@ void print_rpc_stats(Print &out,
     out.print(stats.request_dispatch_retries);
     out.print(" log_framing_errors=");
     out.print(stats.log_framing_errors);
-    out.print(" backoffs=");
-    out.print(stats.background_backoffs);
-    out.print(" backoff_ms=");
-    out.println(runtime.background_backoff_ms);
+    out.print(" rx_pressure_backoff_ms=");
+    out.println(runtime.rx_pressure_backoff_ms);
 
     out.print("[STREAM state] consumers=");
     out.print(stream.consumer_count());
@@ -226,7 +224,9 @@ void print_rpc_stats(Print &out,
 }
 
 void print_as11_status(Print &out, const As11DeviceState &state) {
-    out.print("[AS11] status=");
+    out.print("[AS11] state=");
+    out.print(As11DeviceState::availability_name(state.availability()));
+    out.print(" status=");
     out.print(state.status_valid() ? "known" : "unknown");
     if (state.status_valid()) {
         out.print(" age_ms=");

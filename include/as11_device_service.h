@@ -38,6 +38,9 @@ public:
 
     bool apply_activity_event_frame(const As11EventFrame &frame,
                                     uint32_t now_ms);
+    bool unavailable() const {
+        return state_.availability() == As11Availability::Unavailable;
+    }
     void device_reset(RpcRequestPort &rpc, uint32_t now_ms);
     void poll(RpcRequestPort &rpc,
               uint32_t now_ms,
@@ -70,6 +73,8 @@ private:
     void note_change();
 
     void initialize_schedule(uint32_t now_ms);
+    void initialize_recovery_schedule(uint32_t now_ms);
+    void clear_schedule();
     void schedule_query(QueryKind kind,
                         uint32_t due_ms,
                         RpcSource source);
@@ -84,6 +89,9 @@ private:
                           uint32_t now_ms);
     void complete_clock_write(const RpcRequestCompletion &completion);
     void cancel_ticket(RpcRequestPort &rpc, OperationTicket &ticket);
+    void note_query_response(uint32_t now_ms);
+    void note_query_timeout(uint32_t now_ms);
+    void enter_unavailable(uint32_t now_ms);
 
     static size_t query_index(QueryKind kind);
     static bool background_source(RpcSource source);
@@ -97,6 +105,7 @@ private:
     bool schedule_initialized_ = false;
     QueryKind active_query_kind_ = QueryKind::None;
     OperationTicket query_ticket_;
+    uint8_t consecutive_query_timeouts_ = 0;
 
     OperationTicket therapy_ticket_;
     std::string therapy_method_;

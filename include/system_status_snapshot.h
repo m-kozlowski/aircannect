@@ -38,6 +38,7 @@ struct WifiStatusSnapshot {
 };
 
 struct As11StatusSnapshot {
+    As11Availability availability = As11Availability::Unknown;
     std::string_view product_name;
     std::string_view serial_number;
     std::string_view software_identifier;

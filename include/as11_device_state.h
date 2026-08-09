@@ -14,10 +14,24 @@ const char *as11_runtime_get_params_json();
 const char *as11_motor_runtime_get_params_json();
 const char *as11_timezone_get_params_json();
 
+enum class As11Availability : uint8_t {
+    Unknown,
+    Available,
+    Unavailable,
+};
+
 class As11DeviceState {
 public:
     void reset();
     void poll(uint32_t now_ms);
+
+    // Device presence
+    bool set_availability(As11Availability availability, uint32_t now_ms);
+    As11Availability availability() const { return availability_; }
+    bool available() const {
+        return availability_ == As11Availability::Available;
+    }
+    static const char *availability_name(As11Availability availability);
 
     // Incoming payloads
     bool apply_status_get_response(RpcPayloadView payload,
@@ -108,6 +122,8 @@ public:
 private:
     void update_rop(const std::string &value, uint32_t now_ms);
     void confirm_pending_if_matched(uint32_t now_ms);
+
+    As11Availability availability_ = As11Availability::Unknown;
 
     bool status_valid_ = false;
     uint32_t status_updated_ms_ = 0;

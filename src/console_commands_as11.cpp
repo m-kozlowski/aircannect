@@ -316,6 +316,11 @@ void handle_time(Print &out,
         return;
     }
 
+    if (rest != "ntp" && device.unavailable()) {
+        out.println("[TIME] AS11 unavailable");
+        return;
+    }
+
     if (rest == "get") {
         (void)time_sync.request_pull_resmed_to_esp(RpcSource::Console);
         return;
@@ -376,7 +381,12 @@ bool As11DeviceConsoleCommands::execute(
             device_.request_healthcheck(rpc_, RpcSource::Console, millis());
             out.println("[AS11] healthcheck scheduled");
         } else if (rest == "version") {
-            passthrough_.send_request("GetVersion", "", RpcSource::Console);
+            if (device_.unavailable()) {
+                out.println("[AS11] unavailable");
+            } else {
+                passthrough_.send_request("GetVersion", "",
+                                          RpcSource::Console);
+            }
         } else {
             print_unknown_command(out, "AS11", "as11 status, poll, version");
         }
@@ -389,6 +399,10 @@ bool As11DeviceConsoleCommands::execute(
         if (!rest.length() || rest == "status") {
             ConsoleFormat::print_as11_status(out, device_.state());
         } else if (rest == "start" || rest == "on" || rest == "run") {
+            if (device_.unavailable()) {
+                out.println("[THERAPY] AS11 unavailable");
+                return true;
+            }
             const bool accepted = device_.request_therapy(
                 rpc_, As11TherapyTarget::Running, RpcSource::Console,
                 millis()).accepted();
@@ -396,6 +410,10 @@ bool As11DeviceConsoleCommands::execute(
                                  : "[THERAPY] EnterTherapy queue failed");
         } else if (rest == "stop" || rest == "off" ||
                    rest == "standby") {
+            if (device_.unavailable()) {
+                out.println("[THERAPY] AS11 unavailable");
+                return true;
+            }
             const bool accepted = device_.request_therapy(
                 rpc_, As11TherapyTarget::Standby, RpcSource::Console,
                 millis()).accepted();

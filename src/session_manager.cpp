@@ -62,9 +62,12 @@ void SessionManager::poll(const As11DeviceState &as11, uint32_t now_ms) {
         return;
     }
 
-    if (status_.state == SessionState::Active &&
-        current_therapy_state == As11TherapyState::Standby) {
+    if (status_.state != SessionState::Active) return;
+
+    if (current_therapy_state == As11TherapyState::Standby) {
         end_session(as11, now_ms, "rop_standby");
+    } else if (as11.availability() == As11Availability::Unavailable) {
+        end_session(as11, now_ms, "device_unavailable");
     }
 }
 

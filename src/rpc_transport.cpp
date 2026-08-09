@@ -17,8 +17,9 @@ bool emit_matched_response(RpcSource source) {
            source == RpcSource::HttpApi;
 }
 
-bool scheduler_source(RpcSource source) {
-    return source == RpcSource::Scheduler || source == RpcSource::Internal;
+bool interactive_source(RpcSource source) {
+    return source == RpcSource::Console || source == RpcSource::Tcp ||
+           source == RpcSource::HttpApi;
 }
 
 const char *completion_cause_name(RpcCompletionCause cause) {
@@ -119,6 +120,15 @@ void RpcTransport::process_deferred_payloads(size_t budget) {
 }
 
 bool RpcTransport::submit_raw_payload(const std::string &payload, RpcSource source) {
+    if (as11_unavailable_) {
+        if (interactive_source(source)) {
+            push_text_event(RpcEventKind::Info,
+                            "AS11 unavailable; RPC request rejected",
+                            sizeof("AS11 unavailable; RPC request rejected") - 1);
+        }
+        return false;
+    }
+
     if (quiesce_mode_) {
         push_text_event(
             RpcEventKind::Info,
@@ -204,6 +214,9 @@ OperationSubmission RpcTransport::request(const RpcRequestCommand &command) {
     request.generation = command.generation;
     request.admission = command.admission;
     request.dispatch_window = command.dispatch_window;
+    if (!request_allowed_while_unavailable(request)) {
+        return OperationSubmission::rejected();
+    }
     if (!enqueue_request(request)) return OperationSubmission::busy();
 
     request_completion_reservations_++;
@@ -268,11 +281,12 @@ bool RpcTransport::take_completion(OperationTicket ticket,
 }
 
 bool RpcTransport::enqueue_request(QueuedRequest &request) {
-    const uint32_t now = millis();
-    const bool quiesce_control =
-        quiesce_mode_ && request_allowed_during_quiesce(request);
-    if (scheduler_source(request.source) && background_backoff_active(now) &&
-        !quiesce_control) {
+    if (!request_allowed_while_unavailable(request)) {
+        if (interactive_source(request.source)) {
+            push_text_event(RpcEventKind::Info,
+                            "AS11 unavailable; RPC request rejected",
+                            sizeof("AS11 unavailable; RPC request rejected") - 1);
+        }
         return false;
     }
 
@@ -301,6 +315,13 @@ bool RpcTransport::background_backpressure_active() const {
         return true;
     }
     return false;
+}
+
+void RpcTransport::set_as11_unavailable(bool unavailable) {
+    if (unavailable == as11_unavailable_) return;
+
+    as11_unavailable_ = unavailable;
+    if (unavailable) cancel_requests_while_unavailable();
 }
 
 bool RpcTransport::can_rx_queue_pressure_active() const {
@@ -356,14 +377,10 @@ RpcTransportStatus RpcTransport::runtime_status() const {
     out.payload_queue_depth = deferred_payloads_.count();
     out.pending_request_id = pending_.active ? pending_.id : 0;
     out.dispatch_retry_id = dispatch_retry_active_ ? dispatch_retry_.id : 0;
-    const uint32_t timeout_backoff_ms = background_backoff_active(now)
-        ? background_backoff_until_ms_ - now
-        : 0;
     const uint32_t rx_pressure_backoff_ms = background_rx_pressure_active(now)
         ? background_rx_pressure_until_ms_ - now
         : 0;
-    out.background_backoff_ms =
-        std::max(timeout_backoff_ms, rx_pressure_backoff_ms);
+    out.rx_pressure_backoff_ms = rx_pressure_backoff_ms;
     out.boot_notifications = boot_notifications_seen_;
     if (!last_boot_notification_.empty()) {
         out.last_boot_notification_age_ms = now - last_boot_notification_ms_;
@@ -424,11 +441,6 @@ void RpcTransport::poll_debug_log_rx_filter() {
     log_rx_.reset();
 }
 
-bool RpcTransport::background_backoff_active(uint32_t now) const {
-    return background_backoff_until_ms_ &&
-           static_cast<int32_t>(background_backoff_until_ms_ - now) > 0;
-}
-
 bool RpcTransport::background_rx_pressure_active(uint32_t now) const {
     return background_rx_pressure_until_ms_ &&
            static_cast<int32_t>(background_rx_pressure_until_ms_ - now) > 0;
@@ -453,28 +465,38 @@ bool RpcTransport::request_allowed_during_quiesce(
     return request.admission == RpcRequestAdmission::QuiesceControl;
 }
 
-void RpcTransport::note_request_success(RpcSource source, uint32_t now) {
-    (void)now;
-    (void)source;
-    consecutive_scheduler_timeouts_ = 0;
-    background_backoff_until_ms_ = 0;
+bool RpcTransport::request_allowed_while_unavailable(
+    const QueuedRequest &request) const {
+    if (!as11_unavailable_) return true;
+    return request.admission == RpcRequestAdmission::PresenceProbe ||
+           request.admission == RpcRequestAdmission::QuiesceControl;
 }
 
-void RpcTransport::note_request_timeout(RpcSource source, uint32_t now) {
-    if (!scheduler_source(source)) return;
-    if (consecutive_scheduler_timeouts_ < 255) {
-        consecutive_scheduler_timeouts_++;
+void RpcTransport::cancel_requests_while_unavailable() {
+    if (pending_.active &&
+        pending_.admission == RpcRequestAdmission::Normal) {
+        cancel_pending_request("as11_unavailable");
     }
-    if (consecutive_scheduler_timeouts_ <
-        AC_RPC_BACKGROUND_TIMEOUTS_BEFORE_BACKOFF) {
-        return;
+
+    if (dispatch_retry_active_ &&
+        dispatch_retry_.admission == RpcRequestAdmission::Normal) {
+        cancel_queued_request(dispatch_retry_, "as11_unavailable");
+        dispatch_retry_ = {};
+        dispatch_retry_active_ = false;
+        dispatch_retry_deadline_ms_ = 0;
+        next_dispatch_retry_ms_ = 0;
     }
-    background_backoff_until_ms_ = now + AC_RPC_BACKGROUND_BACKOFF_MS;
-    stats_.background_backoffs++;
-    Log::logf(CAT_RPC, LOG_WARN,
-              "background polling paused for %lu ms after %u timeouts\n",
-              static_cast<unsigned long>(AC_RPC_BACKGROUND_BACKOFF_MS),
-              static_cast<unsigned>(consecutive_scheduler_timeouts_));
+
+    QueuedRequest request;
+    FixedQueue<QueuedRequest, AC_RPC_REQUEST_QUEUE_DEPTH> keep;
+    while (requests_.pop(request)) {
+        if (request.admission == RpcRequestAdmission::Normal) {
+            cancel_queued_request(request, "as11_unavailable");
+        } else {
+            keep.push(std::move(request));
+        }
+    }
+    while (keep.pop(request)) requests_.push(std::move(request));
 }
 
 void RpcTransport::push_event(RpcEventKind kind,
@@ -761,6 +783,17 @@ void RpcTransport::dispatch_next_request() {
         return;
     }
 
+    if (!request_allowed_while_unavailable(request)) {
+        cancel_queued_request(request, "as11_unavailable");
+        if (from_retry) {
+            dispatch_retry_ = {};
+            dispatch_retry_active_ = false;
+            dispatch_retry_deadline_ms_ = 0;
+            next_dispatch_retry_ms_ = 0;
+        }
+        return;
+    }
+
     if (request.dispatch_window.enabled) {
         if (static_cast<int32_t>(
                 now - request.dispatch_window.not_before_ms) < 0) {
@@ -876,12 +909,6 @@ void RpcTransport::check_pending_timeout() {
         push_text_event(RpcEventKind::Info, buf, strlen(buf));
     }
     stats_.request_timeouts++;
-    const bool quiesce_control =
-        quiesce_mode_ &&
-        pending_.admission == RpcRequestAdmission::QuiesceControl;
-    if (!quiesce_control) {
-        note_request_timeout(pending_.source, now);
-    }
     if (addressed_request) {
         remember_retired_addressed_request(
             pending_, RpcCompletionCause::Timeout, "timeout");
@@ -1053,7 +1080,6 @@ void RpcTransport::handle_rpc_payload(const RpcPayloadRef &payload) {
                     response_error, request_completions_,
                     pending_.dispatch_utc_ms, response_epoch_ms,
                     pending_.dispatch_ms, response_ms);
-                note_request_success(response_source, response_ms);
                 pending_ = {};
                 if (addressed_request) break;
                 if (!emit_matched_response(response_source)) break;

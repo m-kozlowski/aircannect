@@ -71,6 +71,7 @@ public:
     bool recover_can(const char *reason) override;
 
     bool background_backpressure_active() const;
+    void set_as11_unavailable(bool unavailable);
     void set_quiesce_mode(bool requested) override;
     void request_debug_log_rx(bool enabled) override;
     RpcQuiesceStatus quiesce_status() const override;
@@ -185,13 +186,13 @@ private:
                                RpcSource &source,
                                uint32_t now);
 
-    bool background_backoff_active(uint32_t now) const;
     bool background_rx_pressure_active(uint32_t now) const;
     bool can_rx_queue_pressure_active() const;
     void note_can_rx_pressure(uint32_t now);
-    void note_request_success(RpcSource source, uint32_t now);
-    void note_request_timeout(RpcSource source, uint32_t now);
     bool request_allowed_during_quiesce(const QueuedRequest &request) const;
+    bool request_allowed_while_unavailable(
+        const QueuedRequest &request) const;
+    void cancel_requests_while_unavailable();
     bool quiesce_idle() const;
     void poll_debug_log_rx_filter();
 
@@ -261,9 +262,8 @@ private:
     bool raw_rpc_forwarding_enabled_ = false;
     bool quiesce_mode_ = false;
     bool debug_log_rx_requested_ = true;
+    bool as11_unavailable_ = false;
 
-    uint8_t consecutive_scheduler_timeouts_ = 0;
-    uint32_t background_backoff_until_ms_ = 0;
     uint32_t background_rx_pressure_until_ms_ = 0;
     uint32_t observed_rx_queue_full_alerts_ = 0;
 };

@@ -54,10 +54,13 @@ const char *setting_kind_name(As11SettingKind kind) {
     return "text";
 }
 
-String settings_placeholder_json(bool refresh_queued,
-                                 bool snapshot_pending) {
+String settings_placeholder_json(As11Availability availability,
+                                  bool refresh_queued,
+                                  bool snapshot_pending) {
     String json = "{";
     json_add_bool(json, "valid", false, false);
+    json_add_string(json, "as11_state",
+                    As11DeviceState::availability_name(availability));
     json_add_bool(json, "refresh_queued", refresh_queued);
     json_add_bool(json, "snapshot_pending", snapshot_pending);
     json_add_int(json, "pending_count", 0);
@@ -83,6 +86,9 @@ void build_settings_json(LargeTextBuffer &json,
 
     json = "{";
     json_add_bool(json, "valid", state.valid(), false);
+    json_add_string(json, "as11_state",
+                    As11DeviceState::availability_name(
+                        device.availability()));
     json_add_bool(json, "refresh_queued", refresh_queued);
     json_add_int(json, "supported_mode_mask", supported_modes);
     json_add_int(json, "pending_count",
@@ -315,6 +321,14 @@ void SettingsHttpController::drain_commands() {
 }
 
 void SettingsHttpController::execute(Command &command) {
+    if (device_->unavailable()) {
+        if (command.kind == CommandKind::Refresh) {
+            (void)device_->request_healthcheck(
+                *rpc_, RpcSource::HttpApi, millis());
+        }
+        return;
+    }
+
     if (command.kind == CommandKind::Refresh) {
         (void)settings_->request_refresh(*rpc_, RpcSource::HttpApi, millis());
     } else {
@@ -350,7 +364,10 @@ void SettingsHttpController::publish_snapshot_if_needed() {
         return;
     }
 
-    const bool refresh_pending = settings_->refresh_pending();
+    const As11Availability availability = device_->state().availability();
+    const bool refresh_pending =
+        availability != As11Availability::Unavailable &&
+        settings_->refresh_pending();
     const uint32_t settings_revision = settings_->revision();
     const uint32_t device_revision = device_->revision();
     if (!requested_snapshot &&
@@ -374,6 +391,7 @@ void SettingsHttpController::publish_snapshot_if_needed() {
     if (request_generation_ == request_generation) {
         settings_json_.swap(next);
         cached_request_mode_ = requested_mode;
+        cached_device_availability_ = availability;
         cached_refresh_pending_ = refresh_pending;
         snapshot_pending_ = false;
     }
@@ -417,8 +435,11 @@ void SettingsHttpController::send_settings(
     }
 
     const bool snapshot_pending = snapshot_pending_;
+    const As11Availability availability = cached_device_availability_;
+    const bool unavailable =
+        availability == As11Availability::Unavailable;
     const bool refresh_queued =
-        refresh_requested || cached_refresh_pending_;
+        !unavailable && (refresh_requested || cached_refresh_pending_);
     if (!snapshot_pending && !refresh_queued && settings_json_.length()) {
         AsyncResponseStream *response =
             request->beginResponseStream("application/json");
@@ -440,7 +461,8 @@ void SettingsHttpController::send_settings(
 
     xSemaphoreGive(cache_mutex_);
     request->send(200, "application/json",
-                  settings_placeholder_json(refresh_queued,
+                  settings_placeholder_json(availability,
+                                            refresh_queued,
                                             snapshot_pending));
 }
 
