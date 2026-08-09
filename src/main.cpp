@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "as11_device_service.h"
+#include "as11_service_manager.h"
 #include "as11_settings_manager.h"
 #include "arduino_ota_source.h"
 #include "ble_sensor_source.h"
@@ -74,13 +75,14 @@ static CanDriver can_driver;
 static EventBroker event_broker;
 static StreamBroker stream_broker;
 static RpcTransport rpc_transport(can_driver);
+static As11ServiceManager as11_service_manager(can_driver);
 static RpcQuiesceCoordinator rpc_quiesce_coordinator(
     rpc_transport, event_broker, stream_broker);
 static As11DeviceService as11_device_service;
 static As11SettingsManager as11_settings_manager;
 static ManagementConsole serial_management_console;
 static WifiManager wifi_manager;
-static TcpBridge tcp_bridge;
+static TcpBridge tcp_bridge(as11_service_manager);
 static TelnetConsole telnet_console;
 static ConfigService config_service;
 static WebUI web_ui;
@@ -262,6 +264,16 @@ static void route_tcp_raw_request(void *context,
 
     stream->observe_external_request(RpcPayloadView(payload, payload_len),
                                      now_ms);
+}
+
+static void route_as11_service_frame(void *context,
+                                     const RawCanFrame &frame,
+                                     uint32_t now_ms) {
+    As11ServiceManager *service =
+        static_cast<As11ServiceManager *>(context);
+    if (!service) return;
+
+    service->accept_can_frame(frame, now_ms);
 }
 
 static void sync_rpc_transport_generation(uint32_t now_ms) {
@@ -847,6 +859,8 @@ void setup() {
                                                    &stream_broker);
     rpc_transport.set_spool_notification_observer(route_spool_notification,
                                                   &report_spool_service);
+    rpc_transport.set_as11_service_frame_observer(
+        route_as11_service_frame, &as11_service_manager);
     tcp_bridge.set_raw_request_observer(route_tcp_raw_request,
                                         &stream_broker);
     rpc_transport_generation_seen = rpc_transport.transport_generation();
@@ -996,6 +1010,7 @@ void loop() {
                                                    now_ms);
 
     rpc_transport.poll();
+    as11_service_manager.poll(now_ms);
     sync_rpc_transport_generation(now_ms);
     stream_broker.poll(rpc_transport, now_ms);
     event_broker.poll(rpc_transport, now_ms,

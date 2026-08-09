@@ -29,6 +29,14 @@
 #define AC_CAN_BOOT_ID 0x2c8
 #endif
 
+#ifndef AC_AS11_SERVICE_TX_ID
+#define AC_AS11_SERVICE_TX_ID 0x3c1
+#endif
+
+#ifndef AC_AS11_SERVICE_RX_ID
+#define AC_AS11_SERVICE_RX_ID 0x3c0
+#endif
+
 #ifndef AC_CAN_BITRATE
 #define AC_CAN_BITRATE 1000000
 #endif
@@ -57,6 +65,8 @@ static constexpr size_t AC_CAN_RX_QUEUE_LEN = 512;
 static constexpr size_t AC_CAN_RX_DRAIN_BASE_BUDGET = 128;
 static constexpr size_t AC_CAN_RX_DRAIN_PRESSURE_BUDGET = 512;
 static constexpr uint32_t AC_CAN_RX_DRAIN_PRESSURE_MAX_MS = 2;
+static constexpr uint32_t AC_AS11_SERVICE_REASSEMBLY_TIMEOUT_MS = 1000;
+static constexpr uint32_t AC_AS11_SERVICE_RESPONSE_TIMEOUT_MS = 5000;
 static constexpr uint32_t AC_CAN_BUS_RECOVERY_TIMEOUT_MS = 1500;
 static constexpr uint32_t AC_CAN_RECOVERY_RETRY_MS = 250;
 static constexpr uint32_t AC_CAN_RECOVERY_LOG_INTERVAL_MS = 5000;

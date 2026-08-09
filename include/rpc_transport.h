@@ -21,6 +21,9 @@ using RpcRetainedNotificationObserver = void (*)(
     void *context,
     const RpcPayloadRef &payload,
     uint32_t now_ms);
+using As11ServiceFrameObserver = void (*)(void *context,
+                                          const RawCanFrame &frame,
+                                          uint32_t now_ms);
 
 class RpcTransport final : public RpcRequestPort,
                            public RpcPassthroughPort,
@@ -57,6 +60,9 @@ public:
                                           void *context);
     void set_spool_notification_observer(
         RpcRetainedNotificationObserver observer,
+        void *context);
+    void set_as11_service_frame_observer(
+        As11ServiceFrameObserver observer,
         void *context);
 
     // Transport maintenance
@@ -247,6 +253,8 @@ private:
     void *stream_notification_context_ = nullptr;
     RpcRetainedNotificationObserver spool_notification_observer_ = nullptr;
     void *spool_notification_context_ = nullptr;
+    As11ServiceFrameObserver as11_service_frame_observer_ = nullptr;
+    void *as11_service_frame_context_ = nullptr;
     uint32_t transport_generation_ = 1;
 
     // Backpressure and transport admission

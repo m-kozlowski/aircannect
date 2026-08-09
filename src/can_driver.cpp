@@ -32,13 +32,15 @@ constexpr bool required_rx_filter_accepts(uint32_t id) {
 
 static_assert(required_rx_filter_accepts(AC_CAN_RX_ID));
 static_assert(required_rx_filter_accepts(AC_CAN_BOOT_ID));
+static_assert(required_rx_filter_accepts(AC_AS11_SERVICE_RX_ID));
 static_assert(!required_rx_filter_accepts(AC_CAN_LOG_ID));
 
 twai_filter_config_t can_rx_filter_config(bool debug_log_enabled) {
     if (debug_log_enabled) return TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
     // One hardware mask admits a small standard-ID superset around the RPC
-    // and boot IDs. It still rejects the high-rate 0x796 debug channel.
+    // and boot IDs. The service response ID is already inside that set, while
+    // the high-rate 0x796 debug channel remains rejected.
     twai_filter_config_t config = {};
     config.acceptance_code = REQUIRED_RX_FILTER_CODE;
     config.acceptance_mask = REQUIRED_RX_FILTER_MASK;
@@ -90,6 +92,35 @@ const char *can_timing_name() {
 #else
     return "unknown";
 #endif
+}
+
+void log_service_can_frame(const char *direction,
+                           const char *action,
+                           const RawCanFrame &frame) {
+    if (frame.id != AC_AS11_SERVICE_TX_ID &&
+        frame.id != AC_AS11_SERVICE_RX_ID) {
+        return;
+    }
+    if (Log::get_cat_level(CAT_CAN) < LOG_DEBUG) return;
+
+    char bytes[24] = {};
+    size_t used = 0;
+    const size_t count = frame.len <= sizeof(frame.data)
+        ? frame.len
+        : sizeof(frame.data);
+
+    for (size_t i = 0; i < count && used < sizeof(bytes); ++i) {
+        const int written = snprintf(bytes + used, sizeof(bytes) - used,
+                                     i == 0 ? "%02X" : " %02X",
+                                     frame.data[i]);
+        if (written <= 0) break;
+        used += static_cast<size_t>(written);
+    }
+
+    Log::logf(CAT_CAN, LOG_DEBUG,
+              "[SERVICE][%s] %s id=0x%03lX dlc=%u data=%s\n",
+              direction, action, static_cast<unsigned long>(frame.id),
+              static_cast<unsigned>(frame.len), bytes);
 }
 
 }  // namespace
@@ -256,6 +287,7 @@ void CanDriver::pump_tx_queue(uint32_t alerts) {
             return;
         }
         stats_.tx_frames++;
+        log_service_can_frame("TX", "submitted", frame);
         if (!last_tx_success_ms_) last_tx_success_ms_ = now;
     }
 
@@ -287,6 +319,7 @@ bool CanDriver::receive(RawCanFrame &frame, uint32_t wait_ms) {
     frame.remote = msg.rtr != 0;
     memcpy(frame.data, msg.data, frame.len);
     stats_.rx_frames++;
+    log_service_can_frame("RX", "received", frame);
     return true;
 }
 

@@ -561,6 +561,8 @@ void print_tcp_status(Print &out, TcpBridge &tcp_bridge) {
         out.print(i);
         out.print("] remote=");
         out.print(clients[i].remote_ip);
+        out.print(" protocol=");
+        out.print(tcp_bridge_client_protocol_name(clients[i].protocol));
         out.print(" line_buf=");
         out.print(clients[i].line_buffer_len);
         out.print(" out_q=");

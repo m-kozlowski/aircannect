@@ -94,6 +94,12 @@ size_t RpcTransport::drain_can_rx() {
         if (!can_rx_queue_pressure_active()) break;
         if (millis() - start_ms >= AC_CAN_RX_DRAIN_PRESSURE_MAX_MS) break;
     }
+
+    // RX observers can enqueue an ISO-TP flow-control response or the next
+    // request block. Start that TX before returning to unrelated main-loop
+    // work instead of delaying every block until the next transport poll.
+    if (can_.tx_queue_depth() > 0) can_.poll();
+
     return drained;
 }
 
@@ -326,6 +332,13 @@ void RpcTransport::set_spool_notification_observer(
     void *context) {
     spool_notification_observer_ = observer;
     spool_notification_context_ = observer ? context : nullptr;
+}
+
+void RpcTransport::set_as11_service_frame_observer(
+    As11ServiceFrameObserver observer,
+    void *context) {
+    as11_service_frame_observer_ = observer;
+    as11_service_frame_context_ = observer ? context : nullptr;
 }
 
 void RpcTransport::reset_stats() {
@@ -964,6 +977,12 @@ void RpcTransport::handle_frame(const RawCanFrame &frame) {
         push_text_event(RpcEventKind::BootNotification,
                         last_boot_notification_.data(),
                         last_boot_notification_.size());
+        return;
+    }
+
+    if (frame.id == AC_AS11_SERVICE_RX_ID &&
+        as11_service_frame_observer_) {
+        as11_service_frame_observer_(as11_service_frame_context_, frame, now);
     }
 }
 

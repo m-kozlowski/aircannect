@@ -94,6 +94,7 @@ static constexpr size_t AC_TCP_LINE_MAX = 2048;
 static constexpr size_t AC_TCP_TX_QUEUE_DEPTH = 24;
 static constexpr size_t AC_TCP_WRITE_CHUNK = 512;
 static constexpr size_t AC_TCP_READ_BYTES_PER_POLL = 512;
+static constexpr uint32_t AC_AS11_SERVICE_TCP_IDLE_TIMEOUT_MS = 30000;
 static constexpr size_t AC_TELNET_TX_QUEUE_DEPTH = 16;
 static constexpr size_t AC_TELNET_READ_BYTES_PER_POLL = 256;
 static constexpr size_t AC_TELNET_AUTH_LINE_MAX = 96;
