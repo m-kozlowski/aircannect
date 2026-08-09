@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "crc16.h"
 #include "crc32.h"
 #include "runtime_clock.h"
 
@@ -33,6 +34,11 @@ uint32_t get_le32(const uint8_t *value) {
            (static_cast<uint32_t>(value[3]) << 24);
 }
 
+bool service_protocol_supported(uint8_t protocol_version) {
+    return protocol_version == AS11_SERVICE_PROTOCOL_VERSION_V1 ||
+           protocol_version == AS11_SERVICE_PROTOCOL_VERSION_V2;
+}
+
 }  // namespace
 
 const char *as11_service_packet_error_name(As11ServicePacketError error) {
@@ -50,41 +56,88 @@ const char *as11_service_packet_error_name(As11ServicePacketError error) {
     return "unknown";
 }
 
+size_t as11_service_packet_crc_bytes(uint8_t protocol_version) {
+    switch (protocol_version) {
+        case AS11_SERVICE_PROTOCOL_VERSION_V1:
+            return AS11_SERVICE_V1_CRC_BYTES;
+        case AS11_SERVICE_PROTOCOL_VERSION_V2:
+            return AS11_SERVICE_V2_CRC_BYTES;
+        default:
+            return 0;
+    }
+}
+
+As11ServicePacketError as11_service_packet_size_from_header(
+    const uint8_t *packet_header,
+    size_t header_size,
+    size_t &packet_size) {
+    packet_size = 0;
+    if (!packet_header || header_size < AS11_SERVICE_PACKET_HEADER_BYTES) {
+        return As11ServicePacketError::TooShort;
+    }
+    if (packet_header[0] != AS11_SERVICE_PACKET_MAGIC) {
+        return As11ServicePacketError::BadMagic;
+    }
+
+    const uint8_t protocol_version = packet_header[1];
+    if (!service_protocol_supported(protocol_version)) {
+        return As11ServicePacketError::UnsupportedVersion;
+    }
+
+    const size_t crc_bytes =
+        as11_service_packet_crc_bytes(protocol_version);
+    const size_t payload_length = get_le16(packet_header + 6);
+    const size_t expected_size = AS11_SERVICE_PACKET_HEADER_BYTES +
+                                 payload_length + crc_bytes;
+    if (expected_size > AS11_SERVICE_PACKET_MAX_BYTES) {
+        return As11ServicePacketError::TooLarge;
+    }
+
+    packet_size = expected_size;
+    return As11ServicePacketError::None;
+}
+
 As11ServicePacketError as11_service_validate_packet(
     const uint8_t *packet,
     size_t packet_size,
     As11ServicePacketHeader &header) {
     header = {};
-    if (!packet || packet_size < AS11_SERVICE_PACKET_OVERHEAD) {
+    if (!packet || packet_size < AS11_SERVICE_PACKET_HEADER_BYTES) {
         return As11ServicePacketError::TooShort;
     }
     if (packet_size > AS11_SERVICE_PACKET_MAX_BYTES) {
         return As11ServicePacketError::TooLarge;
     }
-    if (packet[0] != AS11_SERVICE_PACKET_MAGIC) {
-        return As11ServicePacketError::BadMagic;
-    }
-    if (packet[1] != AS11_SERVICE_PROTOCOL_VERSION) {
-        return As11ServicePacketError::UnsupportedVersion;
-    }
+    size_t expected_size = 0;
+    const As11ServicePacketError size_error =
+        as11_service_packet_size_from_header(
+            packet, AS11_SERVICE_PACKET_HEADER_BYTES, expected_size);
+    if (size_error != As11ServicePacketError::None) return size_error;
 
+    header.protocol_version = packet[1];
     header.command = packet[2];
     header.status = packet[3];
     header.sequence = get_le16(packet + 4);
     header.payload_length = get_le16(packet + 6);
 
-    const size_t expected_size =
-        AS11_SERVICE_PACKET_OVERHEAD + header.payload_length;
     if (packet_size != expected_size) {
         return As11ServicePacketError::LengthMismatch;
     }
 
     const size_t crc_offset =
         AS11_SERVICE_PACKET_HEADER_BYTES + header.payload_length;
-    const uint32_t expected_crc = get_le32(packet + crc_offset);
-    const uint32_t actual_crc = crc32_ieee(packet, crc_offset);
-    if (actual_crc != expected_crc) {
-        return As11ServicePacketError::CrcMismatch;
+    if (header.protocol_version == AS11_SERVICE_PROTOCOL_VERSION_V1) {
+        const uint32_t expected_crc = get_le32(packet + crc_offset);
+        const uint32_t actual_crc = crc32_ieee(packet, crc_offset);
+        if (actual_crc != expected_crc) {
+            return As11ServicePacketError::CrcMismatch;
+        }
+    } else {
+        const uint16_t expected_crc = get_le16(packet + crc_offset);
+        const uint16_t actual_crc = crc16_ccitt_false(packet, crc_offset);
+        if (actual_crc != expected_crc) {
+            return As11ServicePacketError::CrcMismatch;
+        }
     }
     return As11ServicePacketError::None;
 }

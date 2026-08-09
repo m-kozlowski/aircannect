@@ -6,19 +6,26 @@
 namespace aircannect {
 
 static constexpr uint8_t AS11_SERVICE_PACKET_MAGIC = 0xA5;
-static constexpr uint8_t AS11_SERVICE_PROTOCOL_VERSION = 1;
+static constexpr uint8_t AS11_SERVICE_PROTOCOL_VERSION_V1 = 1;
+static constexpr uint8_t AS11_SERVICE_PROTOCOL_VERSION_V2 = 2;
+static constexpr uint8_t AS11_SERVICE_PROTOCOL_VERSION_CURRENT =
+    AS11_SERVICE_PROTOCOL_VERSION_V2;
 static constexpr size_t AS11_SERVICE_PACKET_HEADER_BYTES = 8;
-static constexpr size_t AS11_SERVICE_PACKET_CRC_BYTES = 4;
-static constexpr size_t AS11_SERVICE_PACKET_OVERHEAD =
-    AS11_SERVICE_PACKET_HEADER_BYTES + AS11_SERVICE_PACKET_CRC_BYTES;
+static constexpr size_t AS11_SERVICE_V1_CRC_BYTES = 4;
+static constexpr size_t AS11_SERVICE_V2_CRC_BYTES = 2;
 static constexpr size_t AS11_SERVICE_PACKET_MAX_BYTES = 0x0FFF;
-static constexpr size_t AS11_SERVICE_PAYLOAD_MAX_BYTES =
-    AS11_SERVICE_PACKET_MAX_BYTES - AS11_SERVICE_PACKET_OVERHEAD;
+static constexpr size_t AS11_SERVICE_V1_PAYLOAD_MAX_BYTES =
+    AS11_SERVICE_PACKET_MAX_BYTES - AS11_SERVICE_PACKET_HEADER_BYTES -
+    AS11_SERVICE_V1_CRC_BYTES;
+static constexpr size_t AS11_SERVICE_V2_PAYLOAD_MAX_BYTES =
+    AS11_SERVICE_PACKET_MAX_BYTES - AS11_SERVICE_PACKET_HEADER_BYTES -
+    AS11_SERVICE_V2_CRC_BYTES;
 
 static constexpr uint8_t AS11_SERVICE_RESPONSE_BLOCK_SIZE = 128;
 static constexpr uint8_t AS11_SERVICE_RESPONSE_ST_MIN = 0;
 
 struct As11ServicePacketHeader {
+    uint8_t protocol_version = 0;
     uint8_t command = 0;
     uint8_t status = 0;
     uint16_t sequence = 0;
@@ -36,6 +43,13 @@ enum class As11ServicePacketError : uint8_t {
 };
 
 const char *as11_service_packet_error_name(As11ServicePacketError error);
+
+size_t as11_service_packet_crc_bytes(uint8_t protocol_version);
+
+As11ServicePacketError as11_service_packet_size_from_header(
+    const uint8_t *packet_header,
+    size_t header_size,
+    size_t &packet_size);
 
 As11ServicePacketError as11_service_validate_packet(
     const uint8_t *packet,

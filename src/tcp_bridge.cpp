@@ -7,14 +7,6 @@
 #include "debug_log.h"
 
 namespace aircannect {
-namespace {
-
-uint16_t get_le16(const uint8_t *value) {
-    return static_cast<uint16_t>(value[0]) |
-           (static_cast<uint16_t>(value[1]) << 8);
-}
-
-}  // namespace
 
 const char *tcp_bridge_client_protocol_name(
     TcpBridgeClientProtocol protocol) {
@@ -388,13 +380,15 @@ bool TcpBridge::pump_service_input(size_t idx) {
                 continue;
             }
 
-            const size_t packet_size = AS11_SERVICE_PACKET_OVERHEAD +
-                get_le16(service_header_ + 6);
-            if (packet_size > AS11_SERVICE_PACKET_MAX_BYTES) {
+            size_t packet_size = 0;
+            const As11ServicePacketError packet_error =
+                as11_service_packet_size_from_header(
+                    service_header_, service_header_received_, packet_size);
+            if (packet_error != As11ServicePacketError::None) {
                 Log::logf(CAT_TCP, LOG_WARN,
-                          "[CLIENT %u SERVICE] invalid request size=%u\n",
+                          "[CLIENT %u SERVICE] invalid request error=%s\n",
                           static_cast<unsigned>(idx),
-                          static_cast<unsigned>(packet_size));
+                          as11_service_packet_error_name(packet_error));
                 disconnect_slot(idx);
                 return false;
             }
