@@ -189,6 +189,17 @@ bool parse_event_duration_ms(JsonObjectConst event, int32_t &duration_ms) {
     return false;
 }
 
+bool parse_event_backdate_ms(JsonObjectConst event, int32_t &backdate_ms) {
+    int32_t value = 0;
+    if (!variant_to_int32(event["backdateSeconds"], value) || value < 0 ||
+        value > (INT32_MAX / 1000)) {
+        return false;
+    }
+
+    backdate_ms = value * 1000;
+    return true;
+}
+
 bool parse_event_notification(RpcPayloadView payload,
                               As11EventFrame &frame) {
     frame = {};
@@ -222,6 +233,8 @@ bool parse_event_notification(RpcPayloadView payload,
         record.has_value = variant_to_int32(event["value"], record.value);
         record.has_duration =
             parse_event_duration_ms(event, record.duration_ms);
+        record.has_backdate =
+            parse_event_backdate_ms(event, record.backdate_ms);
         frame.event_count++;
     }
     return true;

@@ -12,6 +12,12 @@ void set_result(EdfEventAnnotationResult &result,
     result.error = error;
 }
 
+bool event_has_apnea_duration(const As11EventRecord &record) {
+    return record.name == "CentralApneaEnd" ||
+           record.name == "ObstructiveApneaEnd" ||
+           record.name == "ApneaEnd";
+}
+
 }  // namespace
 
 bool edf_event_frame_is_respiratory(const As11EventFrame &frame) {
@@ -48,11 +54,17 @@ bool edf_build_event_annotation(EdfAnnotationKind kind,
         return false;
     }
 
+    if (kind == EdfAnnotationKind::Csl &&
+        edf_event_record_is_csr(record) && record.has_backdate) {
+        event_epoch_ms -= record.backdate_ms;
+    }
+
     int64_t onset_ms = event_epoch_ms - session_start_epoch_ms;
     if (onset_ms < 0) onset_ms = 0;
 
     int32_t duration_ms = 0;
     if (kind == EdfAnnotationKind::Eve &&
+        event_has_apnea_duration(record) &&
         record.has_duration && record.duration_ms > 0) {
         duration_ms = record.duration_ms;
     }

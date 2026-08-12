@@ -19,8 +19,10 @@ struct As11EventRecord {
     std::string report_time;
     int32_t value = 0;
     int32_t duration_ms = 0;
+    int32_t backdate_ms = 0;
     bool has_value = false;
     bool has_duration = false;
+    bool has_backdate = false;
 };
 
 struct As11EventFrame {
