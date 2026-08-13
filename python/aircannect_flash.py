@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import http.client
 import json
 import os
@@ -17,11 +18,12 @@ import pathlib
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import zlib
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode, urlparse
 
 
@@ -29,6 +31,27 @@ DEFAULT_ENV = "xiao-esp32s3-plus-sdmmc4"
 DEFAULT_HOST = "aircannect"
 DEFAULT_USER = "admin"
 DEFAULT_PASSWORD = "aircannect"
+
+
+class FlashError(Exception):
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class OutputContext:
+    prefix: str = ""
+    target_label: str = ""
+    inline_status: bool = False
+    last_status: str = ""
+    last_status_time: float = 0.0
+    upload_percent: int = -1
+    upload_time: float = 0.0
+
+
+_OUTPUT_LOCK = threading.Lock()
+_OUTPUT_CONTEXT = threading.local()
 
 
 @dataclass(frozen=True)
@@ -48,9 +71,123 @@ class UploadPayload:
     encoding: str
 
 
+class MultiTargetOutput:
+    def __init__(self, labels: list[str]) -> None:
+        self.labels = labels
+        self.label_width = max(len(label) for label in labels)
+        self.statuses = {label: "queued" for label in labels}
+        self.tty = sys.stdout.isatty()
+        self.lines_drawn = 0
+
+    def start(self) -> None:
+        if self.tty:
+            self._render()
+            return
+
+        print("targets: " + ", ".join(self.labels), flush=True)
+
+    def update(self, label: str, message: str, *, error: bool = False) -> None:
+        self.statuses[label] = "ERROR: " + message if error else message
+        if self.tty:
+            self._render()
+            return
+
+        stream = sys.stderr if error else sys.stdout
+        print(f"[{label}] {message}", file=stream, flush=True)
+
+    def finish(self) -> None:
+        self.lines_drawn = 0
+
+    def _render(self) -> None:
+        if self.lines_drawn:
+            sys.stdout.write(f"\x1b[{self.lines_drawn}A")
+
+        for label in self.labels:
+            sys.stdout.write(
+                "\r\x1b[2K"
+                f"{label:<{self.label_width}}  {self.statuses[label]}\n"
+            )
+        sys.stdout.flush()
+        self.lines_drawn = len(self.labels)
+
+
+_MULTI_OUTPUT: MultiTargetOutput | None = None
+
+
 def die(message: str, code: int = 1) -> None:
-    print(f"error: {message}", file=sys.stderr)
-    raise SystemExit(code)
+    raise FlashError(message, code)
+
+
+def set_output_context(prefix: str = "", target_label: str = "") -> None:
+    _OUTPUT_CONTEXT.value = OutputContext(
+        prefix=prefix,
+        target_label=target_label,
+    )
+
+
+def output_context() -> OutputContext:
+    context = getattr(_OUTPUT_CONTEXT, "value", None)
+    if context is None:
+        context = OutputContext()
+        _OUTPUT_CONTEXT.value = context
+    return context
+
+
+def emit(message: str = "", *, error: bool = False) -> None:
+    context = output_context()
+    stream = sys.stderr if error else sys.stdout
+
+    with _OUTPUT_LOCK:
+        if _MULTI_OUTPUT and context.target_label:
+            _MULTI_OUTPUT.update(
+                context.target_label,
+                message,
+                error=error,
+            )
+            return
+
+        if context.inline_status:
+            sys.stdout.write("\n")
+            context.inline_status = False
+        print(context.prefix + message, file=stream, flush=True)
+
+
+def update_status(message: str, *, force: bool = False) -> None:
+    context = output_context()
+    now = time.monotonic()
+
+    if _MULTI_OUTPUT and context.target_label:
+        if not force and now - context.last_status_time < 1.0:
+            return
+
+        with _OUTPUT_LOCK:
+            _MULTI_OUTPUT.update(context.target_label, message)
+    elif context.prefix:
+        if not force and now - context.last_status_time < 1.0:
+            return
+
+        with _OUTPUT_LOCK:
+            print(context.prefix + message, flush=True)
+    else:
+        with _OUTPUT_LOCK:
+            padding = " " * max(0, len(context.last_status) - len(message))
+            sys.stdout.write("\r" + message + padding)
+            sys.stdout.flush()
+            context.inline_status = True
+
+    context.last_status = message
+    context.last_status_time = now
+
+
+def finish_status() -> None:
+    context = output_context()
+    if not context.inline_status:
+        return
+
+    with _OUTPUT_LOCK:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    context.inline_status = False
 
 
 def format_bytes(value: int) -> str:
@@ -79,6 +216,35 @@ def parse_target(text: str) -> Target:
     )
 
 
+def target_url(target: Target) -> str:
+    host = f"[{target.host}]" if ":" in target.host else target.host
+    return f"http://{host}:{target.port}{target.base_path}"
+
+
+def target_label(target: Target) -> str:
+    host = f"[{target.host}]" if ":" in target.host else target.host
+    port = f":{target.port}" if target.port != 80 else ""
+    return f"{host}{port}{target.base_path}"
+
+
+def parse_targets(values: list[str]) -> list[Target]:
+    targets = [parse_target(value) for value in values]
+    seen: set[tuple[str, str, int, str]] = set()
+
+    for target in targets:
+        identity = (
+            target.scheme,
+            target.host.lower(),
+            target.port,
+            target.base_path,
+        )
+        if identity in seen:
+            die(f"duplicate target: {target_url(target)}")
+        seen.add(identity)
+
+    return targets
+
+
 def auth_header(user: str | None, password: str | None) -> str | None:
     if user is None:
         return None
@@ -91,7 +257,7 @@ def firmware_path_for_env(env: str) -> pathlib.Path:
 
 
 def run_build(env: str) -> None:
-    print(f"building PlatformIO env {env}...")
+    emit(f"building PlatformIO env {env}...")
     subprocess.run(["pio", "run", "-e", env], check=True)
 
 
@@ -144,11 +310,11 @@ def detect_upload_compression(
             target, "GET", "/api/ota", auth=auth, timeout=timeout
         )
     except (OSError, http.client.HTTPException, socket.timeout) as error:
-        print(f"compression autodetect failed: {error}; using plain")
+        emit(f"compression autodetect failed: {error}; using plain")
         return "none"
 
     if status >= 400:
-        print(f"compression autodetect failed: HTTP {status}; using plain")
+        emit(f"compression autodetect failed: HTTP {status}; using plain")
         return "none"
 
     encodings = body.get("upload_encodings")
@@ -238,8 +404,8 @@ def start_url_update(
     if encoding not in capabilities.get("upload_encodings", []):
         die(f"target firmware does not support {encoding} OTA images")
 
-    print(f"source: {display_source_url(source_url)}")
-    print(f"transport: device download, {encoding}")
+    emit(f"source: {display_source_url(source_url)}")
+    emit(f"transport: device download, {encoding}")
     status, body = request_json(
         target,
         "POST",
@@ -261,7 +427,7 @@ def wait_for_url_update(
     timeout: float,
     url_timeout: float,
 ) -> dict[str, Any]:
-    print("device is downloading and installing the image...")
+    emit("device is downloading and installing the image...")
     body = initial
     deadline = time.monotonic() + url_timeout
     last_line = ""
@@ -284,15 +450,14 @@ def wait_for_url_update(
         else:
             line = "resolving source URL"
         if line != last_line:
-            sys.stdout.write("\r" + line + " " * max(0, len(last_line) - len(line)))
-            sys.stdout.flush()
+            update_status(line)
             last_line = line
 
         if body.get("last_error") and not body.get("url_active"):
-            print()
+            finish_status()
             die(f"URL update failed: {body['last_error']}")
         if body.get("reboot_pending") or body.get("http_ready"):
-            print()
+            finish_status()
             return body
 
         time.sleep(0.5)
@@ -304,7 +469,7 @@ def wait_for_url_update(
             saw_disconnect = True
             continue
         if status >= 400:
-            print()
+            finish_status()
             die("status poll failed: " + describe_ota_error(status, body))
         if (
             saw_disconnect
@@ -313,10 +478,10 @@ def wait_for_url_update(
             and not body.get("http_active")
             and not body.get("last_error")
         ):
-            print()
+            finish_status()
             return body
 
-    print()
+    finish_status()
     die("timed out waiting for URL update")
 
 
@@ -333,7 +498,7 @@ def prepare_upload(
         query["encoding"] = payload.encoding
         query["wire_size"] = str(payload.wire_size)
 
-    print(f"preparing HTTP OTA for {format_bytes(payload.raw_size)}...")
+    emit(f"preparing HTTP OTA for {format_bytes(payload.raw_size)}...")
     status, body = request_json(
         target,
         "POST",
@@ -349,7 +514,7 @@ def prepare_upload(
     while True:
         if body.get("http_prepared"):
             partition = body.get("partition") or "--"
-            print(f"prepared: partition={partition}")
+            emit(f"prepared: partition={partition}")
             return
         if body.get("last_error"):
             die(f"prepare failed: {body['last_error']}")
@@ -370,17 +535,31 @@ def print_progress(sent: int, total: int, *, force: bool = False) -> None:
         return
     percent = int((sent * 100) / total)
     now = time.monotonic()
-    last_percent = getattr(print_progress, "_last_percent", -1)
-    last_time = getattr(print_progress, "_last_time", 0.0)
-    if not force and percent == last_percent and now - last_time < 0.5:
+    context = output_context()
+    last_percent = context.upload_percent
+    last_time = context.upload_time
+    if percent == last_percent:
         return
-    setattr(print_progress, "_last_percent", percent)
-    setattr(print_progress, "_last_time", now)
-    sys.stdout.write(
-        f"\ruploading: {percent:3d}% "
-        f"({format_bytes(sent)} / {format_bytes(total)})"
+    if (
+        _MULTI_OUTPUT
+        and not _MULTI_OUTPUT.tty
+        and not force
+        and percent < min(100, last_percent + 25)
+    ):
+        return
+    if (
+        not force
+        and not (_MULTI_OUTPUT and not _MULTI_OUTPUT.tty)
+        and now - last_time < 0.5
+    ):
+        return
+    context.upload_percent = percent
+    context.upload_time = now
+    update_status(
+        f"uploading: {percent:3d}% "
+        f"({format_bytes(sent)} / {format_bytes(total)})",
+        force=force or bool(_MULTI_OUTPUT and not _MULTI_OUTPUT.tty),
     )
-    sys.stdout.flush()
 
 
 def upload_multipart(
@@ -438,7 +617,7 @@ def upload_multipart(
             print_progress(sent, payload.wire_size)
         conn.send(suffix)
         print_progress(payload.wire_size, payload.wire_size, force=True)
-        print()
+        finish_status()
 
         response = conn.getresponse()
         raw = response.read()
@@ -460,7 +639,7 @@ def wait_for_reboot(
     timeout: float,
     reboot_timeout: float,
 ) -> None:
-    print("waiting for reboot/API...")
+    emit("waiting for reboot/API...")
     deadline = time.monotonic() + reboot_timeout
     saw_down = False
     while time.monotonic() < deadline:
@@ -474,12 +653,89 @@ def wait_for_reboot(
             continue
         if status == 200:
             if saw_down:
-                print("device API is back")
+                emit("device API is back")
                 return
             if not body.get("reboot_pending") and not body.get("http_ready"):
-                print("device API is reachable")
+                emit("device API is reachable")
                 return
     die("timed out waiting for device API after upload", code=2)
+
+
+def run_target(
+    target: Target,
+    *,
+    prefix: str,
+    operation: Callable[[Target], None],
+) -> int:
+    label = target_label(target) if _MULTI_OUTPUT else ""
+    set_output_context(prefix, label)
+    if not _MULTI_OUTPUT:
+        emit(f"target: {target_url(target)}")
+
+    try:
+        operation(target)
+    except FlashError as error:
+        finish_status()
+        emit(f"error: {error}", error=True)
+        return error.code
+    except (OSError, http.client.HTTPException, socket.timeout) as error:
+        finish_status()
+        emit(f"error: {error}", error=True)
+        return 1
+
+    return 0
+
+
+def run_target_operations(
+    targets: list[Target], operation: Callable[[Target], None]
+) -> int:
+    global _MULTI_OUTPUT
+
+    if len(targets) == 1:
+        return run_target(targets[0], prefix="", operation=operation)
+
+    _MULTI_OUTPUT = MultiTargetOutput(
+        [target_label(target) for target in targets]
+    )
+    with _OUTPUT_LOCK:
+        _MULTI_OUTPUT.start()
+
+    def worker(target: Target) -> int:
+        return run_target(
+            target,
+            prefix=f"[{target_label(target)}] ",
+            operation=operation,
+        )
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(targets),
+            thread_name_prefix="aircannect-flash",
+        ) as executor:
+            results = list(executor.map(worker, targets))
+    finally:
+        with _OUTPUT_LOCK:
+            _MULTI_OUTPUT.finish()
+        _MULTI_OUTPUT = None
+
+    succeeded = sum(result == 0 for result in results)
+    emit(f"completed: {succeeded}/{len(targets)} targets")
+    return max(results)
+
+
+def validate_source_url(source_url: str) -> None:
+    parsed_source = urlparse(source_url)
+    try:
+        source_port = parsed_source.port
+    except ValueError:
+        die("--url contains an invalid port")
+    if source_port == 0:
+        die("--url contains an invalid port")
+    if (
+        parsed_source.scheme not in ("http", "https")
+        or not parsed_source.hostname
+    ):
+        die("--url must be an HTTP or HTTPS URL")
 
 
 def main() -> int:
@@ -487,10 +743,14 @@ def main() -> int:
         description="Flash AirCANnect firmware through HTTP OTA."
     )
     parser.add_argument(
-        "target",
-        nargs="?",
-        default=DEFAULT_HOST,
-        help="device host, IP, or http:// URL (default: aircannect)",
+        "targets",
+        nargs="*",
+        default=[DEFAULT_HOST],
+        metavar="TARGET",
+        help=(
+            "one or more device hosts, IPs, or http:// URLs; multiple "
+            "targets are flashed in parallel (default: aircannect)"
+        ),
     )
     parser.add_argument(
         "-e",
@@ -558,48 +818,96 @@ def main() -> int:
     if args.chunk_size <= 0:
         die("--chunk-size must be positive")
 
-    target = parse_target(args.target)
+    targets = parse_targets(args.targets)
     authorization = None if args.no_auth else auth_header(args.user, args.password)
-
-    print(
-        f"target: http://{target.host}:{target.port}{target.base_path or ''}"
-    )
 
     if args.source_url:
         if args.file or args.build:
             die("--url cannot be combined with --file or --build")
-        parsed_source = urlparse(args.source_url)
-        try:
-            source_port = parsed_source.port
-        except ValueError:
-            die("--url contains an invalid port")
-        if source_port == 0:
-            die("--url contains an invalid port")
-        if (
-            parsed_source.scheme not in ("http", "https")
-            or not parsed_source.hostname
-        ):
-            die("--url must be an HTTP or HTTPS URL")
+        validate_source_url(args.source_url)
 
         encoding = url_source_encoding(args.compress)
-        body = start_url_update(
+
+        def install_url(target: Target) -> None:
+            body = start_url_update(
+                target,
+                source_url=args.source_url,
+                encoding=encoding,
+                auth=authorization,
+                timeout=args.timeout,
+            )
+            body = wait_for_url_update(
+                target,
+                initial=body,
+                auth=authorization,
+                timeout=args.timeout,
+                url_timeout=args.url_timeout,
+            )
+            emit(
+                f"update complete: bytes={body.get('bytes', 0)} "
+                f"wire_bytes={body.get('wire_bytes', 0)} "
+                f"partition={body.get('partition') or '--'}"
+            )
+            if not args.no_wait:
+                wait_for_reboot(
+                    target,
+                    auth=authorization,
+                    timeout=args.timeout,
+                    reboot_timeout=args.reboot_timeout,
+                )
+
+        return run_target_operations(targets, install_url)
+
+    if args.build:
+        run_build(args.env)
+
+    firmware = args.file or firmware_path_for_env(args.env)
+    size = validate_firmware(firmware)
+    emit(f"firmware: {firmware} ({format_bytes(size)})")
+
+    payloads: dict[str, UploadPayload] = {}
+    if args.compress in ("auto", "none"):
+        payloads["none"] = make_upload_payload(firmware, "none")
+    if args.compress in ("auto", "zlib"):
+        payloads["zlib"] = make_upload_payload(firmware, "zlib")
+
+    def upload_firmware(target: Target) -> None:
+        compression = args.compress
+        if compression == "auto":
+            compression = detect_upload_compression(
+                target, auth=authorization, timeout=args.timeout
+            )
+
+        payload = payloads[compression]
+        if payload.encoding != "plain":
+            ratio = payload.wire_size / payload.raw_size * 100.0
+            emit(
+                f"transport: {payload.encoding} "
+                f"{format_bytes(payload.wire_size)} "
+                f"({ratio:.1f}% of raw)"
+            )
+        else:
+            emit("transport: plain")
+
+        prepare_upload(
             target,
-            source_url=args.source_url,
-            encoding=encoding,
+            payload=payload,
             auth=authorization,
             timeout=args.timeout,
+            prepare_timeout=args.prepare_timeout,
         )
-        body = wait_for_url_update(
+        body = upload_multipart(
             target,
-            initial=body,
+            payload=payload,
             auth=authorization,
-            timeout=args.timeout,
-            url_timeout=args.url_timeout,
+            timeout=max(args.timeout, 60.0),
+            chunk_size=args.chunk_size,
         )
-        print(
-            f"update complete: bytes={body.get('bytes', 0)} "
-            f"wire_bytes={body.get('wire_bytes', 0)} "
-            f"partition={body.get('partition') or '--'}"
+        partition = body.get("partition") or "--"
+        emit(
+            f"upload complete: bytes={body.get('bytes', size)} "
+            f"wire_bytes={body.get('wire_bytes', payload.wire_size)} "
+            f"partition={partition}"
         )
         if not args.no_wait:
             wait_for_reboot(
@@ -608,61 +916,14 @@ def main() -> int:
                 timeout=args.timeout,
                 reboot_timeout=args.reboot_timeout,
             )
-        return 0
 
-    if args.build:
-        run_build(args.env)
-
-    firmware = args.file or firmware_path_for_env(args.env)
-    size = validate_firmware(firmware)
-    print(f"firmware: {firmware} ({format_bytes(size)})")
-
-    compression = args.compress
-    if compression == "auto":
-        compression = detect_upload_compression(
-            target, auth=authorization, timeout=args.timeout
-        )
-
-    payload = make_upload_payload(firmware, compression)
-
-    if payload.encoding != "plain":
-        ratio = payload.wire_size / payload.raw_size * 100.0
-        print(
-            f"transport: {payload.encoding} "
-            f"{format_bytes(payload.wire_size)} ({ratio:.1f}% of raw)"
-        )
-    else:
-        print("transport: plain")
-
-    prepare_upload(
-        target,
-        payload=payload,
-        auth=authorization,
-        timeout=args.timeout,
-        prepare_timeout=args.prepare_timeout,
-    )
-    body = upload_multipart(
-        target,
-        payload=payload,
-        auth=authorization,
-        timeout=max(args.timeout, 60.0),
-        chunk_size=args.chunk_size,
-    )
-    partition = body.get("partition") or "--"
-    print(
-        f"upload complete: bytes={body.get('bytes', size)} "
-        f"wire_bytes={body.get('wire_bytes', payload.wire_size)} "
-        f"partition={partition}"
-    )
-    if not args.no_wait:
-        wait_for_reboot(
-            target,
-            auth=authorization,
-            timeout=args.timeout,
-            reboot_timeout=args.reboot_timeout,
-        )
-    return 0
+    return run_target_operations(targets, upload_firmware)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except FlashError as error:
+        emit(f"error: {error}", error=True)
+        exit_code = error.code
+    raise SystemExit(exit_code)
