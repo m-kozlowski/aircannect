@@ -498,8 +498,23 @@ void ResmedOtaManager::abort(const char *reason) {
     ScopedLock lock(*this, 1000);
     if (!lock || !cold_) return;
 
-    cancel_rpc_request();
-    set_error(reason ? reason : "aborted");
+    const char *result = reason ? reason : "aborted";
+    clear_session();
+
+    Log::logf(CAT_OTA, LOG_INFO, "[RESMED] %s\n", result);
+}
+
+bool ResmedOtaManager::reset_terminal_state() {
+    ScopedLock lock(*this, 1000);
+    if (!lock || !cold_) return false;
+
+    if (active() || transport_active()) return false;
+
+    if (cold_->status.phase == ResmedOtaPhase::Error ||
+        cold_->status.phase == ResmedOtaPhase::Complete) {
+        clear_session();
+    }
+    return cold_->status.phase == ResmedOtaPhase::Idle;
 }
 
 bool ResmedOtaManager::active() const {

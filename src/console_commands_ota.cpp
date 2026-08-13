@@ -350,7 +350,7 @@ void handle_resmed_ota(Print &out,
 
         if (!path.length()) {
             out.println("[RESMED OTA] image path is required");
-        } else if (!resmed_ota.active() &&
+        } else if (resmed_ota.reset_terminal_state() &&
                    preparer.request(path.c_str(), nullptr, false, target,
                                     transport)) {
             out.print("[RESMED OTA] install queued transport=");

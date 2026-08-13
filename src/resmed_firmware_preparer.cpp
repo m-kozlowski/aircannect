@@ -152,6 +152,15 @@ bool ResmedFirmwarePreparer::request(const char *path,
 
 void ResmedFirmwarePreparer::cancel() {
     cancel_requested_.store(true, std::memory_order_release);
+
+    if (!cold_ || !lock(0)) return;
+    if (!task_ && !cold_->result_pending) {
+        cold_->request = {};
+        cold_->result = {};
+        cold_->status = {};
+        cancel_requested_.store(false, std::memory_order_release);
+    }
+    unlock();
 }
 
 void ResmedFirmwarePreparer::publish_activity(
@@ -204,6 +213,9 @@ bool ResmedFirmwarePreparer::take_result(ResmedPreparedFirmware &result,
     cancelled = cancel_requested_.load(std::memory_order_acquire);
     cold_->result = {};
     cold_->result_pending = false;
+    cold_->request = {};
+    cold_->status = {};
+    cancel_requested_.store(false, std::memory_order_release);
     unlock();
     return true;
 }
@@ -625,6 +637,16 @@ void ResmedFirmwarePreparer::finish_task(
     const char *error,
     const ResmedPreparedFirmware *result) {
     if (!cold_ || !lock(100)) return;
+
+    if (state == ResmedFirmwarePrepareState::Cancelled && !result) {
+        cold_->request = {};
+        cold_->result = {};
+        cold_->status = {};
+        cancel_requested_.store(false, std::memory_order_release);
+        task_ = nullptr;
+        unlock();
+        return;
+    }
 
     cold_->status.state = state;
     copy_cstr(cold_->status.error, sizeof(cold_->status.error), error);

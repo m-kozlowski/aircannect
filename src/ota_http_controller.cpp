@@ -606,7 +606,7 @@ void OtaHttpController::execute(Command &command) {
             break;
 
         case CommandKind::ResmedInstall:
-            if (resmed_ota_->active() ||
+            if (!resmed_ota_->reset_terminal_state() ||
                 !resmed_preparer_->request(
                     command.path.c_str(), command.filename.c_str(),
                     command.flag, command.resmed_target,

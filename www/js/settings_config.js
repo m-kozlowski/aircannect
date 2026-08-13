@@ -1603,6 +1603,7 @@
           target,
           transport,
         });
+        await waitResmedOtaStart();
         await waitResmedOta((data) => data.phase === "complete", 4200);
         msg("resmedRepositoryMsg", "Installation complete", true, true);
       } catch (error) {
@@ -1635,6 +1636,15 @@
         await sleep(500);
       }
       throw new Error("ResMed OTA timeout");
+    }
+
+    async function waitResmedOtaStart(attempts) {
+      for (let index = 0; index < (attempts || 20); index++) {
+        const data = await getResmedOta();
+        if (data.active) return data;
+        await sleep(500);
+      }
+      throw new Error("ResMed OTA did not start");
     }
 
     async function postResmedOta(url, body) {
@@ -1720,6 +1730,7 @@
           target,
           transport,
         });
+        await waitResmedOtaStart();
         await waitResmedOta((data) => data.phase === "complete", 4200);
         msg("resmedOtaMsg", "Installation complete", true, true);
       } catch (error) {

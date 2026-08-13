@@ -77,6 +77,7 @@ public:
     bool request_apply_authenticated(const String &authentication,
                                      const String &confirm);
     void abort(const char *reason);
+    bool reset_terminal_state();
 
     bool active() const;
     bool transport_active() const;
