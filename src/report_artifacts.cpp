@@ -184,7 +184,7 @@ bool artifact_path(const ReportArtifactKey &key,
     const int written = snprintf(
         out,
         out_size,
-        "%s/%s-%016llx.%s",
+        "%s/%s/%016llx.%s",
         REPORT_ARTIFACT_ROOT,
         day,
         static_cast<unsigned long long>(key.source_revision.value()),
@@ -716,7 +716,7 @@ bool report_artifact_manifest_path(
     if (!sleep_day.format_yyyymmdd(day, sizeof(day))) return false;
     const int written = snprintf(out,
                                  out_size,
-                                 "%s/%s.manifest",
+                                 "%s/%s/manifest",
                                  REPORT_ARTIFACT_ROOT,
                                  day);
     return written > 0 && static_cast<size_t>(written) < out_size;
@@ -736,7 +736,7 @@ bool report_artifact_tile_path(
     const int written = snprintf(
         out,
         out_size,
-        "%s/%s-%016llx-%lld-%lld.tile",
+        "%s/%s/%016llx-%lld-%lld.tile",
         REPORT_ARTIFACT_ROOT,
         day,
         static_cast<unsigned long long>(key.source_revision.value()),

@@ -29,11 +29,29 @@ size_t ReportArtifactPayloadCache::find_exact(
     return SIZE_MAX;
 }
 
+size_t ReportArtifactPayloadCache::find_key(
+    const ReportArtifactKey &artifact) const {
+    for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
+        if (entries_[i].valid() && entries_[i].artifact.key == artifact) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
 size_t ReportArtifactPayloadCache::find_free() const {
     for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
         if (!entries_[i].valid()) return i;
     }
     return SIZE_MAX;
+}
+
+size_t ReportArtifactPayloadCache::free_count() const {
+    size_t count = 0;
+    for (const Entry &entry : entries_) {
+        if (!entry.valid()) ++count;
+    }
+    return count;
 }
 
 size_t ReportArtifactPayloadCache::find_lru() const {
@@ -81,6 +99,27 @@ bool ReportArtifactPayloadCache::can_hold(
 bool ReportArtifactPayloadCache::contains(
     const ReportArtifactDescriptor &artifact) const {
     return find_exact(artifact) != SIZE_MAX;
+}
+
+bool ReportArtifactPayloadCache::describe_ready(
+    const ReportArtifactKey &artifact,
+    ReportArtifactDescriptor &out) const {
+    out = {};
+    if (!artifact.valid()) return false;
+
+    const size_t requested = find_key(artifact);
+    if (requested == SIZE_MAX) return false;
+
+    const ReportArtifactKey result = ReportArtifactKey::result(
+        artifact.sleep_day, artifact.source_revision);
+    const ReportArtifactKey overview = ReportArtifactKey::overview(
+        artifact.sleep_day, artifact.source_revision);
+    if (find_key(result) == SIZE_MAX || find_key(overview) == SIZE_MAX) {
+        return false;
+    }
+
+    out = entries_[requested].artifact;
+    return true;
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportArtifactPayloadCache::find(
@@ -139,6 +178,54 @@ bool ReportArtifactPayloadCache::insert(
     entries_[index].bytes = std::move(bytes);
     entries_[index].last_used = next_use();
     bytes_ += entries_[index].bytes->size();
+    return true;
+}
+
+bool ReportArtifactPayloadCache::insert_pair(
+    const ReportArtifactDescriptor &result,
+    std::shared_ptr<const LargeByteBuffer> result_bytes,
+    const ReportArtifactDescriptor &overview,
+    std::shared_ptr<const LargeByteBuffer> overview_bytes) {
+    if (!can_hold(result) || !can_hold(overview) || !result_bytes ||
+        !overview_bytes || result_bytes->size() != result.size ||
+        overview_bytes->size() != overview.size ||
+        result.key.kind != ReportArtifactKind::Result ||
+        overview.key.kind != ReportArtifactKind::Overview ||
+        result.key.sleep_day != overview.key.sleep_day ||
+        result.key.source_revision != overview.key.source_revision ||
+        result.size + overview.size > byte_budget_) {
+        return false;
+    }
+
+    for (size_t i = 0; i < AC_REPORT_PAYLOAD_CACHE_ENTRY_CAPACITY; ++i) {
+        if (!entries_[i].valid()) continue;
+        if (entries_[i].artifact.key == result.key ||
+            entries_[i].artifact.key == overview.key) {
+            erase(i, false);
+        }
+    }
+
+    while (bytes_ + result.size + overview.size > byte_budget_ ||
+           free_count() < 2) {
+        if (!evict_lru()) return false;
+    }
+
+    const size_t result_index = find_free();
+    if (result_index == SIZE_MAX) return false;
+    entries_[result_index].artifact = result;
+    entries_[result_index].bytes = std::move(result_bytes);
+    entries_[result_index].last_used = next_use();
+    bytes_ += entries_[result_index].bytes->size();
+
+    const size_t overview_index = find_free();
+    if (overview_index == SIZE_MAX) {
+        erase(result_index, false);
+        return false;
+    }
+    entries_[overview_index].artifact = overview;
+    entries_[overview_index].bytes = std::move(overview_bytes);
+    entries_[overview_index].last_used = next_use();
+    bytes_ += entries_[overview_index].bytes->size();
     return true;
 }
 

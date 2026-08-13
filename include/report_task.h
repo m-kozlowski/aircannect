@@ -82,6 +82,12 @@ struct ReportTaskDiagnosticSnapshot {
 
     ReportEngineState engine_state = ReportEngineState::Idle;
     size_t engine_queued = 0;
+    SleepDayId engine_sleep_day;
+    ReportExecutorState executor_state = ReportExecutorState::Idle;
+    size_t executor_operation_index = 0;
+    size_t executor_operation_count = 0;
+    uint32_t executor_record_index = 0;
+    uint32_t executor_record_count = 0;
     char engine_error[AC_STORAGE_ERROR_MAX] = {};
 
     ReportFallbackAcquisitionState fallback_state =

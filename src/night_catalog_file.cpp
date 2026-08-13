@@ -738,7 +738,8 @@ bool parse_header(const uint8_t *header,
         get_le16(header + 20) != SIGNAL_LAYOUT_BYTES ||
         get_le16(header + 22) != FALLBACK_FILE_BYTES ||
         get_le16(header + 24) != FALLBACK_SECTION_BYTES ||
-        get_le16(header + 26) != 0 || get_le32(header + 64) != 0 ||
+        get_le16(header + 26) != NIGHT_CATALOG_SOURCE_REVISION_POLICY ||
+        get_le32(header + 64) != 0 ||
         get_le32(header + 80) != 0 ||
         crc32_ieee(header, 84) != get_le32(header + 84)) {
         return false;
@@ -921,6 +922,7 @@ std::shared_ptr<const LargeByteBuffer> NightCatalogFileCodec::encode(
     put_le16(header + 20, SIGNAL_LAYOUT_BYTES);
     put_le16(header + 22, FALLBACK_FILE_BYTES);
     put_le16(header + 24, FALLBACK_SECTION_BYTES);
+    put_le16(header + 26, NIGHT_CATALOG_SOURCE_REVISION_POLICY);
     put_le32(header + 28, layout.records);
     put_le32(header + 32, layout.sessions);
     put_le32(header + 36, layout.masks);

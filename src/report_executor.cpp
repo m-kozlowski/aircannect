@@ -164,6 +164,12 @@ ReportExecutorStatus ReportExecutor::status() const {
     out.generation = generation_;
     out.operation_index = operation_index_;
     out.operation_count = operation_count_;
+    out.record_index = record_index_;
+    const ReportReadOperation *operation =
+        plan_ && operation_index_ < operation_count_
+            ? plan_->operation(operation_index_)
+            : nullptr;
+    out.record_count = operation ? operation->record_count : 0;
     return out;
 }
 

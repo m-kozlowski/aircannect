@@ -26,12 +26,18 @@ public:
 
     bool can_hold(const ReportArtifactDescriptor &artifact) const;
     bool contains(const ReportArtifactDescriptor &artifact) const;
+    bool describe_ready(const ReportArtifactKey &artifact,
+                        ReportArtifactDescriptor &out) const;
     std::shared_ptr<const LargeByteBuffer> find(
         const ReportArtifactDescriptor &artifact);
     std::shared_ptr<const LargeByteBuffer> find_if_present(
         const ReportArtifactDescriptor &artifact);
     bool insert(const ReportArtifactDescriptor &artifact,
                 std::shared_ptr<const LargeByteBuffer> bytes);
+    bool insert_pair(const ReportArtifactDescriptor &result,
+                     std::shared_ptr<const LargeByteBuffer> result_bytes,
+                     const ReportArtifactDescriptor &overview,
+                     std::shared_ptr<const LargeByteBuffer> overview_bytes);
 
     bool evict_lru();
     void reconcile(const NightCatalog &catalog);
@@ -54,7 +60,9 @@ private:
                          const ReportArtifactDescriptor &rhs);
 
     size_t find_exact(const ReportArtifactDescriptor &artifact) const;
+    size_t find_key(const ReportArtifactKey &artifact) const;
     size_t find_free() const;
+    size_t free_count() const;
     size_t find_lru() const;
     void erase(size_t index, bool eviction);
     uint64_t next_use();

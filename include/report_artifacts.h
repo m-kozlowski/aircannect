@@ -11,7 +11,7 @@
 namespace aircannect {
 
 static constexpr const char *REPORT_ARTIFACT_ROOT =
-    "/aircannect/report/v7";
+    "/aircannect/report/v8/nights";
 
 enum ReportResultArtifactFlag : uint16_t {
     REPORT_RESULT_COMPLETE = 1u << 0,

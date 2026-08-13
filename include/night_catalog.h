@@ -11,6 +11,7 @@
 namespace aircannect {
 
 static constexpr uint16_t NIGHT_CATALOG_NO_SESSION = UINT16_MAX;
+static constexpr uint16_t NIGHT_CATALOG_SOURCE_REVISION_POLICY = 2;
 
 enum class NightCatalogFileKind : uint8_t {
     Brp,

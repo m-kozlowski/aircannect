@@ -124,14 +124,14 @@ void ReportEngine::publish_catalog(std::shared_ptr<const NightCatalog> catalog) 
         }
     }
 
-    if (published_bundle_) {
-        const NightCatalogRecord *published_night = catalog_
-            ? catalog_->find(published_bundle_->key.sleep_day)
+    if (built_bundle_) {
+        const NightCatalogRecord *built_night = catalog_
+            ? catalog_->find(built_bundle_->key.sleep_day)
             : nullptr;
-        if (!published_night ||
-            published_night->source_revision !=
-                published_bundle_->key.source_revision) {
-            published_bundle_.reset();
+        if (!built_night ||
+            built_night->source_revision !=
+                built_bundle_->key.source_revision) {
+            built_bundle_.reset();
         }
     }
 
@@ -262,7 +262,7 @@ void ReportEngine::clear() {
 
     reset_active();
     available_ = {};
-    published_bundle_.reset();
+    built_bundle_.reset();
     last_completion_ = {};
 }
 
@@ -364,8 +364,8 @@ ReportArtifactAvailability ReportEngine::take_available() {
 }
 
 std::shared_ptr<const ReportArtifactBundle>
-ReportEngine::take_published_bundle() {
-    return std::move(published_bundle_);
+ReportEngine::take_built_bundle() {
+    return std::move(built_bundle_);
 }
 
 ReportArtifactKey ReportEngine::build_key(
@@ -641,7 +641,7 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
         }
 
         const OperationAdmission admitted = artifact_store_.start(
-            std::move(bundle),
+            bundle,
             active_request_.ticket.generation,
             write_lane(active_request_.priority));
         if (admitted != OperationAdmission::Accepted) {
@@ -652,6 +652,7 @@ bool ReportEngine::finish_execution(uint32_t now_ms) {
             return true;
         }
 
+        built_bundle_ = std::move(bundle);
         executor_.reset();
         active_plan_.reset();
         phase_ = ActivePhase::Publishing;
@@ -696,8 +697,6 @@ bool ReportEngine::finish_publication(uint32_t now_ms) {
                             "report_artifact_publish_missing");
             return true;
         }
-
-        published_bundle_ = bundle;
 
         if (build_tile_after_pair_ &&
             bundle->key.kind == ReportArtifactKind::Result) {

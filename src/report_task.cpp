@@ -33,7 +33,9 @@ constexpr uint32_t LEGACY_CACHE_DELETE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MS = 30000;
 constexpr uint32_t ARTIFACT_FAILURE_RETRY_MAX_MS = 15 * 60 * 1000;
 constexpr char LEGACY_CACHE_PARENT[] = "/aircannect/report";
-constexpr const char *LEGACY_CACHE_NAMES[] = {"v3", "v4", "v5", "v6"};
+constexpr const char *LEGACY_CACHE_NAMES[] = {
+    "v3", "v4", "v5", "v6", "v7",
+};
 
 enum class ReportTaskCommandKind : uint8_t {
     Artifact,
@@ -381,6 +383,16 @@ struct ReportTask::Runtime {
             return out;
         }
 
+        if (lock(0)) {
+            const bool cached =
+                payload_cache.describe_ready(out.artifact, out.descriptor);
+            unlock();
+            if (cached) {
+                out.state = ReportArtifactQueryState::Ready;
+                return out;
+            }
+        }
+
         ReportArtifactAvailability availability;
         if (!published->artifact_index ||
             !published->artifact_index->availability(
@@ -502,21 +514,38 @@ struct ReportTask::Runtime {
         const std::shared_ptr<const ReportArtifactBundle> &bundle) {
         if (!bundle || !bundle->valid()) return false;
 
-        bool cached = false;
         if (bundle->key.kind == ReportArtifactKind::Result) {
             ReportArtifactDescriptor result;
             result.key = ReportArtifactKey::result(
                 bundle->key.sleep_day, bundle->key.source_revision);
             result.size = bundle->result->size();
             result.crc32 = bundle->result_crc32;
-            cached = cache_payload(result, bundle->result) || cached;
-
             ReportArtifactDescriptor overview;
             overview.key = ReportArtifactKey::overview(
                 bundle->key.sleep_day, bundle->key.source_revision);
             overview.size = bundle->overview->size();
             overview.crc32 = bundle->overview_crc32;
-            cached = cache_payload(overview, bundle->overview) || cached;
+            if (!lock(20)) return false;
+
+#ifdef ARDUINO
+            MemoryStatus memory = Memory::status();
+            while (memory.psram_available &&
+                   memory.psram_free <
+                       AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE &&
+                   payload_cache.evict_lru()) {
+                memory = Memory::status();
+            }
+            if (!memory.psram_available ||
+                memory.psram_free <
+                    AC_REPORT_PAYLOAD_CACHE_PSRAM_RESERVE) {
+                unlock();
+                return false;
+            }
+#endif
+
+            const bool cached = payload_cache.insert_pair(
+                result, bundle->result, overview, bundle->overview);
+            unlock();
             return cached;
         }
 
@@ -525,9 +554,9 @@ struct ReportTask::Runtime {
             tile.key = bundle->key;
             tile.size = bundle->range_tile->size();
             tile.crc32 = bundle->range_tile_crc32;
-            cached = cache_payload(tile, bundle->range_tile);
+            return cache_payload(tile, bundle->range_tile);
         }
-        return cached;
+        return false;
     }
 
     OperationAdmission start_payload_load(
@@ -1284,6 +1313,12 @@ ReportTaskDiagnosticSnapshot ReportTask::diagnostic_snapshot() const {
 
     out.engine_state = engine.state;
     out.engine_queued = engine.queued;
+    out.engine_sleep_day = engine.active_request.artifact.sleep_day;
+    out.executor_state = engine.executor.state;
+    out.executor_operation_index = engine.executor.operation_index;
+    out.executor_operation_count = engine.executor.operation_count;
+    out.executor_record_index = engine.executor.record_index;
+    out.executor_record_count = engine.executor.record_count;
     copy_cstr(out.engine_error, sizeof(out.engine_error),
               engine.last_completion.error);
 
@@ -1731,10 +1766,10 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
     worked = runtime.engine.poll(now_ms, record_budget) || worked;
 
-    std::shared_ptr<const ReportArtifactBundle> published_bundle =
-        runtime.engine.take_published_bundle();
-    if (published_bundle) {
-        (void)runtime.cache_bundle(published_bundle);
+    std::shared_ptr<const ReportArtifactBundle> built_bundle =
+        runtime.engine.take_built_bundle();
+    if (built_bundle) {
+        (void)runtime.cache_bundle(built_bundle);
         worked = true;
     }
 
@@ -1776,15 +1811,10 @@ void ReportTask::run() {
     runtime_->publish_status();
     for (;;) {
         const bool worked = step(millis(), 1);
-        const ReportTaskState state = control_snapshot().state;
+        const ReportTaskControlSnapshot control = control_snapshot();
         if (worked) {
             vTaskDelay(pdMS_TO_TICKS(AC_REPORT_TASK_WORK_TICK_MS));
-        } else if (state == ReportTaskState::LoadingCatalog ||
-                   state == ReportTaskState::RefreshingCatalog ||
-                   state == ReportTaskState::Queued ||
-                   state == ReportTaskState::LookingUp ||
-                   state == ReportTaskState::Building ||
-                   state == ReportTaskState::Publishing) {
+        } else if (control.background_active) {
             ulTaskNotifyTake(pdTRUE,
                              pdMS_TO_TICKS(AC_REPORT_TASK_WAIT_TICK_MS));
         } else {

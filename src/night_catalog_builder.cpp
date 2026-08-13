@@ -20,7 +20,6 @@ namespace {
 
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
 constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
-constexpr uint32_t REPORT_OUTPUT_POLICY_REVISION = 2;
 constexpr int64_t SUMMARY_SESSION_EDGE_TOLERANCE_MS = 2LL * 60000LL;
 
 enum class SessionOrigin : uint8_t {
@@ -853,7 +852,7 @@ uint16_t find_session_index(const NightCatalog &catalog,
 uint64_t calculate_revision(const NightCatalog &catalog,
                             const NightCatalogRecord &record) {
     uint64_t hash = FNV_OFFSET;
-    hash = hash_u32(hash, REPORT_OUTPUT_POLICY_REVISION);
+    hash = hash_u32(hash, NIGHT_CATALOG_SOURCE_REVISION_POLICY);
     hash = hash_u32(hash,
                     static_cast<uint32_t>(record.sleep_day.epoch_days()));
     hash = hash_i64(hash, record.day_start_ms);

@@ -39,6 +39,8 @@ struct ReportExecutorStatus {
     uint32_t generation = 0;
     size_t operation_index = 0;
     size_t operation_count = 0;
+    uint32_t record_index = 0;
+    uint32_t record_count = 0;
 
     bool active() const;
     bool terminal() const;

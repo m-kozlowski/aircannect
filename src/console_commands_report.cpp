@@ -119,6 +119,22 @@ void print_report_status(Print &out, const ReportTask &task) {
     out.print(status.background_active ? "yes" : "no");
     out.print(" suspended=");
     out.print(status.background_suspended ? "yes" : "no");
+    char active_day[9] = {};
+    if (status.engine_sleep_day.format_yyyymmdd(active_day,
+                                                sizeof(active_day))) {
+        out.print(" night=");
+        out.print(active_day);
+    }
+    out.print(" operation=");
+    out.print(static_cast<unsigned long>(
+        status.executor_operation_index));
+    out.print('/');
+    out.print(static_cast<unsigned long>(
+        status.executor_operation_count));
+    out.print(" record=");
+    out.print(static_cast<unsigned long>(status.executor_record_index));
+    out.print('/');
+    out.print(static_cast<unsigned long>(status.executor_record_count));
     out.print(" last_error=");
     out.println(status.engine_error[0] ? status.engine_error : "--");
 

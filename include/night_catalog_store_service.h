@@ -13,7 +13,7 @@
 namespace aircannect {
 
 static constexpr const char *NIGHT_CATALOG_STORE_PATH =
-    "/aircannect/report/v7/catalog.bin";
+    "/aircannect/report/v8/catalog.bin";
 
 enum class NightCatalogStoreState : uint8_t {
     Idle,

@@ -89,37 +89,48 @@ EdfReportSeriesStatus edf_report_decode_series_record(
         return EdfReportSeriesStatus::Ok;
     }
 
-    for (uint32_t i = 0; i < decoder.signal_header.samples_per_record; ++i) {
-        const int64_t sample_ms =
-            record_start_ms +
-            (static_cast<int64_t>(i) *
-             static_cast<int64_t>(decoder.record_duration_ms)) /
-                static_cast<int64_t>(
-                    decoder.signal_header.samples_per_record);
-        if (sample_ms < range_start_ms || sample_ms >= range_end_ms) {
-            continue;
+    const uint32_t samples_per_record =
+        decoder.signal_header.samples_per_record;
+    const uint32_t sample_step_ms =
+        decoder.record_duration_ms / samples_per_record;
+    const uint32_t sample_step_remainder =
+        decoder.record_duration_ms % samples_per_record;
+
+    int64_t sample_ms = record_start_ms;
+    uint32_t sample_remainder = 0;
+    for (uint32_t i = 0; i < samples_per_record; ++i) {
+        if (sample_ms >= range_start_ms && sample_ms < range_end_ms) {
+            int16_t digital = 0;
+
+            if (!edf_decode_signal_digital_sample(decoder.signal_header,
+                                                  record,
+                                                  record_size,
+                                                  i,
+                                                  digital)) {
+                return EdfReportSeriesStatus::RecordSizeMismatch;
+            }
+
+            if (!edf_digital_sample_is_missing(decoder.signal_scale,
+                                               digital)) {
+                ReportSeriesSample sample;
+                sample.timestamp_ms = sample_ms;
+                sample.value_milli = physical_to_milli(
+                    edf_scale_digital_sample(decoder.signal_scale, digital));
+
+                if (!callback(context, sample)) {
+                    return EdfReportSeriesStatus::CallbackRejected;
+                }
+            }
         }
 
-        int16_t digital = 0;
-        if (!edf_decode_signal_digital_sample(decoder.signal_header,
-                                              record,
-                                              record_size,
-                                              i,
-                                              digital)) {
-            return EdfReportSeriesStatus::RecordSizeMismatch;
-        }
-        if (edf_digital_sample_is_missing(decoder.signal_scale, digital)) {
-            continue;
-        }
-
-        ReportSeriesSample sample;
-        sample.timestamp_ms = sample_ms;
-        sample.value_milli = physical_to_milli(
-            edf_scale_digital_sample(decoder.signal_scale, digital));
-        if (!callback(context, sample)) {
-            return EdfReportSeriesStatus::CallbackRejected;
+        sample_ms += sample_step_ms;
+        sample_remainder += sample_step_remainder;
+        if (sample_remainder >= samples_per_record) {
+            ++sample_ms;
+            sample_remainder -= samples_per_record;
         }
     }
+
     return EdfReportSeriesStatus::Ok;
 }
 

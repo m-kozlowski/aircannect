@@ -12,7 +12,7 @@
 namespace aircannect {
 
 static constexpr const char *REPORT_FALLBACK_ARTIFACT_ROOT =
-    "/aircannect/report/v7/fallback";
+    "/aircannect/report/v8/fallback";
 
 struct ReportFallbackSectionInput {
     ReportFallbackSectionKind kind = ReportFallbackSectionKind::Series;

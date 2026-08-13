@@ -1979,7 +1979,10 @@ bool process_read_step() {
     }
 
     const size_t remaining = job.target_length - job.bytes_read;
-    const size_t requested = std::min(remaining, AC_STORAGE_READ_STEP_BYTES);
+    const size_t step_bytes = job.lane == StorageReadLane::Report
+        ? AC_STORAGE_REPORT_READ_STEP_BYTES
+        : AC_STORAGE_READ_STEP_BYTES;
+    const size_t requested = std::min(remaining, step_bytes);
     size_t received = 0;
     {
         const int read = active_read_file.read(job.bytes + job.bytes_read,
