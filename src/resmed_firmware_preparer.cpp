@@ -95,7 +95,8 @@ bool ResmedFirmwarePreparer::begin(StorageStreamPort &stream_port,
 
 bool ResmedFirmwarePreparer::request(const char *path,
                                      const char *filename,
-                                     bool transient_source) {
+                                     bool transient_source,
+                                     ResmedFirmwareTarget target) {
     if (!cold_ || !path || !stream_port_ || !upload_port_ || !path_port_ ||
         !storage_user_path_valid(path) || !lock(100)) {
         return false;
@@ -113,6 +114,7 @@ bool ResmedFirmwarePreparer::request(const char *path,
     copy_cstr(cold_->request.device_identifier,
               sizeof(cold_->request.device_identifier), cold_->device_identifier);
     cold_->request.transient_source = transient_source;
+    cold_->request.target = target;
 
     cold_->result = {};
     cold_->status = {};
@@ -120,6 +122,8 @@ bool ResmedFirmwarePreparer::request(const char *path,
     copy_cstr(cold_->status.source_path, sizeof(cold_->status.source_path), path);
     copy_cstr(cold_->status.filename, sizeof(cold_->status.filename),
               cold_->request.filename);
+    copy_cstr(cold_->status.target, sizeof(cold_->status.target),
+              resmed_firmware_target_code(target));
     cancel_requested_.store(false, std::memory_order_release);
 
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -137,7 +141,8 @@ bool ResmedFirmwarePreparer::request(const char *path,
 
     unlock();
     Log::logf(CAT_OTA, LOG_INFO,
-              "[RESMED] firmware preparation queued path=%s\n", path);
+              "[RESMED] firmware preparation queued target=%s path=%s\n",
+              resmed_firmware_target_code(target), path);
     return true;
 }
 
@@ -297,7 +302,7 @@ bool ResmedFirmwarePreparer::inspect_source(
 
     ResmedFirmwareInspector inspector;
     if (!inspector.begin(input_size, request.filename,
-                         request.device_identifier)) {
+                         request.device_identifier, request.target)) {
         copy_cstr(error, error_size, inspector.error());
         reader.close(false);
         return false;

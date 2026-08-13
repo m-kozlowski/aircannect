@@ -20,6 +20,17 @@ enum class ResmedFirmwareImageKind : uint8_t {
     Raw,
 };
 
+enum class ResmedFirmwareTarget : uint8_t {
+    Conf,
+    Appl,
+    Apcx,
+    Fgbl,
+    Fgcb,
+};
+
+static constexpr ResmedFirmwareTarget AC_RESMED_FIRMWARE_DEFAULT_TARGET =
+    ResmedFirmwareTarget::Apcx;
+
 struct ResmedFirmwareImageInfo {
     ResmedFirmwareImageKind kind = ResmedFirmwareImageKind::Unknown;
     uint64_t input_size = 0;
@@ -45,12 +56,16 @@ struct ResmedFirmwareImageInfo {
 };
 
 const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind);
+const char *resmed_firmware_target_code(ResmedFirmwareTarget target);
+bool resmed_firmware_target_parse(const char *code,
+                                  ResmedFirmwareTarget &target);
 
 class ResmedFirmwareInspector {
 public:
     bool begin(uint64_t input_size,
                const char *filename,
-               const char *device_identifier);
+               const char *device_identifier,
+               ResmedFirmwareTarget target);
     bool consume(uint64_t offset, const uint8_t *data, size_t length);
     bool finish();
 
@@ -96,6 +111,8 @@ private:
     char filename_[96] = {};
     char device_identifier_[96] = {};
     char error_[64] = {};
+    ResmedFirmwareTarget requested_target_ =
+        AC_RESMED_FIRMWARE_DEFAULT_TARGET;
 };
 
 bool resmed_build_raw_abc_prefix(

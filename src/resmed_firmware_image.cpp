@@ -19,24 +19,13 @@ constexpr uint32_t ConfigFlashStart = 0x08020000;
 constexpr uint32_t ApplicationFlashStart = 0x08040000;
 constexpr char Component0005[] = "PacificFG";
 
-enum class RawDescriptorPolicy : uint8_t {
-    Config,
-    Application,
-    Combined,
-};
-
-struct RawTargetSpec {
+struct FirmwareTargetSpec {
+    ResmedFirmwareTarget id = AC_RESMED_FIRMWARE_DEFAULT_TARGET;
     const char *code = nullptr;
     uint32_t flash_start = 0;
     uint64_t payload_size = 0;
-    uint64_t source_offset = 0;
-    RawDescriptorPolicy descriptor_policy = RawDescriptorPolicy::Combined;
-};
-
-struct TargetBounds {
-    const char *code = nullptr;
-    uint32_t start = 0;
-    uint64_t size = 0;
+    bool descriptor_word_2 = false;
+    bool descriptor_word_3 = false;
 };
 
 struct DescriptorPreset {
@@ -45,12 +34,17 @@ struct DescriptorPreset {
     uint32_t word_3 = 0;
 };
 
-constexpr TargetBounds TargetBoundsTable[] = {
-    {"CONF", ConfigFlashStart, ConfigBytes},
-    {"APPL", ApplicationFlashStart, ApplicationBytes},
-    {"APCX", ConfigFlashStart, ConfigAndApplicationBytes},
-    {"FGBL", FlashBase, ConfigBytes},
-    {"FGCB", FlashBase, FullFlashBytes},
+constexpr FirmwareTargetSpec FirmwareTargets[] = {
+    {ResmedFirmwareTarget::Conf, "CONF", ConfigFlashStart, ConfigBytes,
+     true, false},
+    {ResmedFirmwareTarget::Appl, "APPL", ApplicationFlashStart,
+     ApplicationBytes, true, true},
+    {ResmedFirmwareTarget::Apcx, "APCX", ConfigFlashStart,
+     ConfigAndApplicationBytes, false, true},
+    {ResmedFirmwareTarget::Fgbl, "FGBL", FlashBase, ConfigBytes,
+     false, true},
+    {ResmedFirmwareTarget::Fgcb, "FGCB", FlashBase, FullFlashBytes,
+     false, false},
 };
 
 // Keep presets ordered from oldest to newest. Combined CONF+APPL images may
@@ -129,38 +123,19 @@ const DescriptorPreset &latest_descriptor_preset() {
     return DescriptorPresets[DescriptorPresetCount - 1];
 }
 
-bool infer_raw_target(uint64_t size, RawTargetSpec &target) {
-    if (size == FullFlashBytes) {
-        target = {"APCX", ConfigFlashStart, ConfigAndApplicationBytes,
-                  ConfigBytes, RawDescriptorPolicy::Combined};
-        return true;
+const FirmwareTargetSpec *target_spec(ResmedFirmwareTarget target) {
+    for (const FirmwareTargetSpec &candidate : FirmwareTargets) {
+        if (candidate.id == target) return &candidate;
     }
-    if (size == ConfigAndApplicationBytes) {
-        target = {"APCX", ConfigFlashStart, ConfigAndApplicationBytes,
-                  0, RawDescriptorPolicy::Combined};
-        return true;
-    }
-    if (size == ApplicationBytes) {
-        target = {"APPL", ApplicationFlashStart, ApplicationBytes,
-                  0, RawDescriptorPolicy::Application};
-        return true;
-    }
-    if (size == ConfigBytes) {
-        target = {"CONF", ConfigFlashStart, ConfigBytes,
-                  0, RawDescriptorPolicy::Config};
-        return true;
-    }
-    return false;
+    return nullptr;
 }
 
-bool target_bounds(const char code[5], TargetBounds &target) {
-    for (const TargetBounds &candidate : TargetBoundsTable) {
-        if (strncmp(code, candidate.code, 4) == 0) {
-            target = candidate;
-            return true;
-        }
+const FirmwareTargetSpec *target_spec(const char code[5]) {
+    if (!code) return nullptr;
+    for (const FirmwareTargetSpec &candidate : FirmwareTargets) {
+        if (strncmp(code, candidate.code, 4) == 0) return &candidate;
     }
-    return false;
+    return nullptr;
 }
 
 bool ascii_target_code(const uint8_t *code) {
@@ -185,16 +160,40 @@ const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind) {
     return "unknown";
 }
 
+const char *resmed_firmware_target_code(ResmedFirmwareTarget target) {
+    const FirmwareTargetSpec *spec = target_spec(target);
+    return spec ? spec->code : "APCX";
+}
+
+bool resmed_firmware_target_parse(const char *code,
+                                  ResmedFirmwareTarget &target) {
+    if (!code || strlen(code) != 4) return false;
+
+    char normalized[5] = {};
+    for (size_t i = 0; i < 4; ++i) {
+        normalized[i] = static_cast<char>(
+            toupper(static_cast<unsigned char>(code[i])));
+    }
+
+    const FirmwareTargetSpec *spec = target_spec(normalized);
+    if (!spec) return false;
+    target = spec->id;
+    return true;
+}
+
 bool ResmedFirmwareInspector::begin(uint64_t input_size,
                                     const char *filename,
-                                    const char *device_identifier) {
+                                    const char *device_identifier,
+                                    ResmedFirmwareTarget target) {
     *this = ResmedFirmwareInspector();
     if (input_size == 0) return fail("empty_image");
+    if (!target_spec(target)) return fail("unsupported_target");
 
     info_.input_size = input_size;
     copy_text(filename_, sizeof(filename_), filename);
     copy_text(device_identifier_, sizeof(device_identifier_),
               device_identifier);
+    requested_target_ = target;
     rest_crc_state_ = crc32_ieee_initial_state();
     return true;
 }
@@ -249,9 +248,15 @@ bool ResmedFirmwareInspector::configure_from_prefix() {
 }
 
 bool ResmedFirmwareInspector::configure_raw() {
-    RawTargetSpec target;
-    if (!infer_raw_target(info_.input_size, target)) {
-        return fail("unsupported_raw_image_size");
+    const FirmwareTargetSpec *target = target_spec(requested_target_);
+    if (!target) return fail("unsupported_target");
+
+    if (info_.input_size == target->payload_size) {
+        info_.source_offset = 0;
+    } else if (info_.input_size == FullFlashBytes) {
+        info_.source_offset = target->flash_start - FlashBase;
+    } else {
+        return fail("raw_image_size_mismatch");
     }
 
     uint32_t word_2 = 0;
@@ -269,37 +274,29 @@ bool ResmedFirmwareInspector::configure_raw() {
                                         word_2, word_3);
     }
     if (!have_preset) {
-        if (target.descriptor_policy != RawDescriptorPolicy::Combined) {
+        if (requested_target_ != ResmedFirmwareTarget::Apcx &&
+            requested_target_ != ResmedFirmwareTarget::Fgcb) {
             return fail("unsupported_descriptor_preset");
         }
 
         word_2 = 0;
-        word_3 = latest_descriptor_preset().word_3;
+        word_3 = requested_target_ == ResmedFirmwareTarget::Apcx
+            ? latest_descriptor_preset().word_3
+            : 0;
     }
 
     info_.kind = ResmedFirmwareImageKind::Raw;
-    info_.source_offset = target.source_offset;
-    info_.payload_size = target.payload_size;
+    info_.payload_size = target->payload_size;
     info_.prepared_size = AC_RESMED_RAW_ABC_PREFIX_BYTES +
-                          target.payload_size;
-    info_.flash_start = target.flash_start;
-    switch (target.descriptor_policy) {
-        case RawDescriptorPolicy::Config:
-            info_.descriptor_word_2 = word_2;
-            break;
-        case RawDescriptorPolicy::Application:
-            info_.descriptor_word_2 = word_2;
-            info_.descriptor_word_3 = word_3;
-            break;
-        case RawDescriptorPolicy::Combined:
-            info_.descriptor_word_3 = word_3;
-            break;
-    }
-    copy_text(info_.target, sizeof(info_.target), target.code);
+                          target->payload_size;
+    info_.flash_start = target->flash_start;
+    if (target->descriptor_word_2) info_.descriptor_word_2 = word_2;
+    if (target->descriptor_word_3) info_.descriptor_word_3 = word_3;
+    copy_text(info_.target, sizeof(info_.target), target->code);
 
     uint8_t segment[AC_RESMED_ABC_SEGMENT_BYTES] = {};
-    put_le32(segment, 0, static_cast<uint32_t>(target.payload_size));
-    put_le32(segment, 4, target.flash_start);
+    put_le32(segment, 0, static_cast<uint32_t>(target->payload_size));
+    put_le32(segment, 4, target->flash_start);
     rest_crc_state_ = crc32_ieee_update_state(
         crc32_ieee_initial_state(), segment, sizeof(segment));
     configured_ = true;
@@ -321,6 +318,10 @@ bool ResmedFirmwareInspector::configure_abc_0005() {
 bool ResmedFirmwareInspector::configure_abc_0006() {
     if (info_.input_size != AC_RESMED_ABC_PRIMARY_BYTES + FullFlashBytes) {
         return fail("abc_0006_bad_size");
+    }
+
+    if (requested_target_ != ResmedFirmwareTarget::Fgcb) {
+        return fail("image_target_mismatch");
     }
 
     info_.kind = ResmedFirmwareImageKind::Abc0006;
@@ -416,12 +417,17 @@ bool ResmedFirmwareInspector::parse_abc_0005_header() {
 
     memcpy(info_.target, descriptor + 4, 4);
     info_.target[4] = '\0';
-    TargetBounds bounds;
-    if (!target_bounds(info_.target, bounds)) {
+    const FirmwareTargetSpec *target = target_spec(info_.target);
+    if (!target) {
         return fail("abc_unsupported_target");
     }
-    info_.flash_start = bounds.start;
-    target_flash_end_ = static_cast<uint64_t>(bounds.start) + bounds.size;
+    if (target->id != requested_target_) {
+        return fail("image_target_mismatch");
+    }
+
+    info_.flash_start = target->flash_start;
+    target_flash_end_ = static_cast<uint64_t>(target->flash_start) +
+                        target->payload_size;
 
     const uint32_t expected_rest_size = get_le32(descriptor, 0x40);
     expected_rest_crc_ = get_le32(descriptor, 0x44);

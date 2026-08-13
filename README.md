@@ -32,7 +32,8 @@ Using an AirSense 10? See [AirBridge](https://github.com/m-kozlowski/airbridge).
   - up to four STA profiles, BSSID-targeted roaming, SoftAP auto-fallback or forced always-on.
 - **ResMed OTA**
   - flash compatible AirSense 11 / AirCurve 11 firmware from web UI or CLI. \
-    (Autodetects firmware format (raw or .abc container) and target memory block)
+    (Autodetects raw and .abc formats; CONF, APPL, and bootloader regions can
+    be selected explicitly.)
 
 
 ## First setup

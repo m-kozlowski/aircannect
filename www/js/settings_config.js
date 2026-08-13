@@ -1295,6 +1295,9 @@
       const install = document.getElementById("resmedOtaInstallBtn");
       if (install) install.disabled = data.active || resmedDirectUploadBusy;
 
+      const target = document.getElementById("resmedOtaTarget");
+      if (target) target.disabled = data.active || resmedDirectUploadBusy;
+
       const progress = document.getElementById("resmedOtaUploadProgress");
       const bar = document.getElementById("resmedOtaUploadBar");
       progress.style.display =
@@ -1541,13 +1544,34 @@
       }
     }
 
+    function selectedResmedOtaTarget() {
+      const select = document.getElementById("resmedOtaTarget");
+      return select && select.value ? select.value : "APCX";
+    }
+
+    function confirmResmedOtaTarget(target, name) {
+      if (target === "FGBL") {
+        return confirm("Install " + name +
+          " into the ResMed bootloader region (FGBL)?");
+      }
+      if (target === "FGCB") {
+        return confirm("Replace the complete ResMed internal flash with " +
+          name + "?");
+      }
+      return true;
+    }
+
     async function resmedRepositoryInstall(path, name) {
+      const target = selectedResmedOtaTarget();
+      if (!confirmResmedOtaTarget(target, name)) return;
+
       try {
         msg("resmedRepositoryMsg", "Installing " + name, true, true);
         await postResmedOta("/api/resmed-ota/install", {
           path,
           filename: name,
           transient: false,
+          target,
         });
         await waitResmedOta((data) => data.phase === "complete", 4200);
         msg("resmedRepositoryMsg", "Installation complete", true, true);
@@ -1632,6 +1656,9 @@
         return;
       }
 
+      const target = selectedResmedOtaTarget();
+      if (!confirmResmedOtaTarget(target, file.name)) return;
+
       try {
         const current = await getResmedOta();
         if (current.active) {
@@ -1659,6 +1686,7 @@
           path: "/aircannect/resmed-ota-input.image",
           filename: file.name,
           transient: true,
+          target,
         });
         await waitResmedOta((data) => data.phase === "complete", 4200);
         msg("resmedOtaMsg", "Installation complete", true, true);

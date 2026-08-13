@@ -71,7 +71,8 @@ public:
                StoragePathPort &path_port);
     bool request(const char *path,
                  const char *filename,
-                 bool transient_source);
+                 bool transient_source,
+                 ResmedFirmwareTarget target);
     void cancel();
 
     void publish_activity(const ActivitySnapshot &activity);
@@ -87,6 +88,8 @@ private:
         char filename[96] = {};
         char device_identifier[96] = {};
         bool transient_source = false;
+        ResmedFirmwareTarget target =
+            AC_RESMED_FIRMWARE_DEFAULT_TARGET;
     };
 
     struct ColdState;

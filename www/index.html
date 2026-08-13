@@ -680,6 +680,16 @@
               <label>SHA256</label>
               <span class="value" id="resmedOtaHash">--</span>
             </div>
+            <div class="row">
+              <label>Firmware regions</label>
+              <select id="resmedOtaTarget">
+                <option value="APCX" selected>CONF + APPL</option>
+                <option value="APPL">APPL</option>
+                <option value="CONF">CONF</option>
+                <option value="FGBL">Bootloader (FGBL)</option>
+                <option value="FGCB">Full flash (FGBL + CONF + APPL)</option>
+              </select>
+            </div>
             <div class="section-title">Firmware repository</div>
             <div class="storage-toolbar">
               <span class="storage-path" id="resmedRepositoryPath">

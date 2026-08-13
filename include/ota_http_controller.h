@@ -6,6 +6,7 @@
 
 #include "http_route_module.h"
 #include "main_loop_inbox.h"
+#include "resmed_firmware_image.h"
 
 class AsyncWebServerRequest;
 
@@ -52,6 +53,8 @@ private:
         std::string sha256;
         std::string authentication;
         std::string confirmation;
+        ResmedFirmwareTarget resmed_target =
+            AC_RESMED_FIRMWARE_DEFAULT_TARGET;
     };
 
     static constexpr size_t CommandQueueDepth = 8;

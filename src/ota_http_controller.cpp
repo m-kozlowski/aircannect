@@ -403,6 +403,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
 
             String path;
             String filename;
+            String target_text;
             if (!json_get_string(doc, "path", path)) {
                 request->send(
                     400, "application/json",
@@ -411,12 +412,24 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             }
             (void)json_get_string(doc, "filename", filename);
 
+            ResmedFirmwareTarget target =
+                AC_RESMED_FIRMWARE_DEFAULT_TARGET;
+            if (!doc["target"].isNull() &&
+                (!json_get_string(doc, "target", target_text) ||
+                 !resmed_firmware_target_parse(target_text.c_str(), target))) {
+                request->send(
+                    400, "application/json",
+                    "{\"ok\":false,\"error\":\"invalid target\"}");
+                return;
+            }
+
             Command command;
             command.kind = CommandKind::ResmedInstall;
             command.path = path.c_str();
             command.filename = filename.c_str();
             command.flag = doc["transient"].is<bool>() &&
                            doc["transient"].as<bool>();
+            command.resmed_target = target;
             send_queue_result(request, enqueue(std::move(command)));
         },
         nullptr, http_request_body_handler);
@@ -577,7 +590,7 @@ void OtaHttpController::execute(Command &command) {
             if (resmed_ota_->active() ||
                 !resmed_preparer_->request(
                     command.path.c_str(), command.filename.c_str(),
-                    command.flag)) {
+                    command.flag, command.resmed_target)) {
                 Log::logf(CAT_OTA, LOG_WARN,
                           "[RESMED] firmware preparation rejected\n");
             }

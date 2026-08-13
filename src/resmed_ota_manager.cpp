@@ -215,19 +215,6 @@ bool ResmedOtaManager::begin_prepared_install(
     cold_->status.last_result = "opening";
     last_activity_ms_ = millis();
 
-    StorageStreamCommand command;
-    command.path = firmware.path;
-    command.lane = StorageStreamLane::Foreground;
-    command.expected_size = firmware.image.prepared_size;
-    command.verification = StorageStreamVerification::Size;
-
-    char error[AC_STORAGE_ERROR_MAX] = {};
-    if (!stream_port_->request_stream(command, cold_->prepared_stream, error,
-                                      sizeof(error))) {
-        set_error(error[0] ? error : "prepared_stream_rejected");
-        return false;
-    }
-
     Log::logf(CAT_OTA, LOG_INFO,
               "[RESMED] prepared install opening target=%s size=%u path=%s\n",
               firmware.image.target,
@@ -681,9 +668,29 @@ void ResmedOtaManager::poll_prepared_transfer() {
 }
 
 bool ResmedOtaManager::open_prepared_stream() {
-    if (!cold_->prepared_stream || !stream_port_) {
-        set_error("prepared_stream_missing");
+    if (!stream_port_) {
+        set_error("prepared_stream_unavailable");
         return false;
+    }
+
+    if (!cold_->prepared_stream) {
+        StorageStreamCommand command;
+        command.path = cold_->prepared.path;
+        command.lane = StorageStreamLane::Foreground;
+        command.expected_size = cold_->prepared.image.prepared_size;
+        command.verification = StorageStreamVerification::Size;
+
+        char error[AC_STORAGE_ERROR_MAX] = {};
+        if (!stream_port_->request_stream(
+                command, cold_->prepared_stream, error, sizeof(error))) {
+            if (!strcmp(error, "stream_busy") ||
+                !strcmp(error, "stream_slots_full")) {
+                return false;
+            }
+
+            set_error(error[0] ? error : "prepared_stream_rejected");
+            return false;
+        }
     }
 
     StorageStreamStatus stream_status;

@@ -320,11 +320,26 @@ void handle_resmed_ota(Print &out,
     if (install_prefix) {
         String path = rest.substring(strlen(install_prefix));
         trim_inplace(path);
+
+        ResmedFirmwareTarget target =
+            AC_RESMED_FIRMWARE_DEFAULT_TARGET;
+        int target_pos = 0;
+        String target_arg;
+        ResmedFirmwareTarget parsed_target;
+        if (parse_console_arg(path, target_pos, target_arg) &&
+            resmed_firmware_target_parse(target_arg.c_str(),
+                                         parsed_target)) {
+            target = parsed_target;
+            path = path.substring(target_pos);
+            trim_inplace(path);
+        }
+
         if (!path.length()) {
             out.println("[RESMED OTA] image path is required");
         } else if (!resmed_ota.active() &&
-                   preparer.request(path.c_str(), nullptr, false)) {
-            out.println("[RESMED OTA] install queued");
+                   preparer.request(path.c_str(), nullptr, false, target)) {
+            out.print("[RESMED OTA] install queued target=");
+            out.println(resmed_firmware_target_code(target));
         } else {
             out.println("[RESMED OTA] install rejected");
         }
