@@ -176,10 +176,12 @@ void complete_metrics(ReportResultArtifactData &result,
     }
 
     const uint16_t leak_bit = metric_bit(NightCatalogMetric::Leak50);
-    if ((metrics.valid_mask & leak_bit) == 0 && plot.leak_samples > 0) {
+    if (plot.leak_samples > 0) {
         metrics.leak_50_milli =
             divide_round(plot.leak_sum_milli, plot.leak_samples);
         metrics.valid_mask |= leak_bit;
+        metrics.str_mask &= static_cast<uint16_t>(~leak_bit);
+        metrics.summary_mask &= static_cast<uint16_t>(~leak_bit);
     }
 }
 
