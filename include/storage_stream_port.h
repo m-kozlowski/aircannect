@@ -41,10 +41,17 @@ struct StorageStreamCommand {
     StorageStreamLane lane = StorageStreamLane::Export;
     uint64_t expected_size = 0;
     uint64_t expected_modified = 0;
+
+    // Select a file range after snapshot verification. A zero length means
+    // through EOF; consumer offsets always start at zero for the range.
+    uint64_t source_offset = 0;
+    uint64_t source_length = 0;
     StorageStreamVerification verification = StorageStreamVerification::None;
 
     bool valid() const {
-        return !path.empty() && path.front() == '/';
+        return !path.empty() && path.front() == '/' &&
+               (source_length == 0 ||
+                source_offset <= UINT64_MAX - source_length);
     }
 };
 

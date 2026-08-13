@@ -681,6 +681,13 @@
               <span class="value" id="resmedOtaHash">--</span>
             </div>
             <div class="row">
+              <label>Installation method</label>
+              <select id="resmedOtaTransport">
+                <option value="rpc" selected>Native RPC</option>
+                <option value="service">Patched Bootloader</option>
+              </select>
+            </div>
+            <div class="row">
               <label>Firmware regions</label>
               <select id="resmedOtaTarget">
                 <option value="APCX" selected>CONF + APPL</option>

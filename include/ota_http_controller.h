@@ -55,6 +55,8 @@ private:
         std::string confirmation;
         ResmedFirmwareTarget resmed_target =
             AC_RESMED_FIRMWARE_DEFAULT_TARGET;
+        ResmedFirmwareInstallTransport resmed_transport =
+            AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
     };
 
     static constexpr size_t CommandQueueDepth = 8;

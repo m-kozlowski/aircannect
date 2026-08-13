@@ -11,14 +11,24 @@
 
 #include "as11_device_service.h"
 #include "as11_rpc.h"
+#include "as11_service_manager.h"
+#include "as11_service_protocol.h"
 #include "debug_log.h"
+#include "large_byte_buffer.h"
 #include "memory_manager.h"
+#include "runtime_clock.h"
 #include "storage_path_port.h"
 #include "storage_stream_port.h"
 #include "string_util.h"
 
 namespace aircannect {
 namespace {
+
+static constexpr uint32_t ServiceFgcbEraseBytes = 0x00020000;
+static constexpr uint32_t ServiceFgcbProgramBytes = 32;
+static constexpr uint32_t ServiceResetWaitMs = 10000;
+static constexpr uint8_t ServiceResetMaxAttempts = 2;
+static constexpr uint8_t ServiceProgressLogStep = 10;
 
 int hex_nibble(char value) {
     if (value >= '0' && value <= '9') return value - '0';
@@ -101,6 +111,13 @@ String bytes_to_hex(const uint8_t *bytes, size_t length) {
     return hex;
 }
 
+void put_le32(uint8_t *destination, uint32_t value) {
+    destination[0] = static_cast<uint8_t>(value);
+    destination[1] = static_cast<uint8_t>(value >> 8);
+    destination[2] = static_cast<uint8_t>(value >> 16);
+    destination[3] = static_cast<uint8_t>(value >> 24);
+}
+
 }  // namespace
 
 struct ResmedOtaManager::ColdState {
@@ -109,7 +126,7 @@ struct ResmedOtaManager::ColdState {
 
     ResmedPreparedFirmware prepared;
     std::shared_ptr<StorageByteStream> prepared_stream;
-    uint8_t prepared_block[AC_RESMED_OTA_MAX_BLOCK_BYTES] = {};
+    uint8_t prepared_block[AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES] = {};
 
     char cleanup_paths[2][AC_STORAGE_PATH_MAX] = {};
 };
@@ -127,6 +144,7 @@ ResmedOtaManager::ScopedLock::~ScopedLock() {
 
 bool ResmedOtaManager::begin(RpcRequestPort &rpc,
                              As11DeviceService &device,
+                             As11ServiceManager &service,
                              StorageStreamPort &stream_port,
                              StoragePathPort &path_port) {
     if (cold_) return true;
@@ -144,6 +162,7 @@ bool ResmedOtaManager::begin(RpcRequestPort &rpc,
     cold_ = new (memory) ColdState();
     rpc_ = &rpc;
     device_ = &device;
+    service_ = &service;
     stream_port_ = &stream_port;
     path_port_ = &path_port;
     mbedtls_sha256_init(&sha_ctx_);
@@ -155,6 +174,7 @@ void ResmedOtaManager::poll() {
     if (!lock || !cold_ || !rpc_) return;
 
     poll_rpc_completion();
+    poll_service_completion();
     poll_prepared_transfer();
     poll_cleanup();
 
@@ -190,8 +210,15 @@ bool ResmedOtaManager::begin_prepared_install(
     ScopedLock lock(*this, 1000);
     if (!lock) return false;
     if (!cold_ || !rpc_ || !stream_port_ || !path_port_) return false;
-    if (!firmware.valid() ||
-        firmware.image.prepared_size > AC_RESMED_OTA_MAX_FILE_BYTES) {
+    const bool service_install =
+        firmware.transport == ResmedFirmwareInstallTransport::Service;
+    const uint64_t install_size = service_install
+        ? firmware.image.service_payload_size
+        : firmware.image.prepared_size;
+    if (!firmware.valid() || install_size == 0 ||
+        install_size > AC_RESMED_OTA_MAX_FILE_BYTES ||
+        (service_install &&
+         (!service_ || !firmware.image.service_payload_valid()))) {
         set_error("invalid_prepared_image");
         return false;
     }
@@ -202,23 +229,32 @@ bool ResmedOtaManager::begin_prepared_install(
     clear_session();
     cold_->prepared = firmware;
     if (!guard_device_idle_for_upgrade()) return false;
+    if (service_install) {
+        if (!service_->acquire(As11ServiceOwner::ResmedOta)) {
+            set_error("service_busy");
+            return false;
+        }
+        service_owned_ = true;
+    }
 
     prepared_transfer_ = true;
     apply_after_check_ = true;
     cold_->status.phase = ResmedOtaPhase::Opening;
-    cold_->status.total_size = static_cast<size_t>(firmware.image.prepared_size);
+    cold_->status.total_size = static_cast<size_t>(install_size);
     cold_->status.filename = firmware.filename;
     cold_->status.input_type =
         resmed_firmware_image_kind_name(firmware.image.kind);
+    cold_->status.transport = firmware.transport;
     cold_->status.target = firmware.image.target;
     cold_->status.source_path = firmware.path;
     cold_->status.last_result = "opening";
     last_activity_ms_ = millis();
 
     Log::logf(CAT_OTA, LOG_INFO,
-              "[RESMED] prepared install opening target=%s size=%u path=%s\n",
-              firmware.image.target,
-              static_cast<unsigned>(firmware.image.prepared_size),
+              "[RESMED] prepared install opening transport=%s target=%s "
+              "size=%u path=%s\n",
+              resmed_firmware_install_transport_name(firmware.transport),
+              firmware.image.target, static_cast<unsigned>(install_size),
               firmware.path);
     return true;
 }
@@ -473,13 +509,16 @@ bool ResmedOtaManager::active() const {
 
     return cleanup_count_ != 0 ||
            cold_->status.phase == ResmedOtaPhase::Opening ||
+           cold_->status.phase == ResmedOtaPhase::EnteringService ||
+           cold_->status.phase == ResmedOtaPhase::Erasing ||
            cold_->status.phase == ResmedOtaPhase::Initiating ||
            cold_->status.phase == ResmedOtaPhase::Ready ||
            cold_->status.phase == ResmedOtaPhase::Uploading ||
            cold_->status.phase == ResmedOtaPhase::Uploaded ||
            cold_->status.phase == ResmedOtaPhase::Checking ||
            cold_->status.phase == ResmedOtaPhase::Verified ||
-           cold_->status.phase == ResmedOtaPhase::Applying;
+           cold_->status.phase == ResmedOtaPhase::Applying ||
+           cold_->status.phase == ResmedOtaPhase::Resetting;
 }
 
 bool ResmedOtaManager::transport_active() const {
@@ -488,13 +527,17 @@ bool ResmedOtaManager::transport_active() const {
     if (!cold_) return false;
 
     return waiting_for_ != WaitingFor::None || cleanup_count_ != 0 ||
+           service_waiting_for_ != ServiceWaitingFor::None || service_owned_ ||
            cold_->status.phase == ResmedOtaPhase::Opening ||
+           cold_->status.phase == ResmedOtaPhase::EnteringService ||
+           cold_->status.phase == ResmedOtaPhase::Erasing ||
            cold_->status.phase == ResmedOtaPhase::Initiating ||
            cold_->status.phase == ResmedOtaPhase::Ready ||
            cold_->status.phase == ResmedOtaPhase::Uploading ||
            cold_->status.phase == ResmedOtaPhase::Uploaded ||
            cold_->status.phase == ResmedOtaPhase::Checking ||
-           cold_->status.phase == ResmedOtaPhase::Applying;
+           cold_->status.phase == ResmedOtaPhase::Applying ||
+           cold_->status.phase == ResmedOtaPhase::Resetting;
 }
 
 ResmedOtaStatus ResmedOtaManager::status() const {
@@ -510,6 +553,8 @@ const char *ResmedOtaManager::phase_name() const {
     switch (cold_->status.phase) {
         case ResmedOtaPhase::Idle: return "idle";
         case ResmedOtaPhase::Opening: return "opening";
+        case ResmedOtaPhase::EnteringService: return "entering_service";
+        case ResmedOtaPhase::Erasing: return "erasing";
         case ResmedOtaPhase::Initiating: return "initiating";
         case ResmedOtaPhase::Ready: return "ready";
         case ResmedOtaPhase::Uploading: return "uploading";
@@ -517,6 +562,7 @@ const char *ResmedOtaManager::phase_name() const {
         case ResmedOtaPhase::Checking: return "checking";
         case ResmedOtaPhase::Verified: return "verified";
         case ResmedOtaPhase::Applying: return "applying";
+        case ResmedOtaPhase::Resetting: return "resetting";
         case ResmedOtaPhase::Complete: return "complete";
         case ResmedOtaPhase::Error: return "error";
     }
@@ -646,11 +692,438 @@ void ResmedOtaManager::handle_response(RpcPayloadView payload) {
     }
 }
 
+bool ResmedOtaManager::begin_service_install() {
+    if (!service_ || !cold_->prepared.image.service_payload_valid() ||
+        cold_->prepared.image.flash_start % ServiceFgcbEraseBytes != 0 ||
+        cold_->prepared.image.service_payload_size % ServiceFgcbEraseBytes != 0) {
+        set_error("service_range_invalid");
+        return false;
+    }
+    if (!service_owned_ &&
+        !service_->acquire(As11ServiceOwner::ResmedOta)) {
+        set_error("service_busy");
+        return false;
+    }
+
+    service_owned_ = true;
+    service_erase_offset_ = cold_->prepared.image.flash_start;
+    service_started_ms_ = millis();
+    service_reset_attempts_ = 0;
+    service_reset_accepted_ms_ = 0;
+    service_reset_boot_revision_ = 0;
+    service_next_progress_percent_ = ServiceProgressLogStep;
+    cold_->status.xfer_block_size = AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES;
+    cold_->status.phase = ResmedOtaPhase::EnteringService;
+
+    Log::logf(
+        CAT_OTA, LOG_INFO,
+        "[RESMED] service install started target=%s offset=0x%08lx "
+        "bytes=%u sectors=%u\n",
+        cold_->status.target.c_str(),
+        static_cast<unsigned long>(cold_->prepared.image.flash_start),
+        static_cast<unsigned>(cold_->status.total_size),
+        static_cast<unsigned>(cold_->status.total_size /
+                              ServiceFgcbEraseBytes));
+
+    return submit_service_request(AS11_SERVICE_COMMAND_ENTER, nullptr, 0,
+                                  ServiceWaitingFor::Enter);
+}
+
+void ResmedOtaManager::poll_service_completion() {
+    if (!service_owned_ || !service_) return;
+
+    As11ServiceTransactionError error;
+    if (service_->take_error(As11ServiceOwner::ResmedOta, error)) {
+        char reason[64];
+        snprintf(reason, sizeof(reason), "service_%s",
+                 as11_service_transaction_error_name(error));
+        set_error(reason);
+        return;
+    }
+
+    std::shared_ptr<const LargeByteBuffer> response;
+    bool close_after_send = false;
+    if (!service_->take_response(As11ServiceOwner::ResmedOta, response,
+                                 close_after_send)) {
+        return;
+    }
+
+    (void)close_after_send;
+    handle_service_response(response);
+}
+
+void ResmedOtaManager::poll_service_transfer() {
+    if (service_waiting_for_ != ServiceWaitingFor::None) return;
+
+    if (cold_->status.phase == ResmedOtaPhase::Resetting) {
+        poll_service_reset();
+        return;
+    }
+    if (cold_->status.phase == ResmedOtaPhase::Erasing) {
+        (void)submit_service_erase();
+        return;
+    }
+    if (cold_->status.phase != ResmedOtaPhase::Uploading) return;
+
+    if (cold_->status.uploaded_bytes >= cold_->status.total_size) {
+        close_prepared_stream(true);
+        (void)submit_service_reset();
+        return;
+    }
+
+    (void)submit_service_write();
+}
+
+bool ResmedOtaManager::submit_service_request(
+    uint8_t command,
+    const uint8_t *payload,
+    size_t payload_size,
+    ServiceWaitingFor waiting_for) {
+    if (!service_ || !service_owned_ ||
+        service_waiting_for_ != ServiceWaitingFor::None) {
+        set_error("service_not_ready");
+        return false;
+    }
+
+    const size_t packet_capacity = AS11_SERVICE_PACKET_HEADER_BYTES +
+                                   payload_size +
+                                   AS11_SERVICE_V2_CRC_BYTES;
+    std::unique_ptr<LargeByteBuffer> packet =
+        LargeByteBuffer::allocate(packet_capacity);
+    if (!packet) {
+        set_error("service_packet_alloc_failed");
+        return false;
+    }
+
+    service_sequence_++;
+    if (service_sequence_ == 0) service_sequence_++;
+
+    size_t packet_size = 0;
+    if (!as11_service_encode_packet(
+            AS11_SERVICE_PROTOCOL_VERSION_V2, command,
+            AS11_SERVICE_STATUS_OK, service_sequence_, payload, payload_size,
+            packet->data(), packet->size(), packet_size) ||
+        !packet->truncate(packet_size)) {
+        set_error("service_packet_encode_failed");
+        return false;
+    }
+
+    const bool enter_allowed = command == AS11_SERVICE_COMMAND_ENTER;
+    if (!service_->submit_packet(As11ServiceOwner::ResmedOta,
+                                 std::move(packet), enter_allowed, millis())) {
+        char reason[64];
+        snprintf(reason, sizeof(reason), "service_%s",
+                 as11_service_transaction_error_name(service_->last_error()));
+        set_error(reason);
+        return false;
+    }
+
+    service_waiting_for_ = waiting_for;
+    cold_->status.waiting = true;
+    last_activity_ms_ = millis();
+    return true;
+}
+
+void ResmedOtaManager::handle_service_response(
+    const std::shared_ptr<const LargeByteBuffer> &response) {
+    if (!response || service_waiting_for_ == ServiceWaitingFor::None) {
+        set_error("service_response_missing");
+        return;
+    }
+
+    As11ServicePacketHeader header;
+    const As11ServicePacketError packet_error = as11_service_validate_packet(
+        response->data(), response->size(), header);
+    const ServiceWaitingFor completed = service_waiting_for_;
+    service_waiting_for_ = ServiceWaitingFor::None;
+    cold_->status.waiting = false;
+    last_activity_ms_ = millis();
+
+    uint8_t expected_command = 0;
+    switch (completed) {
+        case ServiceWaitingFor::Enter:
+            expected_command = AS11_SERVICE_COMMAND_ENTER;
+            break;
+        case ServiceWaitingFor::Erase:
+            expected_command = AS11_SERVICE_COMMAND_ERASE;
+            break;
+        case ServiceWaitingFor::Write:
+            expected_command = AS11_SERVICE_COMMAND_WRITE;
+            break;
+        case ServiceWaitingFor::Reset:
+            expected_command = AS11_SERVICE_COMMAND_RESET;
+            break;
+        case ServiceWaitingFor::None:
+            break;
+    }
+
+    if (packet_error != As11ServicePacketError::None ||
+        header.command != expected_command ||
+        header.sequence != service_sequence_) {
+        set_error("service_response_invalid");
+        return;
+    }
+    if (header.status != AS11_SERVICE_STATUS_OK) {
+        char reason[40];
+        snprintf(reason, sizeof(reason), "service_status_%u",
+                 static_cast<unsigned>(header.status));
+        set_error(reason);
+        return;
+    }
+    if (completed != ServiceWaitingFor::Enter && header.payload_length != 0) {
+        set_error("service_response_payload");
+        return;
+    }
+
+    cold_->status.last_result = "ok";
+    switch (completed) {
+        case ServiceWaitingFor::Enter:
+            cold_->status.phase = ResmedOtaPhase::Erasing;
+            Log::logf(CAT_OTA, LOG_INFO,
+                      "[RESMED] service entered target=%s\n",
+                      cold_->status.target.c_str());
+            break;
+
+        case ServiceWaitingFor::Erase:
+            cold_->status.phase = ResmedOtaPhase::Uploading;
+            break;
+
+        case ServiceWaitingFor::Write:
+            cold_->status.uploaded_bytes += service_pending_bytes_;
+            service_pending_bytes_ = 0;
+            prepared_block_bytes_ = 0;
+            prepared_block_wanted_ = 0;
+            update_progress();
+            log_service_progress();
+
+            if (cold_->status.uploaded_bytes < cold_->status.total_size &&
+                cold_->prepared.image.flash_start +
+                        cold_->status.uploaded_bytes ==
+                    service_erase_offset_ + ServiceFgcbEraseBytes) {
+                service_erase_offset_ += ServiceFgcbEraseBytes;
+                cold_->status.phase = ResmedOtaPhase::Erasing;
+            }
+            break;
+
+        case ServiceWaitingFor::Reset:
+            service_reset_accepted_ms_ = millis();
+            Log::logf(
+                CAT_OTA, LOG_INFO,
+                "[RESMED] service reset accepted target=%s attempt=%u; "
+                "waiting for application boot\n",
+                cold_->status.target.c_str(),
+                static_cast<unsigned>(service_reset_attempts_));
+            break;
+
+        case ServiceWaitingFor::None:
+            break;
+    }
+}
+
+bool ResmedOtaManager::submit_service_erase() {
+    const uint64_t region_end =
+        cold_->prepared.image.flash_start + cold_->status.total_size;
+    if (service_erase_offset_ >= region_end) {
+        cold_->status.phase = ResmedOtaPhase::Uploading;
+        return true;
+    }
+
+    uint8_t payload[9] = {AS11_SERVICE_TARGET_FGCB};
+    put_le32(payload + 1, service_erase_offset_);
+    put_le32(payload + 5, ServiceFgcbEraseBytes);
+    if (!submit_service_request(AS11_SERVICE_COMMAND_ERASE, payload,
+                                sizeof(payload),
+                                ServiceWaitingFor::Erase)) {
+        return false;
+    }
+
+    const uint32_t region_start = cold_->prepared.image.flash_start;
+    const size_t sector_index =
+        (service_erase_offset_ - region_start) / ServiceFgcbEraseBytes + 1;
+    const size_t sector_count =
+        cold_->status.total_size / ServiceFgcbEraseBytes;
+    Log::logf(CAT_OTA, LOG_INFO,
+              "[RESMED] service erase target=%s sector=%u/%u "
+              "offset=0x%08lx\n",
+              cold_->status.target.c_str(),
+              static_cast<unsigned>(sector_index),
+              static_cast<unsigned>(sector_count),
+              static_cast<unsigned long>(service_erase_offset_));
+    return true;
+}
+
+bool ResmedOtaManager::submit_service_write() {
+    if (!cold_->prepared_stream || !stream_port_) {
+        set_error("prepared_stream_missing");
+        return false;
+    }
+
+    if (prepared_block_wanted_ == 0) {
+        const size_t remaining =
+            cold_->status.total_size - cold_->status.uploaded_bytes;
+        const uint32_t write_offset =
+            cold_->prepared.image.flash_start +
+            cold_->status.uploaded_bytes;
+        const uint32_t sector_end =
+            service_erase_offset_ + ServiceFgcbEraseBytes;
+        if (write_offset < service_erase_offset_ ||
+            write_offset >= sector_end) {
+            set_error("service_sector_state_invalid");
+            return false;
+        }
+
+        const size_t sector_remaining =
+            sector_end - write_offset;
+        prepared_block_wanted_ = std::min({
+            static_cast<size_t>(AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES),
+            remaining,
+            sector_remaining,
+        });
+        if (prepared_block_wanted_ == 0 ||
+            prepared_block_wanted_ % ServiceFgcbProgramBytes != 0) {
+            set_error("service_write_alignment");
+            return false;
+        }
+        prepared_block_bytes_ = 0;
+    }
+
+    const uint64_t source_offset =
+        cold_->status.uploaded_bytes + prepared_block_bytes_;
+    const StorageStreamRead read = stream_port_->read(
+        *cold_->prepared_stream,
+        cold_->prepared_block + prepared_block_bytes_,
+        prepared_block_wanted_ - prepared_block_bytes_, source_offset);
+    if (read.state == StorageStreamReadState::Retry) return false;
+    if (read.state != StorageStreamReadState::Data || read.bytes == 0) {
+        set_error(read.state == StorageStreamReadState::End
+                      ? "prepared_stream_short"
+                      : "prepared_stream_read_failed");
+        return false;
+    }
+
+    prepared_block_bytes_ += read.bytes;
+    if (prepared_block_bytes_ != prepared_block_wanted_) return true;
+
+    const size_t payload_size = AS11_SERVICE_STORAGE_ADDRESS_BYTES +
+                                prepared_block_bytes_;
+    std::unique_ptr<LargeByteBuffer> payload =
+        LargeByteBuffer::allocate(payload_size);
+    if (!payload) {
+        set_error("service_write_alloc_failed");
+        return false;
+    }
+
+    payload->data()[0] = AS11_SERVICE_TARGET_FGCB;
+    put_le32(payload->data() + 1,
+             cold_->prepared.image.flash_start +
+                 cold_->status.uploaded_bytes);
+    memcpy(payload->data() + AS11_SERVICE_STORAGE_ADDRESS_BYTES,
+           cold_->prepared_block, prepared_block_bytes_);
+    service_pending_bytes_ = prepared_block_bytes_;
+    return submit_service_request(AS11_SERVICE_COMMAND_WRITE,
+                                  payload->data(), payload->size(),
+                                  ServiceWaitingFor::Write);
+}
+
+bool ResmedOtaManager::submit_service_reset() {
+    cold_->status.phase = ResmedOtaPhase::Resetting;
+    service_reset_accepted_ms_ = 0;
+    service_reset_boot_revision_ = device_ ? device_->boot_revision() : 0;
+    const uint8_t attempt = service_reset_attempts_ + 1;
+    if (!submit_service_request(AS11_SERVICE_COMMAND_RESET, nullptr, 0,
+                                ServiceWaitingFor::Reset)) {
+        return false;
+    }
+
+    service_reset_attempts_ = attempt;
+    Log::logf(CAT_OTA, LOG_INFO,
+              "[RESMED] service reset requested target=%s attempt=%u\n",
+              cold_->status.target.c_str(),
+              static_cast<unsigned>(service_reset_attempts_));
+    return true;
+}
+
+void ResmedOtaManager::poll_service_reset() {
+    if (!device_ || service_reset_accepted_ms_ == 0) return;
+
+    if (device_->boot_revision() != service_reset_boot_revision_) {
+        finish_service_install();
+        return;
+    }
+
+    const uint32_t now_ms = millis();
+    if (!millis_elapsed_at_least(now_ms, service_reset_accepted_ms_,
+                                 ServiceResetWaitMs)) {
+        return;
+    }
+
+    if (service_reset_attempts_ < ServiceResetMaxAttempts) {
+        Log::logf(
+            CAT_OTA, LOG_WARN,
+            "[RESMED] application boot not observed after service reset; "
+            "retrying target=%s\n",
+            cold_->status.target.c_str());
+        (void)submit_service_reset();
+        return;
+    }
+
+    set_error("service_reset_not_observed");
+}
+
+void ResmedOtaManager::log_service_progress() {
+    if (cold_->status.progress_percent < service_next_progress_percent_ &&
+        cold_->status.uploaded_bytes < cold_->status.total_size) {
+        return;
+    }
+
+    Log::logf(CAT_OTA, LOG_INFO,
+              "[RESMED] service write target=%s bytes=%u/%u progress=%u%%\n",
+              cold_->status.target.c_str(),
+              static_cast<unsigned>(cold_->status.uploaded_bytes),
+              static_cast<unsigned>(cold_->status.total_size),
+              static_cast<unsigned>(cold_->status.progress_percent));
+
+    while (service_next_progress_percent_ <=
+               cold_->status.progress_percent &&
+           service_next_progress_percent_ <= 100 - ServiceProgressLogStep) {
+        service_next_progress_percent_ += ServiceProgressLogStep;
+    }
+}
+
+void ResmedOtaManager::finish_service_install() {
+    const uint32_t elapsed_ms = millis() - service_started_ms_;
+    Log::logf(CAT_OTA, LOG_INFO,
+              "[RESMED] service install complete target=%s bytes=%u "
+              "elapsed_ms=%lu\n",
+              cold_->status.target.c_str(),
+              static_cast<unsigned>(cold_->status.uploaded_bytes),
+              static_cast<unsigned long>(elapsed_ms));
+
+    prepared_transfer_ = false;
+    cold_->status.phase = ResmedOtaPhase::Complete;
+    cold_->status.last_result = "application_ready";
+    schedule_prepared_cleanup();
+    release_service();
+}
+
+void ResmedOtaManager::release_service() {
+    if (service_ && service_owned_) {
+        service_->release(As11ServiceOwner::ResmedOta);
+    }
+    service_owned_ = false;
+    service_waiting_for_ = ServiceWaitingFor::None;
+    service_pending_bytes_ = 0;
+}
+
 void ResmedOtaManager::poll_prepared_transfer() {
     if (!prepared_transfer_) return;
 
     if (cold_->status.phase == ResmedOtaPhase::Opening) {
         (void)open_prepared_stream();
+        return;
+    }
+    if (cold_->status.transport == ResmedFirmwareInstallTransport::Service) {
+        poll_service_transfer();
         return;
     }
     if (waiting_for_ != WaitingFor::None) return;
@@ -677,7 +1150,17 @@ bool ResmedOtaManager::open_prepared_stream() {
         StorageStreamCommand command;
         command.path = cold_->prepared.path;
         command.lane = StorageStreamLane::Foreground;
-        command.expected_size = cold_->prepared.image.prepared_size;
+        command.expected_size =
+            cold_->status.transport == ResmedFirmwareInstallTransport::Service
+                ? cold_->prepared.image.input_size
+                : cold_->prepared.image.prepared_size;
+        if (cold_->status.transport ==
+            ResmedFirmwareInstallTransport::Service) {
+            command.source_offset =
+                cold_->prepared.image.service_source_offset;
+            command.source_length =
+                cold_->prepared.image.service_payload_size;
+        }
         command.verification = StorageStreamVerification::Size;
 
         char error[AC_STORAGE_ERROR_MAX] = {};
@@ -705,8 +1188,13 @@ bool ResmedOtaManager::open_prepared_stream() {
     if (stream_status.state != StorageStreamState::Ready) return false;
     if (!stream_port_->attach(*cold_->prepared_stream)) return false;
 
-    return begin_protocol(static_cast<size_t>(cold_->prepared.image.prepared_size),
-                          "", cold_->prepared.filename);
+    if (cold_->status.transport == ResmedFirmwareInstallTransport::Service) {
+        return begin_service_install();
+    }
+
+    return begin_protocol(
+        static_cast<size_t>(cold_->prepared.image.prepared_size), "",
+        cold_->prepared.filename);
 }
 
 bool ResmedOtaManager::fill_prepared_block() {
@@ -855,6 +1343,7 @@ bool ResmedOtaManager::finish_hash() {
 
 void ResmedOtaManager::clear_session() {
     cancel_rpc_request();
+    release_service();
     close_prepared_stream(false);
     schedule_prepared_cleanup();
 
@@ -865,15 +1354,24 @@ void ResmedOtaManager::clear_session() {
     cold_->status = {};
     cold_->status.phase = ResmedOtaPhase::Idle;
     cold_->status.xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
+    cold_->status.transport = AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
     sha_started_ = false;
     sha_finished_ = false;
     last_activity_ms_ = 0;
     cold_->prepared = {};
     prepared_transfer_ = false;
     apply_after_check_ = false;
+    service_erase_offset_ = 0;
+    service_sequence_ = 0;
+    service_reset_attempts_ = 0;
+    service_next_progress_percent_ = 0;
+    service_started_ms_ = 0;
+    service_reset_accepted_ms_ = 0;
+    service_reset_boot_revision_ = 0;
 }
 
 void ResmedOtaManager::set_error(const char *error) {
+    release_service();
     close_prepared_stream(false);
     schedule_prepared_cleanup();
     prepared_transfer_ = false;

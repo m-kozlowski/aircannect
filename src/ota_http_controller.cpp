@@ -147,6 +147,8 @@ const char *resmed_phase_name(ResmedOtaPhase phase) {
     switch (phase) {
         case ResmedOtaPhase::Idle: return "idle";
         case ResmedOtaPhase::Opening: return "opening";
+        case ResmedOtaPhase::EnteringService: return "entering_service";
+        case ResmedOtaPhase::Erasing: return "erasing";
         case ResmedOtaPhase::Initiating: return "initiating";
         case ResmedOtaPhase::Ready: return "ready";
         case ResmedOtaPhase::Uploading: return "uploading";
@@ -154,6 +156,7 @@ const char *resmed_phase_name(ResmedOtaPhase phase) {
         case ResmedOtaPhase::Checking: return "checking";
         case ResmedOtaPhase::Verified: return "verified";
         case ResmedOtaPhase::Applying: return "applying";
+        case ResmedOtaPhase::Resetting: return "resetting";
         case ResmedOtaPhase::Complete: return "complete";
         case ResmedOtaPhase::Error: return "error";
     }
@@ -193,6 +196,8 @@ void build_resmed_ota_json(JsonOut &json,
     json_add_string(json, "computed_sha256", status.computed_sha256.c_str());
     json_add_string(json, "apply_mode", status.apply_mode.c_str());
     json_add_string(json, "input_type", status.input_type.c_str());
+    json_add_string(json, "transport",
+                    resmed_firmware_install_transport_name(status.transport));
     json_add_string(json, "target", status.target.c_str());
     json_add_string(json, "source_path", status.source_path.c_str());
     json_add_string(json, "last_result", status.last_result.c_str());
@@ -404,6 +409,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             String path;
             String filename;
             String target_text;
+            String transport_text;
             if (!json_get_string(doc, "path", path)) {
                 request->send(
                     400, "application/json",
@@ -423,6 +429,18 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
                 return;
             }
 
+            ResmedFirmwareInstallTransport transport =
+                AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
+            if (!doc["transport"].isNull() &&
+                (!json_get_string(doc, "transport", transport_text) ||
+                 !resmed_firmware_install_transport_parse(
+                     transport_text.c_str(), transport))) {
+                request->send(
+                    400, "application/json",
+                    "{\"ok\":false,\"error\":\"invalid transport\"}");
+                return;
+            }
+
             Command command;
             command.kind = CommandKind::ResmedInstall;
             command.path = path.c_str();
@@ -430,6 +448,7 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
             command.flag = doc["transient"].is<bool>() &&
                            doc["transient"].as<bool>();
             command.resmed_target = target;
+            command.resmed_transport = transport;
             send_queue_result(request, enqueue(std::move(command)));
         },
         nullptr, http_request_body_handler);
@@ -590,7 +609,8 @@ void OtaHttpController::execute(Command &command) {
             if (resmed_ota_->active() ||
                 !resmed_preparer_->request(
                     command.path.c_str(), command.filename.c_str(),
-                    command.flag, command.resmed_target)) {
+                    command.flag, command.resmed_target,
+                    command.resmed_transport)) {
                 Log::logf(CAT_OTA, LOG_WARN,
                           "[RESMED] firmware preparation rejected\n");
             }

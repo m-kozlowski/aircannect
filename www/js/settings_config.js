@@ -1203,7 +1203,17 @@
       }
     }
 
+    function resmedOtaDisplayPhase(data) {
+      const phase = data.phase || "";
+      if (data.transport === "service" &&
+          (phase === "erasing" || phase === "uploading")) {
+        return "programming";
+      }
+      return phase;
+    }
+
     function resmedOtaStatusText(data) {
+      const phase = resmedOtaDisplayPhase(data);
       const target = data.target && data.target !== "ABC" ? " " + data.target : "";
       const prepareTarget = data.prepare_target ? " " + data.prepare_target : "";
       if (data.prepare_state === "queued") return "Preparation queued";
@@ -1214,27 +1224,33 @@
         return "Building ABC image" + prepareTarget;
       }
       if (data.prepare_state === "publishing") return "Saving ABC image";
-      if (data.phase === "opening") return "Opening prepared image" + target;
-      if (data.phase === "initiating") return "Starting device upload" + target;
-      if (data.phase === "ready" || data.phase === "uploading") {
-        return "Sending to ResMed" + target;
+      if (phase === "opening") return "Opening prepared image" + target;
+      if (phase === "entering_service") return "Entering service mode";
+      if (phase === "programming") return "Programming ResMed" + target;
+      if (phase === "initiating") return "Starting device upload" + target;
+      if (phase === "ready" || phase === "uploading") {
+        return data.transport === "service" ?
+          "Programming ResMed" + target : "Sending to ResMed" + target;
       }
-      if (data.phase === "uploaded" || data.phase === "checking") {
+      if (phase === "uploaded" || phase === "checking") {
         return "Verifying on ResMed";
       }
-      if (data.phase === "verified") return "Firmware verified";
-      if (data.phase === "applying") return "Installing firmware";
-      if (data.phase === "complete") return "Installation complete";
-      if (data.phase === "error") return data.last_error || "ResMed OTA failed";
-      return data.phase || "--";
+      if (phase === "verified") return "Firmware verified";
+      if (phase === "applying") return "Installing firmware";
+      if (phase === "resetting") return "Restarting ResMed";
+      if (phase === "complete") return "Installation complete";
+      if (phase === "error") return data.last_error || "ResMed OTA failed";
+      return phase || "--";
     }
 
     function resmedOtaTransferActive(data) {
-      return data.phase === "ready" || data.phase === "uploading";
+      const phase = resmedOtaDisplayPhase(data);
+      return phase === "programming" || phase === "ready" ||
+        phase === "uploading";
     }
 
     function resetResmedOtaRate(data, now, bytes, total) {
-      resmedOtaRate.phase = data.phase || "";
+      resmedOtaRate.phase = resmedOtaDisplayPhase(data);
       resmedOtaRate.total = total || 0;
       resmedOtaRate.bytes = bytes || 0;
       resmedOtaRate.time = now || performance.now();
@@ -1250,7 +1266,7 @@
         return "";
       }
 
-      if (resmedOtaRate.phase !== data.phase ||
+      if (resmedOtaRate.phase !== resmedOtaDisplayPhase(data) ||
           resmedOtaRate.total !== total ||
           bytes < resmedOtaRate.bytes) {
         resetResmedOtaRate(data, now, bytes, total);
@@ -1274,8 +1290,10 @@
 
     function renderResmedOta(data) {
       const rateText = resmedOtaRateText(data);
+      const displayPhase = resmedOtaDisplayPhase(data);
       const stateText = resmedOtaStatusText(data) +
-        (data.waiting ? " / waiting" : "");
+        (data.waiting && displayPhase !== "programming" ?
+          " / waiting" : "");
       const progressValue = data.prepare_active ?
         Number(data.prepare_progress || 0) : Number(data.progress || 0);
       const progressText = progressValue + "%" +
@@ -1297,6 +1315,11 @@
 
       const target = document.getElementById("resmedOtaTarget");
       if (target) target.disabled = data.active || resmedDirectUploadBusy;
+
+      const transport = document.getElementById("resmedOtaTransport");
+      if (transport) {
+        transport.disabled = data.active || resmedDirectUploadBusy;
+      }
 
       const progress = document.getElementById("resmedOtaUploadProgress");
       const bar = document.getElementById("resmedOtaUploadBar");
@@ -1549,6 +1572,11 @@
       return select && select.value ? select.value : "APCX";
     }
 
+    function selectedResmedOtaTransport() {
+      const select = document.getElementById("resmedOtaTransport");
+      return select && select.value ? select.value : "rpc";
+    }
+
     function confirmResmedOtaTarget(target, name) {
       if (target === "FGBL") {
         return confirm("Install " + name +
@@ -1563,6 +1591,7 @@
 
     async function resmedRepositoryInstall(path, name) {
       const target = selectedResmedOtaTarget();
+      const transport = selectedResmedOtaTransport();
       if (!confirmResmedOtaTarget(target, name)) return;
 
       try {
@@ -1572,6 +1601,7 @@
           filename: name,
           transient: false,
           target,
+          transport,
         });
         await waitResmedOta((data) => data.phase === "complete", 4200);
         msg("resmedRepositoryMsg", "Installation complete", true, true);
@@ -1657,6 +1687,7 @@
       }
 
       const target = selectedResmedOtaTarget();
+      const transport = selectedResmedOtaTransport();
       if (!confirmResmedOtaTarget(target, file.name)) return;
 
       try {
@@ -1687,6 +1718,7 @@
           filename: file.name,
           transient: true,
           target,
+          transport,
         });
         await waitResmedOta((data) => data.phase === "complete", 4200);
         msg("resmedOtaMsg", "Installation complete", true, true);

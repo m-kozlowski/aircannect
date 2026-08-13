@@ -59,10 +59,33 @@ const char *As11ServiceManager::state_name(State state) {
     return "unknown";
 }
 
+bool As11ServiceManager::acquire(As11ServiceOwner owner) {
+    if (owner == As11ServiceOwner::None) return false;
+    if (owner_ == owner) return true;
+    if (owner_ != As11ServiceOwner::None || state_ != State::Idle) {
+        return false;
+    }
+
+    owner_ = owner;
+    return true;
+}
+
+void As11ServiceManager::release(As11ServiceOwner owner) {
+    if (owner == As11ServiceOwner::None || owner_ != owner) return;
+
+    cancel();
+    owner_ = As11ServiceOwner::None;
+}
+
 bool As11ServiceManager::submit_packet(
+    As11ServiceOwner owner,
     std::unique_ptr<LargeByteBuffer> request,
     bool enter_allowed,
     uint32_t now_ms) {
+    if (owner == As11ServiceOwner::None || owner_ != owner) {
+        error_ = As11ServiceTransactionError::Busy;
+        return false;
+    }
     if (state_ != State::Idle) {
         error_ = As11ServiceTransactionError::Busy;
         return false;
@@ -783,10 +806,12 @@ void As11ServiceManager::poll(uint32_t now_ms) {
 }
 
 bool As11ServiceManager::take_response(
+    As11ServiceOwner owner,
     std::shared_ptr<const LargeByteBuffer> &response,
     bool &close_after_send) {
     response.reset();
     close_after_send = false;
+    if (owner == As11ServiceOwner::None || owner_ != owner) return false;
     if (state_ != State::ResponseReady || !response_) return false;
 
     response = std::move(response_);
@@ -796,8 +821,10 @@ bool As11ServiceManager::take_response(
 }
 
 bool As11ServiceManager::take_error(
+    As11ServiceOwner owner,
     As11ServiceTransactionError &error) {
     error = As11ServiceTransactionError::None;
+    if (owner == As11ServiceOwner::None || owner_ != owner) return false;
     if (state_ != State::Failed) return false;
 
     error = error_;

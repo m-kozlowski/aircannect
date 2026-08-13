@@ -190,6 +190,8 @@ void handle_resmed_ota(Print &out,
         out.print(resmed_ota.phase_name());
         out.print(" waiting=");
         out.print(status.waiting ? "yes" : "no");
+        out.print(" transport=");
+        out.print(resmed_firmware_install_transport_name(status.transport));
         out.print(" file=\"");
         out.print(status.filename);
         out.print("\" total=");
@@ -323,9 +325,21 @@ void handle_resmed_ota(Print &out,
 
         ResmedFirmwareTarget target =
             AC_RESMED_FIRMWARE_DEFAULT_TARGET;
+        ResmedFirmwareInstallTransport transport =
+            AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
         int target_pos = 0;
         String target_arg;
         ResmedFirmwareTarget parsed_target;
+        ResmedFirmwareInstallTransport parsed_transport;
+        if (parse_console_arg(path, target_pos, target_arg) &&
+            resmed_firmware_install_transport_parse(
+                target_arg.c_str(), parsed_transport)) {
+            transport = parsed_transport;
+            path = path.substring(target_pos);
+            trim_inplace(path);
+            target_pos = 0;
+            target_arg = "";
+        }
         if (parse_console_arg(path, target_pos, target_arg) &&
             resmed_firmware_target_parse(target_arg.c_str(),
                                          parsed_target)) {
@@ -337,8 +351,11 @@ void handle_resmed_ota(Print &out,
         if (!path.length()) {
             out.println("[RESMED OTA] image path is required");
         } else if (!resmed_ota.active() &&
-                   preparer.request(path.c_str(), nullptr, false, target)) {
-            out.print("[RESMED OTA] install queued target=");
+                   preparer.request(path.c_str(), nullptr, false, target,
+                                    transport)) {
+            out.print("[RESMED OTA] install queued transport=");
+            out.print(resmed_firmware_install_transport_name(transport));
+            out.print(" target=");
             out.println(resmed_firmware_target_code(target));
         } else {
             out.println("[RESMED OTA] install rejected");

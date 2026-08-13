@@ -30,15 +30,26 @@ enum class As11ServiceTransactionError : uint8_t {
 const char *as11_service_transaction_error_name(
     As11ServiceTransactionError error);
 
+enum class As11ServiceOwner : uint8_t {
+    None,
+    TcpBridge,
+    ResmedOta,
+};
+
 class As11ServiceManager {
 public:
     explicit As11ServiceManager(CanDriver &can) : can_(can) {}
 
+    // Session ownership
+    bool acquire(As11ServiceOwner owner);
+    void release(As11ServiceOwner owner);
+    bool owned_by(As11ServiceOwner owner) const { return owner_ == owner; }
+
     // Transaction lifecycle
-    bool submit_packet(std::unique_ptr<LargeByteBuffer> request,
+    bool submit_packet(As11ServiceOwner owner,
+                       std::unique_ptr<LargeByteBuffer> request,
                        bool enter_allowed,
                        uint32_t now_ms);
-    void cancel();
     void poll(uint32_t now_ms);
     void poll_entry(RpcQuiescePort &rpc,
                     bool quiesce_ready,
@@ -49,9 +60,11 @@ public:
     void accept_can_frame(const RawCanFrame &frame, uint32_t now_ms);
 
     // Completion
-    bool take_response(std::shared_ptr<const LargeByteBuffer> &response,
+    bool take_response(As11ServiceOwner owner,
+                       std::shared_ptr<const LargeByteBuffer> &response,
                        bool &close_after_send);
-    bool take_error(As11ServiceTransactionError &error);
+    bool take_error(As11ServiceOwner owner,
+                    As11ServiceTransactionError &error);
     bool pending() const;
     bool exclusive_requested() const { return entry_session_owned_; }
     As11ServiceTransactionError last_error() const { return error_; }
@@ -103,6 +116,7 @@ private:
     void release_entry_can_policy();
     static const char *state_name(State state);
     void fail(As11ServiceTransactionError error);
+    void cancel();
     void clear_transaction();
 
     CanDriver &can_;
@@ -132,6 +146,7 @@ private:
     bool entry_session_owned_ = false;
     bool entry_info_pending_ = false;
     bool close_after_response_ = false;
+    As11ServiceOwner owner_ = As11ServiceOwner::None;
     State state_ = State::Idle;
 };
 

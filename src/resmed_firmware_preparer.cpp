@@ -96,7 +96,8 @@ bool ResmedFirmwarePreparer::begin(StorageStreamPort &stream_port,
 bool ResmedFirmwarePreparer::request(const char *path,
                                      const char *filename,
                                      bool transient_source,
-                                     ResmedFirmwareTarget target) {
+                                     ResmedFirmwareTarget target,
+                                     ResmedFirmwareInstallTransport transport) {
     if (!cold_ || !path || !stream_port_ || !upload_port_ || !path_port_ ||
         !storage_user_path_valid(path) || !lock(100)) {
         return false;
@@ -115,6 +116,7 @@ bool ResmedFirmwarePreparer::request(const char *path,
               sizeof(cold_->request.device_identifier), cold_->device_identifier);
     cold_->request.transient_source = transient_source;
     cold_->request.target = target;
+    cold_->request.transport = transport;
 
     cold_->result = {};
     cold_->status = {};
@@ -141,7 +143,9 @@ bool ResmedFirmwarePreparer::request(const char *path,
 
     unlock();
     Log::logf(CAT_OTA, LOG_INFO,
-              "[RESMED] firmware preparation queued target=%s path=%s\n",
+              "[RESMED] firmware preparation queued transport=%s target=%s "
+              "path=%s\n",
+              resmed_firmware_install_transport_name(transport),
               resmed_firmware_target_code(target), path);
     return true;
 }
@@ -243,8 +247,18 @@ void ResmedFirmwarePreparer::run() {
     copy_cstr(result.source_path, sizeof(result.source_path), request.path);
     copy_cstr(result.filename, sizeof(result.filename), request.filename);
     result.cleanup_source = request.transient_source;
+    result.transport = request.transport;
 
-    if (info.kind == ResmedFirmwareImageKind::Raw) {
+    if (request.transport == ResmedFirmwareInstallTransport::Service) {
+        if (!info.service_payload_valid()) {
+            if (request.transient_source) cleanup_path(request.path);
+            finish_task(ResmedFirmwarePrepareState::Error,
+                        "service_image_not_contiguous", nullptr);
+            return;
+        }
+
+        copy_cstr(result.path, sizeof(result.path), request.path);
+    } else if (info.kind == ResmedFirmwareImageKind::Raw) {
         if (!convert_raw(request, info, error, sizeof(error))) {
             if (request.transient_source) cleanup_path(request.path);
             cleanup_path(AC_RESMED_OTA_STAGED_PATH);
@@ -264,10 +278,16 @@ void ResmedFirmwarePreparer::run() {
     }
 
     finish_task(ResmedFirmwarePrepareState::Ready, nullptr, &result);
+    const uint64_t install_size =
+        request.transport == ResmedFirmwareInstallTransport::Service
+            ? info.service_payload_size
+            : info.prepared_size;
     Log::logf(CAT_OTA, LOG_INFO,
-              "[RESMED] firmware ready kind=%s target=%s bytes=%u path=%s\n",
+              "[RESMED] firmware ready transport=%s kind=%s target=%s "
+              "bytes=%u path=%s\n",
+              resmed_firmware_install_transport_name(request.transport),
               resmed_firmware_image_kind_name(info.kind), info.target,
-              static_cast<unsigned>(info.prepared_size), result.path);
+              static_cast<unsigned>(install_size), result.path);
 }
 
 bool ResmedFirmwarePreparer::inspect_source(
@@ -302,7 +322,8 @@ bool ResmedFirmwarePreparer::inspect_source(
 
     ResmedFirmwareInspector inspector;
     if (!inspector.begin(input_size, request.filename,
-                         request.device_identifier, request.target)) {
+                         request.device_identifier, request.target,
+                         request.transport)) {
         copy_cstr(error, error_size, inspector.error());
         reader.close(false);
         return false;

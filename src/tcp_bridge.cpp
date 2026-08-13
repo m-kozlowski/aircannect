@@ -141,7 +141,7 @@ void TcpBridge::poll_service_completion() {
 
     const size_t owner = service_owner_;
     As11ServiceTransactionError error;
-    if (service_.take_error(error)) {
+    if (service_.take_error(As11ServiceOwner::TcpBridge, error)) {
         Log::logf(CAT_TCP, LOG_DEBUG,
                   "[CLIENT %u SERVICE] closing after error=%s\n",
                   static_cast<unsigned>(owner),
@@ -151,7 +151,8 @@ void TcpBridge::poll_service_completion() {
     }
 
     if (!service_output_) {
-        (void)service_.take_response(service_output_,
+        (void)service_.take_response(As11ServiceOwner::TcpBridge,
+                                     service_output_,
                                      service_close_after_output_);
         service_output_pos_ = 0;
     }
@@ -326,6 +327,13 @@ bool TcpBridge::begin_service_client(size_t idx, uint32_t now_ms) {
         disconnect_slot(idx);
         return false;
     }
+    if (!service_.acquire(As11ServiceOwner::TcpBridge)) {
+        Log::logf(CAT_TCP, LOG_WARN,
+                  "[CLIENT %u SERVICE] rejected; service is in use\n",
+                  static_cast<unsigned>(idx));
+        disconnect_slot(idx);
+        return false;
+    }
 
     service_owner_ = idx;
     protocols_[idx] = TcpBridgeClientProtocol::Service;
@@ -430,7 +438,8 @@ bool TcpBridge::pump_service_input(size_t idx,
             std::move(service_request_);
         reset_service_request();
 
-        if (!service_.submit_packet(std::move(complete),
+        if (!service_.submit_packet(As11ServiceOwner::TcpBridge,
+                                    std::move(complete),
                                     service_entry_allowed, millis())) {
             Log::logf(CAT_TCP, LOG_WARN,
                       "[CLIENT %u SERVICE] request rejected error=%s\n",
@@ -519,7 +528,7 @@ void TcpBridge::disconnect_slot(size_t idx) {
                       static_cast<unsigned>(idx));
         }
 
-        service_.cancel();
+        service_.release(As11ServiceOwner::TcpBridge);
         reset_service_request();
         service_output_.reset();
         service_output_pos_ = 0;

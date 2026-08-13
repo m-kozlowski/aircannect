@@ -181,10 +181,36 @@ bool resmed_firmware_target_parse(const char *code,
     return true;
 }
 
+const char *resmed_firmware_install_transport_name(
+    ResmedFirmwareInstallTransport transport) {
+    switch (transport) {
+        case ResmedFirmwareInstallTransport::Rpc: return "rpc";
+        case ResmedFirmwareInstallTransport::Service: return "service";
+    }
+    return "rpc";
+}
+
+bool resmed_firmware_install_transport_parse(
+    const char *name,
+    ResmedFirmwareInstallTransport &transport) {
+    if (!name) return false;
+
+    if (strcasecmp(name, "rpc") == 0) {
+        transport = ResmedFirmwareInstallTransport::Rpc;
+        return true;
+    }
+    if (strcasecmp(name, "service") == 0) {
+        transport = ResmedFirmwareInstallTransport::Service;
+        return true;
+    }
+    return false;
+}
+
 bool ResmedFirmwareInspector::begin(uint64_t input_size,
                                     const char *filename,
                                     const char *device_identifier,
-                                    ResmedFirmwareTarget target) {
+                                    ResmedFirmwareTarget target,
+                                    ResmedFirmwareInstallTransport transport) {
     *this = ResmedFirmwareInspector();
     if (input_size == 0) return fail("empty_image");
     if (!target_spec(target)) return fail("unsupported_target");
@@ -194,6 +220,7 @@ bool ResmedFirmwareInspector::begin(uint64_t input_size,
     copy_text(device_identifier_, sizeof(device_identifier_),
               device_identifier);
     requested_target_ = target;
+    transport_ = transport;
     rest_crc_state_ = crc32_ieee_initial_state();
     return true;
 }
@@ -274,19 +301,24 @@ bool ResmedFirmwareInspector::configure_raw() {
                                         word_2, word_3);
     }
     if (!have_preset) {
-        if (requested_target_ != ResmedFirmwareTarget::Apcx &&
+        if (transport_ == ResmedFirmwareInstallTransport::Rpc &&
+            requested_target_ != ResmedFirmwareTarget::Apcx &&
             requested_target_ != ResmedFirmwareTarget::Fgcb) {
             return fail("unsupported_descriptor_preset");
         }
 
         word_2 = 0;
-        word_3 = requested_target_ == ResmedFirmwareTarget::Apcx
-            ? latest_descriptor_preset().word_3
-            : 0;
+        word_3 = 0;
+        if (transport_ == ResmedFirmwareInstallTransport::Rpc &&
+            requested_target_ == ResmedFirmwareTarget::Apcx) {
+            word_3 = latest_descriptor_preset().word_3;
+        }
     }
 
     info_.kind = ResmedFirmwareImageKind::Raw;
     info_.payload_size = target->payload_size;
+    info_.service_source_offset = info_.source_offset;
+    info_.service_payload_size = target->payload_size;
     info_.prepared_size = AC_RESMED_RAW_ABC_PREFIX_BYTES +
                           target->payload_size;
     info_.flash_start = target->flash_start;
@@ -328,6 +360,8 @@ bool ResmedFirmwareInspector::configure_abc_0006() {
     info_.prepared_size = info_.input_size;
     info_.source_offset = AC_RESMED_ABC_PRIMARY_BYTES;
     info_.payload_size = FullFlashBytes;
+    info_.service_source_offset = AC_RESMED_ABC_PRIMARY_BYTES;
+    info_.service_payload_size = FullFlashBytes;
     info_.flash_start = FlashBase;
     copy_text(info_.target, sizeof(info_.target), "FGCB");
     header_required_ = AC_RESMED_ABC_PRIMARY_BYTES;
@@ -428,6 +462,7 @@ bool ResmedFirmwareInspector::parse_abc_0005_header() {
     info_.flash_start = target->flash_start;
     target_flash_end_ = static_cast<uint64_t>(target->flash_start) +
                         target->payload_size;
+    target_payload_size_ = target->payload_size;
 
     const uint32_t expected_rest_size = get_le32(descriptor, 0x40);
     expected_rest_crc_ = get_le32(descriptor, 0x44);
@@ -477,6 +512,10 @@ bool ResmedFirmwareInspector::parse_segment_byte(uint8_t value) {
         return fail("abc_segment_size_overflow");
     }
 
+    if (segments_parsed_ == 0) {
+        first_segment_start_ = start;
+        first_segment_length_ = length;
+    }
     segment_data_bytes_ += length;
     segments_parsed_++;
     segment_partial_bytes_ = 0;
@@ -516,6 +555,13 @@ bool ResmedFirmwareInspector::finish() {
         return fail("abc_payload_crc_mismatch");
     }
     info_.rest_crc = expected_rest_crc_;
+
+    if (segment_count_ == 1 && first_segment_start_ == info_.flash_start &&
+        first_segment_length_ == target_payload_size_) {
+        info_.service_source_offset =
+            AC_RESMED_ABC_0005_HEADER_BYTES + segment_table_bytes_;
+        info_.service_payload_size = segment_data_bytes_;
+    }
     return true;
 }
 

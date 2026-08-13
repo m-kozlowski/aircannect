@@ -33,6 +33,8 @@ struct ResmedPreparedFirmware {
     char path[AC_STORAGE_PATH_MAX] = {};
     char source_path[AC_STORAGE_PATH_MAX] = {};
     char filename[96] = {};
+    ResmedFirmwareInstallTransport transport =
+        AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
     bool cleanup_source = false;
     bool cleanup_prepared = false;
 
@@ -72,7 +74,9 @@ public:
     bool request(const char *path,
                  const char *filename,
                  bool transient_source,
-                 ResmedFirmwareTarget target);
+                 ResmedFirmwareTarget target,
+                 ResmedFirmwareInstallTransport transport =
+                     AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT);
     void cancel();
 
     void publish_activity(const ActivitySnapshot &activity);
@@ -90,6 +94,8 @@ private:
         bool transient_source = false;
         ResmedFirmwareTarget target =
             AC_RESMED_FIRMWARE_DEFAULT_TARGET;
+        ResmedFirmwareInstallTransport transport =
+            AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
     };
 
     struct ColdState;

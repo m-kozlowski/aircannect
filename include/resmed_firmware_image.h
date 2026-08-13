@@ -28,8 +28,16 @@ enum class ResmedFirmwareTarget : uint8_t {
     Fgcb,
 };
 
+enum class ResmedFirmwareInstallTransport : uint8_t {
+    Rpc,
+    Service,
+};
+
 static constexpr ResmedFirmwareTarget AC_RESMED_FIRMWARE_DEFAULT_TARGET =
     ResmedFirmwareTarget::Apcx;
+static constexpr ResmedFirmwareInstallTransport
+    AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT =
+        ResmedFirmwareInstallTransport::Rpc;
 
 struct ResmedFirmwareImageInfo {
     ResmedFirmwareImageKind kind = ResmedFirmwareImageKind::Unknown;
@@ -37,6 +45,8 @@ struct ResmedFirmwareImageInfo {
     uint64_t prepared_size = 0;
     uint64_t source_offset = 0;
     uint64_t payload_size = 0;
+    uint64_t service_source_offset = 0;
+    uint64_t service_payload_size = 0;
     uint32_t flash_start = 0;
     uint32_t rest_crc = 0;
     uint32_t descriptor_word_2 = 0;
@@ -53,19 +63,30 @@ struct ResmedFirmwareImageInfo {
         return kind == ResmedFirmwareImageKind::Abc0005 ||
                kind == ResmedFirmwareImageKind::Abc0006;
     }
+
+    bool service_payload_valid() const {
+        return service_payload_size != 0;
+    }
 };
 
 const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind);
 const char *resmed_firmware_target_code(ResmedFirmwareTarget target);
 bool resmed_firmware_target_parse(const char *code,
                                   ResmedFirmwareTarget &target);
+const char *resmed_firmware_install_transport_name(
+    ResmedFirmwareInstallTransport transport);
+bool resmed_firmware_install_transport_parse(
+    const char *name,
+    ResmedFirmwareInstallTransport &transport);
 
 class ResmedFirmwareInspector {
 public:
     bool begin(uint64_t input_size,
                const char *filename,
                const char *device_identifier,
-               ResmedFirmwareTarget target);
+               ResmedFirmwareTarget target,
+               ResmedFirmwareInstallTransport transport =
+                   AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT);
     bool consume(uint64_t offset, const uint8_t *data, size_t length);
     bool finish();
 
@@ -102,6 +123,9 @@ private:
     uint32_t segment_table_bytes_ = 0;
     uint32_t segment_partial_bytes_ = 0;
     uint64_t target_flash_end_ = 0;
+    uint64_t target_payload_size_ = 0;
+    uint32_t first_segment_start_ = 0;
+    uint32_t first_segment_length_ = 0;
     size_t header_required_ = 0;
     size_t header_received_ = 0;
     bool configured_ = false;
@@ -113,6 +137,8 @@ private:
     char error_[64] = {};
     ResmedFirmwareTarget requested_target_ =
         AC_RESMED_FIRMWARE_DEFAULT_TARGET;
+    ResmedFirmwareInstallTransport transport_ =
+        AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
 };
 
 bool resmed_build_raw_abc_prefix(

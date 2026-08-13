@@ -907,6 +907,7 @@ void setup() {
     report_http_controller.begin(report_task);
 
     if (!resmed_ota_manager.begin(rpc_transport, as11_device_service,
+                                  as11_service_manager,
                                   StorageService::stream_port(),
                                   StorageService::path_port())) {
         Log::logf(CAT_OTA, LOG_ERROR,

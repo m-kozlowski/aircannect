@@ -265,6 +265,9 @@ void As11DeviceService::device_reset(RpcRequestPort &rpc, uint32_t now_ms) {
     consecutive_query_timeouts_ = 0;
     schedule_initialized_ = false;
     initialize_schedule(now_ms);
+
+    boot_revision_++;
+    if (boot_revision_ == 0) boot_revision_++;
     note_change();
 }
 

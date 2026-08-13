@@ -35,7 +35,10 @@ struct StorageByteStream {
     StorageStreamLane lane = StorageStreamLane::Export;
     uint64_t expected_size = 0;
     uint64_t expected_modified = 0;
+    uint64_t source_offset = 0;
+    uint64_t source_length = 0;
     uint64_t size = 0;
+    uint64_t source_size = 0;
     uint64_t modified = 0;
     uint64_t produced = 0;
     uint32_t ready_ms = 0;
@@ -122,6 +125,8 @@ bool StorageStreamService::request_stream(
     stream->lane = command.lane;
     stream->expected_size = command.expected_size;
     stream->expected_modified = command.expected_modified;
+    stream->source_offset = command.source_offset;
+    stream->source_length = command.source_length;
     stream->verification = command.verification;
 
     if (!lock(0)) {
@@ -252,7 +257,7 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
     {
         stream.input = Storage::open(stream.path, "r");
         if (stream.input && !stream.input.isDirectory()) {
-            stream.size = static_cast<uint64_t>(stream.input.size());
+            stream.source_size = static_cast<uint64_t>(stream.input.size());
             stream.modified = file_modified(stream.input);
             (void)stream.input.setBufferSize(512);
             stream.input_open = true;
@@ -267,12 +272,30 @@ bool StorageStreamService::open_locked(StorageByteStream &stream) {
     }
     const bool size_changed =
         stream.verification != StorageStreamVerification::None &&
-        stream.size != stream.expected_size;
+        stream.source_size != stream.expected_size;
     const bool modified_changed =
         stream.verification == StorageStreamVerification::SizeAndModified &&
         stream.modified != stream.expected_modified;
     if (size_changed || modified_changed) {
         fail_locked(stream, "snapshot_changed");
+        return false;
+    }
+
+    if (stream.source_offset > stream.source_size ||
+        stream.source_offset > UINT32_MAX) {
+        fail_locked(stream, "stream_range_invalid");
+        return false;
+    }
+
+    const uint64_t available = stream.source_size - stream.source_offset;
+    stream.size = stream.source_length == 0
+        ? available
+        : stream.source_length;
+    if (stream.size > available ||
+        (stream.source_offset != 0 &&
+         !stream.input.seek(static_cast<uint32_t>(stream.source_offset),
+                            SeekSet))) {
+        fail_locked(stream, "stream_range_invalid");
         return false;
     }
 

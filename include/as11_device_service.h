@@ -47,6 +47,7 @@ public:
               bool background_suspended = false);
 
     uint32_t revision() const { return revision_; }
+    uint32_t boot_revision() const { return boot_revision_; }
 
 private:
     enum class QueryKind : uint8_t {
@@ -115,6 +116,7 @@ private:
 
     uint32_t next_generation_ = 0;
     uint32_t revision_ = 0;
+    uint32_t boot_revision_ = 0;
 };
 
 }  // namespace aircannect

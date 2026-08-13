@@ -15,12 +15,16 @@
 namespace aircannect {
 
 class As11DeviceService;
+class As11ServiceManager;
+class LargeByteBuffer;
 class StoragePathPort;
 class StorageStreamPort;
 
 enum class ResmedOtaPhase {
     Idle,
     Opening,
+    EnteringService,
+    Erasing,
     Initiating,
     Ready,
     Uploading,
@@ -28,6 +32,7 @@ enum class ResmedOtaPhase {
     Checking,
     Verified,
     Applying,
+    Resetting,
     Complete,
     Error,
 };
@@ -44,6 +49,8 @@ struct ResmedOtaStatus {
     String computed_sha256;
     String apply_mode;
     String input_type;
+    ResmedFirmwareInstallTransport transport =
+        AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
     String target;
     String source_path;
     String last_result;
@@ -54,6 +61,7 @@ class ResmedOtaManager {
 public:
     bool begin(RpcRequestPort &rpc,
                As11DeviceService &device,
+               As11ServiceManager &service,
                StorageStreamPort &stream_port,
                StoragePathPort &path_port);
     void poll();
@@ -95,6 +103,14 @@ private:
         Apply,
     };
 
+    enum class ServiceWaitingFor : uint8_t {
+        None,
+        Enter,
+        Erase,
+        Write,
+        Reset,
+    };
+
     struct ColdState;
 
     bool begin_protocol(size_t total_size,
@@ -107,6 +123,23 @@ private:
     void poll_rpc_completion();
     void cancel_rpc_request();
     void handle_response(RpcPayloadView payload);
+
+    bool begin_service_install();
+    void poll_service_completion();
+    void poll_service_transfer();
+    bool submit_service_request(uint8_t command,
+                                const uint8_t *payload,
+                                size_t payload_size,
+                                ServiceWaitingFor waiting_for);
+    void handle_service_response(
+        const std::shared_ptr<const LargeByteBuffer> &response);
+    bool submit_service_erase();
+    bool submit_service_write();
+    bool submit_service_reset();
+    void poll_service_reset();
+    void log_service_progress();
+    void finish_service_install();
+    void release_service();
 
     void poll_prepared_transfer();
     bool open_prepared_stream();
@@ -130,6 +163,7 @@ private:
 
     RpcRequestPort *rpc_ = nullptr;
     As11DeviceService *device_ = nullptr;
+    As11ServiceManager *service_ = nullptr;
     StorageStreamPort *stream_port_ = nullptr;
     StoragePathPort *path_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
@@ -145,6 +179,18 @@ private:
     bool sha_finished_ = false;
     uint32_t last_activity_ms_ = 0;
     mbedtls_sha256_context sha_ctx_;
+
+    // Bootloader service protocol
+    ServiceWaitingFor service_waiting_for_ = ServiceWaitingFor::None;
+    uint32_t service_erase_offset_ = 0;
+    size_t service_pending_bytes_ = 0;
+    uint16_t service_sequence_ = 0;
+    bool service_owned_ = false;
+    uint8_t service_reset_attempts_ = 0;
+    uint8_t service_next_progress_percent_ = 0;
+    uint32_t service_started_ms_ = 0;
+    uint32_t service_reset_accepted_ms_ = 0;
+    uint32_t service_reset_boot_revision_ = 0;
 
     // Prepared storage source
     size_t prepared_block_bytes_ = 0;

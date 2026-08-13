@@ -25,8 +25,14 @@ static constexpr size_t AS11_SERVICE_V2_PAYLOAD_MAX_BYTES =
 // never forwarded to the AS11 service CAN IDs.
 static constexpr uint8_t AS11_SERVICE_COMMAND_ENTER = 0x01;
 static constexpr uint8_t AS11_SERVICE_COMMAND_INFO = 0x02;
+static constexpr uint8_t AS11_SERVICE_COMMAND_ERASE = 0x04;
+static constexpr uint8_t AS11_SERVICE_COMMAND_WRITE = 0x05;
+static constexpr uint8_t AS11_SERVICE_COMMAND_RESET = 0x06;
 static constexpr uint8_t AS11_SERVICE_STATUS_OK = 0x00;
 static constexpr uint8_t AS11_SERVICE_STATUS_ENTRY_TIMEOUT = 0x0B;
+static constexpr uint8_t AS11_SERVICE_TARGET_FGCB = 0x01;
+static constexpr size_t AS11_SERVICE_STORAGE_ADDRESS_BYTES = 5;
+static constexpr size_t AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES = 4064;
 
 static constexpr uint8_t AS11_SERVICE_RESPONSE_BLOCK_SIZE = 128;
 static constexpr uint8_t AS11_SERVICE_RESPONSE_ST_MIN = 0;
