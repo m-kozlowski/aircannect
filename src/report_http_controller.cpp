@@ -416,12 +416,23 @@ void ReportHttpController::poll() {
 
         std::shared_ptr<const LargeByteBuffer> payload =
             report_task_->artifact_payload_if_present(entry.artifact);
+        bool superseded = false;
+        if (!payload) {
+            const ReportArtifactQuery current = report_task_->query_artifact(
+                entry.artifact.key.sleep_day,
+                entry.artifact.key.kind,
+                entry.artifact.key.range_start_ms,
+                entry.artifact.key.range_end_ms);
+            superseded = current.state != ReportArtifactQueryState::Ready ||
+                !same_artifact_descriptor(current.descriptor, entry.artifact);
+        }
+
         ReportArtifactFailureStatus failure;
-        const bool failed = !payload && report_task_->try_artifact_failure(
-            entry.artifact.key, failure);
+        const bool failed = !payload && !superseded &&
+            report_task_->try_artifact_failure(entry.artifact.key, failure);
         const bool timed_out =
             millis_deadline_reached(now_ms, entry.deadline_ms);
-        if (!payload && !failed && !timed_out) continue;
+        if (!payload && !superseded && !failed && !timed_out) continue;
 
         const ReportArtifactDescriptor artifact = entry.artifact;
         const AsyncWebServerRequestPtr pending_request = entry.request;
@@ -434,6 +445,10 @@ void ReportHttpController::poll() {
 
         if (failed) {
             send_artifact_failure(request.get(), failure);
+            return;
+        }
+        if (superseded) {
+            send_preparing(request.get());
             return;
         }
         if (!payload) {

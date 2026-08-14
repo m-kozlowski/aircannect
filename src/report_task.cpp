@@ -43,6 +43,16 @@ enum class ReportTaskCommandKind : uint8_t {
     RefreshCatalog,
 };
 
+enum class PayloadLoadStartResult : uint8_t {
+    Started,
+    AlreadyCached,
+    Busy,
+    Superseded,
+    TooLarge,
+    MemoryUnavailable,
+    Rejected,
+};
+
 struct ReportTaskCommand {
     ReportTaskCommandKind kind = ReportTaskCommandKind::Artifact;
     ReportArtifactKey artifact;
@@ -458,12 +468,18 @@ struct ReportTask::Runtime {
         return cached;
     }
 
-    bool prepare_payload_allocation(
+    PayloadLoadStartResult prepare_payload_allocation(
         const ReportArtifactDescriptor &artifact) {
-        if (!artifact.valid() || !lock(20)) return false;
+        if (!artifact.valid()) return PayloadLoadStartResult::Rejected;
+        if (!lock(20)) return PayloadLoadStartResult::Busy;
+
+        if (payload_cache.contains(artifact)) {
+            unlock();
+            return PayloadLoadStartResult::AlreadyCached;
+        }
         if (!payload_cache.can_hold(artifact)) {
             unlock();
-            return false;
+            return PayloadLoadStartResult::TooLarge;
         }
 
 #ifdef ARDUINO
@@ -483,7 +499,8 @@ struct ReportTask::Runtime {
 #endif
 
         unlock();
-        return available;
+        return available ? PayloadLoadStartResult::Started
+                         : PayloadLoadStartResult::MemoryUnavailable;
     }
 
     bool cache_payload(const ReportArtifactDescriptor &artifact,
@@ -559,28 +576,37 @@ struct ReportTask::Runtime {
         return false;
     }
 
-    OperationAdmission start_payload_load(
+    PayloadLoadStartResult start_payload_load(
         const ReportArtifactKey &artifact,
         uint32_t generation,
         StorageReadLane lane) {
-        if (payload_loader.status().active()) return OperationAdmission::Busy;
+        if (payload_loader.status().active()) {
+            return PayloadLoadStartResult::Busy;
+        }
 
         ReportArtifactAvailability availability;
         if (!artifact_index ||
             !artifact_index->availability(artifact, availability)) {
-            return OperationAdmission::Rejected;
+            return PayloadLoadStartResult::Superseded;
         }
 
         ReportArtifactDescriptor descriptor;
         if (!availability.descriptor(artifact, descriptor)) {
-            return OperationAdmission::Rejected;
-        }
-        if (payload_cached(descriptor)) return OperationAdmission::Accepted;
-        if (!prepare_payload_allocation(descriptor)) {
-            return OperationAdmission::Rejected;
+            return PayloadLoadStartResult::Superseded;
         }
 
-        return payload_loader.start(descriptor, generation, lane);
+        const PayloadLoadStartResult prepared =
+            prepare_payload_allocation(descriptor);
+        if (prepared != PayloadLoadStartResult::Started) return prepared;
+
+        const OperationAdmission admitted =
+            payload_loader.start(descriptor, generation, lane);
+        if (admitted == OperationAdmission::Accepted) {
+            return PayloadLoadStartResult::Started;
+        }
+        return admitted == OperationAdmission::Busy
+            ? PayloadLoadStartResult::Busy
+            : PayloadLoadStartResult::Rejected;
     }
 
     bool finish_payload_load(uint32_t now_ms) {
@@ -879,12 +905,12 @@ struct ReportTask::Runtime {
                         continue;
                     }
 
-                    const OperationAdmission admitted = start_payload_load(
+                    const PayloadLoadStartResult started = start_payload_load(
                         candidate.key,
                         idle_generation,
                         StorageReadLane::Maintenance);
-                    if (admitted == OperationAdmission::Accepted) return true;
-                    if (admitted == OperationAdmission::Busy) return false;
+                    if (started == PayloadLoadStartResult::Started) return true;
+                    if (started == PayloadLoadStartResult::Busy) return false;
                 }
             }
 
@@ -1469,16 +1495,33 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
 
             case ReportTaskCommandKind::CacheArtifact: {
                 worked = runtime.preempt_background_work() || worked;
-                const OperationAdmission admitted = runtime.start_payload_load(
-                    command.artifact,
-                    command.generation,
-                    StorageReadLane::Foreground);
-                if (admitted == OperationAdmission::Rejected &&
-                    runtime.lock(20)) {
-                    runtime.remember_artifact_failure_locked(
+                const PayloadLoadStartResult started =
+                    runtime.start_payload_load(
                         command.artifact,
-                        "report_payload_load_rejected",
-                        now_ms);
+                        command.generation,
+                        StorageReadLane::Foreground);
+
+                if (started == PayloadLoadStartResult::Busy) {
+                    (void)runtime.enqueue(command);
+                    break;
+                }
+                if (started == PayloadLoadStartResult::Superseded ||
+                    started == PayloadLoadStartResult::Started ||
+                    started == PayloadLoadStartResult::AlreadyCached) {
+                    break;
+                }
+
+                const char *error = "report_payload_load_start_failed";
+                if (started == PayloadLoadStartResult::TooLarge) {
+                    error = "report_payload_too_large";
+                } else if (started ==
+                           PayloadLoadStartResult::MemoryUnavailable) {
+                    error = "report_payload_memory_unavailable";
+                }
+
+                if (runtime.lock(20)) {
+                    runtime.remember_artifact_failure_locked(
+                        command.artifact, error, now_ms);
                     runtime.unlock();
                 }
                 break;
