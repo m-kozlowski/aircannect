@@ -234,6 +234,7 @@
     }
 
     function resetReportData() {
+      cancelReportRangeRequest();
       disconnectReportResizeObserver();
       reportHiddenSessions.clear();
       reportZoom = null;
@@ -275,6 +276,7 @@
     }
 
     function activateReportBasePlot(nightId, revision, etag, series, events) {
+      cancelReportRangeRequest();
       reportSeries = series || {};
       reportEvents = events || [];
       reportBaseSeries = reportSeries;
@@ -1047,6 +1049,7 @@
 
     function resetReportZoom() {
       if (!reportZoom) return;
+      cancelReportRangeRequest();
       reportZoom = null;
       reportRangeInFlightKey = "";
       reportRangeToken++;
@@ -1409,6 +1412,26 @@
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
+    function cancelReportLoadRequest() {
+      if (!reportLoadAbortController) return;
+      reportLoadAbortController.abort();
+      reportLoadAbortController = null;
+    }
+
+    function cancelReportRangeRequest() {
+      if (!reportRangeAbortController) return;
+      reportRangeAbortController.abort();
+      reportRangeAbortController = null;
+    }
+
+    function cancelReportRequests() {
+      cancelReportLoadRequest();
+      cancelReportRangeRequest();
+      reportLoadToken++;
+      reportRangeToken++;
+      reportRangeInFlightKey = "";
+    }
+
     async function pollReportFetch(options) {
       const active = options.active || (() => true);
       const delay = options.delayMs || REPORT_POLL_DELAY_MS;
@@ -1419,6 +1442,7 @@
         try {
           response = await options.request();
         } catch (error) {
+          if (error && error.name === "AbortError") return null;
           await delayMs(delay);
           continue;
         }
@@ -1431,10 +1455,10 @@
       return options.timeoutValue === undefined ? null : options.timeoutValue;
     }
 
-    function conditionalRequestOptions(cached) {
+    function conditionalRequestOptions(cached, signal) {
       const headers = {};
       if (cached && cached.etag) headers["If-None-Match"] = cached.etag;
-      return {cache: "no-cache", headers};
+      return {cache: "no-cache", headers, signal};
     }
 
     function reportArtifactRevision(response) {
@@ -1442,7 +1466,7 @@
         response.headers.get("X-Report-Source-Revision") || "").toLowerCase();
     }
 
-    async function pollReportResult(token, nightId) {
+    async function pollReportResult(token, nightId, signal) {
       const url = "/api/report/result?night=" + encodeURIComponent(nightId);
       return pollReportFetch({
         active: () => token === reportLoadToken,
@@ -1451,7 +1475,7 @@
         timeoutValue: {status: 0, etag: "", result: null},
         request: () => {
           const cached = lruGet(reportResultClientCache, url);
-          return fetch(url, conditionalRequestOptions(cached));
+          return fetch(url, conditionalRequestOptions(cached, signal));
         },
         handle: async (resp) => {
           if (resp.status === 304) {
@@ -1509,14 +1533,14 @@
       return url;
     }
 
-    async function pollReportPlot(url, active, maxAttempts, delay) {
+    async function pollReportPlot(url, active, maxAttempts, delay, signal) {
       return pollReportFetch({
         active,
         maxAttempts,
         delayMs: delay,
         request: () => {
           const cached = lruGet(reportPlotClientCache, url);
-          return fetch(url, conditionalRequestOptions(cached));
+          return fetch(url, conditionalRequestOptions(cached, signal));
         },
         handle: async (response) => {
           if (response.status === 304) {
@@ -1550,13 +1574,14 @@
       });
     }
 
-    async function fetchReportPlot(token, nightId, revision) {
+    async function fetchReportPlot(token, nightId, revision, signal) {
       const url = reportPlotUrl(nightId);
       const fetched = await pollReportPlot(
         url,
         () => token === reportLoadToken,
         REPORT_PLOT_POLL_MAX_ATTEMPTS,
-        REPORT_POLL_DELAY_MS);
+        REPORT_POLL_DELAY_MS,
+        signal);
       if (!fetched || token !== reportLoadToken) return false;
       if (fetched.revision && fetched.revision !== revision) {
         return "revision_changed";
@@ -1659,6 +1684,10 @@
         return;
       }
       if (reportRangeInFlightKey === key) return;
+
+      cancelReportRangeRequest();
+      const controller = new AbortController();
+      reportRangeAbortController = controller;
       reportRangeInFlightKey = key;
       const token = ++reportRangeToken;
       try {
@@ -1673,7 +1702,8 @@
               nightId === reportCurrentNightId &&
               revision === reportCurrentRevision,
             REPORT_RANGE_POLL_MAX_ATTEMPTS,
-            REPORT_RANGE_POLL_DELAY_MS);
+            REPORT_RANGE_POLL_DELAY_MS,
+            controller.signal);
           if (!fetched || token !== reportRangeToken ||
               nightId !== reportCurrentNightId ||
               revision !== reportCurrentRevision) {
@@ -1694,6 +1724,9 @@
         reportEvents = decoded.events;
         renderReportCharts();
       } finally {
+        if (reportRangeAbortController === controller) {
+          reportRangeAbortController = null;
+        }
         if (reportRangeInFlightKey === key) reportRangeInFlightKey = "";
       }
     }
@@ -1993,12 +2026,16 @@
     }
 
     async function loadSelectedReportNight() {
+      cancelReportLoadRequest();
       const night = selectedReportNight();
       if (!night) {
         resetReportData();
         renderReportSummary();
         return;
       }
+
+      const controller = new AbortController();
+      reportLoadAbortController = controller;
       const nightId = reportNightLoadKey(night);
       const token = ++reportLoadToken;
       resetReportData();
@@ -2006,7 +2043,8 @@
       msg("reportMsg", "Loading report...", true, true);
       try {
         for (let attempt = 0; attempt < 2; attempt++) {
-          const res = await pollReportResult(token, nightId);
+          const res = await pollReportResult(
+            token, nightId, controller.signal);
           if (!res || token !== reportLoadToken) return;
           if (res.status === 404) {
             msg("reportMsg", "Night not found", false, true);
@@ -2027,7 +2065,7 @@
           }
 
           const plotStatus = await fetchReportPlot(
-            token, nightId, reportResult.source_revision);
+            token, nightId, reportResult.source_revision, controller.signal);
           if (!plotStatus || token !== reportLoadToken) return;
           if (plotStatus === "revision_changed") continue;
 
@@ -2043,6 +2081,10 @@
       } catch (error) {
         if (token !== reportLoadToken) return;
         msg("reportMsg", error.message, false, true);
+      } finally {
+        if (reportLoadAbortController === controller) {
+          reportLoadAbortController = null;
+        }
       }
     }
 

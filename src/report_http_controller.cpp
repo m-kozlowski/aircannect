@@ -29,6 +29,12 @@ static constexpr uint32_t REPORT_HTTP_PENDING_TIMEOUT_MS = 30000;
 static constexpr const char *REPORT_SOURCE_REVISION_HEADER =
     "X-Report-Source-Revision";
 
+bool same_artifact_descriptor(const ReportArtifactDescriptor &lhs,
+                              const ReportArtifactDescriptor &rhs) {
+    return lhs.key == rhs.key && lhs.size == rhs.size &&
+           lhs.crc32 == rhs.crc32;
+}
+
 void send_json_error(AsyncWebServerRequest *request,
                      int status,
                      const char *error) {
@@ -472,20 +478,27 @@ void ReportHttpController::queue_artifact_response(
     }
 
     if (xSemaphoreTake(pending_->mutex, 0) != pdTRUE) {
-        send_json_error(request, 503, "report_response_busy");
+        send_preparing(request);
         return;
     }
 
     PendingResponses::Entry *free_entry = nullptr;
     for (PendingResponses::Entry &entry : pending_->entries) {
-        if (!entry.used()) {
+        if (entry.used() && entry.request.expired()) entry = {};
+
+        if (entry.used() &&
+            same_artifact_descriptor(entry.artifact, artifact)) {
+            xSemaphoreGive(pending_->mutex);
+            send_preparing(request);
+            return;
+        }
+        if (!entry.used() && !free_entry) {
             free_entry = &entry;
-            break;
         }
     }
     if (!free_entry) {
         xSemaphoreGive(pending_->mutex);
-        send_json_error(request, 503, "report_response_busy");
+        send_preparing(request);
         return;
     }
 

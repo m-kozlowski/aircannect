@@ -73,6 +73,7 @@
     let reportSummary = null;
     let reportPollTimer = null;
     let reportLoadToken = 0;
+    let reportLoadAbortController = null;
     let reportSummaryEtag = "";
     let reportResult = null;
     const reportResultClientCache = new Map();
@@ -96,6 +97,7 @@
     const reportRangeCache = new Map();
     let reportRangeInFlightKey = "";
     let reportRangeToken = 0;
+    let reportRangeAbortController = null;
     let reportHoverTime = null;   // cursor time shared across all charts
     let reportDrag = null;        // active drag-to-zoom selection state
     let reportSelectedNightId = ""; // user-picked night id; "" defaults to newest

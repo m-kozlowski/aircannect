@@ -37,6 +37,7 @@
       document.getElementById("title").textContent = tabs[id];
       location.hash = id;
       updateLiveViewState(id);
+      if (id !== "report") cancelReportRequests();
 
       if (id === "dash") loadStatus();
       if (id === "report") {
@@ -175,4 +176,3 @@
       return (value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)) +
         " " + units[index];
     }
-
