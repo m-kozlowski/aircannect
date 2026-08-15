@@ -61,6 +61,7 @@ const char *As11ServiceManager::state_name(State state) {
 
 bool As11ServiceManager::acquire(As11ServiceOwner owner) {
     if (owner == As11ServiceOwner::None) return false;
+    if (tcp_reset_boot_wait_) return false;
     if (owner_ == owner) return true;
     if (owner_ != As11ServiceOwner::None || state_ != State::Idle) {
         return false;
@@ -83,6 +84,10 @@ bool As11ServiceManager::submit_packet(
     bool enter_allowed,
     uint32_t now_ms) {
     if (owner == As11ServiceOwner::None || owner_ != owner) {
+        error_ = As11ServiceTransactionError::Busy;
+        return false;
+    }
+    if (tcp_reset_boot_wait_) {
         error_ = As11ServiceTransactionError::Busy;
         return false;
     }
@@ -629,6 +634,12 @@ void As11ServiceManager::handle_complete_response(size_t packet_size,
         return;
     }
 
+    if (owner_ == As11ServiceOwner::TcpBridge &&
+        header.command == AS11_SERVICE_COMMAND_RESET &&
+        header.status == AS11_SERVICE_STATUS_OK) {
+        begin_tcp_reset_boot_wait(now_ms);
+    }
+
     if (entry_info_pending_ &&
         !translate_entry_info_response(header, now_ms)) {
         return;
@@ -732,7 +743,45 @@ void As11ServiceManager::release_entry_can_policy() {
     can_.set_ack_gap_expected(false);
 }
 
+void As11ServiceManager::begin_tcp_reset_boot_wait(uint32_t now_ms) {
+    tcp_reset_boot_wait_ = true;
+    tcp_reset_started_ms_ = now_ms;
+    tcp_reset_deadline_ms_ =
+        now_ms + AC_AS11_SERVICE_RESET_BOOT_TIMEOUT_MS;
+    if (tcp_reset_deadline_ms_ == 0) tcp_reset_deadline_ms_ = 1;
+
+    Log::logf(CAT_CAN, LOG_INFO,
+              "[SERVICE] RESET accepted; RPC held until AS11 boot\n");
+}
+
+void As11ServiceManager::clear_tcp_reset_boot_wait() {
+    tcp_reset_boot_wait_ = false;
+    tcp_reset_started_ms_ = 0;
+    tcp_reset_deadline_ms_ = 0;
+}
+
+void As11ServiceManager::note_device_boot(uint32_t now_ms) {
+    if (!tcp_reset_boot_wait_) return;
+
+    const uint32_t elapsed_ms = now_ms - tcp_reset_started_ms_;
+    clear_tcp_reset_boot_wait();
+    Log::logf(CAT_CAN, LOG_INFO,
+              "[SERVICE] AS11 boot observed; RPC resume allowed "
+              "elapsed_ms=%lu\n",
+              static_cast<unsigned long>(elapsed_ms));
+}
+
 void As11ServiceManager::poll(uint32_t now_ms) {
+    if (tcp_reset_boot_wait_ &&
+        static_cast<int32_t>(now_ms - tcp_reset_deadline_ms_) >= 0) {
+        const uint32_t elapsed_ms = now_ms - tcp_reset_started_ms_;
+        clear_tcp_reset_boot_wait();
+        Log::logf(CAT_CAN, LOG_WARN,
+                  "[SERVICE] AS11 boot not observed after RESET; "
+                  "RPC resume allowed elapsed_ms=%lu\n",
+                  static_cast<unsigned long>(elapsed_ms));
+    }
+
     if (state_ == State::EntryWaitingQuiesce ||
         state_ == State::EntryWaitingResetDrain ||
         state_ == State::EntryProbing) {

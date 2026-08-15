@@ -51,6 +51,7 @@ public:
                        bool enter_allowed,
                        uint32_t now_ms);
     void poll(uint32_t now_ms);
+    void note_device_boot(uint32_t now_ms);
     void poll_entry(RpcQuiescePort &rpc,
                     bool quiesce_ready,
                     bool quiesce_failed,
@@ -66,7 +67,9 @@ public:
     bool take_error(As11ServiceOwner owner,
                     As11ServiceTransactionError &error);
     bool pending() const;
-    bool exclusive_requested() const { return entry_session_owned_; }
+    bool exclusive_requested() const {
+        return entry_session_owned_ || tcp_reset_boot_wait_;
+    }
     As11ServiceTransactionError last_error() const { return error_; }
 
 private:
@@ -114,6 +117,8 @@ private:
                                 bool close_after_send);
     void publish_entry_timeout();
     void release_entry_can_policy();
+    void begin_tcp_reset_boot_wait(uint32_t now_ms);
+    void clear_tcp_reset_boot_wait();
     static const char *state_name(State state);
     void fail(As11ServiceTransactionError error);
     void cancel();
@@ -132,6 +137,8 @@ private:
     uint32_t phase_activity_ms_ = 0;
     uint32_t entry_started_ms_ = 0;
     uint32_t entry_deadline_ms_ = 0;
+    uint32_t tcp_reset_started_ms_ = 0;
+    uint32_t tcp_reset_deadline_ms_ = 0;
     uint32_t next_entry_probe_ms_ = 0;
     uint32_t next_request_frame_ms_ = 0;
     uint32_t request_st_min_ms_ = 0;
@@ -145,6 +152,7 @@ private:
         As11ServiceTransactionError::None;
     bool entry_session_owned_ = false;
     bool entry_info_pending_ = false;
+    bool tcp_reset_boot_wait_ = false;
     bool close_after_response_ = false;
     As11ServiceOwner owner_ = As11ServiceOwner::None;
     State state_ = State::Idle;

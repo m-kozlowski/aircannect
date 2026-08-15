@@ -69,6 +69,7 @@ static constexpr uint32_t AC_AS11_SERVICE_REASSEMBLY_TIMEOUT_MS = 1000;
 static constexpr uint32_t AC_AS11_SERVICE_RESPONSE_TIMEOUT_MS = 5000;
 static constexpr uint32_t AC_AS11_SERVICE_ENTRY_TIMEOUT_MS = 30000;
 static constexpr uint32_t AC_AS11_SERVICE_ENTRY_PROBE_INTERVAL_MS = 100;
+static constexpr uint32_t AC_AS11_SERVICE_RESET_BOOT_TIMEOUT_MS = 30000;
 static constexpr uint32_t AC_AS11_SERVICE_ENTRY_BURST_ID = 0x7FF;
 static constexpr uint32_t AC_CAN_BUS_RECOVERY_TIMEOUT_MS = 1500;
 static constexpr uint32_t AC_CAN_RECOVERY_RETRY_MS = 250;

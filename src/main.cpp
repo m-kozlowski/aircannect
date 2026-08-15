@@ -608,6 +608,7 @@ static void drain_rpc_events() {
     RpcEvent event;
     while (rpc_transport.next_event(event)) {
         if (event.kind == RpcEventKind::BootNotification) {
+            as11_service_manager.note_device_boot(millis());
             as11_device_service.device_reset(rpc_transport, millis());
             rpc_transport.set_as11_unavailable(false);
             as11_settings_manager.device_reset(rpc_transport);
