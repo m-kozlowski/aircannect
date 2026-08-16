@@ -21,19 +21,32 @@ static constexpr size_t AS11_SERVICE_V2_PAYLOAD_MAX_BYTES =
     AS11_SERVICE_PACKET_MAX_BYTES - AS11_SERVICE_PACKET_HEADER_BYTES -
     AS11_SERVICE_V2_CRC_BYTES;
 
-// Local host-transport extension. ENTER is consumed by AirCANnect and is
-// never forwarded to the AS11 service CAN IDs.
+// Commands. ENTER is local to AirCANnect and never reaches the service CAN IDs.
 static constexpr uint8_t AS11_SERVICE_COMMAND_ENTER = 0x01;
 static constexpr uint8_t AS11_SERVICE_COMMAND_INFO = 0x02;
+static constexpr uint8_t AS11_SERVICE_COMMAND_READ = 0x03;
 static constexpr uint8_t AS11_SERVICE_COMMAND_ERASE = 0x04;
 static constexpr uint8_t AS11_SERVICE_COMMAND_WRITE = 0x05;
 static constexpr uint8_t AS11_SERVICE_COMMAND_RESET = 0x06;
+static constexpr uint8_t AS11_SERVICE_COMMAND_READ_LZ4 = 0x07;
+static constexpr uint8_t AS11_SERVICE_COMMAND_WRITE_LZ4 = 0x08;
+
+// Response status
 static constexpr uint8_t AS11_SERVICE_STATUS_OK = 0x00;
+static constexpr uint8_t AS11_SERVICE_STATUS_BAD_COMMAND = 0x01;
 static constexpr uint8_t AS11_SERVICE_STATUS_ENTRY_TIMEOUT = 0x0B;
+
+// Storage payloads
 static constexpr uint8_t AS11_SERVICE_TARGET_FGCB = 0x01;
 static constexpr size_t AS11_SERVICE_STORAGE_ADDRESS_BYTES = 5;
 static constexpr size_t AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES = 4064;
+static constexpr size_t AS11_SERVICE_LZ4_RAW_MAX_BYTES = 4080;
+static constexpr size_t AS11_SERVICE_WRITE_LZ4_METADATA_BYTES = 7;
+static constexpr size_t AS11_SERVICE_WRITE_LZ4_DATA_MAX_BYTES =
+    AS11_SERVICE_V2_PAYLOAD_MAX_BYTES -
+    AS11_SERVICE_WRITE_LZ4_METADATA_BYTES;
 
+// ISO-TP
 static constexpr uint8_t AS11_SERVICE_RESPONSE_BLOCK_SIZE = 128;
 static constexpr uint8_t AS11_SERVICE_RESPONSE_ST_MIN = 0;
 

@@ -11,6 +11,7 @@
 
 #include "as11_device_service.h"
 #include "as11_rpc.h"
+#include "as11_service_lz4.h"
 #include "as11_service_manager.h"
 #include "as11_service_protocol.h"
 #include "debug_log.h"
@@ -118,6 +119,11 @@ void put_le32(uint8_t *destination, uint32_t value) {
     destination[3] = static_cast<uint8_t>(value >> 24);
 }
 
+void put_le16(uint8_t *destination, uint16_t value) {
+    destination[0] = static_cast<uint8_t>(value);
+    destination[1] = static_cast<uint8_t>(value >> 8);
+}
+
 }  // namespace
 
 struct ResmedOtaManager::ColdState {
@@ -127,6 +133,7 @@ struct ResmedOtaManager::ColdState {
     ResmedPreparedFirmware prepared;
     std::shared_ptr<StorageByteStream> prepared_stream;
     uint8_t prepared_block[AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES] = {};
+    std::unique_ptr<LargeByteBuffer> service_lz4_state;
 
     char cleanup_paths[2][AC_STORAGE_PATH_MAX] = {};
 };
@@ -727,6 +734,8 @@ bool ResmedOtaManager::begin_service_install() {
     service_reset_accepted_ms_ = 0;
     service_reset_boot_revision_ = 0;
     service_next_progress_percent_ = ServiceProgressLogStep;
+    service_write_lz4_supported_ = true;
+    cold_->service_lz4_state.reset();
     cold_->status.xfer_block_size = AS11_SERVICE_V2_WRITE_DATA_MAX_BYTES;
     cold_->status.phase = ResmedOtaPhase::EnteringService;
 
@@ -865,6 +874,9 @@ void ResmedOtaManager::handle_service_response(
         case ServiceWaitingFor::Write:
             expected_command = AS11_SERVICE_COMMAND_WRITE;
             break;
+        case ServiceWaitingFor::WriteLz4:
+            expected_command = AS11_SERVICE_COMMAND_WRITE_LZ4;
+            break;
         case ServiceWaitingFor::Reset:
             expected_command = AS11_SERVICE_COMMAND_RESET;
             break;
@@ -878,6 +890,15 @@ void ResmedOtaManager::handle_service_response(
         set_error("service_response_invalid");
         return;
     }
+    if (completed == ServiceWaitingFor::WriteLz4 &&
+        header.status == AS11_SERVICE_STATUS_BAD_COMMAND) {
+        service_write_lz4_supported_ = false;
+        cold_->service_lz4_state.reset();
+        Log::logf(CAT_OTA, LOG_DEBUG,
+                  "[RESMED] service LZ4 unavailable; using raw writes\n");
+        return;
+    }
+
     if (header.status != AS11_SERVICE_STATUS_OK) {
         char reason[40];
         snprintf(reason, sizeof(reason), "service_status_%u",
@@ -904,6 +925,7 @@ void ResmedOtaManager::handle_service_response(
             break;
 
         case ServiceWaitingFor::Write:
+        case ServiceWaitingFor::WriteLz4:
             cold_->status.uploaded_bytes += service_pending_bytes_;
             service_pending_bytes_ = 0;
             prepared_block_bytes_ = 0;
@@ -1002,22 +1024,31 @@ bool ResmedOtaManager::submit_service_write() {
         prepared_block_bytes_ = 0;
     }
 
-    const uint64_t source_offset =
-        cold_->status.uploaded_bytes + prepared_block_bytes_;
-    const StorageStreamRead read = stream_port_->read(
-        *cold_->prepared_stream,
-        cold_->prepared_block + prepared_block_bytes_,
-        prepared_block_wanted_ - prepared_block_bytes_, source_offset);
-    if (read.state == StorageStreamReadState::Retry) return false;
-    if (read.state != StorageStreamReadState::Data || read.bytes == 0) {
-        set_error(read.state == StorageStreamReadState::End
-                      ? "prepared_stream_short"
-                      : "prepared_stream_read_failed");
-        return false;
+    if (prepared_block_bytes_ < prepared_block_wanted_) {
+        const uint64_t source_offset =
+            cold_->status.uploaded_bytes + prepared_block_bytes_;
+        const StorageStreamRead read = stream_port_->read(
+            *cold_->prepared_stream,
+            cold_->prepared_block + prepared_block_bytes_,
+            prepared_block_wanted_ - prepared_block_bytes_, source_offset);
+        if (read.state == StorageStreamReadState::Retry) return false;
+        if (read.state != StorageStreamReadState::Data || read.bytes == 0) {
+            set_error(read.state == StorageStreamReadState::End
+                          ? "prepared_stream_short"
+                          : "prepared_stream_read_failed");
+            return false;
+        }
+
+        prepared_block_bytes_ += read.bytes;
     }
 
-    prepared_block_bytes_ += read.bytes;
     if (prepared_block_bytes_ != prepared_block_wanted_) return true;
+
+    if (service_write_lz4_supported_) {
+        bool submitted = false;
+        if (!submit_service_write_lz4(submitted)) return false;
+        if (submitted) return true;
+    }
 
     const size_t payload_size = AS11_SERVICE_STORAGE_ADDRESS_BYTES +
                                 prepared_block_bytes_;
@@ -1038,6 +1069,65 @@ bool ResmedOtaManager::submit_service_write() {
     return submit_service_request(AS11_SERVICE_COMMAND_WRITE,
                                   payload->data(), payload->size(),
                                   ServiceWaitingFor::Write);
+}
+
+bool ResmedOtaManager::submit_service_write_lz4(bool &submitted) {
+    submitted = false;
+    if (prepared_block_bytes_ == 0 ||
+        prepared_block_bytes_ > AS11_SERVICE_LZ4_RAW_MAX_BYTES) {
+        return true;
+    }
+
+    const size_t state_bytes = as11_service_lz4_state_bytes();
+    if (!cold_->service_lz4_state) {
+        cold_->service_lz4_state = LargeByteBuffer::allocate(state_bytes);
+        if (!cold_->service_lz4_state) {
+            service_write_lz4_supported_ = false;
+            return true;
+        }
+    }
+
+    const size_t payload_capacity = AS11_SERVICE_WRITE_LZ4_METADATA_BYTES +
+                                    prepared_block_bytes_;
+    std::unique_ptr<LargeByteBuffer> payload =
+        LargeByteBuffer::allocate(payload_capacity);
+    if (!payload) {
+        set_error("service_write_alloc_failed");
+        return false;
+    }
+
+    size_t compressed_size = 0;
+    if (!as11_service_compress_lz4_block(
+            cold_->prepared_block,
+            prepared_block_bytes_,
+            payload->data() + AS11_SERVICE_WRITE_LZ4_METADATA_BYTES,
+            payload->size() - AS11_SERVICE_WRITE_LZ4_METADATA_BYTES,
+            cold_->service_lz4_state->data(),
+            cold_->service_lz4_state->size(),
+            compressed_size)) {
+        set_error("service_lz4_compress_failed");
+        return false;
+    }
+
+    if (compressed_size == 0) return true;
+
+    payload->data()[0] = AS11_SERVICE_TARGET_FGCB;
+    put_le32(payload->data() + 1,
+             cold_->prepared.image.flash_start +
+                 cold_->status.uploaded_bytes);
+    put_le16(payload->data() + 5,
+             static_cast<uint16_t>(prepared_block_bytes_));
+    if (!payload->truncate(AS11_SERVICE_WRITE_LZ4_METADATA_BYTES +
+                           compressed_size)) {
+        set_error("service_lz4_payload_failed");
+        return false;
+    }
+
+    service_pending_bytes_ = prepared_block_bytes_;
+    submitted = submit_service_request(AS11_SERVICE_COMMAND_WRITE_LZ4,
+                                       payload->data(), payload->size(),
+                                       ServiceWaitingFor::WriteLz4);
+    return submitted;
 }
 
 bool ResmedOtaManager::submit_service_reset() {
@@ -1128,6 +1218,7 @@ void ResmedOtaManager::release_service() {
     service_owned_ = false;
     service_waiting_for_ = ServiceWaitingFor::None;
     service_pending_bytes_ = 0;
+    if (cold_) cold_->service_lz4_state.reset();
 }
 
 void ResmedOtaManager::poll_prepared_transfer() {
@@ -1378,6 +1469,7 @@ void ResmedOtaManager::clear_session() {
     apply_after_check_ = false;
     service_erase_offset_ = 0;
     service_sequence_ = 0;
+    service_write_lz4_supported_ = true;
     service_reset_attempts_ = 0;
     service_next_progress_percent_ = 0;
     service_started_ms_ = 0;

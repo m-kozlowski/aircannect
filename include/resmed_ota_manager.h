@@ -109,6 +109,7 @@ private:
         Enter,
         Erase,
         Write,
+        WriteLz4,
         Reset,
     };
 
@@ -136,6 +137,7 @@ private:
         const std::shared_ptr<const LargeByteBuffer> &response);
     bool submit_service_erase();
     bool submit_service_write();
+    bool submit_service_write_lz4(bool &submitted);
     bool submit_service_reset();
     void poll_service_reset();
     void log_service_progress();
@@ -187,6 +189,7 @@ private:
     size_t service_pending_bytes_ = 0;
     uint16_t service_sequence_ = 0;
     bool service_owned_ = false;
+    bool service_write_lz4_supported_ = true;
     uint8_t service_reset_attempts_ = 0;
     uint8_t service_next_progress_percent_ = 0;
     uint32_t service_started_ms_ = 0;
