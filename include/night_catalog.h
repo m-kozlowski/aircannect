@@ -11,7 +11,7 @@
 namespace aircannect {
 
 static constexpr uint16_t NIGHT_CATALOG_NO_SESSION = UINT16_MAX;
-static constexpr uint16_t NIGHT_CATALOG_SOURCE_REVISION_POLICY = 2;
+static constexpr uint16_t NIGHT_CATALOG_SOURCE_REVISION_POLICY = 3;
 
 enum class NightCatalogFileKind : uint8_t {
     Brp,
@@ -126,6 +126,7 @@ struct NightCatalogFallbackFile {
     int64_t last_write_ms = 0;
     uint64_t identity = 0;
     uint32_t metadata_bytes = 0;
+    int32_t time_adjust_ms = 0;
 };
 
 struct NightCatalogRecord {
@@ -145,6 +146,8 @@ struct NightCatalogRecord {
 
     uint8_t source_flags = 0;
     uint64_t summary_identity = 0;
+    int32_t timezone_offset_minutes = 0;
+    bool timezone_offset_valid = false;
     NightCatalogMetrics metrics;
 };
 

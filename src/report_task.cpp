@@ -1747,7 +1747,8 @@ bool ReportTask::step(uint32_t now_ms, size_t record_budget) {
                 summary,
                 runtime.pending_refresh.current_offset_valid,
                 runtime.pending_refresh.current_offset_minutes,
-                runtime.pending_refresh.generation);
+                runtime.pending_refresh.generation,
+                runtime.catalog);
         if (admitted == OperationAdmission::Accepted) {
             runtime.refresh_generation = runtime.pending_refresh.generation;
             runtime.refresh_offset_valid =

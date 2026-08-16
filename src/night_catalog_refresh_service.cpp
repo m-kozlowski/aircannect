@@ -394,6 +394,7 @@ struct NightCatalogRefreshRuntime {
 
     void clear_summary() {
         summary.reset();
+        previous_catalog.reset();
     }
 
     Phase phase = Phase::Idle;
@@ -403,6 +404,7 @@ struct NightCatalogRefreshRuntime {
     std::shared_ptr<const StorageScanSnapshot> scan;
 
     std::shared_ptr<const NightCatalogSummarySnapshot> summary;
+    std::shared_ptr<const NightCatalog> previous_catalog;
 
     EdfReportSessionDescriptor *edf_sessions = nullptr;
     size_t edf_session_capacity = 0;
@@ -529,7 +531,8 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
     std::shared_ptr<const NightCatalogSummarySnapshot> summary,
     bool current_offset_valid,
     int32_t current_offset_minutes,
-    uint32_t generation) {
+    uint32_t generation,
+    std::shared_ptr<const NightCatalog> previous_catalog) {
     if (!runtime_ || !scan_port_ || !read_port_ || active()) {
         return OperationAdmission::Busy;
     }
@@ -537,6 +540,7 @@ OperationAdmission NightCatalogRefreshService::request_refresh(
 
     reset_transient();
     runtime_->summary = std::move(summary);
+    runtime_->previous_catalog = std::move(previous_catalog);
     runtime_->current_offset_valid = current_offset_valid;
     runtime_->current_offset_minutes = current_offset_minutes;
 
@@ -1160,6 +1164,31 @@ bool finish_fallback_read(NightCatalogRefreshRuntime &runtime,
         static_cast<int64_t>(runtime.current_modified) * 1000LL;
     out.identity = info.content_identity;
     out.metadata_bytes = static_cast<uint32_t>(info.metadata_bytes);
+    out.source_timezone_offset_minutes = info.timezone_offset_minutes;
+    out.source_timezone_offset_valid = info.timezone_offset_valid;
+    if (runtime.previous_catalog) {
+        const NightCatalogRecord *previous_night =
+            runtime.previous_catalog->find(info.sleep_day);
+        size_t previous_count = 0;
+        const NightCatalogFallbackFile *previous_files = previous_night
+            ? runtime.previous_catalog->fallback_files(*previous_night,
+                                                        previous_count)
+            : nullptr;
+        for (size_t i = 0; previous_files && i < previous_count; ++i) {
+            const NightCatalogFallbackFile &previous = previous_files[i];
+            const char *previous_path =
+                runtime.previous_catalog->path(previous);
+            if (previous.identity == out.identity && previous_path &&
+                strcmp(previous_path, out.path) == 0) {
+                out.time_adjust_ms = previous.time_adjust_ms;
+                out.resolved_timezone_offset_minutes =
+                    previous_night->timezone_offset_minutes;
+                out.resolved_timezone_offset_valid =
+                    previous_night->timezone_offset_valid;
+                break;
+            }
+        }
+    }
     out.sections = runtime.fallback_sections +
         section_offset;
     out.section_count = info.section_count;
@@ -1428,7 +1457,8 @@ void normalize_edf_day_boundaries(NightCatalogEdfSessionInput *sessions,
 bool build_catalog(NightCatalogRefreshRuntime &runtime,
                    std::shared_ptr<const NightCatalog> &catalog,
                    const char *&error,
-                   bool &retryable) {
+                   bool &retryable,
+                   NightCatalogRefreshStatus &status) {
     retryable = false;
 
     const size_t session_count = runtime.edf_session_count;
@@ -1632,6 +1662,16 @@ bool build_catalog(NightCatalogRefreshRuntime &runtime,
         retryable = build_status.retryable();
         return false;
     }
+    if (build_status.invalid_fallback_records > 0) {
+        const uint32_t skipped = static_cast<uint32_t>(std::min(
+            build_status.invalid_fallback_records,
+            static_cast<size_t>(UINT32_MAX)));
+        status.files_skipped += skipped;
+        status.files_indexed = status.files_indexed > skipped
+            ? status.files_indexed - skipped
+            : 0;
+        set_warning(status, "night_catalog_fallback_invalid");
+    }
     return true;
 }
 
@@ -1726,7 +1766,12 @@ bool NightCatalogRefreshService::poll() {
         case NightCatalogRefreshRuntime::Phase::Build: {
             std::shared_ptr<const NightCatalog> catalog;
             bool retryable = false;
-            if (!build_catalog(*runtime_, catalog, error, retryable)) {
+
+            if (!build_catalog(*runtime_,
+                               catalog,
+                               error,
+                               retryable,
+                               status_)) {
                 fail(error, retryable);
                 return true;
             }

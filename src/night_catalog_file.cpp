@@ -22,7 +22,7 @@ using LittleEndian::put_le32;
 using LittleEndian::put_le64;
 
 constexpr uint8_t FILE_MAGIC[8] = {
-    'A', 'C', 'N', 'C', 'A', 'T', '1', '0',
+    'A', 'C', 'N', 'C', 'A', 'T', '1', '1',
 };
 
 constexpr size_t RECORD_BYTES = 120;
@@ -39,6 +39,7 @@ constexpr uint8_t SOURCE_FLAGS = NIGHT_CATALOG_SOURCE_EDF |
                                  NIGHT_CATALOG_SOURCE_SPOOL_FALLBACK;
 constexpr uint16_t METRIC_FLAGS =
     (1u << static_cast<uint8_t>(NightCatalogMetric::Count)) - 1u;
+constexpr int32_t TIMEZONE_OFFSET_MISSING = INT32_MIN;
 
 struct CatalogLayout {
     uint32_t records = 0;
@@ -97,6 +98,10 @@ bool metrics_valid(const NightCatalogMetrics &metrics) {
            std::isfinite(metrics.arousal_index) &&
            std::isfinite(metrics.mask_pressure_50_cm_h2o) &&
            std::isfinite(metrics.leak_50_l_min);
+}
+
+bool timezone_offset_valid(bool valid, int32_t minutes) {
+    return !valid || (minutes >= -24 * 60 && minutes <= 24 * 60);
 }
 
 bool file_span_valid(const NightCatalogSourceFile &file) {
@@ -199,6 +204,8 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
             (((record->source_flags &
                NIGHT_CATALOG_SOURCE_SUMMARY_FALLBACK) != 0) !=
              (record->summary_identity != 0)) ||
+            !timezone_offset_valid(record->timezone_offset_valid,
+                                   record->timezone_offset_minutes) ||
             !metrics_valid(record->metrics)) {
             return false;
         }
@@ -501,6 +508,10 @@ void encode_record(uint8_t *out, const NightCatalogRecord &record) {
     encode_metrics(out + 64, record.metrics);
     put_le32(out + 108, record.fallback_file_offset);
     put_le32(out + 112, record.fallback_file_count);
+    put_le32(out + 116,
+             static_cast<uint32_t>(record.timezone_offset_valid
+                 ? record.timezone_offset_minutes
+                 : TIMEZONE_OFFSET_MISSING));
 }
 
 bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
@@ -514,9 +525,12 @@ bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
     const uint32_t mask_count = get_le32(in + 44);
     const uint32_t file_count = get_le32(in + 52);
     const uint32_t fallback_file_count = get_le32(in + 112);
+    const int32_t timezone_offset =
+        static_cast<int32_t>(get_le32(in + 116));
     if (session_count > UINT16_MAX || mask_count > UINT16_MAX ||
         file_count > UINT16_MAX || fallback_file_count > UINT16_MAX ||
-        get_le32(in + 116) != 0) {
+        !timezone_offset_valid(timezone_offset != TIMEZONE_OFFSET_MISSING,
+                               timezone_offset)) {
         return false;
     }
 
@@ -535,6 +549,11 @@ bool decode_record(const uint8_t *in, NightCatalogRecord &record) {
     record.fallback_file_count =
         static_cast<uint16_t>(fallback_file_count);
     record.summary_identity = get_le64(in + 56);
+    record.timezone_offset_valid =
+        timezone_offset != TIMEZONE_OFFSET_MISSING;
+    record.timezone_offset_minutes = record.timezone_offset_valid
+        ? timezone_offset
+        : 0;
     decode_metrics(in + 64, record.metrics);
     return true;
 }
@@ -665,6 +684,7 @@ void encode_fallback_file(uint8_t *out,
     put_le64(out + 24, static_cast<uint64_t>(file.last_write_ms));
     put_le64(out + 32, file.identity);
     put_le32(out + 40, file.metadata_bytes);
+    put_le32(out + 44, static_cast<uint32_t>(file.time_adjust_ms));
 }
 
 bool decode_fallback_file(const uint8_t *in,
@@ -672,8 +692,7 @@ bool decode_fallback_file(const uint8_t *in,
     const uint32_t path_length = get_le32(in + 4);
     const uint32_t section_count = get_le32(in + 12);
     if (path_length == 0 || path_length > UINT16_MAX ||
-        section_count == 0 || section_count > UINT16_MAX ||
-        get_le32(in + 44) != 0) {
+        section_count == 0 || section_count > UINT16_MAX) {
         return false;
     }
 
@@ -685,6 +704,7 @@ bool decode_fallback_file(const uint8_t *in,
     file.last_write_ms = static_cast<int64_t>(get_le64(in + 24));
     file.identity = get_le64(in + 32);
     file.metadata_bytes = get_le32(in + 40);
+    file.time_adjust_ms = static_cast<int32_t>(get_le32(in + 44));
     return true;
 }
 

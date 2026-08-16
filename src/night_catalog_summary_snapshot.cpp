@@ -20,6 +20,7 @@ namespace {
 
 constexpr int64_t MS_PER_MINUTE = 60LL * 1000LL;
 constexpr int64_t MS_PER_DAY = 24LL * 60LL * MS_PER_MINUTE;
+constexpr int64_t LOCAL_NOON_MS = 12LL * 60LL * MS_PER_MINUTE;
 constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
 constexpr uint64_t FNV_PRIME = 1099511628211ULL;
 
@@ -130,6 +131,26 @@ bool summary_sleep_day(const ReportSummaryRecord &record, SleepDayId &out) {
     return SleepDayId::from_epoch_days(local_ms / MS_PER_DAY, out);
 }
 
+bool summary_axis_timezone_offset(SleepDayId sleep_day,
+                                  int64_t day_start_ms,
+                                  int32_t &out) {
+    if (!sleep_day.valid() || day_start_ms <= 0) return false;
+
+    const int64_t local_noon_ms =
+        static_cast<int64_t>(sleep_day.epoch_days()) * MS_PER_DAY +
+        LOCAL_NOON_MS;
+    const int64_t offset_ms = local_noon_ms - day_start_ms;
+    if (offset_ms % MS_PER_MINUTE != 0) return false;
+
+    const int64_t offset_minutes = offset_ms / MS_PER_MINUTE;
+    if (offset_minutes < -24 * 60 || offset_minutes > 24 * 60) {
+        return false;
+    }
+
+    out = static_cast<int32_t>(offset_minutes);
+    return true;
+}
+
 size_t valid_session_count(const ReportSummaryRecord &record) {
     const size_t count = std::min<size_t>(
         record.session_interval_count, AC_REPORT_SUMMARY_SESSION_MAX);
@@ -156,10 +177,17 @@ bool valid_record(const ReportSummaryRecord &record,
                   SleepDayId &sleep_day,
                   size_t &session_count) {
     session_count = 0;
+    int32_t axis_timezone_offset = 0;
     if (!summary_sleep_day(record, sleep_day) ||
+        record.tz_offset_min < -24 * 60 ||
+        record.tz_offset_min > 24 * 60 ||
         record.start_ms > static_cast<uint64_t>(INT64_MAX) ||
         record.end_ms > static_cast<uint64_t>(INT64_MAX) ||
-        record.end_ms <= record.start_ms) {
+        record.end_ms <= record.start_ms ||
+        !summary_axis_timezone_offset(
+            sleep_day,
+            static_cast<int64_t>(record.start_ms),
+            axis_timezone_offset)) {
         return false;
     }
 
@@ -193,6 +221,11 @@ bool fill_record(const ReportSummaryRecord &source,
     target.sessions = expected_sessions > 0 ? sessions : nullptr;
     target.session_count = expected_sessions;
     target.identity = summary_identity(source);
+    target.timezone_offset_valid = summary_axis_timezone_offset(
+        sleep_day,
+        static_cast<int64_t>(source.start_ms),
+        target.timezone_offset_minutes);
+    if (!target.timezone_offset_valid) return false;
     fill_metrics(source, target.metrics);
 
     sessions_written = 0;
@@ -384,6 +417,9 @@ NightCatalogSummarySnapshot::copy(const NightCatalogSummaryInput *records,
         const NightCatalogSummaryInput &record = records[i];
         if (!record.sleep_day.valid() || record.identity == 0 ||
             record.day_end_ms <= record.day_start_ms ||
+            (record.timezone_offset_valid &&
+             (record.timezone_offset_minutes < -24 * 60 ||
+              record.timezone_offset_minutes > 24 * 60)) ||
             (record.session_count > 0 && !record.sessions) ||
             session_count > std::numeric_limits<size_t>::max() -
                                 record.session_count) {
@@ -500,6 +536,8 @@ NightCatalogSummarySnapshot::from_catalog(const NightCatalog &catalog) {
         target.day_start_ms = source->day_start_ms;
         target.day_end_ms = source->day_end_ms;
         target.identity = source->summary_identity;
+        target.timezone_offset_minutes = source->timezone_offset_minutes;
+        target.timezone_offset_valid = source->timezone_offset_valid;
 
         size_t count = 0;
         const NightCatalogTimeRange *sessions =

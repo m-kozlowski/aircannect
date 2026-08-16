@@ -82,6 +82,42 @@ bool report_append_event_record(ReportSpoolBuffer &out,
     return true;
 }
 
+bool report_adjust_event_time(ReportEventRecord &event,
+                              int64_t adjustment_ms) {
+    if (!valid_timestamp(event.start_ms) ||
+        (adjustment_ms > 0 &&
+         event.start_ms > INT64_MAX - adjustment_ms) ||
+        (adjustment_ms < 0 &&
+         event.start_ms < INT64_MIN - adjustment_ms)) {
+        return false;
+    }
+
+    event.start_ms += adjustment_ms;
+    return valid_timestamp(event.start_ms);
+}
+
+bool report_adjust_event_payload(uint8_t *data,
+                                 size_t len,
+                                 size_t record_count,
+                                 int64_t adjustment_ms) {
+    if (!data || record_count > SIZE_MAX / EVENT_RECORD_WIRE_SIZE ||
+        record_count * EVENT_RECORD_WIRE_SIZE != len) {
+        return false;
+    }
+
+    for (size_t i = 0; i < record_count; ++i) {
+        ReportEventRecord event;
+        if (!report_read_event_record(data, len, i, event) ||
+            !report_adjust_event_time(event, adjustment_ms)) {
+            return false;
+        }
+
+        put_le64(data + i * EVENT_RECORD_WIRE_SIZE,
+                 static_cast<uint64_t>(event.start_ms));
+    }
+    return true;
+}
+
 bool report_read_event_record(const uint8_t *data,
                               size_t len,
                               size_t index,

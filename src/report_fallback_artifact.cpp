@@ -23,9 +23,12 @@ constexpr uint8_t FILE_MAGIC[8] = {
     'A', 'C', 'F', 'B', 'A', 'C', 'K', '5',
 };
 constexpr uint8_t NO_SIGNAL = UINT8_MAX;
+constexpr size_t TIMEZONE_OFFSET = 28;
 constexpr size_t IDENTITY_OFFSET = 56;
 constexpr size_t METADATA_CRC_OFFSET = 64;
 constexpr size_t HEADER_CRC_OFFSET = 68;
+constexpr int32_t TIMEZONE_BIAS = 2048;
+constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
 constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
 
@@ -39,6 +42,29 @@ bool multiply_size(size_t count, size_t width, size_t &total) {
     if (count > std::numeric_limits<size_t>::max() / width) return false;
     total = count * width;
     return true;
+}
+
+bool timezone_offset_valid(int32_t minutes) {
+    return minutes >= -MAX_TIMEZONE_OFFSET_MINUTES &&
+           minutes <= MAX_TIMEZONE_OFFSET_MINUTES;
+}
+
+bool decode_timezone_offset(uint32_t encoded,
+                            bool &valid,
+                            int32_t &minutes) {
+    valid = encoded != 0;
+    minutes = 0;
+    if (!valid) return true;
+    if (encoded > INT32_MAX) return false;
+
+    minutes = static_cast<int32_t>(encoded) - TIMEZONE_BIAS;
+    return timezone_offset_valid(minutes);
+}
+
+uint32_t encode_timezone_offset(bool valid, int32_t minutes) {
+    return valid
+        ? static_cast<uint32_t>(minutes + TIMEZONE_BIAS)
+        : 0;
 }
 
 uint64_t identity_update(uint64_t hash,
@@ -311,6 +337,13 @@ bool ReportFallbackArtifactCodec::inspect_header(
 
     const uint32_t session_count = get_le32(header + 20);
     const uint32_t section_count = get_le32(header + 24);
+    bool timezone_valid = false;
+    int32_t timezone_minutes = 0;
+    if (!decode_timezone_offset(get_le32(header + TIMEZONE_OFFSET),
+                                timezone_valid,
+                                timezone_minutes)) {
+        return false;
+    }
     const int64_t day_start_ms =
         static_cast<int64_t>(get_le64(header + 32));
     const int64_t day_end_ms =
@@ -349,6 +382,8 @@ bool ReportFallbackArtifactCodec::inspect_header(
     info.metadata_bytes = metadata_bytes;
     info.payload_bytes = static_cast<size_t>(payload_bytes_u64);
     info.total_bytes = total_bytes;
+    info.timezone_offset_minutes = timezone_minutes;
+    info.timezone_offset_valid = timezone_valid;
     return true;
 }
 
@@ -445,9 +480,12 @@ std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::encode(
     const NightCatalogTimeRange *sessions,
     size_t session_count,
     const ReportFallbackSectionInput *sections,
-    size_t section_count) {
+    size_t section_count,
+    bool timezone_valid,
+    int32_t timezone_minutes) {
     if (!sleep_day.valid() || day_start_ms <= 0 ||
         day_end_ms <= day_start_ms ||
+        (timezone_valid && !timezone_offset_valid(timezone_minutes)) ||
         !sessions_valid(sessions,
                         session_count,
                         day_start_ms,
@@ -471,7 +509,9 @@ std::shared_ptr<const LargeByteBuffer> ReportFallbackArtifactCodec::encode(
                        day_start_ms,
                        day_end_ms,
                        sessions,
-                       session_count)) {
+                       session_count,
+                       timezone_valid,
+                       timezone_minutes)) {
         return {};
     }
     for (size_t i = 0; i < section_count; ++i) {
@@ -485,10 +525,13 @@ bool ReportFallbackArtifactBuilder::begin(
     int64_t day_start_ms,
     int64_t day_end_ms,
     const NightCatalogTimeRange *sessions,
-    size_t session_count) {
+    size_t session_count,
+    bool timezone_valid,
+    int32_t timezone_minutes) {
     reset();
     if (!sleep_day.valid() || day_start_ms <= 0 ||
         day_end_ms <= day_start_ms ||
+        (timezone_valid && !timezone_offset_valid(timezone_minutes)) ||
         !sessions_valid(sessions,
                         session_count,
                         day_start_ms,
@@ -514,6 +557,8 @@ bool ReportFallbackArtifactBuilder::begin(
     sleep_day_ = sleep_day;
     day_start_ms_ = day_start_ms;
     day_end_ms_ = day_end_ms;
+    timezone_offset_minutes_ = timezone_minutes;
+    timezone_offset_valid_ = timezone_valid;
     session_count_ = session_count;
     return true;
 }
@@ -523,6 +568,8 @@ void ReportFallbackArtifactBuilder::reset() {
     sleep_day_ = {};
     day_start_ms_ = 0;
     day_end_ms_ = 0;
+    timezone_offset_minutes_ = 0;
+    timezone_offset_valid_ = false;
     session_count_ = 0;
     section_count_ = 0;
     payload_bytes_ = 0;
@@ -703,6 +750,9 @@ ReportFallbackArtifactBuilder::finish() {
              static_cast<uint32_t>(sleep_day_.epoch_days()));
     put_le32(header + 20, static_cast<uint32_t>(session_count_));
     put_le32(header + 24, static_cast<uint32_t>(section_count_));
+    put_le32(header + TIMEZONE_OFFSET,
+             encode_timezone_offset(timezone_offset_valid_,
+                                    timezone_offset_minutes_));
     put_le64(header + 32, static_cast<uint64_t>(day_start_ms_));
     put_le64(header + 40, static_cast<uint64_t>(day_end_ms_));
     put_le64(header + 48, payload_bytes_);
@@ -720,6 +770,8 @@ ReportFallbackArtifactBuilder::finish() {
     sleep_day_ = {};
     day_start_ms_ = 0;
     day_end_ms_ = 0;
+    timezone_offset_minutes_ = 0;
+    timezone_offset_valid_ = false;
     session_count_ = 0;
     section_count_ = 0;
     payload_bytes_ = 0;

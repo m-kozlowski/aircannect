@@ -25,7 +25,7 @@ struct NightCatalogFileInfo {
 
 class NightCatalogFileCodec {
 public:
-    static constexpr uint16_t Version = 10;
+    static constexpr uint16_t Version = 11;
     static constexpr size_t HeaderBytes = 88;
     static constexpr size_t MaximumFileBytes = 512 * 1024;
 

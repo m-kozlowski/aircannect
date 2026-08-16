@@ -55,6 +55,12 @@ uint8_t report_event_source_mask(const ReportEventRecord &event);
 
 bool report_append_event_record(ReportSpoolBuffer &out,
                                 const ReportEventRecord &event);
+bool report_adjust_event_time(ReportEventRecord &event,
+                              int64_t adjustment_ms);
+bool report_adjust_event_payload(uint8_t *data,
+                                 size_t len,
+                                 size_t record_count,
+                                 int64_t adjustment_ms);
 bool report_event_overlaps_window(const ReportEventRecord &event,
                                   int64_t window_start_ms,
                                   int64_t window_end_ms,

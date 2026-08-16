@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "crc32.h"
 #include "report_planner.h"
 #include "report_sources.h"
 
@@ -197,7 +198,9 @@ bool ReportFallbackAcquisitionService::prepare() {
                         night.day_start_ms,
                         night.day_end_ms,
                         sessions,
-                        session_count_)) {
+                        session_count_,
+                        night.timezone_offset_valid,
+                        night.timezone_offset_minutes)) {
         fail("fallback_builder_start_failed");
         return false;
     }
@@ -401,10 +404,20 @@ bool ReportFallbackAcquisitionService::finish_preserved_read() {
 
     read_port_->release_prepared(preserve_prepared_);
     preserve_prepared_ = {};
-    if (read.state != PreparedByteReadState::Data ||
-        read.bytes != preserve_section_->data_size ||
-        !builder_.commit_reserved_section(
-            true, preserve_section_->data_crc32)) {
+    const bool payload_valid =
+        read.state == PreparedByteReadState::Data &&
+        read.bytes == preserve_section_->data_size &&
+        crc32_ieee(preserve_payload_, read.bytes) ==
+            preserve_section_->data_crc32;
+    const bool adjusted = payload_valid &&
+        (preserve_section_->kind != ReportFallbackSectionKind::Events ||
+         preserve_file_->time_adjust_ms == 0 ||
+         report_adjust_event_payload(
+             preserve_payload_,
+             read.bytes,
+             preserve_section_->record_count,
+             preserve_file_->time_adjust_ms));
+    if (!adjusted || !builder_.commit_reserved_section()) {
         fail("fallback_preserved_read_failed");
         return true;
     }

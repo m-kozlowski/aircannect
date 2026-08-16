@@ -81,6 +81,8 @@ struct NightCatalogSummaryInput {
     size_t session_count = 0;
     ReportDailyMetrics metrics;
     uint64_t identity = 0;
+    int32_t timezone_offset_minutes = 0;
+    bool timezone_offset_valid = false;
 };
 
 struct NightCatalogFallbackSectionInput {
@@ -110,6 +112,11 @@ struct NightCatalogFallbackInput {
     uint32_t metadata_bytes = 0;
     const NightCatalogFallbackSectionInput *sections = nullptr;
     size_t section_count = 0;
+    int32_t time_adjust_ms = 0;
+    int32_t source_timezone_offset_minutes = 0;
+    int32_t resolved_timezone_offset_minutes = 0;
+    bool source_timezone_offset_valid = false;
+    bool resolved_timezone_offset_valid = false;
 };
 
 struct NightCatalogBuildInput {
@@ -133,6 +140,7 @@ enum class NightCatalogBuildFailure : uint8_t {
 struct NightCatalogBuildStatus {
     NightCatalogBuildFailure failure = NightCatalogBuildFailure::None;
     const char *detail = "";
+    size_t invalid_fallback_records = 0;
 
     bool retryable() const {
         return failure == NightCatalogBuildFailure::AllocationFailed;

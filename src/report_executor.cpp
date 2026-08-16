@@ -526,10 +526,13 @@ bool ReportExecutor::decode_record() {
 
 bool ReportExecutor::decode_fallback_operation() {
     const ReportReadOperation *operation = plan_->operation(operation_index_);
+    const NightCatalogFallbackFile *file = operation
+        ? plan_->fallback_file(*operation)
+        : nullptr;
     const NightCatalogFallbackSection *section = operation
         ? plan_->fallback_section(*operation)
         : nullptr;
-    if (!operation || !section || record_index_ != 0 ||
+    if (!operation || !file || !section || record_index_ != 0 ||
         operation->length > record_capacity_) {
         finish(ReportExecutorState::Failed,
                ReportExecutorError::InvalidPlan);
@@ -581,7 +584,8 @@ bool ReportExecutor::decode_fallback_operation() {
         for (size_t i = 0; i < section->record_count; ++i) {
             ReportEventRecord event;
             if (!report_read_event_record(record_buffer_, read.bytes, i,
-                                          event)) {
+                                          event) ||
+                !report_adjust_event_time(event, file->time_adjust_ms)) {
                 finish(ReportExecutorState::Failed,
                        ReportExecutorError::DecodeFailed);
                 return false;

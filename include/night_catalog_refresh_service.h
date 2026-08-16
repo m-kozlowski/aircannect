@@ -57,7 +57,8 @@ public:
         std::shared_ptr<const NightCatalogSummarySnapshot> summary,
         bool current_offset_valid,
         int32_t current_offset_minutes,
-        uint32_t generation);
+        uint32_t generation,
+        std::shared_ptr<const NightCatalog> previous_catalog = {});
     bool poll();
     void cancel();
 
