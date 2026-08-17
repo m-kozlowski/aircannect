@@ -22,6 +22,7 @@
 #include "storage_browser_port.h"
 #include "storage_delete_port.h"
 #include "storage_path.h"
+#include "storage_path_port.h"
 #include "storage_read_port.h"
 #include "storage_service.h"
 
@@ -259,16 +260,28 @@ struct StorageHttpController::PendingArchiveDownload {
     char filename[AC_STORAGE_ARCHIVE_NAME_MAX] = {};
 };
 
+struct StorageHttpController::PendingStorageRename {
+    StoragePathPort *port = nullptr;
+    OperationTicket ticket;
+    AsyncWebServerRequestPtr request;
+
+    ~PendingStorageRename() {
+        if (port && ticket.valid()) (void)port->abandon(ticket);
+    }
+};
+
 StorageHttpController::StorageHttpController() = default;
 StorageHttpController::~StorageHttpController() = default;
 
 bool StorageHttpController::begin(StorageReadPort &read_port,
                                   StorageBrowserPort &browser_port,
+                                  StoragePathPort &path_port,
                                   StorageArchivePort &archive_port,
                                   StorageDeletePort &delete_port,
                                   StorageStatusPort &status_port) {
     storage_read_ = &read_port;
     storage_browser_ = &browser_port;
+    storage_path_ = &path_port;
     storage_archive_ = &archive_port;
     storage_delete_ = &delete_port;
     storage_status_ = &status_port;
@@ -287,6 +300,51 @@ void StorageHttpController::publish_activity(const ActivitySnapshot &activity) {
 void StorageHttpController::poll() {
     poll_file_log_tail();
     poll_archive_download();
+    poll_storage_rename();
+}
+
+void StorageHttpController::poll_storage_rename() {
+    if (!job_mutex_ || !storage_path_ ||
+        xSemaphoreTake(job_mutex_, 0) != pdTRUE) {
+        return;
+    }
+
+    if (!pending_storage_rename_) {
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    if (pending_storage_rename_->request.expired()) {
+        pending_storage_rename_.reset();
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    StoragePathCompletion completion;
+    if (!storage_path_->take_completion(
+            pending_storage_rename_->ticket, completion)) {
+        xSemaphoreGive(job_mutex_);
+        return;
+    }
+
+    const AsyncWebServerRequestPtr pending_request =
+        pending_storage_rename_->request;
+    pending_storage_rename_->ticket = {};
+    pending_storage_rename_.reset();
+    xSemaphoreGive(job_mutex_);
+
+    std::shared_ptr<AsyncWebServerRequest> request = pending_request.lock();
+    if (!request) return;
+    if (completion.outcome.disposition != OperationDisposition::Succeeded) {
+        char body[128] = {};
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"error\":\"%s\"}",
+                 completion.error[0] ? completion.error : "rename_failed");
+        request->send(409, "application/json", body);
+        return;
+    }
+
+    request->send(200, "application/json", "{\"ok\":true}");
 }
 
 void StorageHttpController::poll_file_log_tail() {
@@ -498,6 +556,13 @@ void StorageHttpController::register_routes(AsyncWebServer &server) {
               [this](AsyncWebServerRequest *request) {
         send_storage_download(request);
     });
+
+    server.on(
+        AsyncURIMatcher::exact("/api/storage/rename"), HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            send_storage_rename(request);
+        },
+        nullptr, http_request_body_handler);
 
     server.on(
         AsyncURIMatcher::exact("/api/storage/archive/start"), HTTP_POST,
@@ -813,6 +878,89 @@ void StorageHttpController::send_storage_download(AsyncWebServerRequest *request
     response->addHeader("Cache-Control", "no-store");
     response->addHeader("Accept-Ranges", "none");
     request->send(response);
+}
+
+void StorageHttpController::send_storage_rename(
+    AsyncWebServerRequest *request) {
+    if (!storage_path_) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"rename_unavailable\"}");
+        return;
+    }
+
+    JsonDocument document;
+    std::string body;
+    if (!http_parse_json_body(request, document, body) ||
+        !document["base"].is<const char *>() ||
+        !document["name"].is<const char *>() ||
+        !document["new_name"].is<const char *>()) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_rename\"}");
+        return;
+    }
+
+    const char *base = document["base"].as<const char *>();
+    const char *name = document["name"].as<const char *>();
+    const char *new_name = document["new_name"].as<const char *>();
+    char source[AC_STORAGE_PATH_MAX] = {};
+    char destination[AC_STORAGE_PATH_MAX] = {};
+    if (!storage_user_path_valid(base) ||
+        !storage_valid_child_name(name) ||
+        !storage_valid_child_name(new_name) ||
+        strlen(name) >= AC_STORAGE_NAME_MAX ||
+        strlen(new_name) >= AC_STORAGE_NAME_MAX ||
+        strcmp(name, new_name) == 0 ||
+        !storage_append_child_path(base, name, source, sizeof(source)) ||
+        !storage_append_child_path(
+            base, new_name, destination, sizeof(destination))) {
+        request->send(400, "application/json",
+                      "{\"ok\":false,\"error\":\"bad_rename\"}");
+        return;
+    }
+
+    StorageJobGate gate(request, job_mutex_);
+    if (!gate.locked()) return;
+    if (!storage_heavy_request_available(
+            request,
+            therapy_active_.load(std::memory_order_relaxed),
+            storage_status_) ||
+        !storage_jobs_available(request, storage_archive_, storage_delete_)) {
+        return;
+    }
+    if (pending_storage_rename_) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"rename_busy\"}");
+        return;
+    }
+
+    storage_rename_generation_++;
+    if (storage_rename_generation_ == 0) storage_rename_generation_++;
+
+    StoragePathCommand command;
+    command.operation = StoragePathOperation::Move;
+    command.source = source;
+    command.destination = destination;
+    command.generation = storage_rename_generation_;
+    const OperationSubmission submission = storage_path_->request(command);
+    if (!submission.accepted()) {
+        request->send(409, "application/json",
+                      "{\"ok\":false,\"error\":\"rename_rejected\"}");
+        return;
+    }
+
+    std::unique_ptr<PendingStorageRename> pending(
+        new (std::nothrow) PendingStorageRename());
+    if (!pending) {
+        (void)storage_path_->abandon(submission.ticket);
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"rename_alloc\"}");
+        return;
+    }
+
+    pending->port = storage_path_;
+    pending->ticket = submission.ticket;
+    pending->request = request->pause();
+    pending_storage_rename_ = std::move(pending);
 }
 
 void StorageHttpController::send_file_log_tail(AsyncWebServerRequest *request,

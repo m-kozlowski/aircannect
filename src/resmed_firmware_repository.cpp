@@ -20,7 +20,6 @@ const char *resmed_firmware_repository_state_name(
         case ResmedFirmwareRepositoryState::StoringBootloader:
             return "storing_bootloader";
         case ResmedFirmwareRepositoryState::Removing: return "removing";
-        case ResmedFirmwareRepositoryState::Renaming: return "renaming";
         case ResmedFirmwareRepositoryState::Ready: return "ready";
         case ResmedFirmwareRepositoryState::Error: return "error";
     }
@@ -113,7 +112,7 @@ bool ResmedFirmwareRepository::consume_file_published(const char *path) {
 
 bool ResmedFirmwareRepository::request_remove(const char *path) {
     if (!direct_repository_file(path) || !lock()) return false;
-    if (remove_requested_ || rename_requested_ || !snapshot_ ||
+    if (remove_requested_ || !snapshot_ ||
         !snapshot_->contains_file(path)) {
         unlock();
         return false;
@@ -123,34 +122,6 @@ bool ResmedFirmwareRepository::request_remove(const char *path) {
     remove_requested_ = true;
     retry_at_ms_ = 0;
     status_.state = ResmedFirmwareRepositoryState::Removing;
-    unlock();
-    return true;
-}
-
-bool ResmedFirmwareRepository::request_rename(const char *path,
-                                              const char *new_name) {
-    char destination[AC_STORAGE_PATH_MAX] = {};
-    if (!direct_repository_file(path) ||
-        !storage_valid_child_name(new_name) ||
-        strlen(new_name) >= AC_STORAGE_NAME_MAX ||
-        !storage_append_child_path(AC_RESMED_FIRMWARE_REPOSITORY_PATH,
-                                   new_name, destination,
-                                   sizeof(destination)) ||
-        strcmp(path, destination) == 0 || !lock()) {
-        return false;
-    }
-    if (remove_requested_ || rename_requested_ || !snapshot_ ||
-        !snapshot_->contains_file(path) ||
-        snapshot_->contains_file(destination)) {
-        unlock();
-        return false;
-    }
-
-    copy_cstr(rename_source_, sizeof(rename_source_), path);
-    copy_cstr(rename_destination_, sizeof(rename_destination_), destination);
-    rename_requested_ = true;
-    retry_at_ms_ = 0;
-    status_.state = ResmedFirmwareRepositoryState::Renaming;
     unlock();
     return true;
 }
@@ -352,12 +323,6 @@ void ResmedFirmwareRepository::poll_completion() {
     ticket_ = {};
     action_ = Action::None;
     if (completion.outcome.disposition != OperationDisposition::Succeeded) {
-        if (completed_action == Action::Rename && lock(50)) {
-            rename_requested_ = false;
-            rename_source_[0] = '\0';
-            rename_destination_[0] = '\0';
-            unlock();
-        }
         fail_action(completion.error[0] ? completion.error
                                         : "repository_path_failed");
         return;
@@ -404,28 +369,15 @@ void ResmedFirmwareRepository::poll_completion() {
         publish_status(ResmedFirmwareRepositoryState::Idle);
         return;
     }
-    if (completed_action == Action::Rename) {
-        if (lock(50)) {
-            rename_requested_ = false;
-            rename_source_[0] = '\0';
-            rename_destination_[0] = '\0';
-            request_refresh_locked(true);
-            unlock();
-        }
-        publish_status(ResmedFirmwareRepositoryState::Idle);
-    }
 }
 
 void ResmedFirmwareRepository::start_pending_operation() {
     bool refresh_requested = false;
     bool foreground_refresh = false;
     bool remove_requested = false;
-    bool rename_requested = false;
     PublicationPhase publication_phase = PublicationPhase::None;
     uint32_t refresh_generation = 0;
     char remove_path[AC_STORAGE_PATH_MAX] = {};
-    char rename_source[AC_STORAGE_PATH_MAX] = {};
-    char rename_destination[AC_STORAGE_PATH_MAX] = {};
     char publication_path[AC_STORAGE_PATH_MAX] = {};
     char bootloader_directory[AC_STORAGE_PATH_MAX] = {};
     char bootloader_destination[AC_STORAGE_PATH_MAX] = {};
@@ -435,13 +387,9 @@ void ResmedFirmwareRepository::start_pending_operation() {
     refresh_requested = refresh_requested_;
     foreground_refresh = foreground_refresh_;
     remove_requested = remove_requested_;
-    rename_requested = rename_requested_;
     publication_phase = publication_phase_;
     refresh_generation = refresh_generation_;
     copy_cstr(remove_path, sizeof(remove_path), remove_path_);
-    copy_cstr(rename_source, sizeof(rename_source), rename_source_);
-    copy_cstr(rename_destination, sizeof(rename_destination),
-              rename_destination_);
     copy_cstr(publication_path, sizeof(publication_path), publication_path_);
     copy_cstr(bootloader_directory, sizeof(bootloader_directory),
               bootloader_directory_);
@@ -451,7 +399,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
     retry_at_ms = retry_at_ms_;
     unlock();
 
-    if (!refresh_requested && !remove_requested && !rename_requested &&
+    if (!refresh_requested && !remove_requested &&
         publication_phase == PublicationPhase::None) {
         return;
     }
@@ -473,7 +421,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
                                     activity.foreground_report_demand ||
                                     activity.export_work_claimed;
     if (hard_blocked ||
-        (!foreground_refresh && !remove_requested && !rename_requested &&
+        (!foreground_refresh && !remove_requested &&
          publication_phase == PublicationPhase::None &&
          background_blocked)) {
         return;
@@ -582,29 +530,6 @@ void ResmedFirmwareRepository::start_pending_operation() {
             publish_status(ResmedFirmwareRepositoryState::Removing);
         } else if (submitted.admission == OperationAdmission::Rejected) {
             fail_action("repository_remove_rejected");
-        }
-        return;
-    }
-
-    if (rename_requested) {
-        StoragePathCommand command;
-        command.operation = StoragePathOperation::Move;
-        command.source = rename_source;
-        command.destination = rename_destination;
-        command.generation = next_generation();
-        const OperationSubmission submitted = path_port_->request(command);
-        if (submitted.accepted()) {
-            ticket_ = submitted.ticket;
-            action_ = Action::Rename;
-            publish_status(ResmedFirmwareRepositoryState::Renaming);
-        } else if (submitted.admission == OperationAdmission::Rejected) {
-            if (lock(50)) {
-                rename_requested_ = false;
-                rename_source_[0] = '\0';
-                rename_destination_[0] = '\0';
-                unlock();
-            }
-            fail_action("repository_rename_rejected");
         }
         return;
     }

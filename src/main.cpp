@@ -821,6 +821,7 @@ void setup() {
     const bool storage_http_started = storage_http_controller.begin(
         StorageService::read_port(),
         StorageService::browser_port(),
+        StorageService::path_port(),
         StorageService::archive_port(),
         StorageService::delete_port(),
         StorageService::status_port());

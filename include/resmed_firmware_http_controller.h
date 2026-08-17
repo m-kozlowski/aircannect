@@ -17,7 +17,6 @@ private:
     void send_catalog(AsyncWebServerRequest *request) const;
     void request_refresh(AsyncWebServerRequest *request) const;
     void request_remove(AsyncWebServerRequest *request) const;
-    void request_rename(AsyncWebServerRequest *request) const;
 
     ResmedFirmwareRepository *repository_ = nullptr;
 };

@@ -116,6 +116,7 @@
     let storageSelectedNames = new Set();
     let storageArchiveBusy = false;
     let storageDeleteBusy = false;
+    let storageRenameBusy = false;
     let storageUploadBusy = false;
     let storageUploadCancelRequested = false;
     let storageUploadCurrentId = 0;

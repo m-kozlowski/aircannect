@@ -1482,7 +1482,7 @@
       if (refresh) {
         refresh.disabled = !!data.refresh_pending ||
           ["preparing", "scanning", "inspecting", "storing_bootloader",
-           "removing", "renaming"].includes(
+           "removing"].includes(
             data.state);
       }
 
@@ -1526,7 +1526,7 @@
         renderResmedRepository(data);
         if (data.refresh_pending ||
             ["idle", "preparing", "scanning", "inspecting",
-             "storing_bootloader", "removing", "renaming"].includes(
+             "storing_bootloader", "removing"].includes(
               data.state)) {
           const delay = resmedRepositoryPollDelayMs;
           resmedRepositoryPollDelayMs = Math.min(5000, delay * 2);
@@ -1618,21 +1618,17 @@
     }
 
     async function resmedRepositoryRename(path, currentName) {
-      const requested = prompt("Rename firmware image", currentName);
-      if (requested === null) return;
-      const name = requested.trim();
-      if (!name || name === currentName) return;
-
       try {
-        const response = await fetch("/api/resmed-ota/repository/rename", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({path, name}),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Rename failed");
-        msg("resmedRepositoryMsg", "Renaming " + currentName, true, true);
-        await loadResmedRepository(false);
+        const slash = path.lastIndexOf("/");
+        const base = slash > 0 ? path.slice(0, slash) : "/";
+        const name = slash >= 0 ? path.slice(slash + 1) : currentName;
+        const renamed = await storageRenamePath(
+          base, name, "Rename firmware image");
+        if (!renamed) return;
+
+        msg("resmedRepositoryMsg", "Renamed " + currentName + " to " +
+          renamed, true, true);
+        await loadResmedRepository(true);
       } catch (error) {
         msg("resmedRepositoryMsg", error.message, false, true);
       }

@@ -71,14 +71,6 @@ void ResmedFirmwareHttpController::register_routes(AsyncWebServer &server) {
         nullptr,
         http_request_body_handler);
 
-    server.on(
-        AsyncURIMatcher::exact("/api/resmed-ota/repository/rename"),
-        HTTP_POST,
-        [this](AsyncWebServerRequest *request) {
-            request_rename(request);
-        },
-        nullptr,
-        http_request_body_handler);
 }
 
 void ResmedFirmwareHttpController::send_catalog(
@@ -186,30 +178,6 @@ void ResmedFirmwareHttpController::request_remove(
     if (!repository_ || !repository_->request_remove(path)) {
         request->send(409, "application/json",
                       "{\"ok\":false,\"error\":\"remove_rejected\"}");
-        return;
-    }
-
-    request->send(202, "application/json",
-                  "{\"ok\":true,\"state\":\"queued\"}");
-}
-
-void ResmedFirmwareHttpController::request_rename(
-    AsyncWebServerRequest *request) const {
-    JsonDocument document;
-    std::string body;
-    if (!http_parse_json_body(request, document, body) ||
-        !document["path"].is<const char *>() ||
-        !document["name"].is<const char *>()) {
-        request->send(400, "application/json",
-                      "{\"ok\":false,\"error\":\"bad_rename\"}");
-        return;
-    }
-
-    const char *path = document["path"].as<const char *>();
-    const char *name = document["name"].as<const char *>();
-    if (!repository_ || !repository_->request_rename(path, name)) {
-        request->send(409, "application/json",
-                      "{\"ok\":false,\"error\":\"rename_rejected\"}");
         return;
     }
 

@@ -16,6 +16,7 @@ namespace aircannect {
 class StorageArchivePort;
 class StorageBrowserPort;
 class StorageDeletePort;
+class StoragePathPort;
 class StorageReadPort;
 class StorageStatusPort;
 
@@ -27,6 +28,7 @@ public:
 
     bool begin(StorageReadPort &read_port,
                StorageBrowserPort &browser_port,
+               StoragePathPort &path_port,
                StorageArchivePort &archive_port,
                StorageDeletePort &delete_port,
                StorageStatusPort &status_port);
@@ -38,10 +40,12 @@ public:
 private:
     void poll_file_log_tail();
     void poll_archive_download();
+    void poll_storage_rename();
 
     // storage browser and maintenance
     void send_storage_list(AsyncWebServerRequest *request) const;
     void send_storage_download(AsyncWebServerRequest *request) const;
+    void send_storage_rename(AsyncWebServerRequest *request);
     void send_file_log_tail(AsyncWebServerRequest *request, size_t lines);
     void send_storage_archive_start(AsyncWebServerRequest *request) const;
     void send_storage_archive_status(AsyncWebServerRequest *request) const;
@@ -51,14 +55,18 @@ private:
 
     StorageReadPort *storage_read_ = nullptr;
     StorageBrowserPort *storage_browser_ = nullptr;
+    StoragePathPort *storage_path_ = nullptr;
     StorageArchivePort *storage_archive_ = nullptr;
     StorageDeletePort *storage_delete_ = nullptr;
     StorageStatusPort *storage_status_ = nullptr;
 
     struct PendingFileLogTail;
     struct PendingArchiveDownload;
+    struct PendingStorageRename;
     std::unique_ptr<PendingFileLogTail> pending_file_log_tail_;
     std::unique_ptr<PendingArchiveDownload> pending_archive_download_;
+    std::unique_ptr<PendingStorageRename> pending_storage_rename_;
+    uint32_t storage_rename_generation_ = 0;
 
     mutable StaticSemaphore_t job_mutex_storage_ = {};
     mutable SemaphoreHandle_t job_mutex_ = nullptr;

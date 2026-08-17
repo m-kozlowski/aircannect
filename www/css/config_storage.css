@@ -173,6 +173,12 @@
       line-height: 1;
     }
 
+    .storage-entry-actions {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+
     .storage-empty {
       padding: 16px 12px;
       color: var(--muted);

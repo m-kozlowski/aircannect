@@ -169,7 +169,7 @@
     function storageSelectionUi() {
       const selected = storageSelectedNames.size;
       const storageJobBusy = storageArchiveBusy || storageDeleteBusy ||
-        storageUploadBusy;
+        storageRenameBusy || storageUploadBusy;
       const exportBusy = smbSyncBusy || sleepHqSyncBusy;
       const archiveBusy = storageJobBusy || exportBusy;
       const destructiveBusy = storageJobBusy || exportBusy;
@@ -209,7 +209,8 @@
       if (sleepCheckBtn) sleepCheckBtn.disabled = endpointBusy || !sleepHqSyncConfigured;
       document.querySelectorAll("[data-storage-action]").forEach((button) => {
         button.disabled = storageJobBusy ||
-          (button.dataset.storageAction === "archive" && exportBusy);
+          ((button.dataset.storageAction === "archive" ||
+            button.dataset.storageAction === "rename") && exportBusy);
       });
     }
 
@@ -329,17 +330,26 @@
         info.appendChild(name);
         info.appendChild(meta);
 
-        const action = document.createElement("button");
-        action.className = "btn primary storage-action";
-        action.textContent = "\u2193";
-        action.title = entry.type === "dir" ?
+        const actions = document.createElement("div");
+        actions.className = "storage-entry-actions";
+        const rename = document.createElement("button");
+        rename.className = "btn";
+        rename.textContent = "Rename";
+        rename.dataset.storageAction = "rename";
+        rename.onclick = () => storageRenameEntry(entry);
+        const download = document.createElement("button");
+        download.className = "btn primary storage-action";
+        download.textContent = "\u2193";
+        download.title = entry.type === "dir" ?
           "Download directory as ZIP" : "Download file";
-        action.setAttribute("aria-label", action.title);
-        action.dataset.storageAction = entry.type === "dir" ? "archive" : "download";
-        action.onclick = () => storageDownloadEntry(entry);
+        download.setAttribute("aria-label", download.title);
+        download.dataset.storageAction = entry.type === "dir" ? "archive" : "download";
+        download.onclick = () => storageDownloadEntry(entry);
+        actions.appendChild(rename);
+        actions.appendChild(download);
         row.appendChild(select);
         row.appendChild(info);
-        row.appendChild(action);
+        row.appendChild(actions);
         root.appendChild(row);
       });
       storageSelectionUi();
@@ -418,6 +428,47 @@
         throw new Error("download_prepare_timeout");
       } catch (error) {
         msg(target, error.message, false, true);
+      }
+    }
+
+    async function storageRenamePath(base, currentName, title) {
+      const requested = prompt(title || "Rename storage item", currentName);
+      if (requested === null) return;
+      const newName = requested.trim();
+      if (!newName || newName === currentName) return;
+
+      const response = await fetch("/api/storage/rename", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({base, name: currentName, new_name: newName}),
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(storageErrorText(text, response.status));
+      }
+      return newName;
+    }
+
+    async function storageRenameEntry(entry) {
+      if (!entry || !entry.name || storageRenameBusy) return;
+
+      storageRenameBusy = true;
+      storageSelectionUi();
+      msg("storageMsg", "Renaming " + entry.name, true, false);
+      try {
+        const renamed = await storageRenamePath(storagePath, entry.name);
+        if (!renamed) return;
+
+        msg("storageMsg", "Renamed " + entry.name + " to " + renamed,
+          true, false);
+        storageClearSelection();
+        await loadStorageList(true);
+      } catch (error) {
+        msg("storageMsg", error.message, false, true);
+      } finally {
+        storageRenameBusy = false;
+        storageSelectionUi();
       }
     }
 
