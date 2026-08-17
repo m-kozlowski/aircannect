@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -121,6 +122,23 @@ bool ascii_target_code(const uint8_t *code) {
     return true;
 }
 
+bool parse_uint_field(const char *text, size_t &offset, unsigned &value) {
+    if (!text || !isdigit(static_cast<unsigned char>(text[offset]))) {
+        return false;
+    }
+
+    unsigned parsed = 0;
+    do {
+        const unsigned digit = static_cast<unsigned>(text[offset] - '0');
+        if (parsed > (UINT_MAX - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
+        offset++;
+    } while (isdigit(static_cast<unsigned char>(text[offset])));
+
+    value = parsed;
+    return true;
+}
+
 }  // namespace
 
 bool resmed_firmware_version_from_text(const char *text,
@@ -153,6 +171,65 @@ bool resmed_firmware_version_from_text(const char *text,
         return length > 0 && static_cast<size_t>(length) < out_size;
     }
     return false;
+}
+
+bool resmed_firmware_bootloader_version_from_text(const char *text,
+                                                  char *out,
+                                                  size_t out_size) {
+    if (!text || !out || out_size == 0) return false;
+    out[0] = '\0';
+
+    for (size_t start = 0; text[start]; ++start) {
+        if (!isdigit(static_cast<unsigned char>(text[start])) ||
+            (start > 0 && isdigit(static_cast<unsigned char>(text[start - 1])))) {
+            continue;
+        }
+
+        size_t offset = start;
+        unsigned fields[3] = {};
+        bool valid = true;
+        for (size_t field = 0; field < 3; ++field) {
+            if (!parse_uint_field(text, offset, fields[field])) {
+                valid = false;
+                break;
+            }
+            if (text[offset] != '.') {
+                valid = false;
+                break;
+            }
+            offset++;
+        }
+        if (!valid) continue;
+
+        size_t hash_length = 0;
+        while (isxdigit(static_cast<unsigned char>(text[offset + hash_length]))) {
+            hash_length++;
+        }
+        if (hash_length < 7) continue;
+
+        const int length = snprintf(out, out_size, "%u.%u.%u",
+                                    fields[0], fields[1], fields[2]);
+        return length > 0 && static_cast<size_t>(length) < out_size;
+    }
+    return false;
+}
+
+bool resmed_firmware_identify_fgbl(
+    uint64_t image_size,
+    const uint8_t *boot_id,
+    size_t boot_id_size,
+    char *version_out,
+    size_t version_out_size) {
+    if (image_size != AC_RESMED_FGBL_BYTES || !boot_id ||
+        boot_id_size != AC_RESMED_FGBL_BOOT_ID_BYTES || !version_out ||
+        version_out_size == 0) {
+        return false;
+    }
+
+    char identifier[AC_RESMED_FGBL_BOOT_ID_BYTES + 1] = {};
+    memcpy(identifier, boot_id, AC_RESMED_FGBL_BOOT_ID_BYTES);
+    return resmed_firmware_bootloader_version_from_text(
+        identifier, version_out, version_out_size);
 }
 
 const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind) {

@@ -10,6 +10,8 @@ namespace aircannect {
 
 static constexpr const char *AC_RESMED_FIRMWARE_REPOSITORY_PATH =
     "/aircannect/resmed-firmware";
+static constexpr const char *AC_RESMED_BOOTLOADER_REPOSITORY_PATH =
+    "/aircannect/resmed-firmware/bootloaders";
 
 enum class ResmedFirmwareNameHint : uint8_t {
     Abc,
@@ -28,6 +30,12 @@ struct ResmedFirmwareEntryView {
 const char *resmed_firmware_name_hint_name(ResmedFirmwareNameHint hint);
 ResmedFirmwareNameHint resmed_firmware_name_hint_for_filename(
     const char *filename);
+bool resmed_firmware_patched_bootloader_path(
+    const char *bootloader_version,
+    char *directory_out,
+    size_t directory_out_size,
+    char *path_out,
+    size_t path_out_size);
 
 class ResmedFirmwareCatalogSnapshot {
 public:

@@ -383,9 +383,14 @@ static void publish_runtime_network() {
 }
 
 static void poll_storage_upload_publication() {
-    char path[AC_STORAGE_PATH_MAX] = {};
-    if (StorageService::take_uploaded_path(path, sizeof(path))) {
-        resmed_firmware_repository.notify_file_published(path);
+    static char pending_path[AC_STORAGE_PATH_MAX] = {};
+    if (!pending_path[0]) {
+        (void)StorageService::take_uploaded_path(pending_path,
+                                                 sizeof(pending_path));
+    }
+    if (pending_path[0] &&
+        resmed_firmware_repository.consume_file_published(pending_path)) {
+        pending_path[0] = '\0';
     }
 }
 
@@ -834,6 +839,7 @@ void setup() {
     }
 
     if (!resmed_firmware_repository.begin(StorageService::scan_port(),
+                                          StorageService::read_port(),
                                           StorageService::path_port())) {
         Log::logf(CAT_GENERAL, LOG_ERROR,
                   "[INIT] ResMed firmware repository failed to start\n");

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <ctype.h>
 #include <new>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,6 +75,40 @@ ResmedFirmwareNameHint resmed_firmware_name_hint_for_filename(
         return ResmedFirmwareNameHint::Raw;
     }
     return ResmedFirmwareNameHint::Unsupported;
+}
+
+bool resmed_firmware_patched_bootloader_path(
+    const char *bootloader_version,
+    char *directory_out,
+    size_t directory_out_size,
+    char *path_out,
+    size_t path_out_size) {
+    if (!bootloader_version || !bootloader_version[0] || !directory_out ||
+        directory_out_size == 0 || !path_out || path_out_size == 0) {
+        return false;
+    }
+
+    unsigned major = 0;
+    unsigned minor = 0;
+    unsigned patch = 0;
+    char trailing = '\0';
+    if (sscanf(bootloader_version, "%u.%u.%u%c",
+               &major, &minor, &patch, &trailing) != 3) {
+        return false;
+    }
+
+    const int directory_length = snprintf(
+        directory_out, directory_out_size, "%s/%u.%u.%u",
+        AC_RESMED_BOOTLOADER_REPOSITORY_PATH, major, minor, patch);
+    if (directory_length <= 0 ||
+        static_cast<size_t>(directory_length) >= directory_out_size) {
+        return false;
+    }
+
+    const int path_length = snprintf(path_out, path_out_size, "%s/patched.bin",
+                                     directory_out);
+    return path_length > 0 &&
+           static_cast<size_t>(path_length) < path_out_size;
 }
 
 ResmedFirmwareCatalogSnapshot::~ResmedFirmwareCatalogSnapshot() {

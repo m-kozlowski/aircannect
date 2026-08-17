@@ -1481,7 +1481,8 @@
       const refresh = document.getElementById("resmedRepositoryRefreshBtn");
       if (refresh) {
         refresh.disabled = !!data.refresh_pending ||
-          ["preparing", "scanning", "removing", "renaming"].includes(
+          ["preparing", "scanning", "inspecting", "storing_bootloader",
+           "removing", "renaming"].includes(
             data.state);
       }
 
@@ -1524,7 +1525,8 @@
         const data = await fetchResmedRepository(!!refresh);
         renderResmedRepository(data);
         if (data.refresh_pending ||
-            ["idle", "preparing", "scanning", "removing", "renaming"].includes(
+            ["idle", "preparing", "scanning", "inspecting",
+             "storing_bootloader", "removing", "renaming"].includes(
               data.state)) {
           const delay = resmedRepositoryPollDelayMs;
           resmedRepositoryPollDelayMs = Math.min(5000, delay * 2);

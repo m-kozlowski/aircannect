@@ -255,7 +255,7 @@ bool response_midpoint_epoch_ms(int64_t request_epoch_ms,
 }  // namespace
 
 const char *as11_identity_get_params_json() {
-    return "[\"_PNA\",\"_SRN\",\"_SID\",\"_MID\",\"_VID\"]";
+    return "[\"_PNA\",\"_SRN\",\"_SID\",\"_BID\",\"_MID\",\"_VID\"]";
 }
 
 const char *as11_runtime_get_params_json() {
@@ -329,6 +329,10 @@ bool As11DeviceState::apply_status_get_response(RpcPayloadView payload,
     }
     if (get_string(result, "_SID", text)) {
         software_identifier_ = text;
+        updated = true;
+    }
+    if (get_string(result, "_BID", text)) {
+        bootloader_identifier_ = text;
         updated = true;
     }
     int32_t identity_number = 0;

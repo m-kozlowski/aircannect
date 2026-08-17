@@ -53,13 +53,17 @@ bool format_path(char *out,
 bool resmed_firmware_dump_identity(
     const char *product_name,
     const char *software_identifier,
+    const char *bootloader_identifier,
     int32_t variant_id,
     ResmedFirmwareDumpIdentity &out) {
     out = {};
     if (variant_id < 0 || variant_id > 99 ||
         !extract_family(product_name, out.family, sizeof(out.family)) ||
         !resmed_firmware_version_from_text(
-            software_identifier, out.version, sizeof(out.version))) {
+            software_identifier, out.version, sizeof(out.version)) ||
+        !resmed_firmware_bootloader_version_from_text(
+            bootloader_identifier, out.bootloader_version,
+            sizeof(out.bootloader_version))) {
         return false;
     }
 
@@ -78,13 +82,14 @@ bool resmed_firmware_dump_identity(
         return false;
     }
 
-    const int bootloader_length = snprintf(
-        out.patched_bootloader_path, sizeof(out.patched_bootloader_path),
-        "%s/bootloaders/%s/patched.bin",
-        AC_RESMED_FIRMWARE_REPOSITORY_PATH, out.version);
-    return bootloader_length > 0 &&
-           static_cast<size_t>(bootloader_length) <
-               sizeof(out.patched_bootloader_path);
+    char bootloader_directory[AC_STORAGE_PATH_MAX] = {};
+    if (!resmed_firmware_patched_bootloader_path(
+            out.bootloader_version, bootloader_directory,
+            sizeof(bootloader_directory), out.patched_bootloader_path,
+            sizeof(out.patched_bootloader_path))) {
+        return false;
+    }
+    return true;
 }
 
 }  // namespace aircannect

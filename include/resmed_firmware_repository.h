@@ -8,6 +8,7 @@
 #include "resmed_firmware_catalog.h"
 #include "runtime_snapshots.h"
 #include "storage_path_port.h"
+#include "storage_read_port.h"
 #include "storage_scan_port.h"
 
 namespace aircannect {
@@ -16,6 +17,8 @@ enum class ResmedFirmwareRepositoryState : uint8_t {
     Idle,
     EnsuringDirectory,
     Scanning,
+    Inspecting,
+    StoringBootloader,
     Removing,
     Renaming,
     Ready,
@@ -38,13 +41,15 @@ class ResmedFirmwareRepository {
 public:
     ~ResmedFirmwareRepository();
 
-    bool begin(StorageScanPort &scan_port, StoragePathPort &path_port);
+    bool begin(StorageScanPort &scan_port,
+               StorageReadPort &read_port,
+               StoragePathPort &path_port);
     void poll();
 
     bool request_refresh(bool foreground = true);
     bool request_remove(const char *path);
     bool request_rename(const char *path, const char *new_name);
-    void notify_file_published(const char *path);
+    bool consume_file_published(const char *path);
     void publish_activity(const ActivitySnapshot &activity);
 
     ResmedFirmwareRepositoryStatus status() const;
@@ -57,8 +62,23 @@ private:
         None,
         EnsureDirectory,
         Scan,
+        InspectPublishedPath,
+        ReadPublishedBootId,
+        EnsureBootloaderRoot,
+        EnsureBootloaderDirectory,
+        StoreBootloader,
         Remove,
         Rename,
+    };
+
+    enum class PublicationPhase : uint8_t {
+        None,
+        InspectPath,
+        ReadBootId,
+        DecodeBootId,
+        EnsureBootloaderRoot,
+        EnsureBootloaderDirectory,
+        StoreBootloader,
     };
 
     bool lock(uint32_t timeout_ms = 20) const;
@@ -71,9 +91,12 @@ private:
     void publish_status(ResmedFirmwareRepositoryState state,
                         const char *error = nullptr);
     void fail_action(const char *error);
+    void finish_publication();
+    void decode_published_boot_id();
     bool direct_repository_file(const char *path) const;
 
     StorageScanPort *scan_port_ = nullptr;
+    StorageReadPort *read_port_ = nullptr;
     StoragePathPort *path_port_ = nullptr;
 
     mutable StaticSemaphore_t mutex_storage_ = {};
@@ -90,6 +113,13 @@ private:
     bool rename_requested_ = false;
     char rename_source_[AC_STORAGE_PATH_MAX] = {};
     char rename_destination_[AC_STORAGE_PATH_MAX] = {};
+
+    PublicationPhase publication_phase_ = PublicationPhase::None;
+    char publication_path_[AC_STORAGE_PATH_MAX] = {};
+    char bootloader_version_[16] = {};
+    char bootloader_directory_[AC_STORAGE_PATH_MAX] = {};
+    char bootloader_destination_[AC_STORAGE_PATH_MAX] = {};
+    StoragePreparedRead publication_prepared_;
 
     Action action_ = Action::None;
     OperationTicket ticket_;

@@ -12,6 +12,9 @@ static constexpr size_t AC_RESMED_ABC_0005_HEADER_BYTES =
 static constexpr size_t AC_RESMED_ABC_SEGMENT_BYTES = 8;
 static constexpr size_t AC_RESMED_RAW_ABC_PREFIX_BYTES =
     AC_RESMED_ABC_0005_HEADER_BYTES + AC_RESMED_ABC_SEGMENT_BYTES;
+static constexpr uint64_t AC_RESMED_FGBL_BYTES = 0x00020000;
+static constexpr uint64_t AC_RESMED_FGBL_BOOT_ID_OFFSET = 0x00004000;
+static constexpr size_t AC_RESMED_FGBL_BOOT_ID_BYTES = 16;
 
 enum class ResmedFirmwareImageKind : uint8_t {
     Unknown,
@@ -73,6 +76,15 @@ const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind);
 bool resmed_firmware_version_from_text(const char *text,
                                        char *out,
                                        size_t out_size);
+bool resmed_firmware_bootloader_version_from_text(const char *text,
+                                                  char *out,
+                                                  size_t out_size);
+bool resmed_firmware_identify_fgbl(
+    uint64_t image_size,
+    const uint8_t *boot_id,
+    size_t boot_id_size,
+    char *version_out,
+    size_t version_out_size);
 const char *resmed_firmware_target_code(ResmedFirmwareTarget target);
 bool resmed_firmware_target_parse(const char *code,
                                   ResmedFirmwareTarget &target);

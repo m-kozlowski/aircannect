@@ -69,6 +69,9 @@ public:
     const std::string &software_identifier() const {
         return software_identifier_;
     }
+    const std::string &bootloader_identifier() const {
+        return bootloader_identifier_;
+    }
     const std::string &active_therapy_profile() const {
         return active_therapy_profile_;
     }
@@ -136,6 +139,7 @@ private:
     std::string serial_number_;
     std::string product_name_;
     std::string software_identifier_;
+    std::string bootloader_identifier_;
     std::string active_therapy_profile_;
     std::string mhr_;
     bool platform_id_valid_ = false;

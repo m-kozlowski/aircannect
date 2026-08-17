@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "resmed_firmware_image.h"
 #include "string_util.h"
 
 namespace aircannect {
@@ -15,6 +16,9 @@ const char *resmed_firmware_repository_state_name(
         case ResmedFirmwareRepositoryState::EnsuringDirectory:
             return "preparing";
         case ResmedFirmwareRepositoryState::Scanning: return "scanning";
+        case ResmedFirmwareRepositoryState::Inspecting: return "inspecting";
+        case ResmedFirmwareRepositoryState::StoringBootloader:
+            return "storing_bootloader";
         case ResmedFirmwareRepositoryState::Removing: return "removing";
         case ResmedFirmwareRepositoryState::Renaming: return "renaming";
         case ResmedFirmwareRepositoryState::Ready: return "ready";
@@ -24,12 +28,17 @@ const char *resmed_firmware_repository_state_name(
 }
 
 ResmedFirmwareRepository::~ResmedFirmwareRepository() {
+    if (read_port_ && publication_prepared_.valid()) {
+        read_port_->release_prepared(publication_prepared_);
+    }
     if (mutex_) vSemaphoreDelete(mutex_);
 }
 
 bool ResmedFirmwareRepository::begin(StorageScanPort &scan_port,
+                                     StorageReadPort &read_port,
                                      StoragePathPort &path_port) {
     scan_port_ = &scan_port;
+    read_port_ = &read_port;
     path_port_ = &path_port;
     if (!mutex_) {
         mutex_ = xSemaphoreCreateMutexStatic(&mutex_storage_);
@@ -85,8 +94,21 @@ bool ResmedFirmwareRepository::direct_repository_file(
     return filename[0] != '\0' && strchr(filename, '/') == nullptr;
 }
 
-void ResmedFirmwareRepository::notify_file_published(const char *path) {
-    if (direct_repository_file(path)) (void)request_refresh(false);
+bool ResmedFirmwareRepository::consume_file_published(const char *path) {
+    if (!direct_repository_file(path)) return true;
+    if (!lock()) return false;
+    if (publication_phase_ != PublicationPhase::None) {
+        unlock();
+        return false;
+    }
+
+    copy_cstr(publication_path_, sizeof(publication_path_), path);
+    publication_phase_ = PublicationPhase::InspectPath;
+    retry_at_ms_ = 0;
+    status_.state = ResmedFirmwareRepositoryState::Inspecting;
+    status_.refresh_pending = true;
+    unlock();
+    return true;
 }
 
 bool ResmedFirmwareRepository::request_remove(const char *path) {
@@ -173,6 +195,10 @@ void ResmedFirmwareRepository::publish_status(
 }
 
 void ResmedFirmwareRepository::fail_action(const char *error) {
+    if (read_port_ && publication_prepared_.valid()) {
+        read_port_->release_prepared(publication_prepared_);
+        publication_prepared_ = {};
+    }
     action_ = Action::None;
     ticket_ = {};
     active_refresh_generation_ = 0;
@@ -182,7 +208,8 @@ void ResmedFirmwareRepository::fail_action(const char *error) {
     if (lock(50)) {
         retry_at_ms_ = millis() + RetryDelayMs;
         status_.state = ResmedFirmwareRepositoryState::Error;
-        status_.refresh_pending = refresh_requested_;
+        status_.refresh_pending =
+            refresh_requested_ || publication_phase_ != PublicationPhase::None;
         copy_cstr(status_.error, sizeof(status_.error), reason);
         unlock();
     }
@@ -192,8 +219,88 @@ void ResmedFirmwareRepository::fail_action(const char *error) {
               reason);
 }
 
+void ResmedFirmwareRepository::finish_publication() {
+    if (read_port_ && publication_prepared_.valid()) {
+        read_port_->release_prepared(publication_prepared_);
+        publication_prepared_ = {};
+    }
+    if (!lock(50)) {
+        fail_action("repository_status_busy");
+        return;
+    }
+
+    publication_phase_ = PublicationPhase::None;
+    publication_path_[0] = '\0';
+    bootloader_version_[0] = '\0';
+    bootloader_directory_[0] = '\0';
+    bootloader_destination_[0] = '\0';
+    request_refresh_locked(false);
+    status_.state = ResmedFirmwareRepositoryState::Idle;
+    unlock();
+}
+
+void ResmedFirmwareRepository::decode_published_boot_id() {
+    if (!publication_prepared_.valid()) {
+        fail_action("repository_boot_id_read_missing");
+        return;
+    }
+
+    uint8_t boot_id[AC_RESMED_FGBL_BOOT_ID_BYTES] = {};
+    const PreparedByteRead read = read_port_->read_prepared(
+        publication_prepared_, 0, boot_id, sizeof(boot_id));
+    if (read.state == PreparedByteReadState::Retry) return;
+
+    read_port_->release_prepared(publication_prepared_);
+    publication_prepared_ = {};
+    if (read.state != PreparedByteReadState::Data ||
+        read.bytes != sizeof(boot_id)) {
+        fail_action("repository_boot_id_short_read");
+        return;
+    }
+
+    if (!resmed_firmware_identify_fgbl(
+            AC_RESMED_FGBL_BYTES, boot_id, sizeof(boot_id),
+            bootloader_version_, sizeof(bootloader_version_))) {
+        finish_publication();
+        return;
+    }
+    if (!resmed_firmware_patched_bootloader_path(
+            bootloader_version_, bootloader_directory_,
+            sizeof(bootloader_directory_), bootloader_destination_,
+            sizeof(bootloader_destination_))) {
+        fail_action("repository_bootloader_path_invalid");
+        return;
+    }
+
+    publication_phase_ = PublicationPhase::EnsureBootloaderRoot;
+    publish_status(ResmedFirmwareRepositoryState::StoringBootloader);
+}
+
 void ResmedFirmwareRepository::poll_completion() {
     if (!ticket_.valid()) return;
+
+    if (action_ == Action::ReadPublishedBootId) {
+        StorageReadCompletion completion;
+        if (!read_port_->take_completion(ticket_, completion)) return;
+
+        ticket_ = {};
+        action_ = Action::None;
+        if (completion.outcome.disposition !=
+                OperationDisposition::Succeeded ||
+            !completion.prepared.valid() ||
+            completion.prepared.length != AC_RESMED_FGBL_BOOT_ID_BYTES) {
+            if (completion.prepared.valid()) {
+                read_port_->release_prepared(completion.prepared);
+            }
+            fail_action(completion.error[0] ? completion.error
+                                            : "repository_boot_id_read_failed");
+            return;
+        }
+
+        publication_prepared_ = completion.prepared;
+        publication_phase_ = PublicationPhase::DecodeBootId;
+        return;
+    }
 
     if (action_ == Action::Scan) {
         StorageScanCompletion completion;
@@ -261,6 +368,32 @@ void ResmedFirmwareRepository::poll_completion() {
         publish_status(ResmedFirmwareRepositoryState::Idle);
         return;
     }
+    if (completed_action == Action::InspectPublishedPath) {
+        if (!completion.exists || completion.directory ||
+            completion.size != AC_RESMED_FGBL_BYTES) {
+            finish_publication();
+            return;
+        }
+
+        publication_phase_ = PublicationPhase::ReadBootId;
+        publish_status(ResmedFirmwareRepositoryState::Inspecting);
+        return;
+    }
+    if (completed_action == Action::EnsureBootloaderRoot) {
+        publication_phase_ = PublicationPhase::EnsureBootloaderDirectory;
+        return;
+    }
+    if (completed_action == Action::EnsureBootloaderDirectory) {
+        publication_phase_ = PublicationPhase::StoreBootloader;
+        return;
+    }
+    if (completed_action == Action::StoreBootloader) {
+        Log::logf(CAT_OTA, LOG_INFO,
+                  "[RESMED] stored patched bootloader version=%s path=%s\n",
+                  bootloader_version_, bootloader_destination_);
+        finish_publication();
+        return;
+    }
     if (completed_action == Action::Remove) {
         if (lock(50)) {
             remove_requested_ = false;
@@ -288,10 +421,14 @@ void ResmedFirmwareRepository::start_pending_operation() {
     bool foreground_refresh = false;
     bool remove_requested = false;
     bool rename_requested = false;
+    PublicationPhase publication_phase = PublicationPhase::None;
     uint32_t refresh_generation = 0;
     char remove_path[AC_STORAGE_PATH_MAX] = {};
     char rename_source[AC_STORAGE_PATH_MAX] = {};
     char rename_destination[AC_STORAGE_PATH_MAX] = {};
+    char publication_path[AC_STORAGE_PATH_MAX] = {};
+    char bootloader_directory[AC_STORAGE_PATH_MAX] = {};
+    char bootloader_destination[AC_STORAGE_PATH_MAX] = {};
     ActivitySnapshot activity;
     uint32_t retry_at_ms = 0;
     if (!lock()) return;
@@ -299,16 +436,31 @@ void ResmedFirmwareRepository::start_pending_operation() {
     foreground_refresh = foreground_refresh_;
     remove_requested = remove_requested_;
     rename_requested = rename_requested_;
+    publication_phase = publication_phase_;
     refresh_generation = refresh_generation_;
     copy_cstr(remove_path, sizeof(remove_path), remove_path_);
     copy_cstr(rename_source, sizeof(rename_source), rename_source_);
     copy_cstr(rename_destination, sizeof(rename_destination),
               rename_destination_);
+    copy_cstr(publication_path, sizeof(publication_path), publication_path_);
+    copy_cstr(bootloader_directory, sizeof(bootloader_directory),
+              bootloader_directory_);
+    copy_cstr(bootloader_destination, sizeof(bootloader_destination),
+              bootloader_destination_);
     activity = activity_;
     retry_at_ms = retry_at_ms_;
     unlock();
 
-    if (!refresh_requested && !remove_requested && !rename_requested) return;
+    if (!refresh_requested && !remove_requested && !rename_requested &&
+        publication_phase == PublicationPhase::None) {
+        return;
+    }
+
+    if (publication_phase == PublicationPhase::DecodeBootId) {
+        decode_published_boot_id();
+        return;
+    }
+
     const uint32_t now_ms = millis();
     if (retry_at_ms != 0 &&
         static_cast<int32_t>(now_ms - retry_at_ms) < 0) {
@@ -322,6 +474,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
                                     activity.export_work_claimed;
     if (hard_blocked ||
         (!foreground_refresh && !remove_requested && !rename_requested &&
+         publication_phase == PublicationPhase::None &&
          background_blocked)) {
         return;
     }
@@ -338,6 +491,81 @@ void ResmedFirmwareRepository::start_pending_operation() {
             publish_status(ResmedFirmwareRepositoryState::EnsuringDirectory);
         } else if (submitted.admission == OperationAdmission::Rejected) {
             fail_action("repository_directory_rejected");
+        }
+        return;
+    }
+
+    if (publication_phase == PublicationPhase::InspectPath) {
+        StoragePathCommand command;
+        command.operation = StoragePathOperation::Stat;
+        command.source = publication_path;
+        command.generation = next_generation();
+        const OperationSubmission submitted = path_port_->request(command);
+        if (submitted.accepted()) {
+            ticket_ = submitted.ticket;
+            action_ = Action::InspectPublishedPath;
+            publish_status(ResmedFirmwareRepositoryState::Inspecting);
+        } else if (submitted.admission == OperationAdmission::Rejected) {
+            fail_action("repository_upload_stat_rejected");
+        }
+        return;
+    }
+
+    if (publication_phase == PublicationPhase::ReadBootId) {
+        StorageReadCommand command;
+        command.path = publication_path;
+        command.mode = StorageReadMode::Range;
+        command.offset = AC_RESMED_FGBL_BOOT_ID_OFFSET;
+        command.length = AC_RESMED_FGBL_BOOT_ID_BYTES;
+        command.lane = StorageReadLane::Foreground;
+        command.generation = next_generation();
+        const OperationSubmission submitted = read_port_->request_read(command);
+        if (submitted.accepted()) {
+            ticket_ = submitted.ticket;
+            action_ = Action::ReadPublishedBootId;
+            publish_status(ResmedFirmwareRepositoryState::Inspecting);
+        } else if (submitted.admission == OperationAdmission::Rejected) {
+            fail_action("repository_boot_id_read_rejected");
+        }
+        return;
+    }
+
+    if (publication_phase == PublicationPhase::EnsureBootloaderRoot ||
+        publication_phase == PublicationPhase::EnsureBootloaderDirectory) {
+        StoragePathCommand command;
+        command.operation = StoragePathOperation::EnsureDirectory;
+        command.source =
+            publication_phase == PublicationPhase::EnsureBootloaderRoot
+                ? AC_RESMED_BOOTLOADER_REPOSITORY_PATH
+                : bootloader_directory;
+        command.generation = next_generation();
+        const OperationSubmission submitted = path_port_->request(command);
+        if (submitted.accepted()) {
+            ticket_ = submitted.ticket;
+            action_ =
+                publication_phase == PublicationPhase::EnsureBootloaderRoot
+                    ? Action::EnsureBootloaderRoot
+                    : Action::EnsureBootloaderDirectory;
+            publish_status(ResmedFirmwareRepositoryState::StoringBootloader);
+        } else if (submitted.admission == OperationAdmission::Rejected) {
+            fail_action("repository_bootloader_directory_rejected");
+        }
+        return;
+    }
+
+    if (publication_phase == PublicationPhase::StoreBootloader) {
+        StoragePathCommand command;
+        command.operation = StoragePathOperation::MoveReplacing;
+        command.source = publication_path;
+        command.destination = bootloader_destination;
+        command.generation = next_generation();
+        const OperationSubmission submitted = path_port_->request(command);
+        if (submitted.accepted()) {
+            ticket_ = submitted.ticket;
+            action_ = Action::StoreBootloader;
+            publish_status(ResmedFirmwareRepositoryState::StoringBootloader);
+        } else if (submitted.admission == OperationAdmission::Rejected) {
+            fail_action("repository_bootloader_store_rejected");
         }
         return;
     }
@@ -401,7 +629,7 @@ void ResmedFirmwareRepository::start_pending_operation() {
 }
 
 void ResmedFirmwareRepository::poll() {
-    if (!scan_port_ || !path_port_ || !mutex_) return;
+    if (!scan_port_ || !read_port_ || !path_port_ || !mutex_) return;
 
     poll_completion();
     if (action_ == Action::None) start_pending_operation();

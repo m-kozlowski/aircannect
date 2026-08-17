@@ -918,7 +918,7 @@ bool ResmedOtaManager::begin_recovery_install(
     Log::logf(CAT_OTA, LOG_WARN,
               "[RESMED] installing confirmed patched bootloader "
               "version=%s path=%s\n",
-              cold_->dump_identity.version, firmware.path);
+              cold_->dump_identity.bootloader_version, firmware.path);
     return true;
 }
 
@@ -1026,7 +1026,8 @@ bool ResmedOtaManager::capture_dump_identity() {
     if (!state.variant_id_valid() ||
         !resmed_firmware_dump_identity(
             state.product_name().c_str(),
-            state.software_identifier().c_str(), state.variant_id(),
+            state.software_identifier().c_str(),
+            state.bootloader_identifier().c_str(), state.variant_id(),
             cold_->dump_identity)) {
         set_error("firmware_identity_invalid");
         return false;
@@ -1059,9 +1060,10 @@ bool ResmedOtaManager::request_dump_path_check(DumpPathCheck check) {
         return false;
     }
 
-    const char *path = check == DumpPathCheck::Output
-        ? cold_->dump_identity.output_path
-        : cold_->dump_identity.patched_bootloader_path;
+    const char *path = cold_->dump_identity.patched_bootloader_path;
+    if (check == DumpPathCheck::Output) {
+        path = cold_->dump_identity.output_path;
+    }
     dump_path_generation_++;
     if (dump_path_generation_ == 0) dump_path_generation_++;
 
