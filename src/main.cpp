@@ -198,6 +198,7 @@ static uint32_t rpc_transport_generation_seen = 0;
 static ActivitySnapshot storage_activity;
 static NetworkSnapshot runtime_network;
 static bool runtime_activity_published = false;
+static bool ota_storage_upload_active_published = false;
 static bool runtime_network_published = false;
 static uint32_t export_config_due_ms = 0;
 static constexpr uint32_t AC_MAIN_LOOP_CAN_DRAIN_WARN_MS = 30;
@@ -320,6 +321,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
                                      bool realtime_stream_active,
                                      bool export_work_claimed,
                                      bool ota_install_active,
+                                     bool ota_storage_upload_active,
                                      bool therapy_active) {
     const bool changed =
         !runtime_activity_published ||
@@ -327,6 +329,7 @@ static void publish_runtime_activity(bool foreground_report_demand,
         storage_activity.realtime_stream_active != realtime_stream_active ||
         storage_activity.export_work_claimed != export_work_claimed ||
         storage_activity.ota_install_active != ota_install_active ||
+        ota_storage_upload_active_published != ota_storage_upload_active ||
         storage_activity.therapy_active != therapy_active;
     if (!changed) return;
 
@@ -335,11 +338,13 @@ static void publish_runtime_activity(bool foreground_report_demand,
     storage_activity.export_work_claimed = export_work_claimed;
     storage_activity.ota_install_active = ota_install_active;
     storage_activity.therapy_active = therapy_active;
+    ota_storage_upload_active_published = ota_storage_upload_active;
     storage_activity.generation++;
     if (storage_activity.generation == 0) storage_activity.generation++;
     runtime_activity_published = true;
 
-    StorageService::publish_activity(storage_activity);
+    StorageService::publish_activity(storage_activity,
+                                     ota_storage_upload_active);
     report_task.publish_activity(storage_activity);
     export_task.publish_activity(storage_activity);
     storage_http_controller.publish_activity(storage_activity);
@@ -909,8 +914,10 @@ void setup() {
 
     if (!resmed_ota_manager.begin(rpc_transport, as11_device_service,
                                   as11_service_manager,
+                                  resmed_firmware_preparer,
                                   StorageService::stream_port(),
-                                  StorageService::path_port())) {
+                                  StorageService::path_port(),
+                                  StorageService::upload_port())) {
         Log::logf(CAT_OTA, LOG_ERROR,
                   "ResMed OTA manager failed to start\n");
     }
@@ -1062,22 +1069,6 @@ void loop() {
     drain_can_rx_after("report");
 
     resmed_ota_manager.poll();
-    if (!resmed_ota_manager.active()) {
-        ResmedPreparedFirmware prepared_firmware;
-        bool preparation_cancelled = false;
-        if (resmed_firmware_preparer.take_result(
-                prepared_firmware, preparation_cancelled)) {
-            const bool accepted = preparation_cancelled
-                ? resmed_ota_manager.discard_prepared_firmware(
-                      prepared_firmware)
-                : resmed_ota_manager.begin_prepared_install(
-                      prepared_firmware);
-            if (!accepted) {
-                Log::logf(CAT_OTA, LOG_WARN,
-                          "[RESMED] prepared firmware handoff rejected\n");
-            }
-        }
-    }
     drain_can_rx_after("resmed_ota");
 
     // RPC event fanout before services that depend on fresh state.
@@ -1172,6 +1163,8 @@ void loop() {
     const bool esp_ota_install_active = firmware_installer.active();
     const bool storage_ota_active =
         esp_ota_install_active || resmed_ota_manager.transport_active();
+    const bool ota_storage_upload_active =
+        resmed_ota_manager.storage_upload_active();
     const bool therapy_active =
         session_manager.status().state == SessionState::Active ||
         as11_device_service.state().therapy_state() ==
@@ -1181,6 +1174,7 @@ void loop() {
                              stream_activity_active,
                              export_work_claimed,
                              storage_ota_active,
+                             ota_storage_upload_active,
                              therapy_active);
 
     publish_export_config(now_ms);

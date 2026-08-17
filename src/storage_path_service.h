@@ -58,7 +58,8 @@ private:
     StoragePathCompletion execute_stat(const JobSlot &job) const;
     StoragePathCompletion execute_ensure_directory(
         const JobSlot &job) const;
-    StoragePathCompletion execute_move_replacing(const JobSlot &job) const;
+    StoragePathCompletion execute_move(const JobSlot &job,
+                                       bool replace) const;
     StoragePathCompletion execute_remove(const JobSlot &job) const;
     void finish(OperationTicket ticket,
                 const StoragePathCompletion &completion);

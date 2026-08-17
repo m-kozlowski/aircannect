@@ -37,6 +37,8 @@ private:
         ResmedInit,
         ResmedBlock,
         ResmedInstall,
+        ResmedDump,
+        ResmedDumpConfirm,
         ResmedCheck,
         ResmedApplyPlain,
         ResmedApplyAuthenticated,

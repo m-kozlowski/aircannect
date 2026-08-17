@@ -79,33 +79,6 @@ void copy_text(char *out, size_t out_size, const char *value) {
     snprintf(out, out_size, "%s", value ? value : "");
 }
 
-bool extract_version(const char *text, char *out, size_t out_size) {
-    if (!text || !out || out_size == 0) return false;
-    out[0] = '\0';
-
-    for (size_t i = 0; text[i]; ++i) {
-        if (!isdigit(static_cast<unsigned char>(text[i]))) continue;
-
-        int a = 0;
-        int b = 0;
-        int c = 0;
-        int d = 0;
-        int consumed = 0;
-        if (sscanf(text + i, "%d.%d.%d.%d%n",
-                   &a, &b, &c, &d, &consumed) != 4) {
-            continue;
-        }
-        if (a <= 0 || a >= 100 || b < 0 || b >= 100 ||
-            c < 0 || c >= 100 || d < 0 || d >= 100) {
-            continue;
-        }
-
-        snprintf(out, out_size, "%d.%d.%d.%d", a, b, c, d);
-        return true;
-    }
-    return false;
-}
-
 bool descriptor_preset(const char *version,
                        uint32_t &word_2,
                        uint32_t &word_3) {
@@ -149,6 +122,38 @@ bool ascii_target_code(const uint8_t *code) {
 }
 
 }  // namespace
+
+bool resmed_firmware_version_from_text(const char *text,
+                                       char *out,
+                                       size_t out_size) {
+    if (!text || !out || out_size == 0) return false;
+    out[0] = '\0';
+
+    for (size_t i = 0; text[i]; ++i) {
+        if (!isdigit(static_cast<unsigned char>(text[i]))) continue;
+
+        int fields[4] = {};
+        int consumed = 0;
+        if (sscanf(text + i, "%d.%d.%d.%d%n",
+                   &fields[0], &fields[1], &fields[2], &fields[3],
+                   &consumed) != 4) {
+            continue;
+        }
+        if (fields[0] <= 0 || fields[0] >= 100) continue;
+
+        bool valid = true;
+        for (size_t field = 1; field < 4; ++field) {
+            if (fields[field] < 0 || fields[field] >= 100) valid = false;
+        }
+        if (!valid) continue;
+
+        const int length = snprintf(out, out_size, "%d.%d.%d.%d",
+                                    fields[0], fields[1], fields[2],
+                                    fields[3]);
+        return length > 0 && static_cast<size_t>(length) < out_size;
+    }
+    return false;
+}
 
 const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind) {
     switch (kind) {
@@ -204,6 +209,17 @@ bool resmed_firmware_install_transport_parse(
         return true;
     }
     return false;
+}
+
+bool resmed_firmware_target_range(ResmedFirmwareTarget target,
+                                  uint32_t &flash_start,
+                                  uint64_t &payload_size) {
+    const FirmwareTargetSpec *spec = target_spec(target);
+    if (!spec) return false;
+
+    flash_start = spec->flash_start;
+    payload_size = spec->payload_size;
+    return true;
 }
 
 bool ResmedFirmwareInspector::begin(uint64_t input_size,
@@ -289,14 +305,16 @@ bool ResmedFirmwareInspector::configure_raw() {
     uint32_t word_2 = 0;
     uint32_t word_3 = 0;
     bool have_preset = false;
-    if (extract_version(device_identifier_, info_.descriptor_version,
-                        sizeof(info_.descriptor_version))) {
+    if (resmed_firmware_version_from_text(
+            device_identifier_, info_.descriptor_version,
+            sizeof(info_.descriptor_version))) {
         have_preset = descriptor_preset(info_.descriptor_version,
                                         word_2, word_3);
     }
     if (!have_preset &&
-        extract_version(filename_, info_.descriptor_version,
-                        sizeof(info_.descriptor_version))) {
+        resmed_firmware_version_from_text(
+            filename_, info_.descriptor_version,
+            sizeof(info_.descriptor_version))) {
         have_preset = descriptor_preset(info_.descriptor_version,
                                         word_2, word_3);
     }

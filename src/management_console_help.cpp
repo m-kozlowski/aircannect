@@ -217,6 +217,9 @@ void ManagementConsole::print_help(Print &out, const String &topic_arg) {
         out.println("  resmed-ota status         show AS11 firmware install state");
         out.println("  resmed-ota check          queue CheckUpgradeFile");
         out.println("  resmed-ota abort          abort current AS11 OTA flow");
+        out.println("  resmed-ota dump           dump current FGCB to repository");
+        out.println("  resmed-ota dump confirm INSTALL_PATCHED_BOOTLOADER");
+        out.println("                            install matching FGBL and retry dump");
         out.println("  resmed-ota install [rpc|service] [TARGET] PATH");
         out.println("                            verify and install an image");
         out.println("  resmed-ota repository     list repository images");

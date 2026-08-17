@@ -705,8 +705,14 @@
               <div class="btns">
                 <button class="btn primary" id="resmedRepositoryAddBtn"
                         onclick="resmedRepositoryChooseFiles()">Add</button>
+                <button class="btn" id="resmedOtaDumpBtn"
+                        onclick="resmedOtaDump()">Dump current</button>
                 <button class="btn" id="resmedRepositoryRefreshBtn"
                         onclick="loadResmedRepository(true)">Refresh</button>
+                <button class="btn danger" id="resmedOtaDumpConfirmBtn"
+                        hidden onclick="resmedOtaConfirmBootloader()">
+                  Install patched bootloader and retry
+                </button>
               </div>
               <input id="resmedRepositoryInput" type="file" multiple hidden
                      accept=".abc,.bin,.img"

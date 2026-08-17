@@ -24,6 +24,9 @@ public:
     bool request_clock_read(RpcRequestPort &rpc,
                             RpcSource source,
                             uint32_t now_ms);
+    bool request_identity_refresh(RpcRequestPort &rpc,
+                                  RpcSource source,
+                                  uint32_t now_ms);
     OperationSubmission request_therapy(RpcRequestPort &rpc,
                                         As11TherapyTarget target,
                                         RpcSource source,
@@ -48,6 +51,7 @@ public:
 
     uint32_t revision() const { return revision_; }
     uint32_t boot_revision() const { return boot_revision_; }
+    uint32_t identity_revision() const { return identity_revision_; }
 
 private:
     enum class QueryKind : uint8_t {
@@ -117,6 +121,7 @@ private:
     uint32_t next_generation_ = 0;
     uint32_t revision_ = 0;
     uint32_t boot_revision_ = 0;
+    uint32_t identity_revision_ = 0;
 };
 
 }  // namespace aircannect

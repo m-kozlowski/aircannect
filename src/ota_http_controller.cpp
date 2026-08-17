@@ -146,8 +146,16 @@ void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
 const char *resmed_phase_name(ResmedOtaPhase phase) {
     switch (phase) {
         case ResmedOtaPhase::Idle: return "idle";
+        case ResmedOtaPhase::ReadingIdentity: return "reading_identity";
+        case ResmedOtaPhase::CheckingStorage: return "checking_storage";
         case ResmedOtaPhase::Opening: return "opening";
         case ResmedOtaPhase::EnteringService: return "entering_service";
+        case ResmedOtaPhase::Dumping: return "dumping";
+        case ResmedOtaPhase::Publishing: return "publishing";
+        case ResmedOtaPhase::BootloaderRequired:
+            return "bootloader_required";
+        case ResmedOtaPhase::PreparingBootloader:
+            return "preparing_bootloader";
         case ResmedOtaPhase::Erasing: return "erasing";
         case ResmedOtaPhase::Initiating: return "initiating";
         case ResmedOtaPhase::Ready: return "ready";
@@ -171,7 +179,12 @@ void build_resmed_ota_json(JsonOut &json,
     const ResmedFirmwarePrepareStatus prepare = preparer.status();
     json = "{";
     json_add_string(json, "phase", resmed_phase_name(status.phase), false);
+    json_add_string(json, "operation",
+                    resmed_ota_operation_name(status.operation));
     json_add_bool(json, "active", manager.active() || preparer.active());
+    json_add_bool(json, "confirmation_required",
+                  status.confirmation_required);
+    json_add_bool(json, "recovery_available", status.recovery_available);
     json_add_string(json, "prepare_state",
                     resmed_firmware_prepare_state_name(prepare.state));
     json_add_bool(json, "prepare_active", prepare.active());
@@ -200,6 +213,8 @@ void build_resmed_ota_json(JsonOut &json,
                     resmed_firmware_install_transport_name(status.transport));
     json_add_string(json, "target", status.target.c_str());
     json_add_string(json, "source_path", status.source_path.c_str());
+    json_add_string(json, "output_path", status.output_path.c_str());
+    json_add_string(json, "recovery_path", status.recovery_path.c_str());
     json_add_string(json, "last_result", status.last_result.c_str());
     json_add_string(json, "last_error", status.last_error.c_str());
     json += '}';
@@ -453,6 +468,46 @@ void OtaHttpController::register_routes(AsyncWebServer &server) {
         },
         nullptr, http_request_body_handler);
 
+    server.on(AsyncURIMatcher::exact("/api/resmed-ota/dump"), HTTP_POST,
+              [this](AsyncWebServerRequest *request) {
+        if (resmed_ota_->active() || resmed_preparer_->active()) {
+            request->send(
+                409, "application/json",
+                "{\"ok\":false,\"error\":\"resmed_ota_active\"}");
+            return;
+        }
+
+        Command command;
+        command.kind = CommandKind::ResmedDump;
+        send_queue_result(request, enqueue(std::move(command)));
+    });
+
+    server.on(
+        AsyncURIMatcher::exact("/api/resmed-ota/dump/confirm"), HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            JsonDocument doc;
+            std::string body;
+            if (!http_parse_json_body(request, doc, body)) {
+                request->send(400, "application/json",
+                              "{\"ok\":false,\"error\":\"bad json\"}");
+                return;
+            }
+
+            String confirm;
+            if (!json_get_string(doc, "confirm", confirm)) {
+                request->send(
+                    400, "application/json",
+                    "{\"ok\":false,\"error\":\"missing confirm\"}");
+                return;
+            }
+
+            Command command;
+            command.kind = CommandKind::ResmedDumpConfirm;
+            command.confirmation = confirm.c_str();
+            send_queue_result(request, enqueue(std::move(command)));
+        },
+        nullptr, http_request_body_handler);
+
     server.on(
         AsyncURIMatcher::exact("/api/resmed-ota/init"), HTTP_POST,
         [this](AsyncWebServerRequest *request) {
@@ -613,6 +668,22 @@ void OtaHttpController::execute(Command &command) {
                     command.resmed_transport)) {
                 Log::logf(CAT_OTA, LOG_WARN,
                           "[RESMED] firmware preparation rejected\n");
+            }
+            break;
+
+        case CommandKind::ResmedDump:
+            if (!resmed_ota_->request_firmware_dump()) {
+                Log::logf(CAT_OTA, LOG_WARN,
+                          "[RESMED] firmware dump rejected\n");
+            }
+            break;
+
+        case CommandKind::ResmedDumpConfirm:
+            if (!resmed_ota_->confirm_dump_bootloader(
+                    String(command.confirmation.c_str()))) {
+                Log::logf(CAT_OTA, LOG_WARN,
+                          "[RESMED] patched bootloader confirmation "
+                          "rejected\n");
             }
             break;
 

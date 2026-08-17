@@ -17,6 +17,7 @@ enum class ResmedFirmwareRepositoryState : uint8_t {
     EnsuringDirectory,
     Scanning,
     Removing,
+    Renaming,
     Ready,
     Error,
 };
@@ -42,6 +43,7 @@ public:
 
     bool request_refresh(bool foreground = true);
     bool request_remove(const char *path);
+    bool request_rename(const char *path, const char *new_name);
     void notify_file_published(const char *path);
     void publish_activity(const ActivitySnapshot &activity);
 
@@ -56,6 +58,7 @@ private:
         EnsureDirectory,
         Scan,
         Remove,
+        Rename,
     };
 
     bool lock(uint32_t timeout_ms = 20) const;
@@ -84,6 +87,9 @@ private:
     uint32_t active_refresh_generation_ = 0;
     bool remove_requested_ = false;
     char remove_path_[AC_STORAGE_PATH_MAX] = {};
+    bool rename_requested_ = false;
+    char rename_source_[AC_STORAGE_PATH_MAX] = {};
+    char rename_destination_[AC_STORAGE_PATH_MAX] = {};
 
     Action action_ = Action::None;
     OperationTicket ticket_;

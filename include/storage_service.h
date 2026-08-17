@@ -190,7 +190,8 @@ StorageDiagnosticStatus diagnostic_status();
 FileLogSinkPort &file_log_port();
 
 // Runtime facts used by storage-owned scheduling policy
-void publish_activity(const ActivitySnapshot &activity);
+void publish_activity(const ActivitySnapshot &activity,
+                      bool ota_storage_upload_active);
 
 // Status
 StorageStatusPort &status_port();

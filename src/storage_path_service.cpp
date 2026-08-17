@@ -244,7 +244,9 @@ StoragePathCompletion StoragePathService::execute_ensure_directory(
     return completion;
 }
 
-StoragePathCompletion StoragePathService::execute_move_replacing(const JobSlot &job) const {
+StoragePathCompletion StoragePathService::execute_move(
+    const JobSlot &job,
+    bool replace) const {
     StoragePathCompletion completion;
     completion.ticket = job.ticket;
 
@@ -254,12 +256,19 @@ StoragePathCompletion StoragePathService::execute_move_replacing(const JobSlot &
                   "source_not_found");
         return completion;
     }
-    if (Storage::exists(job.destination) &&
-        !Storage::remove(job.destination)) {
-        completion.outcome = OperationOutcome::failed();
-        copy_cstr(completion.error, sizeof(completion.error),
-                  "destination_remove_failed");
-        return completion;
+    if (Storage::exists(job.destination)) {
+        if (!replace) {
+            completion.outcome = OperationOutcome::failed();
+            copy_cstr(completion.error, sizeof(completion.error),
+                      "destination_exists");
+            return completion;
+        }
+        if (!Storage::remove(job.destination)) {
+            completion.outcome = OperationOutcome::failed();
+            copy_cstr(completion.error, sizeof(completion.error),
+                      "destination_remove_failed");
+            return completion;
+        }
     }
     if (!Storage::rename(job.source, job.destination)) {
         completion.outcome = OperationOutcome::failed();
@@ -301,8 +310,10 @@ StoragePathCompletion StoragePathService::execute(const JobSlot &job) const {
                   "storage_not_mounted");
         return completion;
     }
-    if (job.operation == StoragePathOperation::MoveReplacing) {
-        return execute_move_replacing(job);
+    if (job.operation == StoragePathOperation::Move ||
+        job.operation == StoragePathOperation::MoveReplacing) {
+        return execute_move(
+            job, job.operation == StoragePathOperation::MoveReplacing);
     }
     if (job.operation == StoragePathOperation::EnsureDirectory) {
         return execute_ensure_directory(job);

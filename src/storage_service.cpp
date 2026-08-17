@@ -2625,7 +2625,8 @@ FileLogSinkPort &file_log_port() {
     return file_log_sink;
 }
 
-void publish_activity(const ActivitySnapshot &activity) {
+void publish_activity(const ActivitySnapshot &activity,
+                      bool ota_storage_upload_active) {
     capacity_update_allowed.store(!activity.therapy_active &&
                                   !activity.realtime_stream_active);
     file_log_sink.set_rotation_allowed(!activity.therapy_active &&
@@ -2640,8 +2641,9 @@ void publish_activity(const ActivitySnapshot &activity) {
     const bool maintenance_paused =
         scan_paused || activity.foreground_report_demand ||
         activity.export_work_claimed;
-    const bool upload_paused = activity.therapy_active ||
-                               activity.ota_install_active;
+    const bool upload_paused =
+        activity.therapy_active ||
+        (activity.ota_install_active && !ota_storage_upload_active);
 
     upload_service.set_paused(upload_paused);
     scan_service.set_paused(scan_paused);

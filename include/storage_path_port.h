@@ -11,6 +11,7 @@ namespace aircannect {
 enum class StoragePathOperation : uint8_t {
     Stat,
     EnsureDirectory,
+    Move,
     MoveReplacing,
     Remove,
 };

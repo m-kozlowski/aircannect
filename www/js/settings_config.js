@@ -1212,6 +1212,12 @@
       return phase;
     }
 
+    function resmedOtaDumpSavedText(data) {
+      const path = String(data.output_path || "");
+      const filename = String(data.filename || path.split("/").pop() || "");
+      return "Firmware dump saved" + (filename ? ": " + filename : "");
+    }
+
     function resmedOtaStatusText(data) {
       const phase = resmedOtaDisplayPhase(data);
       const target = data.target && data.target !== "ABC" ? " " + data.target : "";
@@ -1224,8 +1230,19 @@
         return "Building ABC image" + prepareTarget;
       }
       if (data.prepare_state === "publishing") return "Saving ABC image";
+      if (phase === "reading_identity") return "Reading ResMed identity";
+      if (phase === "checking_storage") return "Checking firmware repository";
       if (phase === "opening") return "Opening prepared image" + target;
       if (phase === "entering_service") return "Entering service mode";
+      if (phase === "dumping") return "Reading current firmware";
+      if (phase === "publishing") return data.operation === "dump" ?
+        "Saving firmware dump" : "Publishing firmware";
+      if (phase === "bootloader_required") {
+        return "Patched bootloader required";
+      }
+      if (phase === "preparing_bootloader") {
+        return "Preparing patched bootloader";
+      }
       if (phase === "programming") return "Programming ResMed" + target;
       if (phase === "initiating") return "Starting device upload" + target;
       if (phase === "ready" || phase === "uploading") {
@@ -1238,7 +1255,8 @@
       if (phase === "verified") return "Firmware verified";
       if (phase === "applying") return "Installing firmware";
       if (phase === "resetting") return "Restarting ResMed";
-      if (phase === "complete") return "Installation complete";
+      if (phase === "complete") return data.operation === "dump" ?
+        resmedOtaDumpSavedText(data) : "Installation complete";
       if (phase === "error") return data.last_error || "ResMed OTA failed";
       return phase || "--";
     }
@@ -1246,7 +1264,7 @@
     function resmedOtaTransferActive(data) {
       const phase = resmedOtaDisplayPhase(data);
       return phase === "programming" || phase === "ready" ||
-        phase === "uploading";
+        phase === "uploading" || phase === "dumping";
     }
 
     function resetResmedOtaRate(data, now, bytes, total) {
@@ -1313,6 +1331,15 @@
       const install = document.getElementById("resmedOtaInstallBtn");
       if (install) install.disabled = data.active || resmedDirectUploadBusy;
 
+      const dump = document.getElementById("resmedOtaDumpBtn");
+      if (dump) dump.disabled = data.active || resmedDirectUploadBusy;
+
+      const dumpConfirm = document.getElementById("resmedOtaDumpConfirmBtn");
+      if (dumpConfirm) {
+        dumpConfirm.hidden = !data.confirmation_required;
+        dumpConfirm.disabled = !data.confirmation_required ||
+          !data.recovery_available;
+      }
       const target = document.getElementById("resmedOtaTarget");
       if (target) target.disabled = data.active || resmedDirectUploadBusy;
 
@@ -1328,13 +1355,16 @@
           data.phase === "verified" ?
           "block" : "none";
       bar.style.width = progressValue + "%";
-      if (data.prepare_error || data.last_error) {
+      if (data.confirmation_required) {
+        msg("resmedOtaMsg", "Matching patched bootloader found", false, true);
+      } else if (data.prepare_error || data.last_error) {
         msg("resmedOtaMsg", data.prepare_error || data.last_error,
           false, true);
       } else if (data.phase === "verified") {
         msg("resmedOtaMsg", "Firmware verified", true, true);
       } else if (data.phase === "complete") {
-        msg("resmedOtaMsg", "Installation complete", true, true);
+        msg("resmedOtaMsg", data.operation === "dump" ?
+          resmedOtaDumpSavedText(data) : "Installation complete", true, true);
       } else if (data.active) {
         msg("resmedOtaMsg", stateText, true, true);
       }
@@ -1402,6 +1432,15 @@
         const name = document.createElement("div");
         name.className = "storage-name";
         name.textContent = entry.name || entry.path || "--";
+        name.tabIndex = 0;
+        name.onclick = () => storageDownload(entry.path,
+          "resmedRepositoryMsg");
+        name.onkeydown = (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            storageDownload(entry.path, "resmedRepositoryMsg");
+          }
+        };
         const meta = document.createElement("div");
         meta.className = "storage-meta";
         meta.textContent = fmtBytes(entry.size) +
@@ -1419,6 +1458,13 @@
           entry.path, entry.name || entry.path);
         actions.appendChild(install);
 
+        const rename = document.createElement("button");
+        rename.className = "btn";
+        rename.textContent = "Rename";
+        rename.onclick = () => resmedRepositoryRename(entry.path,
+          entry.name || entry.path);
+        actions.appendChild(rename);
+
         const remove = document.createElement("button");
         remove.className = "btn danger";
         remove.textContent = "Remove";
@@ -1435,7 +1481,8 @@
       const refresh = document.getElementById("resmedRepositoryRefreshBtn");
       if (refresh) {
         refresh.disabled = !!data.refresh_pending ||
-          ["preparing", "scanning", "removing"].includes(data.state);
+          ["preparing", "scanning", "removing", "renaming"].includes(
+            data.state);
       }
 
       if (data.error) {
@@ -1477,7 +1524,8 @@
         const data = await fetchResmedRepository(!!refresh);
         renderResmedRepository(data);
         if (data.refresh_pending ||
-            ["idle", "preparing", "scanning", "removing"].includes(data.state)) {
+            ["idle", "preparing", "scanning", "removing", "renaming"].includes(
+              data.state)) {
           const delay = resmedRepositoryPollDelayMs;
           resmedRepositoryPollDelayMs = Math.min(5000, delay * 2);
           resmedRepositoryPollTimer = setTimeout(
@@ -1561,6 +1609,27 @@
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Remove failed");
+        await loadResmedRepository(false);
+      } catch (error) {
+        msg("resmedRepositoryMsg", error.message, false, true);
+      }
+    }
+
+    async function resmedRepositoryRename(path, currentName) {
+      const requested = prompt("Rename firmware image", currentName);
+      if (requested === null) return;
+      const name = requested.trim();
+      if (!name || name === currentName) return;
+
+      try {
+        const response = await fetch("/api/resmed-ota/repository/rename", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({path, name}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Rename failed");
+        msg("resmedRepositoryMsg", "Renaming " + currentName, true, true);
         await loadResmedRepository(false);
       } catch (error) {
         msg("resmedRepositoryMsg", error.message, false, true);
@@ -1741,6 +1810,42 @@
         storageUploadSetBusy(false);
         resmedDirectUploadBusy = false;
         setTimeout(getResmedOta, 0);
+      }
+    }
+
+    async function resmedOtaDump() {
+      try {
+        await postResmedOta("/api/resmed-ota/dump", {});
+        await waitResmedOtaStart();
+        const result = await waitResmedOta((data) =>
+          data.phase === "complete" || data.confirmation_required, 4200);
+        if (result.confirmation_required) return;
+
+        msg("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
+        loadResmedRepository(true);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false, true);
+      }
+    }
+
+    async function resmedOtaConfirmBootloader() {
+      const current = await getResmedOta();
+      if (!current.confirmation_required || !current.recovery_available) return;
+      if (!confirm("Install the matching patched bootloader from " +
+          current.recovery_path + " and retry the firmware dump?")) {
+        return;
+      }
+
+      try {
+        await postResmedOta("/api/resmed-ota/dump/confirm", {
+          confirm: "INSTALL_PATCHED_BOOTLOADER",
+        });
+        const result = await waitResmedOta(
+          (data) => data.phase === "complete", 4200);
+        msg("resmedOtaMsg", resmedOtaDumpSavedText(result), true, true);
+        loadResmedRepository(true);
+      } catch (error) {
+        msg("resmedOtaMsg", error.message, false, true);
       }
     }
 

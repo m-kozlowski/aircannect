@@ -70,6 +70,9 @@ struct ResmedFirmwareImageInfo {
 };
 
 const char *resmed_firmware_image_kind_name(ResmedFirmwareImageKind kind);
+bool resmed_firmware_version_from_text(const char *text,
+                                       char *out,
+                                       size_t out_size);
 const char *resmed_firmware_target_code(ResmedFirmwareTarget target);
 bool resmed_firmware_target_parse(const char *code,
                                   ResmedFirmwareTarget &target);
@@ -78,6 +81,9 @@ const char *resmed_firmware_install_transport_name(
 bool resmed_firmware_install_transport_parse(
     const char *name,
     ResmedFirmwareInstallTransport &transport);
+bool resmed_firmware_target_range(ResmedFirmwareTarget target,
+                                  uint32_t &flash_start,
+                                  uint64_t &payload_size);
 
 class ResmedFirmwareInspector {
 public:

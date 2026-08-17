@@ -385,8 +385,9 @@
       loadStorageList(false);
     }
 
-    async function storageDownload(path) {
-      msg("storageMsg", "Preparing download", true, false);
+    async function storageDownload(path, messageId) {
+      const target = messageId || "storageMsg";
+      msg(target, "Preparing download", true, false);
       try {
         for (let attempt = 0; attempt < 400; attempt++) {
           const response = await fetch("/api/storage/download?path=" +
@@ -411,12 +412,12 @@
           document.body.appendChild(link);
           link.click();
           link.remove();
-          msg("storageMsg", "Download started", true, false);
+          msg(target, "Download started", true, false);
           return;
         }
         throw new Error("download_prepare_timeout");
       } catch (error) {
-        msg("storageMsg", error.message, false, true);
+        msg(target, error.message, false, true);
       }
     }
 

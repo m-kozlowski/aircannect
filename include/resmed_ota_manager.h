@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <mbedtls/sha256.h>
+#include <atomic>
 #include <stdint.h>
 #include <string>
 
@@ -14,16 +15,35 @@
 
 namespace aircannect {
 
+static constexpr char AC_RESMED_DUMP_BOOTLOADER_CONFIRM[] =
+    "INSTALL_PATCHED_BOOTLOADER";
+
 class As11DeviceService;
 class As11ServiceManager;
+struct As11ServicePacketHeader;
 class LargeByteBuffer;
 class StoragePathPort;
 class StorageStreamPort;
+class StorageUploadPort;
+
+enum class ResmedOtaOperation : uint8_t {
+    None,
+    Install,
+    Dump,
+};
+
+const char *resmed_ota_operation_name(ResmedOtaOperation operation);
 
 enum class ResmedOtaPhase {
     Idle,
+    ReadingIdentity,
+    CheckingStorage,
     Opening,
     EnteringService,
+    Dumping,
+    Publishing,
+    BootloaderRequired,
+    PreparingBootloader,
     Erasing,
     Initiating,
     Ready,
@@ -39,7 +59,10 @@ enum class ResmedOtaPhase {
 
 struct ResmedOtaStatus {
     ResmedOtaPhase phase = ResmedOtaPhase::Idle;
+    ResmedOtaOperation operation = ResmedOtaOperation::None;
     bool waiting = false;
+    bool confirmation_required = false;
+    bool recovery_available = false;
     size_t total_size = 0;
     size_t uploaded_bytes = 0;
     size_t xfer_block_size = AC_RESMED_OTA_MAX_BLOCK_BYTES;
@@ -53,6 +76,8 @@ struct ResmedOtaStatus {
         AC_RESMED_FIRMWARE_DEFAULT_TRANSPORT;
     String target;
     String source_path;
+    String output_path;
+    String recovery_path;
     String last_result;
     String last_error;
 };
@@ -62,8 +87,10 @@ public:
     bool begin(RpcRequestPort &rpc,
                As11DeviceService &device,
                As11ServiceManager &service,
+               ResmedFirmwarePreparer &preparer,
                StorageStreamPort &stream_port,
-               StoragePathPort &path_port);
+               StoragePathPort &path_port,
+               StorageUploadPort &upload_port);
     void poll();
 
     bool begin_upload(size_t total_size,
@@ -71,6 +98,8 @@ public:
                       const String &filename);
     bool begin_prepared_install(const ResmedPreparedFirmware &firmware);
     bool discard_prepared_firmware(const ResmedPreparedFirmware &firmware);
+    bool request_firmware_dump();
+    bool confirm_dump_bootloader(const String &confirm);
     bool submit_block(size_t offset, const String &hex_data);
     bool request_check();
     bool request_apply_plain(bool reset_settings, const String &confirm);
@@ -81,6 +110,7 @@ public:
 
     bool active() const;
     bool transport_active() const;
+    bool storage_upload_active() const;
     ResmedOtaStatus status() const;
     const char *phase_name() const;
 
@@ -107,6 +137,7 @@ private:
     enum class ServiceWaitingFor : uint8_t {
         None,
         Enter,
+        Read,
         Erase,
         Write,
         WriteLz4,
@@ -114,6 +145,12 @@ private:
     };
 
     struct ColdState;
+
+    enum class DumpPathCheck : uint8_t {
+        None,
+        Output,
+        Bootloader,
+    };
 
     bool begin_protocol(size_t total_size,
                         const String &expected_sha256,
@@ -125,6 +162,26 @@ private:
     void poll_rpc_completion();
     void cancel_rpc_request();
     void handle_response(RpcPayloadView payload);
+
+    void poll_preparer_result();
+    bool begin_recovery_install(const ResmedPreparedFirmware &firmware);
+    void poll_recovery_boot();
+
+    void poll_firmware_dump();
+    bool begin_dump_identity_refresh(bool after_recovery);
+    bool capture_dump_identity();
+    bool request_dump_path_check(DumpPathCheck check);
+    void poll_dump_path_check();
+    bool begin_dump_service();
+    bool begin_dump_upload();
+    void poll_dump_upload();
+    bool submit_dump_read();
+    bool submit_dump_chunk();
+    void finish_dump_read(const std::shared_ptr<const LargeByteBuffer> &response,
+                          const As11ServicePacketHeader &header);
+    void require_dump_bootloader();
+    void finish_firmware_dump();
+    void cancel_dump_upload();
 
     bool begin_service_install();
     void poll_service_completion();
@@ -157,6 +214,7 @@ private:
     bool finish_hash();
     void clear_session();
     void set_error(const char *error);
+    void finish_error(const char *error);
     void update_progress();
 
     bool guard_device_idle_for_upgrade();
@@ -167,8 +225,10 @@ private:
     RpcRequestPort *rpc_ = nullptr;
     As11DeviceService *device_ = nullptr;
     As11ServiceManager *service_ = nullptr;
+    ResmedFirmwarePreparer *preparer_ = nullptr;
     StorageStreamPort *stream_port_ = nullptr;
     StoragePathPort *path_port_ = nullptr;
+    StorageUploadPort *upload_port_ = nullptr;
     mutable SemaphoreHandle_t mutex_ = nullptr;
     ColdState *cold_ = nullptr;
 
@@ -195,6 +255,27 @@ private:
     uint32_t service_started_ms_ = 0;
     uint32_t service_reset_accepted_ms_ = 0;
     uint32_t service_reset_boot_revision_ = 0;
+
+    // Firmware dump and bootloader recovery
+    OperationTicket dump_path_ticket_;
+    DumpPathCheck dump_path_check_ = DumpPathCheck::None;
+    uint32_t dump_path_generation_ = 0;
+    uint32_t dump_identity_revision_ = 0;
+    uint32_t dump_identity_started_ms_ = 0;
+    uint32_t dump_upload_id_ = 0;
+    uint32_t dump_upload_generation_ = 0;
+    std::atomic<bool> dump_upload_active_{false};
+    uint32_t dump_flash_start_ = 0;
+    uint32_t dump_read_offset_ = 0;
+    size_t dump_read_bytes_ = 0;
+    size_t dump_buffer_bytes_ = 0;
+    uint32_t dump_chunk_offset_ = 0;
+    bool dump_service_entered_ = false;
+    bool dump_recovery_prepare_pending_ = false;
+    bool dump_recovery_install_ = false;
+    bool dump_error_reset_pending_ = false;
+    uint32_t recovery_boot_revision_ = 0;
+    uint32_t recovery_boot_started_ms_ = 0;
 
     // Prepared storage source
     size_t prepared_block_bytes_ = 0;

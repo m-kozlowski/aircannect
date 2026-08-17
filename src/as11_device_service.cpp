@@ -114,6 +114,19 @@ bool As11DeviceService::request_clock_read(RpcRequestPort &rpc,
     return true;
 }
 
+bool As11DeviceService::request_identity_refresh(RpcRequestPort &rpc,
+                                                 RpcSource source,
+                                                 uint32_t now_ms) {
+    schedule_initialized_ = true;
+    schedule_query(QueryKind::Identity, now_ms, source);
+
+    if (!query_ticket_.valid()) {
+        const QueryKind due = next_due_query(now_ms, false);
+        if (due != QueryKind::None) (void)submit_query(rpc, due, now_ms);
+    }
+    return true;
+}
+
 OperationSubmission As11DeviceService::request_therapy(
     RpcRequestPort &rpc,
     As11TherapyTarget target,
@@ -473,6 +486,8 @@ void As11DeviceService::complete_query(
 
     switch (active_query_kind_) {
         case QueryKind::Identity:
+            identity_revision_++;
+            if (identity_revision_ == 0) identity_revision_++;
             break;
         case QueryKind::Runtime:
             if (before_state == As11TherapyState::Running &&

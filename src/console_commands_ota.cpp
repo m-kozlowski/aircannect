@@ -188,6 +188,8 @@ void handle_resmed_ota(Print &out,
         const ResmedOtaStatus status = resmed_ota.status();
         out.print("[RESMED OTA] phase=");
         out.print(resmed_ota.phase_name());
+        out.print(" operation=");
+        out.print(resmed_ota_operation_name(status.operation));
         out.print(" waiting=");
         out.print(status.waiting ? "yes" : "no");
         out.print(" transport=");
@@ -215,6 +217,21 @@ void handle_resmed_ota(Print &out,
             out.print(status.last_error);
         }
         out.println();
+        if (status.output_path.length()) {
+            out.print("[RESMED dump] output=\"");
+            out.print(status.output_path);
+            out.print("\"");
+            if (status.confirmation_required) {
+                out.print(" confirmation=");
+                out.print(AC_RESMED_DUMP_BOOTLOADER_CONFIRM);
+            }
+            if (status.recovery_path.length()) {
+                out.print(" bootloader=\"");
+                out.print(status.recovery_path);
+                out.print("\"");
+            }
+            out.println();
+        }
         out.print("[RESMED prepare] state=");
         out.print(resmed_firmware_prepare_state_name(prepare.state));
         out.print(" file=\"");
@@ -251,6 +268,38 @@ void handle_resmed_ota(Print &out,
         preparer.cancel();
         resmed_ota.abort("aborted_by_console");
         out.println("[RESMED OTA] aborted");
+        return;
+    }
+
+    if (rest == "dump") {
+        if (resmed_ota.request_firmware_dump()) {
+            out.println("[RESMED OTA] firmware dump queued");
+        } else {
+            const ResmedOtaStatus status = resmed_ota.status();
+            out.print("[RESMED OTA] dump rejected");
+            if (status.last_error.length()) {
+                out.print(": ");
+                out.print(status.last_error);
+            }
+            out.println();
+        }
+        return;
+    }
+
+    if (rest.startsWith("dump confirm ")) {
+        String confirm = rest.substring(strlen("dump confirm "));
+        trim_inplace(confirm);
+        if (resmed_ota.confirm_dump_bootloader(confirm)) {
+            out.println("[RESMED OTA] patched bootloader install queued");
+        } else {
+            const ResmedOtaStatus status = resmed_ota.status();
+            out.print("[RESMED OTA] confirmation rejected");
+            if (status.last_error.length()) {
+                out.print(": ");
+                out.print(status.last_error);
+            }
+            out.println();
+        }
         return;
     }
 
@@ -414,7 +463,7 @@ void handle_resmed_ota(Print &out,
     print_unknown_command(
         out, "RESMED OTA",
         "status, check, abort, apply, install PATH, repository "
-        "[refresh|remove PATH|install PATH]");
+        "[refresh|remove PATH|install PATH], dump");
 }
 
 }  // namespace
