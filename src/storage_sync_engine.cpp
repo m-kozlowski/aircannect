@@ -1374,12 +1374,27 @@ void StorageSyncEngine::finish_run_locked() {
 
 void StorageSyncEngine::preempt_run_locked() {
     const RunKind kind = current_run_kind_;
+    const WorkPhase interrupted_phase = phase_;
+    const uint32_t now_ms = nonzero_millis(millis());
+
+    const uint32_t elapsed_ms = status_.started_ms
+        ? static_cast<uint32_t>(now_ms - status_.started_ms) : 0;
+
+    char current_path[AC_STORAGE_PATH_MAX] = {};
+    copy_cstr(current_path, sizeof(current_path), current_file_.path);
+
     char reason[AC_STORAGE_SYNC_REASON_MAX] = {};
+
     copy_cstr(reason,
               sizeof(reason),
               status_.pending_reason[0]
                   ? status_.pending_reason
                   : run_kind_reason(kind));
+
+    const char *cause = runtime_blocked_.load()
+        ? "priority_activity"
+        : (!network_available_.load() ? "network_unavailable"
+                                      : "abort_requested");
 
     reset_run_locked(true);
 
@@ -1388,12 +1403,18 @@ void StorageSyncEngine::preempt_run_locked() {
     status_.pending = true;
     copy_cstr(status_.pending_reason, sizeof(status_.pending_reason), reason);
     status_.last_error[0] = '\0';
-    status_.updated_ms = nonzero_millis(millis());
+    status_.updated_ms = now_ms;
     retry_due_ms_ = 0;
     retry_attempt_ = 0;
+
     Log::logf(CAT_EXPORT,
-              LOG_DEBUG,
-              "[SMB] preempted; queued reason=%s\n",
+              LOG_INFO,
+              "[SMB] preempted phase=%s elapsed_ms=%lu current=%s "
+              "cause=%s queued_reason=%s\n",
+              work_phase_name(interrupted_phase),
+              static_cast<unsigned long>(elapsed_ms),
+              current_path[0] ? current_path : "--",
+              cause,
               status_.pending_reason);
     publish_runtime_locked();
 }
