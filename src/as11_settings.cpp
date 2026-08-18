@@ -52,6 +52,91 @@ constexpr uint8_t option_count(const T (&)[N]) {
     return static_cast<uint8_t>(N);
 }
 
+struct SettingValue {
+    As11SettingKind kind;
+    float min_value;
+    float max_value;
+    float step;
+    const char *const *options;
+    uint8_t option_count;
+    uint16_t scale_div;
+    uint8_t decimals;
+    const char *const *wire_options;
+};
+
+constexpr SettingValue number_value(float min_value, float max_value,
+                                    float step, uint16_t scale_div,
+                                    uint8_t decimals) {
+    return {As11SettingKind::Number, min_value, max_value, step,
+            nullptr, 0, scale_div, decimals, nullptr};
+}
+
+template <size_t N>
+constexpr SettingValue enum_value(const char *const (&options)[N]) {
+    return {As11SettingKind::Enum, 0.0f, 0.0f, 1.0f, options,
+            option_count(options), 1, 0, nullptr};
+}
+
+template <size_t N, size_t M>
+constexpr SettingValue enum_value(const char *const (&options)[N],
+                                  const char *const (&wire_options)[M]) {
+    static_assert(N == M, "display and wire option counts must match");
+    return {As11SettingKind::Enum, 0.0f, 0.0f, 1.0f, options,
+            option_count(options), 1, 0, wire_options};
+}
+
+template <size_t N, size_t M>
+constexpr SettingValue ranged_enum_value(
+    const char *const (&options)[N],
+    const char *const (&wire_options)[M],
+    float min_value, float max_value, float step) {
+    static_assert(N == M, "display and wire option counts must match");
+    return {As11SettingKind::Enum, min_value, max_value, step, options,
+            option_count(options), 1, 0, wire_options};
+}
+
+constexpr As11SettingDef setting_definition(
+    const char *key, As11SettingSource source, As11ProfileId profile,
+    const char *source_object, const char *source_field, const char *label,
+    const char *group, const char *category, uint16_t mode_mask,
+    SettingValue value) {
+    return {
+        key, source, profile, source_object, source_field,
+        label, group, category,
+        value.kind, value.min_value, value.max_value, value.step,
+        value.options, value.option_count, mode_mask, value.scale_div,
+        value.decimals, value.wire_options,
+    };
+}
+
+constexpr As11SettingDef flat_setting(
+    const char *key, const char *source_field, const char *label,
+    const char *group, const char *category, uint16_t mode_mask,
+    SettingValue value) {
+    return setting_definition(key, As11SettingSource::Flat,
+                              As11ProfileId::None, nullptr, source_field,
+                              label, group, category, mode_mask, value);
+}
+
+constexpr As11SettingDef therapy_setting(
+    const char *key, As11ProfileId profile, const char *source_field,
+    const char *label, const char *group, const char *category,
+    uint16_t mode_mask, SettingValue value) {
+    return setting_definition(key, As11SettingSource::TherapyProfile,
+                              profile, nullptr, source_field, label, group,
+                              category, mode_mask, value);
+}
+
+constexpr As11SettingDef feature_setting(
+    const char *key, const char *source_object, const char *source_field,
+    const char *label, const char *group, const char *category,
+    uint16_t mode_mask, SettingValue value) {
+    return setting_definition(key, As11SettingSource::FeatureProfile,
+                              As11ProfileId::None, source_object,
+                              source_field, label, group, category,
+                              mode_mask, value);
+}
+
 #include "as11_settings_catalog.inc"
 
 constexpr size_t SETTINGS_COUNT = sizeof(SETTINGS) / sizeof(SETTINGS[0]);
