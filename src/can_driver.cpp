@@ -406,14 +406,16 @@ void CanDriver::handle_alerts(uint32_t alerts) {
 
     const uint32_t suppressed = suppressed_bus_error_alerts_;
     suppressed_bus_error_alerts_ = 0;
-    const log_level_t alert_level =
-        (visible_alerts & (TWAI_ALERT_RX_QUEUE_FULL |
-                           TWAI_ALERT_TX_FAILED |
-                           TWAI_ALERT_BUS_OFF |
-                           TWAI_ALERT_ERR_PASS |
-                           TWAI_ALERT_ABOVE_ERR_WARN))
-            ? LOG_WARN
-            : LOG_INFO;
+    log_level_t alert_level = LOG_INFO;
+    if (visible_alerts == TWAI_ALERT_BELOW_ERR_WARN) {
+        alert_level = LOG_DEBUG;
+    } else if (visible_alerts & (TWAI_ALERT_RX_QUEUE_FULL |
+                                 TWAI_ALERT_TX_FAILED |
+                                 TWAI_ALERT_BUS_OFF |
+                                 TWAI_ALERT_ERR_PASS |
+                                 TWAI_ALERT_ABOVE_ERR_WARN)) {
+        alert_level = LOG_WARN;
+    }
     twai_status_info_t status = {};
     const bool have_status =
         (visible_alerts & TWAI_ALERT_RX_QUEUE_FULL) &&
