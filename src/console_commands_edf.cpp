@@ -116,8 +116,11 @@ void print_edf_recorder_stats(Print &out,
 
     const auto series_total = [&assembly](
         uint32_t EdfSeriesAssemblyStatus::*field) {
-        return assembly.brp.*field + assembly.pld.*field +
-               assembly.sa2.*field + assembly.tcv.*field;
+        uint32_t total = 0;
+        for (const EdfSeriesAssemblyStatus &series : assembly.series) {
+            total += series.*field;
+        }
+        return total;
     };
 
     out.print("[EDF capture] frames=");
@@ -127,14 +130,17 @@ void print_edf_recorder_stats(Print &out,
     out.print(" segment_rollovers=");
     out.println(static_cast<unsigned long>(status.segment_rollovers));
 
-    out.print("[EDF records] brp=");
-    out.print(static_cast<unsigned long>(status.brp_records));
-    out.print(" pld=");
-    out.print(static_cast<unsigned long>(status.pld_records));
-    out.print(" sa2=");
-    out.print(static_cast<unsigned long>(status.sa2_records));
-    out.print(" tcv=");
-    out.print(static_cast<unsigned long>(status.tcv_records));
+    out.print("[EDF records]");
+    size_t schema_count = 0;
+    const EdfFileSchema *schemas = edf_numeric_schemas(schema_count);
+    for (size_t i = 0; i < schema_count; ++i) {
+        out.print(' ');
+        for (const char *tag = schemas[i].suffix; tag && *tag; ++tag) {
+            out.print(*tag >= 'A' && *tag <= 'Z' ? *tag - 'A' + 'a' : *tag);
+        }
+        out.print('=');
+        out.print(static_cast<unsigned long>(status.numeric_records[i]));
+    }
     out.print(" eve=");
     out.print(static_cast<unsigned long>(status.eve_records));
     out.print(" csl=");

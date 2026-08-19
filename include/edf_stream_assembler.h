@@ -31,23 +31,17 @@ struct EdfStreamAssemblerStatus {
 
     int64_t session_start_epoch_ms = 0;
 
-    EdfSeriesAssemblyStatus brp;
-    EdfSeriesAssemblyStatus pld;
-    EdfSeriesAssemblyStatus sa2;
-    EdfSeriesAssemblyStatus tcv;
+    EdfSeriesAssemblyStatus series[AC_EDF_NUMERIC_SERIES_COUNT];
 
     char unmapped_signal[AC_STREAM_FRAME_SIGNAL_NAME_MAX] = {};
     char last_error[80] = {};
-};
 
-struct EdfCompletedRecordView {
-    EdfSeriesId series = EdfSeriesId::Brp;
-    uint32_t record_index = 0;
-    size_t signal_count = 0;
-    size_t samples_per_record = 0;
-    const float *values = nullptr;
-    const uint8_t *present = nullptr;
-    const uint8_t *valid = nullptr;
+    EdfSeriesAssemblyStatus &for_series(EdfSeriesId id) {
+        return series[edf_series_index(id)];
+    }
+    const EdfSeriesAssemblyStatus &for_series(EdfSeriesId id) const {
+        return series[edf_series_index(id)];
+    }
 };
 
 using EdfRecordObserver = void (*)(void *context,
@@ -69,10 +63,8 @@ public:
 
     bool start_session(const char *device_start_time,
                        const As11ClockTransform &clock_transform);
-    void set_current_records(uint32_t brp_record,
-                             uint32_t pld_record,
-                             uint32_t sa2_record,
-                             uint32_t tcv_record);
+    void set_current_records(
+        const uint32_t (&records)[AC_EDF_NUMERIC_SERIES_COUNT]);
     void end_session();
 
     EdfFramePrepareStatus prepare_frame(const StreamFrameData &frame,
@@ -91,6 +83,12 @@ private:
         uint8_t *present = nullptr;
         uint8_t *valid = nullptr;
         EdfSeriesAssemblyStatus *status = nullptr;
+    };
+
+    struct SeriesStorage {
+        float *values = nullptr;
+        uint8_t *present = nullptr;
+        uint8_t *valid = nullptr;
     };
 
     struct FrameTiming {
@@ -151,18 +149,7 @@ private:
     bool initial_epoch_can_rebase() const;
     void set_error(const char *error);
 
-    float *brp_values_ = nullptr;
-    float *pld_values_ = nullptr;
-    float *sa2_values_ = nullptr;
-    float *tcv_values_ = nullptr;
-    uint8_t *brp_present_ = nullptr;
-    uint8_t *pld_present_ = nullptr;
-    uint8_t *sa2_present_ = nullptr;
-    uint8_t *tcv_present_ = nullptr;
-    uint8_t *brp_valid_ = nullptr;
-    uint8_t *pld_valid_ = nullptr;
-    uint8_t *sa2_valid_ = nullptr;
-    uint8_t *tcv_valid_ = nullptr;
+    SeriesStorage series_storage_[AC_EDF_NUMERIC_SERIES_COUNT];
 
     EdfRecordObserver record_observer_ = nullptr;
     void *record_observer_context_ = nullptr;

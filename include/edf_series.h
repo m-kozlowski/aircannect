@@ -28,6 +28,28 @@ enum class EdfSeriesId : uint8_t {
     Pld,
     Sa2,
     Tcv,
+    Count,
+};
+
+static constexpr size_t AC_EDF_NUMERIC_SERIES_COUNT =
+    static_cast<size_t>(EdfSeriesId::Count);
+
+constexpr size_t edf_series_index(EdfSeriesId series) {
+    return static_cast<size_t>(series);
+}
+
+constexpr bool edf_series_id_valid(EdfSeriesId series) {
+    return edf_series_index(series) < AC_EDF_NUMERIC_SERIES_COUNT;
+}
+
+struct EdfCompletedRecordView {
+    EdfSeriesId series = EdfSeriesId::Brp;
+    uint32_t record_index = 0;
+    size_t signal_count = 0;
+    size_t samples_per_record = 0;
+    const float *values = nullptr;
+    const uint8_t *present = nullptr;
+    const uint8_t *valid = nullptr;
 };
 
 }  // namespace aircannect

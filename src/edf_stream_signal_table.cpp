@@ -4,80 +4,29 @@ namespace aircannect {
 namespace {
 
 const EdfStreamSignalDescriptor EDF_STREAM_SIGNALS[] = {
-    {"_RFL", StreamSignalId::PatientFlow, EdfFileKind::Brp,
-     EdfSeriesId::Brp, 0, AC_EDF_BRP_SAMPLE_MS},
-    {"_MKP", StreamSignalId::MaskPressure, EdfFileKind::Brp,
-     EdfSeriesId::Brp, 1, AC_EDF_BRP_SAMPLE_MS},
-    {"_MKF", StreamSignalId::MaskPressureTwoSecond, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 0, AC_EDF_PLD_SAMPLE_MS},
-    {"_MKI", StreamSignalId::InspiratoryPressureTwoSecond, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 1, AC_EDF_PLD_SAMPLE_MS},
-    {"_MKE", StreamSignalId::ExpiratoryPressureTwoSecond, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 2, AC_EDF_PLD_SAMPLE_MS},
-    {"_LKF", StreamSignalId::Leak, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 3, AC_EDF_PLD_SAMPLE_MS},
-    {"_RR2", StreamSignalId::RespiratoryRate, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 4, AC_EDF_PLD_SAMPLE_MS},
-    {"_TD2", StreamSignalId::TidalVolume, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 5, AC_EDF_PLD_SAMPLE_MS},
-    {"_MV2", StreamSignalId::MinuteVentilation, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 6, AC_EDF_PLD_SAMPLE_MS},
-    {"_TGT", StreamSignalId::TargetMinuteVentilation, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 7, AC_EDF_PLD_SAMPLE_MS},
-    {"_IE2", StreamSignalId::IeRatio, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 8, AC_EDF_PLD_SAMPLE_MS},
-    {"_SNI", StreamSignalId::SnoreIndex, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 9, AC_EDF_PLD_SAMPLE_MS},
-    {"_FFL", StreamSignalId::FlowLimitation, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 10, AC_EDF_PLD_SAMPLE_MS},
-    {"_INT", StreamSignalId::InspiratoryDuration, EdfFileKind::Pld,
-     EdfSeriesId::Pld, 11, AC_EDF_PLD_SAMPLE_MS},
-    {"_HRT", StreamSignalId::HeartRate, EdfFileKind::Sa2,
-     EdfSeriesId::Sa2, 0, AC_EDF_SA2_SAMPLE_MS},
-    {"_SAO", StreamSignalId::SpO2, EdfFileKind::Sa2,
-     EdfSeriesId::Sa2, 1, AC_EDF_SA2_SAMPLE_MS},
-    {"_BYV", StreamSignalId::TriggerCycleEvent, EdfFileKind::Tcv,
-     EdfSeriesId::Tcv, 0, AC_EDF_TCV_SAMPLE_MS},
+    {"_RFL", StreamSignalId::PatientFlow, EdfSeriesId::Brp, 0},
+    {"_MKP", StreamSignalId::MaskPressure, EdfSeriesId::Brp, 1},
+    {"_MKF", StreamSignalId::MaskPressureTwoSecond, EdfSeriesId::Pld, 0},
+    {"_MKI", StreamSignalId::InspiratoryPressureTwoSecond,
+     EdfSeriesId::Pld, 1},
+    {"_MKE", StreamSignalId::ExpiratoryPressureTwoSecond,
+     EdfSeriesId::Pld, 2},
+    {"_LKF", StreamSignalId::Leak, EdfSeriesId::Pld, 3},
+    {"_RR2", StreamSignalId::RespiratoryRate, EdfSeriesId::Pld, 4},
+    {"_TD2", StreamSignalId::TidalVolume, EdfSeriesId::Pld, 5},
+    {"_MV2", StreamSignalId::MinuteVentilation, EdfSeriesId::Pld, 6},
+    {"_TGT", StreamSignalId::TargetMinuteVentilation,
+     EdfSeriesId::Pld, 7},
+    {"_IE2", StreamSignalId::IeRatio, EdfSeriesId::Pld, 8},
+    {"_SNI", StreamSignalId::SnoreIndex, EdfSeriesId::Pld, 9},
+    {"_FFL", StreamSignalId::FlowLimitation, EdfSeriesId::Pld, 10},
+    {"_INT", StreamSignalId::InspiratoryDuration, EdfSeriesId::Pld, 11},
+    {"_HRT", StreamSignalId::HeartRate, EdfSeriesId::Sa2, 0},
+    {"_SAO", StreamSignalId::SpO2, EdfSeriesId::Sa2, 1},
+    {"_BYV", StreamSignalId::TriggerCycleEvent, EdfSeriesId::Tcv, 0},
 };
 
 }  // namespace
-
-const char *const DEFAULT_EDF_STREAM_IDS =
-    "_RFL,"
-    "_MKP,"
-    "_MKF,"
-    "_MKI,"
-    "_MKE,"
-    "_LKF,"
-    "_RR2,"
-    "_TD2,"
-    "_MV2,"
-    "_TGT,"
-    "_IE2,"
-    "_SNI,"
-    "_FFL,"
-    "_INT,"
-    "_HRT,"
-    "_SAO,"
-    "_BYV";
-
-const char *const REQUIRED_EDF_STREAM_IDS =
-    "_RFL,"
-    "_MKP,"
-    "_MKF,"
-    "_MKI,"
-    "_MKE,"
-    "_LKF,"
-    "_RR2,"
-    "_TD2,"
-    "_MV2,"
-    "_TGT,"
-    "_IE2,"
-    "_SNI,"
-    "_FFL,"
-    "_INT,"
-    "_HRT,"
-    "_SAO";
 
 const EdfStreamSignalDescriptor *edf_stream_signal_descriptors(
     size_t &count) {
@@ -94,6 +43,22 @@ const EdfStreamSignalDescriptor *edf_stream_signal_descriptor_for_stream(
         if (signals[i].stream_id == id) return &signals[i];
     }
     return nullptr;
+}
+
+std::string edf_stream_ids_csv(bool required_only) {
+    std::string out;
+    size_t count = 0;
+    const EdfStreamSignalDescriptor *signals =
+        edf_stream_signal_descriptors(count);
+    for (size_t i = 0; i < count; ++i) {
+        const EdfFileSchema *schema =
+            edf_numeric_schema_for_series(signals[i].series);
+        if (!schema || (required_only && !schema->required)) continue;
+
+        if (!out.empty()) out.push_back(',');
+        out += signals[i].short_tag;
+    }
+    return out;
 }
 
 }  // namespace aircannect

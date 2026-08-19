@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "edf_stream_assembler.h"
+#include "edf_series.h"
 
 namespace aircannect {
 
@@ -52,6 +52,7 @@ struct EdfFileSchema {
     EdfFileKind kind = EdfFileKind::Brp;
     EdfSeriesId series = EdfSeriesId::Brp;
     const char *suffix = "";
+    bool required = true;
     const char *reserved = "EDF";
     const EdfSignalSpec *signals = nullptr;
     const uint8_t *source_signal_indices = nullptr;
@@ -81,6 +82,8 @@ struct EdfStrRecordView {
 };
 
 const EdfFileSchema &edf_numeric_schema(EdfFileKind kind);
+const EdfFileSchema *edf_numeric_schema_for_series(EdfSeriesId series);
+const EdfFileSchema *edf_numeric_schemas(size_t &count);
 const EdfSignalSpec *edf_str_signal_spec(size_t signal_index);
 
 size_t edf_header_size(const EdfFileSchema &schema);

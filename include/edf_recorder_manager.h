@@ -64,10 +64,7 @@ struct EdfRecorderStatus {
     uint32_t event_coverage_session_gap_count = 0;
 
     // EDF records
-    uint32_t brp_records = 0;
-    uint32_t pld_records = 0;
-    uint32_t sa2_records = 0;
-    uint32_t tcv_records = 0;
+    uint32_t numeric_records[AC_EDF_NUMERIC_SERIES_COUNT] = {};
     uint32_t eve_records = 0;
     uint32_t csl_records = 0;
     uint32_t str_records = 0;
@@ -107,6 +104,9 @@ struct EdfRecorderStatus {
     bool annotation_open_pending() const { return annotation_open_is_pending; }
     uint32_t event_coverage_session_gaps() const {
         return event_coverage_session_gap_count;
+    }
+    uint32_t numeric_record_count(EdfSeriesId series) const {
+        return numeric_records[edf_series_index(series)];
     }
 };
 
@@ -208,6 +208,7 @@ private:
     bool numeric_stream_ready() const;
     bool build_numeric_schemas();
     void reset_numeric_schemas();
+    void enqueue_numeric_file_closes();
     bool enqueue_numeric_file_open(const EdfFileSchema &schema,
                                    const EdfLocalDateTime &start,
                                    const EdfHeaderInfo &info,

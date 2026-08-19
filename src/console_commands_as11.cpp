@@ -209,12 +209,12 @@ void handle_stream(Print &out,
         return;
     }
 
-    std::string ids = DEFAULT_EDF_STREAM_IDS;
+    std::string ids = edf_stream_ids_csv();
     uint32_t sample_ms = 40;
     uint32_t report_ms = 200;
 
     if (rest == "edf" || rest == "full" || rest == "default") {
-        ids = DEFAULT_EDF_STREAM_IDS;
+        ids = edf_stream_ids_csv();
     } else if (rest.length()) {
         const int split = rest.indexOf(' ');
         ids = to_std(split < 0 ? rest : rest.substring(0, split));

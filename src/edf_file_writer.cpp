@@ -97,57 +97,63 @@ static_assert(sizeof(STR_SIGNAL_DESCRIPTORS) /
                   AC_EDF_STR_SIGNAL_COUNT,
               "STR signal descriptor table size must match STR layout");
 
-const EdfFileSchema BRP_SCHEMA = {
-    EdfFileKind::Brp,
-    EdfSeriesId::Brp,
-    "BRP",
-    "EDF",
-    BRP_SIGNALS,
-    nullptr,
-    sizeof(BRP_SIGNALS) / sizeof(BRP_SIGNALS[0]),
-    AC_EDF_BRP_SIGNAL_COUNT,
-    AC_EDF_BRP_SAMPLES_PER_RECORD,
-    60,
+const EdfFileSchema NUMERIC_SCHEMAS[] = {
+    {
+        EdfFileKind::Brp,
+        EdfSeriesId::Brp,
+        "BRP",
+        true,
+        "EDF",
+        BRP_SIGNALS,
+        nullptr,
+        sizeof(BRP_SIGNALS) / sizeof(BRP_SIGNALS[0]),
+        AC_EDF_BRP_SIGNAL_COUNT,
+        AC_EDF_BRP_SAMPLES_PER_RECORD,
+        60,
+    },
+    {
+        EdfFileKind::Pld,
+        EdfSeriesId::Pld,
+        "PLD",
+        true,
+        "EDF",
+        PLD_SIGNALS,
+        nullptr,
+        sizeof(PLD_SIGNALS) / sizeof(PLD_SIGNALS[0]),
+        AC_EDF_PLD_SIGNAL_COUNT,
+        AC_EDF_PLD_SAMPLES_PER_RECORD,
+        60,
+    },
+    {
+        EdfFileKind::Sa2,
+        EdfSeriesId::Sa2,
+        "SA2",
+        true,
+        "EDF",
+        SA2_SIGNALS,
+        nullptr,
+        sizeof(SA2_SIGNALS) / sizeof(SA2_SIGNALS[0]),
+        AC_EDF_SA2_SIGNAL_COUNT,
+        AC_EDF_SA2_SAMPLES_PER_RECORD,
+        60,
+    },
+    {
+        EdfFileKind::Tcv,
+        EdfSeriesId::Tcv,
+        "TCV",
+        false,
+        "EDF",
+        TCV_SIGNALS,
+        nullptr,
+        sizeof(TCV_SIGNALS) / sizeof(TCV_SIGNALS[0]),
+        AC_EDF_TCV_SIGNAL_COUNT,
+        AC_EDF_TCV_SAMPLES_PER_RECORD,
+        60,
+    },
 };
-
-const EdfFileSchema PLD_SCHEMA = {
-    EdfFileKind::Pld,
-    EdfSeriesId::Pld,
-    "PLD",
-    "EDF",
-    PLD_SIGNALS,
-    nullptr,
-    sizeof(PLD_SIGNALS) / sizeof(PLD_SIGNALS[0]),
-    AC_EDF_PLD_SIGNAL_COUNT,
-    AC_EDF_PLD_SAMPLES_PER_RECORD,
-    60,
-};
-
-const EdfFileSchema SA2_SCHEMA = {
-    EdfFileKind::Sa2,
-    EdfSeriesId::Sa2,
-    "SA2",
-    "EDF",
-    SA2_SIGNALS,
-    nullptr,
-    sizeof(SA2_SIGNALS) / sizeof(SA2_SIGNALS[0]),
-    AC_EDF_SA2_SIGNAL_COUNT,
-    AC_EDF_SA2_SAMPLES_PER_RECORD,
-    60,
-};
-
-const EdfFileSchema TCV_SCHEMA = {
-    EdfFileKind::Tcv,
-    EdfSeriesId::Tcv,
-    "TCV",
-    "EDF",
-    TCV_SIGNALS,
-    nullptr,
-    sizeof(TCV_SIGNALS) / sizeof(TCV_SIGNALS[0]),
-    AC_EDF_TCV_SIGNAL_COUNT,
-    AC_EDF_TCV_SAMPLES_PER_RECORD,
-    60,
-};
+static_assert(sizeof(NUMERIC_SCHEMAS) / sizeof(NUMERIC_SCHEMAS[0]) ==
+                  AC_EDF_NUMERIC_SERIES_COUNT,
+              "numeric EDF descriptor count must match EdfSeriesId");
 
 void append_field(uint8_t *dst,
                   size_t capacity,
@@ -336,18 +342,22 @@ const char *record_duration_text(uint32_t seconds) {
 }  // namespace
 
 const EdfFileSchema &edf_numeric_schema(EdfFileKind kind) {
-    switch (kind) {
-        case EdfFileKind::Brp:
-            return BRP_SCHEMA;
-        case EdfFileKind::Pld:
-            return PLD_SCHEMA;
-        case EdfFileKind::Sa2:
-            return SA2_SCHEMA;
-        case EdfFileKind::Tcv:
-            return TCV_SCHEMA;
-        default:
-            return SA2_SCHEMA;
+    size_t count = 0;
+    const EdfFileSchema *schemas = edf_numeric_schemas(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (schemas[i].kind == kind) return schemas[i];
     }
+    return schemas[edf_series_index(EdfSeriesId::Sa2)];
+}
+
+const EdfFileSchema *edf_numeric_schema_for_series(EdfSeriesId series) {
+    if (!edf_series_id_valid(series)) return nullptr;
+    return &NUMERIC_SCHEMAS[edf_series_index(series)];
+}
+
+const EdfFileSchema *edf_numeric_schemas(size_t &count) {
+    count = sizeof(NUMERIC_SCHEMAS) / sizeof(NUMERIC_SCHEMAS[0]);
+    return NUMERIC_SCHEMAS;
 }
 
 const EdfSignalSpec *edf_str_signal_spec(size_t signal_index) {

@@ -68,7 +68,7 @@ bool edf_build_numeric_file_layout(EdfFileKind kind,
     size_t count = 0;
     for (size_t i = 0; i < descriptor_count; ++i) {
         const EdfStreamSignalDescriptor &entry = descriptors[i];
-        if (entry.file_kind != kind ||
+        if (entry.series != base.series ||
             !edf_short_tag_is_accepted(accepted_data_ids_csv,
                                        entry.short_tag)) {
             continue;

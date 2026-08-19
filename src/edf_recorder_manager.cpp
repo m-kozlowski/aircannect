@@ -137,10 +137,7 @@ struct EdfRecorderManager::ColdState {
     bool segment_metadata_active = false;
     bool pending_final_metadata_valid = false;
 
-    NumericSchemaState brp_schema;
-    NumericSchemaState pld_schema;
-    NumericSchemaState sa2_schema;
-    NumericSchemaState tcv_schema;
+    NumericSchemaState numeric_schemas[AC_EDF_NUMERIC_SERIES_COUNT];
 };
 
 void EdfRecorderManager::begin(EventBroker &events,
@@ -977,15 +974,21 @@ bool EdfRecorderManager::enqueue_numeric_file_open(
 }
 
 void EdfRecorderManager::reset_numeric_schemas() {
-    auto reset = [](NumericSchemaState &state) {
+    for (NumericSchemaState &state : cold_->numeric_schemas) {
         state.open = false;
         state.open_handle = {};
         edf_reset_numeric_file_layout(state.layout);
-    };
-    reset(cold_->brp_schema);
-    reset(cold_->pld_schema);
-    reset(cold_->sa2_schema);
-    reset(cold_->tcv_schema);
+    }
+}
+
+void EdfRecorderManager::enqueue_numeric_file_closes() {
+    for (NumericSchemaState &state : cold_->numeric_schemas) {
+        if (!state.open) continue;
+
+        (void)StorageService::enqueue_edf_close_numeric(
+            state.layout.schema.kind);
+        state.open = false;
+    }
 }
 
 bool EdfRecorderManager::build_numeric_schemas() {
@@ -993,23 +996,19 @@ bool EdfRecorderManager::build_numeric_schemas() {
     const char *accepted = stream_
                                ? stream_->accepted_data_ids_csv().c_str()
                                : "";
-    if (!edf_build_numeric_file_layout(EdfFileKind::Brp,
-                                       accepted,
-                                       cold_->brp_schema.layout) ||
-        !edf_build_numeric_file_layout(EdfFileKind::Pld,
-                                       accepted,
-                                       cold_->pld_schema.layout) ||
-        !edf_build_numeric_file_layout(EdfFileKind::Sa2,
-                                       accepted,
-                                       cold_->sa2_schema.layout) ||
-        !edf_build_numeric_file_layout(EdfFileKind::Tcv,
-                                       accepted,
-                                       cold_->tcv_schema.layout)) {
-        set_error("numeric_schema_failed");
-        return false;
+    bool any_enabled = false;
+    size_t count = 0;
+    const EdfFileSchema *schemas = edf_numeric_schemas(count);
+    for (size_t i = 0; i < count; ++i) {
+        NumericSchemaState &state = cold_->numeric_schemas[i];
+        if (!edf_build_numeric_file_layout(
+                schemas[i].kind, accepted, state.layout)) {
+            set_error("numeric_schema_failed");
+            return false;
+        }
+        any_enabled = any_enabled || state.layout.enabled;
     }
-    if (!cold_->brp_schema.layout.enabled && !cold_->pld_schema.layout.enabled &&
-        !cold_->sa2_schema.layout.enabled && !cold_->tcv_schema.layout.enabled) {
+    if (!any_enabled) {
         set_error("no_accepted_numeric_streams");
         return false;
     }
@@ -1026,7 +1025,18 @@ bool EdfRecorderManager::numeric_stream_ready() const {
     if (!stream_->actual_active()) {
         return false;
     }
-    return stream_->accepted_data_ids_cover(REQUIRED_EDF_STREAM_IDS);
+    size_t signal_count = 0;
+    const EdfStreamSignalDescriptor *signals =
+        edf_stream_signal_descriptors(signal_count);
+    for (size_t i = 0; i < signal_count; ++i) {
+        const EdfFileSchema *schema =
+            edf_numeric_schema_for_series(signals[i].series);
+        if (schema && schema->required &&
+            !stream_->accepted_data_id(signals[i].short_tag)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool EdfRecorderManager::open_numeric_files_from_stream(uint32_t now_ms) {
@@ -1157,98 +1167,46 @@ bool EdfRecorderManager::ensure_numeric_files_open(
     info.record_count = 0;
 
     char path[AC_STORAGE_WRITE_PATH_MAX] = {};
-    if (cold_->brp_schema.layout.enabled) {
-        if (!enqueue_numeric_file_open(cold_->brp_schema.layout.schema,
-                                       numeric_start, info,
-                                       path, sizeof(path),
-                                       cold_->brp_schema.open_handle)) {
+    numeric_files_open_ = false;
+    for (NumericSchemaState &state : cold_->numeric_schemas) {
+        if (!state.layout.enabled) continue;
+
+        if (!enqueue_numeric_file_open(state.layout.schema,
+                                       numeric_start,
+                                       info,
+                                       path,
+                                       sizeof(path),
+                                       state.open_handle)) {
+            enqueue_numeric_file_closes();
             status_.file_open_failures++;
             next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
+            numeric_files_open_ = false;
             return false;
         }
-        cold_->brp_schema.open = true;
-    }
-    if (cold_->pld_schema.layout.enabled) {
-        if (!enqueue_numeric_file_open(cold_->pld_schema.layout.schema,
-                                       numeric_start, info,
-                                       path, sizeof(path),
-                                       cold_->pld_schema.open_handle)) {
-            if (cold_->brp_schema.open) {
-                (void)StorageService::enqueue_edf_close_numeric(
-                    EdfFileKind::Brp);
-                cold_->brp_schema.open = false;
-            }
-            status_.file_open_failures++;
-            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-            return false;
-        }
-        cold_->pld_schema.open = true;
-    }
-    if (cold_->sa2_schema.layout.enabled) {
-        if (!enqueue_numeric_file_open(cold_->sa2_schema.layout.schema,
-                                       numeric_start, info,
-                                       path, sizeof(path),
-                                       cold_->sa2_schema.open_handle)) {
-            if (cold_->brp_schema.open) {
-                (void)StorageService::enqueue_edf_close_numeric(
-                    EdfFileKind::Brp);
-                cold_->brp_schema.open = false;
-            }
-            if (cold_->pld_schema.open) {
-                (void)StorageService::enqueue_edf_close_numeric(
-                    EdfFileKind::Pld);
-                cold_->pld_schema.open = false;
-            }
-            status_.file_open_failures++;
-            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-            return false;
-        }
-        cold_->sa2_schema.open = true;
-    }
-    if (cold_->tcv_schema.layout.enabled) {
-        if (!enqueue_numeric_file_open(cold_->tcv_schema.layout.schema,
-                                       numeric_start, info,
-                                       path, sizeof(path),
-                                       cold_->tcv_schema.open_handle)) {
-            if (cold_->brp_schema.open) {
-                (void)StorageService::enqueue_edf_close_numeric(
-                    EdfFileKind::Brp);
-                cold_->brp_schema.open = false;
-            }
-            if (cold_->pld_schema.open) {
-                (void)StorageService::enqueue_edf_close_numeric(
-                    EdfFileKind::Pld);
-                cold_->pld_schema.open = false;
-            }
-            if (cold_->sa2_schema.open) {
-                (void)StorageService::enqueue_edf_close_numeric(
-                    EdfFileKind::Sa2);
-                cold_->sa2_schema.open = false;
-            }
-            status_.file_open_failures++;
-            next_numeric_open_ms_ = now_ms + AC_EDF_SESSION_RETRY_MS;
-            return false;
-        }
-        cold_->tcv_schema.open = true;
+        state.open = true;
+        numeric_files_open_ = true;
     }
 
-    numeric_files_open_ = cold_->brp_schema.open || cold_->pld_schema.open ||
-                          cold_->sa2_schema.open || cold_->tcv_schema.open;
     numeric_segment_day_ = numeric_day;
     if (numeric_files_open_) {
+        const NumericSchemaState *numeric = cold_->numeric_schemas;
         Log::logf(CAT_EDF, LOG_DEBUG,
                   "numeric files open start=%s accepted=%s brp=%u "
                   "pld=%u sa2=%u tcv=%u\n",
                   numeric_start_time ? numeric_start_time : "--",
                   stream_->accepted_data_ids_csv().c_str(),
                   static_cast<unsigned>(
-                      cold_->brp_schema.layout.schema.source_signal_count),
+                      numeric[edf_series_index(EdfSeriesId::Brp)]
+                          .layout.schema.source_signal_count),
                   static_cast<unsigned>(
-                      cold_->pld_schema.layout.schema.source_signal_count),
+                      numeric[edf_series_index(EdfSeriesId::Pld)]
+                          .layout.schema.source_signal_count),
                   static_cast<unsigned>(
-                      cold_->sa2_schema.layout.schema.source_signal_count),
+                      numeric[edf_series_index(EdfSeriesId::Sa2)]
+                          .layout.schema.source_signal_count),
                   static_cast<unsigned>(
-                      cold_->tcv_schema.layout.schema.source_signal_count));
+                      numeric[edf_series_index(EdfSeriesId::Tcv)]
+                          .layout.schema.source_signal_count));
     }
     return true;
 }
@@ -1281,18 +1239,7 @@ void EdfRecorderManager::close_session_files() {
     if (!files_open_ && !numeric_files_open_) {
         return;
     }
-    if (cold_->brp_schema.open) {
-        (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Brp);
-    }
-    if (cold_->pld_schema.open) {
-        (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Pld);
-    }
-    if (cold_->sa2_schema.open) {
-        (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Sa2);
-    }
-    if (cold_->tcv_schema.open) {
-        (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Tcv);
-    }
+    enqueue_numeric_file_closes();
     if (files_open_) {
         (void)StorageService::enqueue_edf_close_annotation(
             EdfAnnotationKind::Eve);
@@ -1368,42 +1315,27 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
     if (!numeric_files_open_) return true;
     if (numeric_open_synced_) return true;
 
-    EdfStorageOpenResult brp;
-    EdfStorageOpenResult pld;
-    EdfStorageOpenResult sa2;
-    EdfStorageOpenResult tcv;
-    const bool brp_known =
-        !cold_->brp_schema.open ||
-        StorageService::edf_open_result(cold_->brp_schema.open_handle, brp);
-    const bool pld_known =
-        !cold_->pld_schema.open ||
-        StorageService::edf_open_result(cold_->pld_schema.open_handle, pld);
-    const bool sa2_known =
-        !cold_->sa2_schema.open ||
-        StorageService::edf_open_result(cold_->sa2_schema.open_handle, sa2);
-    const bool tcv_known =
-        !cold_->tcv_schema.open ||
-        StorageService::edf_open_result(cold_->tcv_schema.open_handle, tcv);
+    EdfStorageOpenResult results[AC_EDF_NUMERIC_SERIES_COUNT];
+    bool known[AC_EDF_NUMERIC_SERIES_COUNT] = {};
+    bool all_ready = true;
+    bool completed_failure = false;
+    for (size_t i = 0; i < AC_EDF_NUMERIC_SERIES_COUNT; ++i) {
+        const NumericSchemaState &state = cold_->numeric_schemas[i];
+        if (!state.open) {
+            known[i] = true;
+            continue;
+        }
 
-    const bool brp_ready =
-        !cold_->brp_schema.open || (brp.complete && brp.success && brp.open);
-    const bool pld_ready =
-        !cold_->pld_schema.open || (pld.complete && pld.success && pld.open);
-    const bool sa2_ready =
-        !cold_->sa2_schema.open || (sa2.complete && sa2.success && sa2.open);
-    const bool tcv_ready =
-        !cold_->tcv_schema.open || (tcv.complete && tcv.success && tcv.open);
-    const bool completed_failure =
-        (cold_->brp_schema.open && brp_known &&
-         brp.complete && !brp.success) ||
-        (cold_->pld_schema.open && pld_known &&
-         pld.complete && !pld.success) ||
-        (cold_->sa2_schema.open && sa2_known &&
-         sa2.complete && !sa2.success) ||
-        (cold_->tcv_schema.open && tcv_known &&
-         tcv.complete && !tcv.success);
+        known[i] = StorageService::edf_open_result(
+            state.open_handle, results[i]);
+        const bool ready = known[i] && results[i].complete &&
+            results[i].success && results[i].open;
+        all_ready = all_ready && ready;
+        completed_failure = completed_failure ||
+            (known[i] && results[i].complete && !results[i].success);
+    }
 
-    if (!brp_ready || !pld_ready || !sa2_ready || !tcv_ready) {
+    if (!all_ready) {
         const StorageWorkloadSnapshot storage =
             StorageService::workload_snapshot();
         if (!storage.valid) return false;
@@ -1413,29 +1345,17 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         }
 
         status_.file_open_failures++;
-        if (cold_->brp_schema.open && brp.complete && !brp.success) {
-            set_error(open_result_error(brp, "numeric_open_failed"));
-        } else if (cold_->pld_schema.open && pld.complete && !pld.success) {
-            set_error(open_result_error(pld, "numeric_open_failed"));
-        } else if (cold_->sa2_schema.open && sa2.complete && !sa2.success) {
-            set_error(open_result_error(sa2, "numeric_open_failed"));
-        } else if (cold_->tcv_schema.open && tcv.complete && !tcv.success) {
-            set_error(open_result_error(tcv, "numeric_open_failed"));
-        } else {
-            set_error("numeric_open_failed");
+        const char *error = "numeric_open_failed";
+        for (size_t i = 0; i < AC_EDF_NUMERIC_SERIES_COUNT; ++i) {
+            if (cold_->numeric_schemas[i].open && known[i] &&
+                results[i].complete && !results[i].success) {
+                error = open_result_error(results[i], error);
+                break;
+            }
         }
-        if (cold_->brp_schema.open) {
-            (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Brp);
-        }
-        if (cold_->pld_schema.open) {
-            (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Pld);
-        }
-        if (cold_->sa2_schema.open) {
-            (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Sa2);
-        }
-        if (cold_->tcv_schema.open) {
-            (void)StorageService::enqueue_edf_close_numeric(EdfFileKind::Tcv);
-        }
+        set_error(error);
+
+        enqueue_numeric_file_closes();
         numeric_files_open_ = false;
         numeric_open_synced_ = true;
         reset_numeric_schemas();
@@ -1444,20 +1364,14 @@ bool EdfRecorderManager::sync_numeric_open_status(uint32_t now_ms) {
         return false;
     }
 
-    const uint32_t brp_records =
-        cold_->brp_schema.open ? brp.record_count : 0;
-    const uint32_t pld_records =
-        cold_->pld_schema.open ? pld.record_count : 0;
-    const uint32_t sa2_records =
-        cold_->sa2_schema.open ? sa2.record_count : 0;
-    const uint32_t tcv_records =
-        cold_->tcv_schema.open ? tcv.record_count : 0;
-    assembler_.set_current_records(brp_records, pld_records, sa2_records,
-                                   tcv_records);
-    status_.brp_records = brp_records;
-    status_.pld_records = pld_records;
-    status_.sa2_records = sa2_records;
-    status_.tcv_records = tcv_records;
+    uint32_t records[AC_EDF_NUMERIC_SERIES_COUNT] = {};
+    for (size_t i = 0; i < AC_EDF_NUMERIC_SERIES_COUNT; ++i) {
+        if (cold_->numeric_schemas[i].open) {
+            records[i] = results[i].record_count;
+        }
+        status_.numeric_records[i] = records[i];
+    }
+    assembler_.set_current_records(records);
     numeric_open_synced_ = true;
     return true;
 }
@@ -2041,9 +1955,8 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
 
     next_attach_ms_ = now_ms + AC_EDF_ATTACH_RETRY_MS;
 
-    const std::string params = build_stream_params(DEFAULT_EDF_STREAM_IDS,
-                                                   40,
-                                                   200);
+    const std::string params = build_stream_params(
+        edf_stream_ids_csv(), 40, 200);
     StreamAcquireResult result =
         stream_->acquire(params, RpcSource::EdfRecorder);
     if (result.status == StreamAcquireStatus::Acquired ||
@@ -2273,21 +2186,10 @@ bool EdfRecorderManager::roll_segment_if_needed(
 
 void EdfRecorderManager::handle_completed_record(
     const EdfCompletedRecordView &record) {
-    const NumericSchemaState *state = nullptr;
-    switch (record.series) {
-        case EdfSeriesId::Brp:
-            state = &cold_->brp_schema;
-            break;
-        case EdfSeriesId::Pld:
-            state = &cold_->pld_schema;
-            break;
-        case EdfSeriesId::Sa2:
-            state = &cold_->sa2_schema;
-            break;
-        case EdfSeriesId::Tcv:
-            state = &cold_->tcv_schema;
-            break;
-    }
+    const size_t index = edf_series_index(record.series);
+    const NumericSchemaState *state = edf_series_id_valid(record.series)
+        ? &cold_->numeric_schemas[index]
+        : nullptr;
     if (numeric_files_open_ && state && state->open) {
         if (!StorageService::enqueue_edf_numeric_record(state->layout.schema,
                                                         record)) {
@@ -2296,20 +2198,7 @@ void EdfRecorderManager::handle_completed_record(
             return;
         }
 
-        switch (record.series) {
-            case EdfSeriesId::Brp:
-                status_.brp_records++;
-                break;
-            case EdfSeriesId::Pld:
-                status_.pld_records++;
-                break;
-            case EdfSeriesId::Sa2:
-                status_.sa2_records++;
-                break;
-            case EdfSeriesId::Tcv:
-                status_.tcv_records++;
-                break;
-        }
+        status_.numeric_records[index]++;
         return;
     }
 
