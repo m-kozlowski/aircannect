@@ -17,19 +17,6 @@ const char *const LIVE_CHART_STREAM_IDS =
     "_HRT,"
     "_SAO";
 
-const char *acquire_status_name(StreamAcquireStatus status) {
-    switch (status) {
-        case StreamAcquireStatus::Acquired: return "acquired";
-        case StreamAcquireStatus::AlreadyActive: return "already_active";
-        case StreamAcquireStatus::Incompatible: return "incompatible";
-        case StreamAcquireStatus::Full: return "full";
-        case StreamAcquireStatus::Busy: return "busy";
-        case StreamAcquireStatus::Rejected:
-        default:
-            return "rejected";
-    }
-}
-
 void append_live_sample(LiveChartSeriesBatch &series,
                         bool valid,
                         float value,
@@ -231,7 +218,7 @@ void SinkManager::attach_live_chart_stream(uint32_t now_ms) {
 
     live_chart_.attach_failures++;
     live_chart_.state_dirty = true;
-    set_live_error(acquire_status_name(result.status));
+    set_live_error(stream_acquire_status_name(result.status));
 }
 
 void SinkManager::release_live_chart_stream() {

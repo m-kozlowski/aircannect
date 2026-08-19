@@ -13,12 +13,6 @@ namespace {
 
 static constexpr size_t HASH_BUFFER_BYTES = 4096;
 
-void digest_to_hex(const uint8_t digest[16],
-                   char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
-    (void)hex_encode(digest, 16, out, AC_SLEEPHQ_CONTENT_HASH_MAX,
-                     HexCase::Lower);
-}
-
 }  // namespace
 
 bool SleepHqSyncFile::UploadReader::open() {
@@ -153,7 +147,8 @@ bool SleepHqSyncFile::compute_content_hash(
                        strlen(state_.name));
     uint8_t digest[16];
     esp_rom_md5_final(digest, &md5);
-    digest_to_hex(digest, out);
+    (void)hex_encode(digest, sizeof(digest), out,
+                     AC_SLEEPHQ_CONTENT_HASH_MAX, HexCase::Lower);
     close(true);
     return true;
 }

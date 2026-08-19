@@ -38,15 +38,6 @@ bool motor_hours(std::string_view iso_duration,
     return true;
 }
 
-const char *oximetry_source_name(OximetrySource source) {
-    switch (source) {
-        case OximetrySource::None: return "none";
-        case OximetrySource::Udp: return "udp";
-        case OximetrySource::Ble: return "ble";
-        default: return "unknown";
-    }
-}
-
 bool build_status_json(LargeTextBuffer &json,
                        const SystemStatusSnapshot &snap,
                        const char *hostname) {

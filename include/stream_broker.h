@@ -23,6 +23,8 @@ enum class StreamAcquireStatus {
     Rejected,
 };
 
+const char *stream_acquire_status_name(StreamAcquireStatus status);
+
 enum class StreamCommandType {
     None,
     Start,
@@ -207,6 +209,9 @@ private:
                             const std::string &data_id);
     static bool merge_data_ids(Subscription &subscription,
                                const Subscription &input);
+    static bool merge_subscription(Subscription &subscription,
+                                   bool &have_interval,
+                                   const Subscription &input);
     static bool parse_start_response(RpcPayloadView payload,
                                      Subscription &accepted,
                                      uint32_t &stream_id);

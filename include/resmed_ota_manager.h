@@ -57,6 +57,8 @@ enum class ResmedOtaPhase {
     Error,
 };
 
+const char *resmed_ota_phase_name(ResmedOtaPhase phase);
+
 struct ResmedOtaStatus {
     ResmedOtaPhase phase = ResmedOtaPhase::Idle;
     ResmedOtaOperation operation = ResmedOtaOperation::None;

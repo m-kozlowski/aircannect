@@ -52,6 +52,19 @@ bool parse_external_stream_request(const char *payload,
 
 }  // namespace
 
+const char *stream_acquire_status_name(StreamAcquireStatus status) {
+    switch (status) {
+        case StreamAcquireStatus::Acquired: return "acquired";
+        case StreamAcquireStatus::AlreadyActive: return "already_active";
+        case StreamAcquireStatus::Incompatible: return "incompatible";
+        case StreamAcquireStatus::Full: return "full";
+        case StreamAcquireStatus::Busy: return "busy";
+        case StreamAcquireStatus::Rejected:
+        default:
+            return "rejected";
+    }
+}
+
 void StreamBroker::poll(RpcRequestPort &rpc, uint32_t now_ms) {
     RpcRequestCompletion completion;
     if (command_ticket_.valid() &&
@@ -738,6 +751,26 @@ bool StreamBroker::merge_data_ids(Subscription &subscription,
                              STREAM_DATA_ID_LIMITS);
 }
 
+bool StreamBroker::merge_subscription(Subscription &subscription,
+                                      bool &have_interval,
+                                      const Subscription &input) {
+    if (input.data_id_count == 0) return true;
+
+    if (!have_interval) {
+        subscription.sample_ms = input.sample_ms;
+        subscription.report_ms = input.report_ms;
+        have_interval = true;
+    } else {
+        if (input.sample_ms < subscription.sample_ms) {
+            subscription.sample_ms = input.sample_ms;
+        }
+        if (input.report_ms < subscription.report_ms) {
+            subscription.report_ms = input.report_ms;
+        }
+    }
+    return merge_data_ids(subscription, input);
+}
+
 bool StreamBroker::parse_start_response(RpcPayloadView payload,
                                         Subscription &accepted,
                                         uint32_t &stream_id) {
@@ -865,27 +898,17 @@ bool StreamBroker::build_desired_subscription(
     clear_subscription(subscription);
     bool have_interval = false;
 
-    auto merge = [&](const Subscription &input) -> bool {
-        if (input.data_id_count == 0) return true;
-        if (!have_interval) {
-            subscription.sample_ms = input.sample_ms;
-            subscription.report_ms = input.report_ms;
-            have_interval = true;
-        } else {
-            if (input.sample_ms < subscription.sample_ms) {
-                subscription.sample_ms = input.sample_ms;
-            }
-            if (input.report_ms < subscription.report_ms) {
-                subscription.report_ms = input.report_ms;
-            }
-        }
-        return merge_data_ids(subscription, input);
-    };
-
-    if (external_active_ && !merge(external_subscription_)) return false;
+    if (external_active_ &&
+        !merge_subscription(subscription, have_interval,
+                            external_subscription_)) {
+        return false;
+    }
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         if (!consumers_[i].active) continue;
-        if (!merge(consumers_[i].subscription)) return false;
+        if (!merge_subscription(subscription, have_interval,
+                                consumers_[i].subscription)) {
+            return false;
+        }
     }
 
     return have_interval;
@@ -897,29 +920,19 @@ bool StreamBroker::build_desired_with_extra(
     clear_subscription(subscription);
     bool have_interval = false;
 
-    auto merge = [&](const Subscription &input) -> bool {
-        if (input.data_id_count == 0) return true;
-        if (!have_interval) {
-            subscription.sample_ms = input.sample_ms;
-            subscription.report_ms = input.report_ms;
-            have_interval = true;
-        } else {
-            if (input.sample_ms < subscription.sample_ms) {
-                subscription.sample_ms = input.sample_ms;
-            }
-            if (input.report_ms < subscription.report_ms) {
-                subscription.report_ms = input.report_ms;
-            }
-        }
-        return merge_data_ids(subscription, input);
-    };
-
-    if (external_active_ && !merge(external_subscription_)) return false;
+    if (external_active_ &&
+        !merge_subscription(subscription, have_interval,
+                            external_subscription_)) {
+        return false;
+    }
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         if (!consumers_[i].active) continue;
-        if (!merge(consumers_[i].subscription)) return false;
+        if (!merge_subscription(subscription, have_interval,
+                                consumers_[i].subscription)) {
+            return false;
+        }
     }
-    if (!merge(extra)) return false;
+    if (!merge_subscription(subscription, have_interval, extra)) return false;
     if (!have_interval) return false;
     return true;
 }
@@ -931,29 +944,20 @@ bool StreamBroker::build_desired_with_replacement(
     clear_subscription(subscription);
     bool have_interval = false;
 
-    auto merge = [&](const Subscription &input) -> bool {
-        if (input.data_id_count == 0) return true;
-        if (!have_interval) {
-            subscription.sample_ms = input.sample_ms;
-            subscription.report_ms = input.report_ms;
-            have_interval = true;
-        } else {
-            if (input.sample_ms < subscription.sample_ms) {
-                subscription.sample_ms = input.sample_ms;
-            }
-            if (input.report_ms < subscription.report_ms) {
-                subscription.report_ms = input.report_ms;
-            }
-        }
-        return merge_data_ids(subscription, input);
-    };
-
-    if (external_active_ && !merge(external_subscription_)) return false;
+    if (external_active_ &&
+        !merge_subscription(subscription, have_interval,
+                            external_subscription_)) {
+        return false;
+    }
     for (size_t i = 0; i < AC_STREAM_CONSUMERS_MAX; ++i) {
         if (!consumers_[i].active) continue;
         if (static_cast<StreamConsumerHandle>(i) == handle) {
-            if (!merge(replacement)) return false;
-        } else if (!merge(consumers_[i].subscription)) {
+            if (!merge_subscription(subscription, have_interval,
+                                    replacement)) {
+                return false;
+            }
+        } else if (!merge_subscription(subscription, have_interval,
+                                       consumers_[i].subscription)) {
             return false;
         }
     }

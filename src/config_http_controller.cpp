@@ -12,6 +12,7 @@
 #include "config_service.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 
 namespace aircannect {
@@ -255,17 +256,6 @@ void build_schema_json(LargeTextBuffer &json) {
     json += "]}";
 }
 
-bool write_json_response(AsyncWebServerRequest *request,
-                         const LargeTextBuffer &json,
-                         AsyncResponseStream *&response) {
-    response = request->beginResponseStream("application/json");
-    if (!response) return false;
-
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    return true;
-}
-
 }  // namespace
 
 bool ConfigHttpController::begin(ConfigService &config) {
@@ -420,7 +410,7 @@ void ConfigHttpController::send_config(AsyncWebServerRequest *request,
     const LargeTextBuffer &json =
         index == SectionCount ? all_json_ : section_json_[index];
     AsyncResponseStream *response = nullptr;
-    const bool prepared = write_json_response(request, json, response);
+    const bool prepared = http_prepare_json_response(request, json, response);
     xSemaphoreGive(cache_mutex_);
     if (!prepared) {
         request->send(503, "application/json",
@@ -433,7 +423,7 @@ void ConfigHttpController::send_config(AsyncWebServerRequest *request,
 void ConfigHttpController::send_schema(
     AsyncWebServerRequest *request) const {
     AsyncResponseStream *response = nullptr;
-    if (!write_json_response(request, schema_json_, response)) {
+    if (!http_prepare_json_response(request, schema_json_, response)) {
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response_alloc\"}");
         return;

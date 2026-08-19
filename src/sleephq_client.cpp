@@ -91,12 +91,6 @@ const char *json_string_or_empty(JsonVariantConst value) {
     return value.is<const char *>() ? value.as<const char *>() : "";
 }
 
-void digest_to_hex(const uint8_t digest[16],
-                   char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
-    (void)hex_encode(digest, 16, out, AC_SLEEPHQ_CONTENT_HASH_MAX,
-                     HexCase::Lower);
-}
-
 }  // namespace
 
 SleepHqClient::~SleepHqClient() {
@@ -1047,7 +1041,8 @@ bool SleepHqClient::upload_file_once(const SleepHqUploadRequest &request,
                            strlen(request.name));
         uint8_t digest[16];
         esp_rom_md5_final(digest, &md5);
-        digest_to_hex(digest, out.content_hash);
+        (void)hex_encode(digest, sizeof(digest), out.content_hash,
+                         sizeof(out.content_hash), HexCase::Lower);
     }
 
     len = snprintf(part, sizeof(part),

@@ -10,6 +10,8 @@ enum class OximetrySource : uint8_t {
     Ble,
 };
 
+const char *oximetry_source_name(OximetrySource source);
+
 struct OximetryReading {
     int16_t spo2 = -1;
     int16_t pulse_bpm = -1;

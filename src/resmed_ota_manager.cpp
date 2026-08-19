@@ -118,6 +118,34 @@ const char *resmed_ota_operation_name(ResmedOtaOperation operation) {
     return "none";
 }
 
+const char *resmed_ota_phase_name(ResmedOtaPhase phase) {
+    switch (phase) {
+        case ResmedOtaPhase::Idle: return "idle";
+        case ResmedOtaPhase::ReadingIdentity: return "reading_identity";
+        case ResmedOtaPhase::CheckingStorage: return "checking_storage";
+        case ResmedOtaPhase::Opening: return "opening";
+        case ResmedOtaPhase::EnteringService: return "entering_service";
+        case ResmedOtaPhase::Dumping: return "dumping";
+        case ResmedOtaPhase::Publishing: return "publishing";
+        case ResmedOtaPhase::BootloaderRequired:
+            return "bootloader_required";
+        case ResmedOtaPhase::PreparingBootloader:
+            return "preparing_bootloader";
+        case ResmedOtaPhase::Erasing: return "erasing";
+        case ResmedOtaPhase::Initiating: return "initiating";
+        case ResmedOtaPhase::Ready: return "ready";
+        case ResmedOtaPhase::Uploading: return "uploading";
+        case ResmedOtaPhase::Uploaded: return "uploaded";
+        case ResmedOtaPhase::Checking: return "checking";
+        case ResmedOtaPhase::Verified: return "verified";
+        case ResmedOtaPhase::Applying: return "applying";
+        case ResmedOtaPhase::Resetting: return "resetting";
+        case ResmedOtaPhase::Complete: return "complete";
+        case ResmedOtaPhase::Error: return "error";
+    }
+    return "unknown";
+}
+
 struct ResmedOtaManager::ColdState {
     ResmedOtaStatus status;
     char pending_block_hex[AC_RESMED_OTA_MAX_BLOCK_BYTES * 2 + 1] = {};
@@ -648,32 +676,7 @@ const char *ResmedOtaManager::phase_name() const {
     ScopedLock lock(*this, 50);
     if (!lock) return "busy";
     if (!cold_) return "unavailable";
-
-    switch (cold_->status.phase) {
-        case ResmedOtaPhase::Idle: return "idle";
-        case ResmedOtaPhase::ReadingIdentity: return "reading_identity";
-        case ResmedOtaPhase::CheckingStorage: return "checking_storage";
-        case ResmedOtaPhase::Opening: return "opening";
-        case ResmedOtaPhase::EnteringService: return "entering_service";
-        case ResmedOtaPhase::Dumping: return "dumping";
-        case ResmedOtaPhase::Publishing: return "publishing";
-        case ResmedOtaPhase::BootloaderRequired:
-            return "bootloader_required";
-        case ResmedOtaPhase::PreparingBootloader:
-            return "preparing_bootloader";
-        case ResmedOtaPhase::Erasing: return "erasing";
-        case ResmedOtaPhase::Initiating: return "initiating";
-        case ResmedOtaPhase::Ready: return "ready";
-        case ResmedOtaPhase::Uploading: return "uploading";
-        case ResmedOtaPhase::Uploaded: return "uploaded";
-        case ResmedOtaPhase::Checking: return "checking";
-        case ResmedOtaPhase::Verified: return "verified";
-        case ResmedOtaPhase::Applying: return "applying";
-        case ResmedOtaPhase::Resetting: return "resetting";
-        case ResmedOtaPhase::Complete: return "complete";
-        case ResmedOtaPhase::Error: return "error";
-    }
-    return "unknown";
+    return resmed_ota_phase_name(cold_->status.phase);
 }
 
 bool ResmedOtaManager::queue_request(const char *method,

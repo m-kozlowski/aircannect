@@ -86,37 +86,6 @@ const char *open_result_error(const EdfStorageOpenResult &result,
     return fallback;
 }
 
-const char *acquire_status_name(StreamAcquireStatus status) {
-    switch (status) {
-        case StreamAcquireStatus::Acquired: return "acquired";
-        case StreamAcquireStatus::AlreadyActive: return "already_active";
-        case StreamAcquireStatus::Incompatible: return "incompatible";
-        case StreamAcquireStatus::Full: return "full";
-        case StreamAcquireStatus::Busy: return "busy";
-        case StreamAcquireStatus::Rejected:
-        default:
-            return "rejected";
-    }
-}
-
-const char *file_kind_name(EdfFileKind kind) {
-    switch (kind) {
-        case EdfFileKind::Brp: return "BRP";
-        case EdfFileKind::Pld: return "PLD";
-        case EdfFileKind::Sa2: return "SA2";
-        case EdfFileKind::Tcv: return "TCV";
-        default: return "EDF";
-    }
-}
-
-const char *annotation_kind_name(EdfAnnotationKind kind) {
-    switch (kind) {
-        case EdfAnnotationKind::Eve: return "EVE";
-        case EdfAnnotationKind::Csl: return "CSL";
-        default: return "EDF";
-    }
-}
-
 bool edf_event_record_is_mask_event(const As11EventFrame &frame,
                                     const As11EventRecord &record) {
     if (!as11_event_data_id_is_activity(frame.data_id) ||
@@ -966,7 +935,7 @@ bool EdfRecorderManager::enqueue_numeric_file_open(
                                                   &handle)) {
         char error[80] = {};
         snprintf(error, sizeof(error), "open_queue_%s",
-                 file_kind_name(schema.kind));
+                 edf_file_tag(schema.kind));
         set_error(error);
         return false;
     }
@@ -1228,7 +1197,7 @@ bool EdfRecorderManager::enqueue_annotation_file_open(
                                                      &handle)) {
         char error[80] = {};
         snprintf(error, sizeof(error), "open_queue_%s",
-                 annotation_kind_name(kind));
+                 edf_annotation_file_tag(kind));
         set_error(error);
         return false;
     }
@@ -1968,7 +1937,7 @@ void EdfRecorderManager::attach_stream(uint32_t now_ms) {
     }
 
     status_.attach_failures++;
-    set_error(acquire_status_name(result.status));
+    set_error(stream_acquire_status_name(result.status));
 }
 
 void EdfRecorderManager::release_stream() {

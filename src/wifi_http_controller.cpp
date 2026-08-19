@@ -9,6 +9,7 @@
 #include "board.h"
 #include "debug_log.h"
 #include "http_request_utils.h"
+#include "http_response_utils.h"
 #include "json_util.h"
 #include "wifi_manager.h"
 
@@ -40,17 +41,6 @@ bool build_wifi_json(LargeTextBuffer &json, const WifiManager &wifi) {
     }
     json += "]}";
     return !json.overflowed();
-}
-
-bool prepare_json_response(AsyncWebServerRequest *request,
-                           const LargeTextBuffer &json,
-                           AsyncResponseStream *&response) {
-    response = request->beginResponseStream("application/json");
-    if (!response) return false;
-
-    response->write(reinterpret_cast<const uint8_t *>(json.c_str()),
-                    json.length());
-    return true;
 }
 
 }  // namespace
@@ -155,7 +145,7 @@ void WifiHttpController::send_snapshot(
 
     AsyncResponseStream *response = nullptr;
     const bool prepared =
-        prepare_json_response(request, snapshot_json_, response);
+        http_prepare_json_response(request, snapshot_json_, response);
     xSemaphoreGive(cache_mutex_);
     if (!prepared) {
         request->send(503, "application/json",

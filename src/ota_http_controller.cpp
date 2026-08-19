@@ -143,34 +143,6 @@ void build_ota_json(JsonOut &json, const OtaStatusSnapshot &ota) {
     json += '}';
 }
 
-const char *resmed_phase_name(ResmedOtaPhase phase) {
-    switch (phase) {
-        case ResmedOtaPhase::Idle: return "idle";
-        case ResmedOtaPhase::ReadingIdentity: return "reading_identity";
-        case ResmedOtaPhase::CheckingStorage: return "checking_storage";
-        case ResmedOtaPhase::Opening: return "opening";
-        case ResmedOtaPhase::EnteringService: return "entering_service";
-        case ResmedOtaPhase::Dumping: return "dumping";
-        case ResmedOtaPhase::Publishing: return "publishing";
-        case ResmedOtaPhase::BootloaderRequired:
-            return "bootloader_required";
-        case ResmedOtaPhase::PreparingBootloader:
-            return "preparing_bootloader";
-        case ResmedOtaPhase::Erasing: return "erasing";
-        case ResmedOtaPhase::Initiating: return "initiating";
-        case ResmedOtaPhase::Ready: return "ready";
-        case ResmedOtaPhase::Uploading: return "uploading";
-        case ResmedOtaPhase::Uploaded: return "uploaded";
-        case ResmedOtaPhase::Checking: return "checking";
-        case ResmedOtaPhase::Verified: return "verified";
-        case ResmedOtaPhase::Applying: return "applying";
-        case ResmedOtaPhase::Resetting: return "resetting";
-        case ResmedOtaPhase::Complete: return "complete";
-        case ResmedOtaPhase::Error: return "error";
-    }
-    return "unknown";
-}
-
 template <typename JsonOut>
 void build_resmed_ota_json(JsonOut &json,
                            const ResmedFirmwarePreparer &preparer,
@@ -178,7 +150,7 @@ void build_resmed_ota_json(JsonOut &json,
     const ResmedOtaStatus status = manager.status();
     const ResmedFirmwarePrepareStatus prepare = preparer.status();
     json = "{";
-    json_add_string(json, "phase", resmed_phase_name(status.phase), false);
+    json_add_string(json, "phase", resmed_ota_phase_name(status.phase), false);
     json_add_string(json, "operation",
                     resmed_ota_operation_name(status.operation));
     json_add_bool(json, "active", manager.active() || preparer.active());

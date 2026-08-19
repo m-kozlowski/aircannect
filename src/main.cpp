@@ -449,16 +449,6 @@ static void configure_oximetry(const AppConfigData &config) {
                              config.hostname.c_str());
 }
 
-static const char *oximetry_source_name(OximetrySource source) {
-    switch (source) {
-        case OximetrySource::Udp: return "udp";
-        case OximetrySource::Ble: return "ble";
-        case OximetrySource::None:
-        default:
-            return "none";
-    }
-}
-
 static void poll_oximetry(bool network_available, uint32_t now_ms) {
     const OximetryHubSnapshot before = oximetry_hub.snapshot(now_ms);
     OximetryHubAction actions = oximetry_udp_source.poll(

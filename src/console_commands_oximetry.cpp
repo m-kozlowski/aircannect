@@ -24,15 +24,6 @@ const char *sensor_state_text(OximetrySensorState state) {
     }
 }
 
-const char *oximetry_source_text(OximetrySource source) {
-    switch (source) {
-        case OximetrySource::None: return "none";
-        case OximetrySource::Udp: return "udp";
-        case OximetrySource::Ble: return "ble";
-        default: return "unknown";
-    }
-}
-
 void print_yes_no(Print &out, bool value) {
     out.print(value ? "yes" : "no");
 }
@@ -50,7 +41,7 @@ void print_oximetry_status(Print &out,
     out.print("[OXI] enabled=");
     print_yes_no(out, status.enabled);
     out.print(" source=");
-    out.print(oximetry_source_text(status.source));
+    out.print(oximetry_source_name(status.source));
     if (status.source_detail[0]) {
         out.print(':');
         out.print(status.source_detail);
