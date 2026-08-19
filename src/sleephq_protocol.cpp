@@ -6,23 +6,13 @@
 #include <string.h>
 #include <strings.h>
 
+#include "json_util.h"
 #include "string_util.h"
 
 namespace aircannect {
 namespace {
 
 static constexpr size_t SLEEPHQ_REMOTE_FILE_ITEM_MAX = 8 * 1024;
-
-bool json_string_to_u32(JsonVariantConst value, uint32_t &out) {
-    if (value.is<uint32_t>()) {
-        out = value.as<uint32_t>();
-        return true;
-    }
-    if (value.is<const char *>()) {
-        return parse_uint32_decimal(value.as<const char *>(), out);
-    }
-    return false;
-}
 
 bool json_string_to_u64(JsonVariantConst value, uint64_t &out) {
     if (value.is<uint64_t>()) {
@@ -66,7 +56,7 @@ bool status_contains_failure_token(const char *status) {
 
 bool parse_remote_file_item(JsonVariantConst item, SleepHqRemoteFile &file) {
     JsonVariantConst attr = item["attributes"];
-    json_string_to_u32(attr["id"], file.id);
+    json_variant_to_uint32(attr["id"], file.id);
     json_string_to_u64(attr["size"], file.size);
     copy_cstr(file.name, sizeof(file.name),
               json_string_or_empty(attr["name"]));
@@ -74,7 +64,7 @@ bool parse_remote_file_item(JsonVariantConst item, SleepHqRemoteFile &file) {
               json_string_or_empty(attr["path"]));
     copy_cstr(file.content_hash, sizeof(file.content_hash),
               json_string_or_empty(attr["content_hash"]));
-    if (file.id == 0) json_string_to_u32(item["id"], file.id);
+    if (file.id == 0) json_variant_to_uint32(item["id"], file.id);
     return true;
 }
 
@@ -349,9 +339,9 @@ bool sleephq_parse_machine_list_json(const char *json,
     for (JsonObjectConst item : data) {
         SleepHqMachine machine;
         JsonVariantConst id = item["id"];
-        if (!json_string_to_u32(id, machine.id)) {
+        if (!json_variant_to_uint32(id, machine.id)) {
             id = item["attributes"]["id"];
-            (void)json_string_to_u32(id, machine.id);
+            (void)json_variant_to_uint32(id, machine.id);
         }
         copy_cstr(machine.serial_number,
                   sizeof(machine.serial_number),
@@ -393,12 +383,12 @@ bool sleephq_parse_machine_date_json(const char *json,
     }
 
     JsonVariantConst id = data["id"];
-    if (!json_string_to_u32(id, out.id)) {
+    if (!json_variant_to_uint32(id, out.id)) {
         id = data["attributes"]["id"];
-        (void)json_string_to_u32(id, out.id);
+        (void)json_variant_to_uint32(id, out.id);
     }
-    (void)json_string_to_u32(data["attributes"]["machine_id"],
-                             out.machine_id);
+    (void)json_variant_to_uint32(data["attributes"]["machine_id"],
+                                 out.machine_id);
     copy_cstr(out.date,
               sizeof(out.date),
               json_string_or_empty(data["attributes"]["date"]));

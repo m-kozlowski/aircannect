@@ -19,6 +19,7 @@ namespace aircannect {
 class LargeTextBuffer;
 
 bool json_variant_to_string(JsonVariantConst value, std::string &out);
+bool json_variant_to_uint32(JsonVariantConst value, uint32_t &out);
 void append_json_escaped(std::string &out, const char *value, size_t len);
 void append_json_escaped(std::string &out, std::string_view value);
 

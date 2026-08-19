@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "large_text_buffer.h"
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
@@ -142,6 +143,17 @@ bool json_variant_to_string(JsonVariantConst value, std::string &out) {
     if (value.is<bool>()) {
         out = value.as<bool>() ? "true" : "false";
         return true;
+    }
+    return false;
+}
+
+bool json_variant_to_uint32(JsonVariantConst value, uint32_t &out) {
+    if (value.is<uint32_t>()) {
+        out = value.as<uint32_t>();
+        return true;
+    }
+    if (value.is<const char *>()) {
+        return parse_uint32_decimal(value.as<const char *>(), out);
     }
     return false;
 }

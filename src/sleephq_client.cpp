@@ -13,6 +13,7 @@
 
 #include "debug_log.h"
 #include "hex_util.h"
+#include "json_util.h"
 #include "memory_manager.h"
 #include "string_util.h"
 #include "tls_memory.h"
@@ -74,17 +75,6 @@ void trim_ascii(char *text) {
     while (len && isspace(static_cast<unsigned char>(text[len - 1]))) {
         text[--len] = 0;
     }
-}
-
-bool json_string_to_u32(JsonVariantConst value, uint32_t &out) {
-    if (value.is<uint32_t>()) {
-        out = value.as<uint32_t>();
-        return true;
-    }
-    if (value.is<const char *>()) {
-        return parse_uint32_decimal(value.as<const char *>(), out);
-    }
-    return false;
 }
 
 const char *json_string_or_empty(JsonVariantConst value) {
@@ -729,13 +719,13 @@ bool SleepHqClient::parse_team_id(const SleepHqHttpResponse &response,
 
     JsonVariantConst v =
         doc["data"]["relationships"]["current_team"]["data"]["id"];
-    if (json_string_to_u32(v, team_id)) return true;
+    if (json_variant_to_uint32(v, team_id)) return true;
     v = doc["data"]["attributes"]["current_team_id"];
-    if (json_string_to_u32(v, team_id)) return true;
+    if (json_variant_to_uint32(v, team_id)) return true;
     v = doc["data"]["current_team_id"];
-    if (json_string_to_u32(v, team_id)) return true;
+    if (json_variant_to_uint32(v, team_id)) return true;
     v = doc["current_team_id"];
-    if (json_string_to_u32(v, team_id)) return true;
+    if (json_variant_to_uint32(v, team_id)) return true;
 
     set_error("team_id_missing");
     return false;
@@ -1265,7 +1255,7 @@ bool SleepHqClient::parse_import(const SleepHqHttpResponse &response,
 
     out = SleepHqImportInfo{};
     JsonVariantConst id = doc["data"]["id"];
-    if (!json_string_to_u32(id, out.id)) {
+    if (!json_variant_to_uint32(id, out.id)) {
         set_error("import_id_missing");
         return false;
     }
