@@ -8,6 +8,7 @@
 
 #include "crc32.h"
 #include "debug_log.h"
+#include "little_endian.h"
 #include "memory_manager.h"
 #include "prepared_byte_transfer.h"
 #include "runtime_clock.h"
@@ -53,15 +54,11 @@ const char *relative_archive_name(const char *source, const char *path) {
 }
 
 void put_le16(uint8_t *dst, size_t offset, uint16_t value) {
-    dst[offset + 0] = static_cast<uint8_t>(value & 0xffu);
-    dst[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xffu);
+    LittleEndian::put_le16(dst + offset, value);
 }
 
 void put_le32(uint8_t *dst, size_t offset, uint32_t value) {
-    dst[offset + 0] = static_cast<uint8_t>(value & 0xffu);
-    dst[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xffu);
-    dst[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xffu);
-    dst[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xffu);
+    LittleEndian::put_le32(dst + offset, value);
 }
 
 ZipDosTimestamp zip_dos_timestamp(time_t seconds) {

@@ -1,39 +1,15 @@
 #include "report_executor.h"
 
 #include <algorithm>
-#include <limits>
 #include <new>
-#include <stdlib.h>
+#include <utility>
 
 #include "crc32.h"
-#include "report_records.h"
-
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
+#include "report_records.h"
 
 namespace aircannect {
 namespace {
-
-void *allocate_executor_scratch(size_t count, size_t size) {
-    if (count == 0 || size == 0 ||
-        count > std::numeric_limits<size_t>::max() / size) {
-        return nullptr;
-    }
-#ifdef ARDUINO
-    return Memory::calloc_large(count, size, false);
-#else
-    return calloc(count, size);
-#endif
-}
-
-void free_executor_scratch(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
 
 bool source_kind(ReportReadOperationKind operation_kind,
                  NightCatalogFileKind file_kind,
@@ -297,14 +273,15 @@ bool ReportExecutor::validate_plan(size_t &record_capacity,
 bool ReportExecutor::allocate_scratch(size_t record_capacity,
                                       size_t decoder_capacity) {
     record_buffer_ = static_cast<uint8_t *>(
-        allocate_executor_scratch(record_capacity, 1));
+        Memory::calloc_large(record_capacity, 1, false));
     if (!record_buffer_) return false;
     record_capacity_ = record_capacity;
 
     if (decoder_capacity == 0) return true;
     decoders_ = static_cast<EdfReportSeriesDecoder *>(
-        allocate_executor_scratch(decoder_capacity,
-                                  sizeof(EdfReportSeriesDecoder)));
+        Memory::calloc_large(decoder_capacity,
+                             sizeof(EdfReportSeriesDecoder),
+                             false));
     if (!decoders_) return false;
     decoder_capacity_ = decoder_capacity;
     for (size_t i = 0; i < decoder_capacity_; ++i) {
@@ -668,12 +645,12 @@ void ReportExecutor::free_scratch() {
     for (size_t i = 0; i < decoder_capacity_; ++i) {
         decoders_[i].~EdfReportSeriesDecoder();
     }
-    free_executor_scratch(decoders_);
+    Memory::free(decoders_);
     decoders_ = nullptr;
     decoder_capacity_ = 0;
     decoder_count_ = 0;
 
-    free_executor_scratch(record_buffer_);
+    Memory::free(record_buffer_);
     record_buffer_ = nullptr;
     record_capacity_ = 0;
 }

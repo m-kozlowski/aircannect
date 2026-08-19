@@ -3,38 +3,16 @@
 #include <limits.h>
 #include <new>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-#include "string_util.h"
-
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
 
 static constexpr size_t STATE_PARSE_BUDGET_BYTES = 4096;
 static constexpr size_t STATE_READ_CHUNK_BYTES = 1024;
-
-void *allocate_inventory(size_t count, size_t size) {
-    if (count == 0 || size == 0 || count > SIZE_MAX / size) return nullptr;
-
-#ifdef ARDUINO
-    return Memory::calloc_large(count, size, false);
-#else
-    return calloc(count, size);
-#endif
-}
-
-void free_inventory(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
 
 uint32_t path_hash(const char *path) {
     uint32_t hash = 2166136261u;
@@ -87,10 +65,10 @@ bool done_path_datalog_day(const char *state_dir,
 }  // namespace
 
 StorageExportInventory::~StorageExportInventory() {
-    free_inventory(source_indices_);
-    free_inventory(path_index_);
-    free_inventory(complete_);
-    free_inventory(datalog_days_);
+    Memory::free(source_indices_);
+    Memory::free(path_index_);
+    Memory::free(complete_);
+    Memory::free(datalog_days_);
 }
 
 size_t StorageExportInventory::source_size() const {
@@ -225,11 +203,11 @@ bool StorageExportInventory::build_sources() {
     if (source_count_ > UINT32_MAX) return false;
 
     source_indices_ = static_cast<uint32_t *>(
-        allocate_inventory(source_count_, sizeof(uint32_t)));
+        Memory::calloc_large(source_count_, sizeof(uint32_t), false));
     path_index_ = static_cast<PathIndexEntry *>(
-        allocate_inventory(source_count_, sizeof(PathIndexEntry)));
+        Memory::calloc_large(source_count_, sizeof(PathIndexEntry), false));
     complete_ = static_cast<uint8_t *>(
-        allocate_inventory(source_count_, sizeof(uint8_t)));
+        Memory::calloc_large(source_count_, sizeof(uint8_t), false));
     if (!source_indices_ || !path_index_ || !complete_) return false;
 
     size_t source_index = 0;
@@ -282,7 +260,7 @@ bool StorageExportInventory::build_catalog_days(uint64_t now_epoch) {
     if (capacity == 0) return true;
 
     datalog_days_ = static_cast<DatalogDay *>(
-        allocate_inventory(capacity, sizeof(DatalogDay)));
+        Memory::calloc_large(capacity, sizeof(DatalogDay), false));
     if (!datalog_days_) return false;
 
     for (size_t i = 0; i < scan_->size(); ++i) {
@@ -347,7 +325,7 @@ bool StorageExportInventory::build_datalog_day(const char *day,
     if (!scan_ || !storage_export_is_datalog_day_name(day)) return false;
 
     datalog_days_ = static_cast<DatalogDay *>(
-        allocate_inventory(1, sizeof(DatalogDay)));
+        Memory::calloc_large(1, sizeof(DatalogDay), false));
     if (!datalog_days_) return false;
 
     datalog_day_count_ = 1;

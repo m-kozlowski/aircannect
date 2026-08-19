@@ -1,9 +1,9 @@
 #include "report_fallback_artifact.h"
 
-#include <limits>
 #include <stdio.h>
 #include <string.h>
 
+#include "checked_size.h"
 #include "crc32.h"
 #include "little_endian.h"
 #include "storage_read_port.h"
@@ -31,18 +31,6 @@ constexpr int32_t TIMEZONE_BIAS = 2048;
 constexpr int32_t MAX_TIMEZONE_OFFSET_MINUTES = 24 * 60;
 constexpr uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
 constexpr uint64_t FNV_PRIME = UINT64_C(1099511628211);
-
-bool add_size(size_t lhs, size_t rhs, size_t &total) {
-    if (lhs > std::numeric_limits<size_t>::max() - rhs) return false;
-    total = lhs + rhs;
-    return true;
-}
-
-bool multiply_size(size_t count, size_t width, size_t &total) {
-    if (count > std::numeric_limits<size_t>::max() / width) return false;
-    total = count * width;
-    return true;
-}
 
 bool timezone_offset_valid(int32_t minutes) {
     return minutes >= -MAX_TIMEZONE_OFFSET_MINUTES &&
@@ -361,14 +349,14 @@ bool ReportFallbackArtifactCodec::inspect_header(
     size_t section_bytes = 0;
     size_t metadata_bytes = 0;
     size_t total_bytes = 0;
-    if (!multiply_size(session_count, SessionBytes, session_bytes) ||
-        !multiply_size(section_count, SectionBytes, section_bytes) ||
-        !add_size(HeaderBytes, session_bytes, metadata_bytes) ||
-        !add_size(metadata_bytes, section_bytes, metadata_bytes) ||
-        payload_bytes_u64 > std::numeric_limits<size_t>::max() ||
-        !add_size(metadata_bytes,
-                  static_cast<size_t>(payload_bytes_u64),
-                  total_bytes) ||
+    if (!CheckedSize::multiply(session_count, SessionBytes, session_bytes) ||
+        !CheckedSize::multiply(section_count, SectionBytes, section_bytes) ||
+        !CheckedSize::add(HeaderBytes, session_bytes, metadata_bytes) ||
+        !CheckedSize::add(metadata_bytes, section_bytes, metadata_bytes) ||
+        payload_bytes_u64 > SIZE_MAX ||
+        !CheckedSize::add(metadata_bytes,
+                          static_cast<size_t>(payload_bytes_u64),
+                          total_bytes) ||
         total_bytes > MaxFileBytes) {
         return false;
     }

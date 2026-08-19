@@ -1,55 +1,13 @@
 #include "night_catalog.h"
 
-#include <limits>
 #include <new>
-#include <stdlib.h>
 #include <type_traits>
 
-#ifdef ARDUINO
+#include "checked_size.h"
 #include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
-
-size_t align_up(size_t value, size_t alignment) {
-    if (alignment <= 1) return value;
-
-    const size_t mask = alignment - 1;
-    if (value > std::numeric_limits<size_t>::max() - mask) return 0;
-    return (value + mask) & ~mask;
-}
-
-bool reserve_array(size_t &total,
-                   size_t count,
-                   size_t item_size,
-                   size_t alignment,
-                   size_t &offset) {
-    offset = align_up(total, alignment);
-    if (offset == 0 && total != 0) return false;
-    if (count > std::numeric_limits<size_t>::max() / item_size) return false;
-
-    const size_t bytes = count * item_size;
-    if (offset > std::numeric_limits<size_t>::max() - bytes) return false;
-    total = offset + bytes;
-    return true;
-}
-
-void *allocate_catalog_storage(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, bytes, false);
-#else
-    return calloc(1, bytes);
-#endif
-}
-
-void free_catalog_storage(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
 
 bool metric_bit(NightCatalogMetric metric, uint16_t &bit) {
     const uint8_t index = static_cast<uint8_t>(metric);
@@ -81,7 +39,7 @@ NightCatalogMetricSource NightCatalogMetrics::source(
 }
 
 NightCatalog::~NightCatalog() {
-    free_catalog_storage(storage_);
+    Memory::free(storage_);
 }
 
 bool NightCatalog::allocate(size_t record_count,
@@ -104,56 +62,29 @@ bool NightCatalog::allocate(size_t record_count,
     size_t fallback_sections_offset = 0;
     size_t paths_offset = 0;
 
-    if (!reserve_array(total,
-                       record_count,
-                       sizeof(NightCatalogRecord),
-                       alignof(NightCatalogRecord),
-                       records_offset) ||
-        !reserve_array(total,
-                       session_count,
-                       sizeof(NightCatalogTimeRange),
-                       alignof(NightCatalogTimeRange),
-                       sessions_offset) ||
-        !reserve_array(total,
-                       mask_window_count,
-                       sizeof(NightCatalogTimeRange),
-                       alignof(NightCatalogTimeRange),
-                       masks_offset) ||
-        !reserve_array(total,
-                       file_count,
-                       sizeof(NightCatalogSourceFile),
-                       alignof(NightCatalogSourceFile),
-                       files_offset) ||
-        !reserve_array(total,
-                       coverage_count,
-                       sizeof(NightCatalogSourceCoverage),
-                       alignof(NightCatalogSourceCoverage),
-                       coverage_offset) ||
-        !reserve_array(total,
-                       signal_layout_count,
-                       sizeof(EdfReportSignalLayout),
-                       alignof(EdfReportSignalLayout),
-                       signal_layouts_offset) ||
-        !reserve_array(total,
-                       fallback_file_count,
-                       sizeof(NightCatalogFallbackFile),
-                       alignof(NightCatalogFallbackFile),
-                       fallback_files_offset) ||
-        !reserve_array(total,
-                       fallback_section_count,
-                       sizeof(NightCatalogFallbackSection),
-                       alignof(NightCatalogFallbackSection),
-                       fallback_sections_offset) ||
-        !reserve_array(total,
-                       path_bytes,
-                       sizeof(char),
-                       alignof(char),
-                       paths_offset)) {
+    if (!CheckedSize::reserve_array<NightCatalogRecord>(
+            total, record_count, records_offset) ||
+        !CheckedSize::reserve_array<NightCatalogTimeRange>(
+            total, session_count, sessions_offset) ||
+        !CheckedSize::reserve_array<NightCatalogTimeRange>(
+            total, mask_window_count, masks_offset) ||
+        !CheckedSize::reserve_array<NightCatalogSourceFile>(
+            total, file_count, files_offset) ||
+        !CheckedSize::reserve_array<NightCatalogSourceCoverage>(
+            total, coverage_count, coverage_offset) ||
+        !CheckedSize::reserve_array<EdfReportSignalLayout>(
+            total, signal_layout_count, signal_layouts_offset) ||
+        !CheckedSize::reserve_array<NightCatalogFallbackFile>(
+            total, fallback_file_count, fallback_files_offset) ||
+        !CheckedSize::reserve_array<NightCatalogFallbackSection>(
+            total, fallback_section_count, fallback_sections_offset) ||
+        !CheckedSize::reserve_array<char>(total, path_bytes, paths_offset)) {
         return false;
     }
 
     if (total > 0) {
-        storage_ = static_cast<uint8_t *>(allocate_catalog_storage(total));
+        storage_ = static_cast<uint8_t *>(
+            Memory::calloc_large(1, total, false));
         if (!storage_) return false;
     }
 

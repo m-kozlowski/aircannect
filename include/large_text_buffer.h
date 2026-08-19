@@ -2,13 +2,6 @@
 
 #include <stddef.h>
 
-#if __has_include(<Arduino.h>)
-#include <Arduino.h>
-#define AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO 1
-#else
-#define AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO 0
-#endif
-
 namespace aircannect {
 
 class LargeTextBuffer {

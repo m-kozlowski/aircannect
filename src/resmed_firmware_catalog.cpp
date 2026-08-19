@@ -4,12 +4,10 @@
 #include <ctype.h>
 #include <new>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
+#include "storage_path.h"
 
 namespace aircannect {
 namespace {
@@ -29,29 +27,6 @@ bool ends_with_case_insensitive(const char *value, const char *suffix) {
         }
     }
     return true;
-}
-
-void *allocate_catalog_memory(size_t count, size_t size) {
-    if (count == 0 || size == 0) return nullptr;
-#ifdef ARDUINO
-    return Memory::calloc_large(count, size, false);
-#else
-    return calloc(count, size);
-#endif
-}
-
-void free_catalog_memory(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-const char *path_filename(const char *path) {
-    if (!path) return nullptr;
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
 }
 
 }  // namespace
@@ -112,8 +87,8 @@ bool resmed_firmware_patched_bootloader_path(
 }
 
 ResmedFirmwareCatalogSnapshot::~ResmedFirmwareCatalogSnapshot() {
-    free_catalog_memory(entries_);
-    free_catalog_memory(paths_);
+    Memory::free(entries_);
+    Memory::free(paths_);
 }
 
 std::shared_ptr<const ResmedFirmwareCatalogSnapshot>
@@ -149,9 +124,9 @@ ResmedFirmwareCatalogSnapshot::build(const StorageScanSnapshot &scan,
 
     if (entry_count > 0) {
         result->entries_ = static_cast<Entry *>(
-            allocate_catalog_memory(entry_count, sizeof(Entry)));
+            Memory::calloc_large(entry_count, sizeof(Entry), false));
         result->paths_ = static_cast<char *>(
-            allocate_catalog_memory(path_bytes, sizeof(char)));
+            Memory::calloc_large(path_bytes, sizeof(char), false));
         if (!result->entries_ || !result->paths_) return {};
     }
 
@@ -167,7 +142,7 @@ ResmedFirmwareCatalogSnapshot::build(const StorageScanSnapshot &scan,
         const size_t length = strlen(source.path) + 1;
         memcpy(result->paths_ + path_offset, source.path, length);
 
-        const char *filename = path_filename(source.path);
+        const char *filename = storage_basename_from_path(source.path);
         Entry &entry = result->entries_[output_index++];
         entry.size = source.size;
         entry.modified = source.modified;

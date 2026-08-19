@@ -2,58 +2,16 @@
 
 #include <limits.h>
 #include <math.h>
-#include <new>
-#include <stdlib.h>
 #include <utility>
 
 #include "board_report.h"
 #include "crc32.h"
-#include "report_plot_accumulator.h"
-
-#ifdef ARDUINO
+#include "large_object.h"
 #include "memory_manager.h"
-#endif
+#include "report_plot_accumulator.h"
 
 namespace aircannect {
 namespace {
-
-void *allocate_large(size_t count, size_t width) {
-    if (count == 0 || width == 0 || count > SIZE_MAX / width) return nullptr;
-#ifdef ARDUINO
-    return Memory::calloc_large(count, width, false);
-#else
-    return calloc(count, width);
-#endif
-}
-
-void free_large(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-template <typename T>
-T *create_large() {
-#ifdef ARDUINO
-    void *memory = Memory::alloc_large(sizeof(T), false);
-    return memory ? new (memory) T() : nullptr;
-#else
-    return new (std::nothrow) T();
-#endif
-}
-
-template <typename T>
-void destroy_large(T *value) {
-    if (!value) return;
-#ifdef ARDUINO
-    value->~T();
-    Memory::free(value);
-#else
-    delete value;
-#endif
-}
 
 uint16_t metric_bit(NightCatalogMetric metric) {
     return static_cast<uint16_t>(1u << static_cast<uint8_t>(metric));
@@ -204,7 +162,7 @@ struct ReportNightArtifactBuilder::Runtime {
 
     void clear_work() {
         plot.clear();
-        free_large(session_ranges);
+        Memory::free(session_ranges);
         session_ranges = nullptr;
         session_count = 0;
         request = {};
@@ -216,11 +174,11 @@ struct ReportNightArtifactBuilder::Runtime {
 };
 
 ReportNightArtifactBuilder::ReportNightArtifactBuilder() :
-    runtime_(create_large<Runtime>()) {}
+    runtime_(LargeObject::create<Runtime>()) {}
 
 ReportNightArtifactBuilder::~ReportNightArtifactBuilder() {
     if (runtime_) runtime_->clear_work();
-    destroy_large(runtime_);
+    LargeObject::destroy(runtime_);
 }
 
 bool ReportNightArtifactBuilder::begin_build(
@@ -247,8 +205,9 @@ bool ReportNightArtifactBuilder::begin_build(
     if (request.artifact.kind == ReportArtifactKind::Result) {
         if (plan.session_count() > 0) {
             runtime_->session_ranges = static_cast<NightCatalogTimeRange *>(
-                allocate_large(plan.session_count(),
-                               sizeof(NightCatalogTimeRange)));
+                Memory::calloc_large(plan.session_count(),
+                                     sizeof(NightCatalogTimeRange),
+                                     false));
             if (!runtime_->session_ranges) {
                 failure_reason_ = "report_builder_sessions_allocation_failed";
                 runtime_->clear_work();

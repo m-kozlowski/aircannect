@@ -2,33 +2,13 @@
 
 #include <algorithm>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "board.h"
-
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
-
-void *alloc_reassembly_bytes(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::alloc_large(bytes);
-#else
-    return malloc(bytes);
-#endif
-}
-
-void free_reassembly_bytes(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
 
 size_t clamp_initial_reserve(size_t reserve) {
     if (reserve < AC_DG_INITIAL_RESERVE_BYTES) {
@@ -121,7 +101,7 @@ DatagramRx::DatagramRx(size_t initial_reserve)
     : initial_reserve_(clamp_initial_reserve(initial_reserve)) {}
 
 DatagramRx::~DatagramRx() {
-    free_reassembly_bytes(parts_);
+    Memory::free(parts_);
 }
 
 bool DatagramRx::reserve_initial() {
@@ -162,7 +142,7 @@ bool DatagramRx::reserve_parts(size_t capacity, DatagramFeedResult &result) {
     if (capacity <= parts_capacity_) return true;
     if (capacity > AC_DG_MAX_PAYLOAD_BYTES) capacity = AC_DG_MAX_PAYLOAD_BYTES;
 
-    uint8_t *next = static_cast<uint8_t *>(alloc_reassembly_bytes(capacity));
+    uint8_t *next = static_cast<uint8_t *>(Memory::alloc_large(capacity));
     if (!next) {
         reset();
         result.status = DatagramStatus::Error;
@@ -170,7 +150,7 @@ bool DatagramRx::reserve_parts(size_t capacity, DatagramFeedResult &result) {
         return false;
     }
     if (parts_ && parts_len_) memcpy(next, parts_, parts_len_);
-    free_reassembly_bytes(parts_);
+    Memory::free(parts_);
     parts_ = next;
     parts_capacity_ = capacity;
     return true;

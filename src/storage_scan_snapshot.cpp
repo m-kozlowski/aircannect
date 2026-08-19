@@ -1,27 +1,12 @@
 #include "storage_scan_port.h"
 
-#include <stdlib.h>
-
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
 
 namespace aircannect {
-namespace {
-
-void free_snapshot_memory(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-}  // namespace
 
 StorageScanSnapshot::~StorageScanSnapshot() {
-    free_snapshot_memory(entries_);
-    free_snapshot_memory(paths_);
+    Memory::free(entries_);
+    Memory::free(paths_);
 }
 
 bool StorageScanSnapshot::entry(size_t index,

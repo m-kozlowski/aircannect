@@ -1,36 +1,15 @@
 #include "large_text_buffer.h"
 
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
-#if AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO
 #include "memory_manager.h"
-#endif
+
 
 namespace aircannect {
-namespace {
-
-void *allocate_buffer(size_t size) {
-#if AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO
-    return Memory::alloc_large(size);
-#else
-    return ::malloc(size);
-#endif
-}
-
-void free_buffer(void *ptr) {
-#if AIRCANNECT_LARGE_TEXT_BUFFER_HAS_ARDUINO
-    Memory::free(ptr);
-#else
-    ::free(ptr);
-#endif
-}
-
-}  // namespace
 
 LargeTextBuffer::~LargeTextBuffer() {
-    free_buffer(data_);
+    Memory::free(data_);
 }
 
 bool LargeTextBuffer::reserve(size_t capacity) {
@@ -110,11 +89,11 @@ bool LargeTextBuffer::ensure_capacity(size_t needed) {
         target *= 2;
     }
 
-    char *next = static_cast<char *>(allocate_buffer(target + 1));
+    char *next = static_cast<char *>(Memory::alloc_large(target + 1));
     if (!next) return false;
     if (data_ && length_) memcpy(next, data_, length_);
     next[length_] = 0;
-    free_buffer(data_);
+    Memory::free(data_);
     data_ = next;
     capacity_ = target;
     return true;

@@ -2,38 +2,16 @@
 
 #include <ctype.h>
 #include <limits.h>
-#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
-#ifdef ARDUINO
+#include "checked_size.h"
 #include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
 
 constexpr size_t NO_STOCK_SETTING = SIZE_MAX;
-
-void *catalog_alloc(size_t size) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, size, false);
-#else
-    return calloc(1, size);
-#endif
-}
-
-void catalog_free(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
-
-size_t align_up(size_t value, size_t alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
-}
 
 bool selector_key(const char *selector, const char *&key, size_t &key_len) {
     if (!selector || selector[0] != '_') return false;
@@ -186,31 +164,50 @@ bool As11SettingsCatalog::apply_airbreak_info(JsonObjectConst info,
         size_t item_options = 0;
         const bool has_enum = editable_enum(item, item_options);
 
-        item_count++;
-        option_count += has_enum ? item_options : 0;
-        string_bytes += key_len + 1;
-        string_bytes += strlen(name ? name : key) + 1;
-        string_bytes += strlen(group ? group : "") + 1;
+        if (!CheckedSize::add_to(item_count, 1) ||
+            !CheckedSize::add_to(option_count,
+                                 has_enum ? item_options : 0) ||
+            !CheckedSize::add_to(string_bytes, key_len + 1) ||
+            !CheckedSize::add_to(string_bytes,
+                                 strlen(name ? name : key) + 1) ||
+            !CheckedSize::add_to(string_bytes,
+                                 strlen(group ? group : "") + 1)) {
+            return false;
+        }
         if (has_enum) {
             for (JsonVariantConst value : item["enum"].as<JsonArrayConst>()) {
-                string_bytes += strlen(value.as<const char *>()) + 1;
+                if (!CheckedSize::add_to(
+                        string_bytes,
+                        strlen(value.as<const char *>()) + 1)) {
+                    return false;
+                }
             }
         }
     }
 
     if (item_count) {
-        const size_t items_bytes = sizeof(RuntimeItem) * item_count;
-        const size_t options_offset = align_up(items_bytes,
-                                               alignof(const char *));
-        const size_t options_bytes = sizeof(const char *) * option_count;
-        if (options_offset > SIZE_MAX - options_bytes ||
-            options_offset + options_bytes > SIZE_MAX - string_bytes) {
+        size_t items_bytes = 0;
+        size_t options_offset = 0;
+        size_t options_bytes = 0;
+        size_t allocation_size = 0;
+        if (!CheckedSize::multiply(item_count,
+                                   sizeof(RuntimeItem),
+                                   items_bytes) ||
+            !CheckedSize::align_up(items_bytes,
+                                   alignof(const char *),
+                                   options_offset) ||
+            !CheckedSize::multiply(option_count,
+                                   sizeof(const char *),
+                                   options_bytes) ||
+            !CheckedSize::add(options_offset,
+                              options_bytes,
+                              allocation_size) ||
+            !CheckedSize::add_to(allocation_size, string_bytes)) {
             return false;
         }
 
-        const size_t allocation_size =
-            options_offset + options_bytes + string_bytes;
-        candidate.allocation_ = catalog_alloc(allocation_size);
+        candidate.allocation_ =
+            Memory::calloc_large(1, allocation_size, false);
         if (!candidate.allocation_) return false;
 
         candidate.items_ = static_cast<RuntimeItem *>(candidate.allocation_);
@@ -323,7 +320,7 @@ bool As11SettingsCatalog::equivalent(
 }
 
 void As11SettingsCatalog::clear_overlay() {
-    catalog_free(allocation_);
+    Memory::free(allocation_);
     allocation_ = nullptr;
     items_ = nullptr;
     item_count_ = 0;

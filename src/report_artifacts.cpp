@@ -1,10 +1,11 @@
 #include "report_artifacts.h"
 
-#include <limits>
 #include <stdio.h>
 #include <string.h>
 
+#include "checked_size.h"
 #include "crc32.h"
+#include "little_endian.h"
 #include "report_range_tile.h"
 
 namespace aircannect {
@@ -18,66 +19,27 @@ constexpr size_t RESULT_HEADER_CRC_OFFSET = 152;
 constexpr size_t MANIFEST_BODY_CRC_OFFSET = 60;
 constexpr size_t MANIFEST_HEADER_CRC_OFFSET = 64;
 
-void put_u16(uint8_t *out, uint16_t value) {
-    out[0] = static_cast<uint8_t>(value);
-    out[1] = static_cast<uint8_t>(value >> 8);
-}
-
-void put_u32(uint8_t *out, uint32_t value) {
-    out[0] = static_cast<uint8_t>(value);
-    out[1] = static_cast<uint8_t>(value >> 8);
-    out[2] = static_cast<uint8_t>(value >> 16);
-    out[3] = static_cast<uint8_t>(value >> 24);
-}
-
-void put_u64(uint8_t *out, uint64_t value) {
-    put_u32(out, static_cast<uint32_t>(value));
-    put_u32(out + 4, static_cast<uint32_t>(value >> 32));
-}
+using LittleEndian::get_le16;
+using LittleEndian::get_le32;
+using LittleEndian::get_le64;
+using LittleEndian::put_le16;
+using LittleEndian::put_le32;
+using LittleEndian::put_le64;
 
 void put_i32(uint8_t *out, int32_t value) {
-    put_u32(out, static_cast<uint32_t>(value));
+    put_le32(out, static_cast<uint32_t>(value));
 }
 
 void put_i64(uint8_t *out, int64_t value) {
-    put_u64(out, static_cast<uint64_t>(value));
-}
-
-uint16_t get_u16(const uint8_t *data) {
-    return static_cast<uint16_t>(data[0]) |
-           static_cast<uint16_t>(data[1]) << 8;
-}
-
-uint32_t get_u32(const uint8_t *data) {
-    return static_cast<uint32_t>(data[0]) |
-           static_cast<uint32_t>(data[1]) << 8 |
-           static_cast<uint32_t>(data[2]) << 16 |
-           static_cast<uint32_t>(data[3]) << 24;
-}
-
-uint64_t get_u64(const uint8_t *data) {
-    return static_cast<uint64_t>(get_u32(data)) |
-           static_cast<uint64_t>(get_u32(data + 4)) << 32;
+    put_le64(out, static_cast<uint64_t>(value));
 }
 
 int32_t get_i32(const uint8_t *data) {
-    return static_cast<int32_t>(get_u32(data));
+    return static_cast<int32_t>(get_le32(data));
 }
 
 int64_t get_i64(const uint8_t *data) {
-    return static_cast<int64_t>(get_u64(data));
-}
-
-bool multiply_size(size_t count, size_t width, size_t &bytes) {
-    if (count > std::numeric_limits<size_t>::max() / width) return false;
-    bytes = count * width;
-    return true;
-}
-
-bool add_size(size_t lhs, size_t rhs, size_t &total) {
-    if (lhs > std::numeric_limits<size_t>::max() - rhs) return false;
-    total = lhs + rhs;
-    return true;
+    return static_cast<int64_t>(get_le64(data));
 }
 
 bool key_is_result(const ReportArtifactKey &key) {
@@ -124,9 +86,9 @@ bool tile_follows(const ReportRangeTileArtifact &previous,
 }
 
 void encode_metrics(uint8_t *out, const ReportArtifactMetrics &metrics) {
-    put_u16(out, metrics.valid_mask);
-    put_u16(out + 2, metrics.str_mask);
-    put_u16(out + 4, metrics.summary_mask);
+    put_le16(out, metrics.valid_mask);
+    put_le16(out + 2, metrics.str_mask);
+    put_le16(out + 4, metrics.summary_mask);
     put_i32(out + 8, metrics.ahi_milli);
     put_i32(out + 12, metrics.obstructive_apnea_index_milli);
     put_i32(out + 16, metrics.central_apnea_index_milli);
@@ -138,9 +100,9 @@ void encode_metrics(uint8_t *out, const ReportArtifactMetrics &metrics) {
 }
 
 void decode_metrics(const uint8_t *data, ReportArtifactMetrics &metrics) {
-    metrics.valid_mask = get_u16(data);
-    metrics.str_mask = get_u16(data + 2);
-    metrics.summary_mask = get_u16(data + 4);
+    metrics.valid_mask = get_le16(data);
+    metrics.str_mask = get_le16(data + 2);
+    metrics.summary_mask = get_le16(data + 4);
     metrics.ahi_milli = get_i32(data + 8);
     metrics.obstructive_apnea_index_milli = get_i32(data + 12);
     metrics.central_apnea_index_milli = get_i32(data + 16);
@@ -152,21 +114,21 @@ void decode_metrics(const uint8_t *data, ReportArtifactMetrics &metrics) {
 }
 
 void encode_events(uint8_t *out, const ReportArtifactEventCounts &events) {
-    put_u32(out, events.hypopnea);
-    put_u32(out + 4, events.central_apnea);
-    put_u32(out + 8, events.obstructive_apnea);
-    put_u32(out + 12, events.unknown_apnea);
-    put_u32(out + 16, events.arousal);
-    put_u32(out + 20, events.csr);
+    put_le32(out, events.hypopnea);
+    put_le32(out + 4, events.central_apnea);
+    put_le32(out + 8, events.obstructive_apnea);
+    put_le32(out + 12, events.unknown_apnea);
+    put_le32(out + 16, events.arousal);
+    put_le32(out + 20, events.csr);
 }
 
 void decode_events(const uint8_t *data, ReportArtifactEventCounts &events) {
-    events.hypopnea = get_u32(data);
-    events.central_apnea = get_u32(data + 4);
-    events.obstructive_apnea = get_u32(data + 8);
-    events.unknown_apnea = get_u32(data + 12);
-    events.arousal = get_u32(data + 16);
-    events.csr = get_u32(data + 20);
+    events.hypopnea = get_le32(data);
+    events.central_apnea = get_le32(data + 4);
+    events.obstructive_apnea = get_le32(data + 8);
+    events.unknown_apnea = get_le32(data + 12);
+    events.arousal = get_le32(data + 16);
+    events.csr = get_le32(data + 20);
 }
 
 bool artifact_path(const ReportArtifactKey &key,
@@ -215,8 +177,8 @@ bool ReportArtifactManifestView::tile(
         ReportArtifactManifestCodec::TileBytes;
     tile_out.start_ms = get_i64(record);
     tile_out.end_ms = get_i64(record + 8);
-    tile_out.size = get_u32(record + 16);
-    tile_out.crc32 = get_u32(record + 20);
+    tile_out.size = get_le32(record + 16);
+    tile_out.crc32 = get_le32(record + 20);
     return tile_out.end_ms > tile_out.start_ms && tile_out.size > 0;
 }
 
@@ -371,8 +333,8 @@ std::shared_ptr<const LargeByteBuffer> ReportResultArtifactCodec::encode(
 
     size_t body_bytes = 0;
     size_t total_bytes = 0;
-    if (!multiply_size(data.session_count, SessionBytes, body_bytes) ||
-        !add_size(HeaderBytes, body_bytes, total_bytes) ||
+    if (!CheckedSize::multiply(data.session_count, SessionBytes, body_bytes) ||
+        !CheckedSize::add(HeaderBytes, body_bytes, total_bytes) ||
         total_bytes > UINT32_MAX) {
         return {};
     }
@@ -383,23 +345,23 @@ std::shared_ptr<const LargeByteBuffer> ReportResultArtifactCodec::encode(
 
     uint8_t *bytes = output->data();
     memset(bytes, 0, total_bytes);
-    put_u32(bytes, RESULT_MAGIC);
-    put_u16(bytes + 4, Version);
-    put_u16(bytes + 6, HeaderBytes);
-    put_u32(bytes + 8, static_cast<uint32_t>(total_bytes));
+    put_le32(bytes, RESULT_MAGIC);
+    put_le16(bytes + 4, Version);
+    put_le16(bytes + 6, HeaderBytes);
+    put_le32(bytes + 8, static_cast<uint32_t>(total_bytes));
     put_i32(bytes + 12, data.key.sleep_day.epoch_days());
-    put_u64(bytes + 16, data.key.source_revision.value());
+    put_le64(bytes + 16, data.key.source_revision.value());
     put_i64(bytes + 24, data.day_start_ms);
     put_i64(bytes + 32, data.day_end_ms);
     put_i64(bytes + 40, data.therapy_start_ms);
     put_i64(bytes + 48, data.therapy_end_ms);
-    put_u32(bytes + 56, data.duration_min);
-    put_u32(bytes + 60, data.requested_signal_mask);
-    put_u32(bytes + 64, data.available_signal_mask);
-    put_u32(bytes + 68, data.missing_required_signal_mask);
-    put_u32(bytes + 72, data.missing_optional_signal_mask);
-    put_u16(bytes + 76, data.flags);
-    put_u16(bytes + 78, static_cast<uint16_t>(data.session_count));
+    put_le32(bytes + 56, data.duration_min);
+    put_le32(bytes + 60, data.requested_signal_mask);
+    put_le32(bytes + 64, data.available_signal_mask);
+    put_le32(bytes + 68, data.missing_required_signal_mask);
+    put_le32(bytes + 72, data.missing_optional_signal_mask);
+    put_le16(bytes + 76, data.flags);
+    put_le16(bytes + 78, static_cast<uint16_t>(data.session_count));
     bytes[80] = data.requested_event_mask;
     bytes[81] = data.missing_event_mask;
     bytes[82] = data.source_flags;
@@ -413,9 +375,9 @@ std::shared_ptr<const LargeByteBuffer> ReportResultArtifactCodec::encode(
         put_i64(body + i * SessionBytes + 8, session.end_ms);
     }
 
-    put_u32(bytes + RESULT_BODY_CRC_OFFSET,
+    put_le32(bytes + RESULT_BODY_CRC_OFFSET,
             crc32_ieee(body, body_bytes));
-    put_u32(bytes + RESULT_HEADER_CRC_OFFSET,
+    put_le32(bytes + RESULT_HEADER_CRC_OFFSET,
             crc32_ieee(bytes, RESULT_HEADER_CRC_OFFSET));
     return LargeByteBuffer::freeze(std::move(output));
 }
@@ -425,21 +387,21 @@ bool ReportResultArtifactCodec::decode(
     size_t length,
     ReportResultArtifactView &view) {
     view = {};
-    if (!bytes || length < HeaderBytes || get_u32(bytes) != RESULT_MAGIC ||
-        get_u16(bytes + 4) != Version || get_u16(bytes + 6) != HeaderBytes ||
-        get_u32(bytes + 8) != length ||
+    if (!bytes || length < HeaderBytes || get_le32(bytes) != RESULT_MAGIC ||
+        get_le16(bytes + 4) != Version || get_le16(bytes + 6) != HeaderBytes ||
+        get_le32(bytes + 8) != length ||
         crc32_ieee(bytes, RESULT_HEADER_CRC_OFFSET) !=
-            get_u32(bytes + RESULT_HEADER_CRC_OFFSET)) {
+            get_le32(bytes + RESULT_HEADER_CRC_OFFSET)) {
         return false;
     }
 
-    const size_t session_count = get_u16(bytes + 78);
+    const size_t session_count = get_le16(bytes + 78);
     size_t body_bytes = 0;
     size_t expected = 0;
-    if (!multiply_size(session_count, SessionBytes, body_bytes) ||
-        !add_size(HeaderBytes, body_bytes, expected) || expected != length ||
+    if (!CheckedSize::multiply(session_count, SessionBytes, body_bytes) ||
+        !CheckedSize::add(HeaderBytes, body_bytes, expected) || expected != length ||
         crc32_ieee(bytes + HeaderBytes, body_bytes) !=
-            get_u32(bytes + RESULT_BODY_CRC_OFFSET)) {
+            get_le32(bytes + RESULT_BODY_CRC_OFFSET)) {
         return false;
     }
 
@@ -450,17 +412,17 @@ bool ReportResultArtifactCodec::decode(
 
     ReportResultArtifactData &data = view.data;
     data.key = ReportArtifactKey::result(
-        sleep_day, SourceRevision(get_u64(bytes + 16)));
+        sleep_day, SourceRevision(get_le64(bytes + 16)));
     data.day_start_ms = get_i64(bytes + 24);
     data.day_end_ms = get_i64(bytes + 32);
     data.therapy_start_ms = get_i64(bytes + 40);
     data.therapy_end_ms = get_i64(bytes + 48);
-    data.duration_min = get_u32(bytes + 56);
-    data.requested_signal_mask = get_u32(bytes + 60);
-    data.available_signal_mask = get_u32(bytes + 64);
-    data.missing_required_signal_mask = get_u32(bytes + 68);
-    data.missing_optional_signal_mask = get_u32(bytes + 72);
-    data.flags = get_u16(bytes + 76);
+    data.duration_min = get_le32(bytes + 56);
+    data.requested_signal_mask = get_le32(bytes + 60);
+    data.available_signal_mask = get_le32(bytes + 64);
+    data.missing_required_signal_mask = get_le32(bytes + 68);
+    data.missing_optional_signal_mask = get_le32(bytes + 72);
+    data.flags = get_le16(bytes + 76);
     data.session_count = session_count;
     data.requested_event_mask = bytes[80];
     data.missing_event_mask = bytes[81];
@@ -508,8 +470,8 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
 
     size_t body_bytes = 0;
     size_t total_bytes = 0;
-    if (!multiply_size(tile_count, TileBytes, body_bytes) ||
-        !add_size(HeaderBytes, body_bytes, total_bytes) ||
+    if (!CheckedSize::multiply(tile_count, TileBytes, body_bytes) ||
+        !CheckedSize::add(HeaderBytes, body_bytes, total_bytes) ||
         total_bytes > UINT32_MAX) {
         return {};
     }
@@ -520,17 +482,17 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
 
     uint8_t *bytes = output->data();
     memset(bytes, 0, total_bytes);
-    put_u32(bytes, MANIFEST_MAGIC);
-    put_u16(bytes + 4, Version);
-    put_u16(bytes + 6, HeaderBytes);
-    put_u32(bytes + 8, static_cast<uint32_t>(total_bytes));
+    put_le32(bytes, MANIFEST_MAGIC);
+    put_le16(bytes + 4, Version);
+    put_le16(bytes + 6, HeaderBytes);
+    put_le32(bytes + 8, static_cast<uint32_t>(total_bytes));
     put_i32(bytes + 12, bundle.key.sleep_day.epoch_days());
-    put_u64(bytes + 16, bundle.key.source_revision.value());
-    put_u64(bytes + 24, bundle.result->size());
-    put_u64(bytes + 32, bundle.overview->size());
-    put_u32(bytes + 40, bundle.result_crc32);
-    put_u32(bytes + 44, bundle.overview_crc32);
-    put_u16(bytes + 48, static_cast<uint16_t>(tile_count));
+    put_le64(bytes + 16, bundle.key.source_revision.value());
+    put_le64(bytes + 24, bundle.result->size());
+    put_le64(bytes + 32, bundle.overview->size());
+    put_le32(bytes + 40, bundle.result_crc32);
+    put_le32(bytes + 44, bundle.overview_crc32);
+    put_le16(bytes + 48, static_cast<uint16_t>(tile_count));
 
     uint8_t *body = bytes + HeaderBytes;
     for (size_t i = 0; i < tile_count; ++i) {
@@ -541,13 +503,13 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
         uint8_t *record = body + i * TileBytes;
         put_i64(record, tiles[i].start_ms);
         put_i64(record + 8, tiles[i].end_ms);
-        put_u32(record + 16, static_cast<uint32_t>(tiles[i].size));
-        put_u32(record + 20, tiles[i].crc32);
+        put_le32(record + 16, static_cast<uint32_t>(tiles[i].size));
+        put_le32(record + 20, tiles[i].crc32);
     }
 
-    put_u32(bytes + MANIFEST_BODY_CRC_OFFSET,
+    put_le32(bytes + MANIFEST_BODY_CRC_OFFSET,
             crc32_ieee(body, body_bytes));
-    put_u32(bytes + MANIFEST_HEADER_CRC_OFFSET,
+    put_le32(bytes + MANIFEST_HEADER_CRC_OFFSET,
             crc32_ieee(bytes, MANIFEST_HEADER_CRC_OFFSET));
     return LargeByteBuffer::freeze(std::move(output));
 }
@@ -584,8 +546,8 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
 
     size_t body_bytes = 0;
     size_t total_bytes = 0;
-    if (!multiply_size(tile_count, TileBytes, body_bytes) ||
-        !add_size(HeaderBytes, body_bytes, total_bytes) ||
+    if (!CheckedSize::multiply(tile_count, TileBytes, body_bytes) ||
+        !CheckedSize::add(HeaderBytes, body_bytes, total_bytes) ||
         total_bytes > UINT32_MAX) {
         return {};
     }
@@ -596,17 +558,17 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
 
     uint8_t *bytes = output->data();
     memset(bytes, 0, total_bytes);
-    put_u32(bytes, MANIFEST_MAGIC);
-    put_u16(bytes + 4, Version);
-    put_u16(bytes + 6, HeaderBytes);
-    put_u32(bytes + 8, static_cast<uint32_t>(total_bytes));
+    put_le32(bytes, MANIFEST_MAGIC);
+    put_le16(bytes + 4, Version);
+    put_le16(bytes + 6, HeaderBytes);
+    put_le32(bytes + 8, static_cast<uint32_t>(total_bytes));
     put_i32(bytes + 12, manifest.key.sleep_day.epoch_days());
-    put_u64(bytes + 16, manifest.key.source_revision.value());
-    put_u64(bytes + 24, manifest.result_size);
-    put_u64(bytes + 32, manifest.overview_size);
-    put_u32(bytes + 40, manifest.result_crc32);
-    put_u32(bytes + 44, manifest.overview_crc32);
-    put_u16(bytes + 48, static_cast<uint16_t>(tile_count));
+    put_le64(bytes + 16, manifest.key.source_revision.value());
+    put_le64(bytes + 24, manifest.result_size);
+    put_le64(bytes + 32, manifest.overview_size);
+    put_le32(bytes + 40, manifest.result_crc32);
+    put_le32(bytes + 44, manifest.overview_crc32);
+    put_le16(bytes + 48, static_cast<uint16_t>(tile_count));
 
     uint8_t *body = bytes + HeaderBytes;
     size_t source_index = 0;
@@ -622,13 +584,13 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
         uint8_t *record = body + output_index * TileBytes;
         put_i64(record, value.start_ms);
         put_i64(record + 8, value.end_ms);
-        put_u32(record + 16, static_cast<uint32_t>(value.size));
-        put_u32(record + 20, value.crc32);
+        put_le32(record + 16, static_cast<uint32_t>(value.size));
+        put_le32(record + 20, value.crc32);
     }
 
-    put_u32(bytes + MANIFEST_BODY_CRC_OFFSET,
+    put_le32(bytes + MANIFEST_BODY_CRC_OFFSET,
             crc32_ieee(body, body_bytes));
-    put_u32(bytes + MANIFEST_HEADER_CRC_OFFSET,
+    put_le32(bytes + MANIFEST_HEADER_CRC_OFFSET,
             crc32_ieee(bytes, MANIFEST_HEADER_CRC_OFFSET));
     return LargeByteBuffer::freeze(std::move(output));
 }
@@ -638,22 +600,22 @@ bool ReportArtifactManifestCodec::decode(
     size_t length,
     ReportArtifactManifestView &view) {
     view = {};
-    if (!bytes || length < HeaderBytes || get_u32(bytes) != MANIFEST_MAGIC ||
-        get_u16(bytes + 4) != Version || get_u16(bytes + 6) != HeaderBytes ||
-        get_u32(bytes + 8) != length ||
+    if (!bytes || length < HeaderBytes || get_le32(bytes) != MANIFEST_MAGIC ||
+        get_le16(bytes + 4) != Version || get_le16(bytes + 6) != HeaderBytes ||
+        get_le32(bytes + 8) != length ||
         crc32_ieee(bytes, MANIFEST_HEADER_CRC_OFFSET) !=
-            get_u32(bytes + MANIFEST_HEADER_CRC_OFFSET)) {
+            get_le32(bytes + MANIFEST_HEADER_CRC_OFFSET)) {
         return false;
     }
 
-    const size_t tile_count = get_u16(bytes + 48);
+    const size_t tile_count = get_le16(bytes + 48);
     size_t body_bytes = 0;
     size_t expected = 0;
-    if (!multiply_size(tile_count, TileBytes, body_bytes) ||
+    if (!CheckedSize::multiply(tile_count, TileBytes, body_bytes) ||
         tile_count > MaxTiles ||
-        !add_size(HeaderBytes, body_bytes, expected) || expected != length ||
+        !CheckedSize::add(HeaderBytes, body_bytes, expected) || expected != length ||
         crc32_ieee(bytes + HeaderBytes, body_bytes) !=
-            get_u32(bytes + MANIFEST_BODY_CRC_OFFSET)) {
+            get_le32(bytes + MANIFEST_BODY_CRC_OFFSET)) {
         return false;
     }
 
@@ -663,11 +625,11 @@ bool ReportArtifactManifestCodec::decode(
     }
 
     view.key = ReportArtifactKey::result(
-        sleep_day, SourceRevision(get_u64(bytes + 16)));
-    view.result_size = get_u64(bytes + 24);
-    view.overview_size = get_u64(bytes + 32);
-    view.result_crc32 = get_u32(bytes + 40);
-    view.overview_crc32 = get_u32(bytes + 44);
+        sleep_day, SourceRevision(get_le64(bytes + 16)));
+    view.result_size = get_le64(bytes + 24);
+    view.overview_size = get_le64(bytes + 32);
+    view.result_crc32 = get_le32(bytes + 40);
+    view.overview_crc32 = get_le32(bytes + 44);
     view.tile_count = tile_count;
     view.tile_bytes = bytes + HeaderBytes;
     if (!view.key.valid() || view.result_size == 0 ||

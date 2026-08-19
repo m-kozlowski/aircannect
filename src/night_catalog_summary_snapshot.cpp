@@ -8,12 +8,10 @@
 #include <string.h>
 
 #include "calendar_utils.h"
+#include "checked_size.h"
+#include "memory_manager.h"
 #include "report_daily_metrics.h"
 #include "report_parser.h"
-
-#ifdef ARDUINO
-#include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
@@ -27,49 +25,6 @@ constexpr uint64_t FNV_PRIME = 1099511628211ULL;
 void set_error(char *error, size_t error_size, const char *message) {
     if (!error || error_size == 0) return;
     snprintf(error, error_size, "%s", message ? message : "");
-}
-
-void *allocate_large(size_t size) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, size, false);
-#else
-    return calloc(1, size);
-#endif
-}
-
-void free_large(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-bool add_size(size_t &value, size_t add) {
-    if (value > std::numeric_limits<size_t>::max() - add) return false;
-    value += add;
-    return true;
-}
-
-bool multiply_size(size_t count, size_t width, size_t &out) {
-    if (width != 0 && count > std::numeric_limits<size_t>::max() / width) {
-        return false;
-    }
-    out = count * width;
-    return true;
-}
-
-bool align_size(size_t value, size_t alignment, size_t &out) {
-    if (alignment == 0) return false;
-
-    const size_t remainder = value % alignment;
-    if (remainder == 0) {
-        out = value;
-        return true;
-    }
-    if (!add_size(value, alignment - remainder)) return false;
-    out = value;
-    return true;
 }
 
 uint64_t hash_bytes(uint64_t hash, const void *data, size_t size) {
@@ -322,7 +277,7 @@ bool fill_parsed_record(void *context, const ReportSummaryRecord &record) {
 }  // namespace
 
 NightCatalogSummarySnapshot::~NightCatalogSummarySnapshot() {
-    free_large(storage_);
+    Memory::free(storage_);
 }
 
 bool NightCatalogSummarySnapshot::allocate(size_t record_count,
@@ -331,22 +286,23 @@ bool NightCatalogSummarySnapshot::allocate(size_t record_count,
     size_t session_offset = 0;
     size_t session_bytes = 0;
     size_t total_bytes = 0;
-    if (!multiply_size(record_count,
-                       sizeof(NightCatalogSummaryInput),
-                       record_bytes) ||
-        !align_size(record_bytes,
-                    alignof(NightCatalogTimeRange),
-                    session_offset) ||
-        !multiply_size(session_count,
-                       sizeof(NightCatalogTimeRange),
-                       session_bytes) ||
-        !add_size(total_bytes, session_offset) ||
-        !add_size(total_bytes, session_bytes)) {
+    if (!CheckedSize::multiply(record_count,
+                               sizeof(NightCatalogSummaryInput),
+                               record_bytes) ||
+        !CheckedSize::align_up(record_bytes,
+                               alignof(NightCatalogTimeRange),
+                               session_offset) ||
+        !CheckedSize::multiply(session_count,
+                               sizeof(NightCatalogTimeRange),
+                               session_bytes) ||
+        !CheckedSize::add_to(total_bytes, session_offset) ||
+        !CheckedSize::add_to(total_bytes, session_bytes)) {
         return false;
     }
 
     if (total_bytes > 0) {
-        storage_ = static_cast<uint8_t *>(allocate_large(total_bytes));
+        storage_ = static_cast<uint8_t *>(
+            Memory::calloc_large(1, total_bytes, false));
         if (!storage_) return false;
     }
 

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <limits>
 #include <new>
-#include <stdlib.h>
 #include <string.h>
 #include <type_traits>
 
@@ -15,11 +14,8 @@
 #include "night_catalog_clock.h"
 #include "night_str_record.h"
 #include "report_fallback_artifact.h"
-#include "string_util.h"
-
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
@@ -34,37 +30,17 @@ constexpr int64_t MS_PER_MINUTE = 60LL * 1000LL;
 constexpr int64_t MS_PER_DAY = 24LL * 60LL * MS_PER_MINUTE;
 constexpr int64_t LOCAL_NOON_MS = 12LL * 60LL * MS_PER_MINUTE;
 
-void *allocate_large(size_t count, size_t size) {
-#ifdef ARDUINO
-    return Memory::calloc_large(count, size, false);
-#else
-    return calloc(count, size);
-#endif
-}
-
-void free_large(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
 template <typename T>
 void destroy_large_array(T *values, size_t count) {
     if (!values) return;
     for (size_t i = 0; i < count; ++i) values[i].~T();
-    free_large(values);
+    Memory::free(values);
 }
 
 template <typename T>
 T *allocate_large_array(size_t count) {
     if (count == 0) return nullptr;
-    if (count > std::numeric_limits<size_t>::max() / sizeof(T)) {
-        return nullptr;
-    }
-
-    void *memory = allocate_large(count, sizeof(T));
+    void *memory = Memory::calloc_large(count, sizeof(T), false);
     if (!memory) return nullptr;
 
     T *values = static_cast<T *>(memory);
@@ -336,7 +312,7 @@ struct NightCatalogRefreshRuntime {
 
     ~NightCatalogRefreshRuntime() {
         clear_sources();
-        free_large(read_buffer);
+        Memory::free(read_buffer);
     }
 
     void clear_sources() {
@@ -655,7 +631,7 @@ bool prepare_scan_sources(NightCatalogRefreshRuntime &runtime,
 
     if (!runtime.read_buffer) {
         runtime.read_buffer = static_cast<uint8_t *>(
-            allocate_large(1, SOURCE_READ_BUFFER_BYTES));
+            Memory::calloc_large(1, SOURCE_READ_BUFFER_BYTES, false));
         if (!runtime.read_buffer) return false;
     }
 

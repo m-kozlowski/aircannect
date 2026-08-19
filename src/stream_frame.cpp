@@ -2,17 +2,13 @@
 
 #include <new>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <type_traits>
 
 #include "as11_stream_signals.h"
 #include "json_cursor.h"
-#include "string_util.h"
-
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
+#include "string_util.h"
 
 namespace aircannect {
 namespace {
@@ -283,22 +279,6 @@ bool parse_top(JsonCursor &json,
     return false;
 }
 
-void *alloc_frame_bytes(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, bytes);
-#else
-    return calloc(1, bytes);
-#endif
-}
-
-void free_frame_bytes(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
-
 }  // namespace
 
 bool StreamFrameData::value_valid(size_t index) const {
@@ -364,9 +344,9 @@ void StreamFrameRef::reset() {
 void StreamFramePool::free_storage() {
     if (!frames_) return;
     for (size_t i = 0; i < capacity_; ++i) {
-        free_frame_bytes(frames_[i]);
+        Memory::free(frames_[i]);
     }
-    free_frame_bytes(frames_);
+    Memory::free(frames_);
     frames_ = nullptr;
     capacity_ = 0;
 }
@@ -388,7 +368,7 @@ bool StreamFramePool::begin(size_t capacity) {
     if (capacity == 0) return false;
 
     frames_ = static_cast<StreamFrameData **>(
-        alloc_frame_bytes(sizeof(StreamFrameData *) * capacity));
+        Memory::calloc_large(capacity, sizeof(StreamFrameData *)));
     if (!frames_) {
         allocation_failures_++;
         return false;
@@ -397,13 +377,13 @@ bool StreamFramePool::begin(size_t capacity) {
     capacity_ = capacity;
     for (size_t i = 0; i < capacity_; ++i) {
         frames_[i] = static_cast<StreamFrameData *>(
-            alloc_frame_bytes(sizeof(StreamFrameData)));
+            Memory::calloc_large(1, sizeof(StreamFrameData)));
         if (!frames_[i]) {
             allocation_failures_++;
             for (size_t j = 0; j < i; ++j) {
-                free_frame_bytes(frames_[j]);
+                Memory::free(frames_[j]);
             }
-            free_frame_bytes(frames_);
+            Memory::free(frames_);
             frames_ = nullptr;
             capacity_ = 0;
             return false;

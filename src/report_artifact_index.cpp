@@ -1,63 +1,15 @@
 #include "report_artifact_index.h"
 
 #include <algorithm>
-#include <limits>
 #include <new>
-#include <stdlib.h>
 #include <string.h>
 
-#include "report_range_tile.h"
-
-#ifdef ARDUINO
+#include "checked_size.h"
 #include "memory_manager.h"
-#endif
+#include "report_range_tile.h"
 
 namespace aircannect {
 namespace {
-
-void *allocate_large(size_t size) {
-    if (size == 0) return nullptr;
-#ifdef ARDUINO
-    return Memory::calloc_large(1, size, false);
-#else
-    return calloc(1, size);
-#endif
-}
-
-void free_large(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-bool add_size(size_t &value, size_t add) {
-    if (value > std::numeric_limits<size_t>::max() - add) return false;
-    value += add;
-    return true;
-}
-
-bool multiply_size(size_t count, size_t width, size_t &out) {
-    if (width != 0 && count > std::numeric_limits<size_t>::max() / width) {
-        return false;
-    }
-    out = count * width;
-    return true;
-}
-
-bool align_size(size_t value, size_t alignment, size_t &out) {
-    if (alignment == 0) return false;
-
-    const size_t remainder = value % alignment;
-    if (remainder == 0) {
-        out = value;
-        return true;
-    }
-    if (!add_size(value, alignment - remainder)) return false;
-    out = value;
-    return true;
-}
 
 bool valid_tile(const ReportRangeTileArtifact &tile) {
     return tile.start_ms > 0 &&
@@ -111,7 +63,7 @@ void fill_availability(const ReportArtifactIndexRecord &record,
 }  // namespace
 
 ReportArtifactIndex::~ReportArtifactIndex() {
-    free_large(storage_);
+    Memory::free(storage_);
 }
 
 bool ReportArtifactIndex::allocate(size_t record_count, size_t tile_count) {
@@ -119,23 +71,24 @@ bool ReportArtifactIndex::allocate(size_t record_count, size_t tile_count) {
     size_t tile_offset = 0;
     size_t tile_bytes = 0;
     size_t total_bytes = 0;
-    if (!multiply_size(record_count,
-                       sizeof(ReportArtifactIndexRecord),
-                       record_bytes) ||
-        !align_size(record_bytes,
-                    alignof(ReportRangeTileArtifact),
-                    tile_offset) ||
-        !multiply_size(tile_count,
-                       sizeof(ReportRangeTileArtifact),
-                       tile_bytes) ||
+    if (!CheckedSize::multiply(record_count,
+                               sizeof(ReportArtifactIndexRecord),
+                               record_bytes) ||
+        !CheckedSize::align_up(record_bytes,
+                               alignof(ReportRangeTileArtifact),
+                               tile_offset) ||
+        !CheckedSize::multiply(tile_count,
+                               sizeof(ReportRangeTileArtifact),
+                               tile_bytes) ||
         tile_count > UINT32_MAX ||
-        !add_size(total_bytes, tile_offset) ||
-        !add_size(total_bytes, tile_bytes)) {
+        !CheckedSize::add_to(total_bytes, tile_offset) ||
+        !CheckedSize::add_to(total_bytes, tile_bytes)) {
         return false;
     }
 
     if (total_bytes > 0) {
-        storage_ = static_cast<uint8_t *>(allocate_large(total_bytes));
+        storage_ = static_cast<uint8_t *>(
+            Memory::calloc_large(1, total_bytes, false));
         if (!storage_) return false;
     }
 
@@ -226,7 +179,7 @@ std::shared_ptr<const ReportArtifactIndex> ReportArtifactIndexBuilder::build(
     size_t tile_count = 0;
     for (size_t i = 0; i < input_count; ++i) {
         if (!valid_input(inputs[i]) ||
-            !add_size(tile_count, inputs[i].tile_count)) {
+            !CheckedSize::add_to(tile_count, inputs[i].tile_count)) {
             return {};
         }
         for (size_t j = 0; j < i; ++j) {
@@ -287,7 +240,7 @@ ReportArtifactIndexBuilder::replace_input(
     const size_t record_count = source.record_count_ + (replaced ? 0 : 1);
     size_t tile_count = source.tile_count_;
     if (replaced) tile_count -= replaced->tile_count;
-    if (!add_size(tile_count, input.tile_count)) return {};
+    if (!CheckedSize::add_to(tile_count, input.tile_count)) return {};
 
     std::shared_ptr<ReportArtifactIndex> index(
         new (std::nothrow) ReportArtifactIndex());
@@ -388,8 +341,10 @@ ReportArtifactIndexBuilder::merge_availability(
             return {};
         }
 
-        merged_tiles = static_cast<ReportRangeTileArtifact *>(allocate_large(
-            merged_tile_count * sizeof(ReportRangeTileArtifact)));
+        merged_tiles = static_cast<ReportRangeTileArtifact *>(
+            Memory::calloc_large(merged_tile_count,
+                                 sizeof(ReportRangeTileArtifact),
+                                 false));
         if (!merged_tiles) return {};
 
         const ReportRangeTileArtifact added{
@@ -431,7 +386,7 @@ ReportArtifactIndexBuilder::merge_availability(
     input.tile_count = merged_tile_count;
     std::shared_ptr<const ReportArtifactIndex> merged =
         replace_input(source, input);
-    free_large(merged_tiles);
+    Memory::free(merged_tiles);
     return merged;
 }
 
@@ -447,7 +402,7 @@ ReportArtifactIndexBuilder::reconcile(const ReportArtifactIndex &source,
             continue;
         }
         ++record_count;
-        if (!add_size(tile_count, record.tile_count)) return {};
+        if (!CheckedSize::add_to(tile_count, record.tile_count)) return {};
     }
 
     std::shared_ptr<ReportArtifactIndex> index(

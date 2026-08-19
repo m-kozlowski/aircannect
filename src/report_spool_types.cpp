@@ -1,12 +1,12 @@
 #include "report_spool_types.h"
 
-#include <stdlib.h>
 #include <string.h>
 #include <utility>
 
+#include "memory_manager.h"
+
 #ifdef ARDUINO
 #include "debug_log.h"
-#include "memory_manager.h"
 #endif
 
 namespace aircannect {
@@ -15,19 +15,7 @@ namespace {
 static constexpr size_t REPORT_INTERNAL_FALLBACK_MAX = 4096;
 
 void *alloc_report_buffer(size_t size) {
-#ifdef ARDUINO
     return Memory::alloc_large(size, size <= REPORT_INTERNAL_FALLBACK_MAX);
-#else
-    return malloc(size);
-#endif
-}
-
-void free_report_buffer(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
 }
 
 void log_report_alloc_failure(size_t capacity, size_t current) {
@@ -46,11 +34,11 @@ void log_report_alloc_failure(size_t capacity, size_t current) {
 }  // namespace
 
 ReportSpoolBuffer::~ReportSpoolBuffer() {
-    free_report_buffer(data_);
+    Memory::free(data_);
 }
 
 void ReportSpoolBuffer::clear() {
-    free_report_buffer(data_);
+    Memory::free(data_);
     data_ = nullptr;
     size_ = 0;
     capacity_ = 0;
@@ -77,7 +65,7 @@ bool ReportSpoolBuffer::reserve(size_t capacity) {
         return false;
     }
     if (data_ && size_) memcpy(next, data_, size_);
-    free_report_buffer(data_);
+    Memory::free(data_);
     data_ = next;
     capacity_ = capacity;
     return true;

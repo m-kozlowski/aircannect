@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "crc32.h"
+#include "little_endian.h"
 
 namespace aircannect {
 namespace {
@@ -62,17 +63,11 @@ constexpr size_t DescriptorPresetCount =
 static_assert(DescriptorPresetCount > 0, "descriptor presets required");
 
 uint32_t get_le32(const uint8_t *data, size_t offset) {
-    return static_cast<uint32_t>(data[offset]) |
-           (static_cast<uint32_t>(data[offset + 1]) << 8) |
-           (static_cast<uint32_t>(data[offset + 2]) << 16) |
-           (static_cast<uint32_t>(data[offset + 3]) << 24);
+    return LittleEndian::get_le32(data + offset);
 }
 
 void put_le32(uint8_t *data, size_t offset, uint32_t value) {
-    data[offset] = static_cast<uint8_t>(value);
-    data[offset + 1] = static_cast<uint8_t>(value >> 8);
-    data[offset + 2] = static_cast<uint8_t>(value >> 16);
-    data[offset + 3] = static_cast<uint8_t>(value >> 24);
+    LittleEndian::put_le32(data + offset, value);
 }
 
 void copy_text(char *out, size_t out_size, const char *value) {

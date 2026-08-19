@@ -2,18 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
-#include <new>
-#include <stdlib.h>
 #include <string.h>
 
+#include "checked_size.h"
+#include "large_scratch_array.h"
 #include "report_records.h"
 #include "report_fallback_artifact.h"
 #include "report_fallback_payload_layout.h"
-
-#ifdef ARDUINO
-#include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
@@ -66,63 +61,8 @@ struct BuildFallback {
     int32_t time_adjust_ms = 0;
 };
 
-void *allocate_scratch(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, bytes, false);
-#else
-    return calloc(1, bytes);
-#endif
-}
-
-void free_scratch(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
-
-template <typename T>
-class ScratchArray {
-public:
-    ~ScratchArray() {
-        for (size_t i = 0; i < capacity_; ++i) values_[i].~T();
-        free_scratch(values_);
-    }
-
-    bool allocate(size_t capacity) {
-        if (capacity == 0) return true;
-        if (capacity > std::numeric_limits<size_t>::max() / sizeof(T)) {
-            return false;
-        }
-
-        values_ = static_cast<T *>(
-            allocate_scratch(capacity * sizeof(T)));
-        if (!values_) return false;
-        capacity_ = capacity;
-        for (size_t i = 0; i < capacity; ++i) new (&values_[i]) T();
-        return true;
-    }
-
-    T *append() {
-        if (size_ >= capacity_) return nullptr;
-        return &values_[size_++];
-    }
-
-    T *data() { return values_; }
-    const T *data() const { return values_; }
-    size_t size() const { return size_; }
-
-private:
-    T *values_ = nullptr;
-    size_t size_ = 0;
-    size_t capacity_ = 0;
-};
-
 bool add_count(size_t &total, size_t amount) {
-    if (total > std::numeric_limits<size_t>::max() - amount) return false;
-    total += amount;
-    return true;
+    return CheckedSize::add_to(total, amount);
 }
 
 bool valid_boundary(int64_t start_ms, int64_t end_ms) {
@@ -397,7 +337,7 @@ bool signal_layouts_valid(const NightCatalogSourceFileInput &file) {
            seen_fallback == file.coverage.fallback_signal_mask;
 }
 
-BuildNight *find_or_add_night(ScratchArray<BuildNight> &nights,
+BuildNight *find_or_add_night(LargeScratchArray<BuildNight> &nights,
                               SleepDayId sleep_day) {
     if (!sleep_day.valid()) return nullptr;
 
@@ -414,7 +354,7 @@ BuildNight *find_or_add_night(ScratchArray<BuildNight> &nights,
     return night;
 }
 
-BuildNight *find_night(ScratchArray<BuildNight> &nights,
+BuildNight *find_night(LargeScratchArray<BuildNight> &nights,
                        SleepDayId sleep_day) {
     if (!sleep_day.valid()) return nullptr;
 
@@ -472,7 +412,7 @@ bool set_primary_boundary(BuildNight &night,
     return night.day_start_ms == start_ms && night.day_end_ms == end_ms;
 }
 
-bool append_session(ScratchArray<BuildSession> &sessions,
+bool append_session(LargeScratchArray<BuildSession> &sessions,
                     size_t owner,
                     SessionOrigin origin,
                     const NightCatalogTimeRange &range) {
@@ -486,7 +426,7 @@ bool append_session(ScratchArray<BuildSession> &sessions,
     return true;
 }
 
-bool append_file(ScratchArray<BuildFile> &files,
+bool append_file(LargeScratchArray<BuildFile> &files,
                  size_t owner,
                  const NightCatalogSourceFileInput &source,
                  const NightCatalogTimeRange *session_range) {
@@ -706,9 +646,9 @@ bool resolve_fallback_adjustment(
 }
 
 bool ingest_fallback(const NightCatalogBuildInput &input,
-                     ScratchArray<BuildNight> &nights,
-                     ScratchArray<BuildSession> &sessions,
-                     ScratchArray<BuildFallback> &fallbacks,
+                     LargeScratchArray<BuildNight> &nights,
+                     LargeScratchArray<BuildSession> &sessions,
+                     LargeScratchArray<BuildFallback> &fallbacks,
                      size_t &invalid_fallback_records) {
     for (size_t i = 0; i < input.fallback_record_count; ++i) {
         const NightCatalogFallbackInput &source =
@@ -822,9 +762,9 @@ bool ingest_fallback(const NightCatalogBuildInput &input,
 }
 
 bool ingest_edf(const NightCatalogBuildInput &input,
-                ScratchArray<BuildNight> &nights,
-                ScratchArray<BuildSession> &sessions,
-                ScratchArray<BuildFile> &files) {
+                LargeScratchArray<BuildNight> &nights,
+                LargeScratchArray<BuildSession> &sessions,
+                LargeScratchArray<BuildFile> &files) {
     for (size_t i = 0; i < input.edf_session_count; ++i) {
         const NightCatalogEdfSessionInput &source = input.edf_sessions[i];
         if (!source.display_window.valid() || !source.files ||
@@ -859,8 +799,8 @@ bool ingest_edf(const NightCatalogBuildInput &input,
 }
 
 bool ingest_str(const NightCatalogBuildInput &input,
-                ScratchArray<BuildNight> &nights,
-                ScratchArray<BuildFile> &files) {
+                LargeScratchArray<BuildNight> &nights,
+                LargeScratchArray<BuildFile> &files) {
     for (size_t i = 0; i < input.str_record_count; ++i) {
         const NightCatalogStrInput &source = input.str_records[i];
         if (!source.record.sleep_day.valid() || !source.path ||
@@ -893,8 +833,8 @@ bool ingest_str(const NightCatalogBuildInput &input,
 }
 
 bool ingest_summary(const NightCatalogBuildInput &input,
-                    ScratchArray<BuildNight> &nights,
-                    ScratchArray<BuildSession> &sessions) {
+                    LargeScratchArray<BuildNight> &nights,
+                    LargeScratchArray<BuildSession> &sessions) {
     for (size_t i = 0; i < input.summary_record_count; ++i) {
         const NightCatalogSummaryInput &source = input.summary_records[i];
         if (!source.sleep_day.valid() || source.identity == 0 ||
@@ -978,7 +918,7 @@ bool selected_session(const BuildNight &night,
 }
 
 size_t count_unique_sessions(const BuildNight &night,
-                             const ScratchArray<BuildSession> &sessions) {
+                             const LargeScratchArray<BuildSession> &sessions) {
     size_t count = 0;
     NightCatalogTimeRange previous;
     bool have_previous = false;
@@ -994,7 +934,7 @@ size_t count_unique_sessions(const BuildNight &night,
 }
 
 size_t count_files(const BuildNight &night,
-                   const ScratchArray<BuildFile> &files,
+                   const LargeScratchArray<BuildFile> &files,
                    size_t &path_bytes) {
     size_t count = 0;
     for (size_t i = 0; i < files.size(); ++i) {
@@ -1012,7 +952,7 @@ size_t count_files(const BuildNight &night,
 }
 
 size_t count_fallback_files(const BuildNight &night,
-                            const ScratchArray<BuildFallback> &fallbacks,
+                            const LargeScratchArray<BuildFallback> &fallbacks,
                             size_t &section_count,
                             size_t &path_bytes) {
     size_t count = 0;
@@ -1253,10 +1193,10 @@ std::shared_ptr<const NightCatalog> NightCatalogBuilder::build(
         }
     }
 
-    ScratchArray<BuildNight> nights;
-    ScratchArray<BuildSession> sessions;
-    ScratchArray<BuildFile> files;
-    ScratchArray<BuildFallback> fallbacks;
+    LargeScratchArray<BuildNight> nights;
+    LargeScratchArray<BuildSession> sessions;
+    LargeScratchArray<BuildFile> files;
+    LargeScratchArray<BuildFallback> fallbacks;
     if (!nights.allocate(max_nights) ||
         !sessions.allocate(max_sessions) ||
         !files.allocate(max_files) ||

@@ -1,60 +1,15 @@
 #include "report_read_plan.h"
 
-#include <limits>
 #include <new>
-#include <stdlib.h>
 #include <type_traits>
 
-#ifdef ARDUINO
+#include "checked_size.h"
 #include "memory_manager.h"
-#endif
 
 namespace aircannect {
-namespace {
-
-size_t align_up(size_t value, size_t alignment) {
-    if (alignment <= 1) return value;
-
-    const size_t mask = alignment - 1;
-    if (value > std::numeric_limits<size_t>::max() - mask) return 0;
-    return (value + mask) & ~mask;
-}
-
-bool reserve_array(size_t &total,
-                   size_t count,
-                   size_t item_size,
-                   size_t alignment,
-                   size_t &offset) {
-    offset = align_up(total, alignment);
-    if (offset == 0 && total != 0) return false;
-    if (count > std::numeric_limits<size_t>::max() / item_size) return false;
-
-    const size_t bytes = count * item_size;
-    if (offset > std::numeric_limits<size_t>::max() - bytes) return false;
-    total = offset + bytes;
-    return true;
-}
-
-void *allocate_plan_storage(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, bytes, false);
-#else
-    return calloc(1, bytes);
-#endif
-}
-
-void free_plan_storage(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-}  // namespace
 
 ReportReadPlan::~ReportReadPlan() {
-    free_plan_storage(storage_);
+    Memory::free(storage_);
 }
 
 bool ReportReadPlan::allocate(size_t session_count,
@@ -65,26 +20,18 @@ bool ReportReadPlan::allocate(size_t session_count,
     size_t operations_offset = 0;
     size_t mappings_offset = 0;
 
-    if (!reserve_array(total,
-                       session_count,
-                       sizeof(ReportReadSession),
-                       alignof(ReportReadSession),
-                       sessions_offset) ||
-        !reserve_array(total,
-                       operation_count,
-                       sizeof(ReportReadOperation),
-                       alignof(ReportReadOperation),
-                       operations_offset) ||
-        !reserve_array(total,
-                       mapping_count,
-                       sizeof(ReportReadMapping),
-                       alignof(ReportReadMapping),
-                       mappings_offset)) {
+    if (!CheckedSize::reserve_array<ReportReadSession>(
+            total, session_count, sessions_offset) ||
+        !CheckedSize::reserve_array<ReportReadOperation>(
+            total, operation_count, operations_offset) ||
+        !CheckedSize::reserve_array<ReportReadMapping>(
+            total, mapping_count, mappings_offset)) {
         return false;
     }
 
     if (total > 0) {
-        storage_ = static_cast<uint8_t *>(allocate_plan_storage(total));
+        storage_ = static_cast<uint8_t *>(
+            Memory::calloc_large(1, total, false));
         if (!storage_) return false;
     }
 

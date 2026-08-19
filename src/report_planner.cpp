@@ -2,14 +2,10 @@
 
 #include <algorithm>
 #include <limits>
-#include <new>
-#include <stdlib.h>
 
+#include "checked_size.h"
+#include "large_scratch_array.h"
 #include "storage_read_port.h"
-
-#ifdef ARDUINO
-#include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
@@ -47,63 +43,8 @@ struct PendingOperation {
     bool has_mapping = false;
 };
 
-void *allocate_scratch(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, bytes, false);
-#else
-    return calloc(1, bytes);
-#endif
-}
-
-void free_scratch(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-template <typename T>
-class ScratchArray {
-public:
-    ~ScratchArray() {
-        for (size_t i = 0; i < capacity_; ++i) values_[i].~T();
-        free_scratch(values_);
-    }
-
-    bool allocate(size_t capacity) {
-        if (capacity == 0) return true;
-        if (capacity > std::numeric_limits<size_t>::max() / sizeof(T)) {
-            return false;
-        }
-
-        values_ = static_cast<T *>(
-            allocate_scratch(capacity * sizeof(T)));
-        if (!values_) return false;
-
-        capacity_ = capacity;
-        for (size_t i = 0; i < capacity_; ++i) new (&values_[i]) T();
-        return true;
-    }
-
-    T *append() {
-        return size_ < capacity_ ? &values_[size_++] : nullptr;
-    }
-
-    T *data() { return values_; }
-    const T *data() const { return values_; }
-    size_t size() const { return size_; }
-
-private:
-    T *values_ = nullptr;
-    size_t size_ = 0;
-    size_t capacity_ = 0;
-};
-
 bool add_count(size_t &total, size_t amount) {
-    if (total > std::numeric_limits<size_t>::max() - amount) return false;
-    total += amount;
-    return true;
+    return CheckedSize::add_to(total, amount);
 }
 
 NightCatalogTimeRange intersect_ranges(const NightCatalogTimeRange &lhs,
@@ -477,7 +418,7 @@ SourceCandidate select_source(const NightCatalog &catalog,
 bool select_sources(const ReportPlanRequest &request,
                     const NightCatalog &catalog,
                     const NightCatalogRecord &night,
-                    ScratchArray<SelectedSource> &selected) {
+                    LargeScratchArray<SelectedSource> &selected) {
     size_t catalog_session_count = 0;
     const NightCatalogTimeRange *sessions =
         catalog.sessions(night, catalog_session_count);
@@ -919,7 +860,7 @@ bool count_event_operations(const ReportPlanRequest &request,
     return true;
 }
 
-bool append_record_operations(ScratchArray<PendingOperation> &pending,
+bool append_record_operations(LargeScratchArray<PendingOperation> &pending,
                               const NightCatalogSourceFile &file,
                               uint16_t catalog_file_index,
                               uint16_t session_index,
@@ -961,7 +902,7 @@ bool append_edf_numeric_operations(
     const NightCatalog &catalog,
     const NightCatalogRecord &night,
     const SelectedSource &selected,
-    ScratchArray<PendingOperation> &pending) {
+    LargeScratchArray<PendingOperation> &pending) {
     size_t file_count = 0;
     const NightCatalogSourceFile *files = catalog.files(night, file_count);
     if (!files || selected.catalog_file_index >= file_count) return false;
@@ -1011,7 +952,7 @@ bool append_fallback_series_operations(
     const NightCatalog &catalog,
     const NightCatalogRecord &night,
     const SelectedSource &selected,
-    ScratchArray<PendingOperation> &pending) {
+    LargeScratchArray<PendingOperation> &pending) {
     size_t file_count = 0;
     const NightCatalogFallbackFile *files =
         catalog.fallback_files(night, file_count);
@@ -1061,7 +1002,7 @@ bool append_fallback_series_operations(
 bool append_numeric_operations(const NightCatalog &catalog,
                                const NightCatalogRecord &night,
                                const SelectedSource &selected,
-                               ScratchArray<PendingOperation> &pending) {
+                               LargeScratchArray<PendingOperation> &pending) {
     return selected.storage == SelectedStorage::Edf
         ? append_edf_numeric_operations(catalog,
                                         night,
@@ -1076,7 +1017,7 @@ bool append_numeric_operations(const NightCatalog &catalog,
 bool append_event_operations(const ReportPlanRequest &request,
                              const NightCatalog &catalog,
                              const NightCatalogRecord &night,
-                             ScratchArray<PendingOperation> &pending) {
+                             LargeScratchArray<PendingOperation> &pending) {
     size_t catalog_session_count = 0;
     const NightCatalogTimeRange *sessions =
         catalog.sessions(night, catalog_session_count);
@@ -1266,7 +1207,7 @@ bool mappings_merge(const ReportReadMapping &lhs,
            rhs.output_window.start_ms <= lhs.output_window.end_ms;
 }
 
-void count_final_entries(const ScratchArray<PendingOperation> &pending,
+void count_final_entries(const LargeScratchArray<PendingOperation> &pending,
                          size_t &operation_count,
                          size_t &mapping_count) {
     operation_count = 0;
@@ -1301,7 +1242,7 @@ void count_final_entries(const ScratchArray<PendingOperation> &pending,
 bool fill_sessions(const ReportPlanRequest &request,
                    const NightCatalog &catalog,
                    const NightCatalogRecord &night,
-                   const ScratchArray<SelectedSource> &selected,
+                   const LargeScratchArray<SelectedSource> &selected,
                    ReportReadSession *plan_sessions,
                    size_t plan_session_count,
                    bool fallback_acquisition_allowed,
@@ -1390,7 +1331,7 @@ bool fill_sessions(const ReportPlanRequest &request,
     return plan_session == plan_session_count;
 }
 
-bool fill_operations(const ScratchArray<PendingOperation> &pending,
+bool fill_operations(const LargeScratchArray<PendingOperation> &pending,
                      ReportReadOperation *plan_operations,
                      size_t plan_operation_count,
                      ReportReadMapping *plan_mappings,
@@ -1477,7 +1418,7 @@ ReportPlanResult ReportPlanner::build(
         return result;
     }
 
-    ScratchArray<SelectedSource> selected;
+    LargeScratchArray<SelectedSource> selected;
     if (!selected.allocate(session_count * requested_signals)) {
         result.status = ReportPlanStatus::AllocationFailed;
         return result;
@@ -1502,7 +1443,7 @@ ReportPlanResult ReportPlanner::build(
         return result;
     }
 
-    ScratchArray<PendingOperation> pending;
+    LargeScratchArray<PendingOperation> pending;
     if (!pending.allocate(pending_count)) {
         result.status = ReportPlanStatus::AllocationFailed;
         return result;

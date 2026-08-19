@@ -2,19 +2,15 @@
 
 #include <algorithm>
 #include <limits>
-#include <new>
-#include <stdlib.h>
 #include <string.h>
 #include <utility>
 
 #include "board_report.h"
+#include "large_object.h"
+#include "memory_manager.h"
 #include "report_plot_encoder.h"
 #include "report_records.h"
 #include "report_sources.h"
-
-#ifdef ARDUINO
-#include "memory_manager.h"
-#endif
 
 namespace aircannect {
 namespace {
@@ -39,47 +35,6 @@ struct SeriesState {
 struct EventSlot {
     ReportEventRecord event;
 };
-
-void *allocate_large(size_t count, size_t width) {
-    if (count == 0 || width == 0 ||
-        count > std::numeric_limits<size_t>::max() / width) {
-        return nullptr;
-    }
-#ifdef ARDUINO
-    return Memory::calloc_large(count, width, false);
-#else
-    return calloc(count, width);
-#endif
-}
-
-void free_large(void *memory) {
-#ifdef ARDUINO
-    Memory::free(memory);
-#else
-    free(memory);
-#endif
-}
-
-template <typename T, typename... Args>
-T *create_large(Args &&...args) {
-#ifdef ARDUINO
-    void *memory = Memory::alloc_large(sizeof(T), false);
-    return memory ? new (memory) T(std::forward<Args>(args)...) : nullptr;
-#else
-    return new (std::nothrow) T(std::forward<Args>(args)...);
-#endif
-}
-
-template <typename T>
-void destroy_large(T *value) {
-    if (!value) return;
-#ifdef ARDUINO
-    value->~T();
-    Memory::free(value);
-#else
-    delete value;
-#endif
-}
 
 int32_t scaled_plot_value(const ReportSeriesDescriptor &series,
                           int32_t value_milli) {
@@ -242,7 +197,7 @@ struct ReportPlotAccumulator::Runtime {
     bool active = false;
 
     void clear() {
-        free_large(cell_storage);
+        Memory::free(cell_storage);
         cell_storage = nullptr;
         event_slots.clear();
         plan = nullptr;
@@ -258,11 +213,11 @@ struct ReportPlotAccumulator::Runtime {
 };
 
 ReportPlotAccumulator::ReportPlotAccumulator() :
-    runtime_(create_large<Runtime>()) {}
+    runtime_(LargeObject::create<Runtime>()) {}
 
 ReportPlotAccumulator::~ReportPlotAccumulator() {
     if (runtime_) runtime_->clear();
-    destroy_large(runtime_);
+    LargeObject::destroy(runtime_);
 }
 
 bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
@@ -330,7 +285,9 @@ bool ReportPlotAccumulator::begin(const ReportReadPlan &plan,
 
     if (total_cells > 0) {
         runtime_->cell_storage = static_cast<EnvelopeCell *>(
-            allocate_large(total_cells, sizeof(EnvelopeCell)));
+            Memory::calloc_large(total_cells,
+                                 sizeof(EnvelopeCell),
+                                 false));
         if (!runtime_->cell_storage) {
             failure_reason_ = "report_plot_cells_allocation_failed";
             runtime_->clear();

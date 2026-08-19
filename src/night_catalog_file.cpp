@@ -1,10 +1,10 @@
 #include "night_catalog_file.h"
 
 #include <cmath>
-#include <limits>
 #include <new>
 #include <string.h>
 
+#include "checked_size.h"
 #include "crc32.h"
 #include "little_endian.h"
 #include "report_records.h"
@@ -53,15 +53,6 @@ struct CatalogLayout {
     uint32_t path_bytes = 0;
     size_t body_bytes = 0;
 };
-
-bool add_size(size_t &total, size_t count, size_t item_size) {
-    if (count > std::numeric_limits<size_t>::max() / item_size) return false;
-
-    const size_t bytes = count * item_size;
-    if (total > std::numeric_limits<size_t>::max() - bytes) return false;
-    total += bytes;
-    return true;
-}
 
 bool add_u32(uint32_t &total, size_t count) {
     if (count > UINT32_MAX || total > UINT32_MAX - count) return false;
@@ -412,21 +403,21 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
     layout.path_bytes = expected_path;
 
     size_t body_bytes = 0;
-    if (!add_size(body_bytes, layout.records, RECORD_BYTES) ||
-        !add_size(body_bytes, layout.sessions, RANGE_BYTES) ||
-        !add_size(body_bytes, layout.masks, RANGE_BYTES) ||
-        !add_size(body_bytes, layout.files, FILE_BYTES) ||
-        !add_size(body_bytes, layout.coverage, COVERAGE_BYTES) ||
-        !add_size(body_bytes,
+    if (!CheckedSize::add_array(body_bytes, layout.records, RECORD_BYTES) ||
+        !CheckedSize::add_array(body_bytes, layout.sessions, RANGE_BYTES) ||
+        !CheckedSize::add_array(body_bytes, layout.masks, RANGE_BYTES) ||
+        !CheckedSize::add_array(body_bytes, layout.files, FILE_BYTES) ||
+        !CheckedSize::add_array(body_bytes, layout.coverage, COVERAGE_BYTES) ||
+        !CheckedSize::add_array(body_bytes,
                   layout.signal_layouts,
                   SIGNAL_LAYOUT_BYTES) ||
-        !add_size(body_bytes,
+        !CheckedSize::add_array(body_bytes,
                   layout.fallback_files,
                   FALLBACK_FILE_BYTES) ||
-        !add_size(body_bytes,
+        !CheckedSize::add_array(body_bytes,
                   layout.fallback_sections,
                   FALLBACK_SECTION_BYTES) ||
-        !add_size(body_bytes, layout.path_bytes, 1) ||
+        !CheckedSize::add_array(body_bytes, layout.path_bytes, 1) ||
         body_bytes >
             NightCatalogFileCodec::MaximumFileBytes -
                 NightCatalogFileCodec::HeaderBytes) {
@@ -776,21 +767,21 @@ bool parse_header(const uint8_t *header,
     info.path_bytes = get_le32(header + 60);
 
     size_t body_bytes = 0;
-    if (!add_size(body_bytes, info.record_count, RECORD_BYTES) ||
-        !add_size(body_bytes, info.session_count, RANGE_BYTES) ||
-        !add_size(body_bytes, info.mask_window_count, RANGE_BYTES) ||
-        !add_size(body_bytes, info.file_count, FILE_BYTES) ||
-        !add_size(body_bytes, info.coverage_count, COVERAGE_BYTES) ||
-        !add_size(body_bytes,
+    if (!CheckedSize::add_array(body_bytes, info.record_count, RECORD_BYTES) ||
+        !CheckedSize::add_array(body_bytes, info.session_count, RANGE_BYTES) ||
+        !CheckedSize::add_array(body_bytes, info.mask_window_count, RANGE_BYTES) ||
+        !CheckedSize::add_array(body_bytes, info.file_count, FILE_BYTES) ||
+        !CheckedSize::add_array(body_bytes, info.coverage_count, COVERAGE_BYTES) ||
+        !CheckedSize::add_array(body_bytes,
                   info.signal_layout_count,
                   SIGNAL_LAYOUT_BYTES) ||
-        !add_size(body_bytes,
+        !CheckedSize::add_array(body_bytes,
                   info.fallback_file_count,
                   FALLBACK_FILE_BYTES) ||
-        !add_size(body_bytes,
+        !CheckedSize::add_array(body_bytes,
                   info.fallback_section_count,
                   FALLBACK_SECTION_BYTES) ||
-        !add_size(body_bytes, info.path_bytes, 1) ||
+        !CheckedSize::add_array(body_bytes, info.path_bytes, 1) ||
         get_le64(header + 68) != body_bytes ||
         body_bytes > NightCatalogFileCodec::MaximumFileBytes -
                          NightCatalogFileCodec::HeaderBytes) {

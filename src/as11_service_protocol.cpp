@@ -7,6 +7,7 @@
 
 #include "crc16.h"
 #include "crc32.h"
+#include "little_endian.h"
 #include "runtime_clock.h"
 
 namespace aircannect {
@@ -23,29 +24,10 @@ static_assert(AS11_SERVICE_PACKET_MAX_BYTES ==
                   ISO_TP_MAX_CLASSIC_PACKET_BYTES,
               "service packet limit must match classic-CAN ISO-TP");
 
-uint16_t get_le16(const uint8_t *value) {
-    return static_cast<uint16_t>(value[0]) |
-           (static_cast<uint16_t>(value[1]) << 8);
-}
-
-uint32_t get_le32(const uint8_t *value) {
-    return static_cast<uint32_t>(value[0]) |
-           (static_cast<uint32_t>(value[1]) << 8) |
-           (static_cast<uint32_t>(value[2]) << 16) |
-           (static_cast<uint32_t>(value[3]) << 24);
-}
-
-void put_le16(uint8_t *destination, uint16_t value) {
-    destination[0] = static_cast<uint8_t>(value & 0xFF);
-    destination[1] = static_cast<uint8_t>(value >> 8);
-}
-
-void put_le32(uint8_t *destination, uint32_t value) {
-    destination[0] = static_cast<uint8_t>(value & 0xFF);
-    destination[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
-    destination[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
-    destination[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
-}
+using LittleEndian::get_le16;
+using LittleEndian::get_le32;
+using LittleEndian::put_le16;
+using LittleEndian::put_le32;
 
 bool service_protocol_supported(uint8_t protocol_version) {
     return protocol_version == AS11_SERVICE_PROTOCOL_VERSION_V1 ||

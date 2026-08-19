@@ -5,34 +5,15 @@
 #include <math.h>
 #include <new>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <utility>
 
 #include "as11_rpc.h"
-#ifdef ARDUINO
 #include "memory_manager.h"
-#endif
 #include "string_util.h"
 
 namespace aircannect {
 namespace {
-
-void *settings_alloc_large(size_t size) {
-#ifdef ARDUINO
-    return Memory::alloc_large(size);
-#else
-    return malloc(size);
-#endif
-}
-
-void settings_free(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
 
 #define MODE_BIT(mode) (static_cast<uint16_t>(1u << (mode)))
 #define MODES_NONE 0x0000u
@@ -678,7 +659,7 @@ As11StoredValue &As11StoredValue::operator=(
 bool As11StoredValue::set(const std::string &value) {
     const size_t len = value.size();
     if (len <= InlineCapacity) {
-        settings_free(heap_);
+        Memory::free(heap_);
         heap_ = nullptr;
         length_ = len;
         if (len) memcpy(inline_, value.data(), len);
@@ -686,11 +667,11 @@ bool As11StoredValue::set(const std::string &value) {
         return true;
     }
 
-    char *next = static_cast<char *>(settings_alloc_large(len + 1));
+    char *next = static_cast<char *>(Memory::alloc_large(len + 1));
     if (!next) return false;
     memcpy(next, value.data(), len);
     next[len] = 0;
-    settings_free(heap_);
+    Memory::free(heap_);
     heap_ = next;
     length_ = len;
     inline_[0] = 0;
@@ -698,7 +679,7 @@ bool As11StoredValue::set(const std::string &value) {
 }
 
 void As11StoredValue::clear() {
-    settings_free(heap_);
+    Memory::free(heap_);
     heap_ = nullptr;
     length_ = 0;
     inline_[0] = 0;
@@ -720,7 +701,7 @@ bool As11SettingsState::ensure_storage() {
     release_storage();
 
     values_ = static_cast<As11StoredValue *>(
-        settings_alloc_large(sizeof(As11StoredValue) * catalog_count));
+        Memory::alloc_large(sizeof(As11StoredValue) * catalog_count));
     if (!values_) goto fail;
     setting_capacity_ = catalog_count;
     for (size_t i = 0; i < setting_capacity_; ++i) {
@@ -728,14 +709,14 @@ bool As11SettingsState::ensure_storage() {
     }
 
     pending_values_ = static_cast<As11StoredValue *>(
-        settings_alloc_large(sizeof(As11StoredValue) * setting_capacity_));
+        Memory::alloc_large(sizeof(As11StoredValue) * setting_capacity_));
     if (!pending_values_) goto fail;
     for (size_t i = 0; i < setting_capacity_; ++i) {
         new (&pending_values_[i]) As11StoredValue();
     }
 
     profile_values_ = static_cast<ProfileValueSlot *>(
-        settings_alloc_large(sizeof(ProfileValueSlot) * MaxProfileValues));
+        Memory::alloc_large(sizeof(ProfileValueSlot) * MaxProfileValues));
     if (!profile_values_) goto fail;
     profile_capacity_ = MaxProfileValues;
     for (size_t i = 0; i < profile_capacity_; ++i) {
@@ -743,11 +724,11 @@ bool As11SettingsState::ensure_storage() {
     }
 
     feature_present_ = static_cast<bool *>(
-        settings_alloc_large(sizeof(bool) * setting_capacity_));
+        Memory::alloc_large(sizeof(bool) * setting_capacity_));
     pending_ = static_cast<bool *>(
-        settings_alloc_large(sizeof(bool) * setting_capacity_));
+        Memory::alloc_large(sizeof(bool) * setting_capacity_));
     pending_since_ms_ = static_cast<uint32_t *>(
-        settings_alloc_large(sizeof(uint32_t) * setting_capacity_));
+        Memory::alloc_large(sizeof(uint32_t) * setting_capacity_));
     if (!feature_present_ || !pending_ || !pending_since_ms_) goto fail;
 
     memset(feature_present_, 0, sizeof(bool) * setting_capacity_);
@@ -766,26 +747,26 @@ void As11SettingsState::release_storage() {
         for (size_t i = 0; i < setting_capacity_; ++i) {
             values_[i].~As11StoredValue();
         }
-        settings_free(values_);
+        Memory::free(values_);
     }
 
     if (pending_values_) {
         for (size_t i = 0; i < setting_capacity_; ++i) {
             pending_values_[i].~As11StoredValue();
         }
-        settings_free(pending_values_);
+        Memory::free(pending_values_);
     }
 
     if (profile_values_) {
         for (size_t i = 0; i < profile_capacity_; ++i) {
             profile_values_[i].~ProfileValueSlot();
         }
-        settings_free(profile_values_);
+        Memory::free(profile_values_);
     }
 
-    settings_free(feature_present_);
-    settings_free(pending_);
-    settings_free(pending_since_ms_);
+    Memory::free(feature_present_);
+    Memory::free(pending_);
+    Memory::free(pending_since_ms_);
 
     values_ = nullptr;
     pending_values_ = nullptr;

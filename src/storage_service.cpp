@@ -363,24 +363,6 @@ static constexpr size_t AC_EDF_STORAGE_NUMERIC_VALUE_MAX = max_size(
 static constexpr size_t AC_EDF_STORAGE_NUMERIC_BIT_BYTES =
     (AC_EDF_STORAGE_NUMERIC_VALUE_MAX + 7u) / 8u;
 
-const char *basename_from_path(const char *path) {
-    if (!path) return "";
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
-}
-
-bool build_child_path(const char *parent,
-                      const char *name,
-                      char *dst,
-                      size_t dst_size) {
-    if (!parent || !name || !*name || !dst || dst_size == 0) return false;
-    const int written =
-        strcmp(parent, "/") == 0
-            ? snprintf(dst, dst_size, "/%s", name)
-            : snprintf(dst, dst_size, "%s/%s", parent, name);
-    return written > 0 && static_cast<size_t>(written) < dst_size;
-}
-
 bool legacy_str_backup_artifact_name(const char *name) {
     if (!name || strncmp(name, "STR-", 4) != 0) return false;
     const size_t len = strlen(name);
@@ -413,12 +395,12 @@ void recover_str_storage_artifacts() {
         File child = root.openNextFile();
         if (!child) break;
         const bool is_dir = child.isDirectory();
-        const char *name = basename_from_path(child.name());
+        const char *name = storage_basename_from_path(child.name());
         char path[64] = {};
         const bool remove =
             !is_dir &&
             legacy_str_backup_artifact_name(name) &&
-            build_child_path("/", name, path, sizeof(path));
+            storage_append_child_path("/", name, path, sizeof(path));
         child.close();
         if (remove && Storage::remove(path)) removed++;
     }
@@ -2422,42 +2404,11 @@ bool enqueue_edf_open_annotation(const char *path,
 
 bool enqueue_edf_numeric_record(const EdfFileSchema &schema,
                                 const EdfCompletedRecordView &record) {
-    if (!service_state.initialized) begin();
-    if (!service_state.available) return false;
-    if (!lock_queue()) {
-        service_state.queue_drops++;
-        set_error("queue_lock_failed");
-        log_worker_failure(LOG_WARN, "queue_lock_failed");
-        return false;
-    }
-    if (!slot_storage_available()) {
-        unlock_queue();
-        return false;
-    }
-
-    if (free_slots() == 0) {
-        unlock_queue();
-        service_state.queue_drops++;
-        set_error("queue_full");
-        log_worker_failure(LOG_WARN, "queue_full");
-        return false;
-    }
-
-    JobSlot &job = slots[tail];
-    clear_slot(job);
-    if (!prepare_numeric_record_job(job, schema, record)) {
-        unlock_queue();
-        set_error("record_snapshot_failed");
-        log_worker_failure(LOG_WARN, "record_snapshot_failed");
-        return false;
-    }
-
-    tail = (tail + 1) % AC_EDF_STORAGE_QUEUE_CAPACITY;
-    queued++;
-    unlock_queue();
-
-    wake_service_task();
-    return true;
+    return enqueue_prepared_slot(
+        [&](JobSlot &job) {
+            return prepare_numeric_record_job(job, schema, record);
+        },
+        "record_snapshot_failed");
 }
 
 bool enqueue_edf_annotation_record(EdfAnnotationKind kind,

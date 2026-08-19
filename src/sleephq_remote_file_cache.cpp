@@ -1,13 +1,9 @@
 #include "sleephq_remote_file_cache.h"
 
 #include <new>
-#include <stdlib.h>
 #include <string.h>
 
-#if defined(ARDUINO)
 #include "memory_manager.h"
-#endif
-
 #include "string_util.h"
 
 namespace aircannect {
@@ -15,22 +11,6 @@ namespace {
 
 static constexpr size_t INITIAL_ENTRY_CAPACITY = 32;
 static constexpr size_t INITIAL_BUCKET_COUNT = 64;
-
-void *alloc_zeroed(size_t count, size_t size) {
-#if defined(ARDUINO)
-    return Memory::calloc_large(count, size, false);
-#else
-    return calloc(count, size);
-#endif
-}
-
-void free_large(void *ptr) {
-#if defined(ARDUINO)
-    Memory::free(ptr);
-#else
-    free(ptr);
-#endif
-}
 
 uint64_t fnv1a_append(uint64_t hash, const void *data, size_t size) {
     const uint8_t *bytes = static_cast<const uint8_t *>(data);
@@ -83,12 +63,13 @@ bool SleepHqRemoteFileCache::reserve_entries(size_t needed) {
     size_t next = capacity_ == 0 ? INITIAL_ENTRY_CAPACITY : capacity_ * 2;
     while (next < needed) next *= 2;
 
-    Entry *entries = static_cast<Entry *>(alloc_zeroed(next, sizeof(Entry)));
+    Entry *entries = static_cast<Entry *>(
+        Memory::calloc_large(next, sizeof(Entry), false));
     if (!entries) return false;
     for (size_t i = 0; i < next; ++i) new (&entries[i]) Entry();
     for (size_t i = 0; i < count_; ++i) entries[i] = entries_[i];
 
-    if (entries_) free_large(entries_);
+    if (entries_) Memory::free(entries_);
     entries_ = entries;
     capacity_ = next;
     return true;
@@ -100,10 +81,10 @@ bool SleepHqRemoteFileCache::reserve_buckets(size_t needed_entries) {
     if (next == bucket_count_) return true;
 
     uint32_t *buckets = static_cast<uint32_t *>(
-        alloc_zeroed(next, sizeof(uint32_t)));
+        Memory::calloc_large(next, sizeof(uint32_t), false));
     if (!buckets) return false;
 
-    if (buckets_) free_large(buckets_);
+    if (buckets_) Memory::free(buckets_);
     buckets_ = buckets;
     bucket_count_ = next;
     for (size_t i = 0; i < count_; ++i) insert_bucket(i);
@@ -198,9 +179,9 @@ bool SleepHqRemoteFileCache::contains(const char *name,
 void SleepHqRemoteFileCache::clear() {
     if (entries_) {
         for (size_t i = 0; i < capacity_; ++i) entries_[i].~Entry();
-        free_large(entries_);
+        Memory::free(entries_);
     }
-    if (buckets_) free_large(buckets_);
+    if (buckets_) Memory::free(buckets_);
 
     entries_ = nullptr;
     count_ = 0;

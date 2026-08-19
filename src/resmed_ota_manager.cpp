@@ -16,6 +16,7 @@
 #include "as11_service_protocol.h"
 #include "debug_log.h"
 #include "large_byte_buffer.h"
+#include "little_endian.h"
 #include "memory_manager.h"
 #include "resmed_firmware_dump.h"
 #include "runtime_clock.h"
@@ -119,17 +120,8 @@ String bytes_to_hex(const uint8_t *bytes, size_t length) {
     return hex;
 }
 
-void put_le32(uint8_t *destination, uint32_t value) {
-    destination[0] = static_cast<uint8_t>(value);
-    destination[1] = static_cast<uint8_t>(value >> 8);
-    destination[2] = static_cast<uint8_t>(value >> 16);
-    destination[3] = static_cast<uint8_t>(value >> 24);
-}
-
-void put_le16(uint8_t *destination, uint16_t value) {
-    destination[0] = static_cast<uint8_t>(value);
-    destination[1] = static_cast<uint8_t>(value >> 8);
-}
+using LittleEndian::put_le16;
+using LittleEndian::put_le32;
 
 }  // namespace
 

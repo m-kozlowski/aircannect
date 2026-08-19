@@ -1,15 +1,14 @@
 #include "edf_stream_assembler.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "edf_bytes.h"
 #include "edf_time.h"
+#include "memory_manager.h"
 
 #ifdef ARDUINO
 #include "debug_log.h"
-#include "memory_manager.h"
 #endif
 
 namespace aircannect {
@@ -27,14 +26,6 @@ int64_t abs_i64(int64_t value) {
     return value < 0 ? -value : value;
 }
 
-void *alloc_large_bytes(size_t bytes) {
-#ifdef ARDUINO
-    return Memory::calloc_large(1, bytes);
-#else
-    return calloc(1, bytes);
-#endif
-}
-
 void log_alloc_failed(const char *name, size_t bytes) {
 #ifdef ARDUINO
     Log::logf(CAT_EDF,
@@ -45,14 +36,6 @@ void log_alloc_failed(const char *name, size_t bytes) {
 #else
     (void)name;
     (void)bytes;
-#endif
-}
-
-void free_large_bytes(void *ptr) {
-#ifdef ARDUINO
-    Memory::free(ptr);
-#else
-    free(ptr);
 #endif
 }
 
@@ -286,29 +269,29 @@ bool EdfStreamAssembler::allocate_buffers() {
         series_slot_count(AC_EDF_TCV_SIGNAL_COUNT,
                           AC_EDF_TCV_SAMPLES_PER_RECORD);
 
-    brp_values_ = static_cast<float *>(alloc_large_bytes(sizeof(float) *
+    brp_values_ = static_cast<float *>(Memory::calloc_large(1, sizeof(float) *
                                                          brp_slots));
-    pld_values_ = static_cast<float *>(alloc_large_bytes(sizeof(float) *
+    pld_values_ = static_cast<float *>(Memory::calloc_large(1, sizeof(float) *
                                                          pld_slots));
-    sa2_values_ = static_cast<float *>(alloc_large_bytes(sizeof(float) *
+    sa2_values_ = static_cast<float *>(Memory::calloc_large(1, sizeof(float) *
                                                          sa2_slots));
-    tcv_values_ = static_cast<float *>(alloc_large_bytes(sizeof(float) *
+    tcv_values_ = static_cast<float *>(Memory::calloc_large(1, sizeof(float) *
                                                          tcv_slots));
-    brp_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    brp_present_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         brp_slots)));
-    pld_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    pld_present_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         pld_slots)));
-    sa2_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    sa2_present_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         sa2_slots)));
-    tcv_present_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    tcv_present_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         tcv_slots)));
-    brp_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    brp_valid_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         brp_slots)));
-    pld_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    pld_valid_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         pld_slots)));
-    sa2_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    sa2_valid_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         sa2_slots)));
-    tcv_valid_ = static_cast<uint8_t *>(alloc_large_bytes(bitset_size(
+    tcv_valid_ = static_cast<uint8_t *>(Memory::calloc_large(1, bitset_size(
         tcv_slots)));
 
     if (!brp_values_ || !pld_values_ || !sa2_values_ || !tcv_values_ ||
@@ -361,18 +344,18 @@ bool EdfStreamAssembler::allocate_buffers() {
 }
 
 void EdfStreamAssembler::free_buffers() {
-    free_large_bytes(brp_values_);
-    free_large_bytes(pld_values_);
-    free_large_bytes(sa2_values_);
-    free_large_bytes(tcv_values_);
-    free_large_bytes(brp_present_);
-    free_large_bytes(pld_present_);
-    free_large_bytes(sa2_present_);
-    free_large_bytes(tcv_present_);
-    free_large_bytes(brp_valid_);
-    free_large_bytes(pld_valid_);
-    free_large_bytes(sa2_valid_);
-    free_large_bytes(tcv_valid_);
+    Memory::free(brp_values_);
+    Memory::free(pld_values_);
+    Memory::free(sa2_values_);
+    Memory::free(tcv_values_);
+    Memory::free(brp_present_);
+    Memory::free(pld_present_);
+    Memory::free(sa2_present_);
+    Memory::free(tcv_present_);
+    Memory::free(brp_valid_);
+    Memory::free(pld_valid_);
+    Memory::free(sa2_valid_);
+    Memory::free(tcv_valid_);
     brp_values_ = nullptr;
     pld_values_ = nullptr;
     sa2_values_ = nullptr;

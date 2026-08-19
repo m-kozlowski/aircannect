@@ -1,12 +1,18 @@
 #include "memory_manager.h"
 
+#ifdef ARDUINO
+#include <Arduino.h>
 #include <esp_heap_caps.h>
+#endif
+
+#include <stdlib.h>
 #include <string.h>
 
 namespace aircannect {
 namespace Memory {
 namespace {
 
+#ifdef ARDUINO
 bool initialized = false;
 bool psram_detected = false;
 
@@ -17,15 +23,19 @@ bool detect_psram() {
 void ensure_begin() {
     if (!initialized) begin();
 }
+#endif
 
 }  // namespace
 
 void begin() {
+#ifdef ARDUINO
     psram_detected = detect_psram();
     initialized = true;
+#endif
 }
 
 MemoryStatus status() {
+#ifdef ARDUINO
     ensure_begin();
     MemoryStatus out;
     out.heap_total = ESP.getHeapSize();
@@ -42,8 +52,12 @@ MemoryStatus status() {
                                              MALLOC_CAP_8BIT);
     }
     return out;
+#else
+    return {};
+#endif
 }
 
+#ifdef ARDUINO
 MemoryRegionStatus region_status(uint32_t caps) {
     MemoryRegionStatus out;
     multi_heap_info_t info = {};
@@ -57,8 +71,10 @@ MemoryRegionStatus region_status(uint32_t caps) {
     out.total_blocks = info.total_blocks;
     return out;
 }
+#endif
 
 MemoryDetailStatus detail_status() {
+#ifdef ARDUINO
     ensure_begin();
     MemoryDetailStatus out;
     out.summary = status();
@@ -69,13 +85,21 @@ MemoryDetailStatus detail_status() {
                                     MALLOC_CAP_DMA);
     out.psram_8bit = region_status(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     return out;
+#else
+    return {};
+#endif
 }
 
 bool psram_available() {
+#ifdef ARDUINO
     return status().psram_available;
+#else
+    return false;
+#endif
 }
 
 void *alloc_large(size_t size, bool allow_internal_fallback) {
+#ifdef ARDUINO
     ensure_begin();
     if (size == 0) return nullptr;
 
@@ -87,6 +111,10 @@ void *alloc_large(size_t size, bool allow_internal_fallback) {
 
     if (!allow_internal_fallback) return nullptr;
     return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
+    (void)allow_internal_fallback;
+    return size == 0 ? nullptr : malloc(size);
+#endif
 }
 
 void *calloc_large(size_t count,
@@ -95,10 +123,15 @@ void *calloc_large(size_t count,
     if (count == 0 || size == 0) return nullptr;
     if (count > SIZE_MAX / size) return nullptr;
 
+#ifdef ARDUINO
     const size_t bytes = count * size;
     void *ptr = alloc_large(bytes, allow_internal_fallback);
     if (ptr) memset(ptr, 0, bytes);
     return ptr;
+#else
+    (void)allow_internal_fallback;
+    return calloc(count, size);
+#endif
 }
 
 void free(void *ptr) {
