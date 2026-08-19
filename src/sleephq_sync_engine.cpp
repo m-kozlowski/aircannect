@@ -291,7 +291,7 @@ void SleepHqSyncEngine::begin(const SleepHqExportConfig &config,
                            StorageAtomicWritePort &write_port,
                            StoragePathPort &path_port) {
     if (!lock_) lock_ = xSemaphoreCreateMutex();
-    inventory_loader_.begin(scan_port, read_port);
+    inventory_session_.begin(scan_port, read_port);
     state_io_.begin(read_port, write_port, path_port);
     stream_port_ = &stream_port;
     configure(config);
@@ -316,13 +316,8 @@ void SleepHqSyncEngine::apply_config_locked(const SleepHqExportConfig &config) {
     status_.pending_reason[0] = 0;
     status_.last_error[0] = 0;
     state_dir_[0] = 0;
-    inventory_loader_.reset();
-    export_inventory_.reset();
-    export_day_inventory_.reset();
-    inventory_requested_ = false;
-    day_inventory_requested_ = false;
+    inventory_session_.reset();
     day_load_resume_phase_ = WorkPhase::NextFile;
-    requested_datalog_day_[0] = '\0';
     state_io_.reset();
     rebuild_marker_file_.reset();
     state_batch_.clear();
@@ -531,35 +526,14 @@ bool SleepHqSyncEngine::begin_run_locked(uint32_t now_ms) {
 }
 
 ExportStep SleepHqSyncEngine::step_load_inventory_locked() {
-    if (!inventory_requested_) {
-        const uint32_t generation = next_inventory_generation_;
-        const OperationAdmission admission =
-            inventory_loader_.request(state_dir_, generation);
-        if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
-        if (admission != OperationAdmission::Accepted) {
-            fail_locked("export_inventory_rejected");
-            return ExportStep::Idle;
-        }
-
-        next_inventory_generation_++;
-        if (next_inventory_generation_ == 0) next_inventory_generation_ = 1;
-        inventory_requested_ = true;
-    }
-
     char error[AC_SLEEPHQ_ERROR_MAX] = {};
     const StorageExportInventoryLoadResult result =
-        inventory_loader_.poll(error, sizeof(error));
+        inventory_session_.poll_catalog(state_dir_, error, sizeof(error));
     if (result == StorageExportInventoryLoadResult::Waiting) {
         return ExportStep::Waiting;
     }
     if (result == StorageExportInventoryLoadResult::Error) {
         fail_locked(error[0] ? error : "export_inventory_failed");
-        return ExportStep::Idle;
-    }
-
-    export_inventory_ = inventory_loader_.snapshot();
-    if (!export_inventory_) {
-        fail_locked("export_inventory_missing");
         return ExportStep::Idle;
     }
     if (!prepare_remote_reconcile_locked(error, sizeof(error))) {
@@ -579,56 +553,27 @@ bool SleepHqSyncEngine::queue_datalog_day_load_locked(
         return false;
     }
 
-    if (export_day_inventory_ &&
-        strcmp(export_day_inventory_->loaded_datalog_day(), day) == 0) {
-        char pending_day[9] = {};
-        if (export_planner_.pending_datalog_day_inventory(
-                pending_day, sizeof(pending_day))) {
-            char error[AC_SLEEPHQ_ERROR_MAX] = {};
-            if (strcmp(pending_day, day) != 0 ||
-                !export_planner_.provide_datalog_day_inventory(
-                    export_day_inventory_, error, sizeof(error))) {
-                return false;
-            }
-        }
-        phase_ = resume_phase;
-        return true;
-    }
+    char error[AC_SLEEPHQ_ERROR_MAX] = {};
+    const StorageExportDayRequestResult result =
+        inventory_session_.request_datalog_day(
+            day,
+            export_planner_,
+            error,
+            sizeof(error));
+    if (result == StorageExportDayRequestResult::Error) return false;
 
-    copy_cstr(requested_datalog_day_,
-              sizeof(requested_datalog_day_),
-              day);
-    day_inventory_requested_ = false;
     day_load_resume_phase_ = resume_phase;
-    phase_ = WorkPhase::LoadDatalogDay;
+    phase_ = result == StorageExportDayRequestResult::Ready
+        ? resume_phase
+        : WorkPhase::LoadDatalogDay;
     return true;
 }
 
 ExportStep SleepHqSyncEngine::step_load_datalog_day_locked() {
-    if (!requested_datalog_day_[0]) {
-        fail_locked("export_day_missing");
-        return ExportStep::Idle;
-    }
-
-    if (!day_inventory_requested_) {
-        const uint32_t generation = next_inventory_generation_;
-        const OperationAdmission admission =
-            inventory_loader_.request_datalog_day(requested_datalog_day_,
-                                                  generation);
-        if (admission == OperationAdmission::Busy) return ExportStep::Waiting;
-        if (admission != OperationAdmission::Accepted) {
-            fail_locked("export_day_inventory_rejected");
-            return ExportStep::Idle;
-        }
-
-        next_inventory_generation_++;
-        if (next_inventory_generation_ == 0) next_inventory_generation_ = 1;
-        day_inventory_requested_ = true;
-    }
-
     char error[AC_SLEEPHQ_ERROR_MAX] = {};
     const StorageExportInventoryLoadResult result =
-        inventory_loader_.poll(error, sizeof(error));
+        inventory_session_.poll_datalog_day(
+            export_planner_, error, sizeof(error));
     if (result == StorageExportInventoryLoadResult::Waiting) {
         return ExportStep::Waiting;
     }
@@ -636,31 +581,8 @@ ExportStep SleepHqSyncEngine::step_load_datalog_day_locked() {
         fail_locked(error[0] ? error : "export_day_inventory_failed");
         return ExportStep::Idle;
     }
-
-    export_day_inventory_ = inventory_loader_.snapshot();
-    if (!export_day_inventory_ ||
-        strcmp(export_day_inventory_->loaded_datalog_day(),
-               requested_datalog_day_) != 0) {
-        fail_locked("export_day_inventory_missing");
-        return ExportStep::Idle;
-    }
-
-    char pending_day[9] = {};
-    if (export_planner_.pending_datalog_day_inventory(
-            pending_day, sizeof(pending_day))) {
-        if (strcmp(pending_day, requested_datalog_day_) != 0 ||
-            !export_planner_.provide_datalog_day_inventory(
-                export_day_inventory_, error, sizeof(error))) {
-            fail_locked(error[0] ? error : "planner_day_inventory_failed");
-            return ExportStep::Idle;
-        }
-    }
-
-    const WorkPhase resume_phase = day_load_resume_phase_;
-    requested_datalog_day_[0] = '\0';
-    day_inventory_requested_ = false;
+    phase_ = day_load_resume_phase_;
     day_load_resume_phase_ = WorkPhase::NextFile;
-    phase_ = resume_phase;
     return ExportStep::Working;
 }
 
@@ -914,9 +836,7 @@ ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
 
 void SleepHqSyncEngine::reset_run_locked(bool keep_status) {
     client_.disconnect();
-    inventory_loader_.reset();
-    export_inventory_.reset();
-    export_day_inventory_.reset();
+    inventory_session_.reset();
     export_planner_.reset();
     clear_current_file_locked();
     clear_staged_locked();
@@ -945,10 +865,6 @@ void SleepHqSyncEngine::reset_run_locked(bool keep_status) {
     state_dir_[0] = 0;
     pending_state_path_[0] = '\0';
     pending_state_bytes_.reset();
-    inventory_requested_ = false;
-    day_inventory_requested_ = false;
-    day_load_resume_phase_ = WorkPhase::NextFile;
-    requested_datalog_day_[0] = '\0';
     current_run_kind_ = RunKind::Check;
     abort_requested_.store(false);
     if (!keep_status) {
@@ -1168,7 +1084,8 @@ bool SleepHqSyncEngine::cancel_post_therapy_locked() {
 
 bool SleepHqSyncEngine::begin_export_planner_locked(char *error_out,
                                                  size_t error_out_size) {
-    if (!export_inventory_) {
+    const auto &catalog = inventory_session_.catalog();
+    if (!catalog) {
         copy_cstr(error_out, error_out_size, "export_inventory_missing");
         return false;
     }
@@ -1187,7 +1104,7 @@ bool SleepHqSyncEngine::begin_export_planner_locked(char *error_out,
         config.only_datalog_day = current_datalog_day_filter_;
     }
     return export_planner_.begin(config,
-                                 export_inventory_,
+                                 catalog,
                                  error_out,
                                  error_out_size);
 }
@@ -1386,13 +1303,14 @@ bool SleepHqSyncEngine::staged_contains_locked(const char *path,
 
 void SleepHqSyncEngine::note_completed_datalog_day_locked(const char *day) {
     pending_done_day_[0] = '\0';
-    if (!day || !export_inventory_) return;
+    const auto &catalog = inventory_session_.catalog();
+    if (!day || !catalog) return;
     if (!storage_export_datalog_day_finalized(
             day,
-            export_inventory_->latest_datalog_day())) {
+            catalog->latest_datalog_day())) {
         return;
     }
-    if (export_inventory_->datalog_day_done(day)) return;
+    if (catalog->datalog_day_done(day)) return;
     copy_cstr(pending_done_day_, sizeof(pending_done_day_), day);
 }
 
@@ -1889,23 +1807,6 @@ void SleepHqSyncEngine::continue_after_state_flush_locked() {
     }
 }
 
-const StorageExportInventoryView *
-SleepHqSyncEngine::inventory_for_state_path_locked(
-    const char *state_path) const {
-    char day[9] = {};
-    if (!storage_export_state_path_datalog_day(state_dir_,
-                                               state_path,
-                                               day,
-                                               sizeof(day))) {
-        return export_inventory_.get();
-    }
-    if (!export_day_inventory_ ||
-        strcmp(export_day_inventory_->loaded_datalog_day(), day) != 0) {
-        return nullptr;
-    }
-    return export_day_inventory_.get();
-}
-
 ExportStep SleepHqSyncEngine::step_flush_state_locked() {
     if (state_batch_.empty()) {
         continue_after_state_flush_locked();
@@ -1938,7 +1839,7 @@ ExportStep SleepHqSyncEngine::step_flush_state_locked() {
         return ExportStep::Idle;
     }
     const StorageExportInventoryView *inventory =
-        inventory_for_state_path_locked(state_path);
+        inventory_session_.inventory_for_state_path(state_dir_, state_path);
     if (!inventory) {
         char day[9] = {};
         if (!storage_export_state_path_datalog_day(state_dir_,
@@ -2176,13 +2077,14 @@ bool SleepHqSyncEngine::read_local_machine_serial(
         return false;
     }
     out[0] = '\0';
-    if (!export_inventory_ || !stream_port_) {
+    const auto &catalog = inventory_session_.catalog();
+    if (!catalog || !stream_port_) {
         copy_cstr(error, error_size, "identification_inventory_missing");
         return false;
     }
 
     StorageExportInventoryEntryView entry;
-    if (!export_inventory_->find_file(SLEEPHQ_IDENTIFICATION_PATH, entry)) {
+    if (!catalog->find_file(SLEEPHQ_IDENTIFICATION_PATH, entry)) {
         return true;
     }
     if (!entry.info.exists || entry.info.is_dir || entry.info.size == 0 ||

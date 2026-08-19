@@ -14,7 +14,7 @@
 #include "sleephq_remote_file_cache.h"
 #include "sleephq_sync_file.h"
 #include "storage_atomic_write_port.h"
-#include "storage_export_inventory.h"
+#include "storage_export_inventory_session.h"
 #include "storage_export_plan.h"
 #include "storage_export_planner.h"
 #include "storage_export_state_batch.h"
@@ -273,8 +273,6 @@ private:
     ExportStep step_write_done_marker_locked();
     bool prepare_rebuild_marker_locked();
     bool prepare_done_marker_locked();
-    const StorageExportInventoryView *inventory_for_state_path_locked(
-        const char *state_path) const;
     void continue_after_state_flush_locked();
     uint32_t next_storage_generation_locked();
     bool reserve_staged_locked(size_t needed);
@@ -340,6 +338,7 @@ private:
     SleepHqExportConfig pending_config_;
     bool pending_config_valid_ = false;
     WorkPhase phase_ = WorkPhase::Idle;
+    WorkPhase day_load_resume_phase_ = WorkPhase::NextFile;
     RunKind pending_run_kind_ = RunKind::Check;
     RunKind current_run_kind_ = RunKind::Check;
     SleepHqClient client_;
@@ -361,10 +360,8 @@ private:
     std::atomic<uint32_t> runtime_completed_check_generation_{0};
 
     // active export/import
-    StorageExportInventoryLoader inventory_loader_;
+    StorageExportInventorySession inventory_session_;
     StorageStreamPort *stream_port_ = nullptr;
-    std::shared_ptr<const StorageExportInventory> export_inventory_;
-    std::shared_ptr<const StorageExportInventory> export_day_inventory_;
     StorageExportPlanner export_planner_;
     StorageExportStateBatch state_batch_;
     StorageFileClient state_io_;
@@ -421,12 +418,7 @@ private:
     char inflight_line_[AC_STORAGE_PATH_MAX * 2 + 160] = {};
 
     // storage generations
-    uint32_t next_inventory_generation_ = 1;
     uint32_t next_storage_generation_ = 1;
-    bool inventory_requested_ = false;
-    bool day_inventory_requested_ = false;
-    WorkPhase day_load_resume_phase_ = WorkPhase::NextFile;
-    char requested_datalog_day_[9] = {};
 };
 
 }  // namespace aircannect
