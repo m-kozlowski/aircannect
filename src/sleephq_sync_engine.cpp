@@ -56,25 +56,6 @@ static constexpr uint32_t SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT =
 static constexpr uint32_t SLEEPHQ_DATALOG_REBUILD_COOLDOWN_SECONDS =
     6UL * 60UL * 60UL;
 
-bool parse_uint64_text(const char *text, uint64_t &out) {
-    if (!text || !text[0]) return false;
-
-    char *end = nullptr;
-    const unsigned long long value = strtoull(text, &end, 10);
-    if (!end || *end != '\0') return false;
-
-    out = static_cast<uint64_t>(value);
-    return true;
-}
-
-bool parse_uint32_text(const char *text, uint32_t &out) {
-    uint64_t value = 0;
-    if (!parse_uint64_text(text, value) || value > UINT32_MAX) return false;
-
-    out = static_cast<uint32_t>(value);
-    return true;
-}
-
 std::shared_ptr<const LargeByteBuffer> freeze_bytes(const void *data,
                                                     size_t size) {
     if (!data || size == 0) return {};
@@ -891,7 +872,7 @@ ExportStep SleepHqSyncEngine::step_read_rebuild_marker_locked() {
                 raw[read.bytes] = '\0';
                 char *newline = strpbrk(raw, "\r\n");
                 if (newline) *newline = '\0';
-                if (parse_uint64_text(raw, marker_epoch)) {
+                if (parse_uint64_decimal(raw, marker_epoch)) {
                     const uint64_t now_epoch =
                         storage_export_current_epoch_seconds_or_zero();
                     marker_recent = now_epoch != 0 &&
@@ -1648,8 +1629,8 @@ bool SleepHqSyncEngine::parse_inflight_line_locked(char *line) {
         uint32_t team_id = 0;
         uint32_t import_id = 0;
         InflightPhase phase = InflightPhase::None;
-        if (!parse_uint32_text(team_text, team_id) || team_id == 0 ||
-            !parse_uint32_text(import_text, import_id) || import_id == 0 ||
+        if (!parse_uint32_decimal(team_text, team_id) || team_id == 0 ||
+            !parse_uint32_decimal(import_text, import_id) || import_id == 0 ||
             !parse_inflight_phase(phase_text, phase) ||
             phase == InflightPhase::None ||
             (status_.team_id != 0 && status_.team_id != team_id)) {
@@ -1687,9 +1668,9 @@ bool SleepHqSyncEngine::parse_inflight_line_locked(char *line) {
     uint64_t size = 0;
     uint64_t mtime = 0;
     uint32_t import_id = 0;
-    if (!parse_uint64_text(size_text, size) ||
-        !parse_uint64_text(mtime_text, mtime) ||
-        !parse_uint32_text(import_text, import_id) || import_id == 0 ||
+    if (!parse_uint64_decimal(size_text, size) ||
+        !parse_uint64_decimal(mtime_text, mtime) ||
+        !parse_uint32_decimal(import_text, import_id) || import_id == 0 ||
         import_id != status_.import_id ||
         (strcmp(hash, "-") != 0 &&
          strlen(hash) >= AC_SLEEPHQ_CONTENT_HASH_MAX) ||

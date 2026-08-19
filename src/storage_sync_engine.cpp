@@ -31,22 +31,6 @@ const uint32_t SYNC_RETRY_BACKOFF_MS[] = {
     6UL * 60UL * 60UL * 1000UL,
 };
 
-bool parse_uint64_text(const char *text, uint64_t &out) {
-    if (!text || !*text) return false;
-    char *end = nullptr;
-    const unsigned long long value = strtoull(text, &end, 10);
-    if (!end || *end != '\0') return false;
-    out = static_cast<uint64_t>(value);
-    return true;
-}
-
-bool parse_uint32_text(const char *text, uint32_t &out) {
-    uint64_t value = 0;
-    if (!parse_uint64_text(text, value) || value > UINT32_MAX) return false;
-    out = static_cast<uint32_t>(value);
-    return true;
-}
-
 std::shared_ptr<const LargeByteBuffer> freeze_bytes(const void *data,
                                                     size_t size) {
     if (!data || size == 0) return {};
@@ -269,34 +253,35 @@ void StorageSyncEngine::parse_result_metadata_locked(char *buffer) {
             const char *key = line;
             const char *value = eq + 1;
             if (strcmp(key, "last_sync_epoch") == 0) {
-                (void)parse_uint64_text(value, loaded.last_sync_epoch);
+                (void)parse_uint64_decimal(value, loaded.last_sync_epoch);
             } else if (strcmp(key, "last_sync_files_seen") == 0) {
-                (void)parse_uint32_text(value,
+                (void)parse_uint32_decimal(value,
                                         loaded.last_sync_files_seen);
             } else if (strcmp(key, "last_sync_files_uploaded") == 0) {
-                (void)parse_uint32_text(value,
+                (void)parse_uint32_decimal(value,
                                         loaded.last_sync_files_uploaded);
             } else if (strcmp(key, "last_sync_files_skipped") == 0) {
-                (void)parse_uint32_text(value,
+                (void)parse_uint32_decimal(value,
                                         loaded.last_sync_files_skipped);
             } else if (strcmp(key, "last_sync_files_failed") == 0) {
-                (void)parse_uint32_text(value,
+                (void)parse_uint32_decimal(value,
                                         loaded.last_sync_files_failed);
             } else if (strcmp(key, "last_sync_bytes_uploaded") == 0) {
-                (void)parse_uint64_text(value,
+                (void)parse_uint64_decimal(value,
                                         loaded.last_sync_bytes_uploaded);
             } else if (strcmp(key, "last_verify_epoch") == 0) {
-                (void)parse_uint64_text(value, loaded.last_verify_epoch);
+                (void)parse_uint64_decimal(value, loaded.last_verify_epoch);
             } else if (strcmp(key, "last_verify_files_seen") == 0) {
-                (void)parse_uint32_text(value,
+                (void)parse_uint32_decimal(value,
                                         loaded.last_verify_files_seen);
             } else if (strcmp(key, "last_reconcile_epoch") == 0) {
-                (void)parse_uint64_text(value, loaded.last_reconcile_epoch);
+                (void)parse_uint64_decimal(value,
+                                           loaded.last_reconcile_epoch);
             } else if (strcmp(key, "last_reconcile_files_seen") == 0) {
-                (void)parse_uint32_text(
+                (void)parse_uint32_decimal(
                     value, loaded.last_reconcile_files_seen);
             } else if (strcmp(key, "last_failure_epoch") == 0) {
-                (void)parse_uint64_text(value, loaded.last_failure_epoch);
+                (void)parse_uint64_decimal(value, loaded.last_failure_epoch);
             } else if (strcmp(key, "last_failure_error") == 0) {
                 copy_cstr(loaded.last_failure_error,
                           sizeof(loaded.last_failure_error),

@@ -2,7 +2,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
 #include <string_view>
+
+#include <ArduinoJson.h>
 
 #if __has_include(<Arduino.h>)
 #include <Arduino.h>
@@ -14,6 +17,10 @@
 namespace aircannect {
 
 class LargeTextBuffer;
+
+bool json_variant_to_string(JsonVariantConst value, std::string &out);
+void append_json_escaped(std::string &out, const char *value, size_t len);
+void append_json_escaped(std::string &out, std::string_view value);
 
 #if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
 void json_add_string(String &out, const char *key, const char *value, bool comma = true);

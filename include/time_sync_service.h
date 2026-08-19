@@ -58,8 +58,6 @@ private:
     void poll_resmed_push(uint32_t now_ms);
     bool therapy_running() const;
     bool set_esp_time_from_resmed(const std::string &utc_datetime);
-    bool parse_resmed_datetime_ms(const std::string &utc_datetime,
-                                  int64_t &epoch_ms) const;
     bool format_utc(int64_t epoch_ms, char *out, size_t size) const;
 
     const AppConfigData *app_config_ = nullptr;

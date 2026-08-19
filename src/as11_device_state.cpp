@@ -7,45 +7,17 @@
 #include <time.h>
 
 #include "board.h"
-#include "calendar_utils.h"
+#include "json_util.h"
 #include "string_util.h"
+#include "utc_time.h"
 
 namespace aircannect {
 namespace {
 
 static constexpr time_t VALID_TIME_MIN_EPOCH = 1609459200;
 
-bool variant_to_string(JsonVariantConst value, std::string &out) {
-    if (value.isNull()) return false;
-    if (value.is<const char *>()) {
-        out = value.as<const char *>();
-        return true;
-    }
-    if (value.is<int>()) {
-        out = std::to_string(value.as<int>());
-        return true;
-    }
-    if (value.is<unsigned int>()) {
-        out = std::to_string(value.as<unsigned int>());
-        return true;
-    }
-    if (value.is<long>()) {
-        out = std::to_string(value.as<long>());
-        return true;
-    }
-    if (value.is<unsigned long>()) {
-        out = std::to_string(value.as<unsigned long>());
-        return true;
-    }
-    if (value.is<bool>()) {
-        out = value.as<bool>() ? "true" : "false";
-        return true;
-    }
-    return false;
-}
-
 bool get_string(JsonObjectConst object, const char *name, std::string &out) {
-    return variant_to_string(object[name], out);
+    return json_variant_to_string(object[name], out);
 }
 
 bool variant_to_int(JsonVariantConst value, int32_t &out) {
@@ -148,69 +120,6 @@ As11TherapyState therapy_state_for_event(const std::string &event) {
         return As11TherapyState::Other;
     }
     return As11TherapyState::Unknown;
-}
-
-bool utc_fields_to_epoch_ms(int year,
-                            int month,
-                            int day,
-                            int hour,
-                            int minute,
-                            int second,
-                            int millisecond,
-                            int64_t &epoch_ms) {
-    if (year < 2020 || month < 1 || month > 12 || day < 1 ||
-        day > calendar_days_in_month(year, month) ||
-        hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
-        second < 0 || second > 59 ||
-        millisecond < 0 || millisecond > 999) {
-        return false;
-    }
-    const int64_t days =
-        calendar_days_from_civil(year, static_cast<unsigned>(month),
-                                 static_cast<unsigned>(day));
-    const int64_t seconds = days * 86400 +
-                            static_cast<int64_t>(hour) * 3600 +
-                            static_cast<int64_t>(minute) * 60 + second;
-    if (seconds < static_cast<int64_t>(VALID_TIME_MIN_EPOCH)) return false;
-    epoch_ms = seconds * 1000 + millisecond;
-    return true;
-}
-
-bool parse_datetime_epoch_ms(const std::string &datetime, int64_t &epoch_ms) {
-    int year = 0;
-    int month = 0;
-    int day = 0;
-    int hour = 0;
-    int minute = 0;
-    int second = 0;
-    int consumed = 0;
-    if (sscanf(datetime.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d%n",
-               &year, &month, &day, &hour, &minute, &second,
-               &consumed) != 6) {
-        return false;
-    }
-
-    int millisecond = 0;
-    const char *p = datetime.c_str() + consumed;
-    if (*p == '.') {
-        p++;
-        int digits = 0;
-        while (*p >= '0' && *p <= '9') {
-            if (digits < 3) {
-                millisecond = millisecond * 10 + (*p - '0');
-            }
-            digits++;
-            p++;
-        }
-        if (digits == 0) return false;
-        while (digits < 3) {
-            millisecond *= 10;
-            digits++;
-        }
-    }
-    if (*p != 'Z' || p[1] != 0) return false;
-    return utc_fields_to_epoch_ms(year, month, day, hour, minute, second,
-                                  millisecond, epoch_ms);
 }
 
 bool current_epoch_ms(int64_t &epoch_ms) {
@@ -387,13 +296,15 @@ bool As11DeviceState::apply_datetime_response(
     if (error) return false;
 
     std::string text;
-    if (!variant_to_string(doc["result"]["dateTime"], text)) return false;
+    if (!json_variant_to_string(doc["result"]["dateTime"], text)) {
+        return false;
+    }
     device_datetime_ = text;
     clock_valid_ = true;
     clock_sample_ms_ = now_ms;
     int64_t device_epoch_ms = 0;
     int64_t esp_epoch_ms = 0;
-    if (parse_datetime_epoch_ms(text, device_epoch_ms) &&
+    if (parse_utc_iso8601_ms(text.c_str(), device_epoch_ms) &&
         (response_midpoint_epoch_ms(request_epoch_ms, response_epoch_ms,
                                     request_ms, response_ms, esp_epoch_ms) ||
          current_epoch_ms(esp_epoch_ms))) {

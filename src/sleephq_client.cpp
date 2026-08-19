@@ -12,6 +12,7 @@
 #include <sys/time.h>
 
 #include "debug_log.h"
+#include "hex_util.h"
 #include "memory_manager.h"
 #include "string_util.h"
 #include "tls_memory.h"
@@ -75,22 +76,13 @@ void trim_ascii(char *text) {
     }
 }
 
-bool parse_u32_text(const char *text, uint32_t &out) {
-    if (!text || !*text) return false;
-    char *end = nullptr;
-    const unsigned long value = strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || value > UINT32_MAX) return false;
-    out = static_cast<uint32_t>(value);
-    return true;
-}
-
 bool json_string_to_u32(JsonVariantConst value, uint32_t &out) {
     if (value.is<uint32_t>()) {
         out = value.as<uint32_t>();
         return true;
     }
     if (value.is<const char *>()) {
-        return parse_u32_text(value.as<const char *>(), out);
+        return parse_uint32_decimal(value.as<const char *>(), out);
     }
     return false;
 }
@@ -101,12 +93,8 @@ const char *json_string_or_empty(JsonVariantConst value) {
 
 void digest_to_hex(const uint8_t digest[16],
                    char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
-    static const char HEX_DIGITS[] = "0123456789abcdef";
-    for (size_t i = 0; i < 16; ++i) {
-        out[i * 2] = HEX_DIGITS[(digest[i] >> 4) & 0x0F];
-        out[i * 2 + 1] = HEX_DIGITS[digest[i] & 0x0F];
-    }
-    out[32] = '\0';
+    (void)hex_encode(digest, 16, out, AC_SLEEPHQ_CONTENT_HASH_MAX,
+                     HexCase::Lower);
 }
 
 }  // namespace
@@ -720,12 +708,7 @@ bool SleepHqClient::parse_token(const SleepHqHttpResponse &response) {
 }
 
 bool SleepHqClient::parse_uint32_field(const char *text, uint32_t &out) {
-    if (!text || !*text) return false;
-    char *end = nullptr;
-    const unsigned long value = strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || value > UINT32_MAX) return false;
-    out = static_cast<uint32_t>(value);
-    return true;
+    return parse_uint32_decimal(text, out);
 }
 
 bool SleepHqClient::resolve_team_id(

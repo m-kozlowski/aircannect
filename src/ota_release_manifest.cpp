@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "hex_util.h"
 #include <strings.h>
 
 #if defined(ARDUINO_ARCH_ESP32)
@@ -250,14 +252,6 @@ int compare_versions(const ParsedVersion &left,
     return compare_prerelease(left, right);
 }
 
-bool valid_sha256(const char *value) {
-    if (!value || strlen(value) != 64) return false;
-    for (size_t i = 0; i < 64; ++i) {
-        if (!isxdigit(static_cast<unsigned char>(value[i]))) return false;
-    }
-    return true;
-}
-
 bool parse_artifact(JsonObjectConst artifact,
                     bool zlib,
                     OtaReleaseArtifact &parsed) {
@@ -270,7 +264,7 @@ bool parse_artifact(JsonObjectConst artifact,
         strlen(url) >= sizeof(parsed.url) ||
         !artifact["size"].is<uint64_t>() ||
         wire_size == 0 || wire_size > SIZE_MAX ||
-        !valid_sha256(sha256)) {
+        !sha256_text_valid(sha256)) {
         return false;
     }
 
@@ -281,7 +275,7 @@ bool parse_artifact(JsonObjectConst artifact,
         image_size = artifact["decoded_size"].as<uint64_t>();
         if (!artifact["decoded_size"].is<uint64_t>() ||
             image_size == 0 || image_size > SIZE_MAX ||
-            !valid_sha256(decoded_sha256)) {
+            !sha256_text_valid(decoded_sha256)) {
             return false;
         }
     }

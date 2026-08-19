@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "hex_util.h"
 #include "memory_manager.h"
 #include "board_report.h"
 #include "runtime_clock.h"
@@ -17,13 +18,8 @@ namespace aircannect {
 namespace {
 
 std::string sha_to_hex(const uint8_t hash[32]) {
-    static const char *digits = "0123456789ABCDEF";
-    std::string out;
-    out.resize(64);
-    for (size_t i = 0; i < 32; ++i) {
-        out[i * 2] = digits[(hash[i] >> 4) & 0x0F];
-        out[i * 2 + 1] = digits[hash[i] & 0x0F];
-    }
+    char out[65] = {};
+    if (!hex_encode(hash, 32, out, sizeof(out), HexCase::Upper)) return {};
     return out;
 }
 

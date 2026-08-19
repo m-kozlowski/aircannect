@@ -25,5 +25,7 @@ bool parse_index(String text, size_t count, size_t &index);
 
 std::string lower_compact_copy(const std::string &value);
 bool parse_bool_yesno(const std::string &text, bool &value);
+bool parse_uint32_decimal(const char *text, uint32_t &value);
+bool parse_uint64_decimal(const char *text, uint64_t &value);
 
 }  // namespace aircannect

@@ -9,6 +9,7 @@
 
 #include "data_id_csv.h"
 #include "json_cursor.h"
+#include "json_util.h"
 
 namespace aircannect {
 namespace {
@@ -97,27 +98,7 @@ const char *rpc_version_for_method(const std::string &method) {
 std::string json_escape(const std::string &text) {
     std::string out;
     out.reserve(text.size() + 8);
-    for (char c : text) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[7];
-                    snprintf(buf, sizeof(buf), "\\u%04X",
-                             static_cast<unsigned char>(c));
-                    out += buf;
-                } else {
-                    out += c;
-                }
-                break;
-        }
-    }
+    append_json_escaped(out, text);
     return out;
 }
 

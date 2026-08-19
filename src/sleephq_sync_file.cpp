@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "debug_log.h"
+#include "hex_util.h"
 #include "memory_manager.h"
 #include "string_util.h"
 
@@ -14,12 +15,8 @@ static constexpr size_t HASH_BUFFER_BYTES = 4096;
 
 void digest_to_hex(const uint8_t digest[16],
                    char out[AC_SLEEPHQ_CONTENT_HASH_MAX]) {
-    static const char HEX_DIGITS[] = "0123456789abcdef";
-    for (size_t i = 0; i < 16; ++i) {
-        out[i * 2] = HEX_DIGITS[(digest[i] >> 4) & 0x0f];
-        out[i * 2 + 1] = HEX_DIGITS[digest[i] & 0x0f];
-    }
-    out[32] = '\0';
+    (void)hex_encode(digest, 16, out, AC_SLEEPHQ_CONTENT_HASH_MAX,
+                     HexCase::Lower);
 }
 
 }  // namespace

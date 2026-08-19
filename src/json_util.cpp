@@ -117,6 +117,43 @@ void json_add_uint64_impl(Out &out, const char *key, uint64_t value, bool comma)
 
 }  // namespace
 
+bool json_variant_to_string(JsonVariantConst value, std::string &out) {
+    if (value.isNull()) return false;
+    if (value.is<const char *>()) {
+        out = value.as<const char *>();
+        return true;
+    }
+    if (value.is<int>()) {
+        out = std::to_string(value.as<int>());
+        return true;
+    }
+    if (value.is<unsigned int>()) {
+        out = std::to_string(value.as<unsigned int>());
+        return true;
+    }
+    if (value.is<long>()) {
+        out = std::to_string(value.as<long>());
+        return true;
+    }
+    if (value.is<unsigned long>()) {
+        out = std::to_string(value.as<unsigned long>());
+        return true;
+    }
+    if (value.is<bool>()) {
+        out = value.as<bool>() ? "true" : "false";
+        return true;
+    }
+    return false;
+}
+
+void append_json_escaped(std::string &out, const char *value, size_t len) {
+    append_json_escaped_impl(out, value, len);
+}
+
+void append_json_escaped(std::string &out, std::string_view value) {
+    append_json_escaped_impl(out, value.data(), value.size());
+}
+
 #if AIRCANNECT_JSON_UTIL_HAS_ARDUINO
 void json_add_string(String &out, const char *key, const char *value, bool comma) {
     json_add_string_impl(out, key, value, comma);

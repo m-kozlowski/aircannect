@@ -11,6 +11,7 @@
 #include <mbedtls/sha256.h>
 
 #include "debug_log.h"
+#include "hex_util.h"
 #include "memory_manager.h"
 #include "storage_directory.h"
 #include "storage_internal.h"
@@ -26,24 +27,13 @@ static constexpr uint32_t CLIENT_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 bool normalize_sha256(const std::string &value, char out[65]) {
     out[0] = '\0';
     if (value.empty()) return true;
-    if (value.size() != 64) return false;
-
-    for (size_t i = 0; i < value.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(value[i]);
-        if (!isxdigit(c)) return false;
-        out[i] = static_cast<char>(toupper(c));
-    }
-    out[64] = '\0';
-    return true;
+    return value.size() == 64 &&
+           hex_text_normalize(value.c_str(), value.size(), out, 65,
+                              HexCase::Upper);
 }
 
 void hash_to_hex(const uint8_t hash[32], char out[65]) {
-    static constexpr char DIGITS[] = "0123456789ABCDEF";
-    for (size_t i = 0; i < 32; ++i) {
-        out[i * 2] = DIGITS[(hash[i] >> 4) & 0x0F];
-        out[i * 2 + 1] = DIGITS[hash[i] & 0x0F];
-    }
-    out[64] = '\0';
+    (void)hex_encode(hash, 32, out, 65, HexCase::Upper);
 }
 
 bool parent_directory(const char *path, char *out, size_t out_size) {

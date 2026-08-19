@@ -13,22 +13,13 @@ namespace {
 
 static constexpr size_t SLEEPHQ_REMOTE_FILE_ITEM_MAX = 8 * 1024;
 
-bool parse_u32_text(const char *text, uint32_t &out) {
-    if (!text || !*text) return false;
-    char *end = nullptr;
-    const unsigned long value = strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || value > UINT32_MAX) return false;
-    out = static_cast<uint32_t>(value);
-    return true;
-}
-
 bool json_string_to_u32(JsonVariantConst value, uint32_t &out) {
     if (value.is<uint32_t>()) {
         out = value.as<uint32_t>();
         return true;
     }
     if (value.is<const char *>()) {
-        return parse_u32_text(value.as<const char *>(), out);
+        return parse_uint32_decimal(value.as<const char *>(), out);
     }
     return false;
 }
@@ -39,13 +30,7 @@ bool json_string_to_u64(JsonVariantConst value, uint64_t &out) {
         return true;
     }
     if (value.is<const char *>()) {
-        const char *text = value.as<const char *>();
-        if (!text || !*text) return false;
-        char *end = nullptr;
-        const unsigned long long parsed = strtoull(text, &end, 10);
-        if (!end || *end != '\0') return false;
-        out = static_cast<uint64_t>(parsed);
-        return true;
+        return parse_uint64_decimal(value.as<const char *>(), out);
     }
     return false;
 }

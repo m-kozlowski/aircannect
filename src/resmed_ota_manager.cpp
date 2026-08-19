@@ -15,6 +15,7 @@
 #include "as11_service_manager.h"
 #include "as11_service_protocol.h"
 #include "debug_log.h"
+#include "hex_util.h"
 #include "large_byte_buffer.h"
 #include "little_endian.h"
 #include "memory_manager.h"
@@ -39,13 +40,6 @@ static constexpr uint64_t FirmwareDumpFreeReserveBytes = 1024 * 1024;
 static constexpr uint32_t FirmwareDumpIdentityTimeoutMs = 30000;
 static constexpr uint32_t FirmwareDumpRecoveryBootTimeoutMs = 30000;
 
-int hex_nibble(char value) {
-    if (value >= '0' && value <= '9') return value - '0';
-    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-    return -1;
-}
-
 bool normalize_hex(String &hex, size_t max_raw_bytes) {
     hex.trim();
     if (!hex.length() || (hex.length() & 1)) return false;
@@ -61,11 +55,7 @@ bool normalize_hex(String &hex, size_t max_raw_bytes) {
 bool valid_sha256(String value) {
     value.trim();
     if (!value.length()) return true;
-    if (value.length() != 64) return false;
-    for (size_t i = 0; i < value.length(); ++i) {
-        if (hex_nibble(value[i]) < 0) return false;
-    }
-    return true;
+    return sha256_text_valid(value.c_str());
 }
 
 bool json_result_true(RpcPayloadView json) {
@@ -77,14 +67,9 @@ bool json_result_true(RpcPayloadView json) {
 }
 
 String sha_to_hex(const uint8_t hash[32]) {
-    static constexpr char Digits[] = "0123456789ABCDEF";
-    String out;
-    out.reserve(64);
-    for (size_t i = 0; i < 32; ++i) {
-        out += Digits[(hash[i] >> 4) & 0x0F];
-        out += Digits[hash[i] & 0x0F];
-    }
-    return out;
+    char out[65] = {};
+    if (!hex_encode(hash, 32, out, sizeof(out), HexCase::Upper)) return {};
+    return String(out);
 }
 
 bool update_sha_from_hex(mbedtls_sha256_context &context,
@@ -110,12 +95,11 @@ bool update_sha_from_hex(mbedtls_sha256_context &context,
 }
 
 String bytes_to_hex(const uint8_t *bytes, size_t length) {
-    static constexpr char Digits[] = "0123456789ABCDEF";
     String hex;
     hex.reserve(length * 2);
     for (size_t i = 0; i < length; ++i) {
-        hex += Digits[(bytes[i] >> 4) & 0x0F];
-        hex += Digits[bytes[i] & 0x0F];
+        hex += hex_digit(bytes[i] >> 4, HexCase::Upper);
+        hex += hex_digit(bytes[i], HexCase::Upper);
     }
     return hex;
 }

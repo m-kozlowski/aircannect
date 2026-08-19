@@ -9,8 +9,8 @@
 
 #include "as11_rpc.h"
 #include "board.h"
-#include "calendar_utils.h"
 #include "debug_log.h"
+#include "utc_time.h"
 
 namespace aircannect {
 namespace {
@@ -33,21 +33,6 @@ void ntp_sync_cb(struct timeval *) {
 
 bool sta_online(const WifiManager &wifi_manager) {
     return wifi_manager.sta_ipv4_online();
-}
-
-time_t utc_fields_to_epoch(int year,
-                           int month,
-                           int day,
-                           int hour,
-                           int minute,
-                           int second) {
-    const int64_t days =
-        calendar_days_from_civil(year, static_cast<unsigned>(month),
-                                 static_cast<unsigned>(day));
-    const int64_t seconds = days * 86400 +
-                            static_cast<int64_t>(hour) * 3600 +
-                            static_cast<int64_t>(minute) * 60 + second;
-    return static_cast<time_t>(seconds);
 }
 
 }  // namespace
@@ -381,7 +366,7 @@ bool TimeSyncService::therapy_running() const {
 bool TimeSyncService::set_esp_time_from_resmed(
     const std::string &utc_datetime) {
     int64_t epoch_ms = 0;
-    if (!parse_resmed_datetime_ms(utc_datetime, epoch_ms)) {
+    if (!parse_utc_iso8601_ms(utc_datetime.c_str(), epoch_ms)) {
         last_status_ = "resmed_time_parse_failed";
         return false;
     }
@@ -398,55 +383,6 @@ bool TimeSyncService::set_esp_time_from_resmed(
     last_status_ = "resmed_to_esp_synced";
     Log::logf(CAT_GENERAL, LOG_INFO, "[TIME] ESP clock set from AS11 UTC=%s\n",
               utc_datetime.c_str());
-    return true;
-}
-
-bool TimeSyncService::parse_resmed_datetime_ms(
-    const std::string &utc_datetime,
-    int64_t &epoch_ms) const {
-    int year = 0;
-    int month = 0;
-    int day = 0;
-    int hour = 0;
-    int minute = 0;
-    int second = 0;
-    int consumed = 0;
-    if (sscanf(utc_datetime.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d%n",
-               &year, &month, &day, &hour, &minute, &second,
-               &consumed) != 6) {
-        return false;
-    }
-
-    int millisecond = 0;
-    const char *p = utc_datetime.c_str() + consumed;
-    if (*p == '.') {
-        p++;
-        int digits = 0;
-        while (*p >= '0' && *p <= '9') {
-            if (digits < 3) {
-                millisecond = millisecond * 10 + (*p - '0');
-            }
-            digits++;
-            p++;
-        }
-        if (digits == 0) return false;
-        while (digits < 3) {
-            millisecond *= 10;
-            digits++;
-        }
-    }
-    if (*p != 'Z' || p[1] != 0) return false;
-
-    if (year < 2020 || month < 1 || month > 12 || day < 1 ||
-        day > calendar_days_in_month(year, month) ||
-        hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
-        second < 0 || second > 59) {
-        return false;
-    }
-    const time_t epoch = utc_fields_to_epoch(year, month, day, hour,
-                                             minute, second);
-    if (epoch < VALID_TIME_MIN_EPOCH) return false;
-    epoch_ms = static_cast<int64_t>(epoch) * 1000 + millisecond;
     return true;
 }
 

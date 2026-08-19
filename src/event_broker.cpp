@@ -5,6 +5,7 @@
 
 #include "board_can.h"
 #include "data_id_csv.h"
+#include "json_util.h"
 #ifdef ARDUINO
 #include "debug_log.h"
 #endif
@@ -34,35 +35,6 @@ uint32_t retry_delay_for_command(EventCommandType type) {
     return type == EventCommandType::Quiesce
         ? AC_AS11_EVENT_QUIESCE_RETRY_MS
         : AC_AS11_EVENT_SUBSCRIBE_RETRY_MS;
-}
-
-bool variant_to_string(JsonVariantConst value, std::string &out) {
-    if (value.isNull()) return false;
-    if (value.is<const char *>()) {
-        out = value.as<const char *>();
-        return true;
-    }
-    if (value.is<int>()) {
-        out = std::to_string(value.as<int>());
-        return true;
-    }
-    if (value.is<unsigned int>()) {
-        out = std::to_string(value.as<unsigned int>());
-        return true;
-    }
-    if (value.is<long>()) {
-        out = std::to_string(value.as<long>());
-        return true;
-    }
-    if (value.is<unsigned long>()) {
-        out = std::to_string(value.as<unsigned long>());
-        return true;
-    }
-    if (value.is<bool>()) {
-        out = value.as<bool>() ? "true" : "false";
-        return true;
-    }
-    return false;
 }
 
 bool variant_to_uint32(JsonVariantConst value, uint32_t &out) {
@@ -115,7 +87,7 @@ bool response_data_id_valid(JsonArrayConst ids, const char *data_id) {
     if (!data_id || !*data_id) return true;
     for (JsonObjectConst item : ids) {
         std::string returned_id;
-        if (!variant_to_string(item["dataId"], returned_id)) continue;
+        if (!json_variant_to_string(item["dataId"], returned_id)) continue;
         if (returned_id == data_id && item["valid"].as<bool>()) return true;
     }
     return false;
@@ -127,7 +99,7 @@ bool response_has_valid_activity_selector(JsonArrayConst ids) {
 
     for (JsonObjectConst item : ids) {
         std::string returned_id;
-        if (!variant_to_string(item["dataId"], returned_id)) continue;
+        if (!json_variant_to_string(item["dataId"], returned_id)) continue;
         if ((returned_id == "SystemActivityEvents-FrequentActivityEvents" ||
              returned_id == "SystemActivityEvents-SporadicActivityEvents") &&
             item["valid"].as<bool>()) {
@@ -210,7 +182,7 @@ bool parse_event_notification(RpcPayloadView payload,
     if (error) return false;
 
     std::string method;
-    if (!variant_to_string(doc["method"], method) ||
+    if (!json_variant_to_string(doc["method"], method) ||
         method != "EventNotification") {
         return false;
     }
@@ -218,7 +190,9 @@ bool parse_event_notification(RpcPayloadView payload,
     JsonObjectConst params = doc["params"].as<JsonObjectConst>();
     if (params.isNull()) return false;
     (void)variant_to_uint32(params["subscriptionId"], frame.subscription_id);
-    if (!variant_to_string(params["dataId"], frame.data_id)) return false;
+    if (!json_variant_to_string(params["dataId"], frame.data_id)) {
+        return false;
+    }
 
     JsonArrayConst events = params["events"].as<JsonArrayConst>();
     for (JsonObjectConst event : events) {
@@ -227,9 +201,10 @@ bool parse_event_notification(RpcPayloadView payload,
             break;
         }
         As11EventRecord &record = frame.events[frame.event_count];
-        if (!variant_to_string(event["event"], record.name)) continue;
+        if (!json_variant_to_string(event["event"], record.name)) continue;
         record.kind = as11_event_record_kind_from_name(record.name);
-        (void)variant_to_string(event["reportTime"], record.report_time);
+        (void)json_variant_to_string(event["reportTime"],
+                                     record.report_time);
         record.has_value = variant_to_int32(event["value"], record.value);
         record.has_duration =
             parse_event_duration_ms(event, record.duration_ms);
@@ -411,7 +386,7 @@ bool EventBroker::accept_subscribe_response(
 
     for (JsonVariantConst item : requested_ids) {
         std::string requested_id;
-        if (!variant_to_string(item, requested_id)) continue;
+        if (!json_variant_to_string(item, requested_id)) continue;
         if (event_data_id_is_base(requested_id.c_str())) continue;
         if (!response_data_id_valid(response_ids, requested_id.c_str())) {
             return false;

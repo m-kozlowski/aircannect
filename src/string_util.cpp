@@ -86,6 +86,32 @@ bool parse_bool_yesno(const std::string &text, bool &value) {
     return false;
 }
 
+bool parse_uint64_decimal(const char *text, uint64_t &value) {
+    if (!text || !*text) return false;
+
+    uint64_t parsed = 0;
+    for (const char *cursor = text; *cursor; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') return false;
+
+        const uint8_t digit = static_cast<uint8_t>(*cursor - '0');
+        if (parsed > (UINT64_MAX - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
+    }
+
+    value = parsed;
+    return true;
+}
+
+bool parse_uint32_decimal(const char *text, uint32_t &value) {
+    uint64_t parsed = 0;
+    if (!parse_uint64_decimal(text, parsed) || parsed > UINT32_MAX) {
+        return false;
+    }
+
+    value = static_cast<uint32_t>(parsed);
+    return true;
+}
+
 #if AIRCANNECT_STRING_UTIL_HAS_ARDUINO
 bool parse_port(String text, uint16_t &port) {
     trim_inplace(text);
