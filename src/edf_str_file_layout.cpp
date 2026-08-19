@@ -6,18 +6,6 @@
 #include "edf_bytes.h"
 
 namespace aircannect {
-namespace {
-
-bool header_range_matches(const uint8_t *actual,
-                          const uint8_t *expected,
-                          size_t header_size,
-                          size_t begin,
-                          size_t end) {
-    return actual && expected && begin <= end && end <= header_size &&
-           memcmp(actual + begin, expected + begin, end - begin) == 0;
-}
-
-}  // namespace
 
 bool edf_str_file_layout_from_size(size_t file_size,
                                    EdfStrFileLayout &layout) {
@@ -48,41 +36,43 @@ bool edf_str_header_schema_matches(const uint8_t *actual,
         return false;
     }
 
-    return header_range_matches(actual,
-                                expected,
-                                header_size,
-                                AC_EDF_HEADER_VERSION_OFFSET,
-                                AC_EDF_HEADER_VERSION_OFFSET +
-                                    AC_EDF_HEADER_VERSION_WIDTH) &&
-           header_range_matches(actual,
-                                expected,
-                                header_size,
-                                AC_EDF_HEADER_SIZE_OFFSET,
-                                AC_EDF_HEADER_SIZE_OFFSET +
-                                    AC_EDF_HEADER_SIZE_WIDTH) &&
-           header_range_matches(actual,
-                                expected,
-                                header_size,
-                                AC_EDF_HEADER_RESERVED_OFFSET,
-                                AC_EDF_HEADER_RESERVED_OFFSET +
-                                    AC_EDF_HEADER_RESERVED_WIDTH) &&
-           header_range_matches(actual,
-                                expected,
-                                header_size,
-                                AC_EDF_HEADER_RECORD_DURATION_OFFSET,
-                                AC_EDF_HEADER_RECORD_DURATION_OFFSET +
-                                    AC_EDF_HEADER_RECORD_DURATION_WIDTH) &&
-           header_range_matches(actual,
-                                expected,
-                                header_size,
-                                AC_EDF_HEADER_SIGNAL_COUNT_OFFSET,
-                                AC_EDF_HEADER_SIGNAL_COUNT_OFFSET +
-                                    AC_EDF_HEADER_SIGNAL_COUNT_WIDTH) &&
-           header_range_matches(actual,
-                                expected,
-                                header_size,
-                                AC_EDF_HEADER_SIGNAL_HEADER_OFFSET,
-                                header_size);
+    return edf_bytes_match_range(
+               actual,
+               expected,
+               header_size,
+               AC_EDF_HEADER_VERSION_OFFSET,
+               AC_EDF_HEADER_VERSION_OFFSET + AC_EDF_HEADER_VERSION_WIDTH) &&
+           edf_bytes_match_range(
+               actual,
+               expected,
+               header_size,
+               AC_EDF_HEADER_SIZE_OFFSET,
+               AC_EDF_HEADER_SIZE_OFFSET + AC_EDF_HEADER_SIZE_WIDTH) &&
+           edf_bytes_match_range(
+               actual,
+               expected,
+               header_size,
+               AC_EDF_HEADER_RESERVED_OFFSET,
+               AC_EDF_HEADER_RESERVED_OFFSET + AC_EDF_HEADER_RESERVED_WIDTH) &&
+           edf_bytes_match_range(
+               actual,
+               expected,
+               header_size,
+               AC_EDF_HEADER_RECORD_DURATION_OFFSET,
+               AC_EDF_HEADER_RECORD_DURATION_OFFSET +
+                   AC_EDF_HEADER_RECORD_DURATION_WIDTH) &&
+           edf_bytes_match_range(
+               actual,
+               expected,
+               header_size,
+               AC_EDF_HEADER_SIGNAL_COUNT_OFFSET,
+               AC_EDF_HEADER_SIGNAL_COUNT_OFFSET +
+                   AC_EDF_HEADER_SIGNAL_COUNT_WIDTH) &&
+           edf_bytes_match_range(actual,
+                                 expected,
+                                 header_size,
+                                 AC_EDF_HEADER_SIGNAL_HEADER_OFFSET,
+                                 header_size);
 }
 
 bool edf_str_format_record_count_field(uint32_t record_count,

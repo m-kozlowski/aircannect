@@ -1,20 +1,8 @@
 #include "edf_file_resume.h"
 
-#include <string.h>
+#include "edf_bytes.h"
 
 namespace aircannect {
-namespace {
-
-bool header_range_matches(const uint8_t *actual,
-                          const uint8_t *expected,
-                          size_t header_size,
-                          size_t begin,
-                          size_t end) {
-    return actual && expected && begin <= end && end <= header_size &&
-           memcmp(actual + begin, expected + begin, end - begin) == 0;
-}
-
-}  // namespace
 
 bool edf_resume_parse_record_count_field(const uint8_t *header,
                                          size_t header_size,
@@ -52,18 +40,19 @@ bool edf_resume_header_matches(const uint8_t *actual,
 
     // Patient ID can legitimately vary across firmware/user revisions. The
     // recording ID and signal header carry the session/device/schema identity.
-    return header_range_matches(actual, expected, header_size, 0, 8) &&
-           header_range_matches(actual,
-                                expected,
-                                header_size,
-                                88,
-                                AC_EDF_HEADER_RECORD_COUNT_OFFSET) &&
-           header_range_matches(actual,
-                                expected,
-                                header_size,
-                                AC_EDF_HEADER_RECORD_COUNT_OFFSET +
-                                    AC_EDF_HEADER_RECORD_COUNT_WIDTH,
-                                header_size);
+    return edf_bytes_match_range(actual, expected, header_size, 0, 8) &&
+           edf_bytes_match_range(actual,
+                                 expected,
+                                 header_size,
+                                 88,
+                                 AC_EDF_HEADER_RECORD_COUNT_OFFSET) &&
+           edf_bytes_match_range(
+               actual,
+               expected,
+               header_size,
+               AC_EDF_HEADER_RECORD_COUNT_OFFSET +
+                   AC_EDF_HEADER_RECORD_COUNT_WIDTH,
+               header_size);
 }
 
 EdfResumeDecision edf_resume_check_file(const uint8_t *actual_header,

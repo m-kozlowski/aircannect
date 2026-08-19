@@ -2,8 +2,18 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 namespace aircannect {
+
+inline bool edf_bytes_match_range(const uint8_t *actual,
+                                  const uint8_t *expected,
+                                  size_t size,
+                                  size_t begin,
+                                  size_t end) {
+    return actual && expected && begin <= end && end <= size &&
+           memcmp(actual + begin, expected + begin, end - begin) == 0;
+}
 
 inline bool edf_bit_get(const uint8_t *bits, size_t index) {
     if (!bits) return false;
