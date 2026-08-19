@@ -4,6 +4,7 @@
     let settingsCatalog = [];
     let settingsComposites = [];
     let settingsCatalogPromise = null;
+    let settingsCatalogRevision = 0;
     let configData = null;
     let configSections = [];
     let configSchemaPromise = null;

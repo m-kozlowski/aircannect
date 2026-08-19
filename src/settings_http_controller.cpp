@@ -56,13 +56,15 @@ const char *setting_kind_name(As11SettingKind kind) {
 
 String settings_placeholder_json(As11Availability availability,
                                   bool refresh_queued,
-                                  bool snapshot_pending) {
+                                  bool snapshot_pending,
+                                  uint32_t catalog_revision) {
     String json = "{";
     json_add_bool(json, "valid", false, false);
     json_add_string(json, "as11_state",
                     As11DeviceState::availability_name(availability));
     json_add_bool(json, "refresh_queued", refresh_queued);
     json_add_bool(json, "snapshot_pending", snapshot_pending);
+    json_add_int(json, "catalog_revision", catalog_revision);
     json_add_int(json, "pending_count", 0);
     json_add_string(json, "last_write_status", "");
     json += ",\"last_write_age_ms\":null";
@@ -79,6 +81,7 @@ void build_settings_json(LargeTextBuffer &json,
     const int active_mode = active_settings_mode(device, state);
     int profile_mode = requested_mode >= 0 ? requested_mode : active_mode;
     const uint16_t supported_modes = state.supported_mode_mask();
+    const As11SettingsCatalog &catalog = state.catalog();
     if (profile_mode >= 0 && supported_modes &&
         !(supported_modes & (1u << profile_mode))) {
         profile_mode = active_mode;
@@ -90,6 +93,7 @@ void build_settings_json(LargeTextBuffer &json,
                     As11DeviceState::availability_name(
                         device.availability()));
     json_add_bool(json, "refresh_queued", refresh_queued);
+    json_add_int(json, "catalog_revision", catalog.revision());
     json_add_int(json, "supported_mode_mask", supported_modes);
     json_add_int(json, "pending_count",
                  static_cast<long>(state.pending_count()));
@@ -109,8 +113,8 @@ void build_settings_json(LargeTextBuffer &json,
 
     json += ",\"settings\":[";
     size_t emitted = 0;
-    for (size_t i = 0; i < as11_setting_count(); ++i) {
-        const As11SettingDef &def = as11_setting(i);
+    for (size_t i = 0; i < catalog.count(); ++i) {
+        const As11SettingDef &def = catalog.setting(i);
         if (!state.setting_visible(i, profile_mode) ||
             !as11_setting_readable_via_rpc(def)) {
             continue;
@@ -139,11 +143,14 @@ void build_settings_json(LargeTextBuffer &json,
     json += "]}";
 }
 
-void build_catalog_json(LargeTextBuffer &json) {
-    json = "{\"settings\":[";
+void build_catalog_json(LargeTextBuffer &json,
+                        const As11SettingsCatalog &catalog) {
+    json = "{";
+    json_add_int(json, "revision", catalog.revision(), false);
+    json += ",\"settings\":[";
     size_t emitted = 0;
-    for (size_t i = 0; i < as11_setting_count(); ++i) {
-        const As11SettingDef &def = as11_setting(i);
+    for (size_t i = 0; i < catalog.count(); ++i) {
+        const As11SettingDef &def = catalog.setting(i);
         if (!def.mode_mask || !as11_setting_readable_via_rpc(def)) continue;
 
         if (emitted++) json += ',';
@@ -161,6 +168,7 @@ void build_catalog_json(LargeTextBuffer &json) {
         json_add_float(json, "step", def.step);
         json_add_int(json, "scale_div", def.scale_div);
         json_add_int(json, "decimals", def.decimals);
+        if (!def.writable) json_add_bool(json, "writable", false);
         if (def.options && def.option_count) {
             json += ",\"options\":[";
             for (uint8_t option = 0; option < def.option_count; ++option) {
@@ -176,9 +184,15 @@ void build_catalog_json(LargeTextBuffer &json) {
     }
 
     json += "],\"composites\":[";
+    size_t emitted_composites = 0;
     for (size_t i = 0; i < as11_setting_composite_count(); ++i) {
         const As11SettingCompositeDef &def = as11_setting_composite(i);
-        if (i) json += ',';
+        if (catalog.overlaid(def.enum_key) ||
+            catalog.overlaid(def.numeric_key)) {
+            continue;
+        }
+
+        if (emitted_composites++) json += ',';
         json += '{';
         json_add_string(json, "key", def.key, false);
         json_add_string(json, "kind", "paired_enum_numeric");
@@ -189,8 +203,8 @@ void build_catalog_json(LargeTextBuffer &json) {
         json_add_string(json, "group", def.group);
         json_add_string(json, "category", def.category);
 
-        const As11SettingDef *enum_def = as11_find_setting(def.enum_key);
-        const As11SettingDef *numeric_def = as11_find_setting(def.numeric_key);
+        const As11SettingDef *enum_def = catalog.find(def.enum_key);
+        const As11SettingDef *numeric_def = catalog.find(def.numeric_key);
         const std::string enum_rpc_name =
             enum_def ? as11_setting_rpc_long_name(*enum_def) : def.enum_key;
         const std::string numeric_rpc_name =
@@ -248,7 +262,8 @@ bool SettingsHttpController::begin(RpcRequestPort &rpc,
     if (!commands_.begin() || !cache_mutex_) return false;
 
     catalog_json_.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
-    build_catalog_json(catalog_json_);
+    build_catalog_json(catalog_json_, settings_->state().catalog());
+    cached_catalog_revision_ = settings_->state().catalog().revision();
     return !catalog_json_.overflowed();
 }
 
@@ -338,7 +353,8 @@ void SettingsHttpController::execute(Command &command) {
 
         size_t accepted = 0;
         const std::string params =
-            as11_build_set_params_from_json(command.body, mode, accepted);
+            as11_build_set_params_from_json(
+                command.body, mode, accepted, state.catalog());
         if (accepted) {
             (void)settings_->write(
                 *rpc_, params, RpcSource::HttpApi, millis());
@@ -387,9 +403,27 @@ void SettingsHttpController::publish_snapshot_if_needed() {
         return;
     }
 
+    LargeTextBuffer next_catalog;
+    const As11SettingsCatalog &catalog = settings_->state().catalog();
+    const bool catalog_changed =
+        cached_catalog_revision_ != catalog.revision();
+    if (catalog_changed) {
+        next_catalog.reserve(AC_WEB_SETTINGS_CATALOG_JSON_RESERVE);
+        build_catalog_json(next_catalog, catalog);
+        if (next_catalog.overflowed()) {
+            Log::logf(CAT_CONFIG, LOG_WARN,
+                      "HTTP settings catalog allocation failed\n");
+            return;
+        }
+    }
+
     if (xSemaphoreTake(cache_mutex_, 0) != pdTRUE) return;
     if (request_generation_ == request_generation) {
         settings_json_.swap(next);
+        if (catalog_changed) {
+            catalog_json_.swap(next_catalog);
+            cached_catalog_revision_ = catalog.revision();
+        }
         cached_request_mode_ = requested_mode;
         cached_device_availability_ = availability;
         cached_refresh_pending_ = refresh_pending;
@@ -403,16 +437,26 @@ void SettingsHttpController::publish_snapshot_if_needed() {
 }
 
 void SettingsHttpController::send_catalog(
-    AsyncWebServerRequest *request) const {
+    AsyncWebServerRequest *request) {
+    if (!cache_mutex_ ||
+        xSemaphoreTake(cache_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+        request->send(503, "application/json",
+                      "{\"ok\":false,\"error\":\"catalog busy\"}");
+        return;
+    }
     if (!catalog_json_.length() || catalog_json_.overflowed()) {
+        xSemaphoreGive(cache_mutex_);
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"catalog unavailable\"}");
         return;
     }
     if (!send_json_buffer(request, catalog_json_)) {
+        xSemaphoreGive(cache_mutex_);
         request->send(503, "application/json",
                       "{\"ok\":false,\"error\":\"response alloc\"}");
+        return;
     }
+    xSemaphoreGive(cache_mutex_);
 }
 
 void SettingsHttpController::send_settings(
@@ -440,6 +484,7 @@ void SettingsHttpController::send_settings(
         availability == As11Availability::Unavailable;
     const bool refresh_queued =
         !unavailable && (refresh_requested || cached_refresh_pending_);
+    const uint32_t catalog_revision = cached_catalog_revision_;
     if (!snapshot_pending && !refresh_queued && settings_json_.length()) {
         AsyncResponseStream *response =
             request->beginResponseStream("application/json");
@@ -463,7 +508,8 @@ void SettingsHttpController::send_settings(
     request->send(200, "application/json",
                   settings_placeholder_json(availability,
                                             refresh_queued,
-                                            snapshot_pending));
+                                            snapshot_pending,
+                                            catalog_revision));
 }
 
 }  // namespace aircannect

@@ -125,7 +125,7 @@ bool As11SettingsManager::submit_refresh(RpcRequestPort &rpc,
                                          RpcSource source) {
     RpcRequestCommand command;
     command.method = "Get";
-    command.params_json = as11_settings_get_params_json();
+    command.params_json = as11_settings_get_params_json(state_.catalog());
     command.source = source;
     command.timeout_ms = AC_RPC_DEFAULT_TIMEOUT_MS;
     command.generation = next_generation();
@@ -185,12 +185,15 @@ void As11SettingsManager::complete_write(
 void As11SettingsManager::complete_refresh(
     const RpcRequestCompletion &completion,
     uint32_t now_ms) {
+    const uint32_t catalog_revision = state_.catalog().revision();
     bool complete_snapshot = false;
     const RpcPayloadView payload = rpc_payload_view(completion.payload);
     const bool applied = completion.cause == RpcCompletionCause::Response &&
         state_.apply_settings_get_response(payload, now_ms,
                                            &complete_snapshot);
     const bool succeeded = applied && complete_snapshot;
+    const bool catalog_changed =
+        state_.catalog().revision() != catalog_revision;
     note_change();
 
     if (!succeeded) {
@@ -200,7 +203,7 @@ void As11SettingsManager::complete_refresh(
 
     refresh_retry_pending_ = false;
     next_refresh_retry_ms_ = 0;
-    if (refresh_again_pending_) {
+    if (refresh_again_pending_ || catalog_changed) {
         refresh_again_pending_ = false;
         schedule_refresh(refresh_source_, now_ms, 0);
         return;

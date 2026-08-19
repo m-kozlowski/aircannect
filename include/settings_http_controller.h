@@ -48,7 +48,7 @@ private:
     void execute(Command &command);
 
     void publish_snapshot_if_needed();
-    void send_catalog(AsyncWebServerRequest *request) const;
+    void send_catalog(AsyncWebServerRequest *request);
     void send_settings(AsyncWebServerRequest *request,
                        int requested_mode,
                        bool refresh_requested);
@@ -65,6 +65,7 @@ private:
     LargeTextBuffer settings_json_;
     int requested_mode_ = -1;
     int cached_request_mode_ = -1;
+    uint32_t cached_catalog_revision_ = 0;
     uint32_t request_generation_ = 1;
     uint32_t observed_settings_revision_ = UINT32_MAX;
     uint32_t observed_device_revision_ = UINT32_MAX;

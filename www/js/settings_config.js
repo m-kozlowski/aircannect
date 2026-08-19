@@ -45,6 +45,7 @@
       settingsCatalog = [];
       settingsComposites = [];
       settingsCatalogPromise = null;
+      settingsCatalogRevision = 0;
       settingsProfileMode = null;
       settingsModeDirty = false;
       if (clinicalTabActive()) loadSettings(true);
@@ -56,28 +57,37 @@
       return 1 << value;
     }
 
-    async function ensureSettingsCatalog() {
-      if (settingsCatalog.length) return;
-      if (!settingsCatalogPromise) {
-        settingsCatalogPromise = api("/api/settings-catalog")
-          .then((response) => response.json())
-          .then((data) => {
-            const catalog = Array.isArray(data.settings) ?
-              data.settings : [];
-            if (!catalog.some((item) => item && item.kind && item.label)) {
-              throw new Error("settings catalog unavailable");
-            }
-            settingsCatalog = catalog.map((item, index) =>
-              Object.assign({_catalogIndex: index}, item));
-            settingsComposites = Array.isArray(data.composites) ?
-              data.composites.map((item, index) =>
-                Object.assign({_catalogIndex: 10000 + index}, item)) : [];
-          })
-          .finally(() => {
-            settingsCatalogPromise = null;
-          });
+    async function ensureSettingsCatalog(expectedRevision) {
+      const expected = Number(expectedRevision || 0);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (settingsCatalog.length &&
+            (!expected || settingsCatalogRevision === expected)) {
+          return;
+        }
+        if (!settingsCatalogPromise) {
+          settingsCatalogPromise = api("/api/settings-catalog")
+            .then((response) => response.json())
+            .then((data) => {
+              const catalog = Array.isArray(data.settings) ?
+                data.settings : [];
+              if (!catalog.some((item) => item && item.kind && item.label)) {
+                throw new Error("settings catalog unavailable");
+              }
+              settingsCatalog = catalog.map((item, index) =>
+                Object.assign({_catalogIndex: index}, item));
+              settingsComposites = Array.isArray(data.composites) ?
+                data.composites.map((item, index) =>
+                  Object.assign({_catalogIndex: 10000 + index}, item)) : [];
+              settingsCatalogRevision = Number(data.revision || 0);
+            })
+            .finally(() => {
+              settingsCatalogPromise = null;
+            });
+        }
+        await settingsCatalogPromise;
       }
-      await settingsCatalogPromise;
+
+      throw new Error("settings catalog changed during refresh");
     }
 
     function settingMetaFor(setting, mode) {
@@ -481,7 +491,7 @@
         const response = await api("/api/settings" +
           (query.length ? "?" + query.join("&") : ""));
         const data = await response.json();
-        await ensureSettingsCatalog();
+        await ensureSettingsCatalog(data.catalog_revision);
         settingsData = mergeSettingsCatalog(data);
         renderSettings(settingsData, !!refresh);
       } catch (error) {

@@ -709,7 +709,8 @@ As11SettingsState::~As11SettingsState() {
 }
 
 bool As11SettingsState::ensure_storage() {
-    if (setting_capacity_ == SETTINGS_COUNT &&
+    const size_t catalog_count = catalog_.count();
+    if (setting_capacity_ == catalog_count &&
         profile_capacity_ == MaxProfileValues &&
         values_ && pending_values_ && profile_values_ &&
         feature_present_ && pending_ && pending_since_ms_) {
@@ -719,9 +720,9 @@ bool As11SettingsState::ensure_storage() {
     release_storage();
 
     values_ = static_cast<As11StoredValue *>(
-        settings_alloc_large(sizeof(As11StoredValue) * SETTINGS_COUNT));
+        settings_alloc_large(sizeof(As11StoredValue) * catalog_count));
     if (!values_) goto fail;
-    setting_capacity_ = SETTINGS_COUNT;
+    setting_capacity_ = catalog_count;
     for (size_t i = 0; i < setting_capacity_; ++i) {
         new (&values_[i]) As11StoredValue();
     }
@@ -810,6 +811,21 @@ bool As11SettingsState::apply_settings_get_response(
         result = doc["error"]["data"].as<JsonObjectConst>();
     }
     if (result.isNull()) return false;
+
+    bool catalog_changed = false;
+    if (!catalog_.apply_airbreak_info(
+            result["AirbreakInfo"].as<JsonObjectConst>(), catalog_changed)) {
+        return false;
+    }
+    if (catalog_changed) {
+        release_storage();
+        pending_count_ = 0;
+        last_write_status_.clear();
+        last_write_ms_ = 0;
+        updated_ms_ = 0;
+        supported_mode_mask_ = 0;
+        valid_ = false;
+    }
     if (!ensure_storage()) return false;
 
     const bool complete_snapshot =
@@ -839,7 +855,7 @@ bool As11SettingsState::apply_settings_get_response(
         }
         if (pending_[index]) {
             const bool matches = setting_value_matches(
-                SETTINGS[index], values_[index].str(),
+                catalog_.setting(index), values_[index].str(),
                 pending_values_[index].str());
             if (matches || complete_snapshot) {
                 clear_pending(index);
@@ -862,7 +878,8 @@ bool As11SettingsState::apply_settings_get_response(
         }
         if (pending_[index]) {
             const bool matches = setting_value_matches(
-                SETTINGS[index], normalized, pending_values_[index].str());
+                catalog_.setting(index), normalized,
+                pending_values_[index].str());
             if (matches || complete_snapshot) {
                 clear_pending(index);
                 pending_confirmed = pending_confirmed || matches;
@@ -872,42 +889,43 @@ bool As11SettingsState::apply_settings_get_response(
         any = true;
     };
 
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
+    for (size_t i = 0; i < setting_capacity_; ++i) {
+        const As11SettingDef &def = catalog_.setting(i);
         JsonVariantConst value;
-        if (SETTINGS[i].source == As11SettingSource::FeatureProfile) {
-            JsonObjectConst feature = feature_object_from_result(result,
-                                                                 SETTINGS[i]);
+        if (def.source == As11SettingSource::FeatureProfile) {
+            JsonObjectConst feature = feature_object_from_result(result, def);
             if (feature.isNull()) continue;
             feature_present_[i] = true;
-            value = feature[SETTINGS[i].source_field];
+            value = feature[def.source_field];
             if (value.isNull()) {
                 values_[i].clear();
                 continue;
             }
         } else {
-            value = value_for_setting(result, SETTINGS[i]);
+            value = value_for_setting(result, def);
             if (value.isNull()) continue;
         }
-        remember_value(i, normalize_value_for_def(SETTINGS[i], value));
+        remember_value(i, normalize_value_for_def(def, value));
     }
 
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-        if (SETTINGS[i].source != As11SettingSource::TherapyProfile) {
+    for (size_t i = 0; i < setting_capacity_; ++i) {
+        const As11SettingDef &def = catalog_.setting(i);
+        if (def.source != As11SettingSource::TherapyProfile) {
             continue;
         }
 
         JsonObjectConst profile =
-            therapy_profile_object_from_result(result, SETTINGS[i]);
+            therapy_profile_object_from_result(result, def);
         if (profile.isNull()) continue;
 
-        JsonVariantConst value = profile[SETTINGS[i].source_field];
+        JsonVariantConst value = profile[def.source_field];
         if (value.isNull()) continue;
 
-        const int mode = profile_mode_index(SETTINGS[i].profile);
-        if (!as11_setting_visible_for_mode(SETTINGS[i], mode)) continue;
+        const int mode = profile_mode_index(def.profile);
+        if (!as11_setting_visible_for_mode(def, mode)) continue;
 
         remember_profile_value(
-            mode, i, normalize_value_for_def(SETTINGS[i], value));
+            mode, i, normalize_value_for_def(def, value));
     }
 
     if (any && storage_ok && complete_snapshot) {
@@ -942,11 +960,12 @@ bool As11SettingsState::note_set_request(const std::string &params_json,
     if (target_mode >= 0) mode = target_mode;
 
     bool any = false;
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-        if (!as11_setting_visible_for_mode(SETTINGS[i], mode)) continue;
-        JsonVariantConst value = value_for_setting(root, SETTINGS[i]);
+    for (size_t i = 0; i < setting_capacity_; ++i) {
+        const As11SettingDef &def = catalog_.setting(i);
+        if (!as11_setting_visible_for_mode(def, mode)) continue;
+        JsonVariantConst value = value_for_setting(root, def);
         if (value.isNull()) continue;
-        std::string pending_value = normalize_value_for_def(SETTINGS[i], value);
+        std::string pending_value = normalize_value_for_def(def, value);
         if (pending_value.empty()) continue;
 
         const bool was_pending = pending_[i];
@@ -973,7 +992,7 @@ void As11SettingsState::note_set_response(bool is_error, uint32_t now_ms) {
         clear_all_pending();
         last_write_status_ = "set_error";
     } else {
-        for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
+        for (size_t i = 0; i < setting_capacity_; ++i) {
             if (pending_[i]) pending_since_ms_[i] = now_ms;
         }
         last_write_status_ = "waiting_readback";
@@ -994,7 +1013,7 @@ bool As11SettingsState::expire_pending(uint32_t now_ms,
     if (!pending_count_ || timeout_ms == 0) return false;
 
     bool expired = false;
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
+    for (size_t i = 0; i < setting_capacity_; ++i) {
         if (!pending_[i]) continue;
         if (static_cast<uint32_t>(now_ms - pending_since_ms_[i]) < timeout_ms) {
             continue;
@@ -1022,7 +1041,7 @@ void As11SettingsState::clear() {
         return;
     }
 
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
+    for (size_t i = 0; i < setting_capacity_; ++i) {
         values_[i].clear();
         feature_present_[i] = false;
         pending_values_[i].clear();
@@ -1039,7 +1058,7 @@ void As11SettingsState::clear() {
 }
 
 void As11SettingsState::clear_pending(size_t index) {
-    if (!pending_ || index >= SETTINGS_COUNT || !pending_[index]) return;
+    if (!pending_ || index >= setting_capacity_ || !pending_[index]) return;
     pending_[index] = false;
     if (pending_values_) pending_values_[index].clear();
     pending_since_ms_[index] = 0;
@@ -1047,7 +1066,7 @@ void As11SettingsState::clear_pending(size_t index) {
 }
 
 void As11SettingsState::clear_all_pending() {
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) clear_pending(i);
+    for (size_t i = 0; i < setting_capacity_; ++i) clear_pending(i);
 }
 
 void As11SettingsState::clear_profile_values() {
@@ -1065,7 +1084,7 @@ void As11SettingsState::clear_profile_values() {
 const As11StoredValue *As11SettingsState::profile_value(
     size_t index,
     int mode) const {
-    if (!profile_values_ || index >= SETTINGS_COUNT || mode < 0 ||
+    if (!profile_values_ || index >= setting_capacity_ || mode < 0 ||
         mode >= static_cast<int>(MaxModes)) {
         return nullptr;
     }
@@ -1085,7 +1104,7 @@ bool As11SettingsState::set_profile_value(int mode,
                                           const std::string &value) {
     if (!ensure_storage() ||
         mode < 0 || mode >= static_cast<int>(MaxModes) ||
-        index >= SETTINGS_COUNT) {
+        index >= setting_capacity_) {
         return false;
     }
 
@@ -1116,13 +1135,14 @@ bool As11SettingsState::set_profile_value(int mode,
 }
 
 std::string As11SettingsState::value(size_t index, int mode) const {
-    if (!values_ || index >= SETTINGS_COUNT) return "";
+    if (!values_ || index >= setting_capacity_) return "";
+    const As11SettingDef &def = catalog_.setting(index);
     if (mode >= 0 && mode < static_cast<int>(MaxModes)) {
-        if (setting_is_therapy_mode(SETTINGS[index])) {
+        if (setting_is_therapy_mode(def)) {
             return std::to_string(mode);
         }
         const As11StoredValue *stored = profile_value(index, mode);
-        if (SETTINGS[index].source == As11SettingSource::TherapyProfile &&
+        if (def.source == As11SettingSource::TherapyProfile &&
             stored && !stored->empty()) {
             return stored->str();
         }
@@ -1131,13 +1151,13 @@ std::string As11SettingsState::value(size_t index, int mode) const {
 }
 
 std::string As11SettingsState::pending_value(size_t index) const {
-    if (!pending_values_ || index >= SETTINGS_COUNT) return "";
+    if (!pending_values_ || index >= setting_capacity_) return "";
     return pending_values_[index].str();
 }
 
 bool As11SettingsState::setting_visible(size_t index, int mode) const {
-    if (!feature_present_ || index >= SETTINGS_COUNT) return false;
-    const As11SettingDef &def = SETTINGS[index];
+    if (!feature_present_ || index >= setting_capacity_) return false;
+    const As11SettingDef &def = catalog_.setting(index);
     if (!as11_setting_visible_for_mode(def, mode)) return false;
     if (def.source != As11SettingSource::FeatureProfile) return true;
     return feature_present_[index];
@@ -1146,8 +1166,8 @@ bool As11SettingsState::setting_visible(size_t index, int mode) const {
 int As11SettingsState::mode_index() const {
     if (!values_) return -1;
 
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-        if (setting_is_therapy_mode(SETTINGS[i])) {
+    for (size_t i = 0; i < setting_capacity_; ++i) {
+        if (setting_is_therapy_mode(catalog_.setting(i))) {
             return as11_mode_index_from_value(values_[i].str());
         }
     }
@@ -1231,8 +1251,27 @@ int as11_mode_index_from_value(const std::string &value) {
 }
 
 std::string as11_settings_get_params_json() {
+    As11SettingsCatalog catalog;
+    return as11_settings_get_params_json(catalog);
+}
+
+std::string as11_settings_get_params_json(
+    const As11SettingsCatalog &catalog) {
     std::string out = "[";
-    out += "\"_MOP\",\"TherapyProfiles\",\"FeatureProfiles\",\"_PHI\"";
+    out += "\"_MOP\",\"TherapyProfiles\",\"FeatureProfiles\",\"_PHI\",";
+    out += "\"AirbreakInfo\"";
+    for (size_t i = 0; i < catalog.count(); ++i) {
+        const As11SettingDef &def = catalog.setting(i);
+        if (!def.mode_mask || !catalog.overlaid(def.key)) continue;
+        if (rpc_name_matches_key(def.key, "MOP") ||
+            rpc_name_matches_key(def.key, "PHI")) {
+            continue;
+        }
+
+        out += ",\"_";
+        out += def.key;
+        out += '"';
+    }
     out += ']';
     return out;
 }
@@ -1240,6 +1279,15 @@ std::string as11_settings_get_params_json() {
 std::string as11_build_set_params_from_json(const std::string &body,
                                             int mode,
                                             size_t &accepted) {
+    As11SettingsCatalog catalog;
+    return as11_build_set_params_from_json(body, mode, accepted, catalog);
+}
+
+std::string as11_build_set_params_from_json(
+    const std::string &body,
+    int mode,
+    size_t &accepted,
+    const As11SettingsCatalog &catalog) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, body);
     if (err || !doc.is<JsonObjectConst>()) {
@@ -1253,17 +1301,18 @@ std::string as11_build_set_params_from_json(const std::string &body,
 
     std::string out = "{";
     accepted = 0;
-    for (size_t i = 0; i < SETTINGS_COUNT; ++i) {
-        if (!as11_setting_visible_for_mode(SETTINGS[i], mode)) continue;
-        JsonVariantConst value = root[SETTINGS[i].key];
+    for (size_t i = 0; i < catalog.count(); ++i) {
+        const As11SettingDef &def = catalog.setting(i);
+        if (!def.writable || !as11_setting_visible_for_mode(def, mode)) {
+            continue;
+        }
+        JsonVariantConst value = root[def.key];
         if (value.isNull()) continue;
         char key[80];
-        const char *rpc_key = setting_rpc_key(SETTINGS[i],
-                                              key,
-                                              sizeof(key));
+        const char *rpc_key = setting_rpc_key(def, key, sizeof(key));
         if (!rpc_key) continue;
         std::string literal;
-        if (!json_literal_for_set(SETTINGS[i], value, literal)) continue;
+        if (!json_literal_for_set(def, value, literal)) continue;
         if (accepted) out += ",";
         out += "\"";
         out += rpc_key;

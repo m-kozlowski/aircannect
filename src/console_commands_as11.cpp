@@ -526,7 +526,7 @@ bool RpcConsoleCommands::execute(const String &command,
             std::string mapped_params = "{}";
             if (setting_count) {
                 mapped_params = as11_build_set_params_from_json(
-                    setting_body, mode, accepted);
+                    setting_body, mode, accepted, settings.catalog());
             }
             if (!raw_count && !accepted) {
                 out.println("[RPC] no accepted settings");

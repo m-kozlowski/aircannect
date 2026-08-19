@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <string>
 
+#include <ArduinoJson.h>
+
 #include "rpc_payload.h"
 
 namespace aircannect {
@@ -81,6 +83,36 @@ struct As11SettingDef {
     uint8_t decimals;
     // Optional protocol literals when display labels differ from AS11 values.
     const char *const *wire_options = nullptr;
+    bool writable = true;
+};
+
+class As11SettingsCatalog {
+public:
+    As11SettingsCatalog() = default;
+    As11SettingsCatalog(const As11SettingsCatalog &) = delete;
+    As11SettingsCatalog &operator=(const As11SettingsCatalog &) = delete;
+    ~As11SettingsCatalog();
+
+    size_t count() const;
+    const As11SettingDef &setting(size_t index) const;
+    const As11SettingDef *find(const char *key) const;
+    bool overlaid(const char *key) const;
+    uint32_t revision() const { return revision_; }
+
+private:
+    friend class As11SettingsState;
+
+    struct RuntimeItem;
+
+    bool apply_airbreak_info(JsonObjectConst info, bool &changed);
+    bool equivalent(const As11SettingsCatalog &other) const;
+    void clear_overlay();
+    void swap(As11SettingsCatalog &other);
+
+    void *allocation_ = nullptr;
+    RuntimeItem *items_ = nullptr;
+    size_t item_count_ = 0;
+    uint32_t revision_ = 1;
 };
 
 struct As11SettingCompositeOption {
@@ -146,6 +178,7 @@ public:
     int mode_index() const;
     uint16_t supported_mode_mask() const { return supported_mode_mask_; }
     bool setting_visible(size_t index, int mode) const;
+    const As11SettingsCatalog &catalog() const { return catalog_; }
 
 private:
     struct ProfileValueSlot {
@@ -178,6 +211,8 @@ private:
     size_t profile_capacity_ = 0;
     size_t pending_count_ = 0;
 
+    As11SettingsCatalog catalog_;
+
     std::string last_write_status_;
     uint32_t last_write_ms_ = 0;
     uint32_t updated_ms_ = 0;
@@ -198,8 +233,14 @@ bool as11_setting_readable_via_rpc(const As11SettingDef &def);
 int as11_mode_index_from_value(const std::string &value);
 
 std::string as11_settings_get_params_json();
+std::string as11_settings_get_params_json(const As11SettingsCatalog &catalog);
 std::string as11_build_set_params_from_json(const std::string &body,
                                             int mode,
                                             size_t &accepted);
+std::string as11_build_set_params_from_json(
+    const std::string &body,
+    int mode,
+    size_t &accepted,
+    const As11SettingsCatalog &catalog);
 
 }  // namespace aircannect
