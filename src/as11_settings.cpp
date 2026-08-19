@@ -8,7 +8,10 @@
 #include <string.h>
 #include <utility>
 
+#include <array>
+
 #include "as11_rpc.h"
+#include "as11_setting_catalog_builder.h"
 #include "memory_manager.h"
 #include "string_util.h"
 
@@ -28,95 +31,92 @@ namespace {
 #define MODES_IVAPS MODE_BIT(9)
 #define MODES_PAC MODE_BIT(10)
 
-template <typename T, size_t N>
-constexpr uint8_t option_count(const T (&)[N]) {
-    return static_cast<uint8_t>(N);
-}
-
-struct SettingValue {
-    As11SettingKind kind;
-    float min_value;
-    float max_value;
-    float step;
-    const char *const *options;
-    uint8_t option_count;
-    uint16_t scale_div;
-    uint8_t decimals;
-    const char *const *wire_options;
+struct TherapyProfileDescriptor {
+    uint8_t mode_index;
+    As11ProfileId profile;
+    const char *display_name;
+    const char *object_name;
+    const char *rpc_prefix;
+    const char *wire_name;
 };
 
-constexpr SettingValue number_value(float min_value, float max_value,
-                                    float step, uint16_t scale_div,
-                                    uint8_t decimals) {
-    return {As11SettingKind::Number, min_value, max_value, step,
-            nullptr, 0, scale_div, decimals, nullptr};
+constexpr TherapyProfileDescriptor THERAPY_PROFILES[] = {
+    {0, As11ProfileId::Cpap,
+     "CPAP", "CpapProfile", "Cpap", "CpapProfile"},
+    {1, As11ProfileId::AutoSet,
+     "AutoSet", "AutoSetProfile", "AutoSet", "AutoSetProfile"},
+    {2, As11ProfileId::HerAuto,
+     "AutoSet For Her", "AutoSetForHerProfile", "HerAuto",
+     "AutoSetForHerProfile"},
+    {3, As11ProfileId::Spont,
+     "S", "SpontProfile", "Spont", "SpontProfile"},
+    {4, As11ProfileId::ST,
+     "ST", "STProfile", "ST", "STProfile"},
+    {5, As11ProfileId::Timed,
+     "T", "TimedProfile", "Timed", "TimedProfile"},
+    {6, As11ProfileId::VAuto,
+     "VAuto", "VAutoProfile", "VAuto", "VAutoProfile"},
+    {7, As11ProfileId::ASV,
+     "ASV", "ASVProfile", "ASV", "ASVProfile"},
+    {8, As11ProfileId::ASVAuto,
+     "ASVAuto", "ASVAutoProfile", "ASVAuto", "ASVAutoProfile"},
+    {9, As11ProfileId::iVAPS,
+     "iVAPS", "iVAPSProfile", "iVAPS", "iVAPSProfile"},
+    {10, As11ProfileId::PAC,
+     "PAC", "PACProfile", "PAC", "PACProfile"},
+};
+
+constexpr size_t THERAPY_PROFILE_COUNT =
+    sizeof(THERAPY_PROFILES) / sizeof(THERAPY_PROFILES[0]);
+static_assert(THERAPY_PROFILE_COUNT == As11SettingsState::MaxModes,
+              "therapy profile table must cover every mode");
+
+constexpr bool therapy_profiles_are_indexed() {
+    for (size_t i = 0; i < THERAPY_PROFILE_COUNT; ++i) {
+        if (THERAPY_PROFILES[i].mode_index != i) return false;
+    }
+    return true;
 }
 
-template <size_t N>
-constexpr SettingValue enum_value(const char *const (&options)[N]) {
-    return {As11SettingKind::Enum, 0.0f, 0.0f, 1.0f, options,
-            option_count(options), 1, 0, nullptr};
+static_assert(therapy_profiles_are_indexed(),
+              "therapy profiles must follow mode index order");
+
+const TherapyProfileDescriptor *profile_for_mode(int mode) {
+    if (mode < 0 || mode >= static_cast<int>(THERAPY_PROFILE_COUNT)) {
+        return nullptr;
+    }
+
+    const TherapyProfileDescriptor &profile = THERAPY_PROFILES[mode];
+    return profile.mode_index == mode ? &profile : nullptr;
 }
 
-template <size_t N, size_t M>
-constexpr SettingValue enum_value(const char *const (&options)[N],
-                                  const char *const (&wire_options)[M]) {
-    static_assert(N == M, "display and wire option counts must match");
-    return {As11SettingKind::Enum, 0.0f, 0.0f, 1.0f, options,
-            option_count(options), 1, 0, wire_options};
+const TherapyProfileDescriptor *profile_for_id(As11ProfileId id) {
+    for (const TherapyProfileDescriptor &profile : THERAPY_PROFILES) {
+        if (profile.profile == id) return &profile;
+    }
+    return nullptr;
 }
 
-template <size_t N, size_t M>
-constexpr SettingValue ranged_enum_value(
-    const char *const (&options)[N],
-    const char *const (&wire_options)[M],
-    float min_value, float max_value, float step) {
-    static_assert(N == M, "display and wire option counts must match");
-    return {As11SettingKind::Enum, min_value, max_value, step, options,
-            option_count(options), 1, 0, wire_options};
+constexpr std::array<const char *, THERAPY_PROFILE_COUNT>
+therapy_mode_display_options() {
+    std::array<const char *, THERAPY_PROFILE_COUNT> options = {};
+    for (size_t i = 0; i < THERAPY_PROFILE_COUNT; ++i) {
+        options[i] = THERAPY_PROFILES[i].display_name;
+    }
+    return options;
 }
 
-constexpr As11SettingDef setting_definition(
-    const char *key, As11SettingSource source, As11ProfileId profile,
-    const char *source_object, const char *source_field, const char *label,
-    const char *group, const char *category, uint16_t mode_mask,
-    SettingValue value) {
-    return {
-        key, source, profile, source_object, source_field,
-        label, group, category,
-        value.kind, value.min_value, value.max_value, value.step,
-        value.options, value.option_count, mode_mask, value.scale_div,
-        value.decimals, value.wire_options,
-    };
+constexpr std::array<const char *, THERAPY_PROFILE_COUNT>
+therapy_mode_wire_options() {
+    std::array<const char *, THERAPY_PROFILE_COUNT> options = {};
+    for (size_t i = 0; i < THERAPY_PROFILE_COUNT; ++i) {
+        options[i] = THERAPY_PROFILES[i].wire_name;
+    }
+    return options;
 }
 
-constexpr As11SettingDef flat_setting(
-    const char *key, const char *source_field, const char *label,
-    const char *group, const char *category, uint16_t mode_mask,
-    SettingValue value) {
-    return setting_definition(key, As11SettingSource::Flat,
-                              As11ProfileId::None, nullptr, source_field,
-                              label, group, category, mode_mask, value);
-}
-
-constexpr As11SettingDef therapy_setting(
-    const char *key, As11ProfileId profile, const char *source_field,
-    const char *label, const char *group, const char *category,
-    uint16_t mode_mask, SettingValue value) {
-    return setting_definition(key, As11SettingSource::TherapyProfile,
-                              profile, nullptr, source_field, label, group,
-                              category, mode_mask, value);
-}
-
-constexpr As11SettingDef feature_setting(
-    const char *key, const char *source_object, const char *source_field,
-    const char *label, const char *group, const char *category,
-    uint16_t mode_mask, SettingValue value) {
-    return setting_definition(key, As11SettingSource::FeatureProfile,
-                              As11ProfileId::None, source_object,
-                              source_field, label, group, category,
-                              mode_mask, value);
-}
+constexpr auto THERAPY_MODE_OPTIONS = therapy_mode_display_options();
+constexpr auto THERAPY_MODE_WIRE_OPTIONS = therapy_mode_wire_options();
 
 #include "as11_settings_catalog.inc"
 
@@ -238,55 +238,14 @@ const As11SettingDef *setting_def_for_rpc_name(const char *rpc_name) {
     return nullptr;
 }
 
-const char *profile_name_for_mode(int mode) {
-    static const char *const names[] = {
-        "CpapProfile",
-        "AutoSetProfile",
-        "AutoSetForHerProfile",
-        "SpontProfile",
-        "STProfile",
-        "TimedProfile",
-        "VAutoProfile",
-        "ASVProfile",
-        "ASVAutoProfile",
-        "iVAPSProfile",
-        "PACProfile",
-    };
-    if (mode < 0 || mode >= static_cast<int>(sizeof(names) / sizeof(names[0]))) {
-        return nullptr;
-    }
-    return names[mode];
+const char *profile_wire_name_for_mode(int mode) {
+    const TherapyProfileDescriptor *profile = profile_for_mode(mode);
+    return profile ? profile->wire_name : nullptr;
 }
 
 const char *profile_long_name_prefix(As11ProfileId profile) {
-    switch (profile) {
-        case As11ProfileId::Cpap:
-            return "Cpap";
-        case As11ProfileId::AutoSet:
-            return "AutoSet";
-        case As11ProfileId::HerAuto:
-            return "HerAuto";
-        case As11ProfileId::Spont:
-            return "Spont";
-        case As11ProfileId::ST:
-            return "ST";
-        case As11ProfileId::Timed:
-            return "Timed";
-        case As11ProfileId::VAuto:
-            return "VAuto";
-        case As11ProfileId::ASV:
-            return "ASV";
-        case As11ProfileId::ASVAuto:
-            return "ASVAuto";
-        case As11ProfileId::iVAPS:
-            return "iVAPS";
-        case As11ProfileId::PAC:
-            return "PAC";
-        case As11ProfileId::None:
-            return nullptr;
-    }
-
-    return nullptr;
+    const TherapyProfileDescriptor *descriptor = profile_for_id(profile);
+    return descriptor ? descriptor->rpc_prefix : nullptr;
 }
 
 }  // namespace
@@ -298,22 +257,6 @@ bool as11_setting_option_index_for_rpc_name(const char *rpc_name,
 
     const As11SettingDef *def = setting_def_for_rpc_name(rpc_name);
     if (!def) return false;
-
-    if (setting_is_therapy_mode(*def)) {
-        for (int mode = 0; mode <= 10; ++mode) {
-            const char *profile = profile_name_for_mode(mode);
-            if (profile && strcmp(profile, wire_value) == 0) {
-                index = static_cast<int16_t>(mode);
-                return true;
-            }
-            if (mode < def->option_count &&
-                strcmp(def->options[mode], wire_value) == 0) {
-                index = static_cast<int16_t>(mode);
-                return true;
-            }
-        }
-        return false;
-    }
 
     if (!def->options || !def->option_count) return false;
     const int matched_index = option_index_of(*def, wire_value);
@@ -330,54 +273,24 @@ uint16_t profile_modes_from_result(JsonObjectConst result) {
     JsonObjectConst profiles =
         result["TherapyProfiles"].as<JsonObjectConst>();
     if (profiles.isNull()) return 0;
-    for (int mode = 0; mode <= 10; ++mode) {
-        const char *profile_name = profile_name_for_mode(mode);
-        if (!profile_name) continue;
+    for (const TherapyProfileDescriptor &descriptor : THERAPY_PROFILES) {
         JsonObjectConst profile =
-            profiles[profile_name].as<JsonObjectConst>();
+            profiles[descriptor.object_name].as<JsonObjectConst>();
         if (!profile.isNull()) {
-            mask |= MODE_BIT(mode);
+            mask |= MODE_BIT(descriptor.mode_index);
         }
     }
     return mask;
 }
 
 const char *profile_object_name(As11ProfileId profile) {
-    switch (profile) {
-        case As11ProfileId::Cpap:
-            return "CpapProfile";
-        case As11ProfileId::AutoSet:
-            return "AutoSetProfile";
-        case As11ProfileId::HerAuto:
-            return "AutoSetForHerProfile";
-        case As11ProfileId::Spont:
-            return "SpontProfile";
-        case As11ProfileId::ST:
-            return "STProfile";
-        case As11ProfileId::Timed:
-            return "TimedProfile";
-        case As11ProfileId::VAuto:
-            return "VAutoProfile";
-        case As11ProfileId::ASV:
-            return "ASVProfile";
-        case As11ProfileId::ASVAuto:
-            return "ASVAutoProfile";
-        case As11ProfileId::iVAPS:
-            return "iVAPSProfile";
-        case As11ProfileId::PAC:
-            return "PACProfile";
-        case As11ProfileId::None:
-            return nullptr;
-    }
-
-    return nullptr;
+    const TherapyProfileDescriptor *descriptor = profile_for_id(profile);
+    return descriptor ? descriptor->object_name : nullptr;
 }
 
 int profile_mode_index(As11ProfileId profile) {
-    if (profile == As11ProfileId::None) return -1;
-
-    const uint8_t raw = static_cast<uint8_t>(profile);
-    return raw <= static_cast<uint8_t>(As11ProfileId::PAC) ? raw : -1;
+    const TherapyProfileDescriptor *descriptor = profile_for_id(profile);
+    return descriptor ? descriptor->mode_index : -1;
 }
 
 JsonObjectConst therapy_profile_object_from_result(
@@ -550,7 +463,7 @@ bool json_literal_for_set(const As11SettingDef &def,
                           std::string &out) {
     if (setting_is_therapy_mode(def)) {
         int index = mode_index_from_json(value);
-        const char *profile = profile_name_for_mode(index);
+        const char *profile = profile_wire_name_for_mode(index);
         if (!profile) return false;
         out = "\"";
         out += profile;

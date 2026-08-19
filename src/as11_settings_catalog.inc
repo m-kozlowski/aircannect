@@ -1,11 +1,4 @@
 
-const char *const THERAPY_MODE_OPTIONS[] = {
-    "CPAP", "AutoSet", "AutoSet For Her", "S", "ST", "T", "VAuto", "ASV", "ASVAuto", "iVAPS", "PAC",
-};
-const char *const THERAPY_MODE_WIRE_OPTIONS[] = {
-    "CpapProfile", "AutoSetProfile", "AutoSetForHerProfile", "SpontProfile", "STProfile", "TimedProfile", "VAutoProfile", "ASVProfile", "ASVAutoProfile", "iVAPSProfile", "PACProfile",
-};
-
 const char *const SENSITIVITY_OPTIONS[] = {
     "Very Low", "Low", "Medium", "High", "Very High", "Very High 1", "Very High 2",
 };

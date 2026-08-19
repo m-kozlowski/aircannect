@@ -6,6 +6,7 @@
 #include <strings.h>
 
 #include "checked_size.h"
+#include "as11_setting_catalog_builder.h"
 #include "memory_manager.h"
 
 namespace aircannect {
@@ -258,28 +259,15 @@ bool As11SettingsCatalog::apply_airbreak_info(JsonObjectConst info,
                 }
             }
 
+            const As11SettingValueDef value = has_enum
+                ? enum_value(stored_options,
+                             static_cast<uint8_t>(item_options))
+                : text_value(false);
+
             output.stock_index = stock_index;
-            output.def = {
-                stored_key,
-                As11SettingSource::Flat,
-                As11ProfileId::None,
-                nullptr,
-                stored_key,
-                stored_name,
-                stored_group,
-                "airbreak",
-                has_enum ? As11SettingKind::Enum : As11SettingKind::Text,
-                0.0f,
-                0.0f,
-                1.0f,
-                stored_options,
-                static_cast<uint8_t>(has_enum ? item_options : 0),
-                mode_mask,
-                1,
-                0,
-                stored_options,
-                has_enum,
-            };
+            output.def = flat_setting(
+                stored_key, stored_key, stored_name, stored_group,
+                "airbreak", mode_mask, value);
         }
     }
 
