@@ -79,6 +79,36 @@ bool parse_storage_selection_body(AsyncWebServerRequest *request,
     return true;
 }
 
+bool parse_storage_selection_request(AsyncWebServerRequest *request,
+                                     StorageSelectionRequest &selection) {
+    const char *error = "bad_selection";
+    if (parse_storage_selection_body(request, selection, &error)) return true;
+
+    char body[96] = {};
+    snprintf(body, sizeof(body),
+             "{\"ok\":false,\"error\":\"%s\"}", error);
+    request->send(400, "application/json", body);
+    return false;
+}
+
+void send_storage_job_start_failed(AsyncWebServerRequest *request,
+                                   const char *error,
+                                   const char *fallback) {
+    char body[128] = {};
+    snprintf(body, sizeof(body),
+             "{\"ok\":false,\"error\":\"%s\"}",
+             error && error[0] ? error : fallback);
+    request->send(409, "application/json", body);
+}
+
+void send_storage_job_queued(AsyncWebServerRequest *request, uint32_t id) {
+    char body[128] = {};
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"queued\":true,\"id\":%lu}",
+             static_cast<unsigned long>(id));
+    request->send(202, "application/json", body);
+}
+
 bool append_storage_list_entry(LargeTextBuffer &json,
                                const char *name,
                                const char *path,
@@ -1017,16 +1047,7 @@ void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *re
     if (request && request->_tempObject &&
         static_cast<const char *>(request->_tempObject)[0] != 0) {
         StorageSelectionRequest selection;
-        const char *parse_error = "bad_selection";
-        if (!parse_storage_selection_body(request, selection, &parse_error)) {
-            char body[96] = {};
-            snprintf(body,
-                     sizeof(body),
-                     "{\"ok\":false,\"error\":\"%s\"}",
-                     parse_error);
-            request->send(400, "application/json", body);
-            return;
-        }
+        if (!parse_storage_selection_request(request, selection)) return;
         StorageJobGate gate(request, job_mutex_);
         if (!gate.locked()) return;
         if (!storage_heavy_request_available(
@@ -1049,21 +1070,12 @@ void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *re
                                               &id,
                                               error,
                                               sizeof(error))) {
-            char body[128] = {};
-            snprintf(body,
-                     sizeof(body),
-                     "{\"ok\":false,\"error\":\"%s\"}",
-                     error[0] ? error : "archive_start_failed");
-            request->send(409, "application/json", body);
+            send_storage_job_start_failed(
+                request, error, "archive_start_failed");
             return;
         }
 
-        char body[128] = {};
-        snprintf(body,
-                 sizeof(body),
-                 "{\"ok\":true,\"queued\":true,\"id\":%lu}",
-                 static_cast<unsigned long>(id));
-        request->send(202, "application/json", body);
+        send_storage_job_queued(request, id);
         return;
     }
     http_discard_request_body(request);
@@ -1101,21 +1113,12 @@ void StorageHttpController::send_storage_archive_start(AsyncWebServerRequest *re
                                  &id,
                                  error,
                                  sizeof(error))) {
-        char body[128] = {};
-        snprintf(body,
-                 sizeof(body),
-                 "{\"ok\":false,\"error\":\"%s\"}",
-                 error[0] ? error : "archive_start_failed");
-        request->send(409, "application/json", body);
+        send_storage_job_start_failed(
+            request, error, "archive_start_failed");
         return;
     }
 
-    char body[128] = {};
-    snprintf(body,
-             sizeof(body),
-             "{\"ok\":true,\"queued\":true,\"id\":%lu}",
-             static_cast<unsigned long>(id));
-    request->send(202, "application/json", body);
+    send_storage_job_queued(request, id);
 }
 
 void StorageHttpController::send_storage_archive_status(AsyncWebServerRequest *request) const {
@@ -1265,16 +1268,7 @@ void StorageHttpController::send_storage_delete_start(AsyncWebServerRequest *req
         return;
     }
     StorageSelectionRequest selection;
-    const char *parse_error = "bad_selection";
-    if (!parse_storage_selection_body(request, selection, &parse_error)) {
-        char body[96] = {};
-        snprintf(body,
-                 sizeof(body),
-                 "{\"ok\":false,\"error\":\"%s\"}",
-                 parse_error);
-        request->send(400, "application/json", body);
-        return;
-    }
+    if (!parse_storage_selection_request(request, selection)) return;
     StorageJobGate gate(request, job_mutex_);
     if (!gate.locked()) return;
     if (!storage_heavy_request_available(
@@ -1297,21 +1291,12 @@ void StorageHttpController::send_storage_delete_start(AsyncWebServerRequest *req
                                          &id,
                                          error,
                                          sizeof(error))) {
-        char body[128] = {};
-        snprintf(body,
-                 sizeof(body),
-                 "{\"ok\":false,\"error\":\"%s\"}",
-                 error[0] ? error : "delete_start_failed");
-        request->send(409, "application/json", body);
+        send_storage_job_start_failed(
+            request, error, "delete_start_failed");
         return;
     }
 
-    char body[128] = {};
-    snprintf(body,
-             sizeof(body),
-             "{\"ok\":true,\"queued\":true,\"id\":%lu}",
-             static_cast<unsigned long>(id));
-    request->send(202, "application/json", body);
+    send_storage_job_queued(request, id);
 }
 
 void StorageHttpController::send_storage_delete_status(AsyncWebServerRequest *request) const {
