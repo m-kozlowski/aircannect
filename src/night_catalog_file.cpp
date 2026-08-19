@@ -118,59 +118,6 @@ bool signal_layout_valid(const NightCatalogSourceFile &file,
            std::isfinite(layout.scale.offset) && layout.scale.scale > 0.0f;
 }
 
-bool fallback_section_valid(const NightCatalogRecord &record,
-                            const NightCatalogFallbackFile &file,
-                            const NightCatalogFallbackSection &section) {
-    if (!section.coverage.valid() ||
-        section.coverage.start_ms < record.day_start_ms ||
-        section.coverage.end_ms > record.day_end_ms ||
-        section.data_offset < file.metadata_bytes ||
-        section.data_offset > file.file_size ||
-        section.data_size > file.file_size - section.data_offset) {
-        return false;
-    }
-
-    if (section.kind == ReportFallbackSectionKind::Series) {
-        const ReportSourceDef *source = report_source_def(section.source);
-        const ReportSignalDef *signal = report_signal_def(section.signal);
-        return source && signal && report_source_is_sampled(*source) &&
-               (section.source == signal->preferred_source ||
-                section.source == signal->fallback_source) &&
-               report_signal_bit(section.signal) != 0 &&
-               section.event_mask == 0 && section.record_count > 0 &&
-               section.sample_interval_ms > 0 &&
-               section.data_size > 0 &&
-               section.payload_schema ==
-                   REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
-    }
-    if (section.kind == ReportFallbackSectionKind::Events) {
-        const size_t record_bytes = report_event_record_wire_size();
-        if (section.record_count > SIZE_MAX / record_bytes) return false;
-
-        return section.source == ReportSourceId::RespiratoryEvents &&
-               section.signal == ReportSignalId::Count &&
-               section.event_mask != 0 &&
-               section.sample_interval_ms == 0 &&
-               (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&
-               section.payload_schema ==
-                   REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
-               static_cast<size_t>(section.record_count) * record_bytes ==
-                   section.data_size;
-    }
-    if (section.kind == ReportFallbackSectionKind::Unavailable) {
-        const ReportSourceDef *source = report_source_def(section.source);
-        const ReportSignalDef *signal = report_signal_def(section.signal);
-        return source && signal && report_source_is_sampled(*source) &&
-               (section.source == signal->preferred_source ||
-                section.source == signal->fallback_source) &&
-               report_signal_bit(section.signal) != 0 &&
-               section.event_mask == 0 && section.payload_schema == 0 &&
-               section.record_count == 0 &&
-               section.sample_interval_ms == 0 && section.data_size == 0;
-    }
-    return false;
-}
-
 bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
     if (catalog.size() > UINT32_MAX) return false;
     layout.records = static_cast<uint32_t>(catalog.size());
@@ -370,7 +317,11 @@ bool inspect_catalog(const NightCatalog &catalog, CatalogLayout &layout) {
                  ++section_index) {
                 const NightCatalogFallbackSection &section =
                     sections[section_index];
-                if (!fallback_section_valid(*record, file, section)) {
+                if (!report_fallback_section_valid(section,
+                                                   record->day_start_ms,
+                                                   record->day_end_ms,
+                                                   file.metadata_bytes,
+                                                   file.file_size)) {
                     return false;
                 }
             }

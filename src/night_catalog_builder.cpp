@@ -455,70 +455,14 @@ bool append_file(LargeScratchArray<BuildFile> &files,
     return true;
 }
 
-bool fallback_section_valid(
-    const NightCatalogFallbackSectionInput &section,
-    int64_t day_start_ms,
-    int64_t day_end_ms,
-    uint64_t file_size,
-    uint32_t metadata_bytes) {
-    if (!section.coverage.valid() ||
-        section.coverage.start_ms < day_start_ms ||
-        section.coverage.end_ms > day_end_ms ||
-        section.data_offset < metadata_bytes ||
-        section.data_offset > file_size ||
-        section.data_size > file_size - section.data_offset) {
-        return false;
-    }
-
-    if (section.kind == ReportFallbackSectionKind::Series) {
-        const ReportSourceDef *source = report_source_def(section.source);
-        const ReportSignalDef *signal = report_signal_def(section.signal);
-        return source && signal && report_source_is_sampled(*source) &&
-               (section.source == signal->preferred_source ||
-                section.source == signal->fallback_source) &&
-               report_signal_bit(section.signal) != 0 &&
-               section.event_mask == 0 && section.record_count > 0 &&
-               section.sample_interval_ms > 0 &&
-               section.data_size > 0 &&
-               section.payload_schema ==
-                   REPORT_SERIES_CHUNK_PAYLOAD_SCHEMA_V2;
-    }
-    if (section.kind == ReportFallbackSectionKind::Events) {
-        const size_t record_bytes = report_event_record_wire_size();
-        if (section.record_count > SIZE_MAX / record_bytes) return false;
-
-        return section.source == ReportSourceId::RespiratoryEvents &&
-               section.signal == ReportSignalId::Count &&
-               section.event_mask != 0 &&
-               section.sample_interval_ms == 0 &&
-               (section.event_mask & ~REPORT_EVENT_ALL) == 0 &&
-               section.payload_schema ==
-                   REPORT_EVENT_CHUNK_PAYLOAD_SCHEMA_V1 &&
-               static_cast<size_t>(section.record_count) * record_bytes ==
-                   section.data_size;
-    }
-    if (section.kind == ReportFallbackSectionKind::Unavailable) {
-        const ReportSourceDef *source = report_source_def(section.source);
-        const ReportSignalDef *signal = report_signal_def(section.signal);
-        return source && signal && report_source_is_sampled(*source) &&
-               (section.source == signal->preferred_source ||
-                section.source == signal->fallback_source) &&
-               report_signal_bit(section.signal) != 0 &&
-               section.event_mask == 0 && section.payload_schema == 0 &&
-               section.record_count == 0 &&
-               section.sample_interval_ms == 0 && section.data_size == 0;
-    }
-    return false;
-}
-
 bool fallback_payload_valid(const NightCatalogFallbackInput &source) {
     for (size_t i = 0; i < source.section_count; ++i) {
         const NightCatalogFallbackSectionInput &section = source.sections[i];
-        if (!fallback_section_valid(section,
-                                    source.day_start_ms,
-                                    source.day_end_ms,
-                                    source.file_size,
-                                    source.metadata_bytes)) {
+        if (!report_fallback_section_valid(section,
+                                           source.day_start_ms,
+                                           source.day_end_ms,
+                                           source.metadata_bytes,
+                                           source.file_size)) {
             return false;
         }
     }

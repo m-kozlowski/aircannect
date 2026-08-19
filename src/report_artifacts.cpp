@@ -85,6 +85,80 @@ bool tile_follows(const ReportRangeTileArtifact &previous,
             tile.end_ms > previous.end_ms);
 }
 
+struct ManifestHeaderFields {
+    ReportArtifactKey key;
+    uint64_t result_size = 0;
+    uint64_t overview_size = 0;
+    uint32_t result_crc32 = 0;
+    uint32_t overview_crc32 = 0;
+};
+
+template <typename TileReader>
+std::shared_ptr<const LargeByteBuffer> encode_manifest(
+    const ManifestHeaderFields &fields,
+    size_t tile_count,
+    TileReader read_tile) {
+    if (!key_is_result(fields.key) || fields.result_size == 0 ||
+        fields.overview_size == 0 ||
+        tile_count > ReportArtifactManifestCodec::MaxTiles) {
+        return {};
+    }
+
+    size_t body_bytes = 0;
+    size_t total_bytes = 0;
+    if (!CheckedSize::multiply(
+            tile_count, ReportArtifactManifestCodec::TileBytes, body_bytes) ||
+        !CheckedSize::add(
+            ReportArtifactManifestCodec::HeaderBytes,
+            body_bytes,
+            total_bytes) ||
+        total_bytes > UINT32_MAX) {
+        return {};
+    }
+
+    std::unique_ptr<LargeByteBuffer> output =
+        LargeByteBuffer::allocate(total_bytes);
+    if (!output) return {};
+
+    uint8_t *bytes = output->data();
+    memset(bytes, 0, total_bytes);
+    put_le32(bytes, MANIFEST_MAGIC);
+    put_le16(bytes + 4, ReportArtifactManifestCodec::Version);
+    put_le16(bytes + 6, ReportArtifactManifestCodec::HeaderBytes);
+    put_le32(bytes + 8, static_cast<uint32_t>(total_bytes));
+    put_i32(bytes + 12, fields.key.sleep_day.epoch_days());
+    put_le64(bytes + 16, fields.key.source_revision.value());
+    put_le64(bytes + 24, fields.result_size);
+    put_le64(bytes + 32, fields.overview_size);
+    put_le32(bytes + 40, fields.result_crc32);
+    put_le32(bytes + 44, fields.overview_crc32);
+    put_le16(bytes + 48, static_cast<uint16_t>(tile_count));
+
+    uint8_t *body = bytes + ReportArtifactManifestCodec::HeaderBytes;
+    ReportRangeTileArtifact previous;
+    for (size_t i = 0; i < tile_count; ++i) {
+        ReportRangeTileArtifact tile;
+        if (!read_tile(i, tile) || !valid_tile(tile) ||
+            (i > 0 && !tile_follows(previous, tile))) {
+            return {};
+        }
+
+        uint8_t *record =
+            body + i * ReportArtifactManifestCodec::TileBytes;
+        put_i64(record, tile.start_ms);
+        put_i64(record + 8, tile.end_ms);
+        put_le32(record + 16, static_cast<uint32_t>(tile.size));
+        put_le32(record + 20, tile.crc32);
+        previous = tile;
+    }
+
+    put_le32(bytes + MANIFEST_BODY_CRC_OFFSET,
+             crc32_ieee(body, body_bytes));
+    put_le32(bytes + MANIFEST_HEADER_CRC_OFFSET,
+             crc32_ieee(bytes, MANIFEST_HEADER_CRC_OFFSET));
+    return LargeByteBuffer::freeze(std::move(output));
+}
+
 void encode_metrics(uint8_t *out, const ReportArtifactMetrics &metrics) {
     put_le16(out, metrics.valid_mask);
     put_le16(out + 2, metrics.str_mask);
@@ -468,50 +542,19 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::encode(
         return {};
     }
 
-    size_t body_bytes = 0;
-    size_t total_bytes = 0;
-    if (!CheckedSize::multiply(tile_count, TileBytes, body_bytes) ||
-        !CheckedSize::add(HeaderBytes, body_bytes, total_bytes) ||
-        total_bytes > UINT32_MAX) {
-        return {};
-    }
+    ManifestHeaderFields fields;
+    fields.key = bundle.key;
+    fields.result_size = bundle.result->size();
+    fields.overview_size = bundle.overview->size();
+    fields.result_crc32 = bundle.result_crc32;
+    fields.overview_crc32 = bundle.overview_crc32;
 
-    std::unique_ptr<LargeByteBuffer> output =
-        LargeByteBuffer::allocate(total_bytes);
-    if (!output) return {};
-
-    uint8_t *bytes = output->data();
-    memset(bytes, 0, total_bytes);
-    put_le32(bytes, MANIFEST_MAGIC);
-    put_le16(bytes + 4, Version);
-    put_le16(bytes + 6, HeaderBytes);
-    put_le32(bytes + 8, static_cast<uint32_t>(total_bytes));
-    put_i32(bytes + 12, bundle.key.sleep_day.epoch_days());
-    put_le64(bytes + 16, bundle.key.source_revision.value());
-    put_le64(bytes + 24, bundle.result->size());
-    put_le64(bytes + 32, bundle.overview->size());
-    put_le32(bytes + 40, bundle.result_crc32);
-    put_le32(bytes + 44, bundle.overview_crc32);
-    put_le16(bytes + 48, static_cast<uint16_t>(tile_count));
-
-    uint8_t *body = bytes + HeaderBytes;
-    for (size_t i = 0; i < tile_count; ++i) {
-        if (!valid_tile(tiles[i]) ||
-            (i > 0 && !tile_follows(tiles[i - 1], tiles[i]))) {
-            return {};
-        }
-        uint8_t *record = body + i * TileBytes;
-        put_i64(record, tiles[i].start_ms);
-        put_i64(record + 8, tiles[i].end_ms);
-        put_le32(record + 16, static_cast<uint32_t>(tiles[i].size));
-        put_le32(record + 20, tiles[i].crc32);
-    }
-
-    put_le32(bytes + MANIFEST_BODY_CRC_OFFSET,
-            crc32_ieee(body, body_bytes));
-    put_le32(bytes + MANIFEST_HEADER_CRC_OFFSET,
-            crc32_ieee(bytes, MANIFEST_HEADER_CRC_OFFSET));
-    return LargeByteBuffer::freeze(std::move(output));
+    return encode_manifest(fields, tile_count,
+                           [tiles](size_t index,
+                                   ReportRangeTileArtifact &tile) {
+                               tile = tiles[index];
+                               return true;
+                           });
 }
 
 std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
@@ -544,55 +587,27 @@ std::shared_ptr<const LargeByteBuffer> ReportArtifactManifestCodec::add_tile(
     const size_t tile_count = manifest.tile_count + (replacing ? 0 : 1);
     if (tile_count > MaxTiles) return {};
 
-    size_t body_bytes = 0;
-    size_t total_bytes = 0;
-    if (!CheckedSize::multiply(tile_count, TileBytes, body_bytes) ||
-        !CheckedSize::add(HeaderBytes, body_bytes, total_bytes) ||
-        total_bytes > UINT32_MAX) {
-        return {};
-    }
+    ManifestHeaderFields fields;
+    fields.key = manifest.key;
+    fields.result_size = manifest.result_size;
+    fields.overview_size = manifest.overview_size;
+    fields.result_crc32 = manifest.result_crc32;
+    fields.overview_crc32 = manifest.overview_crc32;
 
-    std::unique_ptr<LargeByteBuffer> output =
-        LargeByteBuffer::allocate(total_bytes);
-    if (!output) return {};
-
-    uint8_t *bytes = output->data();
-    memset(bytes, 0, total_bytes);
-    put_le32(bytes, MANIFEST_MAGIC);
-    put_le16(bytes + 4, Version);
-    put_le16(bytes + 6, HeaderBytes);
-    put_le32(bytes + 8, static_cast<uint32_t>(total_bytes));
-    put_i32(bytes + 12, manifest.key.sleep_day.epoch_days());
-    put_le64(bytes + 16, manifest.key.source_revision.value());
-    put_le64(bytes + 24, manifest.result_size);
-    put_le64(bytes + 32, manifest.overview_size);
-    put_le32(bytes + 40, manifest.result_crc32);
-    put_le32(bytes + 44, manifest.overview_crc32);
-    put_le16(bytes + 48, static_cast<uint16_t>(tile_count));
-
-    uint8_t *body = bytes + HeaderBytes;
     size_t source_index = 0;
-    for (size_t output_index = 0; output_index < tile_count; ++output_index) {
-        ReportRangeTileArtifact value;
-        if (output_index == insertion) {
-            value = tile;
-            if (replacing) ++source_index;
-        } else if (!manifest.tile(source_index++, value)) {
-            return {};
-        }
-
-        uint8_t *record = body + output_index * TileBytes;
-        put_i64(record, value.start_ms);
-        put_i64(record + 8, value.end_ms);
-        put_le32(record + 16, static_cast<uint32_t>(value.size));
-        put_le32(record + 20, value.crc32);
-    }
-
-    put_le32(bytes + MANIFEST_BODY_CRC_OFFSET,
-            crc32_ieee(body, body_bytes));
-    put_le32(bytes + MANIFEST_HEADER_CRC_OFFSET,
-            crc32_ieee(bytes, MANIFEST_HEADER_CRC_OFFSET));
-    return LargeByteBuffer::freeze(std::move(output));
+    return encode_manifest(
+        fields,
+        tile_count,
+        [&manifest, &tile, insertion, replacing, &source_index](
+            size_t output_index,
+            ReportRangeTileArtifact &value) {
+            if (output_index == insertion) {
+                value = tile;
+                if (replacing) ++source_index;
+                return true;
+            }
+            return manifest.tile(source_index++, value);
+        });
 }
 
 bool ReportArtifactManifestCodec::decode(

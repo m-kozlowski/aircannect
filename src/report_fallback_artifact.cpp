@@ -6,6 +6,7 @@
 #include "checked_size.h"
 #include "crc32.h"
 #include "little_endian.h"
+#include "report_fallback_payload_layout.h"
 #include "storage_read_port.h"
 #include "storage_path.h"
 
@@ -167,27 +168,6 @@ bool section_input_valid(const ReportFallbackSectionInput &section) {
     return false;
 }
 
-bool section_valid(const ReportFallbackSection &section,
-                   size_t file_bytes) {
-    ReportFallbackSectionInput input;
-    input.kind = section.kind;
-    input.source = section.source;
-    input.signal = section.signal;
-    input.event_mask = section.event_mask;
-    input.payload_schema = section.payload_schema;
-    input.record_count = section.record_count;
-    input.sample_interval_ms = section.sample_interval_ms;
-    input.coverage = section.coverage;
-    input.payload = section.data_size > 0
-        ? reinterpret_cast<const uint8_t *>(1)
-        : nullptr;
-    input.payload_size = section.data_size;
-
-    return section_input_valid(input) &&
-           section.data_offset <= file_bytes &&
-           section.data_size <= file_bytes - section.data_offset;
-}
-
 bool section_precedes(const ReportFallbackSectionInput &lhs,
                       const ReportFallbackSectionInput &rhs) {
     if (lhs.kind != rhs.kind) {
@@ -295,7 +275,11 @@ bool ReportFallbackArtifactView::section(
     const uint8_t *record = section_bytes + index *
         ReportFallbackArtifactCodec::SectionBytes;
     if (!decode_section(record, out) ||
-        !section_valid(out, info.total_bytes)) {
+        !report_fallback_section_valid(out,
+                                       info.day_start_ms,
+                                       info.day_end_ms,
+                                       info.metadata_bytes,
+                                       info.total_bytes)) {
         return false;
     }
     return true;
@@ -415,11 +399,11 @@ bool ReportFallbackArtifactCodec::decode_metadata(
     for (size_t i = 0; i < info.section_count; ++i) {
         ReportFallbackSection section;
         if (!decode_section(section_bytes + i * SectionBytes, section) ||
-            !section_valid(section, info.total_bytes) ||
-            section.coverage.start_ms < info.day_start_ms ||
-            section.coverage.end_ms > info.day_end_ms ||
-            section.data_offset < info.metadata_bytes ||
-            section.data_offset > info.total_bytes ||
+            !report_fallback_section_valid(section,
+                                           info.day_start_ms,
+                                           info.day_end_ms,
+                                           info.metadata_bytes,
+                                           info.total_bytes) ||
             section.data_size > info.payload_bytes - payload_bytes) {
             return false;
         }
