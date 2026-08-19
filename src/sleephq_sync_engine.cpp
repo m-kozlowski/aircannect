@@ -56,17 +56,6 @@ static constexpr uint32_t SLEEPHQ_REMOTE_MACHINE_PAGE_LIMIT =
 static constexpr uint32_t SLEEPHQ_DATALOG_REBUILD_COOLDOWN_SECONDS =
     6UL * 60UL * 60UL;
 
-std::shared_ptr<const LargeByteBuffer> freeze_bytes(const void *data,
-                                                    size_t size) {
-    if (!data || size == 0) return {};
-
-    std::unique_ptr<LargeByteBuffer> bytes = LargeByteBuffer::allocate(size);
-    if (!bytes) return {};
-
-    memcpy(bytes->data(), data, size);
-    return LargeByteBuffer::freeze(std::move(bytes));
-}
-
 uint32_t sleep_hq_upload_timeout_ms(uint64_t size) {
     const uint64_t transfer_ms =
         (size * 1000ULL + SLEEPHQ_UPLOAD_MIN_BYTES_PER_SECOND - 1) /
@@ -1886,7 +1875,8 @@ bool SleepHqSyncEngine::prepare_rebuild_marker_locked() {
     if (length <= 0 || static_cast<size_t>(length) >= sizeof(marker)) {
         return false;
     }
-    pending_state_bytes_ = freeze_bytes(marker, static_cast<size_t>(length));
+    pending_state_bytes_ = LargeByteBuffer::copy_and_freeze(
+        marker, static_cast<size_t>(length));
     return pending_state_bytes_ != nullptr;
 }
 
@@ -1952,8 +1942,8 @@ bool SleepHqSyncEngine::prepare_done_marker_locked() {
     }
 
     static constexpr char DONE_MARKER[] = "done\n";
-    pending_state_bytes_ = freeze_bytes(DONE_MARKER,
-                                        sizeof(DONE_MARKER) - 1);
+    pending_state_bytes_ = LargeByteBuffer::copy_and_freeze(
+        DONE_MARKER, sizeof(DONE_MARKER) - 1);
     return pending_state_bytes_ != nullptr;
 }
 

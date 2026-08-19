@@ -31,17 +31,6 @@ const uint32_t SYNC_RETRY_BACKOFF_MS[] = {
     6UL * 60UL * 60UL * 1000UL,
 };
 
-std::shared_ptr<const LargeByteBuffer> freeze_bytes(const void *data,
-                                                    size_t size) {
-    if (!data || size == 0) return {};
-
-    std::unique_ptr<LargeByteBuffer> bytes = LargeByteBuffer::allocate(size);
-    if (!bytes) return {};
-
-    memcpy(bytes->data(), data, size);
-    return LargeByteBuffer::freeze(std::move(bytes));
-}
-
 }  // namespace
 
 const char *storage_sync_state_name(StorageSyncState state) {
@@ -359,8 +348,8 @@ bool StorageSyncEngine::queue_result_metadata_save_locked() {
         return false;
     }
 
-    pending_metadata_bytes_ = freeze_bytes(buffer,
-                                           static_cast<size_t>(written));
+    pending_metadata_bytes_ = LargeByteBuffer::copy_and_freeze(
+        buffer, static_cast<size_t>(written));
     if (!pending_metadata_bytes_) {
         pending_metadata_path_[0] = '\0';
         return false;
@@ -1076,8 +1065,8 @@ bool StorageSyncEngine::prepare_done_marker_locked() {
     }
 
     static constexpr char DONE_MARKER[] = "done\n";
-    pending_state_bytes_ = freeze_bytes(DONE_MARKER,
-                                        sizeof(DONE_MARKER) - 1);
+    pending_state_bytes_ = LargeByteBuffer::copy_and_freeze(
+        DONE_MARKER, sizeof(DONE_MARKER) - 1);
     return pending_state_bytes_ != nullptr;
 }
 

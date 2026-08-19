@@ -1,6 +1,7 @@
 #include "large_byte_buffer.h"
 
 #include <new>
+#include <string.h>
 
 #include "memory_manager.h"
 
@@ -19,6 +20,17 @@ std::unique_ptr<LargeByteBuffer> LargeByteBuffer::allocate(size_t size) {
         return {};
     }
     return std::unique_ptr<LargeByteBuffer>(buffer);
+}
+
+std::shared_ptr<const LargeByteBuffer> LargeByteBuffer::copy_and_freeze(
+    const void *data, size_t size) {
+    if (!data || size == 0) return {};
+
+    std::unique_ptr<LargeByteBuffer> buffer = allocate(size);
+    if (!buffer) return {};
+
+    memcpy(buffer->data(), data, size);
+    return freeze(std::move(buffer));
 }
 
 std::shared_ptr<const LargeByteBuffer> LargeByteBuffer::freeze(

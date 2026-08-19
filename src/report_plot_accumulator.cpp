@@ -169,18 +169,6 @@ bool append_series(ReportSpoolBuffer &plot, const SeriesState *series) {
     return true;
 }
 
-std::shared_ptr<const LargeByteBuffer> freeze_copy(
-    const ReportSpoolBuffer &source) {
-    if (source.size() == 0) return {};
-
-    std::unique_ptr<LargeByteBuffer> output =
-        LargeByteBuffer::allocate(source.size());
-    if (!output) return {};
-
-    memcpy(output->data(), source.data(), source.size());
-    return LargeByteBuffer::freeze(std::move(output));
-}
-
 }  // namespace
 
 struct ReportPlotAccumulator::Runtime {
@@ -474,7 +462,8 @@ std::shared_ptr<const LargeByteBuffer> ReportPlotAccumulator::finish(
     summary.leak_sum_milli = runtime_->leak_sum_milli;
     summary.pressure_samples = runtime_->pressure_samples;
     summary.leak_samples = runtime_->leak_samples;
-    std::shared_ptr<const LargeByteBuffer> frozen = freeze_copy(plot);
+    std::shared_ptr<const LargeByteBuffer> frozen =
+        LargeByteBuffer::copy_and_freeze(plot.data(), plot.size());
     if (!frozen) failure_reason_ = "report_plot_output_allocation_failed";
     return frozen;
 }
